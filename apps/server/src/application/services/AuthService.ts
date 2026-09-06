@@ -150,7 +150,7 @@ export class AuthService {
     }
 
     if (server.passwordHash && server.passwordHash.length > 0) {
-      const isValid = PasswordService.verifyPassword(parseResult.data.password || '', server.passwordHash);
+      const isValid = await PasswordService.verifyPassword(parseResult.data.password || '', server.passwordHash);
       if (!isValid) {
         Logger.security(`Failed authentication attempt for nickname: ${parseResult.data.nickname}`);
         return {

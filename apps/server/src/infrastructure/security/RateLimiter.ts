@@ -44,6 +44,24 @@ export class RateLimiter {
     return true;
   }
 
+  /**
+   * Responde se a ação passaria, **sem** gastar uma vaga. Existe para o caso em
+   * que só o fracasso deve contar: limitar toda tentativa de conexão gastaria a
+   * cota com quem entra normalmente, e uma casa atrás de um NAT só — várias
+   * pessoas no mesmo IP público — se bloquearia sozinha ao reconectar depois de
+   * uma queda do servidor (#372).
+   */
+  public peek(
+    userIdOrIp: string,
+    maxCount: number = LIMITS.RATE_LIMIT_MAX_MESSAGES,
+    windowMs: number = LIMITS.RATE_LIMIT_WINDOW_MS
+  ): boolean {
+    const now = Date.now();
+    const timestamps = this.userMessageTimestamps.get(userIdOrIp);
+    if (!timestamps) return true;
+    return timestamps.filter((t) => now - t < windowMs).length < maxCount;
+  }
+
   public cleanup(): void {
     const now = Date.now();
     for (const [key, timestamps] of this.userMessageTimestamps.entries()) {

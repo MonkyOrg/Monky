@@ -105,6 +105,9 @@ async function downloadToFile(url: string, destPath: string): Promise<void> {
   });
 }
 
+/** Extensões que a soundboard aceita, na listagem e na leitura de um som. */
+const SOUNDBOARD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm']);
+
 interface NativeWindowOwner {
   windowId: number;
   pid: number;
@@ -678,7 +681,7 @@ export function setupIpcHandlers(
         return [];
       }
       const entries = await fs.promises.readdir(folderPath, { withFileTypes: true });
-      const validExts = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm']);
+      const validExts = SOUNDBOARD_EXTENSIONS;
       
       const soundPromises = entries
         .filter((entry) => entry.isFile() && validExts.has(path.extname(entry.name).toLowerCase()))
@@ -708,6 +711,11 @@ export function setupIpcHandlers(
   // Soundboard Read Sound
   ipcMain.handle('soundboard:read-sound', async (_, filePath: string) => {
     if (!filePath || typeof filePath !== 'string') {
+      return null;
+    }
+    // O caminho vem do renderer, então a extensão é conferida antes da leitura:
+    // sem isso o canal devolvia o conteúdo de qualquer arquivo até 3 MB (#372).
+    if (!SOUNDBOARD_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
       return null;
     }
     try {

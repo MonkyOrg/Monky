@@ -95,6 +95,7 @@ import { CoturnManager } from '../turn/CoturnManager';
 import { describeSfuPortProblem, SfuManager } from '../sfu/SfuManager';
 import { checkSfuPreflight, formatSfuPreflightForLog } from '../sfu/SfuPreflight';
 import { Logger } from '../logger/Logger';
+import { RateLimiter } from '../security/RateLimiter';
 
 interface ClientSession {
   ws: WebSocket;
@@ -150,9 +151,15 @@ export class WebSocketServer {
     private permissionService: PermissionService,
     private roleService: RoleService,
     private coturnManager: CoturnManager,
+    private rateLimiter: RateLimiter,
+    // Kept last: it is the only one with a default, and TypeScript requires a
+    // parameter with an initialiser to come after every required one.
     private sfuManager: SfuManager = new SfuManager()
   ) {
-    this.wss = new WSServer({ server: this.server });
+    // Without a ceiling the ws default of 100 MiB applies, so an
+    // unauthenticated client could have the server buffer and JSON.parse a
+    // frame that size (#372).
+    this.wss = new WSServer({ server: this.server, maxPayload: LIMITS.WS_MAX_PAYLOAD_BYTES });
     this.setupWss();
     this.startHeartbeat();
     void this.initSfuIfConfigured();
@@ -293,6 +300,22 @@ export class WebSocketServer {
 
     // Connect / Auth
     if (type === MessageType.AUTH_CONNECT) {
+      // Verificar a senha custa uma derivação scrypt, então deixar isso sem
+      // medida entregava de uma vez um laço infinito de adivinhação de senha e
+      // um jeito de manter o servidor ocupado (#372). Só a tentativa que falha
+      // gasta cota: quem entra normalmente não é penalizado, e várias pessoas
+      // atrás do mesmo IP público continuam reconectando depois de uma queda.
+      if (!this.rateLimiter.peek(
+        `auth:${session.ip}`,
+        LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS,
+        LIMITS.RATE_LIMIT_AUTH_WINDOW_MS
+      )) {
+        Logger.security(`Authentication rate limit reached for ${session.ip}`);
+        // Código próprio: o cliente traduz por código, e RATE_LIMITED já
+        // significa "flood de mensagens" para ele (#372).
+        this.sendError(session.ws, ProtocolErrorCode.AUTH_RATE_LIMITED, 'Muitas tentativas de conexão. Aguarde um minuto.', requestId);
+        return;
+      }
       await this.handleAuthConnect(session, payload as AuthConnectPayload, requestId);
       return;
     }
@@ -516,6 +539,13 @@ export class WebSocketServer {
     const result = await this.authService.createChallenge(session.ws, payload);
 
     if (!result.success || !result.nonce) {
+      // Aqui é onde a senha errada aparece: é esta tentativa que conta para o
+      // limite por IP (#372).
+      this.rateLimiter.checkLimit(
+        `auth:${session.ip}`,
+        LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS,
+        LIMITS.RATE_LIMIT_AUTH_WINDOW_MS
+      );
       this.sendError(
         session.ws,
         result.errorCode || ProtocolErrorCode.INTERNAL_ERROR,

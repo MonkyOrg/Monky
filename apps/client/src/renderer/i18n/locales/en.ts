@@ -858,6 +858,7 @@ export const en: TranslationMap = {
   'protocolError.channelFull': 'This voice channel is full.',
   'protocolError.messageTooLong': 'Message is too long.',
   'protocolError.rateLimited': 'You are sending messages too fast. Wait a few seconds.',
+  'protocolError.authRateLimited': 'Too many connection attempts. Wait a minute and try again.',
   'protocolError.avatarTooLarge': 'The image is too large (5MB maximum).',
   'protocolError.avatarInvalidType': 'Unsupported image format. Use PNG, JPG or WebP.',
   'protocolError.serverFull': 'The server is full.',

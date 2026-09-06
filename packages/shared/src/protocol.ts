@@ -8,6 +8,12 @@ export enum ProtocolErrorCode {
   CHANNEL_FULL = 'CHANNEL_FULL',
   MESSAGE_TOO_LONG = 'MESSAGE_TOO_LONG',
   RATE_LIMITED = 'RATE_LIMITED',
+  /**
+   * Tentativas de conexão limitadas por IP (#372). Separado de RATE_LIMITED
+   * porque o cliente traduz por código: reusar aquele mostraria "você está
+   * enviando mensagens rápido demais" para quem nem entrou no servidor.
+   */
+  AUTH_RATE_LIMITED = 'AUTH_RATE_LIMITED',
   AVATAR_TOO_LARGE = 'AVATAR_TOO_LARGE',
   AVATAR_INVALID_TYPE = 'AVATAR_INVALID_TYPE',
   ATTACHMENT_TOO_LARGE = 'ATTACHMENT_TOO_LARGE',

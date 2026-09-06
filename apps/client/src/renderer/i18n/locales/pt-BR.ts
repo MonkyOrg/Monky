@@ -859,6 +859,7 @@ export const ptBR = {
   'protocolError.channelFull': 'Este canal de voz está cheio.',
   'protocolError.messageTooLong': 'Mensagem muito longa.',
   'protocolError.rateLimited': 'Você está enviando mensagens rápido demais. Aguarde alguns segundos.',
+  'protocolError.authRateLimited': 'Muitas tentativas de conexão. Aguarde um minuto e tente de novo.',
   'protocolError.avatarTooLarge': 'A imagem é muito grande (máximo 5MB).',
   'protocolError.avatarInvalidType': 'Formato de imagem não suportado. Use PNG, JPG ou WebP.',
   'protocolError.serverFull': 'O servidor está cheio.',

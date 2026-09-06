@@ -387,6 +387,7 @@ export class MonkyServer {
       permissionService,
       roleService,
       coturnManager,
+      rateLimiter,
       sfuManager
     );
 

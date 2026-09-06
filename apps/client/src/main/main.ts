@@ -108,11 +108,28 @@ ipcMain.handle('app:leave-complete', () => {
   onLeaveComplete?.();
 });
 
+/**
+ * Hands a URL to the OS only when it is a plain web link. Both guards below used
+ * to forward whatever they were given, so a link with another scheme — file://,
+ * or one of the Windows handlers that take arguments — would have been opened
+ * by the system (#372). The `app:open-external` IPC channel already checked
+ * this; the guards did not.
+ */
+function openExternalIfWebUrl(url: string): void {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+    void shell.openExternal(parsed.toString());
+  } catch {
+    // Not a URL we can make sense of: leaving it to the OS is the risk itself.
+  }
+}
+
 function bindMainWindowNavigationGuards(): void {
   if (!mainWindow) return;
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    openExternalIfWebUrl(url);
     return { action: 'deny' };
   });
 
@@ -120,7 +137,7 @@ function bindMainWindowNavigationGuards(): void {
     if (!mainWindow) return;
     if (url === mainWindow.webContents.getURL()) return;
     event.preventDefault();
-    void shell.openExternal(url);
+    openExternalIfWebUrl(url);
   });
 }
 
