@@ -1265,4 +1265,16 @@ export const ptBR = {
   'bots.nameRequired': 'O nome do bot deve ter pelo menos 2 caracteres.',
   'bots.createError': 'Erro ao criar bot.',
   'bots.revokeError': 'Erro ao revogar bot.',
+
+  // Bot Marketplace (#578)
+  'bots.installTitle': 'Instalar Bot via URL',
+  'bots.installDescription': 'Cole a URL do manifest do bot para instalá-lo automaticamente no servidor.',
+  'bots.manifestUrlLabel': 'URL do Manifest',
+  'bots.manifestUrlPlaceholder': 'Ex.: https://meubot.com/manifest',
+  'bots.installBtn': 'Instalar',
+  'bots.manifestUrlRequired': 'Informe a URL do manifest do bot.',
+  'bots.manifestUrlInvalid': 'URL inválida.',
+  'bots.installing': 'Instalando bot...',
+  'bots.installSuccess': 'Bot instalado com sucesso!',
+  'bots.installError': 'Erro ao instalar bot.',
 } as const;
