@@ -4855,6 +4855,11 @@ input:focus, textarea:focus, select:focus {
   background-color: var(--text-dim, #72767d);
 }
 
+.status-indicator.invisible {
+  background-color: var(--text-dim, #72767d);
+  border-style: dashed;
+}
+
 .member-item.member-offline {
   opacity: 0.45;
 }

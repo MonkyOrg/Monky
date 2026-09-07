@@ -220,6 +220,9 @@ export class SettingsModal {
         void this.open();
       },
       showError: (msg: string) => this.showError(msg),
+      onVisibilityChanged: (appearOffline: boolean) => {
+        networkClient.send(MessageType.USER_UPDATE_VISIBILITY, { appearOffline });
+      },
     });
 
     this.voiceVideoTab.attachEvents(this.modalEl);

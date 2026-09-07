@@ -74,6 +74,8 @@ export class SettingsStore {
   // Ask whether to shut the local server down when its owner is the last one
   // leaving (#334). Turned off from the prompt itself or in Settings.
   public askShutdownOnLastLeave: boolean = true;
+  // Appear offline to other users on all servers (#561).
+  public appearOffline: boolean = false;
   // Per-server / per-channel overrides of the global chat-sound mode (#153).
   // A missing entry (or 'inherit') means "use the level above".
   public chatSoundServerOverrides: Record<string, ChatSoundMode> = {};
@@ -183,6 +185,9 @@ export class SettingsStore {
         }
         if (typeof this.askShutdownOnLastLeave !== 'boolean') {
           this.askShutdownOnLastLeave = true;
+        }
+        if (typeof this.appearOffline !== 'boolean') {
+          this.appearOffline = false;
         }
         this.chatSoundServerOverrides = this.sanitizeModeMap(this.chatSoundServerOverrides);
         this.chatSoundChannelOverrides = this.sanitizeModeMap(this.chatSoundChannelOverrides);
@@ -402,6 +407,7 @@ export class SettingsStore {
         updateBetaChannel: this.updateBetaChannel,
         minimizeToTrayOnClose: this.minimizeToTrayOnClose,
         askShutdownOnLastLeave: this.askShutdownOnLastLeave,
+        appearOffline: this.appearOffline,
         chatSoundServerOverrides: this.chatSoundServerOverrides,
         chatSoundChannelOverrides: this.chatSoundChannelOverrides,
         onboardingCompleted: this.onboardingCompleted,

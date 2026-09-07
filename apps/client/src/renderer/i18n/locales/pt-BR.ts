@@ -514,6 +514,7 @@ export const ptBR = {
   'main.profileSettings': 'Configurações de Perfil',
   'main.statusOnline': 'Online',
   'main.statusOffline': 'Offline',
+  'main.statusInvisible': 'Invisível',
   'main.mute': 'Mutar',
   'main.unmute': 'Desmutar',
   'main.deafen': 'Ensurdecer',
@@ -765,6 +766,9 @@ export const ptBR = {
   'settings.tabAbout': 'Sobre e Updates',
   'settings.tabAboutLong': 'Sobre e Atualizações',
   'settings.accountIntro': 'Personalize sua identidade visual e nome de exibição nos servidores.',
+  'settings.appearOfflineSection': 'Visibilidade',
+  'settings.appearOfflineLabel': 'Aparecer offline',
+  'settings.appearOfflineHint': 'Você ficará invisível para todos os outros usuários em qualquer servidor.',
 
   // ── Atalhos de Teclado (KeybindsTab.ts) ──────────────────────────────────
   'keybinds.title': 'Atalhos do Teclado',

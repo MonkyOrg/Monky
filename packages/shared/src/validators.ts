@@ -50,6 +50,8 @@ export const authConnectSchema = z.object({
     .string()
     .regex(/^[A-Za-z0-9_-]{1,64}$/, 'Identificador de dispositivo inválido')
     .optional(),
+  // Appear-offline visibility flag (#561). Optional for backward compatibility.
+  appearOffline: z.boolean().optional(),
 });
 
 export const authChallengeResponseSchema = z.object({

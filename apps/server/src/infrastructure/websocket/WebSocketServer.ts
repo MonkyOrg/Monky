@@ -56,6 +56,7 @@ import {
   UserSummary,
   UserUpdateAvatarPayload,
   UserUpdatedPayload,
+  UserUpdateVisibilityPayload,
   VoiceJoinPayload,
   VoiceLeavePayload,
   VoiceStateChangedPayload,
@@ -111,6 +112,8 @@ interface ClientSession {
   replaced?: boolean;
   /** True when the client explicitly logged out (graceful disconnect). */
   intentionalLogout?: boolean;
+  /** True when this connection has "appear offline" active (#561). */
+  invisible?: boolean;
   /**
    * Channels this connection currently knows about (#384). The server filters
    * private channels out before sending, so it has to remember what each client
@@ -186,6 +189,20 @@ export class WebSocketServer {
     const map = new Map<string, { user: UserSummary }>();
     for (const session of this.sessions.values()) {
       if (session.user && session.sessionId) {
+        map.set(session.sessionId, { user: session.user });
+      }
+    }
+    return map;
+  }
+
+  /**
+   * Like `getOnlineUsersMap` but excludes sessions marked invisible (#561).
+   * Used when building the member list for AUTH_SUCCESS sent to other clients.
+   */
+  public getVisibleOnlineUsersMap(): Map<string, { user: UserSummary }> {
+    const map = new Map<string, { user: UserSummary }>();
+    for (const session of this.sessions.values()) {
+      if (session.user && session.sessionId && !session.invisible) {
         map.set(session.sessionId, { user: session.user });
       }
     }
@@ -367,6 +384,10 @@ export class WebSocketServer {
 
       case MessageType.USER_UPDATE_AVATAR:
         await this.handleUserUpdateAvatar(session, payload as UserUpdateAvatarPayload, requestId);
+        break;
+
+      case MessageType.USER_UPDATE_VISIBILITY:
+        this.handleUserUpdateVisibility(session, payload as UserUpdateVisibilityPayload, requestId);
         break;
 
       case MessageType.SERVER_UPDATE_SETTINGS:
@@ -564,6 +585,7 @@ export class WebSocketServer {
     session.user = result.user;
     const sessionId = result.user.sessionId!;
     session.sessionId = sessionId;
+    session.invisible = result.appearOffline === true;
 
     // Prevent duplicate sessions for the *same device*. A lingering/zombie socket
     // (e.g. after a reconnect where the old TCP connection was not yet cleaned
@@ -589,20 +611,23 @@ export class WebSocketServer {
 
     // If this session had a pending "reconnecting" grace timer (from a recent
     // ungraceful drop), cancel it and tell everyone they are back online (#44).
+    // Invisible users suppress the online broadcast (#561).
     const pendingTimer = this.reconnectTimers.get(sessionId);
     if (pendingTimer) {
       clearTimeout(pendingTimer);
       this.reconnectTimers.delete(sessionId);
-      const backOnlinePayload: UserConnectionStatePayload = {
-        userId: result.user.id,
-        sessionId,
-        nickname: result.user.nickname,
-        status: 'online',
-      };
-      this.broadcast({
-        type: MessageType.USER_CONNECTION_STATE,
-        payload: backOnlinePayload,
-      }, session.ws);
+      if (!session.invisible) {
+        const backOnlinePayload: UserConnectionStatePayload = {
+          userId: result.user.id,
+          sessionId,
+          nickname: result.user.nickname,
+          status: 'online',
+        };
+        this.broadcast({
+          type: MessageType.USER_CONNECTION_STATE,
+          payload: backOnlinePayload,
+        }, session.ws);
+      }
     }
 
     // Populate current voice states into serverDetails
@@ -634,12 +659,14 @@ export class WebSocketServer {
       payload: successPayload,
     });
 
-    // Broadcast USER_JOINED to all other clients
-    const userJoinedPayload: UserJoinedPayload = { user: result.user };
-    this.broadcast({
-      type: MessageType.USER_JOINED,
-      payload: userJoinedPayload,
-    }, session.ws);
+    // Broadcast USER_JOINED to all other clients — unless the user is invisible (#561).
+    if (!session.invisible) {
+      const userJoinedPayload: UserJoinedPayload = { user: result.user };
+      this.broadcast({
+        type: MessageType.USER_JOINED,
+        payload: userJoinedPayload,
+      }, session.ws);
+    }
 
     await this.broadcastRolesState(requestId);
 
@@ -1109,6 +1136,57 @@ export class WebSocketServer {
       requestId,
       payload: updatePayload,
     });
+  }
+
+  /**
+   * Toggle appear-offline on an already-authenticated session (#561).
+   *
+   * Going invisible → broadcast USER_LEFT so other clients drop the user from
+   * their online list. Going visible → broadcast USER_JOINED so they appear.
+   */
+  private handleUserUpdateVisibility(
+    session: ClientSession,
+    payload: UserUpdateVisibilityPayload,
+    _requestId?: string
+  ): void {
+    if (!session.user || !session.sessionId) return;
+    const wasInvisible = !!session.invisible;
+    const nowInvisible = payload.appearOffline === true;
+
+    if (wasInvisible === nowInvisible) return;
+
+    session.invisible = nowInvisible;
+    session.user.invisible = nowInvisible;
+
+    // Propagate to all sessions of the same user so multi-device is consistent.
+    for (const s of this.getSessionsOfUser(session.user.id)) {
+      s.invisible = nowInvisible;
+      if (s.user) s.user.invisible = nowInvisible;
+    }
+
+    if (nowInvisible) {
+      // Tell everyone else the user left (for each device session).
+      for (const s of this.getSessionsOfUser(session.user.id)) {
+        if (!s.sessionId) continue;
+        const leftPayload: UserLeftPayload = {
+          userId: session.user.id,
+          sessionId: s.sessionId,
+          nickname: session.user.nickname,
+        };
+        this.broadcast({ type: MessageType.USER_LEFT, payload: leftPayload }, s.ws);
+      }
+    } else {
+      // Tell everyone else the user joined (for each device session).
+      for (const s of this.getSessionsOfUser(session.user.id)) {
+        if (!s.user) continue;
+        const joinPayload: UserJoinedPayload = {
+          user: { ...s.user, invisible: undefined },
+        };
+        this.broadcast({ type: MessageType.USER_JOINED, payload: joinPayload }, s.ws);
+      }
+    }
+
+    Logger.info('NETWORK', `User ${session.user.nickname} is now ${nowInvisible ? 'invisible' : 'visible'}.`);
   }
 
   private async handleServerUpdateSettings(
@@ -2079,22 +2157,28 @@ export class WebSocketServer {
     // immediately. Otherwise treat it as a possible temporary connection loss
     // and give them a grace period to reconnect before announcing USER_LEFT.
     if (session.intentionalLogout) {
-      this.finalizeSessionLeave(user, sessionId);
+      this.finalizeSessionLeave(user, sessionId, session.invisible);
       return;
     }
 
-    // Notify everyone else that this session lost connection (#44).
-    const reconnectingPayload: UserConnectionStatePayload = {
-      userId: user.id,
-      sessionId,
-      nickname: user.nickname,
-      status: 'reconnecting',
-    };
-    this.broadcast({
-      type: MessageType.USER_CONNECTION_STATE,
-      payload: reconnectingPayload,
-    });
+    // Invisible users are already "offline" to everyone: skip the reconnecting
+    // broadcast so the UI doesn't flash them into existence (#561).
+    if (!session.invisible) {
+      const reconnectingPayload: UserConnectionStatePayload = {
+        userId: user.id,
+        sessionId,
+        nickname: user.nickname,
+        status: 'reconnecting',
+      };
+      this.broadcast({
+        type: MessageType.USER_CONNECTION_STATE,
+        payload: reconnectingPayload,
+      });
+    }
     Logger.info('NETWORK', `User ${user.nickname} lost connection (aguardando reconexão)`);
+
+    // Capture the invisible flag before the session object is reclaimed.
+    const wasInvisible = session.invisible;
 
     // Clear any previous timer just in case, then start the grace period.
     const existingTimer = this.reconnectTimers.get(sessionId);
@@ -2103,7 +2187,7 @@ export class WebSocketServer {
       this.reconnectTimers.delete(sessionId);
       // Only finalize if this session hasn't reconnected in the meantime.
       if (this.sessionSockets.has(sessionId)) return;
-      this.finalizeSessionLeave(user, sessionId);
+      this.finalizeSessionLeave(user, sessionId, wasInvisible);
     }, LIMITS.RECONNECT_GRACE_MS);
     this.reconnectTimers.set(sessionId, timer);
   }
@@ -2154,19 +2238,24 @@ export class WebSocketServer {
    * period expires. The person may still be online from another device, which
    * the client resolves from the `sessionId` carried in the payload (#309).
    */
-  private finalizeSessionLeave(user: UserSummary, sessionId: string): void {
+  private finalizeSessionLeave(user: UserSummary, sessionId: string, invisible?: boolean): void {
     // Normally already done by handleDisconnect; kept for the paths that
     // finalize a session without going through it.
     this.announceVoiceLeave(user, sessionId);
-    const userLeftPayload: UserLeftPayload = {
-      userId: user.id,
-      sessionId,
-      nickname: user.nickname,
-    };
-    this.broadcast({
-      type: MessageType.USER_LEFT,
-      payload: userLeftPayload,
-    });
+
+    // Invisible users were never announced as online, so don't announce
+    // their departure either (#561).
+    if (!invisible) {
+      const userLeftPayload: UserLeftPayload = {
+        userId: user.id,
+        sessionId,
+        nickname: user.nickname,
+      };
+      this.broadcast({
+        type: MessageType.USER_LEFT,
+        payload: userLeftPayload,
+      });
+    }
 
     Logger.info('NETWORK', `User ${user.nickname} disconnected`);
   }
