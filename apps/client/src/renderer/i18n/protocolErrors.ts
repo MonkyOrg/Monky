@@ -77,6 +77,8 @@ export function translateProtocolError(
   if (mismatch) return describeVersionMismatch(mismatch.serverVersion);
 
   const key = code ? ERROR_KEYS[code as ProtocolErrorCode] : undefined;
-  if (key) return t(key);
-  return serverMessage || code || t('protocolError.internalError');
+  // For BAD_REQUEST, prefer the server's specific message (e.g. bot install
+  // errors) over the generic "Requisição inválida" / "Invalid request".
+  if (key && !(code === ProtocolErrorCode.BAD_REQUEST && serverMessage)) return t(key);
+  return serverMessage || (key ? t(key) : undefined) || code || t('protocolError.internalError');
 }
