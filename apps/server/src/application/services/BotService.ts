@@ -130,6 +130,79 @@ export class BotService {
     return record;
   }
 
+  /**
+   * Installs a bot from a remote manifest URL (#578).
+   *
+   * 1. Fetches the manifest from the bot's HTTP endpoint.
+   * 2. Creates the bot record with the metadata from the manifest.
+   * 3. POSTs the generated token to the bot's `registrationUrl`.
+   * 4. The bot responds with its public key, which is immediately TOFU-bound.
+   */
+  async installFromManifest(
+    manifestUrl: string,
+    createdByUserId: string,
+    serverName: string,
+    serverWsUrl?: string
+  ): Promise<{ success: boolean; bot?: BotInfo; errorCode?: ProtocolErrorCode; errorMessage?: string }> {
+    // 1. Fetch manifest.
+    let manifest: any;
+    try {
+      const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) {
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: `Não foi possível buscar o manifest: HTTP ${res.status}` };
+      }
+      manifest = await res.json();
+    } catch (err: any) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: `Erro ao buscar manifest: ${err?.message || 'timeout/rede'}` };
+    }
+
+    if (!manifest?.name || !manifest?.registrationUrl) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Manifest inválido: "name" e "registrationUrl" são obrigatórios.' };
+    }
+
+    // 2. Create the bot (reuse the existing create flow).
+    const createResult = await this.create(manifest.name, createdByUserId, manifest.icon);
+    if (!createResult.success || !createResult.bot || !createResult.token) {
+      return createResult;
+    }
+
+    // 3. POST the token to the bot's registration endpoint.
+    let publicKey: string | null = null;
+    try {
+      const regRes = await fetch(manifest.registrationUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: createResult.token,
+          serverId: createResult.bot.id,
+          serverName,
+          ...(serverWsUrl ? { serverUrl: serverWsUrl } : {}),
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (regRes.ok) {
+        const regBody = await regRes.json().catch(() => null);
+        publicKey = regBody?.publicKey || null;
+      }
+    } catch {
+      // Non-critical: bot may register later via normal token auth.
+      Logger.warn('BOT', `Failed to deliver token to ${manifest.registrationUrl}; bot can still connect manually.`);
+    }
+
+    // 4. If the bot returned a public key, bind it immediately (TOFU).
+    if (publicKey && typeof publicKey === 'string' && publicKey.length > 0) {
+      await this.botRepo.update(createResult.bot.id, { boundPublicKey: publicKey });
+      Logger.info('BOT', `Bot "${manifest.name}" TOFU-bound via manifest registration.`);
+    }
+
+    // Refresh the bot info (bound status may have changed).
+    const refreshed = await this.botRepo.findById(createResult.bot.id);
+    const botInfo = refreshed ? this.toBotInfo(refreshed) : createResult.bot;
+
+    Logger.info('BOT', `Bot "${manifest.name}" installed from manifest by user ${createdByUserId}.`);
+    return { success: true, bot: botInfo };
+  }
+
   private toBotInfo(record: BotRecord): BotInfo {
     const onlineBots = this.getOnlineBotsMap();
     return {

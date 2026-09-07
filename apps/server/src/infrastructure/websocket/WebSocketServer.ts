@@ -60,6 +60,8 @@ import {
   UserUpdateVisibilityPayload,
   BotCreatePayload,
   BotCreatedPayload,
+  BotInstallPayload,
+  BotInstalledPayload,
   BotListResponsePayload,
   BotRevokePayload,
   BotRevokedPayload,
@@ -556,6 +558,11 @@ export class WebSocketServer {
         await this.handleBotRevoke(session, payload as BotRevokePayload, requestId);
         break;
 
+      case MessageType.BOT_INSTALL:
+        if (!(await this.requirePermission(session, Permission.MANAGE_BOTS, requestId))) return;
+        await this.handleBotInstall(session, payload as BotInstallPayload, requestId);
+        break;
+
       // ── Slash commands (#569) ────────────────────────────────────────
       case MessageType.COMMAND_REGISTER:
         this.handleCommandRegister(session, payload as CommandRegisterPayload, requestId);
@@ -998,6 +1005,45 @@ export class WebSocketServer {
     const revokedPayload: BotRevokedPayload = { botId: payload.botId };
     // Broadcast revocation to all clients.
     this.broadcast({ type: MessageType.BOT_REVOKED, payload: revokedPayload });
+  }
+
+  private async handleBotInstall(
+    session: ClientSession,
+    payload: BotInstallPayload,
+    requestId?: string
+  ): Promise<void> {
+    if (!session.user || !this.botService) return;
+
+    const server = await this.serverRepo.getServer();
+    const serverName = server?.name || 'Monky Server';
+
+    // Derive the server's WebSocket URL so the bot can auto-connect.
+    const addr = this.server.address();
+    let serverWsUrl: string | undefined;
+    if (addr && typeof addr === 'object') {
+      const host = addr.address === '::' || addr.address === '0.0.0.0' ? 'localhost' : addr.address;
+      serverWsUrl = `ws://${host}:${addr.port}`;
+    }
+
+    const result = await this.botService.installFromManifest(
+      payload.manifestUrl,
+      session.user.id,
+      serverName,
+      serverWsUrl
+    );
+
+    if (!result.success || !result.bot) {
+      this.sendError(
+        session.ws,
+        result.errorCode || ProtocolErrorCode.BAD_REQUEST,
+        result.errorMessage || 'Erro ao instalar bot.',
+        requestId
+      );
+      return;
+    }
+
+    const installedPayload: BotInstalledPayload = { bot: result.bot };
+    this.send(session.ws, { type: MessageType.BOT_INSTALLED, requestId, payload: installedPayload });
   }
 
   // ── Slash command handlers (#569) ──────────────────────────────────────

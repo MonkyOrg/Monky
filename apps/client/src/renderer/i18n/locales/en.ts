@@ -1264,4 +1264,16 @@ export const en: TranslationMap = {
   'bots.nameRequired': 'Bot name must be at least 2 characters.',
   'bots.createError': 'Error creating bot.',
   'bots.revokeError': 'Error revoking bot.',
+
+  // Bot Marketplace (#578)
+  'bots.installTitle': 'Install Bot from URL',
+  'bots.installDescription': 'Paste the bot manifest URL to automatically install it on the server.',
+  'bots.manifestUrlLabel': 'Manifest URL',
+  'bots.manifestUrlPlaceholder': 'E.g.: https://mybot.com/manifest',
+  'bots.installBtn': 'Install',
+  'bots.manifestUrlRequired': 'Please enter the bot manifest URL.',
+  'bots.manifestUrlInvalid': 'Invalid URL.',
+  'bots.installing': 'Installing bot...',
+  'bots.installSuccess': 'Bot installed successfully!',
+  'bots.installError': 'Error installing bot.',
 };

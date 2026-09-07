@@ -123,6 +123,10 @@ export enum MessageType {
   COMMAND_INVOKE = 'COMMAND_INVOKE',
   /** Server -> client (from bot): command response (may be ephemeral). */
   COMMAND_RESPONSE = 'COMMAND_RESPONSE',
+  /** Client -> server: install a bot from a manifest URL (#578). */
+  BOT_INSTALL = 'BOT_INSTALL',
+  /** Server -> client: bot was installed from manifest (#578). */
+  BOT_INSTALLED = 'BOT_INSTALLED',
 
   // Server -> Client
   AUTH_CHALLENGE = 'AUTH_CHALLENGE',
@@ -792,4 +796,39 @@ export interface CommandResponsePayload {
   content: string;
   /** When true the message is only visible to the invoking user. */
   ephemeral?: boolean;
+}
+
+// ── Bot marketplace / installation (#578) ─────────────────────────────
+
+/**
+ * Manifest that a bot exposes at its `/manifest` endpoint.
+ * Contains everything the server needs to create the bot record and deliver
+ * the token back automatically.
+ */
+export interface BotManifest {
+  /** Display name of the bot. */
+  name: string;
+  /** Short description shown in the install preview. */
+  description?: string;
+  /** Base64-encoded avatar image (data URI or raw base64). */
+  icon?: string;
+  /** Commands the bot will register on connect. Informational only. */
+  commands?: Array<{ name: string; description: string }>;
+  /**
+   * URL where the server POSTs the token after creation.
+   * The bot must accept `{ token, serverId, serverName }` and respond
+   * with `{ publicKey }`.
+   */
+  registrationUrl: string;
+}
+
+/** Client -> server: install a bot from a manifest URL (#578). */
+export interface BotInstallPayload {
+  /** URL of the bot's manifest endpoint (e.g. http://bot-host:4000/manifest). */
+  manifestUrl: string;
+}
+
+/** Server -> client: bot installed successfully (#578). */
+export interface BotInstalledPayload {
+  bot: import('./models').BotInfo;
 }

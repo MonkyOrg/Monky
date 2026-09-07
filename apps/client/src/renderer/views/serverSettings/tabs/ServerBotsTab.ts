@@ -36,6 +36,26 @@ export class ServerBotsTab {
           </div>
         </div>
 
+        <!-- Install bot from URL (#578) -->
+        <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
+          <div style="font-size: 13px; font-weight: 700; margin-bottom: 10px;">
+            <span class="material-symbols-outlined md-16" style="vertical-align: middle;">download</span>
+            ${t('bots.installTitle')}
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">${t('bots.installDescription')}</div>
+          <div style="display: flex; gap: 8px; align-items: flex-end;">
+            <div style="flex: 1;">
+              <label style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">${t('bots.manifestUrlLabel')}</label>
+              <input id="bot-manifest-url" type="url" class="input-field" placeholder="${t('bots.manifestUrlPlaceholder')}" style="width: 100%;">
+            </div>
+            <button id="btn-install-bot" type="button" class="btn btn-primary" style="white-space: nowrap;">
+              <span class="material-symbols-outlined md-16">download</span>
+              ${t('bots.installBtn')}
+            </button>
+          </div>
+          <div id="bot-install-status" style="display: none; margin-top: 8px; font-size: 12px; padding: 8px; border-radius: var(--radius-sm);"></div>
+        </div>
+
         <!-- Token reveal (shown once after creation) -->
         <div id="bot-token-reveal" style="display: none; background: var(--bg-card); border: 1px solid var(--warning-color, #f0b232); border-radius: var(--radius-md); padding: 14px;">
           <div style="font-size: 12px; font-weight: 700; color: var(--warning-color, #f0b232); margin-bottom: 6px;">
@@ -74,6 +94,11 @@ export class ServerBotsTab {
       }
     });
 
+    // Install from URL (#578).
+    const installBtn = document.getElementById('btn-install-bot');
+    const manifestInput = document.getElementById('bot-manifest-url') as HTMLInputElement | null;
+    installBtn?.addEventListener('click', () => this.handleInstall(manifestInput));
+
     // Listen for BOT_CREATED (token reveal) and refresh.
     const u1 = appEvents.on(`message.${MessageType.BOT_CREATED}`, (payload: { bot: BotInfo; token: string }) => {
       this.pendingToken = payload.token;
@@ -95,7 +120,12 @@ export class ServerBotsTab {
       this.renderBotList();
     });
 
-    this.unbind.push(u1, u2, u3);
+    const u4 = appEvents.on(`message.${MessageType.BOT_INSTALLED}`, () => {
+      this.showInstallStatus('success', t('bots.installSuccess'));
+      this.refreshList();
+    });
+
+    this.unbind.push(u1, u2, u3, u4);
 
     // Initial load.
     this.refreshList();
@@ -105,6 +135,51 @@ export class ServerBotsTab {
     for (const fn of this.unbind) fn();
     this.unbind = [];
     this.pendingToken = null;
+  }
+
+  private async handleInstall(urlInput: HTMLInputElement | null): Promise<void> {
+    const url = urlInput?.value.trim();
+    if (!url) {
+      showAlert({ message: t('bots.manifestUrlRequired') });
+      return;
+    }
+
+    // Basic URL validation.
+    try {
+      new URL(url);
+    } catch {
+      showAlert({ message: t('bots.manifestUrlInvalid') });
+      return;
+    }
+
+    this.showInstallStatus('loading', t('bots.installing'));
+
+    try {
+      await networkClient.sendRequest(MessageType.BOT_INSTALL, { manifestUrl: url });
+      if (urlInput) urlInput.value = '';
+    } catch (err: any) {
+      this.showInstallStatus('error', err?.message || t('bots.installError'));
+    }
+  }
+
+  private showInstallStatus(type: 'loading' | 'success' | 'error', message: string): void {
+    const el = document.getElementById('bot-install-status');
+    if (!el) return;
+    el.style.display = 'block';
+    el.textContent = message;
+    if (type === 'success') {
+      el.style.background = 'var(--success-color-bg, rgba(59,165,93,0.15))';
+      el.style.color = 'var(--success-color, #3ba55d)';
+    } else if (type === 'error') {
+      el.style.background = 'var(--danger-color-bg, rgba(237,66,69,0.15))';
+      el.style.color = 'var(--danger-color, #ed4245)';
+    } else {
+      el.style.background = 'var(--bg-elevated)';
+      el.style.color = 'var(--text-muted)';
+    }
+    if (type !== 'loading') {
+      setTimeout(() => { el.style.display = 'none'; }, 5000);
+    }
   }
 
   private async handleCreate(nameInput: HTMLInputElement | null): Promise<void> {
