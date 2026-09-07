@@ -56,13 +56,26 @@ Ideal para bots distribuídos que servem múltiplos servidores.
 
 ### Instalação do SDK
 
-Instale diretamente a partir da release do Monky no GitHub:
-
 ```bash
-npm install https://github.com/MonkyOrg/Monky/releases/latest/download/monky-bot-sdk-X.Y.Z.tgz
+curl -fsSL https://monkyorg.github.io/install-bot-sdk.sh | bash
 ```
 
-Substitua `X.Y.Z` pela versão desejada (consulte a página de [Releases](https://github.com/MonkyOrg/Monky/releases)).
+Para instalar uma versão beta:
+
+```bash
+curl -fsSL https://monkyorg.github.io/install-bot-sdk.sh | bash -s -- --beta
+```
+
+<details>
+<summary>Instalação manual (sem o script)</summary>
+
+Baixe o `.tgz` da versão desejada em [Releases](https://github.com/MonkyOrg/Monky/releases) e instale com:
+
+```bash
+npm install https://github.com/MonkyOrg/Monky/releases/download/vX.Y.Z/monky-bot-sdk-X.Y.Z.tgz
+```
+
+</details>
 
 ### Exemplo básico
 
@@ -191,6 +204,8 @@ bot.on('serving', ({ port, manifest }) => console.log(`Manifest em :${port}/mani
 Na primeira conexão, o bot apresenta sua **chave pública Ed25519**. O servidor a vincula permanentemente ao bot (TOFU binding). Conexões futuras exigem a mesma chave — se alguém tentar usar o token com uma chave diferente, é rejeitado.
 
 No modo marketplace, o TOFU binding acontece automaticamente durante a instalação.
+
+> 💡 **Você não precisa gerar chaves manualmente.** O [Monky Bot](https://github.com/MonkyOrg/MonkyBot) e bots criados com o SDK podem gerar o par Ed25519 automaticamente na primeira execução. As chaves são salvas em `.keys/` e reutilizadas.
 
 ## Monky Bot (bot oficial)
 

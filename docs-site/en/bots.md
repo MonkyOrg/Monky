@@ -56,13 +56,26 @@ Ideal for distributed bots that serve multiple servers.
 
 ### SDK Installation
 
-Install directly from the Monky GitHub release:
-
 ```bash
-npm install https://github.com/MonkyOrg/Monky/releases/latest/download/monky-bot-sdk-X.Y.Z.tgz
+curl -fsSL https://monkyorg.github.io/install-bot-sdk.sh | bash
 ```
 
-Replace `X.Y.Z` with the desired version (check the [Releases](https://github.com/MonkyOrg/Monky/releases) page).
+To install a beta version:
+
+```bash
+curl -fsSL https://monkyorg.github.io/install-bot-sdk.sh | bash -s -- --beta
+```
+
+<details>
+<summary>Manual installation (without the script)</summary>
+
+Download the `.tgz` from the desired version at [Releases](https://github.com/MonkyOrg/Monky/releases) and install with:
+
+```bash
+npm install https://github.com/MonkyOrg/Monky/releases/download/vX.Y.Z/monky-bot-sdk-X.Y.Z.tgz
+```
+
+</details>
 
 ### Basic example
 
@@ -191,6 +204,8 @@ bot.on('serving', ({ port, manifest }) => console.log(`Manifest at :${port}/mani
 On the first connection, the bot presents its **Ed25519 public key**. The server permanently binds it to the bot (TOFU binding). Future connections require the same key — if someone tries to use the token with a different key, it's rejected.
 
 In marketplace mode, TOFU binding happens automatically during installation.
+
+> 💡 **You don't need to generate keys manually.** The [Monky Bot](https://github.com/MonkyOrg/MonkyBot) and bots built with the SDK can auto-generate the Ed25519 key pair on first run. Keys are saved to `.keys/` and reused.
 
 ## Monky Bot (official bot)
 
