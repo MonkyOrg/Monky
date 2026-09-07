@@ -80,9 +80,9 @@ npm install https://github.com/MonkyOrg/Monky/releases/download/vX.Y.Z/monky-bot
 ### Basic example
 
 ```ts
-import { MonkyBot } from '@monky/bot-sdk';
+import { BotClient } from '@monky/bot-sdk';
 
-const bot = new MonkyBot({
+const bot = new BotClient({
   serverUrl: 'ws://your-server:3000',
   token: 'YOUR_BOT_TOKEN',
   publicKey: 'YOUR_ED25519_PUBLIC_KEY_HEX',
@@ -155,9 +155,9 @@ bot.command({
 If you want to distribute your bot so any Monky server can install it, use the `serve()` mode:
 
 ```ts
-import { MonkyBot } from '@monky/bot-sdk';
+import { BotClient } from '@monky/bot-sdk';
 
-const bot = new MonkyBot({
+const bot = new BotClient({
   publicKey: 'YOUR_ED25519_PUBLIC_KEY_HEX',
 });
 
@@ -224,11 +224,11 @@ See the [Monky Bot repository](https://github.com/MonkyOrg/MonkyBot) for install
 
 ## Quick API reference
 
-### `MonkyBot`
+### `BotClient`
 
 | Method | Description |
 |--------|-------------|
-| `new MonkyBot(options)` | Create a bot instance |
+| `new BotClient(options)` | Create a bot instance |
 | `bot.command(def)` | Register a slash command |
 | `bot.connect(overrides?)` | Connect to a server (manual mode) |
 | `bot.disconnect(serverId?)` | Disconnect from one or all servers |

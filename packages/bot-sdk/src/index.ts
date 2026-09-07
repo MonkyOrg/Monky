@@ -58,20 +58,20 @@ interface ServerConnection {
  *
  * **Single-server mode** (manual token):
  * ```ts
- * const bot = new MonkyBot({ serverUrl: 'ws://localhost:3000', token: 'TOKEN', publicKey: 'HEX' });
+ * const bot = new BotClient({ serverUrl: 'ws://localhost:3000', token: 'TOKEN', publicKey: 'HEX' });
  * bot.command({ name: 'ping', description: 'Pong!', handler: ctx => ctx.reply('🏓') });
  * bot.connect();
  * ```
  *
  * **Multi-server mode** (marketplace):
  * ```ts
- * const bot = new MonkyBot({ publicKey: 'HEX' });
+ * const bot = new BotClient({ publicKey: 'HEX' });
  * bot.command({ name: 'ping', description: 'Pong!', handler: ctx => ctx.reply('🏓') });
  * bot.serve({ name: 'PingBot', port: 7780, publicHost: 'mybot.example.com' });
  * // Each server that installs via the manifest URL gets its own connection.
  * ```
  */
-export class MonkyBot extends EventEmitter {
+export class BotClient extends EventEmitter {
   private options: Required<Pick<BotOptions, 'publicKey' | 'autoReconnect'>> & Omit<BotOptions, 'publicKey' | 'autoReconnect'>;
   private commands = new Map<string, CommandDefinition>();
   private connections = new Map<string, ServerConnection>();
@@ -101,7 +101,7 @@ export class MonkyBot extends EventEmitter {
     const serverUrl = overrides?.serverUrl || this.options.serverUrl;
     const token = overrides?.token || this.options.token;
     if (!serverUrl || !token) {
-      throw new Error('MonkyBot.connect() requires serverUrl and token (via constructor or overrides).');
+      throw new Error('BotClient.connect() requires serverUrl and token (via constructor or overrides).');
     }
     const serverId = overrides?.serverId || `conn_${++this.connIdCounter}`;
     this.connectToServer(serverId, serverUrl, token);
@@ -403,3 +403,6 @@ export interface ServeOptions {
 
 export { MessageType, PROTOCOL_VERSION } from '@monky/shared';
 export type { SlashCommand, CommandOption, CommandResponsePayload, BotManifest } from '@monky/shared';
+
+/** @deprecated Use `BotClient` instead. */
+export { BotClient as MonkyBot };
