@@ -48,6 +48,12 @@ export interface UserSummary {
   sessionId?: string;
   /** When this particular connection came up, used to order a user's devices (#309). */
   connectedAt?: number;
+  /**
+   * True when this user has "appear offline" active (#561). Only sent to the
+   * user themselves so they can see their own visibility status; other clients
+   * never receive this flag (they simply see status 'DISCONNECTED').
+   */
+  invisible?: boolean;
 }
 
 export interface ChannelSummary {

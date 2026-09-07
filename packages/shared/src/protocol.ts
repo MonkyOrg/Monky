@@ -76,6 +76,8 @@ export enum MessageType {
    * has to travel the same way or only the sender would fall silent (#499).
    */
   SOUNDBOARD_STOP = 'SOUNDBOARD_STOP',
+  /** Client -> server: toggle appear-offline visibility while connected (#561). */
+  USER_UPDATE_VISIBILITY = 'USER_UPDATE_VISIBILITY',
   SERVER_GET_INVITE_INFO = 'SERVER_GET_INVITE_INFO',
 
   // SFU Client <-> Server Messages (#515)
@@ -152,6 +154,12 @@ export interface AuthConnectPayload {
    * same person" (keep both) (#309).
    */
   deviceId?: string;
+  /**
+   * When true the user wants to appear offline to everyone else (#561).
+   * The server suppresses USER_JOINED broadcasts and masks the status in
+   * member lists sent to other clients.
+   */
+  appearOffline?: boolean;
 }
 
 export interface AuthChallengePayload {
@@ -527,6 +535,11 @@ export interface UserConnectionStatePayload {
 
 export interface UserUpdatedPayload {
   user: UserSummary;
+}
+
+/** Client -> server: toggle appear-offline without reconnecting (#561). */
+export interface UserUpdateVisibilityPayload {
+  appearOffline: boolean;
 }
 
 export interface ChannelCreatedPayload {

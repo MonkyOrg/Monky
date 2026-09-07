@@ -170,10 +170,11 @@ export class MainView {
               <div id="user-profile-btn" class="user-profile-summary" title="${t('main.profileSettings')}">
                 <div class="user-avatar-container">
                   <img id="main-user-avatar" class="user-avatar-main ${voiceStore.isSpeaking ? 'speaking' : ''}" src="${getAvatarUrl(u.avatarUrl)}" data-fallback="avatar">
+                  <span id="main-user-status-dot" class="status-indicator ${settingsStore.appearOffline ? 'invisible' : 'online'}"></span>
                 </div>
                 <div class="user-info-text">
                   <span id="main-user-name" class="user-name-display">${escapeHtml(u.nickname)}</span>
-                  <span class="user-status-text">${t('main.statusOnline')}</span>
+                  <span id="main-user-status-text" class="user-status-text">${settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline')}</span>
                 </div>
               </div>
 
@@ -1692,6 +1693,11 @@ export class MainView {
         btnRnnoise.className = `btn btn-icon voice-conn-rnnoise ${enabled ? 'rnnoise-active' : ''}`;
         btnRnnoise.setAttribute('title', enabled ? t('main.rnnoiseOn') : t('main.rnnoiseOff'));
       }
+      // Update the user status indicator when appear-offline changes (#561).
+      const dot = document.getElementById('main-user-status-dot');
+      if (dot) dot.className = `status-indicator ${settingsStore.appearOffline ? 'invisible' : 'online'}`;
+      const statusText = document.getElementById('main-user-status-text');
+      if (statusText) statusText.textContent = settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline');
     });
 
     const u11 = appEvents.on('server.members_updated', () => {

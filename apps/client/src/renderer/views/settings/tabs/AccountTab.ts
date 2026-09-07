@@ -1,6 +1,7 @@
 import { escapeHtml } from '../../../utils/html';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { serverStore } from '../../../stores/serverStore';
+import { settingsStore } from '../../../stores/settingsStore';
 import { connectionStore } from '../../../stores/connectionStore';
 import { getLanguage, setLanguage, SUPPORTED_LANGUAGES, t, SupportedLanguage } from '../../../i18n';
 import { pickAndCropImage } from '../../ImageCropModal';
@@ -8,6 +9,7 @@ import { showIdentityExportDialog, showIdentityImportDialog } from '../../Identi
 import { showBackupExportDialog, showBackupImportDialog } from '../../BackupDialogs';
 import { showAlert } from '../../Dialog';
 import { attachInputEmojiPicker } from '../../../utils/inputEmojiPicker';
+import { MessageType } from '@monky/shared';
 
 export class AccountTab {
   private detachEmojiPicker: (() => void) | null = null;
@@ -38,6 +40,24 @@ export class AccountTab {
               <button id="btn-save-nickname" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px;">${t('common.save')}</button>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- Appear Offline (#561) -->
+      <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+        <label style="display: flex; align-items: center; gap: 6px;">
+          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">visibility_off</span>
+          ${t('settings.appearOfflineSection')}
+        </label>
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+          <div style="flex: 1; margin-right: 12px;">
+            <div style="font-size: 13px; color: var(--text-primary);">${t('settings.appearOfflineLabel')}</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.appearOfflineHint')}</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-appear-offline" ${settingsStore.appearOffline ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
         </div>
       </div>
 
@@ -120,6 +140,7 @@ export class AccountTab {
       onAvatarChanged: (base64: string) => Promise<void>;
       onReloadModal: () => void;
       showError: (msg: string) => void;
+      onVisibilityChanged?: (appearOffline: boolean) => void;
     }
   ): void {
     const inputNickname = container.querySelector<HTMLInputElement>('#settings-nickname-input');
@@ -159,6 +180,17 @@ export class AccountTab {
         await window.api.setLanguage(newLang);
       }
       callbacks.onReloadModal();
+    });
+
+    // Appear Offline toggle (#561)
+    const toggleAppearOffline = container.querySelector<HTMLInputElement>('#toggle-appear-offline');
+    toggleAppearOffline?.addEventListener('change', () => {
+      settingsStore.appearOffline = toggleAppearOffline.checked;
+      settingsStore.save();
+      // Notify the server of the visibility change if currently connected.
+      if (callbacks.onVisibilityChanged) {
+        callbacks.onVisibilityChanged(toggleAppearOffline.checked);
+      }
     });
 
     btnExportIdentity?.addEventListener('click', async () => {

@@ -513,6 +513,7 @@ export const en: TranslationMap = {
   'main.profileSettings': 'Profile settings',
   'main.statusOnline': 'Online',
   'main.statusOffline': 'Offline',
+  'main.statusInvisible': 'Invisible',
   'main.mute': 'Mute',
   'main.unmute': 'Unmute',
   'main.deafen': 'Deafen',
@@ -764,6 +765,9 @@ export const en: TranslationMap = {
   'settings.tabAbout': 'About and Updates',
   'settings.tabAboutLong': 'About and Updates',
   'settings.accountIntro': 'Customize how you look and the name shown on servers.',
+  'settings.appearOfflineSection': 'Visibility',
+  'settings.appearOfflineLabel': 'Appear offline',
+  'settings.appearOfflineHint': 'You will be invisible to all other users on any server.',
 
   // ── Keyboard Shortcuts (KeybindsTab.ts) ──────────────────────────────────
   'keybinds.title': 'Keyboard Shortcuts',
