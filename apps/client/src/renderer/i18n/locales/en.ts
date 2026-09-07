@@ -1266,14 +1266,15 @@ export const en: TranslationMap = {
   'bots.revokeError': 'Error revoking bot.',
 
   // Bot Marketplace (#578)
-  'bots.installTitle': 'Install Bot from URL',
-  'bots.installDescription': 'Paste the bot manifest URL to automatically install it on the server.',
+  'bots.installTitle': 'Add Bot from URL',
+  'bots.installDescription': 'Paste the bot manifest URL to add it to the server automatically.',
   'bots.manifestUrlLabel': 'Manifest URL',
   'bots.manifestUrlPlaceholder': 'E.g.: https://mybot.com/manifest',
-  'bots.installBtn': 'Install',
+  'bots.installBtn': 'Add',
   'bots.manifestUrlRequired': 'Please enter the bot manifest URL.',
   'bots.manifestUrlInvalid': 'Invalid URL.',
-  'bots.installing': 'Installing bot...',
-  'bots.installSuccess': 'Bot installed successfully!',
-  'bots.installError': 'Error installing bot.',
+  'bots.installing': 'Adding bot...',
+  'bots.installSuccess': 'Bot added successfully!',
+  'bots.installError': 'Error adding bot.',
+  'bots.installTimeout': 'Could not connect to the bot. Make sure the URL is reachable and the port is open (firewall/iptables).',
 };

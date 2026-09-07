@@ -42,7 +42,7 @@ Ideal para bots distribuídos que servem múltiplos servidores.
 
 1. O desenvolvedor do bot publica um **manifest HTTP** (nome, descrição, URL de registro)
 2. No client, vá em **Configurações do Servidor → Bots**
-3. Cole a URL do manifest no campo "Instalar Bot via URL" e clique **Instalar**
+3. Cole a URL do manifest no campo "Adicionar Bot via URL" e clique **Adicionar**
 4. O servidor busca o manifest, cria o bot, e envia o token automaticamente
 5. O bot auto-conecta e registra seus comandos
 
@@ -181,6 +181,26 @@ Isso expõe:
 - `POST /register` — recebe o token de cada servidor que instala o bot
 
 Cada servidor que instalar cria uma **conexão WebSocket independente**. O bot gerencia todas automaticamente, com reconexão.
+
+### Requisitos de rede
+
+Para que servidores Monky consigam acessar o manifest e registrar o bot, a porta configurada (padrão `7780`) precisa estar **acessível externamente**:
+
+```bash
+# Verificar se a porta está aberta
+curl http://SEU-IP:7780/manifest
+
+# Se usar iptables (Linux):
+sudo iptables -A INPUT -p tcp --dport 7780 -j ACCEPT
+
+# Se usar ufw (Ubuntu):
+sudo ufw allow 7780/tcp
+
+# Se estiver em cloud (AWS, GCP, Azure, etc.):
+# Libere a porta 7780 TCP no Security Group / Firewall Rules
+```
+
+Além disso, o `publicHost` deve ser o **IP ou domínio público** da máquina — `localhost` só funciona se bot e servidor estiverem na mesma máquina.
 
 ### Propriedades úteis
 
