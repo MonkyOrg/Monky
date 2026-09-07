@@ -56,9 +56,13 @@ Ideal para bots distribuídos que servem múltiplos servidores.
 
 ### Instalação do SDK
 
+Instale diretamente a partir da release do Monky no GitHub:
+
 ```bash
-npm install @monky/bot-sdk
+npm install https://github.com/MonkyOrg/Monky/releases/latest/download/monky-bot-sdk-X.Y.Z.tgz
 ```
+
+Substitua `X.Y.Z` pela versão desejada (consulte a página de [Releases](https://github.com/MonkyOrg/Monky/releases)).
 
 ### Exemplo básico
 
