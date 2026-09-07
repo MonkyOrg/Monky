@@ -24,6 +24,7 @@ import { ServerStorageTab } from './serverSettings/tabs/ServerStorageTab';
 import { ServerNotificationsTab } from './serverSettings/tabs/ServerNotificationsTab';
 import { ServerMembersTab } from './serverSettings/tabs/ServerMembersTab';
 import { ServerRolesTab } from './serverSettings/tabs/ServerRolesTab';
+import { ServerBotsTab } from './serverSettings/tabs/ServerBotsTab';
 
 export class ServerSettingsModal {
   private modalEl: HTMLElement | null = null;
@@ -42,6 +43,7 @@ export class ServerSettingsModal {
   private notificationsTab = new ServerNotificationsTab();
   private membersTab = new ServerMembersTab();
   private rolesTab = new ServerRolesTab();
+  private botsTab = new ServerBotsTab();
 
   public open(initialTab?: string): void {
     this.close();
@@ -54,6 +56,7 @@ export class ServerSettingsModal {
 
     const canManageServer = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES);
+    const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
 
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';
@@ -92,6 +95,12 @@ export class ServerSettingsModal {
           <button type="button" class="settings-tab-btn ${this.activeTab === 'roles' ? 'active' : ''}" data-tab="roles">
             <span class="material-symbols-outlined md-18">admin_panel_settings</span>
             <span>${t('serverSettings.tabRoles')}</span>
+          </button>
+          ` : ''}
+          ${canManageBots ? `
+          <button type="button" class="settings-tab-btn ${this.activeTab === 'bots' ? 'active' : ''}" data-tab="bots">
+            <span class="material-symbols-outlined md-18">smart_toy</span>
+            <span>${t('serverSettings.tabBots')}</span>
           </button>
           ` : ''}
         </div>
@@ -143,6 +152,11 @@ export class ServerSettingsModal {
                 ${this.rolesTab.renderHtml()}
               </div>
               ` : ''}
+              ${canManageBots ? `
+              <div class="settings-tab-panel" id="tab-panel-bots" style="${this.activeTab === 'bots' ? '' : 'display: none;'}">
+                ${this.botsTab.renderHtml()}
+              </div>
+              ` : ''}
             </div>
 
             <!-- Footer Action Bar -->
@@ -177,6 +191,7 @@ export class ServerSettingsModal {
       notifications: { icon: 'notifications', title: t('serverSettings.tabNotifications') },
       members: { icon: 'group', title: t('serverSettings.tabMembers') },
       roles: { icon: 'admin_panel_settings', title: t('serverSettings.tabRoles') },
+      bots: { icon: 'smart_toy', title: t('serverSettings.tabBots') },
     };
 
     const target = tabTitles[tabName] || tabTitles.general;
@@ -448,6 +463,7 @@ export class ServerSettingsModal {
     });
 
     this.rolesTab.attachEvents(this.modalEl, () => this.reopenPreservingTab());
+    this.botsTab.attachEvents();
   }
 
   private showIconActionModal(hasCustomIcon: boolean): Promise<'change' | 'remove' | null> {
@@ -565,6 +581,7 @@ export class ServerSettingsModal {
   public close(): void {
     this.detachEmojiPicker?.();
     this.detachEmojiPicker = null;
+    this.botsTab.detachEvents();
     if (this.modalEl) {
       const handler = (this.modalEl as any)._escHandler;
       if (handler) window.removeEventListener('keydown', handler);

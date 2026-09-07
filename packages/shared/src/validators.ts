@@ -52,6 +52,9 @@ export const authConnectSchema = z.object({
     .optional(),
   // Appear-offline visibility flag (#561). Optional for backward compatibility.
   appearOffline: z.boolean().optional(),
+  // Bot token for bot authentication (#569). Mutually exclusive with the
+  // challenge-response flow: when present the server skips the nonce handshake.
+  botToken: z.string().min(1).max(128).optional(),
 });
 
 export const authChallengeResponseSchema = z.object({

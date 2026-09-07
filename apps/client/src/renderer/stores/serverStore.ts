@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, hasPermission } from '@monky/shared';
+import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, hasPermission } from '@monky/shared';
 import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
@@ -20,6 +20,8 @@ export class ServerStore {
   // Everyone who has ever connected (keyed by userId), so offline users remain
   // mentionable in chat (#14). Kept separate from the live members list.
   public knownMembers: Map<string, UserSummary> = new Map();
+  /** Slash commands registered by online bots (#569). */
+  public slashCommands: SlashCommand[] = [];
 
   public setServerDetails(details: ServerDetails, currentUser: UserSummary): void {
     clientLog.info('SERVER_HOST', `Server details received: "${details.name}"`, {
@@ -87,6 +89,12 @@ export class ServerStore {
       if (aOnline !== bOnline) return aOnline - bOnline;
       return a.nickname.localeCompare(b.nickname);
     });
+  }
+
+  /** Updates the list of slash commands from a COMMANDS_LIST message (#569). */
+  public setSlashCommands(commands: SlashCommand[]): void {
+    this.slashCommands = commands;
+    this.bus.emit('server.commands_updated');
   }
 
   /** True when the id refers to this very connection, not just to this person (#309). */
@@ -428,6 +436,7 @@ export class ServerStore {
     this.ownerId = null;
     this.myPermissions = 0;
     this.knownMembers = new Map();
+    this.slashCommands = [];
     this.bus.emit('server.updated');
   }
 }

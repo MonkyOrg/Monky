@@ -5,6 +5,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, VoiceMode, stripAdministrator } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
 import { AttachmentService } from './application/services/AttachmentService';
+import { BotService } from './application/services/BotService';
+import { CommandRegistry } from './application/services/CommandRegistry';
 import { ChannelService } from './application/services/ChannelService';
 import { ChatService } from './application/services/ChatService';
 import { PermissionService } from './application/services/PermissionService';
@@ -14,6 +16,7 @@ import { UserService } from './application/services/UserService';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import {
   SqliteAttachmentRepository,
+  SqliteBotRepository,
   SqliteChannelRepository,
   SqliteMentionRepository,
   SqliteMessageRepository,
@@ -255,6 +258,24 @@ export class MonkyServer {
       () => getOnlineUsers()
     );
 
+    // Bot infrastructure (#569).
+    const botRepo = new SqliteBotRepository(db);
+    const botService = new BotService(
+      botRepo,
+      serverRepo,
+      avatarStorage,
+      () => {
+        // Online bots: filter sessions where isBot flag is set.
+        const all = getOnlineUsers() as Map<string, { user: any }>;
+        const bots = new Map<string, any>();
+        for (const [k, v] of all) {
+          if (v.user?.isBot) bots.set(k, v.user);
+        }
+        return bots;
+      }
+    );
+    const commandRegistry = new CommandRegistry();
+
     // Seed server and default channels if new database
     await ensureServerSeedData(config, serverRepo, channelRepo, roleRepo);
 
@@ -387,7 +408,9 @@ export class MonkyServer {
       permissionService,
       roleService,
       coturnManager,
-      sfuManager
+      sfuManager,
+      botService,
+      commandRegistry
     );
 
     getOnlineUsers = () => wsServer.getOnlineUsersMap();

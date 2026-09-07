@@ -12,6 +12,7 @@ export enum Permission {
   ATTACH_FILES = 1 << 10,
   ADMINISTRATOR = 1 << 11,
   USE_SOUNDBOARD = 1 << 12,
+  MANAGE_BOTS = 1 << 13,
 }
 
 export const DEFAULT_PERMISSIONS =

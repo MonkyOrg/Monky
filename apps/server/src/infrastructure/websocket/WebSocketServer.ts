@@ -30,6 +30,7 @@ import {
   ChatUploadTokenPayload,
   LIMITS,
   MessageType,
+  PROTOCOL_VERSION,
   MemberKickPayload,
   MemberKickedPayload,
   Permission,
@@ -57,6 +58,15 @@ import {
   UserUpdateAvatarPayload,
   UserUpdatedPayload,
   UserUpdateVisibilityPayload,
+  BotCreatePayload,
+  BotCreatedPayload,
+  BotListResponsePayload,
+  BotRevokePayload,
+  BotRevokedPayload,
+  CommandRegisterPayload,
+  CommandsListResponsePayload,
+  CommandInvokePayload,
+  CommandResponsePayload,
   VoiceJoinPayload,
   VoiceLeavePayload,
   VoiceStateChangedPayload,
@@ -88,6 +98,8 @@ import { ChannelService } from '../../application/services/ChannelService';
 import { ChatService } from '../../application/services/ChatService';
 import { PermissionService } from '../../application/services/PermissionService';
 import { RoleService } from '../../application/services/RoleService';
+import { BotService } from '../../application/services/BotService';
+import { CommandRegistry } from '../../application/services/CommandRegistry';
 import { SignalingService } from '../../application/services/SignalingService';
 import { UserService } from '../../application/services/UserService';
 import { IServerRepository } from '../../domain/repositories';
@@ -114,6 +126,10 @@ interface ClientSession {
   intentionalLogout?: boolean;
   /** True when this connection has "appear offline" active (#561). */
   invisible?: boolean;
+  /** True when this connection is a bot, not a human user (#569). */
+  isBot?: boolean;
+  /** The bot record id — set only for bot sessions (#569). */
+  botId?: string;
   /**
    * Channels this connection currently knows about (#384). The server filters
    * private channels out before sending, so it has to remember what each client
@@ -153,7 +169,9 @@ export class WebSocketServer {
     private permissionService: PermissionService,
     private roleService: RoleService,
     private coturnManager: CoturnManager,
-    private sfuManager: SfuManager = new SfuManager()
+    private sfuManager: SfuManager = new SfuManager(),
+    private botService?: BotService,
+    private commandRegistry: CommandRegistry = new CommandRegistry()
   ) {
     this.wss = new WSServer({ server: this.server });
     this.setupWss();
@@ -523,6 +541,38 @@ export class WebSocketServer {
         session.intentionalLogout = true;
         break;
 
+      // ── Bot management (#569) ────────────────────────────────────────
+      case MessageType.BOT_CREATE:
+        if (!(await this.requirePermission(session, Permission.MANAGE_BOTS, requestId))) return;
+        await this.handleBotCreate(session, payload as BotCreatePayload, requestId);
+        break;
+
+      case MessageType.BOT_LIST:
+        await this.handleBotList(session, requestId);
+        break;
+
+      case MessageType.BOT_REVOKE:
+        if (!(await this.requirePermission(session, Permission.MANAGE_BOTS, requestId))) return;
+        await this.handleBotRevoke(session, payload as BotRevokePayload, requestId);
+        break;
+
+      // ── Slash commands (#569) ────────────────────────────────────────
+      case MessageType.COMMAND_REGISTER:
+        this.handleCommandRegister(session, payload as CommandRegisterPayload, requestId);
+        break;
+
+      case MessageType.COMMANDS_LIST:
+        this.handleCommandsList(session, requestId);
+        break;
+
+      case MessageType.COMMAND_INVOKE:
+        this.handleCommandInvoke(session, payload as CommandInvokePayload, requestId);
+        break;
+
+      case MessageType.COMMAND_RESPONSE:
+        this.handleCommandResponse(session, payload as CommandResponsePayload, requestId);
+        break;
+
       default:
         Logger.warn('NETWORK', `Unknown message type received: ${type}`);
         this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, `Tipo de mensagem não suportado: ${type}`, requestId);
@@ -534,6 +584,12 @@ export class WebSocketServer {
     payload: AuthConnectPayload,
     requestId?: string
   ): Promise<void> {
+    // Bot token auth: skip challenge-response, authenticate directly (#569).
+    if (payload.botToken && this.botService) {
+      await this.handleBotAuth(session, payload, requestId);
+      return;
+    }
+
     const result = await this.authService.createChallenge(session.ws, payload);
 
     if (!result.success || !result.nonce) {
@@ -742,6 +798,284 @@ export class WebSocketServer {
         return 'O relay TURN só é suportado em servidores Linux. Não existe pacote do coturn para Windows ou macOS.';
       default:
         return `Não foi possível instalar o coturn automaticamente: ${outcome.detail ?? 'erro desconhecido'}`;
+    }
+  }
+
+  // ── Bot authentication (token-based, no challenge) ───────────────────────
+  private async handleBotAuth(
+    session: ClientSession,
+    payload: AuthConnectPayload,
+    requestId?: string
+  ): Promise<void> {
+    if (!this.botService || !payload.botToken || !payload.publicKey) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de autenticação de bot inválidos.', requestId);
+      return;
+    }
+
+    // Protocol version must match.
+    if (payload.protocolVersion !== PROTOCOL_VERSION) {
+      this.sendError(
+        session.ws,
+        ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
+        `Versão de protocolo incompatível. Este servidor usa a versão ${PROTOCOL_VERSION}.`,
+        requestId,
+        PROTOCOL_VERSION
+      );
+      return;
+    }
+
+    const publicKey = payload.publicKey;
+    const botRecord = await this.botService.validateToken(payload.botToken, publicKey);
+    if (!botRecord) {
+      this.send(session.ws, {
+        type: MessageType.AUTH_FAILED,
+        requestId,
+        payload: {
+          code: ProtocolErrorCode.UNAUTHORIZED,
+          message: 'Token de bot inválido ou chave pública não corresponde ao vínculo TOFU.',
+        } satisfies AuthFailedPayload,
+      });
+      return;
+    }
+
+    // Build a synthetic UserSummary for the bot.
+    const sessionId = `bot:${botRecord.id}`;
+    const now = Date.now();
+    const botUser: UserSummary = {
+      id: botRecord.id,
+      clientId: `bot-${botRecord.id}`,
+      nickname: botRecord.name,
+      avatarUrl: botRecord.avatarPath ? `/avatars/${botRecord.avatarPath}` : undefined,
+      status: 'ONLINE',
+      joinedAt: now,
+      sessionId,
+      connectedAt: now,
+      isBot: true,
+    };
+
+    session.user = botUser;
+    session.sessionId = sessionId;
+    session.isBot = true;
+    session.botId = botRecord.id;
+
+    // Replace existing bot session if any.
+    const existingWs = this.sessionSockets.get(sessionId);
+    if (existingWs && existingWs !== session.ws) {
+      const stale = this.sessions.get(existingWs);
+      if (stale) {
+        stale.replaced = true;
+        this.sessions.delete(existingWs);
+      }
+      try { existingWs.close(); } catch { /* ignore */ }
+    }
+    this.sessionSockets.set(sessionId, session.ws);
+
+    // Build a minimal ServerDetails for the bot.
+    const server = await this.serverRepo.getServer();
+    const channels = server ? await this.channelService.listChannels() : [];
+    const serverDetails = {
+      id: server?.id ?? '',
+      name: server?.name ?? '',
+      createdAt: server?.createdAt ?? now,
+      maxUsers: server?.maxUsers ?? 0,
+      hasPassword: false,
+      allowSoundboard: false,
+      allowEveryoneMention: false,
+      allowMessageEdit: false,
+      showRoleBadgesToEveryone: false,
+      voiceMode: 'p2p' as const,
+      hostSpecs: { cpuCores: 0, ramTotalGb: 0 },
+      turnEnabled: false,
+      maxBots: server?.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
+      iconUrl: null,
+      channels: channels.map((c: any) => ({
+        id: c.id, serverId: c.serverId, name: c.name, type: c.type,
+        position: c.position, createdAt: c.createdAt,
+        maxParticipants: c.maxParticipants, isPrivate: c.isPrivate,
+        allowedRoleIds: c.allowedRoleIds,
+      })),
+      members: [botUser],
+      knownMembers: [botUser],
+      mentionedChannelIds: [],
+      voiceStates: {},
+      roles: [],
+      userRoles: [],
+      ownerId: server?.ownerUserId ?? null,
+      myPermissions: 0,
+      attachmentStorage: { maxFileBytes: 0, maxTotalBytes: 0, usedBytes: 0 },
+    };
+
+    this.send(session.ws, {
+      type: MessageType.AUTH_SUCCESS,
+      requestId,
+      payload: {
+        server: { ...serverDetails, turnAvailability: CoturnManager.describeAvailability() },
+        currentUser: botUser,
+        roles: [],
+        userRoles: [],
+        ownerId: serverDetails.ownerId,
+        myPermissions: 0,
+        iceServers: [],
+      } satisfies AuthSuccessPayload,
+    });
+
+    // Broadcast the bot joining.
+    this.broadcast({ type: MessageType.USER_JOINED, payload: { user: botUser } satisfies UserJoinedPayload }, session.ws);
+    Logger.info('BOT', `Bot "${botRecord.name}" (${botRecord.id}) connected.`);
+  }
+
+  // ── Bot management handlers (#569) ─────────────────────────────────────
+
+  private async handleBotCreate(
+    session: ClientSession,
+    payload: BotCreatePayload,
+    requestId?: string
+  ): Promise<void> {
+    if (!session.user || !this.botService) return;
+
+    const result = await this.botService.create(
+      payload.name,
+      session.user.id,
+      payload.avatarBase64
+    );
+
+    if (!result.success || !result.bot || !result.token) {
+      this.sendError(
+        session.ws,
+        result.errorCode || ProtocolErrorCode.BAD_REQUEST,
+        result.errorMessage || 'Erro ao criar bot.',
+        requestId
+      );
+      return;
+    }
+
+    const createdPayload: BotCreatedPayload = {
+      bot: result.bot,
+      token: result.token,
+    };
+    this.send(session.ws, { type: MessageType.BOT_CREATED, requestId, payload: createdPayload });
+  }
+
+  private async handleBotList(
+    session: ClientSession,
+    requestId?: string
+  ): Promise<void> {
+    if (!session.user || !this.botService) return;
+    const bots = await this.botService.list();
+    const listPayload: BotListResponsePayload = { bots };
+    this.send(session.ws, { type: MessageType.BOT_LIST, requestId, payload: listPayload });
+  }
+
+  private async handleBotRevoke(
+    session: ClientSession,
+    payload: BotRevokePayload,
+    requestId?: string
+  ): Promise<void> {
+    if (!session.user || !this.botService) return;
+
+    // Disconnect the bot if it's online.
+    const botSessionId = `bot:${payload.botId}`;
+    const botWs = this.sessionSockets.get(botSessionId);
+    if (botWs) {
+      const botSession = this.sessions.get(botWs);
+      if (botSession) {
+        botSession.replaced = true;
+        this.sessions.delete(botWs);
+      }
+      this.sessionSockets.delete(botSessionId);
+      try { botWs.close(); } catch { /* ignore */ }
+    }
+
+    // Unregister commands.
+    this.commandRegistry.clearBot(payload.botId);
+
+    const result = await this.botService.revoke(payload.botId);
+    if (!result.success) {
+      this.sendError(session.ws, result.errorCode || ProtocolErrorCode.BAD_REQUEST, result.errorMessage || 'Erro ao revogar bot.', requestId);
+      return;
+    }
+
+    const revokedPayload: BotRevokedPayload = { botId: payload.botId };
+    // Broadcast revocation to all clients.
+    this.broadcast({ type: MessageType.BOT_REVOKED, payload: revokedPayload });
+  }
+
+  // ── Slash command handlers (#569) ──────────────────────────────────────
+
+  private handleCommandRegister(
+    session: ClientSession,
+    payload: CommandRegisterPayload,
+    requestId?: string
+  ): void {
+    if (!session.user || !session.isBot || !session.botId) {
+      this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'Apenas bots podem registrar comandos.', requestId);
+      return;
+    }
+
+    this.commandRegistry.register(session.botId, session.user.nickname, payload.commands);
+    // Broadcast updated command list to all human clients.
+    const listPayload: CommandsListResponsePayload = { commands: this.commandRegistry.listAll() };
+    this.broadcast({ type: MessageType.COMMANDS_LIST, payload: listPayload });
+  }
+
+  private handleCommandsList(
+    session: ClientSession,
+    requestId?: string
+  ): void {
+    if (!session.user) return;
+    const listPayload: CommandsListResponsePayload = { commands: this.commandRegistry.listAll() };
+    this.send(session.ws, { type: MessageType.COMMANDS_LIST, requestId, payload: listPayload });
+  }
+
+  private handleCommandInvoke(
+    session: ClientSession,
+    payload: CommandInvokePayload,
+    requestId?: string
+  ): void {
+    if (!session.user) return;
+
+    const command = this.commandRegistry.find(payload.botId, payload.commandName);
+    if (!command) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Comando não encontrado.', requestId);
+      return;
+    }
+
+    // Route the invocation to the target bot.
+    const botSessionId = `bot:${payload.botId}`;
+    const botWs = this.sessionSockets.get(botSessionId);
+    if (!botWs || botWs.readyState !== WebSocket.OPEN) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'O bot está offline.', requestId);
+      return;
+    }
+
+    this.send(botWs, {
+      type: MessageType.COMMAND_INVOKE,
+      payload: {
+        ...payload,
+        invokerId: session.user.id,
+        invokerNickname: session.user.nickname,
+        channelId: payload.channelId,
+      },
+    });
+  }
+
+  private handleCommandResponse(
+    session: ClientSession,
+    payload: CommandResponsePayload,
+    requestId?: string
+  ): void {
+    if (!session.user || !session.isBot) return;
+
+    if (payload.ephemeral) {
+      // Ephemeral: deliver only to the invoker.
+      for (const [ws, s] of this.sessions.entries()) {
+        if (s.user?.id === payload.userId && ws.readyState === WebSocket.OPEN) {
+          this.send(ws, { type: MessageType.COMMAND_RESPONSE, payload });
+        }
+      }
+    } else {
+      // Public command response: broadcast to channel audience.
+      this.broadcast({ type: MessageType.COMMAND_RESPONSE, payload });
     }
   }
 
@@ -2126,6 +2460,14 @@ export class WebSocketServer {
     // sessionSockets mapping (which now points at the newer session).
     if (session.replaced) {
       return;
+    }
+
+    // Bots: clear registered commands on disconnect (#569).
+    if (session.isBot && session.botId) {
+      this.commandRegistry.clearBot(session.botId);
+      // Broadcast updated (now empty for this bot) command list.
+      const listPayload: CommandsListResponsePayload = { commands: this.commandRegistry.listAll() };
+      this.broadcast({ type: MessageType.COMMANDS_LIST, payload: listPayload });
     }
 
     if (!session.user || !session.sessionId) {

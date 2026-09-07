@@ -54,6 +54,8 @@ export interface UserSummary {
    * never receive this flag (they simply see status 'DISCONNECTED').
    */
   invisible?: boolean;
+  /** True when this account is a bot created via the bot management API (#569). */
+  isBot?: boolean;
 }
 
 export interface ChannelSummary {
@@ -129,6 +131,11 @@ export interface ChatMessage {
    * would silently rewrite the conversation for everyone reading it.
    */
   deletedAt?: number | null;
+  /**
+   * True when this message is only visible to the invoking user (#569).
+   * Ephemeral messages are not persisted and disappear on reconnect.
+   */
+  isEphemeral?: boolean;
 }
 
 export interface Role {
@@ -174,6 +181,45 @@ export interface HostSpecs {
   ramTotalGb: number;
 }
 
+// ── Bot & slash command types (#569) ──────────────────────────────────────
+
+/** Option type for a slash command parameter. */
+export type CommandOptionType = 'string' | 'integer' | 'boolean' | 'user';
+
+/** One option (parameter) a slash command accepts. */
+export interface CommandOption {
+  name: string;
+  description: string;
+  type: CommandOptionType;
+  required?: boolean;
+}
+
+/** A registered slash command. */
+export interface SlashCommand {
+  /** Unique per bot; the command name without the leading `/`. */
+  name: string;
+  description: string;
+  /** The bot that owns this command (`UserSummary.id`). */
+  botId: string;
+  /** Display-friendly bot name for the command dropup. */
+  botName: string;
+  options?: CommandOption[];
+}
+
+/** A bot account visible in the management UI. */
+export interface BotInfo {
+  id: string;
+  name: string;
+  avatarUrl?: string | null;
+  createdAt: number;
+  createdByUserId: string;
+  /** Whether TOFU binding is complete (first connection done). */
+  bound: boolean;
+  online: boolean;
+}
+
+// ── End bot types ─────────────────────────────────────────────────────────
+
 export interface ServerDetails {
   id: string;
   name: string;
@@ -193,6 +239,8 @@ export interface ServerDetails {
    * When false, each badge is only rendered for members holding that role.
    */
   showRoleBadgesToEveryone?: boolean;
+  /** Maximum number of bots the server allows (#569). */
+  maxBots?: number;
   /**
    * Voice and video topology mode (#515).
    * - 'p2p': Direct full-mesh WebRTC connections between participants.

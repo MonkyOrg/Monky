@@ -24,6 +24,8 @@ export interface ServerRecord {
   maxAttachmentStorageBytes?: number | null;
   /** Whether the built-in TURN relay should run alongside the server (#425). */
   turnEnabled?: boolean;
+  /** Maximum number of bots allowed on this server (#569). */
+  maxBots?: number;
   /**
    * Shared secret backing TURN's REST-API credentials (#425).
    *
@@ -111,4 +113,19 @@ export interface RoleRecord {
 export interface UserRoleRecord {
   userId: string;
   roleId: string;
+}
+
+/** A bot account registered on the server (#569). */
+export interface BotRecord {
+  id: string;
+  /** Human-readable name shown in the member list. */
+  name: string;
+  /** Token hash (bcrypt or sha256-hex); the plain token is never stored. */
+  tokenHash: string;
+  avatarPath: string | null;
+  /** The public key bound on first connection (TOFU). Null until bound. */
+  boundPublicKey: string | null;
+  /** The user who created this bot. */
+  createdByUserId: string;
+  createdAt: number;
 }

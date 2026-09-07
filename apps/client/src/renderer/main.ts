@@ -771,6 +771,31 @@ class App {
       }
     });
 
+    // ── Bot infrastructure (#569) ────────────────────────────────────────
+    appEvents.on(`message.${MessageType.COMMANDS_LIST}`, (payload: { commands: any[] }) => {
+      serverStore.setSlashCommands(payload.commands ?? []);
+    });
+
+    appEvents.on(`message.${MessageType.COMMAND_RESPONSE}`, (payload: { channelId: string; userId: string; content: string; ephemeral?: boolean }) => {
+      // Render command responses as system-like chat messages.
+      const msg: ChatMessage = {
+        id: `cmd-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        channelId: payload.channelId,
+        userId: payload.userId,
+        userNickname: 'Bot',
+        content: payload.content,
+        createdAt: Date.now(),
+        isSystem: false,
+        attachments: [],
+      };
+      chatStore.addMessage(msg);
+    });
+
+    appEvents.on(`message.${MessageType.BOT_REVOKED}`, (payload: { botId: string }) => {
+      // Remove the bot from the member list.
+      serverStore.removeMember(payload.botId);
+    });
+
     // Local VAD speaking state
     appEvents.on('local.speaking', (speaking: boolean) => {
       voiceStore.setSpeaking(speaking);

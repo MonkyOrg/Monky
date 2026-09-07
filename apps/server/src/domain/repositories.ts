@@ -1,4 +1,4 @@
-import { AttachmentRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from './entities';
+import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from './entities';
 
 export interface IServerRepository {
   getServer(): Promise<ServerRecord | null>;
@@ -83,4 +83,15 @@ export interface IRoleRepository {
   assignRole(userId: string, roleId: string): Promise<void>;
   unassignRole(userId: string, roleId: string): Promise<void>;
   hasRole(userId: string, roleId: string): Promise<boolean>;
+}
+
+export interface IBotRepository {
+  create(bot: BotRecord): Promise<void>;
+  findById(id: string): Promise<BotRecord | null>;
+  findByTokenHash(tokenHash: string): Promise<BotRecord | null>;
+  listAll(): Promise<BotRecord[]>;
+  /** Update selected fields (e.g. binding the public key on TOFU). */
+  update(id: string, updates: Partial<BotRecord>): Promise<void>;
+  delete(id: string): Promise<void>;
+  count(): Promise<number>;
 }
