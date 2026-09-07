@@ -403,6 +403,3 @@ export interface ServeOptions {
 
 export { MessageType, PROTOCOL_VERSION } from '@monky/shared';
 export type { SlashCommand, CommandOption, CommandResponsePayload, BotManifest } from '@monky/shared';
-
-/** @deprecated Use `BotClient` instead. */
-export { BotClient as MonkyBot };
