@@ -149,15 +149,15 @@ export class BotService {
     try {
       const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(10_000) });
       if (!res.ok) {
-        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: `Não foi possível buscar o manifest: HTTP ${res.status}` };
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: `O bot não respondeu corretamente (HTTP ${res.status}). Verifique se a URL está correta e o bot está em execução.` };
       }
       manifest = await res.json();
-    } catch (err: any) {
-      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: `Erro ao buscar manifest: ${err?.message || 'timeout/rede'}` };
+    } catch {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Não foi possível conectar ao bot. Verifique se a URL está acessível e a porta está aberta no firewall.' };
     }
 
     if (!manifest?.name || !manifest?.registrationUrl) {
-      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Manifest inválido: "name" e "registrationUrl" são obrigatórios.' };
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O bot respondeu, mas o manifest está incompleto. Verifique se o bot está configurado corretamente.' };
     }
 
     // 2. Create the bot (reuse the existing create flow).
