@@ -1283,6 +1283,7 @@ export class MainView {
               <span class="member-name">${escapeHtml(m.nickname)}</span>
               ${isLocal ? `<span class="member-badge-you">${t('common.you')}</span>` : ''}
               ${m.id === serverStore.ownerId ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
+              ${m.isBot ? `<span class="member-badge-bot" title="Bot">BOT</span>` : ''}
               ${isReconnecting ? `<span class="member-reconnecting-badge" title="${t('main.reconnectingTitle')}"><span class="material-symbols-outlined md-14 spin">sync</span></span>` : ''}
               ${(!effectiveOffline && voiceState?.isScreenSharing) ? `<span class="member-live-badge" title="${t('main.sharingScreen')}">LIVE</span>` : ''}
               ${(!effectiveOffline && voiceState?.isCameraOn) ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}

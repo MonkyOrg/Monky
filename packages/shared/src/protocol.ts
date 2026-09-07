@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, ChannelSummary, ChannelType, ChatMessage, Role, ServerDetails, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, WebRtcSignalPayload } from './models.js';
+import { AttachmentStorageInfo, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, WebRtcSignalPayload } from './models.js';
 
 export enum ProtocolErrorCode {
   AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
@@ -98,6 +98,32 @@ export enum MessageType {
   SFU_GET_PRODUCERS = 'SFU_GET_PRODUCERS',
   SFU_PRODUCERS_LIST = 'SFU_PRODUCERS_LIST',
 
+  // Bot & Slash Command Messages (#569)
+  /** Admin -> server: create a new bot account. */
+  BOT_CREATE = 'BOT_CREATE',
+  /** Server -> admin: bot created with its one-time token. */
+  BOT_CREATED = 'BOT_CREATED',
+  /** Admin -> server: list all bots on this server. */
+  BOT_LIST = 'BOT_LIST',
+  /** Server -> admin: the bot list. */
+  BOT_LIST_RESPONSE = 'BOT_LIST_RESPONSE',
+  /** Admin -> server: revoke a bot's token and disconnect it. */
+  BOT_REVOKE = 'BOT_REVOKE',
+  /** Server -> admin: bot was revoked. */
+  BOT_REVOKED = 'BOT_REVOKED',
+  /** Bot -> server: register slash commands. */
+  COMMAND_REGISTER = 'COMMAND_REGISTER',
+  /** Server -> bot: commands were registered. */
+  COMMAND_REGISTERED = 'COMMAND_REGISTERED',
+  /** Client -> server: discover available commands. */
+  COMMANDS_LIST = 'COMMANDS_LIST',
+  /** Server -> client: available slash commands. */
+  COMMANDS_LIST_RESPONSE = 'COMMANDS_LIST_RESPONSE',
+  /** Client -> server: invoke a slash command. */
+  COMMAND_INVOKE = 'COMMAND_INVOKE',
+  /** Server -> client (from bot): command response (may be ephemeral). */
+  COMMAND_RESPONSE = 'COMMAND_RESPONSE',
+
   // Server -> Client
   AUTH_CHALLENGE = 'AUTH_CHALLENGE',
   AUTH_SUCCESS = 'AUTH_SUCCESS',
@@ -160,6 +186,12 @@ export interface AuthConnectPayload {
    * member lists sent to other clients.
    */
   appearOffline?: boolean;
+  /**
+   * Bot authentication token (#569). Mutually exclusive with `publicKey` /
+   * challenge-response: a bot sends its token here and the server verifies it
+   * directly, skipping the nonce/signature handshake.
+   */
+  botToken?: string;
 }
 
 export interface AuthChallengePayload {
@@ -690,4 +722,74 @@ export interface SfuGetProducersPayload {
 export interface SfuProducersListPayload {
   channelId: string;
   producers: SfuNewProducerPayload[];
+}
+
+// ── Bot & Slash Command Payloads (#569) ───────────────────────────────────
+
+/** Admin -> server: create a new bot account. */
+export interface BotCreatePayload {
+  name: string;
+  avatarBase64?: string;
+}
+
+/** Server -> admin: bot created with its one-time token. */
+export interface BotCreatedPayload {
+  bot: BotInfo;
+  /** Shown exactly once — the admin must copy it before closing the dialog. */
+  token: string;
+}
+
+/** Server -> admin: the bot list. */
+export interface BotListResponsePayload {
+  bots: BotInfo[];
+}
+
+/** Admin -> server: revoke a bot's token and disconnect it. */
+export interface BotRevokePayload {
+  botId: string;
+}
+
+/** Server -> admin: bot was revoked. */
+export interface BotRevokedPayload {
+  botId: string;
+}
+
+/** Bot -> server: register slash commands (replaces the bot's previous set). */
+export interface CommandRegisterPayload {
+  commands: Array<{
+    name: string;
+    description: string;
+    options?: CommandOption[];
+  }>;
+}
+
+/** Server -> bot: registration result. */
+export interface CommandRegisteredPayload {
+  registered: number;
+}
+
+/** Server -> client: available slash commands. */
+export interface CommandsListResponsePayload {
+  commands: SlashCommand[];
+}
+
+/** Client -> server: invoke a slash command. */
+export interface CommandInvokePayload {
+  commandName: string;
+  /** Which bot to target when multiple bots register the same command name. */
+  botId: string;
+  channelId: string;
+  /** Typed options keyed by option name. */
+  options?: Record<string, string | number | boolean>;
+}
+
+/** Server -> client (from bot) / Bot -> server: command response. */
+export interface CommandResponsePayload {
+  /** The invocation this responds to. */
+  channelId: string;
+  /** The user who invoked the command. */
+  userId: string;
+  content: string;
+  /** When true the message is only visible to the invoking user. */
+  ephemeral?: boolean;
 }

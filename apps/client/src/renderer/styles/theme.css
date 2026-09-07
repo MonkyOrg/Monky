@@ -2754,6 +2754,37 @@ input:focus, textarea:focus, select:focus {
   text-overflow: ellipsis;
 }
 
+/* ── Slash command dropup (#569) ───────────────────────────────────── */
+.command-slash {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent-primary);
+  margin-right: 2px;
+}
+
+.command-description {
+  font-size: 11px;
+  color: var(--text-muted, #949ba4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+.command-bot-name {
+  font-size: 10px;
+  color: var(--text-muted, #949ba4);
+  background: rgba(88, 101, 242, 0.15);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+.mention-item.active .command-description,
+.mention-item.active .command-bot-name {
+  color: rgba(255, 255, 255, 0.8);
+}
+
 .mention-item.active .mention-nick {
   color: #fff;
 }
@@ -5004,6 +5035,17 @@ button[data-loading="1"]::after {
   padding: 1px 5px;
   border-radius: var(--radius-sm);
   flex-shrink: 0;
+}
+
+.member-badge-bot {
+  font-size: 9px;
+  font-weight: 700;
+  background-color: rgba(88, 101, 242, 0.3);
+  color: var(--accent-primary);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  letter-spacing: 0.5px;
 }
 
 /* Custom quality profile: dropdowns of common values (#476). */

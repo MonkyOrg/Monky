@@ -398,6 +398,7 @@ export class AuthService {
       voiceMode: server.voiceMode || 'p2p',
       hostSpecs: CapacityEstimator.getHostSpecs(),
       turnEnabled: Boolean(server.turnEnabled),
+      maxBots: server.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
       iconUrl: this.avatarStorage.getPublicUrl(server.iconPath),
       channels: visibleChannels.map((c) => ({
         id: c.id,

@@ -1,0 +1,20 @@
+{
+  "name": "@monky/bot-sdk",
+  "version": "1.0.0",
+  "description": "SDK for building Monky bots with slash commands",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "ws": "^8.14.2",
+    "@monky/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/ws": "^8.5.0"
+  },
+  "license": "MIT"
+}

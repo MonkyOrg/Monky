@@ -188,6 +188,7 @@ export const en: TranslationMap = {
   'serverSettings.tabNotifications': 'Notifications',
   'serverSettings.tabMembers': 'Members',
   'serverSettings.tabRoles': 'Roles',
+  'serverSettings.tabBots': 'Bots',
   'serverSettings.generalInfo': 'Server Information',
   'serverSettings.nameLabel': 'Server name',
   'serverSettings.securitySection': 'Security and access password',
@@ -1245,4 +1246,22 @@ export const en: TranslationMap = {
   'capacity.sourceServer': 'CPU and RAM reported by the server itself. An estimate, not a guarantee.',
   'capacity.sourceLocalApprox':
     'CPU and RAM approximated from this machine (browsers cap the RAM reading at 8 GB). An estimate, not a guarantee.',
+
+  // ── Bots (#569) ─────────────────────────────────────────────────────
+  'bots.createTitle': 'Create Bot',
+  'bots.nameLabel': 'Bot Name',
+  'bots.namePlaceholder': 'E.g.: Monky Bot',
+  'bots.createBtn': 'Create',
+  'bots.tokenWarning': 'Token generated — copy it now, it will not be shown again!',
+  'bots.copyToken': 'Copy Token',
+  'bots.listTitle': 'Registered Bots',
+  'bots.loading': 'Loading...',
+  'bots.noBots': 'No bots registered.',
+  'bots.tofuBound': 'Public key bound (TOFU)',
+  'bots.createdAt': 'Created at',
+  'bots.revoke': 'Revoke',
+  'bots.revokeConfirm': 'Are you sure you want to revoke the bot "{name}"? This action is irreversible.',
+  'bots.nameRequired': 'Bot name must be at least 2 characters.',
+  'bots.createError': 'Error creating bot.',
+  'bots.revokeError': 'Error revoking bot.',
 };

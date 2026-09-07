@@ -189,6 +189,7 @@ export const ptBR = {
   'serverSettings.tabNotifications': 'Notificações',
   'serverSettings.tabMembers': 'Membros',
   'serverSettings.tabRoles': 'Cargos',
+  'serverSettings.tabBots': 'Bots',
   'serverSettings.generalInfo': 'Informações do Servidor',
   'serverSettings.nameLabel': 'Nome do Servidor',
   'serverSettings.securitySection': 'Segurança e Senha de Acesso',
@@ -1246,4 +1247,22 @@ export const ptBR = {
   'capacity.sourceServer': 'CPU e RAM informados pelo próprio servidor. Estimativa, não garantia.',
   'capacity.sourceLocalApprox':
     'CPU e RAM aproximados desta máquina (o navegador limita a leitura de RAM a 8 GB). Estimativa, não garantia.',
+
+  // ── Bots (#569) ─────────────────────────────────────────────────────
+  'bots.createTitle': 'Criar Bot',
+  'bots.nameLabel': 'Nome do Bot',
+  'bots.namePlaceholder': 'Ex.: Monky Bot',
+  'bots.createBtn': 'Criar',
+  'bots.tokenWarning': 'Token gerado — copie agora, ele não será exibido novamente!',
+  'bots.copyToken': 'Copiar Token',
+  'bots.listTitle': 'Bots Registrados',
+  'bots.loading': 'Carregando...',
+  'bots.noBots': 'Nenhum bot registrado.',
+  'bots.tofuBound': 'Chave pública vinculada (TOFU)',
+  'bots.createdAt': 'Criado em',
+  'bots.revoke': 'Revogar',
+  'bots.revokeConfirm': 'Tem certeza que deseja revogar o bot "{name}"? Essa ação é irreversível.',
+  'bots.nameRequired': 'O nome do bot deve ter pelo menos 2 caracteres.',
+  'bots.createError': 'Erro ao criar bot.',
+  'bots.revokeError': 'Erro ao revogar bot.',
 } as const;

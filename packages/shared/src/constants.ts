@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 /**
  * Default size of the floating overlay window (#169). Shared so the renderer can
@@ -61,6 +61,14 @@ export const LIMITS = {
   // already-online identity could open unlimited connections and bypass
   // maxUsers, since capacity counts people rather than connections.
   MAX_SESSIONS_PER_USER: 3,
+  /** Maximum bots a server can have, separate from member cap (#569). */
+  MAX_BOTS_DEFAULT: 10,
+  /** Bot token length in bytes (displayed as hex = 64 chars). */
+  BOT_TOKEN_BYTES: 32,
+  /** Max slash commands a single bot may register at once (#569). */
+  MAX_COMMANDS_PER_BOT: 50,
+  /** Max options (parameters) per slash command (#569). */
+  MAX_OPTIONS_PER_COMMAND: 10,
   // Chat attachments (#11). Both size limits are server-configurable; these are
   // only the initial defaults applied when a server is first created.
   MAX_ATTACHMENT_FILE_SIZE_DEFAULT: 50 * 1024 * 1024, // 50 MB per file

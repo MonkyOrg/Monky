@@ -1,5 +1,5 @@
 import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, hasEveryoneMention } from '@monky/shared';
-import type { AttachmentMeta, StickerEntry, UserSummary } from '@monky/shared';
+import type { AttachmentMeta, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
@@ -57,6 +57,11 @@ export class ChatView {
   private mentionMatches: MentionCandidate[] = [];
   private mentionActiveIndex = 0;
   private mentionAtIndex = -1;
+  // /-command autocomplete state (#569).
+  private commandActive = false;
+  private commandMatches: SlashCommand[] = [];
+  private commandActiveIndex = 0;
+  private commandSlashIndex = -1;
   // Files picked for the next message, keyed by a local id (#11).
   private pending: PendingAttachment[] = [];
   /** Message currently open in the inline editor, if any (#504). */
@@ -126,6 +131,7 @@ export class ChatView {
 
         <div class="chat-input-container">
           <div id="mention-dropup" class="mention-dropup" style="display: none;"></div>
+          <div id="command-dropup" class="mention-dropup" style="display: none;"></div>
           <div id="chat-attachment-tray" class="chat-attachment-tray" style="display: none;"></div>
           <div id="chat-compose-link-preview" class="chat-compose-link-preview" style="display: none;"></div>
           <div id="chat-send-permission-banner" class="chat-permission-banner" style="display: none;"></div>
@@ -1073,6 +1079,7 @@ export class ChatView {
       autoResize();
       this.persistDraft(input.value);
       this.updateMentionDropup(input);
+      this.updateCommandDropup(input);
       if (composeLinkTimer) clearTimeout(composeLinkTimer);
       composeLinkTimer = setTimeout(updateComposeLinkPreview, 500);
     });
@@ -1109,6 +1116,31 @@ export class ChatView {
         .map((p) => p.meta!.id);
 
       if (!text && attachmentIds.length === 0) return;
+
+      // Slash command invocation (#569): /commandName [args...]
+      const cmdMatch = text.match(/^\/(\S+)(?:\s+(.*))?$/s);
+      if (cmdMatch && attachmentIds.length === 0) {
+        const cmdName = cmdMatch[1].toLowerCase();
+        const argsRaw = (cmdMatch[2] || '').trim();
+        const matches = serverStore.slashCommands.filter((c) => c.name === cmdName);
+        if (matches.length === 1) {
+          networkClient.send(MessageType.COMMAND_INVOKE, {
+            commandName: cmdName,
+            botId: matches[0].botId,
+            channelId: this.currentChannelId,
+            args: argsRaw ? [{ name: 'input', value: argsRaw }] : [],
+          });
+          input.value = '';
+          this.persistDraft('');
+          input.style.height = 'auto';
+          if (charCounter) charCounter.innerText = `0/${LIMITS.MAX_MESSAGE_LENGTH}`;
+          this.closeMentionDropup();
+          this.closeCommandDropup();
+          return;
+        }
+        // Multiple bots with the same command — the dropup should have
+        // disambiguated, but if we reach here, send as a normal message.
+      }
 
       networkClient.send(MessageType.CHAT_SEND, {
         channelId: this.currentChannelId,
@@ -1292,6 +1324,33 @@ export class ChatView {
         }
       }
 
+      // While the command dropup is open (#569).
+      if (this.commandActive && this.commandMatches.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          this.commandActiveIndex = (this.commandActiveIndex + 1) % this.commandMatches.length;
+          this.renderCommandDropup();
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          this.commandActiveIndex =
+            (this.commandActiveIndex - 1 + this.commandMatches.length) % this.commandMatches.length;
+          this.renderCommandDropup();
+          return;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          this.applyCommand(this.commandActiveIndex);
+          return;
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this.closeCommandDropup();
+          return;
+        }
+      }
+
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         handleSend();
@@ -1300,7 +1359,7 @@ export class ChatView {
 
     input?.addEventListener('blur', () => {
       // Delay so a click (mousedown) on a dropup item is processed first.
-      setTimeout(() => this.closeMentionDropup(), 150);
+      setTimeout(() => { this.closeMentionDropup(); this.closeCommandDropup(); }, 150);
     });
 
     btnSend?.addEventListener('click', () => {
@@ -1483,6 +1542,113 @@ export class ChatView {
     this.mentionActiveIndex = 0;
     this.mentionAtIndex = -1;
     const el = document.getElementById('mention-dropup');
+    if (el) {
+      el.style.display = 'none';
+      el.innerHTML = '';
+    }
+  }
+
+  // ── Slash command dropup (#569) ──────────────────────────────────────
+
+  private updateCommandDropup(input: HTMLTextAreaElement): void {
+    const caret = input.selectionStart ?? input.value.length;
+    const before = input.value.substring(0, caret);
+    // A command token is a "/" at the very start of the message, followed by
+    // the partial command name typed so far (no spaces in the name).
+    const match = before.match(/^\/(\w*)$/);
+    if (!match) {
+      this.closeCommandDropup();
+      return;
+    }
+    const query = match[1].toLowerCase();
+    this.commandSlashIndex = 0; // The "/" is always at position 0.
+
+    const all = serverStore.slashCommands;
+    const matches = (query ? all.filter((c) => c.name.includes(query)) : all)
+      .sort((a, b) => {
+        const aStarts = a.name.startsWith(query) ? 0 : 1;
+        const bStarts = b.name.startsWith(query) ? 0 : 1;
+        return aStarts - bStarts || a.name.localeCompare(b.name);
+      })
+      .slice(0, 10);
+
+    if (matches.length === 0) {
+      this.closeCommandDropup();
+      return;
+    }
+
+    this.commandMatches = matches;
+    this.commandActive = true;
+    if (this.commandActiveIndex >= matches.length || this.commandActiveIndex < 0) {
+      this.commandActiveIndex = 0;
+    }
+    this.renderCommandDropup();
+  }
+
+  private renderCommandDropup(): void {
+    const el = document.getElementById('command-dropup');
+    if (!el) return;
+    el.innerHTML = this.commandMatches
+      .map((cmd, i) => {
+        const active = i === this.commandActiveIndex ? 'active' : '';
+        return `
+          <div class="mention-item ${active}" data-cmd-index="${i}">
+            <span class="command-slash">/</span>
+            <span class="mention-nick">${escapeHtml(cmd.name)}</span>
+            <span class="command-description">${escapeHtml(cmd.description)}</span>
+            <span class="command-bot-name">${escapeHtml(cmd.botName)}</span>
+          </div>
+        `;
+      })
+      .join('');
+    el.style.display = 'block';
+
+    el.querySelectorAll('.mention-item').forEach((item) => {
+      item.addEventListener('mouseenter', () => {
+        const idx = parseInt((item as HTMLElement).getAttribute('data-cmd-index') || '0', 10);
+        this.commandActiveIndex = idx;
+        el.querySelectorAll('.mention-item').forEach((el, i) => {
+          el.classList.toggle('active', i === idx);
+        });
+      });
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const idx = parseInt((item as HTMLElement).getAttribute('data-cmd-index') || '0', 10);
+        this.applyCommand(idx);
+      });
+    });
+  }
+
+  private applyCommand(index: number): void {
+    const input = document.getElementById('chat-message-input') as HTMLTextAreaElement | null;
+    const cmd = this.commandMatches[index];
+    if (!input || !cmd) {
+      this.closeCommandDropup();
+      return;
+    }
+    // Replace everything from / to caret with the full command + a space.
+    const caret = input.selectionStart ?? input.value.length;
+    const after = input.value.substring(caret);
+    const insert = `/${cmd.name} `;
+    input.value = `${insert}${after}`;
+    const newCaret = insert.length;
+    input.setSelectionRange(newCaret, newCaret);
+    this.closeCommandDropup();
+    input.focus();
+
+    const charCounter = document.getElementById('chat-char-counter');
+    if (charCounter) charCounter.innerText = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
+    this.persistDraft(input.value);
+  }
+
+  private closeCommandDropup(): void {
+    this.commandActive = false;
+    this.commandMatches = [];
+    this.commandActiveIndex = 0;
+    this.commandSlashIndex = -1;
+    const el = document.getElementById('command-dropup');
     if (el) {
       el.style.display = 'none';
       el.innerHTML = '';

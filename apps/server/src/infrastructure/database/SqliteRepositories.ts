@@ -1,7 +1,7 @@
 import { IDatabaseDriver } from './SqliteWrapper';
-import { ChannelType } from '@monky/shared';
-import { AttachmentRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
-import { IAttachmentRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
+import { ChannelType, LIMITS } from '@monky/shared';
+import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
+import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 
 /**
  * Note: all repository methods are declared `async` even though the underlying
@@ -16,7 +16,7 @@ export class SqliteServerRepository implements IServerRepository {
   constructor(private db: IDatabaseDriver) {}
 
   async getServer(): Promise<ServerRecord | null> {
-    const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret FROM server_meta LIMIT 1').get() as any;
+    const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as any;
     if (!row) return null;
     return {
       id: row.id,
@@ -35,6 +35,7 @@ export class SqliteServerRepository implements IServerRepository {
       maxAttachmentStorageBytes: row.maxAttachmentStorageBytes ?? null,
       turnEnabled: Boolean(row.turnEnabled),
       turnSecret: row.turnSecret ?? null,
+      maxBots: row.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
     };
   }
 
@@ -710,5 +711,79 @@ export class SqliteRoleRepository implements IRoleRepository {
   async hasRole(userId: string, roleId: string): Promise<boolean> {
     const row = this.db.prepare('SELECT 1 as found FROM user_roles WHERE user_id = ? AND role_id = ? LIMIT 1').get(userId, roleId) as { found?: number } | undefined;
     return Boolean(row?.found);
+  }
+}
+
+export class SqliteBotRepository implements IBotRepository {
+  constructor(private db: IDatabaseDriver) {}
+
+  async create(bot: BotRecord): Promise<void> {
+    this.db.prepare(
+      `INSERT INTO bots (id, name, token_hash, avatar_path, bound_public_key, created_by_user_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(bot.id, bot.name, bot.tokenHash, bot.avatarPath, bot.boundPublicKey, bot.createdByUserId, bot.createdAt);
+  }
+
+  async findById(id: string): Promise<BotRecord | null> {
+    const row = this.db.prepare(
+      `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
+              bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
+              created_at as createdAt
+       FROM bots WHERE id = ?`
+    ).get(id) as any;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async findByTokenHash(tokenHash: string): Promise<BotRecord | null> {
+    const row = this.db.prepare(
+      `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
+              bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
+              created_at as createdAt
+       FROM bots WHERE token_hash = ?`
+    ).get(tokenHash) as any;
+    return row ? this.mapRow(row) : null;
+  }
+
+  async listAll(): Promise<BotRecord[]> {
+    const rows = this.db.prepare(
+      `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
+              bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
+              created_at as createdAt
+       FROM bots ORDER BY created_at ASC`
+    ).all() as any[];
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  async update(id: string, updates: Partial<BotRecord>): Promise<void> {
+    const cols: string[] = [];
+    const vals: any[] = [];
+    if (updates.name !== undefined) { cols.push('name = ?'); vals.push(updates.name); }
+    if (updates.tokenHash !== undefined) { cols.push('token_hash = ?'); vals.push(updates.tokenHash); }
+    if (updates.avatarPath !== undefined) { cols.push('avatar_path = ?'); vals.push(updates.avatarPath); }
+    if (updates.boundPublicKey !== undefined) { cols.push('bound_public_key = ?'); vals.push(updates.boundPublicKey); }
+    if (cols.length === 0) return;
+    vals.push(id);
+    this.db.prepare(`UPDATE bots SET ${cols.join(', ')} WHERE id = ?`).run(...vals);
+  }
+
+  async delete(id: string): Promise<void> {
+    this.db.prepare('DELETE FROM bots WHERE id = ?').run(id);
+  }
+
+  async count(): Promise<number> {
+    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM bots').get() as { cnt: number };
+    return row.cnt;
+  }
+
+  private mapRow(row: any): BotRecord {
+    return {
+      id: row.id,
+      name: row.name,
+      tokenHash: row.tokenHash,
+      avatarPath: row.avatarPath ?? null,
+      boundPublicKey: row.boundPublicKey ?? null,
+      createdByUserId: row.createdByUserId,
+      createdAt: row.createdAt,
+    };
   }
 }
