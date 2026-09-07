@@ -36,10 +36,10 @@ export class ServerBotsTab {
           </div>
         </div>
 
-        <!-- Install bot from URL (#578) -->
+        <!-- Add bot from URL (#578) -->
         <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
           <div style="font-size: 13px; font-weight: 700; margin-bottom: 10px;">
-            <span class="material-symbols-outlined md-16" style="vertical-align: middle;">download</span>
+            <span class="material-symbols-outlined md-16" style="vertical-align: middle;">add_circle</span>
             ${t('bots.installTitle')}
           </div>
           <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">${t('bots.installDescription')}</div>
@@ -49,7 +49,7 @@ export class ServerBotsTab {
               <input id="bot-manifest-url" type="url" class="input-field" placeholder="${t('bots.manifestUrlPlaceholder')}" style="width: 100%;">
             </div>
             <button id="btn-install-bot" type="button" class="btn btn-primary" style="white-space: nowrap;">
-              <span class="material-symbols-outlined md-16">download</span>
+              <span class="material-symbols-outlined md-16">add_circle</span>
               ${t('bots.installBtn')}
             </button>
           </div>
@@ -155,10 +155,18 @@ export class ServerBotsTab {
     this.showInstallStatus('loading', t('bots.installing'));
 
     try {
-      await networkClient.sendRequest(MessageType.BOT_INSTALL, { manifestUrl: url });
+      // BOT_INSTALL fetches the manifest and POSTs to the bot — may take longer than default 8s.
+      await networkClient.sendRequest(MessageType.BOT_INSTALL, { manifestUrl: url }, undefined, 30000);
       if (urlInput) urlInput.value = '';
+      // Success status may also arrive via BOT_INSTALLED event, but show it here as fallback.
+      this.showInstallStatus('success', t('bots.installSuccess'));
     } catch (err: any) {
-      this.showInstallStatus('error', err?.message || t('bots.installError'));
+      const raw = err?.message || '';
+      // Replace the raw timeout message with a user-friendly one.
+      const message = raw.includes('Timeout')
+        ? t('bots.installTimeout')
+        : raw || t('bots.installError');
+      this.showInstallStatus('error', message);
     }
   }
 

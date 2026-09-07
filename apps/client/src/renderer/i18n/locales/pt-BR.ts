@@ -1267,14 +1267,15 @@ export const ptBR = {
   'bots.revokeError': 'Erro ao revogar bot.',
 
   // Bot Marketplace (#578)
-  'bots.installTitle': 'Instalar Bot via URL',
-  'bots.installDescription': 'Cole a URL do manifest do bot para instalá-lo automaticamente no servidor.',
+  'bots.installTitle': 'Adicionar Bot via URL',
+  'bots.installDescription': 'Cole a URL do manifest do bot para adicioná-lo automaticamente ao servidor.',
   'bots.manifestUrlLabel': 'URL do Manifest',
   'bots.manifestUrlPlaceholder': 'Ex.: https://meubot.com/manifest',
-  'bots.installBtn': 'Instalar',
+  'bots.installBtn': 'Adicionar',
   'bots.manifestUrlRequired': 'Informe a URL do manifest do bot.',
   'bots.manifestUrlInvalid': 'URL inválida.',
-  'bots.installing': 'Instalando bot...',
-  'bots.installSuccess': 'Bot instalado com sucesso!',
-  'bots.installError': 'Erro ao instalar bot.',
+  'bots.installing': 'Adicionando bot...',
+  'bots.installSuccess': 'Bot adicionado com sucesso!',
+  'bots.installError': 'Erro ao adicionar bot.',
+  'bots.installTimeout': 'Não foi possível conectar ao bot. Verifique se a URL está acessível e a porta está aberta (firewall/iptables).',
 } as const;
