@@ -71,10 +71,11 @@ if (!process.versions.electron) {
 }
 
 async function runDomSmoke() {
-  const [{ ChatView }, chats, servers, networks, events, inputs, catalog, language, proxies, botEvents] = await Promise.all([
+  const [{ ChatView }, chats, servers, networks, events, inputs, catalog, language, proxies, botEvents, clipboard, markdown] = await Promise.all([
     import('/views/ChatView.ts'), import('/stores/chatStore.ts'), import('/stores/serverStore.ts'),
     import('/core/NetworkClient.ts'), import('/core/EventBus.ts'), import('/utils/botInputs.ts'),
     import('/utils/commandCatalog.ts'), import('/i18n/index.ts'), import('/core/activeProxy.ts'), import('/core/botChatEvents.ts'),
+    import('/utils/clipboardMarkdown.ts'), import('/utils/markdown.ts'),
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
@@ -684,6 +685,76 @@ async function runDomSmoke() {
   check(publicRequests.length === requestsBeforeDestroy, 'Destroyed public selector views must not send further requests');
   selectorClient.dispose();
   selectorFeed.remove();
+  // The clipboard conversion is the other half of #516: what Ctrl+C hands over
+  // is built from the rendered message, so it is exercised against real markup
+  // and real Ranges rather than a string fixture.
+  const rendered = (source) => {
+    const host = document.createElement('div');
+    host.className = 'chat-message-text';
+    host.innerHTML = markdown.renderMarkdown(source);
+    document.body.appendChild(host);
+    return host;
+  };
+  const roundTrip = (source) => {
+    const host = rendered(source);
+    const back = clipboard.toMarkdown(host);
+    host.remove();
+    return back;
+  };
+  for (const source of [
+    '**negrito**', '*italico*', '~~tachado~~', '`inline`', '# Titulo', '> citacao',
+    '- um\n- dois', '1. um\n2. dois', '---', '[Monky](https://monky.chat)', 'https://monky.chat',
+    'Um paragrafo\n\nOutro paragrafo',
+  ]) {
+    check(roundTrip(source) === source, `Round-trip must return the source unchanged for ${JSON.stringify(source)}`);
+  }
+  // A fence opened with an alias keeps the alias: the renderer canonicalises it
+  // into the class, and reading only the class would rewrite the message.
+  check(roundTrip('```ts\nconst a = 1;\n```') === '```ts\nconst a = 1;\n```', 'Code fences must keep the tag the author typed');
+
+  // Trailing spaces and blank runs are content inside code, and the separator
+  // collapse used to reach in and rewrite them.
+  const spaced = '```\nconst a = 1;   \n\n\n\nconst b = 2;  \n```';
+  check(roundTrip(spaced) === spaced, 'Code blocks must keep trailing spaces and blank lines');
+  const multiline = '```js\nconst s = `linha   \n\n\n\nfim`;\n```';
+  check(roundTrip(multiline) === multiline, 'Multiline strings inside code must survive untouched');
+  // Outside code the collapse still has to happen.
+  check(roundTrip('Um paragrafo   \n\n\n\nOutro paragrafo') === 'Um paragrafo\n\nOutro paragrafo', 'Prose must still have its spacing normalized');
+
+  // A selection with both ends inside one formatted element: cloneContents
+  // alone returns bare text, so the copy has to put the ancestors back.
+  const feed = find('#chat-messages-feed');
+  const partial = (source, pick) => {
+    const host = rendered(source);
+    feed.appendChild(host);
+    // The first text node under the picked element: with a language the
+    // highlighter wraps every token in a span, and a Range needs a text node.
+    const walker = document.createTreeWalker(pick(host), NodeFilter.SHOW_TEXT);
+    const target = walker.nextNode();
+    const range = document.createRange();
+    range.setStart(target, 1);
+    range.setEnd(target, target.length - 1);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const event = new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: new DataTransfer() });
+    document.dispatchEvent(event);
+    const result = { text: event.clipboardData.getData('text/plain'), html: event.clipboardData.getData('text/html') };
+    selection.removeAllRanges();
+    host.remove();
+    return result;
+  };
+  const bold = partial('**importante**', (host) => host.querySelector('strong'));
+  check(bold.text === '**mportant**', 'A selection inside bold must keep the bold and only the selected text');
+  check(bold.html.includes('<strong>mportant</strong>'), 'The rich flavour of a partial selection must keep the bold too');
+  const italic = partial('*destaque*', (host) => host.querySelector('em'));
+  check(italic.text === '*estaqu*', 'A selection inside italics must keep the italics');
+  const link = partial('[Monky](https://monky.chat)', (host) => host.querySelector('a'));
+  check(link.text === '[onk](https://monky.chat)', 'A selection inside a link must keep its target');
+  check(link.html.includes('href="https://monky.chat"'), 'The rich flavour of a link selection must keep the href');
+  const inCode = partial('```\nconst a = 1;\n```', (host) => host.querySelector('pre code'));
+  check(inCode.text === '```\nonst a = 1\n```', 'A selection inside code must stay fenced, with only the selected code');
+
   window.commandDomCleanup = () => { view.destroy(); unbindBotEvents(); client.dispose(); };
   return { checks };
 }

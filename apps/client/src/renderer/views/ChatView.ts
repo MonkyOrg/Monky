@@ -389,7 +389,25 @@ export class ChatView {
     if (!anchorNode || !focusNode) return null;
     if (!feed.contains(anchorNode) || !feed.contains(focusNode)) return null;
 
-    return selection.getRangeAt(0).cloneContents();
+    const range = selection.getRangeAt(0);
+    let fragment = range.cloneContents();
+
+    // cloneContents hands back the selected nodes without anything above them,
+    // so a word picked out of **importante** comes back as bare text and the
+    // rewrite would lose the very formatting it exists to keep. The ancestors
+    // up to the message text are cloned back around it, empty, which restores
+    // the context without dragging in a character that was not selected.
+    const start = range.commonAncestorContainer;
+    let ancestor = start.nodeType === Node.ELEMENT_NODE ? (start as HTMLElement) : start.parentElement;
+    while (ancestor && ancestor !== feed && !ancestor.classList.contains('chat-message-text')) {
+      const wrapper = ancestor.cloneNode(false) as HTMLElement;
+      wrapper.appendChild(fragment);
+      fragment = document.createDocumentFragment();
+      fragment.appendChild(wrapper);
+      ancestor = ancestor.parentElement;
+    }
+
+    return fragment;
   }
 
   /**

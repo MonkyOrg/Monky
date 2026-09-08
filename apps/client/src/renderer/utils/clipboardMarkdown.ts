@@ -40,6 +40,18 @@ const BLOCK_SEPARATOR = '\n\n';
  */
 const ATTACHED_BREAK = '\u0001';
 
+/**
+ * Stands in for the body of a code block while the separators are collapsed.
+ *
+ * The collapse at the end of `toMarkdown` trims spaces before a newline and
+ * squeezes runs of blank lines. That is right for the prose the walker
+ * produced and wrong for code, where a trailing space or a run of blank lines
+ * is content — inside a multiline string it is part of the value. So the body
+ * leaves the walker as a marker and comes back untouched afterwards.
+ */
+const CODE_MARK = '\u0002';
+const codeBodies: string[] = [];
+
 function isElement(node: Node): node is HTMLElement {
   return node.nodeType === Node.ELEMENT_NODE;
 }
@@ -129,7 +141,8 @@ function nodeToMarkdown(node: Node): string {
       // a <span>, and those must not become part of the code.
       const code = (el.textContent ?? '').replace(/\n$/, '');
       const language = codeLanguageOf(el);
-      return block(`\`\`\`${language}\n${code}\n\`\`\``);
+      const slot = codeBodies.push(code) - 1;
+      return block(`\`\`\`${language}\n${CODE_MARK}${slot}${CODE_MARK}\n\`\`\``);
     }
 
     case 'a': {
@@ -192,13 +205,17 @@ function nodeToMarkdown(node: Node): string {
  * what came before it.
  */
 export function toMarkdown(root: Node): string {
+  codeBodies.length = 0;
   return childrenToMarkdown(root)
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, BLOCK_SEPARATOR)
     // Applied after the collapse, so the author line keeps a single newline
     // while every other block keeps its blank line.
     .replace(new RegExp(`${ATTACHED_BREAK}\\n*`, 'g'), '\n')
-    .trim();
+    .trim()
+    // Last, so nothing above can reach inside a code block. Replacing through a
+    // function keeps a `$1` in the code from being read as a group reference.
+    .replace(new RegExp(`${CODE_MARK}(\\d+)${CODE_MARK}`, 'g'), (_, slot) => codeBodies[Number(slot)]);
 }
 
 /**
