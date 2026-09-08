@@ -48,7 +48,7 @@ import { t, tCount } from '../i18n';
  * signal/connection ("tilted wifi"); `signal_wifi_bad` carries the failure
  * exclamation used while reconnecting.
  */
-const VOICE_ICON_CONNECTED = 'signal_cellular_null';
+const VOICE_ICON_CONNECTED = 'rss_feed';
 const VOICE_ICON_RECONNECTING = 'signal_wifi_bad';
 
 export class MainView {

@@ -69,16 +69,17 @@ test('logical offline presence and subsequent SFU reconciliation preserve the ph
   assert.equal(original.voiceState?.connectionHealth, 'connected');
 });
 
-test('quality glyph and color thresholds agree with the call stage, including unavailable RTT', () => {
+test('RSS glyph is preserved while quality thresholds agree with the call stage, including unavailable RTT', () => {
   assert.equal(voiceConnectionIndicator(0).quality, 'good');
   assert.equal(voiceConnectionIndicator(49).quality, 'good');
   assert.equal(voiceConnectionIndicator(50).quality, 'medium');
   assert.equal(voiceConnectionIndicator(119).quality, 'medium');
   assert.equal(voiceConnectionIndicator(120).quality, 'bad');
   for (const ping of [null, -1, NaN]) assert.equal(voiceConnectionIndicator(ping).quality, 'unknown');
-  assert.equal(voiceConnectionIndicator(20, true).quality, 'reconnecting');
-  assert.notEqual(voiceConnectionIndicator(20).icon, voiceConnectionIndicator(80).icon);
-  assert.notEqual(voiceConnectionIndicator(80).icon, voiceConnectionIndicator(200).icon);
+  assert.deepEqual(voiceConnectionIndicator(20, true), { quality: 'reconnecting', icon: 'signal_wifi_bad' });
+  for (const ping of [null, -1, NaN, 0, 49, 50, 119, 120, 200]) {
+    assert.equal(voiceConnectionIndicator(ping).icon, 'rss_feed');
+  }
 });
 
 function engineFixture() {

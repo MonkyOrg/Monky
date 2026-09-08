@@ -7,7 +7,7 @@ import { t, tCount, TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { normalizeSearchString } from '../utils/search';
 
-type PickerTab = 'recent' | 'emojis' | 'stickers';
+type PickerTab = 'emojis' | 'stickers';
 
 export interface EmojiPickerOptions {
   /** Positioned ancestor the popover is anchored inside (`.chat-input-container` or document.body). */
@@ -153,20 +153,16 @@ export class EmojiPicker {
   // --- shell -------------------------------------------------------------
 
   private renderShell(): string {
-    const tabsHtml = `
+    const tabsHtml = this.options.emojiOnly ? '' : `
       <div class="emoji-picker-tabs">
-        <button type="button" class="emoji-picker-tab" data-picker-tab="recent">
-          <span class="material-symbols-outlined md-16" aria-hidden="true">schedule</span>
-          ${t('emojiPicker.tabRecent')}
-        </button>
         <button type="button" class="emoji-picker-tab" data-picker-tab="emojis">
           <span class="material-symbols-outlined md-16">mood</span>
           ${t('emojiPicker.tabEmojis')}
         </button>
-        ${this.options.emojiOnly ? '' : `<button type="button" class="emoji-picker-tab" data-picker-tab="stickers">
+        <button type="button" class="emoji-picker-tab" data-picker-tab="stickers">
           <span class="material-symbols-outlined md-16">gesture</span>
           ${t('emojiPicker.tabStickers')}
-        </button>`}
+        </button>
       </div>
     `;
 
@@ -221,7 +217,8 @@ export class EmojiPicker {
       if (emoji) {
         recentEmojis.select(emoji);
         this.options.onSelectEmoji(emoji);
-        if (this.root && this.tab === 'recent') this.renderResults();
+        const recent = this.bodyEl?.querySelector<HTMLElement>('[data-emoji-group="recent"]');
+        if (recent) recent.innerHTML = this.renderRecent();
         return;
       }
 
@@ -327,8 +324,7 @@ export class EmojiPicker {
       this.imageObserver?.disconnect();
       this.imageObserver = null;
     }
-    if (this.tab === 'recent') this.renderRecent();
-    else if (this.tab === 'emojis') this.renderEmojis();
+    if (this.tab === 'emojis') this.renderEmojis();
     else this.renderStickers();
   }
 
@@ -342,20 +338,16 @@ export class EmojiPicker {
 
   // --- emojis ------------------------------------------------------------
 
-  private renderRecent(): void {
-    const body = this.bodyEl;
-    const footer = this.footerEl;
-    if (!body || !footer) return;
-    const query = normalizeSearchString(this.query).trim();
+  private renderRecent(): string {
     const catalog = new Map(EMOJI_CATALOG.flatMap((group) => group.emojis.map((entry) => [entry[0], entry] as const)));
     const buttons = recentEmojis.get().flatMap((char) => {
       const entry = catalog.get(char);
-      return entry && (!query || entry[2].includes(query)) ? [this.renderEmojiButton(char, entry[1])] : [];
+      return entry ? [this.renderEmojiButton(char, entry[1])] : [];
     });
-    body.innerHTML = buttons.length
+    const content = buttons.length
       ? `<div class="emoji-picker-grid">${buttons.join('')}</div>`
-      : this.renderEmptyState('schedule', t(query ? 'emojiPicker.noResults' : 'emojiPicker.noRecent'), '');
-    footer.innerHTML = '';
+      : `<div class="emoji-picker-recent-empty">${t('emojiPicker.noRecent')}</div>`;
+    return `<div class="emoji-picker-section-title">${t('emojiPicker.group.recent')}</div>${content}`;
   }
 
   private renderEmojis(): void {
@@ -382,7 +374,7 @@ export class EmojiPicker {
         : this.renderEmptyState('search_off', t('emojiPicker.noResults'), '');
       footer.innerHTML = '';
     } else {
-      html = EMOJI_CATALOG.map(
+      html = `<div class="emoji-picker-section" data-emoji-group="recent">${this.renderRecent()}</div>` + EMOJI_CATALOG.map(
         (group) => `
           <div class="emoji-picker-section" data-emoji-group="${group.id}">
             <div class="emoji-picker-section-title">${t(GROUP_LABEL_KEYS[group.id])}</div>
@@ -394,9 +386,12 @@ export class EmojiPicker {
       ).join('');
       footer.innerHTML = `
         <div class="emoji-picker-nav">
+          <button type="button" class="emoji-picker-nav-btn" data-goto-group="recent" title="${t('emojiPicker.group.recent')}" aria-label="${t('emojiPicker.group.recent')}">
+            <span class="material-symbols-outlined md-18" aria-hidden="true">schedule</span>
+          </button>
           ${EMOJI_CATALOG.map(
             (group) => `
-              <button type="button" class="emoji-picker-nav-btn" data-goto-group="${group.id}" title="${t(GROUP_LABEL_KEYS[group.id])}">
+              <button type="button" class="emoji-picker-nav-btn" data-goto-group="${group.id}" title="${t(GROUP_LABEL_KEYS[group.id])}" aria-label="${t(GROUP_LABEL_KEYS[group.id])}">
                 ${GROUP_ICONS[group.id]}
               </button>
             `

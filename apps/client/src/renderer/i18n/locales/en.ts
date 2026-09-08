@@ -141,6 +141,7 @@ export const en: TranslationMap = {
   'chat.emojiAction': 'Emoji',
   'chat.replyMessage': 'Reply',
   'chat.copyMessage': 'Copy message',
+  'chat.messageCopied': 'Copied!',
   'chat.messageActions': 'Message actions',
   'chat.moreActions': 'More options',
   'chat.replyAttachment': 'Attachment',
@@ -282,7 +283,7 @@ export const en: TranslationMap = {
 
   // Chat emojis and stickers (#356)
   'emojiPicker.tabEmojis': 'Emojis',
-  'emojiPicker.tabRecent': 'Recent',
+  'emojiPicker.group.recent': 'Recent',
   'emojiPicker.noRecent': 'Selected emojis will appear here.',
   'emojiPicker.tabStickers': 'Stickers',
   'emojiPicker.searchEmojis': 'Search emoji...',

@@ -142,6 +142,7 @@ export const ptBR = {
   'chat.emojiAction': 'Emoji',
   'chat.replyMessage': 'Responder',
   'chat.copyMessage': 'Copiar mensagem',
+  'chat.messageCopied': 'Copiado!',
   'chat.messageActions': 'Ações da mensagem',
   'chat.moreActions': 'Mais opções',
   'chat.replyAttachment': 'Anexo',
@@ -283,7 +284,7 @@ export const ptBR = {
 
   // Emojis e figurinhas do chat (#356)
   'emojiPicker.tabEmojis': 'Emojis',
-  'emojiPicker.tabRecent': 'Recentes',
+  'emojiPicker.group.recent': 'Recentes',
   'emojiPicker.noRecent': 'Os emojis selecionados aparecerão aqui.',
   'emojiPicker.tabStickers': 'Figurinhas',
   'emojiPicker.searchEmojis': 'Buscar emoji...',

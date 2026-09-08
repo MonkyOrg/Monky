@@ -44,9 +44,9 @@ Quem preferir digitar direto no campo de mensagem também pode: envolver o trech
 
 ## Emojis e figurinhas
 
-O botão de carinha ao lado do campo de mensagem abre um seletor com as abas **Recentes**, **Emojis** e **Figurinhas**.
+O botão de carinha ao lado do campo de mensagem abre um seletor com as abas **Emojis** e **Figurinhas**. Na barra inferior de categorias dos emojis, o ícone de relógio leva a **Recentes**.
 
-**Recentes** também aparece no seletor de reações. Os dois compartilham os últimos 32 emojis distintos selecionados neste dispositivo, do mais recente para o mais antigo, mesmo depois de reiniciar o app. Abrir uma aba ou pesquisar não altera a lista; selecionar novamente um emoji o move para o começo. Figurinhas não entram nessa lista.
+O relógio de **Recentes** também aparece na barra de categorias do seletor de reações. Os dois compartilham os últimos 32 emojis distintos selecionados neste dispositivo, do mais recente para o mais antigo, mesmo depois de reiniciar o app. Navegar entre categorias ou pesquisar não altera a lista; selecionar novamente um emoji o move para o começo. Figurinhas não entram nessa lista.
 
 Em **Emojis** há o catálogo completo, dividido por categorias e com busca em português (procure por `coracao`, `festa`, `bolo`…). Clicar em um emoji o insere onde o cursor estiver, então dá para misturar emoji e texto na mesma mensagem.
 
