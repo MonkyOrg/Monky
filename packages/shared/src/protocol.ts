@@ -581,8 +581,26 @@ export interface SoundboardStoppedPayload {
   userId: string;
 }
 
+/**
+ * Why the server is closing every session (#558).
+ *
+ * - 'shutdown': the host stopped the server; there is nothing to wait for.
+ * - 'update': the server is being restarted to apply an update and is expected
+ *   back within seconds.
+ *
+ * Optional so an older server, which sends no kind at all, keeps falling back
+ * to the plain shutdown notice instead of failing to parse.
+ */
+export type ServerShutdownKind = 'shutdown' | 'update';
+
 export interface ServerShutdownPayload {
+  /**
+   * Human-readable text from the server. Kept for clients that predate `kind`;
+   * newer clients prefer their own localized string, because this one is
+   * written in the server's language, not the reader's.
+   */
   reason?: string;
+  kind?: ServerShutdownKind;
 }
 
 export interface UserJoinedPayload {

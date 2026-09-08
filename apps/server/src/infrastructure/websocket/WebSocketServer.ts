@@ -48,6 +48,8 @@ import {
   ServerInviteInfoPayload,
   ServerNetworkInterface,
   ServerSettingsUpdatedPayload,
+  ServerShutdownKind,
+  ServerShutdownPayload,
   ServerUpdateSettingsPayload,
   SoundboardPlayPayload,
   SoundboardStopPayload,
@@ -100,6 +102,7 @@ import {
   botProfileUpdateSchema,
   commandRegisterSchema,
 } from '@monky/shared';
+import { getServerVersion } from '../version/ServerVersion';
 import { AuthService } from '../../application/services/AuthService';
 import { AttachmentService } from '../../application/services/AttachmentService';
 import { ChannelService } from '../../application/services/ChannelService';
@@ -823,12 +826,19 @@ export class WebSocketServer {
     session.visibleChannelIds = new Set(result.serverDetails.channels.map((c) => c.id));
 
     // Send AUTH_SUCCESS to the connecting client
+    const serverVersion = getServerVersion();
     const successPayload: AuthSuccessPayload = {
       server: {
         ...result.serverDetails,
         // Told at login because it never changes while the process lives: it
         // depends on the host OS and on coturn being installed (#429).
         turnAvailability: CoturnManager.describeAvailability(),
+        // Same reasoning: the release is fixed for the life of the process, and
+        // sending it lets an admin read the version of a server running on a
+        // VPS without opening a shell on it (#559). Left out entirely when the
+        // server cannot establish it, so the client shows nothing rather than
+        // an invented number.
+        ...(serverVersion ? { version: serverVersion } : {}),
       },
       currentUser: result.user,
       roles: result.serverDetails.roles,
@@ -3206,7 +3216,12 @@ export class WebSocketServer {
     });
   }
 
-  public close(): void {
+  /**
+   * @param kind Why the sessions are being closed. 'update' tells the clients
+   * the server is coming back on its own, so they keep reconnecting instead of
+   * dropping to the home screen (#558).
+   */
+  public close(kind: ServerShutdownKind = 'shutdown'): void {
     if (this.closing) return;
     this.closing = true;
     this.botInteractions.close();
@@ -3218,12 +3233,23 @@ export class WebSocketServer {
       clearTimeout(timer);
     }
     this.reconnectTimers.clear();
-    // Let connected clients know the host is shutting the server down so they can
-    // show a friendly notice and return to the home screen instead of silently
-    // trying to reconnect forever.
+    // Let connected clients know why their session is ending, so they can show a
+    // friendly notice instead of silently trying to reconnect forever — and, on
+    // an update, keep reconnecting instead of dropping to the home screen.
+    //
+    // `reason` stays for clients that predate `kind` and would otherwise show
+    // nothing; anyone who understands `kind` translates it themselves, because
+    // this text is written in the server's language, not the reader's.
+    const shutdownPayload: ServerShutdownPayload = {
+      kind,
+      reason:
+        kind === 'update'
+          ? 'O servidor está sendo atualizado e volta em instantes.'
+          : 'O anfitrião encerrou o servidor.',
+    };
     this.broadcast({
       type: MessageType.SERVER_SHUTDOWN,
-      payload: { reason: 'O anfitrião encerrou o servidor.' },
+      payload: shutdownPayload,
     });
     for (const ws of this.sessions.keys()) {
       ws.close();

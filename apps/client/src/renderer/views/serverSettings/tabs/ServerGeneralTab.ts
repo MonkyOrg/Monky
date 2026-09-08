@@ -35,6 +35,14 @@ export class ServerGeneralTab {
     // turning the switch on never shows an empty or invalid box.
     const limitValue = hasLimit ? s.maxUsers : Math.max(memberCount, LIMITS.MAX_USERS_DEFAULT);
 
+    // Escaped like any other server-controlled string: it arrives over the wire
+    // and is interpolated into HTML. A server that predates the field, or one
+    // running from an untagged checkout, sends nothing and is labelled as such
+    // instead of showing an empty row (#559).
+    const serverVersion = s.version
+      ? escapeHtml(s.version)
+      : t('serverSettings.infoVersionUnknown');
+
     const iconSrc = pendingIconBase64 !== undefined
       ? (pendingIconBase64 ? getAvatarUrl(pendingIconBase64) : logoUrl)
       : (s.iconUrl ? getAvatarUrl(s.iconUrl) : logoUrl);
@@ -118,9 +126,10 @@ export class ServerGeneralTab {
           <span>${t('serverSettings.generalInfo')}</span>
         </div>
         <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; font-size: 12px; color: var(--text-secondary);">
-          <div><strong>Canais:</strong> ${s.channels.length}</div>
-          <div><strong>Membros:</strong> ${memberCount}</div>
-          <div style="grid-column: span 2; font-size: 11px; color: var(--text-muted); word-break: break-all;"><strong>ID:</strong> ${s.id}</div>
+          <div><strong>${t('serverSettings.infoChannels')}:</strong> ${s.channels.length}</div>
+          <div><strong>${t('serverSettings.infoMembers')}:</strong> ${memberCount}</div>
+          <div style="grid-column: span 2;"><strong>${t('serverSettings.infoVersion')}:</strong> ${serverVersion}</div>
+          <div style="grid-column: span 2; font-size: 11px; color: var(--text-muted); word-break: break-all;"><strong>${t('serverSettings.infoId')}:</strong> ${s.id}</div>
         </div>
       </div>
     `;

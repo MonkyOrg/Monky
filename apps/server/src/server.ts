@@ -27,6 +27,7 @@ import {
   SqliteServerRepository,
   SqliteUserRepository,
 } from './infrastructure/database/SqliteRepositories';
+import { clearRestartMarker, consumeRestartKind } from './infrastructure/lifecycle/RestartMarker';
 import { Logger } from './infrastructure/logger/Logger';
 import { LanBroadcaster } from './infrastructure/discovery/LanBroadcaster';
 import { scanServerNetworkInterfaces } from './infrastructure/discovery/ServerIpScanner';
@@ -582,6 +583,10 @@ export class MonkyServer {
   }
 
   public async start(): Promise<void> {
+    // The process that was killed normally consumes its own marker, but one
+    // killed outright (SIGKILL, power loss) leaves it behind. Clearing it here
+    // keeps a leftover from labelling an unrelated shutdown as an update (#558).
+    clearRestartMarker(this.config.dataDir);
     return new Promise((resolve) => {
       this.httpServer.listen(this.config.port, '0.0.0.0', () => {
         this.startedAt = Date.now();
@@ -634,11 +639,18 @@ export class MonkyServer {
 
   public async stop(): Promise<void> {
     Logger.info('INFO', 'Stopping Monky Server...');
+    // An update leaves a marker in the data directory before PM2 kills this
+    // process, which is the only way the goodbye can tell "the host stopped the
+    // server" apart from "it will be back in a moment" (#558).
+    const shutdownKind = consumeRestartKind(this.config.dataDir);
+    if (shutdownKind === 'update') {
+      Logger.info('INFO', 'Shutdown is an update restart; telling clients to wait for the server.');
+    }
     this.sfuManager.close();
     await this.coturnManager.stop();
     await this.lanBroadcaster.stop();
     this.rateLimiter.dispose();
-    this.wsServer.close();
+    this.wsServer.close(shutdownKind);
     // The desktop host awaits this call before it can start another server, so
     // the shutdown must be bounded: destroy whatever is still hanging on rather
     // than waiting on it forever (#333).

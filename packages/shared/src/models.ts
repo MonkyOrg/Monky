@@ -294,6 +294,15 @@ export interface ServerDetails {
    * an older server simply will not send it.
    */
   hostSpecs?: HostSpecs;
+  /**
+   * Release the server is running, as `1.2.3` (#559).
+   *
+   * Resolved by the server from its own package, so an admin looking after a
+   * VPS can read it without opening a shell on the host. Optional: an older
+   * server does not send it, and a server running from a source checkout with
+   * no tags cannot know it.
+   */
+  version?: string;
   iconUrl?: string | null;
   channels: ChannelSummary[];
   /** One entry per live connection: a user signed in from two devices appears twice (#309). */

@@ -9,6 +9,8 @@ import {
   PROTOCOL_VERSION,
   RECONNECT_DELAYS_MS,
   ServerErrorPayload,
+  ServerShutdownKind,
+  ServerShutdownPayload,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { createActiveProxy } from './activeProxy';
@@ -393,8 +395,20 @@ export class NetworkClient {
     }
 
     if (type === MessageType.SERVER_SHUTDOWN) {
-      const reason = (payload as { reason?: string })?.reason;
-      this.emitScoped('network.server_shutdown', { reason });
+      const shutdown = (payload as ServerShutdownPayload) || {};
+      // An older server sends no kind at all, and its only wording is "the host
+      // closed the server", so treat the absence as a definitive shutdown.
+      const kind: ServerShutdownKind = shutdown.kind === 'update' ? 'update' : 'shutdown';
+      this.emitScoped('network.server_shutdown', { reason: shutdown.reason, kind });
+      if (kind === 'update') {
+        // The server is restarting to apply an update and is coming back on its
+        // own. Letting the socket close on its own hands it to the normal
+        // reconnect backoff, whereas `disconnect()` sets `manualDisconnect` and
+        // would strand the client on the home screen — telling people to wait
+        // for a reconnection the app had just disabled (#558).
+        clientLog.info('NETWORK', 'Server is restarting for an update; keeping the reconnect loop alive');
+        return;
+      }
       this.disconnect();
       return;
     }

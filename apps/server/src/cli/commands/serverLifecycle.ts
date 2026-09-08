@@ -1,5 +1,6 @@
 import { LIMITS, LOG_LEVELS, LogLevel } from '@monky/shared';
 import { SqliteServerRepository } from '../../infrastructure/database/SqliteRepositories';
+import { clearRestartMarker, markUpdateRestart } from '../../infrastructure/lifecycle/RestartMarker';
 import { ANSI, color, DEFAULT_SERVER_NAME } from '../constants';
 import { GlobalArgs, readLocalConfig, withContext } from '../context';
 import { formatBool, parseOption, parsePositiveInt, pad } from '../formatters';
@@ -203,7 +204,20 @@ export async function stopServerCommand(globalArgs: GlobalArgs): Promise<void> {
   console.log(color(t('lifecycle.logsAvailable'), ANSI.dim));
 }
 
-export async function restartServerCommand(globalArgs: GlobalArgs, args: string[] = []): Promise<void> {
+export interface RestartOptions {
+  /**
+   * Whether this restart is applying an update. It is written to the data
+   * directory so the outgoing process can tell its clients the server is
+   * coming back, instead of the standard "the host closed the server" (#558).
+   */
+  asUpdate?: boolean;
+}
+
+export async function restartServerCommand(
+  globalArgs: GlobalArgs,
+  args: string[] = [],
+  options: RestartOptions = {}
+): Promise<void> {
   if (!requirePm2('reiniciar')) return;
 
   const fresh = args.includes('--fresh');
@@ -226,8 +240,16 @@ export async function restartServerCommand(globalArgs: GlobalArgs, args: string[
   const ecosystemPath = writeEcosystem(plan);
   recreateIfStale(processName, findPm2Process(processName), fresh);
 
+  // Written immediately before the signal: the running process reads it while
+  // shutting down, and a marker left by a restart that never happened would
+  // otherwise sit there waiting to mislabel a later stop.
+  if (options.asUpdate) {
+    markUpdateRestart(target.dataDir);
+  }
+
   const result = runSync('pm2', ['startOrRestart', ecosystemPath], { stdio: 'inherit' });
   if (result.status !== 0) {
+    clearRestartMarker(target.dataDir);
     throw new Error(t('lifecycle.restartFailed'));
   }
 

@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
 import { ANSI, color } from '../constants';
 import { GlobalArgs } from '../context';
 import { resolveInterpreter } from '../health';
@@ -16,90 +15,24 @@ import {
 } from '../pm2';
 import { confirm } from '../prompts';
 import { runSync } from '../process';
+import { getServerVersion } from '../../infrastructure/version/ServerVersion';
 import { restartServerCommand } from './serverLifecycle';
 
 export const GITHUB_RELEASES_URL =
   'https://api.github.com/repos/MonkyOrg/Monky/releases?per_page=100';
 export const GITHUB_LATEST_RELEASE_URL = 'https://api.github.com/repos/MonkyOrg/Monky/releases/latest';
 
-export function getRepoRoot(): string | null {
-  // apps/server/dist/cli/commands/update.js -> 4 levels up is repo root
-  const candidate = path.resolve(__dirname, '..', '..', '..', '..');
-  if (fs.existsSync(path.join(candidate, 'package.json')) && fs.existsSync(path.join(candidate, '.git'))) {
-    return candidate;
-  }
-  // Try 3 levels up if executed directly from src or dist
-  const candidate3 = path.resolve(__dirname, '..', '..', '..');
-  if (fs.existsSync(path.join(candidate3, 'package.json')) && fs.existsSync(path.join(candidate3, '.git'))) {
-    return candidate3;
-  }
-  // Fallback: try to find via git
-  try {
-    const root = execSync('git rev-parse --show-toplevel', { encoding: 'utf8', cwd: __dirname, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-    if (root && fs.existsSync(path.join(root, 'package.json'))) {
-      return root;
-    }
-  } catch {
-    // Not in a git repo (e.g. standalone global tarball install)
-  }
-  return null;
-}
-
 /**
- * Version stamped into the published CLI package.
+ * Version this CLI is running, for the update check.
  *
- * `pack-cli.js` writes the release version into the tarball's package.json, so
- * this is authoritative for the recommended install. The placeholder versions
- * checked out in the repository are ignored on purpose.
+ * Delegates to the server's own resolver so `monky --version`, the update
+ * comparison and the version shown in the client's server settings can never
+ * disagree (#559). `0.0.0` stands in for "unknown" here — unlike the settings
+ * screen, which omits the field, the comparison needs a number and treating an
+ * untagged checkout as the oldest possible version offers the update.
  */
-function readPackagedVersion(): string | null {
-  const candidatePkgs = [
-    path.resolve(__dirname, '..', '..', 'package.json'),
-    path.resolve(__dirname, '..', '..', '..', 'package.json'),
-  ];
-  for (const pkgFile of candidatePkgs) {
-    if (!fs.existsSync(pkgFile)) continue;
-    try {
-      const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
-      if (pkg.version && pkg.version !== '1.0.0' && pkg.version !== '0.0.0') {
-        return pkg.version;
-      }
-    } catch {}
-  }
-  return null;
-}
-
-/**
- * Version of the checked-out repository, taken from the nearest tag.
- *
- * The repository never bumps `package.json` — releases exist only as tags — so
- * reading it here always returned `1.0.0` and made every check report an
- * update as available.
- */
-function readGitVersion(repoRoot: string): string | null {
-  try {
-    const described = execSync('git describe --tags --abbrev=0', {
-      encoding: 'utf8',
-      cwd: repoRoot,
-      stdio: ['pipe', 'pipe', 'ignore'],
-    }).trim();
-    return described ? described.replace(/^v/, '') : null;
-  } catch {
-    return null;
-  }
-}
-
 export function getLocalVersion(): string {
-  const packaged = readPackagedVersion();
-  if (packaged) return packaged;
-
-  const repoRoot = getRepoRoot();
-  if (repoRoot) {
-    const fromGit = readGitVersion(repoRoot);
-    if (fromGit) return fromGit;
-  }
-
-  return '0.0.0';
+  return getServerVersion() ?? '0.0.0';
 }
 
 export async function fetchLatestVersion(
@@ -383,13 +316,13 @@ export async function updateCommand(globalArgs: GlobalArgs, args: string[]): Pro
   // Restarting goes through the lifecycle command so the ecosystem file is
   // rewritten and the right server is picked when the machine hosts several.
   if (assumeYes) {
-    await restartServerCommand(globalArgs);
+    await restartServerCommand(globalArgs, [], { asUpdate: true });
     return;
   }
 
   const shouldRestart = await confirm(t('update.confirmRestart'), true);
   if (shouldRestart) {
-    await restartServerCommand(globalArgs);
+    await restartServerCommand(globalArgs, [], { asUpdate: true });
   }
 }
 

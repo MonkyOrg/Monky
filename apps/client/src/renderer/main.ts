@@ -18,6 +18,7 @@ import {
   ProtocolErrorCode,
   RolesListPayload,
   ServerErrorPayload,
+  ServerShutdownKind,
   UserJoinedPayload,
   UserLeftPayload,
   UserConnectionStatePayload,
@@ -864,12 +865,20 @@ class App {
       });
     });
 
-    // Host closed the server: show a friendly notice (the network layer already
-    // returned us to the home screen).
-    appEvents.on('network.server_shutdown', (data: { reason?: string }) => {
+    // The server closed every session. For a plain shutdown the network layer
+    // has already returned us to the home screen; for an update it kept the
+    // reconnect loop running, so the notice says to wait rather than to leave.
+    //
+    // The server's own `reason` is only used as a last resort: it is written in
+    // the server's language, so preferring it showed Portuguese to an English
+    // client. A known kind is translated here instead (#558).
+    appEvents.on('network.server_shutdown', (data: { reason?: string; kind?: ServerShutdownKind }) => {
+      const isUpdate = data?.kind === 'update';
       showAlert({
-        title: t('app.serverShutdownTitle'),
-        message: data?.reason || t('app.serverShutdownMessage'),
+        title: isUpdate ? t('app.serverUpdatingTitle') : t('app.serverShutdownTitle'),
+        message: isUpdate
+          ? t('app.serverUpdatingMessage')
+          : data?.reason || t('app.serverShutdownMessage'),
         variant: 'warning',
       });
     });
