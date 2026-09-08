@@ -250,10 +250,12 @@ No modo marketplace, `serve({ name, icon, ... })` aceita a mesma imagem em `icon
 Se você quer distribuir seu bot para que qualquer servidor Monky possa adicioná-lo, use o modo `serve()`:
 
 ```ts
+import path from 'node:path';
 import { BotClient } from '@monky/bot-sdk';
 
 const bot = new BotClient({
   publicKey: 'SUA_CHAVE_ED25519_HEX',
+  registrationFile: path.join(process.cwd(), '.keys', 'registrations.json'),
 });
 
 bot.command({
@@ -276,6 +278,33 @@ Isso expõe:
 - `POST /register` — recebe o token de cada servidor que adiciona o bot
 
 Cada servidor que adicionar o bot cria uma **conexão WebSocket independente**. O bot gerencia todas automaticamente, com reconexão.
+
+### Persistência dos vínculos
+
+Configure `registrationFile` para recuperar as conexões depois de reiniciar o processo.
+Sem essa opção, os vínculos só existem durante a execução. Com `serverUrl` no registro,
+o SDK confirma o `POST /register` após autenticar no servidor e salvar o vínculo;
+credenciais rejeitadas não substituem um vínculo válido. O servidor desfaz a criação
+se o callback recusar o registro ou não confirmar uma chave válida.
+Um `serverId` conhecido só aceita o mesmo token e URL; um callback público não pode
+redirecionar esse vínculo para outro destino.
+
+O arquivo contém tokens e deve ficar fora do código-fonte, com acesso restrito.
+As gravações são atômicas e usam permissão `0600` em sistemas POSIX. Faça backup
+dele junto com a identidade Ed25519; não gere novas chaves ao atualizar.
+Há limites de 1.000 vínculos e 4 MiB por arquivo. Não compartilhe o mesmo arquivo
+entre processos de bot simultâneos. Arquivos inválidos interrompem o início sem
+ser sobrescritos. `disconnect()` e `close()` não apagam os vínculos salvos.
+
+Vínculos perdidos por versões que só guardavam os dados em memória precisam de
+nova autorização: o servidor não consegue recuperar um token a partir de seu hash.
+No MonkyBot, após atualizar, revogue o cadastro antigo e adicione pela URL uma vez,
+reaplicando eventuais ajustes do cadastro. Não apague as chaves.
+
+Erros de autenticação são emitidos em `error`, além de `auth_failed`.
+Incompatibilidade de protocolo permite novas tentativas com `autoReconnect`;
+token inválido não fica em um ciclo de tentativas. Rejeitar uma atualização de
+foto não desconecta o bot nem impede o registro de comandos.
 
 ### Requisitos de rede
 
@@ -304,6 +333,7 @@ O teste precisa retornar o JSON do manifest. Se `monkybot status` indicar `error
 ```ts
 bot.serverCount;  // Número de servidores conectados
 bot.serverIds;    // Lista de IDs dos servidores
+bot.registeredServerCount; // Vínculos autenticados conhecidos, inclusive offline
 ```
 
 ### Eventos
@@ -353,6 +383,7 @@ Consulte o [repositório do Monky Bot](https://github.com/MonkyOrg/MonkyBot) par
 | `bot.serve(options)` | Inicia servidor HTTP para marketplace |
 | `bot.serverCount` | Número de servidores conectados |
 | `bot.serverIds` | IDs dos servidores conectados |
+| `bot.registeredServerCount` | Quantidade de vínculos autenticados conhecidos, inclusive offline |
 
 ### `BotOptions`
 
@@ -364,6 +395,7 @@ Consulte o [repositório do Monky Bot](https://github.com/MonkyOrg/MonkyBot) par
 | `autoReconnect` | `boolean` | — | Reconectar automaticamente (padrão: `true`) |
 | `name` | `string` | — | Nome a sincronizar no perfil |
 | `avatarBase64` | `string` | — | Foto em base64 ou data URI, sincronizada ao conectar |
+| `registrationFile` | `string` | — | Arquivo privado dos vínculos Marketplace, restaurado por `serve()` |
 
 ### `ServeOptions`
 

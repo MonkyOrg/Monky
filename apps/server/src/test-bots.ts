@@ -761,6 +761,8 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     let registration: Record<string, unknown> | undefined;
     let icon = PNG;
     const keys = identity();
+    let registrationStatus = 200;
+    let registrationKey = keys.publicKey;
     const manifestServer = http.createServer((req, res) => {
       if (req.url === '/manifest') {
         const address = manifestServer.address();
@@ -774,7 +776,8 @@ test('bot interactions over authenticated WebSockets', async (t) => {
           const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           registration = record(parsed);
           res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ publicKey: keys.publicKey }));
+          res.statusCode = registrationStatus;
+          res.end(JSON.stringify({ publicKey: registrationKey }));
         });
       }
     });
@@ -797,6 +800,17 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       icon = 'not an image';
       await owner.peer.error(MessageType.BOT_INSTALL, { manifestUrl }, ProtocolErrorCode.AVATAR_INVALID_TYPE);
       assert.equal(await fixture.botRepo.count(), count);
+      icon = PNG;
+      registrationStatus = 502;
+      const rejected = await owner.peer.request(MessageType.BOT_INSTALL, { manifestUrl });
+      assert.equal(rejected.type, MessageType.SERVER_ERROR);
+      assert.equal(rejected.payload.code, ProtocolErrorCode.BAD_REQUEST);
+      assert.match(text(rejected.payload.message), /registro.*502/);
+      assert.equal(await fixture.botRepo.count(), count, 'a rejected registration must not leave an offline account behind');
+      registrationStatus = 200;
+      registrationKey = 'invalid-key';
+      await owner.peer.error(MessageType.BOT_INSTALL, { manifestUrl }, ProtocolErrorCode.BAD_REQUEST);
+      assert.equal(await fixture.botRepo.count(), count, 'an invalid confirmation must not leave an account behind');
     } finally {
       await new Promise<void>((resolve, reject) => manifestServer.close((error) => error ? reject(error) : resolve()));
     }

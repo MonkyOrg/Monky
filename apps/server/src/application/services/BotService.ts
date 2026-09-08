@@ -14,7 +14,12 @@ import { IBotRepository, IServerRepository } from '../../domain/repositories';
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
 import { Logger } from '../../infrastructure/logger/Logger';
 
-type BotFailure = { success: false; errorCode: ProtocolErrorCode; errorMessage: string };
+type BotFailure = {
+  success: false;
+  errorCode: ProtocolErrorCode;
+  errorMessage: string;
+  revokedBotId?: string;
+};
 type BotProfileResult = { success: true; bot: BotInfo } | BotFailure;
 type BotCreateResult = { success: true; bot: BotInfo; token: string } | BotFailure;
 
@@ -232,6 +237,7 @@ export class BotService {
 
     // 3. POST the token to the bot's registration endpoint.
     let publicKey: string | null = null;
+    let registrationError = 'O bot não confirmou o registro com uma chave pública válida. Verifique os logs e a versão do bot.';
     try {
       const regRes = await fetch(manifest.registrationUrl, {
         method: 'POST',
@@ -252,15 +258,21 @@ export class BotService {
         ) {
           publicKey = regBody.publicKey;
         }
+      } else {
+        registrationError = `O bot recusou o registro (HTTP ${regRes.status}). Verifique os logs do bot e se as versões do bot e do servidor são compatíveis.`;
       }
-    } catch {
-      // Non-critical: bot may register later via normal token auth.
-      Logger.warn('BOT', `Failed to deliver token to ${manifest.registrationUrl}; bot can still connect manually.`);
+    } catch (error) {
+      registrationError = 'Não foi possível concluir o registro no bot. Verifique a conexão, a porta e os logs do bot.';
+      Logger.error('BOT', 'Failed to complete bot registration.', error);
     }
 
-    // 4. If the bot returned a public key, bind it immediately (TOFU).
-    if (publicKey) {
-      await this.validateToken(createResult.token, publicKey);
+    if (!publicKey) {
+      return this.rollbackInstallation(createResult.bot.id, registrationError);
+    }
+
+    // 4. Bind the confirmed key (or verify the binding established by the SDK).
+    if (!await this.validateToken(createResult.token, publicKey)) {
+      return this.rollbackInstallation(createResult.bot.id, 'A identidade confirmada pelo bot não corresponde ao registro. Verifique as chaves do bot.');
     }
 
     // Refresh the bot info (bound status may have changed).
@@ -269,6 +281,14 @@ export class BotService {
 
     Logger.info('BOT', `Bot "${manifest.name}" installed from manifest by user ${createdByUserId}.`);
     return { success: true, bot: botInfo };
+  }
+
+  private async rollbackInstallation(botId: string, errorMessage: string): Promise<BotFailure> {
+    if (await this.botRepo.findById(botId)) {
+      const revoked = await this.revoke(botId);
+      if (!revoked.success) return revoked;
+    }
+    return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage, revokedBotId: botId };
   }
 
   private toBotInfo(record: BotRecord): BotInfo {
