@@ -12,7 +12,8 @@
     "dev": "node scripts/copy-migrations.js && tsc --watch",
     "start": "node dist/index.js",
     "cli": "node dist/cli.js",
-    "test": "node dist/test-server.js",
+    "test": "node dist/test-server.js && node --test dist/test-bots.js",
+    "test:bots": "node --test dist/test-bots.js",
     "clean": "rimraf dist"
   },
   "dependencies": {

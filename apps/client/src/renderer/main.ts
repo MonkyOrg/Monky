@@ -13,6 +13,7 @@ import {
   ChatMessage,
   MessageType,
   MemberKickedPayload,
+  Permission,
   ProtocolErrorCode,
   RolesListPayload,
   ServerErrorPayload,
@@ -27,7 +28,7 @@ import {
 } from '@monky/shared';
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
-import { networkClient } from './core/NetworkClient';
+import { networkClient, type ConnectionStatus } from './core/NetworkClient';
 import { callClient, rejoinCallOnSession } from './core/serverConnection';
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
@@ -56,6 +57,7 @@ import { installImageFallback } from './utils/imageFallback';
 import { clientLog } from './core/ClientLogService';
 import { overlayBridgeService } from './core/OverlayBridgeService';
 import { OverlayStageView } from './views/OverlayStageView';
+import { bindBotChatEvents } from './core/botChatEvents';
 
 class App {
   private appContainer: HTMLElement;
@@ -395,6 +397,7 @@ class App {
       // automatic reconnection (null on a fresh connect, so this no-ops then).
       const previousVoiceChannelId = ownsCall ? voiceStore.currentVoiceChannelId : null;
 
+      chatStore.setCommandUsageScope({ serverId: payload.server.id, callerId: payload.currentUser.id });
       serverStore.setServerDetails(payload.server, payload.currentUser);
       // The in-server layout needs more room than the connection card (#342).
       if (isForegroundEvent()) void window.api?.setWindowInServer?.(true);
@@ -462,6 +465,13 @@ class App {
       }
     });
 
+    appEvents.on('network.status', (status: ConnectionStatus) => {
+      if (status !== 'CONNECTED') {
+        chatStore.finishAllInvocations('caller_disconnected');
+        chatStore.setCommands([]);
+      }
+    });
+
     appEvents.on('network.disconnected', () => {
       const origin = currentEventOrigin();
       const ownsCall = !voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === origin;
@@ -517,6 +527,7 @@ class App {
 
     appEvents.on(`message.${MessageType.ROLES_LIST}`, (payload: RolesListPayload) => {
       serverStore.updateRoles(payload.roles, payload.userRoles);
+      if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) chatStore.finishAllInvocations('cancelled');
     });
 
     appEvents.on(`message.${MessageType.USER_LEFT}`, (payload: UserLeftPayload) => {
@@ -527,6 +538,7 @@ class App {
       }
       // Only drop the member row once the person has no device left online (#309).
       if (participantManager.getSessionsOfUser(payload.userId).length === 0) {
+        if (serverStore.knownMembers.get(payload.userId)?.isBot) chatStore.finishBotInvocations(payload.userId);
         serverStore.removeMember(payload.userId);
       }
     });
@@ -570,6 +582,7 @@ class App {
     });
 
     appEvents.on(`message.${MessageType.CHANNEL_DELETED}`, (payload: ChannelDeletedPayload) => {
+      chatStore.finishChannelInvocations(payload.channelId);
       serverStore.removeChannel(payload.channelId);
     });
 
@@ -772,29 +785,7 @@ class App {
     });
 
     // ── Bot infrastructure (#569) ────────────────────────────────────────
-    appEvents.on(`message.${MessageType.COMMANDS_LIST}`, (payload: { commands: any[] }) => {
-      serverStore.setSlashCommands(payload.commands ?? []);
-    });
-
-    appEvents.on(`message.${MessageType.COMMAND_RESPONSE}`, (payload: { channelId: string; userId: string; content: string; ephemeral?: boolean }) => {
-      // Render command responses as system-like chat messages.
-      const msg: ChatMessage = {
-        id: `cmd-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        channelId: payload.channelId,
-        userId: payload.userId,
-        userNickname: 'Bot',
-        content: payload.content,
-        createdAt: Date.now(),
-        isSystem: false,
-        attachments: [],
-      };
-      chatStore.addMessage(msg);
-    });
-
-    appEvents.on(`message.${MessageType.BOT_REVOKED}`, (payload: { botId: string }) => {
-      // Remove the bot from the member list.
-      serverStore.removeMember(payload.botId);
-    });
+    bindBotChatEvents();
 
     // Local VAD speaking state
     appEvents.on('local.speaking', (speaking: boolean) => {

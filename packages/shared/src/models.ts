@@ -111,6 +111,14 @@ export interface AttachmentStorageInfo {
   maxFileBytes: number;
 }
 
+export interface BotCommandContext {
+  invocationId: string;
+  commandName: string;
+  invokerId: string;
+  invokerNickname: string;
+  invokerAvatarUrl?: string | null;
+}
+
 export interface ChatMessage {
   id: string;
   channelId: string;
@@ -136,6 +144,9 @@ export interface ChatMessage {
    * Ephemeral messages are not persisted and disappear on reconnect.
    */
   isEphemeral?: boolean;
+  isBot?: boolean;
+  /** Server-authenticated attribution; private argument values are never included. */
+  botCommand?: BotCommandContext;
 }
 
 export interface Role {
@@ -192,6 +203,10 @@ export interface CommandOption {
   description: string;
   type: CommandOptionType;
   required?: boolean;
+  placeholder?: string;
+  choices?: Array<{ label: string; value: string }>;
+  min?: number;
+  max?: number;
 }
 
 /** A registered slash command. */
@@ -203,6 +218,7 @@ export interface SlashCommand {
   botId: string;
   /** Display-friendly bot name for the command dropup. */
   botName: string;
+  botAvatarUrl?: string | null;
   options?: CommandOption[];
 }
 

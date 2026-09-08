@@ -14,6 +14,10 @@ export class UserService {
     private getActiveOnlineUsers: () => Map<string, { user: UserSummary }>
   ) {}
 
+  public async isMember(userId: string): Promise<boolean> {
+    return (await this.userRepo.findById(userId)) !== null;
+  }
+
   public async changeNickname(
     userId: string,
     newNickname: string

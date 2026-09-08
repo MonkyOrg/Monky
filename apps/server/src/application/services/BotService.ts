@@ -1,10 +1,22 @@
 import { randomBytes, createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
-import { LIMITS, ProtocolErrorCode, BotInfo, UserSummary } from '@monky/shared';
+import {
+  LIMITS,
+  ProtocolErrorCode,
+  BotInfo,
+  UserSummary,
+  botCreateSchema,
+  botManifestSchema,
+  botProfileUpdateSchema,
+} from '@monky/shared';
 import { BotRecord } from '../../domain/entities';
 import { IBotRepository, IServerRepository } from '../../domain/repositories';
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
 import { Logger } from '../../infrastructure/logger/Logger';
+
+type BotFailure = { success: false; errorCode: ProtocolErrorCode; errorMessage: string };
+type BotProfileResult = { success: true; bot: BotInfo } | BotFailure;
+type BotCreateResult = { success: true; bot: BotInfo; token: string } | BotFailure;
 
 /**
  * Manages bot lifecycle: creation, token validation, TOFU binding and revocation (#569).
@@ -14,6 +26,8 @@ import { Logger } from '../../infrastructure/logger/Logger';
  * keeping the on-disk token safe from casual disclosure.
  */
 export class BotService {
+  private mutations: Promise<void> = Promise.resolve();
+
   constructor(
     private botRepo: IBotRepository,
     private serverRepo: IServerRepository,
@@ -30,7 +44,21 @@ export class BotService {
     name: string,
     createdByUserId: string,
     avatarBase64?: string
-  ): Promise<{ success: boolean; bot?: BotInfo; token?: string; errorCode?: ProtocolErrorCode; errorMessage?: string }> {
+  ): Promise<BotCreateResult> {
+    return this.mutate(() => this.createBot(name, createdByUserId, avatarBase64));
+  }
+
+  private async createBot(name: string, createdByUserId: string, avatarBase64?: string): Promise<BotCreateResult> {
+    const parsed = botCreateSchema.safeParse({ name, avatarBase64 });
+    if (!parsed.success) {
+      return {
+        success: false,
+        errorCode: parsed.error.issues.some((issue) => issue.path[0] === 'avatarBase64' && issue.code === 'too_big')
+          ? ProtocolErrorCode.AVATAR_TOO_LARGE : ProtocolErrorCode.BOT_INVALID_PROFILE,
+        errorMessage: 'Nome ou avatar do bot inválido.',
+      };
+    }
+
     const server = await this.serverRepo.getServer();
     const maxBots = server?.maxBots ?? LIMITS.MAX_BOTS_DEFAULT;
     const count = await this.botRepo.count();
@@ -42,48 +70,35 @@ export class BotService {
       };
     }
 
-    const trimmed = name.trim();
-    if (trimmed.length < LIMITS.MIN_NICKNAME_LENGTH || trimmed.length > LIMITS.MAX_NICKNAME_LENGTH) {
-      return {
-        success: false,
-        errorCode: ProtocolErrorCode.BAD_REQUEST,
-        errorMessage: `O nome do bot deve ter entre ${LIMITS.MIN_NICKNAME_LENGTH} e ${LIMITS.MAX_NICKNAME_LENGTH} caracteres.`,
-      };
-    }
-
     const rawToken = randomBytes(LIMITS.BOT_TOKEN_BYTES).toString('hex');
     const tokenHash = BotService.hashToken(rawToken);
     const id = uuidv4();
     const now = Date.now();
 
     let avatarPath: string | null = null;
-    if (avatarBase64) {
-      try {
-        let rawBase64 = avatarBase64;
-        if (avatarBase64.includes(',')) {
-          rawBase64 = avatarBase64.split(',')[1];
-        }
-        const buffer = Buffer.from(rawBase64, 'base64');
-        const validation = this.avatarStorage.validateAvatarBuffer(buffer);
-        if (validation.isValid && validation.extension) {
-          avatarPath = await this.avatarStorage.saveAvatar(buffer, validation.extension);
-        }
-      } catch {
-        /* non-critical */
-      }
+    if (parsed.data.avatarBase64 !== undefined) {
+      const avatar = await this.saveProfileAvatar(parsed.data.avatarBase64);
+      if (!avatar.success) return avatar;
+      avatarPath = avatar.filename;
     }
 
     const record: BotRecord = {
       id,
-      name: trimmed,
+      name: parsed.data.name,
       tokenHash,
       avatarPath,
       boundPublicKey: null,
       createdByUserId,
       createdAt: now,
     };
-    await this.botRepo.create(record);
-    Logger.info('BOT', `Bot "${trimmed}" (${id}) created by user ${createdByUserId}.`);
+    try {
+      await this.botRepo.create(record);
+    } catch (error) {
+      if (avatarPath) this.avatarStorage.deleteAvatar(avatarPath);
+      Logger.error('BOT', 'Failed to create bot.', error);
+      return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar o bot.' };
+    }
+    Logger.info('BOT', `Bot "${record.name}" (${id}) created by user ${createdByUserId}.`);
 
     return {
       success: true,
@@ -97,14 +112,62 @@ export class BotService {
     return records.map((r) => this.toBotInfo(r));
   }
 
-  async revoke(botId: string): Promise<{ success: boolean; errorCode?: ProtocolErrorCode; errorMessage?: string }> {
-    const record = await this.botRepo.findById(botId);
-    if (!record) {
-      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Bot não encontrado.' };
+  async updateProfile(botId: string, profile: unknown): Promise<BotProfileResult> {
+    const parsed = botProfileUpdateSchema.safeParse(profile);
+    if (!parsed.success) {
+      return {
+        success: false,
+        errorCode: parsed.error.issues.some((issue) => issue.path[0] === 'avatarBase64' && issue.code === 'too_big')
+          ? ProtocolErrorCode.AVATAR_TOO_LARGE : ProtocolErrorCode.BOT_INVALID_PROFILE,
+        errorMessage: 'Perfil do bot inválido.',
+      };
     }
-    await this.botRepo.delete(botId);
-    Logger.info('BOT', `Bot "${record.name}" (${botId}) revoked.`);
-    return { success: true };
+    if (parsed.data.botId !== undefined && parsed.data.botId !== botId) {
+      return { success: false, errorCode: ProtocolErrorCode.BOT_INVALID_PROFILE, errorMessage: 'Bot inválido.' };
+    }
+
+    return this.mutate(async () => {
+      const record = await this.botRepo.findById(botId);
+      if (!record) {
+        return { success: false, errorCode: ProtocolErrorCode.BOT_INVALID_PROFILE, errorMessage: 'Bot não encontrado.' };
+      }
+
+      const updates: Partial<BotRecord> = {};
+      if (parsed.data.name !== undefined) updates.name = parsed.data.name;
+      const avatarBase64 = parsed.data.avatarBase64;
+      if (avatarBase64 === null) {
+        updates.avatarPath = null;
+      } else if (avatarBase64 !== undefined) {
+        const avatar = await this.saveProfileAvatar(avatarBase64);
+        if (!avatar.success) return avatar;
+        updates.avatarPath = avatar.filename;
+      }
+
+      try {
+        await this.botRepo.update(botId, updates);
+      } catch (error) {
+        if (updates.avatarPath) this.avatarStorage.deleteAvatar(updates.avatarPath);
+        Logger.error('BOT', 'Failed to update bot profile.', error);
+        return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar o perfil do bot.' };
+      }
+      if (updates.avatarPath !== undefined && record.avatarPath) {
+        this.avatarStorage.deleteAvatar(record.avatarPath);
+      }
+      return { success: true, bot: this.toBotInfo({ ...record, ...updates }) };
+    });
+  }
+
+  async revoke(botId: string): Promise<{ success: true } | BotFailure> {
+    return this.mutate(async () => {
+      const record = await this.botRepo.findById(botId);
+      if (!record) {
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Bot não encontrado.' };
+      }
+      await this.botRepo.delete(botId);
+      if (record.avatarPath) this.avatarStorage.deleteAvatar(record.avatarPath);
+      Logger.info('BOT', `Bot "${record.name}" (${botId}) revoked.`);
+      return { success: true };
+    });
   }
 
   /**
@@ -112,22 +175,23 @@ export class BotService {
    * Returns the BotRecord if valid, or null.
    */
   async validateToken(rawToken: string, publicKey: string): Promise<BotRecord | null> {
-    const hash = BotService.hashToken(rawToken);
-    const record = await this.botRepo.findByTokenHash(hash);
-    if (!record) return null;
+    return this.mutate(async () => {
+      const hash = BotService.hashToken(rawToken);
+      const record = await this.botRepo.findByTokenHash(hash);
+      if (!record) return null;
 
-    if (!record.boundPublicKey) {
-      // TOFU: bind the public key on first connection.
-      await this.botRepo.update(record.id, { boundPublicKey: publicKey });
-      record.boundPublicKey = publicKey;
-      Logger.info('BOT', `Bot "${record.name}" TOFU-bound to public key ${publicKey.substring(0, 16)}...`);
-    } else if (record.boundPublicKey !== publicKey) {
-      // Public key mismatch: reject.
-      Logger.security(`Bot "${record.name}" rejected: public key mismatch (TOFU binding violated).`);
-      return null;
-    }
+      if (!record.boundPublicKey) {
+        // TOFU: bind the public key on first connection.
+        await this.botRepo.update(record.id, { boundPublicKey: publicKey });
+        record.boundPublicKey = publicKey;
+        Logger.info('BOT', `Bot "${record.name}" TOFU-bound to public key ${publicKey.substring(0, 16)}...`);
+      } else if (record.boundPublicKey !== publicKey) {
+        Logger.security(`Bot "${record.name}" rejected: public key mismatch (TOFU binding violated).`);
+        return null;
+      }
 
-    return record;
+      return record;
+    });
   }
 
   /**
@@ -143,28 +207,28 @@ export class BotService {
     createdByUserId: string,
     serverName: string,
     serverWsUrl?: string
-  ): Promise<{ success: boolean; bot?: BotInfo; errorCode?: ProtocolErrorCode; errorMessage?: string }> {
+  ): Promise<BotProfileResult> {
     // 1. Fetch manifest.
-    let manifest: any;
+    let rawManifest: unknown;
     try {
       const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(10_000) });
       if (!res.ok) {
         return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: `O bot não respondeu corretamente (HTTP ${res.status}). Verifique se a URL está correta e o bot está em execução.` };
       }
-      manifest = await res.json();
+      rawManifest = await res.json();
     } catch {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Não foi possível conectar ao bot. Verifique se a URL está acessível e a porta está aberta no firewall.' };
     }
 
-    if (!manifest?.name || !manifest?.registrationUrl) {
-      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O bot respondeu, mas o manifest está incompleto. Verifique se o bot está configurado corretamente.' };
+    const parsed = botManifestSchema.safeParse(rawManifest);
+    if (!parsed.success) {
+      return { success: false, errorCode: ProtocolErrorCode.BOT_INVALID_PROFILE, errorMessage: 'O bot respondeu, mas o manifest é inválido. Verifique o nome, a imagem e a URL de registro.' };
     }
+    const manifest = parsed.data;
 
     // 2. Create the bot (reuse the existing create flow).
     const createResult = await this.create(manifest.name, createdByUserId, manifest.icon);
-    if (!createResult.success || !createResult.bot || !createResult.token) {
-      return createResult;
-    }
+    if (!createResult.success) return createResult;
 
     // 3. POST the token to the bot's registration endpoint.
     let publicKey: string | null = null;
@@ -181,8 +245,13 @@ export class BotService {
         signal: AbortSignal.timeout(10_000),
       });
       if (regRes.ok) {
-        const regBody = await regRes.json().catch(() => null);
-        publicKey = regBody?.publicKey || null;
+        const regBody: unknown = await regRes.json();
+        if (
+          regBody !== null && typeof regBody === 'object' && 'publicKey' in regBody &&
+          typeof regBody.publicKey === 'string' && /^[a-fA-F0-9]{64,128}$/.test(regBody.publicKey)
+        ) {
+          publicKey = regBody.publicKey;
+        }
       }
     } catch {
       // Non-critical: bot may register later via normal token auth.
@@ -190,9 +259,8 @@ export class BotService {
     }
 
     // 4. If the bot returned a public key, bind it immediately (TOFU).
-    if (publicKey && typeof publicKey === 'string' && publicKey.length > 0) {
-      await this.botRepo.update(createResult.bot.id, { boundPublicKey: publicKey });
-      Logger.info('BOT', `Bot "${manifest.name}" TOFU-bound via manifest registration.`);
+    if (publicKey) {
+      await this.validateToken(createResult.token, publicKey);
     }
 
     // Refresh the bot info (bound status may have changed).
@@ -214,5 +282,43 @@ export class BotService {
       bound: record.boundPublicKey !== null,
       online: onlineBots.has(record.id),
     };
+  }
+
+  private mutate<T>(action: () => Promise<T>): Promise<T> {
+    const result = this.mutations.then(action);
+    this.mutations = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async saveProfileAvatar(value: string): Promise<{ success: true; filename: string } | BotFailure> {
+    const invalid: BotFailure = {
+      success: false,
+      errorCode: ProtocolErrorCode.AVATAR_INVALID_TYPE,
+      errorMessage: 'Avatar inválido. Utilize uma imagem PNG, JPEG ou WebP em base64.',
+    };
+    let rawBase64 = value;
+    let declaredMime: string | undefined;
+    if (value.startsWith('data:')) {
+      const match = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(value);
+      if (!match) return invalid;
+      declaredMime = match[1];
+      rawBase64 = match[2];
+    }
+    if (!rawBase64 || rawBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(rawBase64)) return invalid;
+    const buffer = Buffer.from(rawBase64, 'base64');
+    if (buffer.length > LIMITS.MAX_AVATAR_SIZE) {
+      return { success: false, errorCode: ProtocolErrorCode.AVATAR_TOO_LARGE, errorMessage: 'Avatar excede o limite de tamanho.' };
+    }
+    if (buffer.toString('base64') !== rawBase64) return invalid;
+    const validation = this.avatarStorage.validateAvatarBuffer(buffer);
+    if (!validation.isValid || !validation.extension || (declaredMime && declaredMime !== validation.mimeType)) {
+      return { ...invalid, errorMessage: validation.error ?? invalid.errorMessage };
+    }
+    try {
+      return { success: true, filename: await this.avatarStorage.saveAvatar(buffer, validation.extension) };
+    } catch (error) {
+      Logger.error('BOT', 'Failed to save bot avatar.', error);
+      return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar o avatar do bot.' };
+    }
   }
 }

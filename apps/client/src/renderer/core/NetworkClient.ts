@@ -578,4 +578,8 @@ export function setActiveNetworkClient(client: NetworkClient): void {
   activeNetworkClient = client;
 }
 
+export function getActiveNetworkClient(): NetworkClient {
+  return activeNetworkClient;
+}
+
 export const networkClient = createActiveProxy<NetworkClient>(() => activeNetworkClient);

@@ -1,4 +1,4 @@
-import { LIMITS, SlashCommand, CommandOption } from '@monky/shared';
+import { SlashCommand, commandRegisterSchema } from '@monky/shared';
 import { Logger } from '../../infrastructure/logger/Logger';
 
 /**
@@ -20,35 +20,40 @@ export class CommandRegistry {
   register(
     botId: string,
     botName: string,
-    raw: Array<{ name: string; description: string; options?: CommandOption[] }>
+    raw: unknown,
+    botAvatarUrl?: string | null
   ): number {
-    // First, clear existing commands from this bot.
+    // Validate the whole replacement before touching the existing set. Silently
+    // sanitizing names can collapse different commands into the same key.
+    const { commands } = commandRegisterSchema.parse({ commands: raw });
     this.clearBot(botId);
 
-    const toRegister = raw.slice(0, LIMITS.MAX_COMMANDS_PER_BOT);
-    for (const cmd of toRegister) {
-      const name = cmd.name.toLowerCase().replace(/[^a-z0-9_-]/g, '');
-      if (!name || name.length > 32) continue;
-
-      const options = (cmd.options || []).slice(0, LIMITS.MAX_OPTIONS_PER_COMMAND);
+    for (const cmd of commands) {
       const command: SlashCommand = {
-        name,
-        description: cmd.description.substring(0, 100),
+        ...cmd,
         botId,
         botName,
-        options,
+        botAvatarUrl,
       };
-      this.commands.set(`${botId}:${name}`, command);
+      this.commands.set(`${botId}:${cmd.name}`, command);
     }
 
-    Logger.info('BOT', `Bot "${botName}" registered ${toRegister.length} command(s).`);
-    return toRegister.length;
+    Logger.info('BOT', `Bot "${botName}" registered ${commands.length} command(s).`);
+    return commands.length;
+  }
+
+  updateBotIdentity(botId: string, botName: string, botAvatarUrl?: string | null): void {
+    for (const command of this.commands.values()) {
+      if (command.botId !== botId) continue;
+      command.botName = botName;
+      command.botAvatarUrl = botAvatarUrl;
+    }
   }
 
   /** Removes all commands registered by a bot (e.g. on disconnect). */
   clearBot(botId: string): void {
-    for (const [key] of this.commands) {
-      if (key.startsWith(`${botId}:`)) {
+    for (const [key, command] of this.commands) {
+      if (command.botId === botId) {
         this.commands.delete(key);
       }
     }
@@ -61,7 +66,7 @@ export class CommandRegistry {
 
   /** Find a specific command by name and bot id. */
   find(botId: string, commandName: string): SlashCommand | undefined {
-    return this.commands.get(`${botId}:${commandName.toLowerCase()}`);
+    return this.commands.get(`${botId}:${commandName}`);
   }
 
   /**

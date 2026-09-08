@@ -20,3 +20,4 @@ export * from './ipc.js';
 export * from './lruCache.js';
 export * from './logging.js';
 export * from './capacity.js';
+export * from './botInteractions.js';

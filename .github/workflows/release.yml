@@ -215,6 +215,10 @@ jobs:
       - name: Build bot-sdk
         run: npm run build --workspace=packages/bot-sdk
 
+      - name: Test bot-sdk interactions
+        if: hashFiles('packages/bot-sdk/test/client.test.cjs') != ''
+        run: npm run test --workspace=packages/bot-sdk
+
       - name: Pack CLI
         id: pack
         shell: bash
@@ -248,6 +252,10 @@ jobs:
           fi
           node scripts/pack-bot-sdk.js "${{ needs.version.outputs.version }}"
           echo "packed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Exercise isolated bot-sdk installation
+        if: steps.pack-sdk.outputs.packed == 'true' && hashFiles('scripts/test-bot-sdk-package.js') != ''
+        run: node scripts/test-bot-sdk-package.js "release/monky-bot-sdk-${{ needs.version.outputs.version }}.tgz"
 
       - name: Upload bot-sdk artifact
         if: steps.pack-sdk.outputs.packed == 'true'
