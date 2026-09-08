@@ -75,15 +75,9 @@ export class RemoteMediaRouter {
     for (const audioEl of this.audioElements.values()) {
       audioEl.muted = deafened;
     }
-    for (const screenAudioEl of this.screenAudioElements.values()) {
-      screenAudioEl.muted = deafened;
-    }
     // Also silence any active amplification pipelines
     if (deafened) {
       for (const pipeline of this.amplificationPipelines.values()) {
-        pipeline.gain.gain.value = 0;
-      }
-      for (const pipeline of this.screenAmplificationPipelines.values()) {
         pipeline.gain.gain.value = 0;
       }
     } else {
@@ -128,7 +122,6 @@ export class RemoteMediaRouter {
 
   public routeScreenAudioTrack(peerSessionId: string, track: MediaStreamTrack): void {
     let screenAudioEl = this.screenAudioElements.get(peerSessionId);
-    const isDeaf = this.isDeafened || voiceStore.getEffectiveDeafened();
     if (!screenAudioEl) {
       screenAudioEl = document.createElement('audio');
       screenAudioEl.autoplay = true;
@@ -138,9 +131,6 @@ export class RemoteMediaRouter {
       screenAudioEl.setAttribute('data-screen-audio-session', peerSessionId);
       document.body.appendChild(screenAudioEl);
       this.screenAudioElements.set(peerSessionId, screenAudioEl);
-    }
-    if (isDeaf) {
-      screenAudioEl.muted = true;
     }
     const screenStream = new MediaStream([track]);
     screenAudioEl.srcObject = screenStream;
@@ -160,11 +150,8 @@ export class RemoteMediaRouter {
     if (screenAudioEl) {
       screenAudioEl.muted = muted;
     }
-    // Also mute the amplification pipeline if active
-    const pipeline = this.screenAmplificationPipelines.get(peerSessionId);
-    if (pipeline) {
-      pipeline.gain.gain.value = muted ? 0 : pipeline.gain.gain.value;
-    }
+    const participant = this.getVoiceParticipants().get(peerSessionId);
+    this.setScreenAudioVolume(peerSessionId, settingsStore.getScreenAudioVolume(peerSessionId, participant?.user.clientId));
   }
 
   // ── Screen video routing ──
@@ -284,7 +271,8 @@ export class RemoteMediaRouter {
     track?: MediaStreamTrack
   ): void {
     const clamped = Math.max(0, Math.min(200, volume));
-    const isDeaf = this.isDeafened || voiceStore.getEffectiveDeafened();
+    const isScreenAudio = audioEl.hasAttribute('data-screen-audio-session');
+    const isDeaf = !isScreenAudio && (this.isDeafened || voiceStore.getEffectiveDeafened());
 
     if (isDeaf) {
       audioEl.muted = true;
@@ -312,7 +300,7 @@ export class RemoteMediaRouter {
       this.ensureAmplificationPipeline(sessionId, audioEl, pipelineMap, track);
       const pipeline = pipelineMap.get(sessionId);
       if (pipeline) {
-        pipeline.gain.gain.value = clamped / 100; // 1.01 – 2.0
+        pipeline.gain.gain.value = isScreenAudio && audioEl.muted ? 0 : clamped / 100;
       }
     }
   }

@@ -639,7 +639,7 @@ function runTests() {
 
   // Priorização de Codecs de Vídeo WebRTC (AV1 > VP9 > VP8 > H264)
   console.log('\n--- Testando priorização de codecs de vídeo WebRTC ---');
-  const { sortVideoCodecs } = require('../src/renderer/core/webrtc/codecPreferences');
+  const { sortVideoCodecs, getSdpVideoCodecOrder } = require('../src/renderer/core/webrtc/codecPreferences');
 
   const mockCodecs = [
     { mimeType: 'video/H264', clockRate: 90000 },
@@ -678,6 +678,39 @@ function runTests() {
 
   const prefVp8 = sortVideoCodecs(mockCodecs, 'vp8');
   assert(prefVp8[0].mimeType === 'video/VP8', 'VP8 passa a ser o primeiro quando selecionado pelo usuário');
+
+  // #566: leitura da ordem real de codecs de vídeo a partir do SDP (diagnóstico)
+  console.log('\n--- Testando getSdpVideoCodecOrder (#566) ---');
+  const sdpAv1First = [
+    'v=0',
+    'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+    'a=rtpmap:111 opus/48000/2',
+    'm=video 9 UDP/TLS/RTP/SAVPF 98 99 100 101 96 97',
+    'a=rtpmap:98 AV1/90000',
+    'a=rtpmap:99 rtx/90000',
+    'a=rtpmap:100 VP9/90000',
+    'a=rtpmap:101 rtx/90000',
+    'a=rtpmap:96 H264/90000',
+    'a=rtpmap:97 rtx/90000',
+  ].join('\r\n');
+  assert(
+    JSON.stringify(getSdpVideoCodecOrder(sdpAv1First)) === JSON.stringify(['av1', 'vp9', 'h264']),
+    'getSdpVideoCodecOrder lê a ordem do m=video e descarta rtx (AV1 primeiro)'
+  );
+
+  const sdpH264First = [
+    'm=video 9 UDP/TLS/RTP/SAVPF 96 98 100',
+    'a=rtpmap:96 H264/90000',
+    'a=rtpmap:98 AV1/90000',
+    'a=rtpmap:100 VP9/90000',
+  ].join('\n');
+  assert(getSdpVideoCodecOrder(sdpH264First)[0] === 'h264', 'getSdpVideoCodecOrder reflete H.264 primeiro quando o SDP o prioriza');
+
+  assert(getSdpVideoCodecOrder('').length === 0, 'getSdpVideoCodecOrder("") retorna lista vazia');
+  assert(
+    getSdpVideoCodecOrder('v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2').length === 0,
+    'getSdpVideoCodecOrder retorna vazio quando não há seção de vídeo'
+  );
 
   // Testar persistência de preferredVideoCodec na SettingsStore
   const storeCodec = new SettingsStore();

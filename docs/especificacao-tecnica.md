@@ -251,8 +251,14 @@ Client C
 Vantagens:
 - Quem compartilha tela em 1080p60 transmite apenas 1 stream upstream.
 - Redução exponencial do uso de CPU e banda dos clientes em chamadas com mais de 3 participantes.
-- Mecanismo de **contingência automática (Fallback P2P)** caso o worker SFU sofra interrupção.
+- Reconexão automática ao SFU em caso de interrupção, sem trocar silenciosamente a topologia para P2P.
 - Estimador de capacidade integrado (CPU, RAM, Bandwidth) no client e CLI.
+
+Diagnóstico e recuperação:
+- Os ícones de cada participante refletem o estado ICE/DTLS observado pelo servidor (conectando, conectado, reconectando ou falha), inclusive para quem apenas observa a lista do canal. A conexão WebSocket não comprova que a mídia está funcionando.
+- O ping SFU usa o maior RTT disponível entre os transportes ativos de envio e recebimento; clientes que só recebem também têm medição. Os indicadores usam os mesmos limites: abaixo de 50 ms, excelente; de 50 a 119 ms, boa; a partir de 120 ms, ruim. Sem amostra, exibem estado desconhecido, não uma conexão saudável.
+- A entrada na chamada e a reconstrução da sessão SFU reconciliam a lista autoritativa de participantes, independentemente de haver um produtor de áudio ativo.
+- Ensurdecer silencia a voz, não o áudio de compartilhamento de tela. Em P2P e SFU, o áudio da tela depende de assistir à transmissão e dos controles próprios de silenciar/volume (0–200%); sair de ensurdecido não reativa uma tela silenciada.
 
 ---
 

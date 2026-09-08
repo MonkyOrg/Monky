@@ -1,5 +1,6 @@
 import { MessageType } from '@monky/shared';
 import { networkClient } from '../core/NetworkClient';
+import { sessionManager } from '../core/SessionManager';
 import { serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { t } from '../i18n';
@@ -220,6 +221,9 @@ export class SettingsModal {
         void this.open();
       },
       showError: (msg: string) => this.showError(msg),
+      onVisibilityChanged: (appearOffline: boolean) => {
+        sessionManager.setAppearOffline(appearOffline);
+      },
     });
 
     this.voiceVideoTab.attachEvents(this.modalEl);

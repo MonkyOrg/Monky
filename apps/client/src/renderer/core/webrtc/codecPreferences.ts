@@ -99,6 +99,40 @@ export function getPrioritizedVideoCodecs(
 }
 
 /**
+ * Extracts the ordered list of video codec names from the first `m=video`
+ * section of an SDP, in the payload-type order that actually drives codec
+ * selection. Purely diagnostic: it lets us see which codec a (re)negotiation
+ * prioritised at runtime, e.g. to catch H.264 falling back to AV1 after a
+ * SFU -> P2P switch (#566). Supporting codecs (rtx/red/ulpfec/flexfec) are
+ * dropped so only the real video codecs remain.
+ */
+export function getSdpVideoCodecOrder(sdp: string): string[] {
+  if (!sdp) return [];
+  const lines = sdp.split(/\r\n|\r|\n/);
+  const videoIndex = lines.findIndex((line) => line.startsWith('m=video'));
+  if (videoIndex === -1) return [];
+
+  const payloadOrder = lines[videoIndex].split(' ').slice(3);
+  const codecNameByPayload = new Map<string, string>();
+  for (let i = videoIndex + 1; i < lines.length; i++) {
+    if (lines[i].startsWith('m=')) break; // reached the next media section
+    const match = /^a=rtpmap:(\d+)\s+([^/]+)\//.exec(lines[i]);
+    if (match) codecNameByPayload.set(match[1], match[2].toLowerCase());
+  }
+
+  const supporting = new Set(['rtx', 'red', 'ulpfec', 'flexfec-03']);
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (const payload of payloadOrder) {
+    const name = codecNameByPayload.get(payload);
+    if (!name || supporting.has(name) || seen.has(name)) continue;
+    seen.add(name);
+    order.push(name);
+  }
+  return order;
+}
+
+/**
  * Applies the prioritized video codecs to all video transceivers on a given RTCPeerConnection.
  */
 export function applyVideoCodecPreferences(

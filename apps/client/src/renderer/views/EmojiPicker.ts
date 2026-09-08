@@ -1,5 +1,6 @@
 import { StickerEntry } from '@monky/shared';
 import { EMOJI_CATALOG, EmojiGroupId } from '../emoji/emojiCatalog';
+import { recentEmojis } from '../emoji/recentEmojis';
 import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
 import { t, tCount, TranslationKey } from '../i18n';
@@ -92,6 +93,8 @@ export class EmojiPicker {
     const emojiOnlyClass = this.options.emojiOnly ? ' emoji-picker--emoji-only' : '';
     const floatingClass = this.options.floating ? ' emoji-picker--floating' : '';
     root.className = `emoji-picker${posClass}${emojiOnlyClass}${floatingClass}`;
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-label', t('chat.emojiPickerTitle'));
     root.innerHTML = this.renderShell();
     this.options.container.appendChild(root);
     this.root = root;
@@ -212,7 +215,10 @@ export class EmojiPicker {
 
       const emoji = target.closest<HTMLElement>('[data-emoji]')?.getAttribute('data-emoji');
       if (emoji) {
+        recentEmojis.select(emoji);
         this.options.onSelectEmoji(emoji);
+        const recent = this.bodyEl?.querySelector<HTMLElement>('[data-emoji-group="recent"]');
+        if (recent) recent.innerHTML = this.renderRecent();
         return;
       }
 
@@ -259,10 +265,24 @@ export class EmojiPicker {
       if (e.key === 'Escape') {
         e.stopPropagation();
         this.close();
+        this.options.anchor.focus({ preventScroll: true });
       }
     };
     document.addEventListener('keydown', onKeyDown, true);
     this.unbind.push(() => document.removeEventListener('keydown', onKeyDown, true));
+
+    if (this.options.floating) {
+      const onScroll = (event: Event) => {
+        if (!(event.target instanceof Node) || !root.contains(event.target)) this.close();
+      };
+      const onResize = () => this.close();
+      window.addEventListener('scroll', onScroll, true);
+      window.addEventListener('resize', onResize);
+      this.unbind.push(() => {
+        window.removeEventListener('scroll', onScroll, true);
+        window.removeEventListener('resize', onResize);
+      });
+    }
   }
 
   // --- body --------------------------------------------------------------
@@ -273,12 +293,14 @@ export class EmojiPicker {
 
     root.querySelectorAll<HTMLElement>('[data-picker-tab]').forEach((btn) => {
       btn.classList.toggle('is-active', btn.getAttribute('data-picker-tab') === this.tab);
+      btn.setAttribute('aria-pressed', String(btn.getAttribute('data-picker-tab') === this.tab));
     });
 
     const search = root.querySelector<HTMLInputElement>('.emoji-picker-search-input');
     if (search) {
       search.placeholder =
-        this.tab === 'emojis' ? t('emojiPicker.searchEmojis') : t('emojiPicker.searchStickers');
+        this.tab !== 'stickers' ? t('emojiPicker.searchEmojis') : t('emojiPicker.searchStickers');
+      search.setAttribute('aria-label', search.placeholder);
     }
 
     // The folder listing is async, so the first paint shows a loading state and
@@ -298,6 +320,10 @@ export class EmojiPicker {
   }
 
   private renderResults(): void {
+    if (this.tab !== 'stickers') {
+      this.imageObserver?.disconnect();
+      this.imageObserver = null;
+    }
     if (this.tab === 'emojis') this.renderEmojis();
     else this.renderStickers();
   }
@@ -311,6 +337,18 @@ export class EmojiPicker {
   }
 
   // --- emojis ------------------------------------------------------------
+
+  private renderRecent(): string {
+    const catalog = new Map(EMOJI_CATALOG.flatMap((group) => group.emojis.map((entry) => [entry[0], entry] as const)));
+    const buttons = recentEmojis.get().flatMap((char) => {
+      const entry = catalog.get(char);
+      return entry ? [this.renderEmojiButton(char, entry[1])] : [];
+    });
+    const content = buttons.length
+      ? `<div class="emoji-picker-grid">${buttons.join('')}</div>`
+      : `<div class="emoji-picker-recent-empty">${t('emojiPicker.noRecent')}</div>`;
+    return `<div class="emoji-picker-section-title">${t('emojiPicker.group.recent')}</div>${content}`;
+  }
 
   private renderEmojis(): void {
     const body = this.bodyEl;
@@ -336,7 +374,7 @@ export class EmojiPicker {
         : this.renderEmptyState('search_off', t('emojiPicker.noResults'), '');
       footer.innerHTML = '';
     } else {
-      html = EMOJI_CATALOG.map(
+      html = `<div class="emoji-picker-section" data-emoji-group="recent">${this.renderRecent()}</div>` + EMOJI_CATALOG.map(
         (group) => `
           <div class="emoji-picker-section" data-emoji-group="${group.id}">
             <div class="emoji-picker-section-title">${t(GROUP_LABEL_KEYS[group.id])}</div>
@@ -348,9 +386,12 @@ export class EmojiPicker {
       ).join('');
       footer.innerHTML = `
         <div class="emoji-picker-nav">
+          <button type="button" class="emoji-picker-nav-btn" data-goto-group="recent" title="${t('emojiPicker.group.recent')}" aria-label="${t('emojiPicker.group.recent')}">
+            <span class="material-symbols-outlined md-18" aria-hidden="true">schedule</span>
+          </button>
           ${EMOJI_CATALOG.map(
             (group) => `
-              <button type="button" class="emoji-picker-nav-btn" data-goto-group="${group.id}" title="${t(GROUP_LABEL_KEYS[group.id])}">
+              <button type="button" class="emoji-picker-nav-btn" data-goto-group="${group.id}" title="${t(GROUP_LABEL_KEYS[group.id])}" aria-label="${t(GROUP_LABEL_KEYS[group.id])}">
                 ${GROUP_ICONS[group.id]}
               </button>
             `

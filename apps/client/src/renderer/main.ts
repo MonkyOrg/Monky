@@ -11,8 +11,10 @@ import {
   ChatHistoryPayload,
   ChatMessageUpdatedPayload,
   ChatMessage,
+  chatReactionEventSchema,
   MessageType,
   MemberKickedPayload,
+  Permission,
   ProtocolErrorCode,
   RolesListPayload,
   ServerErrorPayload,
@@ -28,11 +30,11 @@ import {
 } from '@monky/shared';
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
-import { networkClient } from './core/NetworkClient';
+import { networkClient, type ConnectionStatus } from './core/NetworkClient';
 import { callClient, rejoinCallOnSession } from './core/serverConnection';
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
-import { currentEventOrigin, isForegroundEvent } from './core/sessionRouting';
+import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
 import { soundEffects } from './core/SoundEffects';
 import { soundboardService } from './core/SoundboardService';
 import { keybindService } from './core/KeybindService';
@@ -57,6 +59,7 @@ import { installImageFallback } from './utils/imageFallback';
 import { clientLog } from './core/ClientLogService';
 import { overlayBridgeService } from './core/OverlayBridgeService';
 import { OverlayStageView } from './views/OverlayStageView';
+import { bindBotChatEvents } from './core/botChatEvents';
 
 class App {
   private appContainer: HTMLElement;
@@ -396,6 +399,7 @@ class App {
       // automatic reconnection (null on a fresh connect, so this no-ops then).
       const previousVoiceChannelId = ownsCall ? voiceStore.currentVoiceChannelId : null;
 
+      chatStore.setCommandUsageScope({ serverId: payload.server.id, callerId: payload.currentUser.id });
       serverStore.setServerDetails(payload.server, payload.currentUser);
       // The in-server layout needs more room than the connection card (#342).
       if (isForegroundEvent()) void window.api?.setWindowInServer?.(true);
@@ -406,7 +410,14 @@ class App {
       participantManager.setUsers(payload.server.members);
 
       // Populate existing voice states
+      const knownVoiceUsers = new Map(payload.server.knownMembers?.map((user) => [user.id, user]));
       for (const [_, state] of Object.entries(payload.server.voiceStates)) {
+        // Invisible users are absent from the online member list, but their
+        // physical voice session still exists and can still carry media.
+        if (!participantManager.get(state.sessionId)) {
+          const user = knownVoiceUsers.get(state.userId);
+          if (user) participantManager.addUser({ ...user, sessionId: state.sessionId });
+        }
         participantManager.updateVoiceState(state);
       }
 
@@ -460,6 +471,13 @@ class App {
         } else if (origin) {
           void rejoinCallOnSession(origin, previousVoiceChannelId!);
         }
+      }
+    });
+
+    appEvents.on('network.status', (status: ConnectionStatus) => {
+      if (status !== 'CONNECTED') {
+        chatStore.finishAllInvocations('caller_disconnected');
+        chatStore.setCommands([]);
       }
     });
 
@@ -518,6 +536,7 @@ class App {
 
     appEvents.on(`message.${MessageType.ROLES_LIST}`, (payload: RolesListPayload) => {
       serverStore.updateRoles(payload.roles, payload.userRoles);
+      if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) chatStore.finishAllInvocations('cancelled');
     });
 
     appEvents.on(`message.${MessageType.USER_LEFT}`, (payload: UserLeftPayload) => {
@@ -528,6 +547,7 @@ class App {
       }
       // Only drop the member row once the person has no device left online (#309).
       if (participantManager.getSessionsOfUser(payload.userId).length === 0) {
+        if (serverStore.knownMembers.get(payload.userId)?.isBot) chatStore.finishBotInvocations(payload.userId);
         serverStore.removeMember(payload.userId);
       }
     });
@@ -563,6 +583,15 @@ class App {
       participantManager.updateUser(payload.user);
       if (payload.user.id === serverStore.currentUser?.id) {
         serverStore.updateCurrentUser(payload.user);
+        const invisible = payload.user.invisible;
+        if (typeof invisible === 'boolean') {
+          emitOutsideRouting(() => {
+            if (settingsStore.appearOffline !== invisible) {
+              settingsStore.appearOffline = invisible;
+              settingsStore.save();
+            }
+          });
+        }
       }
     });
 
@@ -571,6 +600,7 @@ class App {
     });
 
     appEvents.on(`message.${MessageType.CHANNEL_DELETED}`, (payload: ChannelDeletedPayload) => {
+      chatStore.finishChannelInvocations(payload.channelId);
       serverStore.removeChannel(payload.channelId);
     });
 
@@ -634,8 +664,15 @@ class App {
     });
 
     appEvents.on(`message.${MessageType.CHAT_HISTORY}`, (payload: ChatHistoryPayload) => {
-      chatStore.setHistory(payload.channelId, payload.messages);
+      chatStore.setHistory(payload.channelId, payload.messages, payload.aroundMessageId);
     });
+
+    for (const type of [MessageType.CHAT_REACTION_ADDED, MessageType.CHAT_REACTION_REMOVED]) {
+      appEvents.on(`message.${type}`, (payload: unknown) => {
+        const parsed = chatReactionEventSchema.safeParse(payload);
+        if (parsed.success) chatStore.updateReaction(parsed.data, type === MessageType.CHAT_REACTION_ADDED);
+      });
+    }
 
     // An existing message was edited or deleted (#504). No sound and no unread
     // marker: nothing new was said, so nothing should call attention to it.
@@ -644,6 +681,17 @@ class App {
     });
 
     appEvents.on(`message.${MessageType.VOICE_USER_JOINED}`, (payload: VoiceUserJoinedPayload) => {
+      if (payload.user) participantManager.addUser(payload.user);
+      if (payload.participants) {
+        participantManager.reconcileVoiceChannel(payload.channelId, payload.participants);
+        if (this.eventOwnsCall() && voiceStore.currentVoiceChannelId === payload.channelId && !webRtcManager.isSfuMode()) {
+          for (const { voiceState } of payload.participants) {
+            if (!serverStore.isMySession(voiceState.sessionId)) {
+              void webRtcManager.connectToPeer(voiceState.sessionId, true);
+            }
+          }
+        }
+      }
       // Read before the state is overwritten: an admin move announces the
       // arrival once itself and once more when the moved client re-joins, so
       // the room would hear the join sound twice (#500). A repeated
@@ -771,6 +819,9 @@ class App {
         if (origin) void rejoinCallOnSession(origin, payload.channelId);
       }
     });
+
+    // ── Bot infrastructure (#569) ────────────────────────────────────────
+    bindBotChatEvents();
 
     // Local VAD speaking state
     appEvents.on('local.speaking', (speaking: boolean) => {

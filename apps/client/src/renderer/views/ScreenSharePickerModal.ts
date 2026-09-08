@@ -159,7 +159,12 @@ export class ScreenSharePickerModal {
       <div class="screen-sources-grid">
         ${available.map((s) => `
           <div class="source-item ${this.selectedSourceId === s.id ? 'selected' : ''}" data-source-id="${escapeHtml(s.id)}">
-            <img class="source-thumbnail" src="${s.thumbnailDataUrl}" alt="${escapeHtml(s.name)}">
+            ${s.thumbnailDataUrl
+              ? `<img class="source-thumbnail" src="${s.thumbnailDataUrl}" alt="${escapeHtml(s.name)}">`
+              : `<div class="source-thumbnail source-thumbnail--minimized">
+                  <span class="material-symbols-outlined">web_asset</span>
+                  <span class="source-thumbnail-label">${t('screenShare.minimizedNoPreview')}</span>
+                </div>`}
             <div class="source-name" title="${escapeHtml(s.name)}">
               ${s.appIconDataUrl
                 ? `<img class="source-app-icon" src="${s.appIconDataUrl}" alt="">`

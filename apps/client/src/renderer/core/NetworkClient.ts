@@ -18,6 +18,7 @@ import { routeSessionEvent } from './sessionRouting';
 import { clientLog } from './ClientLogService';
 import { t } from '../i18n';
 import { translateProtocolError } from '../i18n/protocolErrors';
+import { settingsStore } from '../stores/settingsStore';
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING';
 
@@ -254,6 +255,7 @@ export class NetworkClient {
             nickname,
             password: password || '',
             deviceId: getDeviceId(),
+            appearOffline: settingsStore.appearOffline || undefined,
           },
           authRequestId
         );
@@ -588,6 +590,10 @@ let activeNetworkClient = createNetworkClient();
 
 export function setActiveNetworkClient(client: NetworkClient): void {
   activeNetworkClient = client;
+}
+
+export function getActiveNetworkClient(): NetworkClient {
+  return activeNetworkClient;
 }
 
 export const networkClient = createActiveProxy<NetworkClient>(() => activeNetworkClient);

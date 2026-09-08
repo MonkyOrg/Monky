@@ -2,18 +2,24 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, VoiceMode, stripAdministrator } from '@monky/shared';
+import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
 import { AttachmentService } from './application/services/AttachmentService';
+import { BotService } from './application/services/BotService';
+import { BotSelectorService } from './application/services/BotSelectorService';
+import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
+import { CommandRegistry } from './application/services/CommandRegistry';
 import { ChannelService } from './application/services/ChannelService';
 import { ChatService } from './application/services/ChatService';
 import { PermissionService } from './application/services/PermissionService';
 import { RoleService } from './application/services/RoleService';
 import { SignalingService } from './application/services/SignalingService';
 import { UserService } from './application/services/UserService';
+import { listOnlineHumans } from './application/services/onlineHumans';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import {
   SqliteAttachmentRepository,
+  SqliteBotRepository,
   SqliteChannelRepository,
   SqliteMentionRepository,
   SqliteMessageRepository,
@@ -78,6 +84,7 @@ export async function ensureServerSeedData(
       id: uuidv4(),
       serverId,
       name: config.initialTextChannel || 'geral',
+      botCommandsEnabled: true,
       type: 'TEXT',
       position: 0,
       createdAt: now,
@@ -90,6 +97,7 @@ export async function ensureServerSeedData(
       id: uuidv4(),
       serverId,
       name: config.initialVoiceChannel || 'Geral',
+      botCommandsEnabled: true,
       type: 'VOICE',
       position: 1,
       createdAt: now,
@@ -236,7 +244,7 @@ export class MonkyServer {
       (userId, channelId) => channelService.canUserAccessChannel(userId, channelId)
     );
 
-    let getOnlineUsers: () => any = () => new Map();
+    let getOnlineUsers: () => Map<string, { user: UserSummary }> = () => new Map();
 
     const authService = new AuthService(
       serverRepo,
@@ -255,6 +263,23 @@ export class MonkyServer {
       avatarStorage,
       () => getOnlineUsers()
     );
+
+    // Bot infrastructure (#569).
+    const botRepo = new SqliteBotRepository(db);
+    const botService = new BotService(
+      botRepo,
+      serverRepo,
+      avatarStorage,
+      () => {
+        // Online bots: filter sessions where isBot flag is set.
+        const bots = new Map<string, UserSummary>();
+        for (const { user } of getOnlineUsers().values()) {
+          if (user.isBot) bots.set(user.id, user);
+        }
+        return bots;
+      }
+    );
+    const commandRegistry = new CommandRegistry();
 
     // Seed server and default channels if new database
     await ensureServerSeedData(config, serverRepo, channelRepo, roleRepo);
@@ -276,19 +301,13 @@ export class MonkyServer {
         return;
       }
       if (req.url === '/preview') {
-        const online = getOnlineUsers() as Map<string, { user: { id: string; nickname: string; avatarUrl?: string | null } }>;
-        // Keyed per connection, so collapse a person's devices into one entry (#309).
-        const seenUserIds = new Set<string>();
-        const users = Array.from(online.values())
-          .filter((entry) => {
-            if (seenUserIds.has(entry.user.id)) return false;
-            seenUserIds.add(entry.user.id);
-            return true;
-          })
+        const people = listOnlineHumans(getOnlineUsers().values());
+        const users = people
+          .filter((user) => !user.invisible)
           .slice(0, 10)
-          .map((entry) => ({
-            nickname: entry.user.nickname,
-            avatarUrl: entry.user.avatarUrl || null,
+          .map((user) => ({
+            nickname: user.nickname,
+            avatarUrl: user.avatarUrl || null,
           }));
         Promise.all([serverRepo.getServer(), userRepo.count()])
           .then(([server, memberCount]) => {
@@ -302,7 +321,7 @@ export class MonkyServer {
                 hasPassword: !!(server?.passwordHash && server.passwordHash.length > 0),
                 iconUrl: avatarStorage.getPublicUrl(server?.iconPath),
                 // Distinct people, matching the per-person maxUsers semantics (#309).
-                userCount: seenUserIds.size,
+                userCount: people.length,
                 // Registered members and the cap they count against, so a visitor
                 // can tell whether there is room before trying to join (#403).
                 // `??` rather than `||`: 0 is the "unlimited" sentinel and must
@@ -388,7 +407,10 @@ export class MonkyServer {
       permissionService,
       roleService,
       coturnManager,
-      sfuManager
+      sfuManager,
+      botService,
+      commandRegistry,
+      new BotSelectorService(new SqliteBotSelectorRepository(db))
     );
 
     getOnlineUsers = () => wsServer.getOnlineUsersMap();
@@ -669,10 +691,7 @@ export class MonkyServer {
 
     // Counts people rather than sockets: one person may hold several sessions
     // since a single identity can be connected from more than one device.
-    const onlineUserIds = new Set<string>();
-    for (const session of this.wsServer.getOnlineUsersMap().values()) {
-      onlineUserIds.add(session.user.id);
-    }
+    const onlineUsers = listOnlineHumans(this.wsServer.getOnlineUsersMap().values()).length;
 
     return {
       serverName: serverRecord?.name ?? this.config.serverName ?? 'Monky Server',
@@ -680,7 +699,7 @@ export class MonkyServer {
       dataDir: this.config.dataDir,
       startedAt: this.startedAt,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
-      onlineUsers: onlineUserIds.size,
+      onlineUsers,
       maxUsers: serverRecord?.maxUsers ?? LIMITS.MAX_USERS_DEFAULT,
       members: members.length,
       channels: channels.length,

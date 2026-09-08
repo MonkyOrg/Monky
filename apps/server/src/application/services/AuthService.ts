@@ -33,6 +33,8 @@ export interface AuthResult {
   authFailed?: boolean;
   user?: UserSummary;
   serverDetails?: ServerDetails;
+  /** Whether this connection should be invisible to other users (#561). */
+  appearOffline?: boolean;
 }
 
 interface PendingAuthChallenge {
@@ -43,6 +45,8 @@ interface PendingAuthChallenge {
   nonce: string;
   /** Which installation is connecting, so two devices of the same person coexist (#309). */
   deviceId: string;
+  /** The user wants to appear offline to everyone else (#561). */
+  appearOffline: boolean;
 }
 
 /**
@@ -171,6 +175,7 @@ export class AuthService {
       // Clients that predate #309 send nothing; give them a random id so each of
       // their connections is still a distinct session.
       deviceId: parseResult.data.deviceId || randomBytes(16).toString('hex'),
+      appearOffline: parseResult.data.appearOffline === true,
     });
 
     return {
@@ -333,20 +338,34 @@ export class AuthService {
       connectedAt: now,
     });
 
+    // Mark the user summary with the invisible flag so the WebSocket layer
+    // knows to suppress broadcasts and mask presence (#561).
+    userSummary.invisible = pending.appearOffline;
+
     const channels = await this.channelRepo.listByServerId(server.id);
     // One entry per live connection, so the other devices of this person are
-    // visible to the newcomer (#309).
-    const members: UserSummary[] = Array.from(onlineMap.values()).map((s) => s.user);
+    // visible to the newcomer (#309). Invisible users are excluded from the
+    // online list so they appear offline to everyone else (#561). The
+    // connecting user's own session is always included regardless.
+    const members: UserSummary[] = Array.from(onlineMap.values())
+      .filter((s) => !s.user.invisible || s.user.id === userSummary.id)
+      .map((s) => s.user);
     if (!members.some((m) => m.sessionId === userSummary.sessionId)) {
       members.push(userSummary);
     }
 
     const allUsers = await this.userRepo.listAll();
     // The known-members list describes people, so collapse a user's sessions to
-    // a single (online) record.
+    // a single (online) record. Invisible users appear as DISCONNECTED (#561).
     const onlineByUserId = new Map<string, UserSummary>();
     for (const session of onlineMap.values()) {
-      if (!onlineByUserId.has(session.user.id)) onlineByUserId.set(session.user.id, session.user);
+      if (!session.user.invisible && !onlineByUserId.has(session.user.id)) {
+        onlineByUserId.set(session.user.id, session.user);
+      }
+    }
+    // The connecting user always sees themselves as online in knownMembers.
+    if (!onlineByUserId.has(userSummary.id)) {
+      onlineByUserId.set(userSummary.id, userSummary);
     }
     const knownMembers: UserSummary[] = allUsers.map((user) => {
       const online = onlineByUserId.get(user.id);
@@ -377,6 +396,7 @@ export class AuthService {
       voiceMode: server.voiceMode || 'p2p',
       hostSpecs: CapacityEstimator.getHostSpecs(),
       turnEnabled: Boolean(server.turnEnabled),
+      maxBots: server.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
       iconUrl: this.avatarStorage.getPublicUrl(server.iconPath),
       channels: visibleChannels.map((c) => ({
         id: c.id,
@@ -387,6 +407,7 @@ export class AuthService {
         createdAt: c.createdAt,
         maxParticipants: c.maxParticipants,
         isPrivate: c.isPrivate,
+        botCommandsEnabled: c.botCommandsEnabled,
         allowedRoleIds: c.allowedRoleIds,
       })),
       members,
@@ -404,6 +425,7 @@ export class AuthService {
       success: true,
       user: userSummary,
       serverDetails,
+      appearOffline: pending.appearOffline,
     };
   }
 

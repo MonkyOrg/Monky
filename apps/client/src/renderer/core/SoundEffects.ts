@@ -106,37 +106,62 @@ export class SoundEffectManager {
   }
 
   /**
+   * Lazily creates the shared tone AudioContext and routes it to the speaker
+   * selected in the app.
+   */
+  private ensureToneCtx(): AudioContext {
+    if (!this.toneCtx) {
+      const Ctor = window.AudioContext || (window as any).webkitAudioContext;
+      this.toneCtx = new Ctor();
+      if (settingsStore.selectedSpeakerId && typeof (this.toneCtx as any).setSinkId === 'function') {
+        (this.toneCtx as any).setSinkId(settingsStore.selectedSpeakerId).catch(() => {});
+      }
+    }
+    return this.toneCtx!;
+  }
+
+  /**
+   * Runs `schedule` with the tone context guaranteed to be running. Chromium can
+   * park an AudioContext in the "suspended" state — e.g. while Monky sits in the
+   * background behind the window being shared or a fullscreen game. A suspended
+   * context advances no clock, so scheduling oscillators at `currentTime` would
+   * place them in the past and silently drop the cue (this is why the
+   * screen-share stop sound went missing when the shared window was closed).
+   * `resume()` is async, so we must await it and only then read the clock (#560).
+   */
+  private withRunningToneCtx(schedule: (ctx: AudioContext, now: number) => void): void {
+    const ctx = this.ensureToneCtx();
+    const run = () => schedule(ctx, ctx.currentTime);
+    if (ctx.state === 'suspended') {
+      ctx.resume().then(run).catch(() => {});
+    } else {
+      run();
+    }
+  }
+
+  /**
    * Synthesizes a short two-note cue for screen-share start/stop using the Web
    * Audio API, so no extra binary assets are needed. A rising interval signals
    * "start" and a falling interval signals "stop".
    */
   private playTone(rising: boolean): void {
     try {
-      if (!this.toneCtx) {
-        const Ctor = window.AudioContext || (window as any).webkitAudioContext;
-        this.toneCtx = new Ctor();
-        if (settingsStore.selectedSpeakerId && typeof (this.toneCtx as any).setSinkId === 'function') {
-          (this.toneCtx as any).setSinkId(settingsStore.selectedSpeakerId).catch(() => {});
-        }
-      }
-      const ctx = this.toneCtx!;
-      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      this.withRunningToneCtx((ctx, now) => {
+        const freqs = rising ? [523.25, 783.99] : [783.99, 523.25];
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.25, now + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
+        gain.connect(ctx.destination);
 
-      const now = ctx.currentTime;
-      const freqs = rising ? [523.25, 783.99] : [783.99, 523.25];
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.25, now + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
-      gain.connect(ctx.destination);
-
-      freqs.forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(freq, now + i * 0.13);
-        osc.connect(gain);
-        osc.start(now + i * 0.13);
-        osc.stop(now + i * 0.13 + 0.16);
+        freqs.forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, now + i * 0.13);
+          osc.connect(gain);
+          osc.start(now + i * 0.13);
+          osc.stop(now + i * 0.13 + 0.16);
+        });
       });
     } catch (e) {
       console.debug('[SoundEffects] Tone synthesis failed:', e);
@@ -150,31 +175,22 @@ export class SoundEffectManager {
    */
   private playChatCue(): void {
     try {
-      if (!this.toneCtx) {
-        const Ctor = window.AudioContext || (window as any).webkitAudioContext;
-        this.toneCtx = new Ctor();
-        if (settingsStore.selectedSpeakerId && typeof (this.toneCtx as any).setSinkId === 'function') {
-          (this.toneCtx as any).setSinkId(settingsStore.selectedSpeakerId).catch(() => {});
-        }
-      }
-      const ctx = this.toneCtx!;
-      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      this.withRunningToneCtx((ctx, now) => {
+        const freqs = [659.25, 987.77]; // E5 -> B5, a light ascending blip
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.18, now + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+        gain.connect(ctx.destination);
 
-      const now = ctx.currentTime;
-      const freqs = [659.25, 987.77]; // E5 -> B5, a light ascending blip
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.18, now + 0.015);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
-      gain.connect(ctx.destination);
-
-      freqs.forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(freq, now + i * 0.07);
-        osc.connect(gain);
-        osc.start(now + i * 0.07);
-        osc.stop(now + i * 0.07 + 0.1);
+        freqs.forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, now + i * 0.07);
+          osc.connect(gain);
+          osc.start(now + i * 0.07);
+          osc.stop(now + i * 0.07 + 0.1);
+        });
       });
     } catch (e) {
       console.debug('[SoundEffects] Chat cue synthesis failed:', e);
@@ -187,30 +203,21 @@ export class SoundEffectManager {
   public playPttTone(activate: boolean): void {
     if (!settingsStore.pttSoundCue) return;
     try {
-      if (!this.toneCtx) {
-        const Ctor = window.AudioContext || (window as any).webkitAudioContext;
-        this.toneCtx = new Ctor();
-        if (settingsStore.selectedSpeakerId && typeof (this.toneCtx as any).setSinkId === 'function') {
-          (this.toneCtx as any).setSinkId(settingsStore.selectedSpeakerId).catch(() => {});
-        }
-      }
-      const ctx = this.toneCtx!;
-      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      this.withRunningToneCtx((ctx, now) => {
+        const freq = activate ? 620 : 440;
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.12, now + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+        gain.connect(ctx.destination);
 
-      const now = ctx.currentTime;
-      const freq = activate ? 620 : 440;
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.12, now + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
-      gain.connect(ctx.destination);
-
-      const osc = ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq, now);
-      osc.connect(gain);
-      osc.start(now);
-      osc.stop(now + 0.08);
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now);
+        osc.connect(gain);
+        osc.start(now);
+        osc.stop(now + 0.08);
+      });
     } catch (e) {
       console.debug('[SoundEffects] PTT tone synthesis failed:', e);
     }
@@ -223,31 +230,22 @@ export class SoundEffectManager {
    */
   private playReconnectCue(): void {
     try {
-      if (!this.toneCtx) {
-        const Ctor = window.AudioContext || (window as any).webkitAudioContext;
-        this.toneCtx = new Ctor();
-        if (settingsStore.selectedSpeakerId && typeof (this.toneCtx as any).setSinkId === 'function') {
-          (this.toneCtx as any).setSinkId(settingsStore.selectedSpeakerId).catch(() => {});
-        }
-      }
-      const ctx = this.toneCtx!;
-      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      this.withRunningToneCtx((ctx, now) => {
+        const freqs = [440, 349.23]; // A4 -> F4, a gentle falling minor third
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.16, now + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+        gain.connect(ctx.destination);
 
-      const now = ctx.currentTime;
-      const freqs = [440, 349.23]; // A4 -> F4, a gentle falling minor third
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.16, now + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
-      gain.connect(ctx.destination);
-
-      freqs.forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(freq, now + i * 0.16);
-        osc.connect(gain);
-        osc.start(now + i * 0.16);
-        osc.stop(now + i * 0.16 + 0.2);
+        freqs.forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, now + i * 0.16);
+          osc.connect(gain);
+          osc.start(now + i * 0.16);
+          osc.stop(now + i * 0.16 + 0.2);
+        });
       });
     } catch (e) {
       console.debug('[SoundEffects] Reconnect cue synthesis failed:', e);

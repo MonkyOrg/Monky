@@ -48,9 +48,18 @@ export interface UserSummary {
   sessionId?: string;
   /** When this particular connection came up, used to order a user's devices (#309). */
   connectedAt?: number;
+  /**
+   * True when this user has "appear offline" active (#561). Only sent to the
+   * user themselves so they can see their own visibility status; other clients
+   * never receive this flag (they simply see status 'DISCONNECTED').
+   */
+  invisible?: boolean;
+  /** True when this account is a bot created via the bot management API (#569). */
+  isBot?: boolean;
 }
 
 export interface ChannelSummary {
+  botCommandsEnabled: boolean;
   id: string;
   serverId: string;
   name: string;
@@ -103,7 +112,26 @@ export interface AttachmentStorageInfo {
   maxFileBytes: number;
 }
 
+export interface BotCommandContext {
+  invocationId: string;
+  commandName: string;
+  invokerId: string;
+  invokerNickname: string;
+  invokerAvatarUrl?: string | null;
+}
+
+/** Resolved by the server from the original, never supplied by the sender. */
+export interface MessageReply {
+  messageId: string;
+  userNickname: string;
+  content: string;
+  deleted: boolean;
+  hasAttachments: boolean;
+}
+
 export interface ChatMessage {
+  reply?: MessageReply;
+  reactions?: import('./reactions.js').MessageReaction[];
   id: string;
   channelId: string;
   userId: string;
@@ -123,6 +151,14 @@ export interface ChatMessage {
    * would silently rewrite the conversation for everyone reading it.
    */
   deletedAt?: number | null;
+  /**
+   * True when this message is only visible to the invoking user (#569).
+   * Ephemeral messages are not persisted and disappear on reconnect.
+   */
+  isEphemeral?: boolean;
+  isBot?: boolean;
+  /** Server-authenticated attribution; private argument values are never included. */
+  botCommand?: BotCommandContext;
 }
 
 export interface Role {
@@ -139,6 +175,13 @@ export interface UserRoleSummary {
   roleIds: string[];
 }
 
+export type VoiceConnectionHealth = 'connecting' | 'connected' | 'reconnecting' | 'failed';
+
+export interface VoiceRosterParticipant {
+  user: UserSummary;
+  voiceState: VoiceParticipantState;
+}
+
 export interface VoiceParticipantState {
   /** The connection this state belongs to (#309). Unique per device. */
   sessionId: string;
@@ -152,6 +195,8 @@ export interface VoiceParticipantState {
   isCameraOn: boolean;
   isScreenSharing: boolean;
   isSharingScreenAudio: boolean;
+  /** SFU transport health, measured by the server rather than signaling presence. */
+  connectionHealth?: VoiceConnectionHealth;
   /**
    * IDs of the screen shares this participant is currently broadcasting (#253).
    * Each entry is the MediaStream id announced over `screen-video-meta`, so
@@ -167,6 +212,50 @@ export interface HostSpecs {
   cpuCores: number;
   ramTotalGb: number;
 }
+
+// ── Bot & slash command types (#569) ──────────────────────────────────────
+
+/** Option type for a slash command parameter. */
+export type CommandOptionType = 'string' | 'integer' | 'boolean' | 'user';
+
+/** One option (parameter) a slash command accepts. */
+export interface CommandOption {
+  name: string;
+  description: string;
+  type: CommandOptionType;
+  required?: boolean;
+  placeholder?: string;
+  choices?: Array<{ label: string; value: string }>;
+  min?: number;
+  max?: number;
+}
+
+/** A registered slash command. */
+export interface SlashCommand {
+  /** Unique per bot; the command name without the leading `/`. */
+  name: string;
+  description: string;
+  /** The bot that owns this command (`UserSummary.id`). */
+  botId: string;
+  /** Display-friendly bot name for the command dropup. */
+  botName: string;
+  botAvatarUrl?: string | null;
+  options?: CommandOption[];
+}
+
+/** A bot account visible in the management UI. */
+export interface BotInfo {
+  id: string;
+  name: string;
+  avatarUrl?: string | null;
+  createdAt: number;
+  createdByUserId: string;
+  /** Whether TOFU binding is complete (first connection done). */
+  bound: boolean;
+  online: boolean;
+}
+
+// ── End bot types ─────────────────────────────────────────────────────────
 
 export interface ServerDetails {
   id: string;
@@ -187,6 +276,8 @@ export interface ServerDetails {
    * When false, each badge is only rendered for members holding that role.
    */
   showRoleBadgesToEveryone?: boolean;
+  /** Maximum number of bots the server allows (#569). */
+  maxBots?: number;
   /**
    * Voice and video topology mode (#515).
    * - 'p2p': Direct full-mesh WebRTC connections between participants.

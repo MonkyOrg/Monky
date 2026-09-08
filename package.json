@@ -24,7 +24,7 @@
     "dist": "npm run build && node scripts/package.js",
     "dev:server": "npm run dev --workspace=apps/server",
     "dev:client": "npm run dev --workspace=apps/client",
-    "build": "npm run build --workspace=packages/shared && npm run build --workspace=apps/server && npm run build --workspace=apps/client",
+    "build": "npm run build --workspace=packages/shared && npm run build --workspace=packages/bot-sdk && npm run build --workspace=apps/server && npm run build --workspace=apps/client",
     "build:server": "npm run build --workspace=packages/shared && npm run build --workspace=apps/server",
     "pack:cli": "npm run build && node scripts/pack-cli.js",
     "test": "node scripts/test-versioning.js && node scripts/test-changelog.js && npm run test --workspaces",

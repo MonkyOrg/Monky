@@ -134,6 +134,20 @@ export class VideoService {
     let stream: MediaStream;
 
     if (sourceId) {
+      // A minimized window has no surface for the WGC capturer to start on, so a
+      // fullscreen game that got minimized when the user alt-tabbed to open the
+      // picker must be restored (foregrounded) before getUserMedia (#560).
+      if (sourceId.startsWith('window:')) {
+        try {
+          const restored = await window.api?.prepareScreenShareWindow?.(sourceId);
+          if (restored) await new Promise((resolve) => setTimeout(resolve, 350));
+        } catch (e) {
+          clientLog.warn('SCREEN_SHARE', 'Failed to restore window before capture', {
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
       // Electron desktopCapturer — try exact (min=max) first, fallback to max-only
       const exactConstraints: any = {
         audio: false,

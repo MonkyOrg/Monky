@@ -27,7 +27,6 @@ export class SoundboardService {
   private sinkId: string = '';
   private activePlaybacks: Map<string, ActiveSoundPlayback> = new Map();
 
-  private isCapturingKey: boolean = false;
 
   constructor() {
     this.setupListeners();
@@ -67,25 +66,11 @@ export class SoundboardService {
     // Listen to global shortcuts triggered via Electron
     if (window.api?.onSoundboardShortcutTriggered) {
       window.api.onSoundboardShortcutTriggered((soundName: string) => {
-        if (this.isCapturingKey) return;
         const sound = this.sounds.find((s) => s.name === soundName);
         if (sound) {
           this.playSound(sound.filePath);
         }
       });
-    }
-  }
-
-  public setCapturingKey(active: boolean): void {
-    this.isCapturingKey = active;
-  }
-
-  public async pauseShortcuts(): Promise<void> {
-    if (!window.api?.registerSoundboardShortcuts) return;
-    try {
-      await window.api.registerSoundboardShortcuts([]);
-    } catch (err) {
-      console.warn('[SoundboardService] Failed to pause shortcuts:', err);
     }
   }
 
@@ -99,7 +84,8 @@ export class SoundboardService {
           soundName,
           accelerator: data.accelerator,
         }));
-      await window.api.registerSoundboardShortcuts(list);
+      const ok = await window.api.registerSoundboardShortcuts(list);
+      if (!ok) console.warn('[SoundboardService] Shortcuts unavailable: invalid binding or native input hook failed.');
     } catch (err) {
       console.warn('[SoundboardService] Failed to sync shortcuts:', err);
     }

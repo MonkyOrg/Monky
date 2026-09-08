@@ -231,6 +231,11 @@ O processo continua listado no PM2 de propósito: removê-lo descartaria os logs
 justamente quando eles mais importam, logo depois de uma queda ou parada.
 `monky logs` continua funcionando com o servidor parado.
 
+Os contadores de pessoas online (inclusive na página inicial e no monitor)
+excluem bots e contam uma identidade apenas uma vez, mesmo conectada em vários
+dispositivos. Pessoas invisíveis ainda contam para o aviso de desligamento:
+elas continuam conectadas e também serão desconectadas.
+
 Se houver gente conectada no momento, o CLI avisa quantas pessoas serão
 desconectadas e pede confirmação antes de parar. Em terminal não interativo
 (scripts, cron) o aviso é exibido e a parada segue normalmente.

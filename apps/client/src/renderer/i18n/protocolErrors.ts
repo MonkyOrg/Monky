@@ -28,6 +28,13 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.STORAGE_FULL]: 'protocolError.storageFull',
   [ProtocolErrorCode.TURN_UNAVAILABLE]: 'protocolError.turnUnavailable',
   [ProtocolErrorCode.SFU_UNAVAILABLE]: 'protocolError.sfuUnavailable',
+  [ProtocolErrorCode.BOT_OFFLINE]: 'protocolError.botOffline',
+  [ProtocolErrorCode.BOT_COMMAND_NOT_FOUND]: 'protocolError.botCommandNotFound',
+  [ProtocolErrorCode.BOT_INVALID_OPTIONS]: 'protocolError.botInvalidOptions',
+  [ProtocolErrorCode.BOT_INTERACTION_EXPIRED]: 'protocolError.botInteractionExpired',
+  [ProtocolErrorCode.BOT_INTERACTION_INVALID]: 'protocolError.botInteractionInvalid',
+  [ProtocolErrorCode.BOT_COMMAND_BUSY]: 'protocolError.botCommandBusy',
+  [ProtocolErrorCode.BOT_INVALID_PROFILE]: 'protocolError.botInvalidProfile',
 };
 
 /**
@@ -77,6 +84,8 @@ export function translateProtocolError(
   if (mismatch) return describeVersionMismatch(mismatch.serverVersion);
 
   const key = code ? ERROR_KEYS[code as ProtocolErrorCode] : undefined;
-  if (key) return t(key);
-  return serverMessage || code || t('protocolError.internalError');
+  // For BAD_REQUEST, prefer the server's specific message (e.g. bot install
+  // errors) over the generic "Requisição inválida" / "Invalid request".
+  if (key && !(code === ProtocolErrorCode.BAD_REQUEST && serverMessage)) return t(key);
+  return serverMessage || (key ? t(key) : undefined) || code || t('protocolError.internalError');
 }

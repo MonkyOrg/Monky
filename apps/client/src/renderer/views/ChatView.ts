@@ -1,10 +1,10 @@
 import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, hasEveryoneMention } from '@monky/shared';
-import type { AttachmentMeta, StickerEntry, UserSummary } from '@monky/shared';
+import type { AttachmentMeta, MessageReply, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
-import { networkClient } from '../core/NetworkClient';
-import { chatStore } from '../stores/chatStore';
-import { serverStore } from '../stores/serverStore';
+import { networkClient, getActiveNetworkClient } from '../core/NetworkClient';
+import { chatStore, getActiveChatStore, type BotInvocation } from '../stores/chatStore';
+import { serverStore, getActiveServerStore } from '../stores/serverStore';
 import { participantManager } from '../core/ParticipantManager';
 import { userContextMenu } from './UserContextMenu';
 import { contextMenu, ContextMenuItem } from './ContextMenu';
@@ -22,6 +22,12 @@ import { buildCodeMessage, codeBlockModal } from './CodeBlockModal';
 import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
 import { extractStickerIds, stickerToken, stripStickerTokens } from '../utils/stickers';
+import { parseTypedCommand } from '../utils/botInputs';
+import { BotChatView, renderBotInvocation } from './BotChatView';
+import { groupCommands, type CommandGroup } from '../utils/commandCatalog';
+import { renderCommandCatalog } from './commandCatalog';
+import { renderBotCommandContext } from './botResponse';
+import { PublicSelectorView } from './PublicSelectorView';
 
 /** How close to the end the feed must be to keep following new messages (#270). */
 const BOTTOM_SCROLL_THRESHOLD_PX = 48;
@@ -57,6 +63,14 @@ export class ChatView {
   private mentionMatches: MentionCandidate[] = [];
   private mentionActiveIndex = 0;
   private mentionAtIndex = -1;
+  // /-command autocomplete state (#569).
+  private commandActive = false;
+  private commandMatches: SlashCommand[] = [];
+  private commandGroups: CommandGroup[] = [];
+  private commandActiveIndex = 0;
+  private commandQuery = '';
+  private botChat: BotChatView | null = null;
+  private publicSelectors: PublicSelectorView | null = null;
   // Files picked for the next message, keyed by a local id (#11).
   private pending: PendingAttachment[] = [];
   /** Message currently open in the inline editor, if any (#504). */
@@ -64,6 +78,10 @@ export class ChatView {
   private uploadSeq = 0;
   /** Emoji/sticker popover anchored to the composer (#356). */
   private emojiPicker: EmojiPicker | null = null;
+  private reactionPicker: EmojiPicker | null = null;
+  private pendingJumpId: string | null = null;
+  private copyRequestId = 0;
+  private clearCopyFeedback: (() => void) | null = null;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -77,6 +95,7 @@ export class ChatView {
     }
 
     this.currentChannelId = channelId;
+    this.pendingJumpId = null;
     // Switching channels discards any files staged for the previous channel (#11).
     this.clearPending();
     // Opening a channel reads its mentions: clear the local badge and tell the
@@ -123,12 +142,17 @@ export class ChatView {
         </div>
 
         <div id="chat-messages-feed" class="chat-messages-feed"></div>
+        <button type="button" id="chat-return-latest" class="btn btn-secondary" hidden>${t('chat.returnLatest')}</button>
 
         <div class="chat-input-container">
+          <div id="chat-reply-composer" class="chat-reply-composer" hidden></div>
           <div id="mention-dropup" class="mention-dropup" style="display: none;"></div>
+          <div id="command-dropup" class="command-dropup" style="display: none;"></div>
           <div id="chat-attachment-tray" class="chat-attachment-tray" style="display: none;"></div>
           <div id="chat-compose-link-preview" class="chat-compose-link-preview" style="display: none;"></div>
           <div id="chat-send-permission-banner" class="chat-permission-banner" style="display: none;"></div>
+          <div id="chat-command-notice" class="bot-error" role="alert" hidden></div>
+          <div id="chat-command-composer" class="bot-command-composer" hidden></div>
           <div class="chat-input-wrapper">
             <button id="btn-attach" type="button" class="chat-attach-btn" title="${t('chat.attachFile')}">
               <span class="material-symbols-outlined md-22">add_circle</span>
@@ -167,6 +191,8 @@ export class ChatView {
   private renderMessages(options: { forceScroll?: boolean } = {}): void {
     const feed = document.getElementById('chat-messages-feed');
     if (!feed || !this.currentChannelId) return;
+    contextMenu.close();
+    this.reactionPicker?.close();
 
     // Read before the feed is replaced: new messages only pull the view down when
     // the user is already reading the end of the conversation (#270).
@@ -176,7 +202,7 @@ export class ChatView {
     this.editingMessageId = null;
 
     const messages = chatStore.getMessages(this.currentChannelId);
-    if (messages.length === 0) {
+    if (messages.length === 0 && chatStore.getInvocations(this.currentChannelId).length === 0) {
       feed.innerHTML = `
         <div id="chat-empty-placeholder" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 10px;">
           <span class="material-symbols-outlined" style="color: var(--text-dim); font-size: 44px;">forum</span>
@@ -287,6 +313,23 @@ export class ChatView {
       : Array.from(container.querySelectorAll<HTMLElement>('.chat-message-row'));
 
     rows.forEach((row) => {
+      this.bindReactionButtons(row);
+      row.querySelector<HTMLButtonElement>('[data-message-action="reply"]')?.addEventListener('click', () => {
+        this.startReply(row.dataset.messageId ?? '');
+      });
+      row.querySelector<HTMLButtonElement>('[data-message-action="copy"]')?.addEventListener('click', () => {
+        void this.copyMessage(row.dataset.messageId ?? '');
+      });
+      const more = row.querySelector<HTMLButtonElement>('[data-message-action="more"]');
+      more?.addEventListener('click', () => {
+        this.reactionPicker?.close();
+        const rect = more.getBoundingClientRect();
+        contextMenu.open(rect.right, rect.bottom, this.buildMessageMenuItems(row.dataset.messageId ?? null), more);
+      });
+      row.querySelector<HTMLButtonElement>('[data-reply-target]')?.addEventListener('click', (event) => {
+        const button = event.currentTarget;
+        if (button instanceof HTMLButtonElement && button.dataset.replyTarget) this.jumpToMessage(button.dataset.replyTarget);
+      });
       row.addEventListener('contextmenu', (e: Event) => {
         const mouseEvent = e as MouseEvent;
         // If text is currently highlighted / selected, allow normal browser selection copy
@@ -333,13 +376,22 @@ export class ChatView {
   private buildMessageMenuItems(messageId: string | null): ContextMenuItem[] {
     if (!messageId || !this.currentChannelId) return [];
     const message = chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId);
-    if (!message || message.isSystem || message.deletedAt) return [];
+    if (!message || message.isSystem || message.isEphemeral || message.deletedAt) return [];
 
     const isAuthor = !!serverStore.currentUser && message.userId === serverStore.currentUser.id;
     const canModerate = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const editingAllowed = serverStore.serverDetails?.allowMessageEdit !== false;
 
     const items: ContextMenuItem[] = [];
+    if (serverStore.hasPermission(Permission.SEND_MESSAGES)) {
+      items.push({
+        label: t('chat.emojiAction'), icon: 'add_reaction',
+        onClick: () => this.container.querySelector<HTMLButtonElement>(
+          `.chat-message-row[data-message-id="${CSS.escape(message.id)}"] .chat-reaction-add`
+        )?.click(),
+      }, { label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(message.id) });
+    }
+    items.push({ label: t('chat.copyMessage'), icon: 'content_copy', onClick: () => { void this.copyMessage(message.id); } });
     if (isAuthor && editingAllowed) {
       items.push({
         label: t('chat.editMessage'),
@@ -518,13 +570,20 @@ export class ChatView {
   private renderMessagesWithDividers(messages: ChatMessage[]): string {
     const parts: string[] = [];
     let lastKey = '';
-    for (const m of messages) {
-      const key = this.dateKey(m.createdAt);
+    const items = [
+      ...messages.map((message) => ({ createdAt: message.createdAt, html: this.renderMessageRow(message) })),
+      ...chatStore.getInvocations(this.currentChannelId ?? '').map((invocation) => ({
+        createdAt: invocation.createdAt,
+        html: renderBotInvocation(invocation, !this.getBotCommandDeniedReason()),
+      })),
+    ].filter((item) => item.html !== '').sort((a, b) => a.createdAt - b.createdAt);
+    for (const item of items) {
+      const key = this.dateKey(item.createdAt);
       if (key !== lastKey) {
-        parts.push(this.renderDateDivider(m.createdAt));
+        parts.push(this.renderDateDivider(item.createdAt));
         lastKey = key;
       }
-      parts.push(this.renderMessageRow(m));
+      parts.push(item.html);
     }
     return parts.join('');
   }
@@ -553,6 +612,10 @@ export class ChatView {
 
   private focusChatInput(options?: { defer?: boolean }): void {
     const applyFocus = () => {
+      if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+        this.botChat?.focusComposer();
+        return;
+      }
       const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
       if (!input) return;
       input.focus({ preventScroll: true });
@@ -585,8 +648,14 @@ export class ChatView {
     const channelName = serverStore.serverDetails?.channels.find((c) => c.id === this.currentChannelId)?.name || 'geral';
     const permissionsResolved = this.arePermissionsResolved();
     const canSendMessages = !permissionsResolved || serverStore.hasPermission(Permission.SEND_MESSAGES);
+    this.container.querySelectorAll<HTMLButtonElement>('.chat-reaction, .chat-reaction-add, [data-message-action="reply"]').forEach((button) => {
+      button.disabled = !canSendMessages;
+    });
+    if (!canSendMessages) { this.reactionPicker?.destroy(); this.reactionPicker = null; }
     const canAttachFiles = canSendMessages && (!permissionsResolved || serverStore.hasPermission(Permission.ATTACH_FILES));
     const locked = permissionsResolved && !canSendMessages;
+    const commandSelected = !!this.currentChannelId && !!chatStore.getCommandDraft(this.currentChannelId);
+    inputWrapper.style.display = commandSelected ? 'none' : '';
 
     input.readOnly = locked;
     input.placeholder = locked
@@ -625,7 +694,10 @@ export class ChatView {
 
     if (locked) {
       this.closeMentionDropup();
+      this.closeCommandDropup();
       this.emojiPicker?.close();
+    } else if (this.commandActive) {
+      this.updateCommandDropup(input);
     }
   }
 
@@ -675,18 +747,25 @@ export class ChatView {
       knownNicknames.push(currentNickname);
     }
 
-    const avatarSrc = getAvatarUrl(m.userAvatarUrl);
+    const avatarSrc = escapeHtml(getAvatarUrl(m.userAvatarUrl));
+    const isBot = m.isBot || serverStore.knownMembers.get(m.userId)?.isBot === true;
+    const botContext = isBot ? renderBotCommandContext(m) : '';
+    const botBadge = isBot ? `<span class="member-badge-bot">${t('botChat.badge')}</span>` : '';
+    const privateCue = m.isEphemeral ? `<span class="bot-private-cue"><span class="material-symbols-outlined md-14" aria-hidden="true">lock</span>${t('botChat.private')}</span>` : '';
 
     // A deleted message keeps its place in the conversation with a placeholder
     // instead of vanishing, so nothing silently reshuffles under the reader
     // (#504). Its text, stickers, attachments and link previews are all gone.
     if (m.deletedAt) {
       return `
-        <div class="chat-message-row chat-message-deleted" data-user-id="${m.userId}" data-message-id="${m.id}">
+        <div class="chat-message-row chat-message-deleted${isBot ? ' chat-bot-response' : ''}" data-user-id="${escapeHtml(m.userId)}" data-message-id="${escapeHtml(m.id)}">
+          ${botContext}
+          ${isBot ? '<div class="bot-response-main">' : ''}
           <img class="chat-author-avatar" src="${avatarSrc}" data-fallback="avatar">
-          <div class="chat-message-body">
+          <div class="chat-message-body${isBot ? ' bot-response-bubble' : ''}">
             <div class="chat-author-header">
               <span class="chat-author-name">${escapeHtml(m.userNickname)}</span>
+              ${botBadge}${privateCue}
               <span class="chat-timestamp">${time}</span>
             </div>
             <div class="chat-message-deleted-text">
@@ -694,6 +773,7 @@ export class ChatView {
               <span>${t('chat.messageDeleted')}</span>
             </div>
           </div>
+          ${isBot ? '</div>' : ''}
         </div>
       `;
     }
@@ -722,14 +802,19 @@ export class ChatView {
         : '';
     const stickersHtml = this.renderStickers(stickers);
     const attachmentsHtml = this.renderAttachments(otherAttachments, m);
-    const rowClass = `chat-message-row${isMentioned ? ' chat-message-mentioned' : ''}`;
+    const rowClass = `chat-message-row${isMentioned ? ' chat-message-mentioned' : ''}${m.isEphemeral ? ' chat-message-private' : ''}${isBot ? ' chat-bot-response' : ''}`;
 
     return `
-      <div class="${rowClass}" data-user-id="${m.userId}" data-message-id="${m.id}">
+      <div class="${rowClass}" tabindex="-1" data-user-id="${escapeHtml(m.userId)}" data-message-id="${escapeHtml(m.id)}">
+        ${m.isEphemeral ? '' : this.renderMessageToolbar()}
+        ${botContext}
+        ${isBot ? '<div class="bot-response-main">' : ''}
         <img class="chat-author-avatar" src="${avatarSrc}" data-fallback="avatar">
-        <div class="chat-message-body">
+        <div class="chat-message-body${isBot ? ' bot-response-bubble' : ''}">
+          ${m.reply ? this.renderReplyReference(m.reply) : ''}
           <div class="chat-author-header">
             <span class="chat-author-name">${escapeHtml(m.userNickname)}</span>
+            ${botBadge}${privateCue}
             <span class="chat-timestamp">${time}</span>
             ${m.editedAt ? `<span class="chat-edited-badge" title="${escapeHtml(t('chat.editedAtTitle', { time: this.formatDateTime(m.editedAt) }))}">${t('chat.messageEdited')}</span>` : ''}
           </div>
@@ -737,9 +822,171 @@ export class ChatView {
           ${stickersHtml}
           <div class="chat-link-previews" data-message-id="${escapeHtml(m.id)}"></div>
           ${attachmentsHtml}
+          ${m.isEphemeral ? '' : `<div class="chat-reactions">${this.renderReactions(m)}</div>`}
         </div>
+        ${isBot ? '</div>' : ''}
       </div>
     `;
+  }
+
+  private renderReactions(message: ChatMessage): string {
+    const me = serverStore.currentUser?.id;
+    const disabled = serverStore.hasPermission(Permission.SEND_MESSAGES) ? '' : 'disabled';
+    const buttons = (message.reactions ?? []).map((reaction) => {
+      const mine = reaction.users.some((user) => user.userId === me);
+      const names = reaction.users.map((user) => serverStore.knownMembers.get(user.userId)?.nickname ?? user.userNickname).join(', ');
+      const title = t('chat.reactedBy', { emoji: reaction.emoji, users: names });
+      return `<button type="button" class="chat-reaction${mine ? ' chat-reaction--mine' : ''}"
+        ${disabled} data-reaction-emoji="${escapeHtml(reaction.emoji)}" aria-pressed="${mine}" title="${escapeHtml(title)}"
+        aria-label="${escapeHtml(title)}">${escapeHtml(reaction.emoji)} <span>${reaction.users.length}</span></button>`;
+    }).join('');
+    return buttons;
+  }
+
+  private renderMessageToolbar(): string {
+    const disabled = serverStore.hasPermission(Permission.SEND_MESSAGES) ? '' : 'disabled';
+    const button = (action: string, icon: string, label: string, extra = '') =>
+      `<button type="button" ${extra} data-message-action="${action}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><span class="material-symbols-outlined md-18" aria-hidden="true">${icon}</span></button>`;
+    return `<div class="chat-message-toolbar" role="group" aria-label="${t('chat.messageActions')}">
+      ${button('emoji', 'add_reaction', t('chat.emojiAction'), `class="chat-reaction-add" ${disabled}`)}
+      ${button('reply', 'reply', t('chat.replyMessage'), disabled)}
+      ${button('copy', 'content_copy', t('chat.copyMessage'))}
+      <span class="chat-message-copy-status" role="status"></span>
+      ${button('more', 'more_horiz', t('chat.moreActions'), 'aria-haspopup="menu"')}
+    </div>`;
+  }
+
+  private replyPreview(reply: MessageReply): string {
+    return reply.deleted ? t('chat.messageDeleted') : stripStickerTokens(reply.content, extractStickerIds(reply.content)).trim()
+      || (reply.hasAttachments ? t('chat.replyAttachment') : reply.content);
+  }
+
+  private renderReplyReference(reply: MessageReply): string {
+    return `<button type="button" class="chat-reply-reference" ${reply.deleted ? 'disabled' : ''}
+      data-reply-target="${escapeHtml(reply.messageId)}" title="${escapeHtml(t('chat.jumpToMessage'))}">
+      <span class="material-symbols-outlined md-16" aria-hidden="true">reply</span>
+      ${reply.deleted ? '' : `<strong>${escapeHtml(reply.userNickname)}</strong>`}
+      <span>${escapeHtml(this.replyPreview(reply))}</span>
+    </button>`;
+  }
+
+  private startReply(messageId: string): void {
+    if (!this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+    const message = chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === messageId);
+    if (!message || message.deletedAt || message.isSystem || message.isEphemeral) return;
+    chatStore.setReplyDraft(this.currentChannelId, message);
+    this.renderReplyComposer();
+    this.focusChatInput();
+  }
+
+  private renderReplyComposer(): void {
+    const el = this.container.querySelector<HTMLElement>('#chat-reply-composer');
+    if (!el) return;
+    const reply = this.currentChannelId ? chatStore.getReplyDraft(this.currentChannelId) : undefined;
+    el.hidden = !reply;
+    el.innerHTML = reply ? `<span>${escapeHtml(reply.deleted ? t('chat.messageDeleted') : t('chat.replyingTo', { user: reply.userNickname }))}: ${escapeHtml(this.replyPreview(reply))}</span>
+      <button type="button" aria-label="${t('chat.cancelReply')}" title="${t('chat.cancelReply')}"><span class="material-symbols-outlined md-18" aria-hidden="true">close</span></button>` : '';
+    el.querySelector('button')?.addEventListener('click', () => {
+      this.clearReply();
+      this.focusChatInput();
+    });
+  }
+
+  private clearReply(): void {
+    if (this.currentChannelId) chatStore.setReplyDraft(this.currentChannelId);
+    this.renderReplyComposer();
+  }
+
+  private async copyMessage(messageId: string): Promise<void> {
+    const message = this.currentChannelId ? chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === messageId) : undefined;
+    if (!message || message.deletedAt) return;
+    const requestId = ++this.copyRequestId;
+    this.clearCopyFeedback?.();
+    try {
+      await navigator.clipboard.writeText(message.content || message.attachments?.map((entry) => entry.originalName).join('\n') || '');
+    } catch (error) {
+      console.warn('[ChatView] Could not copy message', error);
+      if (requestId === this.copyRequestId) void showAlert({ message: t('chat.copyFailed'), variant: 'danger' });
+      return;
+    }
+    if (requestId !== this.copyRequestId) return;
+    const toolbar = this.container.querySelector<HTMLElement>(
+      `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] .chat-message-toolbar`
+    );
+    const button = toolbar?.querySelector<HTMLButtonElement>('[data-message-action="copy"]');
+    const icon = button?.querySelector<HTMLElement>('.material-symbols-outlined');
+    const status = toolbar?.querySelector<HTMLElement>('.chat-message-copy-status');
+    if (!toolbar || !button || !icon || !status) return;
+    toolbar.classList.add('copy-confirmed');
+    icon.textContent = 'check';
+    status.textContent = t('chat.messageCopied');
+    button.title = t('chat.messageCopied');
+    button.setAttribute('aria-label', t('chat.messageCopied'));
+    const clear = () => {
+      window.clearTimeout(timeout);
+      toolbar.classList.remove('copy-confirmed');
+      icon.textContent = 'content_copy';
+      status.textContent = '';
+      button.title = t('chat.copyMessage');
+      button.setAttribute('aria-label', t('chat.copyMessage'));
+      this.clearCopyFeedback = null;
+    };
+    const timeout = window.setTimeout(clear, 1600);
+    this.clearCopyFeedback = clear;
+  }
+
+  private jumpToMessage(messageId: string): void {
+    if (!this.currentChannelId) return;
+    const row = this.container.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(messageId)}"].chat-message-row`);
+    if (row) {
+      row.scrollIntoView({ block: 'center' });
+      row.tabIndex = -1;
+      row.focus({ preventScroll: true });
+      this.pinnedToBottom = false;
+      return;
+    }
+    this.pendingJumpId = messageId;
+    networkClient.send(MessageType.CHAT_LOAD_HISTORY, { channelId: this.currentChannelId, aroundMessageId: messageId });
+  }
+
+  private bindReactionButtons(row: HTMLElement): void {
+    row.querySelectorAll<HTMLButtonElement>('.chat-reaction, .chat-reaction-add').forEach((button) => {
+      button.addEventListener('click', () => {
+        if (!this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+        const channelId = this.currentChannelId;
+        const store = getActiveChatStore();
+        const client = getActiveNetworkClient();
+        const me = serverStore.currentUser?.id;
+        const messageId = row.closest<HTMLElement>('.chat-message-row')?.dataset.messageId;
+        const toggle = (emoji: string) => {
+          const message = store.getMessages(channelId).find((entry) => entry.id === messageId);
+          if (!message || message.deletedAt || message.isSystem || message.isEphemeral) return;
+          const mine = message.reactions?.find((reaction) => reaction.emoji === emoji)?.users.some((user) => user.userId === me);
+          client.send(mine ? MessageType.CHAT_REACTION_REMOVE : MessageType.CHAT_REACTION_ADD, {
+            channelId, messageId: message.id, emoji,
+          });
+        };
+        if (button.dataset.reactionEmoji) { toggle(button.dataset.reactionEmoji); return; }
+        this.reactionPicker?.destroy();
+        contextMenu.close();
+        const picker = new EmojiPicker({
+          container: document.body, anchor: button, emojiOnly: true, floating: true,
+          onSelectEmoji: (emoji) => { picker.close(); toggle(emoji); },
+        });
+        this.reactionPicker = picker;
+        void picker.open();
+      });
+    });
+  }
+
+  private updateReactionRow(message: ChatMessage): void {
+    const row = this.container.querySelector<HTMLElement>(`.chat-message-row[data-message-id="${CSS.escape(message.id)}"]`);
+    const reactions = row?.querySelector<HTMLElement>('.chat-reactions');
+    if (!row || !reactions) return;
+    this.reactionPicker?.destroy();
+    this.reactionPicker = null;
+    reactions.innerHTML = this.renderReactions(message);
+    this.bindReactionButtons(reactions);
   }
 
   /**
@@ -990,6 +1237,20 @@ export class ChatView {
     const btnSend = document.getElementById('btn-send-message');
 
     const messagesFeed = this.container.querySelector('#chat-messages-feed') as HTMLElement | null;
+    const commandDropup = this.container.querySelector<HTMLElement>('#command-dropup');
+    const onCommandFocusOut = (event: FocusEvent) => {
+      if (event.relatedTarget === input || (event.relatedTarget instanceof Node && commandDropup?.contains(event.relatedTarget))) return;
+      this.closeCommandDropup();
+    };
+    const onOutsideCommand = (event: PointerEvent) => {
+      if (this.commandActive && event.target instanceof Node && event.target !== input && !commandDropup?.contains(event.target)) this.closeCommandDropup();
+    };
+    commandDropup?.addEventListener('focusout', onCommandFocusOut);
+    document.addEventListener('pointerdown', onOutsideCommand);
+    this.unbindEvents.push(() => {
+      commandDropup?.removeEventListener('focusout', onCommandFocusOut);
+      document.removeEventListener('pointerdown', onOutsideCommand);
+    });
     if (messagesFeed) {
       messagesFeed.addEventListener('scroll', () => {
         this.pinnedToBottom = this.isFeedAtBottom(messagesFeed);
@@ -1006,18 +1267,24 @@ export class ChatView {
       const target = e.target as HTMLElement | null;
       if (!input) return;
       if (this.isEditableTarget(target)) return;
-      if (target?.closest('button, .mention-dropup, #chat-attachment-tray')) return;
+      if (target?.closest('button, .mention-dropup, #chat-attachment-tray, #chat-command-composer')) return;
       requestAnimationFrame(() => this.focusChatInput());
     };
     inputContainer?.addEventListener('mousedown', focusFromInputShell);
     inputWrapper?.addEventListener('mousedown', focusFromInputShell);
 
     let composeLinkTimer: ReturnType<typeof setTimeout> | null = null;
+    let pastePreviewTimer: ReturnType<typeof setTimeout> | null = null;
+    let dropupBlurTimer: ReturnType<typeof setTimeout> | null = null;
     let lastComposeUrl = '';
     const composeLinkPreviewEl = this.container.querySelector('#chat-compose-link-preview') as HTMLElement | null;
 
     const updateComposeLinkPreview = () => {
-      if (!input || !composeLinkPreviewEl) return;
+      if (!input || !composeLinkPreviewEl || !input.isConnected) return;
+      if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+        composeLinkPreviewEl.style.display = 'none';
+        return;
+      }
       const urlMatch = input.value.match(/(https?:\/\/[^\s<]+)/);
       const url = urlMatch ? urlMatch[1] : '';
       if (url === lastComposeUrl) return;
@@ -1072,14 +1339,21 @@ export class ChatView {
       }
       autoResize();
       this.persistDraft(input.value);
+      this.showCommandNotice('');
       this.updateMentionDropup(input);
+      this.updateCommandDropup(input);
       if (composeLinkTimer) clearTimeout(composeLinkTimer);
       composeLinkTimer = setTimeout(updateComposeLinkPreview, 500);
     });
 
     // Also detect URL on paste immediately
     input?.addEventListener('paste', () => {
-      setTimeout(updateComposeLinkPreview, 100);
+      if (pastePreviewTimer) clearTimeout(pastePreviewTimer);
+      pastePreviewTimer = setTimeout(updateComposeLinkPreview, 100);
+    });
+    this.unbindEvents.push(() => {
+      if (composeLinkTimer) clearTimeout(composeLinkTimer);
+      if (pastePreviewTimer) clearTimeout(pastePreviewTimer);
     });
 
     // A restored draft (#478) has to look exactly like it did before the view
@@ -1100,6 +1374,30 @@ export class ChatView {
     const handleSend = () => {
       if (!input || !this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
       const text = input.value.trim();
+      if (chatStore.getCommandDraft(this.currentChannelId)) {
+        this.botChat?.focusComposer();
+        return;
+      }
+      const command = parseTypedCommand(input.value, chatStore.getCommands());
+      if (command.kind !== 'chat') {
+        const denied = this.getBotCommandDeniedReason();
+        if (denied) {
+          this.showCommandNotice(denied);
+          this.updateCommandDropup(input);
+          return;
+        }
+        if (command.kind === 'command') this.selectCommand(command.command, command.text);
+        else if (command.kind === 'ambiguous') {
+          this.showCommandNotice(t('botChat.commandAmbiguous'));
+          this.commandGroups = groupCommands(command.commands, [], getLanguage(), false);
+          this.commandMatches = this.commandGroups.flatMap((group) => group.commands);
+          this.commandActiveIndex = 0;
+          this.commandActive = true;
+          this.renderCommandDropup();
+          input.focus();
+        } else this.showCommandNotice(t('botChat.commandUnavailable'));
+        return;
+      }
 
       // Block sending until every staged upload has finished (#11).
       if (this.pending.some((p) => p.status === 'uploading')) return;
@@ -1109,13 +1407,20 @@ export class ChatView {
         .map((p) => p.meta!.id);
 
       if (!text && attachmentIds.length === 0) return;
+      const reply = chatStore.getReplyDraft(this.currentChannelId);
+      if (reply?.deleted) {
+        void showAlert({ message: t('chat.replyUnavailable'), variant: 'danger' });
+        return;
+      }
 
       networkClient.send(MessageType.CHAT_SEND, {
         channelId: this.currentChannelId,
         content: text,
         attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
+        replyToMessageId: reply?.messageId,
       });
 
+      this.clearReply();
       this.clearPending();
       input.value = '';
       this.persistDraft('');
@@ -1262,9 +1567,11 @@ export class ChatView {
 
     // Re-render the tray for any files staged before this (re)render.
     this.renderTray();
+    this.renderReplyComposer();
     this.syncComposerPermissionState();
 
     input?.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !this.mentionActive && !this.commandActive) this.clearReply();
       // While the mention dropup is open, arrows/enter/tab/esc drive it (#14).
       if (this.mentionActive && this.mentionMatches.length > 0) {
         if (e.key === 'ArrowDown') {
@@ -1292,15 +1599,58 @@ export class ChatView {
         }
       }
 
+      // While the command dropup is open (#569).
+      if (this.commandActive) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this.closeCommandDropup();
+          return;
+        }
+        if (this.commandMatches.length === 0) return;
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          this.setActiveCommand((this.commandActiveIndex + 1) % this.commandMatches.length);
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          this.setActiveCommand((this.commandActiveIndex - 1 + this.commandMatches.length) % this.commandMatches.length);
+          return;
+        }
+        if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+          e.preventDefault();
+          this.applyCommand(this.commandActiveIndex);
+          return;
+        }
+      }
+
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         handleSend();
       }
     });
 
-    input?.addEventListener('blur', () => {
+    const onInputBlur = () => {
+      if (!input?.isConnected) return;
       // Delay so a click (mousedown) on a dropup item is processed first.
-      setTimeout(() => this.closeMentionDropup(), 150);
+      if (dropupBlurTimer) clearTimeout(dropupBlurTimer);
+      dropupBlurTimer = setTimeout(() => {
+        dropupBlurTimer = null;
+        if (!input.isConnected || document.activeElement === input) return;
+        this.closeMentionDropup();
+        if (!this.container.querySelector('#command-dropup')?.contains(document.activeElement)) this.closeCommandDropup();
+      }, 150);
+    };
+    const onInputFocus = () => {
+      if (dropupBlurTimer) clearTimeout(dropupBlurTimer);
+      dropupBlurTimer = null;
+    };
+    input?.addEventListener('blur', onInputBlur);
+    input?.addEventListener('focus', onInputFocus);
+    this.unbindEvents.push(() => {
+      input?.removeEventListener('blur', onInputBlur);
+      input?.removeEventListener('focus', onInputFocus);
+      if (dropupBlurTimer) clearTimeout(dropupBlurTimer);
     });
 
     btnSend?.addEventListener('click', () => {
@@ -1318,19 +1668,119 @@ export class ChatView {
       }
     });
 
-    const u4 = appEvents.on('chat.history_loaded', (data: { channelId: string }) => {
+    const returnLatest = this.container.querySelector<HTMLButtonElement>('#chat-return-latest');
+    returnLatest?.addEventListener('click', () => {
+      this.pendingJumpId = null;
+      this.loadHistory();
+    });
+    const u4 = appEvents.on('chat.history_loaded', (data: { channelId: string; aroundMessageId?: string }) => {
       if (data.channelId === this.currentChannelId) {
-        this.renderMessages({ forceScroll: true });
+        const jumpId = data.aroundMessageId === this.pendingJumpId ? this.pendingJumpId : null;
+        if (jumpId) this.pendingJumpId = null;
+        if (returnLatest) returnLatest.hidden = !data.aroundMessageId;
+        this.renderMessages({ forceScroll: !jumpId });
+        if (jumpId) {
+          if (chatStore.getMessages(data.channelId).some((message) => message.id === jumpId)) this.jumpToMessage(jumpId);
+          else void showAlert({ message: t('chat.replyUnavailable'), variant: 'danger' });
+        }
       }
     });
 
     // Only the affected row is redrawn: rebuilding the whole feed would drop
     // the reader's scroll position and reload every image (#504).
     const u5 = appEvents.on('chat.message_updated', (msg: ChatMessage) => {
-      if (msg.channelId === this.currentChannelId) this.replaceMessageRow(msg);
+      if (msg.channelId === this.currentChannelId) {
+        contextMenu.close();
+        this.reactionPicker?.close();
+        this.replaceMessageRow(msg);
+        this.renderReplyComposer();
+      }
     });
 
-    this.unbindEvents.push(u1, u2, u3, u4, u5);
+    const u6 = appEvents.on('chat.commands_updated', () => {
+      if (input && !chatStore.getCommandDraft(this.currentChannelId ?? '')) this.updateCommandDropup(input);
+    });
+    this.unbindEvents.push(appEvents.on('chat.reactions_updated', (message: ChatMessage) => {
+      if (message.channelId === this.currentChannelId) this.updateReactionRow(message);
+    }), () => { this.reactionPicker?.destroy(); this.reactionPicker = null; });
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6);
+
+    const composer = this.container.querySelector<HTMLElement>('#chat-command-composer');
+    if (composer && messagesFeed && this.currentChannelId) {
+      this.publicSelectors = new PublicSelectorView(
+        messagesFeed, getActiveNetworkClient(), getActiveServerStore(), this.currentChannelId
+      );
+      const store = getActiveChatStore();
+      const channelId = this.currentChannelId;
+      let wasSelected = false;
+      this.botChat = new BotChatView(
+        store, getActiveNetworkClient(), getActiveServerStore(), channelId, composer, messagesFeed,
+        () => {
+          const selected = !!store.getCommandDraft(channelId);
+          this.syncComposerPermissionState();
+          if (input && (selected || wasSelected)) {
+            input.value = store.getDraft(channelId);
+            if (charCounter) charCounter.textContent = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+            if (!selected) autoResize();
+          }
+          if (selected && composeLinkPreviewEl) composeLinkPreviewEl.style.display = 'none';
+          if (selected && this.pending.length > 0) this.showCommandNotice(t('botChat.attachmentsKept'));
+          if (!selected && wasSelected) {
+            this.showCommandNotice('');
+            this.focusChatInput();
+          }
+          wasSelected = selected;
+          if (this.pinnedToBottom) this.scrollToBottom();
+        },
+        (invocation) => this.renderInvocationCard(invocation)
+      );
+    }
+  }
+
+  private renderInvocationCard(invocation: BotInvocation): void {
+    const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
+    if (!feed || invocation.channelId !== this.currentChannelId) return;
+    const shouldScroll = this.isFeedAtBottom(feed);
+    const previous = [...feed.querySelectorAll<HTMLElement>('[data-invocation-id]')]
+      .find((element) => element.dataset.invocationId === invocation.invocationId);
+    const focused = document.activeElement;
+    const focusId = focused instanceof HTMLElement && previous?.contains(focused) ? focused.id : '';
+    const selection = focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement
+      ? { start: focused.selectionStart, end: focused.selectionEnd }
+      : undefined;
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = renderBotInvocation(invocation, !this.getBotCommandDeniedReason());
+    const card = wrapper.firstElementChild;
+    if (!card) {
+      previous?.remove();
+      if (shouldScroll) this.scrollToBottom();
+      return;
+    }
+    if (previous) previous.replaceWith(card);
+    else {
+      feed.querySelector('#chat-empty-placeholder')?.remove();
+      feed.appendChild(card);
+    }
+    for (const element of feed.querySelectorAll<HTMLElement>('[data-invocation-id]')) {
+      if (!chatStore.getInvocation(element.dataset.invocationId ?? '')) element.remove();
+    }
+    if (focusId) {
+      const next = document.getElementById(focusId);
+      next?.focus({ preventScroll: true });
+      if (selection?.start !== null && selection?.end !== null &&
+          (next instanceof HTMLInputElement || next instanceof HTMLTextAreaElement) && next.type !== 'checkbox') {
+        next.setSelectionRange(selection?.start ?? 0, selection?.end ?? 0);
+      }
+    }
+    if (shouldScroll) this.scrollToBottom();
+  }
+
+  private showCommandNotice(message: string): void {
+    const notice = this.container.querySelector<HTMLElement>('#chat-command-notice');
+    if (notice) {
+      notice.textContent = message;
+      notice.hidden = !message;
+    }
   }
 
   private scrollToBottom(): void {
@@ -1489,6 +1939,177 @@ export class ChatView {
     }
   }
 
+  // ── Slash command dropup (#569) ──────────────────────────────────────
+
+  private getBotCommandDeniedReason(): string | undefined {
+    const channel = serverStore.serverDetails?.channels.find((candidate) => candidate.id === this.currentChannelId);
+    if (!channel || channel.type !== 'TEXT' || !channel.botCommandsEnabled) {
+      return t('botChat.commandsDisabledInChannel');
+    }
+    if (!serverStore.hasPermission(Permission.USE_BOT_COMMANDS)) return t('botChat.commandsPermissionDenied');
+    if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) return t('chat.sendPermissionDenied');
+    return undefined;
+  }
+
+  private updateCommandDropup(input: HTMLTextAreaElement): void {
+    if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+      this.closeCommandDropup();
+      return;
+    }
+    const caret = input.selectionStart ?? input.value.length;
+    const before = input.value.substring(0, caret);
+    // A command token is a "/" at the very start of the message, followed by
+    // the partial command name typed so far (no spaces in the name).
+    const match = before.match(/^\/([a-z0-9_-]*)$/i);
+    if (!match) {
+      this.closeCommandDropup();
+      return;
+    }
+    if (this.getBotCommandDeniedReason()) {
+      this.commandGroups = [];
+      this.commandMatches = [];
+      this.commandActive = true;
+      this.renderCommandDropup();
+      return;
+    }
+    const query = match[1].toLowerCase();
+    const all = chatStore.getCommands();
+    const matches = query
+      ? all.filter((command) => command.name.includes(query) || command.botName.toLocaleLowerCase(getLanguage()).includes(query))
+      : all;
+    const previous = query === this.commandQuery ? this.commandMatches[this.commandActiveIndex] : undefined;
+    const retained = previous && matches.find((command) => command.botId === previous.botId && command.name === previous.name);
+    const exact = matches.filter((command) => command.name === query);
+    const preferred = retained ?? (exact.length === 1 ? exact[0] : undefined);
+    this.commandQuery = query;
+    this.commandGroups = groupCommands(matches, chatStore.getCommandUsage(), getLanguage(), query.length === 0);
+    this.commandMatches = this.commandGroups.flatMap((group) => group.commands);
+    this.commandActive = true;
+    this.commandActiveIndex = Math.max(0, this.commandMatches.findIndex((command) =>
+      preferred !== undefined && command.botId === preferred.botId && command.name === preferred.name));
+    this.renderCommandDropup();
+  }
+
+  private renderCommandDropup(): void {
+    const el = document.getElementById('command-dropup');
+    if (!el) return;
+    const denied = this.getBotCommandDeniedReason();
+    if (denied) {
+      const input = this.container.querySelector('#chat-message-input');
+      for (const attribute of ['role', 'aria-expanded', 'aria-controls', 'aria-autocomplete', 'aria-activedescendant']) input?.removeAttribute(attribute);
+      el.innerHTML = `<div class="command-empty-frequency" role="status">${escapeHtml(denied)}</div>`;
+      el.style.display = 'block';
+      return;
+    }
+    el.innerHTML = renderCommandCatalog(this.commandGroups, this.commandActiveIndex);
+    el.style.display = 'block';
+    const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
+    input?.setAttribute('role', 'combobox');
+    input?.setAttribute('aria-expanded', 'true');
+    input?.setAttribute('aria-controls', 'command-list-options');
+    input?.setAttribute('aria-autocomplete', 'list');
+    el.querySelectorAll<HTMLElement>('[data-cmd-index]').forEach((item) => {
+      item.addEventListener('mouseenter', () => {
+        this.setActiveCommand(Number(item.dataset.cmdIndex), false);
+      });
+      item.addEventListener('mousedown', (event) => event.preventDefault());
+      item.addEventListener('click', () => this.applyCommand(Number(item.dataset.cmdIndex)));
+    });
+    const groupButtons = [...el.querySelectorAll<HTMLButtonElement>('[data-command-group]')];
+    groupButtons.forEach((button, index) => {
+      button.addEventListener('mousedown', (event) => event.preventDefault());
+      button.addEventListener('click', () => {
+        const section = [...el.querySelectorAll<HTMLElement>('[data-command-section]')]
+          .find((element) => element.dataset.commandSection === button.dataset.commandGroup);
+        section?.scrollIntoView({ block: 'start', inline: 'nearest' });
+        const first = section?.querySelector<HTMLElement>('[data-cmd-index]');
+        if (first) this.setActiveCommand(Number(first.dataset.cmdIndex), false);
+      });
+      button.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          const offset = event.key === 'ArrowDown' ? 1 : -1;
+          const next = groupButtons[(index + offset + groupButtons.length) % groupButtons.length];
+          next?.focus();
+          next?.click();
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          this.closeCommandDropup();
+          input?.focus();
+        }
+      });
+    });
+    this.setActiveCommand(this.commandActiveIndex, false);
+  }
+
+  private setActiveCommand(index: number, scroll = true): void {
+    if (!Number.isInteger(index) || index < 0 || index >= this.commandMatches.length) return;
+    this.commandActiveIndex = index;
+    const dropup = this.container.querySelector<HTMLElement>('#command-dropup');
+    let active: HTMLElement | undefined;
+    dropup?.querySelectorAll<HTMLElement>('[data-cmd-index]').forEach((row) => {
+      const selected = Number(row.dataset.cmdIndex) === index;
+      row.classList.toggle('active', selected);
+      row.setAttribute('aria-selected', String(selected));
+      if (selected) active = row;
+    });
+    const groupId = active?.closest<HTMLElement>('[data-command-section]')?.dataset.commandSection;
+    dropup?.querySelectorAll<HTMLButtonElement>('[data-command-group]').forEach((button) => {
+      button.classList.toggle('active', button.dataset.commandGroup === groupId);
+    });
+    this.container.querySelector('#chat-message-input')?.setAttribute('aria-activedescendant', `command-option-${index}`);
+    if (scroll) active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  private applyCommand(index: number): void {
+    const denied = this.getBotCommandDeniedReason();
+    if (denied) {
+      this.showCommandNotice(denied);
+      this.renderCommandDropup();
+      return;
+    }
+    const input = document.getElementById('chat-message-input') as HTMLTextAreaElement | null;
+    const cmd = this.commandMatches[index];
+    if (!input || !cmd) {
+      this.closeCommandDropup();
+      return;
+    }
+    const typed = parseTypedCommand(input.value, chatStore.getCommands());
+    this.selectCommand(cmd, typed.kind === 'command' || typed.kind === 'ambiguous' ? typed.text : '');
+  }
+
+  private selectCommand(command: SlashCommand, text = ''): void {
+    if (!this.currentChannelId) return;
+    this.showCommandNotice('');
+    this.closeMentionDropup();
+    this.closeCommandDropup();
+    this.emojiPicker?.close();
+    chatStore.selectCommand(this.currentChannelId, command, text);
+    const draft = chatStore.getCommandDraft(this.currentChannelId);
+    if (draft && !command.options?.length && text.trim()) {
+      chatStore.setCommandPending(this.currentChannelId, draft, false, t('botChat.unexpectedText'));
+    } else if (draft && !command.options?.length) {
+      void this.botChat?.invoke();
+      return;
+    }
+    this.botChat?.focusComposer();
+  }
+
+  private closeCommandDropup(): void {
+    this.commandActive = false;
+    this.commandMatches = [];
+    this.commandGroups = [];
+    this.commandActiveIndex = 0;
+    this.commandQuery = '';
+    const input = this.container.querySelector('#chat-message-input');
+    for (const attribute of ['role', 'aria-expanded', 'aria-controls', 'aria-autocomplete', 'aria-activedescendant']) input?.removeAttribute(attribute);
+    const el = document.getElementById('command-dropup');
+    if (el) {
+      el.style.display = 'none';
+      el.innerHTML = '';
+    }
+  }
+
   /**
    * Inserts text (an emoji) where the caret is, then replays an `input` event so
    * the character counter, auto-resize and mention logic all react as if the
@@ -1526,7 +2147,10 @@ export class ChatView {
     const content = buildCodeMessage(language, code);
     if (!code.trim() || content.length > LIMITS.MAX_MESSAGE_LENGTH) return;
 
-    networkClient.send(MessageType.CHAT_SEND, { channelId, content });
+    const reply = chatStore.getReplyDraft(channelId);
+    if (reply?.deleted) { void showAlert({ message: t('chat.replyUnavailable'), variant: 'danger' }); return; }
+    networkClient.send(MessageType.CHAT_SEND, { channelId, content, replyToMessageId: reply?.messageId });
+    this.clearReply();
   }
 
   /**
@@ -1537,6 +2161,10 @@ export class ChatView {
   private async sendSticker(sticker: StickerEntry): Promise<void> {
     const channelId = this.currentChannelId;
     if (!channelId) return;
+    const client = getActiveNetworkClient();
+    const store = getActiveChatStore();
+    const reply = store.getReplyDraft(channelId);
+    if (reply?.deleted) { void showAlert({ message: t('chat.replyUnavailable'), variant: 'danger' }); return; }
     if (
       this.arePermissionsResolved() &&
       (!serverStore.hasPermission(Permission.SEND_MESSAGES) || !serverStore.hasPermission(Permission.ATTACH_FILES))
@@ -1550,11 +2178,14 @@ export class ChatView {
       if (!file) throw new Error(t('chat.stickerReadFailed'));
 
       const meta = await uploadAttachment(channelId, file).promise;
-      networkClient.send(MessageType.CHAT_SEND, {
+      client.send(MessageType.CHAT_SEND, {
         channelId,
         content: stickerToken(meta.id),
         attachmentIds: [meta.id],
+        replyToMessageId: reply?.messageId,
       });
+      if (store.getReplyDraft(channelId) === reply) store.setReplyDraft(channelId);
+      this.renderReplyComposer();
     } catch (e) {
       void showAlert({
         message: e instanceof Error ? e.message : t('chat.stickerSendFailed'),
@@ -1739,6 +2370,15 @@ export class ChatView {
   }
 
   private unbindListeners(): void {
+    this.copyRequestId++;
+    this.clearCopyFeedback?.();
+    contextMenu.close();
+    this.pendingJumpId = null;
+    this.publicSelectors?.destroy();
+    this.publicSelectors = null;
+    this.botChat?.destroy();
+    this.botChat = null;
+    this.closeCommandDropup();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
   }
