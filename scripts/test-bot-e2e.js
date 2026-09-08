@@ -261,20 +261,60 @@ try {
     assert.ok(fs.statSync(officialEntry).isFile());
     const workingDir = path.join(dataDir, 'official-bot');
     fs.mkdirSync(workingDir);
-    const officialAccount = await owner.request(MessageType.BOT_CREATE, { name: 'Official before sync' });
-    const officialId = officialAccount.bot.id;
-    officialProcess = spawn(process.execPath, [officialEntry], {
-      cwd: workingDir,
-      env: {
-        ...process.env, NODE_PATH: '',
-        MONKY_SERVE: 'false', MONKY_SERVER_URL: url, MONKY_BOT_TOKEN: officialAccount.token, MONKY_BOT_NAME: 'MonkyBot',
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const marketplaceRestart = process.argv.includes('--marketplace-restart');
+    const manifestPort = marketplaceRestart ? await freePort() : 0;
+    const manifestUrl = `http://127.0.0.1:${manifestPort}/manifest`;
+    const officialAccount = marketplaceRestart ? null : await owner.request(MessageType.BOT_CREATE, { name: 'Official before sync' });
+    let officialId = officialAccount?.bot.id;
     let officialOutput = '';
-    officialProcess.stdout.on('data', (data) => { officialOutput = (officialOutput + data.toString()).slice(-10000); });
-    officialProcess.stderr.on('data', (data) => { officialOutput = (officialOutput + data.toString()).slice(-10000); });
-    officialExited = once(officialProcess, 'exit');
+    const startOfficial = async () => {
+      officialOutput = '';
+      const child = spawn(process.execPath, [officialEntry], {
+        cwd: workingDir,
+        env: {
+          ...process.env, NODE_PATH: '',
+          MONKY_SERVE: String(marketplaceRestart),
+          MONKY_SERVE_PORT: String(manifestPort), MONKY_SERVE_HOST: '127.0.0.1', MONKY_SERVE_PUBLIC_HOST: '127.0.0.1',
+          MONKY_SERVER_URL: officialAccount ? url : '', MONKY_BOT_TOKEN: officialAccount?.token ?? '',
+          MONKY_BOT_NAME: 'MonkyBot',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      officialProcess = child;
+      officialExited = once(child, 'close');
+      child.stdout.on('data', (data) => { officialOutput = (officialOutput + data.toString()).slice(-10000); });
+      child.stderr.on('data', (data) => { officialOutput = (officialOutput + data.toString()).slice(-10000); });
+      if (marketplaceRestart) {
+        await new Promise((resolve, reject) => {
+          const cleanup = () => {
+            clearTimeout(timer);
+            child.stdout.off('data', onData);
+            child.off('exit', onExit);
+          };
+          const onData = () => {
+            if (!officialOutput.includes(`Manifest: ${manifestUrl}`)) return;
+            cleanup();
+            resolve();
+          };
+          const onExit = () => {
+            cleanup();
+            reject(new Error(`Official bot exited before serving its manifest: ${officialOutput}`));
+          };
+          const timer = setTimeout(() => {
+            cleanup();
+            reject(new Error(`Official bot manifest startup timed out: ${officialOutput}`));
+          }, 5000);
+          child.stdout.on('data', onData);
+          child.once('exit', onExit);
+        });
+      }
+    };
+    await startOfficial();
+    if (marketplaceRestart) {
+      const installed = await owner.request(MessageType.BOT_INSTALL, { manifestUrl });
+      officialId = installed.bot.id;
+    }
+    assert.ok(officialId);
     await owner.wait((message) => message.type === MessageType.COMMANDS_LIST_RESPONSE &&
       message.payload.commands?.some((command) => command.botId === officialId && command.name === 'enquete'), 'official command discovery');
     const registered = await owner.request(MessageType.COMMANDS_LIST, {});
@@ -360,6 +400,35 @@ try {
     assert.deepEqual(Buffer.from(await image.arrayBuffer()), fs.readFileSync(path.join(officialRoot, 'assets', 'monky-logo.png')));
     assert.doesNotMatch(officialOutput, /MODULE_NOT_FOUND|Fatal:|❌/);
     console.log('Official MonkyBot runtime: all six commands, typed parameters, 8ball form, poll edit/confirm/publish and exact bundled logo passed.');
+    if (marketplaceRestart) {
+      const accountsBefore = await owner.request(MessageType.BOT_LIST, {});
+      const publicKey = fs.readFileSync(path.join(workingDir, '.keys', 'public.hex'), 'utf8');
+      const beforeStop = owner.messages.length;
+      officialProcess.kill();
+      await officialExited;
+      await owner.wait((message) => owner.messages.indexOf(message) >= beforeStop &&
+        message.type === MessageType.COMMANDS_LIST_RESPONSE &&
+        !message.payload.commands.some((command) => command.botId === officialId), 'offline bot commands removed');
+      const offline = await owner.request(MessageType.BOT_LIST, {});
+      assert.equal(offline.bots.find((entry) => entry.id === officialId).online, false);
+      const beforeRestart = owner.messages.length;
+      await startOfficial();
+      await owner.wait((message) => owner.messages.indexOf(message) >= beforeRestart &&
+        message.type === MessageType.COMMANDS_LIST_RESPONSE &&
+        message.payload.commands.some((command) => command.botId === officialId && command.name === 'enquete'),
+      'official marketplace reconnection after process restart');
+      const recovered = await owner.request(MessageType.BOT_LIST, {});
+      assert.equal(recovered.bots.length, accountsBefore.bots.length);
+      assert.equal(recovered.bots.find((entry) => entry.id === officialId).online, true);
+      assert.equal(fs.readFileSync(path.join(workingDir, '.keys', 'public.hex'), 'utf8'), publicKey);
+      const afterRestart = await invokeOfficial(owner, 'dado', { lados: 20 });
+      const reply = await owner.wait((message) => message.type === MessageType.COMMAND_RESPONSE &&
+        message.payload.invocationId === afterRestart.invocationId, 'command after marketplace restart');
+      assert.match(reply.payload.content, /Rolling d20/);
+      await owner.finished(afterRestart.invocationId);
+      assert.doesNotMatch(officialOutput, /MODULE_NOT_FOUND|Fatal:|❌/);
+      console.log('Marketplace process restart: same account, same identity, online state and working commands restored without re-adding the bot.');
+    }
     if (process.argv.includes('--ui')) {
       const { exerciseBotUi, exerciseOfficialBotUi } = await import('./test-bot-ui.js');
       await exerciseBotUi(url, (ui) => exerciseOfficialBotUi(ui, {

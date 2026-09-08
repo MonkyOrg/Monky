@@ -250,10 +250,12 @@ In marketplace mode, `serve({ name, icon, ... })` accepts the same image in `ico
 If you want to distribute your bot so any Monky server can add it, use the `serve()` mode:
 
 ```ts
+import path from 'node:path';
 import { BotClient } from '@monky/bot-sdk';
 
 const bot = new BotClient({
   publicKey: 'YOUR_ED25519_PUBLIC_KEY_HEX',
+  registrationFile: path.join(process.cwd(), '.keys', 'registrations.json'),
 });
 
 bot.command({
@@ -276,6 +278,34 @@ This exposes:
 - `POST /register` — receives the token from each server that adds the bot
 
 Each server that adds the bot creates an **independent WebSocket connection**. The bot manages all of them automatically, with reconnection.
+
+### Persistent registrations
+
+Set `registrationFile` to recover connections after restarting the process.
+Without it, registrations only exist during the current run. When registration
+includes `serverUrl`, the SDK confirms `POST /register` after authenticating to
+the server and saving the registration; rejected credentials cannot replace a
+valid registration. The server rolls back account creation if the callback
+rejects registration or fails to confirm a valid key.
+A known `serverId` only accepts the same token and URL; a public callback cannot
+redirect that registration to another destination.
+
+The file contains tokens and must remain outside source control with restricted
+access. Writes are atomic and use `0600` permissions on POSIX systems. Back it up
+together with the Ed25519 identity; do not generate new keys when updating.
+The limits are 1,000 registrations and 4 MiB per file. Do not share the same file
+between simultaneous bot processes. Invalid files stop startup without being
+overwritten. `disconnect()` and `close()` do not erase saved registrations.
+
+Registrations lost by versions that only kept them in memory need authorization
+again: the server cannot recover a token from its hash. After updating MonkyBot,
+revoke the old entry and add it by URL once, reapplying any account-specific
+settings. Do not delete the identity keys.
+
+Authentication errors are emitted through `error` as well as `auth_failed`.
+A protocol mismatch permits further attempts with `autoReconnect`; invalid
+tokens do not enter a retry loop. A rejected photo update does not disconnect
+the bot or prevent command registration.
 
 ### Network requirements
 
@@ -304,6 +334,7 @@ The request must return the manifest JSON. If `monkybot status` reports `errored
 ```ts
 bot.serverCount;  // Number of connected servers
 bot.serverIds;    // List of server IDs
+bot.registeredServerCount; // Known authenticated registrations, including offline
 ```
 
 ### Events
@@ -353,6 +384,7 @@ See the [Monky Bot repository](https://github.com/MonkyOrg/MonkyBot) for install
 | `bot.serve(options)` | Start HTTP server for marketplace |
 | `bot.serverCount` | Number of connected servers |
 | `bot.serverIds` | Connected server IDs |
+| `bot.registeredServerCount` | Number of known authenticated registrations, including offline |
 
 ### `BotOptions`
 
@@ -364,6 +396,7 @@ See the [Monky Bot repository](https://github.com/MonkyOrg/MonkyBot) for install
 | `autoReconnect` | `boolean` | — | Auto-reconnect (default: `true`) |
 | `name` | `string` | — | Name to synchronize in the profile |
 | `avatarBase64` | `string` | — | Base64 or data URI photo, synchronized on connection |
+| `registrationFile` | `string` | — | Private marketplace registration file, restored by `serve()` |
 
 ### `ServeOptions`
 

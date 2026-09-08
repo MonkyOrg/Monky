@@ -970,6 +970,8 @@ export class WebSocketServer {
     };
     session.visibleChannelIds = new Set(serverDetails.channels.map((channel) => channel.id));
 
+    if (this.closing || session.replaced || this.sessions.get(session.ws) !== session ||
+        session.ws.readyState !== WebSocket.OPEN) return;
     this.send(session.ws, {
       type: MessageType.AUTH_SUCCESS,
       requestId,
@@ -1100,8 +1102,14 @@ export class WebSocketServer {
       return;
     }
 
-    // Disconnect the bot if it's online.
-    const botSessionId = `bot:${payload.botId}`;
+    this.disconnectBot(payload.botId);
+    const revokedPayload: BotRevokedPayload = { botId: payload.botId };
+    this.send(session.ws, { type: MessageType.BOT_REVOKED, requestId, payload: revokedPayload });
+    this.broadcast({ type: MessageType.BOT_REVOKED, payload: revokedPayload }, session.ws);
+  }
+
+  private disconnectBot(botId: string): void {
+    const botSessionId = `bot:${botId}`;
     const botWs = this.sessionSockets.get(botSessionId);
     if (botWs) {
       const botSession = this.sessions.get(botWs);
@@ -1116,12 +1124,8 @@ export class WebSocketServer {
     }
 
     // Unregister commands.
-    this.commandRegistry.clearBot(payload.botId);
+    this.commandRegistry.clearBot(botId);
     this.broadcastCommands();
-
-    const revokedPayload: BotRevokedPayload = { botId: payload.botId };
-    this.send(session.ws, { type: MessageType.BOT_REVOKED, requestId, payload: revokedPayload });
-    this.broadcast({ type: MessageType.BOT_REVOKED, payload: revokedPayload }, session.ws);
   }
 
   private async handleBotInstall(
@@ -1159,6 +1163,10 @@ export class WebSocketServer {
     );
 
     if (!result.success) {
+      if (result.revokedBotId) {
+        this.disconnectBot(result.revokedBotId);
+        this.broadcast({ type: MessageType.BOT_REVOKED, payload: { botId: result.revokedBotId } satisfies BotRevokedPayload });
+      }
       this.sendError(
         session.ws,
         result.errorCode || ProtocolErrorCode.BAD_REQUEST,

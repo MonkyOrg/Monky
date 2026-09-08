@@ -6,6 +6,7 @@ import {
   LIMITS,
   MessageType,
   PROTOCOL_VERSION,
+  ProtocolErrorCode,
   botFormSchema,
   botManifestSchema,
   botProfileUpdateSchema,
@@ -18,6 +19,7 @@ import {
   validateBotFormValues,
   validateCommandOptions,
 } from '@monky/shared';
+import { RegistrationStore, type BotRegistration } from './RegistrationStore';
 import type {
   BotForm,
   BotFormValues,
@@ -39,6 +41,8 @@ export interface BotOptions {
   name?: string;
   /** Image bytes encoded as base64 or a data URI, not a remote URL. */
   avatarBase64?: string;
+  /** Private JSON file for authenticated marketplace registrations; survives close/restart. */
+  registrationFile?: string;
 }
 
 export interface CommandDefinition {
@@ -81,6 +85,13 @@ interface Invocation {
   prompt: PendingPrompt | null;
 }
 
+interface PendingRegistration {
+  registration: BotRegistration;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 interface ServerConnection {
   serverId: string;
   serverUrl: string;
@@ -91,6 +102,8 @@ interface ServerConnection {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   profileRequestId: string | null;
   invocations: Map<string, Invocation>;
+  pendingRegistration: PendingRegistration | null;
+  registrationPromise: Promise<void> | null;
 }
 
 interface IncomingMessage {
@@ -121,12 +134,16 @@ export class BotClient extends EventEmitter {
   private commands = new Map<string, CommandDefinition>();
   private connections = new Map<string, ServerConnection>();
   private httpServers = new Set<http.Server>();
+  private startingServers = new Set<Promise<http.Server>>();
   private closing = false;
   private closePromise: Promise<void> | null = null;
+  private registrationStore: RegistrationStore;
+  private registrationsRestored = false;
 
   constructor(options: BotOptions) {
     super();
     this.options = { autoReconnect: true, ...options };
+    this.registrationStore = new RegistrationStore(options.registrationFile, options.publicKey);
     if (options.name !== undefined || options.avatarBase64 !== undefined) {
       this.profile = botProfileUpdateSchema.parse({
         name: options.name,
@@ -158,6 +175,7 @@ export class BotClient extends EventEmitter {
     }
     const url = new URL(serverUrl);
     if (!['ws:', 'wss:'].includes(url.protocol)) throw new Error('serverUrl must use ws:// or wss://.');
+    if (url.hash) throw new Error('serverUrl must not contain a URL fragment.');
     const existing = [...this.connections.values()].find((conn) =>
       conn.serverUrl === serverUrl && conn.token === token
     );
@@ -182,6 +200,7 @@ export class BotClient extends EventEmitter {
     this.closing = true;
     this.closePromise = Promise.resolve().then(async () => {
       this.disconnect();
+      await Promise.allSettled([...this.startingServers]);
       await Promise.all([...this.httpServers].map((server) => new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => server.closeAllConnections(), LIMITS.SHUTDOWN_GRACE_MS);
         server.close((error) => {
@@ -191,6 +210,7 @@ export class BotClient extends EventEmitter {
         });
         server.closeIdleConnections();
       })));
+      await this.registrationStore.flush();
     }).finally(() => this.disconnect());
     return this.closePromise;
   }
@@ -203,11 +223,16 @@ export class BotClient extends EventEmitter {
     return [...this.connections.values()].filter((conn) => conn.connected).map((conn) => conn.serverId);
   }
 
-  private connectToServer(serverId: string, serverUrl: string, token: string): void {
+  /** Known authenticated marketplace registrations, including disconnected servers. */
+  get registeredServerCount(): number {
+    return this.registrationStore.size;
+  }
+
+  private connectToServer(serverId: string, serverUrl: string, token: string): ServerConnection {
     if (this.closing) throw new Error('This bot client has been closed.');
     const existing = this.connections.get(serverId);
     if (existing && existing.token === token && existing.serverUrl === serverUrl && !existing.disposed &&
-        (existing.ws?.readyState === WebSocket.OPEN || existing.ws?.readyState === WebSocket.CONNECTING)) return;
+        (existing.ws?.readyState === WebSocket.OPEN || existing.ws?.readyState === WebSocket.CONNECTING)) return existing;
     if (existing) this.teardownConnection(existing);
 
     const conn: ServerConnection = {
@@ -218,9 +243,12 @@ export class BotClient extends EventEmitter {
       reconnectTimer: null,
       profileRequestId: null,
       invocations: new Map(),
+      pendingRegistration: null,
+      registrationPromise: null,
     };
     this.connections.set(serverId, conn);
     this.openSocket(conn);
+    return conn;
   }
 
   private openSocket(conn: ServerConnection): void {
@@ -258,6 +286,7 @@ export class BotClient extends EventEmitter {
       conn.ws = null;
       conn.connected = false;
       conn.profileRequestId = null;
+      this.rejectRegistration(conn, new Error('The connection closed before the bot registration completed.'));
       this.clearInvocations(conn);
       this.emit('disconnected', { serverId: conn.serverId });
       if (this.options.autoReconnect && !conn.disposed && this.connections.get(conn.serverId) === conn) {
@@ -280,6 +309,7 @@ export class BotClient extends EventEmitter {
     conn.ws = null;
     conn.connected = false;
     conn.profileRequestId = null;
+    this.rejectRegistration(conn, new Error('The bot registration was interrupted.'));
     this.clearInvocations(conn);
     if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
   }
@@ -297,27 +327,34 @@ export class BotClient extends EventEmitter {
     switch (msg.type) {
       case MessageType.AUTH_SUCCESS:
         conn.connected = true;
-        if (this.profile.name !== undefined || this.profile.avatarBase64 !== undefined) {
-          conn.profileRequestId = randomUUID();
-          this.sendToConn(conn, {
-            type: MessageType.BOT_UPDATE_PROFILE,
-            requestId: conn.profileRequestId,
-            payload: this.profile,
+        if (conn.pendingRegistration) {
+          void this.registrationStore.save(conn.pendingRegistration.registration).then(() => {
+            if (conn.disposed || this.closing || conn.ws?.readyState !== WebSocket.OPEN) {
+              this.rejectRegistration(conn, new Error('The bot registration was interrupted.'));
+              return;
+            }
+            this.completeAuthentication(conn);
+            const pending = conn.pendingRegistration;
+            if (pending) {
+              clearTimeout(pending.timer);
+              conn.pendingRegistration = null;
+              conn.registrationPromise = null;
+              pending.resolve();
+            }
+          }).catch((error: unknown) => {
+            this.rejectRegistration(conn, error instanceof Error ? error : new Error(String(error)));
           });
         } else {
-          this.registerCommandsOn(conn);
+          this.completeAuthentication(conn);
         }
-        this.emit('connected', { serverId: conn.serverId });
         return;
       case MessageType.BOT_PROFILE_UPDATED:
         if (conn.profileRequestId && msg.requestId === conn.profileRequestId) {
           conn.profileRequestId = null;
-          this.registerCommandsOn(conn);
         }
         return;
       case MessageType.AUTH_FAILED:
-        this.emit('auth_failed', msg.payload, { serverId: conn.serverId });
-        this.disconnect(conn.serverId);
+        this.failAuthentication(conn, msg.payload);
         return;
       case MessageType.SERVER_ERROR: {
         const error = new Error(isRecord(msg.payload) && typeof msg.payload.message === 'string'
@@ -330,9 +367,12 @@ export class BotClient extends EventEmitter {
             return;
           }
         }
-        if (!conn.connected || (conn.profileRequestId && msg.requestId === conn.profileRequestId)) {
-          this.emit('auth_failed', msg.payload, { serverId: conn.serverId });
-          this.disconnect(conn.serverId);
+        if (!conn.connected) {
+          this.failAuthentication(conn, msg.payload);
+          return;
+        }
+        if (conn.profileRequestId && msg.requestId === conn.profileRequestId) {
+          conn.profileRequestId = null;
         }
         this.reportError(error, conn);
         return;
@@ -381,6 +421,75 @@ export class BotClient extends EventEmitter {
       }
       default:
         this.emit('message', msg, { serverId: conn.serverId });
+    }
+  }
+
+  private completeAuthentication(conn: ServerConnection): void {
+    if (this.profile.name !== undefined || this.profile.avatarBase64 !== undefined) {
+      conn.profileRequestId = randomUUID();
+      this.sendToConn(conn, {
+        type: MessageType.BOT_UPDATE_PROFILE,
+        requestId: conn.profileRequestId,
+        payload: this.profile,
+      });
+    }
+    // Profile changes are cosmetic: a rejected avatar must not hide every command.
+    this.registerCommandsOn(conn);
+    this.emit('connected', { serverId: conn.serverId });
+  }
+
+  private failAuthentication(conn: ServerConnection, payload: unknown): void {
+    const error = new Error(isRecord(payload) && typeof payload.message === 'string'
+      ? payload.message : 'Bot authentication failed. Check the token and the bot identity keys.');
+    const pending = conn.pendingRegistration !== null;
+    this.emit('auth_failed', payload, { serverId: conn.serverId });
+    this.rejectRegistration(conn, error);
+    if (pending) return;
+    if (this.options.autoReconnect && isRecord(payload) &&
+        payload.code === ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED) {
+      conn.ws?.close();
+    } else {
+      this.disconnect(conn.serverId);
+    }
+    this.reportError(error, conn);
+  }
+
+  private rejectRegistration(conn: ServerConnection, error: Error): void {
+    const pending = conn.pendingRegistration;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    conn.pendingRegistration = null;
+    conn.registrationPromise = null;
+    pending.reject(error);
+  }
+
+  private async registerServer(registration: BotRegistration): Promise<void> {
+    const known = this.registrationStore.get(registration.serverId) ?? this.connections.get(registration.serverId);
+    if (known && (known.serverUrl !== registration.serverUrl || known.token !== registration.token)) {
+      throw new Error('This serverId is already registered with different credentials or a different URL.');
+    }
+    const conn = this.connectToServer(registration.serverId, registration.serverUrl, registration.token);
+    if (conn.registrationPromise) return conn.registrationPromise;
+    if (conn.connected) {
+      await this.registrationStore.save(registration);
+      return;
+    }
+    const authenticated = new Promise<void>((resolve, reject) => {
+      conn.pendingRegistration = {
+        registration, resolve, reject,
+        timer: setTimeout(() => {
+          this.rejectRegistration(conn, new Error('The bot could not authenticate to the Monky server in time.'));
+        }, 8000),
+      };
+    });
+    conn.registrationPromise = authenticated;
+    try {
+      await authenticated;
+    } catch (error) {
+      if (this.connections.get(conn.serverId) === conn) {
+        this.disconnect(conn.serverId);
+      }
+      throw error;
     }
   }
 
@@ -544,9 +653,10 @@ export class BotClient extends EventEmitter {
       if (req.method === 'POST' && req.url === '/register') {
         let body = '';
         let tooLarge = false;
-        req.on('data', (chunk: Buffer) => {
+        req.setEncoding('utf8');
+        req.on('data', (chunk: string) => {
           if (tooLarge) return;
-          body += chunk.toString('utf8');
+          body += chunk;
           if (Buffer.byteLength(body) > 16 * 1024) {
             tooLarge = true;
             res.writeHead(413, { 'Content-Type': 'application/json' });
@@ -579,15 +689,33 @@ export class BotClient extends EventEmitter {
           }
           const data = parsed.data;
           const serverId = data.serverId ?? randomUUID();
-          this.emit('registered', { token: data.token, serverId, serverName: data.serverName });
-          if (this.closing) {
-            res.writeHead(503, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'The bot is shutting down.' }));
-            return;
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ publicKey: this.options.publicKey }));
-          if (data.serverUrl) this.connectToServer(serverId, data.serverUrl, data.token);
+          const register = async (): Promise<void> => {
+            if (data.serverUrl) {
+              const url = new URL(data.serverUrl);
+              if (url.hash) throw new Error('The server URL must not contain a fragment.');
+              await this.registerServer({ ...data, serverId, serverUrl: data.serverUrl });
+            }
+            if (this.closing) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'The bot is shutting down.' }));
+              return;
+            }
+            this.emit('registered', { ...data, serverId });
+            if (this.closing) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'The bot is shutting down.' }));
+              return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ publicKey: this.options.publicKey }));
+          };
+          void register().catch((error: unknown) => {
+            if (!this.closing) this.reportError(error);
+            if (!res.destroyed && !res.writableEnded) {
+              res.writeHead(this.closing ? 503 : 502, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'The bot could not complete registration. Check the bot logs and server compatibility.' }));
+            }
+          });
         });
         return;
       }
@@ -595,7 +723,11 @@ export class BotClient extends EventEmitter {
       res.end('Not Found');
     });
 
-    return new Promise((resolve, reject) => {
+    const starting = this.registrationStore.load().then((registrations) => new Promise<http.Server>((resolve, reject) => {
+      if (this.closing) {
+        reject(new Error('This bot client has been closed.'));
+        return;
+      }
       const onStartupError = (error: Error) => reject(error);
       server.once('error', onStartupError);
       server.listen(port, host, () => {
@@ -605,10 +737,22 @@ export class BotClient extends EventEmitter {
         if (address && typeof address === 'object') listeningPort = address.port;
         this.httpServers.add(server);
         server.once('close', () => this.httpServers.delete(server));
+        if (!this.registrationsRestored && !this.closing) {
+          this.registrationsRestored = true;
+          for (const registration of registrations) {
+            this.connectToServer(registration.serverId, registration.serverUrl, registration.token);
+          }
+        }
         this.emit('serving', { port: listeningPort, host, manifest: getManifest() });
         resolve(server);
       });
-    });
+    }));
+    this.startingServers.add(starting);
+    void starting.then(
+      () => this.startingServers.delete(starting),
+      () => this.startingServers.delete(starting)
+    );
+    return starting;
   }
 }
 
@@ -623,7 +767,7 @@ export interface ServeOptions {
   publicHost?: string;
 }
 
-export { MessageType, PROTOCOL_VERSION } from '@monky/shared';
+export { MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
 export type {
   BotForm, BotFormField, BotFormValues, BotManifest,
   SlashCommand, CommandOption, CommandValue, CommandValues, CommandResponsePayload,
