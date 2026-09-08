@@ -292,6 +292,8 @@ Persisted text-channel messages support reactions through the emoji picker. Each
 
 In the SDK, `bot.sendMessage(serverId, channelId, text)` awaits publication and returns the message with its `id`. `addReaction(serverId, channelId, messageId, emoji)` and `removeReaction(...)` change only the bot's own reaction. The `reactionAdded` and `reactionRemoved` events provide channel, message and user IDs, the user's nickname, and the emoji, with `{ serverId }` as the second argument. Typed helpers `onReactionAdded` and `onReactionRemoved` return an unsubscribe function.
 
+To publicly reply to a persisted message, use `bot.sendMessage(serverId, channelId, text, { replyToMessageId: id })`. The fourth argument is optional; existing calls keep working. The server requires a non-deleted original in the same accessible channel and returns its resolved reference in `message.reply`. This differs from `ctx.reply()`, which remains a private command response.
+
 A question can continue the command after a valid reaction without mixing responses from other channels or users:
 
 ```ts

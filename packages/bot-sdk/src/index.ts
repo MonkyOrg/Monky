@@ -15,6 +15,7 @@ import {
   chatReactionSchema,
   chatReactionEventSchema,
   messageContentSchema,
+  messageReferenceSchema,
   commandDefinitionSchema,
   commandExecutionSchema,
   commandFinishedSchema,
@@ -39,6 +40,7 @@ import type {
   CommandResponsePayload,
   CommandValues,
   ChatMessage,
+  ChatSendPayload,
   ChatReactionEventPayload,
 } from '@monky/shared';
 
@@ -243,10 +245,14 @@ export class BotClient extends EventEmitter {
   }
 
   /** Post persistent channel text and resolve with its server-assigned ID. */
-  async sendMessage(serverId: string, channelId: string, content: string): Promise<ChatMessage> {
+  async sendMessage(
+    serverId: string, channelId: string, content: string,
+    options: Pick<ChatSendPayload, 'replyToMessageId'> = {}
+  ): Promise<ChatMessage> {
     const conn = this.requireConnection(serverId);
     if (!channelId || channelId.length > 128) throw new Error('Invalid channel ID.');
     const validatedContent = messageContentSchema.parse(content);
+    const replyToMessageId = messageReferenceSchema.optional().parse(options.replyToMessageId);
     if (conn.pendingMessages.size >= 100) throw new Error('Too many unacknowledged messages.');
     const requestId = randomUUID();
     return new Promise((resolve, reject) => {
@@ -256,7 +262,7 @@ export class BotClient extends EventEmitter {
       }, 30_000);
       conn.pendingMessages.set(requestId, { resolve, reject, timer });
       try {
-        this.sendToConn(conn, { type: MessageType.CHAT_SEND, requestId, payload: { channelId, content: validatedContent } });
+        this.sendToConn(conn, { type: MessageType.CHAT_SEND, requestId, payload: { channelId, content: validatedContent, replyToMessageId } });
       } catch (error) {
         clearTimeout(timer);
         conn.pendingMessages.delete(requestId);

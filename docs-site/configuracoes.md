@@ -20,6 +20,46 @@ Abra pelo ícone de engrenagem na tela de conexão ou na barra inferior.
 - **Atualizações** — versão atual e verificação manual.
 - **Comunidade** — atalhos para ideias, votação e bugs.
 
+### Aparecer offline
+
+Em **Meu Perfil → Visibilidade → Aparecer offline**, o switch altera sua
+presença em todos os servidores conectados, inclusive os que estão em segundo
+plano. Você passa para a seção offline da lista de membros e vê **Invisível**,
+com um indicador circular vazado de alto contraste na barra inferior.
+Os outros membros veem sua presença como offline; alterar nickname ou foto
+não torna você online novamente.
+
+Isso não desconecta o cliente nem interrompe uma chamada em andamento. Sua
+participação em um canal de voz continua visível nesse canal.
+
+### Atalhos de teclado
+
+Na aba **Atalhos**, escolha **Gravar atalho** (ou **Alterar atalho**).
+Segure todas as teclas da combinação juntas e solte todas para salvar.
+Por exemplo, `Ctrl + Q + W + E` usa três teclas comuns, não apenas modificadores
+e uma tecla. O mesmo gravador é usado nos atalhos do **Soundboard**. `Esc`
+cancela; fechar a janela ou sair dela também cancela a gravação.
+
+Não há limite de quantidade de teclas imposto pelo Monky, mas o rollover do
+teclado e as restrições do sistema operacional continuam valendo. Os atalhos
+são observados passivamente, sem reservar teclas: `Q` continua disponível para
+o aplicativo em foco. Isso não contorna bloqueios de anti-cheat ou de segurança.
+Segurar a combinação não repete a ação; solte uma tecla necessária antes de
+acioná-la novamente. Modificadores adicionais impedem o acionamento.
+
+Novos atalhos guardam a posição física da tecla e exibem o caractere do layout,
+incluindo `º` e `ñ` em teclados espanhóis quando suportados pelo sistema.
+No Windows, a conversão usa o layout real da janela em foco, não uma tabela
+americana fixa. Depois de trocar o idioma/layout, solte e pressione novamente
+a combinação. Se o sistema não conseguir distinguir duas teclas de uma
+combinação, ela não é registrada para evitar acionar a ação errada.
+Atalhos antigos continuam sendo lidos; se uma combinação de outro layout não
+for reconhecida, grave-a novamente. Permissões de entrada/acessibilidade podem
+ser necessárias para a captura global. O Push-to-Talk mantém sua tecla ou botão
+do mouse configurado separadamente.
+
+### Perfis de qualidade
+
 | Perfil | Áudio | Câmera | Tela | Quando usar |
 |---|---|---|---|---|
 | Econômico | 24 kbps | 360p | 480p | Internet lenta ou instável |

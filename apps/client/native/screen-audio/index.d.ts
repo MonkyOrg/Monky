@@ -86,3 +86,13 @@ export function listWindows(): NativeWindowInfo[];
  * Windows, returns `false` elsewhere.
  */
 export function restoreWindow(hwnd: number): boolean;
+
+export interface KeyboardLayoutSnapshot {
+  id: string;
+  scanCodeToVirtualKey: Record<string, number>;
+  /** VkKeyScanEx: low byte VK, high byte Shift/Ctrl/Alt requirements. */
+  characterToVirtualKey: Record<string, number>;
+}
+
+/** Windows foreground-thread layout; null if unchanged or native support is unavailable. */
+export function getKeyboardLayout(previousId?: string, characters?: string): KeyboardLayoutSnapshot | null;

@@ -33,7 +33,7 @@ import { networkClient, type ConnectionStatus } from './core/NetworkClient';
 import { callClient, rejoinCallOnSession } from './core/serverConnection';
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
-import { currentEventOrigin, isForegroundEvent } from './core/sessionRouting';
+import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
 import { soundEffects } from './core/SoundEffects';
 import { soundboardService } from './core/SoundboardService';
 import { keybindService } from './core/KeybindService';
@@ -409,7 +409,14 @@ class App {
       participantManager.setUsers(payload.server.members);
 
       // Populate existing voice states
+      const knownVoiceUsers = new Map(payload.server.knownMembers?.map((user) => [user.id, user]));
       for (const [_, state] of Object.entries(payload.server.voiceStates)) {
+        // Invisible users are absent from the online member list, but their
+        // physical voice session still exists and can still carry media.
+        if (!participantManager.get(state.sessionId)) {
+          const user = knownVoiceUsers.get(state.userId);
+          if (user) participantManager.addUser({ ...user, sessionId: state.sessionId });
+        }
         participantManager.updateVoiceState(state);
       }
 
@@ -575,6 +582,15 @@ class App {
       participantManager.updateUser(payload.user);
       if (payload.user.id === serverStore.currentUser?.id) {
         serverStore.updateCurrentUser(payload.user);
+        const invisible = payload.user.invisible;
+        if (typeof invisible === 'boolean') {
+          emitOutsideRouting(() => {
+            if (settingsStore.appearOffline !== invisible) {
+              settingsStore.appearOffline = invisible;
+              settingsStore.save();
+            }
+          });
+        }
       }
     });
 
@@ -647,7 +663,7 @@ class App {
     });
 
     appEvents.on(`message.${MessageType.CHAT_HISTORY}`, (payload: ChatHistoryPayload) => {
-      chatStore.setHistory(payload.channelId, payload.messages);
+      chatStore.setHistory(payload.channelId, payload.messages, payload.aroundMessageId);
     });
 
     for (const type of [MessageType.CHAT_REACTION_ADDED, MessageType.CHAT_REACTION_REMOVED]) {
@@ -664,6 +680,17 @@ class App {
     });
 
     appEvents.on(`message.${MessageType.VOICE_USER_JOINED}`, (payload: VoiceUserJoinedPayload) => {
+      if (payload.user) participantManager.addUser(payload.user);
+      if (payload.participants) {
+        participantManager.reconcileVoiceChannel(payload.channelId, payload.participants);
+        if (this.eventOwnsCall() && voiceStore.currentVoiceChannelId === payload.channelId && !webRtcManager.isSfuMode()) {
+          for (const { voiceState } of payload.participants) {
+            if (!serverStore.isMySession(voiceState.sessionId)) {
+              void webRtcManager.connectToPeer(voiceState.sessionId, true);
+            }
+          }
+        }
+      }
       // Read before the state is overwritten: an admin move announces the
       // arrival once itself and once more when the moved client re-joins, so
       // the room would hear the join sound twice (#500). A repeated

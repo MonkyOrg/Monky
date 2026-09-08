@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import { SHORTCUT_IPC } from '@monky/shared';
 import type {
   ActionShortcutBinding,
   AppIdentityImportResult,
@@ -78,6 +79,7 @@ export interface ElectronApi {
   registerSoundboardShortcuts: (shortcuts: SoundboardShortcutBinding[]) => Promise<boolean>;
   onSoundboardShortcutTriggered: (cb: (soundName: string) => void) => () => void;
   registerActionShortcuts: (shortcuts: ActionShortcutBinding[]) => Promise<boolean>;
+  setShortcutCapture: (active: boolean) => Promise<boolean>;
   onActionShortcutTriggered: (cb: (action: string) => void) => () => void;
   setPttConfig: (config: PttConfig) => Promise<boolean>;
   startPttCapture: () => Promise<boolean>;
@@ -208,7 +210,7 @@ const api: ElectronApi = {
   listStickers: (folderPath) => ipcRenderer.invoke('stickers:list', folderPath),
   readSticker: (filePath) => ipcRenderer.invoke('stickers:read', filePath),
   saveSticker: (folderPath, fileName, bytes) => ipcRenderer.invoke('stickers:save', folderPath, fileName, bytes),
-  registerSoundboardShortcuts: (shortcuts) => ipcRenderer.invoke('soundboard:register-shortcuts', shortcuts),
+  registerSoundboardShortcuts: (shortcuts) => ipcRenderer.invoke(SHORTCUT_IPC.registerSoundboard, shortcuts),
   onSoundboardShortcutTriggered: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, soundName: string) => cb(soundName);
     ipcRenderer.on('soundboard:shortcut-triggered', listener);
@@ -216,7 +218,8 @@ const api: ElectronApi = {
       ipcRenderer.removeListener('soundboard:shortcut-triggered', listener);
     };
   },
-  registerActionShortcuts: (shortcuts) => ipcRenderer.invoke('shortcuts:register-actions', shortcuts),
+  registerActionShortcuts: (shortcuts) => ipcRenderer.invoke(SHORTCUT_IPC.registerActions, shortcuts),
+  setShortcutCapture: (active) => ipcRenderer.invoke(SHORTCUT_IPC.setCapture, active),
   onActionShortcutTriggered: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, action: string) => cb(action);
     ipcRenderer.on('shortcut:action-triggered', listener);
@@ -224,9 +227,9 @@ const api: ElectronApi = {
       ipcRenderer.removeListener('shortcut:action-triggered', listener);
     };
   },
-  setPttConfig: (config) => ipcRenderer.invoke('ptt:set-config', config),
-  startPttCapture: () => ipcRenderer.invoke('ptt:start-capture'),
-  stopPttCapture: () => ipcRenderer.invoke('ptt:stop-capture'),
+  setPttConfig: (config) => ipcRenderer.invoke(SHORTCUT_IPC.setPttConfig, config),
+  startPttCapture: () => ipcRenderer.invoke(SHORTCUT_IPC.startPttCapture),
+  stopPttCapture: () => ipcRenderer.invoke(SHORTCUT_IPC.stopPttCapture),
   onPttStateChanged: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, active: boolean) => cb(active);
     ipcRenderer.on('ptt:state-changed', listener);

@@ -30,6 +30,61 @@ import { renderBotFields } from '../src/renderer/views/botFields';
 import { renderBotInvocation } from '../src/renderer/views/BotChatView';
 import { setLanguage } from '../src/renderer/i18n';
 import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
+import { RecentEmojis, sanitizeRecentEmojis } from '../src/renderer/emoji/recentEmojis';
+import { EMOJI_CATALOG } from '../src/renderer/emoji/emojiCatalog';
+
+test('shared recent emojis are distinct, bounded, persisted and safe against malformed storage', () => {
+  let raw: string | null = null;
+  const storage = { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value; } };
+  const composer = new RecentEmojis(() => storage);
+  const reaction = new RecentEmojis(() => storage);
+  assert.deepEqual(composer.get(), []);
+  const emojis = EMOJI_CATALOG.flatMap((group) => group.emojis.map(([char]) => char)).slice(0, 40);
+  for (const emoji of emojis) composer.select(emoji);
+  assert.deepEqual(reaction.get(), emojis.slice(-32).reverse());
+  reaction.select(emojis[10]);
+  assert.equal(composer.get()[0], emojis[10]);
+  assert.equal(new Set(composer.get()).size, 32);
+  composer.select('<script>');
+  assert.equal(composer.get().length, 32);
+  assert.deepEqual(sanitizeRecentEmojis(['👍', null, {}, '👍', '<img>', '❤️']), ['👍', '❤️']);
+  assert.deepEqual(sanitizeRecentEmojis({ emoji: '👍' }), []);
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    raw = '{broken';
+    assert.doesNotThrow(() => composer.get());
+    raw = JSON.stringify(['👍']);
+    const denied = new RecentEmojis(() => ({ getItem: () => raw, setItem: () => { throw new Error('quota'); } }));
+    denied.select('❤️');
+    denied.select('😀');
+    assert.deepEqual(denied.get(), ['😀', '❤️', '👍']);
+  } finally { console.warn = warn; }
+});
+
+test('replies update even when original is outside cached history and navigation keeps the requested old page', () => {
+  const store = createChatStore();
+  store.bus = new EventBus();
+  const original = { id: 'original', channelId: 'text', userId: 'alice', userNickname: 'Alice', content: 'Original', createdAt: 1 };
+  const response = { ...original, id: 'response', content: 'Answer', createdAt: 999, reply: store.messageReply(original) };
+  store.addMessage(response);
+  store.setReplyDraft('text', original);
+  store.updateMessage({ ...original, content: 'Edited', editedAt: 2 });
+  assert.equal(store.getMessages('text')[0].reply?.content, 'Edited');
+  assert.equal(store.getReplyDraft('text')?.content, 'Edited');
+  store.updateMessage({ ...original, content: '', deletedAt: 3 });
+  assert.deepEqual(store.getMessages('text')[0].reply, {
+    messageId: 'original', userNickname: '', content: '', deleted: true, hasAttachments: false,
+  });
+  assert.equal(store.getReplyDraft('text')?.deleted, true);
+  for (let index = 0; index < 300; index++) store.addMessage({ ...original, id: `recent-${index}`, createdAt: 1000 + index });
+  store.setHistory('text', [original], original.id);
+  assert.deepEqual(store.getMessages('text').map((message) => message.id), [original.id]);
+  store.setReplyDraft('other-channel', original);
+  assert.equal(store.getReplyDraft('other-channel'), undefined);
+  store.clear();
+  assert.equal(store.getReplyDraft('text'), undefined);
+});
 
 test('persistent reactions toggle independently per emoji and do not create phantom messages', () => {
   const store = createChatStore();
@@ -536,6 +591,60 @@ test('bot response identity and private rows survive history without duplicates 
   assert.equal(bot.isEphemeral, true);
   assert.equal(bot.createdAt, 100);
   assert.equal(store.getMessages('channel-one').length, 2);
+});
+
+test('private command messages survive old reply navigation and return-to-latest without displacing the target', () => {
+  const store = createChatStore();
+  store.bus = new EventBus();
+  const privateResponse = botCommandMessage({
+    invocationId: 'private-invocation', messageId: 'private-response', channelId: 'text',
+    botId: 'bot', botName: 'Private Bot', commandName: 'poll',
+    invokerId: 'caller', invokerNickname: 'Caller',
+    createdAt: 100, content: 'Private command result', ephemeral: true,
+  });
+  const original = { id: 'original', channelId: 'text', userId: 'caller', userNickname: 'Caller', content: 'Original', createdAt: 1 };
+  store.addMessage(privateResponse);
+  for (let index = 0; index < 300; index++) {
+    store.addMessage({ ...original, id: `public-${index}`, createdAt: 1000 + index });
+  }
+  store.setHistory('text', [original], original.id);
+  assert.deepEqual(store.getMessages('text').map((message) => message.id), [original.id]);
+  let additions = 0;
+  store.bus.on('chat.message_added', () => additions++);
+  const latePrivate = { ...privateResponse, id: 'private-during-navigation', createdAt: 2000 };
+  store.addMessage(latePrivate);
+  store.addMessage(latePrivate);
+  assert.equal(additions, 0, 'Private arrivals must not append to or displace the historical window');
+  assert.deepEqual(store.getMessages('text').map((message) => message.id), [original.id]);
+  const latest = { ...original, id: 'latest', createdAt: 3000 };
+  store.setHistory('text', [latest]);
+  assert.deepEqual(store.getMessages('text'), [privateResponse, latePrivate, latest]);
+  store.setHistory('text', [original], original.id);
+  store.setHistory('text', [latest]);
+  assert.deepEqual(store.getMessages('text'), [privateResponse, latePrivate, latest]);
+  assert.equal(store.getMessages('other-channel').length, 0);
+  store.clear();
+  store.setHistory('text', [latest]);
+  assert.deepEqual(store.getMessages('text'), [latest], 'Disconnect must clear retained private responses');
+});
+
+test('private history retention stays bounded independently of public navigation windows', () => {
+  const store = createChatStore();
+  store.bus = new EventBus();
+  const original = { id: 'original', channelId: 'text', userId: 'caller', userNickname: 'Caller', content: 'Original', createdAt: 1 };
+  for (let index = 0; index < 300; index++) {
+    store.addMessage({ ...original, id: `private-${index}`, createdAt: 10 + index, isBot: true, isEphemeral: true });
+  }
+  store.setHistory('text', [original], original.id);
+  assert.deepEqual(store.getMessages('text'), [original]);
+  store.setHistory('text', Array.from({ length: 300 }, (_, index) => ({
+    ...original, id: `public-${index}`, createdAt: 1000 + index,
+  })));
+  const messages = store.getMessages('text');
+  assert.equal(messages.filter((message) => message.isEphemeral).length, 250);
+  assert.equal(messages.filter((message) => !message.isEphemeral).length, 250);
+  assert.equal(messages[0].id, 'private-50');
+  assert.equal(new Set(messages.map((message) => message.id)).size, 500);
 });
 
 test('persisted replies reconcile invocation state before live duplicates, including consumed forms', () => {

@@ -19,6 +19,45 @@ Open from the gear icon on the connection screen or bottom bar.
 - **Updates** — current version and manual check.
 - **Community** — shortcuts for ideas, voting and bugs.
 
+### Appear offline
+
+Under **My Profile → Visibility → Appear offline**, the switch changes your
+presence on every connected server, including background connections. You
+move to the offline section of the member list and see **Invisible**, with
+a high-contrast hollow circular indicator in the bottom bar.
+Other members see your presence as offline; changing your nickname or picture
+does not make you appear online again.
+
+This does not disconnect the client or interrupt an ongoing call. Your
+participation in a voice channel remains visible in that channel.
+
+### Keyboard shortcuts
+
+Under **Keybinds**, choose **Record shortcut** (or **Change shortcut**).
+Hold every key in the combination together, then release all keys to save.
+For example, `Ctrl + Q + W + E` contains three ordinary keys, not just modifiers
+and one key. **Soundboard** shortcuts use the same recorder. `Esc` cancels;
+closing the window or switching away also cancels recording.
+
+Monky imposes no key-count limit, but keyboard rollover and operating-system
+restrictions still apply. Shortcuts are observed passively without reserving
+keys: `Q` remains available to the focused application. This does not bypass
+anti-cheat or security restrictions. Holding a chord does not repeat the
+action; release a required key before triggering it again. Extra modifiers
+prevent activation.
+
+New shortcuts store physical key positions and display layout-specific labels,
+including `º` and `ñ` on Spanish keyboards where supported by the system.
+On Windows, conversion uses the focused window's actual layout, not a fixed
+US table. After switching input language/layout, release and press the chord
+again. If the system cannot distinguish two keys in a chord, that chord is not
+registered, preventing an incorrect action.
+Older shortcuts remain readable; re-record an unrecognized combination from
+another layout. Global capture may require input/accessibility permissions.
+Push-to-Talk keeps its separately configured keyboard key or mouse button.
+
+### Quality profiles
+
 | Profile | Audio | Camera | Screen | When to use |
 |---|---|---|---|---|
 | Economy | 24 kbps | 360p | 480p | Slow or unstable internet |

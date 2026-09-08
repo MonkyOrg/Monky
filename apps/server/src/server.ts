@@ -15,6 +15,7 @@ import { PermissionService } from './application/services/PermissionService';
 import { RoleService } from './application/services/RoleService';
 import { SignalingService } from './application/services/SignalingService';
 import { UserService } from './application/services/UserService';
+import { listOnlineHumans } from './application/services/onlineHumans';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import {
   SqliteAttachmentRepository,
@@ -299,19 +300,13 @@ export class MonkyServer {
         return;
       }
       if (req.url === '/preview') {
-        const online = getOnlineUsers() as Map<string, { user: { id: string; nickname: string; avatarUrl?: string | null } }>;
-        // Keyed per connection, so collapse a person's devices into one entry (#309).
-        const seenUserIds = new Set<string>();
-        const users = Array.from(online.values())
-          .filter((entry) => {
-            if (seenUserIds.has(entry.user.id)) return false;
-            seenUserIds.add(entry.user.id);
-            return true;
-          })
+        const people = listOnlineHumans(getOnlineUsers().values());
+        const users = people
+          .filter((user) => !user.invisible)
           .slice(0, 10)
-          .map((entry) => ({
-            nickname: entry.user.nickname,
-            avatarUrl: entry.user.avatarUrl || null,
+          .map((user) => ({
+            nickname: user.nickname,
+            avatarUrl: user.avatarUrl || null,
           }));
         Promise.all([serverRepo.getServer(), userRepo.count()])
           .then(([server, memberCount]) => {
@@ -325,7 +320,7 @@ export class MonkyServer {
                 hasPassword: !!(server?.passwordHash && server.passwordHash.length > 0),
                 iconUrl: avatarStorage.getPublicUrl(server?.iconPath),
                 // Distinct people, matching the per-person maxUsers semantics (#309).
-                userCount: seenUserIds.size,
+                userCount: people.length,
                 // Registered members and the cap they count against, so a visitor
                 // can tell whether there is room before trying to join (#403).
                 // `??` rather than `||`: 0 is the "unlimited" sentinel and must
@@ -684,10 +679,7 @@ export class MonkyServer {
 
     // Counts people rather than sockets: one person may hold several sessions
     // since a single identity can be connected from more than one device.
-    const onlineUserIds = new Set<string>();
-    for (const session of this.wsServer.getOnlineUsersMap().values()) {
-      onlineUserIds.add(session.user.id);
-    }
+    const onlineUsers = listOnlineHumans(this.wsServer.getOnlineUsersMap().values()).length;
 
     return {
       serverName: serverRecord?.name ?? this.config.serverName ?? 'Monky Server',
@@ -695,7 +687,7 @@ export class MonkyServer {
       dataDir: this.config.dataDir,
       startedAt: this.startedAt,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
-      onlineUsers: onlineUserIds.size,
+      onlineUsers,
       maxUsers: serverRecord?.maxUsers ?? LIMITS.MAX_USERS_DEFAULT,
       members: members.length,
       channels: channels.length,

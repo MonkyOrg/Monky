@@ -35,6 +35,7 @@ import { soundboardModal } from './SoundboardModal';
 import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
+import { participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
 import { serverRailView } from './ServerRailView';
 import { soundboardPlayersBar } from './SoundboardPlayersBar';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
@@ -47,7 +48,7 @@ import { t, tCount } from '../i18n';
  * signal/connection ("tilted wifi"); `signal_wifi_bad` carries the failure
  * exclamation used while reconnecting.
  */
-const VOICE_ICON_CONNECTED = 'rss_feed';
+const VOICE_ICON_CONNECTED = 'signal_cellular_null';
 const VOICE_ICON_RECONNECTING = 'signal_wifi_bad';
 
 export class MainView {
@@ -169,7 +170,7 @@ export class MainView {
               <div id="user-profile-btn" class="user-profile-summary" title="${t('main.profileSettings')}">
                 <div class="user-avatar-container">
                   <img id="main-user-avatar" class="user-avatar-main ${voiceStore.isSpeaking ? 'speaking' : ''}" src="${getAvatarUrl(u.avatarUrl)}" data-fallback="avatar">
-                  <span id="main-user-status-dot" class="status-indicator ${settingsStore.appearOffline ? 'invisible' : 'online'}"></span>
+                  <span id="main-user-status-dot" class="status-indicator ${settingsStore.appearOffline ? 'invisible' : 'online'}" role="img" aria-label="${settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline')}"></span>
                 </div>
                 <div class="user-info-text">
                   <span id="main-user-name" class="user-name-display">${escapeHtml(u.nickname)}</span>
@@ -281,7 +282,7 @@ export class MainView {
     slot.innerHTML = `
       <div class="voice-connection-row ${reconnecting ? 'reconnecting' : ''}" id="voice-connection-row">
         <div class="voice-conn-info">
-          <span class="material-symbols-outlined md-16 voice-conn-signal ${reconnecting ? 'reconnecting' : ''}"${reconnecting ? ` title="${t('main.reconnectingTitle')}"` : ''}>${signalIcon}</span>
+          <span class="material-symbols-outlined md-16 voice-conn-signal ${reconnecting ? 'reconnecting' : 'unknown'}"${reconnecting ? ` title="${t('main.reconnectingTitle')}"` : ''}>${signalIcon}</span>
           <div class="voice-conn-text">
             <span class="voice-conn-status">${statusText}</span>
             <span class="voice-conn-channel" id="sidebar-voice-channel">${escapeHtml(vc.name)}</span>
@@ -326,13 +327,23 @@ export class MainView {
       const pingEl = document.getElementById('sidebar-voice-ping');
       if (!pingEl) return;
       const isSfu = webRtcManager.isSfuMode();
+      const channelId = voiceStore.currentVoiceChannelId;
       const participants = participantManager.getInVoiceChannel(voiceStore.currentVoiceChannelId || '');
-      if (participants.length <= 1 && !isSfu) {
-        pingEl.textContent = '0 ms';
-        return;
-      }
-      const avg = await webRtcManager.getAverageP2pPing();
+      const avg = participants.length <= 1 && !isSfu ? 0 : await webRtcManager.getAverageP2pPing();
+      if (!pingEl.isConnected || channelId !== voiceStore.currentVoiceChannelId) return;
       pingEl.textContent = avg !== null ? `${avg} ms` : '-- ms';
+      const { quality, icon } = voiceConnectionIndicator(avg, voiceStore.isReconnecting);
+      const signal = document.querySelector<HTMLElement>('.voice-conn-signal');
+      if (signal) {
+        signal.textContent = icon;
+        signal.className = `material-symbols-outlined md-16 voice-conn-signal ${quality}`;
+      }
+      const label = voiceStore.isReconnecting ? t('main.reconnecting')
+        : quality === 'good' ? t('stage.qualityExcellent')
+        : quality === 'medium' ? t('stage.qualityGood')
+        : quality === 'bad' ? t('stage.qualityPoor') : t('stage.pingCalculating');
+      const info = document.querySelector<HTMLElement>('.voice-conn-info');
+      if (info) info.title = `${isSfu ? 'SFU' : 'P2P'} · ${pingEl.textContent} · ${label}`;
     };
     update();
     this.sidebarPingInterval = window.setInterval(update, 2000);
@@ -690,16 +701,15 @@ export class MainView {
                   const isMicMuted = isSelfMuted || isServerMuted || isSelfDeafened || isServerDeafened;
                   const avatar = getAvatarUrl(p.user.avatarUrl);
                   const displayName = participantManager.displayName(p);
-                  const isPeerFailed = !isLocal && (p.peerConnectionFailed ?? false);
-                  const isConnecting = !isLocal && !isPeerFailed && (p.isConnecting ?? false);
-                  const isRelayed = !isLocal && !isPeerFailed && !isConnecting && (p.isRelayed ?? false);
+                  const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
+                  const { isPeerFailed, isConnecting, isRelayed } = participantConnectionIndicators(p, isSfu, isLocal);
 
                   return `
                     <div id="voice-mini-user-${sessionId}" class="voice-participant-mini ${isSpeaking ? 'speaking' : ''}" data-session-id="${sessionId}" title="${escapeHtml(displayName)} (${t('main.rightClickVolumeShort')})">
                       <img class="voice-mini-avatar" src="${avatar}" data-fallback="avatar">
                       <span class="voice-mini-name">${escapeHtml(displayName)}</span>
-                      ${isPeerFailed ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-failed" title="${peerFailureTooltip('main.peerConnectionFailed')}">link_off</span>` : ''}
-                      ${isConnecting ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t('main.peerConnecting')}">sync</span>` : ''}
+                      ${isPeerFailed ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-failed" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('main.peerConnectionFailed')}">link_off</span>` : ''}
+                      ${isConnecting ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t(isSfu ? 'main.sfuConnecting' : 'main.peerConnecting')}">sync</span>` : ''}
                       ${isRelayed ? `<span class="material-symbols-outlined md-14 voice-mini-icon relayed" title="${t('main.peerRelayed')}">swap_horiz</span>` : ''}
                       ${isServerDeafened ? `<span class="material-symbols-outlined md-14 voice-mini-icon muted" title="${t('permissions.serverDeafened')}">hearing_disabled</span>` : ''}
                       ${isServerMuted ? `<span class="material-symbols-outlined md-14 voice-mini-icon muted" title="${t('permissions.serverMuted')}">admin_panel_settings</span>` : ''}
@@ -1267,8 +1277,8 @@ export class MainView {
       const isSelfMuted = !effectiveOffline && (isLocal ? voiceStore.isMuted : (voiceState?.isMuted ?? false));
       const isMicMuted = inVoice && (isSelfMuted || isServerMuted || isSelfDeafened || isServerDeafened);
 
-      const statusClass = isReconnecting ? 'reconnecting' : (inVoice ? 'voice' : (effectiveOffline ? 'offline' : 'online'));
-      const statusText = isReconnecting
+      const statusClass = m.invisible ? 'invisible' : (isReconnecting ? 'reconnecting' : (inVoice ? 'voice' : (effectiveOffline ? 'offline' : 'online')));
+      const statusText = m.invisible ? t('main.statusInvisible') : isReconnecting
         ? t('main.reconnecting')
         : (inVoice ? t('main.inVoiceChannel') : (effectiveOffline ? t('main.statusOffline') : t('main.statusOnline')));
 
@@ -1276,7 +1286,7 @@ export class MainView {
         <div class="member-item ${effectiveOffline ? 'member-offline' : ''} ${isReconnecting ? 'reconnecting' : ''}" data-user-id="${m.id}" title="${escapeHtml(m.nickname)} ${isLocal ? `(${t('common.you')})` : `(${t('main.rightClickVolume')})`}">
           <div class="member-avatar-wrapper">
             <img class="member-avatar-img" src="${avatar}" data-fallback="avatar">
-            <span class="status-indicator ${statusClass}"></span>
+            <span class="status-indicator ${statusClass}" role="img" aria-label="${statusText}"></span>
           </div>
           <div class="member-info">
             <div class="member-name-row">
@@ -1525,6 +1535,7 @@ export class MainView {
       const nameEl = document.getElementById('main-user-name');
       if (avatarEl) avatarEl.src = getAvatarUrl(user.avatarUrl);
       if (nameEl) nameEl.innerText = user.nickname;
+      this.renderMembers();
     });
 
     let lastLocalMuted = voiceStore.isMuted;
@@ -1696,7 +1707,10 @@ export class MainView {
       }
       // Update the user status indicator when appear-offline changes (#561).
       const dot = document.getElementById('main-user-status-dot');
-      if (dot) dot.className = `status-indicator ${settingsStore.appearOffline ? 'invisible' : 'online'}`;
+      if (dot) {
+        dot.className = `status-indicator ${settingsStore.appearOffline ? 'invisible' : 'online'}`;
+        dot.setAttribute('aria-label', settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline'));
+      }
       const statusText = document.getElementById('main-user-status-text');
       if (statusText) statusText.textContent = settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline');
     });

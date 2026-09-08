@@ -20,6 +20,10 @@ Cada canal de texto tem histórico salvo no servidor, avatares, horários, forma
 
 Uma mensagem começada e não enviada fica guardada no canal onde você estava digitando. Ir para o palco de voz, abrir outro canal e voltar não apaga o texto — cada canal guarda o seu rascunho, que só some quando você envia a mensagem ou sai do servidor.
 
+Ao passar o mouse sobre uma mensagem (ou chegar aos botões com `Tab`), uma barra flutuante oferece **Emoji**, **Responder**, **Copiar mensagem** e **Mais opções**. O menu de três pontos mostra os nomes completos; **Editar mensagem** aparece apenas para o autor, se o servidor permitir, e **Apagar mensagem** para o autor ou moderadores. Use as setas para navegar no menu e `Escape` para fechá-lo.
+
+**Responder** mantém uma referência à mensagem original, com autor e prévia. A resposta pode incluir texto, anexos, código ou figurinha; mensagens públicas de bots também podem receber respostas. Cancele pelo `×` no campo de composição ou com `Escape`. A referência acompanha o rascunho do canal. Clicar na prévia leva à mensagem original, carregando uma janela do histórico se necessário; **Voltar às mensagens recentes** retorna ao fim da conversa. A prévia acompanha edições e mostra **Mensagem apagada** se o original for excluído, sem preservar seu conteúdo. Mensagens privadas de bots não podem ser usadas como referência.
+
 ## Menções
 
 Digitar `@` no campo de mensagem abre a lista de membros: escolha alguém para inserir `@apelido`. Quem é mencionado recebe o destaque na mensagem, o badge no canal e o som de menção.
@@ -40,7 +44,9 @@ Quem preferir digitar direto no campo de mensagem também pode: envolver o trech
 
 ## Emojis e figurinhas
 
-O botão de carinha ao lado do campo de mensagem abre um seletor com duas abas.
+O botão de carinha ao lado do campo de mensagem abre um seletor com as abas **Recentes**, **Emojis** e **Figurinhas**.
+
+**Recentes** também aparece no seletor de reações. Os dois compartilham os últimos 32 emojis distintos selecionados neste dispositivo, do mais recente para o mais antigo, mesmo depois de reiniciar o app. Abrir uma aba ou pesquisar não altera a lista; selecionar novamente um emoji o move para o começo. Figurinhas não entram nessa lista.
 
 Em **Emojis** há o catálogo completo, dividido por categorias e com busca em português (procure por `coracao`, `festa`, `bolo`…). Clicar em um emoji o insere onde o cursor estiver, então dá para misturar emoji e texto na mesma mensagem.
 

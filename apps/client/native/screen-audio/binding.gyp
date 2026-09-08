@@ -13,7 +13,7 @@
         [
           "OS=='win'",
           {
-            "sources": ["src/win/wasapi_loopback.cpp", "src/win/window_enum.cpp"],
+            "sources": ["src/win/wasapi_loopback.cpp", "src/win/window_enum.cpp", "src/win/keyboard_layout.cpp"],
             "libraries": [
               "-lMmdevapi",
               "-lOle32",

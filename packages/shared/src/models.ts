@@ -120,7 +120,17 @@ export interface BotCommandContext {
   invokerAvatarUrl?: string | null;
 }
 
+/** Resolved by the server from the original, never supplied by the sender. */
+export interface MessageReply {
+  messageId: string;
+  userNickname: string;
+  content: string;
+  deleted: boolean;
+  hasAttachments: boolean;
+}
+
 export interface ChatMessage {
+  reply?: MessageReply;
   reactions?: import('./reactions.js').MessageReaction[];
   id: string;
   channelId: string;
@@ -165,6 +175,13 @@ export interface UserRoleSummary {
   roleIds: string[];
 }
 
+export type VoiceConnectionHealth = 'connecting' | 'connected' | 'reconnecting' | 'failed';
+
+export interface VoiceRosterParticipant {
+  user: UserSummary;
+  voiceState: VoiceParticipantState;
+}
+
 export interface VoiceParticipantState {
   /** The connection this state belongs to (#309). Unique per device. */
   sessionId: string;
@@ -178,6 +195,8 @@ export interface VoiceParticipantState {
   isCameraOn: boolean;
   isScreenSharing: boolean;
   isSharingScreenAudio: boolean;
+  /** SFU transport health, measured by the server rather than signaling presence. */
+  connectionHealth?: VoiceConnectionHealth;
   /**
    * IDs of the screen shares this participant is currently broadcasting (#253).
    * Each entry is the MediaStream id announced over `screen-video-meta`, so

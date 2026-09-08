@@ -53,4 +53,9 @@ function restoreWindow(hwnd) {
   return binding.restoreWindow(hwnd);
 }
 
-module.exports = { isSupported, start, stop, getLastError, getStatus, listWindowOwners, listWindows, restoreWindow };
+function getKeyboardLayout(previousId = '', characters = '') {
+  if (!binding || typeof binding.getKeyboardLayout !== 'function') return null;
+  return binding.getKeyboardLayout(previousId, characters);
+}
+
+module.exports = { isSupported, start, stop, getLastError, getStatus, listWindowOwners, listWindows, restoreWindow, getKeyboardLayout };

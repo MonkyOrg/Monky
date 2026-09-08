@@ -2,6 +2,7 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { keybindService, KEYBIND_ACTIONS, KeybindActionDefinition } from '../../../core/KeybindService';
 import { t, type TranslationKey } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { captureShortcut } from '../../../utils/keybind';
 
 export class KeybindsTab {
   public renderHtml(): string {
@@ -125,31 +126,8 @@ export class KeybindsTab {
 
     document.body.appendChild(backdrop);
 
-    const onKeyDown = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      if (e.key === 'Escape') {
-        cleanup();
-        return;
-      }
-
-      const modifiers: string[] = [];
-      if (e.ctrlKey) modifiers.push('Control');
-      if (e.altKey) modifiers.push('Alt');
-      if (e.shiftKey) modifiers.push('Shift');
-      if (e.metaKey) modifiers.push('Meta');
-
-      let key = e.key;
-      if (['Control', 'Alt', 'Shift', 'Meta'].includes(key)) return;
-
-      if (key.length === 1) key = key.toUpperCase();
-
-      const acceleratorModifiers = modifiers.map((m) => (m === 'Control' ? 'CommandOrControl' : m));
-      const accelerator = [...acceleratorModifiers, key].join('+');
-      const display = [...modifiers, key].join(' + ');
-
-      settingsStore.keybindShortcuts[actionId] = { accelerator, display };
+    const disposeCapture = captureShortcut(backdrop, backdrop.querySelector('#keybind-capture-box'), (combo) => {
+      settingsStore.keybindShortcuts[actionId] = combo;
       settingsStore.save();
       keybindService.syncShortcuts();
 
@@ -160,14 +138,13 @@ export class KeybindsTab {
         listContainer.innerHTML = this.renderActionsList();
         this.attachEvents(container);
       }
-    };
+    }, () => cleanup(), container);
 
     const cleanup = () => {
-      window.removeEventListener('keydown', onKeyDown, true);
+      disposeCapture();
       backdrop.remove();
     };
 
     backdrop.querySelector('#btn-cancel-action-keybind')?.addEventListener('click', cleanup);
-    window.addEventListener('keydown', onKeyDown, true);
   }
 }

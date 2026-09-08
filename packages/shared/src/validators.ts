@@ -1,6 +1,14 @@
 import { z } from 'zod';
 import { LIMITS, PROTOCOL_VERSION } from './constants.js';
 
+export const messageReferenceSchema = z.string().min(1).max(128);
+export const chatHistoryRequestSchema = z.object({
+  channelId: messageReferenceSchema,
+  limit: z.number().int().positive().optional(),
+  beforeTimestamp: z.number().finite().nonnegative().optional(),
+  aroundMessageId: messageReferenceSchema.optional(),
+});
+
 export const nicknameSchema = z
   .string()
   .min(LIMITS.MIN_NICKNAME_LENGTH, `Nickname deve ter pelo menos ${LIMITS.MIN_NICKNAME_LENGTH} caracteres`)

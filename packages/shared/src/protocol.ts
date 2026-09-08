@@ -241,6 +241,7 @@ export interface AuthFailedPayload {
 }
 
 export interface ChatSendPayload {
+  replyToMessageId?: string;
   channelId: string;
   content: string;
   // Ids of files already uploaded via POST /attachments to be linked to this
@@ -260,6 +261,8 @@ export interface ChatUploadTokenPayload {
 }
 
 export interface ChatLoadHistoryPayload {
+  /** Fetch a history window ending at this message, including the target. */
+  aroundMessageId?: string;
   channelId: string;
   beforeTimestamp?: number;
   limit?: number;
@@ -622,6 +625,7 @@ export interface ChannelDeletedPayload {
 }
 
 export interface ChatHistoryPayload {
+  aroundMessageId?: string;
   channelId: string;
   messages: ChatMessage[];
 }
@@ -631,6 +635,9 @@ export interface VoiceUserJoinedPayload {
   userId: string;
   sessionId: string;
   voiceState: VoiceParticipantState;
+  user?: UserSummary;
+  /** Authoritative channel roster, sent only to the joining connection. */
+  participants?: import('./models.js').VoiceRosterParticipant[];
 }
 
 export interface VoiceUserLeftPayload {
@@ -757,6 +764,7 @@ export interface SfuGetProducersPayload {
 export interface SfuProducersListPayload {
   channelId: string;
   producers: SfuNewProducerPayload[];
+  participants: import('./models.js').VoiceRosterParticipant[];
 }
 
 // ── Bot & Slash Command Payloads (#569) ───────────────────────────────────

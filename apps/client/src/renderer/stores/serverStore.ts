@@ -214,7 +214,12 @@ export class ServerStore {
   }
 
   public updateMember(user: UserSummary): void {
-    this.addMember(user);
+    if (user.status === 'DISCONNECTED') {
+      this.knownMembers.set(user.id, user);
+      this.removeMember(user.id);
+    } else {
+      this.addMember(user);
+    }
   }
 
   public updateServerMeta(
@@ -388,12 +393,11 @@ export class ServerStore {
    * name (#401, #489).
    */
   public getAllMembersInDisplayOrder(): UserSummary[] {
-    const onlineIds = new Set((this.serverDetails?.members ?? []).map((m) => m.id));
     const all = new Map<string, UserSummary>();
 
     // Online members first (authoritative state)
     for (const m of (this.serverDetails?.members ?? [])) {
-      all.set(m.id, m);
+      all.set(m.id, m.invisible ? { ...m, status: 'DISCONNECTED' } : m);
     }
     // Offline members from knownMembers
     for (const [id, m] of this.knownMembers) {
@@ -403,8 +407,8 @@ export class ServerStore {
     }
 
     return Array.from(all.values()).sort((a, b) => {
-      const aOnline = onlineIds.has(a.id) ? 0 : 1;
-      const bOnline = onlineIds.has(b.id) ? 0 : 1;
+      const aOnline = a.status !== 'DISCONNECTED' ? 0 : 1;
+      const bOnline = b.status !== 'DISCONNECTED' ? 0 : 1;
       if (aOnline !== bOnline) return aOnline - bOnline;
       return this.compareMembersForDisplay(a, b);
     });

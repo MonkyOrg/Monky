@@ -22,6 +22,7 @@ import {
   ChatEditPayload,
   ChatHistoryPayload,
   ChatLoadHistoryPayload,
+  chatHistoryRequestSchema,
   ChatMentionsReadPayload,
   ChatMessage,
   ChatMessageUpdatedPayload,
@@ -75,6 +76,7 @@ import {
   VoiceStateUpdatePayload,
   VoiceUserJoinedPayload,
   VoiceUserLeftPayload,
+  VoiceRosterParticipant,
   WebRtcSignalPayload,
   RtcDiagnosticsReportPayload,
   SfuGetRouterRtpCapabilitiesPayload,
@@ -113,7 +115,7 @@ import { UserService } from '../../application/services/UserService';
 import { IServerRepository } from '../../domain/repositories';
 import { scanServerNetworkInterfaces } from '../discovery/ServerIpScanner';
 import { CoturnManager } from '../turn/CoturnManager';
-import { describeSfuPortProblem, SfuManager } from '../sfu/SfuManager';
+import { describeSfuPortProblem, SfuManager, SfuProducerClosedError } from '../sfu/SfuManager';
 import { checkSfuPreflight, formatSfuPreflightForLog } from '../sfu/SfuPreflight';
 import { Logger } from '../logger/Logger';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
@@ -187,6 +189,17 @@ export class WebSocketServer {
     private commandRegistry: CommandRegistry = new CommandRegistry(),
     selectorService?: BotSelectorService
   ) {
+    this.sfuManager.setHealthListener((sessionId, channelId, connectionHealth) => {
+      const current = this.signalingService.getVoiceState(sessionId);
+      if (!current || current.channelId !== channelId || current.connectionHealth === connectionHealth) return;
+      const voiceState = this.signalingService.updateVoiceState(sessionId, { connectionHealth });
+      if (voiceState) {
+        void this.broadcastToChannel(channelId, {
+          type: MessageType.VOICE_STATE_CHANGED,
+          payload: { voiceState } satisfies VoiceStateChangedPayload,
+        }, undefined, () => this.signalingService.getVoiceState(sessionId) === voiceState);
+      }
+    });
     if (selectorService) {
       this.botSelectors = new BotSelectorHandler(selectorService, this.channelService, this.userService, {
         sessions: () => this.sessions.values(),
@@ -825,12 +838,25 @@ export class WebSocketServer {
       iceServers: await this.buildIceServersFor(result.user.id, session),
     };
 
+    // Auth and ICE setup await I/O. Refresh the live roster at the send boundary
+    // so an intervening join/leave cannot be erased by an older auth snapshot.
+    successPayload.server.members = Array.from(this.getOnlineUsersMap().values())
+      .filter(({ user }) => !user.invisible || user.id === result.user!.id)
+      .map(({ user }) => user);
+    successPayload.server.voiceStates = Object.fromEntries(
+      Object.entries(this.signalingService.getAllVoiceStates())
+        .filter(([, state]) => session.visibleChannelIds?.has(state.channelId))
+    );
     this.send(session.ws, {
       type: MessageType.AUTH_SUCCESS,
       requestId,
       payload: successPayload,
     });
     this.handleCommandsList(session);
+
+    if (this.getSessionsOfUser(result.user.id).some((other) => !!other.invisible !== !!session.invisible)) {
+      this.handleUserUpdateVisibility(session, { appearOffline: session.invisible === true });
+    }
 
     // Broadcast USER_JOINED to all other clients — unless the user is invisible (#561).
     if (!session.invisible) {
@@ -1319,12 +1345,13 @@ export class WebSocketServer {
       return;
     }
     const result = bot
-      ? await this.chatService.sendBotMessage(bot, payload.channelId, payload.content, undefined, undefined, () => this.isCurrentSession(session))
+      ? await this.chatService.sendBotMessage(bot, payload.channelId, payload.content, undefined, undefined, () => this.isCurrentSession(session), bot.id, payload.replyToMessageId)
       : await this.chatService.sendMessage(
       session.user.id,
       payload.channelId,
       payload.content,
-      payload.attachmentIds
+      payload.attachmentIds,
+      payload.replyToMessageId
     );
     if (!result.success) {
       this.sendError(
@@ -1451,13 +1478,20 @@ export class WebSocketServer {
     payload: ChatLoadHistoryPayload,
     requestId?: string
   ): Promise<void> {
+    const parsed = chatHistoryRequestSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Histórico inválido.', requestId);
+      return;
+    }
     const messages = await this.chatService.loadHistory(
-      payload.channelId,
-      payload.limit || LIMITS.MAX_HISTORY_MESSAGES_INITIAL,
-      payload.beforeTimestamp
+      parsed.data.channelId,
+      parsed.data.limit || LIMITS.MAX_HISTORY_MESSAGES_INITIAL,
+      parsed.data.beforeTimestamp,
+      parsed.data.aroundMessageId
     );
 
     const historyPayload: ChatHistoryPayload = {
+      aroundMessageId: parsed.data.aroundMessageId,
       channelId: payload.channelId,
       messages,
     };
@@ -1684,13 +1718,7 @@ export class WebSocketServer {
     }
 
     this.applyUserUpdate(result.updatedUser);
-    const updatePayload: UserUpdatedPayload = { user: result.updatedUser };
-
-    this.broadcast({
-      type: MessageType.USER_UPDATED,
-      requestId,
-      payload: updatePayload,
-    });
+    this.broadcastUserUpdate(result.updatedUser, requestId);
   }
 
   private async handleUserUpdateAvatar(
@@ -1712,55 +1740,50 @@ export class WebSocketServer {
     }
 
     this.applyUserUpdate(result.updatedUser);
-    const updatePayload: UserUpdatedPayload = { user: result.updatedUser };
-
-    this.broadcast({
-      type: MessageType.USER_UPDATED,
-      requestId,
-      payload: updatePayload,
-    });
+    this.broadcastUserUpdate(result.updatedUser, requestId);
   }
 
-  /**
-   * Toggle appear-offline on an already-authenticated session (#561).
-   *
-   * Going invisible → broadcast USER_LEFT so other clients drop the user from
-   * their online list. Going visible → broadcast USER_JOINED so they appear.
-   */
+  /** Presence updates must not masquerade as a physical disconnect from voice. */
+  private broadcastUserUpdate(user: UserSummary, requestId?: string): void {
+    const invisible = this.getSessionsOfUser(user.id).some((session) => session.invisible);
+    const publicUser: UserSummary = {
+      ...user,
+      invisible: undefined,
+      ...(invisible ? { status: 'DISCONNECTED', sessionId: undefined, connectedAt: undefined } : {}),
+    };
+    for (const recipient of this.sessions.values()) {
+      if (!recipient.user) continue;
+      const payload: UserUpdatedPayload = {
+        user: recipient.user.id === user.id ? recipient.user : publicUser,
+      };
+      this.send(recipient.ws, { type: MessageType.USER_UPDATED, requestId, payload });
+    }
+  }
+
   private handleUserUpdateVisibility(
     session: ClientSession,
     payload: UserUpdateVisibilityPayload,
-    _requestId?: string
+    requestId?: string
   ): void {
     if (!session.user || !session.sessionId) return;
-    const wasInvisible = !!session.invisible;
-    const nowInvisible = payload.appearOffline === true;
-
-    if (wasInvisible === nowInvisible) return;
-
-    session.invisible = nowInvisible;
-    session.user.invisible = nowInvisible;
+    if (session.isBot || !payload || typeof payload.appearOffline !== 'boolean') {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Visibilidade inválida.', requestId);
+      return;
+    }
+    const nowInvisible = payload.appearOffline;
+    const userSessions = this.getSessionsOfUser(session.user.id);
+    const changed = userSessions.some((other) => !!other.invisible !== nowInvisible);
 
     // Propagate to all sessions of the same user so multi-device is consistent.
-    for (const s of this.getSessionsOfUser(session.user.id)) {
+    for (const s of userSessions) {
       s.invisible = nowInvisible;
       if (s.user) s.user.invisible = nowInvisible;
     }
 
-    if (nowInvisible) {
-      // Tell everyone else the user left (for each device session).
-      for (const s of this.getSessionsOfUser(session.user.id)) {
-        if (!s.sessionId) continue;
-        const leftPayload: UserLeftPayload = {
-          userId: session.user.id,
-          sessionId: s.sessionId,
-          nickname: session.user.nickname,
-        };
-        this.broadcast({ type: MessageType.USER_LEFT, payload: leftPayload }, s.ws);
-      }
-    } else {
+    this.broadcastUserUpdate(session.user, requestId);
+    if (changed && !nowInvisible) {
       // Tell everyone else the user joined (for each device session).
-      for (const s of this.getSessionsOfUser(session.user.id)) {
+      for (const s of userSessions) {
         if (!s.user) continue;
         const joinPayload: UserJoinedPayload = {
           user: { ...s.user, invisible: undefined },
@@ -2013,6 +2036,7 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    const isSfu = (await this.serverRepo.getServer())?.voiceMode === 'sfu';
 
     const result = await this.signalingService.joinVoiceChannel(
       session.sessionId,
@@ -2030,12 +2054,18 @@ export class WebSocketServer {
       );
       return;
     }
+    if (isSfu) {
+      result.voiceState = this.signalingService.updateVoiceState(session.sessionId, {
+        connectionHealth: this.sfuManager.getConnectionHealth(session.sessionId, payload.channelId),
+      }) ?? result.voiceState;
+    }
 
     const joinPayload: VoiceUserJoinedPayload = {
       channelId: payload.channelId,
       userId: session.user.id,
       sessionId: session.sessionId,
       voiceState: result.voiceState,
+      user: this.voiceRosterUser(session.user),
     };
 
     // Whatever this session had in another channel is over: switching channels
@@ -2061,6 +2091,34 @@ export class WebSocketServer {
       type: MessageType.VOICE_USER_JOINED,
       requestId,
       payload: joinPayload,
+    });
+    // Capture and send without an await: membership can change while a scoped
+    // broadcast resolves permissions. The joining client needs today's roster,
+    // not the auth snapshot from before its connection finished.
+    const currentVoiceState = this.signalingService.getVoiceState(session.sessionId);
+    if (currentVoiceState?.channelId === payload.channelId) {
+      this.send(session.ws, {
+        type: MessageType.VOICE_USER_JOINED,
+        payload: {
+          ...joinPayload,
+          user: session.user,
+          voiceState: currentVoiceState,
+          participants: this.getVoiceRoster(payload.channelId, session.user.id),
+        } satisfies VoiceUserJoinedPayload,
+      });
+    }
+  }
+
+  private voiceRosterUser(user: UserSummary, viewerUserId?: string): UserSummary {
+    if (user.id === viewerUserId) return user;
+    // Voice needs physical session IDs even when logical presence is offline.
+    return { ...user, invisible: undefined, ...(user.invisible ? { status: 'DISCONNECTED' } : {}) };
+  }
+
+  private getVoiceRoster(channelId: string, viewerUserId?: string): VoiceRosterParticipant[] {
+    return this.signalingService.getParticipantsInChannel(channelId).flatMap((voiceState) => {
+      const user = this.findSessionById(voiceState.sessionId)?.user;
+      return user ? [{ user: this.voiceRosterUser(user, viewerUserId), voiceState }] : [];
     });
   }
 
@@ -2106,7 +2164,11 @@ export class WebSocketServer {
       effectivePayload.isSpeaking = false;
     }
 
-    const updated = this.signalingService.updateVoiceState(session.sessionId, effectivePayload);
+    // Health is server-observed; renderer payloads cannot overwrite it.
+    const updated = this.signalingService.updateVoiceState(session.sessionId, {
+      ...effectivePayload,
+      connectionHealth: current?.connectionHealth,
+    });
     if (updated) {
       const changedPayload: VoiceStateChangedPayload = { voiceState: updated };
       this.broadcast({
@@ -2332,9 +2394,19 @@ export class WebSocketServer {
           ...consumed,
         } satisfies SfuConsumedPayload,
       });
-    } catch (err: any) {
+    } catch (err) {
+      if (err instanceof SfuProducerClosedError) {
+        // The normal close broadcast may still be awaiting channel permissions.
+        // Complete this request with the same terminal event, not a link error.
+        this.send(session.ws, {
+          type: MessageType.SFU_PRODUCER_CLOSED,
+          requestId,
+          payload: { channelId: payload.channelId, producerId: err.producerId } satisfies SfuProducerClosedPayload,
+        });
+        return;
+      }
       console.error(`[SFU Server:WS] Error consuming producer ${payload.producerId} for ${session.user.nickname}:`, err);
-      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, err?.message || 'Erro ao consumir mídia no SFU', requestId);
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, err instanceof Error ? err.message : 'Erro ao consumir mídia no SFU', requestId);
     }
   }
 
@@ -2374,6 +2446,7 @@ export class WebSocketServer {
         payload: {
           channelId: payload.channelId,
           producers,
+          participants: this.getVoiceRoster(payload.channelId, session.user.id),
         } satisfies SfuProducersListPayload,
       });
     } catch (err: any) {
@@ -2695,6 +2768,7 @@ export class WebSocketServer {
         ...updatedUser,
         sessionId: target.sessionId,
         connectedAt: target.user?.connectedAt,
+        invisible: target.invisible,
       };
     }
   }
