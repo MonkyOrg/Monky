@@ -2119,7 +2119,8 @@ input:focus, textarea:focus, select:focus {
   pointer-events: none;
 }
 .chat-message-row:hover > .chat-message-toolbar,
-.chat-message-row:focus-within > .chat-message-toolbar {
+.chat-message-row:focus-within > .chat-message-toolbar,
+.chat-message-toolbar.copy-confirmed {
   opacity: 1;
   pointer-events: auto;
 }
@@ -2140,6 +2141,16 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-primary);
 }
 .chat-message-toolbar button:disabled { opacity: .4; cursor: not-allowed; }
+.chat-message-toolbar.copy-confirmed [data-message-action="copy"],
+.chat-message-copy-status {
+  color: var(--success);
+}
+.chat-message-copy-status {
+  font-size: 12px;
+  white-space: nowrap;
+  padding: 0 4px;
+}
+.chat-message-copy-status:empty { display: none; }
 .chat-message-row:focus { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
 .chat-reply-reference {
   display: flex;
@@ -3727,11 +3738,14 @@ input:focus, textarea:focus, select:focus {
   border-color: var(--border-focus);
 }
 
-.emoji-picker-search-input {
+.emoji-picker input.emoji-picker-search-input {
   flex: 1;
+  min-width: 0;
   height: 30px;
+  padding: 0;
   background: transparent;
   border: none;
+  border-radius: 0;
   outline: none;
   color: var(--text-primary);
   font-size: 12px;
@@ -3754,6 +3768,12 @@ input:focus, textarea:focus, select:focus {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+.emoji-picker-recent-empty {
+  padding: 8px 4px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .emoji-picker-grid {
@@ -3830,9 +3850,13 @@ input:focus, textarea:focus, select:focus {
 }
 
 .emoji-picker-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
   background: transparent;
+  color: var(--text-secondary);
   border: none;
   border-radius: 6px;
   font-size: 16px;

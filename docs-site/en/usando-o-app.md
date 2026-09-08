@@ -44,9 +44,9 @@ You can also type it straight into the message field: wrapping the snippet in th
 
 ## Emojis and stickers
 
-The smiley button next to the message field opens a picker with **Recent**, **Emojis** and **Stickers** tabs.
+The smiley button next to the message field opens a picker with **Emojis** and **Stickers** tabs. In the emoji category bar at the bottom, the clock icon takes you to **Recent**.
 
-**Recent** also appears in the reaction picker. Both share the last 32 distinct emojis selected on this device, newest first, even after restarting the app. Opening a tab or searching does not change the list; selecting an emoji again moves it to the front. Stickers are not included.
+The **Recent** clock also appears in the reaction picker's category bar. Both share the last 32 distinct emojis selected on this device, newest first, even after restarting the app. Navigating categories or searching does not change the list; selecting an emoji again moves it to the front. Stickers are not included.
 
 **Emojis** holds the full catalog, split by category and searchable (try `heart`, `party`, `cake`…). Clicking an emoji inserts it at the cursor, so you can mix emoji and text in the same message.
 

@@ -80,6 +80,8 @@ export class ChatView {
   private emojiPicker: EmojiPicker | null = null;
   private reactionPicker: EmojiPicker | null = null;
   private pendingJumpId: string | null = null;
+  private copyRequestId = 0;
+  private clearCopyFeedback: (() => void) | null = null;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -849,6 +851,7 @@ export class ChatView {
       ${button('emoji', 'add_reaction', t('chat.emojiAction'), `class="chat-reaction-add" ${disabled}`)}
       ${button('reply', 'reply', t('chat.replyMessage'), disabled)}
       ${button('copy', 'content_copy', t('chat.copyMessage'))}
+      <span class="chat-message-copy-status" role="status"></span>
       ${button('more', 'more_horiz', t('chat.moreActions'), 'aria-haspopup="menu"')}
     </div>`;
   }
@@ -897,12 +900,39 @@ export class ChatView {
   private async copyMessage(messageId: string): Promise<void> {
     const message = this.currentChannelId ? chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === messageId) : undefined;
     if (!message || message.deletedAt) return;
+    const requestId = ++this.copyRequestId;
+    this.clearCopyFeedback?.();
     try {
       await navigator.clipboard.writeText(message.content || message.attachments?.map((entry) => entry.originalName).join('\n') || '');
     } catch (error) {
       console.warn('[ChatView] Could not copy message', error);
-      void showAlert({ message: t('chat.copyFailed'), variant: 'danger' });
+      if (requestId === this.copyRequestId) void showAlert({ message: t('chat.copyFailed'), variant: 'danger' });
+      return;
     }
+    if (requestId !== this.copyRequestId) return;
+    const toolbar = this.container.querySelector<HTMLElement>(
+      `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] .chat-message-toolbar`
+    );
+    const button = toolbar?.querySelector<HTMLButtonElement>('[data-message-action="copy"]');
+    const icon = button?.querySelector<HTMLElement>('.material-symbols-outlined');
+    const status = toolbar?.querySelector<HTMLElement>('.chat-message-copy-status');
+    if (!toolbar || !button || !icon || !status) return;
+    toolbar.classList.add('copy-confirmed');
+    icon.textContent = 'check';
+    status.textContent = t('chat.messageCopied');
+    button.title = t('chat.messageCopied');
+    button.setAttribute('aria-label', t('chat.messageCopied'));
+    const clear = () => {
+      window.clearTimeout(timeout);
+      toolbar.classList.remove('copy-confirmed');
+      icon.textContent = 'content_copy';
+      status.textContent = '';
+      button.title = t('chat.copyMessage');
+      button.setAttribute('aria-label', t('chat.copyMessage'));
+      this.clearCopyFeedback = null;
+    };
+    const timeout = window.setTimeout(clear, 1600);
+    this.clearCopyFeedback = clear;
   }
 
   private jumpToMessage(messageId: string): void {
@@ -2340,6 +2370,8 @@ export class ChatView {
   }
 
   private unbindListeners(): void {
+    this.copyRequestId++;
+    this.clearCopyFeedback?.();
     contextMenu.close();
     this.pendingJumpId = null;
     this.publicSelectors?.destroy();
