@@ -4,6 +4,7 @@ import {
   type BotForm,
   type BotFormValues,
   type ChatMessage,
+  type ChatReactionEventPayload,
   type CommandFinishedPayload,
   type CommandFinishReason,
   type CommandInvokedPayload,
@@ -115,10 +116,12 @@ export class ChatStore {
       .sort((a, b) => a.createdAt - b.createdAt)
       .slice(-ChatStore.MAX_MESSAGES_PER_CHANNEL);
     this.messages.set(channelId, trimmed);
+    for (const message of trimmed) this.recordBotResponse(message);
     this.bus.emit('chat.history_loaded', { channelId, messages: trimmed });
   }
 
   public addMessage(message: ChatMessage): void {
+    this.recordBotResponse(message);
     let list = this.messages.get(message.channelId);
     if (!list) {
       list = [];
@@ -132,14 +135,17 @@ export class ChatStore {
     if (list.length > ChatStore.MAX_MESSAGES_PER_CHANNEL) {
       list.splice(0, list.length - ChatStore.MAX_MESSAGES_PER_CHANNEL);
     }
+    this.bus.emit('chat.message_added', message);
+  }
+
+  private recordBotResponse(message: ChatMessage): void {
     const invocation = message.isBot && message.botCommand
       ? this.invocations.get(message.botCommand.invocationId)
       : undefined;
-    const firstResponse = invocation && !invocation.hasResponse &&
-      invocation.botId === message.userId && invocation.channelId === message.channelId;
-    if (firstResponse) invocation.hasResponse = true;
-    this.bus.emit('chat.message_added', message);
-    if (firstResponse && invocation.status === 'completed' && invocation.forms.length === 0) this.notifyInvocation(invocation);
+    if (!invocation || invocation.hasResponse ||
+        invocation.botId !== message.userId || invocation.channelId !== message.channelId) return;
+    invocation.hasResponse = true;
+    if (invocation.status === 'completed') this.notifyInvocation(invocation);
   }
 
   /**
@@ -163,6 +169,23 @@ export class ChatStore {
 
   public getMessages(channelId: string): ChatMessage[] {
     return this.messages.get(channelId) || [];
+  }
+
+  public updateReaction(event: ChatReactionEventPayload, add: boolean): void {
+    const message = this.messages.get(event.channelId)?.find((entry) => entry.id === event.messageId);
+    if (!message || message.deletedAt || message.isSystem || message.isEphemeral) return;
+    const reactions = message.reactions ?? (message.reactions = []);
+    let reaction = reactions.find((entry) => entry.emoji === event.emoji);
+    if (add) {
+      if (!reaction) { reaction = { emoji: event.emoji, users: [] }; reactions.push(reaction); }
+      if (!reaction.users.some((user) => user.userId === event.userId)) {
+        reaction.users.push({ userId: event.userId, userNickname: event.userNickname });
+      }
+    } else if (reaction) {
+      reaction.users = reaction.users.filter((user) => user.userId !== event.userId);
+      if (reaction.users.length === 0) reactions.splice(reactions.indexOf(reaction), 1);
+    }
+    this.bus.emit('chat.reactions_updated', message);
   }
 
   /** Flag a text channel as having an unread @-mention (#14). */
@@ -438,7 +461,8 @@ export class ChatStore {
     const invocation = this.invocations.get(payload.invocationId);
     const form = invocation?.forms.find((entry) => entry.interactionId === payload.interactionId);
     if (!invocation || !form || (invocation.status !== 'active' && form.status !== 'submitted')) return;
-    form.values = { ...payload.values };
+    // Keep the consumed interaction ID for replay protection, not its input.
+    form.values = {};
     form.status = 'submitted';
     form.error = undefined;
     this.notifyInvocation(invocation);

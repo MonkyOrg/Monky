@@ -409,6 +409,7 @@ export class AuthService {
         createdAt: c.createdAt,
         maxParticipants: c.maxParticipants,
         isPrivate: c.isPrivate,
+        botCommandsEnabled: c.botCommandsEnabled,
         allowedRoleIds: c.allowedRoleIds,
       })),
       members,

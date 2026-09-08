@@ -42,10 +42,22 @@ export enum ProtocolErrorCode {
 }
 
 export enum MessageType {
+  SELECTOR_CREATE = 'SELECTOR_CREATE',
+  SELECTOR_LIST = 'SELECTOR_LIST',
+  SELECTOR_UPDATE = 'SELECTOR_UPDATE',
+  SELECTOR_CLOSE = 'SELECTOR_CLOSE',
+  SELECTOR_RESPOND = 'SELECTOR_RESPOND',
+  SELECTOR_FINALIZE = 'SELECTOR_FINALIZE',
+  SELECTOR_SNAPSHOT = 'SELECTOR_SNAPSHOT',
+  SELECTOR_LIST_RESULT = 'SELECTOR_LIST_RESULT',
   // Client -> Server
   AUTH_CONNECT = 'AUTH_CONNECT',
   AUTH_CHALLENGE_RESPONSE = 'AUTH_CHALLENGE_RESPONSE',
   CHAT_SEND = 'CHAT_SEND',
+  CHAT_REACTION_ADD = 'CHAT_REACTION_ADD',
+  CHAT_REACTION_REMOVE = 'CHAT_REACTION_REMOVE',
+  CHAT_REACTION_ADDED = 'CHAT_REACTION_ADDED',
+  CHAT_REACTION_REMOVED = 'CHAT_REACTION_REMOVED',
   CHAT_LOAD_HISTORY = 'CHAT_LOAD_HISTORY',
   CHAT_MENTIONS_READ = 'CHAT_MENTIONS_READ',
   /** Client -> server: rewrite the content of a message the caller wrote (#504). */
@@ -260,6 +272,7 @@ export interface ChatMentionsReadPayload {
 }
 
 export interface ChannelCreatePayload {
+  botCommandsEnabled?: boolean;
   name: string;
   type: 'VOICE' | 'TEXT';
   maxParticipants?: number;
@@ -273,6 +286,7 @@ export interface ChannelCreatePayload {
  * resending the name.
  */
 export interface ChannelUpdatePayload {
+  botCommandsEnabled?: boolean;
   channelId: string;
   name?: string;
   maxParticipants?: number;

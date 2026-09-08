@@ -16,6 +16,35 @@ export interface ChannelPrivacySelection {
   allowedRoleIds: string[];
 }
 
+export function renderChannelBotCommandsField(enabled: boolean, type: 'TEXT' | 'VOICE'): string {
+  return `<div class="form-group" id="channel-bot-commands-group" ${type === 'VOICE' ? 'hidden' : ''}>
+    <div class="channel-privacy-row">
+      <div class="channel-privacy-info">
+        <span class="channel-privacy-title">${t('channelModal.botCommandsLabel')}</span>
+        <span class="channel-privacy-desc">${t('channelModal.botCommandsHint')}</span>
+      </div>
+      <label class="toggle-switch" aria-label="${t('channelModal.botCommandsLabel')}">
+        <input type="checkbox" id="input-channel-bot-commands" ${enabled ? 'checked' : ''}>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+  </div>`;
+}
+
+export function readChannelBotCommandsField(root: HTMLElement): boolean {
+  return root.querySelector<HTMLInputElement>('#input-channel-bot-commands')?.checked ?? true;
+}
+
+export function attachChannelBotCommandsField(root: HTMLElement): () => void {
+  const group = root.querySelector<HTMLElement>('#channel-bot-commands-group');
+  const inputs = root.querySelectorAll<HTMLInputElement>('input[name="channel-type"]');
+  const sync = () => {
+    if (group) group.hidden = root.querySelector<HTMLInputElement>('input[name="channel-type"]:checked')?.value === 'VOICE';
+  };
+  inputs.forEach((input) => input.addEventListener('change', sync));
+  return () => inputs.forEach((input) => input.removeEventListener('change', sync));
+}
+
 export function renderChannelPrivacyFields(selection: ChannelPrivacySelection): string {
   const roles = serverStore.getVisibleRoles();
   const selected = new Set(selection.allowedRoleIds);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -22,14 +22,18 @@ import {
 import { AttachmentService } from './application/services/AttachmentService';
 import { AuthService } from './application/services/AuthService';
 import { BotService } from './application/services/BotService';
+import { BotSelectorService } from './application/services/BotSelectorService';
+import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
 import { ChannelService } from './application/services/ChannelService';
 import { ChatService } from './application/services/ChatService';
+import type { MessageRecord } from './domain/entities';
 import { CommandRegistry } from './application/services/CommandRegistry';
 import { PermissionService } from './application/services/PermissionService';
 import { RoleService } from './application/services/RoleService';
 import { SignalingService } from './application/services/SignalingService';
 import { UserService } from './application/services/UserService';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
+import { SqlJsDriver } from './infrastructure/database/SqliteWrapper';
 import {
   SqliteAttachmentRepository,
   SqliteBotRepository,
@@ -184,15 +188,16 @@ async function createFixture() {
   });
   await ensureServerSeedData({ serverName: 'Bot tests', maxUsers: 10 }, serverRepo, channelRepo, roleRepo);
   const httpServer = http.createServer();
+  const chatService = new ChatService(
+    messageRepo, channelRepo, userRepo, mentionRepo, avatars, rateLimiter, attachmentService, serverRepo,
+    (userId, channelId) => channelService.canUserAccessChannel(userId, channelId)
+  );
   const wsServer = new WebSocketServer(
     httpServer,
     new AuthService(serverRepo, userRepo, channelRepo, mentionRepo, avatars, () => online(), attachmentService, permissions, roleService),
     userService,
     channelService,
-    new ChatService(
-      messageRepo, channelRepo, userRepo, mentionRepo, avatars, rateLimiter, attachmentService, serverRepo,
-      (userId, channelId) => channelService.canUserAccessChannel(userId, channelId)
-    ),
+    chatService,
     new SignalingService(channelRepo),
     serverRepo,
     attachmentService,
@@ -201,7 +206,8 @@ async function createFixture() {
     new CoturnManager(dataDir),
     new SfuManager(),
     botService,
-    registry
+    registry,
+    new BotSelectorService(new SqliteBotSelectorRepository(database.getDb()))
   );
   online = () => wsServer.getOnlineUsersMap();
   httpServer.listen(0, '127.0.0.1');
@@ -245,13 +251,417 @@ async function createFixture() {
   };
   return {
     connect, human, bot, dispose, peers, wsServer, botService, botRepo, roleRepo, avatars,
-    channelService, userService, registry, dataDir,
+    channelService, userService, registry, dataDir, messageRepo, channelRepo, userRepo, serverRepo, chatService,
   };
 }
 
 function hasInvocation(message: Received, type: MessageType, id: string): boolean {
   return message.type === type && message.payload.invocationId === id;
 }
+
+test('public selectors persist responses, expire across restart and count distinct voters atomically', async () => {
+  const dbPath = path.join(__dirname, '..', `.selector-test-${randomUUID()}.db`);
+  let db = await SqlJsDriver.create(dbPath);
+  try {
+    db.exec(`CREATE TABLE bot_selectors (
+      id TEXT PRIMARY KEY, bot_id TEXT, channel_id TEXT, snapshot TEXT, closed_at INTEGER, expires_at INTEGER
+    )`);
+    let selectors = new BotSelectorService(new SqliteBotSelectorRepository(db));
+    const input = {
+      id: 'durable-poll', channelId: 'text', title: 'Choose?', choices: [
+        { label: 'A', value: 'a' }, { label: 'B', value: 'b' },
+      ], presentation: 'buttons' as const, responder: 'any' as const, allowChange: true,
+      expiresAt: 2000, maxResponders: 2,
+    };
+    const first = selectors.create('bot', input, 1000);
+    const scoped = selectors.create('bot', { ...input, id: 'scoped', invocationId: 'authorized-invocation' }, 1000, 'alice');
+    assert.equal(scoped.creatorUserId, 'alice');
+    assert.equal(scoped.invokerId, 'alice');
+    assert.equal(selectors.create('bot', input, 1000).messageId, first.messageId);
+    selectors.respond(first.id, 'alice', 'a', 1001);
+    selectors.respond(first.id, 'alice', 'b', 1002);
+    assert.deepEqual(selectors.get(first.id)?.responses, { alice: 'b' });
+    assert.equal(selectors.get(first.id)?.closedAt, null);
+    db.close();
+    db = await SqlJsDriver.create(dbPath);
+    selectors = new BotSelectorService(new SqliteBotSelectorRepository(db));
+    assert.equal(selectors.get(scoped.id)?.creatorUserId, 'alice');
+    assert.equal(selectors.get(scoped.id)?.sourceInvocationId, 'authorized-invocation');
+    assert.deepEqual(selectors.get(first.id)?.responses, { alice: 'b' });
+    const closed = selectors.respond(first.id, 'bob', 'a', 1003);
+    assert.equal(closed.closedAt, 1003);
+    assert.throws(() => selectors.respond(first.id, 'alice', 'a', 1004));
+    assert.throws(() => selectors.update(first.id, 'bot', { maxResponders: 3 }, 1004));
+    assert.equal(selectors.markFinalized(first.id, 'bot', 'final-one').resultMessageId, 'final-one');
+    assert.equal(selectors.markFinalized(first.id, 'bot', 'final-two').resultMessageId, 'final-one');
+    const timed = selectors.create('bot', { ...input, id: 'timed', maxResponders: undefined }, 1000);
+    assert.throws(() => selectors.respond(timed.id, 'alice', 'a', 2000));
+    assert.equal(selectors.expire(2500)[0].closedAt, 2000);
+    assert.deepEqual(selectors.get(timed.id)?.responses, {});
+    const privateResponder = selectors.create('bot', {
+      ...input, id: 'invoker-only', responder: 'invoker', invokerId: 'alice', allowChange: false,
+    }, 1000);
+    assert.throws(() => selectors.respond(privateResponder.id, 'bob', 'a', 1001));
+    selectors.respond(privateResponder.id, 'alice', 'a', 1001);
+    assert.throws(() => selectors.respond(privateResponder.id, 'alice', 'b', 1002));
+    assert.throws(() => selectors.close(privateResponder.id, 'another-bot', 1002));
+    assert.equal(selectors.close(privateResponder.id, 'bot', 1002).closedAt, 1002);
+  } finally {
+    db.close();
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test('public selectors publish durable controls, enforce permissions and finalize only once', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.dispose());
+  const owner = await fixture.human('Selector owner');
+  const alice = await fixture.human('Selector Alice');
+  const bob = await fixture.human('Selector Bob');
+  const channelId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'TEXT')?.id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Selector bot' });
+  const bot = await fixture.bot(text(created.payload.token));
+  const input = {
+    id: randomUUID(), channelId, title: 'Choose A or B', choices: [
+      { label: 'A', value: 'a' }, { label: 'B', value: 'b' },
+    ], presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 2,
+    metadata: { kind: 'poll', locale: 'en' },
+  };
+  const published = await bot.peer.request(MessageType.SELECTOR_CREATE, input);
+  assert.equal(published.type, MessageType.SELECTOR_SNAPSHOT);
+  const id = text(published.payload.id);
+  const messageId = text(published.payload.messageId);
+  const replay = await bot.peer.request(MessageType.SELECTOR_CREATE, input);
+  assert.equal(replay.payload.messageId, messageId);
+  const history = await owner.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId });
+  assert.equal(records(history.payload.messages).filter((message) => message.id === messageId).length, 1);
+  const publicList = await alice.peer.request(MessageType.SELECTOR_LIST, { channelId });
+  const publicSnapshot = records(publicList.payload.selectors)[0];
+  assert.equal('responses' in publicSnapshot, false);
+  assert.equal('metadata' in publicSnapshot, false);
+  await bot.peer.error(MessageType.SELECTOR_RESPOND, { id, value: 'a' }, ProtocolErrorCode.PERMISSION_DENIED);
+  await alice.peer.request(MessageType.SELECTOR_RESPOND, { id, value: 'a' });
+  const changed = await alice.peer.request(MessageType.SELECTOR_RESPOND, { id, value: 'b' });
+  assert.equal(changed.payload.responseCount, 1);
+  assert.equal(changed.payload.closedAt, null);
+  assert.equal(changed.payload.ownResponse, 'b');
+  assert.deepEqual(record(changed.payload.counts), { a: 0, b: 1 });
+  const closed = await bob.peer.request(MessageType.SELECTOR_RESPOND, { id, value: 'a' });
+  assert.equal(closed.payload.responseCount, 2);
+  assert.equal(closed.payload.canRespond, false);
+  await alice.peer.error(MessageType.SELECTOR_RESPOND, { id, value: 'a' }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+  const results = await Promise.all([
+    bot.peer.request(MessageType.SELECTOR_FINALIZE, { id, content: 'Final: tie 50% / 50%' }),
+    bot.peer.request(MessageType.SELECTOR_FINALIZE, { id, content: 'Final: tie 50% / 50%' }),
+  ]);
+  assert.equal(results[0].payload.resultMessageId, results[1].payload.resultMessageId);
+  const finalHistory = await owner.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId });
+  assert.equal(records(finalHistory.payload.messages).filter((message) => message.id === results[0].payload.resultMessageId).length, 1);
+  const another = await bot.peer.request(MessageType.SELECTOR_CREATE, { ...input, id: randomUUID() });
+  const memberRole = await fixture.roleRepo.findByName('Membro');
+  assert.ok(memberRole);
+  await fixture.roleRepo.update(memberRole.id, { permissions: memberRole.permissions & ~Permission.USE_BOT_COMMANDS });
+  await alice.peer.error(MessageType.SELECTOR_RESPOND, { id: another.payload.id, value: 'a' }, ProtocolErrorCode.PERMISSION_DENIED);
+  await fixture.roleRepo.update(memberRole.id, { permissions: memberRole.permissions });
+  const concurrent = await Promise.all([alice, bob, owner].map(({ peer }) =>
+    peer.request(MessageType.SELECTOR_RESPOND, { id: another.payload.id, value: 'a' })
+  ));
+  assert.equal(concurrent.filter((message) => message.type === MessageType.SELECTOR_SNAPSHOT).length, 2);
+  assert.equal(concurrent.filter((message) => message.type === MessageType.SERVER_ERROR).length, 1);
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId, botCommandsEnabled: false });
+  await owner.peer.error(MessageType.SELECTOR_RESPOND, { id: another.payload.id, value: 'a' }, ProtocolErrorCode.PERMISSION_DENIED);
+});
+
+test('private channel selectors bind invocations and revalidate durable creator capabilities', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.dispose());
+  const owner = await fixture.human('Capability owner');
+  const creator = await fixture.human('Capability creator');
+  const voter = await fixture.human('Capability voter');
+  const memberRole = await fixture.roleRepo.findByName('Membro');
+  assert.ok(memberRole);
+  await fixture.roleRepo.update(memberRole.id, { permissions: 0 });
+  const creatorRole = {
+    id: randomUUID(), name: 'Poll creators', color: '#123456', permissions: DEFAULT_PERMISSIONS,
+    position: 1, isDefault: false, createdAt: Date.now(),
+  };
+  const voterRole = { ...creatorRole, id: randomUUID(), name: 'Poll voters' };
+  await fixture.roleRepo.create(creatorRole);
+  await fixture.roleRepo.create(voterRole);
+  await fixture.roleRepo.assignRole(creator.id, creatorRole.id);
+  await fixture.roleRepo.assignRole(voter.id, voterRole.id);
+  const channel = await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'private-polls', type: 'TEXT', isPrivate: true, allowedRoleIds: [creatorRole.id, voterRole.id],
+  });
+  const channelId = text(record(channel.payload.channel).id);
+  const publicChannelId = text(records(record(owner.auth.payload.server).channels).find((entry) => entry.type === 'TEXT')?.id);
+  const account = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Capability bot' });
+  const botId = text(record(account.payload.bot).id);
+  const token = text(account.payload.token);
+  let bot = await fixture.bot(token);
+  const otherAccount = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Other capability bot' });
+  const otherBot = await fixture.bot(text(otherAccount.payload.token));
+  await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: [{ name: 'enquete', description: 'Private-channel poll' }] });
+  const invoke = async () => {
+    const call = await creator.peer.request(MessageType.COMMAND_INVOKE, {
+      botId, channelId, commandName: 'enquete', locale: 'en',
+    });
+    return text(call.payload.invocationId);
+  };
+  const invocationId = await invoke();
+  const input = {
+    id: randomUUID(), invocationId, invokerId: creator.id, channelId, title: 'Private poll?',
+    choices: [{ label: 'A', value: 'a' }, { label: 'B', value: 'b' }],
+    presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 2,
+  };
+  await otherBot.peer.error(MessageType.SELECTOR_CREATE, input, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.error(MessageType.SELECTOR_CREATE, { ...input, invocationId: randomUUID() }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.error(MessageType.SELECTOR_CREATE, { ...input, channelId: publicChannelId }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.error(MessageType.SELECTOR_CREATE, { ...input, invokerId: owner.id }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.error(MessageType.SELECTOR_CREATE, { ...input, creatorUserId: owner.id }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+  const { invocationId: _invocation, ...rawInput } = input;
+  await bot.peer.error(MessageType.SELECTOR_CREATE, rawInput, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await bot.peer.error(MessageType.CHAT_SEND, { channelId, content: 'No global inherited access' }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  const created = await bot.peer.request(MessageType.SELECTOR_CREATE, input);
+  assert.equal(created.payload.creatorUserId, creator.id);
+  assert.equal(created.payload.sourceInvocationId, invocationId);
+  const id = text(created.payload.id);
+  const messageId = text(created.payload.messageId);
+  const history = await voter.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId });
+  assert.equal(records(history.payload.messages).filter((message) => message.id === messageId && message.userId === botId).length, 1);
+  await bot.peer.error(MessageType.CHAT_REACTION_ADD, { channelId, messageId, emoji: '👍' }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await bot.peer.request(MessageType.COMMAND_FINISH, { invocationId });
+  await bot.peer.error(MessageType.SELECTOR_CREATE, { ...input, id: randomUUID() }, ProtocolErrorCode.PERMISSION_DENIED);
+  const replay = await bot.peer.request(MessageType.SELECTOR_CREATE, input);
+  assert.equal(replay.payload.messageId, messageId);
+  assert.equal((await bot.peer.request(MessageType.SELECTOR_CREATE, rawInput)).payload.messageId, messageId,
+    'Replaying an existing selector uses its persisted principal, not an active invocation or supplied user ID.');
+  const visible = await voter.peer.request(MessageType.SELECTOR_LIST, { channelId });
+  const snapshot = records(visible.payload.selectors)[0];
+  assert.equal('creatorUserId' in snapshot, false);
+  assert.equal('sourceInvocationId' in snapshot, false);
+  assert.equal('responses' in snapshot, false);
+  assert.deepEqual(records((await otherBot.peer.request(MessageType.SELECTOR_LIST, { channelId })).payload.selectors), []);
+  await voter.peer.request(MessageType.SELECTOR_RESPOND, { id, value: 'a' });
+  const keys = bot.keys;
+  await bot.peer.close();
+  bot = await fixture.bot(token, keys);
+  await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: [{ name: 'enquete', description: 'Recovered private-channel poll' }] });
+  const recovered = records((await bot.peer.request(MessageType.SELECTOR_LIST, {})).payload.selectors)[0];
+  assert.equal(recovered.creatorUserId, creator.id);
+  assert.deepEqual(record(recovered.responses), { [voter.id]: 'a' });
+  await creator.peer.request(MessageType.SELECTOR_RESPOND, { id, value: 'b' });
+  const finalized = await bot.peer.request(MessageType.SELECTOR_FINALIZE, { id, content: 'Private final: tie' });
+  const finalId = text(finalized.payload.resultMessageId);
+  assert.equal((await bot.peer.request(MessageType.SELECTOR_FINALIZE, { id, content: 'Private final: tie' })).payload.resultMessageId, finalId);
+  assert.equal(records((await voter.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId })).payload.messages)
+    .filter((message) => message.id === finalId).length, 1);
+
+  const liveInvocation = await invoke();
+  const live = await bot.peer.request(MessageType.SELECTOR_CREATE, {
+    ...input, id: randomUUID(), invocationId: liveInvocation, maxResponders: 10,
+  });
+  const liveId = text(live.payload.id);
+  await bot.peer.request(MessageType.COMMAND_FINISH, { invocationId: liveInvocation });
+  const access = fixture.channelService.getAccessContext.bind(fixture.channelService);
+  const brokenList = t.mock.method(fixture.channelService, 'getAccessContext', async (userId: string) => {
+    if (userId === creator.id) throw new Error('selector-list-database-failure');
+    return access(userId);
+  });
+  const listFailure = await bot.peer.request(MessageType.SELECTOR_LIST, {});
+  assert.equal(listFailure.type, MessageType.SERVER_ERROR);
+  assert.equal(listFailure.payload.message, 'selector-list-database-failure');
+  brokenList.mock.restore();
+  let voterChecks = 0;
+  const brokenPublic = t.mock.method(fixture.channelService, 'getAccessContext', async (userId: string) => {
+    if (userId === voter.id && ++voterChecks === 2) throw new Error('selector-public-database-failure');
+    return access(userId);
+  });
+  const publicFailure = await voter.peer.request(MessageType.SELECTOR_LIST, { channelId });
+  assert.equal(publicFailure.type, MessageType.SERVER_ERROR);
+  assert.equal(publicFailure.payload.message, 'selector-public-database-failure');
+  brokenPublic.mock.restore();
+  const brokenNotify = t.mock.method(fixture.channelService, 'getAccessContext', async (userId: string) => {
+    if (userId === creator.id) throw new Error('selector-notify-database-failure');
+    return access(userId);
+  });
+  const sinceFailure = voter.peer.messages.length;
+  await voter.peer.request(MessageType.SELECTOR_RESPOND, { id: liveId, value: 'a' });
+  await voter.peer.wait((message) => message.type === MessageType.SERVER_ERROR &&
+    message.payload.message === 'selector-notify-database-failure', sinceFailure);
+  brokenNotify.mock.restore();
+
+  for (const permission of [Permission.READ_MESSAGES, Permission.SEND_MESSAGES, Permission.USE_BOT_COMMANDS]) {
+    await fixture.roleRepo.update(creatorRole.id, { permissions: creatorRole.permissions & ~permission });
+    assert.deepEqual(records((await bot.peer.request(MessageType.SELECTOR_LIST, {})).payload.selectors), []);
+    assert.equal((await bot.peer.request(MessageType.SELECTOR_UPDATE, { id: liveId, patch: { title: 'Denied' } })).type, MessageType.SERVER_ERROR);
+    assert.equal((await bot.peer.request(MessageType.SELECTOR_FINALIZE, { id, content: 'Private final: tie' })).type, MessageType.SERVER_ERROR);
+    await fixture.roleRepo.update(creatorRole.id, { permissions: creatorRole.permissions });
+  }
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId, allowedRoleIds: [voterRole.id] });
+  const beforeRevokedVote = bot.peer.messages.length;
+  await voter.peer.request(MessageType.SELECTOR_RESPOND, { id: liveId, value: 'b' });
+  assert.deepEqual(records((await bot.peer.request(MessageType.SELECTOR_LIST, {})).payload.selectors), []);
+  assert.equal(bot.peer.messages.slice(beforeRevokedVote).some((message) => message.type === MessageType.SELECTOR_SNAPSHOT), false,
+    'Revoked creator visibility must not leak future responses to the bot.');
+  await bot.peer.error(MessageType.SELECTOR_CREATE, input, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await bot.peer.error(MessageType.SELECTOR_CLOSE, { id: liveId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await bot.peer.error(MessageType.SELECTOR_FINALIZE, { id, content: 'Private final: tie' }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await owner.peer.request(MessageType.CHANNEL_UPDATE, {
+    channelId, allowedRoleIds: [creatorRole.id, voterRole.id], botCommandsEnabled: false,
+  });
+  await bot.peer.error(MessageType.SELECTOR_UPDATE, { id: liveId, patch: { title: 'Disabled' } }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.request(MessageType.SELECTOR_CLOSE, { id: liveId });
+  await bot.peer.request(MessageType.SELECTOR_FINALIZE, { id: liveId, content: 'Final after disabling new interactions' });
+  await fixture.userRepo.delete(creator.id);
+  assert.deepEqual(records((await bot.peer.request(MessageType.SELECTOR_LIST, {})).payload.selectors), []);
+});
+
+test('persistent text reactions support bot events and enforce privacy', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.dispose());
+  const owner = await fixture.human('Reaction owner');
+  const alice = await fixture.human('Reaction Alice');
+  const channels = records(record(owner.auth.payload.server).channels);
+  const channelId = text(channels.find((channel) => channel.type === 'TEXT')?.id);
+  const voiceChannelId = text(channels.find((channel) => channel.type === 'VOICE')?.id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Question bot' });
+  const botId = text(record(created.payload.bot).id);
+  const bot = await fixture.bot(text(created.payload.token));
+  const question = await bot.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Choose with reactions' });
+  assert.equal(question.type, MessageType.CHAT_MESSAGE);
+  assert.equal(question.payload.userId, botId);
+  assert.equal(question.payload.isBot, true);
+  const messageId = text(question.payload.id);
+  const reaction = { channelId, messageId, emoji: '👍' };
+  const added = await alice.peer.request(MessageType.CHAT_REACTION_ADD, reaction);
+  assert.equal(added.type, MessageType.CHAT_REACTION_ADDED);
+  assert.equal(added.payload.userId, alice.id);
+  await bot.peer.wait((message) => message.type === MessageType.CHAT_REACTION_ADDED && message.payload.messageId === messageId);
+  await bot.peer.request(MessageType.CHAT_REACTION_ADD, reaction);
+  await alice.peer.request(MessageType.CHAT_REACTION_ADD, { ...reaction, emoji: '❤️' });
+  const firstHistory = await owner.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId });
+  const historyMessage = records(firstHistory.payload.messages).find((message) => message.id === messageId);
+  assert.ok(historyMessage);
+  assert.equal(historyMessage.userId, botId);
+  assert.equal(historyMessage.isBot, true);
+  assert.equal(historyMessage.userNickname, 'Question bot');
+  const reactions = records(historyMessage.reactions);
+  assert.equal(reactions.length, 2);
+  assert.equal(records(reactions.find((entry) => entry.emoji === '👍')?.users).length, 2);
+  const since = bot.peer.messages.length;
+  alice.peer.send(MessageType.CHAT_REACTION_ADD, reaction);
+  await alice.peer.barrier();
+  assert.equal(bot.peer.messages.slice(since).some((message) => message.type === MessageType.CHAT_REACTION_ADDED), false);
+  await bot.peer.request(MessageType.CHAT_REACTION_REMOVE, reaction);
+  assert.equal((await fixture.messageRepo.listReactions([messageId])).filter((entry) => entry.emoji === '👍').length, 1);
+  await alice.peer.error(MessageType.CHAT_REACTION_ADD, { ...reaction, userId: botId }, ProtocolErrorCode.BAD_REQUEST);
+  await alice.peer.error(MessageType.CHAT_REACTION_ADD, { ...reaction, emoji: 'not emoji' }, ProtocolErrorCode.BAD_REQUEST);
+  await alice.peer.error(MessageType.CHAT_REACTION_ADD, { ...reaction, messageId: randomUUID() }, ProtocolErrorCode.BAD_REQUEST);
+  await alice.peer.error(MessageType.CHAT_REACTION_ADD, { ...reaction, channelId: voiceChannelId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  const privateChannel = await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'reaction-private', type: 'TEXT', isPrivate: true, allowedRoleIds: [],
+  });
+  const privateId = text(record(privateChannel.payload.channel).id);
+  await bot.peer.error(MessageType.CHAT_SEND, { channelId: privateId, content: 'Cannot bypass privacy' }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  const secret = await owner.peer.request(MessageType.CHAT_SEND, { channelId: privateId, content: 'Secret' });
+  await bot.peer.error(MessageType.CHAT_REACTION_ADD, { channelId: privateId, messageId: text(secret.payload.id), emoji: '👍' }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await owner.peer.request(MessageType.CHAT_REACTION_ADD, { channelId: privateId, messageId: text(secret.payload.id), emoji: '👍' });
+  await bot.peer.barrier();
+  assert.equal(bot.peer.messages.some((message) => message.type === MessageType.CHAT_REACTION_ADDED && message.payload.channelId === privateId), false);
+  const systemId = randomUUID();
+  await fixture.messageRepo.create({ id: systemId, channelId, userId: owner.id, content: 'System', createdAt: Date.now(), isSystem: true });
+  await owner.peer.error(MessageType.CHAT_REACTION_ADD, { ...reaction, messageId: systemId }, ProtocolErrorCode.BAD_REQUEST);
+  const staleReaction = await fixture.chatService.setReaction(
+    { id: alice.id, nickname: 'Reaction Alice' }, { ...reaction, emoji: '🔥' }, true, () => false
+  );
+  assert.equal(staleReaction.success, false);
+  if (!staleReaction.success) assert.equal(staleReaction.errorCode, ProtocolErrorCode.UNAUTHORIZED);
+  assert.equal((await fixture.messageRepo.listReactions([messageId])).some((entry) => entry.emoji === '🔥'), false);
+  const botRecord = await fixture.botRepo.findById(botId);
+  assert.ok(botRecord);
+  const staleMessageId = randomUUID();
+  const stalePost = await fixture.chatService.sendBotMessage(botRecord, channelId, 'Stale socket', undefined, staleMessageId, () => false);
+  assert.equal(stalePost.success, false);
+  assert.equal(await fixture.messageRepo.findById(staleMessageId), null);
+  await owner.peer.request(MessageType.CHAT_DELETE, { channelId, messageId });
+  assert.deepEqual(await fixture.messageRepo.listReactions([messageId]), []);
+  await owner.peer.error(MessageType.CHAT_REACTION_ADD, reaction, ProtocolErrorCode.BAD_REQUEST);
+});
+
+test('reaction rows survive reopening SQLite and enforce atomic bounds and cleanup', async (t) => {
+  const directory = path.join(__dirname, '..', `.reaction-test-data-${process.pid}-${randomUUID()}`);
+  const filename = path.join(directory, 'server.db');
+  let database = await DatabaseConnection.create(filename);
+  t.after(() => { database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  let db = database.getDb();
+  const serverRepo = new SqliteServerRepository(db);
+  const channelRepo = new SqliteChannelRepository(db);
+  const roleRepo = new SqliteRoleRepository(db);
+  await ensureServerSeedData({ serverName: 'Reaction storage', maxUsers: 10 }, serverRepo, channelRepo, roleRepo);
+  const server = await serverRepo.getServer();
+  assert.ok(server);
+  const channel = (await channelRepo.listByServerId(server.id)).find((entry) => entry.type === 'TEXT');
+  assert.ok(channel);
+  const userId = randomUUID();
+  await new SqliteUserRepository(db).create({ id: userId, clientId: userId, nickname: 'Reactor', publicKey: null, avatarPath: null, createdAt: 1, lastSeenAt: 1 });
+  let repo = new SqliteMessageRepository(db);
+  const messageId = randomUUID();
+  await repo.create({ id: messageId, channelId: channel.id, userId, content: 'Persist me', createdAt: 1 });
+  assert.equal(await repo.setReaction(messageId, userId, '👍', true), 'changed');
+  assert.equal(await repo.setReaction(messageId, userId, '👍', true), 'unchanged');
+  const botId = randomUUID();
+  const botMessageId = randomUUID();
+  await new SqliteBotRepository(db).create({
+    id: botId, name: 'Persistent bot', tokenHash: randomUUID(), avatarPath: null,
+    boundPublicKey: null, createdByUserId: userId, createdAt: 1,
+  });
+  const botMessage = {
+    id: botMessageId, channelId: channel.id, userId: botId, content: 'Persistent bot question', createdAt: 2,
+    botAuthor: { id: botId, name: 'Persistent bot', avatarPath: null, ownerUserId: userId },
+    botCommand: { invocationId: randomUUID(), commandName: 'question', invokerId: userId, invokerNickname: 'Reactor' },
+  };
+  const [firstBotPost, retriedBotPost] = await Promise.all([
+    repo.createBotMessage(botMessage), repo.createBotMessage({ ...botMessage, createdAt: 3 }),
+  ]);
+  assert.deepEqual(firstBotPost, retriedBotPost);
+  assert.equal(await repo.setReaction(botMessageId, userId, '👍', true), 'changed');
+  database.close();
+  database = await DatabaseConnection.create(filename);
+  db = database.getDb();
+  repo = new SqliteMessageRepository(db);
+  const restoredBotMessage = await repo.findById(botMessageId);
+  assert.equal(restoredBotMessage?.userId, botId);
+  assert.equal(restoredBotMessage?.botAuthor?.name, 'Persistent bot');
+  assert.deepEqual(restoredBotMessage?.botCommand, botMessage.botCommand);
+  assert.equal((await repo.listReactions([botMessageId])).length, 1);
+  await new SqliteBotRepository(db).delete(botId);
+  assert.equal((await repo.findById(botMessageId))?.userId, botId);
+  assert.equal(await repo.createBotMessage({ ...botMessage, id: randomUUID() }), null);
+  assert.deepEqual(await repo.listReactions([messageId]), [{ messageId, userId, userNickname: 'Reactor', emoji: '👍' }]);
+  for (const emoji of ['😀', '😁', '😂', '😃', '😄', '😅', '😆', '😇', '😈', '😉', '😊', '😋', '😌', '😍', '😎', '😏', '😐', '😑', '😒']) {
+    assert.equal(await repo.setReaction(messageId, userId, emoji, true), 'changed');
+  }
+  assert.equal(await repo.setReaction(messageId, userId, '😓', true), 'limit');
+  assert.equal(await repo.setReaction(messageId, userId, '👍', false), 'changed');
+  assert.equal(await repo.setReaction(messageId, userId, '😓', true), 'changed');
+  const users = new SqliteUserRepository(db);
+  let lastUserId = '';
+  for (let index = 0; index < 481; index += 1) {
+    lastUserId = randomUUID();
+    await users.create({ id: lastUserId, clientId: lastUserId, nickname: `Reactor ${index}`, publicKey: null, avatarPath: null, createdAt: 1, lastSeenAt: 1 });
+    assert.equal(await repo.setReaction(messageId, lastUserId, '😓', true), index < 480 ? 'changed' : 'limit');
+  }
+  assert.equal((await repo.listReactions([messageId])).length, 500);
+  const reactingUser = (await repo.listReactions([messageId])).find((entry) => entry.userId !== userId);
+  assert.ok(reactingUser);
+  await users.delete(reactingUser.userId);
+  assert.equal((await repo.listReactions([messageId])).length, 499);
+  assert.equal(await repo.setReaction(messageId, lastUserId, '😓', true), 'changed');
+  await repo.markDeleted(messageId, Date.now());
+  assert.deepEqual(await repo.listReactions([messageId]), []);
+  assert.equal(await repo.setReaction(messageId, userId, '👍', true), 'invalid');
+});
 
 test('bot interactions over authenticated WebSockets', async (t) => {
   const fixture = await createFixture();
@@ -487,6 +897,14 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.equal(publicMessage.payload.invokerId, alice.id);
     assert.equal(publicMessage.payload.invokerNickname, 'Alice');
     assert.equal(publicMessage.payload.options, undefined);
+    const persistedHistory = await bob.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId: textChannel });
+    const persisted = records(persistedHistory.payload.messages).find((message) => message.id === publicMessage.payload.messageId);
+    assert.ok(persisted);
+    assert.equal(persisted.isBot, true);
+    assert.equal(persisted.userId, botId);
+    assert.equal(record(persisted.botCommand).invocationId, first.id);
+    assert.equal(record(persisted.botCommand).invokerId, alice.id);
+    assert.equal(records(persistedHistory.payload.messages).some((message) => message.id === privateMessage.payload.messageId), false);
     assert.ok(otherDevice.peer.messages.some((m) => m.payload.content === 'Public channel'));
     const secret = await invoke(alice.peer, privateChannel);
     bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: secret.id, content: 'Private channel publication', ephemeral: false });
@@ -498,6 +916,8 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await finish(first.id);
     await finish(second.id);
     await finish(secret.id);
+    await bob.peer.request(MessageType.CHAT_REACTION_ADD, { channelId: textChannel, messageId: text(publicMessage.payload.messageId), emoji: '👍' });
+    await bot.peer.wait((message) => message.type === MessageType.CHAT_REACTION_ADDED && message.payload.messageId === publicMessage.payload.messageId);
   });
 
   await t.test('delivers the last asynchronous private-channel publication before completion', async () => {
@@ -518,6 +938,42 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.ok(otherDevice.peer.messages.some((m) => hasInvocation(m, MessageType.COMMAND_RESPONSE, id)));
     assert.ok(!bob.peer.messages.some((m) => hasInvocation(m, MessageType.COMMAND_RESPONSE, id)));
     assert.ok(!otherBot.peer.messages.some((m) => hasInvocation(m, MessageType.COMMAND_RESPONSE, id)));
+  });
+
+  await t.test('queues command finish behind explicitly blocked persistent publication', async () => {
+    const { id } = await invoke(alice.peer, privateChannel);
+    const gate = new EventEmitter();
+    const started = once(gate, 'started');
+    const released = once(gate, 'release');
+    const create = fixture.messageRepo.createBotMessage.bind(fixture.messageRepo);
+    const delayed = t.mock.method(fixture.messageRepo, 'createBotMessage', async (message: MessageRecord) => {
+      gate.emit('started');
+      await released;
+      return create(message);
+    });
+    try {
+      bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: id, content: 'Delayed persistent result', ephemeral: false });
+      bot.peer.send(MessageType.COMMAND_FINISH, { invocationId: id });
+      await started;
+      await alice.peer.barrier();
+      assert.equal(alice.peer.messages.some((message) => hasInvocation(message, MessageType.COMMAND_FINISHED, id)), false);
+      gate.emit('release');
+      await alice.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_FINISHED, id));
+      const related = alice.peer.messages.filter((message) => message.payload.invocationId === id);
+      const responseIndex = related.findIndex((message) => message.type === MessageType.COMMAND_RESPONSE);
+      const finishIndex = related.findIndex((message) => message.type === MessageType.COMMAND_FINISHED);
+      assert.ok(responseIndex >= 0 && responseIndex < finishIndex);
+      const messageId = text(related[responseIndex].payload.messageId);
+      const persisted = await fixture.messageRepo.findById(messageId);
+      assert.equal(persisted?.content, 'Delayed persistent result');
+      assert.equal(persisted?.userId, botId);
+      const history = await alice.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId: privateChannel });
+      assert.equal(records(history.payload.messages).filter((message) => message.id === messageId).length, 1);
+      await bot.peer.error(MessageType.COMMAND_RESPONSE, { invocationId: id, content: 'Genuinely late', ephemeral: false }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    } finally {
+      gate.emit('release');
+      delayed.mock.restore();
+    }
   });
 
   const form = {
@@ -664,6 +1120,99 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await bot.peer.error(MessageType.COMMAND_RESPONSE, { invocationId: ownerPrivate.id, content: 'Leaked after deletion', ephemeral: false }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
     await barrier();
     assert.ok(!bob.peer.messages.some((m) => String(m.payload.content).startsWith('Leaked')));
+  });
+
+  await t.test('bot channel switches preserve defaults and block admins and existing forms', async () => {
+    assert.equal((await fixture.channelService.getChannelSummary(textChannel))?.botCommandsEnabled, true);
+    const created = await owner.peer.request(MessageType.CHANNEL_CREATE, {
+      name: 'disabled-bots', type: 'TEXT', botCommandsEnabled: false,
+    });
+    const channel = record(created.payload.channel);
+    assert.equal(channel.botCommandsEnabled, false);
+    const disabledId = text(channel.id);
+    await owner.peer.error(MessageType.COMMAND_INVOKE, {
+      channelId: disabledId, botId, commandName: 'ping',
+    }, ProtocolErrorCode.PERMISSION_DENIED);
+    const renamed = await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: disabledId, name: 'still-disabled' });
+    assert.equal(record(renamed.payload.channel).botCommandsEnabled, false);
+    assert.equal((await fixture.channelService.getChannelSummary(disabledId))?.botCommandsEnabled, false);
+    await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: disabledId, botCommandsEnabled: true });
+    const active = await invoke(owner.peer, disabledId);
+    bot.peer.send(MessageType.COMMAND_PROMPT, { invocationId: active.id, interactionId: 'disable-channel', form });
+    await owner.peer.wait((m) => hasInvocation(m, MessageType.COMMAND_PROMPT, active.id));
+    await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: disabledId, botCommandsEnabled: false });
+    assert.equal((await owner.peer.wait((m) => hasInvocation(m, MessageType.COMMAND_FINISHED, active.id))).payload.reason, 'cancelled');
+    await owner.peer.error(MessageType.COMMAND_SUBMIT, {
+      invocationId: active.id, interactionId: 'disable-channel', values: formValues,
+    }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    await bot.peer.error(MessageType.COMMAND_RESPONSE, {
+      invocationId: active.id, content: 'Blocked even for admins', ephemeral: false,
+    }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    await owner.peer.request(MessageType.CHANNEL_DELETE, { channelId: disabledId });
+  });
+
+  await t.test('USE_BOT_COMMANDS revocation cancels forms without revoking ordinary chat', async () => {
+    const member = await fixture.roleRepo.findByName('Membro');
+    assert.ok(member);
+    const active = await invoke();
+    await ask(active.id, 'revoke-bot-permission');
+    try {
+      await owner.peer.request(MessageType.ROLE_UPDATE, {
+        roleId: member.id, permissions: DEFAULT_PERMISSIONS & ~Permission.USE_BOT_COMMANDS,
+      });
+      assert.equal((await alice.peer.wait((m) => hasInvocation(m, MessageType.COMMAND_FINISHED, active.id))).payload.reason, 'cancelled');
+      await alice.peer.error(MessageType.COMMAND_INVOKE, {
+        channelId: textChannel, botId, commandName: 'ping',
+      }, ProtocolErrorCode.PERMISSION_DENIED);
+      await alice.peer.error(MessageType.COMMAND_SUBMIT, {
+        invocationId: active.id, interactionId: 'revoke-bot-permission', values: formValues,
+      }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+      const sent = await alice.peer.request(MessageType.CHAT_SEND, { channelId: textChannel, content: 'Chat still allowed' });
+      assert.equal(sent.type, MessageType.CHAT_MESSAGE);
+    } finally {
+      await owner.peer.request(MessageType.ROLE_UPDATE, { roleId: member.id, permissions: DEFAULT_PERMISSIONS });
+    }
+  });
+
+  await t.test('checks bot permission and channel switch again at submission without broadcasts', async () => {
+    const member = await fixture.roleRepo.findByName('Membro');
+    assert.ok(member);
+    for (const revoked of ['permission', 'channel']) {
+      const active = await invoke();
+      await ask(active.id, `direct-${revoked}`);
+      try {
+        if (revoked === 'permission') {
+          await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS & ~Permission.USE_BOT_COMMANDS });
+        } else {
+          await fixture.channelService.updateChannel({ channelId: textChannel, botCommandsEnabled: false });
+        }
+        await alice.peer.error(MessageType.COMMAND_SUBMIT, {
+          invocationId: active.id, interactionId: `direct-${revoked}`, values: formValues,
+        }, ProtocolErrorCode.PERMISSION_DENIED);
+        assert.ok(!bot.peer.messages.some((m) => hasInvocation(m, MessageType.COMMAND_SUBMITTED, active.id)));
+      } finally {
+        await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS });
+        await fixture.channelService.updateChannel({ channelId: textChannel, botCommandsEnabled: true });
+      }
+    }
+  });
+
+  await t.test('MANAGE_BOTS grants management independently from bot command permission', async () => {
+    await alice.peer.error(MessageType.BOT_CREATE, { name: 'Forbidden bot' }, ProtocolErrorCode.PERMISSION_DENIED);
+    const managerRole = {
+      id: randomUUID(), name: 'Bot managers', color: '#123456', permissions: Permission.MANAGE_BOTS,
+      position: 2, isDefault: false, createdAt: Date.now(),
+    };
+    await fixture.roleRepo.create(managerRole);
+    await fixture.roleRepo.assignRole(alice.id, managerRole.id);
+    try {
+      const managed = await alice.peer.request(MessageType.BOT_CREATE, { name: 'Managed bot' });
+      assert.equal(managed.type, MessageType.BOT_CREATED);
+      const managedId = text(record(managed.payload.bot).id);
+      assert.equal((await alice.peer.request(MessageType.BOT_REVOKE, { botId: managedId })).type, MessageType.BOT_REVOKED);
+    } finally {
+      await fixture.roleRepo.delete(managerRole.id);
+    }
   });
 
   await t.test('revalidates access on submissions and replies even without a visibility broadcast', async () => {
@@ -842,6 +1391,47 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   });
 });
 
+test('bot permission migration preserves existing roles and channels and runs only once', async (t) => {
+  const dataDir = path.join(__dirname, '..', `.bot-migration-data-${process.pid}-${randomUUID()}`);
+  const dbPath = path.join(dataDir, 'server.db');
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const legacy = await SqlJsDriver.create(dbPath);
+  const migrations = path.join(__dirname, 'infrastructure', 'database', 'migrations');
+  legacy.exec('CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+  for (const file of fs.readdirSync(migrations).filter((name) => name.endsWith('.sql') && name < '017').sort()) {
+    legacy.exec(fs.readFileSync(path.join(migrations, file), 'utf8'));
+    legacy.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(file, Date.now());
+  }
+  const previous = [0, Permission.SEND_MESSAGES, Permission.MANAGE_BOTS, 0xFFFFFFFF];
+  previous.forEach((permissions, index) => {
+    legacy.prepare('INSERT INTO roles (id, name, permissions, created_at) VALUES (?, ?, ?, ?)')
+      .run(`legacy-${index}`, `Legacy ${index}`, permissions, 0);
+  });
+  legacy.prepare('INSERT INTO channels (id, server_id, name, type, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run('legacy-channel', 'legacy-server', 'Legacy', 'TEXT', 0);
+  legacy.close();
+  const migrated = await DatabaseConnection.create(dbPath);
+  try {
+    const roleRepo = new SqliteRoleRepository(migrated.getDb());
+    for (const [index, permissions] of previous.entries()) {
+      assert.equal((await roleRepo.findById(`legacy-${index}`))?.permissions, (permissions | Permission.USE_BOT_COMMANDS) >>> 0);
+    }
+    const channelRepo = new SqliteChannelRepository(migrated.getDb());
+    assert.equal((await channelRepo.findById('legacy-channel'))?.botCommandsEnabled, true);
+    await channelRepo.update('legacy-channel', { botCommandsEnabled: false });
+    await roleRepo.update('legacy-0', { permissions: 0 });
+  } finally {
+    migrated.close();
+  }
+  const reopened = await DatabaseConnection.create(dbPath);
+  try {
+    assert.equal((await new SqliteRoleRepository(reopened.getDb()).findById('legacy-0'))?.permissions, 0);
+    assert.equal((await new SqliteChannelRepository(reopened.getDb()).findById('legacy-channel'))?.botCommandsEnabled, false);
+  } finally {
+    reopened.close();
+  }
+});
+
 test('invocation limits and timers bound memory and release all capacity', async (t) => {
   const fixture = await createFixture();
   t.after(() => fixture.dispose());
@@ -866,6 +1456,7 @@ test('invocation limits and timers bound memory and release all capacity', async
     send: (_ws, message) => { messages.push(message); },
     sendError: (_ws, code) => { errors.push(code); },
     broadcastToChannel: async () => { assert.fail('Timer test must not publish'); },
+    publishResponse: async () => { assert.fail('Timer test must not publish'); },
   }, fixture.channelService, fixture.userService, registry);
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   try {

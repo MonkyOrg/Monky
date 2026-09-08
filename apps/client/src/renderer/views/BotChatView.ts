@@ -49,11 +49,14 @@ export function renderBotIdentity(name: string, avatarUrl?: string | null): stri
 }
 
 export function renderBotInvocation(invocation: BotInvocation, canSend = true): string {
+  const visibleForms = invocation.forms.filter((state) => state.status !== 'submitted');
   // The attributed reply already represents a completed text-only command.
-  if (invocation.status === 'completed' && invocation.forms.length === 0 && invocation.hasResponse) return '';
+  if (invocation.status === 'completed' && visibleForms.length === 0 && invocation.hasResponse) return '';
   const active = invocation.status === 'active';
-  const forms = invocation.forms.map((state) => {
+  const forms = visibleForms.map((state) => {
     const editable = active && !invocation.cancelPending && state.status === 'editing' && canSend;
+    const buttonsOnly = state.form.fields.length === 1 &&
+      state.form.fields[0].type === 'select' && state.form.fields[0].presentation === 'buttons';
     return `<form class="bot-inline-form" data-interaction-id="${escapeHtml(state.interactionId)}" novalidate>
       <h3>${escapeHtml(state.form.title)}</h3>
       ${state.form.description ? `<p class="bot-field-description">${escapeHtml(state.form.description)}</p>` : ''}
@@ -61,7 +64,7 @@ export function renderBotInvocation(invocation: BotInvocation, canSend = true): 
       <p class="bot-error" role="alert" ${state.error ? '' : 'hidden'}>${escapeHtml(state.error)}</p>
       ${state.status === 'submitted' ? `<p class="bot-status">${t('botChat.submitted')}</p>` :
         state.status === 'closed' || !active ? `<p class="bot-status">${t('botChat.stepClosed')}</p>` :
-          `<button type="submit" class="btn btn-primary" ${!editable ? 'disabled' : ''}>
+          buttonsOnly ? '' : `<button type="submit" class="btn btn-primary" ${!editable ? 'disabled' : ''}>
             ${escapeHtml(state.status === 'submitting' ? t('botChat.submitting') : state.form.submitLabel ?? t('botChat.submit'))}
           </button>`}
     </form>`;
@@ -148,6 +151,7 @@ export class BotChatView {
         this.scheduleExpiry();
       }),
       appEvents.on('server.roles_updated', () => this.refreshPermissions()),
+      appEvents.on('server.updated', () => this.refreshPermissions()),
       appEvents.on('server.members_updated', () => this.refreshMembers()),
       appEvents.on('user.updated', () => this.refreshMembers())
     );
@@ -161,7 +165,10 @@ export class BotChatView {
   }
 
   private canSend(): boolean {
-    return this.server.hasPermission(Permission.SEND_MESSAGES) && this.client.getStatus() === 'CONNECTED';
+    const channel = this.server.serverDetails?.channels.find((candidate) => candidate.id === this.channelId);
+    return channel?.type === 'TEXT' && channel.botCommandsEnabled &&
+      this.server.hasPermission(Permission.USE_BOT_COMMANDS) &&
+      this.server.hasPermission(Permission.SEND_MESSAGES) && this.client.getStatus() === 'CONNECTED';
   }
 
   public renderComposer(): void {
@@ -464,6 +471,15 @@ export class BotChatView {
     } else if (button.dataset.botAction === 'optional-parameters') {
       if (this.parameterMenu?.kind === 'optional') this.closeParameterMenu();
       else this.openParameterMenu({ kind: 'optional', activeIndex: 0 });
+    } else if (button.dataset.botSelectValue !== undefined) {
+      const binding = this.fieldBinding(button);
+      const fieldName = button.closest<HTMLElement>('[data-field-name]')?.dataset.fieldName;
+      const field = binding?.fields.find((entry) => entry.name === fieldName);
+      if (!binding || binding.context.disabled || field?.type !== 'select' ||
+          field.presentation !== 'buttons' ||
+          !field.choices.some((choice) => choice.value === button.dataset.botSelectValue)) return;
+      binding.save({ ...binding.values, [field.name]: button.dataset.botSelectValue });
+      button.closest('form')?.requestSubmit();
     } else if (button.dataset.fieldAction) {
       const binding = this.fieldBinding(button);
       if (!binding) return;
@@ -521,7 +537,7 @@ export class BotChatView {
     this.store.clearCommand(this.channelId);
   }
 
-  private async invoke(): Promise<void> {
+  public async invoke(): Promise<void> {
     const draft = this.store.getCommandDraft(this.channelId);
     if (!draft || draft.pending || !this.canSend()) return;
     const command = draft.command;

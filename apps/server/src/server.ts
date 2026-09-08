@@ -6,6 +6,8 @@ import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErr
 import { AuthService } from './application/services/AuthService';
 import { AttachmentService } from './application/services/AttachmentService';
 import { BotService } from './application/services/BotService';
+import { BotSelectorService } from './application/services/BotSelectorService';
+import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
 import { CommandRegistry } from './application/services/CommandRegistry';
 import { ChannelService } from './application/services/ChannelService';
 import { ChatService } from './application/services/ChatService';
@@ -80,6 +82,7 @@ export async function ensureServerSeedData(
       id: uuidv4(),
       serverId,
       name: config.initialTextChannel || 'geral',
+      botCommandsEnabled: true,
       type: 'TEXT',
       position: 0,
       createdAt: now,
@@ -92,6 +95,7 @@ export async function ensureServerSeedData(
       id: uuidv4(),
       serverId,
       name: config.initialVoiceChannel || 'Geral',
+      botCommandsEnabled: true,
       type: 'VOICE',
       position: 1,
       createdAt: now,
@@ -409,7 +413,8 @@ export class MonkyServer {
       coturnManager,
       sfuManager,
       botService,
-      commandRegistry
+      commandRegistry,
+      new BotSelectorService(new SqliteBotSelectorRepository(db))
     );
 
     getOnlineUsers = () => wsServer.getOnlineUsersMap();

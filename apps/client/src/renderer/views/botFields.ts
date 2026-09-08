@@ -50,6 +50,11 @@ export function renderBotField(field: BotInputField, values: BotFormValues, cont
       </label>
       <span class="bot-switch-value">${state}</span>
     </div>`;
+  } else if (field.type === 'select' && field.presentation === 'buttons') {
+    control = `<div class="bot-choice-buttons" id="${id}" role="group" aria-label="${escapeHtml(field.label)}">
+      ${field.choices.map((choice) => `<button type="button" class="btn btn-secondary"
+        data-bot-select-value="${escapeHtml(choice.value)}" ${disabled}>${escapeHtml(choice.label)}</button>`).join('')}
+    </div>`;
   } else if (field.type === 'select' || field.type === 'user') {
     const choices = field.type === 'select'
       ? field.choices

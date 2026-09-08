@@ -5,6 +5,9 @@ import { enableBackdropClose } from '../utils/modal';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
 import {
   attachChannelPrivacyFields,
+  attachChannelBotCommandsField,
+  readChannelBotCommandsField,
+  renderChannelBotCommandsField,
   readChannelPrivacyFields,
   renderChannelPrivacyFields,
   renderChannelTypeFields,
@@ -13,6 +16,7 @@ import {
 export class CreateChannelModal {
   private modalEl: HTMLElement | null = null;
   private detachPrivacyFields: (() => void) | null = null;
+  private detachBotCommandsField: (() => void) | null = null;
   private detachEmojiPicker: (() => void) | null = null;
 
   public open(defaultType: 'TEXT' | 'VOICE' = 'TEXT'): void {
@@ -43,6 +47,7 @@ export class CreateChannelModal {
           </div>
 
           ${renderChannelPrivacyFields({ isPrivate: false, allowedRoleIds: [] })}
+          ${renderChannelBotCommandsField(true, defaultType)}
 
           <div class="modal-footer">
             <button type="button" id="btn-cancel" class="btn btn-secondary">${t('common.cancel')}</button>
@@ -70,6 +75,7 @@ export class CreateChannelModal {
     btnCancel?.addEventListener('click', () => this.close());
     enableBackdropClose(this.modalEl, () => this.close());
     this.detachPrivacyFields = attachChannelPrivacyFields(this.modalEl);
+    this.detachBotCommandsField = attachChannelBotCommandsField(this.modalEl);
 
     if (btnEmoji && inputName) {
       this.detachEmojiPicker = attachInputEmojiPicker(inputName, btnEmoji);
@@ -90,6 +96,7 @@ export class CreateChannelModal {
           type,
           isPrivate: privacy.isPrivate,
           allowedRoleIds: privacy.allowedRoleIds,
+          ...(type === 'TEXT' ? { botCommandsEnabled: readChannelBotCommandsField(this.modalEl) } : {}),
         });
         this.close();
       } catch (err: any) {
@@ -103,6 +110,8 @@ export class CreateChannelModal {
   }
 
   public close(): void {
+    this.detachBotCommandsField?.();
+    this.detachBotCommandsField = null;
     this.detachEmojiPicker?.();
     this.detachEmojiPicker = null;
     this.detachPrivacyFields?.();

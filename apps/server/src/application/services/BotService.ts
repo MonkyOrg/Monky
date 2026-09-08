@@ -291,6 +291,10 @@ export class BotService {
     return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage, revokedBotId: botId };
   }
 
+  public async findById(botId: string): Promise<BotRecord | null> {
+    return this.botRepo.findById(botId);
+  }
+
   private toBotInfo(record: BotRecord): BotInfo {
     const onlineBots = this.getOnlineBotsMap();
     return {

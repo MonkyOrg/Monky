@@ -13,6 +13,7 @@ import {
   hasPermission,
 } from '../src/index.js';
 import './botInteractions.test.js';
+import './reactions.test.js';
 
 console.log('=== Início dos Testes Unitários de @monky/shared ===');
 
@@ -39,7 +40,7 @@ console.assert(QUALITY_PRESETS.GAMING.name === 'Gaming Mode', 'Preset Gaming Mod
 console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version
-console.assert(PROTOCOL_VERSION === 8, 'Versão do protocolo deve ser 8');
+console.assert(PROTOCOL_VERSION === 9, 'Versão do protocolo deve ser 9');
 console.assert(LIMITS.SFU_DEFAULT_MIN_PORT === 40000, 'Porta mínima padrão SFU');
 console.assert(LIMITS.SFU_DEFAULT_MAX_PORT === 49151, 'Porta máxima padrão SFU');
 console.assert(
@@ -93,6 +94,13 @@ console.log('✔ Regras de visibilidade de canal privado verificadas (#384)');
 
 // Schemas de canal (#384)
 const createDefaults = channelCreateSchema.safeParse({ name: 'geral', type: 'TEXT' });
+console.assert(hasPermission(DEFAULT_PERMISSIONS, Permission.USE_BOT_COMMANDS), 'Novos membros podem usar comandos de bots por padrão');
+console.assert(!hasPermission(DEFAULT_PERMISSIONS, Permission.MANAGE_BOTS), 'Novos membros não gerenciam bots por padrão');
+console.assert(createDefaults.success && createDefaults.data.botCommandsEnabled === true, 'Novos canais permitem bots por padrão');
+console.assert(channelCreateSchema.parse({ name: 'sem-bots', type: 'TEXT', botCommandsEnabled: false }).botCommandsEnabled === false, 'Criação preserva bloqueio explícito de bots');
+console.assert(channelUpdateSchema.parse({ channelId: 'c1' }).botCommandsEnabled === undefined, 'Edição parcial não redefine configuração de bots');
+console.assert(channelUpdateSchema.parse({ channelId: 'c1', botCommandsEnabled: false }).botCommandsEnabled === false, 'Edição permite bloquear bots');
+console.assert(!channelUpdateSchema.safeParse({ channelId: 'c1', botCommandsEnabled: 'false' }).success, 'Configuração de bots exige booleano');
 console.assert(createDefaults.success === true, 'Criação sem campos de privacidade deve ser válida');
 console.assert(
   createDefaults.success && createDefaults.data.isPrivate === false,

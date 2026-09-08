@@ -1,5 +1,5 @@
 import { IDatabaseDriver } from './SqliteWrapper';
-import { ChannelType, LIMITS } from '@monky/shared';
+import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema } from '@monky/shared';
 import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
 import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 
@@ -223,6 +223,7 @@ export class SqliteUserRepository implements IUserRepository {
 }
 
 interface SqliteChannelRow {
+  botCommandsEnabled: number;
   id: string;
   serverId: string;
   name: string;
@@ -237,7 +238,7 @@ export class SqliteChannelRepository implements IChannelRepository {
   constructor(private db: IDatabaseDriver) {}
 
   private static readonly SELECT_COLUMNS =
-    'id, server_id as serverId, name, type, position, created_at as createdAt, max_participants as maxParticipants, is_private as isPrivate';
+    'id, server_id as serverId, name, type, position, created_at as createdAt, max_participants as maxParticipants, is_private as isPrivate, bot_commands_enabled as botCommandsEnabled';
 
   /** Allowed roles for a set of channels, in one query, to avoid N+1 (#384). */
   private loadAllowedRoles(channelIds: string[]): Map<string, string[]> {
@@ -267,6 +268,7 @@ export class SqliteChannelRepository implements IChannelRepository {
       createdAt: row.createdAt,
       maxParticipants: row.maxParticipants,
       isPrivate: row.isPrivate === 1,
+      botCommandsEnabled: row.botCommandsEnabled === 1,
       allowedRoleIds,
     };
   }
@@ -292,7 +294,7 @@ export class SqliteChannelRepository implements IChannelRepository {
   async create(channel: ChannelRecord): Promise<void> {
     this.db.transaction(() => {
       this.db.prepare(
-        'INSERT INTO channels (id, server_id, name, type, position, created_at, max_participants, is_private) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO channels (id, server_id, name, type, position, created_at, max_participants, is_private, bot_commands_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         channel.id,
         channel.serverId,
@@ -301,7 +303,8 @@ export class SqliteChannelRepository implements IChannelRepository {
         channel.position,
         channel.createdAt,
         channel.maxParticipants,
-        channel.isPrivate ? 1 : 0
+        channel.isPrivate ? 1 : 0,
+        channel.botCommandsEnabled ? 1 : 0
       );
       this.replaceAllowedRoles(channel.id, channel.allowedRoleIds);
     })();
@@ -327,6 +330,10 @@ export class SqliteChannelRepository implements IChannelRepository {
       if (updates.isPrivate !== undefined) {
         assignments.push('is_private = ?');
         values.push(updates.isPrivate ? 1 : 0);
+      }
+      if (updates.botCommandsEnabled !== undefined) {
+        assignments.push('bot_commands_enabled = ?');
+        values.push(updates.botCommandsEnabled ? 1 : 0);
       }
 
       if (assignments.length > 0) {
@@ -362,6 +369,10 @@ export class SqliteChannelRepository implements IChannelRepository {
 }
 
 interface SqliteMessageRow {
+  authorBotId: string | null;
+  authorBotName: string | null;
+  authorBotAvatarPath: string | null;
+  botCommandJson: string | null;
   id: string;
   channelId: string;
   userId: string;
@@ -374,13 +385,18 @@ interface SqliteMessageRow {
 
 /** Columns every message read shares, so the three queries cannot drift (#504). */
 const MESSAGE_COLUMNS =
-  'id, channel_id as channelId, user_id as userId, content, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt';
+  'id, channel_id as channelId, user_id as userId, content, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson';
 
 function toMessageRecord(r: SqliteMessageRow): MessageRecord {
+  if (r.authorBotId && !r.authorBotName) throw new Error('Stored bot message is missing its author name.');
   return {
     id: r.id,
     channelId: r.channelId,
-    userId: r.userId,
+    userId: r.authorBotId ?? r.userId,
+    botAuthor: r.authorBotId && r.authorBotName
+      ? { id: r.authorBotId, name: r.authorBotName, avatarPath: r.authorBotAvatarPath, ownerUserId: r.userId }
+      : undefined,
+    botCommand: r.botCommandJson ? botCommandContextSchema.parse(JSON.parse(r.botCommandJson)) : undefined,
     content: r.content,
     createdAt: r.createdAt,
     isSystem: Boolean(r.isSystem),
@@ -392,6 +408,40 @@ function toMessageRecord(r: SqliteMessageRow): MessageRecord {
 export class SqliteMessageRepository implements IMessageRepository {
   constructor(private db: IDatabaseDriver) {}
 
+  async setReaction(messageId: string, userId: string, emoji: string, add: boolean): Promise<'changed' | 'unchanged' | 'limit' | 'invalid'> {
+    return this.db.transaction(() => {
+      // Check again inside the transaction: a message may have been deleted
+      // while the service was resolving channel permissions.
+      const message = this.db.prepare(`SELECT m.id FROM messages m JOIN channels c ON c.id = m.channel_id
+        WHERE m.id = ? AND m.deleted_at IS NULL AND m.is_system = 0 AND c.type = 'TEXT'`).get(messageId);
+      if (!message) return 'invalid';
+      const actor = this.db.prepare('SELECT id FROM users WHERE id = ? UNION ALL SELECT id FROM bots WHERE id = ?').get(userId, userId);
+      if (!actor) return 'invalid';
+      const existing = this.db.prepare('SELECT 1 FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?')
+        .get(messageId, userId, emoji);
+      if (Boolean(existing) === add) return 'unchanged';
+      if (!add) {
+        this.db.prepare('DELETE FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?').run(messageId, userId, emoji);
+        return 'changed';
+      }
+      const counts = this.db.prepare(`SELECT COUNT(*) AS total, COUNT(DISTINCT emoji) AS distinctEmoji,
+        SUM(CASE WHEN emoji = ? THEN 1 ELSE 0 END) AS matching
+        FROM message_reactions WHERE message_id = ?`).get(emoji, messageId) as { total: number; distinctEmoji: number; matching: number | null };
+      if (counts.total >= REACTION_LIMITS.MAX_PER_MESSAGE ||
+          (!counts.matching && counts.distinctEmoji >= REACTION_LIMITS.MAX_DISTINCT_EMOJI)) return 'limit';
+      this.db.prepare('INSERT INTO message_reactions (message_id, user_id, emoji) VALUES (?, ?, ?)').run(messageId, userId, emoji);
+      return 'changed';
+    })();
+  }
+
+  async listReactions(messageIds: string[]): Promise<import('../../domain/entities').MessageReactionRecord[]> {
+    if (messageIds.length === 0) return [];
+    return this.db.prepare(`SELECT r.message_id AS messageId, r.user_id AS userId, COALESCE(u.nickname, b.name) AS userNickname, r.emoji
+      FROM message_reactions r LEFT JOIN users u ON u.id = r.user_id LEFT JOIN bots b ON b.id = r.user_id
+      WHERE r.message_id IN (${messageIds.map(() => '?').join(',')})
+      ORDER BY r.emoji, u.nickname, r.user_id`).all(...messageIds) as import('../../domain/entities').MessageReactionRecord[];
+  }
+
   async countAll(): Promise<number> {
     const row = this.db.prepare('SELECT COUNT(*) as count FROM messages').get() as
       | { count?: number }
@@ -400,9 +450,28 @@ export class SqliteMessageRepository implements IMessageRepository {
   }
 
   async create(message: MessageRecord): Promise<void> {
+    this.insertMessage(message);
+  }
+
+  async createBotMessage(message: MessageRecord): Promise<MessageRecord | null> {
+    const author = message.botAuthor;
+    if (!author) throw new Error('Bot messages require an author snapshot.');
+    return this.db.transaction(() => {
+      if (!this.db.prepare('SELECT id FROM bots WHERE id = ? AND created_by_user_id = ?').get(author.id, author.ownerUserId)) return null;
+      this.insertMessage(message, true);
+      const row = this.db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`).get(message.id) as SqliteMessageRow | undefined;
+      if (!row) throw new Error('Bot message was not persisted.');
+      return toMessageRecord(row);
+    })();
+  }
+
+  private insertMessage(message: MessageRecord, idempotent = false): void {
     this.db.prepare(
-      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(message.id, message.channelId, message.userId, message.content, message.createdAt, message.isSystem ? 1 : 0);
+      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
+      (idempotent ? ' ON CONFLICT(id) DO NOTHING' : '')
+    ).run(message.id, message.channelId, message.botAuthor?.ownerUserId ?? message.userId, message.content, message.createdAt, message.isSystem ? 1 : 0,
+      message.botAuthor?.id ?? null, message.botAuthor?.name ?? null, message.botAuthor?.avatarPath ?? null,
+      message.botCommand ? JSON.stringify(message.botCommand) : null);
   }
 
   async findById(messageId: string): Promise<MessageRecord | null> {
