@@ -340,9 +340,7 @@ export class AuthService {
 
     // Mark the user summary with the invisible flag so the WebSocket layer
     // knows to suppress broadcasts and mask presence (#561).
-    if (pending.appearOffline) {
-      userSummary.invisible = true;
-    }
+    userSummary.invisible = pending.appearOffline;
 
     const channels = await this.channelRepo.listByServerId(server.id);
     // One entry per live connection, so the other devices of this person are

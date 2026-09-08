@@ -162,6 +162,26 @@ test('durable selectors correlate acknowledgements, emit updates and outlive inv
   assert.deepEqual(errors, []);
 });
 
+test('public message reply option preserves trusted acknowledgement metadata', { timeout: 10000 }, async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const connected = once(bot, 'connected');
+  bot.connect({ serverId: 'reply-server' });
+  await connected;
+  const sent = bot.sendMessage('reply-server', 'channel-one', 'Answer', { replyToMessageId: 'original' });
+  const frame = await server.next(MessageType.CHAT_SEND);
+  assert.equal(frame.payload.replyToMessageId, 'original');
+  const reply = { messageId: 'original', userNickname: 'Alice', content: 'Question', deleted: false, hasAttachments: false };
+  server.send(MessageType.CHAT_MESSAGE, {
+    id: 'response', channelId: 'channel-one', userId: 'bot-one', userNickname: 'Answer bot',
+    content: frame.payload.content, createdAt: Date.now(), isBot: true, reply,
+  }, frame.requestId);
+  assert.deepEqual((await sent).reply, reply);
+  await assert.rejects(bot.sendMessage('reply-server', 'channel-one', 'Invalid', { replyToMessageId: '' }));
+  await bot.close();
+  assert.deepEqual(errors, []);
+});
+
 test('persistent messages are acknowledged and reactions outlive command invocations', { timeout: 10000 }, async (t) => {
   const server = await makeServer(t);
   const { bot, errors } = makeBot(t, server);

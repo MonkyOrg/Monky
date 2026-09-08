@@ -39,6 +39,13 @@ export type ChatReactionEventPayload = z.infer<typeof chatReactionEventSchema>;
 
 /** An acknowledged, persistent plain-text bot post. */
 export const botChatMessageSchema = z.object({
+  reply: z.object({
+    messageId: z.string().min(1).max(128),
+    userNickname: z.string(),
+    content: z.string().max(200),
+    deleted: z.boolean(),
+    hasAttachments: z.boolean(),
+  }).optional(),
   id: z.string().min(1).max(128),
   channelId: z.string().min(1).max(128),
   userId: z.string().min(1).max(128),

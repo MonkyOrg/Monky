@@ -31,7 +31,8 @@ jobs:
         run: |
           npm run build --workspace=apps/server
           npm run test:bots --workspace=apps/server
-          npm run test:bots --workspace=apps/client
+          node --test apps/server/dist/test-online-preview.js apps/server/dist/test-voice.js
+          npm run test --workspace=apps/client
           node scripts/test-bot-e2e.js
       - name: Exercise an isolated SDK installation
         run: |

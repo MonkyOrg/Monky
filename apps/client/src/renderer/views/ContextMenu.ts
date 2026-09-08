@@ -15,21 +15,26 @@ export interface ContextMenuItem {
 export class ContextMenu {
   private menuEl: HTMLElement | null = null;
   private unbindGlobalListeners: Array<() => void> = [];
+  private returnFocus: HTMLElement | null = null;
 
   constructor() {
     appEvents.on('network.disconnected', () => this.close());
     appEvents.on('voice.channel_changed', () => this.close());
   }
 
-  public open(x: number, y: number, items: ContextMenuItem[]): void {
+  public open(x: number, y: number, items: ContextMenuItem[], anchor?: HTMLElement): void {
     this.close();
     if (!items.length) return;
+    this.returnFocus = anchor ?? null;
 
     const menu = document.createElement('div');
     menu.className = 'floating-context-menu';
+    menu.setAttribute('role', 'menu');
 
     for (const item of items) {
       const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.setAttribute('role', 'menuitem');
       btn.className = 'server-dropdown-item' + (item.danger ? ' danger' : '');
       btn.innerHTML = `${
         item.icon ? `<span class="material-symbols-outlined md-18">${item.icon}</span>` : ''
@@ -57,6 +62,7 @@ export class ContextMenu {
     menu.style.top = `${posY}px`;
 
     this.attachDismiss();
+    menu.querySelector('button')?.focus({ preventScroll: true });
   }
 
   private attachDismiss(): void {
@@ -64,27 +70,43 @@ export class ContextMenu {
       if (this.menuEl && !this.menuEl.contains(e.target as Node)) this.close();
     };
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') this.close();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        const anchor = this.returnFocus;
+        this.close();
+        anchor?.focus({ preventScroll: true });
+      }
+      if (e.key === 'Tab') this.close();
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key) && this.menuEl) {
+        e.preventDefault();
+        const buttons = Array.from(this.menuEl.querySelectorAll('button'));
+        const current = buttons.findIndex((button) => button === document.activeElement);
+        const next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
+          : (current + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[next]?.focus();
+      }
     };
     const handleResize = () => this.close();
 
-    // Defer so the opening click doesn't immediately dismiss the menu.
-    setTimeout(() => {
-      document.addEventListener('pointerdown', handleOutsideClick, true);
-      document.addEventListener('contextmenu', handleOutsideClick, true);
-      window.addEventListener('keydown', handleKeyDown, true);
-      window.addEventListener('resize', handleResize);
-    }, 10);
+    // Opening happens after pointerdown/capture; no delayed callback may
+    // install listeners after a menu has already been destroyed.
+    document.addEventListener('pointerdown', handleOutsideClick, true);
+    document.addEventListener('contextmenu', handleOutsideClick, true);
+    window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('scroll', handleResize, true);
 
     this.unbindGlobalListeners.push(() => {
       document.removeEventListener('pointerdown', handleOutsideClick, true);
       document.removeEventListener('contextmenu', handleOutsideClick, true);
       window.removeEventListener('keydown', handleKeyDown, true);
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('scroll', handleResize, true);
     });
   }
 
   public close(): void {
+    this.returnFocus = null;
     this.unbindGlobalListeners.forEach((u) => u());
     this.unbindGlobalListeners = [];
     if (this.menuEl) {

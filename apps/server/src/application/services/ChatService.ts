@@ -13,6 +13,8 @@ import {
   type UserSummary,
   type BotCommandContext,
   botCommandContextSchema,
+  messageReferenceSchema,
+  type MessageReply,
 } from '@monky/shared';
 import { BotRecord, MentionRecord, MessageRecord } from '../../domain/entities';
 import {
@@ -56,7 +58,8 @@ export class ChatService {
     botCommand?: BotCommandContext,
     messageId?: string,
     canSend: () => boolean = () => true,
-    accessUserId: string = bot.id
+    accessUserId: string = bot.id,
+    replyToMessageId?: string
   ): Promise<BotMessageResult> {
     const parsed = messageContentSchema.safeParse(content);
     if (!parsed.success || typeof channelId !== 'string' || !channelId || channelId.length > 128 ||
@@ -67,14 +70,17 @@ export class ChatService {
     if (!channel || channel.type !== 'TEXT' || !(await this.canUserAccessChannel(accessUserId, channelId))) {
       return { success: false, errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND, errorMessage: 'Canal não encontrado.' };
     }
+    if (!(await this.isValidReply(channelId, replyToMessageId))) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de referência indisponível.' };
+    }
     const existing = messageId ? await this.messageRepo.findById(messageId) : null;
     if (!canSend()) return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Publicação cancelada.' };
     if (existing) {
       if (!existing.botAuthor || existing.userId !== bot.id || existing.channelId !== channelId ||
-          existing.content !== parsed.data || existing.deletedAt) {
+          existing.content !== parsed.data || existing.deletedAt || existing.replyToMessageId !== replyToMessageId) {
         return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem já utilizado.' };
       }
-      return { success: true, message: this.botMessage(existing) };
+      return { success: true, message: { ...this.botMessage(existing), reply: await this.resolveReply(existing) } };
     }
     if (!this.rateLimiter.checkLimit(bot.id)) {
       return { success: false, errorCode: ProtocolErrorCode.RATE_LIMITED, errorMessage: 'Aguarde antes de publicar novamente.' };
@@ -83,16 +89,42 @@ export class ChatService {
       id: messageId ?? uuidv4(), channelId, userId: bot.id, content: parsed.data, createdAt: Date.now(), isSystem: false,
       botAuthor: { id: bot.id, name: bot.name, avatarPath: bot.avatarPath, ownerUserId: bot.createdByUserId },
       botCommand: botCommand ? botCommandContextSchema.parse(botCommand) : undefined,
+      replyToMessageId,
     };
     const persisted = await this.messageRepo.createBotMessage(record);
     if (!persisted) {
       return { success: false, errorCode: ProtocolErrorCode.UNAUTHORIZED, errorMessage: 'Bot indisponível.' };
     }
     if (!persisted.botAuthor || persisted.userId !== bot.id || persisted.channelId !== channelId ||
-        persisted.content !== parsed.data || persisted.deletedAt) {
+        persisted.content !== parsed.data || persisted.deletedAt || persisted.replyToMessageId !== replyToMessageId) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem já utilizado.' };
     }
-    return { success: true, message: this.botMessage(persisted) };
+    return { success: true, message: { ...this.botMessage(persisted), reply: await this.resolveReply(persisted) } };
+  }
+
+  private async isValidReply(channelId: string, messageId?: string): Promise<boolean> {
+    if (messageId === undefined) return true;
+    if (!messageReferenceSchema.safeParse(messageId).success) return false;
+    const original = await this.messageRepo.findById(messageId);
+    return !!original && original.channelId === channelId && !original.isSystem && !original.deletedAt;
+  }
+
+  private async resolveReply(record: MessageRecord): Promise<MessageReply | undefined> {
+    if (!record.replyToMessageId || record.deletedAt) return undefined;
+    const original = await this.messageRepo.findById(record.replyToMessageId);
+    // A dangling/cross-channel reference must never reveal any original data.
+    if (!original || original.channelId !== record.channelId || original.deletedAt) {
+      return { messageId: record.replyToMessageId, userNickname: '', content: '', deleted: true, hasAttachments: false };
+    }
+    const user = original.botAuthor ? null : await this.userRepo.findById(original.userId);
+    const attachments = await this.attachmentService.getForMessages([original.id]);
+    return {
+      messageId: original.id,
+      userNickname: original.botAuthor?.name ?? user?.nickname ?? 'Usuário Desconhecido',
+      content: original.content.slice(0, 200),
+      deleted: false,
+      hasAttachments: (attachments.get(original.id)?.length ?? 0) > 0,
+    };
   }
 
   private botMessage(record: MessageRecord): ChatMessage {
@@ -154,7 +186,8 @@ export class ChatService {
     userId: string,
     channelId: string,
     content: string,
-    attachmentIds?: string[]
+    attachmentIds?: string[],
+    replyToMessageId?: string
   ): Promise<{
     success: boolean;
     errorCode?: ProtocolErrorCode;
@@ -186,12 +219,16 @@ export class ChatService {
 
     // Check channel
     const channel = await this.channelRepo.findById(channelId);
-    if (!channel || channel.type !== 'TEXT') {
+    if (!channel || channel.type !== 'TEXT' || !(await this.canUserAccessChannel(userId, channelId))) {
       return {
         success: false,
         errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND,
         errorMessage: 'Canal de texto não encontrado',
       };
+    }
+
+    if (!(await this.isValidReply(channelId, replyToMessageId))) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de referência indisponível.' };
     }
 
     const user = await this.userRepo.findById(userId);
@@ -209,6 +246,7 @@ export class ChatService {
       channelId,
       userId: user.id,
       content: parseResult.data,
+      replyToMessageId,
       createdAt: now,
       isSystem: false,
     };
@@ -231,6 +269,7 @@ export class ChatService {
       createdAt: messageRecord.createdAt,
       isSystem: false,
       attachments: attachments.length > 0 ? attachments : undefined,
+      reply: await this.resolveReply(messageRecord),
     };
 
     return {
@@ -324,6 +363,7 @@ export class ChatService {
         editedAt,
         deletedAt: null,
         reactions: (await this.getReactions([messageId])).get(messageId) ?? [],
+        reply: await this.resolveReply(existing),
       },
     };
   }
@@ -454,12 +494,17 @@ export class ChatService {
   public async loadHistory(
     channelId: string,
     limit: number = LIMITS.MAX_HISTORY_MESSAGES_INITIAL,
-    beforeTimestamp?: number
+    beforeTimestamp?: number,
+    aroundMessageId?: string
   ): Promise<ChatMessage[]> {
     const boundedLimit = Number.isFinite(limit)
       ? Math.max(1, Math.min(LIMITS.MAX_HISTORY_MESSAGES_INITIAL, Math.floor(limit)))
       : LIMITS.MAX_HISTORY_MESSAGES_INITIAL;
-    const rawMessages = await this.messageRepo.listByChannel(channelId, boundedLimit, beforeTimestamp);
+    const target = aroundMessageId ? await this.messageRepo.findById(aroundMessageId) : null;
+    if (aroundMessageId && (!target || target.channelId !== channelId)) return [];
+    const rawMessages = target
+      ? [...(boundedLimit > 1 ? await this.messageRepo.listByChannel(channelId, boundedLimit - 1, target.createdAt) : []), target]
+      : await this.messageRepo.listByChannel(channelId, boundedLimit, beforeTimestamp);
     const uniqueUserIds = [...new Set(rawMessages.map((m) => m.userId))];
     const users = await this.userRepo.findByIds(uniqueUserIds);
     const userMap = new Map(users.map((u) => [u.id, u]));
@@ -467,7 +512,7 @@ export class ChatService {
     const attachmentsByMessage = await this.attachmentService.getForMessages(rawMessages.map((m) => m.id));
     const reactionsByMessage = await this.getReactions(rawMessages.filter((m) => !m.deletedAt && !m.isSystem).map((m) => m.id));
 
-    return rawMessages.map((m) => {
+    return Promise.all(rawMessages.map(async (m) => {
       const user = userMap.get(m.userId);
       // A deleted message keeps its row but nothing of its content: its files
       // must not travel to clients either (#504).
@@ -487,7 +532,8 @@ export class ChatService {
         editedAt: m.editedAt ?? null,
         deletedAt: m.deletedAt ?? null,
         reactions: reactionsByMessage.get(m.id) ?? [],
+        reply: await this.resolveReply(m),
       };
-    });
+    }));
   }
 }

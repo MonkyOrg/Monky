@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chatReactionSchema, reactionEmojiSchema } from '../src/reactions.js';
+import { botChatMessageSchema, chatReactionSchema, reactionEmojiSchema } from '../src/reactions.js';
+import { chatHistoryRequestSchema, messageReferenceSchema } from '../src/validators.js';
+
+test('reply references and historical navigation validate IDs without requiring replies on ordinary bot messages', () => {
+  for (const value of ['', null, 12, {}, 'x'.repeat(129)]) assert.equal(messageReferenceSchema.safeParse(value).success, false);
+  assert.equal(messageReferenceSchema.safeParse('message').success, true);
+  assert.equal(chatHistoryRequestSchema.safeParse({ channelId: 'text', aroundMessageId: 'message', limit: 1 }).success, true);
+  for (const value of [NaN, Infinity, -1, 1.5]) assert.equal(chatHistoryRequestSchema.safeParse({ channelId: 'text', limit: value }).success, false);
+  const message = { id: 'message', channelId: 'text', userId: 'bot', userNickname: 'Bot', content: 'Answer', createdAt: 1 };
+  assert.equal(botChatMessageSchema.safeParse(message).success, true);
+  const reply = { messageId: 'original', userNickname: 'Alice', content: 'Question', deleted: false, hasAttachments: false };
+  assert.deepEqual(botChatMessageSchema.parse({ ...message, reply }).reply, reply);
+});
 
 test('reactions accept one Unicode emoji and reject malformed or oversized payloads', () => {
   for (const emoji of ['👍', '👍🏽', '❤️', '👨‍👩‍👧‍👦', '🇧🇷', '1️⃣', '🏴󠁧󠁢󠁥󠁮󠁧󠁿']) {

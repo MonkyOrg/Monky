@@ -3,7 +3,7 @@ import net from 'net';
 import dgram from 'dgram';
 import * as mediasoup from 'mediasoup';
 import type { RouterRtpCodecCapability, TransportListenInfo } from 'mediasoup/node/lib/types.js';
-import { LIMITS } from '@monky/shared';
+import { LIMITS, aggregateTransportHealth, VoiceConnectionHealth } from '@monky/shared';
 import { getPublicIp } from '../discovery/ServerIpScanner';
 
 const MEDIA_CODECS: RouterRtpCodecCapability[] = [
@@ -72,6 +72,7 @@ export interface SfuTransportRecord {
   sessionId: string;
   channelId: string;
   direction: 'send' | 'recv';
+  healthState?: string;
 }
 
 /**
@@ -116,7 +117,38 @@ export function describeSfuPortProblem(problem: SfuPortProblem): string {
   );
 }
 
+export class SfuProducerClosedError extends Error {
+  constructor(public readonly producerId: string) {
+    super(`Producer ${producerId} is no longer available`);
+    this.name = 'SfuProducerClosedError';
+  }
+}
+
 export class SfuManager {
+  private healthListener?: (sessionId: string, channelId: string, health: VoiceConnectionHealth) => void;
+
+  public setHealthListener(listener: (sessionId: string, channelId: string, health: VoiceConnectionHealth) => void): void {
+    this.healthListener = listener;
+  }
+
+  public getConnectionHealth(sessionId: string, channelId: string): VoiceConnectionHealth {
+    return aggregateTransportHealth(Array.from(this.transports.values())
+      .filter((r) => r.sessionId === sessionId && r.channelId === channelId)
+      .map((r) => r.healthState ?? 'new'));
+  }
+
+  private updateTransportHealth(transportId: string): void {
+    const record = this.transports.get(transportId);
+    if (!record) return;
+    const { transport } = record;
+    record.healthState = transport.closed || transport.dtlsState === 'failed' || transport.dtlsState === 'closed'
+      ? 'failed'
+      : transport.iceState === 'disconnected' ? 'disconnected'
+      : transport.dtlsState === 'connected' && (transport.iceState === 'connected' || transport.iceState === 'completed')
+        ? 'connected'
+        : transport.iceState === 'new' && transport.dtlsState === 'new' ? 'new' : 'connecting';
+    this.healthListener?.(record.sessionId, record.channelId, this.getConnectionHealth(record.sessionId, record.channelId));
+  }
   private worker: mediasoup.types.Worker | null = null;
   private routers: Map<string, mediasoup.types.Router> = new Map(); // key = channelId
   private transports: Map<string, SfuTransportRecord> = new Map(); // key = transportId
@@ -409,10 +441,12 @@ export class SfuManager {
 
     transport.on('icestatechange', (iceState) => {
       console.log(`[SFU Server] Transport ${transport.id} (${direction}, session ${sessionId}) ICE state changed: ${iceState}`);
+      this.updateTransportHealth(transport.id);
     });
 
     transport.on('dtlsstatechange', (dtlsState) => {
       console.log(`[SFU Server] Transport ${transport.id} (${direction}, session ${sessionId}) DTLS state changed: ${dtlsState}`);
+      this.updateTransportHealth(transport.id);
       if (dtlsState === 'failed' || dtlsState === 'closed') {
         transport.close();
       }
@@ -420,8 +454,11 @@ export class SfuManager {
 
     transport.on('@close', () => {
       console.log(`[SFU Server] Transport ${transport.id} closed`);
-      this.transports.delete(transport.id);
+      // Keep the failed direction until replacement/leave; forgetting it would
+      // let the opposite transport falsely report the whole session healthy.
+      this.updateTransportHealth(transport.id);
     });
+    transport.on('routerclose', () => this.updateTransportHealth(transport.id));
 
     this.transports.set(transport.id, {
       transport,
@@ -429,6 +466,7 @@ export class SfuManager {
       channelId,
       direction,
     });
+    this.updateTransportHealth(transport.id);
 
     return {
       id: transport.id,
@@ -638,26 +676,38 @@ export class SfuManager {
     producerSessionId: string;
     appData: Record<string, any>;
   }> {
-    const router = await this.getOrCreateRouter(channelId);
     const transportRecord = this.transports.get(transportId);
     if (!transportRecord) {
       throw new Error(`Transport ${transportId} not found`);
     }
 
     const producerRecord = this.producers.get(producerId);
-    if (!producerRecord) {
-      throw new Error(`Producer ${producerId} not found`);
+    if (!producerRecord || producerRecord.producer.closed) {
+      throw new SfuProducerClosedError(producerId);
     }
 
+    const router = await this.getOrCreateRouter(channelId);
+    const producerIsGone = () => this.producers.get(producerId) !== producerRecord || producerRecord.producer.closed;
+    if (producerIsGone()) throw new SfuProducerClosedError(producerId);
     if (!router.canConsume({ producerId, rtpCapabilities })) {
       throw new Error(`Cannot consume producer ${producerId} with provided capabilities`);
     }
 
-    const consumer = await transportRecord.transport.consume({
-      producerId,
-      rtpCapabilities,
-      paused: false,
-    });
+    let consumer: mediasoup.types.Consumer;
+    try {
+      consumer = await transportRecord.transport.consume({
+        producerId,
+        rtpCapabilities,
+        paused: false,
+      });
+    } catch (error) {
+      if (producerIsGone()) throw new SfuProducerClosedError(producerId);
+      throw error;
+    }
+    if (producerIsGone()) {
+      consumer.close();
+      throw new SfuProducerClosedError(producerId);
+    }
 
     console.log(`[SFU Server] Consumer created ${consumer.id} (${consumer.kind}) for session ${sessionId} consuming producer ${producerId} (owner: ${producerRecord.sessionId}, type: ${producerRecord.appData?.mediaType})`);
 

@@ -229,6 +229,11 @@ The process stays listed in PM2 on purpose: removing it would discard the logs
 exactly when they matter most, right after a crash or a manual stop. `monky
 logs` keeps working with the server stopped.
 
+Online people counters (including the home page and monitor) exclude bots and
+count each identity only once, even when connected from multiple devices.
+Invisible people still count toward the shutdown warning: they remain connected
+and will also be disconnected.
+
 If anyone is connected at that moment, the CLI reports how many people will be
 disconnected and asks for confirmation before stopping. On a non-interactive
 terminal (scripts, cron) the warning is printed and the stop goes ahead.

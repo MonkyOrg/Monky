@@ -369,6 +369,7 @@ export class SqliteChannelRepository implements IChannelRepository {
 }
 
 interface SqliteMessageRow {
+  replyToMessageId: string | null;
   authorBotId: string | null;
   authorBotName: string | null;
   authorBotAvatarPath: string | null;
@@ -385,11 +386,12 @@ interface SqliteMessageRow {
 
 /** Columns every message read shares, so the three queries cannot drift (#504). */
 const MESSAGE_COLUMNS =
-  'id, channel_id as channelId, user_id as userId, content, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson';
+  'id, channel_id as channelId, user_id as userId, content, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId';
 
 function toMessageRecord(r: SqliteMessageRow): MessageRecord {
   if (r.authorBotId && !r.authorBotName) throw new Error('Stored bot message is missing its author name.');
   return {
+    replyToMessageId: r.replyToMessageId ?? undefined,
     id: r.id,
     channelId: r.channelId,
     userId: r.authorBotId ?? r.userId,
@@ -467,11 +469,11 @@ export class SqliteMessageRepository implements IMessageRepository {
 
   private insertMessage(message: MessageRecord, idempotent = false): void {
     this.db.prepare(
-      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
+      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json, reply_to_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
       (idempotent ? ' ON CONFLICT(id) DO NOTHING' : '')
     ).run(message.id, message.channelId, message.botAuthor?.ownerUserId ?? message.userId, message.content, message.createdAt, message.isSystem ? 1 : 0,
       message.botAuthor?.id ?? null, message.botAuthor?.name ?? null, message.botAuthor?.avatarPath ?? null,
-      message.botCommand ? JSON.stringify(message.botCommand) : null);
+      message.botCommand ? JSON.stringify(message.botCommand) : null, message.replyToMessageId ?? null);
   }
 
   async findById(messageId: string): Promise<MessageRecord | null> {

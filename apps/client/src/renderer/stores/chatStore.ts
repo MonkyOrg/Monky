@@ -4,6 +4,7 @@ import {
   type BotForm,
   type BotFormValues,
   type ChatMessage,
+  type MessageReply,
   type ChatReactionEventPayload,
   type CommandFinishedPayload,
   type CommandFinishReason,
@@ -52,8 +53,11 @@ export interface BotInvocation extends CommandInvokedPayload {
 export class ChatStore {
   /** See ServerStore.bus: background servers get a silent bus (#400). */
   public bus: EventBus = appEvents;
-  // Map of channelId -> ChatMessage[]
+  // Public history windows and private responses have separate bounded caches:
+  // private responses cannot be fetched again when leaving an old history window.
   private messages: Map<string, ChatMessage[]> = new Map();
+  private ephemeralMessages: Map<string, ChatMessage[]> = new Map();
+  private historicalChannels = new Set<string>();
   // Text channels with an unread @-mention for the current user (#14).
   private mentionChannels: Set<string> = new Set();
   // Text channels with unread messages for the current user (#263).
@@ -62,12 +66,13 @@ export class ChatStore {
   // instead of the view because the view is torn down and rebuilt whenever the
   // center area switches between chat and the voice stage.
   private drafts: Map<string, string> = new Map();
+  private replyDrafts = new Map<string, MessageReply>();
   private commands: SlashCommand[] = [];
   private commandDrafts: Map<string, CommandDraft> = new Map();
   private invocations: Map<string, BotInvocation> = new Map();
   private commandUsageScope: CommandUsageScope | null = null;
   private commandUsage: CommandUsage[] = [];
-  // Maximum number of messages kept in memory per channel to bound memory usage.
+  // Each channel retains at most 250 public and 250 private messages.
   private static readonly MAX_MESSAGES_PER_CHANNEL = 250;
   private static readonly MAX_INVOCATIONS = 50;
   private static readonly MAX_FORMS_PER_INVOCATION = 20;
@@ -96,15 +101,32 @@ export class ChatStore {
     return [...combined.values()].map((entry) => ({ ...entry }));
   }
 
-  public setHistory(channelId: string, msgs: ChatMessage[]): void {
+  public setHistory(channelId: string, msgs: ChatMessage[], aroundMessageId?: string): void {
     // History can arrive after a live response, and never contains private
     // messages. Preserve those rows without duplicating public bot results.
-    const current = this.messages.get(channelId) ?? [];
+    const current = aroundMessageId ? [] : this.messages.get(channelId) ?? [];
+    if (aroundMessageId) this.historicalChannels.add(channelId);
+    else this.historicalChannels.delete(channelId);
+    const publicHistory = msgs.filter((message) => !message.isEphemeral);
+    const publicIds = new Set(publicHistory.map((message) => message.id));
+    const privateMessages = new Map((this.ephemeralMessages.get(channelId) ?? [])
+      .filter((message) => !publicIds.has(message.id))
+      .map((message) => [message.id, message]));
+    for (const message of msgs) {
+      if (message.isEphemeral && !publicIds.has(message.id)) {
+        privateMessages.set(message.id, message);
+        this.recordBotResponse(message);
+      }
+    }
+    if (privateMessages.size) {
+      this.ephemeralMessages.set(channelId, [...privateMessages.values()]
+        .sort((a, b) => a.createdAt - b.createdAt).slice(-ChatStore.MAX_MESSAGES_PER_CHANNEL));
+    } else this.ephemeralMessages.delete(channelId);
     const newestHistory = msgs.reduce((latest, message) => Math.max(latest, message.createdAt), 0);
     const merged = new Map(current
       .filter((message) => message.isBot || message.isEphemeral || message.createdAt > newestHistory)
       .map((message) => [message.id, message]));
-    for (const message of msgs) {
+    for (const message of publicHistory) {
       const previous = merged.get(message.id);
       merged.set(message.id, {
         ...message,
@@ -117,25 +139,27 @@ export class ChatStore {
       .slice(-ChatStore.MAX_MESSAGES_PER_CHANNEL);
     this.messages.set(channelId, trimmed);
     for (const message of trimmed) this.recordBotResponse(message);
-    this.bus.emit('chat.history_loaded', { channelId, messages: trimmed });
+    this.bus.emit('chat.history_loaded', { channelId, messages: this.getMessages(channelId), aroundMessageId });
   }
 
   public addMessage(message: ChatMessage): void {
     this.recordBotResponse(message);
-    let list = this.messages.get(message.channelId);
+    if (this.messages.get(message.channelId)?.some((entry) => entry.id === message.id) ||
+        this.ephemeralMessages.get(message.channelId)?.some((entry) => entry.id === message.id)) return;
+    const cache = message.isEphemeral ? this.ephemeralMessages : this.messages;
+    let list = cache.get(message.channelId);
     if (!list) {
       list = [];
-      this.messages.set(message.channelId, list);
-    }
-    if (list.some((m) => m.id === message.id)) {
-      return;
+      cache.set(message.channelId, list);
     }
     list.push(message);
     // Keep only the most recent messages to prevent unbounded memory growth.
     if (list.length > ChatStore.MAX_MESSAGES_PER_CHANNEL) {
       list.splice(0, list.length - ChatStore.MAX_MESSAGES_PER_CHANNEL);
     }
-    this.bus.emit('chat.message_added', message);
+    if (!message.isEphemeral || !this.historicalChannels.has(message.channelId)) {
+      this.bus.emit('chat.message_added', message);
+    }
   }
 
   private recordBotResponse(message: ChatMessage): void {
@@ -150,17 +174,32 @@ export class ChatStore {
 
   /**
    * Replaces a message already in the feed with its edited/deleted state (#504).
-   * A message the client never loaded is ignored: it will arrive in its final
-   * shape the next time the history is fetched.
+   * Unloaded originals still refresh references, without creating phantom rows.
    */
   public updateMessage(message: ChatMessage): void {
-    const list = this.messages.get(message.channelId);
-    if (!list) return;
+    const privateMessages = this.ephemeralMessages.get(message.channelId);
+    const list = privateMessages?.some((entry) => entry.id === message.id)
+      ? privateMessages : this.messages.get(message.channelId) ?? [];
+    const reply = this.messageReply(message);
+    const updatesDraft = this.replyDrafts.get(message.channelId)?.messageId === message.id;
+    if (updatesDraft) {
+      this.replyDrafts.set(message.channelId, reply);
+    }
+    for (const entry of list) {
+      if (entry.reply?.messageId === message.id) {
+        entry.reply = reply;
+        this.bus.emit('chat.message_updated', entry);
+      }
+    }
     const index = list.findIndex((m) => m.id === message.id);
-    if (index === -1) return;
+    if (index === -1) {
+      if (updatesDraft) this.bus.emit('chat.message_updated', message);
+      return;
+    }
     const previous = list[index];
     list[index] = {
       ...message,
+      ...(previous.isEphemeral ? { isEphemeral: true } : {}),
       ...(previous.isBot && previous.userId === message.userId
         ? { isBot: true, botCommand: message.botCommand ?? previous.botCommand } : {}),
     };
@@ -168,7 +207,31 @@ export class ChatStore {
   }
 
   public getMessages(channelId: string): ChatMessage[] {
-    return this.messages.get(channelId) || [];
+    const publicMessages = this.messages.get(channelId) ?? [];
+    if (this.historicalChannels.has(channelId)) return publicMessages;
+    return [...publicMessages, ...(this.ephemeralMessages.get(channelId) ?? [])]
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  public messageReply(message: ChatMessage): MessageReply {
+    return {
+      messageId: message.id,
+      userNickname: message.deletedAt ? '' : message.userNickname,
+      content: message.deletedAt ? '' : message.content.slice(0, 200),
+      deleted: !!message.deletedAt,
+      hasAttachments: !message.deletedAt && !!message.attachments?.length,
+    };
+  }
+
+  public setReplyDraft(channelId: string, message?: ChatMessage): void {
+    if (!message) this.replyDrafts.delete(channelId);
+    else if (message.channelId === channelId && !message.isSystem && !message.isEphemeral && !message.deletedAt) {
+      this.replyDrafts.set(channelId, this.messageReply(message));
+    }
+  }
+
+  public getReplyDraft(channelId: string): MessageReply | undefined {
+    return this.replyDrafts.get(channelId);
   }
 
   public updateReaction(event: ChatReactionEventPayload, add: boolean): void {
@@ -534,6 +597,9 @@ export class ChatStore {
   }
 
   public clear(): void {
+    this.ephemeralMessages.clear();
+    this.historicalChannels.clear();
+    this.replyDrafts.clear();
     this.messages.clear();
     this.mentionChannels.clear();
     this.unreadChannels.clear();

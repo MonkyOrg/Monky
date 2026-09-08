@@ -1,12 +1,13 @@
 import { StickerEntry } from '@monky/shared';
 import { EMOJI_CATALOG, EmojiGroupId } from '../emoji/emojiCatalog';
+import { recentEmojis } from '../emoji/recentEmojis';
 import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
 import { t, tCount, TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { normalizeSearchString } from '../utils/search';
 
-type PickerTab = 'emojis' | 'stickers';
+type PickerTab = 'recent' | 'emojis' | 'stickers';
 
 export interface EmojiPickerOptions {
   /** Positioned ancestor the popover is anchored inside (`.chat-input-container` or document.body). */
@@ -92,6 +93,8 @@ export class EmojiPicker {
     const emojiOnlyClass = this.options.emojiOnly ? ' emoji-picker--emoji-only' : '';
     const floatingClass = this.options.floating ? ' emoji-picker--floating' : '';
     root.className = `emoji-picker${posClass}${emojiOnlyClass}${floatingClass}`;
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-label', t('chat.emojiPickerTitle'));
     root.innerHTML = this.renderShell();
     this.options.container.appendChild(root);
     this.root = root;
@@ -150,16 +153,20 @@ export class EmojiPicker {
   // --- shell -------------------------------------------------------------
 
   private renderShell(): string {
-    const tabsHtml = this.options.emojiOnly ? '' : `
+    const tabsHtml = `
       <div class="emoji-picker-tabs">
+        <button type="button" class="emoji-picker-tab" data-picker-tab="recent">
+          <span class="material-symbols-outlined md-16" aria-hidden="true">schedule</span>
+          ${t('emojiPicker.tabRecent')}
+        </button>
         <button type="button" class="emoji-picker-tab" data-picker-tab="emojis">
           <span class="material-symbols-outlined md-16">mood</span>
           ${t('emojiPicker.tabEmojis')}
         </button>
-        <button type="button" class="emoji-picker-tab" data-picker-tab="stickers">
+        ${this.options.emojiOnly ? '' : `<button type="button" class="emoji-picker-tab" data-picker-tab="stickers">
           <span class="material-symbols-outlined md-16">gesture</span>
           ${t('emojiPicker.tabStickers')}
-        </button>
+        </button>`}
       </div>
     `;
 
@@ -212,7 +219,9 @@ export class EmojiPicker {
 
       const emoji = target.closest<HTMLElement>('[data-emoji]')?.getAttribute('data-emoji');
       if (emoji) {
+        recentEmojis.select(emoji);
         this.options.onSelectEmoji(emoji);
+        if (this.root && this.tab === 'recent') this.renderResults();
         return;
       }
 
@@ -259,10 +268,24 @@ export class EmojiPicker {
       if (e.key === 'Escape') {
         e.stopPropagation();
         this.close();
+        this.options.anchor.focus({ preventScroll: true });
       }
     };
     document.addEventListener('keydown', onKeyDown, true);
     this.unbind.push(() => document.removeEventListener('keydown', onKeyDown, true));
+
+    if (this.options.floating) {
+      const onScroll = (event: Event) => {
+        if (!(event.target instanceof Node) || !root.contains(event.target)) this.close();
+      };
+      const onResize = () => this.close();
+      window.addEventListener('scroll', onScroll, true);
+      window.addEventListener('resize', onResize);
+      this.unbind.push(() => {
+        window.removeEventListener('scroll', onScroll, true);
+        window.removeEventListener('resize', onResize);
+      });
+    }
   }
 
   // --- body --------------------------------------------------------------
@@ -273,12 +296,14 @@ export class EmojiPicker {
 
     root.querySelectorAll<HTMLElement>('[data-picker-tab]').forEach((btn) => {
       btn.classList.toggle('is-active', btn.getAttribute('data-picker-tab') === this.tab);
+      btn.setAttribute('aria-pressed', String(btn.getAttribute('data-picker-tab') === this.tab));
     });
 
     const search = root.querySelector<HTMLInputElement>('.emoji-picker-search-input');
     if (search) {
       search.placeholder =
-        this.tab === 'emojis' ? t('emojiPicker.searchEmojis') : t('emojiPicker.searchStickers');
+        this.tab !== 'stickers' ? t('emojiPicker.searchEmojis') : t('emojiPicker.searchStickers');
+      search.setAttribute('aria-label', search.placeholder);
     }
 
     // The folder listing is async, so the first paint shows a loading state and
@@ -298,7 +323,12 @@ export class EmojiPicker {
   }
 
   private renderResults(): void {
-    if (this.tab === 'emojis') this.renderEmojis();
+    if (this.tab !== 'stickers') {
+      this.imageObserver?.disconnect();
+      this.imageObserver = null;
+    }
+    if (this.tab === 'recent') this.renderRecent();
+    else if (this.tab === 'emojis') this.renderEmojis();
     else this.renderStickers();
   }
 
@@ -311,6 +341,22 @@ export class EmojiPicker {
   }
 
   // --- emojis ------------------------------------------------------------
+
+  private renderRecent(): void {
+    const body = this.bodyEl;
+    const footer = this.footerEl;
+    if (!body || !footer) return;
+    const query = normalizeSearchString(this.query).trim();
+    const catalog = new Map(EMOJI_CATALOG.flatMap((group) => group.emojis.map((entry) => [entry[0], entry] as const)));
+    const buttons = recentEmojis.get().flatMap((char) => {
+      const entry = catalog.get(char);
+      return entry && (!query || entry[2].includes(query)) ? [this.renderEmojiButton(char, entry[1])] : [];
+    });
+    body.innerHTML = buttons.length
+      ? `<div class="emoji-picker-grid">${buttons.join('')}</div>`
+      : this.renderEmptyState('schedule', t(query ? 'emojiPicker.noResults' : 'emojiPicker.noRecent'), '');
+    footer.innerHTML = '';
+  }
 
   private renderEmojis(): void {
     const body = this.bodyEl;

@@ -7,13 +7,14 @@ import net from 'net';
 import path from 'path';
 import { LanDiscovery } from './lanDiscovery';
 import { globalInputHook } from './globalInputHook';
+import { SHORTCUT_IPC } from '@monky/shared';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
 import { mt, setMainLanguage } from './i18n';
 import { fetchLinkPreview } from './linkPreview';
 import { TrayManager, VoiceStatus } from './trayManager';
-import type { DesktopSource, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState, PttConfig } from '@monky/shared';
+import type { DesktopSource, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
 import { OverlayManager } from './overlayManager';
 import {
   HOME_MIN_HEIGHT,
@@ -929,25 +930,41 @@ export function setupIpcHandlers(
   // of Electron globalShortcut. globalShortcut.register() consumes the key on
   // Windows, so a single-key bind like "Q" was swallowed and never reached the
   // focused game (#571). uiohook only observes input, so the key passes through.
-  ipcMain.handle('soundboard:register-shortcuts', (_, shortcuts: Array<{ soundName: string; accelerator: string }>) => {
-    return globalInputHook.setSoundboardHotkeys(Array.isArray(shortcuts) ? shortcuts : []);
+  ipcMain.handle(SHORTCUT_IPC.registerSoundboard, (_, shortcuts: unknown) => {
+    return globalInputHook.setSoundboardHotkeys(shortcuts);
   });
 
   // Action Global Shortcuts Registration (#252)
-  ipcMain.handle('shortcuts:register-actions', (_, shortcuts: Array<{ action: string; accelerator: string }>) => {
-    return globalInputHook.setActionHotkeys(Array.isArray(shortcuts) ? shortcuts : []);
+  ipcMain.handle(SHORTCUT_IPC.registerActions, (_, shortcuts: unknown) => {
+    return globalInputHook.setActionHotkeys(shortcuts);
+  });
+
+  ipcMain.handle(SHORTCUT_IPC.setCapture, (_, active: unknown) => {
+    return globalInputHook.setShortcutCapture(active);
+  });
+
+  mainWindow.webContents.on('did-start-loading', () => {
+    globalInputHook.stopCapture();
+    globalInputHook.setShortcutCapture(false);
+  });
+  mainWindow.webContents.on('render-process-gone', () => {
+    globalInputHook.stopCapture();
+    globalInputHook.setShortcutCapture(false);
+    globalInputHook.setPttConfig({ enabled: false, key: null });
+    globalInputHook.setActionHotkeys([]);
+    globalInputHook.setSoundboardHotkeys([]);
   });
 
   // Push to Talk (PTT) (#186)
-  ipcMain.handle('ptt:set-config', (_, config: PttConfig) => {
+  ipcMain.handle(SHORTCUT_IPC.setPttConfig, (_, config: unknown) => {
     return globalInputHook.setPttConfig(config);
   });
 
-  ipcMain.handle('ptt:start-capture', () => {
+  ipcMain.handle(SHORTCUT_IPC.startPttCapture, () => {
     return globalInputHook.startCapture();
   });
 
-  ipcMain.handle('ptt:stop-capture', () => {
+  ipcMain.handle(SHORTCUT_IPC.stopPttCapture, () => {
     return globalInputHook.stopCapture();
   });
 

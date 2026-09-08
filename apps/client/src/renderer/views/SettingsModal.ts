@@ -1,5 +1,6 @@
 import { MessageType } from '@monky/shared';
 import { networkClient } from '../core/NetworkClient';
+import { sessionManager } from '../core/SessionManager';
 import { serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { t } from '../i18n';
@@ -221,7 +222,7 @@ export class SettingsModal {
       },
       showError: (msg: string) => this.showError(msg),
       onVisibilityChanged: (appearOffline: boolean) => {
-        networkClient.send(MessageType.USER_UPDATE_VISIBILITY, { appearOffline });
+        sessionManager.setAppearOffline(appearOffline);
       },
     });
 

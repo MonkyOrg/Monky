@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { listOnlineHumans } from './application/services/onlineHumans';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import fs from 'node:fs';
@@ -172,8 +173,9 @@ async function createFixture() {
   const botRepo = new SqliteBotRepository(db);
   const avatars = new AvatarStorageService(dataDir);
   const rateLimiter = new RateLimiter();
+  const attachmentRepo = new SqliteAttachmentRepository(db);
   const attachmentService = new AttachmentService(
-    new SqliteAttachmentRepository(db), serverRepo, new AttachmentStorageService(dataDir), rateLimiter
+    attachmentRepo, serverRepo, new AttachmentStorageService(dataDir), rateLimiter
   );
   const permissions = new PermissionService(serverRepo, roleRepo);
   const roleService = new RoleService(roleRepo, userRepo, permissions);
@@ -222,10 +224,10 @@ async function createFixture() {
     await once(peer.ws, 'open');
     return peer;
   };
-  const human = async (nickname: string, keys = identity(), deviceId = randomUUID()) => {
+  const human = async (nickname: string, keys = identity(), deviceId = randomUUID(), appearOffline = false) => {
     const peer = await connect();
     const challenge = await peer.request(MessageType.AUTH_CONNECT, {
-      protocolVersion: PROTOCOL_VERSION, nickname, publicKey: keys.publicKey, deviceId,
+      protocolVersion: PROTOCOL_VERSION, nickname, publicKey: keys.publicKey, deviceId, appearOffline,
     });
     assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
     const signature = sign(null, Buffer.from(text(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex');
@@ -251,9 +253,73 @@ async function createFixture() {
   };
   return {
     connect, human, bot, dispose, peers, wsServer, botService, botRepo, roleRepo, avatars,
-    channelService, userService, registry, dataDir, messageRepo, channelRepo, userRepo, serverRepo, chatService,
+    channelService, userService, registry, dataDir, messageRepo, channelRepo, userRepo, serverRepo, chatService, attachmentRepo,
   };
 }
+
+test('human counts exclude bot accounts and collapse multiple devices without changing the online bot map', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.dispose());
+  const owner = await fixture.human('Human counter');
+  const second = await fixture.human('Human counter', owner.keys);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Not a person' });
+  const bot = await fixture.bot(text(created.payload.token));
+  const people = () => listOnlineHumans(fixture.wsServer.getOnlineUsersMap().values());
+  assert.equal(fixture.wsServer.getOnlineUsersMap().size, 3);
+  assert.deepEqual(people().map((user) => user.id), [owner.id]);
+  await owner.peer.close();
+  assert.equal(people().length, 1);
+  await second.peer.close();
+  await bot.peer.wait((message) => message.type === MessageType.USER_CONNECTION_STATE &&
+    message.payload.sessionId === record(second.auth.payload.currentUser).sessionId &&
+    message.payload.status === 'reconnecting');
+  assert.equal(people().length, 0);
+  assert.ok([...fixture.wsServer.getOnlineUsersMap().values()].some(({ user }) => user.isBot));
+});
+
+test('invisibility updates presence without fake disconnection and survives profile edits and new devices', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.dispose());
+  const owner = await fixture.human('Invisible owner');
+  const sibling = await fixture.human('Invisible owner', owner.keys);
+  const observer = await fixture.human('Presence observer');
+  const channels = records(record(owner.auth.payload.server).channels);
+  const voiceId = text(channels.find((channel) => channel.type === 'VOICE')?.id);
+  await owner.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
+  const since = observer.peer.messages.length;
+  const update = await owner.peer.request(MessageType.USER_UPDATE_VISIBILITY, { appearOffline: true });
+  assert.equal(record(update.payload.user).invisible, true);
+  const hidden = await observer.peer.wait((message) =>
+    message.type === MessageType.USER_UPDATED && record(message.payload.user).id === owner.id, since);
+  assert.equal(record(hidden.payload.user).status, 'DISCONNECTED');
+  assert.equal(record(hidden.payload.user).invisible, undefined);
+  await observer.peer.barrier();
+  assert.equal(observer.peer.messages.slice(since).some((message) =>
+    message.type === MessageType.USER_LEFT || message.type === MessageType.VOICE_USER_LEFT), false);
+  assert.equal(fixture.wsServer.getOnlineUsersMap().size, 3);
+  assert.equal(fixture.wsServer.getVisibleOnlineUsersMap().size, 1);
+  assert.ok(sibling.peer.messages.some((message) =>
+    message.type === MessageType.USER_UPDATED && record(message.payload.user).invisible === true));
+
+  const fresh = await fixture.human('New observer');
+  const snapshot = record(fresh.auth.payload.server);
+  assert.equal(records(snapshot.members).some((member) => member.id === owner.id), false);
+  assert.equal(records(snapshot.knownMembers).find((member) => member.id === owner.id)?.status, 'DISCONNECTED');
+  const beforeRename = observer.peer.messages.length;
+  await owner.peer.request(MessageType.USER_CHANGE_NICKNAME, { newNickname: 'Still invisible' });
+  const renamed = await observer.peer.wait((message) =>
+    message.type === MessageType.USER_UPDATED && record(message.payload.user).nickname === 'Still invisible', beforeRename);
+  assert.equal(record(renamed.payload.user).status, 'DISCONNECTED');
+  assert.ok([...fixture.wsServer.getOnlineUsersMap().values()]
+    .filter(({ user }) => user.id === owner.id).every(({ user }) => user.invisible));
+
+  await sibling.peer.request(MessageType.USER_UPDATE_VISIBILITY, { appearOffline: false });
+  await observer.peer.barrier();
+  assert.equal(fixture.wsServer.getVisibleOnlineUsersMap().size, 4);
+  await fixture.human('Still invisible', owner.keys, randomUUID(), true);
+  assert.equal(fixture.wsServer.getVisibleOnlineUsersMap().size, 2);
+  await owner.peer.error(MessageType.USER_UPDATE_VISIBILITY, { appearOffline: 'false' }, ProtocolErrorCode.BAD_REQUEST);
+});
 
 function hasInvocation(message: Received, type: MessageType, id: string): boolean {
   return message.type === type && message.payload.invocationId === id;
@@ -517,6 +583,92 @@ test('private channel selectors bind invocations and revalidate durable creator 
   assert.deepEqual(records((await bot.peer.request(MessageType.SELECTOR_LIST, {})).payload.selectors), []);
 });
 
+test('persisted chat replies resolve trusted originals, edits, deletion and old history without privacy leaks', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.dispose());
+  const owner = await fixture.human('Reply owner');
+  const alice = await fixture.human('Reply Alice');
+  const channelId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'TEXT')?.id);
+  const sent = await owner.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Original text' });
+  const originalId = text(sent.payload.id);
+  const response = await alice.peer.request(MessageType.CHAT_SEND, {
+    channelId, content: 'An answer', replyToMessageId: originalId, reply: { userNickname: 'Spoofed', content: 'Forged' },
+  });
+  assert.equal(response.type, MessageType.CHAT_MESSAGE);
+  const responseId = text(response.payload.id);
+  assert.equal(record(response.payload.reply).userNickname, 'Reply owner');
+  assert.equal(record(response.payload.reply).content, 'Original text');
+  assert.equal((await fixture.messageRepo.findById(responseId))?.replyToMessageId, originalId);
+  await owner.peer.wait((message) => message.type === MessageType.CHAT_MESSAGE && message.payload.id === responseId);
+  await owner.peer.request(MessageType.CHAT_EDIT, { channelId, messageId: originalId, content: 'Edited original' });
+  let history = await alice.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId });
+  assert.equal(record(records(history.payload.messages).find((message) => message.id === responseId)?.reply).content, 'Edited original');
+  await alice.peer.error(MessageType.CHAT_EDIT, { channelId, messageId: originalId, content: 'Not mine' }, ProtocolErrorCode.PERMISSION_DENIED);
+  await alice.peer.error(MessageType.CHAT_DELETE, { channelId, messageId: originalId }, ProtocolErrorCode.PERMISSION_DENIED);
+
+  const fileId = randomUUID();
+  await fixture.attachmentRepo.create({
+    id: fileId, messageId: null, channelId, userId: owner.id, kind: 'file', filename: 'reply.txt',
+    originalName: 'reply.txt', mimeType: 'text/plain', sizeBytes: 8, createdAt: Date.now(),
+  });
+  const attachmentMessage = await owner.peer.request(MessageType.CHAT_SEND, { channelId, content: '', attachmentIds: [fileId], replyToMessageId: originalId });
+  assert.equal(attachmentMessage.type, MessageType.CHAT_MESSAGE);
+  assert.equal(record(attachmentMessage.payload.reply).messageId, originalId);
+  const attachmentReply = await owner.peer.request(MessageType.CHAT_SEND, {
+    channelId, content: 'Reply to attachment', replyToMessageId: text(attachmentMessage.payload.id),
+  });
+  assert.equal(record(attachmentReply.payload.reply).hasAttachments, true);
+  assert.equal(record(attachmentReply.payload.reply).content, '');
+
+  // The exact target is included even when more than a page shares its timestamp.
+  const target = await fixture.messageRepo.findById(originalId);
+  assert.ok(target);
+  for (let index = 0; index < LIMITS.MAX_HISTORY_MESSAGES_INITIAL + 1; index++) {
+    await fixture.messageRepo.create({ ...target, id: randomUUID(), content: `Paged ${index}` });
+  }
+  const oldPage = await alice.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId, aroundMessageId: originalId, limit: 3 });
+  assert.equal(oldPage.payload.aroundMessageId, originalId);
+  assert.ok(records(oldPage.payload.messages).some((message) => message.id === originalId));
+  assert.ok(records(oldPage.payload.messages).length <= 3);
+
+  const privateChannel = await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'reply-private', type: 'TEXT', isPrivate: true, allowedRoleIds: [],
+  });
+  const privateId = text(record(privateChannel.payload.channel).id);
+  const secret = await owner.peer.request(MessageType.CHAT_SEND, { channelId: privateId, content: 'Secret reply target' });
+  const secretId = text(secret.payload.id);
+  await alice.peer.error(MessageType.CHAT_SEND, { channelId, content: 'Leak attempt', replyToMessageId: secretId }, ProtocolErrorCode.BAD_REQUEST);
+  await alice.peer.error(MessageType.CHAT_SEND, { channelId: privateId, content: 'Private', replyToMessageId: secretId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  const deniedPage = await alice.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId, aroundMessageId: secretId });
+  assert.deepEqual(deniedPage.payload.messages, []);
+  await alice.peer.error(MessageType.CHAT_LOAD_HISTORY, { channelId: privateId, aroundMessageId: secretId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await alice.peer.error(MessageType.CHAT_SEND, { channelId, content: 'Invalid', replyToMessageId: 123 }, ProtocolErrorCode.BAD_REQUEST);
+  await alice.peer.error(MessageType.CHAT_LOAD_HISTORY, { channelId, aroundMessageId: {} }, ProtocolErrorCode.BAD_REQUEST);
+  const corrupt = { ...target, id: randomUUID(), replyToMessageId: secretId, createdAt: Date.now() + 100 };
+  await fixture.messageRepo.create(corrupt);
+  const corruptPage = await fixture.chatService.loadHistory(channelId, 1, undefined, corrupt.id);
+  assert.equal(corruptPage[0].reply?.deleted, true);
+  assert.equal(corruptPage[0].reply?.content, '');
+
+  const created = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Reply bot' });
+  const bot = await fixture.bot(text(created.payload.token));
+  const botAnswer = await bot.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Bot answer', replyToMessageId: originalId });
+  assert.equal(record(botAnswer.payload.reply).content, 'Edited original');
+  const replyToBot = await owner.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Thanks bot', replyToMessageId: text(botAnswer.payload.id) });
+  assert.equal(record(replyToBot.payload.reply).userNickname, 'Reply bot');
+  await owner.peer.request(MessageType.CHAT_DELETE, { channelId, messageId: originalId });
+  history = await alice.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId, aroundMessageId: responseId });
+  const deletedReply = record(records(history.payload.messages).find((message) => message.id === responseId)?.reply);
+  assert.equal(deletedReply.deleted, true);
+  assert.equal(deletedReply.content, '');
+  assert.equal(deletedReply.userNickname, '');
+  await bot.peer.error(MessageType.CHAT_SEND, { channelId, content: 'Deleted target', replyToMessageId: originalId }, ProtocolErrorCode.BAD_REQUEST);
+  await bot.peer.error(MessageType.CHAT_SEND, { channelId, content: 'Missing target', replyToMessageId: randomUUID() }, ProtocolErrorCode.BAD_REQUEST);
+  const normal = await bot.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Normal still works' });
+  assert.equal(normal.type, MessageType.CHAT_MESSAGE);
+  assert.equal(normal.payload.reply, undefined);
+});
+
 test('persistent text reactions support bot events and enforce privacy', async (t) => {
   const fixture = await createFixture();
   t.after(() => fixture.dispose());
@@ -620,6 +772,7 @@ test('reaction rows survive reopening SQLite and enforce atomic bounds and clean
     id: botMessageId, channelId: channel.id, userId: botId, content: 'Persistent bot question', createdAt: 2,
     botAuthor: { id: botId, name: 'Persistent bot', avatarPath: null, ownerUserId: userId },
     botCommand: { invocationId: randomUUID(), commandName: 'question', invokerId: userId, invokerNickname: 'Reactor' },
+    replyToMessageId: messageId,
   };
   const [firstBotPost, retriedBotPost] = await Promise.all([
     repo.createBotMessage(botMessage), repo.createBotMessage({ ...botMessage, createdAt: 3 }),
@@ -634,6 +787,7 @@ test('reaction rows survive reopening SQLite and enforce atomic bounds and clean
   assert.equal(restoredBotMessage?.userId, botId);
   assert.equal(restoredBotMessage?.botAuthor?.name, 'Persistent bot');
   assert.deepEqual(restoredBotMessage?.botCommand, botMessage.botCommand);
+  assert.equal(restoredBotMessage?.replyToMessageId, messageId);
   assert.equal((await repo.listReactions([botMessageId])).length, 1);
   await new SqliteBotRepository(db).delete(botId);
   assert.equal((await repo.findById(botMessageId))?.userId, botId);

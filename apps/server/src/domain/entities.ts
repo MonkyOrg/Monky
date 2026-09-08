@@ -61,6 +61,7 @@ export interface ChannelRecord {
 }
 
 export interface MessageRecord {
+  replyToMessageId?: string;
   /** The owner backs the existing user FK; readers expose the bot's real ID. */
   botAuthor?: { id: string; name: string; avatarPath: string | null; ownerUserId: string };
   botCommand?: import('@monky/shared').BotCommandContext;
