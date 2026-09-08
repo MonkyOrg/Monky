@@ -2,7 +2,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, VoiceMode, stripAdministrator } from '@monky/shared';
+import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
 import { AttachmentService } from './application/services/AttachmentService';
 import { BotService } from './application/services/BotService';
@@ -238,7 +238,7 @@ export class MonkyServer {
       (userId, channelId) => channelService.canUserAccessChannel(userId, channelId)
     );
 
-    let getOnlineUsers: () => any = () => new Map();
+    let getOnlineUsers: () => Map<string, { user: UserSummary }> = () => new Map();
 
     const authService = new AuthService(
       serverRepo,
@@ -266,10 +266,9 @@ export class MonkyServer {
       avatarStorage,
       () => {
         // Online bots: filter sessions where isBot flag is set.
-        const all = getOnlineUsers() as Map<string, { user: any }>;
-        const bots = new Map<string, any>();
-        for (const [k, v] of all) {
-          if (v.user?.isBot) bots.set(k, v.user);
+        const bots = new Map<string, UserSummary>();
+        for (const { user } of getOnlineUsers().values()) {
+          if (user.isBot) bots.set(user.id, user);
         }
         return bots;
       }

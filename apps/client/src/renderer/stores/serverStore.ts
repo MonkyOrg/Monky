@@ -91,7 +91,7 @@ export class ServerStore {
     });
   }
 
-  /** Updates the list of slash commands from a COMMANDS_LIST message (#569). */
+  /** Updates commands from a COMMANDS_LIST_RESPONSE message (#569). */
   public setSlashCommands(commands: SlashCommand[]): void {
     this.slashCommands = commands;
     this.bus.emit('server.commands_updated');
@@ -410,6 +410,11 @@ export class ServerStore {
     });
   }
 
+  /** Bot user arguments reference persisted human users, not separate bot accounts. */
+  public getHumanMembersInDisplayOrder(): UserSummary[] {
+    return this.getAllMembersInDisplayOrder().filter((member) => !member.isBot);
+  }
+
   public recalculateMyPermissions(): number {
     if (!this.currentUser) {
       this.myPermissions = 0;
@@ -449,6 +454,10 @@ let activeServerStore = createServerStore();
 
 export function setActiveServerStore(store: ServerStore): void {
   activeServerStore = store;
+}
+
+export function getActiveServerStore(): ServerStore {
+  return activeServerStore;
 }
 
 export const serverStore = createActiveProxy<ServerStore>(() => activeServerStore);

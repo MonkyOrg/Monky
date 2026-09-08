@@ -65,6 +65,7 @@ function main() {
       version: sharedPkg.version,
       main: sharedPkg.main,
       types: sharedPkg.types,
+      dependencies: sharedPkg.dependencies,
     }, null, 2) + '\n'
   );
 
@@ -81,7 +82,7 @@ function main() {
     engines: { node: '>=18' },
     dependencies: {
       ...sharedPkg.dependencies,
-      ws: sdkPkg.dependencies.ws,
+      ...sdkPkg.dependencies,
       '@monky/shared': sharedPkg.version,
     },
     bundleDependencies: ['@monky/shared'],

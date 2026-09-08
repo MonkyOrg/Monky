@@ -2,9 +2,9 @@ import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, 
 import type { AttachmentMeta, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
-import { networkClient } from '../core/NetworkClient';
-import { chatStore } from '../stores/chatStore';
-import { serverStore } from '../stores/serverStore';
+import { networkClient, getActiveNetworkClient } from '../core/NetworkClient';
+import { chatStore, getActiveChatStore, type BotInvocation } from '../stores/chatStore';
+import { serverStore, getActiveServerStore } from '../stores/serverStore';
 import { participantManager } from '../core/ParticipantManager';
 import { userContextMenu } from './UserContextMenu';
 import { contextMenu, ContextMenuItem } from './ContextMenu';
@@ -22,6 +22,11 @@ import { buildCodeMessage, codeBlockModal } from './CodeBlockModal';
 import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
 import { extractStickerIds, stickerToken, stripStickerTokens } from '../utils/stickers';
+import { parseTypedCommand } from '../utils/botInputs';
+import { BotChatView, renderBotInvocation } from './BotChatView';
+import { groupCommands, type CommandGroup } from '../utils/commandCatalog';
+import { renderCommandCatalog } from './commandCatalog';
+import { renderBotCommandContext } from './botResponse';
 
 /** How close to the end the feed must be to keep following new messages (#270). */
 const BOTTOM_SCROLL_THRESHOLD_PX = 48;
@@ -60,8 +65,10 @@ export class ChatView {
   // /-command autocomplete state (#569).
   private commandActive = false;
   private commandMatches: SlashCommand[] = [];
+  private commandGroups: CommandGroup[] = [];
   private commandActiveIndex = 0;
-  private commandSlashIndex = -1;
+  private commandQuery = '';
+  private botChat: BotChatView | null = null;
   // Files picked for the next message, keyed by a local id (#11).
   private pending: PendingAttachment[] = [];
   /** Message currently open in the inline editor, if any (#504). */
@@ -131,10 +138,12 @@ export class ChatView {
 
         <div class="chat-input-container">
           <div id="mention-dropup" class="mention-dropup" style="display: none;"></div>
-          <div id="command-dropup" class="mention-dropup" style="display: none;"></div>
+          <div id="command-dropup" class="command-dropup" style="display: none;"></div>
           <div id="chat-attachment-tray" class="chat-attachment-tray" style="display: none;"></div>
           <div id="chat-compose-link-preview" class="chat-compose-link-preview" style="display: none;"></div>
           <div id="chat-send-permission-banner" class="chat-permission-banner" style="display: none;"></div>
+          <div id="chat-command-notice" class="bot-error" role="alert" hidden></div>
+          <div id="chat-command-composer" class="bot-command-composer" hidden></div>
           <div class="chat-input-wrapper">
             <button id="btn-attach" type="button" class="chat-attach-btn" title="${t('chat.attachFile')}">
               <span class="material-symbols-outlined md-22">add_circle</span>
@@ -182,7 +191,7 @@ export class ChatView {
     this.editingMessageId = null;
 
     const messages = chatStore.getMessages(this.currentChannelId);
-    if (messages.length === 0) {
+    if (messages.length === 0 && chatStore.getInvocations(this.currentChannelId).length === 0) {
       feed.innerHTML = `
         <div id="chat-empty-placeholder" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 10px;">
           <span class="material-symbols-outlined" style="color: var(--text-dim); font-size: 44px;">forum</span>
@@ -339,7 +348,7 @@ export class ChatView {
   private buildMessageMenuItems(messageId: string | null): ContextMenuItem[] {
     if (!messageId || !this.currentChannelId) return [];
     const message = chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId);
-    if (!message || message.isSystem || message.deletedAt) return [];
+    if (!message || message.isSystem || message.isEphemeral || message.deletedAt) return [];
 
     const isAuthor = !!serverStore.currentUser && message.userId === serverStore.currentUser.id;
     const canModerate = serverStore.hasPermission(Permission.MANAGE_SERVER);
@@ -524,13 +533,20 @@ export class ChatView {
   private renderMessagesWithDividers(messages: ChatMessage[]): string {
     const parts: string[] = [];
     let lastKey = '';
-    for (const m of messages) {
-      const key = this.dateKey(m.createdAt);
+    const items = [
+      ...messages.map((message) => ({ createdAt: message.createdAt, html: this.renderMessageRow(message) })),
+      ...chatStore.getInvocations(this.currentChannelId ?? '').map((invocation) => ({
+        createdAt: invocation.createdAt,
+        html: renderBotInvocation(invocation, serverStore.hasPermission(Permission.SEND_MESSAGES)),
+      })),
+    ].filter((item) => item.html !== '').sort((a, b) => a.createdAt - b.createdAt);
+    for (const item of items) {
+      const key = this.dateKey(item.createdAt);
       if (key !== lastKey) {
-        parts.push(this.renderDateDivider(m.createdAt));
+        parts.push(this.renderDateDivider(item.createdAt));
         lastKey = key;
       }
-      parts.push(this.renderMessageRow(m));
+      parts.push(item.html);
     }
     return parts.join('');
   }
@@ -559,6 +575,10 @@ export class ChatView {
 
   private focusChatInput(options?: { defer?: boolean }): void {
     const applyFocus = () => {
+      if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+        this.botChat?.focusComposer();
+        return;
+      }
       const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
       if (!input) return;
       input.focus({ preventScroll: true });
@@ -593,6 +613,8 @@ export class ChatView {
     const canSendMessages = !permissionsResolved || serverStore.hasPermission(Permission.SEND_MESSAGES);
     const canAttachFiles = canSendMessages && (!permissionsResolved || serverStore.hasPermission(Permission.ATTACH_FILES));
     const locked = permissionsResolved && !canSendMessages;
+    const commandSelected = !!this.currentChannelId && !!chatStore.getCommandDraft(this.currentChannelId);
+    inputWrapper.style.display = commandSelected ? 'none' : '';
 
     input.readOnly = locked;
     input.placeholder = locked
@@ -631,6 +653,7 @@ export class ChatView {
 
     if (locked) {
       this.closeMentionDropup();
+      this.closeCommandDropup();
       this.emojiPicker?.close();
     }
   }
@@ -681,18 +704,25 @@ export class ChatView {
       knownNicknames.push(currentNickname);
     }
 
-    const avatarSrc = getAvatarUrl(m.userAvatarUrl);
+    const avatarSrc = escapeHtml(getAvatarUrl(m.userAvatarUrl));
+    const isBot = m.isBot || serverStore.knownMembers.get(m.userId)?.isBot === true;
+    const botContext = isBot ? renderBotCommandContext(m) : '';
+    const botBadge = isBot ? `<span class="member-badge-bot">${t('botChat.badge')}</span>` : '';
+    const privateCue = m.isEphemeral ? `<span class="bot-private-cue"><span class="material-symbols-outlined md-14" aria-hidden="true">lock</span>${t('botChat.private')}</span>` : '';
 
     // A deleted message keeps its place in the conversation with a placeholder
     // instead of vanishing, so nothing silently reshuffles under the reader
     // (#504). Its text, stickers, attachments and link previews are all gone.
     if (m.deletedAt) {
       return `
-        <div class="chat-message-row chat-message-deleted" data-user-id="${m.userId}" data-message-id="${m.id}">
+        <div class="chat-message-row chat-message-deleted${isBot ? ' chat-bot-response' : ''}" data-user-id="${escapeHtml(m.userId)}" data-message-id="${escapeHtml(m.id)}">
+          ${botContext}
+          ${isBot ? '<div class="bot-response-main">' : ''}
           <img class="chat-author-avatar" src="${avatarSrc}" data-fallback="avatar">
-          <div class="chat-message-body">
+          <div class="chat-message-body${isBot ? ' bot-response-bubble' : ''}">
             <div class="chat-author-header">
               <span class="chat-author-name">${escapeHtml(m.userNickname)}</span>
+              ${botBadge}${privateCue}
               <span class="chat-timestamp">${time}</span>
             </div>
             <div class="chat-message-deleted-text">
@@ -700,6 +730,7 @@ export class ChatView {
               <span>${t('chat.messageDeleted')}</span>
             </div>
           </div>
+          ${isBot ? '</div>' : ''}
         </div>
       `;
     }
@@ -728,14 +759,17 @@ export class ChatView {
         : '';
     const stickersHtml = this.renderStickers(stickers);
     const attachmentsHtml = this.renderAttachments(otherAttachments, m);
-    const rowClass = `chat-message-row${isMentioned ? ' chat-message-mentioned' : ''}`;
+    const rowClass = `chat-message-row${isMentioned ? ' chat-message-mentioned' : ''}${m.isEphemeral ? ' chat-message-private' : ''}${isBot ? ' chat-bot-response' : ''}`;
 
     return `
-      <div class="${rowClass}" data-user-id="${m.userId}" data-message-id="${m.id}">
+      <div class="${rowClass}" data-user-id="${escapeHtml(m.userId)}" data-message-id="${escapeHtml(m.id)}">
+        ${botContext}
+        ${isBot ? '<div class="bot-response-main">' : ''}
         <img class="chat-author-avatar" src="${avatarSrc}" data-fallback="avatar">
-        <div class="chat-message-body">
+        <div class="chat-message-body${isBot ? ' bot-response-bubble' : ''}">
           <div class="chat-author-header">
             <span class="chat-author-name">${escapeHtml(m.userNickname)}</span>
+            ${botBadge}${privateCue}
             <span class="chat-timestamp">${time}</span>
             ${m.editedAt ? `<span class="chat-edited-badge" title="${escapeHtml(t('chat.editedAtTitle', { time: this.formatDateTime(m.editedAt) }))}">${t('chat.messageEdited')}</span>` : ''}
           </div>
@@ -744,6 +778,7 @@ export class ChatView {
           <div class="chat-link-previews" data-message-id="${escapeHtml(m.id)}"></div>
           ${attachmentsHtml}
         </div>
+        ${isBot ? '</div>' : ''}
       </div>
     `;
   }
@@ -996,6 +1031,20 @@ export class ChatView {
     const btnSend = document.getElementById('btn-send-message');
 
     const messagesFeed = this.container.querySelector('#chat-messages-feed') as HTMLElement | null;
+    const commandDropup = this.container.querySelector<HTMLElement>('#command-dropup');
+    const onCommandFocusOut = (event: FocusEvent) => {
+      if (event.relatedTarget === input || (event.relatedTarget instanceof Node && commandDropup?.contains(event.relatedTarget))) return;
+      this.closeCommandDropup();
+    };
+    const onOutsideCommand = (event: PointerEvent) => {
+      if (this.commandActive && event.target instanceof Node && event.target !== input && !commandDropup?.contains(event.target)) this.closeCommandDropup();
+    };
+    commandDropup?.addEventListener('focusout', onCommandFocusOut);
+    document.addEventListener('pointerdown', onOutsideCommand);
+    this.unbindEvents.push(() => {
+      commandDropup?.removeEventListener('focusout', onCommandFocusOut);
+      document.removeEventListener('pointerdown', onOutsideCommand);
+    });
     if (messagesFeed) {
       messagesFeed.addEventListener('scroll', () => {
         this.pinnedToBottom = this.isFeedAtBottom(messagesFeed);
@@ -1012,18 +1061,24 @@ export class ChatView {
       const target = e.target as HTMLElement | null;
       if (!input) return;
       if (this.isEditableTarget(target)) return;
-      if (target?.closest('button, .mention-dropup, #chat-attachment-tray')) return;
+      if (target?.closest('button, .mention-dropup, #chat-attachment-tray, #chat-command-composer')) return;
       requestAnimationFrame(() => this.focusChatInput());
     };
     inputContainer?.addEventListener('mousedown', focusFromInputShell);
     inputWrapper?.addEventListener('mousedown', focusFromInputShell);
 
     let composeLinkTimer: ReturnType<typeof setTimeout> | null = null;
+    let pastePreviewTimer: ReturnType<typeof setTimeout> | null = null;
+    let dropupBlurTimer: ReturnType<typeof setTimeout> | null = null;
     let lastComposeUrl = '';
     const composeLinkPreviewEl = this.container.querySelector('#chat-compose-link-preview') as HTMLElement | null;
 
     const updateComposeLinkPreview = () => {
-      if (!input || !composeLinkPreviewEl) return;
+      if (!input || !composeLinkPreviewEl || !input.isConnected) return;
+      if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+        composeLinkPreviewEl.style.display = 'none';
+        return;
+      }
       const urlMatch = input.value.match(/(https?:\/\/[^\s<]+)/);
       const url = urlMatch ? urlMatch[1] : '';
       if (url === lastComposeUrl) return;
@@ -1078,6 +1133,7 @@ export class ChatView {
       }
       autoResize();
       this.persistDraft(input.value);
+      this.showCommandNotice('');
       this.updateMentionDropup(input);
       this.updateCommandDropup(input);
       if (composeLinkTimer) clearTimeout(composeLinkTimer);
@@ -1086,7 +1142,12 @@ export class ChatView {
 
     // Also detect URL on paste immediately
     input?.addEventListener('paste', () => {
-      setTimeout(updateComposeLinkPreview, 100);
+      if (pastePreviewTimer) clearTimeout(pastePreviewTimer);
+      pastePreviewTimer = setTimeout(updateComposeLinkPreview, 100);
+    });
+    this.unbindEvents.push(() => {
+      if (composeLinkTimer) clearTimeout(composeLinkTimer);
+      if (pastePreviewTimer) clearTimeout(pastePreviewTimer);
     });
 
     // A restored draft (#478) has to look exactly like it did before the view
@@ -1107,6 +1168,24 @@ export class ChatView {
     const handleSend = () => {
       if (!input || !this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
       const text = input.value.trim();
+      if (chatStore.getCommandDraft(this.currentChannelId)) {
+        this.botChat?.focusComposer();
+        return;
+      }
+      const command = parseTypedCommand(input.value, chatStore.getCommands());
+      if (command.kind !== 'chat') {
+        if (command.kind === 'command') this.selectCommand(command.command, command.text);
+        else if (command.kind === 'ambiguous') {
+          this.showCommandNotice(t('botChat.commandAmbiguous'));
+          this.commandGroups = groupCommands(command.commands, [], getLanguage(), false);
+          this.commandMatches = this.commandGroups.flatMap((group) => group.commands);
+          this.commandActiveIndex = 0;
+          this.commandActive = true;
+          this.renderCommandDropup();
+          input.focus();
+        } else this.showCommandNotice(t('botChat.commandUnavailable'));
+        return;
+      }
 
       // Block sending until every staged upload has finished (#11).
       if (this.pending.some((p) => p.status === 'uploading')) return;
@@ -1116,31 +1195,6 @@ export class ChatView {
         .map((p) => p.meta!.id);
 
       if (!text && attachmentIds.length === 0) return;
-
-      // Slash command invocation (#569): /commandName [args...]
-      const cmdMatch = text.match(/^\/(\S+)(?:\s+(.*))?$/s);
-      if (cmdMatch && attachmentIds.length === 0) {
-        const cmdName = cmdMatch[1].toLowerCase();
-        const argsRaw = (cmdMatch[2] || '').trim();
-        const matches = serverStore.slashCommands.filter((c) => c.name === cmdName);
-        if (matches.length === 1) {
-          networkClient.send(MessageType.COMMAND_INVOKE, {
-            commandName: cmdName,
-            botId: matches[0].botId,
-            channelId: this.currentChannelId,
-            args: argsRaw ? [{ name: 'input', value: argsRaw }] : [],
-          });
-          input.value = '';
-          this.persistDraft('');
-          input.style.height = 'auto';
-          if (charCounter) charCounter.innerText = `0/${LIMITS.MAX_MESSAGE_LENGTH}`;
-          this.closeMentionDropup();
-          this.closeCommandDropup();
-          return;
-        }
-        // Multiple bots with the same command — the dropup should have
-        // disambiguated, but if we reach here, send as a normal message.
-      }
 
       networkClient.send(MessageType.CHAT_SEND, {
         channelId: this.currentChannelId,
@@ -1325,28 +1379,26 @@ export class ChatView {
       }
 
       // While the command dropup is open (#569).
-      if (this.commandActive && this.commandMatches.length > 0) {
+      if (this.commandActive) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this.closeCommandDropup();
+          return;
+        }
+        if (this.commandMatches.length === 0) return;
         if (e.key === 'ArrowDown') {
           e.preventDefault();
-          this.commandActiveIndex = (this.commandActiveIndex + 1) % this.commandMatches.length;
-          this.renderCommandDropup();
+          this.setActiveCommand((this.commandActiveIndex + 1) % this.commandMatches.length);
           return;
         }
         if (e.key === 'ArrowUp') {
           e.preventDefault();
-          this.commandActiveIndex =
-            (this.commandActiveIndex - 1 + this.commandMatches.length) % this.commandMatches.length;
-          this.renderCommandDropup();
+          this.setActiveCommand((this.commandActiveIndex - 1 + this.commandMatches.length) % this.commandMatches.length);
           return;
         }
-        if (e.key === 'Enter' || e.key === 'Tab') {
+        if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
           e.preventDefault();
           this.applyCommand(this.commandActiveIndex);
-          return;
-        }
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          this.closeCommandDropup();
           return;
         }
       }
@@ -1357,9 +1409,27 @@ export class ChatView {
       }
     });
 
-    input?.addEventListener('blur', () => {
+    const onInputBlur = () => {
+      if (!input?.isConnected) return;
       // Delay so a click (mousedown) on a dropup item is processed first.
-      setTimeout(() => { this.closeMentionDropup(); this.closeCommandDropup(); }, 150);
+      if (dropupBlurTimer) clearTimeout(dropupBlurTimer);
+      dropupBlurTimer = setTimeout(() => {
+        dropupBlurTimer = null;
+        if (!input.isConnected || document.activeElement === input) return;
+        this.closeMentionDropup();
+        if (!this.container.querySelector('#command-dropup')?.contains(document.activeElement)) this.closeCommandDropup();
+      }, 150);
+    };
+    const onInputFocus = () => {
+      if (dropupBlurTimer) clearTimeout(dropupBlurTimer);
+      dropupBlurTimer = null;
+    };
+    input?.addEventListener('blur', onInputBlur);
+    input?.addEventListener('focus', onInputFocus);
+    this.unbindEvents.push(() => {
+      input?.removeEventListener('blur', onInputBlur);
+      input?.removeEventListener('focus', onInputFocus);
+      if (dropupBlurTimer) clearTimeout(dropupBlurTimer);
     });
 
     btnSend?.addEventListener('click', () => {
@@ -1389,7 +1459,84 @@ export class ChatView {
       if (msg.channelId === this.currentChannelId) this.replaceMessageRow(msg);
     });
 
-    this.unbindEvents.push(u1, u2, u3, u4, u5);
+    const u6 = appEvents.on('chat.commands_updated', () => {
+      if (input && !chatStore.getCommandDraft(this.currentChannelId ?? '')) this.updateCommandDropup(input);
+    });
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6);
+
+    const composer = this.container.querySelector<HTMLElement>('#chat-command-composer');
+    if (composer && messagesFeed && this.currentChannelId) {
+      const store = getActiveChatStore();
+      const channelId = this.currentChannelId;
+      let wasSelected = false;
+      this.botChat = new BotChatView(
+        store, getActiveNetworkClient(), getActiveServerStore(), channelId, composer, messagesFeed,
+        () => {
+          const selected = !!store.getCommandDraft(channelId);
+          this.syncComposerPermissionState();
+          if (input && (selected || wasSelected)) {
+            input.value = store.getDraft(channelId);
+            if (charCounter) charCounter.textContent = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+            if (!selected) autoResize();
+          }
+          if (selected && composeLinkPreviewEl) composeLinkPreviewEl.style.display = 'none';
+          if (selected && this.pending.length > 0) this.showCommandNotice(t('botChat.attachmentsKept'));
+          if (!selected && wasSelected) {
+            this.showCommandNotice('');
+            this.focusChatInput();
+          }
+          wasSelected = selected;
+          if (this.pinnedToBottom) this.scrollToBottom();
+        },
+        (invocation) => this.renderInvocationCard(invocation)
+      );
+    }
+  }
+
+  private renderInvocationCard(invocation: BotInvocation): void {
+    const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
+    if (!feed || invocation.channelId !== this.currentChannelId) return;
+    const shouldScroll = this.isFeedAtBottom(feed);
+    const previous = [...feed.querySelectorAll<HTMLElement>('[data-invocation-id]')]
+      .find((element) => element.dataset.invocationId === invocation.invocationId);
+    const focused = document.activeElement;
+    const focusId = focused instanceof HTMLElement && previous?.contains(focused) ? focused.id : '';
+    const selection = focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement
+      ? { start: focused.selectionStart, end: focused.selectionEnd }
+      : undefined;
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = renderBotInvocation(invocation, serverStore.hasPermission(Permission.SEND_MESSAGES));
+    const card = wrapper.firstElementChild;
+    if (!card) {
+      previous?.remove();
+      if (shouldScroll) this.scrollToBottom();
+      return;
+    }
+    if (previous) previous.replaceWith(card);
+    else {
+      feed.querySelector('#chat-empty-placeholder')?.remove();
+      feed.appendChild(card);
+    }
+    for (const element of feed.querySelectorAll<HTMLElement>('[data-invocation-id]')) {
+      if (!chatStore.getInvocation(element.dataset.invocationId ?? '')) element.remove();
+    }
+    if (focusId) {
+      const next = document.getElementById(focusId);
+      next?.focus({ preventScroll: true });
+      if (selection?.start !== null && selection?.end !== null &&
+          (next instanceof HTMLInputElement || next instanceof HTMLTextAreaElement) && next.type !== 'checkbox') {
+        next.setSelectionRange(selection?.start ?? 0, selection?.end ?? 0);
+      }
+    }
+    if (shouldScroll) this.scrollToBottom();
+  }
+
+  private showCommandNotice(message: string): void {
+    const notice = this.container.querySelector<HTMLElement>('#chat-command-notice');
+    if (notice) {
+      notice.textContent = message;
+      notice.hidden = !message;
+    }
   }
 
   private scrollToBottom(): void {
@@ -1551,72 +1698,95 @@ export class ChatView {
   // ── Slash command dropup (#569) ──────────────────────────────────────
 
   private updateCommandDropup(input: HTMLTextAreaElement): void {
+    if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+      this.closeCommandDropup();
+      return;
+    }
     const caret = input.selectionStart ?? input.value.length;
     const before = input.value.substring(0, caret);
     // A command token is a "/" at the very start of the message, followed by
     // the partial command name typed so far (no spaces in the name).
-    const match = before.match(/^\/(\w*)$/);
+    const match = before.match(/^\/([a-z0-9_-]*)$/i);
     if (!match) {
       this.closeCommandDropup();
       return;
     }
     const query = match[1].toLowerCase();
-    this.commandSlashIndex = 0; // The "/" is always at position 0.
-
-    const all = serverStore.slashCommands;
-    const matches = (query ? all.filter((c) => c.name.includes(query)) : all)
-      .sort((a, b) => {
-        const aStarts = a.name.startsWith(query) ? 0 : 1;
-        const bStarts = b.name.startsWith(query) ? 0 : 1;
-        return aStarts - bStarts || a.name.localeCompare(b.name);
-      })
-      .slice(0, 10);
-
-    if (matches.length === 0) {
-      this.closeCommandDropup();
-      return;
-    }
-
-    this.commandMatches = matches;
+    const all = chatStore.getCommands();
+    const matches = query
+      ? all.filter((command) => command.name.includes(query) || command.botName.toLocaleLowerCase(getLanguage()).includes(query))
+      : all;
+    const previous = query === this.commandQuery ? this.commandMatches[this.commandActiveIndex] : undefined;
+    this.commandQuery = query;
+    this.commandGroups = groupCommands(matches, chatStore.getCommandUsage(), getLanguage(), query.length === 0);
+    this.commandMatches = this.commandGroups.flatMap((group) => group.commands);
     this.commandActive = true;
-    if (this.commandActiveIndex >= matches.length || this.commandActiveIndex < 0) {
-      this.commandActiveIndex = 0;
-    }
+    this.commandActiveIndex = Math.max(0, this.commandMatches.findIndex((command) =>
+      previous !== undefined && command.botId === previous.botId && command.name === previous.name));
     this.renderCommandDropup();
   }
 
   private renderCommandDropup(): void {
     const el = document.getElementById('command-dropup');
     if (!el) return;
-    el.innerHTML = this.commandMatches
-      .map((cmd, i) => {
-        const active = i === this.commandActiveIndex ? 'active' : '';
-        return `
-          <div class="mention-item ${active}" data-cmd-index="${i}">
-            <span class="command-slash">/</span>
-            <span class="mention-nick">${escapeHtml(cmd.name)}</span>
-            <span class="command-description">${escapeHtml(cmd.description)}</span>
-            <span class="command-bot-name">${escapeHtml(cmd.botName)}</span>
-          </div>
-        `;
-      })
-      .join('');
+    el.innerHTML = renderCommandCatalog(this.commandGroups, this.commandActiveIndex);
     el.style.display = 'block';
-
-    el.querySelectorAll('.mention-item').forEach((item) => {
+    const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
+    input?.setAttribute('role', 'combobox');
+    input?.setAttribute('aria-expanded', 'true');
+    input?.setAttribute('aria-controls', 'command-list-options');
+    input?.setAttribute('aria-autocomplete', 'list');
+    el.querySelectorAll<HTMLElement>('[data-cmd-index]').forEach((item) => {
       item.addEventListener('mouseenter', () => {
-        const idx = parseInt((item as HTMLElement).getAttribute('data-cmd-index') || '0', 10);
-        this.commandActiveIndex = idx;
-        el.querySelectorAll('.mention-item').forEach((el, i) => {
-          el.classList.toggle('active', i === idx);
-        });
+        this.setActiveCommand(Number(item.dataset.cmdIndex), false);
       });
-      item.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        const idx = parseInt((item as HTMLElement).getAttribute('data-cmd-index') || '0', 10);
-        this.applyCommand(idx);
+      item.addEventListener('mousedown', (event) => event.preventDefault());
+      item.addEventListener('click', () => this.applyCommand(Number(item.dataset.cmdIndex)));
+    });
+    const groupButtons = [...el.querySelectorAll<HTMLButtonElement>('[data-command-group]')];
+    groupButtons.forEach((button, index) => {
+      button.addEventListener('mousedown', (event) => event.preventDefault());
+      button.addEventListener('click', () => {
+        const section = [...el.querySelectorAll<HTMLElement>('[data-command-section]')]
+          .find((element) => element.dataset.commandSection === button.dataset.commandGroup);
+        section?.scrollIntoView({ block: 'start', inline: 'nearest' });
+        const first = section?.querySelector<HTMLElement>('[data-cmd-index]');
+        if (first) this.setActiveCommand(Number(first.dataset.cmdIndex), false);
+      });
+      button.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          const offset = event.key === 'ArrowDown' ? 1 : -1;
+          const next = groupButtons[(index + offset + groupButtons.length) % groupButtons.length];
+          next?.focus();
+          next?.click();
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          this.closeCommandDropup();
+          input?.focus();
+        }
       });
     });
+    this.setActiveCommand(this.commandActiveIndex, false);
+  }
+
+  private setActiveCommand(index: number, scroll = true): void {
+    if (!Number.isInteger(index) || index < 0 || index >= this.commandMatches.length) return;
+    this.commandActiveIndex = index;
+    const dropup = this.container.querySelector<HTMLElement>('#command-dropup');
+    let active: HTMLElement | undefined;
+    dropup?.querySelectorAll<HTMLElement>('[data-cmd-index]').forEach((row) => {
+      const selected = Number(row.dataset.cmdIndex) === index;
+      row.classList.toggle('active', selected);
+      row.setAttribute('aria-selected', String(selected));
+      if (selected) active = row;
+    });
+    const groupId = active?.closest<HTMLElement>('[data-command-section]')?.dataset.commandSection;
+    dropup?.querySelectorAll<HTMLButtonElement>('[data-command-group]').forEach((button) => {
+      button.classList.toggle('active', button.dataset.commandGroup === groupId);
+    });
+    this.container.querySelector('#chat-message-input')?.setAttribute('aria-activedescendant', `command-option-${index}`);
+    if (scroll) active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
   private applyCommand(index: number): void {
@@ -1626,28 +1796,32 @@ export class ChatView {
       this.closeCommandDropup();
       return;
     }
-    // Replace everything from / to caret with the full command + a space.
-    const caret = input.selectionStart ?? input.value.length;
-    const after = input.value.substring(caret);
-    const insert = `/${cmd.name} `;
-    input.value = `${insert}${after}`;
-    const newCaret = insert.length;
-    input.setSelectionRange(newCaret, newCaret);
-    this.closeCommandDropup();
-    input.focus();
+    const typed = parseTypedCommand(input.value, chatStore.getCommands());
+    this.selectCommand(cmd, typed.kind === 'command' || typed.kind === 'ambiguous' ? typed.text : '');
+  }
 
-    const charCounter = document.getElementById('chat-char-counter');
-    if (charCounter) charCounter.innerText = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
-    input.style.height = 'auto';
-    input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
-    this.persistDraft(input.value);
+  private selectCommand(command: SlashCommand, text = ''): void {
+    if (!this.currentChannelId) return;
+    this.showCommandNotice('');
+    this.closeMentionDropup();
+    this.closeCommandDropup();
+    this.emojiPicker?.close();
+    chatStore.selectCommand(this.currentChannelId, command, text);
+    const draft = chatStore.getCommandDraft(this.currentChannelId);
+    if (draft && !command.options?.length && text.trim()) {
+      chatStore.setCommandPending(this.currentChannelId, draft, false, t('botChat.unexpectedText'));
+    }
+    this.botChat?.focusComposer();
   }
 
   private closeCommandDropup(): void {
     this.commandActive = false;
     this.commandMatches = [];
+    this.commandGroups = [];
     this.commandActiveIndex = 0;
-    this.commandSlashIndex = -1;
+    this.commandQuery = '';
+    const input = this.container.querySelector('#chat-message-input');
+    for (const attribute of ['role', 'aria-expanded', 'aria-controls', 'aria-autocomplete', 'aria-activedescendant']) input?.removeAttribute(attribute);
     const el = document.getElementById('command-dropup');
     if (el) {
       el.style.display = 'none';
@@ -1905,6 +2079,9 @@ export class ChatView {
   }
 
   private unbindListeners(): void {
+    this.botChat?.destroy();
+    this.botChat = null;
+    this.closeCommandDropup();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
   }

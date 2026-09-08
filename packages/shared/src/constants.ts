@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 /**
  * Default size of the floating overlay window (#169). Shared so the renderer can
@@ -69,6 +69,12 @@ export const LIMITS = {
   MAX_COMMANDS_PER_BOT: 50,
   /** Max options (parameters) per slash command (#569). */
   MAX_OPTIONS_PER_COMMAND: 10,
+  MAX_BOT_FORM_FIELDS: 10,
+  MAX_BOT_FORM_CHOICES: 20,
+  MAX_BOT_FORM_LIST_ITEMS: 20,
+  MAX_BOT_INVOCATIONS_PER_SESSION: 5,
+  MAX_BOT_INVOCATIONS: 1000,
+  BOT_INTERACTION_TIMEOUT_MS: 5 * 60 * 1000,
   // Chat attachments (#11). Both size limits are server-configurable; these are
   // only the initial defaults applied when a server is first created.
   MAX_ATTACHMENT_FILE_SIZE_DEFAULT: 50 * 1024 * 1024, // 50 MB per file

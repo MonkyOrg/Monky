@@ -730,7 +730,7 @@ export class SqliteBotRepository implements IBotRepository {
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
               created_at as createdAt
        FROM bots WHERE id = ?`
-    ).get(id) as any;
+    ).get(id) as BotRecord | undefined;
     return row ? this.mapRow(row) : null;
   }
 
@@ -740,7 +740,7 @@ export class SqliteBotRepository implements IBotRepository {
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
               created_at as createdAt
        FROM bots WHERE token_hash = ?`
-    ).get(tokenHash) as any;
+    ).get(tokenHash) as BotRecord | undefined;
     return row ? this.mapRow(row) : null;
   }
 
@@ -750,13 +750,13 @@ export class SqliteBotRepository implements IBotRepository {
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
               created_at as createdAt
        FROM bots ORDER BY created_at ASC`
-    ).all() as any[];
+    ).all() as BotRecord[];
     return rows.map((r) => this.mapRow(r));
   }
 
   async update(id: string, updates: Partial<BotRecord>): Promise<void> {
     const cols: string[] = [];
-    const vals: any[] = [];
+    const vals: Array<string | null> = [];
     if (updates.name !== undefined) { cols.push('name = ?'); vals.push(updates.name); }
     if (updates.tokenHash !== undefined) { cols.push('token_hash = ?'); vals.push(updates.tokenHash); }
     if (updates.avatarPath !== undefined) { cols.push('avatar_path = ?'); vals.push(updates.avatarPath); }
@@ -775,7 +775,7 @@ export class SqliteBotRepository implements IBotRepository {
     return row.cnt;
   }
 
-  private mapRow(row: any): BotRecord {
+  private mapRow(row: BotRecord): BotRecord {
     return {
       id: row.id,
       name: row.name,

@@ -1,4 +1,5 @@
-import { AttachmentStorageInfo, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, WebRtcSignalPayload } from './models.js';
+import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, WebRtcSignalPayload } from './models.js';
+import type { BotForm, BotFormValues, CommandValues } from './botInteractions.js';
 
 export enum ProtocolErrorCode {
   AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
@@ -19,6 +20,13 @@ export enum ProtocolErrorCode {
   UNAUTHORIZED = 'UNAUTHORIZED',
   PERMISSION_DENIED = 'PERMISSION_DENIED',
   BAD_REQUEST = 'BAD_REQUEST',
+  BOT_OFFLINE = 'BOT_OFFLINE',
+  BOT_COMMAND_NOT_FOUND = 'BOT_COMMAND_NOT_FOUND',
+  BOT_INVALID_OPTIONS = 'BOT_INVALID_OPTIONS',
+  BOT_INTERACTION_EXPIRED = 'BOT_INTERACTION_EXPIRED',
+  BOT_INTERACTION_INVALID = 'BOT_INTERACTION_INVALID',
+  BOT_COMMAND_BUSY = 'BOT_COMMAND_BUSY',
+  BOT_INVALID_PROFILE = 'BOT_INVALID_PROFILE',
   /**
    * The relay cannot run on the host. Kept apart from BAD_REQUEST so the
    * client can explain what to do instead of showing a generic message (#429).
@@ -111,6 +119,8 @@ export enum MessageType {
   BOT_REVOKE = 'BOT_REVOKE',
   /** Server -> admin: bot was revoked. */
   BOT_REVOKED = 'BOT_REVOKED',
+  BOT_UPDATE_PROFILE = 'BOT_UPDATE_PROFILE',
+  BOT_PROFILE_UPDATED = 'BOT_PROFILE_UPDATED',
   /** Bot -> server: register slash commands. */
   COMMAND_REGISTER = 'COMMAND_REGISTER',
   /** Server -> bot: commands were registered. */
@@ -121,6 +131,13 @@ export enum MessageType {
   COMMANDS_LIST_RESPONSE = 'COMMANDS_LIST_RESPONSE',
   /** Client -> server: invoke a slash command. */
   COMMAND_INVOKE = 'COMMAND_INVOKE',
+  COMMAND_INVOKED = 'COMMAND_INVOKED',
+  COMMAND_PROMPT = 'COMMAND_PROMPT',
+  COMMAND_SUBMIT = 'COMMAND_SUBMIT',
+  COMMAND_SUBMITTED = 'COMMAND_SUBMITTED',
+  COMMAND_CANCEL = 'COMMAND_CANCEL',
+  COMMAND_FINISH = 'COMMAND_FINISH',
+  COMMAND_FINISHED = 'COMMAND_FINISHED',
   /** Server -> client (from bot): command response (may be ephemeral). */
   COMMAND_RESPONSE = 'COMMAND_RESPONSE',
   /** Client -> server: install a bot from a manifest URL (#578). */
@@ -758,6 +775,17 @@ export interface BotRevokedPayload {
   botId: string;
 }
 
+/** Bots update themselves; administrators supply the botId to edit another bot. */
+export interface BotProfileUpdatePayload {
+  botId?: string;
+  name?: string;
+  avatarBase64?: string | null;
+}
+
+export interface BotProfileUpdatedPayload {
+  bot: BotInfo;
+}
+
 /** Bot -> server: register slash commands (replaces the bot's previous set). */
 export interface CommandRegisterPayload {
   commands: Array<{
@@ -784,18 +812,87 @@ export interface CommandInvokePayload {
   botId: string;
   channelId: string;
   /** Typed options keyed by option name. */
-  options?: Record<string, string | number | boolean>;
+  options?: CommandValues;
+  locale?: 'pt-BR' | 'en';
 }
 
-/** Server -> client (from bot) / Bot -> server: command response. */
-export interface CommandResponsePayload {
-  /** The invocation this responds to. */
+/** Server -> bot: caller identity and invocation ID are assigned by the server. */
+export interface CommandExecutionPayload extends CommandInvokePayload {
+  invocationId: string;
+  invokerId: string;
+  invokerNickname: string;
+}
+
+export interface CommandInvokedPayload {
+  invocationId: string;
   channelId: string;
-  /** The user who invoked the command. */
-  userId: string;
+  botId: string;
+  commandName: string;
+}
+
+/** Bot -> server. The destination and author come from the stored invocation. */
+export interface CommandResponsePayload {
+  invocationId: string;
   content: string;
-  /** When true the message is only visible to the invoking user. */
+  /** Private by default. Public output must be explicitly requested. */
   ephemeral?: boolean;
+}
+
+export interface BotCommandMessagePayload extends CommandResponsePayload, BotCommandContext {
+  messageId: string;
+  channelId: string;
+  botId: string;
+  botName: string;
+  botAvatarUrl?: string | null;
+  createdAt: number;
+  ephemeral: boolean;
+}
+
+/** Bot -> server: request the next private step of an invocation. */
+export interface CommandPromptPayload {
+  invocationId: string;
+  interactionId: string;
+  form: BotForm;
+}
+
+/** Server -> the originating client only. */
+export interface CommandPromptReceivedPayload extends CommandPromptPayload {
+  channelId: string;
+  botId: string;
+  botName: string;
+  botAvatarUrl?: string | null;
+  expiresAt: number;
+}
+
+/** Client -> server -> bot; also acknowledged to the submitting client. */
+export interface CommandSubmitPayload {
+  invocationId: string;
+  interactionId: string;
+  values: BotFormValues;
+}
+
+export interface CommandCancelPayload {
+  invocationId: string;
+}
+
+export interface CommandFinishPayload {
+  invocationId: string;
+  failed?: boolean;
+}
+
+export type CommandFinishReason =
+  | 'completed'
+  | 'cancelled'
+  | 'expired'
+  | 'bot_disconnected'
+  | 'caller_disconnected'
+  | 'failed';
+
+/** Sent to both endpoints so pending forms and handlers are always released. */
+export interface CommandFinishedPayload {
+  invocationId: string;
+  channelId: string;
+  reason: CommandFinishReason;
 }
 
 // ── Bot marketplace / installation (#578) ─────────────────────────────

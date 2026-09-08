@@ -10,6 +10,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bot-tests:
+    name: Bot interactions and SDK package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies without native build scripts
+        run: npm ci --ignore-scripts
+      - name: Build shared contracts
+        run: npm run build --workspace=packages/shared
+      - name: Test bot contracts and SDK
+        run: |
+          npm run test --workspace=packages/shared
+          npm run test --workspace=packages/bot-sdk
+      - name: Test server, client state and real bot conversations
+        run: |
+          npm run build --workspace=apps/server
+          npm run test:bots --workspace=apps/server
+          npm run test:bots --workspace=apps/client
+          node scripts/test-bot-e2e.js
+      - name: Exercise an isolated SDK installation
+        run: |
+          node scripts/pack-bot-sdk.js 0.0.0-ci
+          node scripts/test-bot-sdk-package.js release/monky-bot-sdk-0.0.0-ci.tgz
+
   docs-sync:
     name: Docs traduzidos em sincronia
     runs-on: ubuntu-latest
@@ -161,6 +189,9 @@ jobs:
 
       - name: Build workspaces
         run: npm run build
+
+      - name: Exercise bot chat DOM in Electron
+        run: npm run test:bots:ui --workspace=apps/client
 
       # Mirror the release pipeline: tsc does not copy the .sql migration files
       # into the compiled server output, so we copy them next to the compiled
