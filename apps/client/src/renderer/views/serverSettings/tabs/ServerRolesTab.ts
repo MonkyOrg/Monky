@@ -134,6 +134,8 @@ export class ServerRolesTab {
     if (role.permissions & Permission.MANAGE_SERVER) labels.push(t('permissions.manageServer'));
     if (role.permissions & Permission.MANAGE_CHANNELS) labels.push(t('permissions.manageChannels'));
     if (role.permissions & Permission.MANAGE_ROLES) labels.push(t('permissions.manageRoles'));
+    if (role.permissions & Permission.MANAGE_BOTS) labels.push(t('permissions.manageBots'));
+    if (role.permissions & Permission.USE_BOT_COMMANDS) labels.push(t('permissions.useBotCommands'));
     if (role.permissions & Permission.SPEAK) labels.push(t('permissions.speak'));
     return labels.slice(0, 3).join(', ') || t('roles.noPermissions');
   }
@@ -184,6 +186,8 @@ export class ServerRolesTab {
       { key: Permission.READ_MESSAGES, label: t('permissions.readMessages'), description: t('permissions.readMessagesDesc') },
       { key: Permission.ATTACH_FILES, label: t('permissions.attachFiles'), description: t('permissions.attachFilesDesc') },
       { key: Permission.USE_SOUNDBOARD, label: t('permissions.useSoundboard'), description: t('permissions.useSoundboardDesc') },
+      { key: Permission.MANAGE_BOTS, label: t('permissions.manageBots'), description: t('permissions.manageBotsDesc') },
+      { key: Permission.USE_BOT_COMMANDS, label: t('permissions.useBotCommands'), description: t('permissions.useBotCommandsDesc') },
     ];
 
     return items.map((item) => `

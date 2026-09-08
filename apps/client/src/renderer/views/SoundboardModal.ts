@@ -6,7 +6,7 @@ import { serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
 import { appEvents } from '../core/EventBus';
 import { t, tCount } from '../i18n';
-import { formatKeyCombo } from '../utils/keybind';
+import { captureShortcut, shortcutIdentity } from '../utils/keybind';
 import { showConfirm } from './Dialog';
 import { enableBackdropClose } from '../utils/modal';
 import { matchesSearch as matchesSoundSearch } from '../utils/search';
@@ -15,6 +15,7 @@ export class SoundboardModal {
   private modalEl: HTMLElement | null = null;
   private unbindEvents: Array<() => void> = [];
   private searchQuery: string = '';
+  private closeShortcutCapture: (() => void) | null = null;
 
   public async open(): Promise<void> {
     this.close();
@@ -358,9 +359,6 @@ export class SoundboardModal {
   }
 
   private async openKeyCaptureModal(soundName: string): Promise<void> {
-    soundboardService.setCapturingKey(true);
-    await soundboardService.pauseShortcuts();
-
     const backdrop = document.createElement('div');
     backdrop.className = 'modal-backdrop';
     backdrop.style.zIndex = '10000';
@@ -396,29 +394,17 @@ export class SoundboardModal {
     const cleanup = async () => {
       if (isClosed) return;
       isClosed = true;
-      window.removeEventListener('keydown', handleKeyDown, true);
+      this.closeShortcutCapture = null;
+      disposeCapture();
       backdrop.remove();
-      soundboardService.setCapturingKey(false);
-      await soundboardService.syncShortcuts();
     };
 
-    const handleKeyDown = async (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      if (e.key === 'Escape') {
-        await cleanup();
-        return;
-      }
-
-      const combo = formatKeyCombo(e);
-      if (!combo) return; // Lone modifier key, keep listening
-
+    const disposeCapture = captureShortcut(backdrop, backdrop.querySelector('#sb-keybind-box'), async (combo) => {
       await cleanup();
 
       // Check if this shortcut is already in use by another sound
       const existingConflict = Object.entries(settingsStore.soundboardShortcuts || {}).find(
-        ([name, data]) => data && data.accelerator === combo.accelerator && name !== soundName
+        ([name, data]) => data && shortcutIdentity(data.accelerator) === combo.accelerator && name !== soundName
       );
 
       if (existingConflict) {
@@ -449,7 +435,7 @@ export class SoundboardModal {
       await soundboardService.syncShortcuts();
 
       this.refreshGrid();
-    };
+    }, () => { void cleanup(); }, this.modalEl ?? backdrop);
 
     backdrop.querySelector('#sb-keybind-modal-close')?.addEventListener('click', () => cleanup());
     backdrop.querySelector('#sb-keybind-btn-cancel')?.addEventListener('click', () => cleanup());
@@ -467,7 +453,7 @@ export class SoundboardModal {
       if (e.target === backdrop) cleanup();
     });
 
-    window.addEventListener('keydown', handleKeyDown, true);
+    this.closeShortcutCapture = () => { void cleanup(); };
   }
 
   private attachEvents(): void {
@@ -707,6 +693,7 @@ export class SoundboardModal {
   }
 
   public close(): void {
+    this.closeShortcutCapture?.();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
     if (this.modalEl) {

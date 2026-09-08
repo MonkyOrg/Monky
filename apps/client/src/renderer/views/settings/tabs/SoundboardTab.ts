@@ -3,6 +3,7 @@ import { soundboardService, SoundItem } from '../../../core/SoundboardService';
 import { t, tCount } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { matchesSearch } from '../../../utils/search';
+import { captureShortcut } from '../../../utils/keybind';
 
 export class SoundboardTab {
   private searchQuery: string = '';
@@ -261,31 +262,8 @@ export class SoundboardTab {
 
     document.body.appendChild(backdrop);
 
-    const onKeyDown = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      if (e.key === 'Escape') {
-        cleanup();
-        return;
-      }
-
-      const modifiers: string[] = [];
-      if (e.ctrlKey) modifiers.push('Control');
-      if (e.altKey) modifiers.push('Alt');
-      if (e.shiftKey) modifiers.push('Shift');
-      if (e.metaKey) modifiers.push('Meta');
-
-      let key = e.key;
-      if (['Control', 'Alt', 'Shift', 'Meta'].includes(key)) return;
-
-      if (key.length === 1) key = key.toUpperCase();
-
-      const acceleratorModifiers = modifiers.map((m) => (m === 'Control' ? 'CommandOrControl' : m));
-      const accelerator = [...acceleratorModifiers, key].join('+');
-      const display = [...modifiers, key].join(' + ');
-
-      settingsStore.soundboardShortcuts[soundName] = { accelerator, display };
+    const disposeCapture = captureShortcut(backdrop, backdrop.querySelector('#sb-keybind-capture-box'), (combo) => {
+      settingsStore.soundboardShortcuts[soundName] = combo;
       settingsStore.save();
       soundboardService.syncShortcuts();
 
@@ -296,14 +274,13 @@ export class SoundboardTab {
         tableContainer.innerHTML = this.renderShortcutsTable();
         this.attachShortcutButtons(container);
       }
-    };
+    }, () => cleanup(), container);
 
     const cleanup = () => {
-      window.removeEventListener('keydown', onKeyDown, true);
+      disposeCapture();
       backdrop.remove();
     };
 
     backdrop.querySelector('#btn-cancel-keybind')?.addEventListener('click', cleanup);
-    window.addEventListener('keydown', onKeyDown, true);
   }
 }

@@ -1,6 +1,14 @@
 import { z } from 'zod';
 import { LIMITS, PROTOCOL_VERSION } from './constants.js';
 
+export const messageReferenceSchema = z.string().min(1).max(128);
+export const chatHistoryRequestSchema = z.object({
+  channelId: messageReferenceSchema,
+  limit: z.number().int().positive().optional(),
+  beforeTimestamp: z.number().finite().nonnegative().optional(),
+  aroundMessageId: messageReferenceSchema.optional(),
+});
+
 export const nicknameSchema = z
   .string()
   .min(LIMITS.MIN_NICKNAME_LENGTH, `Nickname deve ter pelo menos ${LIMITS.MIN_NICKNAME_LENGTH} caracteres`)
@@ -50,6 +58,11 @@ export const authConnectSchema = z.object({
     .string()
     .regex(/^[A-Za-z0-9_-]{1,64}$/, 'Identificador de dispositivo inválido')
     .optional(),
+  // Appear-offline visibility flag (#561). Optional for backward compatibility.
+  appearOffline: z.boolean().optional(),
+  // Bot token for bot authentication (#569). Mutually exclusive with the
+  // challenge-response flow: when present the server skips the nonce handshake.
+  botToken: z.string().min(1).max(128).optional(),
 });
 
 export const authChallengeResponseSchema = z.object({
@@ -62,6 +75,7 @@ export const channelAllowedRoleIdsSchema = z
   .transform((ids) => Array.from(new Set(ids)));
 
 export const channelCreateSchema = z.object({
+  botCommandsEnabled: z.boolean().optional().default(true),
   name: channelNameSchema,
   type: z.enum(['VOICE', 'TEXT']),
   maxParticipants: z.number().int().min(1).max(50).optional().default(LIMITS.MAX_PARTICIPANTS_PER_CHANNEL_DEFAULT),
@@ -72,6 +86,7 @@ export const channelCreateSchema = z.object({
 // Editing a channel (#384). Only the fields present are changed, so `name` and
 // `isPrivate` are optional here even though they are required on creation.
 export const channelUpdateSchema = z.object({
+  botCommandsEnabled: z.boolean().optional(),
   channelId: z.string().min(1, 'Canal inválido'),
   name: channelNameSchema.optional(),
   maxParticipants: z.number().int().min(1).max(50).optional(),

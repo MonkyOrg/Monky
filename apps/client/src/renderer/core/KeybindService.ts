@@ -79,7 +79,9 @@ export class KeybindService {
       }
     }
 
-    window.api.registerActionShortcuts(shortcuts).catch((err) => {
+    window.api.registerActionShortcuts(shortcuts).then((ok) => {
+      if (!ok) console.warn('[KeybindService] Shortcuts unavailable: invalid binding or native input hook failed.');
+    }).catch((err) => {
       console.warn('[KeybindService] Failed to register action shortcuts:', err);
     });
   }

@@ -13,13 +13,14 @@
         [
           "OS=='win'",
           {
-            "sources": ["src/win/wasapi_loopback.cpp"],
+            "sources": ["src/win/wasapi_loopback.cpp", "src/win/window_enum.cpp", "src/win/keyboard_layout.cpp"],
             "libraries": [
               "-lMmdevapi",
               "-lOle32",
               "-lAvrt",
               "-lKsuser",
-              "-lUser32"
+              "-lUser32",
+              "-lDwmapi"
             ],
             "msvs_settings": {
               "VCCLCompilerTool": {

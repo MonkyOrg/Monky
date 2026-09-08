@@ -1,4 +1,5 @@
-import { AttachmentStorageInfo, ChannelSummary, ChannelType, ChatMessage, Role, ServerDetails, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, WebRtcSignalPayload } from './models.js';
+import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, WebRtcSignalPayload } from './models.js';
+import type { BotForm, BotFormValues, CommandValues } from './botInteractions.js';
 
 export enum ProtocolErrorCode {
   AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
@@ -19,6 +20,13 @@ export enum ProtocolErrorCode {
   UNAUTHORIZED = 'UNAUTHORIZED',
   PERMISSION_DENIED = 'PERMISSION_DENIED',
   BAD_REQUEST = 'BAD_REQUEST',
+  BOT_OFFLINE = 'BOT_OFFLINE',
+  BOT_COMMAND_NOT_FOUND = 'BOT_COMMAND_NOT_FOUND',
+  BOT_INVALID_OPTIONS = 'BOT_INVALID_OPTIONS',
+  BOT_INTERACTION_EXPIRED = 'BOT_INTERACTION_EXPIRED',
+  BOT_INTERACTION_INVALID = 'BOT_INTERACTION_INVALID',
+  BOT_COMMAND_BUSY = 'BOT_COMMAND_BUSY',
+  BOT_INVALID_PROFILE = 'BOT_INVALID_PROFILE',
   /**
    * The relay cannot run on the host. Kept apart from BAD_REQUEST so the
    * client can explain what to do instead of showing a generic message (#429).
@@ -34,10 +42,22 @@ export enum ProtocolErrorCode {
 }
 
 export enum MessageType {
+  SELECTOR_CREATE = 'SELECTOR_CREATE',
+  SELECTOR_LIST = 'SELECTOR_LIST',
+  SELECTOR_UPDATE = 'SELECTOR_UPDATE',
+  SELECTOR_CLOSE = 'SELECTOR_CLOSE',
+  SELECTOR_RESPOND = 'SELECTOR_RESPOND',
+  SELECTOR_FINALIZE = 'SELECTOR_FINALIZE',
+  SELECTOR_SNAPSHOT = 'SELECTOR_SNAPSHOT',
+  SELECTOR_LIST_RESULT = 'SELECTOR_LIST_RESULT',
   // Client -> Server
   AUTH_CONNECT = 'AUTH_CONNECT',
   AUTH_CHALLENGE_RESPONSE = 'AUTH_CHALLENGE_RESPONSE',
   CHAT_SEND = 'CHAT_SEND',
+  CHAT_REACTION_ADD = 'CHAT_REACTION_ADD',
+  CHAT_REACTION_REMOVE = 'CHAT_REACTION_REMOVE',
+  CHAT_REACTION_ADDED = 'CHAT_REACTION_ADDED',
+  CHAT_REACTION_REMOVED = 'CHAT_REACTION_REMOVED',
   CHAT_LOAD_HISTORY = 'CHAT_LOAD_HISTORY',
   CHAT_MENTIONS_READ = 'CHAT_MENTIONS_READ',
   /** Client -> server: rewrite the content of a message the caller wrote (#504). */
@@ -76,6 +96,8 @@ export enum MessageType {
    * has to travel the same way or only the sender would fall silent (#499).
    */
   SOUNDBOARD_STOP = 'SOUNDBOARD_STOP',
+  /** Client -> server: toggle appear-offline visibility while connected (#561). */
+  USER_UPDATE_VISIBILITY = 'USER_UPDATE_VISIBILITY',
   SERVER_GET_INVITE_INFO = 'SERVER_GET_INVITE_INFO',
 
   // SFU Client <-> Server Messages (#515)
@@ -95,6 +117,45 @@ export enum MessageType {
   SFU_NEW_PRODUCER = 'SFU_NEW_PRODUCER',
   SFU_GET_PRODUCERS = 'SFU_GET_PRODUCERS',
   SFU_PRODUCERS_LIST = 'SFU_PRODUCERS_LIST',
+
+  // Bot & Slash Command Messages (#569)
+  /** Admin -> server: create a new bot account. */
+  BOT_CREATE = 'BOT_CREATE',
+  /** Server -> admin: bot created with its one-time token. */
+  BOT_CREATED = 'BOT_CREATED',
+  /** Admin -> server: list all bots on this server. */
+  BOT_LIST = 'BOT_LIST',
+  /** Server -> admin: the bot list. */
+  BOT_LIST_RESPONSE = 'BOT_LIST_RESPONSE',
+  /** Admin -> server: revoke a bot's token and disconnect it. */
+  BOT_REVOKE = 'BOT_REVOKE',
+  /** Server -> admin: bot was revoked. */
+  BOT_REVOKED = 'BOT_REVOKED',
+  BOT_UPDATE_PROFILE = 'BOT_UPDATE_PROFILE',
+  BOT_PROFILE_UPDATED = 'BOT_PROFILE_UPDATED',
+  /** Bot -> server: register slash commands. */
+  COMMAND_REGISTER = 'COMMAND_REGISTER',
+  /** Server -> bot: commands were registered. */
+  COMMAND_REGISTERED = 'COMMAND_REGISTERED',
+  /** Client -> server: discover available commands. */
+  COMMANDS_LIST = 'COMMANDS_LIST',
+  /** Server -> client: available slash commands. */
+  COMMANDS_LIST_RESPONSE = 'COMMANDS_LIST_RESPONSE',
+  /** Client -> server: invoke a slash command. */
+  COMMAND_INVOKE = 'COMMAND_INVOKE',
+  COMMAND_INVOKED = 'COMMAND_INVOKED',
+  COMMAND_PROMPT = 'COMMAND_PROMPT',
+  COMMAND_SUBMIT = 'COMMAND_SUBMIT',
+  COMMAND_SUBMITTED = 'COMMAND_SUBMITTED',
+  COMMAND_CANCEL = 'COMMAND_CANCEL',
+  COMMAND_FINISH = 'COMMAND_FINISH',
+  COMMAND_FINISHED = 'COMMAND_FINISHED',
+  /** Server -> client (from bot): command response (may be ephemeral). */
+  COMMAND_RESPONSE = 'COMMAND_RESPONSE',
+  /** Client -> server: install a bot from a manifest URL (#578). */
+  BOT_INSTALL = 'BOT_INSTALL',
+  /** Server -> client: bot was installed from manifest (#578). */
+  BOT_INSTALLED = 'BOT_INSTALLED',
 
   // Server -> Client
   AUTH_CHALLENGE = 'AUTH_CHALLENGE',
@@ -152,6 +213,18 @@ export interface AuthConnectPayload {
    * same person" (keep both) (#309).
    */
   deviceId?: string;
+  /**
+   * When true the user wants to appear offline to everyone else (#561).
+   * The server suppresses USER_JOINED broadcasts and masks the status in
+   * member lists sent to other clients.
+   */
+  appearOffline?: boolean;
+  /**
+   * Bot authentication token (#569). Mutually exclusive with `publicKey` /
+   * challenge-response: a bot sends its token here and the server verifies it
+   * directly, skipping the nonce/signature handshake.
+   */
+  botToken?: string;
 }
 
 export interface AuthChallengePayload {
@@ -168,6 +241,7 @@ export interface AuthFailedPayload {
 }
 
 export interface ChatSendPayload {
+  replyToMessageId?: string;
   channelId: string;
   content: string;
   // Ids of files already uploaded via POST /attachments to be linked to this
@@ -187,6 +261,8 @@ export interface ChatUploadTokenPayload {
 }
 
 export interface ChatLoadHistoryPayload {
+  /** Fetch a history window ending at this message, including the target. */
+  aroundMessageId?: string;
   channelId: string;
   beforeTimestamp?: number;
   limit?: number;
@@ -199,6 +275,7 @@ export interface ChatMentionsReadPayload {
 }
 
 export interface ChannelCreatePayload {
+  botCommandsEnabled?: boolean;
   name: string;
   type: 'VOICE' | 'TEXT';
   maxParticipants?: number;
@@ -212,6 +289,7 @@ export interface ChannelCreatePayload {
  * resending the name.
  */
 export interface ChannelUpdatePayload {
+  botCommandsEnabled?: boolean;
   channelId: string;
   name?: string;
   maxParticipants?: number;
@@ -529,6 +607,11 @@ export interface UserUpdatedPayload {
   user: UserSummary;
 }
 
+/** Client -> server: toggle appear-offline without reconnecting (#561). */
+export interface UserUpdateVisibilityPayload {
+  appearOffline: boolean;
+}
+
 export interface ChannelCreatedPayload {
   channel: ChannelSummary;
 }
@@ -542,6 +625,7 @@ export interface ChannelDeletedPayload {
 }
 
 export interface ChatHistoryPayload {
+  aroundMessageId?: string;
   channelId: string;
   messages: ChatMessage[];
 }
@@ -551,6 +635,9 @@ export interface VoiceUserJoinedPayload {
   userId: string;
   sessionId: string;
   voiceState: VoiceParticipantState;
+  user?: UserSummary;
+  /** Authoritative channel roster, sent only to the joining connection. */
+  participants?: import('./models.js').VoiceRosterParticipant[];
 }
 
 export interface VoiceUserLeftPayload {
@@ -677,4 +764,190 @@ export interface SfuGetProducersPayload {
 export interface SfuProducersListPayload {
   channelId: string;
   producers: SfuNewProducerPayload[];
+  participants: import('./models.js').VoiceRosterParticipant[];
+}
+
+// ── Bot & Slash Command Payloads (#569) ───────────────────────────────────
+
+/** Admin -> server: create a new bot account. */
+export interface BotCreatePayload {
+  name: string;
+  avatarBase64?: string;
+}
+
+/** Server -> admin: bot created with its one-time token. */
+export interface BotCreatedPayload {
+  bot: BotInfo;
+  /** Shown exactly once — the admin must copy it before closing the dialog. */
+  token: string;
+}
+
+/** Server -> admin: the bot list. */
+export interface BotListResponsePayload {
+  bots: BotInfo[];
+}
+
+/** Admin -> server: revoke a bot's token and disconnect it. */
+export interface BotRevokePayload {
+  botId: string;
+}
+
+/** Server -> admin: bot was revoked. */
+export interface BotRevokedPayload {
+  botId: string;
+}
+
+/** Bots update themselves; administrators supply the botId to edit another bot. */
+export interface BotProfileUpdatePayload {
+  botId?: string;
+  name?: string;
+  avatarBase64?: string | null;
+}
+
+export interface BotProfileUpdatedPayload {
+  bot: BotInfo;
+}
+
+/** Bot -> server: register slash commands (replaces the bot's previous set). */
+export interface CommandRegisterPayload {
+  commands: Array<{
+    name: string;
+    description: string;
+    options?: CommandOption[];
+  }>;
+}
+
+/** Server -> bot: registration result. */
+export interface CommandRegisteredPayload {
+  registered: number;
+}
+
+/** Server -> client: available slash commands. */
+export interface CommandsListResponsePayload {
+  commands: SlashCommand[];
+}
+
+/** Client -> server: invoke a slash command. */
+export interface CommandInvokePayload {
+  commandName: string;
+  /** Which bot to target when multiple bots register the same command name. */
+  botId: string;
+  channelId: string;
+  /** Typed options keyed by option name. */
+  options?: CommandValues;
+  locale?: 'pt-BR' | 'en';
+}
+
+/** Server -> bot: caller identity and invocation ID are assigned by the server. */
+export interface CommandExecutionPayload extends CommandInvokePayload {
+  invocationId: string;
+  invokerId: string;
+  invokerNickname: string;
+}
+
+export interface CommandInvokedPayload {
+  invocationId: string;
+  channelId: string;
+  botId: string;
+  commandName: string;
+}
+
+/** Bot -> server. The destination and author come from the stored invocation. */
+export interface CommandResponsePayload {
+  invocationId: string;
+  content: string;
+  /** Private by default. Public output must be explicitly requested. */
+  ephemeral?: boolean;
+}
+
+export interface BotCommandMessagePayload extends CommandResponsePayload, BotCommandContext {
+  messageId: string;
+  channelId: string;
+  botId: string;
+  botName: string;
+  botAvatarUrl?: string | null;
+  createdAt: number;
+  ephemeral: boolean;
+}
+
+/** Bot -> server: request the next private step of an invocation. */
+export interface CommandPromptPayload {
+  invocationId: string;
+  interactionId: string;
+  form: BotForm;
+}
+
+/** Server -> the originating client only. */
+export interface CommandPromptReceivedPayload extends CommandPromptPayload {
+  channelId: string;
+  botId: string;
+  botName: string;
+  botAvatarUrl?: string | null;
+  expiresAt: number;
+}
+
+/** Client -> server -> bot; also acknowledged to the submitting client. */
+export interface CommandSubmitPayload {
+  invocationId: string;
+  interactionId: string;
+  values: BotFormValues;
+}
+
+export interface CommandCancelPayload {
+  invocationId: string;
+}
+
+export interface CommandFinishPayload {
+  invocationId: string;
+  failed?: boolean;
+}
+
+export type CommandFinishReason =
+  | 'completed'
+  | 'cancelled'
+  | 'expired'
+  | 'bot_disconnected'
+  | 'caller_disconnected'
+  | 'failed';
+
+/** Sent to both endpoints so pending forms and handlers are always released. */
+export interface CommandFinishedPayload {
+  invocationId: string;
+  channelId: string;
+  reason: CommandFinishReason;
+}
+
+// ── Bot marketplace / installation (#578) ─────────────────────────────
+
+/**
+ * Manifest that a bot exposes at its `/manifest` endpoint.
+ * Contains everything the server needs to create the bot record and deliver
+ * the token back automatically.
+ */
+export interface BotManifest {
+  /** Display name of the bot. */
+  name: string;
+  /** Short description shown in the install preview. */
+  description?: string;
+  /** Base64-encoded avatar image (data URI or raw base64). */
+  icon?: string;
+  /** Commands the bot will register on connect. Informational only. */
+  commands?: Array<{ name: string; description: string }>;
+  /**
+   * URL where the server POSTs the token after creation.
+   * The bot must accept `{ token, serverId, serverName }` and respond
+   * with `{ publicKey }`.
+   */
+  registrationUrl: string;
+}
+
+/** Client -> server: install a bot from a manifest URL (#578). */
+export interface BotInstallPayload {
+  /** URL of the bot's manifest endpoint (e.g. http://bot-host:4000/manifest). */
+  manifestUrl: string;
+}
+
+/** Server -> client: bot installed successfully (#578). */
+export interface BotInstalledPayload {
+  bot: import('./models').BotInfo;
 }

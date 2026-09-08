@@ -43,4 +43,19 @@ function listWindowOwners() {
   return binding.listWindowOwners();
 }
 
-module.exports = { isSupported, start, stop, getLastError, getStatus, listWindowOwners };
+function listWindows() {
+  if (!binding || typeof binding.listWindows !== 'function') return [];
+  return binding.listWindows();
+}
+
+function restoreWindow(hwnd) {
+  if (!binding || typeof binding.restoreWindow !== 'function') return false;
+  return binding.restoreWindow(hwnd);
+}
+
+function getKeyboardLayout(previousId = '', characters = '') {
+  if (!binding || typeof binding.getKeyboardLayout !== 'function') return null;
+  return binding.getKeyboardLayout(previousId, characters);
+}
+
+module.exports = { isSupported, start, stop, getLastError, getStatus, listWindowOwners, listWindows, restoreWindow, getKeyboardLayout };

@@ -76,13 +76,24 @@ export interface StickerSaveResult {
 
 export interface SoundboardShortcutBinding {
   soundName: string;
+  /** Legacy accelerator or "+"-joined physical code tokens (e.g. Ctrl+code:KeyQ+code:KeyW). */
   accelerator: string;
 }
 
 export interface ActionShortcutBinding {
   action: string;
+  /** Same local chord encoding as SoundboardShortcutBinding; never sent over WebSocket. */
   accelerator: string;
 }
+
+export const SHORTCUT_IPC = {
+  registerActions: 'shortcuts:register-actions',
+  registerSoundboard: 'soundboard:register-shortcuts',
+  setCapture: 'shortcuts:set-capture',
+  setPttConfig: 'ptt:set-config',
+  startPttCapture: 'ptt:start-capture',
+  stopPttCapture: 'ptt:stop-capture',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export interface PttKeyBinding {
   code: string;
@@ -358,6 +369,7 @@ export interface IpcInvokeChannels {
   // Captura de Tela
   'screen-share:ensure-permission': { args: []; returnType: boolean };
   'screen-share:get-sources': { args: []; returnType: DesktopSource[] };
+  'screen-share:prepare-window': { args: [string]; returnType: boolean };
 
   // Diálogos Nativos
   'dialog:select-image': { args: []; returnType: ImageSelectionResult | null };
@@ -380,6 +392,7 @@ export interface IpcInvokeChannels {
 
   // Atalhos Globais (Keybinds)
   'shortcuts:register-actions': { args: [shortcuts: ActionShortcutBinding[]]; returnType: boolean };
+  'shortcuts:set-capture': { args: [active: boolean]; returnType: boolean };
 
   // Push to Talk (PTT) (#186)
   'ptt:set-config': { args: [config: PttConfig]; returnType: boolean };

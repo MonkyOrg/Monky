@@ -18,7 +18,7 @@ import { videoService } from './VideoService';
 import { RemoteMediaRouter } from './webrtc/RemoteMediaRouter';
 import { RemoteVadMonitor } from './webrtc/RemoteVadMonitor';
 import { RtcDiagnosticsCollector } from './webrtc/RtcDiagnosticsCollector';
-import { applyVideoCodecPreferences } from './webrtc/codecPreferences';
+import { applyVideoCodecPreferences, getSdpVideoCodecOrder } from './webrtc/codecPreferences';
 import { SfuClientEngine, SfuConsumerTrackEvent } from './webrtc/SfuClientEngine';
 
 export interface PeerSession {
@@ -234,6 +234,12 @@ export class WebRtcManager {
       () => this.signalClient,
       () => this.currentSessionId,
       {
+        onHealthChanged: (health) => voiceStore.setReconnecting(health !== 'connected'),
+        onRoster: (channelId, participants) => {
+          if (voiceStore.currentVoiceChannelId === channelId) {
+            this.voiceParticipants.reconcileVoiceChannel(channelId, participants);
+          }
+        },
         onConsumerTrack: (event) => this.handleSfuConsumerTrack(event),
         onConsumerClosed: (sessionId, mediaType, shareId) => this.handleSfuConsumerClosed(sessionId, mediaType, shareId),
         onConnectionFailed: (reason) => this.handleSfuConnectionFailure(reason),
@@ -467,6 +473,11 @@ export class WebRtcManager {
         await this.sfuEngine.produceScreenAudio(this.localScreenAudioTrack, 'default');
       }
 
+      // Freshly created SFU producers start with no bitrate/degradation caps, so
+      // push the active quality profile onto them so screen share keeps its
+      // resolution under motion (#568).
+      await this.applyBitrateConstraints();
+
       if (this.isSfuJoinStale(epoch, channelId)) {
         this.sfuEngine.leave();
       }
@@ -599,7 +610,7 @@ export class WebRtcManager {
 
     clientLog.warn('SFU', `SFU connection failed — rejoin #${attempt} in ${delay}ms`, { reason });
     console.warn(`[SFU] Connection failed (${reason}). Rejoin #${attempt} in ${delay}ms.`);
-    this.markSfuParticipantsConnecting(true);
+    voiceStore.setReconnecting(true);
 
     if (attempt === WebRtcManager.SFU_RECONNECT_WARN_AFTER) {
       appEvents.emit('sfu.reconnecting', { reason });
@@ -636,7 +647,7 @@ export class WebRtcManager {
     }
     const wasRecovering = this.sfuReconnectAttempts > 0;
     this.sfuReconnectAttempts = 0;
-    this.markSfuParticipantsConnecting(false);
+    voiceStore.setReconnecting(false);
     if (wasRecovering) {
       clientLog.info('SFU', 'SFU connection restored');
       appEvents.emit('sfu.reconnected', {});
@@ -664,22 +675,6 @@ export class WebRtcManager {
       this.sfuReconnectTimer = null;
     }
     this.sfuReconnectAttempts = 0;
-  }
-
-  /**
-   * Mirrors the P2P "connecting" indicator while the SFU is being rebuilt: in
-   * SFU mode every remote voice is carried by that one link, so its loss is
-   * what the indicator has to report (#433).
-   */
-  private markSfuParticipantsConnecting(connecting: boolean): void {
-    const channelId = voiceStore.currentVoiceChannelId;
-    if (!channelId) return;
-    for (const p of this.voiceParticipants.getInVoiceChannel(channelId)) {
-      const sid = p.user.sessionId || p.user.id;
-      if (sid && sid !== this.currentSessionId) {
-        this.voiceParticipants.setPeerConnecting(sid, connecting);
-      }
-    }
   }
 
   /**
@@ -1427,6 +1422,19 @@ export class WebRtcManager {
       });
       await session.pc.setLocalDescription(offer);
 
+      // #566 diagnostics: record which video codec the offer actually
+      // prioritised. H.264 explicitly chosen but negotiating AV1 after a
+      // SFU -> P2P switch shows up here as "av1" leading the order.
+      const offerVideoCodecOrder = getSdpVideoCodecOrder(session.pc.localDescription?.sdp ?? '');
+      if (offerVideoCodecOrder.length > 0) {
+        clientLog.info('WEBRTC', 'P2P offer video codec order', {
+          peer: session.peerSessionId,
+          preferred: settingsStore.preferredVideoCodec,
+          qualityPreset: settingsStore.qualityPreset,
+          codecOrder: offerVideoCodecOrder,
+        });
+      }
+
       this.signalClient.send(MessageType.RTC_SIGNAL, {
         targetSessionId: session.peerSessionId,
         fromSessionId: this.currentSessionId,
@@ -1908,6 +1916,14 @@ export class WebRtcManager {
           await sender.setParameters(params);
         } catch (err) {}
       }
+    }
+
+    if (this.isSfuMode()) {
+      // In SFU mode there are no peer connections to iterate — media flows
+      // through the mediasoup send transport — so the loop above is a no-op.
+      // Push the same caps onto the SFU producers, otherwise screen share loses
+      // resolution under motion (#568).
+      await this.sfuEngine.applyQualityParams(this.currentPreset, profile);
     }
   }
 

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, ipcMain, screen, shell, systemPreferences } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, shell, systemPreferences } from 'electron';
 import { execFile } from 'child_process';
 import fs from 'fs';
 import http from 'http';
@@ -7,13 +7,14 @@ import net from 'net';
 import path from 'path';
 import { LanDiscovery } from './lanDiscovery';
 import { globalInputHook } from './globalInputHook';
+import { SHORTCUT_IPC } from '@monky/shared';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
 import { mt, setMainLanguage } from './i18n';
 import { fetchLinkPreview } from './linkPreview';
 import { TrayManager, VoiceStatus } from './trayManager';
-import type { OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState, PttConfig } from '@monky/shared';
+import type { DesktopSource, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
 import { OverlayManager } from './overlayManager';
 import {
   HOME_MIN_HEIGHT,
@@ -112,6 +113,23 @@ interface NativeWindowOwner {
   appName: string;
 }
 
+interface NativeWindowInfo {
+  hwnd: number;
+  title: string;
+  processId: number;
+  processPath: string;
+  isIconic: boolean;
+  isVisible: boolean;
+  isCloaked: boolean;
+  isToolWindow: boolean;
+  isLayered: boolean;
+  isTransparent: boolean;
+  isNoActivate: boolean;
+  isAppWindow: boolean;
+  width: number;
+  height: number;
+}
+
 // Screen audio native module (compiled only on CI — graceful fallback)
 let screenAudio: {
   isSupported: () => boolean;
@@ -120,6 +138,8 @@ let screenAudio: {
   getLastError: () => string;
   getStatus: () => number;
   listWindowOwners?: () => NativeWindowOwner[];
+  listWindows?: () => NativeWindowInfo[];
+  restoreWindow?: (hwnd: number) => boolean;
 } | null = null;
 try {
   screenAudio = require('@monky/screen-audio');
@@ -181,6 +201,61 @@ async function resolveMacAppIcons(sourceIds: string[]): Promise<Map<string, stri
   }
 
   return iconsBySourceId;
+}
+
+/** Enumera as janelas nativas do Windows; vazio nas outras plataformas ou sem o modulo. */
+function listNativeWindows(): NativeWindowInfo[] {
+  if (process.platform !== 'win32' || !screenAudio?.listWindows) return [];
+  try {
+    return screenAudio.listWindows();
+  } catch (e) {
+    console.warn('[ScreenShare:Main] Falha ao enumerar janelas nativas:', (e as Error).message);
+    return [];
+  }
+}
+
+/**
+ * O capturador WGC do Electron 34 parou de filtrar janelas de overlay/ferramenta,
+ * entao elas vazam para o seletor como se fossem janelas reais (Medal Overlay,
+ * helpers do Raycast, Radmin VPN na bandeja...). O discriminador abaixo foi
+ * validado contra janelas reais: nenhuma janela legitima dispara qualquer uma das
+ * combinacoes, enquanto todo overlay dispara pelo menos uma (#560).
+ */
+function isGhostWindow(w: NativeWindowInfo): boolean {
+  if (w.isCloaked) return true;
+  if (w.isToolWindow) return true;
+  if (w.isLayered && w.isTransparent) return true;
+  if (w.isLayered && w.isNoActivate) return true;
+  return false;
+}
+
+/**
+ * Icones das janelas minimizadas que reexibimos: o `getSources` nao as devolve,
+ * entao lemos o icone direto do executavel do processo dono. Reaproveita o
+ * `appIconCache` (chaveado por caminho absoluto, sem colisao com os bundles mac).
+ */
+async function resolveWindowsAppIcons(processPaths: string[]): Promise<Map<string, string>> {
+  const icons = new Map<string, string>();
+  if (process.platform !== 'win32') return icons;
+
+  for (const processPath of processPaths) {
+    if (!processPath || icons.has(processPath)) continue;
+
+    let dataUrl = appIconCache.get(processPath);
+    if (dataUrl === undefined) {
+      try {
+        const icon = await app.getFileIcon(processPath, { size: 'normal' });
+        dataUrl = icon.isEmpty() ? null : icon.toDataURL();
+      } catch (e) {
+        console.warn(`[ScreenShare:Main] Sem icone para ${processPath}:`, (e as Error).message);
+        dataUrl = null;
+      }
+      appIconCache.set(processPath, dataUrl);
+    }
+    if (dataUrl) icons.set(processPath, dataUrl);
+  }
+
+  return icons;
 }
 
 export interface SetupIpcOptions {
@@ -460,9 +535,23 @@ export function setupIpcHandlers(
       fetchWindowIcons: true,
     });
 
+    const nativeWindows = listNativeWindows();
+    const nativeByHwnd = new Map<number, NativeWindowInfo>();
+    for (const w of nativeWindows) nativeByHwnd.set(w.hwnd, w);
+
     const macIcons = await resolveMacAppIcons(sources.map((s) => s.id));
 
-    return sources.map((s) => {
+    // 1) Remove os overlays/tool windows que o capturador WGC passou a vazar. Sem
+    //    dados nativos (outra plataforma ou janela que fechou no meio) mantemos a
+    //    fonte para nao esconder algo legitimo por engano.
+    const realSources = sources.filter((s) => {
+      if (!s.id.startsWith('window:')) return true;
+      const hwnd = nativeWindowIdFromSourceId(s.id);
+      const info = hwnd === null ? undefined : nativeByHwnd.get(hwnd);
+      return info ? !isGhostWindow(info) : true;
+    });
+
+    const result: DesktopSource[] = realSources.map((s) => {
       const electronIcon = s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null;
       return {
         id: s.id,
@@ -472,6 +561,53 @@ export function setupIpcHandlers(
         appIconDataUrl: electronIcon ?? macIcons.get(s.id) ?? null,
       };
     });
+
+    // 2) Reexibe janelas minimizadas que o WGC omite — tipicamente um jogo em tela
+    //    cheia que minimizou quando o usuario deu alt-tab para abrir este seletor
+    //    (#560). Sem preview ao vivo (a janela esta minimizada), a UI mostra um
+    //    tile de fallback; a captura passa a exibir o jogo assim que ele volta ao
+    //    primeiro plano.
+    const presentHwnds = new Set<number>();
+    for (const s of sources) {
+      const hwnd = nativeWindowIdFromSourceId(s.id);
+      if (hwnd !== null) presentHwnds.add(hwnd);
+    }
+    const minimizedExtras = nativeWindows.filter(
+      (w) =>
+        w.isIconic &&
+        !presentHwnds.has(w.hwnd) &&
+        !isGhostWindow(w) &&
+        w.width >= 240 &&
+        w.height >= 160,
+    );
+    const extraIcons = await resolveWindowsAppIcons(minimizedExtras.map((w) => w.processPath));
+    for (const w of minimizedExtras) {
+      result.push({
+        id: `window:${w.hwnd}:0`,
+        name: w.title,
+        type: 'window',
+        thumbnailDataUrl: '',
+        appIconDataUrl: extraIcons.get(w.processPath) ?? null,
+      });
+    }
+
+    return result;
+  });
+
+  // Restaura uma janela minimizada antes da captura (#560). O capturador WGC nao
+  // consegue iniciar numa janela minimizada, entao o jogo em tela cheia que
+  // minimizou no alt-tab precisa voltar ao primeiro plano antes do getUserMedia.
+  ipcMain.handle('screen-share:prepare-window', (_event, sourceId: string) => {
+    if (process.platform !== 'win32' || !screenAudio?.restoreWindow) return false;
+    if (typeof sourceId !== 'string') return false;
+    const hwnd = nativeWindowIdFromSourceId(sourceId);
+    if (hwnd === null) return false;
+    try {
+      return screenAudio.restoreWindow(hwnd);
+    } catch (e) {
+      console.warn('[ScreenShare:Main] Falha ao restaurar janela:', (e as Error).message);
+      return false;
+    }
   });
 
   // Avatar Image Selection Dialog
@@ -789,67 +925,46 @@ export function setupIpcHandlers(
     }
   });
 
-  let registeredSoundboardShortcuts: Array<{ soundName: string; accelerator: string }> = [];
-  let registeredActionShortcuts: Array<{ action: string; accelerator: string }> = [];
-
-  const syncAllGlobalShortcuts = (): boolean => {
-    try {
-      globalShortcut.unregisterAll();
-
-      for (const item of registeredSoundboardShortcuts) {
-        if (!item.accelerator || !item.soundName) continue;
-        try {
-          globalShortcut.register(item.accelerator, () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('soundboard:shortcut-triggered', item.soundName);
-            }
-          });
-        } catch (err) {
-          console.warn(`[main] Failed to register soundboard shortcut "${item.accelerator}" for "${item.soundName}":`, err);
-        }
-      }
-
-      for (const item of registeredActionShortcuts) {
-        if (!item.accelerator || !item.action) continue;
-        try {
-          globalShortcut.register(item.accelerator, () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('shortcut:action-triggered', item.action);
-            }
-          });
-        } catch (err) {
-          console.warn(`[main] Failed to register action shortcut "${item.accelerator}" for "${item.action}":`, err);
-        }
-      }
-      return true;
-    } catch (e) {
-      console.warn('[main] Error in syncAllGlobalShortcuts:', e);
-      return false;
-    }
-  };
-
-  // Soundboard Global Shortcuts Registration
-  ipcMain.handle('soundboard:register-shortcuts', (_, shortcuts: Array<{ soundName: string; accelerator: string }>) => {
-    registeredSoundboardShortcuts = Array.isArray(shortcuts) ? shortcuts : [];
-    return syncAllGlobalShortcuts();
+  // Global shortcuts for the soundboard and actions (mute/deafen/camera/etc.)
+  // are matched through the passive uiohook listener (globalInputHook) instead
+  // of Electron globalShortcut. globalShortcut.register() consumes the key on
+  // Windows, so a single-key bind like "Q" was swallowed and never reached the
+  // focused game (#571). uiohook only observes input, so the key passes through.
+  ipcMain.handle(SHORTCUT_IPC.registerSoundboard, (_, shortcuts: unknown) => {
+    return globalInputHook.setSoundboardHotkeys(shortcuts);
   });
 
   // Action Global Shortcuts Registration (#252)
-  ipcMain.handle('shortcuts:register-actions', (_, shortcuts: Array<{ action: string; accelerator: string }>) => {
-    registeredActionShortcuts = Array.isArray(shortcuts) ? shortcuts : [];
-    return syncAllGlobalShortcuts();
+  ipcMain.handle(SHORTCUT_IPC.registerActions, (_, shortcuts: unknown) => {
+    return globalInputHook.setActionHotkeys(shortcuts);
+  });
+
+  ipcMain.handle(SHORTCUT_IPC.setCapture, (_, active: unknown) => {
+    return globalInputHook.setShortcutCapture(active);
+  });
+
+  mainWindow.webContents.on('did-start-loading', () => {
+    globalInputHook.stopCapture();
+    globalInputHook.setShortcutCapture(false);
+  });
+  mainWindow.webContents.on('render-process-gone', () => {
+    globalInputHook.stopCapture();
+    globalInputHook.setShortcutCapture(false);
+    globalInputHook.setPttConfig({ enabled: false, key: null });
+    globalInputHook.setActionHotkeys([]);
+    globalInputHook.setSoundboardHotkeys([]);
   });
 
   // Push to Talk (PTT) (#186)
-  ipcMain.handle('ptt:set-config', (_, config: PttConfig) => {
+  ipcMain.handle(SHORTCUT_IPC.setPttConfig, (_, config: unknown) => {
     return globalInputHook.setPttConfig(config);
   });
 
-  ipcMain.handle('ptt:start-capture', () => {
+  ipcMain.handle(SHORTCUT_IPC.startPttCapture, () => {
     return globalInputHook.startCapture();
   });
 
-  ipcMain.handle('ptt:stop-capture', () => {
+  ipcMain.handle(SHORTCUT_IPC.stopPttCapture, () => {
     return globalInputHook.stopCapture();
   });
 

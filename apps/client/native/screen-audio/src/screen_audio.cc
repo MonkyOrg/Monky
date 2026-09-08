@@ -9,6 +9,9 @@ uint32_t platform_pid_for_hwnd(int64_t hwnd);
 void platform_stop();
 const char* platform_get_last_error();
 int platform_get_status();
+Napi::Value platform_list_windows(Napi::Env env);
+bool platform_restore_window(int64_t hwnd);
+Napi::Value GetKeyboardLayoutSnapshot(const Napi::CallbackInfo& info);
 #elif defined(__MACOS__)
 bool platform_is_supported();
 bool platform_start(uint32_t targetPid, uint32_t loopbackMode, int64_t includeWindowId,
@@ -146,6 +149,31 @@ Napi::Value ListWindowOwners(const Napi::CallbackInfo& info) {
 #endif
 }
 
+// Enumera as janelas top-level com seus atributos Win32 brutos. Usado no Windows
+// para (a) filtrar overlays que o capturador WGC passou a vazar e (b) reexibir
+// janelas minimizadas que ele omite, como um jogo em tela cheia (#560). Nas
+// outras plataformas devolve uma lista vazia e o chamador segue o caminho padrao.
+Napi::Value ListWindows(const Napi::CallbackInfo& info) {
+#if defined(_WIN32)
+  return platform_list_windows(info.Env());
+#else
+  return Napi::Array::New(info.Env());
+#endif
+}
+
+// Restaura (desminimiza) uma janela pelo handle antes de captura-la — a captura
+// WGC nao inicia numa janela minimizada (#560). Retorna `true` se desminimizou.
+Napi::Value RestoreWindow(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+#if defined(_WIN32)
+  if (info.Length() < 1 || !info[0].IsNumber()) return Napi::Boolean::New(env, false);
+  int64_t hwnd = info[0].As<Napi::Number>().Int64Value();
+  return Napi::Boolean::New(env, platform_restore_window(hwnd));
+#else
+  return Napi::Boolean::New(env, false);
+#endif
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("isSupported", Napi::Function::New(env, IsSupported));
   exports.Set("start", Napi::Function::New(env, Start));
@@ -153,6 +181,11 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("getLastError", Napi::Function::New(env, GetLastError));
   exports.Set("getStatus", Napi::Function::New(env, GetStatus));
   exports.Set("listWindowOwners", Napi::Function::New(env, ListWindowOwners));
+  exports.Set("listWindows", Napi::Function::New(env, ListWindows));
+  exports.Set("restoreWindow", Napi::Function::New(env, RestoreWindow));
+#if defined(_WIN32)
+  exports.Set("getKeyboardLayout", Napi::Function::New(env, GetKeyboardLayoutSnapshot));
+#endif
   return exports;
 }
 

@@ -1,8 +1,4 @@
-/**
- * Utility for capturing and serializing KeyboardEvents into Electron Accelerator format
- * and friendly human-readable display strings.
- */
-
+import { SHORTCUT_CODES, SHORTCUT_MODIFIERS, parseShortcutTokens, type ShortcutModifier } from '@monky/shared';
 import { t } from '../i18n';
 
 export interface ShortcutKeyCombo {
@@ -10,105 +6,126 @@ export interface ShortcutKeyCombo {
   display: string;
 }
 
-export function formatKeyCombo(e: KeyboardEvent): ShortcutKeyCombo | null {
-  // Ignore lone modifier keys
-  if (['Control', 'Shift', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) {
+export function shortcutIdentity(accelerator: string): string | null {
+  const tokens = parseShortcutTokens(accelerator,
+    typeof window !== 'undefined' && window.api?.platform === 'darwin' ? 'Meta' : 'Ctrl');
+  return tokens ? [...tokens.modifiers, ...tokens.codes.map((code) => `code:${code}`)].join('+') : null;
+}
+
+function modifierForCode(code: string): ShortcutModifier | undefined {
+  if (code.startsWith('Control')) return 'Ctrl';
+  return SHORTCUT_MODIFIERS.find((modifier) => code.startsWith(modifier));
+}
+
+/** Records one held chord, not a sequence. Commit only after every key is released. */
+export class ShortcutCapture {
+  private held = new Set<string>();
+  private labels = new Map<string, string>();
+  private releasing = false;
+  private invalid = false;
+
+  public keyDown(event: Pick<KeyboardEvent, 'code' | 'key' | 'repeat'>
+    & Partial<Pick<KeyboardEvent, 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>>): ShortcutKeyCombo | null {
+    if (event.repeat || this.releasing) return this.combo;
+    const modifier = modifierForCode(event.code);
+    this.held.add(event.code);
+    if (!modifier && !Object.hasOwn(SHORTCUT_CODES, event.code)) {
+      this.invalid = true;
+      return null;
+    }
+    const token = modifier ?? `code:${event.code}`;
+    const label = modifier ?? (event.code === 'Space' ? t('keybind.space')
+      : event.code.startsWith('Numpad') ? `Num ${event.key}`
+      : event.key === 'Dead' ? event.code : event.key.length === 1 ? event.key.toUpperCase() : event.key);
+    this.labels.set(token, label);
+    // AltGr can report Ctrl+Alt without delivering a separate Ctrl keydown.
+    for (const [modifier, active] of [
+      ['Ctrl', event.ctrlKey], ['Alt', event.altKey], ['Shift', event.shiftKey], ['Meta', event.metaKey],
+    ] as const) {
+      if (active) this.labels.set(modifier, modifier);
+    }
+    return this.combo;
+  }
+
+  public keyUp(code: string): ShortcutKeyCombo | null {
+    if (!this.held.delete(code)) return null;
+    this.releasing = true;
+    if (this.held.size > 0) return null;
+    if (!this.invalid) return this.combo;
+    this.labels.clear();
+    this.releasing = false;
+    this.invalid = false;
     return null;
   }
 
-  const parts: string[] = [];
-  const displayParts: string[] = [];
-
-  if (e.ctrlKey) {
-    parts.push('CommandOrControl');
-    displayParts.push('Ctrl');
-  }
-  if (e.altKey) {
-    parts.push('Alt');
-    displayParts.push('Alt');
-  }
-  if (e.shiftKey) {
-    parts.push('Shift');
-    displayParts.push('Shift');
-  }
-  if (e.metaKey) {
-    parts.push('Super');
-    displayParts.push('Win');
-  }
-
-  let mainKey = '';
-  let displayKey = '';
-
-  const code = e.code;
-  const key = e.key;
-
-  if (code.startsWith('Numpad')) {
-    // Numpad0-9, NumpadAdd, etc.
-    const num = code.replace('Numpad', '');
-    if (num >= '0' && num <= '9') {
-      mainKey = `num${num}`;
-      displayKey = `Num ${num}`;
-    } else if (num === 'Add') {
-      mainKey = 'numadd';
-      displayKey = 'Num +';
-    } else if (num === 'Subtract') {
-      mainKey = 'numsub';
-      displayKey = 'Num -';
-    } else if (num === 'Multiply') {
-      mainKey = 'nummult';
-      displayKey = 'Num *';
-    } else if (num === 'Divide') {
-      mainKey = 'numdiv';
-      displayKey = 'Num /';
-    } else if (num === 'Decimal') {
-      mainKey = 'numdec';
-      displayKey = 'Num .';
-    } else {
-      mainKey = `num${num.toLowerCase()}`;
-      displayKey = `Num ${num}`;
-    }
-  } else if (/^F\d{1,2}$/i.test(key)) {
-    mainKey = key.toUpperCase();
-    displayKey = key.toUpperCase();
-  } else if (code.startsWith('Digit')) {
-    mainKey = code.replace('Digit', '');
-    displayKey = mainKey;
-  } else if (code.startsWith('Key')) {
-    mainKey = code.replace('Key', '').toUpperCase();
-    displayKey = mainKey;
-  } else if (['Space', 'Backspace', 'Delete', 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab'].includes(code)) {
-    const map: Record<string, { accel: string; disp: string }> = {
-      Space: { accel: 'Space', disp: t('keybind.space') },
-      Backspace: { accel: 'Backspace', disp: 'Backspace' },
-      Delete: { accel: 'Delete', disp: 'Del' },
-      Insert: { accel: 'Insert', disp: 'Ins' },
-      Home: { accel: 'Home', disp: 'Home' },
-      End: { accel: 'End', disp: 'End' },
-      PageUp: { accel: 'PageUp', disp: 'PgUp' },
-      PageDown: { accel: 'PageDown', disp: 'PgDn' },
-      ArrowUp: { accel: 'Up', disp: '↑' },
-      ArrowDown: { accel: 'Down', disp: '↓' },
-      ArrowLeft: { accel: 'Left', disp: '←' },
-      ArrowRight: { accel: 'Right', disp: '→' },
-      Tab: { accel: 'Tab', disp: 'Tab' },
+  public get combo(): ShortcutKeyCombo | null {
+    if (this.invalid || !this.labels.size) return null;
+    const tokens = [
+      ...SHORTCUT_MODIFIERS.filter((modifier) => this.labels.has(modifier)),
+      ...[...this.labels.keys()].filter((token) => token.startsWith('code:')).sort(),
+    ];
+    return {
+      accelerator: tokens.join('+'),
+      display: tokens.map((token) => this.labels.get(token)).join(' + '),
     };
-    mainKey = map[code]?.accel || code;
-    displayKey = map[code]?.disp || code;
-  } else if (key.length === 1) {
-    mainKey = key.toUpperCase();
-    displayKey = key.toUpperCase();
-  } else {
-    mainKey = key;
-    displayKey = key;
   }
+}
 
-  if (!mainKey) return null;
+/** Owns all modal listeners, including cancellation when its parent is removed. */
+let cancelActiveCapture: (() => void) | null = null;
 
-  parts.push(mainKey);
-  displayParts.push(displayKey);
-
-  return {
-    accelerator: parts.join('+'),
-    display: displayParts.join(' + '),
+export function captureShortcut(
+  backdrop: Pick<HTMLElement, 'isConnected'>,
+  preview: Pick<HTMLElement, 'textContent'> | null,
+  onCaptured: (combo: ShortcutKeyCombo) => void,
+  onCancel: () => void,
+  owner: Pick<HTMLElement, 'isConnected'> = backdrop,
+): () => void {
+  cancelActiveCapture?.();
+  cancelActiveCapture = onCancel;
+  const capture = new ShortcutCapture();
+  let closed = false;
+  let ready = !window.api?.setShortcutCapture;
+  const keyDown = (event: KeyboardEvent) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (event.key === 'Escape') { onCancel(); return; }
+    if (!ready) return;
+    const combo = capture.keyDown(event);
+    if (preview) preview.textContent = combo?.display ?? t('keybinds.unsupportedKey');
+  };
+  const keyUp = (event: KeyboardEvent) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!ready) return;
+    const combo = capture.keyUp(event.code);
+    if (combo) onCaptured(combo);
+  };
+  const blur = () => onCancel();
+  const observer = new MutationObserver(() => {
+    if (!backdrop.isConnected || !owner.isConnected) onCancel();
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  window.addEventListener('keydown', keyDown, true);
+  window.addEventListener('keyup', keyUp, true);
+  window.addEventListener('blur', blur);
+  if (window.api?.setShortcutCapture) {
+    window.api.setShortcutCapture(true).then((ok) => {
+      if (closed) return;
+      ready = ok;
+      if (!ok && preview) preview.textContent = t('keybinds.hookUnavailable');
+    }).catch(() => {
+      if (!closed && preview) preview.textContent = t('keybinds.hookUnavailable');
+    });
+  }
+  return () => {
+    if (closed) return;
+    closed = true;
+    if (cancelActiveCapture === onCancel) cancelActiveCapture = null;
+    observer.disconnect();
+    window.removeEventListener('keydown', keyDown, true);
+    window.removeEventListener('keyup', keyUp, true);
+    window.removeEventListener('blur', blur);
+    void window.api?.setShortcutCapture?.(false).catch(() => {});
   };
 }

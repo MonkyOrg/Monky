@@ -35,6 +35,7 @@ import { soundboardModal } from './SoundboardModal';
 import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
+import { participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
 import { serverRailView } from './ServerRailView';
 import { soundboardPlayersBar } from './SoundboardPlayersBar';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
@@ -92,6 +93,7 @@ export class MainView {
     const canManageChannels = serverStore.hasPermission(Permission.MANAGE_CHANNELS);
     const canManageServer = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES);
+    const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
 
     this.container.innerHTML = `
       <div class="main-layout">
@@ -108,12 +110,10 @@ export class MainView {
               <span class="material-symbols-outlined md-18 server-dropdown-caret">expand_more</span>
             </button>
             <div id="server-dropdown-menu" class="server-dropdown-menu" style="display: none;">
-              ${(canManageServer || canManageRoles) ? `
-              <button id="btn-server-settings" class="server-dropdown-item" title="${t('main.serverSettingsTitle')}">
+              <button id="btn-server-settings" class="server-dropdown-item" title="${t('main.serverSettingsTitle')}" style="${canManageServer || canManageRoles || canManageBots ? '' : 'display: none;'}">
                 <span class="material-symbols-outlined md-18">settings</span>
                 <span>${t('serverSettings.title')}</span>
               </button>
-              ` : ''}
               <button id="btn-server-monitor" class="server-dropdown-item" title="${t('serverMonitor.title')}" style="display: none;">
                 <span class="material-symbols-outlined md-18">monitoring</span>
                 <span>${t('serverMonitor.title')}</span>
@@ -170,10 +170,11 @@ export class MainView {
               <div id="user-profile-btn" class="user-profile-summary" title="${t('main.profileSettings')}">
                 <div class="user-avatar-container">
                   <img id="main-user-avatar" class="user-avatar-main ${voiceStore.isSpeaking ? 'speaking' : ''}" src="${getAvatarUrl(u.avatarUrl)}" data-fallback="avatar">
+                  <span id="main-user-status-dot" class="status-indicator ${settingsStore.appearOffline ? 'invisible' : 'online'}" role="img" aria-label="${settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline')}"></span>
                 </div>
                 <div class="user-info-text">
                   <span id="main-user-name" class="user-name-display">${escapeHtml(u.nickname)}</span>
-                  <span class="user-status-text">${t('main.statusOnline')}</span>
+                  <span id="main-user-status-text" class="user-status-text">${settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline')}</span>
                 </div>
               </div>
 
@@ -281,7 +282,7 @@ export class MainView {
     slot.innerHTML = `
       <div class="voice-connection-row ${reconnecting ? 'reconnecting' : ''}" id="voice-connection-row">
         <div class="voice-conn-info">
-          <span class="material-symbols-outlined md-16 voice-conn-signal ${reconnecting ? 'reconnecting' : ''}"${reconnecting ? ` title="${t('main.reconnectingTitle')}"` : ''}>${signalIcon}</span>
+          <span class="material-symbols-outlined md-16 voice-conn-signal ${reconnecting ? 'reconnecting' : 'unknown'}"${reconnecting ? ` title="${t('main.reconnectingTitle')}"` : ''}>${signalIcon}</span>
           <div class="voice-conn-text">
             <span class="voice-conn-status">${statusText}</span>
             <span class="voice-conn-channel" id="sidebar-voice-channel">${escapeHtml(vc.name)}</span>
@@ -326,13 +327,23 @@ export class MainView {
       const pingEl = document.getElementById('sidebar-voice-ping');
       if (!pingEl) return;
       const isSfu = webRtcManager.isSfuMode();
+      const channelId = voiceStore.currentVoiceChannelId;
       const participants = participantManager.getInVoiceChannel(voiceStore.currentVoiceChannelId || '');
-      if (participants.length <= 1 && !isSfu) {
-        pingEl.textContent = '0 ms';
-        return;
-      }
-      const avg = await webRtcManager.getAverageP2pPing();
+      const avg = participants.length <= 1 && !isSfu ? 0 : await webRtcManager.getAverageP2pPing();
+      if (!pingEl.isConnected || channelId !== voiceStore.currentVoiceChannelId) return;
       pingEl.textContent = avg !== null ? `${avg} ms` : '-- ms';
+      const { quality, icon } = voiceConnectionIndicator(avg, voiceStore.isReconnecting);
+      const signal = document.querySelector<HTMLElement>('.voice-conn-signal');
+      if (signal) {
+        signal.textContent = icon;
+        signal.className = `material-symbols-outlined md-16 voice-conn-signal ${quality}`;
+      }
+      const label = voiceStore.isReconnecting ? t('main.reconnecting')
+        : quality === 'good' ? t('stage.qualityExcellent')
+        : quality === 'medium' ? t('stage.qualityGood')
+        : quality === 'bad' ? t('stage.qualityPoor') : t('stage.pingCalculating');
+      const info = document.querySelector<HTMLElement>('.voice-conn-info');
+      if (info) info.title = `${isSfu ? 'SFU' : 'P2P'} · ${pingEl.textContent} · ${label}`;
     };
     update();
     this.sidebarPingInterval = window.setInterval(update, 2000);
@@ -690,16 +701,15 @@ export class MainView {
                   const isMicMuted = isSelfMuted || isServerMuted || isSelfDeafened || isServerDeafened;
                   const avatar = getAvatarUrl(p.user.avatarUrl);
                   const displayName = participantManager.displayName(p);
-                  const isPeerFailed = !isLocal && (p.peerConnectionFailed ?? false);
-                  const isConnecting = !isLocal && !isPeerFailed && (p.isConnecting ?? false);
-                  const isRelayed = !isLocal && !isPeerFailed && !isConnecting && (p.isRelayed ?? false);
+                  const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
+                  const { isPeerFailed, isConnecting, isRelayed } = participantConnectionIndicators(p, isSfu, isLocal);
 
                   return `
                     <div id="voice-mini-user-${sessionId}" class="voice-participant-mini ${isSpeaking ? 'speaking' : ''}" data-session-id="${sessionId}" title="${escapeHtml(displayName)} (${t('main.rightClickVolumeShort')})">
                       <img class="voice-mini-avatar" src="${avatar}" data-fallback="avatar">
                       <span class="voice-mini-name">${escapeHtml(displayName)}</span>
-                      ${isPeerFailed ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-failed" title="${peerFailureTooltip('main.peerConnectionFailed')}">link_off</span>` : ''}
-                      ${isConnecting ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t('main.peerConnecting')}">sync</span>` : ''}
+                      ${isPeerFailed ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-failed" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('main.peerConnectionFailed')}">link_off</span>` : ''}
+                      ${isConnecting ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t(isSfu ? 'main.sfuConnecting' : 'main.peerConnecting')}">sync</span>` : ''}
                       ${isRelayed ? `<span class="material-symbols-outlined md-14 voice-mini-icon relayed" title="${t('main.peerRelayed')}">swap_horiz</span>` : ''}
                       ${isServerDeafened ? `<span class="material-symbols-outlined md-14 voice-mini-icon muted" title="${t('permissions.serverDeafened')}">hearing_disabled</span>` : ''}
                       ${isServerMuted ? `<span class="material-symbols-outlined md-14 voice-mini-icon muted" title="${t('permissions.serverMuted')}">admin_panel_settings</span>` : ''}
@@ -1098,6 +1108,9 @@ export class MainView {
     // If in another channel, close the current mesh locally; the server-side
     // join handler updates the stored voice state to the new room directly.
     if (voiceStore.currentVoiceChannelId) {
+      // Switching rooms ends any screen share (#565): it belongs to the room it
+      // started in and must not follow us into the next one.
+      await this.stopLocalScreenSharesForChannelChange();
       webRtcManager.closeAllPeers();
       // The call lives on a single server (#400). Joining voice somewhere else
       // means leaving the previous one for real, otherwise the old server would
@@ -1146,6 +1159,10 @@ export class MainView {
   }
 
   public async rejoinVoiceChannel(channelId: string): Promise<void> {
+    // Being moved to another room ends any screen share (#565); stop the local
+    // capture and producers before tearing the mesh down, otherwise the stale
+    // tracks would be re-announced into the destination on the next join.
+    await this.stopLocalScreenSharesForChannelChange();
     // Close existing peer connections before moving (#248)
     webRtcManager.closeAllPeers();
     // Reset the stored voice channel so handleJoinVoiceChannel performs a full
@@ -1156,6 +1173,22 @@ export class MainView {
     this.voiceStageView?.setChannel(channelId);
     this.renderChannels();
     this.updateScreenShareNotice();
+  }
+
+  /**
+   * Fully stops every local screen share because the participant's voice
+   * channel is changing (moved by an admin or switching rooms). Stops the OS
+   * capture (which plays the stop cue and auto-stops screen audio), removes the
+   * WebRTC producers/senders so nothing is re-announced into the new room, and
+   * clears the derived store flags. No-ops when nothing is being shared (#565).
+   */
+  private async stopLocalScreenSharesForChannelChange(): Promise<void> {
+    if (videoService.getScreenShareCount() === 0 && !voiceStore.isScreenSharing) {
+      return;
+    }
+    videoService.stopScreenShare();
+    await webRtcManager.removeAllLocalScreenTracks();
+    voiceStore.setScreenSharing(false);
   }
 
   private async handleDeleteChannel(channelId: string): Promise<void> {
@@ -1196,9 +1229,10 @@ export class MainView {
   private updatePermissionDependentUI(): void {
     const canManageServer = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES);
+    const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
     const btnSettings = document.getElementById('btn-server-settings');
     if (btnSettings) {
-      (btnSettings as HTMLElement).style.display = (canManageServer || canManageRoles) ? '' : 'none';
+      (btnSettings as HTMLElement).style.display = (canManageServer || canManageRoles || canManageBots) ? '' : 'none';
     }
   }
 
@@ -1243,8 +1277,8 @@ export class MainView {
       const isSelfMuted = !effectiveOffline && (isLocal ? voiceStore.isMuted : (voiceState?.isMuted ?? false));
       const isMicMuted = inVoice && (isSelfMuted || isServerMuted || isSelfDeafened || isServerDeafened);
 
-      const statusClass = isReconnecting ? 'reconnecting' : (inVoice ? 'voice' : (effectiveOffline ? 'offline' : 'online'));
-      const statusText = isReconnecting
+      const statusClass = m.invisible ? 'invisible' : (isReconnecting ? 'reconnecting' : (inVoice ? 'voice' : (effectiveOffline ? 'offline' : 'online')));
+      const statusText = m.invisible ? t('main.statusInvisible') : isReconnecting
         ? t('main.reconnecting')
         : (inVoice ? t('main.inVoiceChannel') : (effectiveOffline ? t('main.statusOffline') : t('main.statusOnline')));
 
@@ -1252,13 +1286,14 @@ export class MainView {
         <div class="member-item ${effectiveOffline ? 'member-offline' : ''} ${isReconnecting ? 'reconnecting' : ''}" data-user-id="${m.id}" title="${escapeHtml(m.nickname)} ${isLocal ? `(${t('common.you')})` : `(${t('main.rightClickVolume')})`}">
           <div class="member-avatar-wrapper">
             <img class="member-avatar-img" src="${avatar}" data-fallback="avatar">
-            <span class="status-indicator ${statusClass}"></span>
+            <span class="status-indicator ${statusClass}" role="img" aria-label="${statusText}"></span>
           </div>
           <div class="member-info">
             <div class="member-name-row">
               <span class="member-name">${escapeHtml(m.nickname)}</span>
               ${isLocal ? `<span class="member-badge-you">${t('common.you')}</span>` : ''}
               ${m.id === serverStore.ownerId ? `<span class="member-badge-you">${t('roles.ownerBadge')}</span>` : ''}
+              ${m.isBot ? `<span class="member-badge-bot" title="Bot">BOT</span>` : ''}
               ${isReconnecting ? `<span class="member-reconnecting-badge" title="${t('main.reconnectingTitle')}"><span class="material-symbols-outlined md-14 spin">sync</span></span>` : ''}
               ${(!effectiveOffline && voiceState?.isScreenSharing) ? `<span class="member-live-badge" title="${t('main.sharingScreen')}">LIVE</span>` : ''}
               ${(!effectiveOffline && voiceState?.isCameraOn) ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
@@ -1500,6 +1535,7 @@ export class MainView {
       const nameEl = document.getElementById('main-user-name');
       if (avatarEl) avatarEl.src = getAvatarUrl(user.avatarUrl);
       if (nameEl) nameEl.innerText = user.nickname;
+      this.renderMembers();
     });
 
     let lastLocalMuted = voiceStore.isMuted;
@@ -1669,6 +1705,14 @@ export class MainView {
         btnRnnoise.className = `btn btn-icon voice-conn-rnnoise ${enabled ? 'rnnoise-active' : ''}`;
         btnRnnoise.setAttribute('title', enabled ? t('main.rnnoiseOn') : t('main.rnnoiseOff'));
       }
+      // Update the user status indicator when appear-offline changes (#561).
+      const dot = document.getElementById('main-user-status-dot');
+      if (dot) {
+        dot.className = `status-indicator ${settingsStore.appearOffline ? 'invisible' : 'online'}`;
+        dot.setAttribute('aria-label', settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline'));
+      }
+      const statusText = document.getElementById('main-user-status-text');
+      if (statusText) statusText.textContent = settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline');
     });
 
     const u11 = appEvents.on('server.members_updated', () => {

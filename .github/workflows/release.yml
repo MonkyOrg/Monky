@@ -212,6 +212,13 @@ jobs:
           npm run build --workspace=packages/shared
           npm run build --workspace=apps/server
 
+      - name: Build bot-sdk
+        run: npm run build --workspace=packages/bot-sdk
+
+      - name: Test bot-sdk interactions
+        if: hashFiles('packages/bot-sdk/test/client.test.cjs') != ''
+        run: npm run test --workspace=packages/bot-sdk
+
       - name: Pack CLI
         id: pack
         shell: bash
@@ -234,6 +241,30 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           path: release/monky-cli-*.tgz
+
+      - name: Pack bot-sdk
+        id: pack-sdk
+        shell: bash
+        run: |
+          if [ ! -f scripts/pack-bot-sdk.js ]; then
+            echo "packed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node scripts/pack-bot-sdk.js "${{ needs.version.outputs.version }}"
+          echo "packed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Exercise isolated bot-sdk installation
+        if: steps.pack-sdk.outputs.packed == 'true' && hashFiles('scripts/test-bot-sdk-package.js') != ''
+        run: node scripts/test-bot-sdk-package.js "release/monky-bot-sdk-${{ needs.version.outputs.version }}.tgz"
+
+      - name: Upload bot-sdk artifact
+        if: steps.pack-sdk.outputs.packed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-bot-sdk
+          if-no-files-found: error
+          retention-days: 7
+          path: release/monky-bot-sdk-*.tgz
 
   release:
     name: Publish GitHub Release
@@ -322,6 +353,12 @@ jobs:
             - `monky-cli-${{ needs.version.outputs.version }}.tgz` — instale com:
               ```bash
               npm install -g https://github.com/MonkyOrg/Monky/releases/download/v${{ needs.version.outputs.version }}/monky-cli-${{ needs.version.outputs.version }}.tgz
+              ```
+
+            **Bot SDK (@monky/bot-sdk)**
+            - `monky-bot-sdk-${{ needs.version.outputs.version }}.tgz` — instale com:
+              ```bash
+              npm install https://github.com/MonkyOrg/Monky/releases/download/v${{ needs.version.outputs.version }}/monky-bot-sdk-${{ needs.version.outputs.version }}.tgz
               ```
 
             ### Verificação de autenticidade
