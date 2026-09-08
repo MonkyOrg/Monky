@@ -10,6 +10,7 @@ import { userContextMenu } from './UserContextMenu';
 import { contextMenu, ContextMenuItem } from './ContextMenu';
 import { getAvatarUrl } from '../utils/avatar';
 import { renderMarkdown } from '../utils/markdown';
+import { toMarkdown, toPortableHtml, writeRichText } from '../utils/clipboardMarkdown';
 import { getLanguage, t } from '../i18n';
 import { uploadAttachment, UploadHandle } from '../core/AttachmentUploader';
 import { getAttachmentUrl, formatBytes, fileIconName } from '../utils/attachment';
@@ -341,28 +342,72 @@ export class ChatView {
         const userId = row.getAttribute('data-user-id');
         if (!userId) return;
 
-        // Editing/deleting acts on this specific message, so it takes
-        // precedence over the per-person menu (#504).
         const messageActions = this.buildMessageMenuItems(row.getAttribute('data-message-id'));
-        if (messageActions.length > 0) {
-          mouseEvent.preventDefault();
-          contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, messageActions);
-          return;
-        }
 
         const targetUser =
           participantManager.getByUserId(userId)?.user ||
           serverStore.serverDetails?.members.find((m) => m.id === userId);
 
+        // On someone else's message the person's menu is the one that opens, so
+        // the message actions ride along inside it. Deciding by "are there
+        // message actions?" would have hidden the whole user menu the moment
+        // Copy became available on every message (#516).
         if (targetUser && targetUser.id !== serverStore.currentUser?.id) {
           mouseEvent.preventDefault();
-          userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, targetUser);
+          userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, targetUser, messageActions);
+          return;
+        }
+
+        if (messageActions.length > 0) {
+          mouseEvent.preventDefault();
+          contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, messageActions);
         }
       });
     });
 
     this.bindMediaInteractions(container);
     initializeCustomVideoPlayers(container);
+  }
+
+  /**
+   * The current selection, when it lies inside the message feed (#516).
+   *
+   * Returns null for a selection anywhere else — the member list, the composer,
+   * a modal — so copying outside the conversation keeps the browser's own
+   * behaviour untouched.
+   */
+  private selectedMessageFragment(): DocumentFragment | null {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+
+    const feed = document.getElementById('chat-messages-feed');
+    if (!feed) return null;
+
+    // Both ends must be in the feed: a selection that starts in the
+    // conversation and ends outside it is not ours to rewrite.
+    const { anchorNode, focusNode } = selection;
+    if (!anchorNode || !focusNode) return null;
+    if (!feed.contains(anchorNode) || !feed.contains(focusNode)) return null;
+
+    const range = selection.getRangeAt(0);
+    let fragment = range.cloneContents();
+
+    // cloneContents hands back the selected nodes without anything above them,
+    // so a word picked out of **importante** comes back as bare text and the
+    // rewrite would lose the very formatting it exists to keep. The ancestors
+    // up to the message text are cloned back around it, empty, which restores
+    // the context without dragging in a character that was not selected.
+    const start = range.commonAncestorContainer;
+    let ancestor = start.nodeType === Node.ELEMENT_NODE ? (start as HTMLElement) : start.parentElement;
+    while (ancestor && ancestor !== feed && !ancestor.classList.contains('chat-message-text')) {
+      const wrapper = ancestor.cloneNode(false) as HTMLElement;
+      wrapper.appendChild(fragment);
+      fragment = document.createDocumentFragment();
+      fragment.appendChild(wrapper);
+      ancestor = ancestor.parentElement;
+    }
+
+    return fragment;
   }
 
   /**
@@ -902,10 +947,15 @@ export class ChatView {
     if (!message || message.deletedAt) return;
     const requestId = ++this.copyRequestId;
     this.clearCopyFeedback?.();
-    try {
-      await navigator.clipboard.writeText(message.content || message.attachments?.map((entry) => entry.originalName).join('\n') || '');
-    } catch (error) {
-      console.warn('[ChatView] Could not copy message', error);
+    // Both flavours go to the clipboard (#516): the plain one is the stored
+    // Markdown rather than anything read back from the screen, so pasting into
+    // the composer reproduces the original, while the rich one is built from
+    // what is rendered, so Word or Docs keep the bold, links and lists.
+    const markdown = message.content || message.attachments?.map((entry) => entry.originalName).join('\n') || '';
+    const textEl = this.container.querySelector<HTMLElement>(
+      `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] .chat-message-text`
+    );
+    if (!(await writeRichText(textEl ? toPortableHtml(textEl) : '', markdown))) {
       if (requestId === this.copyRequestId) void showAlert({ message: t('chat.copyFailed'), variant: 'danger' });
       return;
     }
@@ -1526,6 +1576,27 @@ export class ChatView {
     };
     document.addEventListener('paste', onGlobalPaste);
     this.unbindEvents.push(() => document.removeEventListener('paste', onGlobalPaste));
+
+    // Ctrl+C over the conversation. The default copy hands over the rendered
+    // text, which drops the Markdown and drags the code-block toolbar along, so
+    // both flavours are rewritten here (#516). Done in the copy event rather
+    // than through the async clipboard API because this is the only place two
+    // flavours can be written synchronously, with no permission prompt.
+    const onCopy = (e: Event) => {
+      const ce = e as ClipboardEvent;
+      if (this.isEditableTarget(ce.target)) return;
+      const fragment = this.selectedMessageFragment();
+      if (!fragment || !ce.clipboardData) return;
+
+      const markdown = toMarkdown(fragment);
+      if (!markdown) return;
+
+      ce.clipboardData.setData('text/plain', markdown);
+      ce.clipboardData.setData('text/html', toPortableHtml(fragment));
+      e.preventDefault();
+    };
+    document.addEventListener('copy', onCopy);
+    this.unbindEvents.push(() => document.removeEventListener('copy', onCopy));
     this.unbindEvents.push(() => {
       inputContainer?.removeEventListener('mousedown', focusFromInputShell);
       inputWrapper?.removeEventListener('mousedown', focusFromInputShell);

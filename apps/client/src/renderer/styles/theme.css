@@ -6693,6 +6693,13 @@ button[data-loading="1"]::after {
   margin: 0 -4px;
 }
 
+/* Actions that belong to the message the menu was opened from (#516). */
+.context-menu-message-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .context-menu-volume-section {
   display: flex;
   flex-direction: column;

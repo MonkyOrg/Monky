@@ -71,10 +71,11 @@ if (!process.versions.electron) {
 }
 
 async function runDomSmoke() {
-  const [{ ChatView }, chats, servers, networks, events, inputs, catalog, language, proxies, botEvents] = await Promise.all([
+  const [{ ChatView }, chats, servers, networks, events, inputs, catalog, language, proxies, botEvents, clipboard, markdown] = await Promise.all([
     import('/views/ChatView.ts'), import('/stores/chatStore.ts'), import('/stores/serverStore.ts'),
     import('/core/NetworkClient.ts'), import('/core/EventBus.ts'), import('/utils/botInputs.ts'),
     import('/utils/commandCatalog.ts'), import('/i18n/index.ts'), import('/core/activeProxy.ts'), import('/core/botChatEvents.ts'),
+    import('/utils/clipboardMarkdown.ts'), import('/utils/markdown.ts'),
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
@@ -155,16 +156,33 @@ async function runDomSmoke() {
   key(document.activeElement, 'Escape');
   check(!document.querySelector('.floating-context-menu'), 'Escape must close message menu');
   check(document.activeElement.dataset.messageAction === 'more', 'Escape must return focus to toolbar');
+  // Copying now hands over both flavours (#516), so what is intercepted here is
+  // clipboard.write: the plain one stays the stored source text and the rich
+  // one carries the rendered markup.
+  const originalWrite = navigator.clipboard.write;
   const originalWriteText = navigator.clipboard.writeText;
   let copiedMessage = '';
+  let copiedHtml = '';
   let finishCopy;
-  navigator.clipboard.writeText = (value) => new Promise((resolve) => { copiedMessage = value; finishCopy = resolve; });
+  let captured = Promise.resolve();
+  const readItem = (items) => {
+    captured = (async () => {
+      copiedMessage = await (await items[0].getType('text/plain')).text();
+      copiedHtml = await (await items[0].getType('text/html')).text();
+    })();
+    return captured;
+  };
+  // Reading a Blob is a task of its own, not a microtask, so the capture is
+  // awaited by hand before giving the view its turn to paint the feedback.
+  const settle = async () => { await captured; await new Promise((resolve) => setTimeout(resolve, 0)); };
+  navigator.clipboard.write = (items) => new Promise((resolve) => { finishCopy = () => resolve(readItem(items)); });
   try {
     find('[data-message-action="copy"]').click();
     check(!document.querySelector('.copy-confirmed'), 'Copy must not report success before the clipboard write finishes');
     finishCopy();
-    await Promise.resolve();
+    await settle();
     check(copiedMessage === original.content, 'Copy message must preserve plain source text without markup');
+    check(copiedHtml.includes('&lt;safe&gt;') && !copiedHtml.includes('<safe>'), 'Copy message must also offer the rendered flavour, with the text escaped');
     check(find('.chat-message-copy-status').textContent === 'Copiado!', 'Copy success must display localized visible feedback');
     check(find('[data-message-action="copy"] .material-symbols-outlined').textContent === 'check', 'Copy success must change its icon');
     check(find('[data-message-action="copy"]').getAttribute('aria-label') === 'Copiado!', 'Copy success must have an accessible label');
@@ -173,13 +191,13 @@ async function runDomSmoke() {
     check(getComputedStyle(copyToolbar).opacity === '1', 'Copy feedback must stay visible without hovering or focusing the toolbar');
     await new Promise((resolve) => setTimeout(resolve, 850));
     language.setLanguage('en');
-    navigator.clipboard.writeText = async (value) => { copiedMessage = value; };
+    navigator.clipboard.write = async (items) => { await readItem(items); };
     find('[data-message-action="more"]').click();
     const menuCopy = [...document.querySelectorAll('.floating-context-menu [role="menuitem"]')]
       .find((button) => button.textContent.includes('Copy message'));
     check(!!menuCopy, 'Message menu must expose its localized copy action');
     menuCopy.click();
-    await Promise.resolve();
+    await settle();
     check(!document.querySelector('.floating-context-menu'), 'Copy from menu must close the menu');
     check(find('.chat-message-copy-status').textContent === 'Copied!', 'Menu copy must show the same feedback in English');
     await new Promise((resolve) => setTimeout(resolve, 850));
@@ -189,26 +207,29 @@ async function runDomSmoke() {
     check(find('[data-message-action="copy"]').getAttribute('aria-label') === 'Copy message', 'Copy action label must be restored');
     check(find('[data-message-action="copy"] .material-symbols-outlined').textContent === 'content_copy', 'Copy action icon must be restored');
     language.setLanguage('pt-BR');
+    // Both are denied: a rich write that fails falls back to the plain one.
+    navigator.clipboard.write = async () => { throw new Error('Clipboard denied by fixture'); };
     navigator.clipboard.writeText = async () => { throw new Error('Clipboard denied by fixture'); };
     find('[data-message-action="copy"]').click();
-    await Promise.resolve();
+    await settle();
     check(!document.querySelector('.copy-confirmed'), 'Clipboard failure must never show successful feedback');
     check(find('.dialog-message').textContent === 'Não foi possível copiar a mensagem.', 'Clipboard failure must retain localized error feedback');
     find('.dialog-card [data-action="confirm"]').click();
-    navigator.clipboard.writeText = async () => {};
+    navigator.clipboard.write = async () => {};
     find('[data-message-action="copy"]').click();
-    await Promise.resolve();
+    await settle();
     view.setChannel('two');
     check(!copyToolbar.classList.contains('copy-confirmed'), 'Changing channels must clean up active copy feedback');
     view.setChannel('one');
-    navigator.clipboard.writeText = () => new Promise((resolve) => { finishCopy = resolve; });
+    navigator.clipboard.write = () => new Promise((resolve) => { finishCopy = resolve; });
     find('[data-message-action="copy"]').click();
     view.destroy();
     finishCopy();
-    await Promise.resolve();
+    await settle();
     check(!document.querySelector('.copy-confirmed'), 'Clipboard completion after view destruction must not resurrect feedback');
     view.render();
   } finally {
+    navigator.clipboard.write = originalWrite;
     navigator.clipboard.writeText = originalWriteText;
     language.setLanguage('pt-BR');
   }
@@ -664,6 +685,76 @@ async function runDomSmoke() {
   check(publicRequests.length === requestsBeforeDestroy, 'Destroyed public selector views must not send further requests');
   selectorClient.dispose();
   selectorFeed.remove();
+  // The clipboard conversion is the other half of #516: what Ctrl+C hands over
+  // is built from the rendered message, so it is exercised against real markup
+  // and real Ranges rather than a string fixture.
+  const rendered = (source) => {
+    const host = document.createElement('div');
+    host.className = 'chat-message-text';
+    host.innerHTML = markdown.renderMarkdown(source);
+    document.body.appendChild(host);
+    return host;
+  };
+  const roundTrip = (source) => {
+    const host = rendered(source);
+    const back = clipboard.toMarkdown(host);
+    host.remove();
+    return back;
+  };
+  for (const source of [
+    '**negrito**', '*italico*', '~~tachado~~', '`inline`', '# Titulo', '> citacao',
+    '- um\n- dois', '1. um\n2. dois', '---', '[Monky](https://monky.chat)', 'https://monky.chat',
+    'Um paragrafo\n\nOutro paragrafo',
+  ]) {
+    check(roundTrip(source) === source, `Round-trip must return the source unchanged for ${JSON.stringify(source)}`);
+  }
+  // A fence opened with an alias keeps the alias: the renderer canonicalises it
+  // into the class, and reading only the class would rewrite the message.
+  check(roundTrip('```ts\nconst a = 1;\n```') === '```ts\nconst a = 1;\n```', 'Code fences must keep the tag the author typed');
+
+  // Trailing spaces and blank runs are content inside code, and the separator
+  // collapse used to reach in and rewrite them.
+  const spaced = '```\nconst a = 1;   \n\n\n\nconst b = 2;  \n```';
+  check(roundTrip(spaced) === spaced, 'Code blocks must keep trailing spaces and blank lines');
+  const multiline = '```js\nconst s = `linha   \n\n\n\nfim`;\n```';
+  check(roundTrip(multiline) === multiline, 'Multiline strings inside code must survive untouched');
+  // Outside code the collapse still has to happen.
+  check(roundTrip('Um paragrafo   \n\n\n\nOutro paragrafo') === 'Um paragrafo\n\nOutro paragrafo', 'Prose must still have its spacing normalized');
+
+  // A selection with both ends inside one formatted element: cloneContents
+  // alone returns bare text, so the copy has to put the ancestors back.
+  const feed = find('#chat-messages-feed');
+  const partial = (source, pick) => {
+    const host = rendered(source);
+    feed.appendChild(host);
+    // The first text node under the picked element: with a language the
+    // highlighter wraps every token in a span, and a Range needs a text node.
+    const walker = document.createTreeWalker(pick(host), NodeFilter.SHOW_TEXT);
+    const target = walker.nextNode();
+    const range = document.createRange();
+    range.setStart(target, 1);
+    range.setEnd(target, target.length - 1);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const event = new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: new DataTransfer() });
+    document.dispatchEvent(event);
+    const result = { text: event.clipboardData.getData('text/plain'), html: event.clipboardData.getData('text/html') };
+    selection.removeAllRanges();
+    host.remove();
+    return result;
+  };
+  const bold = partial('**importante**', (host) => host.querySelector('strong'));
+  check(bold.text === '**mportant**', 'A selection inside bold must keep the bold and only the selected text');
+  check(bold.html.includes('<strong>mportant</strong>'), 'The rich flavour of a partial selection must keep the bold too');
+  const italic = partial('*destaque*', (host) => host.querySelector('em'));
+  check(italic.text === '*estaqu*', 'A selection inside italics must keep the italics');
+  const link = partial('[Monky](https://monky.chat)', (host) => host.querySelector('a'));
+  check(link.text === '[onk](https://monky.chat)', 'A selection inside a link must keep its target');
+  check(link.html.includes('href="https://monky.chat"'), 'The rich flavour of a link selection must keep the href');
+  const inCode = partial('```\nconst a = 1;\n```', (host) => host.querySelector('pre code'));
+  check(inCode.text === '```\nonst a = 1\n```', 'A selection inside code must stay fenced, with only the selected code');
+
   window.commandDomCleanup = () => { view.destroy(); unbindBotEvents(); client.dispose(); };
   return { checks };
 }

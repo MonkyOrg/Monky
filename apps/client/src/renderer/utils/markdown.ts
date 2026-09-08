@@ -47,8 +47,14 @@ function renderCodeBlock(tag: string, code: string): string {
   const label = language ? codeLanguageLabel(language) : t('chat.codeBlockPlain');
   const copyLabel = escapeHtml(t('chat.codeBlockCopy'));
 
+  // The tag the author actually typed is kept alongside the resolved language:
+  // `resolveCodeLanguage` canonicalises aliases (`ts` -> `typescript`), so the
+  // class alone cannot reproduce the original fence when a message is copied
+  // back out as Markdown (#516).
+  const originalTag = tag ? ` data-md-lang="${escapeHtml(tag)}"` : '';
+
   return (
-    `<div class="md-code">` +
+    `<div class="md-code"${originalTag}>` +
     `<div class="md-code-header">` +
     `<span class="md-code-lang">${escapeHtml(label)}</span>` +
     `<button type="button" class="md-code-copy" title="${copyLabel}">` +

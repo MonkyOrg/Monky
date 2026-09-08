@@ -9,6 +9,7 @@ import { webRtcManager } from '../core/WebRtcManager';
 import { appEvents } from '../core/EventBus';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
 import { networkClient } from '../core/NetworkClient';
+import { ContextMenuItem } from './ContextMenu';
 import { showAlert } from './Dialog';
 import { downloadLightboxFile, lightboxModal } from './LightboxModal';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
@@ -25,7 +26,16 @@ export class UserContextMenu {
     appEvents.on('voice.channel_changed', () => this.close());
   }
 
-  public open(x: number, y: number, user: UserSummary): void {
+  /**
+   * @param messageActions Actions that belong to the message the menu was
+   * opened from, rendered above the person's own options (#516).
+   *
+   * They live here because right-clicking a message row opens *this* menu when
+   * the author is someone else. Offering them only in the separate message menu
+   * would mean the most common case — copying what another person wrote — had
+   * nowhere to be.
+   */
+  public open(x: number, y: number, user: UserSummary, messageActions: ContextMenuItem[] = []): void {
     if (
       user.id === serverStore.currentUser?.id ||
       user.clientId === connectionStore.clientId ||
@@ -81,6 +91,20 @@ export class UserContextMenu {
           <span class="context-menu-subtext">${t('userMenu.audioSettings')}</span>
         </div>
       </div>
+
+      ${messageActions.length ? `
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-message-actions">
+        ${messageActions.map((action, index) => `
+          <button type="button" class="btn btn-secondary${action.danger ? ' btn-danger' : ''}" data-action="message-action" data-index="${index}">
+            <span style="display: inline-flex; align-items: center; gap: 8px; width: 100%;">
+              ${action.icon ? `<span class="material-symbols-outlined md-16">${escapeHtml(action.icon)}</span>` : ''}
+              <span>${escapeHtml(action.label)}</span>
+            </span>
+          </button>
+        `).join('')}
+      </div>
+      ` : ''}
 
       <div class="context-menu-divider"></div>
 
@@ -192,6 +216,23 @@ export class UserContextMenu {
 
     this.syncSubmenuPlacement();
     this.attachEvents(user);
+    this.attachMessageActions(messageActions);
+  }
+
+  /**
+   * Runs the message action the button stands for and closes the menu, the way
+   * every other entry here behaves.
+   */
+  private attachMessageActions(messageActions: ContextMenuItem[]): void {
+    if (!this.menuEl || messageActions.length === 0) return;
+    this.menuEl.querySelectorAll<HTMLElement>('[data-action="message-action"]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const index = Number(btn.getAttribute('data-index'));
+        const action = messageActions[index];
+        this.close();
+        action?.onClick();
+      });
+    });
   }
 
   private syncSubmenuPlacement(): void {
