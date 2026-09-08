@@ -38,6 +38,7 @@ export class ChannelService {
       createdAt: record.createdAt,
       maxParticipants: record.maxParticipants,
       isPrivate: record.isPrivate,
+      botCommandsEnabled: record.botCommandsEnabled,
       allowedRoleIds: record.allowedRoleIds,
     };
   }
@@ -115,6 +116,7 @@ export class ChannelService {
       createdAt: Date.now(),
       maxParticipants: parseResult.data.maxParticipants || 10,
       isPrivate,
+      botCommandsEnabled: parseResult.data.type === 'TEXT' ? parseResult.data.botCommandsEnabled : true,
       // Links are meaningless on a public channel and would resurface if it were
       // later made private, so they are only stored while privacy is on.
       allowedRoleIds: isPrivate ? await this.sanitizeRoleIds(parseResult.data.allowedRoleIds) : [],
@@ -140,7 +142,7 @@ export class ChannelService {
       };
     }
 
-    const { channelId, name, maxParticipants, isPrivate, allowedRoleIds } = parseResult.data;
+    const { channelId, name, maxParticipants, isPrivate, allowedRoleIds, botCommandsEnabled } = parseResult.data;
     const existing = await this.channelRepo.findById(channelId);
     if (!existing) {
       return {
@@ -151,6 +153,9 @@ export class ChannelService {
     }
 
     const nextIsPrivate = isPrivate ?? existing.isPrivate;
+    const nextBotCommandsEnabled = existing.type === 'TEXT'
+      ? botCommandsEnabled ?? existing.botCommandsEnabled
+      : existing.botCommandsEnabled;
     // Turning privacy off clears the role list, so switching it back on later
     // starts from a blank slate instead of silently restoring the old audience.
     const nextRoleIds = !nextIsPrivate
@@ -163,6 +168,7 @@ export class ChannelService {
       ...(name !== undefined ? { name } : {}),
       ...(maxParticipants !== undefined ? { maxParticipants } : {}),
       isPrivate: nextIsPrivate,
+      botCommandsEnabled: nextBotCommandsEnabled,
       allowedRoleIds: nextRoleIds,
     });
 
@@ -173,6 +179,7 @@ export class ChannelService {
         name: name ?? existing.name,
         maxParticipants: maxParticipants ?? existing.maxParticipants,
         isPrivate: nextIsPrivate,
+        botCommandsEnabled: nextBotCommandsEnabled,
         allowedRoleIds: nextRoleIds,
       }),
     };

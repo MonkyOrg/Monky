@@ -11,6 +11,7 @@ import {
   ChatHistoryPayload,
   ChatMessageUpdatedPayload,
   ChatMessage,
+  chatReactionEventSchema,
   MessageType,
   MemberKickedPayload,
   Permission,
@@ -648,6 +649,13 @@ class App {
     appEvents.on(`message.${MessageType.CHAT_HISTORY}`, (payload: ChatHistoryPayload) => {
       chatStore.setHistory(payload.channelId, payload.messages);
     });
+
+    for (const type of [MessageType.CHAT_REACTION_ADDED, MessageType.CHAT_REACTION_REMOVED]) {
+      appEvents.on(`message.${type}`, (payload: unknown) => {
+        const parsed = chatReactionEventSchema.safeParse(payload);
+        if (parsed.success) chatStore.updateReaction(parsed.data, type === MessageType.CHAT_REACTION_ADDED);
+      });
+    }
 
     // An existing message was edited or deleted (#504). No sound and no unread
     // marker: nothing new was said, so nothing should call attention to it.

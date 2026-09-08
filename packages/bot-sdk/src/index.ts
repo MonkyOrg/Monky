@@ -11,6 +11,10 @@ import {
   botManifestSchema,
   botProfileUpdateSchema,
   botRegistrationSchema,
+  botChatMessageSchema,
+  chatReactionSchema,
+  chatReactionEventSchema,
+  messageContentSchema,
   commandDefinitionSchema,
   commandExecutionSchema,
   commandFinishedSchema,
@@ -20,6 +24,11 @@ import {
   validateCommandOptions,
 } from '@monky/shared';
 import { RegistrationStore, type BotRegistration } from './RegistrationStore';
+import {
+  botSelectorCreateSchema, botSelectorPatchSchema, botSelectorSchema,
+  botSelectorFinalizeSchema,
+  type BotSelector, type BotSelectorCreate, type BotSelectorPatch,
+} from '@monky/shared';
 import type {
   BotForm,
   BotFormValues,
@@ -29,6 +38,8 @@ import type {
   CommandOption,
   CommandResponsePayload,
   CommandValues,
+  ChatMessage,
+  ChatReactionEventPayload,
 } from '@monky/shared';
 
 export interface BotOptions {
@@ -71,6 +82,18 @@ export interface CommandContext {
   publish: (content: string) => void;
   /** Wait for a private form. Returns null if the interaction ends/cancels. */
   prompt: (form: BotForm) => Promise<BotFormValues | null>;
+  /** Ask one private choice; buttons submit immediately, dropdowns require confirmation. */
+  choose: (choice: BotChoice) => Promise<string | null>;
+  /** Publish durable channel controls, independent of this invocation's lifetime. */
+  createSelector: (input: Omit<BotSelectorCreate, 'channelId' | 'invokerId' | 'invocationId'>) => Promise<BotSelector>;
+}
+
+export interface BotChoice {
+  title: string;
+  description?: string;
+  choices: Array<{ label: string; value: string }>;
+  presentation?: 'dropdown' | 'buttons';
+  submitLabel?: string;
 }
 
 interface PendingPrompt {
@@ -93,6 +116,7 @@ interface PendingRegistration {
 }
 
 interface ServerConnection {
+  pendingMessages: Map<string, { resolve: (message: ChatMessage) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>;
   serverId: string;
   serverUrl: string;
   token: string;
@@ -129,6 +153,12 @@ function readMessage(value: unknown): IncomingMessage {
  * owns its form promise and abort signal; handlers never share conversation state.
  */
 export class BotClient extends EventEmitter {
+  private selectorRequests = new Map<string, {
+    conn: ServerConnection;
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
   private options: BotOptions;
   private profile: BotProfileUpdatePayload = {};
   private commands = new Map<string, CommandDefinition>();
@@ -164,6 +194,117 @@ export class BotClient extends EventEmitter {
     }
     this.commands.set(definition.name, { ...definition, handler: def.handler });
     return this;
+  }
+
+  async createSelector(serverId: string, input: BotSelectorCreate): Promise<BotSelector> {
+    const parsed = botSelectorCreateSchema.parse({ ...input, id: input.id ?? randomUUID() });
+    return botSelectorSchema.parse(await this.requestSelector(serverId, MessageType.SELECTOR_CREATE, parsed));
+  }
+
+  async listSelectors(serverId: string): Promise<BotSelector[]> {
+    const result = await this.requestSelector(serverId, MessageType.SELECTOR_LIST, {});
+    if (!isRecord(result) || !Array.isArray(result.selectors)) throw new Error('Invalid selector list.');
+    return result.selectors.map((entry) => botSelectorSchema.parse(entry));
+  }
+
+  async updateSelector(serverId: string, id: string, patch: BotSelectorPatch): Promise<BotSelector> {
+    return botSelectorSchema.parse(await this.requestSelector(serverId, MessageType.SELECTOR_UPDATE,
+      { id, patch: botSelectorPatchSchema.parse(patch) }));
+  }
+
+  async closeSelector(serverId: string, id: string): Promise<BotSelector> {
+    return botSelectorSchema.parse(await this.requestSelector(serverId, MessageType.SELECTOR_CLOSE, { id }));
+  }
+
+  async finalizeSelector(serverId: string, id: string, content: string): Promise<BotSelector> {
+    return botSelectorSchema.parse(await this.requestSelector(serverId, MessageType.SELECTOR_FINALIZE,
+      botSelectorFinalizeSchema.parse({ id, content })));
+  }
+
+  private requestSelector(serverId: string, type: MessageType, payload: unknown): Promise<unknown> {
+    const conn = this.connections.get(serverId);
+    if (!conn?.connected) return Promise.reject(new Error('The bot is not connected to this server.'));
+    if (this.selectorRequests.size >= 100) return Promise.reject(new Error('Too many selector requests.'));
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.selectorRequests.delete(requestId);
+        reject(new Error('Selector acknowledgement timed out. Retry with the same selector id.'));
+      }, 8000);
+      this.selectorRequests.set(requestId, { conn, resolve, reject, timer });
+      try {
+        this.sendToConn(conn, { type, requestId, payload });
+      } catch (error) {
+        clearTimeout(timer);
+        this.selectorRequests.delete(requestId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  /** Post persistent channel text and resolve with its server-assigned ID. */
+  async sendMessage(serverId: string, channelId: string, content: string): Promise<ChatMessage> {
+    const conn = this.requireConnection(serverId);
+    if (!channelId || channelId.length > 128) throw new Error('Invalid channel ID.');
+    const validatedContent = messageContentSchema.parse(content);
+    if (conn.pendingMessages.size >= 100) throw new Error('Too many unacknowledged messages.');
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        conn.pendingMessages.delete(requestId);
+        reject(new Error('The server did not acknowledge the channel message.'));
+      }, 30_000);
+      conn.pendingMessages.set(requestId, { resolve, reject, timer });
+      try {
+        this.sendToConn(conn, { type: MessageType.CHAT_SEND, requestId, payload: { channelId, content: validatedContent } });
+      } catch (error) {
+        clearTimeout(timer);
+        conn.pendingMessages.delete(requestId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  addReaction(serverId: string, channelId: string, messageId: string, emoji: string): void {
+    this.sendReaction(serverId, channelId, messageId, emoji, true);
+  }
+
+  removeReaction(serverId: string, channelId: string, messageId: string, emoji: string): void {
+    this.sendReaction(serverId, channelId, messageId, emoji, false);
+  }
+
+  private sendReaction(serverId: string, channelId: string, messageId: string, emoji: string, add: boolean): void {
+    const payload = chatReactionSchema.parse({ channelId, messageId, emoji });
+    this.sendToConn(this.requireConnection(serverId), {
+      type: add ? MessageType.CHAT_REACTION_ADD : MessageType.CHAT_REACTION_REMOVE, payload,
+    });
+  }
+
+  /** Channel events outlive slash-command invocations; unsubscribe on bot teardown. */
+  onReactionAdded(listener: (event: ChatReactionEventPayload, context: { serverId: string }) => void): () => void {
+    this.on('reactionAdded', listener);
+    return () => { this.off('reactionAdded', listener); };
+  }
+
+  onReactionRemoved(listener: (event: ChatReactionEventPayload, context: { serverId: string }) => void): () => void {
+    this.on('reactionRemoved', listener);
+    return () => { this.off('reactionRemoved', listener); };
+  }
+
+  private requireConnection(serverId: string): ServerConnection {
+    const conn = this.connections.get(serverId);
+    if (!conn || !conn.connected || conn.disposed || conn.ws?.readyState !== WebSocket.OPEN) {
+      throw new Error('The bot is not connected to this Monky server.');
+    }
+    return conn;
+  }
+
+  private rejectPendingMessages(conn: ServerConnection): void {
+    for (const pending of conn.pendingMessages.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('The connection closed before the channel message was acknowledged.'));
+    }
+    conn.pendingMessages.clear();
   }
 
   connect(overrides?: { serverUrl?: string; token?: string; serverId?: string }): void {
@@ -211,7 +352,10 @@ export class BotClient extends EventEmitter {
         server.closeIdleConnections();
       })));
       await this.registrationStore.flush();
-    }).finally(() => this.disconnect());
+    }).finally(() => {
+      this.disconnect();
+      this.emit('closed');
+    });
     return this.closePromise;
   }
 
@@ -243,6 +387,7 @@ export class BotClient extends EventEmitter {
       reconnectTimer: null,
       profileRequestId: null,
       invocations: new Map(),
+      pendingMessages: new Map(),
       pendingRegistration: null,
       registrationPromise: null,
     };
@@ -288,6 +433,7 @@ export class BotClient extends EventEmitter {
       conn.profileRequestId = null;
       this.rejectRegistration(conn, new Error('The connection closed before the bot registration completed.'));
       this.clearInvocations(conn);
+      this.rejectPendingMessages(conn);
       this.emit('disconnected', { serverId: conn.serverId });
       if (this.options.autoReconnect && !conn.disposed && this.connections.get(conn.serverId) === conn) {
         conn.reconnectTimer = setTimeout(() => {
@@ -311,10 +457,17 @@ export class BotClient extends EventEmitter {
     conn.profileRequestId = null;
     this.rejectRegistration(conn, new Error('The bot registration was interrupted.'));
     this.clearInvocations(conn);
+    this.rejectPendingMessages(conn);
     if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
   }
 
   private clearInvocations(conn: ServerConnection): void {
+    for (const [id, request] of this.selectorRequests) {
+      if (request.conn !== conn) continue;
+      clearTimeout(request.timer);
+      this.selectorRequests.delete(id);
+      request.reject(new Error('The bot disconnected before the selector acknowledgement.'));
+    }
     for (const invocation of conn.invocations.values()) {
       invocation.controller.abort();
       invocation.prompt?.resolve(null);
@@ -324,7 +477,24 @@ export class BotClient extends EventEmitter {
   }
 
   private handleMessage(conn: ServerConnection, msg: IncomingMessage): void {
+    const selectorRequest = msg.requestId ? this.selectorRequests.get(msg.requestId) : undefined;
+    if (selectorRequest?.conn === conn && msg.requestId &&
+        (msg.type === MessageType.SERVER_ERROR || msg.type === MessageType.SELECTOR_SNAPSHOT || msg.type === MessageType.SELECTOR_LIST_RESULT)) {
+      clearTimeout(selectorRequest.timer);
+      this.selectorRequests.delete(msg.requestId);
+      if (msg.type === MessageType.SERVER_ERROR) {
+        const payload = isRecord(msg.payload) ? msg.payload : {};
+        selectorRequest.reject(new Error(typeof payload.message === 'string' ? payload.message : 'Selector request failed.'));
+      } else selectorRequest.resolve(msg.payload);
+      return;
+    }
     switch (msg.type) {
+      case MessageType.SELECTOR_SNAPSHOT: {
+        const parsed = botSelectorSchema.safeParse(msg.payload);
+        if (parsed.success) this.emit('selectorUpdate', { serverId: conn.serverId, selector: parsed.data });
+        else this.reportError(new Error('Invalid selector snapshot.'), conn);
+        return;
+      }
       case MessageType.AUTH_SUCCESS:
         conn.connected = true;
         if (conn.pendingRegistration) {
@@ -359,6 +529,13 @@ export class BotClient extends EventEmitter {
       case MessageType.SERVER_ERROR: {
         const error = new Error(isRecord(msg.payload) && typeof msg.payload.message === 'string'
           ? msg.payload.message : 'The Monky server rejected the bot request.');
+        const pendingMessage = msg.requestId ? conn.pendingMessages.get(msg.requestId) : undefined;
+        if (pendingMessage && msg.requestId) {
+          clearTimeout(pendingMessage.timer);
+          conn.pendingMessages.delete(msg.requestId);
+          pendingMessage.reject(error);
+          return;
+        }
         for (const invocation of conn.invocations.values()) {
           const pending = invocation.prompt;
           if (pending && pending.interactionId === msg.requestId) {
@@ -375,6 +552,29 @@ export class BotClient extends EventEmitter {
           conn.profileRequestId = null;
         }
         this.reportError(error, conn);
+        return;
+      }
+      case MessageType.CHAT_MESSAGE: {
+        const pending = msg.requestId ? conn.pendingMessages.get(msg.requestId) : undefined;
+        if (pending && msg.requestId) {
+          clearTimeout(pending.timer);
+          conn.pendingMessages.delete(msg.requestId);
+          const parsed = botChatMessageSchema.safeParse(msg.payload);
+          if (parsed.success) pending.resolve(parsed.data);
+          else pending.reject(new Error('The server sent an invalid channel message acknowledgement.'));
+        }
+        this.emit('message', msg, { serverId: conn.serverId });
+        return;
+      }
+      case MessageType.CHAT_REACTION_ADDED:
+      case MessageType.CHAT_REACTION_REMOVED: {
+        const parsed = chatReactionEventSchema.safeParse(msg.payload);
+        if (!parsed.success) {
+          this.reportError(new Error('The server sent an invalid reaction event.'), conn);
+          return;
+        }
+        this.emit(msg.type === MessageType.CHAT_REACTION_ADDED ? 'reactionAdded' : 'reactionRemoved',
+          parsed.data, { serverId: conn.serverId });
         return;
       }
       case MessageType.PING:
@@ -551,6 +751,26 @@ export class BotClient extends EventEmitter {
       reply: (content) => reply(content, true),
       replyEphemeral: (content) => reply(content, true),
       publish: (content) => reply(content, false),
+      createSelector: (input) => {
+        requireActive();
+        return this.createSelector(conn.serverId, {
+          ...input, channelId: payload.channelId, invokerId: payload.invokerId, invocationId: payload.invocationId,
+        });
+      },
+      choose: async (choice) => {
+        const values = await ctx.prompt({
+          title: choice.title,
+          description: choice.description,
+          submitLabel: choice.submitLabel,
+          fields: [{
+            name: 'choice', label: choice.title, type: 'select', required: true,
+            choices: choice.choices, presentation: choice.presentation ?? 'dropdown',
+          }],
+        });
+        if (values === null) return null;
+        if (typeof values.choice !== 'string') throw new Error('Invalid choice response.');
+        return values.choice;
+      },
       prompt: (form) => {
         requireActive();
         if (invocation.prompt) throw new Error('Await the current prompt before opening another one.');
@@ -768,7 +988,9 @@ export interface ServeOptions {
 }
 
 export { MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
+export type { BotSelector, BotSelectorCreate, BotSelectorPatch, BotSelectorPublic } from '@monky/shared';
 export type {
   BotForm, BotFormField, BotFormValues, BotManifest,
+  ChatMessage, ChatReactionEventPayload, MessageReaction,
   SlashCommand, CommandOption, CommandValue, CommandValues, CommandResponsePayload,
 } from '@monky/shared';

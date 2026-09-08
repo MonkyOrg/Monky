@@ -7,8 +7,14 @@ import {
   attachmentCaptionSchema,
   hasEveryoneMention,
   messageContentSchema,
+  chatReactionSchema,
+  type ChatReactionEventPayload,
+  type MessageReaction,
+  type UserSummary,
+  type BotCommandContext,
+  botCommandContextSchema,
 } from '@monky/shared';
-import { MentionRecord, MessageRecord } from '../../domain/entities';
+import { BotRecord, MentionRecord, MessageRecord } from '../../domain/entities';
 import {
   IChannelRepository,
   IMentionRepository,
@@ -19,6 +25,10 @@ import {
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
 import { RateLimiter } from '../../infrastructure/security/RateLimiter';
 import { AttachmentService } from './AttachmentService';
+
+export type BotMessageResult =
+  | { success: true; message: ChatMessage }
+  | { success: false; errorCode: ProtocolErrorCode; errorMessage: string };
 
 export class ChatService {
   constructor(
@@ -38,6 +48,107 @@ export class ChatService {
      */
     private canUserAccessChannel: (userId: string, channelId: string) => Promise<boolean>
   ) {}
+
+  public async sendBotMessage(
+    bot: BotRecord,
+    channelId: string,
+    content: string,
+    botCommand?: BotCommandContext,
+    messageId?: string,
+    canSend: () => boolean = () => true,
+    accessUserId: string = bot.id
+  ): Promise<BotMessageResult> {
+    const parsed = messageContentSchema.safeParse(content);
+    if (!parsed.success || typeof channelId !== 'string' || !channelId || channelId.length > 128 ||
+        (messageId !== undefined && (!messageId || messageId.length > 128))) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de bot inválida.' };
+    }
+    const channel = await this.channelRepo.findById(channelId);
+    if (!channel || channel.type !== 'TEXT' || !(await this.canUserAccessChannel(accessUserId, channelId))) {
+      return { success: false, errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND, errorMessage: 'Canal não encontrado.' };
+    }
+    const existing = messageId ? await this.messageRepo.findById(messageId) : null;
+    if (!canSend()) return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Publicação cancelada.' };
+    if (existing) {
+      if (!existing.botAuthor || existing.userId !== bot.id || existing.channelId !== channelId ||
+          existing.content !== parsed.data || existing.deletedAt) {
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem já utilizado.' };
+      }
+      return { success: true, message: this.botMessage(existing) };
+    }
+    if (!this.rateLimiter.checkLimit(bot.id)) {
+      return { success: false, errorCode: ProtocolErrorCode.RATE_LIMITED, errorMessage: 'Aguarde antes de publicar novamente.' };
+    }
+    const record: MessageRecord = {
+      id: messageId ?? uuidv4(), channelId, userId: bot.id, content: parsed.data, createdAt: Date.now(), isSystem: false,
+      botAuthor: { id: bot.id, name: bot.name, avatarPath: bot.avatarPath, ownerUserId: bot.createdByUserId },
+      botCommand: botCommand ? botCommandContextSchema.parse(botCommand) : undefined,
+    };
+    const persisted = await this.messageRepo.createBotMessage(record);
+    if (!persisted) {
+      return { success: false, errorCode: ProtocolErrorCode.UNAUTHORIZED, errorMessage: 'Bot indisponível.' };
+    }
+    if (!persisted.botAuthor || persisted.userId !== bot.id || persisted.channelId !== channelId ||
+        persisted.content !== parsed.data || persisted.deletedAt) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem já utilizado.' };
+    }
+    return { success: true, message: this.botMessage(persisted) };
+  }
+
+  private botMessage(record: MessageRecord): ChatMessage {
+    const author = record.botAuthor;
+    if (!author) throw new Error('Expected a persisted bot author.');
+    return {
+      id: record.id, channelId: record.channelId, userId: author.id, userNickname: author.name,
+      userAvatarUrl: this.avatarStorage.getPublicUrl(author.avatarPath), content: record.content,
+      createdAt: record.createdAt, isSystem: false, isBot: true, botCommand: record.botCommand,
+      editedAt: record.editedAt, deletedAt: record.deletedAt,
+    };
+  }
+
+  public async setReaction(
+    actor: Pick<UserSummary, 'id' | 'nickname'>,
+    payload: unknown,
+    add: boolean,
+    canReact: () => boolean = () => true
+  ): Promise<
+    | { success: true; event?: ChatReactionEventPayload }
+    | { success: false; errorCode: ProtocolErrorCode; errorMessage: string }
+  > {
+    const userId = actor.id;
+    const parsed = chatReactionSchema.safeParse(payload);
+    if (!parsed.success) return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Reação inválida.' };
+    if (!this.rateLimiter.checkLimit(userId)) {
+      return { success: false, errorCode: ProtocolErrorCode.RATE_LIMITED, errorMessage: 'Aguarde antes de reagir novamente.' };
+    }
+    const { channelId, messageId, emoji } = parsed.data;
+    const channel = await this.channelRepo.findById(channelId);
+    if (!channel || channel.type !== 'TEXT' || !(await this.canUserAccessChannel(userId, channelId))) {
+      return { success: false, errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND, errorMessage: 'Canal não encontrado.' };
+    }
+    const message = await this.messageRepo.findById(messageId);
+    if (!message || message.channelId !== channelId || message.isSystem || message.deletedAt) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Essa mensagem não pode receber reações.' };
+    }
+    if (!canReact()) return { success: false, errorCode: ProtocolErrorCode.UNAUTHORIZED, errorMessage: 'Conexão encerrada.' };
+    const result = await this.messageRepo.setReaction(messageId, userId, emoji, add);
+    if (result === 'limit' || result === 'invalid') {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Reação indisponível ou limite de reações atingido.' };
+    }
+    return { success: true, event: result === 'changed' ? { ...parsed.data, userId, userNickname: actor.nickname } : undefined };
+  }
+
+  private async getReactions(messageIds: string[]): Promise<Map<string, MessageReaction[]>> {
+    const result = new Map<string, MessageReaction[]>();
+    for (const row of await this.messageRepo.listReactions(messageIds)) {
+      let reactions = result.get(row.messageId);
+      if (!reactions) { reactions = []; result.set(row.messageId, reactions); }
+      let reaction = reactions.find((entry) => entry.emoji === row.emoji);
+      if (!reaction) { reaction = { emoji: row.emoji, users: [] }; reactions.push(reaction); }
+      reaction.users.push({ userId: row.userId, userNickname: row.userNickname });
+    }
+    return result;
+  }
 
   public async sendMessage(
     userId: string,
@@ -202,14 +313,17 @@ export class ChatService {
         id: existing.id,
         channelId: existing.channelId,
         userId: existing.userId,
-        userNickname: user ? user.nickname : 'Usuário Desconhecido',
-        userAvatarUrl: this.avatarStorage.getPublicUrl(user?.avatarPath),
+        userNickname: existing.botAuthor?.name ?? user?.nickname ?? 'Usuário Desconhecido',
+        userAvatarUrl: this.avatarStorage.getPublicUrl(existing.botAuthor?.avatarPath ?? user?.avatarPath),
+        isBot: !!existing.botAuthor,
+        botCommand: existing.botCommand,
         content: parseResult.data,
         createdAt: existing.createdAt,
         isSystem: false,
         attachments: attachments.length > 0 ? attachments : undefined,
         editedAt,
         deletedAt: null,
+        reactions: (await this.getReactions([messageId])).get(messageId) ?? [],
       },
     };
   }
@@ -266,8 +380,10 @@ export class ChatService {
         id: existing.id,
         channelId: existing.channelId,
         userId: existing.userId,
-        userNickname: user ? user.nickname : 'Usuário Desconhecido',
-        userAvatarUrl: this.avatarStorage.getPublicUrl(user?.avatarPath),
+        userNickname: existing.botAuthor?.name ?? user?.nickname ?? 'Usuário Desconhecido',
+        userAvatarUrl: this.avatarStorage.getPublicUrl(existing.botAuthor?.avatarPath ?? user?.avatarPath),
+        isBot: !!existing.botAuthor,
+        botCommand: existing.botCommand,
         content: '',
         createdAt: existing.createdAt,
         isSystem: false,
@@ -340,12 +456,16 @@ export class ChatService {
     limit: number = LIMITS.MAX_HISTORY_MESSAGES_INITIAL,
     beforeTimestamp?: number
   ): Promise<ChatMessage[]> {
-    const rawMessages = await this.messageRepo.listByChannel(channelId, limit, beforeTimestamp);
+    const boundedLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(LIMITS.MAX_HISTORY_MESSAGES_INITIAL, Math.floor(limit)))
+      : LIMITS.MAX_HISTORY_MESSAGES_INITIAL;
+    const rawMessages = await this.messageRepo.listByChannel(channelId, boundedLimit, beforeTimestamp);
     const uniqueUserIds = [...new Set(rawMessages.map((m) => m.userId))];
     const users = await this.userRepo.findByIds(uniqueUserIds);
     const userMap = new Map(users.map((u) => [u.id, u]));
 
     const attachmentsByMessage = await this.attachmentService.getForMessages(rawMessages.map((m) => m.id));
+    const reactionsByMessage = await this.getReactions(rawMessages.filter((m) => !m.deletedAt && !m.isSystem).map((m) => m.id));
 
     return rawMessages.map((m) => {
       const user = userMap.get(m.userId);
@@ -356,14 +476,17 @@ export class ChatService {
         id: m.id,
         channelId: m.channelId,
         userId: m.userId,
-        userNickname: user ? user.nickname : 'Usuário Desconhecido',
-        userAvatarUrl: this.avatarStorage.getPublicUrl(user?.avatarPath),
+        userNickname: m.botAuthor?.name ?? user?.nickname ?? 'Usuário Desconhecido',
+        userAvatarUrl: this.avatarStorage.getPublicUrl(m.botAuthor?.avatarPath ?? user?.avatarPath),
+        isBot: !!m.botAuthor,
+        botCommand: m.botCommand,
         content: m.deletedAt ? '' : m.content,
         createdAt: m.createdAt,
         isSystem: m.isSystem,
         attachments: attachments && attachments.length > 0 ? attachments : undefined,
         editedAt: m.editedAt ?? null,
         deletedAt: m.deletedAt ?? null,
+        reactions: reactionsByMessage.get(m.id) ?? [],
       };
     });
   }

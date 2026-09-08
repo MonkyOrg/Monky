@@ -141,6 +141,10 @@ export async function exerciseOfficialBotUi(ui, { screenshotDir, sendBackgroundM
       if (!row) throw new Error('The specific bot must remain selectable.');
       row.click();
     })()`);
+    if (command === 'ping' || command === 'enquete') {
+      await ui.wait('!document.querySelector("#chat-command-composer")?.offsetHeight', 'immediate command acknowledged');
+      return;
+    }
     await ui.wait('document.querySelector("#chat-command-composer")?.offsetHeight > 0', 'selected command composer');
     assert.ok(await ui.evaluate(`document.querySelector("#chat-command-composer").innerText.includes(${JSON.stringify(botName)})`));
   };
@@ -210,25 +214,24 @@ export async function exerciseOfficialBotUi(ui, { screenshotDir, sendBackgroundM
     'The normal composer must regain its usable height');
   const initialInvocations = await ui.evaluate('document.querySelectorAll(".bot-interaction-card").length');
   await select('ping');
-  assert.equal(await ui.evaluate('document.querySelectorAll(".bot-interaction-card").length'), initialInvocations,
-    'Choosing a command must not execute it');
-  await ui.click('#chat-command-composer button[type="submit"]');
   await ui.wait('document.querySelector("#chat-messages-feed").innerText.includes("Pong")', 'the selected bot reply');
   await ui.wait(`document.querySelectorAll('.bot-interaction-card').length === ${initialInvocations}`,
     'text-only replies replace the temporary activity card');
   assert.equal(await ui.evaluate('document.querySelector("#chat-messages-feed").innerText.includes("Identity bot ping")'), false);
   assert.equal(await ui.evaluate(`(() => {
-    const context = document.querySelector('.bot-response-context');
-    const name = document.querySelector('.bot-response-bubble .chat-author-name');
-    return context.innerText.includes('UI Tester') && context.innerText.includes('/ping') && name.textContent === 'MonkyBot';
+    const context = [...document.querySelectorAll('.bot-response-context')]
+      .find(element => element.innerText.includes('UI Tester') && element.innerText.includes('/ping'));
+    const name = context?.closest('[data-message-id]')?.querySelector('.bot-response-bubble .chat-author-name');
+    return name?.textContent === 'MonkyBot';
   })()`), true, 'Reply cards must identify the real bot and its calling user/command');
   await ui.wait(`(() => {
-    const image = document.querySelector('.bot-response-main .chat-author-avatar');
+    const context = [...document.querySelectorAll('.bot-response-context')]
+      .find(element => element.innerText.includes('UI Tester') && element.innerText.includes('/ping'));
+    const image = context?.closest('[data-message-id]')?.querySelector('.bot-response-main .chat-author-avatar');
     return image?.naturalWidth > 1 && image.currentSrc.includes('/avatars/');
   })()`, 'actual official logo rendered in the response');
   const replies = await ui.evaluate('document.querySelectorAll(".bot-response-bubble").length');
   await select('ping');
-  await ui.click('#chat-command-composer button[type="submit"]');
   await ui.wait(`document.querySelectorAll('.bot-response-bubble').length > ${replies}`, 'second successful command use');
   await select('dado');
   await addOptional('lados');
@@ -243,14 +246,14 @@ export async function exerciseOfficialBotUi(ui, { screenshotDir, sendBackgroundM
   await ui.wait('document.querySelector("#chat-messages-feed").innerText.includes("d20")', 'typed integer from the actual composer');
 
   await select('enquete');
-  await ui.click('#chat-command-composer button[type="submit"]');
   await ui.wait(`!!document.querySelector(${JSON.stringify(field('pergunta'))})`, 'private poll form');
-  const question = 'Private UI poll question, with a comma';
+  const question = 'UI poll question, with a comma';
   await ui.input(field('pergunta'), question);
   await ui.input(`${field('opcoes')}[data-list-index="0"]`, 'First, still one option');
   await ui.input(`${field('opcoes')}[data-list-index="1"]`, 'Second option');
   await ui.click('.bot-inline-form [data-field-name="opcoes"] [data-field-action="add"]:not(:disabled)');
   await ui.input(`${field('opcoes')}[data-list-index="2"]`, 'Third option');
+  await ui.input(field('max_voters'), '1');
   await ui.input(field('pergunta'), question);
   sendBackgroundMessage();
   await ui.wait('document.querySelector("#chat-messages-feed").innerText.includes("A concurrent ordinary message")', 'concurrent chat message');
@@ -259,27 +262,40 @@ export async function exerciseOfficialBotUi(ui, { screenshotDir, sendBackgroundM
   assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(field('pergunta'))}).value`), question);
   await screenshot('bot-form');
   await submitForm('pergunta');
-  await ui.wait(`!!document.querySelector(${JSON.stringify(field('acao'))})`, 'poll confirmation');
-  await ui.input(field('acao'), 'edit');
-  await submitForm('acao');
-  await ui.wait(`!!document.querySelector(${JSON.stringify(field('pergunta'))})`, 'editable poll defaults');
-  assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(field('pergunta'))}).value`), question);
-  assert.equal(await ui.evaluate(`document.querySelectorAll(${JSON.stringify(field('opcoes'))}).length`), 3);
-  await ui.input(field('visibilidade'), 'private');
-  await submitForm('pergunta');
-  await ui.wait(`!!document.querySelector(${JSON.stringify(field('acao'))})`, 'final confirmation');
-  await ui.input(field('acao'), 'confirm');
-  await submitForm('acao');
-  await ui.wait('document.querySelectorAll(".bot-inline-form button[type=submit]:not(:disabled)").length === 0', 'completed poll');
+  await ui.wait(`!document.querySelector(${JSON.stringify(field('pergunta'))})`, 'consumed poll form');
+  assert.equal(await ui.evaluate(`!!document.querySelector(${JSON.stringify(field('acao'))})`), false,
+    'Poll must publish without a review/confirmation step');
+  await ui.wait(`(() => {
+    const rows = [...document.querySelectorAll('[data-message-id]')];
+    return rows.some(row => row.innerText.includes(${JSON.stringify(question)}) &&
+      row.querySelector('[data-public-selector] [data-selector-value]:not(:disabled)'));
+  })()`, 'public poll voting buttons');
+  const selectorId = await ui.evaluate(`(() => {
+    const row = [...document.querySelectorAll('[data-message-id]')]
+      .find(row => row.innerText.includes(${JSON.stringify(question)}) && row.querySelector('[data-public-selector]'));
+    return row.querySelector('[data-public-selector]').dataset.publicSelector;
+  })()`);
+  const pollSelector = `[data-public-selector="${selectorId}"]`;
+  await screenshot('poll-voting');
+  await ui.click(`${pollSelector} [data-selector-value]:not(:disabled)`);
+  await ui.wait(`(() => {
+    const poll = document.querySelector(${JSON.stringify(pollSelector)});
+    return poll && [...poll.querySelectorAll('[data-selector-value]')].every(button => button.disabled) &&
+      [...document.querySelectorAll('[data-message-id]')].some(row =>
+        row.innerText.includes(${JSON.stringify(question)}) && /100[.,]0%/.test(row.innerText));
+  })()`, 'poll closes at one voter and publishes its final result');
   assert.equal(await ui.evaluate(`Object.values(localStorage).some(value => value.includes(${JSON.stringify(question)}))`), false,
     'Frequency persistence must never include private argument values');
   await screenshot('bot-replies');
 
   await select('8ball');
+  const beforeMissingQuestion = await ui.evaluate('document.querySelectorAll(".bot-response-bubble").length');
   await ui.click('#chat-command-composer button[type="submit"]');
-  await ui.wait(`!!document.querySelector(${JSON.stringify(field('pergunta'))})`, 'optional question prompt');
-  await ui.click('.bot-interaction-card [data-bot-action="cancel-invocation"]:not(:disabled)');
-  await ui.wait(`!document.querySelector(${JSON.stringify(field('pergunta'))})`, 'cancelled form controls');
+  assert.equal(await ui.evaluate('document.querySelectorAll(".bot-response-bubble").length'), beforeMissingQuestion,
+    '8ball must not execute without its required question');
+  await ui.input(field('pergunta'), 'Will this required question work?');
+  await ui.click('#chat-command-composer button[type="submit"]');
+  await ui.wait('document.querySelector("#chat-messages-feed").innerText.includes("Will this required question work?")', 'required 8ball question');
   await ui.input('#chat-message-input', 'Ordinary chat still works');
   await ui.key('Enter');
   await ui.wait('document.querySelector("#chat-messages-feed").innerText.includes("Ordinary chat still works")', 'ordinary chat after commands');
@@ -290,7 +306,7 @@ export async function exerciseOfficialBotUi(ui, { screenshotDir, sendBackgroundM
     return { command: row.querySelector('.command-row-title strong').textContent, bot: row.querySelector('.command-row-bot').textContent };
   })()`), { command: '/ping', bot: 'MonkyBot' });
   await screenshot('frequent-commands');
-  console.log('Electron DOM: grouped/frequent commands, typed/self/choice arguments, attribution/logo, private poll/edit/confirmation, focus, cancellation and ordinary chat passed.');
+  console.log('Electron DOM: immediate commands, required inputs, consumed forms, public poll voting/finalization, attribution, focus and ordinary chat passed.');
 }
 
 /** Uses the installed Electron/Vite, a fresh identity, and the real application. */

@@ -39,12 +39,18 @@ export interface BotInteractionSession {
   botId?: string;
 }
 
+export interface SelectorInvocationAuthorization {
+  creatorUserId: string;
+  isCurrent(): boolean;
+}
+
 interface InteractionTransport {
   isCurrent(session: BotInteractionSession): boolean;
   findBot(botId: string): BotInteractionSession | undefined;
   send(ws: WebSocket, message: ProtocolMessage): void;
   sendError(ws: WebSocket, code: ProtocolErrorCode, message: string, requestId?: string): void;
   broadcastToChannel(channelId: string, message: ProtocolMessage, canSend: () => boolean): Promise<void>;
+  publishResponse(session: BotInteractionSession, response: BotCommandMessagePayload, canSend: () => boolean, requestId?: string): Promise<void>;
 }
 
 interface Invocation {
@@ -122,7 +128,12 @@ export class BotInteractionHandler {
     }
 
     // Service calls can yield to a disconnect, replacement, or registry edit.
+    const currentAccessError = await this.getAccessError(user.id, input.channelId);
     if (!this.transport.isCurrent(session) || this.closed) return;
+    if (currentAccessError) {
+      this.error(session, currentAccessError, requestId);
+      return;
+    }
     if (!this.transport.isCurrent(bot)) {
       this.error(session, ProtocolErrorCode.BOT_OFFLINE, requestId);
       return;
@@ -209,7 +220,7 @@ export class BotInteractionHandler {
     if (response.ephemeral) {
       this.transport.send(invocation.origin.ws, message);
     } else {
-      await this.transport.broadcastToChannel(invocation.channelId, message, () => this.isActive(invocation));
+      await this.transport.publishResponse(session, response, () => this.isActive(invocation), requestId);
     }
   }
 
@@ -319,6 +330,8 @@ export class BotInteractionHandler {
       const context = contexts.get(invocation.invokerId);
       if (
         !channel || channel.type !== 'TEXT' || !context ||
+        !channel.botCommandsEnabled ||
+        !hasPermission(context.permissions, Permission.USE_BOT_COMMANDS) ||
         !hasPermission(context.permissions, Permission.SEND_MESSAGES) ||
         !canAccessChannel(channel, context.permissions, context.roleIds)
       ) {
@@ -330,6 +343,19 @@ export class BotInteractionHandler {
   close(): void {
     this.closed = true;
     for (const invocation of this.invocations.values()) this.finish(invocation, 'failed');
+  }
+
+  async authorizeSelector(
+    session: BotInteractionSession, invocationId: string, channelId: string
+  ): Promise<SelectorInvocationAuthorization | undefined> {
+    const invocation = this.invocations.get(invocationId);
+    if (!invocation || invocation.bot !== session || !session.isBot ||
+        invocation.botId !== session.botId || invocation.channelId !== channelId || !this.isActive(invocation)) {
+      return undefined;
+    }
+    if (await this.getAccessError(invocation.invokerId, channelId)) return undefined;
+    if (!this.isActive(invocation)) return undefined;
+    return { creatorUserId: invocation.invokerId, isCurrent: () => this.isActive(invocation) };
   }
 
   private findOwned(
@@ -387,6 +413,9 @@ export class BotInteractionHandler {
     if (!hasPermission(context.permissions, Permission.SEND_MESSAGES)) return ProtocolErrorCode.PERMISSION_DENIED;
     if (!channel || channel.type !== 'TEXT' || !canAccessChannel(channel, context.permissions, context.roleIds)) {
       return ProtocolErrorCode.CHANNEL_NOT_FOUND;
+    }
+    if (!channel.botCommandsEnabled || !hasPermission(context.permissions, Permission.USE_BOT_COMMANDS)) {
+      return ProtocolErrorCode.PERMISSION_DENIED;
     }
     return undefined;
   }

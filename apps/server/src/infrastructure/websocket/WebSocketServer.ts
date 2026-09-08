@@ -27,6 +27,8 @@ import {
   ChatMessageUpdatedPayload,
   ChatRequestUploadTokenPayload,
   ChatSendPayload,
+  BotCommandMessagePayload,
+  chatReactionSchema,
   ChatUploadTokenPayload,
   LIMITS,
   MessageType,
@@ -103,6 +105,8 @@ import { ChatService } from '../../application/services/ChatService';
 import { PermissionService } from '../../application/services/PermissionService';
 import { RoleService } from '../../application/services/RoleService';
 import { BotService } from '../../application/services/BotService';
+import { BotSelectorService } from '../../application/services/BotSelectorService';
+import { BotSelectorHandler } from './BotSelectorHandler';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
 import { SignalingService } from '../../application/services/SignalingService';
 import { UserService } from '../../application/services/UserService';
@@ -164,6 +168,7 @@ export class WebSocketServer {
   private heartbeatTimer?: NodeJS.Timeout;
   private closing = false;
   private botInteractions: BotInteractionHandler;
+  private botSelectors?: BotSelectorHandler;
 
   constructor(
     private server: http.Server,
@@ -179,14 +184,38 @@ export class WebSocketServer {
     private coturnManager: CoturnManager,
     private sfuManager: SfuManager = new SfuManager(),
     private botService?: BotService,
-    private commandRegistry: CommandRegistry = new CommandRegistry()
+    private commandRegistry: CommandRegistry = new CommandRegistry(),
+    selectorService?: BotSelectorService
   ) {
+    if (selectorService) {
+      this.botSelectors = new BotSelectorHandler(selectorService, this.channelService, this.userService, {
+        sessions: () => this.sessions.values(),
+        isCurrent: (session) => this.isCurrentSession(session),
+        send: (session, message) => this.send(session.ws, message),
+        authorizeInvocation: (session, invocationId, channelId) => this.botInteractions.authorizeSelector(session, invocationId, channelId),
+        publish: async (bot, channelId, content, messageId, canSend, accessUserId) => {
+          const record = await this.botService?.findById(bot.id);
+          if (!record) throw new Error('Bot is unavailable.');
+          const session = this.findSessionById(`bot:${record.id}`);
+          if (!session || !this.isCurrentSession(session) || !canSend()) throw new Error('Bot is disconnected.');
+          const result = await this.chatService.sendBotMessage(
+            record, channelId, content, undefined, messageId, () => canSend() && this.isCurrentSession(session), accessUserId
+          );
+          if (!result.success) throw new Error(result.errorMessage);
+          return result.message;
+        },
+        broadcastMessage: (message) => this.broadcastToChannel(
+          message.channelId, { type: MessageType.CHAT_MESSAGE, payload: message }
+        ),
+      });
+    }
     this.botInteractions = new BotInteractionHandler({
       isCurrent: (session) => this.isCurrentSession(session),
       findBot: (botId) => this.findSessionById(`bot:${botId}`),
       send: (ws, message) => this.send(ws, message),
       sendError: (ws, code, message, requestId) => this.sendError(ws, code, message, requestId),
       broadcastToChannel: (channelId, message, canSend) => this.broadcastToChannel(channelId, message, undefined, canSend),
+      publishResponse: (session, response, canSend, requestId) => this.publishBotResponse(session, response, canSend, requestId),
     }, this.channelService, this.userService, this.commandRegistry);
     this.wss = new WSServer({ server: this.server });
     this.setupWss();
@@ -367,6 +396,30 @@ export class WebSocketServer {
     }
 
     switch (type) {
+      case MessageType.CHAT_REACTION_ADD:
+      case MessageType.CHAT_REACTION_REMOVE: {
+        if (!session.user) return;
+        const reaction = chatReactionSchema.safeParse(payload);
+        if (!reaction.success) {
+          this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Reação inválida.', requestId);
+          return;
+        }
+        if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId))) return;
+        if (!(await this.requireChannelAccess(session, reaction.data.channelId, requestId))) return;
+        if (!this.isCurrentSession(session)) return;
+        const result = await this.chatService.setReaction(session.user, reaction.data, type === MessageType.CHAT_REACTION_ADD,
+          () => this.isCurrentSession(session));
+        if (!result.success) {
+          this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
+        } else if (result.event) {
+          await this.broadcastToChannel(reaction.data.channelId, {
+            type: type === MessageType.CHAT_REACTION_ADD ? MessageType.CHAT_REACTION_ADDED : MessageType.CHAT_REACTION_REMOVED,
+            requestId,
+            payload: result.event,
+          });
+        }
+        return;
+      }
       case MessageType.CHAT_SEND:
         if (!(await this.requirePermission(session, Permission.SEND_MESSAGES, requestId))) return;
         if (!(await this.requireChannelAccess(session, (payload as ChatSendPayload)?.channelId, requestId))) return;
@@ -593,6 +646,16 @@ export class WebSocketServer {
       // ── Slash commands (#569) ────────────────────────────────────────
       case MessageType.COMMAND_REGISTER:
         this.handleCommandRegister(session, payload, requestId);
+        break;
+
+      case MessageType.SELECTOR_CREATE:
+      case MessageType.SELECTOR_LIST:
+      case MessageType.SELECTOR_UPDATE:
+      case MessageType.SELECTOR_CLOSE:
+      case MessageType.SELECTOR_RESPOND:
+      case MessageType.SELECTOR_FINALIZE:
+        if (this.botSelectors) await this.botSelectors.handle(session, type, payload, requestId);
+        else this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Selectors are unavailable.', requestId);
         break;
 
       case MessageType.COMMANDS_LIST:
@@ -956,6 +1019,7 @@ export class WebSocketServer {
         id: c.id, serverId: c.serverId, name: c.name, type: c.type,
         position: c.position, createdAt: c.createdAt,
         maxParticipants: c.maxParticipants, isPrivate: c.isPrivate,
+        botCommandsEnabled: c.botCommandsEnabled,
         allowedRoleIds: c.allowedRoleIds,
       })),
       members: [botUser],
@@ -1245,19 +1309,34 @@ export class WebSocketServer {
   ): Promise<void> {
     if (!session.user) return;
 
-    const result = await this.chatService.sendMessage(
+    const bot = session.isBot && session.botId ? await this.botService?.findById(session.botId) : undefined;
+    if (session.isBot && (!bot || !this.isCurrentSession(session))) {
+      this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'Bot indisponível.', requestId);
+      return;
+    }
+    if (bot && payload.attachmentIds?.length) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Bots devem enviar mensagens de texto.', requestId);
+      return;
+    }
+    const result = bot
+      ? await this.chatService.sendBotMessage(bot, payload.channelId, payload.content, undefined, undefined, () => this.isCurrentSession(session))
+      : await this.chatService.sendMessage(
       session.user.id,
       payload.channelId,
       payload.content,
       payload.attachmentIds
     );
-    if (!result.success || !result.message) {
+    if (!result.success) {
       this.sendError(
         session.ws,
         result.errorCode || ProtocolErrorCode.BAD_REQUEST,
         result.errorMessage || 'Erro ao enviar mensagem',
         requestId
       );
+      return;
+    }
+    if (!result.message) {
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, 'Mensagem não foi persistida.', requestId);
       return;
     }
 
@@ -1267,6 +1346,31 @@ export class WebSocketServer {
       requestId,
       payload: result.message,
     });
+  }
+
+  private async publishBotResponse(
+    session: BotInteractionSession,
+    response: BotCommandMessagePayload,
+    canSend: () => boolean,
+    requestId?: string
+  ): Promise<void> {
+    const bot = session.botId ? await this.botService?.findById(session.botId) : null;
+    if (!bot || !canSend() || !this.isCurrentSession(session)) return;
+    const result = await this.chatService.sendBotMessage(bot, response.channelId, response.content, {
+      invocationId: response.invocationId, commandName: response.commandName,
+      invokerId: response.invokerId, invokerNickname: response.invokerNickname,
+      invokerAvatarUrl: response.invokerAvatarUrl,
+    }, response.messageId, () => canSend() && this.isCurrentSession(session), response.invokerId);
+    if (!result.success) {
+      this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
+      return;
+    }
+    // Keep the existing live event to avoid duplicate client rows; history
+    // returns the same persisted ID and the same authenticated attribution.
+    await this.broadcastToChannel(response.channelId, {
+      type: MessageType.COMMAND_RESPONSE,
+      payload: { ...response, createdAt: result.message.createdAt },
+    }, undefined, canSend);
   }
 
   private async handleChatEdit(
@@ -3032,6 +3136,7 @@ export class WebSocketServer {
     if (this.closing) return;
     this.closing = true;
     this.botInteractions.close();
+    this.botSelectors?.close();
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
     }

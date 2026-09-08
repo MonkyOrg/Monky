@@ -110,7 +110,7 @@ async function runDomSmoke() {
     id: 'command-dom-server', name: 'Command DOM', createdAt: 1, maxUsers: 10, voiceStates: {},
     channels: ['one', 'two'].map((id, position) => ({
       id, serverId: 'command-dom-server', name: id === 'one' ? 'general' : 'other', type: 'TEXT',
-      position, createdAt: 1, isPrivate: false, allowedRoleIds: [],
+      position, createdAt: 1, isPrivate: false, allowedRoleIds: [], botCommandsEnabled: true,
     })),
     members: [caller, otherCaller], knownMembers: [caller, otherCaller], roles: [], userRoles: [],
     myPermissions: 2147483647, ownerId: caller.id,
@@ -135,6 +135,73 @@ async function runDomSmoke() {
   view.setChannel('one');
   await document.fonts.ready;
   await frame();
+  const allowedChannel = { ...server.getChannel('one') };
+  type(find('#chat-message-input'), '/');
+  server.updateChannel({ ...allowedChannel, botCommandsEnabled: false });
+  check(find('#command-dropup').textContent.includes('não são permitidos neste canal'), 'Channel switch must immediately replace an open slash menu with a localized notice');
+  check(document.querySelectorAll('[data-cmd-index]').length === 0, 'Disabled channels must not expose selectable commands, even for admins');
+  const deniedSent = sent.length;
+  type(find('#chat-message-input'), '/ping');
+  key(find('#chat-message-input'), 'Enter');
+  check(sent.length === deniedSent && !store.getCommandDraft('one'), 'Disabled channel must prevent command execution');
+  language.setLanguage('en');
+  type(find('#chat-message-input'), '/');
+  check(find('#command-dropup').textContent.includes('not allowed in this text channel'), 'Channel denial must be localized in English');
+  server.updateChannel(allowedChannel);
+  server.myPermissions = 1 << 8;
+  events.appEvents.emit('server.roles_updated');
+  check(find('#command-dropup').textContent.includes('do not have permission'), 'Role revocation must immediately refresh an open slash menu');
+  check(!find('#chat-message-input').readOnly, 'Bot permission denial must not block ordinary chat');
+  server.myPermissions = 2147483647;
+  events.appEvents.emit('server.roles_updated');
+  check(document.querySelectorAll('[data-cmd-index]').length > 0, 'Granting bot permission must restore commands');
+  language.setLanguage('pt-BR');
+  type(find('#chat-message-input'), '');
+  const [{ CreateChannelModal }, { EditChannelModal }, { ServerRolesTab }] = await Promise.all([
+    import('/views/CreateChannelModal.ts'), import('/views/EditChannelModal.ts'),
+    import('/views/serverSettings/tabs/ServerRolesTab.ts'),
+  ]);
+  const createChannel = new CreateChannelModal();
+  const editChannel = new EditChannelModal();
+  const channelRequests = [];
+  const originalSendRequest = client.sendRequest;
+  client.sendRequest = async (messageType, payload) => { channelRequests.push({ type: messageType, payload }); return {}; };
+  try {
+    createChannel.open('TEXT');
+    check(find('#input-channel-bot-commands').checked, 'New text channels must enable bots by default');
+    check(!!find('#input-channel-bot-commands').closest('.toggle-switch'), 'Channel bot setting must use the established toggle switch');
+    find('#input-channel-bot-commands').checked = false;
+    find('input[name="channel-type"][value="VOICE"]').click();
+    check(find('#channel-bot-commands-group').hidden, 'Voice channels must hide the text-only bot setting');
+    find('input[name="channel-type"][value="TEXT"]').click();
+    check(!find('#channel-bot-commands-group').hidden && !find('#input-channel-bot-commands').checked, 'Switching channel type must preserve the chosen bot setting');
+    type(find('#input-channel-name'), 'channel-test');
+    find('#form-create-channel').requestSubmit();
+    await frame();
+    check(channelRequests.at(-1)?.payload.botCommandsEnabled === false, 'Channel creation must send an explicit disabled switch');
+    check(channelRequests.at(-1)?.payload.maxParticipants === undefined, 'Bot settings must not overwrite the channel participant default');
+    server.updateChannel({ ...allowedChannel, botCommandsEnabled: false });
+    editChannel.open('one');
+    check(!find('#input-channel-bot-commands').checked, 'Channel edit must load the persisted bot switch');
+    find('#form-edit-channel').requestSubmit();
+    await frame();
+    check(channelRequests.at(-1)?.type === 'CHANNEL_UPDATE' && channelRequests.at(-1)?.payload.botCommandsEnabled === false, 'Editing a disabled channel must preserve its bot setting');
+    createChannel.open('VOICE');
+    check(find('#channel-bot-commands-group').hidden, 'Voice creation must initially hide bot controls');
+    type(find('#input-channel-name'), 'voice-test');
+    find('#form-create-channel').requestSubmit();
+    await frame();
+    check(channelRequests.at(-1)?.payload.botCommandsEnabled === undefined, 'Voice creation must leave bot defaults untouched');
+    const rolesMarkup = document.createElement('div');
+    rolesMarkup.innerHTML = new ServerRolesTab().renderHtml();
+    check(!!rolesMarkup.querySelector('.role-permission-switch[data-permission="8192"]'), 'Role editor must expose MANAGE_BOTS as a switch');
+    check(!!rolesMarkup.querySelector('.role-permission-switch[data-permission="16384"]'), 'Role editor must expose USE_BOT_COMMANDS as a switch');
+  } finally {
+    createChannel.close();
+    editChannel.close();
+    client.sendRequest = originalSendRequest;
+    server.updateChannel(allowedChannel);
+  }
   const exactPing = { ...ping, botId: 'zeta', botName: 'Zeta Bot' };
   const botNameMatch = { ...ping, name: 'start', botId: 'ping-bot', botName: 'Ping Bot' };
   refreshRegistry([exactPing, botNameMatch]);
@@ -143,6 +210,9 @@ async function runDomSmoke() {
     key(find('#chat-message-input'), selectKey);
     check(store.getCommandDraft('one')?.command.botId === exactPing.botId,
       `${selectKey} must prefer a unique exact command over an unrelated bot-name match`);
+    check(sent.at(-1)?.type === 'COMMAND_INVOKE' && sent.at(-1)?.payload.botId === exactPing.botId,
+      `${selectKey} must immediately invoke the exact no-argument command`);
+    store.setCommandPending('one', store.getCommandDraft('one'), false);
     find('[data-bot-action="cancel-command"]').click();
   }
   type(find('#chat-message-input'), '/ping');
@@ -151,7 +221,10 @@ async function runDomSmoke() {
   check(find('.command-row.active strong').textContent === '/start', 'Refresh must preserve deliberate keyboard navigation');
   key(find('#chat-message-input'), 'Enter');
   check(store.getCommandDraft('one')?.command.name === 'start', 'Explicit navigation must still select another matching command');
+  check(sent.at(-1)?.payload.commandName === 'start', 'Explicit selection must invoke the no-argument command');
+  store.setCommandPending('one', store.getCommandDraft('one'), false);
   find('[data-bot-action="cancel-command"]').click();
+  sent.length = 0;
   refreshRegistry([command, duplicate, ping]);
   type(find('#chat-message-input'), '/');
   const normalInputHeight = find('#chat-message-input').clientHeight;
@@ -255,7 +328,7 @@ async function runDomSmoke() {
   check(find('#chat-message-input').value === 'Ordinary draft stays here', 'Channel switches must retain ordinary drafts');
   type(find('#chat-message-input'), '/ping');
   key(find('#chat-message-input'), 'Tab');
-  check(sent.filter((entry) => entry.type === 'COMMAND_INVOKE').length === 1, 'No-argument Tab selection must not execute');
+  check(sent.filter((entry) => entry.type === 'COMMAND_INVOKE').length === 2, 'No-argument Tab selection must execute immediately');
   find('#chat-command-composer button[type="submit"]').click();
   find('#chat-command-composer form').requestSubmit();
   check(sent.filter((entry) => entry.type === 'COMMAND_INVOKE').length === 2, 'Pending invocation must reject duplicate submit');
@@ -281,6 +354,52 @@ async function runDomSmoke() {
   view.setChannel('one');
   check(find('.bot-inline-form [data-field-name="question"] [data-bot-input]').value === 'Preserve the private form', 'History/channel rebuilds must retain form answers');
   check(document.querySelectorAll('.bot-inline-form [data-field-name="options"] [data-bot-input]').length === 3, 'Dynamic rows must survive rebuilds');
+  server.updateChannel({ ...allowedChannel, botCommandsEnabled: false });
+  check(find('.bot-inline-form button[type="submit"]').disabled, 'Channel disable must immediately disable an existing form, even for admins');
+  const beforeDeniedForm = sent.length;
+  find('.bot-inline-form').requestSubmit();
+  check(sent.length === beforeDeniedForm, 'A forged DOM submit must not bypass the channel switch');
+  server.updateChannel(allowedChannel);
+  server.myPermissions = 1 << 8;
+  events.appEvents.emit('server.roles_updated');
+  check(find('.bot-inline-form button[type="submit"]').disabled, 'Role revocation must disable an existing form');
+  server.myPermissions = 2147483647;
+  events.appEvents.emit('server.roles_updated');
+  check(!find('.bot-inline-form button[type="submit"]').disabled, 'Restored access must restore form editing');
+  find('.bot-inline-form button[type="submit"]').click();
+  store.failFormSubmit(invocation.invocationId, 'form', 'Retry this form');
+  check(find('.bot-inline-form .bot-error').textContent === 'Retry this form', 'Failed form must stay visible with its error');
+  find('.bot-inline-form button[type="submit"]').click();
+  store.acknowledgeForm({ invocationId: invocation.invocationId, interactionId: 'form', values: { question: 'Preserve the private form' } });
+  check(!document.querySelector('[data-interaction-id="form"]'), 'Acknowledged form must disappear');
+  const selectorForm = (presentation) => ({
+    title: 'Choose a next step',
+    fields: [{ name: 'choice', label: 'Choose', type: 'select', required: true, presentation,
+      choices: [{ label: 'First', value: 'first' }, { label: 'Second', value: 'second' }] }],
+  });
+  store.receivePrompt({
+    ...invocation, interactionId: 'buttons', botName: command.botName, expiresAt: Date.now() + 60_000,
+    form: selectorForm('buttons'),
+  });
+  const beforeButtons = sent.filter((entry) => entry.type === 'COMMAND_SUBMIT').length;
+  find('[data-bot-select-value="second"]').click();
+  check(sent.filter((entry) => entry.type === 'COMMAND_SUBMIT').length === beforeButtons + 1,
+    'Choice button must submit immediately');
+  check(sent.at(-1).payload.values.choice === 'second', 'Choice button must preserve its option value');
+  store.acknowledgeForm({ invocationId: invocation.invocationId, interactionId: 'buttons', values: { choice: 'second' } });
+  store.receivePrompt({
+    ...invocation, interactionId: 'dropdown', botName: command.botName, expiresAt: Date.now() + 60_000,
+    form: selectorForm('dropdown'),
+  });
+  const beforeDropdown = sent.filter((entry) => entry.type === 'COMMAND_SUBMIT').length;
+  type(find('[data-interaction-id="dropdown"] select'), 'first');
+  check(sent.filter((entry) => entry.type === 'COMMAND_SUBMIT').length === beforeDropdown,
+    'Dropdown must wait for confirmation');
+  find('[data-interaction-id="dropdown"] button[type="submit"]').click();
+  check(sent.filter((entry) => entry.type === 'COMMAND_SUBMIT').length === beforeDropdown + 1,
+    'Dropdown confirmation must submit the selected value');
+  store.acknowledgeForm({ invocationId: invocation.invocationId, interactionId: 'dropdown', values: { choice: 'first' } });
+  check(!document.querySelector('.bot-inline-form'), 'All completed selectors must disappear');
   const background = chats.createChatStore();
   background.bus = proxies.silentBus;
   background.receivePrompt({
@@ -327,6 +446,66 @@ async function runDomSmoke() {
     check(find('.bot-response-bubble').getBoundingClientRect().bottom <= find('#chat-messages-feed').getBoundingClientRect().bottom, 'Selecting a command must keep the latest pinned reply in view');
     return { checks };
   };
+  const { PublicSelectorView } = await import('/views/PublicSelectorView.ts');
+  const selectorFeed = document.createElement('div');
+  document.body.append(selectorFeed);
+  const selectorRow = () => {
+    selectorFeed.innerHTML = '<div data-message-id="public-question"><div class="chat-message-body"><div class="chat-message-text">Question</div></div></div>';
+  };
+  selectorRow();
+  const selectorClient = networks.createNetworkClient();
+  selectorClient.sessionKey = 'selector-dom';
+  selectorClient.getStatus = () => 'CONNECTED';
+  let publicSnapshot = {
+    id: 'public-selector', botId: 'music-one', channelId: 'one', messageId: 'public-question',
+    title: 'Question <script>not HTML</script>', choices: [{ label: 'A <img>', value: 'a' }, { label: 'B', value: 'b' }],
+    presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 2,
+    createdAt: 1, closedAt: null, resultMessageId: null, counts: { a: 0, b: 0 }, responseCount: 0, canRespond: true,
+  };
+  const publicRequests = [];
+  selectorClient.sendRequest = async (messageType, payload) => {
+    publicRequests.push({ type: messageType, payload });
+    if (messageType === 'SELECTOR_LIST') return { selectors: [publicSnapshot] };
+    publicSnapshot = { ...publicSnapshot, ownResponse: payload.value, counts: { a: payload.value === 'a' ? 1 : 0, b: payload.value === 'b' ? 1 : 0 }, responseCount: 1 };
+    return publicSnapshot;
+  };
+  const publicView = new PublicSelectorView(selectorFeed, selectorClient, server, 'one');
+  await frame();
+  check(selectorFeed.querySelectorAll('[data-selector-value]').length === 2, 'Persisted public selectors must restore buttons from server list');
+  check(!selectorFeed.querySelector('img,script'), 'Public selector labels and question must be text, never executable HTML');
+  selectorFeed.querySelector('[data-selector-value="b"]').click();
+  await frame();
+  check(publicRequests.filter((request) => request.type === 'SELECTOR_RESPOND').length === 1, 'Public option buttons must submit immediately');
+  check(selectorFeed.querySelector('[data-selector-value="b"]').getAttribute('aria-pressed') === 'true', 'Public response ACK must show the selected option');
+  publicSnapshot = { ...publicSnapshot, presentation: 'dropdown' };
+  events.appEvents.emit('message.SELECTOR_SNAPSHOT', publicSnapshot);
+  const dropdown = selectorFeed.querySelector('select');
+  dropdown.value = 'a';
+  dropdown.dispatchEvent(new Event('change', { bubbles: true }));
+  check(publicRequests.filter((request) => request.type === 'SELECTOR_RESPOND').length === 1, 'Public dropdown selection must wait for Confirm');
+  selectorFeed.querySelector('[data-selector-confirm]').click();
+  await frame();
+  check(publicRequests.filter((request) => request.type === 'SELECTOR_RESPOND').length === 2, 'Confirm must submit a public dropdown once');
+  selectorRow();
+  await frame();
+  check(!!selectorFeed.querySelector('select'), 'History rerenders must restore public selector controls');
+  server.updateChannel({ ...server.getChannel('one'), botCommandsEnabled: false });
+  check(selectorFeed.querySelector('select').disabled, 'Disabled channels must block public selector responses for admins too');
+  server.updateChannel({ ...server.getChannel('one'), botCommandsEnabled: true });
+  publicSnapshot = { ...publicSnapshot, closedAt: Date.now(), canRespond: false };
+  language.setLanguage('pt-BR');
+  events.appEvents.emit('message.SELECTOR_SNAPSHOT', publicSnapshot);
+  check(selectorFeed.querySelector('[data-selector-confirm]').disabled, 'Closed selectors must disable voting');
+  check(selectorFeed.querySelector('.bot-status').textContent === 'Encerrado', 'Public selectors must use the Portuguese central catalog');
+  language.setLanguage('en');
+  events.appEvents.emit('message.SELECTOR_SNAPSHOT', publicSnapshot);
+  check(selectorFeed.querySelector('.bot-status').textContent === 'Closed', 'Public selectors must use the English central catalog');
+  publicView.destroy();
+  const requestsBeforeDestroy = publicRequests.length;
+  events.appEvents.emit('message.SELECTOR_SNAPSHOT', { ...publicSnapshot, closedAt: null, canRespond: true });
+  check(publicRequests.length === requestsBeforeDestroy, 'Destroyed public selector views must not send further requests');
+  selectorClient.dispose();
+  selectorFeed.remove();
   window.commandDomCleanup = () => { view.destroy(); unbindBotEvents(); client.dispose(); };
   return { checks };
 }

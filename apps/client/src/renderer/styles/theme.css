@@ -3209,6 +3209,15 @@ input:focus, textarea:focus, select:focus {
   gap: 14px;
   margin: 12px 0;
 }
+.bot-choice-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.bot-choice-buttons .btn {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .bot-field {
   min-width: 0;
 }
@@ -8110,3 +8119,8 @@ body.overlay-window-mode #app {
   gap: 4px;
   flex-shrink: 0;
 }
+.chat-reactions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 5px; }
+.chat-reaction, .chat-reaction-add { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border-color); border-radius: 12px; padding: 3px 8px; background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
+.chat-reaction--mine { border-color: var(--accent-primary); background: var(--bg-tertiary); }
+.chat-reaction-add { opacity: .5; }
+.chat-reaction-add:hover, .chat-reaction-add:focus-visible { opacity: 1; }

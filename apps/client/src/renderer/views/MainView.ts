@@ -92,6 +92,7 @@ export class MainView {
     const canManageChannels = serverStore.hasPermission(Permission.MANAGE_CHANNELS);
     const canManageServer = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES);
+    const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
 
     this.container.innerHTML = `
       <div class="main-layout">
@@ -108,12 +109,10 @@ export class MainView {
               <span class="material-symbols-outlined md-18 server-dropdown-caret">expand_more</span>
             </button>
             <div id="server-dropdown-menu" class="server-dropdown-menu" style="display: none;">
-              ${(canManageServer || canManageRoles) ? `
-              <button id="btn-server-settings" class="server-dropdown-item" title="${t('main.serverSettingsTitle')}">
+              <button id="btn-server-settings" class="server-dropdown-item" title="${t('main.serverSettingsTitle')}" style="${canManageServer || canManageRoles || canManageBots ? '' : 'display: none;'}">
                 <span class="material-symbols-outlined md-18">settings</span>
                 <span>${t('serverSettings.title')}</span>
               </button>
-              ` : ''}
               <button id="btn-server-monitor" class="server-dropdown-item" title="${t('serverMonitor.title')}" style="display: none;">
                 <span class="material-symbols-outlined md-18">monitoring</span>
                 <span>${t('serverMonitor.title')}</span>
@@ -1220,9 +1219,10 @@ export class MainView {
   private updatePermissionDependentUI(): void {
     const canManageServer = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES);
+    const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
     const btnSettings = document.getElementById('btn-server-settings');
     if (btnSettings) {
-      (btnSettings as HTMLElement).style.display = (canManageServer || canManageRoles) ? '' : 'none';
+      (btnSettings as HTMLElement).style.display = (canManageServer || canManageRoles || canManageBots) ? '' : 'none';
     }
   }
 

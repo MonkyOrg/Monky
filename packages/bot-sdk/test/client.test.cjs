@@ -97,6 +97,159 @@ function registerAt(listener, registration) {
   });
 }
 
+test('durable selectors correlate acknowledgements, emit updates and outlive invocations', { timeout: 10000 }, async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  let published;
+  bot.command({
+    name: 'poll', description: 'Poll',
+    handler: async (ctx) => {
+      published = await ctx.createSelector({
+        id: 'poll-one', title: 'Question?', choices: [{ label: 'A', value: 'a' }],
+        presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 2,
+      });
+    },
+  });
+  const connected = once(bot, 'connected');
+  bot.connect({ serverId: 'selector-server' });
+  await connected;
+  server.invoke('caller-one', 'poll');
+  const created = await server.next(MessageType.SELECTOR_CREATE);
+  assert.equal(created.payload.channelId, 'channel-one');
+  assert.equal(created.payload.invokerId, 'caller-one');
+  assert.equal(created.payload.invocationId, 'caller-one');
+  const { invocationId: sourceInvocationId, ...definition } = created.payload;
+  const selector = {
+    ...definition, id: 'poll-one', botId: 'bot-one', messageId: 'question-one',
+    createdAt: 1, closedAt: null, responses: {}, resultMessageId: null, messagePublished: true,
+    creatorUserId: 'caller-one', sourceInvocationId,
+  };
+  server.send(MessageType.SELECTOR_SNAPSHOT, selector, created.requestId);
+  await server.next(MessageType.COMMAND_FINISH);
+  assert.equal(published.id, selector.id);
+  const updated = once(bot, 'selectorUpdate');
+  server.send(MessageType.SELECTOR_SNAPSHOT, { ...selector, responses: { human: 'a' } });
+  assert.deepEqual((await updated)[0], {
+    serverId: 'selector-server', selector: { ...selector, responses: { human: 'a' } },
+  });
+  const listing = bot.listSelectors('selector-server');
+  const listRequest = await server.next(MessageType.SELECTOR_LIST);
+  server.send(MessageType.SELECTOR_LIST_RESULT, { selectors: [selector] }, listRequest.requestId);
+  assert.equal((await listing)[0].id, selector.id);
+  const update = bot.updateSelector('selector-server', selector.id, { title: 'Updated?' });
+  const updateRequest = await server.next(MessageType.SELECTOR_UPDATE);
+  assert.deepEqual(updateRequest.payload.patch, { title: 'Updated?' });
+  server.send(MessageType.SELECTOR_SNAPSHOT, { ...selector, title: 'Updated?' }, updateRequest.requestId);
+  assert.equal((await update).title, 'Updated?');
+  const close = bot.closeSelector('selector-server', selector.id);
+  const closeRequest = await server.next(MessageType.SELECTOR_CLOSE);
+  const closedSelector = { ...selector, closedAt: 2 };
+  server.send(MessageType.SELECTOR_SNAPSHOT, closedSelector, closeRequest.requestId);
+  await close;
+  const finalize = bot.finalizeSelector('selector-server', selector.id, 'Final result');
+  const finalRequest = await server.next(MessageType.SELECTOR_FINALIZE);
+  server.send(MessageType.SELECTOR_SNAPSHOT, { ...closedSelector, resultMessageId: 'final-one' }, finalRequest.requestId);
+  assert.equal((await finalize).resultMessageId, 'final-one');
+  const denied = bot.closeSelector('selector-server', 'another-bots-selector');
+  const rejected = assert.rejects(denied, /not owned/);
+  const deniedRequest = await server.next(MessageType.SELECTOR_CLOSE);
+  server.send(MessageType.SERVER_ERROR, { message: 'not owned' }, deniedRequest.requestId);
+  await rejected;
+  const interrupted = bot.listSelectors('selector-server');
+  const disconnected = assert.rejects(interrupted, /disconnected/);
+  await bot.close();
+  await disconnected;
+  assert.deepEqual(errors, []);
+});
+
+test('persistent messages are acknowledged and reactions outlive command invocations', { timeout: 10000 }, async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const connected = once(bot, 'connected');
+  bot.connect({ serverId: 'reaction-server' });
+  await connected;
+  const sent = bot.sendMessage('reaction-server', 'channel-one', 'First question?');
+  const frame = await server.next(MessageType.CHAT_SEND);
+  assert.equal(frame.payload.content, 'First question?');
+  server.send(MessageType.CHAT_MESSAGE, {
+    id: 'question-one', channelId: 'channel-one', userId: 'bot-one', userNickname: 'Question bot',
+    content: frame.payload.content, createdAt: Date.now(), isBot: true,
+  }, frame.requestId);
+  const message = await sent;
+  assert.equal(message.id, 'question-one');
+  const events = [];
+  const removeListener = bot.onReactionAdded((event, context) => events.push({ event, context }));
+  const event = { channelId: 'channel-one', messageId: message.id, emoji: '👍', userId: 'human-one', userNickname: 'Alice' };
+  const added = once(bot, 'reactionAdded');
+  server.send(MessageType.CHAT_REACTION_ADDED, event);
+  await added;
+  assert.deepEqual(events, [{ event, context: { serverId: 'reaction-server' } }]);
+  removeListener();
+  bot.addReaction('reaction-server', 'channel-one', message.id, '❤️');
+  assert.deepEqual((await server.next(MessageType.CHAT_REACTION_ADD)).payload, { channelId: 'channel-one', messageId: message.id, emoji: '❤️' });
+  bot.removeReaction('reaction-server', 'channel-one', message.id, '❤️');
+  assert.equal((await server.next(MessageType.CHAT_REACTION_REMOVE)).payload.emoji, '❤️');
+  const removed = once(bot, 'reactionRemoved');
+  server.send(MessageType.CHAT_REACTION_REMOVED, event);
+  assert.deepEqual((await removed)[0], event);
+  assert.throws(() => bot.addReaction('reaction-server', 'channel-one', message.id, 'not emoji'));
+  const denied = bot.sendMessage('reaction-server', 'private', 'Not allowed');
+  const rejected = assert.rejects(denied, /permission denied/);
+  const deniedFrame = await server.next(MessageType.CHAT_SEND);
+  server.send(MessageType.SERVER_ERROR, { message: 'permission denied' }, deniedFrame.requestId);
+  await rejected;
+  const interrupted = bot.sendMessage('reaction-server', 'channel-one', 'Unacknowledged');
+  const disconnected = assert.rejects(interrupted, /connection closed/);
+  await bot.close();
+  await disconnected;
+  assert.deepEqual(errors, []);
+});
+
+test('reaction subscriptions filter a human answer, advance the question and unsubscribe', { timeout: 10000 }, async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const connected = once(bot, 'connected');
+  bot.connect({ serverId: 'question-server' });
+  await connected;
+  const firstQuestion = bot.sendMessage('question-server', 'channel-one', 'Continue? React 👍');
+  const firstFrame = await server.next(MessageType.CHAT_SEND);
+  server.send(MessageType.CHAT_MESSAGE, {
+    id: 'question-one', channelId: 'channel-one', userId: 'bot-one', userNickname: 'Question bot',
+    content: firstFrame.payload.content, createdAt: Date.now(), isBot: true,
+  }, firstFrame.requestId);
+  const question = await firstQuestion;
+  const baseline = bot.listenerCount('reactionAdded');
+  let nextQuestion;
+  let matchingAnswers = 0;
+  const stop = bot.onReactionAdded((reaction, origin) => {
+    if (origin.serverId !== 'question-server' || reaction.channelId !== question.channelId ||
+        reaction.messageId !== question.id || reaction.userId !== 'human-one' || reaction.emoji !== '👍') return;
+    stop();
+    clearTimeout(timeout);
+    matchingAnswers += 1;
+    nextQuestion = bot.sendMessage(origin.serverId, question.channelId, 'Next question: which game?');
+  });
+  const timeout = setTimeout(stop, 5000);
+  t.after(() => { clearTimeout(timeout); stop(); });
+  const answer = { channelId: question.channelId, messageId: question.id, emoji: '👍', userId: 'human-one', userNickname: 'Alice' };
+  for (const distractor of [
+    { channelId: 'another-channel' }, { messageId: 'another-question' },
+    { userId: 'bot-one' }, { emoji: '👎' },
+  ]) server.send(MessageType.CHAT_REACTION_ADDED, { ...answer, ...distractor });
+  server.send(MessageType.CHAT_REACTION_ADDED, answer);
+  server.send(MessageType.CHAT_REACTION_ADDED, answer);
+  const nextFrame = await server.next(MessageType.CHAT_SEND);
+  assert.equal(nextFrame.payload.content, 'Next question: which game?');
+  assert.equal(matchingAnswers, 1);
+  assert.equal(bot.listenerCount('reactionAdded'), baseline);
+  server.send(MessageType.CHAT_MESSAGE, {
+    id: 'question-two', channelId: question.channelId, userId: 'bot-one', userNickname: 'Question bot',
+    content: nextFrame.payload.content, createdAt: Date.now(), isBot: true,
+  }, nextFrame.requestId);
+  assert.equal((await nextQuestion).id, 'question-two');
+  assert.deepEqual(errors, []);
+});
+
 test('named options retain their types and public output is explicit', { timeout: 10000 }, async (t) => {
   const server = await makeServer(t);
   const { bot, errors } = makeBot(t, server);
@@ -184,6 +337,44 @@ test('concurrent callers complete two private rounds without sharing answers', {
   const aliceResult = await server.next(MessageType.COMMAND_RESPONSE, (m) => m.payload.invocationId === 'alice');
   assert.equal(bobResult.payload.content, 'B1 / B2');
   assert.equal(aliceResult.payload.content, 'A1 / A2');
+  assert.deepEqual(errors, []);
+});
+
+test('private choices support button and confirmed dropdown turns', { timeout: 10000 }, async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  bot.command({
+    name: 'choose', description: 'Choose twice',
+    handler: async (ctx) => {
+      const first = await ctx.choose({
+        title: 'First turn', presentation: 'buttons',
+        choices: [{ label: 'One', value: 'one' }, { label: 'Two', value: 'two' }],
+      });
+      if (first === null) return;
+      const second = await ctx.choose({
+        title: `After ${first}`, submitLabel: 'Confirm',
+        choices: [{ label: 'Continue', value: 'continue' }],
+      });
+      if (second !== null) ctx.reply(`${first}:${second}`);
+    },
+  });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  server.invoke('choice-flow', 'choose');
+  const first = await server.next(MessageType.COMMAND_PROMPT);
+  assert.equal(first.payload.form.fields[0].presentation, 'buttons');
+  server.send(MessageType.COMMAND_SUBMITTED, {
+    invocationId: 'choice-flow', interactionId: first.payload.interactionId, values: { choice: 'two' },
+  });
+  const second = await server.next(MessageType.COMMAND_PROMPT);
+  assert.equal(second.payload.form.title, 'After two');
+  assert.equal(second.payload.form.fields[0].presentation, 'dropdown');
+  assert.equal(second.payload.form.submitLabel, 'Confirm');
+  server.send(MessageType.COMMAND_SUBMITTED, {
+    invocationId: 'choice-flow', interactionId: second.payload.interactionId, values: { choice: 'continue' },
+  });
+  assert.equal((await server.next(MessageType.COMMAND_RESPONSE)).payload.content, 'two:continue');
+  await server.next(MessageType.COMMAND_FINISH);
   assert.deepEqual(errors, []);
 });
 

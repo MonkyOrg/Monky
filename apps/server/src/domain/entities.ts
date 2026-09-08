@@ -46,6 +46,7 @@ export interface UserRecord {
 }
 
 export interface ChannelRecord {
+  botCommandsEnabled: boolean;
   id: string;
   serverId: string;
   name: string;
@@ -60,6 +61,9 @@ export interface ChannelRecord {
 }
 
 export interface MessageRecord {
+  /** The owner backs the existing user FK; readers expose the bot's real ID. */
+  botAuthor?: { id: string; name: string; avatarPath: string | null; ownerUserId: string };
+  botCommand?: import('@monky/shared').BotCommandContext;
   id: string;
   channelId: string;
   userId: string;
@@ -78,6 +82,13 @@ export interface MentionRecord {
   channelId: string;
   messageId: string;
   createdAt: number;
+}
+
+export interface MessageReactionRecord {
+  messageId: string;
+  userId: string;
+  userNickname: string;
+  emoji: string;
 }
 
 // A file attached to a chat message (#11). `messageId` is null while the upload

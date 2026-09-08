@@ -59,6 +59,7 @@ export interface UserSummary {
 }
 
 export interface ChannelSummary {
+  botCommandsEnabled: boolean;
   id: string;
   serverId: string;
   name: string;
@@ -120,6 +121,7 @@ export interface BotCommandContext {
 }
 
 export interface ChatMessage {
+  reactions?: import('./reactions.js').MessageReaction[];
   id: string;
   channelId: string;
   userId: string;

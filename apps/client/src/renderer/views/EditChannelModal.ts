@@ -7,6 +7,8 @@ import { enableBackdropClose } from '../utils/modal';
 import { attachInputEmojiPicker } from '../utils/inputEmojiPicker';
 import {
   attachChannelPrivacyFields,
+  readChannelBotCommandsField,
+  renderChannelBotCommandsField,
   readChannelPrivacyFields,
   renderChannelPrivacyFields,
 } from './channelFormFields';
@@ -74,6 +76,7 @@ export class EditChannelModal {
             isPrivate: channel.isPrivate,
             allowedRoleIds: channel.allowedRoleIds,
           })}
+          ${renderChannelBotCommandsField(channel.botCommandsEnabled, channel.type)}
 
           <div class="modal-footer">
             <button type="button" id="btn-cancel" class="btn btn-secondary">${t('common.cancel')}</button>
@@ -116,6 +119,7 @@ export class EditChannelModal {
           name,
           isPrivate: privacy.isPrivate,
           allowedRoleIds: privacy.allowedRoleIds,
+          ...(channel.type === 'TEXT' ? { botCommandsEnabled: readChannelBotCommandsField(this.modalEl) } : {}),
         });
         this.close();
       } catch (err: any) {

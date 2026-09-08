@@ -49,10 +49,16 @@ Ideal for distributed bots that serve multiple servers.
 
 ## Creating your own bot
 
+### Permissions and channels
+
+In **Server Settings → Roles**, **Add and manage bots** controls who can register, configure, or remove bots; **Use bot commands** controls who can use their commands and interactions. Command access is initially enabled for existing members and roles.
+
+When creating or editing a text channel, the **Allow bot commands** switch starts enabled. Turning it off blocks commands and responses to forms and selectors in that channel, **including for administrators**. Typing `/` displays the reason. Permission changes also affect interactions that are already open; ordinary messages and reactions continue to follow their own permissions.
+
 ### Prerequisites
 
 - **Node.js 18+**
-- Client, server, and SDK compatible with **protocol 8**
+- Client, server, and SDK compatible with **protocol 9**
 - The `@monky/bot-sdk` package from the matching release
 
 ::: warning Update together
@@ -140,6 +146,7 @@ bot.command({
     // ctx.reply()    — reply only to the caller, within the chat
     // ctx.publish()  — explicitly publish a result in the channel
     // ctx.prompt()   — await a private form; may be called in multiple steps
+    // ctx.choose()   — await a private choice through buttons or a dropdown
     // ctx.signal     — aborts on cancellation, disconnect, timeout or completion
   },
 });
@@ -149,7 +156,7 @@ bot.command({
 
 Typing `/` opens a menu with frequently used commands and sections grouped by bot. Each item identifies the command, its description, and its bot. While browsing, required parameter chips and the optional parameter count help choose a command.
 
-Selecting a command identifies **which bot and command** are selected in a compact composer with named fields, descriptions, and placeholders. Optional parameters can be added when needed. Submission uses the names declared in `options`; there is no need to join values with commas. Selecting a command does not execute it.
+Selecting a command with parameters identifies **which bot and command** are selected in a compact composer with named fields, descriptions, and placeholders. Optional parameters can be added when needed. Submission uses the names declared in `options`; there is no need to join values with commas. Commands without parameters, such as `/ping` and `/enquete`, start their interaction immediately when selected.
 
 Usage frequency stays local and is scoped by server and identity. Only counts and recency are stored, never the values entered in parameters.
 
@@ -178,7 +185,7 @@ bot.command({
 });
 ```
 
-To deliberately share a result, use `ctx.publish('Result for the channel')`. Publishing respects channel visibility; forms and their answers remain private. Command replies are temporary and are not part of the channel's persisted history.
+To deliberately share a result, use `ctx.publish('Result for the channel')`. Publishing respects channel visibility, is persisted in history, and supports reactions; forms and their answers remain private. Private command replies are temporary and are not part of the channel's persisted history.
 
 ### Forms and multi-step conversations
 
@@ -186,11 +193,11 @@ A bot can wait for user input without opening a modal or requesting manually for
 
 ```ts
 bot.command({
-  name: 'poll',
-  description: 'Create a poll using a form',
+  name: 'list',
+  description: 'Publish a list using a form',
   handler: async (ctx) => {
     const result = await ctx.prompt({
-      title: 'New poll',
+      title: 'New list',
       fields: [
         { name: 'question', label: 'Question', type: 'text', required: true, maxLength: 200 },
         {
@@ -202,31 +209,118 @@ bot.command({
     });
     if (!result) return;
     if (typeof result.question !== 'string' || !Array.isArray(result.options)) {
-      throw new Error('Unexpected poll answer');
+      throw new Error('Unexpected form answer');
     }
     const text = `**${result.question}**\n${result.options.map((option, i) => `${i + 1}. ${option}`).join('\n')}`;
-    ctx.reply(text);
-
-    const confirmation = await ctx.prompt({
-      title: 'Share the poll?',
-      fields: [{
-        name: 'visibility', label: 'Who can see the result?', type: 'select',
-        required: true, defaultValue: 'private',
-        choices: [
-          { label: 'Only me', value: 'private' },
-          { label: 'Publish in this channel', value: 'channel' },
-        ],
-      }],
-    });
-    if (!confirmation) return;
-    if (confirmation.visibility === 'channel') ctx.publish(text);
+    ctx.publish(text);
   },
 });
 ```
 
 Available field types are `text` (with optional `multiline`), `integer`, `select`, `boolean`, and `string-list`. All accept `name`, `label`, `description`, `required`, and a type-compatible `defaultValue`. Use `defaultValue` to edit a previous step, and the form's `submitLabel` to customize its submit button.
 
+Once the server accepts a submission, the form disappears from chat and its values are discarded in the client. If submission fails, the form retains the entered values and displays the error so the caller can try again.
+
 `prompt()` returns `null` if the conversation is cancelled, expires, or loses its connection. Return from the handler in that case; use `ctx.signal` to cancel external operations. Only one form may be pending per invocation: await it before opening the next. Limits are 10 fields, 20 choices/list items, and five simultaneous commands per connection. Each invocation lasts at most five minutes and 100 steps; opening another form does not reset that deadline. A bot cannot send replies after its handler has finished.
+
+### Private selectors
+
+`ctx.choose()` simplifies questions with one choice. With `presentation: 'buttons'`, clicking responds immediately; with `'dropdown'` (the default), the caller selects and confirms. The response is the declared `value`, or `null` when the interaction ends. Each step is visible only to the caller.
+
+```ts
+bot.command({
+  name: 'activity',
+  description: 'Choose an activity in two steps',
+  handler: async (ctx) => {
+    const activity = await ctx.choose({
+      title: 'What should we do?',
+      presentation: 'buttons',
+      choices: [
+        { label: 'Play', value: 'game' },
+        { label: 'Chat', value: 'chat' },
+      ],
+    });
+    if (activity === null) return;
+    const time = await ctx.choose({
+      title: 'When?',
+      submitLabel: 'Confirm time',
+      choices: [
+        { label: 'Now', value: 'now' },
+        { label: 'Later', value: 'later' },
+      ],
+    });
+    if (time !== null) ctx.reply(`Choice: ${activity}, ${time}`);
+  },
+});
+```
+
+You can also use `presentation: 'buttons'` on a `select` field in `ctx.prompt()`. Clicking validates and submits the entire form, so other required fields must be filled first.
+
+### Public selectors and voting
+
+For questions that should remain in the channel, use `bot.createSelector(serverId, definition)`. Unlike a private invocation, the selector is persisted on the server and remains available after disconnections. Buttons respond on click; dropdowns require confirmation.
+
+```ts
+const selector = await bot.createSelector(serverId, {
+  channelId,
+  title: 'Which activity should we organize?',
+  choices: [
+    { label: 'Tournament', value: 'tournament' },
+    { label: 'Chat session', value: 'chat' },
+  ],
+  presentation: 'buttons',
+  responder: 'any',
+  allowChange: true,
+  expiresAt: Date.now() + 60 * 60 * 1000,
+  maxResponders: 50,
+});
+```
+
+`responder: 'any'` accepts human members with channel access and permission. To restrict responses to one person, use `'invoker'` with their `invokerId`. Each person has one response; `allowChange` lets them replace it without increasing the participant count. `maxResponders: 1` closes on the first valid response. Provide a deadline (`expiresAt`), a participant limit (`maxResponders`), or both; the first limit reached closes the interaction. The maximum duration is 30 days and the maximum participant limit is 10,000.
+
+The `selectorUpdate` event delivers `{ serverId, selector }` to the owning bot, including responses by user ID. Other clients receive only totals and their own choice. Register the listener once for the bot's lifecycle and remove it on shutdown. Use `bot.listSelectors(serverId)` after connecting to recover states, `updateSelector(serverId, id, patch)` to adjust title/limits, and `closeSelector(serverId, id)` to close manually.
+
+Inside a command, prefer `ctx.createSelector(definition)` — `channelId` and `invokerId` are supplied automatically. The server binds creation to the real invocation, allowing polls in private channels the caller can access. This authorization applies only to that selector and channel; it does not grant the bot general access to private messages or reactions. Later operations and recovery revalidate the creator's current permissions. If that person loses access, the bot stops receiving responses and cannot publish results until authorization is restored. Standalone `bot.createSelector()` still requires the bot's own channel access.
+
+After closure, `await bot.finalizeSelector(serverId, id, content)` publishes the result to the channel idempotently: repeating finalization does not create another message. This lets processing recover after a bot crash. Do not keep a private handler open while waiting for a long-running vote.
+
+MonkyBot's `/enquete` uses this mechanism: it requires 2–10 options and at least one closing condition (1 minute to 30 days, using minutes/hours/days; or 1–10,000 voters). It publishes immediately after the form, allows vote changes, and closes at the first limit reached. Results show counts, percentages, the winner/tie, or no votes. Polls and pending results are recovered after restarts.
+
+### Reactions and emoji responses
+
+Persisted text-channel messages support reactions through the emoji picker. Each person may add different emojis, but only one reaction per emoji; clicking again removes their own reaction. Totals and the names of people who reacted are available in chat and survive history loading. Temporary private command replies do not receive public reactions.
+
+In the SDK, `bot.sendMessage(serverId, channelId, text)` awaits publication and returns the message with its `id`. `addReaction(serverId, channelId, messageId, emoji)` and `removeReaction(...)` change only the bot's own reaction. The `reactionAdded` and `reactionRemoved` events provide channel, message and user IDs, the user's nickname, and the emoji, with `{ serverId }` as the second argument. Typed helpers `onReactionAdded` and `onReactionRemoved` return an unsubscribe function.
+
+A question can continue the command after a valid reaction without mixing responses from other channels or users:
+
+```ts
+bot.command({
+  name: 'confirm',
+  description: 'Answer a question with an emoji',
+  handler: async (ctx) => {
+    const message = await bot.sendMessage(ctx.serverId, ctx.channelId, 'Continue? React with 👍 or 👎.');
+    const answer = await new Promise<string | null>((resolve) => {
+      const finish = (value: string | null) => {
+        detach();
+        ctx.signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      };
+      const onAbort = () => finish(null);
+      const detach = bot.onReactionAdded((reaction, { serverId }) => {
+        if (serverId === ctx.serverId && reaction.channelId === ctx.channelId &&
+            reaction.messageId === message.id && reaction.userId === ctx.invokerId &&
+            ['👍', '👎'].includes(reaction.emoji)) finish(reaction.emoji);
+      });
+      ctx.signal.addEventListener('abort', onAbort, { once: true });
+      if (ctx.signal.aborted) finish(null);
+    });
+    if (answer !== null) ctx.reply(answer === '👍' ? "Let's continue!" : "Okay, we'll stop here.");
+  },
+});
+```
+
+The example accepts only the caller's first valid reaction and removes the listener on response, cancellation, disconnection, or expiry. Ordinary reactions remain independent of this flow.
 
 ### Bot photos
 
@@ -364,8 +458,8 @@ In marketplace mode, TOFU binding happens automatically during installation.
 | `/ping` | Bot latency |
 | `/dado [sides]` | Roll a dice (2-100 sides) |
 | `/moeda` | Coin flip |
-| `/8ball [question]` | Magic 8-ball; asks for the question in chat when omitted |
-| `/enquete` | Question/options form, review, and sharing confirmation |
+| `/8ball <question>` | Magic 8-ball; the question is required |
+| `/enquete` | Private form; publishes voting to the channel without review and closes by time and/or voter count |
 | `/ajuda` | List all commands |
 
 See the [Monky Bot repository](https://github.com/MonkyOrg/MonkyBot) for installation and usage instructions.

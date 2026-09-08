@@ -94,6 +94,7 @@ export const botFormFieldSchema = z.discriminatedUnion('type', [
     ...fieldBase,
     type: z.literal('select'),
     choices: choicesSchema,
+    presentation: z.enum(['dropdown', 'buttons']).optional(),
     placeholder: z.string().max(150).optional(),
     defaultValue: z.string().max(100).optional(),
   }).strict(),

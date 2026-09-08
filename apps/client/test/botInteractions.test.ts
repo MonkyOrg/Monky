@@ -31,6 +31,28 @@ import { renderBotInvocation } from '../src/renderer/views/BotChatView';
 import { setLanguage } from '../src/renderer/i18n';
 import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
 
+test('persistent reactions toggle independently per emoji and do not create phantom messages', () => {
+  const store = createChatStore();
+  store.bus = new EventBus();
+  store.addMessage({ id: 'question', channelId: 'text', userId: 'bot', userNickname: 'Bot', content: 'Question?', createdAt: 1, isBot: true });
+  const reaction = { channelId: 'text', messageId: 'question', userId: 'alice', userNickname: 'Alice', emoji: '👍' };
+  store.updateReaction(reaction, true);
+  store.updateReaction(reaction, true);
+  store.updateReaction({ ...reaction, emoji: '❤️' }, true);
+  store.updateReaction({ ...reaction, userId: 'bob', userNickname: 'Bob' }, true);
+  const message = store.getMessages('text')[0];
+  assert.equal(message.reactions?.length, 2);
+  assert.equal(message.reactions?.find((entry) => entry.emoji === '👍')?.users.length, 2);
+  store.updateReaction(reaction, false);
+  assert.equal(message.reactions?.find((entry) => entry.emoji === '👍')?.users[0].userId, 'bob');
+  store.updateReaction({ ...reaction, emoji: '❤️' }, false);
+  assert.equal(message.reactions?.length, 1);
+  store.updateReaction({ ...reaction, messageId: 'missing' }, true);
+  assert.equal(store.getMessages('text').length, 1);
+  store.setHistory('text', [{ ...message, reactions: [] }]);
+  assert.deepEqual(store.getMessages('text')[0].reactions, []);
+});
+
 const pollCommand: SlashCommand = {
   name: 'poll',
   description: 'Create a poll',
@@ -274,6 +296,56 @@ test('an early next prompt cannot let a late failure reopen the previous round',
   assert.equal(store.getInvocation('invoke-one')?.forms[1].status, 'editing');
 });
 
+test('successful forms disappear and discard inputs, while failed submissions remain editable', () => {
+  const store = invocationStore();
+  store.receivePrompt(prompt());
+  const invocation = store.getInvocation('invoke-one');
+  assert.ok(invocation);
+  store.setFormValues('invoke-one', 'step-one', { title: 'Private input' });
+  store.beginFormSubmit('invoke-one', 'step-one');
+  store.failFormSubmit('invoke-one', 'step-one', 'Try again');
+  assert.match(renderBotInvocation(invocation), /Private input/);
+  assert.match(renderBotInvocation(invocation), /Try again/);
+  store.beginFormSubmit('invoke-one', 'step-one');
+  store.acknowledgeForm({ invocationId: 'invoke-one', interactionId: 'step-one', values: { title: 'Private input' } });
+  assert.deepEqual(invocation.forms[0].values, {});
+  assert.doesNotMatch(renderBotInvocation(invocation), /bot-inline-form|Private input/);
+  store.failFormSubmit('invoke-one', 'step-one', 'Late failure');
+  assert.doesNotMatch(renderBotInvocation(invocation), /bot-inline-form|Late failure/);
+  store.receivePrompt(prompt('invoke-one', 'step-two'));
+  assert.match(renderBotInvocation(invocation), /data-interaction-id="step-two"/);
+  assert.doesNotMatch(renderBotInvocation(invocation), /data-interaction-id="step-one"/);
+});
+
+test('private selectors render escaped immediate buttons or a dropdown with confirmation', () => {
+  const store = invocationStore();
+  const selector: BotForm = {
+    title: 'Choose',
+    fields: [{
+      name: 'choice', label: 'Your choice', type: 'select', required: true, presentation: 'buttons',
+      choices: [{ label: '<First>', value: '"first"' }, { label: 'Second', value: 'second' }],
+    }],
+  };
+  store.receivePrompt({ ...prompt(), form: selector });
+  const invocation = store.getInvocation('invoke-one');
+  assert.ok(invocation);
+  const buttons = renderBotInvocation(invocation);
+  assert.match(buttons, /data-bot-select-value="&quot;first&quot;"/);
+  assert.match(buttons, /&lt;First&gt;/);
+  assert.doesNotMatch(buttons, /type="submit"/);
+  assert.match(renderBotInvocation(invocation, false), /data-bot-select-value="second" disabled/);
+  store.receivePrompt({
+    ...prompt('invoke-one', 'step-two'),
+    form: { ...selector, fields: [{
+      name: 'choice', label: 'Your choice', type: 'select', required: true,
+      choices: [{ label: 'First', value: 'first' }], presentation: 'dropdown',
+    }] },
+  });
+  const dropdown = renderBotInvocation(invocation);
+  assert.match(dropdown, /<select /);
+  assert.match(dropdown, /type="submit"/);
+});
+
 test('finish, expiry, disconnect, revoked bots and channel access loss disable forms', () => {
   for (const action of ['finish', 'expiry', 'disconnect', 'revoke', 'channel'] as const) {
     const store = invocationStore();
@@ -464,6 +536,40 @@ test('bot response identity and private rows survive history without duplicates 
   assert.equal(bot.isEphemeral, true);
   assert.equal(bot.createdAt, 100);
   assert.equal(store.getMessages('channel-one').length, 2);
+});
+
+test('persisted replies reconcile invocation state before live duplicates, including consumed forms', () => {
+  for (const withForm of [false, true]) {
+    for (const historyFirst of [false, true]) {
+      const store = invocationStore();
+      const invocation = store.getInvocation('invoke-one');
+      assert.ok(invocation);
+      if (withForm) {
+        store.receivePrompt(prompt());
+        store.acknowledgeForm({ invocationId: 'invoke-one', interactionId: 'step-one', values: {} });
+      }
+      const response = {
+        id: 'persisted-result', channelId: 'channel-one', userId: pollCommand.botId,
+        userNickname: pollCommand.botName, content: 'Public result', createdAt: 100, isBot: true,
+        botCommand: { invocationId: 'invoke-one', commandName: pollCommand.name, invokerId: 'caller', invokerNickname: 'Caller' },
+      };
+      let updates = 0;
+      const detach = store.bus.on('chat.bot_interaction_updated', () => updates++);
+      if (historyFirst) store.setHistory('channel-one', [response]);
+      store.finishInvocation({ invocationId: 'invoke-one', channelId: 'channel-one', reason: 'completed' });
+      if (!historyFirst) {
+        assert.notEqual(renderBotInvocation(invocation), '');
+        const beforeResponse = updates;
+        store.setHistory('channel-one', [response]);
+        assert.equal(updates, beforeResponse + 1, 'A late history response must refresh the completed card');
+      }
+      store.addMessage(response);
+      assert.equal(invocation.hasResponse, true);
+      assert.equal(store.getMessages('channel-one').length, 1);
+      assert.equal(renderBotInvocation(invocation), '');
+      detach();
+    }
+  }
 });
 
 test('retained messages, completed invocations and multi-round form cards stay bounded', () => {

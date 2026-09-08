@@ -67,6 +67,7 @@ export const channelAllowedRoleIdsSchema = z
   .transform((ids) => Array.from(new Set(ids)));
 
 export const channelCreateSchema = z.object({
+  botCommandsEnabled: z.boolean().optional().default(true),
   name: channelNameSchema,
   type: z.enum(['VOICE', 'TEXT']),
   maxParticipants: z.number().int().min(1).max(50).optional().default(LIMITS.MAX_PARTICIPANTS_PER_CHANNEL_DEFAULT),
@@ -77,6 +78,7 @@ export const channelCreateSchema = z.object({
 // Editing a channel (#384). Only the fields present are changed, so `name` and
 // `isPrivate` are optional here even though they are required on creation.
 export const channelUpdateSchema = z.object({
+  botCommandsEnabled: z.boolean().optional(),
   channelId: z.string().min(1, 'Canal inválido'),
   name: channelNameSchema.optional(),
   maxParticipants: z.number().int().min(1).max(50).optional(),
