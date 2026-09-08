@@ -11,6 +11,7 @@ const char* platform_get_last_error();
 int platform_get_status();
 Napi::Value platform_list_windows(Napi::Env env);
 bool platform_restore_window(int64_t hwnd);
+Napi::Value GetKeyboardLayoutSnapshot(const Napi::CallbackInfo& info);
 #elif defined(__MACOS__)
 bool platform_is_supported();
 bool platform_start(uint32_t targetPid, uint32_t loopbackMode, int64_t includeWindowId,
@@ -182,6 +183,9 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("listWindowOwners", Napi::Function::New(env, ListWindowOwners));
   exports.Set("listWindows", Napi::Function::New(env, ListWindows));
   exports.Set("restoreWindow", Napi::Function::New(env, RestoreWindow));
+#if defined(_WIN32)
+  exports.Set("getKeyboardLayout", Napi::Function::New(env, GetKeyboardLayoutSnapshot));
+#endif
   return exports;
 }
 

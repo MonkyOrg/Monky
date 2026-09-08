@@ -84,6 +84,16 @@ export class SessionManager {
     return Array.from(this.sessions.values());
   }
 
+  public setAppearOffline(appearOffline: boolean): void {
+    for (const session of this.sessions.values()) {
+      const user = session.serverStore.currentUser;
+      if (user) session.serverStore.updateCurrentUser({ ...user, invisible: appearOffline });
+      if (session.client.getStatus() === 'CONNECTED') {
+        session.client.send(MessageType.USER_UPDATE_VISIBILITY, { appearOffline });
+      }
+    }
+  }
+
   public has(key: string): boolean {
     return this.sessions.has(key);
   }

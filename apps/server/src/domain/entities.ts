@@ -24,6 +24,8 @@ export interface ServerRecord {
   maxAttachmentStorageBytes?: number | null;
   /** Whether the built-in TURN relay should run alongside the server (#425). */
   turnEnabled?: boolean;
+  /** Maximum number of bots allowed on this server (#569). */
+  maxBots?: number;
   /**
    * Shared secret backing TURN's REST-API credentials (#425).
    *
@@ -44,6 +46,7 @@ export interface UserRecord {
 }
 
 export interface ChannelRecord {
+  botCommandsEnabled: boolean;
   id: string;
   serverId: string;
   name: string;
@@ -58,6 +61,10 @@ export interface ChannelRecord {
 }
 
 export interface MessageRecord {
+  replyToMessageId?: string;
+  /** The owner backs the existing user FK; readers expose the bot's real ID. */
+  botAuthor?: { id: string; name: string; avatarPath: string | null; ownerUserId: string };
+  botCommand?: import('@monky/shared').BotCommandContext;
   id: string;
   channelId: string;
   userId: string;
@@ -76,6 +83,13 @@ export interface MentionRecord {
   channelId: string;
   messageId: string;
   createdAt: number;
+}
+
+export interface MessageReactionRecord {
+  messageId: string;
+  userId: string;
+  userNickname: string;
+  emoji: string;
 }
 
 // A file attached to a chat message (#11). `messageId` is null while the upload
@@ -111,4 +125,19 @@ export interface RoleRecord {
 export interface UserRoleRecord {
   userId: string;
   roleId: string;
+}
+
+/** A bot account registered on the server (#569). */
+export interface BotRecord {
+  id: string;
+  /** Human-readable name shown in the member list. */
+  name: string;
+  /** Token hash (bcrypt or sha256-hex); the plain token is never stored. */
+  tokenHash: string;
+  avatarPath: string | null;
+  /** The public key bound on first connection (TOFU). Null until bound. */
+  boundPublicKey: string | null;
+  /** The user who created this bot. */
+  createdByUserId: string;
+  createdAt: number;
 }

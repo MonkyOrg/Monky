@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, ipcMain, screen, shell, systemPreferences } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, shell, systemPreferences } from 'electron';
 import { execFile } from 'child_process';
 import fs from 'fs';
 import http from 'http';
@@ -7,13 +7,14 @@ import net from 'net';
 import path from 'path';
 import { LanDiscovery } from './lanDiscovery';
 import { globalInputHook } from './globalInputHook';
+import { SHORTCUT_IPC } from '@monky/shared';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
 import { mt, setMainLanguage } from './i18n';
 import { fetchLinkPreview } from './linkPreview';
 import { TrayManager, VoiceStatus } from './trayManager';
-import type { DesktopSource, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState, PttConfig } from '@monky/shared';
+import type { DesktopSource, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
 import { OverlayManager } from './overlayManager';
 import {
   HOME_MIN_HEIGHT,
@@ -932,67 +933,46 @@ export function setupIpcHandlers(
     }
   });
 
-  let registeredSoundboardShortcuts: Array<{ soundName: string; accelerator: string }> = [];
-  let registeredActionShortcuts: Array<{ action: string; accelerator: string }> = [];
-
-  const syncAllGlobalShortcuts = (): boolean => {
-    try {
-      globalShortcut.unregisterAll();
-
-      for (const item of registeredSoundboardShortcuts) {
-        if (!item.accelerator || !item.soundName) continue;
-        try {
-          globalShortcut.register(item.accelerator, () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('soundboard:shortcut-triggered', item.soundName);
-            }
-          });
-        } catch (err) {
-          console.warn(`[main] Failed to register soundboard shortcut "${item.accelerator}" for "${item.soundName}":`, err);
-        }
-      }
-
-      for (const item of registeredActionShortcuts) {
-        if (!item.accelerator || !item.action) continue;
-        try {
-          globalShortcut.register(item.accelerator, () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('shortcut:action-triggered', item.action);
-            }
-          });
-        } catch (err) {
-          console.warn(`[main] Failed to register action shortcut "${item.accelerator}" for "${item.action}":`, err);
-        }
-      }
-      return true;
-    } catch (e) {
-      console.warn('[main] Error in syncAllGlobalShortcuts:', e);
-      return false;
-    }
-  };
-
-  // Soundboard Global Shortcuts Registration
-  ipcMain.handle('soundboard:register-shortcuts', (_, shortcuts: Array<{ soundName: string; accelerator: string }>) => {
-    registeredSoundboardShortcuts = Array.isArray(shortcuts) ? shortcuts : [];
-    return syncAllGlobalShortcuts();
+  // Global shortcuts for the soundboard and actions (mute/deafen/camera/etc.)
+  // are matched through the passive uiohook listener (globalInputHook) instead
+  // of Electron globalShortcut. globalShortcut.register() consumes the key on
+  // Windows, so a single-key bind like "Q" was swallowed and never reached the
+  // focused game (#571). uiohook only observes input, so the key passes through.
+  ipcMain.handle(SHORTCUT_IPC.registerSoundboard, (_, shortcuts: unknown) => {
+    return globalInputHook.setSoundboardHotkeys(shortcuts);
   });
 
   // Action Global Shortcuts Registration (#252)
-  ipcMain.handle('shortcuts:register-actions', (_, shortcuts: Array<{ action: string; accelerator: string }>) => {
-    registeredActionShortcuts = Array.isArray(shortcuts) ? shortcuts : [];
-    return syncAllGlobalShortcuts();
+  ipcMain.handle(SHORTCUT_IPC.registerActions, (_, shortcuts: unknown) => {
+    return globalInputHook.setActionHotkeys(shortcuts);
+  });
+
+  ipcMain.handle(SHORTCUT_IPC.setCapture, (_, active: unknown) => {
+    return globalInputHook.setShortcutCapture(active);
+  });
+
+  mainWindow.webContents.on('did-start-loading', () => {
+    globalInputHook.stopCapture();
+    globalInputHook.setShortcutCapture(false);
+  });
+  mainWindow.webContents.on('render-process-gone', () => {
+    globalInputHook.stopCapture();
+    globalInputHook.setShortcutCapture(false);
+    globalInputHook.setPttConfig({ enabled: false, key: null });
+    globalInputHook.setActionHotkeys([]);
+    globalInputHook.setSoundboardHotkeys([]);
   });
 
   // Push to Talk (PTT) (#186)
-  ipcMain.handle('ptt:set-config', (_, config: PttConfig) => {
+  ipcMain.handle(SHORTCUT_IPC.setPttConfig, (_, config: unknown) => {
     return globalInputHook.setPttConfig(config);
   });
 
-  ipcMain.handle('ptt:start-capture', () => {
+  ipcMain.handle(SHORTCUT_IPC.startPttCapture, () => {
     return globalInputHook.startCapture();
   });
 
-  ipcMain.handle('ptt:stop-capture', () => {
+  ipcMain.handle(SHORTCUT_IPC.stopPttCapture, () => {
     return globalInputHook.stopCapture();
   });
 

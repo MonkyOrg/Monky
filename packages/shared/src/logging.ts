@@ -15,7 +15,8 @@ export type LogCategory =
   | 'WEBRTC'
   | 'SFU'
   | 'SOUNDBOARD'
-  | 'ATTACHMENT';
+  | 'ATTACHMENT'
+  | 'BOT';
 
 /** Categories used by the desktop client's logging system (#444). */
 export type ClientLogCategory =

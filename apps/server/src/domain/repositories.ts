@@ -1,4 +1,16 @@
-import { AttachmentRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from './entities';
+import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from './entities';
+import type { BotSelector } from '@monky/shared';
+
+export interface IBotSelectorRepository {
+  findById(id: string): BotSelector | undefined;
+  list(botId?: string, channelId?: string): BotSelector[];
+  listExpired(now: number): BotSelector[];
+  countOpen(botId: string): number;
+  create(selector: BotSelector): void;
+  save(selector: BotSelector): void;
+  /** Vote and closing-condition updates must commit together without yielding. */
+  transaction<T>(operation: () => T): T;
+}
 
 export interface IServerRepository {
   getServer(): Promise<ServerRecord | null>;
@@ -31,6 +43,9 @@ export interface IChannelRepository {
 }
 
 export interface IMessageRepository {
+  createBotMessage(message: MessageRecord): Promise<MessageRecord | null>;
+  setReaction(messageId: string, userId: string, emoji: string, add: boolean): Promise<'changed' | 'unchanged' | 'limit' | 'invalid'>;
+  listReactions(messageIds: string[]): Promise<import('./entities').MessageReactionRecord[]>;
   create(message: MessageRecord): Promise<void>;
   findById(messageId: string): Promise<MessageRecord | null>;
   listByChannel(channelId: string, limit: number, beforeTimestamp?: number): Promise<MessageRecord[]>;
@@ -83,4 +98,15 @@ export interface IRoleRepository {
   assignRole(userId: string, roleId: string): Promise<void>;
   unassignRole(userId: string, roleId: string): Promise<void>;
   hasRole(userId: string, roleId: string): Promise<boolean>;
+}
+
+export interface IBotRepository {
+  create(bot: BotRecord): Promise<void>;
+  findById(id: string): Promise<BotRecord | null>;
+  findByTokenHash(tokenHash: string): Promise<BotRecord | null>;
+  listAll(): Promise<BotRecord[]>;
+  /** Update selected fields (e.g. binding the public key on TOFU). */
+  update(id: string, updates: Partial<BotRecord>): Promise<void>;
+  delete(id: string): Promise<void>;
+  count(): Promise<number>;
 }

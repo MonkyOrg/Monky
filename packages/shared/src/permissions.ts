@@ -12,6 +12,8 @@ export enum Permission {
   ATTACH_FILES = 1 << 10,
   ADMINISTRATOR = 1 << 11,
   USE_SOUNDBOARD = 1 << 12,
+  MANAGE_BOTS = 1 << 13,
+  USE_BOT_COMMANDS = 1 << 14,
 }
 
 export const DEFAULT_PERMISSIONS =
@@ -19,7 +21,8 @@ export const DEFAULT_PERMISSIONS =
   Permission.SEND_MESSAGES |
   Permission.READ_MESSAGES |
   Permission.ATTACH_FILES |
-  Permission.USE_SOUNDBOARD;
+  Permission.USE_SOUNDBOARD |
+  Permission.USE_BOT_COMMANDS;
 
 export const ADMIN_PERMISSIONS = 0xFFFFFFFF;
 

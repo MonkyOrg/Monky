@@ -20,6 +20,10 @@ Each text channel has history saved on the server, avatars, timestamps, basic fo
 
 A message you started but haven't sent stays with the channel you were typing in. Jumping to the voice stage, opening another channel and coming back does not wipe the text — each channel keeps its own draft, which only goes away when you send the message or leave the server.
 
+Hover over a message (or reach its buttons with `Tab`) to reveal a floating toolbar with **Emoji**, **Reply**, **Copy message** and **More options**. The three-dot menu displays full action names; **Edit message** is only available to the author when the server permits editing, and **Delete message** to the author or moderators. Navigate menus with arrow keys and close them with `Escape`.
+
+**Reply** keeps a reference to the original message with its author and preview. Replies support text, attachments, code and stickers; public bot messages can also receive replies. Cancel with the `×` in the composer or `Escape`. The reference stays with the channel draft. Clicking the preview jumps to the original, loading a history window if needed; **Back to latest messages** returns to recent conversation. Previews reflect edits and show **Message deleted** when the original is deleted, without retaining its content. Private bot messages cannot be referenced.
+
 ## Mentions
 
 Typing `@` in the message box opens the member list: pick someone to insert `@nickname`. Whoever is mentioned gets the highlight on the message, the channel badge and the mention sound.
@@ -40,7 +44,9 @@ You can also type it straight into the message field: wrapping the snippet in th
 
 ## Emojis and stickers
 
-The smiley button next to the message field opens a picker with two tabs.
+The smiley button next to the message field opens a picker with **Emojis** and **Stickers** tabs. In the emoji category bar at the bottom, the clock icon takes you to **Recent**.
+
+The **Recent** clock also appears in the reaction picker's category bar. Both share the last 32 distinct emojis selected on this device, newest first, even after restarting the app. Navigating categories or searching does not change the list; selecting an emoji again moves it to the front. Stickers are not included.
 
 **Emojis** holds the full catalog, split by category and searchable (try `heart`, `party`, `cake`…). Clicking an emoji inserts it at the cursor, so you can mix emoji and text in the same message.
 

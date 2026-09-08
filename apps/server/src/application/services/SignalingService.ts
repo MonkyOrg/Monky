@@ -57,6 +57,13 @@ export class SignalingService {
     const resolvedMuted = initialMuted !== undefined ? initialMuted : (previousState?.isMuted ?? false);
     const resolvedDeafened = initialDeafened !== undefined ? initialDeafened : (previousState?.isDeafened ?? false);
 
+    // Changing channels ends any screen share (#565): a share belongs to the
+    // room it started in, so carrying it over would leave the destination
+    // showing the user as "sharing" with no video, while the old room's
+    // producers are torn down. Reconnecting into the *same* channel (grace
+    // period) is not a change and keeps the share alive.
+    const isChannelChange = previousState !== undefined && previousState.channelId !== channelId;
+
     const newState: VoiceParticipantState = {
       sessionId,
       userId,
@@ -67,9 +74,9 @@ export class SignalingService {
       serverDeafened: previousState?.serverDeafened ?? false,
       isSpeaking: false,
       isCameraOn: previousState?.isCameraOn ?? false,
-      isScreenSharing: previousState?.isScreenSharing ?? false,
-      isSharingScreenAudio: previousState?.isSharingScreenAudio ?? false,
-      screenShareIds: previousState?.screenShareIds ?? [],
+      isScreenSharing: isChannelChange ? false : (previousState?.isScreenSharing ?? false),
+      isSharingScreenAudio: isChannelChange ? false : (previousState?.isSharingScreenAudio ?? false),
+      screenShareIds: isChannelChange ? [] : (previousState?.screenShareIds ?? []),
     };
 
     this.voiceStates.set(sessionId, newState);

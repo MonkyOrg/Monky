@@ -1,4 +1,4 @@
-import { UserSummary, VoiceParticipantState } from '@monky/shared';
+import { UserSummary, VoiceParticipantState, VoiceRosterParticipant } from '@monky/shared';
 import { appEvents, EventBus } from './EventBus';
 import { createActiveProxy } from './activeProxy';
 
@@ -148,6 +148,20 @@ export class ParticipantManager {
       participant.voiceState = voiceState;
       participant.isSpeaking = voiceState.isSpeaking;
       this.scheduleUpdate();
+    }
+  }
+
+  public reconcileVoiceChannel(channelId: string, roster: VoiceRosterParticipant[]): void {
+    const present = new Set(roster.map((p) => p.voiceState.sessionId));
+    for (const p of this.getInVoiceChannel(channelId)) {
+      if (p.voiceState && !present.has(p.voiceState.sessionId)) {
+        this.removeVoiceState(p.voiceState.sessionId);
+      }
+    }
+    for (const { user, voiceState } of roster) {
+      if (voiceState.channelId !== channelId) continue;
+      this.addUser(user);
+      this.updateVoiceState(voiceState);
     }
   }
 

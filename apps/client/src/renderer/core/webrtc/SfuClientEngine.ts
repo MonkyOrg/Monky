@@ -2,6 +2,11 @@ import * as mediasoupClient from 'mediasoup-client';
 import type { types as mediasoupTypes } from 'mediasoup-client';
 import {
   MessageType,
+  aggregateTransportHealth,
+  VoiceConnectionHealth,
+  VoiceRosterParticipant,
+  QualityPresetType,
+  QualityProfile,
   SfuConnectWebRtcTransportPayload,
   SfuConsumePayload,
   SfuConsumedPayload,
@@ -34,6 +39,8 @@ export interface SfuConsumerTrackEvent {
 }
 
 export interface SfuClientEngineCallbacks {
+  onHealthChanged: (health: VoiceConnectionHealth) => void;
+  onRoster: (channelId: string, participants: VoiceRosterParticipant[]) => void;
   onConsumerTrack: (event: SfuConsumerTrackEvent) => void;
   onConsumerClosed: (producerSessionId: string, mediaType: string, shareId?: string) => void;
   /**
@@ -53,11 +60,17 @@ export class SfuClientEngine {
   private recvTransport: mediasoupTypes.Transport | null = null;
   private channelId: string | null = null;
   private producers: Map<string, mediasoupTypes.Producer> = new Map();
+  // Last quality profile pushed from WebRtcManager. Applied to every producer's
+  // RTP sender so SFU media honors the same bitrate/degradation caps as the P2P
+  // path (#568). Null until the first apply.
+  private qualityPreset: QualityPresetType = 'NORMAL';
+  private qualityProfile: QualityProfile | null = null;
   private consumers: Map<string, mediasoupTypes.Consumer> = new Map();
+  private pendingConsumers = new Map<string, object>();
   /** Consumer tracking metadata: producerId -> { producerSessionId, mediaType, shareId, consumerId } */
   private consumerMeta: Map<string, { producerSessionId: string; mediaType: string; shareId?: string; consumerId: string }> = new Map();
   private isConnecting: boolean = false;
-  private isConnected: boolean = false;
+  private isInitialized: boolean = false;
   /**
    * Last reported state of each transport.
    *
@@ -70,6 +83,9 @@ export class SfuClientEngine {
   private sendTransportState: string = 'new';
   private recvTransportState: string = 'new';
   private unsubscribeEvents: Array<() => void> = [];
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private joinEpoch = 0;
+  private consumerSetupFailed = false;
 
   constructor(
     getClient: () => NetworkClient,
@@ -86,8 +102,10 @@ export class SfuClientEngine {
 
   public async join(channelId: string): Promise<boolean> {
     this.leave();
+    const epoch = this.joinEpoch;
     this.channelId = channelId;
     this.isConnecting = true;
+    this.callbacks.onHealthChanged('connecting');
 
     try {
       console.log(`[SFU Client] Joining SFU room for channel ${channelId}...`);
@@ -100,6 +118,7 @@ export class SfuClientEngine {
         undefined,
         10000
       );
+      if (epoch !== this.joinEpoch) return false;
 
       if (!routerCapsResp || !routerCapsResp.rtpCapabilities) {
         throw new Error('Falha ao obter capacidades RTP do servidor SFU');
@@ -110,6 +129,7 @@ export class SfuClientEngine {
       // 2. Load device
       this.device = new mediasoupClient.Device();
       await this.device.load({ routerRtpCapabilities: routerCapsResp.rtpCapabilities as any });
+      if (epoch !== this.joinEpoch) return false;
       console.log(`[SFU Client] Mediasoup Device loaded! Can produce audio: ${this.canProduceKind('audio')}, video: ${this.canProduceKind('video')}`);
 
       // 3. Create send transport
@@ -120,12 +140,14 @@ export class SfuClientEngine {
         undefined,
         10000
       );
+      if (epoch !== this.joinEpoch) return false;
 
       console.log(`[SFU Client] Send transport created on server (${sendCreated.transportOptions?.id}). ICE candidates:`, sendCreated.transportOptions?.iceCandidates?.map((c: any) => `${c.protocol?.toUpperCase()} ${c.ip || c.address}:${c.port}`));
 
       this.sendTransport = this.device.createSendTransport(sendCreated.transportOptions as any);
 
       this.sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
+        if (epoch !== this.joinEpoch) { errback(new Error('SFU connection was abandoned')); return; }
         console.log(`[SFU Client] Send transport on('connect') DTLS triggered (role: ${dtlsParameters.role})`);
         this.client
           .sendRequest(
@@ -150,6 +172,7 @@ export class SfuClientEngine {
       });
 
       this.sendTransport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
+        if (epoch !== this.joinEpoch) { errback(new Error('SFU connection was abandoned')); return; }
         console.log(`[SFU Client] Send transport on('produce') triggered: kind=${kind}, type=${appData?.mediaType}`);
         this.client
           .sendRequest<SfuProducedPayload>(
@@ -176,14 +199,10 @@ export class SfuClientEngine {
       });
 
       this.sendTransport.on('connectionstatechange', (state) => {
+        if (epoch !== this.joinEpoch) return;
         console.log(`[SFU Client] Send transport connectionState changed: ${state}`);
         clientLog.info('SFU', `Send transport state: ${state}`);
         this.sendTransportState = state;
-        if (state === 'failed') {
-          clientLog.warn('SFU', 'Send transport failed, requesting reconnect');
-          this.callbacks.onConnectionFailed('SFU send transport connection failed');
-          return;
-        }
         this.notifyIfHealthy();
       });
 
@@ -195,12 +214,14 @@ export class SfuClientEngine {
         undefined,
         10000
       );
+      if (epoch !== this.joinEpoch) return false;
 
       console.log(`[SFU Client] Recv transport created on server (${recvCreated.transportOptions?.id}). ICE candidates:`, recvCreated.transportOptions?.iceCandidates?.map((c: any) => `${c.protocol?.toUpperCase()} ${c.ip || c.address}:${c.port}`));
 
       this.recvTransport = this.device.createRecvTransport(recvCreated.transportOptions as any);
 
       this.recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
+        if (epoch !== this.joinEpoch) { errback(new Error('SFU connection was abandoned')); return; }
         console.log(`[SFU Client] Recv transport on('connect') DTLS triggered (role: ${dtlsParameters.role})`);
         this.client
           .sendRequest(
@@ -225,14 +246,10 @@ export class SfuClientEngine {
       });
 
       this.recvTransport.on('connectionstatechange', (state) => {
+        if (epoch !== this.joinEpoch) return;
         console.log(`[SFU Client] Recv transport connectionState changed: ${state}`);
         clientLog.info('SFU', `Recv transport state: ${state}`);
         this.recvTransportState = state;
-        if (state === 'failed') {
-          clientLog.warn('SFU', 'Recv transport failed, requesting reconnect');
-          this.callbacks.onConnectionFailed('SFU recv transport connection failed');
-          return;
-        }
         this.notifyIfHealthy();
       });
 
@@ -248,6 +265,8 @@ export class SfuClientEngine {
           undefined,
           8000
         );
+        if (epoch !== this.joinEpoch) return false;
+        this.callbacks.onRoster(channelId, producersResp.participants);
 
         if (producersResp && Array.isArray(producersResp.producers)) {
           console.log(`[SFU Client] Found ${producersResp.producers.length} existing producers in channel:`, producersResp.producers);
@@ -258,14 +277,17 @@ export class SfuClientEngine {
       } catch (err: any) {
         console.warn('[SFU Client] Failed to fetch existing producers in channel:', err);
         clientLog.warn('SFU', 'Failed to fetch existing producers in channel', { error: err?.message });
+        throw err;
       }
+      if (epoch !== this.joinEpoch) return false;
 
-      this.isConnected = true;
+      this.isInitialized = true;
       this.isConnecting = false;
       console.log(`[SFU Client] Successfully joined and initialized SFU for channel ${channelId}`);
       clientLog.info('SFU', `Successfully connected to SFU channel ${channelId}`);
       return true;
     } catch (err: any) {
+      if (epoch !== this.joinEpoch) return false;
       console.error('[SFU Client] Error joining SFU channel:', err);
       clientLog.error('SFU', 'Error joining SFU channel', { error: err?.message });
       this.leave();
@@ -328,6 +350,20 @@ export class SfuClientEngine {
     return best;
   }
 
+  private async produceTrack(options: mediasoupTypes.ProducerOptions): Promise<mediasoupTypes.Producer> {
+    const transport = this.sendTransport;
+    const epoch = this.joinEpoch;
+    if (!transport) throw new Error('SFU transport is unavailable');
+    // Capture services own these tracks. A transport rebuild must not stop the
+    // microphone/camera/share that the replacement is about to publish.
+    const producer = await transport.produce({ ...options, stopTracks: false });
+    if (epoch !== this.joinEpoch) {
+      producer.close();
+      throw new Error('SFU producer belongs to an abandoned connection');
+    }
+    return producer;
+  }
+
   public async produceMic(track: MediaStreamTrack): Promise<mediasoupTypes.Producer | null> {
     if (!this.sendTransport || !this.canProduceKind('audio')) {
       console.warn(`[SFU Client] Cannot produce mic: sendTransport=${!!this.sendTransport}, canProduceAudio=${this.canProduceKind('audio')}`);
@@ -336,7 +372,7 @@ export class SfuClientEngine {
     try {
       this.closeProducer('mic');
       console.log(`[SFU Client] Producing microphone track ${track.id} (enabled=${track.enabled}, readyState=${track.readyState})...`);
-      const producer = await this.sendTransport.produce({
+      const producer = await this.produceTrack({
         track,
         appData: { mediaType: 'mic' },
         codecOptions: {
@@ -344,6 +380,7 @@ export class SfuClientEngine {
         },
       });
       this.producers.set('mic', producer);
+      await this.applyProducerQuality('mic', producer);
       producer.on('transportclose', () => {
         console.log(`[SFU Client] Mic producer transport closed`);
         this.producers.delete('mic');
@@ -366,12 +403,13 @@ export class SfuClientEngine {
     try {
       this.closeProducer('camera');
       console.log(`[SFU Client] Producing camera track ${track.id}...`);
-      const producer = await this.sendTransport.produce({
+      const producer = await this.produceTrack({
         track,
         codec: this.pickVideoCodec(),
         appData: { mediaType: 'camera' },
       });
       this.producers.set('camera', producer);
+      await this.applyProducerQuality('camera', producer);
       producer.on('transportclose', () => {
         this.producers.delete('camera');
       });
@@ -390,17 +428,26 @@ export class SfuClientEngine {
     const key = `screen_video:${shareId}`;
     try {
       this.closeProducer(key);
-      const producer = await this.sendTransport.produce({
+      const chosenCodec = this.pickVideoCodec();
+      const producer = await this.produceTrack({
         track,
-        codec: this.pickVideoCodec(),
+        codec: chosenCodec,
         appData: { mediaType: 'screen_video', shareId },
       });
       this.producers.set(key, producer);
+      await this.applyProducerQuality(key, producer);
       producer.on('transportclose', () => {
         this.producers.delete(key);
       });
       console.log(`[SFU Client] Produced screen video track ${track.id} shareId ${shareId} with producerId ${producer.id}`);
-      clientLog.info('SFU', `Produced screen video track ${track.id} shareId ${shareId} with producerId ${producer.id}`);
+      // #566 diagnostics: capture the codec chosen for the SFU screen producer
+      // so the SFU side of a SFU -> P2P transition can be compared with the
+      // P2P offer codec order.
+      clientLog.info('SFU', `Produced screen video track ${track.id} shareId ${shareId} with producerId ${producer.id}`, {
+        preferred: settingsStore?.preferredVideoCodec ?? 'auto',
+        qualityPreset: settingsStore?.qualityPreset,
+        chosenCodec: chosenCodec?.mimeType ?? '(mediasoup default)',
+      });
       return producer;
     } catch (err: any) {
       console.error('[SFU Client] Failed to produce screen video track:', err);
@@ -414,7 +461,7 @@ export class SfuClientEngine {
     const key = `screen_audio:${shareId}`;
     try {
       this.closeProducer(key);
-      const producer = await this.sendTransport.produce({
+      const producer = await this.produceTrack({
         track,
         appData: { mediaType: 'screen_audio', shareId },
         codecOptions: {
@@ -422,6 +469,7 @@ export class SfuClientEngine {
         },
       });
       this.producers.set(key, producer);
+      await this.applyProducerQuality(key, producer);
       producer.on('transportclose', () => {
         this.producers.delete(key);
       });
@@ -432,6 +480,52 @@ export class SfuClientEngine {
       console.error('[SFU Client] Failed to produce screen audio track:', err);
       clientLog.error('SFU', 'Failed to produce screen audio track', { error: err?.message });
       return null;
+    }
+  }
+
+  /**
+   * Apply the active quality profile to every live producer. SFU producers are
+   * created with mediasoup/browser defaults (no bitrate cap, default
+   * degradation preference), so under heavy motion the encoder trades away
+   * resolution to hold framerate — the resolution collapse seen when streaming
+   * a game over SFU (#568). This mirrors WebRtcManager.applyBitrateConstraints
+   * (the P2P path) by writing maxBitrate/maxFramerate/degradationPreference
+   * straight onto each RTP sender.
+   */
+  public async applyQualityParams(preset: QualityPresetType, profile: QualityProfile): Promise<void> {
+    this.qualityPreset = preset;
+    this.qualityProfile = profile;
+    for (const [key, producer] of this.producers.entries()) {
+      await this.applyProducerQuality(key, producer);
+    }
+  }
+
+  private async applyProducerQuality(key: string, producer: mediasoupTypes.Producer): Promise<void> {
+    const profile = this.qualityProfile;
+    if (!profile) return;
+    const sender: RTCRtpSender | undefined = (producer as any).rtpSender;
+    if (!sender) return;
+    try {
+      const params = sender.getParameters();
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+      const isAudio = key === 'mic' || key.startsWith('screen_audio');
+      if (isAudio) {
+        params.encodings[0].maxBitrate = profile.audioBitrateKbps * 1000;
+      } else {
+        const isScreen = key.startsWith('screen_video');
+        params.encodings[0].maxBitrate =
+          (isScreen ? profile.screenBitrateKbps : profile.cameraBitrateKbps) * 1000;
+        params.encodings[0].maxFramerate = isScreen ? profile.screenFps : profile.cameraFps;
+        // Gaming keeps motion fluid (drops resolution first); every other preset
+        // holds resolution, matching the P2P behavior exactly.
+        params.degradationPreference =
+          this.qualityPreset === 'GAMING' ? 'maintain-framerate' : 'maintain-resolution';
+      }
+      await sender.setParameters(params);
+    } catch (err: any) {
+      clientLog.warn('SFU', `Failed to apply quality params to producer ${key}`, { error: err?.message });
     }
   }
 
@@ -477,16 +571,21 @@ export class SfuClientEngine {
       return;
     }
 
-    if (this.consumers.has(producerId) || this.consumerMeta.has(producerId)) {
+    if (this.consumers.has(producerId) || this.pendingConsumers.has(producerId)) {
       console.log(`[SFU Client] Already consuming producer ${producerId}`);
       return;
     }
 
+    const epoch = this.joinEpoch;
+    const transport = this.recvTransport;
+    const pending = {};
+    this.pendingConsumers.set(producerId, pending);
+    const isCurrent = () => epoch === this.joinEpoch && this.pendingConsumers.get(producerId) === pending;
     try {
       console.log(`[SFU Client] Consuming remote producer ${producerId} (${kind}, mediaType: ${appData?.mediaType}) from session ${producerSessionId}...`);
       clientLog.info('SFU', `Consuming producer ${producerId} (${kind}) from session ${producerSessionId}`);
 
-      const consumed = await this.client.sendRequest<SfuConsumedPayload>(
+      const consumed = await this.client.sendRequest<SfuConsumedPayload | SfuProducerClosedPayload>(
         MessageType.SFU_CONSUME,
         {
           channelId: this.channelId,
@@ -497,14 +596,23 @@ export class SfuClientEngine {
         undefined,
         8000
       );
+      if (!isCurrent()) return;
+      if (!('id' in consumed)) {
+        this.handleRemoteProducerClosed(producerId);
+        return;
+      }
 
-      const consumer = await this.recvTransport.consume({
+      const consumer = await transport.consume({
         id: consumed.id,
         producerId: consumed.producerId,
         kind: consumed.kind as any,
         rtpParameters: consumed.rtpParameters as any,
         appData: consumed.appData || {},
       });
+      if (!isCurrent()) {
+        consumer.close();
+        return;
+      }
 
       console.log(`[SFU Client] Consumed producer ${producerId} successfully! Consumer track: (id=${consumer.track.id}, kind=${consumer.track.kind}, enabled=${consumer.track.enabled}, readyState=${consumer.track.readyState}, muted=${consumer.track.muted})`);
 
@@ -517,11 +625,13 @@ export class SfuClientEngine {
       });
 
       consumer.on('trackended', () => {
+        if (epoch !== this.joinEpoch) return;
         console.log(`[SFU Client] Consumer track ended for producer ${producerId}`);
         this.handleRemoteProducerClosed(producerId);
       });
 
       consumer.on('transportclose', () => {
+        if (epoch !== this.joinEpoch) return;
         console.log(`[SFU Client] Consumer transport closed for producer ${producerId}`);
         this.handleRemoteProducerClosed(producerId);
       });
@@ -541,10 +651,17 @@ export class SfuClientEngine {
     } catch (err: any) {
       console.error(`[SFU Client] Error consuming remote producer ${producerId}:`, err);
       clientLog.error('SFU', `Error consuming remote producer ${producerId}`, { error: err?.message });
+      if (isCurrent()) {
+        this.consumerSetupFailed = true;
+        this.notifyIfHealthy();
+      }
+    } finally {
+      if (this.pendingConsumers.get(producerId) === pending) this.pendingConsumers.delete(producerId);
     }
   }
 
   private handleRemoteProducerClosed(producerId: string): void {
+    this.pendingConsumers.delete(producerId);
     const consumer = this.consumers.get(producerId);
     const meta = this.consumerMeta.get(producerId);
     if (consumer) {
@@ -586,11 +703,11 @@ export class SfuClientEngine {
   }
 
   public isReady(): boolean {
-    return this.isConnected && !!this.sendTransport && !!this.recvTransport;
+    return this.isInitialized && !!this.sendTransport && !!this.recvTransport;
   }
 
   public isChannelConnected(): boolean {
-    return this.isConnected;
+    return !this.consumerSetupFailed && aggregateTransportHealth([this.sendTransportState, this.recvTransportState]) === 'connected';
   }
 
   public getCameraSender(): RTCRtpSender | null {
@@ -613,27 +730,31 @@ export class SfuClientEngine {
   }
 
   public async getPing(): Promise<number | null> {
-    const transport = this.sendTransport || this.recvTransport;
-    if (!transport) return null;
-    try {
-      const stats = await transport.getStats();
-      for (const report of stats.values()) {
-        if (report.type === 'candidate-pair' && (report.state === 'succeeded' || report.nominated)) {
-          if (typeof report.currentRoundTripTime === 'number') {
-            return Math.round(report.currentRoundTripTime * 1000);
-          }
-          if (typeof report.roundTripTime === 'number') {
-            return Math.round(report.roundTripTime * 1000);
+    const pings: number[] = [];
+    for (const transport of [this.sendTransport, this.recvTransport]) {
+      if (!transport || transport.connectionState !== 'connected') continue;
+      try {
+        const stats = await transport.getStats();
+        for (const report of stats.values()) {
+          if (report.type === 'candidate-pair' && (report.state === 'succeeded' || report.nominated)) {
+            const rtt = report.currentRoundTripTime ?? report.roundTripTime;
+            if (typeof rtt === 'number' && Number.isFinite(rtt) && rtt >= 0) {
+              pings.push(Math.round(rtt * 1000));
+              break;
+            }
           }
         }
+      } catch {
+        // A closing send transport must not hide a still-live receive RTT.
       }
-      return null;
-    } catch {
-      return null;
     }
+    return pings.length ? Math.max(...pings) : null;
   }
 
   public leave(): void {
+    this.joinEpoch++;
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
     for (const unsub of this.unsubscribeEvents) {
       unsub();
     }
@@ -646,12 +767,11 @@ export class SfuClientEngine {
     }
     this.producers.clear();
 
-    for (const consumer of this.consumers.values()) {
-      try {
-        consumer.close();
-      } catch {}
+    for (const producerId of this.consumers.keys()) {
+      this.handleRemoteProducerClosed(producerId);
     }
     this.consumers.clear();
+    this.pendingConsumers.clear();
     this.consumerMeta.clear();
 
     if (this.sendTransport) {
@@ -670,10 +790,11 @@ export class SfuClientEngine {
 
     this.device = null;
     this.channelId = null;
-    this.isConnected = false;
+    this.isInitialized = false;
     this.isConnecting = false;
     this.sendTransportState = 'new';
     this.recvTransportState = 'new';
+    this.consumerSetupFailed = false;
   }
 
   /**
@@ -691,8 +812,18 @@ export class SfuClientEngine {
    * stay pinned at its longest delay for the rest of the session.
    */
   private notifyIfHealthy(): void {
-    if (this.sendTransportState === 'failed' || this.recvTransportState === 'failed') return;
-    if (this.sendTransportState !== 'connected' && this.recvTransportState !== 'connected') return;
-    this.callbacks.onConnected();
+    const health = this.consumerSetupFailed ? 'failed' : aggregateTransportHealth([this.sendTransportState, this.recvTransportState]);
+    this.callbacks.onHealthChanged(health);
+    if (health === 'connected' || health === 'failed') {
+      if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+      if (health === 'connected') this.callbacks.onConnected();
+      else this.callbacks.onConnectionFailed('SFU transport failed');
+    } else if (!this.recoveryTimer) {
+      this.recoveryTimer = setTimeout(() => {
+        this.recoveryTimer = null;
+        this.callbacks.onConnectionFailed('SFU transport connection timed out');
+      }, health === 'reconnecting' ? 3000 : 15000);
+    }
   }
 }

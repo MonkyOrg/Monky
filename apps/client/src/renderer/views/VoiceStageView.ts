@@ -14,6 +14,7 @@ import { webRtcManager } from '../core/WebRtcManager';
 import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
+import { participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
 import { showAlert, showConfirm } from './Dialog';
 import { userContextMenu } from './UserContextMenu';
 import { setButtonLoading, isButtonLoading } from '../utils/buttonLoading';
@@ -567,7 +568,7 @@ export class VoiceStageView {
       if (this.getShareIds(p, false).length === 0) return;
       const audioEl = document.querySelector(`audio[data-screen-audio-session="${sidOf(p)}"]`) as HTMLAudioElement | null;
       if (!audioEl) return;
-      audioEl.muted = voiceStore.getEffectiveDeafened() || !this.isWatchingAnyShare(p) || this.mutedScreenSessionIds.has(sidOf(p));
+      webRtcManager.setScreenAudioMuted(sidOf(p), !this.isWatchingAnyShare(p) || this.mutedScreenSessionIds.has(sidOf(p)));
     });
 
     // Attach click listeners to cards for focus toggle & right-click for volume adjustment
@@ -911,9 +912,8 @@ export class VoiceStageView {
     const isSelfMuted = isLocal ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
     const isSelfDeafened = isLocal ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
     const isMicMuted = isSelfMuted || isServerMuted || isSelfDeafened || isServerDeafened;
-    const isPeerFailed = !isLocal && (p.peerConnectionFailed ?? false);
-    const isConnecting = !isLocal && !isPeerFailed && (p.isConnecting ?? false);
-    const isRelayed = !isLocal && !isPeerFailed && !isConnecting && (p.isRelayed ?? false);
+    const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
+    const { isPeerFailed, isConnecting, isRelayed } = participantConnectionIndicators(p, isSfu, isLocal);
     const avatarSrc = getAvatarUrl(p.user.avatarUrl);
 
     const isVideoTile = tile.kind === 'camera' || tile.kind === 'screen';
@@ -992,8 +992,8 @@ export class VoiceStageView {
 
       <div class="stage-badges-overlay">
         <span>${label}</span>
-        ${isPeerFailed ? `<span class="material-symbols-outlined md-14 stage-peer-failed-icon" title="${peerFailureTooltip('stage.peerConnectionFailed')}">link_off</span>` : ''}
-        ${isConnecting ? `<span class="material-symbols-outlined md-14 stage-peer-connecting-icon" title="${t('stage.peerConnecting')}">sync</span>` : ''}
+        ${isPeerFailed ? `<span class="material-symbols-outlined md-14 stage-peer-failed-icon" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('stage.peerConnectionFailed')}">link_off</span>` : ''}
+        ${isConnecting ? `<span class="material-symbols-outlined md-14 stage-peer-connecting-icon" title="${t(isSfu ? 'main.sfuConnecting' : 'stage.peerConnecting')}">sync</span>` : ''}
         ${isRelayed ? `<span class="material-symbols-outlined md-14" style="color: var(--warning, #f0b232);" title="${t('stage.peerRelayed')}">swap_horiz</span>` : ''}
         ${isServerDeafened ? `<span class="material-symbols-outlined md-14" style="color: #f0b232;" title="${t('permissions.serverDeafened')}">hearing_disabled</span>` : ''}
         ${isServerMuted ? `<span class="material-symbols-outlined md-14" style="color: #f0b232;" title="${t('permissions.serverMuted')}">admin_panel_settings</span>` : ''}
@@ -1402,15 +1402,23 @@ export class VoiceStageView {
       }
 
       const avgPing = await webRtcManager.getAverageP2pPing();
+      if (!pingBadge.isConnected) return;
+      const indicator = voiceConnectionIndicator(avgPing, voiceStore.isReconnecting);
+      if (voiceStore.isReconnecting) {
+        pingText.textContent = t('main.reconnecting');
+        pingBadge.className = 'stage-ping-badge medium';
+        if (tooltipContent) tooltipContent.textContent = t('main.reconnectingTitle');
+        return;
+      }
 
       if (avgPing !== null) {
         pingText.textContent = `${avgPing} ms`;
 
         let quality = t('stage.qualityExcellentShort');
-        if (avgPing < 50) {
+        if (indicator.quality === 'good') {
           pingBadge.className = 'stage-ping-badge good';
           quality = t('stage.qualityExcellent');
-        } else if (avgPing < 120) {
+        } else if (indicator.quality === 'medium') {
           pingBadge.className = 'stage-ping-badge medium';
           quality = t('stage.qualityGood');
         } else {
@@ -1421,14 +1429,14 @@ export class VoiceStageView {
         if (tooltipContent) {
           const tooltipKey = isSfu ? 'stage.tooltipPingSfu' : 'stage.tooltipPing';
           tooltipContent.innerHTML = `
-            ${t(tooltipKey as any, { ping: avgPing, quality })}
+            ${t(tooltipKey, { ping: avgPing, quality })}
           `;
         }
       } else {
         pingText.textContent = isSfu ? 'SFU' : 'P2P';
-        pingBadge.className = 'stage-ping-badge good';
+        pingBadge.className = 'stage-ping-badge unknown';
         if (tooltipContent) {
-          tooltipContent.innerHTML = isSfu ? t('stage.tooltipEstablishingSfu' as any) : t('stage.tooltipEstablishing');
+          tooltipContent.innerHTML = isSfu ? t('stage.tooltipEstablishingSfu') : t('stage.tooltipEstablishing');
         }
       }
     };
