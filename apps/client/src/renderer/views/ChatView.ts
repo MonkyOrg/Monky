@@ -1717,12 +1717,15 @@ export class ChatView {
       ? all.filter((command) => command.name.includes(query) || command.botName.toLocaleLowerCase(getLanguage()).includes(query))
       : all;
     const previous = query === this.commandQuery ? this.commandMatches[this.commandActiveIndex] : undefined;
+    const retained = previous && matches.find((command) => command.botId === previous.botId && command.name === previous.name);
+    const exact = matches.filter((command) => command.name === query);
+    const preferred = retained ?? (exact.length === 1 ? exact[0] : undefined);
     this.commandQuery = query;
     this.commandGroups = groupCommands(matches, chatStore.getCommandUsage(), getLanguage(), query.length === 0);
     this.commandMatches = this.commandGroups.flatMap((group) => group.commands);
     this.commandActive = true;
     this.commandActiveIndex = Math.max(0, this.commandMatches.findIndex((command) =>
-      previous !== undefined && command.botId === previous.botId && command.name === previous.name));
+      preferred !== undefined && command.botId === preferred.botId && command.name === preferred.name));
     this.renderCommandDropup();
   }
 

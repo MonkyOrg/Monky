@@ -135,6 +135,24 @@ async function runDomSmoke() {
   view.setChannel('one');
   await document.fonts.ready;
   await frame();
+  const exactPing = { ...ping, botId: 'zeta', botName: 'Zeta Bot' };
+  const botNameMatch = { ...ping, name: 'start', botId: 'ping-bot', botName: 'Ping Bot' };
+  refreshRegistry([exactPing, botNameMatch]);
+  for (const selectKey of ['Enter', 'Tab']) {
+    type(find('#chat-message-input'), '/ping');
+    key(find('#chat-message-input'), selectKey);
+    check(store.getCommandDraft('one')?.command.botId === exactPing.botId,
+      `${selectKey} must prefer a unique exact command over an unrelated bot-name match`);
+    find('[data-bot-action="cancel-command"]').click();
+  }
+  type(find('#chat-message-input'), '/ping');
+  key(find('#chat-message-input'), 'ArrowDown');
+  refreshRegistry([exactPing, botNameMatch]);
+  check(find('.command-row.active strong').textContent === '/start', 'Refresh must preserve deliberate keyboard navigation');
+  key(find('#chat-message-input'), 'Enter');
+  check(store.getCommandDraft('one')?.command.name === 'start', 'Explicit navigation must still select another matching command');
+  find('[data-bot-action="cancel-command"]').click();
+  refreshRegistry([command, duplicate, ping]);
   type(find('#chat-message-input'), '/');
   const normalInputHeight = find('#chat-message-input').clientHeight;
   refreshRegistry([command, duplicate, ping, ...Array.from({ length: 20 }, (_, index) => ({
