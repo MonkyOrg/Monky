@@ -163,13 +163,17 @@ async function runDomSmoke() {
   let copiedMessage = '';
   let copiedHtml = '';
   let finishCopy;
-  const readItem = async (items) => {
-    copiedMessage = await (await items[0].getType('text/plain')).text();
-    copiedHtml = await (await items[0].getType('text/html')).text();
+  let captured = Promise.resolve();
+  const readItem = (items) => {
+    captured = (async () => {
+      copiedMessage = await (await items[0].getType('text/plain')).text();
+      copiedHtml = await (await items[0].getType('text/html')).text();
+    })();
+    return captured;
   };
-  // Reading the blobs costs microtasks of its own, so a turn of the event loop
-  // is what guarantees the captured values have arrived.
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  // Reading a Blob is a task of its own, not a microtask, so the capture is
+  // awaited by hand before giving the view its turn to paint the feedback.
+  const settle = async () => { await captured; await new Promise((resolve) => setTimeout(resolve, 0)); };
   navigator.clipboard.write = (items) => new Promise((resolve) => { finishCopy = () => resolve(readItem(items)); });
   try {
     find('[data-message-action="copy"]').click();
