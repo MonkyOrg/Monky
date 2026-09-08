@@ -155,16 +155,29 @@ async function runDomSmoke() {
   key(document.activeElement, 'Escape');
   check(!document.querySelector('.floating-context-menu'), 'Escape must close message menu');
   check(document.activeElement.dataset.messageAction === 'more', 'Escape must return focus to toolbar');
+  // Copying now hands over both flavours (#516), so what is intercepted here is
+  // clipboard.write: the plain one stays the stored source text and the rich
+  // one carries the rendered markup.
+  const originalWrite = navigator.clipboard.write;
   const originalWriteText = navigator.clipboard.writeText;
   let copiedMessage = '';
+  let copiedHtml = '';
   let finishCopy;
-  navigator.clipboard.writeText = (value) => new Promise((resolve) => { copiedMessage = value; finishCopy = resolve; });
+  const readItem = async (items) => {
+    copiedMessage = await (await items[0].getType('text/plain')).text();
+    copiedHtml = await (await items[0].getType('text/html')).text();
+  };
+  // Reading the blobs costs microtasks of its own, so a turn of the event loop
+  // is what guarantees the captured values have arrived.
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  navigator.clipboard.write = (items) => new Promise((resolve) => { finishCopy = () => resolve(readItem(items)); });
   try {
     find('[data-message-action="copy"]').click();
     check(!document.querySelector('.copy-confirmed'), 'Copy must not report success before the clipboard write finishes');
     finishCopy();
-    await Promise.resolve();
+    await settle();
     check(copiedMessage === original.content, 'Copy message must preserve plain source text without markup');
+    check(copiedHtml.includes('&lt;safe&gt;') && !copiedHtml.includes('<safe>'), 'Copy message must also offer the rendered flavour, with the text escaped');
     check(find('.chat-message-copy-status').textContent === 'Copiado!', 'Copy success must display localized visible feedback');
     check(find('[data-message-action="copy"] .material-symbols-outlined').textContent === 'check', 'Copy success must change its icon');
     check(find('[data-message-action="copy"]').getAttribute('aria-label') === 'Copiado!', 'Copy success must have an accessible label');
@@ -173,13 +186,13 @@ async function runDomSmoke() {
     check(getComputedStyle(copyToolbar).opacity === '1', 'Copy feedback must stay visible without hovering or focusing the toolbar');
     await new Promise((resolve) => setTimeout(resolve, 850));
     language.setLanguage('en');
-    navigator.clipboard.writeText = async (value) => { copiedMessage = value; };
+    navigator.clipboard.write = async (items) => { await readItem(items); };
     find('[data-message-action="more"]').click();
     const menuCopy = [...document.querySelectorAll('.floating-context-menu [role="menuitem"]')]
       .find((button) => button.textContent.includes('Copy message'));
     check(!!menuCopy, 'Message menu must expose its localized copy action');
     menuCopy.click();
-    await Promise.resolve();
+    await settle();
     check(!document.querySelector('.floating-context-menu'), 'Copy from menu must close the menu');
     check(find('.chat-message-copy-status').textContent === 'Copied!', 'Menu copy must show the same feedback in English');
     await new Promise((resolve) => setTimeout(resolve, 850));
@@ -189,26 +202,29 @@ async function runDomSmoke() {
     check(find('[data-message-action="copy"]').getAttribute('aria-label') === 'Copy message', 'Copy action label must be restored');
     check(find('[data-message-action="copy"] .material-symbols-outlined').textContent === 'content_copy', 'Copy action icon must be restored');
     language.setLanguage('pt-BR');
+    // Both are denied: a rich write that fails falls back to the plain one.
+    navigator.clipboard.write = async () => { throw new Error('Clipboard denied by fixture'); };
     navigator.clipboard.writeText = async () => { throw new Error('Clipboard denied by fixture'); };
     find('[data-message-action="copy"]').click();
-    await Promise.resolve();
+    await settle();
     check(!document.querySelector('.copy-confirmed'), 'Clipboard failure must never show successful feedback');
     check(find('.dialog-message').textContent === 'Não foi possível copiar a mensagem.', 'Clipboard failure must retain localized error feedback');
     find('.dialog-card [data-action="confirm"]').click();
-    navigator.clipboard.writeText = async () => {};
+    navigator.clipboard.write = async () => {};
     find('[data-message-action="copy"]').click();
-    await Promise.resolve();
+    await settle();
     view.setChannel('two');
     check(!copyToolbar.classList.contains('copy-confirmed'), 'Changing channels must clean up active copy feedback');
     view.setChannel('one');
-    navigator.clipboard.writeText = () => new Promise((resolve) => { finishCopy = resolve; });
+    navigator.clipboard.write = () => new Promise((resolve) => { finishCopy = resolve; });
     find('[data-message-action="copy"]').click();
     view.destroy();
     finishCopy();
-    await Promise.resolve();
+    await settle();
     check(!document.querySelector('.copy-confirmed'), 'Clipboard completion after view destruction must not resurrect feedback');
     view.render();
   } finally {
+    navigator.clipboard.write = originalWrite;
     navigator.clipboard.writeText = originalWriteText;
     language.setLanguage('pt-BR');
   }

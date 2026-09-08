@@ -251,7 +251,10 @@ export function toPortableHtml(root: Node): string {
  */
 export async function writeRichText(html: string, markdown: string): Promise<boolean> {
   try {
-    if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+    // An empty rich flavour is worse than none: a message that is only an
+    // attachment has no rendered text, and writing an empty text/html would
+    // have an editor paste nothing at all.
+    if (html && typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
       await navigator.clipboard.write([
         new ClipboardItem({
           'text/html': new Blob([html], { type: 'text/html' }),
