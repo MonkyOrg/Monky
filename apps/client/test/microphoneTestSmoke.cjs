@@ -188,10 +188,16 @@ async function runMicrophoneTestSmoke() {
     await wait();
     check(captures.length === 0 && plays.length === 0, 'render and event binding never capture or play');
     tab.startVadMeter(container);
-    await wait();
+    for (let attempt = 0; attempt < 40
+      && Number(container.querySelector('#vad-meter').getAttribute('aria-valuenow')) <= 0; attempt++) {
+      await wait();
+    }
     check(captures.length === 1 && plays.length === 0, 'passive VAD meter never plays audio');
     check(!voice.isSpeaking && speakingEvents === 0 && Number(container.querySelector('#vad-meter').getAttribute('aria-valuenow')) > 0,
-      'Voice settings keep their local level preview without announcing speech outside a call');
+      'Voice settings keep their local level preview without announcing speech outside a call: ' + JSON.stringify({
+        level: container.querySelector('#vad-meter').getAttribute('aria-valuenow'),
+        speaking: voice.isSpeaking, speakingEvents, contexts: contexts.map(context => context.state),
+      }));
     check(captures[0].requestedConstraints.audio.deviceId.exact === 'mic-test', 'preview captures the selected input');
     button.click();
     await wait();
