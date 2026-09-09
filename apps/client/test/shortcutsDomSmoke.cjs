@@ -48,6 +48,7 @@ if (!process.versions.electron) {
     assert.ok(address && typeof address !== 'string');
     window = new BrowserWindow({ show: false, webPreferences: {
       contextIsolation: true, nodeIntegration: false, sandbox: false,
+      backgroundThrottling: false, offscreen: true,
       preload: path.join(output, 'src/preload/preload.js'),
     } });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -69,6 +70,8 @@ if (!process.versions.electron) {
       return result;
     });
     await window.loadURL(`http://127.0.0.1:${address.port}/__shortcuts__`);
+    window.focus();
+    window.webContents.focus();
     await window.webContents.executeJavaScript(`(async () => {
       const [{ KeybindsTab }, { keybindService }, { appEvents }, { settingsStore }, controls, { voiceStore }, { clientLog }, { soundEffects }] = await Promise.all([
         import('/views/settings/tabs/KeybindsTab.ts'), import('/core/KeybindService.ts'),
@@ -104,8 +107,9 @@ if (!process.versions.electron) {
       throw new Error('Expected shortcut state was not reached');
     };
     await waitFor(() => registrations.some(row => row.channel === SHORTCUT_IPC.setCapture && row.data === true));
-    // Also wait for the invoke response to arm the renderer recorder.
-    await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 50))');
+    // A completed IPC round trip is a barrier for the recorder's preceding invoke response.
+    assert.equal(await window.webContents.executeJavaScript('window.api.setShortcutCapture(true)'), true,
+      'native capture must be ready before dispatching the recorded chord');
     await window.webContents.executeJavaScript(`(() => {
       for (const type of ['keydown', 'keyup']) window.dispatchEvent(new KeyboardEvent(type, {
         code: '', key: 'q', keyCode: 81, bubbles: true, cancelable: true

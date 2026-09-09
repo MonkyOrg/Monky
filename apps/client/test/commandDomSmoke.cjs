@@ -91,7 +91,12 @@ async function runMessageToolbarPointerSmoke(window) {
   const row = '.chat-message-row[data-message-id="toolbar-pointer"]';
   const action = name => `${row} [data-message-action="${name}"]`;
   const check = async (expression, message) => {
-    if (!await evaluate(expression)) {
+    let matched = false;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if (await evaluate(expression)) { matched = true; break; }
+      await wait();
+    }
+    if (!matched) {
       const state = await evaluate(`(() => {
         const row = document.querySelector('${row}');
         const rect = row.querySelector('.chat-message-text').getBoundingClientRect();
@@ -120,7 +125,8 @@ async function runMessageToolbarPointerSmoke(window) {
   };
   const leave = async () => {
     window.webContents.sendInputEvent({ type: 'mouseMove', x: 5, y: 5 });
-    await wait();
+    await check(`!document.querySelector('${row}').matches(':hover')`,
+      'Native pointer leave must reach the renderer before checking popup dismissal');
   };
   const visible = `getComputedStyle(document.querySelector('${row} .chat-message-toolbar')).opacity === '1'`;
   await evaluate('window.prepareToolbarPointerFixture()');

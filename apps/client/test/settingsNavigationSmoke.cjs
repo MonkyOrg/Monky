@@ -133,7 +133,7 @@ async function runSettingsNavigationSmoke() {
       if (predicate()) return;
       await wait(20);
     }
-    throw new Error('Scroll did not reach its destination');
+    throw new Error('Settings navigation did not settle before the timeout');
   };
   const originalMatchMedia = window.matchMedia;
   let reduced = false;
@@ -173,14 +173,19 @@ async function runSettingsNavigationSmoke() {
   body.scrollTo = function (options) { scrollCalls.push(options); return scrollTo.call(this, options); };
   try {
     navigation.setTab('first');
-    await wait();
-    check(root.querySelectorAll('.settings-section-nav:not([hidden])').length === 1
-      && root.querySelectorAll('.settings-section-link').length === 3, 'Only active tab expands its sections');
     const firstMenu = root.querySelector('[data-tab="first"]').nextElementSibling;
     const secondMenu = root.querySelector('[data-tab="second"]').nextElementSibling;
+    const entrance = firstMenu.getAnimations()[0];
+    check(entrance?.playState === 'running', 'Opening a submenu starts its animation automatically');
+    entrance.pause();
+    entrance.currentTime = 80;
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    check(root.querySelectorAll('.settings-section-nav:not([hidden])').length === 1
+      && root.querySelectorAll('.settings-section-link').length === 3, 'Only active tab expands its sections');
     check(firstMenu.getBoundingClientRect().height > 0
       && firstMenu.getBoundingClientRect().height < firstMenu.firstElementChild.getBoundingClientRect().height,
     'Opening a submenu shows intermediate expansion frames instead of jumping');
+    entrance.play();
     await settled(() => firstMenu.getAnimations().length === 0);
     const expandedHeight = firstMenu.getBoundingClientRect().height;
     firstMenu.querySelector('button').focus();
@@ -192,7 +197,9 @@ async function runSettingsNavigationSmoke() {
     'Closing remains rendered for motion but immediately releases focus and hides its controls from accessibility');
     firstMenu.querySelector('button').focus();
     check(document.activeElement === root.querySelector('[data-tab="second"]'), 'Closing submenu links cannot receive keyboard focus');
-    await wait(40);
+    closingAnimation.pause();
+    closingAnimation.currentTime = 80;
+    await new Promise(resolve => requestAnimationFrame(resolve));
     const closingHeight = firstMenu.getBoundingClientRect().height;
     check(closingHeight > 0 && closingHeight < expandedHeight, 'Closing a submenu progressively collapses its height');
     switchTab('first');
@@ -232,21 +239,22 @@ async function runSettingsNavigationSmoke() {
     check(scrollCalls.at(-1).behavior === 'instant' && Math.abs(body.scrollTop - scrollCalls.at(-1).top) < 1, 'Reduced motion skips scroll animation');
     const retained = root.querySelector('[data-section-target="two"]');
     retained.focus();
+    check(document.activeElement === retained, 'The subsection is focused before its label changes');
     middle.dataset.settingsLabel = 'Updated section';
-    await wait();
+    await settled(() => root.querySelector('[data-section-target="two"]').textContent === 'Updated section');
     check(root.querySelector('[data-section-target="two"]').textContent === 'Updated section'
       && document.activeElement.dataset.sectionTarget === 'two', 'Dynamic labels update without dropping sidebar keyboard focus');
     middle.parentElement.hidden = true;
-    await wait();
+    await settled(() => !root.querySelector('[data-section-target="two"]'));
     check(!root.querySelector('[data-section-target="two"]'), 'Hidden conditional sections disappear from navigation');
     middle.parentElement.hidden = false;
-    await wait();
+    await settled(() => !!root.querySelector('[data-section-target="two"]'));
     check(!!root.querySelector('[data-section-target="two"]'), 'Revealing a section restores its navigation link');
     const oldHeading = root.querySelector('[data-settings-section="one"]');
     const replacement = oldHeading.cloneNode(true);
     replacement.removeAttribute('id');
     oldHeading.replaceWith(replacement);
-    await wait();
+    await settled(() => document.getElementById(root.querySelector('[data-section-target="one"]').getAttribute('aria-controls')) === replacement);
     check(document.getElementById(root.querySelector('[data-section-target="one"]').getAttribute('aria-controls')) === replacement,
       'Replacing tab content retargets links to the new DOM');
     switchTab('second');
