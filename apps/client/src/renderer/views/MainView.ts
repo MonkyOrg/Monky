@@ -183,8 +183,8 @@ export class MainView {
                   </button>
                 </div>
                 <div class="audio-control-group">
-                  <button id="bar-btn-deafen" class="btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}" title="${escapeHtml(moderation.deafenReason ?? (voiceStore.getEffectiveDeafened() ? t('main.undeafen') : t('main.deafen')))}">
-                    ${renderAudioStateIcon(moderation.serverDeafened ? 'headphones' : voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones', moderation.serverDeafened)}
+                  <button id="bar-btn-deafen" class="btn btn-icon ${voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isDeafened}" title="${escapeHtml([t(voiceStore.isDeafened ? 'main.undeafen' : 'main.deafen'), moderation.deafenReason].filter(Boolean).join('. '))}">
+                    ${renderAudioStateIcon(voiceStore.isDeafened ? 'headset_off' : 'headphones', moderation.serverDeafened)}
                   </button>
                   <button type="button" class="audio-device-trigger" data-audio-device="output" aria-label="${t('settings.outputDevice')}" title="${t('settings.outputDevice')}">
                     <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
@@ -1485,20 +1485,23 @@ export class MainView {
     let lastServerMuted = voiceStore.serverMuted;
     let lastServerDeafened = voiceStore.serverDeafened;
     let lastVoiceChannelId = voiceStore.currentVoiceChannelId;
+    const updateDeafenControl = () => {
+      const btnDeafenEl = document.getElementById('bar-btn-deafen');
+      if (btnDeafenEl) {
+        const moderation = getVoiceControlModeration();
+        btnDeafenEl.className = `btn btn-icon ${voiceStore.isDeafened ? 'danger-active' : ''}`;
+        btnDeafenEl.setAttribute('aria-pressed', String(voiceStore.isDeafened));
+        btnDeafenEl.title = [t(voiceStore.isDeafened ? 'main.undeafen' : 'main.deafen'), moderation.deafenReason].filter(Boolean).join('. ');
+        updateAudioStateIcon(btnDeafenEl, voiceStore.isDeafened ? 'headset_off' : 'headphones', moderation.serverDeafened);
+      }
+    };
     const u4 = appEvents.on('voice.state_updated', () => {
       const avatarEl = document.getElementById('main-user-avatar');
       if (avatarEl) {
         if (voiceStore.isSpeaking) avatarEl.classList.add('speaking');
         else avatarEl.classList.remove('speaking');
       }
-
-      const btnDeafenEl = document.getElementById('bar-btn-deafen');
-      if (btnDeafenEl) {
-        const moderation = getVoiceControlModeration();
-        btnDeafenEl.className = `btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}`;
-        btnDeafenEl.title = moderation.deafenReason ?? (voiceStore.getEffectiveDeafened() ? t('main.undeafen') : t('main.deafen'));
-        updateAudioStateIcon(btnDeafenEl, moderation.serverDeafened ? 'headphones' : voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones', moderation.serverDeafened);
-      }
+      updateDeafenControl();
 
       const mediaCamEl = document.getElementById('media-btn-camera');
       if (mediaCamEl) {
@@ -1683,8 +1686,9 @@ export class MainView {
     // Repaint the sidebar voice row when the call flips in/out of reconnecting
     // so the icon, colour and status text track the live state (#553).
     const u16 = appEvents.on('voice.connection_changed', () => this.updateVoiceConnectionRow());
+    const u17 = appEvents.on('server.voice_restrictions_updated', updateDeafenControl);
 
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17);
   }
 
   /** True when the given text channel is the one currently visible on screen (#14). */

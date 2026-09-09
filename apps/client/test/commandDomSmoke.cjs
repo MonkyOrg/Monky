@@ -66,6 +66,7 @@ if (!process.versions.electron) {
     await runMessageToolbarPointerSmoke(window);
     await window.webContents.executeJavaScript('window.commandDomCleanup()', true);
     const sidebarChecks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
+    const restrictionChecks = await window.webContents.executeJavaScript(`(${runServerRestrictionSmoke.toString()})()`, true);
     const settingsChecks = await window.webContents.executeJavaScript(`(${runSettingsNavigationSmoke.toString()})()`, true);
     await window.webContents.executeJavaScript(`document.body.innerHTML = '<div class="user-quick-actions" style="justify-content:flex-start;padding:20px;gap:12px;">' + window.adminAudioPreviewMarkup + '</div>'; new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
     fs.writeFileSync(path.join(output, 'admin-audio-icons.png'), (await window.webContents.capturePage({ x: 0, y: 0, width: 140, height: 80 })).toPNG());
@@ -77,6 +78,7 @@ if (!process.versions.electron) {
     fs.writeFileSync(path.join(output, 'voice-connection-states.png'), (await window.webContents.capturePage({ x: 0, y: 0, width: 1020, height: 180 })).toPNG());
     console.log(`Command DOM smoke: ${result.checks} checks passed`);
     console.log(`Sidebar PTT smoke: ${sidebarChecks} checks passed`);
+    console.log(`Server restriction smoke: ${restrictionChecks} checks passed`);
     console.log(`Settings navigation smoke: ${settingsChecks} checks passed`);
     console.log('Screenshots: dist-test\\command-dom-catalog.png and dist-test\\command-dom-composer.png');
     await finish(0);
@@ -196,6 +198,128 @@ async function runMessageToolbarPointerSmoke(window) {
     console.log('Message toolbar: 14 trusted pointer/keyboard checks passed');
   } finally {
     await evaluate('window.cleanupToolbarPointerFixture()');
+  }
+}
+
+async function runServerRestrictionSmoke() {
+  const [{ MainView }, servers, { voiceStore: voice }, { settingsStore: settings },
+    { appEvents, EventBus }, { soundEffects }] = await Promise.all([
+    import('/views/MainView.ts'), import('/stores/serverStore.ts'), import('/stores/voiceStore.ts'),
+    import('/stores/settingsStore.ts'), import('/core/EventBus.ts'), import('/core/SoundEffects.ts'),
+  ]);
+  let checks = 0;
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const previousStore = servers.getActiveServerStore();
+  const previousMode = settings.inputMode;
+  const previousPlay = soundEffects.play;
+  soundEffects.play = () => {};
+  settings.inputMode = 'voice_activity';
+  voice.reset();
+  voice.setDeafened(false);
+  voice.setMuted(false);
+  document.body.innerHTML = '<div id="app"></div>';
+  const root = document.getElementById('app');
+  const view = new MainView(root);
+  const silent = new EventBus();
+  const user = { id: 'restriction-user', sessionId: 'restriction-device', clientId: 'restriction-client',
+    nickname: 'Restriction fixture', status: 'ONLINE', joinedAt: 1 };
+  const makeServer = (id, restrictions) => {
+    const store = servers.createServerStore();
+    store.bus = silent;
+    store.setServerDetails({
+      id, name: id, createdAt: 1, maxUsers: 10, channels: [], members: [user], voiceStates: {},
+      ownerId: user.id, myPermissions: 2147483647,
+    }, user);
+    store.updateVoiceRestrictions(user.id, restrictions);
+    return store;
+  };
+  const a = makeServer('restricted-a', { serverMuted: true, serverDeafened: true });
+  const b = makeServer('unrestricted-b', { serverMuted: false, serverDeafened: false });
+  const show = (store) => {
+    a.bus = b.bus = silent;
+    servers.setActiveServerStore(store);
+    store.bus = appEvents;
+    view.render();
+  };
+  const mic = () => root.querySelector('#bar-btn-mic');
+  const deafen = () => root.querySelector('#bar-btn-deafen');
+  const blocks = () => root.querySelectorAll('.user-quick-actions [data-audio-block]:not([hidden])').length;
+  let notifications = 0;
+  const off = appEvents.on('server.voice_restrictions_updated', () => { notifications++; });
+  try {
+    show(a);
+    check(!voice.currentVoiceChannelId && blocks() === 2,
+      'The authenticated server policy is visible immediately, without ever joining voice');
+    check(mic().querySelector('[data-audio-icon]').textContent === 'mic'
+      && deafen().querySelector('[data-audio-icon]').textContent === 'headphones'
+      && !mic().classList.contains('danger-active') && !deafen().classList.contains('danger-active'),
+      'Pre-call administrative badges do not replace the personal icons or colors');
+    mic().click();
+    check(voice.isMuted && blocks() === 2 && mic().querySelector('[data-audio-icon]').textContent === 'mic_off',
+      'Personal pre-mute still changes visibly beneath the persisted server restriction');
+    mic().click();
+    check(!voice.isMuted && blocks() === 2 && !voice.getEffectiveMuted(),
+      'A server badge outside voice does not create a physical call mute or override personal intent');
+
+    voice.setChannel('room-a', 'restricted-a');
+    voice.setServerMuted(true);
+    voice.setServerDeafened(true);
+    voice.setChannel(null);
+    check(blocks() === 2 && !voice.serverMuted && !voice.serverDeafened,
+      'Leaving voice clears physical call flags but keeps the server policy visible');
+    voice.reset();
+    check(blocks() === 2, 'Full call teardown also preserves both administrative badges');
+
+    show(b);
+    check(blocks() === 0, 'An unrestricted server never inherits another server policy');
+    const beforeBackground = notifications;
+    a.updateVoiceRestrictions(user.id, { serverMuted: true, serverDeafened: false });
+    check(notifications === beforeBackground && blocks() === 0,
+      'A background server updates only its own silent store, without repainting the visible controls');
+    show(a);
+    check(blocks() === 1 && deafen().querySelector('[data-audio-block]').hidden,
+      'Returning to a server displays its latest policy without a voice join');
+    const beforeDuplicate = notifications;
+    a.updateVoiceRestrictions(user.id, { serverMuted: true, serverDeafened: false });
+    a.updateVoiceRestrictions('another-user', { serverMuted: false, serverDeafened: true });
+    check(notifications === beforeDuplicate && blocks() === 1,
+      'Duplicate updates and restrictions on another identity do not change the current user policy');
+    a.updateVoiceRestrictions(user.id, {
+      sessionId: 'another-device', serverMuted: false, serverDeafened: true,
+    });
+    check(blocks() === 2 && Object.keys(a.voiceRestrictions).sort().join(',') === 'serverDeafened,serverMuted',
+      'An update for another device of the same identity applies outside voice without retaining transient session data');
+
+    voice.setChannel('room-b', 'unrestricted-b');
+    voice.setServerMuted(true);
+    voice.setServerDeafened(true);
+    a.updateVoiceRestrictions(user.id, { serverMuted: false, serverDeafened: false });
+    check(blocks() === 0 && voice.getEffectiveMuted() && voice.getEffectiveDeafened(),
+      'The visible server policy cannot clear the physical restrictions of a call on another server');
+    a.updateVoiceRestrictions(user.id, { serverMuted: true, serverDeafened: false });
+    check(blocks() === 1 && deafen().querySelector('[data-audio-block]').hidden,
+      'Visible badges follow the browsed server, not the different policy of the active call');
+    voice.reset();
+    a.updateVoiceRestrictions(user.id, { serverMuted: false, serverDeafened: false });
+    check(blocks() === 0, 'Administrative removal updates idle controls immediately without a voice event');
+    a.updateVoiceRestrictions(user.id, { serverMuted: true, serverDeafened: true });
+    view.render();
+    check(blocks() === 2, 'Re-rendering after an authenticated snapshot preserves pre-call restrictions');
+    a.clear();
+    check(blocks() === 0 && !a.currentUser, 'Discarding a server session clears only its own displayed policy');
+    a.updateVoiceRestrictions(undefined, { serverMuted: true, serverDeafened: true });
+    check(blocks() === 0 && !a.voiceRestrictions.serverMuted && !a.voiceRestrictions.serverDeafened,
+      'A late or unidentified notification cannot populate a store without an authenticated user');
+    return checks;
+  } finally {
+    off();
+    view.destroy();
+    voice.reset();
+    a.bus = b.bus = silent;
+    servers.setActiveServerStore(previousStore);
+    settings.inputMode = previousMode;
+    soundEffects.play = previousPlay;
+    root.remove();
   }
 }
 
@@ -332,12 +456,25 @@ async function runSidebarPttSmoke() {
     check(root.querySelectorAll('#voice-mini-user-ptt-remote-session [data-audio-block]:not([hidden])').length === 2
       && root.querySelectorAll('.member-item[data-user-id="ptt-remote-user"] [data-audio-block]:not([hidden])').length === 2,
     'Participant updates must show remote administrative microphone and headphones in both lists');
+    const adminStatusColor = getComputedStyle(root.querySelector('#voice-mini-user-ptt-remote-session [data-audio-icon]')).color;
+    const colorProbe = document.createElement('span');
+    colorProbe.style.color = 'var(--text-muted)';
+    root.append(colorProbe);
+    const personalStatusColor = getComputedStyle(colorProbe).color;
+    colorProbe.remove();
     check(channelBlocks() === 0 && memberBlocks() === 0, 'Remote moderation must not change the local participant indicators');
     manager.updateVoiceState({ ...remoteState, isMuted: true });
     await new Promise(resolve => requestAnimationFrame(resolve));
     check(root.querySelectorAll('#voice-mini-user-ptt-remote-session [data-audio-block]:not([hidden])').length === 0
       && root.querySelector('#voice-mini-user-ptt-remote-session [data-audio-icon]').textContent === 'mic_off',
     'Clearing remote moderation must reveal the remaining personal mute');
+    check(getComputedStyle(root.querySelector('#voice-mini-user-ptt-remote-session [data-audio-icon]')).color === personalStatusColor
+      && personalStatusColor !== adminStatusColor, 'Personal mute in the channel is gray, unlike the unchanged administrative red');
+    manager.updateVoiceState({ ...remoteState, isDeafened: true });
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    check([...root.querySelectorAll('#voice-mini-user-ptt-remote-session [data-audio-icon]')]
+      .every(element => getComputedStyle(element).color === personalStatusColor),
+      'Personal deafen keeps both participant indicators gray');
     const button = root.querySelector('#bar-btn-mic');
     const icon = () => button.querySelector('[data-audio-icon]').textContent;
     const block = button.querySelector('[data-audio-block]');
@@ -384,9 +521,17 @@ async function runSidebarPttSmoke() {
     check(button.dataset.state === 'muted' && marker.hidden && button.title.includes('áudio desativado'), 'Deafen hides PTT and remains distinguishable from waiting');
     voice.setDeafened(false);
     voice.setServerMuted(true);
+    server.updateVoiceRestrictions(localUser.id, voice);
     check(channelBlocks() === 1 && memberBlocks() === 1, 'Admin mute must immediately update actual channel and member lists without a participant echo');
-    check(button.dataset.state === 'muted' && marker.hidden && button.title.includes(language.t('permissions.serverMuted')), 'Server mute remains authoritative and hides PTT');
-    check(icon() === 'mic' && !block.hidden && block.textContent === 'block', 'Admin mute uses microphone plus prohibition badge, not the personal slash');
+    check(button.dataset.state === 'closed' && !marker.hidden && button.title.includes(language.t('permissions.serverMuted')),
+      'Server mute adds its explanation without replacing personal PTT state');
+    check(icon() === 'keyboard_voice' && !block.hidden && block.textContent === 'block'
+      && getComputedStyle(button).color === waitingColor, 'Administrative blocking keeps the normal waiting icon and its color');
+    check(getComputedStyle(block).color === adminStatusColor, 'The administrative badge stays red independently of the primary icon');
+    voice.setMicrophoneState(true, true);
+    check(button.dataset.state === 'closed' && icon() === 'keyboard_voice' && !marker.hidden,
+      'A delayed microphone-open event cannot advertise PTT transmission under an administrative block');
+    voice.setMicrophoneState(false, false);
     check(getComputedStyle(button.querySelector('[data-audio-icon]')).color !== getComputedStyle(button).backgroundColor,
       'Administrative microphone must remain visible against the muted button background');
     check(getComputedStyle(block).color !== getComputedStyle(block).backgroundColor,
@@ -395,12 +540,23 @@ async function runSidebarPttSmoke() {
     const buttonRect = button.getBoundingClientRect();
     check(badgeRect.width > 0 && badgeRect.top >= buttonRect.top && badgeRect.right <= buttonRect.right, 'Administrative badge must remain visible inside the button');
     button.click();
-    check(voice.serverMuted && !block.hidden && marker.hidden, 'Clicking personal mute cannot clear an administrative restriction');
+    check(voice.serverMuted && !block.hidden && marker.hidden && icon() === 'mic_off'
+      && getComputedStyle(button).color === mutedColor, 'Personal mute visibly becomes red and crossed out while the administrative badge remains');
+    button.click();
+    check(!voice.isMuted && voice.getEffectiveMuted() && !block.hidden && icon() === 'keyboard_voice'
+      && getComputedStyle(button).color === waitingColor, 'Personal unmute restores its icon without bypassing the actual server mute');
+    button.click();
     voice.setServerMuted(false);
+    server.updateVoiceRestrictions(localUser.id, voice);
     check(channelBlocks() === 0 && memberBlocks() === 0, 'Removing admin mute must clear both lists without a participant echo');
     check(voice.isMuted && icon() === 'mic_off' && block.hidden, 'Removing admin mute reveals an existing personal mute');
     button.click();
+    settings.inputMode = 'voice_activity';
+    appEvents.emit('settings.updated');
+    const normalMicColor = getComputedStyle(button).color;
+    const normalDeafenColor = getComputedStyle(deafenButton).color;
     voice.setServerDeafened(true);
+    server.updateVoiceRestrictions(localUser.id, voice);
     check(channelBlocks() === 2 && memberBlocks() === 2, 'Admin deafen must immediately show blocked microphone and headphones in both lists');
     const channelRow = root.querySelector('#voice-mini-user-ptt-local-session');
     const memberRow = root.querySelector('.member-item[data-user-id="ptt-local-user"]');
@@ -409,10 +565,24 @@ async function runSidebarPttSmoke() {
     check(root.querySelector('#voice-mini-user-ptt-local-session') === channelRow
       && root.querySelector('.member-item[data-user-id="ptt-local-user"]') === memberRow,
     'Unchanged audio flags must not rebuild lists on frequent voice events');
-    check(icon() === 'mic' && !block.hidden && marker.hidden, 'Admin deafen also blocks the microphone');
+    check(icon() === 'mic' && !block.hidden && marker.hidden && getComputedStyle(button).color === normalMicColor
+      && !button.classList.contains('danger-active'), 'Admin deafen adds a red block without changing the personally open microphone');
     check(deafenButton.querySelector('[data-audio-icon]').textContent === 'headphones'
       && !deafenButton.querySelector('[data-audio-block]').hidden
-      && deafenButton.title === language.t('permissions.serverDeafened'), 'Admin deafen uses headphones plus prohibition badge and its own tooltip');
+      && deafenButton.title.includes(language.t('permissions.serverDeafened'))
+      && deafenButton.title.includes(language.t('main.deafen'))
+      && getComputedStyle(deafenButton).color === normalDeafenColor,
+      'Admin deafen keeps normal headphones, its badge and the personal toggle action');
+    deafenButton.click();
+    check(voice.isDeafened && icon() === 'mic_off'
+      && deafenButton.querySelector('[data-audio-icon]').textContent === 'headset_off'
+      && !block.hidden && !deafenButton.querySelector('[data-audio-block]').hidden
+      && getComputedStyle(deafenButton).color === mutedColor,
+      'Personal deafen changes both icons visibly without removing administrative blocks');
+    deafenButton.click();
+    check(!voice.isDeafened && !voice.isMuted && voice.getEffectiveMuted() && voice.getEffectiveDeafened()
+      && icon() === 'mic' && deafenButton.querySelector('[data-audio-icon]').textContent === 'headphones',
+      'Personal undeafen restores normal icons while real administrative restrictions remain enforced');
     window.adminAudioPreviewMarkup = button.outerHTML + deafenButton.outerHTML;
     const originalVoiceSession = voice.voiceSessionKey;
     const moderatedSession = sessionManager.create('moderated.example', 3000, 'Local');
@@ -422,6 +592,8 @@ async function runSidebarPttSmoke() {
     }, localUser);
     moderatedSession.participants.addUser(localUser);
     moderatedSession.participants.updateVoiceState({ ...manager.get(localUser.sessionId).voiceState, serverDeafened: true });
+    moderatedSession.serverStore.updateVoiceRestrictions(localUser.id, voice);
+    server.updateVoiceRestrictions(localUser.id, { serverMuted: false, serverDeafened: false });
     voice.voiceSessionKey = moderatedSession.key;
     appEvents.emit('voice.state_updated');
     view.renderChannels();
@@ -432,9 +604,10 @@ async function runSidebarPttSmoke() {
       'Footer must not claim administrative restrictions belong to the server being viewed');
     check(voice.serverDeafened && voice.getEffectiveMuted() && voice.getEffectiveDeafened(),
       'Changing the visible server never unmutes the actual call');
-    check(icon() === 'mic_off' && deafenButton.querySelector('[data-audio-icon]').textContent === 'headset_off'
-      && button.title.includes('Server <A>') && deafenButton.title.includes('Server <A>'),
-      'Physical call controls remain muted and identify the actual moderating server safely');
+    check(icon() === 'mic' && deafenButton.querySelector('[data-audio-icon]').textContent === 'headphones'
+      && button.title === language.t('main.mute') && deafenButton.title === language.t('main.deafen')
+      && getComputedStyle(button).color === normalMicColor && getComputedStyle(deafenButton).color === normalDeafenColor,
+      'Another server shows only personal icons and actions, without importing the call server restriction');
     const { OverlayBridgeService } = await import('/core/OverlayBridgeService.ts');
     const bridge = new OverlayBridgeService();
     bridge.isOpen = true;
@@ -466,26 +639,32 @@ async function runSidebarPttSmoke() {
     voice.setServerDeafened(true);
     language.setLanguage('en');
     appEvents.emit('voice.state_updated');
-    check(button.title.includes('active call') && deafenButton.title.includes('active call'),
-      'Background-call restriction explanations follow the selected language');
+    check(button.title === language.t('main.mute') && deafenButton.title === language.t('main.deafen'),
+      'Personal tooltips stay localized without mentioning a hidden background-server restriction');
     language.setLanguage('pt-BR');
     voice.voiceSessionKey = originalVoiceSession;
     sessionManager.remove(moderatedSession.key);
+    server.updateVoiceRestrictions(localUser.id, voice);
     appEvents.emit('voice.state_updated');
     view.renderChannels();
     view.renderMembers();
     check(channelBlocks() === 2 && memberBlocks() === 2 && !block.hidden,
       'Returning to the owning server restores its administrative indicators');
     voice.setServerDeafened(false);
+    server.updateVoiceRestrictions(localUser.id, voice);
     check(channelBlocks() === 0 && memberBlocks() === 0, 'Removing admin deafen must clear both lists immediately');
     routing.setForegroundContext(false);
     voice.setServerMuted(true);
     check(channelBlocks() === 0, 'Background moderation must not redraw lists inside the session routing window');
     routing.setForegroundContext(true);
     await Promise.resolve();
+    server.updateVoiceRestrictions(localUser.id, voice);
     check(channelBlocks() === 1 && memberBlocks() === 1, 'Background moderation must repaint after foreground stores are restored');
     voice.setServerMuted(false);
+    server.updateVoiceRestrictions(localUser.id, voice);
     check(block.hidden && deafenButton.querySelector('[data-audio-block]').hidden, 'Removing moderation clears both prohibition badges');
+    settings.inputMode = 'push_to_talk';
+    appEvents.emit('settings.updated');
     voice.setMicrophoneState(true, false);
     updateLocalSpeaking(true);
     const speakingChannel = voice.currentVoiceChannelId;
@@ -501,11 +680,13 @@ async function runSidebarPttSmoke() {
     const manualMuted = voice.isMuted;
     voice.setServerMuted(true);
     voice.setServerDeafened(true);
+    server.updateVoiceRestrictions(localUser.id, voice);
     voice.setChannel('ptt-sidebar-fixture', 'other-server');
     check(!voice.serverMuted && !voice.serverDeafened && voice.isMuted === manualMuted,
       'Changing call server clears only the old server restrictions, never personal mute');
-    check(block.hidden && deafenButton.querySelector('[data-audio-block]').hidden,
-      'Changing call server clears restriction indicators synchronously');
+    check(!block.hidden && !deafenButton.querySelector('[data-audio-block]').hidden,
+      'Changing call server preserves the policy of the server still being viewed');
+    server.updateVoiceRestrictions(localUser.id, { serverMuted: false, serverDeafened: false });
     voice.setChannel('ptt-sidebar-fixture');
     voice.setChannel(null);
     check(button.dataset.state === 'inactive' && !marker.hidden, 'PTT mode remains visible outside a call');
@@ -530,11 +711,21 @@ async function runSidebarPttSmoke() {
       && !document.querySelector('.ping-tooltip'), 'Actual stage latency details use the same immediate accessible tooltip');
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     voice.setServerDeafened(true);
+    server.updateVoiceRestrictions(localUser.id, voice);
     for (const id of ['stage-btn-mic', 'stage-btn-deafen']) {
       check(!document.getElementById(id).querySelector('[data-audio-block]').hidden, 'Stage controls must also distinguish admin restrictions');
     }
     voice.setServerDeafened(false);
+    server.updateVoiceRestrictions(localUser.id, voice);
     const statuses = document.createElement('div');
+    root.append(statuses);
+    const priorInputMode = settings.inputMode;
+    const priorAudioState = {
+      isMuted: voice.isMuted, isDeafened: voice.isDeafened,
+      serverMuted: voice.serverMuted, serverDeafened: voice.serverDeafened,
+    };
+    settings.inputMode = 'voice_activity';
+    appEvents.emit('settings.updated');
     for (let flags = 0; flags < 16; flags++) {
       const audioState = {
         isMuted: !!(flags & 1), isDeafened: !!(flags & 2),
@@ -544,7 +735,36 @@ async function runSidebarPttSmoke() {
       const expectedBlocks = Number(audioState.serverMuted || audioState.serverDeafened) + Number(audioState.serverDeafened);
       check(statuses.querySelectorAll('[data-audio-block]:not([hidden])').length === expectedBlocks, 'Participant indicators must prioritize admin restrictions without duplicate badges');
       check([...statuses.querySelectorAll('[role="img"]')].every(e => e.getAttribute('aria-label')), 'Participant audio indicators must have localized accessible names');
+      check([...statuses.querySelectorAll('.audio-state-icon')].every(element =>
+        getComputedStyle(element.querySelector('[data-audio-icon]')).color
+          === (element.classList.contains('audio-state-icon--blocked') ? adminStatusColor : personalStatusColor)),
+        'All participant mute/deafen combinations preserve gray personal and red administrative indicators');
+      Object.assign(voice, audioState);
+      server.updateVoiceRestrictions(localUser.id, audioState);
+      appEvents.emit('voice.state_updated');
+      for (const id of ['bar-btn-mic', 'stage-btn-mic']) {
+        const control = document.getElementById(id);
+        const personalMuted = audioState.isMuted || audioState.isDeafened;
+        check(control.querySelector('[data-audio-icon]').textContent === (personalMuted ? 'mic_off' : 'mic')
+          && control.classList.contains('danger-active') === personalMuted
+          && control.getAttribute('aria-pressed') === String(audioState.isMuted)
+          && control.querySelector('[data-audio-block]').hidden === !(audioState.serverMuted || audioState.serverDeafened),
+          `${id}: primary microphone and administrative badge stay independent for every combination`);
+      }
+      for (const id of ['bar-btn-deafen', 'stage-btn-deafen']) {
+        const control = document.getElementById(id);
+        check(control.querySelector('[data-audio-icon]').textContent === (audioState.isDeafened ? 'headset_off' : 'headphones')
+          && control.classList.contains('danger-active') === audioState.isDeafened
+          && control.getAttribute('aria-pressed') === String(audioState.isDeafened)
+          && control.querySelector('[data-audio-block]').hidden === !audioState.serverDeafened,
+          `${id}: primary headphones and administrative badge stay independent for every combination`);
+      }
     }
+    Object.assign(voice, priorAudioState);
+    server.updateVoiceRestrictions(localUser.id, priorAudioState);
+    settings.inputMode = priorInputMode;
+    appEvents.emit('settings.updated');
+    appEvents.emit('voice.state_updated');
     const overlay = new OverlayStageView(document.createElement('div'));
     const overlayState = { isMuted: false, isDeafened: false, serverMuted: true, serverDeafened: true, screenShareIds: [], isCameraOn: false };
     statuses.innerHTML = overlay.getMiniIconsHtml(overlayState);
@@ -553,6 +773,7 @@ async function runSidebarPttSmoke() {
     check(statuses.querySelectorAll('[data-audio-block]:not([hidden])').length === 2, 'Overlay video tiles must retain administrative badges');
     statuses.innerHTML = audioIcons.renderAudioMuteIndicators({ isMuted: false, isDeafened: true }, { showMicrophone: false });
     check(statuses.querySelectorAll('[data-audio-icon]').length === 1, 'Member-list masking must preserve audio status without adding a microphone outside voice');
+    statuses.remove();
     stage.destroy();
     view.destroy();
     const previousState = button.dataset.state;

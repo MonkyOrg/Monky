@@ -1752,17 +1752,18 @@ input:focus, textarea:focus, select:focus {
   font-size: inherit;
   line-height: 1;
 }
-.audio-state-icon--status { color: var(--danger); }
+.audio-state-icon--status { color: var(--text-muted); }
+.audio-state-icon--status.audio-state-icon--blocked { color: var(--danger); }
 .audio-state-icon > .audio-state-block {
   position: absolute;
   top: -.15em;
   right: -.25em;
   font-size: .65em;
   border-radius: 50%;
+  color: var(--danger);
   background: var(--bg-secondary);
 }
 .audio-state-block[hidden] { display: none; }
-.btn-icon.danger-active .audio-state-block { background: var(--danger); }
 .input-mode-cards {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6232,7 +6233,7 @@ button[data-loading="1"]::after {
   color: var(--danger);
 }
 
-.user-quick-actions .btn-icon.danger-active .audio-state-block {
+.user-quick-actions .btn-icon .audio-state-block {
   background: var(--bg-panel);
 }
 

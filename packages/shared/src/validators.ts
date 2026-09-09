@@ -2,6 +2,21 @@ import { z } from 'zod';
 import { LIMITS, PROTOCOL_VERSION } from './constants.js';
 
 export const messageReferenceSchema = z.string().min(1).max(128);
+export const adminVoiceRestrictionsGetSchema = z.object({
+  targetUserId: messageReferenceSchema,
+});
+export const adminMuteUserSchema = adminVoiceRestrictionsGetSchema.extend({
+  muted: z.boolean(),
+});
+export const adminDeafenUserSchema = adminVoiceRestrictionsGetSchema.extend({
+  deafened: z.boolean(),
+});
+export const voiceRestrictionsUpdatedSchema = z.object({
+  userId: messageReferenceSchema,
+  serverMuted: z.boolean(),
+  serverDeafened: z.boolean(),
+});
+
 export const voiceModeTransitionSchema = z.object({
   id: messageReferenceSchema,
   from: z.literal('sfu'),

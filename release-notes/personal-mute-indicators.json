@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Bloqueios administrativos podem ser aplicados e removidos pela lista de membros, mesmo fora da voz. Eles aparecem ao abrir o servidor, separados do seu mute pessoal. Nas listas, mute manual fica cinza. Atualize cliente e servidor.",
+  "en": "Administrative blocks can be applied and removed from the member list, even outside voice. They appear when opening the server, separately from your personal mute. In participant lists, personal mute is gray. Update both client and server."
+}

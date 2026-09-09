@@ -137,25 +137,23 @@ export class SignalingService {
     return updated;
   }
 
-  public setServerMuted(sessionId: string, muted: boolean): VoiceParticipantState[] | null {
-    return this.setServerRestriction(sessionId, 'serverMuted', muted);
+  public setServerMuted(userId: string, muted: boolean): VoiceParticipantState[] {
+    return this.setServerRestriction(userId, 'serverMuted', muted);
   }
 
-  public setServerDeafened(sessionId: string, deafened: boolean): VoiceParticipantState[] | null {
-    return this.setServerRestriction(sessionId, 'serverDeafened', deafened);
+  public setServerDeafened(userId: string, deafened: boolean): VoiceParticipantState[] {
+    return this.setServerRestriction(userId, 'serverDeafened', deafened);
   }
 
   private setServerRestriction(
-    sessionId: string,
+    userId: string,
     restriction: keyof VoiceRestrictions,
     value: boolean,
-  ): VoiceParticipantState[] | null {
-    const target = this.voiceStates.get(sessionId);
-    if (!target) return null;
-    const restrictions = { ...this.voiceRestrictions.getForUser(target.userId), [restriction]: value };
+  ): VoiceParticipantState[] {
+    const restrictions = { ...this.voiceRestrictions.getForUser(userId), [restriction]: value };
     // Persist before touching the roster: a failed write must not look like successful moderation.
-    this.voiceRestrictions.save(target.userId, restrictions);
-    return this.getSessionsOfUser(target.userId).map((state) => {
+    this.voiceRestrictions.save(userId, restrictions);
+    return this.getSessionsOfUser(userId).map((state) => {
       const updated = { ...state, ...restrictions, isSpeaking: false };
       this.voiceStates.set(state.sessionId, updated);
       return updated;
@@ -176,6 +174,10 @@ export class SignalingService {
 
   public getVoiceState(sessionId: string): VoiceParticipantState | undefined {
     return this.voiceStates.get(sessionId);
+  }
+
+  public getVoiceRestrictions(userId: string): VoiceRestrictions {
+    return this.voiceRestrictions.getForUser(userId);
   }
 
   /** Every voice session of a person, since they may be in from several devices (#309). */

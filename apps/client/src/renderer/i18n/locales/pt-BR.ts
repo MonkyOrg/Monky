@@ -85,6 +85,7 @@ export const ptBR = {
   'userMenu.moveToChannel': 'Mover para canal',
   'userMenu.manageRoles': 'Gerenciar cargos',
   'userMenu.actionFailed': 'Não foi possível concluir a ação administrativa.',
+  'userMenu.loadingRestrictions': 'Carregando bloqueios...',
 
   // ── Convite (InviteModal.ts) ─────────────────────────────────────────────
   'invite.title': 'Convidar Amigos',
@@ -1050,9 +1051,6 @@ export const ptBR = {
   'permissions.administratorDesc': 'Concede todas as permissões. Administradores ignoram restrições de canal.',
   'permissions.serverMuted': 'Mutado pelo servidor',
   'permissions.serverDeafened': 'Ensurdecido pelo servidor',
-  'voiceModeration.otherServer': 'outro servidor',
-  'voiceModeration.mutedElsewhere': 'Microfone silenciado pelo servidor {server} (chamada ativa)',
-  'voiceModeration.deafenedElsewhere': 'Áudio bloqueado pelo servidor {server} (chamada ativa)',
 
   // ── Atualizações (UpdateService.ts) ──────────────────────────────────────
   'update.available': 'Nova versão <strong>{version}</strong> disponível.',

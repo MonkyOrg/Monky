@@ -78,10 +78,24 @@ naquele servidor**, incluindo seus outros dispositivos. Sair e entrar na
 chamada, trocar de servidor ou reiniciar o aplicativo ou o servidor não remove
 o bloqueio: um administrador precisa liberá-lo.
 
-Ao navegar em outro servidor durante uma chamada, as listas não herdam os
-bloqueios da chamada ativa. Os controles de microfone e áudio continuam
-respeitando essa chamada e informam no tooltip qual servidor aplicou o bloqueio.
-A sobreposição também continua mostrando os participantes da chamada ativa.
+Quem possui permissão para mutar ou ensurdecer membros pode aplicar e remover
+esses bloqueios pelo menu de botão direito da lista de membros, mesmo quando
+a pessoa está fora da voz ou desconectada. O menu consulta a restrição atual
+antes de habilitar a ação. Expulsar da voz e mover de canal continuam exigindo
+uma conexão em chamada.
+
+Nos controles, o ícone e sua cor mostram seu mute pessoal; o bloqueio
+administrativo aparece separadamente como um símbolo vermelho, apenas enquanto
+você visualiza o servidor correspondente, mesmo sem entrar em um canal de voz.
+O servidor informa essa restrição já na conexão, inclusive após reabrir o aplicativo.
+Ao trocar de servidor, o símbolo e o tooltip passam a refletir apenas as
+restrições do servidor visualizado. O bloqueio real de uma chamada em outro
+servidor continua sendo respeitado. Nas listas de participantes, mute pessoal fica cinza
+e restrições administrativas permanecem vermelhas. A sobreposição continua
+mostrando os participantes da chamada ativa.
+
+Cliente e servidor precisam estar atualizados para trocar essa informação
+antes de entrar na voz.
 
 ### Dicas e menus
 
@@ -163,10 +177,10 @@ Com PTT habilitado, o **botão de microfone no canto inferior esquerdo** ganha
 a marca **PTT** sob o ícone, sem borda: amarelo com ícone de entrada de voz
 enquanto aguarda a tecla e verde com microfone aberto ao transmitir. Quando
 há mute manual ou áudio desativado, aparece apenas o microfone cortado em
-vermelho, sem a marca PTT. Um bloqueio feito por administrador usa o microfone
-ou fone com um pequeno símbolo de proibido, também sem PTT. Essa distinção
-aparece nos controles, nas listas de participantes e no overlay; o tooltip
-informa o bloqueio do servidor. Fora de chamada, o estado de espera fica cinza.
+vermelho, sem a marca PTT. Um bloqueio feito por administrador acrescenta o
+símbolo vermelho de proibido, sem substituir o ícone pessoal nem esconder
+a marca PTT. O bloqueio impede a transmissão, mesmo que seu mute pessoal esteja
+desativado. Fora de chamada, o estado de espera fica cinza.
 
 Clicar no botão continua alternando o **mute manual**. Segurar a tecla do PTT
 não desfaz esse mute: apenas abre o microfone quando permitido. O estado

@@ -311,6 +311,7 @@ jobs:
             echo "$NOTES"
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -339,6 +340,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ steps.changelog.outputs.commit }}
           name: ${{ needs.version.outputs.channel == 'beta' && format('Monky v{0} (Beta)', needs.version.outputs.version) || format('Monky v{0}', needs.version.outputs.version) }}
           body: |
             ${{ needs.version.outputs.channel == 'beta' && '> ⚠️ **Versão beta** — em validação. Só recebe automaticamente quem ativou "Receber versões beta" nas Configurações. Após validada, é promovida a estável.' || 'Release estável do Monky.' }}

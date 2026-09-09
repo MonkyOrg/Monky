@@ -1,4 +1,4 @@
-import { MessageType, Permission, UserSummary } from '@monky/shared';
+import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, MessageType, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { avatarFileExtension, getAvatarUrl } from '../utils/avatar';
 import { renderRoleOption } from '../utils/roleOption';
@@ -10,7 +10,7 @@ import { getVoiceControlModeration, toggleAudioDeafen, toggleMicrophoneMute } fr
 import { webRtcManager } from '../core/WebRtcManager';
 import { appEvents } from '../core/EventBus';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
-import { networkClient } from '../core/NetworkClient';
+import { getActiveNetworkClient, networkClient } from '../core/NetworkClient';
 import { showAlert } from './Dialog';
 import { downloadLightboxFile, lightboxModal } from './LightboxModal';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
@@ -30,7 +30,7 @@ export class UserContextMenu {
     const avatarSrc = getAvatarUrl(user.avatarUrl);
     // Sem foto o que se abriria é o logo padrão, então o olho não aparece (#406).
     const hasAvatar = !!user.avatarUrl;
-    // Select a live connection for the action; mute/deafen applies to its user on this server.
+    // Kick and move still require a live voice connection; mute/deafen target the identity.
     const targetState = this.resolveVoiceTarget(user)?.voiceState;
     const voiceChannels = (serverStore.serverDetails?.channels ?? []).filter((channel) => channel.type === 'VOICE');
     const roleIds = new Set(serverStore.getUserRoleIds(user.id));
@@ -38,8 +38,8 @@ export class UserContextMenu {
       .filter((role) => !role.isDefault && !serverStore.isAdminRole(role))
       .sort((a, b) => b.position - a.position);
 
-    const canMuteMembers = !!targetState && serverStore.hasPermission(Permission.MUTE_MEMBERS);
-    const canDeafenMembers = !!targetState && serverStore.hasPermission(Permission.DEAFEN_MEMBERS);
+    const canMuteMembers = !user.isBot && serverStore.hasPermission(Permission.MUTE_MEMBERS);
+    const canDeafenMembers = !user.isBot && serverStore.hasPermission(Permission.DEAFEN_MEMBERS);
     const canKickMembers = !!targetState && serverStore.hasPermission(Permission.KICK_MEMBERS);
     const canMoveMembers = !!targetState && serverStore.hasPermission(Permission.MOVE_MEMBERS) && voiceChannels.length > 0;
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES) && manageableRoles.length > 0;
@@ -116,8 +116,8 @@ export class UserContextMenu {
         <div style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px;">
           ${t('userMenu.adminActions')}
         </div>
-        ${canMuteMembers ? `<button type="button" class="btn btn-secondary" data-action="server-mute">${targetState?.serverMuted ? t('userMenu.serverUnmute') : t('userMenu.serverMute')}</button>` : ''}
-        ${canDeafenMembers ? `<button type="button" class="btn btn-secondary" data-action="server-deafen">${targetState?.serverDeafened ? t('userMenu.serverUndeafen') : t('userMenu.serverDeafen')}</button>` : ''}
+        ${canMuteMembers ? `<button type="button" class="btn btn-secondary" data-action="server-mute" disabled aria-busy="true">${t('userMenu.loadingRestrictions')}</button>` : ''}
+        ${canDeafenMembers ? `<button type="button" class="btn btn-secondary" data-action="server-deafen" disabled aria-busy="true">${t('userMenu.loadingRestrictions')}</button>` : ''}
         ${canKickMembers ? `<button type="button" class="btn btn-secondary" data-action="kick-voice">${t('userMenu.kickFromVoice')}</button>` : ''}
         ${canMoveMembers ? `
           <div class="ctx-submenu-wrap">
@@ -266,11 +266,75 @@ export class UserContextMenu {
     webRtcManager.setPeerVolume(sessionId, clamped);
   }
 
-  private async runAdminAction(action: () => Promise<void>): Promise<void> {
+  private async runAdminAction(action: () => Promise<unknown>): Promise<void> {
+    const menu = this.menuEl;
     try {
       await action();
-      this.close();
+      if (this.menuEl === menu) this.close();
     } catch (err: unknown) {
+      if (this.menuEl !== menu) return;
+      await showAlert({
+        title: t('common.error'),
+        message: err instanceof Error ? err.message : t('userMenu.actionFailed'),
+        variant: 'danger',
+      });
+    }
+  }
+
+  private async attachModerationEvents(user: UserSummary): Promise<void> {
+    const menu = this.menuEl;
+    const mute = menu?.querySelector<HTMLButtonElement>('[data-action="server-mute"]');
+    const deafen = menu?.querySelector<HTMLButtonElement>('[data-action="server-deafen"]');
+    if (!menu || (!mute && !deafen)) return;
+    const client = getActiveNetworkClient();
+    const targetUserId = this.isSelf(user) && serverStore.currentUser ? serverStore.currentUser.id : user.id;
+    try {
+      const response = await client.sendRequest<unknown>(MessageType.ADMIN_GET_VOICE_RESTRICTIONS, {
+        targetUserId,
+      } satisfies AdminVoiceRestrictionsGetPayload);
+      if (this.menuEl !== menu) return;
+      const parsed = voiceRestrictionsUpdatedSchema.safeParse(response);
+      if (!parsed.success || parsed.data.userId !== targetUserId) throw new Error(t('userMenu.actionFailed'));
+      let restrictions = parsed.data;
+      let busy = false;
+      const updateLabels = () => {
+        if (this.menuEl !== menu) return;
+        if (mute) {
+          mute.textContent = t(restrictions.serverMuted ? 'userMenu.serverUnmute' : 'userMenu.serverMute');
+          mute.disabled = busy;
+          mute.setAttribute('aria-busy', String(busy));
+        }
+        if (deafen) {
+          deafen.textContent = t(restrictions.serverDeafened ? 'userMenu.serverUndeafen' : 'userMenu.serverDeafen');
+          deafen.disabled = busy;
+          deafen.setAttribute('aria-busy', String(busy));
+        }
+      };
+      const act = (action: () => Promise<unknown>) => {
+        if (busy || this.menuEl !== menu) return;
+        busy = true;
+        updateLabels();
+        void this.runAdminAction(action).finally(() => {
+          busy = false;
+          updateLabels();
+        });
+      };
+      mute?.addEventListener('click', () => act(() => client.sendRequest(MessageType.ADMIN_MUTE_USER, {
+        targetUserId, muted: !restrictions.serverMuted,
+      } satisfies AdminMuteUserPayload)));
+      deafen?.addEventListener('click', () => act(() => client.sendRequest(MessageType.ADMIN_DEAFEN_USER, {
+        targetUserId, deafened: !restrictions.serverDeafened,
+      } satisfies AdminDeafenUserPayload)));
+      this.unbindGlobalListeners.push(appEvents.on('i18n.language_changed', updateLabels));
+      this.unbindGlobalListeners.push(appEvents.on('server.voice_restrictions_updated', () => {
+        if (serverStore.currentUser?.id !== targetUserId) return;
+        restrictions = { userId: targetUserId, ...serverStore.voiceRestrictions };
+        updateLabels();
+      }));
+      updateLabels();
+    } catch (err: unknown) {
+      if (this.menuEl !== menu) return;
+      this.close();
       await showAlert({
         title: t('common.error'),
         message: err instanceof Error ? err.message : t('userMenu.actionFailed'),
@@ -303,7 +367,7 @@ export class UserContextMenu {
   }
 
   /**
-   * The connection a voice moderation action should target: the exact session
+   * The connection a kick or move should target: the exact session
    * the menu was opened from, else any session of that person in voice (#309).
    */
   private resolveVoiceTarget(user: UserSummary): ParticipantViewModel | undefined {
@@ -337,7 +401,7 @@ export class UserContextMenu {
       this.menuEl.querySelector('[data-action="self-mute"]')?.addEventListener('click', toggleMicrophoneMute);
       this.menuEl.querySelector('[data-action="self-deafen"]')?.addEventListener('click', toggleAudioDeafen);
       this.updateSelfControls();
-      for (const event of ['voice.state_updated', 'i18n.language_changed']) {
+      for (const event of ['voice.state_updated', 'server.voice_restrictions_updated', 'i18n.language_changed']) {
         this.unbindGlobalListeners.push(appEvents.on(event, () => this.updateSelfControls()));
       }
     }
@@ -385,23 +449,7 @@ export class UserContextMenu {
       wrap.addEventListener('mouseenter', () => this.syncSubmenuVerticalOffset(wrap));
     });
 
-    this.menuEl.querySelector('[data-action="server-mute"]')?.addEventListener('click', () => {
-      const state = this.resolveVoiceTarget(user)?.voiceState;
-      if (!state) return this.close();
-      void this.runAdminAction(() => networkClient.sendRequest(MessageType.ADMIN_MUTE_USER, {
-        targetSessionId: state.sessionId,
-        muted: !state.serverMuted,
-      }));
-    });
-
-    this.menuEl.querySelector('[data-action="server-deafen"]')?.addEventListener('click', () => {
-      const state = this.resolveVoiceTarget(user)?.voiceState;
-      if (!state) return this.close();
-      void this.runAdminAction(() => networkClient.sendRequest(MessageType.ADMIN_DEAFEN_USER, {
-        targetSessionId: state.sessionId,
-        deafened: !state.serverDeafened,
-      }));
-    });
+    void this.attachModerationEvents(user);
 
     this.menuEl.querySelector('[data-action="kick-voice"]')?.addEventListener('click', () => {
       const state = this.resolveVoiceTarget(user)?.voiceState;
