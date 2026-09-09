@@ -1,7 +1,8 @@
 import type { ParticipantViewModel } from '../core/ParticipantManager';
 
-export function voiceConnectionIndicator(ping: number | null, reconnecting = false) {
+export function voiceConnectionIndicator(ping: number | null, reconnecting = false, connecting = false) {
   if (reconnecting) return { quality: 'reconnecting', icon: 'signal_wifi_bad' } as const;
+  if (connecting) return { quality: 'connecting', icon: 'sync' } as const;
   if (ping === null || !Number.isFinite(ping) || ping < 0) {
     return { quality: 'unknown', icon: 'rss_feed' } as const;
   }

@@ -26,6 +26,7 @@ export class ContextMenu {
     this.close();
     if (!items.length) return;
     this.returnFocus = anchor ?? null;
+    anchor?.setAttribute('aria-expanded', 'true');
 
     const menu = document.createElement('div');
     menu.className = 'floating-context-menu';
@@ -67,7 +68,8 @@ export class ContextMenu {
 
   private attachDismiss(): void {
     const handleOutsideClick = (e: Event) => {
-      if (this.menuEl && !this.menuEl.contains(e.target as Node)) this.close();
+      if (e.target instanceof Node && this.menuEl
+        && !this.menuEl.contains(e.target) && !this.returnFocus?.contains(e.target)) this.close();
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -105,7 +107,12 @@ export class ContextMenu {
     });
   }
 
+  public isOpenFor(anchor: HTMLElement): boolean {
+    return this.menuEl !== null && this.returnFocus === anchor;
+  }
+
   public close(): void {
+    this.returnFocus?.setAttribute('aria-expanded', 'false');
     this.returnFocus = null;
     this.unbindGlobalListeners.forEach((u) => u());
     this.unbindGlobalListeners = [];

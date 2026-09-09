@@ -38,7 +38,7 @@ if (!process.versions.electron) {
           server.middlewares.use((request, response, next) => {
             if (request.url !== '/__command_dom_smoke__') return next();
             response.setHeader('Content-Type', 'text/html');
-            response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/fonts.css"><link rel="stylesheet" href="/styles/theme.css"></head><body><div id="app"></div></body></html>');
+            response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles/fonts.css"><link rel="stylesheet" href="/styles/theme.css"><link rel="stylesheet" href="/styles/dropdowns.css"><link rel="stylesheet" href="/styles/footerControls.css"></head><body><div id="app"></div></body></html>');
           });
         },
       }],
@@ -53,7 +53,7 @@ if (!process.versions.electron) {
     if (!address || typeof address === 'string') throw new Error('Missing Vite listener');
     window = new BrowserWindow({
       show: false, width: 1100, height: 850,
-      webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
+      webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     timeout = setTimeout(() => { console.error('DOM smoke timed out'); void finish(1); }, 45_000);
@@ -63,11 +63,505 @@ if (!process.versions.electron) {
     fs.writeFileSync(path.join(output, 'command-dom-catalog.png'), (await window.webContents.capturePage()).toPNG());
     const result = await window.webContents.executeJavaScript('window.commandDomCaptureComposer()', true);
     fs.writeFileSync(path.join(output, 'command-dom-composer.png'), (await window.webContents.capturePage()).toPNG());
+    await runMessageToolbarPointerSmoke(window);
     await window.webContents.executeJavaScript('window.commandDomCleanup()', true);
+    const sidebarChecks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
+    const settingsChecks = await window.webContents.executeJavaScript(`(${runSettingsNavigationSmoke.toString()})()`, true);
+    await window.webContents.executeJavaScript(`document.body.innerHTML = '<div class="user-quick-actions" style="justify-content:flex-start;padding:20px;gap:12px;">' + window.adminAudioPreviewMarkup + '</div>'; new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    fs.writeFileSync(path.join(output, 'admin-audio-icons.png'), (await window.webContents.capturePage({ x: 0, y: 0, width: 140, height: 80 })).toPNG());
+    await window.webContents.executeJavaScript(`document.body.innerHTML = '<div style="width:250px;padding:12px;">' + window.adminAudioChannelPreviewMarkup + '</div>'; new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    fs.writeFileSync(path.join(output, 'admin-channel-icons.png'), (await window.webContents.capturePage({ x: 0, y: 0, width: 280, height: 70 })).toPNG());
+    await window.webContents.executeJavaScript(`document.body.innerHTML = '<div id="app">' + window.mainAudioControlsPreviewMarkup + '</div>'; new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    fs.writeFileSync(path.join(output, 'main-audio-controls.png'), (await window.webContents.capturePage({ x: 0, y: 550, width: 620, height: 300 })).toPNG());
+    await window.webContents.executeJavaScript(`document.body.innerHTML = '<div style="display:flex;gap:16px;padding:24px;">' + window.voiceConnectionPreviewMarkup + '</div>'; new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    fs.writeFileSync(path.join(output, 'voice-connection-states.png'), (await window.webContents.capturePage({ x: 0, y: 0, width: 1020, height: 180 })).toPNG());
     console.log(`Command DOM smoke: ${result.checks} checks passed`);
+    console.log(`Sidebar PTT smoke: ${sidebarChecks} checks passed`);
+    console.log(`Settings navigation smoke: ${settingsChecks} checks passed`);
     console.log('Screenshots: dist-test\\command-dom-catalog.png and dist-test\\command-dom-composer.png');
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
+}
+
+async function runMessageToolbarPointerSmoke(window) {
+  window.focus();
+  window.webContents.focus();
+  const evaluate = code => window.webContents.executeJavaScript(code, true);
+  const wait = () => new Promise(resolve => setTimeout(resolve, 50));
+  const row = '.chat-message-row[data-message-id="toolbar-pointer"]';
+  const action = name => `${row} [data-message-action="${name}"]`;
+  const check = async (expression, message) => {
+    if (!await evaluate(expression)) {
+      const state = await evaluate(`(() => {
+        const row = document.querySelector('${row}');
+        const rect = row.querySelector('.chat-message-text').getBoundingClientRect();
+        return { classes: row.className, hovered: row.matches(':hover'),
+          hit: document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.outerHTML,
+          focused: document.activeElement.outerHTML.slice(0, 250),
+          documentFocused: document.hasFocus(), focusVisible: document.activeElement.matches(':focus-visible') };
+      })()`);
+      throw new Error(message + ': ' + JSON.stringify(state));
+    }
+  };
+  const move = async selector => {
+    const point = await evaluate(`(() => {
+      const rect = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+      return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
+    })()`);
+    window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+    await wait();
+    return point;
+  };
+  const click = async selector => {
+    const point = await move(selector);
+    window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+    window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+    await wait();
+  };
+  const leave = async () => {
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: 5, y: 5 });
+    await wait();
+  };
+  const visible = `getComputedStyle(document.querySelector('${row} .chat-message-toolbar')).opacity === '1'`;
+  await evaluate('window.prepareToolbarPointerFixture()');
+  try {
+    await click(`${row} .chat-message-text`);
+    await check(`getComputedStyle(document.querySelector('${row}')).outlineStyle === 'none'`,
+      'Mouse-clicking a message must not draw the keyboard focus outline');
+    await click(action('copy'));
+    await check(`!(${visible}) && !document.querySelector('.chat-copy-toast')`,
+      'Copy must immediately hide its toolbar, even while the clipboard is pending');
+    await evaluate('window.finishToolbarPointerCopy()');
+    await leave();
+    await move(`${row} .chat-message-text`);
+    await check(visible, 'Hovering the message again restores actions');
+    await click(action('reply'));
+    await check(`!(${visible}) && document.activeElement.id === 'chat-message-input'`,
+      'Reply immediately hides actions and focuses the composer');
+    await leave();
+    await move(`${row} .chat-message-text`);
+    await click(action('emoji'));
+    await leave();
+    await check(`${visible} && !!document.querySelector('.emoji-picker')
+      && document.querySelector('${action('emoji')}').getAttribute('aria-expanded') === 'true'`,
+      'Emoji keeps the toolbar visible while its picker is open, even after pointer leave');
+    await click(action('emoji'));
+    await check(`${visible} && !document.querySelector('.emoji-picker')
+      && document.querySelector('${action('emoji')}').getAttribute('aria-expanded') === 'false'`,
+      'Clicking the same emoji button closes only its picker');
+    await leave();
+    await check(`!(${visible})`, 'Closing the emoji picker releases the toolbar');
+    await move(`${row} .chat-message-text`);
+    await click(action('emoji'));
+    await click(action('more'));
+    await check(`!document.querySelector('.emoji-picker') && !!document.querySelector('.floating-context-menu')`,
+      'Opening more closes the emoji picker without leaving its anchor expanded');
+    await click(action('emoji'));
+    await check(`!!document.querySelector('.emoji-picker') && !document.querySelector('.floating-context-menu')`,
+      'Opening emoji closes more and switches the pinned toolbar anchor');
+    await evaluate('window.closeToolbarPointerPicker()');
+    await leave();
+    await move(`${row} .chat-message-text`);
+    await click(action('more'));
+    await leave();
+    await check(`${visible} && !!document.querySelector('.floating-context-menu')
+      && document.querySelector('${action('more')}').getAttribute('aria-expanded') === 'true'`,
+      'An open more-menu must keep its toolbar visible after the pointer leaves');
+    await click(action('more'));
+    await check(`${visible} && !document.querySelector('.floating-context-menu')
+      && document.querySelector('${action('more')}').getAttribute('aria-expanded') === 'false'`,
+      'Clicking the same more-button closes only its submenu, without reopening it');
+    await leave();
+    await check(`!(${visible})`, 'Closed more-menu must not leave mouse focus pinning the toolbar');
+    await move(`${row} .chat-message-text`);
+    await click(action('more'));
+    await evaluate(`Array.from(document.querySelectorAll('.floating-context-menu button'))
+      .find(button => button.textContent.includes('content_copy')).id = 'toolbar-menu-copy'`);
+    await click('#toolbar-menu-copy');
+    await check(`!(${visible}) && !document.querySelector('.floating-context-menu')`,
+      'Selecting a submenu action also dismisses the toolbar');
+    await evaluate('window.finishToolbarPointerCopy()');
+    await leave();
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+    await wait();
+    await check(`${visible} && document.activeElement.matches('.chat-message-toolbar button:focus-visible')`,
+      'Keyboard navigation restores the toolbar and preserves visible focus');
+    console.log('Message toolbar: 14 trusted pointer/keyboard checks passed');
+  } finally {
+    await evaluate('window.cleanupToolbarPointerFixture()');
+  }
+}
+
+async function runSettingsNavigationSmoke() {
+  const [{ SettingsModal }, { t }, { initTooltips }, { selectEnhancer }] = await Promise.all([
+    import('/views/SettingsModal.ts'), import('/i18n/index.ts'), import('/core/TooltipService.ts'), import('/core/SelectEnhancer.ts'),
+  ]);
+  const offTooltips = initTooltips();
+  selectEnhancer.init();
+  let checks = 0;
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  let starts = 0;
+  let deactivations = 0;
+  let cleanups = 0;
+  let versions = 0;
+  const modal = new SettingsModal();
+  for (const key of ['accountTab', 'soundboardTab', 'stickersTab', 'keybindsTab', 'notificationsTab', 'qualityTab', 'logsTab']) {
+    modal[key] = { renderHtml: () => '', attachEvents: () => {}, cleanup: () => {} };
+  }
+  modal.aboutTab = { renderHtml: () => '', attachEvents: () => {}, loadAppVersion: async () => { versions++; } };
+  modal.voiceVideoTab = {
+    renderHtml: () => '<label for="settings-select-fixture">Device</label><select id="settings-select-fixture" title="Device choice"><option value="one">One</option><option value="two">Two</option></select>',
+    attachEvents: () => {}, refreshDevices: async () => {},
+    startVadMeter: () => { starts++; }, deactivate: () => { deactivations++; }, cleanup: () => { cleanups++; },
+  };
+  try {
+    await modal.open();
+    check(starts === 0, 'Opening account settings must not start a hidden microphone meter');
+    modal.close();
+    await modal.open('voice_video');
+    check(document.querySelector('#tab-panel-voice_video').style.display !== 'none'
+      && document.querySelector('#settings-current-tab-title').textContent.includes(t('settings.tabVoiceVideo')),
+    'Quick audio settings shortcut opens the voice tab directly');
+    check(starts === 1, 'Visible voice settings starts its meter exactly once');
+    const select = document.getElementById('settings-select-fixture');
+    select.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' }));
+    select.click();
+    check(!!document.querySelector('.monky-select-popup') && select.title === 'Device choice',
+      'Themed select opens inside settings while tooltip handling preserves its title API');
+    select.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    check(!document.querySelector('.monky-select-popup') && !!document.querySelector('.modal-backdrop--settings'),
+      'Escape closes the dropdown without also closing its settings modal');
+    const priorCleanup = cleanups;
+    modal.switchTab('account');
+    check(deactivations === 1 && cleanups === priorCleanup, 'Leaving voice stops media without removing the tab control bindings');
+    modal.switchTab('voice_video');
+    check(starts === 2 && cleanups === priorCleanup, 'Returning to voice resumes the meter without duplicating or dropping bindings');
+    modal.close();
+    check(cleanups === priorCleanup + 1, 'Closing settings performs full voice tab cleanup');
+    let resolveRefresh;
+    modal.voiceVideoTab.refreshDevices = () => new Promise(resolve => { resolveRefresh = resolve; });
+    const priorStarts = starts;
+    const priorVersions = versions;
+    const opening = modal.open('voice_video');
+    modal.close();
+    resolveRefresh();
+    await opening;
+    check(starts === priorStarts && versions === priorVersions && !document.querySelector('.modal-backdrop--settings'),
+      'Closing during async settings setup cannot start a late microphone preview');
+    return checks;
+  } finally {
+    modal.close();
+    selectEnhancer.dispose();
+    offTooltips();
+  }
+}
+
+async function runSidebarPttSmoke() {
+  const [{ MainView }, { VoiceStageView }, ptt, { voiceStore: voice }, { settingsStore: settings },
+    { appEvents }, { networkClient }, { soundEffects }, language, audioIcons, { OverlayStageView },
+    servers, participants, routing, { userContextMenu }, { initTooltips }, { selectEnhancer }, { webRtcManager }] = await Promise.all([
+    import('/views/MainView.ts'), import('/views/VoiceStageView.ts'), import('/views/PttIndicator.ts'),
+    import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'), import('/core/EventBus.ts'),
+    import('/core/NetworkClient.ts'), import('/core/SoundEffects.ts'), import('/i18n/index.ts'),
+    import('/views/AudioStateIcon.ts'), import('/views/OverlayStageView.ts'),
+    import('/stores/serverStore.ts'), import('/core/ParticipantManager.ts'), import('/core/sessionRouting.ts'), import('/views/UserContextMenu.ts'),
+    import('/core/TooltipService.ts'), import('/core/SelectEnhancer.ts'),
+    import('/core/WebRtcManager.ts'),
+  ]);
+  let checks = 0;
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  document.body.innerHTML = '<div id="app"></div><div id="ptt-stage-fixture"></div>';
+  const root = document.getElementById('app');
+  root.innerHTML = '<div class="user-quick-actions">' + ptt.renderMicrophoneButton()
+    + '<button id="bar-btn-deafen" class="btn btn-icon">' + audioIcons.renderAudioStateIcon('headphones') + '</button></div>'
+    + '<div id="voice-channels-list" style="width:250px"></div><div id="members-list-items"></div>';
+  const view = new MainView(root);
+  const stage = new VoiceStageView(document.getElementById('ptt-stage-fixture'));
+  const send = networkClient.send;
+  const play = soundEffects.play;
+  const enumerateDevices = navigator.mediaDevices.enumerateDevices;
+  networkClient.send = () => {};
+  soundEffects.play = () => {};
+  settings.inputMode = 'push_to_talk';
+  voice.currentVoiceChannelId = 'ptt-sidebar-fixture';
+  voice.isMuted = voice.isDeafened = voice.serverMuted = voice.serverDeafened = false;
+  voice.setMicrophoneState(false, false);
+  language.setLanguage('pt-BR');
+  const offTooltips = initTooltips();
+  selectEnhancer.init();
+  const localUser = { id: 'ptt-local-user', sessionId: 'ptt-local-session', clientId: 'ptt-local-client', nickname: 'Local', status: 'ONLINE', joinedAt: 1 };
+  const remoteUser = { ...localUser, id: 'ptt-remote-user', sessionId: 'ptt-remote-session', clientId: 'ptt-remote-client', nickname: 'Remote' };
+  const server = servers.createServerStore();
+  const manager = participants.createParticipantManager();
+  servers.setActiveServerStore(server);
+  participants.setActiveParticipantManager(manager);
+  server.setServerDetails({
+    id: 'ptt-server', name: 'PTT fixture', createdAt: 1, maxUsers: 10, voiceStates: {},
+    channels: [{ id: voice.currentVoiceChannelId, serverId: 'ptt-server', name: 'Voice', type: 'VOICE', position: 0, createdAt: 1, isPrivate: false, allowedRoleIds: [] }],
+    members: [localUser, remoteUser], knownMembers: [localUser, remoteUser], roles: [], userRoles: [], myPermissions: 2147483647, ownerId: localUser.id,
+  }, localUser);
+  manager.addUser(localUser);
+  manager.updateVoiceState({
+    sessionId: localUser.sessionId, userId: localUser.id, channelId: voice.currentVoiceChannelId,
+    isMuted: false, isDeafened: false, serverMuted: false, serverDeafened: false,
+    isSpeaking: false, isCameraOn: false, isScreenSharing: false,
+  });
+  manager.addUser(remoteUser);
+  const remoteState = {
+    ...manager.get(localUser.sessionId).voiceState, sessionId: remoteUser.sessionId, userId: remoteUser.id,
+  };
+  manager.updateVoiceState(remoteState);
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  try {
+    view.renderChannels();
+    view.renderMembers();
+    view.attachEvents();
+    const channelBlocks = () => root.querySelectorAll('#voice-mini-user-ptt-local-session [data-audio-block]:not([hidden])').length;
+    const memberBlocks = () => root.querySelectorAll('.member-item[data-user-id="ptt-local-user"] [data-audio-block]:not([hidden])').length;
+    manager.updateVoiceState({ ...remoteState, serverMuted: true, serverDeafened: true });
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    check(root.querySelectorAll('#voice-mini-user-ptt-remote-session [data-audio-block]:not([hidden])').length === 2
+      && root.querySelectorAll('.member-item[data-user-id="ptt-remote-user"] [data-audio-block]:not([hidden])').length === 2,
+    'Participant updates must show remote administrative microphone and headphones in both lists');
+    check(channelBlocks() === 0 && memberBlocks() === 0, 'Remote moderation must not change the local participant indicators');
+    manager.updateVoiceState({ ...remoteState, isMuted: true });
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    check(root.querySelectorAll('#voice-mini-user-ptt-remote-session [data-audio-block]:not([hidden])').length === 0
+      && root.querySelector('#voice-mini-user-ptt-remote-session [data-audio-icon]').textContent === 'mic_off',
+    'Clearing remote moderation must reveal the remaining personal mute');
+    const button = root.querySelector('#bar-btn-mic');
+    const icon = () => button.querySelector('[data-audio-icon]').textContent;
+    const block = button.querySelector('[data-audio-block]');
+    const deafenButton = root.querySelector('#bar-btn-deafen');
+    const marker = button.querySelector('[data-ptt-mode]');
+    check(!root.querySelector('[data-ptt-indicator]'), 'Sidebar must not add a separate PTT banner');
+    check(button.dataset.state === 'closed' && icon() === 'keyboard_voice', 'PTT waiting must use its distinct voice-input icon');
+    check(!marker.hidden && marker.textContent === 'PTT', 'PTT mode must remain identifiable on the microphone button');
+    const waitingColor = getComputedStyle(button).color;
+    check(button.getAttribute('aria-pressed') === 'false', 'Waiting for PTT is not manual mute');
+    voice.setMicrophoneState(true, true);
+    check(button.dataset.state === 'open' && icon() === 'mic' && button.dataset.pressed === 'true', 'Actual MainView binding must remain subscribed after attach cleanup');
+    const openColor = getComputedStyle(button).color;
+    check(openColor !== waitingColor, 'PTT open and waiting states must have different colors');
+    const markerStyle = getComputedStyle(marker);
+    check(markerStyle.boxShadow === 'none' && markerStyle.borderTopWidth === '0px' && markerStyle.outlineStyle === 'none', 'Pressed PTT must retain plain text without a border or outline');
+    check(!voice.isMuted && button.getAttribute('aria-pressed') === 'false', 'PTT press must not toggle the manual mute preference');
+    voice.setMicrophoneState(true, false);
+    check(button.dataset.state === 'open' && button.dataset.pressed === 'false', 'Release delay remains visibly open without showing a held key');
+    voice.setMicrophoneState(false, false);
+    check(button.dataset.state === 'closed', 'Releasing the microphone returns the button to waiting');
+    view.attachEvents();
+    button.click();
+    check(voice.isMuted && button.dataset.state === 'muted' && icon() === 'mic_off', 'Clicking the reattached button must toggle manual mute exactly once');
+    check(button.getAttribute('aria-pressed') === 'true' && button.title.includes('silenciado manualmente'), 'Manual mute must be explicit and accessible');
+    const mutedColor = getComputedStyle(button).color;
+    check(mutedColor !== waitingColor && mutedColor !== openColor && marker.hidden, 'Manual mute must have its own color without the PTT label');
+    check(getComputedStyle(button.querySelector('[data-audio-icon]')).transform === 'none' && !button.title.includes('PTT'), 'Fully muted microphone must be centered and described independently of PTT');
+    check(block.hidden, 'Personal mute must not display the administrative block symbol');
+    voice.setMicrophoneState(true, true);
+    check(voice.isMuted && button.dataset.state === 'muted' && marker.hidden, 'PTT state cannot visually override a manual mute or reveal its label');
+    voice.setMicrophoneState(false, false);
+    button.click();
+    check(!voice.isMuted && button.dataset.state === 'closed' && !marker.hidden, 'Manual unmute restores the PTT label and waiting state, not an open microphone');
+    voice.setDeafened(true);
+    check(button.dataset.state === 'muted' && marker.hidden && button.title.includes('áudio desativado'), 'Deafen hides PTT and remains distinguishable from waiting');
+    voice.setDeafened(false);
+    voice.setServerMuted(true);
+    check(channelBlocks() === 1 && memberBlocks() === 1, 'Admin mute must immediately update actual channel and member lists without a participant echo');
+    check(button.dataset.state === 'muted' && marker.hidden && button.title.includes(language.t('permissions.serverMuted')), 'Server mute remains authoritative and hides PTT');
+    check(icon() === 'mic' && !block.hidden && block.textContent === 'block', 'Admin mute uses microphone plus prohibition badge, not the personal slash');
+    check(getComputedStyle(button.querySelector('[data-audio-icon]')).color !== getComputedStyle(button).backgroundColor,
+      'Administrative microphone must remain visible against the muted button background');
+    check(getComputedStyle(block).color !== getComputedStyle(block).backgroundColor,
+      'Prohibition glyph must remain visible against its circular background');
+    const badgeRect = block.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    check(badgeRect.width > 0 && badgeRect.top >= buttonRect.top && badgeRect.right <= buttonRect.right, 'Administrative badge must remain visible inside the button');
+    button.click();
+    check(voice.serverMuted && !block.hidden && marker.hidden, 'Clicking personal mute cannot clear an administrative restriction');
+    voice.setServerMuted(false);
+    check(channelBlocks() === 0 && memberBlocks() === 0, 'Removing admin mute must clear both lists without a participant echo');
+    check(voice.isMuted && icon() === 'mic_off' && block.hidden, 'Removing admin mute reveals an existing personal mute');
+    button.click();
+    voice.setServerDeafened(true);
+    check(channelBlocks() === 2 && memberBlocks() === 2, 'Admin deafen must immediately show blocked microphone and headphones in both lists');
+    const channelRow = root.querySelector('#voice-mini-user-ptt-local-session');
+    const memberRow = root.querySelector('.member-item[data-user-id="ptt-local-user"]');
+    window.adminAudioChannelPreviewMarkup = channelRow.outerHTML;
+    appEvents.emit('voice.state_updated');
+    check(root.querySelector('#voice-mini-user-ptt-local-session') === channelRow
+      && root.querySelector('.member-item[data-user-id="ptt-local-user"]') === memberRow,
+    'Unchanged audio flags must not rebuild lists on frequent voice events');
+    check(icon() === 'mic' && !block.hidden && marker.hidden, 'Admin deafen also blocks the microphone');
+    check(deafenButton.querySelector('[data-audio-icon]').textContent === 'headphones'
+      && !deafenButton.querySelector('[data-audio-block]').hidden
+      && deafenButton.title === language.t('permissions.serverDeafened'), 'Admin deafen uses headphones plus prohibition badge and its own tooltip');
+    window.adminAudioPreviewMarkup = button.outerHTML + deafenButton.outerHTML;
+    voice.setServerDeafened(false);
+    check(channelBlocks() === 0 && memberBlocks() === 0, 'Removing admin deafen must clear both lists immediately');
+    routing.setForegroundContext(false);
+    voice.setServerMuted(true);
+    check(channelBlocks() === 0, 'Background moderation must not redraw lists inside the session routing window');
+    routing.setForegroundContext(true);
+    await Promise.resolve();
+    check(channelBlocks() === 1 && memberBlocks() === 1, 'Background moderation must repaint after foreground stores are restored');
+    voice.setServerMuted(false);
+    check(block.hidden && deafenButton.querySelector('[data-audio-block]').hidden, 'Removing moderation clears both prohibition badges');
+    voice.setChannel(null);
+    check(button.dataset.state === 'inactive' && !marker.hidden, 'PTT mode remains visible outside a call');
+    button.click();
+    check(voice.isMuted && button.dataset.state === 'muted' && marker.hidden, 'Manual pre-mute stays red without PTT even outside a call');
+    language.setLanguage('en');
+    check(button.title.includes('manually muted'), 'Microphone descriptions must follow the selected language');
+    settings.inputMode = 'voice_activity';
+    appEvents.emit('settings.updated');
+    check(marker.hidden && icon() === 'mic_off', 'VAD hides the PTT label without changing manual mute');
+    button.click();
+    check(icon() === 'mic' && button.dataset.state === 'idle', 'Unmuted VAD keeps the normal microphone icon');
+    settings.inputMode = 'push_to_talk';
+    appEvents.emit('settings.updated');
+    stage.setChannel('ptt-sidebar-fixture');
+    check(!!document.querySelector('.stage-call-controls') && !document.querySelector('#ptt-stage-fixture [data-ptt-indicator]'), 'The actual stage must retain its controls without a separate PTT indicator');
+    const pingBadge = document.getElementById('stage-ping-badge');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    pingBadge.focus();
+    check(pingBadge.getAttribute('aria-describedby')?.includes('monky-tooltip')
+      && !!document.querySelector('.monky-tooltip:not([hidden])')?.textContent.trim()
+      && !document.querySelector('.ping-tooltip'), 'Actual stage latency details use the same immediate accessible tooltip');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    voice.setServerDeafened(true);
+    for (const id of ['stage-btn-mic', 'stage-btn-deafen']) {
+      check(!document.getElementById(id).querySelector('[data-audio-block]').hidden, 'Stage controls must also distinguish admin restrictions');
+    }
+    voice.setServerDeafened(false);
+    const statuses = document.createElement('div');
+    for (let flags = 0; flags < 16; flags++) {
+      const audioState = {
+        isMuted: !!(flags & 1), isDeafened: !!(flags & 2),
+        serverMuted: !!(flags & 4), serverDeafened: !!(flags & 8),
+      };
+      statuses.innerHTML = audioIcons.renderAudioMuteIndicators(audioState);
+      const expectedBlocks = Number(audioState.serverMuted || audioState.serverDeafened) + Number(audioState.serverDeafened);
+      check(statuses.querySelectorAll('[data-audio-block]:not([hidden])').length === expectedBlocks, 'Participant indicators must prioritize admin restrictions without duplicate badges');
+      check([...statuses.querySelectorAll('[role="img"]')].every(e => e.getAttribute('aria-label')), 'Participant audio indicators must have localized accessible names');
+    }
+    const overlay = new OverlayStageView(document.createElement('div'));
+    const overlayState = { isMuted: false, isDeafened: false, serverMuted: true, serverDeafened: true, screenShareIds: [], isCameraOn: false };
+    statuses.innerHTML = overlay.getMiniIconsHtml(overlayState);
+    check(statuses.querySelectorAll('[data-audio-block]:not([hidden])').length === 2, 'Minimal overlay must display both administrative restrictions');
+    statuses.innerHTML = overlay.getBadgesHtml({ p: overlayState, kind: 'camera' });
+    check(statuses.querySelectorAll('[data-audio-block]:not([hidden])').length === 2, 'Overlay video tiles must retain administrative badges');
+    statuses.innerHTML = audioIcons.renderAudioMuteIndicators({ isMuted: false, isDeafened: true }, { showMicrophone: false });
+    check(statuses.querySelectorAll('[data-audio-icon]').length === 1, 'Member-list masking must preserve audio status without adding a microphone outside voice');
+    stage.destroy();
+    view.destroy();
+    const previousState = button.dataset.state;
+    voice.setMicrophoneState(true, true);
+    button.click();
+    check(button.dataset.state === previousState && !voice.isMuted, 'Destroy must release microphone state and click listeners');
+    voice.currentVoiceChannelId = 'ptt-sidebar-fixture';
+    document.getElementById('ptt-stage-fixture').style.display = 'none';
+    view.render();
+    language.setLanguage('pt-BR');
+    const healthChanged = webRtcManager.sfuEngine.callbacks.onHealthChanged;
+    const connectionRow = () => root.querySelector('#voice-connection-row');
+    const connectionStatus = () => root.querySelector('.voice-conn-status');
+    const connectionSignal = () => root.querySelector('.voice-conn-signal');
+    const previews = [];
+    const captureConnection = () => previews.push(`<div style="width:300px;">${connectionRow().outerHTML}</div>`);
+    healthChanged('connecting');
+    check(voice.isConnecting && !voice.isReconnecting && connectionRow().classList.contains('connecting')
+      && connectionStatus().textContent === 'Conectando…', 'Actual SFU initial health renders connecting, never reconnecting');
+    check(connectionSignal().textContent === 'sync'
+      && getComputedStyle(connectionSignal()).animationName === 'reconnect-spin',
+      'Initial connection uses the rotating sync icon');
+    check(root.querySelector('.voice-conn-info').title === language.t('main.connectingTitle')
+      && root.querySelector('#sidebar-voice-ping').textContent === '-- ms',
+      'Connecting tooltip explains initial setup without claiming measured latency');
+    const connectingColor = getComputedStyle(connectionStatus()).color;
+    captureConnection();
+    healthChanged('connected');
+    await Promise.resolve();
+    check(!voice.isConnecting && !voice.isReconnecting && connectionStatus().textContent === language.t('main.voiceConnected')
+      && connectionSignal().textContent === 'rss_feed', 'Connected health restores the normal voice status and RSS icon');
+    const connectedColor = getComputedStyle(connectionStatus()).color;
+    captureConnection();
+    healthChanged('reconnecting');
+    check(connectionStatus().textContent === 'Reconectando…' && connectionSignal().textContent === 'signal_wifi_bad',
+      'Real connection loss keeps its recovery text and warning icon');
+    check(getComputedStyle(connectionStatus()).color !== connectingColor
+      && getComputedStyle(connectionStatus()).color !== connectedColor && connectingColor !== connectedColor,
+      'Connecting, connected and reconnecting have distinct status colors');
+    captureConnection();
+    healthChanged('connecting');
+    check(voice.isReconnecting && connectionStatus().textContent === 'Reconectando…',
+      'Rebuilding SFU transports during recovery must not flash initial connecting');
+    healthChanged('connected');
+    language.setLanguage('en');
+    healthChanged('connecting');
+    check(connectionStatus().textContent === 'Connecting…'
+      && root.querySelector('.voice-conn-info').title === 'Establishing the voice connection',
+      'Initial connection status and tooltip follow the selected language');
+    healthChanged('connected');
+    window.voiceConnectionPreviewMarkup = previews.join('');
+    check(root.querySelectorAll('.audio-control-group').length === 2
+      && root.querySelectorAll('button.audio-device-trigger').length === 2, 'Actual MainView must render independent microphone and output device arrows');
+    const footerRect = root.querySelector('.user-control-bar').getBoundingClientRect();
+    for (const trigger of root.querySelectorAll('button.audio-device-trigger')) {
+      const rect = trigger.getBoundingClientRect();
+      check(trigger.getAttribute('aria-expanded') === 'false' && rect.width > 0
+        && rect.left >= footerRect.left && rect.right <= footerRect.right,
+      'Device arrows must be accessible, visible and contained inside the actual footer');
+    }
+    navigator.mediaDevices.enumerateDevices = async () => [
+      { deviceId: 'default', kind: 'audiooutput', label: 'System output', groupId: 'audio' },
+    ];
+    const outputTrigger = root.querySelector('[data-audio-device="output"]');
+    outputTrigger.click();
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const outputPanel = document.querySelector('.audio-device-popover');
+    check(!!outputPanel && outputTrigger.getAttribute('aria-expanded') === 'true', 'Actual output arrow must open its device panel without toggling mute');
+    const selectRect = outputPanel.querySelector('.audio-device-current').getBoundingClientRect();
+    check([selectRect.left + 8, selectRect.left + selectRect.width / 2, selectRect.right - 8].every(x =>
+      outputPanel.contains(document.elementFromPoint(x, selectRect.top + selectRect.height / 2))),
+      'Device selector must appear above the floating footer, not hidden behind its media buttons');
+    check(outputPanel.getBoundingClientRect().bottom <= outputTrigger.getBoundingClientRect().top,
+      'Actual footer device panel must open upward');
+    window.mainAudioControlsPreviewMarkup = root.innerHTML + outputPanel.outerHTML;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    check(!document.querySelector('.audio-device-popover') && document.activeElement === outputTrigger,
+      'Escape closes actual footer panel and restores arrow focus');
+    for (const element of [
+      root.querySelector('#user-profile-btn'),
+      root.querySelector('#voice-mini-user-ptt-local-session'),
+      root.querySelector('.member-item[data-user-id="ptt-local-user"]'),
+    ]) {
+      element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 150, clientY: 100 }));
+      check(!!document.querySelector('.user-context-menu [data-action="self-mute"]')
+        && !document.querySelector('.user-context-menu #ctx-volume-slider'),
+      'Own profile, channel row and member row must all open the same menu without self volume');
+      userContextMenu.close();
+    }
+    const ownProfile = root.querySelector('#user-profile-btn');
+    view.destroy();
+    ownProfile.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    check(!document.querySelector('.user-context-menu'), 'Destroy must release the own-profile context menu listener');
+    return checks;
+  } finally {
+    routing.setForegroundContext(true);
+    selectEnhancer.dispose();
+    offTooltips();
+    userContextMenu.close();
+    stage.destroy();
+    view.destroy();
+    networkClient.send = send;
+    soundEffects.play = play;
+    navigator.mediaDevices.enumerateDevices = enumerateDevices;
+    voice.reset();
+    root.remove();
+    document.getElementById('ptt-stage-fixture').remove();
+  }
 }
 
 async function runDomSmoke() {
@@ -136,18 +630,46 @@ async function runDomSmoke() {
   await document.fonts.ready;
   await frame();
   // Chat actions and both emoji picker modes share the real renderer DOM.
-  const [{ recentEmojis, RECENT_EMOJIS_KEY }, { contextMenu }] = await Promise.all([
-    import('/emoji/recentEmojis.ts'), import('/views/ContextMenu.ts'),
+  const [{ recentEmojis, RECENT_EMOJIS_KEY }, { contextMenu }, { userContextMenu }] = await Promise.all([
+    import('/emoji/recentEmojis.ts'), import('/views/ContextMenu.ts'), import('/views/UserContextMenu.ts'),
   ]);
   localStorage.removeItem(RECENT_EMOJIS_KEY);
   const original = { id: 'chat-original', channelId: 'one', userId: 'bob', userNickname: 'Bob', content: 'Original <safe>', createdAt: 1 };
   store.addMessage(original);
   const row = find('[data-message-id="chat-original"].chat-message-row');
+  const rightClick = element => element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 150, clientY: 100 }));
+  try {
+    rightClick(row.querySelector('.chat-author-name'));
+    check(!!document.querySelector('.user-context-menu #ctx-volume-slider'), 'Right-clicking another chat author must open their user menu');
+    userContextMenu.close();
+    server.currentUser = otherCaller;
+    rightClick(row.querySelector('.chat-author-name'));
+    check(!!document.querySelector('.user-context-menu [data-action="self-mute"]')
+      && !document.querySelector('.user-context-menu #ctx-volume-slider'), 'Right-clicking own chat name opens manual controls without self volume');
+    rightClick(row.querySelector('.chat-message-text'));
+    check(!!document.querySelector('.floating-context-menu') && !document.querySelector('.user-context-menu'), 'Message body retains message actions rather than opening the user menu');
+    rightClick(row.querySelector('.chat-author-avatar'));
+    check(!!document.querySelector('.user-context-menu [data-action="self-deafen"]')
+      && !document.querySelector('.floating-context-menu'), 'Own chat avatar opens the user menu and closes message actions');
+  } finally {
+    contextMenu.close();
+    userContextMenu.close();
+    server.currentUser = caller;
+  }
   const beforeHeight = row.getBoundingClientRect().height;
   find('[data-message-id="chat-original"] [data-message-action="reply"]').focus();
   await frame();
   check(getComputedStyle(find('.chat-message-toolbar')).opacity === '1', 'Keyboard focus must reveal floating message actions');
   check(row.getBoundingClientRect().height === beforeHeight, 'Message toolbar must not shift chat layout');
+  check(getComputedStyle(find('[data-message-action="emoji"]')).opacity === '1', 'Enabled emoji action must not look disabled');
+  const messagePermissions = server.myPermissions;
+  server.myPermissions = 0;
+  events.appEvents.emit('server.roles_updated');
+  check(find('[data-message-action="emoji"]').disabled, 'Emoji action must remain disabled without message permission');
+  check(getComputedStyle(find('[data-message-action="emoji"]')).opacity === '0.4', 'Disabled emoji action must retain the toolbar disabled styling');
+  server.myPermissions = messagePermissions;
+  events.appEvents.emit('server.roles_updated');
+  check(!find('[data-message-action="emoji"]').disabled && getComputedStyle(find('[data-message-action="emoji"]')).opacity === '1', 'Restoring permission must restore full emoji opacity');
   find('[data-message-action="more"]').click();
   check(document.querySelectorAll('.floating-context-menu [role="menuitem"]').length === 4, 'Other authors offer emoji, reply, copy and moderator delete but not edit');
   key(document.activeElement, 'ArrowDown');
@@ -160,17 +682,23 @@ async function runDomSmoke() {
   let finishCopy;
   navigator.clipboard.writeText = (value) => new Promise((resolve) => { copiedMessage = value; finishCopy = resolve; });
   try {
+    const copyToolbar = find('.chat-message-toolbar');
+    const toolbarWidth = copyToolbar.getBoundingClientRect().width;
+    const copyLabel = find('[data-message-action="copy"]').getAttribute('aria-label');
     find('[data-message-action="copy"]').click();
-    check(!document.querySelector('.copy-confirmed'), 'Copy must not report success before the clipboard write finishes');
+    check(!document.querySelector('.chat-copy-toast'), 'Copy must not report success before the clipboard write finishes');
     finishCopy();
     await Promise.resolve();
     check(copiedMessage === original.content, 'Copy message must preserve plain source text without markup');
-    check(find('.chat-message-copy-status').textContent === 'Copiado!', 'Copy success must display localized visible feedback');
-    check(find('[data-message-action="copy"] .material-symbols-outlined').textContent === 'check', 'Copy success must change its icon');
-    check(find('[data-message-action="copy"]').getAttribute('aria-label') === 'Copiado!', 'Copy success must have an accessible label');
-    const copyToolbar = find('.chat-message-toolbar');
+    check(find('.chat-copy-toast-label').textContent === 'Copiado!', 'Copy success must display a localized toast');
+    check(find('.chat-copy-toast').parentElement === document.body && getComputedStyle(find('.chat-copy-toast')).position === 'fixed', 'Copy toast must be outside the hover toolbar and anchored to the viewport');
+    check(find('.chat-copy-toast').getAttribute('role') === 'status', 'Copy toast must expose accessible status feedback');
+    check(getComputedStyle(find('.chat-copy-toast')).pointerEvents === 'none', 'Copy toast must not intercept clicks');
+    check(copyToolbar.getBoundingClientRect().width === toolbarWidth && !copyToolbar.textContent.includes('Copiado!'), 'Copy feedback must not change the hover toolbar layout or content');
+    check(find('[data-message-action="copy"] .material-symbols-outlined').textContent === 'content_copy', 'Copy button must retain its original icon');
+    check(find('[data-message-action="copy"]').getAttribute('aria-label') === copyLabel, 'Copy button must retain its action label');
     find('#chat-message-input').focus();
-    check(getComputedStyle(copyToolbar).opacity === '1', 'Copy feedback must stay visible without hovering or focusing the toolbar');
+    check(getComputedStyle(copyToolbar).opacity === '0' && !!document.querySelector('.chat-copy-toast'), 'Toast must remain visible without forcing the hover toolbar open');
     await new Promise((resolve) => setTimeout(resolve, 850));
     language.setLanguage('en');
     navigator.clipboard.writeText = async (value) => { copiedMessage = value; };
@@ -181,32 +709,32 @@ async function runDomSmoke() {
     menuCopy.click();
     await Promise.resolve();
     check(!document.querySelector('.floating-context-menu'), 'Copy from menu must close the menu');
-    check(find('.chat-message-copy-status').textContent === 'Copied!', 'Menu copy must show the same feedback in English');
+    check(find('.chat-copy-toast-label').textContent === 'Copied!', 'Menu copy must show the same toast in English');
+    check(document.querySelectorAll('.chat-copy-toast').length === 1, 'Repeated copies must replace the toast instead of stacking');
     await new Promise((resolve) => setTimeout(resolve, 850));
-    check(copyToolbar.classList.contains('copy-confirmed'), 'Copying again must renew the feedback duration');
+    check(!!document.querySelector('.chat-copy-toast'), 'Copying again must renew the toast duration');
     await new Promise((resolve) => setTimeout(resolve, 850));
-    check(!copyToolbar.classList.contains('copy-confirmed') && !find('.chat-message-copy-status').textContent, 'Copy feedback must reset automatically');
-    check(find('[data-message-action="copy"]').getAttribute('aria-label') === 'Copy message', 'Copy action label must be restored');
-    check(find('[data-message-action="copy"] .material-symbols-outlined').textContent === 'content_copy', 'Copy action icon must be restored');
+    check(!document.querySelector('.chat-copy-toast'), 'Copy toast must disappear automatically');
+    check(find('[data-message-action="copy"]').getAttribute('aria-label') === copyLabel, 'Copy action label must remain unchanged after toast dismissal');
     language.setLanguage('pt-BR');
     navigator.clipboard.writeText = async () => { throw new Error('Clipboard denied by fixture'); };
     find('[data-message-action="copy"]').click();
     await Promise.resolve();
-    check(!document.querySelector('.copy-confirmed'), 'Clipboard failure must never show successful feedback');
+    check(!document.querySelector('.chat-copy-toast'), 'Clipboard failure must never show a success toast');
     check(find('.dialog-message').textContent === 'Não foi possível copiar a mensagem.', 'Clipboard failure must retain localized error feedback');
     find('.dialog-card [data-action="confirm"]').click();
     navigator.clipboard.writeText = async () => {};
     find('[data-message-action="copy"]').click();
     await Promise.resolve();
     view.setChannel('two');
-    check(!copyToolbar.classList.contains('copy-confirmed'), 'Changing channels must clean up active copy feedback');
+    check(!document.querySelector('.chat-copy-toast'), 'Changing channels must clean up the active copy toast');
     view.setChannel('one');
     navigator.clipboard.writeText = () => new Promise((resolve) => { finishCopy = resolve; });
     find('[data-message-action="copy"]').click();
     view.destroy();
     finishCopy();
     await Promise.resolve();
-    check(!document.querySelector('.copy-confirmed'), 'Clipboard completion after view destruction must not resurrect feedback');
+    check(!document.querySelector('.chat-copy-toast'), 'Clipboard completion after view destruction must not resurrect a toast');
     view.render();
   } finally {
     navigator.clipboard.writeText = originalWriteText;
@@ -251,8 +779,10 @@ async function runDomSmoke() {
   };
   checkPickerSearch();
   find('[data-goto-group="smileys"]').click();
+  await frame();
   check(find('.emoji-picker-body').scrollTop > 0, 'Existing category buttons must still navigate the catalog');
   find('[data-goto-group="recent"]').click();
+  for (let attempt = 0; attempt < 60 && find('.emoji-picker-body').scrollTop > 0; attempt++) await frame();
   check(find('.emoji-picker-body').scrollTop === 0, 'Recent clock must navigate back to the first category');
   check(!!document.querySelector('[data-emoji-group="recent"] .emoji-picker-recent-empty'), 'Empty recent category must explain how it is populated');
   check(recentEmojis.get().length === 0, 'Opening recent category must not record an emoji');
@@ -290,6 +820,105 @@ async function runDomSmoke() {
   contextMenu.close();
   await new Promise((resolve) => setTimeout(resolve, 20));
   check(!document.querySelector('.floating-context-menu'), 'Immediate menu teardown must stay closed');
+  const [{ VoiceVideoTab }, { settingsStore: voiceSettings }, { voiceStore: voiceState }, pttIndicators] = await Promise.all([
+    import('/views/settings/tabs/VoiceVideoTab.ts'), import('/stores/settingsStore.ts'),
+    import('/stores/voiceStore.ts'), import('/views/PttIndicator.ts'),
+  ]);
+  const previousMode = voiceSettings.inputMode;
+  const previousPttKey = voiceSettings.pttKey;
+  const previousApi = window.api;
+  const previousVoice = {
+    currentVoiceChannelId: voiceState.currentVoiceChannelId,
+    isMuted: voiceState.isMuted, isDeafened: voiceState.isDeafened,
+    serverMuted: voiceState.serverMuted, serverDeafened: voiceState.serverDeafened,
+  };
+  const voicePanel = document.createElement('div');
+  const voiceTab = new VoiceVideoTab();
+  voiceSettings.inputMode = 'voice_activity';
+  voiceState.currentVoiceChannelId = null;
+  voiceState.isMuted = voiceState.isDeafened = voiceState.serverMuted = voiceState.serverDeafened = false;
+  voicePanel.innerHTML = voiceTab.renderHtml();
+  document.body.appendChild(voicePanel);
+  voiceTab.attachEvents(voicePanel);
+  const indicatorMirrors = document.createElement('div');
+  indicatorMirrors.innerHTML = pttIndicators.renderPttIndicator() + pttIndicators.renderPttIndicator();
+  document.body.appendChild(indicatorMirrors);
+  const unbindMirrors = pttIndicators.bindPttIndicators(indicatorMirrors);
+  try {
+    const vadCard = voicePanel.querySelector('#mode-card-vad');
+    const pttCard = voicePanel.querySelector('#mode-card-ptt');
+    const indicators = [...document.querySelectorAll('[data-ptt-indicator]')];
+    check(!voicePanel.querySelector('input[type="radio"]'), 'Input mode must use cards instead of native radios');
+    check(vadCard.tagName === 'BUTTON' && pttCard.tagName === 'BUTTON', 'Input cards must have native keyboard activation');
+    check([...voicePanel.querySelectorAll('input[type="checkbox"]')].every((input) => input.closest('.toggle-switch')), 'Boolean settings must retain styled switches, not bare checkboxes');
+    check(indicators.every((indicator) => indicator.hidden), 'VAD mode must not show a PTT badge');
+    pttCard.click();
+    check(voiceSettings.inputMode === 'push_to_talk' && pttCard.getAttribute('aria-pressed') === 'true' && vadCard.getAttribute('aria-pressed') === 'false', 'Selecting the PTT card must persist one exclusive mode');
+    check(voicePanel.querySelector('#container-vad-settings').style.display === 'none' && voicePanel.querySelector('#container-ptt-settings').style.display === 'block', 'Input cards must switch their settings panels');
+    check(indicators.every((indicator) => !indicator.hidden && indicator.dataset.state === 'inactive'), 'PTT enabled outside a call must remain visible without claiming an open microphone');
+    voiceState.currentVoiceChannelId = 'ptt-fixture';
+    events.appEvents.emit('voice.channel_changed', 'ptt-fixture');
+    voiceState.setMicrophoneState(false, false);
+    check(indicators.every((indicator) => indicator.dataset.state === 'closed'), 'Idle PTT must show the microphone closed in every indicator');
+    voiceState.setMicrophoneState(true, true);
+    check(indicators.every((indicator) => indicator.dataset.state === 'open' && indicator.dataset.pressed === 'true'), 'Held PTT with an open microphone must update all indicators');
+    check(indicators[0].querySelector('[data-ptt-label]').textContent.includes('Microfone aberto'), 'PTT state must be localized in Portuguese');
+    check(indicators[0].querySelector('[data-ptt-key]').textContent === voiceSettings.pttKey.display, 'PTT indicator must show its configured shortcut');
+    voiceState.setMicrophoneState(true, false);
+    check(indicators.every((indicator) => indicator.dataset.state === 'open' && indicator.dataset.pressed === 'false'), 'Release delay must show the actual open microphone even after the shortcut is released');
+    voiceState.setMicrophoneState(false, false);
+    voiceState.serverMuted = true;
+    events.appEvents.emit('voice.state_updated');
+    check(indicators.every((indicator) => indicator.dataset.state === 'muted'), 'Server mute must never appear as an open PTT microphone');
+    voiceState.serverMuted = false;
+    language.setLanguage('en');
+    events.appEvents.emit('voice.microphone_updated');
+    check(indicators[0].querySelector('[data-ptt-label]').textContent.includes('Microphone closed'), 'PTT state must be localized in English');
+    vadCard.click();
+    check(voiceSettings.inputMode === 'voice_activity' && indicators.every((indicator) => indicator.hidden), 'Returning to VAD must hide every PTT indicator');
+    let nativeCapture;
+    let captureStarts = true;
+    window.api = {
+      ...previousApi,
+      setPttConfig: async () => true,
+      startPttCapture: async () => captureStarts,
+      stopPttCapture: async () => true,
+      onPttCaptured: (callback) => {
+        nativeCapture = callback;
+        return () => { nativeCapture = null; };
+      },
+    };
+    const recordPtt = voicePanel.querySelector('#btn-record-ptt-key');
+    recordPtt.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM', key: 'm', bubbles: true }));
+    check(voiceSettings.pttKey === previousPttKey && nativeCapture, 'Focused DOM capture must not race ahead of the native worker and save a DOM code as a native PTT key');
+    nativeCapture({ code: 'M', display: 'M', keyType: 'keyboard', keyCode: 50 });
+    check(voiceSettings.pttKey.keyCode === 50 && voiceSettings.pttKey.code === 'M' && !nativeCapture, 'PTT recording must persist the native keycode and release its listener');
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyM', key: 'm', bubbles: true }));
+    captureStarts = false;
+    recordPtt.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    check(!nativeCapture && voicePanel.querySelector('#ptt-key-desc').textContent === language.t('keybinds.hookUnavailable'), 'Unavailable native capture must stop recording and display its failure');
+    voiceTab.cleanup();
+    unbindMirrors();
+    pttCard.click();
+    check(voiceSettings.inputMode === 'voice_activity', 'Unmounted input cards must release their listeners');
+    voiceSettings.inputMode = 'push_to_talk';
+    events.appEvents.emit('settings.updated');
+    check(indicators.every((indicator) => indicator.hidden), 'Unmounted indicators must release global event listeners');
+  } finally {
+    voiceTab.cleanup();
+    unbindMirrors();
+    voicePanel.remove();
+    indicatorMirrors.remove();
+    Object.assign(voiceState, previousVoice);
+    window.api = previousApi;
+    voiceSettings.pttKey = previousPttKey;
+    voiceSettings.inputMode = previousMode;
+    voiceSettings.save();
+    language.setLanguage('pt-BR');
+  }
   store.setHistory('one', []);
   type(find('#chat-message-input'), '');
   sent.length = 0;
@@ -664,6 +1293,25 @@ async function runDomSmoke() {
   check(publicRequests.length === requestsBeforeDestroy, 'Destroyed public selector views must not send further requests');
   selectorClient.dispose();
   selectorFeed.remove();
+  window.prepareToolbarPointerFixture = async () => {
+    const { initTooltips } = await import('/core/TooltipService.ts');
+    const offTooltips = initTooltips();
+    const writeText = navigator.clipboard.writeText;
+    navigator.clipboard.writeText = () => new Promise(resolve => { window.finishToolbarPointerCopy = resolve; });
+    store.addMessage({ ...original, id: 'toolbar-pointer', channelId: 'two', content: 'Toolbar pointer fixture', createdAt: Date.now() });
+    view.setChannel('two');
+    const pointerRow = find('[data-message-id="toolbar-pointer"]');
+    pointerRow.style.marginTop = '60px';
+    pointerRow.scrollIntoView({ block: 'center' });
+    window.closeToolbarPointerPicker = () => view.reactionPicker?.close();
+    window.cleanupToolbarPointerFixture = () => {
+      contextMenu.close();
+      view.reactionPicker?.close();
+      navigator.clipboard.writeText = writeText;
+      offTooltips();
+    };
+    await frame();
+  };
   window.commandDomCleanup = () => { view.destroy(); unbindBotEvents(); client.dispose(); };
   return { checks };
 }

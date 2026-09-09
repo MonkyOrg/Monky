@@ -234,7 +234,7 @@ export class WebRtcManager {
       () => this.signalClient,
       () => this.currentSessionId,
       {
-        onHealthChanged: (health) => voiceStore.setReconnecting(health !== 'connected'),
+        onHealthChanged: (health) => voiceStore.setConnectionHealth(health),
         onRoster: (channelId, participants) => {
           if (voiceStore.currentVoiceChannelId === channelId) {
             this.voiceParticipants.reconcileVoiceChannel(channelId, participants);
@@ -1619,6 +1619,87 @@ export class WebRtcManager {
       });
       console.error(`[WebRTC] Signal handling error from ${fromSessionId}:`, err);
     }
+  }
+
+  /** Initial recovery and raw fallback; normal switches retain the processed track. */
+  public async replaceMicrophoneTrack(track: MediaStreamTrack, signal: AbortSignal): Promise<() => Promise<void>> {
+    const previous = this.localAudioTrack;
+    const channelId = voiceStore.currentVoiceChannelId;
+    const sessionKey = voiceStore.voiceSessionKey;
+    const sfuEpoch = this.sfuJoinEpoch;
+    const sameSession = () => voiceStore.currentVoiceChannelId === channelId &&
+      voiceStore.voiceSessionKey === sessionKey && this.sfuJoinEpoch === sfuEpoch;
+    const ensureCurrent = () => {
+      if (signal.aborted || !sameSession() || this.localAudioTrack !== previous) {
+        throw new DOMException('Microphone replacement was cancelled', 'AbortError');
+      }
+    };
+    let restorePublication: () => Promise<void>;
+    ensureCurrent();
+    if (this.isSfuMode()) {
+      if (!previous) {
+        // The user may have joined receive-only after capture failed.
+        if (!this.sfuEngine.isReady()) throw new Error('SFU microphone transport is not ready');
+        const producer = await this.sfuEngine.produceMic(track);
+        restorePublication = async () => {
+          if (sameSession()) this.sfuEngine.closeProducer('mic');
+          else producer?.close();
+        };
+        try {
+          ensureCurrent();
+          if (!producer) throw new Error('Could not publish SFU microphone');
+        } catch (error) {
+          await restorePublication();
+          throw error;
+        }
+      } else {
+        if (!await this.sfuEngine.replaceTrack('mic', track)) throw new Error('Could not replace SFU microphone');
+        restorePublication = async () => {
+          if (sameSession() && !await this.sfuEngine.replaceTrack('mic', previous)) {
+            console.warn('[WebRTC] Could not restore the previous SFU microphone');
+          }
+        };
+        try {
+          ensureCurrent();
+        } catch (error) {
+          await restorePublication();
+          throw error;
+        }
+      }
+    } else {
+      const replaced: Array<{ sender: RTCRtpSender; previous: MediaStreamTrack | null; pc: RTCPeerConnection }> = [];
+      restorePublication = async () => {
+        const restored = await Promise.allSettled(replaced.filter(({ pc }) => pc.connectionState !== 'closed')
+          .map(({ sender, previous: oldTrack }) => sender.replaceTrack(oldTrack)));
+        if (restored.some((result) => result.status === 'rejected')) {
+          console.warn('[WebRTC] Some microphone senders could not be restored');
+        }
+      };
+      try {
+        for (const session of this.peers.values()) {
+          ensureCurrent();
+          if (session.pc.connectionState === 'closed') continue;
+          const sender = session.audioSender ?? session.pc.getTransceivers().find(
+            (transceiver) => transceiver.receiver.track.kind === 'audio' && transceiver.sender !== session.screenAudioSender,
+          )?.sender;
+          if (!sender) throw new Error('Microphone sender is unavailable');
+          const oldTrack = sender.track;
+          await sender.replaceTrack(track);
+          replaced.push({ sender, previous: oldTrack, pc: session.pc });
+        }
+        ensureCurrent();
+      } catch (error) {
+        await restorePublication();
+        throw error;
+      }
+    }
+    this.localAudioTrack = track;
+    return async () => {
+      // Publication and graph commit are separate awaits; cancellation can land between them.
+      if (this.localAudioTrack !== track) return;
+      await restorePublication();
+      if (sameSession() && this.localAudioTrack === track) this.localAudioTrack = previous;
+    };
   }
 
   public async setLocalAudioTrack(track: MediaStreamTrack | null): Promise<void> {

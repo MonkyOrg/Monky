@@ -1,0 +1,162 @@
+/* The control stays native; SelectEnhancer owns only the opened listbox. */
+select:not([multiple]):not([size]),
+select:not([multiple])[size="0"],
+select:not([multiple])[size="1"] {
+  appearance: none;
+  color-scheme: dark;
+  padding-right: 36px !important;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-input);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239da7b3' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 11px center !important;
+  cursor: pointer;
+  text-overflow: ellipsis;
+  transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+}
+
+select:not(:disabled):hover {
+  border-color: color-mix(in srgb, var(--text-secondary) 45%, var(--border-color));
+}
+
+select:focus-visible,
+select[aria-expanded="true"] {
+  border-color: var(--accent-primary);
+  outline: 2px solid color-mix(in srgb, var(--accent-primary) 35%, transparent);
+  outline-offset: 2px;
+}
+
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+select:dir(rtl):not([multiple]):not([size]),
+select:dir(rtl):not([multiple])[size="0"],
+select:dir(rtl):not([multiple])[size="1"] {
+  padding-right: 12px !important;
+  padding-left: 36px !important;
+  background-position: left 11px center !important;
+}
+
+select option,
+select optgroup {
+  color: var(--text-primary);
+  background: var(--bg-panel);
+}
+
+.monky-select-popup,
+.server-dropdown-menu,
+.floating-context-menu,
+.user-context-menu,
+.ctx-submenu,
+.settings-action-menu,
+.settings-action-submenu,
+.command-dropup,
+.bot-parameter-menu,
+.emoji-picker {
+  background: var(--bg-panel);
+  border: 1px solid color-mix(in srgb, var(--border-color) 80%, var(--text-secondary));
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 42px rgb(0 0 0 / 38%), 0 3px 10px rgb(0 0 0 / 24%), inset 0 1px 0 rgb(255 255 255 / 3%);
+}
+
+.monky-select-popup {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 5px;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-active) transparent;
+  color: var(--text-primary);
+  font-family: var(--font-main);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.monky-select-popup::backdrop {
+  background: transparent;
+  pointer-events: none;
+}
+
+.monky-select-option {
+  position: relative;
+  min-height: 34px;
+  padding: 8px 30px 8px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.monky-select-option.is-active:not([aria-disabled="true"]) {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.monky-select-option[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent-primary) 13%, var(--bg-panel));
+}
+
+.monky-select-option[aria-selected="true"]::after {
+  content: '';
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  width: 5px;
+  height: 9px;
+  border: solid var(--accent-primary);
+  border-width: 0 2px 2px 0;
+  transform: translateY(-65%) rotate(45deg);
+}
+
+.monky-select-option[aria-disabled="true"] {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.monky-select-group {
+  padding: 10px 12px 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Only ordinary menu rows: command palettes and emoji grids keep their layouts. */
+.server-dropdown-item,
+.settings-action-menu-item,
+.ctx-submenu-item {
+  border-radius: 7px;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.server-dropdown-item:not(.danger):not(:disabled):hover,
+.settings-action-menu-item:not(.danger):not(:disabled):hover,
+.ctx-submenu-item:not(.danger):not(:disabled):hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.server-dropdown-item:focus-visible,
+.settings-action-menu-item:focus-visible,
+.ctx-submenu-item:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -2px;
+  background: var(--bg-card-hover);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  select,
+  .server-dropdown-item,
+  .settings-action-menu-item,
+  .ctx-submenu-item {
+    transition: none;
+  }
+}

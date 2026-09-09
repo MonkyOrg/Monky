@@ -2,21 +2,28 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { audioProcessor } from '../../../core/AudioProcessor';
 import { videoService } from '../../../core/VideoService';
 import { t } from '../../../i18n';
+import { escapeHtml } from '../../../utils/html';
+import { bindPttIndicators, renderPttIndicator } from '../../PttIndicator';
+import { bindMicrophoneLevelMeter } from '../../../core/MicrophoneLevelMeter';
+import { audioDeviceError, populateAudioDeviceSelect, selectAudioDevice, selectedAudioDevice } from '../../../core/AudioDeviceService';
+import { MicrophoneTest } from '../../../core/MicrophoneTest';
 
 export class VoiceVideoTab {
   private previewStream: MediaStream | null = null;
   private previewOwned = false;
-  private vadMeterStream: MediaStream | null = null;
-  private vadMeterCtx: AudioContext | null = null;
-  private vadMeterAnalyser: AnalyserNode | null = null;
-  private vadMeterRAF: number | null = null;
+  private cameraPreviewGeneration = 0;
+  private unbindVadMeter: (() => void) | null = null;
   private unbindPttCapture: (() => void) | null = null;
+  private unbindPttInput: (() => void) | null = null;
   private isRecordingPtt = false;
+  private cancelPttRecording: (() => void) | null = null;
+  private unbindInputMode: Array<() => void> = [];
+  private microphoneTest: MicrophoneTest | null = null;
 
   public renderHtml(): string {
     return `
       <!-- Device Header with Refresh Button -->
-      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+      <div data-settings-section="input-devices" data-settings-label="${escapeHtml(t('settings.devicesSection'))}" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
         <span style="font-size: 13px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.5px;">
           ${t('settings.devicesSection')}
         </span>
@@ -35,32 +42,42 @@ export class VoiceVideoTab {
         <select id="select-mic">
           <option value="">${t('settings.loadingMics')}</option>
         </select>
+        <div id="mic-device-status" class="audio-device-status" role="status"></div>
+      </div>
+
+      <div class="form-group">
+        <div class="microphone-test-row">
+          <button id="btn-microphone-test" type="button" class="btn btn-secondary microphone-test-button" aria-pressed="false" aria-controls="microphone-test-meter" aria-describedby="microphone-test-hint microphone-test-status">
+            ${t('settings.microphoneTestStart')}
+          </button>
+          <div id="microphone-test-meter" class="vad-meter microphone-test-meter" role="meter" aria-label="${t('settings.vadMeterTitle')}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="vad-meter-fill"></div>
+          </div>
+        </div>
+        <div id="microphone-test-hint" class="audio-device-status">${t('settings.microphoneTestHint')}</div>
+        <div id="microphone-test-status" class="audio-device-status" role="status"></div>
       </div>
 
       <!-- Input Mode Selector (#186) -->
-      <div class="form-group" style="margin-top: 14px;">
+      <div data-settings-section="input-mode" data-settings-label="${escapeHtml(t('settings.inputMode'))}" class="form-group" style="margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">keyboard_voice</span>
           ${t('settings.inputMode')}
         </label>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-          <label class="input-mode-card ${settingsStore.inputMode === 'voice_activity' ? 'active' : ''}" id="mode-card-vad" style="display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--bg-card); border: 1px solid ${settingsStore.inputMode === 'voice_activity' ? 'var(--accent-primary)' : 'var(--border-color)'}; border-radius: var(--radius-md); cursor: pointer; transition: all 0.2s;">
-            <input type="radio" name="input-mode" value="voice_activity" ${settingsStore.inputMode === 'voice_activity' ? 'checked' : ''} style="margin: 0; cursor: pointer;">
-            <div>
-              <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">${t('settings.inputModeVad')}</div>
-            </div>
-          </label>
-          <label class="input-mode-card ${settingsStore.inputMode === 'push_to_talk' ? 'active' : ''}" id="mode-card-ptt" style="display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--bg-card); border: 1px solid ${settingsStore.inputMode === 'push_to_talk' ? 'var(--accent-primary)' : 'var(--border-color)'}; border-radius: var(--radius-md); cursor: pointer; transition: all 0.2s;">
-            <input type="radio" name="input-mode" value="push_to_talk" ${settingsStore.inputMode === 'push_to_talk' ? 'checked' : ''} style="margin: 0; cursor: pointer;">
-            <div>
-              <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">${t('settings.inputModePtt')}</div>
-            </div>
-          </label>
+        <div class="input-mode-cards" role="group" aria-label="${t('settings.inputMode')}">
+          <button type="button" class="voice-mode-card input-mode-card" id="mode-card-vad" aria-pressed="${settingsStore.inputMode === 'voice_activity'}">
+            <span class="input-mode-card-title"><span class="material-symbols-outlined md-18" aria-hidden="true">graphic_eq</span>${t('settings.inputModeVad')}</span>
+            <span class="input-mode-card-description">${t('settings.inputModeVadDesc')}</span>
+          </button>
+          <button type="button" class="voice-mode-card input-mode-card" id="mode-card-ptt" aria-pressed="${settingsStore.inputMode === 'push_to_talk'}">
+            <span class="input-mode-card-title"><span class="material-symbols-outlined md-18" aria-hidden="true">keyboard</span>${t('settings.inputModePtt')}</span>
+            <span class="input-mode-card-description">${t('settings.inputModePttDesc')}</span>
+          </button>
         </div>
       </div>
 
       <!-- VAD Sensitivity Container -->
-      <div id="container-vad-settings" class="form-group" style="display: ${settingsStore.inputMode === 'voice_activity' ? 'block' : 'none'};">
+      <div id="container-vad-settings" data-settings-section="sensitivity" data-settings-label="${escapeHtml(t('settings.vadLabel'))}" class="form-group" style="display: ${settingsStore.inputMode === 'voice_activity' ? 'block' : 'none'};">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">tune</span>
           ${t('settings.vadLabel')}
@@ -76,7 +93,8 @@ export class VoiceVideoTab {
       </div>
 
       <!-- PTT Configuration Container (#186) -->
-      <div id="container-ptt-settings" style="display: ${settingsStore.inputMode === 'push_to_talk' ? 'block' : 'none'}; margin-bottom: 14px;">
+      <div id="container-ptt-settings" data-settings-section="push-to-talk" data-settings-label="${escapeHtml(t('settings.inputModePtt'))}" style="display: ${settingsStore.inputMode === 'push_to_talk' ? 'block' : 'none'}; margin-bottom: 14px;">
+        ${renderPttIndicator()}
         <!-- Shortcut Key Card -->
         <div class="form-group" style="padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); margin-bottom: 10px;">
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
@@ -138,7 +156,7 @@ export class VoiceVideoTab {
       </div>
 
       <!-- RNNoise Noise Suppression -->
-      <div class="form-group" style="padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+      <div data-settings-section="noise-suppression" data-settings-label="${escapeHtml(t('settings.rnnoiseLabel'))}" class="form-group" style="padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <div>
             <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-rnnoise">
@@ -157,7 +175,7 @@ export class VoiceVideoTab {
       </div>
 
       <!-- Audio Outputs -->
-      <div class="form-group" id="group-speaker">
+      <div class="form-group" id="group-speaker" data-settings-section="output-device" data-settings-label="${escapeHtml(t('settings.outputDevice'))}">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">headphones</span>
           ${t('settings.outputDevice')}
@@ -165,10 +183,11 @@ export class VoiceVideoTab {
         <select id="select-speaker">
           <option value="">${t('settings.loadingOutputs')}</option>
         </select>
+        <div id="speaker-device-status" class="audio-device-status" role="status"></div>
       </div>
 
       <!-- Camera Inputs -->
-      <div class="form-group" id="group-camera" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      <div class="form-group" id="group-camera" data-settings-section="camera" data-settings-label="${escapeHtml(t('settings.camera'))}" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">videocam</span>
           ${t('settings.camera')}
@@ -186,7 +205,7 @@ export class VoiceVideoTab {
       </div>
 
       <!-- Screen Share -->
-      <div style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      <div data-settings-section="screen-share" data-settings-label="${escapeHtml(t('settings.screenShareSection'))}" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
           <span style="font-size: 13px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px;">
             <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">screen_share</span>
@@ -234,6 +253,35 @@ export class VoiceVideoTab {
   }
 
   public attachEvents(container: HTMLElement): void {
+    this.unbindInputMode.forEach((off) => off());
+    this.unbindInputMode = [bindPttIndicators(container)];
+    const testButton = container.querySelector<HTMLButtonElement>('#btn-microphone-test');
+    const testMeter = container.querySelector<HTMLElement>('#microphone-test-meter');
+    const testStatus = container.querySelector<HTMLElement>('#microphone-test-status');
+    if (testButton && testMeter) {
+      const microphoneTest = new MicrophoneTest(testMeter, (state) => {
+        const active = state.status === 'starting' || state.status === 'playing';
+        testButton.textContent = t(active ? 'settings.microphoneTestStop' : 'settings.microphoneTestStart');
+        testButton.setAttribute('aria-pressed', String(active));
+        if (!testStatus) return;
+        if (state.status === 'error') {
+          testStatus.textContent = state.error instanceof DOMException
+            ? audioDeviceError(state.error) : t('settings.microphoneTestFailed');
+        } else if (state.status === 'starting') testStatus.textContent = t('settings.microphoneTestStarting');
+        else if (state.status === 'playing') testStatus.textContent = t('settings.microphoneTestPlaying');
+        else if (state.reason === 'device-changed') testStatus.textContent = t('settings.microphoneTestDeviceChanged');
+        else if (state.reason === 'disconnected') testStatus.textContent = t('settings.microphoneTestDisconnected');
+        else testStatus.textContent = '';
+      });
+      this.microphoneTest = microphoneTest;
+      const toggleTest = () => microphoneTest.toggle();
+      testButton.addEventListener('click', toggleTest);
+      this.unbindInputMode.push(() => {
+        testButton.removeEventListener('click', toggleTest);
+        microphoneTest.destroy();
+        if (this.microphoneTest === microphoneTest) this.microphoneTest = null;
+      });
+    }
     const selectMic = container.querySelector<HTMLSelectElement>('#select-mic');
     const selectSpeaker = container.querySelector<HTMLSelectElement>('#select-speaker');
     const selectCam = container.querySelector<HTMLSelectElement>('#select-cam');
@@ -245,38 +293,25 @@ export class VoiceVideoTab {
     const selectScreenTelemetryPos = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-position');
     const selectScreenTelemetryMode = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-mode');
 
-    // Input Mode Radio & Container toggles (#186)
-    const radioInputModes = container.querySelectorAll<HTMLInputElement>('input[name="input-mode"]');
+    // Input mode cards keep the same persisted modes without native radios.
     const containerVad = container.querySelector<HTMLElement>('#container-vad-settings');
     const containerPtt = container.querySelector<HTMLElement>('#container-ptt-settings');
     const modeCardVad = container.querySelector<HTMLElement>('#mode-card-vad');
     const modeCardPtt = container.querySelector<HTMLElement>('#mode-card-ptt');
 
-    radioInputModes.forEach((radio) => {
-      radio.addEventListener('change', () => {
-        const mode = radio.value as 'voice_activity' | 'push_to_talk';
+    for (const [mode, card] of [['voice_activity', modeCardVad], ['push_to_talk', modeCardPtt]] as const) {
+      const selectMode = () => {
+        if (settingsStore.inputMode === mode) return;
         settingsStore.inputMode = mode;
         settingsStore.save();
-        audioProcessor.syncPttConfig();
-        audioProcessor.applyTrackEnabled();
-
-        if (mode === 'voice_activity') {
-          if (containerVad) containerVad.style.display = 'block';
-          if (containerPtt) containerPtt.style.display = 'none';
-          modeCardVad?.classList.add('active');
-          if (modeCardVad) modeCardVad.style.borderColor = 'var(--accent-primary)';
-          modeCardPtt?.classList.remove('active');
-          if (modeCardPtt) modeCardPtt.style.borderColor = 'var(--border-color)';
-        } else {
-          if (containerVad) containerVad.style.display = 'none';
-          if (containerPtt) containerPtt.style.display = 'block';
-          modeCardVad?.classList.remove('active');
-          if (modeCardVad) modeCardVad.style.borderColor = 'var(--border-color)';
-          modeCardPtt?.classList.add('active');
-          if (modeCardPtt) modeCardPtt.style.borderColor = 'var(--accent-primary)';
-        }
-      });
-    });
+        if (containerVad) containerVad.style.display = mode === 'voice_activity' ? 'block' : 'none';
+        if (containerPtt) containerPtt.style.display = mode === 'push_to_talk' ? 'block' : 'none';
+        modeCardVad?.setAttribute('aria-pressed', String(mode === 'voice_activity'));
+        modeCardPtt?.setAttribute('aria-pressed', String(mode === 'push_to_talk'));
+      };
+      card?.addEventListener('click', selectMode);
+      this.unbindInputMode.push(() => card?.removeEventListener('click', selectMode));
+    }
 
     // PTT Release Delay Slider
     const sliderPttDelay = container.querySelector<HTMLInputElement>('#slider-ptt-delay');
@@ -301,14 +336,17 @@ export class VoiceVideoTab {
     const pttBadge = container.querySelector<HTMLElement>('#ptt-key-badge');
     const pttDesc = container.querySelector<HTMLElement>('#ptt-key-desc');
 
-    const stopPttRecording = () => {
+    const stopPttRecording = (waitForKeyUp = false) => {
       this.isRecordingPtt = false;
+      if (!waitForKeyUp) this.unbindPttInput?.();
       if (this.unbindPttCapture) {
         this.unbindPttCapture();
         this.unbindPttCapture = null;
       }
       if (window.api?.stopPttCapture) {
-        window.api.stopPttCapture().catch(() => {});
+        void window.api.stopPttCapture().catch((error) => {
+          console.warn('[VoiceVideoTab] Could not stop PTT capture:', error);
+        });
       }
       if (btnRecordPtt) {
         btnRecordPtt.textContent = t('settings.pttRecordShortcut');
@@ -321,6 +359,7 @@ export class VoiceVideoTab {
         pttBadge.textContent = settingsStore.pttKey?.display || 'V';
       }
     };
+    this.cancelPttRecording = stopPttRecording;
 
     btnRecordPtt?.addEventListener('click', () => {
       if (this.isRecordingPtt) {
@@ -335,78 +374,83 @@ export class VoiceVideoTab {
         pttDesc.textContent = t('settings.pttRecordingPrompt');
       }
 
-      if (window.api?.startPttCapture) {
-        window.api.startPttCapture().catch(() => {});
+      const failed = (error?: unknown) => {
+        console.warn('[VoiceVideoTab] Native PTT capture unavailable:', error);
+        stopPttRecording();
+        if (pttDesc) pttDesc.textContent = t('keybinds.hookUnavailable');
+      };
+      if (!window.api?.startPttCapture || !window.api?.onPttCaptured) {
+        failed();
+        return;
       }
 
-      const onCaptured = (binding: any) => {
+      this.unbindPttInput?.();
+      let keyDownSeen = false;
+      let keyReleased = false;
+      const blockInput = (event: KeyboardEvent) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (event.type === 'keydown') keyDownSeen = true;
+        else {
+          keyReleased = keyDownSeen;
+          if (!this.isRecordingPtt) unblockInput();
+        }
+      };
+      const unblockInput = () => {
+        window.removeEventListener('keydown', blockInput, true);
+        window.removeEventListener('keyup', blockInput, true);
+        window.removeEventListener('blur', unblockInput);
+        if (this.unbindPttInput === unblockInput) this.unbindPttInput = null;
+      };
+      this.unbindPttInput = unblockInput;
+      window.addEventListener('keydown', blockInput, true);
+      window.addEventListener('keyup', blockInput, true);
+      window.addEventListener('blur', unblockInput);
+
+      // DOM codes (KeyM) are not native codes (M + keyCode); let the worker
+      // finish capture instead of overwriting its result with a faster DOM event.
+      const unbind = window.api.onPttCaptured((binding) => {
+        if (!this.isRecordingPtt || this.unbindPttCapture !== unbind) return;
         settingsStore.pttKey = binding;
         settingsStore.save();
-        audioProcessor.syncPttConfig();
-        stopPttRecording();
-      };
-
-      if (window.api?.onPttCaptured) {
-        this.unbindPttCapture = window.api.onPttCaptured((binding) => {
-          onCaptured(binding);
-        });
-      }
-
-      const handleLocalCaptureKey = (e: KeyboardEvent) => {
-        if (!this.isRecordingPtt) return;
-        e.preventDefault();
-        e.stopPropagation();
-        window.removeEventListener('keydown', handleLocalCaptureKey, true);
-        window.removeEventListener('mousedown', handleLocalCaptureMouse, true);
-
-        const keyName = e.key === ' ' ? 'Space' : e.key;
-        const display = e.code === 'Space' ? 'Espaço' : (e.key.length === 1 ? e.key.toUpperCase() : e.key);
-        onCaptured({
-          code: e.code,
-          display,
-          keyType: 'keyboard',
-        });
-      };
-
-      const handleLocalCaptureMouse = (e: MouseEvent) => {
-        if (!this.isRecordingPtt) return;
-        e.preventDefault();
-        e.stopPropagation();
-        window.removeEventListener('keydown', handleLocalCaptureKey, true);
-        window.removeEventListener('mousedown', handleLocalCaptureMouse, true);
-
-        let button = e.button + 1;
-        if (e.button === 1) button = 3;
-        else if (e.button === 2) button = 2;
-        const buttonNames: Record<number, string> = {
-          1: 'Mouse 1 (Esquerdo)',
-          2: 'Mouse 2 (Direito)',
-          3: 'Mouse 3 (Scroll)',
-          4: 'Mouse 4 (Lateral Traseiro)',
-          5: 'Mouse 5 (Lateral Frontal)',
-        };
-        onCaptured({
-          code: `Mouse${button}`,
-          display: buttonNames[button] || `Mouse ${button}`,
-          keyType: 'mouse',
-          mouseButton: button,
-        });
-      };
-
-      window.addEventListener('keydown', handleLocalCaptureKey, true);
-      window.addEventListener('mousedown', handleLocalCaptureMouse, true);
+        // Keep Space/Enter from also activating the focused record button.
+        stopPttRecording(binding.keyType === 'keyboard' && !keyReleased && document.hasFocus());
+      });
+      this.unbindPttCapture = unbind;
+      void window.api.startPttCapture().then((ok) => {
+        if (!ok && this.unbindPttCapture === unbind) failed();
+      }).catch((error) => {
+        if (this.unbindPttCapture === unbind) failed(error);
+      });
     });
 
-    selectMic?.addEventListener('change', async () => {
-      settingsStore.selectedMicrophoneId = selectMic.value;
-      settingsStore.save();
-      this.restartVadMeter();
-    });
-
-    selectSpeaker?.addEventListener('change', () => {
-      settingsStore.selectedSpeakerId = selectSpeaker.value;
-      settingsStore.save();
-    });
+    const selectionAbort = new AbortController();
+    this.unbindInputMode.push(() => selectionAbort.abort());
+    for (const [kind, select, statusId] of [
+      ['input', selectMic, '#mic-device-status'],
+      ['output', selectSpeaker, '#speaker-device-status'],
+    ] as const) {
+      const change = async () => {
+        if (!select) return;
+        this.microphoneTest?.stop('device-changed');
+        const status = container.querySelector<HTMLElement>(statusId);
+        select.disabled = true;
+        if (status) status.textContent = '';
+        try {
+          await selectAudioDevice(kind, select.value, selectionAbort.signal);
+        } catch (error) {
+          select.value = selectedAudioDevice(kind) === 'default' ? '' : selectedAudioDevice(kind);
+          if (status && !selectionAbort.signal.aborted) status.textContent = audioDeviceError(error);
+        } finally {
+          if (!selectionAbort.signal.aborted) select.disabled = false;
+        }
+      };
+      select?.addEventListener('change', change);
+      this.unbindInputMode.push(() => select?.removeEventListener('change', change));
+    }
+    const onDevices = () => { void this.refreshDevices(container); };
+    navigator.mediaDevices?.addEventListener('devicechange', onDevices);
+    this.unbindInputMode.push(() => navigator.mediaDevices?.removeEventListener('devicechange', onDevices));
 
     selectCam?.addEventListener('change', () => {
       settingsStore.selectedCameraId = selectCam.value;
@@ -469,20 +513,18 @@ export class VoiceVideoTab {
       const selectSpeaker = container.querySelector<HTMLSelectElement>('#select-speaker');
       const selectCam = container.querySelector<HTMLSelectElement>('#select-cam');
 
-      const mics = devices.filter((d) => d.kind === 'audioinput');
-      const speakers = devices.filter((d) => d.kind === 'audiooutput');
       const cams = devices.filter((d) => d.kind === 'videoinput');
 
       if (selectMic) {
-        selectMic.innerHTML = mics
-          .map((d, i) => `<option value="${d.deviceId}" ${d.deviceId === settingsStore.selectedMicrophoneId ? 'selected' : ''}>${d.label || `${t('settings.microphone')} ${i + 1}`}</option>`)
-          .join('') || `<option value="">${t('settings.noMicDetected')}</option>`;
+        const message = populateAudioDeviceSelect(selectMic, 'input', devices);
+        const status = container.querySelector<HTMLElement>('#mic-device-status');
+        if (status) status.textContent = message;
       }
 
       if (selectSpeaker) {
-        selectSpeaker.innerHTML = speakers
-          .map((d, i) => `<option value="${d.deviceId}" ${d.deviceId === settingsStore.selectedSpeakerId ? 'selected' : ''}>${d.label || `${t('settings.outputDevice')} ${i + 1}`}</option>`)
-          .join('') || `<option value="">${t('settings.defaultSpeaker')}</option>`;
+        const message = populateAudioDeviceSelect(selectSpeaker, 'output', devices);
+        const status = container.querySelector<HTMLElement>('#speaker-device-status');
+        if (status) status.textContent = message;
       }
 
       if (selectCam) {
@@ -492,6 +534,10 @@ export class VoiceVideoTab {
       }
     } catch (e) {
       console.warn('[VoiceVideoTab] Error enumerating devices:', e);
+      for (const id of ['#mic-device-status', '#speaker-device-status']) {
+        const status = container.querySelector<HTMLElement>(id);
+        if (status) status.textContent = audioDeviceError(e);
+      }
     }
   }
 
@@ -505,115 +551,49 @@ export class VoiceVideoTab {
 
   public startVadMeter(container: HTMLElement): void {
     this.stopVadMeter();
-
-    const runMeterLoop = (analyser: AnalyserNode) => {
-      const fill = container.querySelector<HTMLElement>('#vad-meter-fill');
-      const meter = container.querySelector<HTMLElement>('#vad-meter');
-      if (!fill || !meter) return;
-
-      const bufferLength = analyser.frequencyBinCount;
-      const buffer = new Uint8Array(bufferLength);
-      const speechBins = Math.min(36, bufferLength);
-
-      const loop = () => {
-        analyser.getByteFrequencyData(buffer);
-        let sum = 0;
-        let peak = 0;
-        for (let i = 0; i < speechBins; i++) {
-          const val = buffer[i];
-          sum += val;
-          if (val > peak) peak = val;
-        }
-        const average = sum / speechBins;
-        const targetAvg = Math.max(16, settingsStore.vadSensitivity * 0.8);
-        const targetPeak = Math.max(42, settingsStore.vadSensitivity * 1.8);
-        const isActive = (average > targetAvg && peak > targetPeak) || average > targetAvg * 1.4;
-
-        const meterLevel = Math.min(100, (peak / 255) * 100);
-        fill.style.width = `${meterLevel}%`;
-        fill.classList.toggle('active', isActive);
-
-        this.vadMeterRAF = requestAnimationFrame(loop);
-      };
-      this.vadMeterRAF = requestAnimationFrame(loop);
-    };
-
-    const micStream = audioProcessor.getLocalAudioStream();
-    if (micStream && micStream.active && micStream.getAudioTracks().length > 0) {
-      try {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        this.vadMeterCtx = new AudioCtx();
-        const src = this.vadMeterCtx.createMediaStreamSource(micStream);
-        this.vadMeterAnalyser = this.vadMeterCtx.createAnalyser();
-        this.vadMeterAnalyser.fftSize = 256;
-        src.connect(this.vadMeterAnalyser);
-        runMeterLoop(this.vadMeterAnalyser);
-        return;
-      } catch {}
-    }
-
-    const deviceId = settingsStore.selectedMicrophoneId || undefined;
-    navigator.mediaDevices
-      ?.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true, video: false })
-      .then((stream) => {
-        this.vadMeterStream = stream;
-        try {
-          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-          this.vadMeterCtx = new AudioCtx();
-          const src = this.vadMeterCtx.createMediaStreamSource(stream);
-          this.vadMeterAnalyser = this.vadMeterCtx.createAnalyser();
-          this.vadMeterAnalyser.fftSize = 256;
-          src.connect(this.vadMeterAnalyser);
-          runMeterLoop(this.vadMeterAnalyser);
-        } catch {}
-      })
-      .catch(() => {});
-  }
-
-  private restartVadMeter(container?: HTMLElement): void {
-    const parent = container || document.getElementById('tab-panel-voice_video');
-    if (parent) {
-      this.startVadMeter(parent);
-    }
+    const meter = container.querySelector<HTMLElement>('#vad-meter');
+    if (!meter) return;
+    meter.setAttribute('aria-label', t('settings.vadMeterTitle'));
+    this.unbindVadMeter = bindMicrophoneLevelMeter(meter, (error) => {
+      const status = container.querySelector<HTMLElement>('#mic-device-status');
+      if (status) status.textContent = error ? audioDeviceError(error) : '';
+    });
   }
 
   public stopVadMeter(): void {
-    if (this.vadMeterRAF !== null) {
-      cancelAnimationFrame(this.vadMeterRAF);
-      this.vadMeterRAF = null;
-    }
-    this.vadMeterAnalyser = null;
-    if (this.vadMeterCtx && this.vadMeterCtx.state !== 'closed') {
-      this.vadMeterCtx.close().catch(() => {});
-    }
-    this.vadMeterCtx = null;
-    if (this.vadMeterStream) {
-      this.vadMeterStream.getTracks().forEach((t) => t.stop());
-      this.vadMeterStream = null;
-    }
+    this.unbindVadMeter?.();
+    this.unbindVadMeter = null;
   }
 
   private async startCameraPreview(container: HTMLElement): Promise<void> {
     this.stopCameraPreview(container);
+    const generation = this.cameraPreviewGeneration;
     const video = container.querySelector<HTMLVideoElement>('#settings-cam-preview');
     const btn = container.querySelector<HTMLButtonElement>('#btn-toggle-cam-preview');
     if (!video) return;
 
     try {
       const liveStream = videoService.getCameraStream();
+      let stream: MediaStream;
+      let owned: boolean;
       if (liveStream && liveStream.active) {
-        this.previewStream = liveStream;
-        this.previewOwned = false;
+        stream = liveStream;
+        owned = false;
       } else {
         const deviceId = settingsStore.selectedCameraId || undefined;
-        this.previewStream = await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           video: deviceId ? { deviceId: { exact: deviceId } } : true,
           audio: false,
         });
-        this.previewOwned = true;
+        owned = true;
       }
-
-      video.srcObject = this.previewStream;
+      if (generation !== this.cameraPreviewGeneration || !video.isConnected) {
+        if (owned) stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      this.previewStream = stream;
+      this.previewOwned = owned;
+      video.srcObject = stream;
       video.style.display = 'block';
       if (btn) {
         btn.innerHTML = `<span class="material-symbols-outlined md-16" style="margin-right: 4px;">visibility_off</span>${t('settings.stopPreview')}`;
@@ -624,6 +604,7 @@ export class VoiceVideoTab {
   }
 
   public stopCameraPreview(container?: HTMLElement): void {
+    this.cameraPreviewGeneration++;
     const parent = container || document.getElementById('tab-panel-voice_video');
     const video = parent?.querySelector<HTMLVideoElement>('#settings-cam-preview');
     const btn = parent?.querySelector<HTMLButtonElement>('#btn-toggle-cam-preview');
@@ -643,18 +624,18 @@ export class VoiceVideoTab {
     }
   }
 
-  public cleanup(): void {
-    if (this.isRecordingPtt) {
-      this.isRecordingPtt = false;
-      if (this.unbindPttCapture) {
-        this.unbindPttCapture();
-        this.unbindPttCapture = null;
-      }
-      if (window.api?.stopPttCapture) {
-        window.api.stopPttCapture().catch(() => {});
-      }
-    }
+  public deactivate(): void {
+    this.microphoneTest?.stop();
+    this.unbindPttInput?.();
+    if (this.isRecordingPtt) this.cancelPttRecording?.();
     this.stopVadMeter();
     this.stopCameraPreview();
+  }
+
+  public cleanup(): void {
+    this.deactivate();
+    this.unbindInputMode.forEach((off) => off());
+    this.unbindInputMode = [];
+    this.cancelPttRecording = null;
   }
 }

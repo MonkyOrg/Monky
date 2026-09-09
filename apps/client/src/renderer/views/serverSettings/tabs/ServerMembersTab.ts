@@ -27,7 +27,7 @@ export class ServerMembersTab {
 
     return `
       <div style="display: flex; flex-direction: column; gap: 16px; width: 100%;">
-        <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; overflow: visible;">
+        <div data-settings-section="members" data-settings-label="${escapeHtml(t('roles.membersList'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; overflow: visible;">
           <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">
             <div>
               <div style="font-size: 13px; font-weight: 700; margin-bottom: 4px;">${t('roles.membersList')}</div>

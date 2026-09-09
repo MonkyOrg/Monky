@@ -20,6 +20,20 @@ Abra pelo ícone de engrenagem na tela de conexão ou na barra inferior.
 - **Atualizações** — versão atual e verificação manual.
 - **Comunidade** — atalhos para ideias, votação e bugs.
 
+### Navegação por seções
+
+Nas configurações do app e do servidor, selecionar uma categoria expande seus
+atalhos de seção na barra lateral. Os submenus abrem e recolhem suavemente,
+inclusive ao alternar rapidamente entre categorias. Clique em um deles para
+rolar suavemente até aquela parte da página. A seção atual fica destacada também ao rolar
+manualmente, sem recriar o formulário nem perder alterações ainda não salvas.
+Seções ocultas ou indisponíveis não aparecem na navegação.
+
+A abertura e o fechamento dos submenus, assim como a rolagem das seções e
+das categorias do seletor de emojis, respeitam a
+preferência de movimento reduzido do sistema: quando ativada, o deslocamento
+é imediato, sem animação.
+
 ### Aparecer offline
 
 Em **Meu Perfil → Visibilidade → Aparecer offline**, o switch altera sua
@@ -31,6 +45,60 @@ não torna você online novamente.
 
 Isso não desconecta o cliente nem interrompe uma chamada em andamento. Sua
 participação em um canal de voz continua visível nesse canal.
+
+### Controles rápidos de áudio
+
+Os ícones de microfone/fone e suas setas compartilham o mesmo estilo na barra
+inferior. As setas abrem um painel para cima que mostra o dispositivo atual.
+Passe o mouse sobre essa informação ou clique nela para abrir a lista lateral
+de dispositivos. Pelo teclado, use as setas para navegar; `Esc` fecha primeiro
+a lista lateral e depois o painel.
+
+O painel do microfone também mostra o **Nível de entrada**, em uma barra
+segmentada. As escolhas usam as mesmas configurações de **Voz e Vídeo** e
+ficam salvas. O medidor é uma prévia local: não desmuta o microfone nem
+transmite sua voz. Fechar o painel encerra a prévia. O botão
+**Configurações de voz** abre diretamente a aba correspondente.
+
+O botão direito no seu próprio nome também abre o menu do usuário, tanto
+nas listas quanto no seu perfil da barra inferior. Nesse menu você pode
+alternar o mute manual do microfone e do áudio, inclusive antes de entrar
+em chamada. O controle de volume de voz só aparece para outros usuários;
+as demais ações continuam respeitando as permissões do servidor.
+Um mute manual nunca remove um bloqueio aplicado por administrador.
+
+### Dicas e menus
+
+Os tooltips do cliente usam um visual escuro e compacto, aparecem após cerca
+de **150 ms** com o mouse e imediatamente ao navegar pelo teclado. `Esc`
+dispensa a dica. Os menus e listas de seleção compartilham o mesmo tema;
+nos seletores, use as setas, digite para buscar uma opção e confirme com
+`Enter`. `Esc` fecha a lista sem alterar a escolha.
+
+Os controles da barra inferior e os botões de **anexo, emoji e código** do
+compositor têm movimentos próprios ao passar o mouse: a engrenagem gira,
+a seta de compartilhamento se move, o soundboard solta notas e o emoji ri.
+O efeito da câmera é uma moldura animada, não um indicador de gravação.
+Cliques e mudanças de estado também têm um feedback visual curto. Os botões
+da barra flutuante de ações das mensagens não recebem essas animações.
+A preferência de movimento reduzido desativa esses efeitos.
+
+No modal **Bloco de código**, arraste o canto inferior direito para ajustar
+largura e altura; o editor acompanha o tamanho do modal. Os limites mantêm
+uma margem de pelo menos **24 px** até as bordas da janela do aplicativo.
+
+Essa padronização vale para a interface do cliente. Diálogos de arquivos e
+menus da bandeja continuam sendo desenhados pelo sistema operacional.
+
+### Teste do microfone
+
+Em **Voz e Vídeo**, o teste permite iniciar e parar o retorno local da sua voz
+enquanto acompanha a barra segmentada. Use fones de ouvido para evitar
+realimentação entre o alto-falante e o microfone. O teste só reproduz áudio
+após você iniciá-lo e não envia essa prévia para o canal de voz nem altera
+seus estados de mute ou Push to Talk. Se você já estiver em uma chamada
+desmutada, ela continua transmitindo sua voz normalmente. Sair da aba ou
+fechar as configurações encerra o teste.
 
 ### Atalhos de teclado
 
@@ -47,6 +115,17 @@ o aplicativo em foco. Isso não contorna bloqueios de anti-cheat ou de seguranç
 Segurar a combinação não repete a ação; solte uma tecla necessária antes de
 acioná-la novamente. Modificadores adicionais impedem o acionamento.
 
+Os atalhos funcionam com o Monky em foco, minimizado ou em segundo plano,
+inclusive durante chamadas com o microfone ativo. No Windows, a captura de
+atalhos roda em um processo separado para evitar interferência do WebRTC.
+
+**Mutar microfone**, **mutar áudio (ensurdecer)** e **mutar soundboard** também
+funcionam fora de chamada. A escolha fica salva e é respeitada ao entrar no
+canal de voz, permitindo entrar já mutado. Fora de chamada, essas ações mudam
+apenas suas preferências locais, sem enviar atualizações de voz ao servidor.
+Os atalhos de câmera, compartilhamento de tela e parar sons do soundboard
+só atuam dentro de um canal de voz.
+
 Novos atalhos guardam a posição física da tecla e exibem o caractere do layout,
 incluindo `º` e `ñ` em teclados espanhóis quando suportados pelo sistema.
 No Windows, a conversão usa o layout real da janela em foco, não uma tabela
@@ -57,6 +136,27 @@ Atalhos antigos continuam sendo lidos; se uma combinação de outro layout não
 for reconhecida, grave-a novamente. Permissões de entrada/acessibilidade podem
 ser necessárias para a captura global. O Push-to-Talk mantém sua tecla ou botão
 do mouse configurado separadamente.
+
+### Modo de entrada e Push to Talk
+
+Em **Voz e Vídeo → Modo de Entrada**, escolha um dos dois cards: **Atividade
+de Voz (VAD)** ou **Push to Talk**. Os cards também podem ser acionados pelo
+teclado, sem radio buttons.
+
+Com PTT habilitado, o **botão de microfone no canto inferior esquerdo** ganha
+a marca **PTT** sob o ícone, sem borda: amarelo com ícone de entrada de voz
+enquanto aguarda a tecla e verde com microfone aberto ao transmitir. Quando
+há mute manual ou áudio desativado, aparece apenas o microfone cortado em
+vermelho, sem a marca PTT. Um bloqueio feito por administrador usa o microfone
+ou fone com um pequeno símbolo de proibido, também sem PTT. Essa distinção
+aparece nos controles, nas listas de participantes e no overlay; o tooltip
+informa o bloqueio do servidor. Fora de chamada, o estado de espera fica cinza.
+
+Clicar no botão continua alternando o **mute manual**. Segurar a tecla do PTT
+não desfaz esse mute: apenas abre o microfone quando permitido. O estado
+acompanha a abertura real, incluindo o atraso de liberação ao soltar a tecla.
+A tecla configurada e a descrição do estado aparecem no tooltip e nas
+configurações; não há mais um indicador separado no palco da chamada.
 
 ### Perfis de qualidade
 

@@ -2,6 +2,7 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { updateService } from '../../../core/UpdateService';
 import { changelogModal } from '../../ChangelogModal';
 import { t } from '../../../i18n';
+import { escapeHtml } from '../../../utils/html';
 
 const IDEAS_URL = 'https://github.com/MonkyOrg/Monky/discussions/categories/ideas';
 const NEW_IDEA_URL = 'https://github.com/MonkyOrg/Monky/discussions/new?category=ideas';
@@ -13,7 +14,7 @@ export class AboutTab {
     return `
       <!-- Updates -->
       <div class="form-group" style="margin-bottom: 16px;">
-        <label style="display: flex; align-items: center; gap: 6px;">
+        <label data-settings-section="updates" data-settings-label="${escapeHtml(t('settings.updatesSection'))}" style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">system_update</span>
           ${t('settings.updatesSection')}
         </label>
@@ -52,7 +53,7 @@ export class AboutTab {
         </div>
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
           <div>
-            <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-auto-start">
+            <label data-settings-section="auto-start" data-settings-label="${escapeHtml(t('settings.autoStart'))}" style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-auto-start">
               <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">power_settings_new</span>
               ${t('settings.autoStart')}
             </label>
@@ -98,7 +99,7 @@ export class AboutTab {
       </div>
 
       <!-- Community -->
-      <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
+      <div data-settings-section="community" data-settings-label="${escapeHtml(t('settings.communitySection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">forum</span>
           ${t('settings.communitySection')}

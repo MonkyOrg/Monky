@@ -1,5 +1,6 @@
 import { serverStore } from '../../../stores/serverStore';
 import { t } from '../../../i18n';
+import { escapeHtml } from '../../../utils/html';
 
 /**
  * Why the relay toggle is unusable on this server, or null when it works.
@@ -47,7 +48,7 @@ export class ServerVoiceVideoTab {
     const turnNotice = turnBlocked ? null : turnInstallNotice();
 
     return `
-      <div style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+      <div data-settings-section="soundboard" data-settings-label="${escapeHtml(t('serverSettings.allowSoundboard'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
         <div>
           <label for="checkbox-allow-soundboard" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 2px;">
             <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">music_note</span>
@@ -63,7 +64,7 @@ export class ServerVoiceVideoTab {
         </label>
       </div>
 
-      <div style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px; ${turnBlocked ? 'opacity: 0.6;' : ''}">
+      <div data-settings-section="turn-relay" data-settings-label="${escapeHtml(t('serverSettings.turnEnabled'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px; ${turnBlocked ? 'opacity: 0.6;' : ''}">
         <div>
           <label for="checkbox-turn-enabled" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: ${turnBlocked ? 'not-allowed' : 'pointer'}; margin-bottom: 2px;">
             <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">swap_horiz</span>

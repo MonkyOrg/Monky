@@ -10,7 +10,7 @@ export class SoundboardTab {
 
   public renderHtml(): string {
     return `
-      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+      <div data-settings-section="sound-folder" data-settings-label="${escapeHtml(t('settings.soundFolder'))}" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
         <span style="font-size: 13px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">music_note</span>
           ${t('settings.soundboardSection')}
@@ -31,7 +31,7 @@ export class SoundboardTab {
         </div>
       </div>
 
-      <div class="form-group" style="margin-bottom: 12px;">
+      <div data-settings-section="soundboard-volume" data-settings-label="${escapeHtml(t('settings.soundboardVolume'))}" class="form-group" style="margin-bottom: 12px;">
         <label style="display: flex; align-items: center; justify-content: space-between;">
           <span>${t('settings.soundboardVolume')}</span>
           <span id="soundboard-vol-val" style="font-family: var(--font-mono); font-size: 12px;">${settingsStore.soundboardVolume}%</span>
@@ -61,7 +61,7 @@ export class SoundboardTab {
       </div>
 
       <!-- Soundboard Shortcuts Table -->
-      <div style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      <div data-settings-section="soundboard-shortcuts" data-settings-label="${escapeHtml(t('soundboard.shortcut'))}" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
           <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 0;">
             <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">keyboard</span>

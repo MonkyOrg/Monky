@@ -1,5 +1,6 @@
 import { serverStore } from '../../../stores/serverStore';
 import { t } from '../../../i18n';
+import { escapeHtml } from '../../../utils/html';
 
 export class ServerSecurityTab {
   public renderHtml(): string {
@@ -8,7 +9,7 @@ export class ServerSecurityTab {
     const hasPass = s.hasPassword;
 
     return `
-      <div style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
+      <div data-settings-section="server-password" data-settings-label="${escapeHtml(t('invite.passwordLabel'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
         <div>
           <div style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
             <span class="material-symbols-outlined md-18" style="color: ${hasPass ? '#f0b232' : '#23a55a'};">${hasPass ? 'lock' : 'lock_open'}</span>

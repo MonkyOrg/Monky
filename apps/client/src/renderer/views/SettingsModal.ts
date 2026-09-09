@@ -14,10 +14,12 @@ import { NotificationsTab } from './settings/tabs/NotificationsTab';
 import { QualityTab } from './settings/tabs/QualityTab';
 import { LogsTab } from './settings/tabs/LogsTab';
 import { AboutTab } from './settings/tabs/AboutTab';
+import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
 
 export class SettingsModal {
   private modalEl: HTMLElement | null = null;
   private activeTab = 'account';
+  private sectionNavigation: SettingsSectionNavigation | null = null;
 
   private accountTab = new AccountTab();
   private voiceVideoTab = new VoiceVideoTab();
@@ -29,8 +31,9 @@ export class SettingsModal {
   private logsTab = new LogsTab();
   private aboutTab = new AboutTab();
 
-  public async open(): Promise<void> {
+  public async open(tab?: 'voice_video'): Promise<void> {
     this.close();
+    if (tab) this.activeTab = tab;
 
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop modal-backdrop--settings';
@@ -144,9 +147,13 @@ export class SettingsModal {
 
     document.body.appendChild(this.modalEl);
     this.attachEvents();
-    await this.voiceVideoTab.refreshDevices(this.modalEl);
-    await this.aboutTab.loadAppVersion(this.modalEl);
-    this.voiceVideoTab.startVadMeter(this.modalEl);
+    this.sectionNavigation = new SettingsSectionNavigation(this.modalEl);
+    this.sectionNavigation.setTab(this.activeTab);
+    const modal = this.modalEl;
+    await this.voiceVideoTab.refreshDevices(modal);
+    if (this.modalEl !== modal) return;
+    await this.aboutTab.loadAppVersion(modal);
+    if (this.modalEl === modal && this.activeTab === 'voice_video') this.voiceVideoTab.startVadMeter(modal);
   }
 
   private getTabHeaderTitle(tab: string): string {
@@ -256,8 +263,9 @@ export class SettingsModal {
     if (tab === 'voice_video') {
       this.voiceVideoTab.startVadMeter(this.modalEl);
     } else {
-      this.voiceVideoTab.cleanup();
+      this.voiceVideoTab.deactivate();
     }
+    this.sectionNavigation?.setTab(tab);
   }
 
   private showError(msg: string): void {
@@ -272,6 +280,8 @@ export class SettingsModal {
   }
 
   public close(): void {
+    this.sectionNavigation?.destroy();
+    this.sectionNavigation = null;
     this.voiceVideoTab.cleanup();
     this.accountTab.cleanup();
     if (this.modalEl) {

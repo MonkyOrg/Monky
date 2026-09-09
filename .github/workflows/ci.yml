@@ -192,8 +192,19 @@ jobs:
       - name: Build workspaces
         run: npm run build
 
-      - name: Exercise bot chat DOM in Electron
-        run: npm run test:bots:ui --workspace=apps/client
+      - name: Exercise client DOM and microphone state in Electron
+        shell: bash
+        run: |
+          npm run test:bots:ui --workspace=apps/client
+          node apps/client/test/userContextMenuSmoke.cjs
+          node apps/client/test/audioDeviceSmoke.cjs
+          node apps/client/test/liveAudioDeviceSmoke.cjs
+          node apps/client/test/dropdownSmoke.cjs
+          node apps/client/test/tooltipSmoke.cjs
+          node apps/client/test/microphoneStateSmoke.cjs
+          node apps/client/test/microphoneTestSmoke.cjs
+          node apps/client/test/settingsNavigationSmoke.cjs
+          node apps/client/test/footerControlsSmoke.cjs
 
       # Mirror the release pipeline: tsc does not copy the .sql migration files
       # into the compiled server output, so we copy them next to the compiled
@@ -215,3 +226,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           npm_config_node_gyp: ${{ env.NODE_GYP_PATH || '' }}
+
+      - name: Exercise shortcut capture and worker recovery
+        shell: bash
+        run: |
+          npm exec -- tsc -p apps/client/tsconfig.test.json
+          node apps/client/test/shortcutsDomSmoke.cjs
+          node apps/client/test/shortcutWorkerSmoke.cjs

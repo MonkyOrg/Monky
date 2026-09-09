@@ -1,0 +1,52 @@
+/* The hit boxes stay stationary; FooterControlsMotion animates only their glyphs. */
+.user-control-bar .user-quick-actions button,
+.user-control-bar .user-quick-actions button:active,
+.user-control-bar .user-media-bar > button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
+.chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-code) {
+  position: relative;
+  transform: none;
+}
+
+.user-control-bar .user-quick-actions button,
+.user-control-bar .user-media-bar > button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
+.chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-code) {
+  transition: color 120ms ease-out, background-color 120ms ease-out;
+}
+
+.user-control-bar .user-media-bar > .broadcasting-pulse {
+  animation: none;
+}
+
+.control-motion-decoration {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.control-motion-decoration svg {
+  width: 24px;
+  height: 24px;
+  overflow: visible;
+}
+
+.control-motion-decoration svg,
+.control-motion-decoration svg * {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.control-motion-decoration[data-motion="music"] svg {
+  width: 30px;
+  height: 26px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .user-control-bar .user-quick-actions button,
+  .user-control-bar .user-media-bar > button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
+  .chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-code) {
+    transition: none;
+  }
+}

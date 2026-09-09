@@ -38,6 +38,7 @@ export class RemoteMediaRouter {
   private screenAmplificationPipelines: Map<string, AmplificationPipeline> = new Map();
   private isDeafened: boolean = false;
   private audioContext: AudioContext | null = null;
+  private speakerDeviceId: string | null = null;
 
   constructor(private getVoiceParticipants: () => ParticipantManager) {}
 
@@ -47,7 +48,7 @@ export class RemoteMediaRouter {
     if (!this.audioContext || this.audioContext.state === 'closed') {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       this.audioContext = new AudioContextClass();
-      const sinkId = settingsStore.selectedSpeakerId;
+      const sinkId = this.speakerDeviceId ?? settingsStore.selectedSpeakerId;
       if (sinkId && typeof (this.audioContext as any).setSinkId === 'function') {
         (this.audioContext as any).setSinkId(sinkId).catch(() => {});
       }
@@ -89,31 +90,32 @@ export class RemoteMediaRouter {
 
   public async setSpeakerDeviceId(deviceId: string): Promise<void> {
     const sinkId = deviceId ?? settingsStore.selectedSpeakerId;
+    this.speakerDeviceId = sinkId;
     // Apply to all peer audio elements
     for (const audioEl of this.audioElements.values()) {
-      await this.applySinkToElement(audioEl, sinkId);
+      await this.applySinkToElement(audioEl, sinkId, false, true);
     }
     // Apply to all screen audio elements
     for (const screenAudioEl of this.screenAudioElements.values()) {
-      await this.applySinkToElement(screenAudioEl, sinkId);
+      await this.applySinkToElement(screenAudioEl, sinkId, false, true);
     }
     // Apply to the AudioContext if it exists (for amplification > 100%)
-    if (this.audioContext && typeof (this.audioContext as any).setSinkId === 'function') {
-      try {
-        await (this.audioContext as any).setSinkId(sinkId || '');
-      } catch (err) {
-        console.warn('[WebRTC:MediaRouter] Error setting sink ID for AudioContext:', err);
-      }
+    if (this.audioContext && 'setSinkId' in this.audioContext && typeof this.audioContext.setSinkId === 'function') {
+      await this.audioContext.setSinkId(sinkId);
     }
   }
 
-  public async applySinkToElement(audioEl: HTMLAudioElement, deviceId?: string, force = false): Promise<void> {
-    const sinkId = deviceId ?? settingsStore.selectedSpeakerId;
-    if (!sinkId || typeof (audioEl as any).setSinkId !== 'function') return;
-    if (!force && (audioEl as any).sinkId === sinkId) return;
+  public async applySinkToElement(audioEl: HTMLAudioElement, deviceId?: string, force = false, strict = false): Promise<void> {
+    const sinkId = deviceId ?? this.speakerDeviceId ?? settingsStore.selectedSpeakerId;
+    if (typeof audioEl.setSinkId !== 'function') {
+      if (strict) throw new Error('Output selection unavailable');
+      return;
+    }
+    if (!force && audioEl.sinkId === sinkId) return;
     try {
-      await (audioEl as any).setSinkId(sinkId);
+      await audioEl.setSinkId(sinkId);
     } catch (err) {
+      if (strict) throw err;
       console.warn('[WebRTC:MediaRouter] Error setting sink ID for speaker device:', err);
     }
   }

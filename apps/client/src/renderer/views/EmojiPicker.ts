@@ -6,6 +6,7 @@ import { settingsStore } from '../stores/settingsStore';
 import { t, tCount, TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { normalizeSearchString } from '../utils/search';
+import { scrollWithin } from '../utils/scroll';
 
 type PickerTab = 'emojis' | 'stickers';
 
@@ -78,6 +79,10 @@ export class EmojiPicker {
     return this.root !== null;
   }
 
+  public isOpenFor(anchor: HTMLElement): boolean {
+    return this.isOpen() && this.options.anchor === anchor;
+  }
+
   public toggle(): void {
     if (this.isOpen()) this.close();
     else void this.open();
@@ -98,6 +103,7 @@ export class EmojiPicker {
     root.innerHTML = this.renderShell();
     this.options.container.appendChild(root);
     this.root = root;
+    this.options.anchor.setAttribute('aria-expanded', 'true');
 
     if (this.options.floating) {
       this.positionFloating(root);
@@ -137,6 +143,7 @@ export class EmojiPicker {
 
   public close(): void {
     if (!this.root) return;
+    this.options.anchor.setAttribute('aria-expanded', 'false');
     this.imageObserver?.disconnect();
     this.imageObserver = null;
     this.unbind.forEach((off) => off());
@@ -236,7 +243,8 @@ export class EmojiPicker {
 
       const groupId = target.closest<HTMLElement>('[data-goto-group]')?.getAttribute('data-goto-group');
       if (groupId) {
-        body?.querySelector(`[data-emoji-group="${groupId}"]`)?.scrollIntoView({ block: 'start' });
+        const group = body?.querySelector<HTMLElement>(`[data-emoji-group="${CSS.escape(groupId)}"]`);
+        if (body && group) scrollWithin(body, group);
         return;
       }
 

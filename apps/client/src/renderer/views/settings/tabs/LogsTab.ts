@@ -1,6 +1,7 @@
 import { CLIENT_LOG_DEFAULTS } from '@monky/shared';
 import { clientLog } from '../../../core/ClientLogService';
 import { t } from '../../../i18n';
+import { escapeHtml } from '../../../utils/html';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -12,7 +13,7 @@ export class LogsTab {
   public renderHtml(): string {
     return `
       <!-- Logging Toggle -->
-      <div class="form-group" style="margin-bottom: 16px;">
+      <div data-settings-section="logging" data-settings-label="${escapeHtml(t('settings.logsSection'))}" class="form-group" style="margin-bottom: 16px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">description</span>
           ${t('settings.logsSection')}
@@ -39,7 +40,7 @@ export class LogsTab {
       </div>
 
       <!-- Size Limit -->
-      <div class="form-group" style="margin-bottom: 16px; border-top: 1px dashed var(--border-color); padding-top: 12px;">
+      <div data-settings-section="log-size" data-settings-label="${escapeHtml(t('settings.logsSizeLimit'))}" class="form-group" style="margin-bottom: 16px; border-top: 1px dashed var(--border-color); padding-top: 12px;">
         <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-weight: 600;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">storage</span>
           ${t('settings.logsSizeLimit')}
@@ -57,7 +58,7 @@ export class LogsTab {
       </div>
 
       <!-- Actions -->
-      <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
+      <div data-settings-section="log-actions" data-settings-label="${escapeHtml(t('settings.logsActions'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 8px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">build</span>
           ${t('settings.logsActions')}

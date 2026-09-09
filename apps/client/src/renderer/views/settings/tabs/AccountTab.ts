@@ -20,7 +20,7 @@ export class AccountTab {
         ${t('settings.accountIntro')}
       </div>
       <!-- Nickname & Profile -->
-      <div style="display: flex; gap: 16px; align-items: center; padding: 14px; background: var(--bg-card); border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
+      <div data-settings-section="profile" data-settings-label="${escapeHtml(t('settings.tabAccount'))}" style="display: flex; gap: 16px; align-items: center; padding: 14px; background: var(--bg-card); border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
         <div id="settings-avatar-wrapper" class="settings-avatar-wrapper" title="${t('settings.avatarTitle')}">
           <img id="settings-avatar-preview" class="settings-avatar-img" src="${serverStore.currentUser?.avatarUrl ? getAvatarUrl(serverStore.currentUser.avatarUrl) : (connectionStore.savedAvatarBase64 || getAvatarUrl(null))}" alt="Avatar" data-fallback="avatar">
           <div class="settings-avatar-overlay">
@@ -44,7 +44,7 @@ export class AccountTab {
       </div>
 
       <!-- Appear Offline (#561) -->
-      <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      <div data-settings-section="visibility" data-settings-label="${escapeHtml(t('settings.appearOfflineSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">visibility_off</span>
           ${t('settings.appearOfflineSection')}
@@ -62,7 +62,7 @@ export class AccountTab {
       </div>
 
       <!-- Language (#16) -->
-      <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      <div data-settings-section="language" data-settings-label="${escapeHtml(t('settings.languageSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;" for="select-language">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">language</span>
           ${t('settings.languageSection')}
@@ -78,7 +78,7 @@ export class AccountTab {
         </small>
       </div>
 
-      <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      <div data-settings-section="identity" data-settings-label="${escapeHtml(t('identity.sectionTitle'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">manage_accounts</span>
           ${t('identity.sectionTitle')}
@@ -109,7 +109,7 @@ export class AccountTab {
           </div>
         </div>
       </div>
-      <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      <div data-settings-section="backup" data-settings-label="${escapeHtml(t('backup.sectionTitle'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">backup</span>
           ${t('backup.sectionTitle')}

@@ -43,7 +43,7 @@ export class ServerBotsTab {
     return `
       <div id="server-bots-tab" style="display: flex; flex-direction: column; gap: 16px; width: 100%;">
         <!-- Create bot form -->
-        <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
+        <div data-settings-section="create-bot" data-settings-label="${escapeHtml(t('bots.createTitle'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
           <div style="font-size: 13px; font-weight: 700; margin-bottom: 10px;">${t('bots.createTitle')}</div>
           ${this.photoHtml('create')}
           <div style="display: flex; gap: 8px; align-items: flex-end;">
@@ -59,7 +59,7 @@ export class ServerBotsTab {
         </div>
 
         <!-- Add bot from URL (#578) -->
-        <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
+        <div data-settings-section="install-bot" data-settings-label="${escapeHtml(t('bots.installTitle'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
           <div style="font-size: 13px; font-weight: 700; margin-bottom: 10px;">
             <span class="material-symbols-outlined md-16" style="vertical-align: middle;">add_circle</span>
             ${t('bots.installTitle')}
@@ -92,13 +92,13 @@ export class ServerBotsTab {
         </div>
 
         <!-- Bot list -->
-        <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
+        <div data-settings-section="bots" data-settings-label="${escapeHtml(t('bots.listTitle'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
           <div style="font-size: 13px; font-weight: 700; margin-bottom: 10px;">${t('bots.listTitle')}</div>
           <div id="bot-list-container" style="display: flex; flex-direction: column; gap: 6px;">
             <div style="font-size: 12px; color: var(--text-muted);">${t('bots.loading')}</div>
           </div>
         </div>
-        <div id="bot-profile-editor" class="bot-profile-editor" hidden></div>
+        <div id="bot-profile-editor" data-settings-section="bot-profile" data-settings-label="${escapeHtml(t('bots.profileEdit'))}" class="bot-profile-editor" hidden></div>
       </div>
     `;
   }

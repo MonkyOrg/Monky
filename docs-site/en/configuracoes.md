@@ -19,6 +19,20 @@ Open from the gear icon on the connection screen or bottom bar.
 - **Updates** — current version and manual check.
 - **Community** — shortcuts for ideas, voting and bugs.
 
+### Section navigation
+
+In app and server settings, selecting a category expands its section shortcuts
+in the sidebar. Submenus expand and collapse smoothly, including when switching
+quickly between categories. Click one to scroll smoothly to that part of the page.
+The current section is also highlighted while scrolling manually, without
+recreating the form or losing unsaved changes. Hidden or unavailable sections
+are not included in the navigation.
+
+Submenu expansion and collapse, as well as scrolling through settings sections
+and emoji-picker categories, respect the
+system's reduced-motion preference: when enabled, navigation is immediate,
+without animation.
+
 ### Appear offline
 
 Under **My Profile → Visibility → Appear offline**, the switch changes your
@@ -30,6 +44,59 @@ does not make you appear online again.
 
 This does not disconnect the client or interrupt an ongoing call. Your
 participation in a voice channel remains visible in that channel.
+
+### Quick audio controls
+
+The microphone/headphone icons and their arrows share the same style in the
+bottom bar. The arrows open an upward panel showing the current device.
+Hover over that information or click it to open the side list of devices.
+Use the arrow keys to navigate; `Esc` closes the side list first, then the
+panel.
+
+The microphone panel also shows **Input level** as a segmented bar.
+Selections use the same **Voice and Video** settings and are saved.
+The meter is a local preview: it does not unmute your microphone or transmit
+your voice. Closing the panel stops the preview. The **Voice settings**
+button opens the corresponding tab directly.
+
+Right-clicking your own name also opens the user menu, both in the lists and
+on your bottom-bar profile. This menu lets you toggle manual microphone
+mute and deafen, including before joining a call. The voice-volume control
+only appears for other users; all other actions still respect server
+permissions. Manual mute never removes an administrator restriction.
+
+### Tooltips and menus
+
+Client tooltips use a compact dark design, appear after approximately
+**150 ms** with the mouse and immediately during keyboard navigation.
+`Esc` dismisses the tooltip. Menus and selection lists share the same theme;
+use the arrow keys, type to find an option and confirm with `Enter`.
+`Esc` closes a selection list without changing its value.
+
+The bottom-bar controls and the composer's **attachment, emoji and code**
+buttons have their own hover motions: the gear rotates, the screen-sharing
+arrow moves, the soundboard releases musical notes and the emoji laughs.
+The camera effect is an animated viewfinder, not a recording indicator.
+Clicks and state changes also receive brief visual feedback. The floating
+message-action toolbar does not receive these animations. The reduced-motion
+preference disables these effects.
+
+In the **Code block** dialog, drag the bottom-right corner to adjust its width
+and height; the editor follows the dialog size. Size limits preserve at least
+**24 px** of space between the dialog and the application window edges.
+
+This styling covers the client interface. File dialogs and system-tray
+menus are still drawn by the operating system.
+
+### Microphone test
+
+Under **Voice and Video**, the test lets you start and stop local playback
+of your voice while watching the segmented bar. Use headphones to avoid
+feedback between your speakers and microphone. Playback only begins when
+you start the test; this preview is not sent to the voice channel and does
+not change your mute or Push-to-Talk state. If you are already unmuted in a
+call, that call continues transmitting your voice normally. Leaving the tab
+or closing settings stops the test.
 
 ### Keyboard shortcuts
 
@@ -46,6 +113,17 @@ anti-cheat or security restrictions. Holding a chord does not repeat the
 action; release a required key before triggering it again. Extra modifiers
 prevent activation.
 
+Shortcuts work while Monky is focused, minimized or in the background,
+including during calls with an active microphone. On Windows, shortcut
+capture runs in a separate process to avoid interference from WebRTC.
+
+**Mute microphone**, **deafen** and **mute soundboard** also work outside a
+call. Your choice is saved and respected when joining a voice channel, so you
+can join already muted. Outside a call, these actions only change your local
+preferences without sending voice-state updates to the server.
+Camera, screen-sharing and stop-soundboard shortcuts only act while you are
+in a voice channel.
+
 New shortcuts store physical key positions and display layout-specific labels,
 including `º` and `ñ` on Spanish keyboards where supported by the system.
 On Windows, conversion uses the focused window's actual layout, not a fixed
@@ -55,6 +133,27 @@ registered, preventing an incorrect action.
 Older shortcuts remain readable; re-record an unrecognized combination from
 another layout. Global capture may require input/accessibility permissions.
 Push-to-Talk keeps its separately configured keyboard key or mouse button.
+
+### Input mode and Push to Talk
+
+Under **Voice and Video → Input Mode**, choose one of the two cards: **Voice
+Activity (VAD)** or **Push to Talk**. The cards also support keyboard
+activation, without radio buttons.
+
+With PTT enabled, the **microphone button in the bottom-left corner** gains a
+borderless **PTT** label below the icon: yellow with a voice-input icon while
+waiting for the key and green with an open microphone while transmitting.
+Manual mute or deafen shows only a red crossed-out microphone, without the PTT
+label. An administrator restriction uses a microphone or headphones with a
+small prohibition badge, also without PTT. Controls, participant lists and the
+overlay share this distinction, with a tooltip identifying the server
+restriction. Outside a call, the waiting state is gray.
+
+Clicking the button still toggles **manual mute**. Holding the PTT key does
+not undo that mute: it only opens the microphone when allowed. The state
+follows the actual microphone gate, including the release delay after letting
+go of the key. The configured key and state description appear in the tooltip
+and settings; there is no longer a separate indicator on the call stage.
 
 ### Quality profiles
 
