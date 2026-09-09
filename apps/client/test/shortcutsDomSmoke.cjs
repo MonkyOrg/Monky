@@ -29,6 +29,12 @@ if (!process.versions.electron) {
     app.exit(code);
   };
   app.whenReady().then(async () => {
+    if (process.platform === 'win32') {
+      const addon = path.join(path.dirname(require.resolve('@monky/screen-audio')), 'build', 'Release', 'screen_audio.node');
+      const binding = require(addon);
+      assert.equal(typeof binding.getKeyboardLayout, 'function', 'packaged native bridge must expose keyboard layout');
+      assert.ok(binding.getKeyboardLayout('', 'q'), 'Windows must provide a keyboard layout for shortcut capture');
+    }
     timeout = setTimeout(() => { console.error('Shortcut DOM smoke timed out'); void finish(1); }, 30000);
     const { createServer } = await import('vite');
     vite = await createServer({
