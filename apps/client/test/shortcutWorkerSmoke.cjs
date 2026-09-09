@@ -28,6 +28,10 @@ if (process.platform !== 'win32') {
     app.exit(code);
   };
   app.whenReady().then(async () => {
+    const addon = path.join(path.dirname(require.resolve('@monky/screen-audio')), 'build', 'Release', 'screen_audio.node');
+    const binding = require(addon);
+    assert.equal(typeof binding.getKeyboardLayout, 'function');
+    const hasKeyboardLayout = binding.getKeyboardLayout('', 'q') !== null;
     window = new BrowserWindow({ show: false, webPreferences: { contextIsolation: true, nodeIntegration: false } });
     hook = new GlobalInputHookProcess();
     hook.init(window);
@@ -49,7 +53,8 @@ if (process.platform !== 'win32') {
     assert.equal(await hook.setSoundboardHotkeys(sounds), true);
     const ptt = { enabled: true, key: { code: 'F24', display: 'F24', keyType: 'keyboard', keyCode: UiohookKey.F24 } };
     assert.equal(await hook.setPttConfig(ptt), true);
-    assert.equal(await hook.setShortcutCapture(true), true);
+    assert.equal(await hook.setShortcutCapture(true), hasKeyboardLayout,
+      'capture must fail closed when the desktop has no keyboard layout');
     assert.equal(await hook.setShortcutCapture(false), true);
     const state = structuredClone(hook.retained);
 

@@ -17,6 +17,7 @@ if (!process.versions.electron) {
   const { app, BrowserWindow, ipcMain } = require('electron');
   const { EventEmitter } = require('node:events');
   const { GlobalInputHook } = require('../dist-test/src/main/globalInputHook');
+  const { WindowsKeyboardLayout } = require('../dist-test/src/main/windowsKeyboardLayout');
   const { SHORTCUT_IPC } = require('@monky/shared');
   const { UiohookKey: K, EventType } = require('uiohook-napi');
   app.setPath('userData', process.env.MONKY_SHORTCUTS_DOM_PROFILE);
@@ -33,7 +34,9 @@ if (!process.versions.electron) {
       const addon = path.join(path.dirname(require.resolve('@monky/screen-audio')), 'build', 'Release', 'screen_audio.node');
       const binding = require(addon);
       assert.equal(typeof binding.getKeyboardLayout, 'function', 'packaged native bridge must expose keyboard layout');
-      assert.ok(binding.getKeyboardLayout('', 'q'), 'Windows must provide a keyboard layout for shortcut capture');
+      if (!binding.getKeyboardLayout('', 'q')) {
+        console.log('No interactive Windows keyboard layout; DOM capture uses its deterministic layout fixture.');
+      }
     }
     timeout = setTimeout(() => { console.error('Shortcut DOM smoke timed out'); void finish(1); }, 30000);
     const { createServer } = await import('vite');
@@ -58,11 +61,14 @@ if (!process.versions.electron) {
       preload: path.join(output, 'src/preload/preload.js'),
     } });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    // Inject only the native event source: never listen to or send OS input.
+    // Inject native events and their layout: hosted desktops need not have an input locale.
     // The renderer, settings tab, preload, IPC transport and matcher are real.
     class Native extends EventEmitter { start() {} stop() {} }
     const native = new Native();
-    hook = new GlobalInputHook(native);
+    const layout = process.platform === 'win32' ? new WindowsKeyboardLayout(() => ({
+      id: 'fixture-us', scanCodeToVirtualKey: { [K.Q]: 0x51 }, characterToVirtualKey: { q: 0x51 },
+    })) : null;
+    hook = new GlobalInputHook(native, layout);
     hook.init(window);
     const registrations = [];
     for (const [channel, method] of [

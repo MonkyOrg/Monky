@@ -232,7 +232,7 @@ async function runSettingsNavigationSmoke() {
     body.dispatchEvent(new WheelEvent('wheel'));
     const middle = root.querySelector('[data-settings-section="two"]');
     body.scrollTop += middle.getBoundingClientRect().top - body.getBoundingClientRect().top - body.clientTop - 16;
-    await wait();
+    await settled(() => current() === 'two');
     check(current() === 'two', 'Manual content scrolling updates the selected subsection');
     setReduced(true);
     root.querySelector('[data-section-target="one"]').click();
