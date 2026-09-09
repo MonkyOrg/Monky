@@ -188,6 +188,13 @@ export class RoleService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Usuário ou cargo não encontrado.' };
     }
 
+    // MANAGE_ROLES não pode virar ADMINISTRATOR pela porta dos fundos: criar e
+    // editar cargo já barram isso (#277), mas atribuir o cargo Admin embutido
+    // dava o mesmo resultado em um passo. Só o dono promove alguém a admin.
+    if ((await this.isBuiltInAdminRole(role.id)) && !(await this.permissionService.isOwner(actorUserId))) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode promover alguém a administrador.' };
+    }
+
     await this.roleRepo.assignRole(parsed.data.userId, parsed.data.roleId);
     return { success: true };
   }
@@ -208,6 +215,10 @@ export class RoleService {
     }
     if (role.isDefault) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O cargo padrão não pode ser removido.' };
+    }
+    // Simétrico ao assign: quem tem MANAGE_ROLES não derruba um administrador.
+    if ((await this.isBuiltInAdminRole(role.id)) && !(await this.permissionService.isOwner(actorUserId))) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode remover um administrador.' };
     }
 
     await this.roleRepo.unassignRole(parsed.data.userId, parsed.data.roleId);

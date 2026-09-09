@@ -20,6 +20,12 @@ import { compareVersions, pickNewestRelease } from './cli/commands/update';
 import { generateEcosystem, getPm2ProcessName } from './cli/pm2';
 import { parseOption } from './cli/formatters';
 import { listServers, registerServer, serverIdFor, unregisterServer } from './cli/registry';
+import { PasswordService } from './infrastructure/security/PasswordService';
+import { RateLimiter } from './infrastructure/security/RateLimiter';
+import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
+import { SqliteRoleRepository, SqliteServerRepository, SqliteUserRepository } from './infrastructure/database/SqliteRepositories';
+import { PermissionService } from './application/services/PermissionService';
+import { RoleService } from './application/services/RoleService';
 import { CapacityEstimator } from './domain/services/CapacityEstimator';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import { resolveTurnSfuExclusion } from './application/services/AuthService';
@@ -60,6 +66,8 @@ async function authenticateSocket(
     deviceId?: string;
     /** Pretend to be a client speaking another protocol version (#355). */
     protocolVersion?: number;
+    /** Resolve on any SERVER_ERROR, para inspecionar qual código veio (#372). */
+    acceptAnyError?: boolean;
   }
 ): Promise<any> {
   const identity = options?.identity ?? createIdentity();
@@ -67,6 +75,12 @@ async function authenticateSocket(
   return await withTimeout(new Promise((resolve, reject) => {
     const onMessage = (data: RawData) => {
       const res = JSON.parse(data.toString());
+
+      if (options?.acceptAnyError && res.type === MessageType.SERVER_ERROR) {
+        ws.off('message', onMessage);
+        resolve(res);
+        return;
+      }
 
       if (
         options?.expectErrorCode &&
@@ -1395,6 +1409,164 @@ async function runTests() {
       throw new Error('Teste 21: closeSfuSession deveria anunciar SFU_PRODUCER_CLOSED para o canal');
     }
     console.log('✔ Teste 21 passou: Todas as saídas da voz fecham a sessão no SFU e anunciam os producers');
+
+    // Teste 22: verifyPassword recebia um hash truncado e chegava ao
+    // timingSafeEqual com buffers de tamanhos diferentes, que lança exceção em
+    // vez de responder "senha errada" (#372).
+    const hashValido = PasswordService.hashPassword('senha-secreta-123');
+    if (!(await PasswordService.verifyPassword('senha-secreta-123', hashValido))) {
+      throw new Error('Teste 22: a senha correta deveria ser aceita');
+    }
+    if (await PasswordService.verifyPassword('senha-errada', hashValido)) {
+      throw new Error('Teste 22: a senha errada deveria ser recusada');
+    }
+    const [saltValido, chaveValida] = hashValido.split(':');
+    for (const hashQuebrado of ['', 'sem-separador', `${saltValido}:`, `${saltValido}:${chaveValida.slice(0, 20)}`]) {
+      if (await PasswordService.verifyPassword('senha-secreta-123', hashQuebrado)) {
+        throw new Error('Teste 22: um hash malformado não deveria autenticar ninguém');
+      }
+    }
+    console.log('✔ Teste 22 passou: Hash malformado responde senha inválida em vez de lançar exceção');
+
+    // Teste 23: a autenticação não passava pelo rate limiter, então a senha do
+    // servidor podia ser testada indefinidamente — e cada tentativa custa uma
+    // derivação scrypt (#372).
+    const limitadorAuth = new RateLimiter();
+    let aceitas = 0;
+    for (let i = 0; i < LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS + 3; i++) {
+      if (limitadorAuth.checkLimit('auth:198.51.100.7', LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS, LIMITS.RATE_LIMIT_AUTH_WINDOW_MS)) {
+        aceitas++;
+      }
+    }
+    if (aceitas !== LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS) {
+      throw new Error(`Teste 23: o IP deveria parar em ${LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS} tentativas, parou em ${aceitas}`);
+    }
+    if (!limitadorAuth.checkLimit('auth:203.0.113.9', LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS, LIMITS.RATE_LIMIT_AUTH_WINDOW_MS)) {
+      throw new Error('Teste 23: o limite de um IP não deveria bloquear outro');
+    }
+    limitadorAuth.dispose();
+    console.log('✔ Teste 23 passou: Tentativas de autenticação são limitadas por IP');
+
+    // Teste 24: sem maxPayload valia o padrão da lib ws, 100 MiB, que qualquer
+    // cliente não autenticado podia mandar para o servidor bufferizar (#372).
+    const maiorAvatarEmBase64 = Math.ceil(LIMITS.MAX_AVATAR_SIZE / 3) * 4;
+    if (LIMITS.WS_MAX_PAYLOAD_BYTES <= maiorAvatarEmBase64) {
+      throw new Error('Teste 24: o teto do frame precisa caber o maior avatar legítimo em base64');
+    }
+    if (LIMITS.WS_MAX_PAYLOAD_BYTES >= 100 * 1024 * 1024) {
+      throw new Error('Teste 24: o teto do frame precisa ser menor que o padrão de 100 MiB da lib ws');
+    }
+    console.log('✔ Teste 24 passou: Frame de WebSocket tem teto acima do avatar legítimo e abaixo do padrão da lib');
+
+    // Teste 25: MANAGE_ROLES podia atribuir o cargo Admin embutido, inclusive a
+    // si mesmo — o mesmo ADMINISTRATOR que criar e editar cargo já barram (#277),
+    // alcançado em um passo pela porta dos fundos (#372).
+    const escaladaDir = path.join(__dirname, '../../test-data-escalada');
+    if (fs.existsSync(escaladaDir)) fs.rmSync(escaladaDir, { recursive: true, force: true });
+    fs.mkdirSync(escaladaDir, { recursive: true });
+
+    const escaladaConn = await DatabaseConnection.create(path.join(escaladaDir, 'server.db'));
+    const escaladaDb = escaladaConn.getDb();
+    const serverRepoEsc = new SqliteServerRepository(escaladaDb);
+    const userRepoEsc = new SqliteUserRepository(escaladaDb);
+    const roleRepoEsc = new SqliteRoleRepository(escaladaDb);
+    const roleServiceEsc = new RoleService(roleRepoEsc, userRepoEsc, new PermissionService(serverRepoEsc, roleRepoEsc));
+
+    const criarUsuario = async (id: string, nickname: string) => {
+      await userRepoEsc.create({
+        id,
+        clientId: `client-${id}`,
+        publicKey: `chave-${id}`,
+        nickname,
+        avatarPath: null,
+        createdAt: Date.now(),
+        lastSeenAt: Date.now(),
+      });
+    };
+
+    await criarUsuario('dono', 'Dono');
+    await criarUsuario('moderador', 'Moderador');
+    await criarUsuario('alvo', 'Alvo');
+    await serverRepoEsc.createServer({
+      id: 'servidor-escalada',
+      name: 'Escalada',
+      passwordHash: '',
+      createdAt: Date.now(),
+      maxUsers: 10,
+      ownerUserId: 'dono',
+      allowSoundboard: true,
+    });
+
+    const cargoAdmin = { id: 'cargo-admin', name: 'Admin', color: null, permissions: ADMIN_PERMISSIONS, position: 100, isDefault: false, createdAt: Date.now() };
+    const cargoModerador = { id: 'cargo-mod', name: 'Moderador', color: null, permissions: Permission.MANAGE_ROLES, position: 50, isDefault: false, createdAt: Date.now() };
+    const cargoComum = { id: 'cargo-comum', name: 'Comum', color: null, permissions: DEFAULT_PERMISSIONS, position: 10, isDefault: false, createdAt: Date.now() };
+    await roleRepoEsc.create(cargoAdmin);
+    await roleRepoEsc.create(cargoModerador);
+    await roleRepoEsc.create(cargoComum);
+    await roleRepoEsc.assignRole('moderador', cargoModerador.id);
+    await roleRepoEsc.assignRole('dono', cargoAdmin.id);
+
+    const escalar = await roleServiceEsc.assignRole('moderador', { userId: 'moderador', roleId: cargoAdmin.id });
+    if (escalar.success || escalar.errorCode !== ProtocolErrorCode.PERMISSION_DENIED) {
+      throw new Error('Teste 25: MANAGE_ROLES não deveria conseguir se promover a administrador');
+    }
+    const escalarOutro = await roleServiceEsc.assignRole('moderador', { userId: 'alvo', roleId: cargoAdmin.id });
+    if (escalarOutro.success) {
+      throw new Error('Teste 25: MANAGE_ROLES não deveria conseguir promover outra pessoa a administrador');
+    }
+    const derrubarAdmin = await roleServiceEsc.unassignRole('moderador', { userId: 'dono', roleId: cargoAdmin.id });
+    if (derrubarAdmin.success) {
+      throw new Error('Teste 25: MANAGE_ROLES não deveria conseguir remover um administrador');
+    }
+    const cargoNormal = await roleServiceEsc.assignRole('moderador', { userId: 'alvo', roleId: cargoComum.id });
+    if (!cargoNormal.success) {
+      throw new Error('Teste 25: MANAGE_ROLES deveria continuar atribuindo cargos comuns');
+    }
+    const donoPromove = await roleServiceEsc.assignRole('dono', { userId: 'alvo', roleId: cargoAdmin.id });
+    if (!donoPromove.success) {
+      throw new Error('Teste 25: o dono deveria continuar podendo promover alguém a administrador');
+    }
+    escaladaConn.close();
+    fs.rmSync(escaladaDir, { recursive: true, force: true });
+    console.log('✔ Teste 25 passou: Só o dono atribui ou remove o cargo Admin embutido');
+
+    // Teste 26: só o fracasso gasta cota. Contar toda tentativa penalizava quem
+    // entra normalmente e travava sozinha uma casa inteira atrás de um NAT ao
+    // reconectar depois de uma queda (#372).
+    const limitadorPeek = new RateLimiter();
+    for (let i = 0; i < 50; i++) {
+      if (!limitadorPeek.peek('auth:203.0.113.5', LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS, LIMITS.RATE_LIMIT_AUTH_WINDOW_MS)) {
+        throw new Error('Teste 26: consultar o limite não deveria gastar cota');
+      }
+    }
+    for (let i = 0; i < LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS; i++) {
+      limitadorPeek.checkLimit('auth:203.0.113.5', LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS, LIMITS.RATE_LIMIT_AUTH_WINDOW_MS);
+    }
+    if (limitadorPeek.peek('auth:203.0.113.5', LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS, LIMITS.RATE_LIMIT_AUTH_WINDOW_MS)) {
+      throw new Error('Teste 26: depois das falhas registradas o IP deveria estar barrado');
+    }
+    limitadorPeek.dispose();
+    console.log('✔ Teste 26 passou: Consultar o limite não gasta cota; só a falha registrada gasta');
+
+    // Teste 27 (por último, de propósito: deixa 127.0.0.1 barrado): a senha
+    // errada repetida acaba recusada antes do scrypt, com código próprio — o
+    // cliente traduz por código, e RATE_LIMITED já quer dizer "flood de
+    // mensagens" para ele (#372).
+    let codigoDeBloqueio: string | undefined;
+    for (let i = 0; i < LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS + 2 && !codigoDeBloqueio; i++) {
+      const wsForca = new WebSocket('ws://127.0.0.1:3999');
+      const erro = await authenticateSocket(wsForca, `req-forca-${i}`, `UserForca${i}`, 'senha-errada', {
+        acceptAnyError: true,
+      });
+      if (erro?.payload?.code === ProtocolErrorCode.AUTH_RATE_LIMITED) {
+        codigoDeBloqueio = erro.payload.code;
+      }
+      wsForca.close();
+    }
+    if (codigoDeBloqueio !== ProtocolErrorCode.AUTH_RATE_LIMITED) {
+      throw new Error('Teste 27: tentativas repetidas de senha errada deveriam ser barradas com AUTH_RATE_LIMITED');
+    }
+    console.log('✔ Teste 27 passou: Senha errada repetida é barrada por IP com AUTH_RATE_LIMITED');
 
     console.log('=== Todos os testes do servidor passaram com sucesso! ===');
   } finally {

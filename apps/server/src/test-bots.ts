@@ -206,6 +206,7 @@ async function createFixture() {
     permissions,
     roleService,
     new CoturnManager(dataDir),
+    new RateLimiter(),
     new SfuManager(),
     botService,
     registry,
