@@ -2,6 +2,7 @@ import { QUALITY_PRESETS, QualityPresetType, QualityProfile } from '@monky/share
 import { settingsStore } from '../../../stores/settingsStore';
 import { webRtcManager } from '../../../core/WebRtcManager';
 import { t } from '../../../i18n';
+import { escapeHtml } from '../../../utils/html';
 import {
   ASPECT_RATIO_GROUPS,
   AUDIO_BITRATE_OPTIONS,
@@ -20,7 +21,7 @@ export class QualityTab {
     return `
       <!-- Quality Preset -->
       <div class="form-group">
-        <label style="display: flex; align-items: center; gap: 6px;">
+        <label data-settings-section="quality-preset" data-settings-label="${escapeHtml(t('settings.qualitySection'))}" style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">speed</span>
           ${t('settings.qualitySection')}
           <span class="material-symbols-outlined md-16" style="color: var(--text-muted); cursor: help;" title="${t('settings.qualityHelp')}">help</span>
@@ -46,7 +47,7 @@ export class QualityTab {
       </div>
 
       <!-- Preferred Video Codec -->
-      <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      <div data-settings-section="video-codec" data-settings-label="${escapeHtml(t('settings.videoCodecSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;" for="select-video-codec">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">movie</span>
           ${t('settings.videoCodecSection')}
@@ -73,21 +74,21 @@ export class QualityTab {
     if (preset === 'CUSTOM') {
       return `
         <div style="font-size: 12px;">
-          <div class="quality-custom-block">
+          <div class="quality-custom-block" data-settings-section="custom-audio" data-settings-label="${escapeHtml(t('settings.audio'))}">
             <div class="quality-custom-title">
               <span class="material-symbols-outlined" style="font-size: 16px; color: var(--accent-primary);">mic</span>
               <strong style="color: var(--text-secondary);">${t('settings.audio')}</strong>
             </div>
             ${this.renderNumberChoice('audioBitrate', t('settings.bitrate'), AUDIO_BITRATE_OPTIONS, p.audioBitrateKbps, 'kbps')}
           </div>
-          <div class="quality-custom-block">
+          <div class="quality-custom-block" data-settings-section="custom-camera" data-settings-label="${escapeHtml(t('settings.cameraShort'))}">
             <div class="quality-custom-title">
               <span class="material-symbols-outlined" style="font-size: 16px; color: var(--accent-primary);">videocam</span>
               <strong style="color: var(--text-secondary);">${t('settings.cameraShort')}</strong>
             </div>
             ${this.renderMediaFields('camera', p.cameraWidth, p.cameraHeight, p.cameraFps, p.cameraBitrateKbps)}
           </div>
-          <div class="quality-custom-block">
+          <div class="quality-custom-block" data-settings-section="custom-screen" data-settings-label="${escapeHtml(t('settings.screen'))}">
             <div class="quality-custom-title">
               <span class="material-symbols-outlined" style="font-size: 16px; color: var(--accent-primary);">screen_share</span>
               <strong style="color: var(--text-secondary);">${t('settings.screen')}</strong>

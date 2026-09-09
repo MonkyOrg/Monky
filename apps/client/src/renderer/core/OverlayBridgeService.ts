@@ -379,6 +379,8 @@ export class OverlayBridgeService {
       const isSpeaking = isLocal ? voiceStore.isSpeaking : p.isSpeaking;
       const isMuted = isLocal ? voiceStore.getEffectiveMuted() : (p.voiceState?.isMuted ?? false);
       const isDeafened = isLocal ? voiceStore.getEffectiveDeafened() : (p.voiceState?.isDeafened ?? false);
+      const serverMuted = isLocal ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
+      const serverDeafened = isLocal ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
 
       let shareIds: string[] = [];
       if (isLocal) {
@@ -449,6 +451,8 @@ export class OverlayBridgeService {
         isSpeaking,
         isMuted,
         isDeafened,
+        serverMuted,
+        serverDeafened,
         isCameraOn: isCamOn,
         screenShareIds: shareIds,
         isLocal,

@@ -47,7 +47,7 @@ export class CodeBlockModal {
             <select id="code-language" class="code-language-select">${languageOptions}</select>
           </div>
 
-          <div class="form-group">
+          <div class="form-group code-editor-field">
             <label for="code-body">${t('chat.codeModalCode')}</label>
             <textarea id="code-body" class="code-textarea" rows="12" spellcheck="false" placeholder="${escapeHtml(t('chat.codeModalPlaceholder'))}"></textarea>
             <div class="code-modal-meta">

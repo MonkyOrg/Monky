@@ -25,12 +25,14 @@ import { ServerNotificationsTab } from './serverSettings/tabs/ServerNotification
 import { ServerMembersTab } from './serverSettings/tabs/ServerMembersTab';
 import { ServerRolesTab } from './serverSettings/tabs/ServerRolesTab';
 import { ServerBotsTab } from './serverSettings/tabs/ServerBotsTab';
+import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
 
 export class ServerSettingsModal {
   private modalEl: HTMLElement | null = null;
   private shouldRemovePassword = false;
   private pendingIconBase64: string | null | undefined = undefined;
   private activeTab = 'general';
+  private sectionNavigation: SettingsSectionNavigation | null = null;
   /** Set while the host installs coturn, which must not be interrupted (#438). */
   private installingRelay = false;
   private detachGeneralTab: (() => void) | null = null;
@@ -180,6 +182,8 @@ export class ServerSettingsModal {
 
     document.body.appendChild(this.modalEl);
     this.attachEvents();
+    this.sectionNavigation = new SettingsSectionNavigation(this.modalEl);
+    this.sectionNavigation.setTab(this.activeTab);
   }
 
   private getTabHeaderTitle(tabName: string): string {
@@ -258,6 +262,7 @@ export class ServerSettingsModal {
       if (currentTabTitle) {
         currentTabTitle.innerHTML = this.getTabHeaderTitle(tabName);
       }
+      this.sectionNavigation?.setTab(tabName);
     };
 
     tabButtons.forEach((btn) => {
@@ -579,6 +584,8 @@ export class ServerSettingsModal {
   }
 
   public close(): void {
+    this.sectionNavigation?.destroy();
+    this.sectionNavigation = null;
     this.detachEmojiPicker?.();
     this.detachEmojiPicker = null;
     this.botsTab.detachEvents();

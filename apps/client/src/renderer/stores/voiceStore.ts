@@ -2,6 +2,7 @@ import { appEvents } from '../core/EventBus';
 import { emitOutsideRouting } from '../core/sessionRouting';
 import { settingsStore } from './settingsStore';
 import { clientLog } from '../core/ClientLogService';
+import type { VoiceConnectionHealth } from '@monky/shared';
 
 export class VoiceStore {
   public currentVoiceChannelId: string | null = null;
@@ -17,6 +18,8 @@ export class VoiceStore {
   public serverDeafened: boolean = false;
   private micMutedBeforeDeafen: boolean = false;
   public isSpeaking: boolean = false;
+  public microphoneOpen: boolean = false;
+  public pttPressed: boolean = false;
   public isCameraOn: boolean = false;
   /**
    * Ids of the local screen shares currently being broadcast (#253).
@@ -34,6 +37,7 @@ export class VoiceStore {
    * cue instead of a screen-blocking overlay.
    */
   public isReconnecting: boolean = false;
+  public isConnecting: boolean = false;
 
   /** Hard cap on simultaneous screen shares per participant (#253). */
   public static readonly MAX_SCREEN_SHARES = 2;
@@ -41,6 +45,10 @@ export class VoiceStore {
   public setChannel(channelId: string | null, sessionKey: string | null = null): void {
     clientLog.info('CONNECTION', `Voice channel ${channelId ? 'joined' : 'left'}`, { channelId, sessionKey });
     const wasReconnecting = this.isReconnecting;
+    if (channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
+      this.isConnecting = false;
+      this.isReconnecting = false;
+    }
     this.currentVoiceChannelId = channelId;
     if (channelId) {
       this.voiceSessionKey = sessionKey;
@@ -52,10 +60,11 @@ export class VoiceStore {
       this.screenAudioShareId = null;
       this.isSpeaking = false;
       this.isReconnecting = false;
+      this.isConnecting = false;
     }
     emitOutsideRouting(() => {
       appEvents.emit('voice.channel_changed', channelId);
-      if (!channelId && wasReconnecting) appEvents.emit('voice.reconnecting_changed', false);
+      if (wasReconnecting && !this.isReconnecting) appEvents.emit('voice.reconnecting_changed', false);
     });
   }
 
@@ -89,13 +98,13 @@ export class VoiceStore {
   public setServerMuted(muted: boolean): void {
     clientLog.warn('AUDIO', `Server muted: ${muted}`);
     this.serverMuted = muted;
-    appEvents.emit('voice.state_updated');
+    emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
   }
 
   public setServerDeafened(deafened: boolean): void {
     clientLog.warn('AUDIO', `Server deafened: ${deafened}`);
     this.serverDeafened = deafened;
-    appEvents.emit('voice.state_updated');
+    emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
   }
 
   public getEffectiveMuted(): boolean {
@@ -114,18 +123,37 @@ export class VoiceStore {
     }
   }
 
+  public setMicrophoneState(open: boolean, pttPressed: boolean): void {
+    if (this.microphoneOpen === open && this.pttPressed === pttPressed) return;
+    this.microphoneOpen = open;
+    this.pttPressed = pttPressed;
+    emitOutsideRouting(() => appEvents.emit('voice.microphone_updated'));
+  }
+
   /**
-   * Flags the active call as (re)connecting so the UI can react (#553). A
+   * Flags recovery of an active call so the UI can react (#553). A
    * `true` with no live call is ignored, so a late event fired right after
    * hang-up can never strand the indicator in the reconnecting state.
    */
   public setReconnecting(reconnecting: boolean): void {
-    if (this.isReconnecting === reconnecting) return;
-    if (reconnecting && !this.currentVoiceChannelId) return;
+    this.setConnectionHealth(reconnecting ? 'reconnecting' : 'connected');
+  }
+
+  public setConnectionHealth(health: VoiceConnectionHealth): void {
+    if (health !== 'connected' && !this.currentVoiceChannelId) return;
+    // Rebuilding transports during recovery is not a new initial connection.
+    const connecting = health === 'connecting' && !this.isReconnecting;
+    const reconnecting = health !== 'connected' && !connecting;
+    if (this.isConnecting === connecting && this.isReconnecting === reconnecting) return;
+    const wasReconnecting = this.isReconnecting;
+    this.isConnecting = connecting;
     this.isReconnecting = reconnecting;
-    clientLog.info('CONNECTION', `Voice reconnecting: ${reconnecting}`);
-    appEvents.emit('voice.reconnecting_changed', reconnecting);
-    appEvents.emit('voice.state_updated');
+    clientLog.info('CONNECTION', `Voice connection: ${connecting ? 'connecting' : reconnecting ? 'reconnecting' : 'connected'}`);
+    emitOutsideRouting(() => {
+      if (wasReconnecting !== reconnecting) appEvents.emit('voice.reconnecting_changed', reconnecting);
+      appEvents.emit('voice.connection_changed');
+      appEvents.emit('voice.state_updated');
+    });
   }
 
   public setCameraOn(on: boolean): void {
@@ -183,6 +211,8 @@ export class VoiceStore {
     this.isScreenSharing = false;
     this.screenAudioShareId = null;
     this.isReconnecting = false;
+    this.isConnecting = false;
+    this.setMicrophoneState(false, false);
     emitOutsideRouting(() => {
       appEvents.emit('voice.state_updated');
       // Ending a call is a channel change: without this the sidebar row and the

@@ -1,6 +1,7 @@
 import { serverStore } from '../../../stores/serverStore';
 import { formatBytes } from '../../../utils/attachment';
 import { t } from '../../../i18n';
+import { escapeHtml } from '../../../utils/html';
 
 export class ServerStorageTab {
   public renderHtml(): string {
@@ -16,7 +17,7 @@ export class ServerStorageTab {
     const totalMb = Math.round(maxTotalBytes / (1024 * 1024));
 
     return `
-      <div style="background: var(--bg-card); padding: 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+      <div data-settings-section="attachment-storage" data-settings-label="${escapeHtml(t('serverSettings.tabStorage'))}" style="background: var(--bg-card); padding: 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
         <div style="display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">
           <span>${t('serverSettings.storageUsed', { used: formatBytes(usedBytes), total: formatBytes(maxTotalBytes) })}</span>
           <span style="font-weight: 600; color: ${barColor};">${usedPct}%</span>

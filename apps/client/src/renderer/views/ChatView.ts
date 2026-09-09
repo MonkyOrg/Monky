@@ -19,6 +19,7 @@ import { linkPreviewService } from '../core/LinkPreviewService';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
 import { EmojiPicker } from './EmojiPicker';
 import { buildCodeMessage, codeBlockModal } from './CodeBlockModal';
+import { bindChatComposerMotion } from './FooterControlsMotion';
 import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
 import { extractStickerIds, stickerToken, stripStickerTokens } from '../utils/stickers';
@@ -313,6 +314,16 @@ export class ChatView {
       : Array.from(container.querySelectorAll<HTMLElement>('.chat-message-row'));
 
     rows.forEach((row) => {
+      const toolbar = row.querySelector<HTMLElement>('.chat-message-toolbar');
+      const dismissToolbar = () => this.dismissMessageToolbar(row);
+      const resetToolbar = () => row.classList.remove('chat-message-actions-dismissed');
+      row.addEventListener('mouseenter', resetToolbar);
+      row.addEventListener('mouseleave', resetToolbar);
+      toolbar?.addEventListener('focusin', resetToolbar);
+      toolbar?.addEventListener('click', (event) => {
+        const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-message-action]') : null;
+        if (button && !button.disabled && !['more', 'emoji'].includes(button.dataset.messageAction ?? '')) dismissToolbar();
+      }, true);
       this.bindReactionButtons(row);
       row.querySelector<HTMLButtonElement>('[data-message-action="reply"]')?.addEventListener('click', () => {
         this.startReply(row.dataset.messageId ?? '');
@@ -321,10 +332,20 @@ export class ChatView {
         void this.copyMessage(row.dataset.messageId ?? '');
       });
       const more = row.querySelector<HTMLButtonElement>('[data-message-action="more"]');
-      more?.addEventListener('click', () => {
+      more?.addEventListener('click', (event) => {
+        if (contextMenu.isOpenFor(more)) {
+          contextMenu.close();
+          (event.detail === 0 ? more : row).focus({ preventScroll: true });
+          return;
+        }
         this.reactionPicker?.close();
+        resetToolbar();
         const rect = more.getBoundingClientRect();
-        contextMenu.open(rect.right, rect.bottom, this.buildMessageMenuItems(row.dataset.messageId ?? null), more);
+        const items = this.buildMessageMenuItems(row.dataset.messageId ?? null).map((item) => ({
+          ...item,
+          onClick: () => { dismissToolbar(); item.onClick(); },
+        }));
+        contextMenu.open(rect.right, rect.bottom, items, more);
       });
       row.querySelector<HTMLButtonElement>('[data-reply-target]')?.addEventListener('click', (event) => {
         const button = event.currentTarget;
@@ -341,20 +362,29 @@ export class ChatView {
         const userId = row.getAttribute('data-user-id');
         if (!userId) return;
 
+        const targetUser =
+          participantManager.getByUserId(userId)?.user ||
+          serverStore.serverDetails?.members.find((m) => m.id === userId) ||
+          serverStore.knownMembers.get(userId);
+        if (targetUser && mouseEvent.target instanceof Element
+          && mouseEvent.target.closest('.chat-author-name, .chat-author-avatar')) {
+          mouseEvent.preventDefault();
+          contextMenu.close();
+          userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, targetUser);
+          return;
+        }
+
         // Editing/deleting acts on this specific message, so it takes
         // precedence over the per-person menu (#504).
         const messageActions = this.buildMessageMenuItems(row.getAttribute('data-message-id'));
         if (messageActions.length > 0) {
           mouseEvent.preventDefault();
+          userContextMenu.close();
           contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, messageActions);
           return;
         }
 
-        const targetUser =
-          participantManager.getByUserId(userId)?.user ||
-          serverStore.serverDetails?.members.find((m) => m.id === userId);
-
-        if (targetUser && targetUser.id !== serverStore.currentUser?.id) {
+        if (targetUser) {
           mouseEvent.preventDefault();
           userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, targetUser);
         }
@@ -848,12 +878,17 @@ export class ChatView {
     const button = (action: string, icon: string, label: string, extra = '') =>
       `<button type="button" ${extra} data-message-action="${action}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><span class="material-symbols-outlined md-18" aria-hidden="true">${icon}</span></button>`;
     return `<div class="chat-message-toolbar" role="group" aria-label="${t('chat.messageActions')}">
-      ${button('emoji', 'add_reaction', t('chat.emojiAction'), `class="chat-reaction-add" ${disabled}`)}
+      ${button('emoji', 'add_reaction', t('chat.emojiAction'), `class="chat-reaction-add" aria-haspopup="dialog" aria-expanded="false" ${disabled}`)}
       ${button('reply', 'reply', t('chat.replyMessage'), disabled)}
       ${button('copy', 'content_copy', t('chat.copyMessage'))}
-      <span class="chat-message-copy-status" role="status"></span>
-      ${button('more', 'more_horiz', t('chat.moreActions'), 'aria-haspopup="menu"')}
+      ${button('more', 'more_horiz', t('chat.moreActions'), 'aria-haspopup="menu" aria-expanded="false"')}
     </div>`;
+  }
+
+  private dismissMessageToolbar(row: HTMLElement): void {
+    contextMenu.close();
+    row.classList.add('chat-message-actions-dismissed');
+    row.focus({ preventScroll: true });
   }
 
   private replyPreview(reply: MessageReply): string {
@@ -910,25 +945,18 @@ export class ChatView {
       return;
     }
     if (requestId !== this.copyRequestId) return;
-    const toolbar = this.container.querySelector<HTMLElement>(
-      `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] .chat-message-toolbar`
-    );
-    const button = toolbar?.querySelector<HTMLButtonElement>('[data-message-action="copy"]');
-    const icon = button?.querySelector<HTMLElement>('.material-symbols-outlined');
-    const status = toolbar?.querySelector<HTMLElement>('.chat-message-copy-status');
-    if (!toolbar || !button || !icon || !status) return;
-    toolbar.classList.add('copy-confirmed');
-    icon.textContent = 'check';
-    status.textContent = t('chat.messageCopied');
-    button.title = t('chat.messageCopied');
-    button.setAttribute('aria-label', t('chat.messageCopied'));
+    const toast = document.createElement('div');
+    toast.className = 'chat-copy-toast';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-atomic', 'true');
+    toast.innerHTML = `
+      <span class="material-symbols-outlined md-18" aria-hidden="true">check_circle</span>
+      <span class="chat-copy-toast-label">${escapeHtml(t('chat.messageCopied'))}</span>
+    `;
+    document.body.appendChild(toast);
     const clear = () => {
       window.clearTimeout(timeout);
-      toolbar.classList.remove('copy-confirmed');
-      icon.textContent = 'content_copy';
-      status.textContent = '';
-      button.title = t('chat.copyMessage');
-      button.setAttribute('aria-label', t('chat.copyMessage'));
+      toast.remove();
       this.clearCopyFeedback = null;
     };
     const timeout = window.setTimeout(clear, 1600);
@@ -951,7 +979,7 @@ export class ChatView {
 
   private bindReactionButtons(row: HTMLElement): void {
     row.querySelectorAll<HTMLButtonElement>('.chat-reaction, .chat-reaction-add').forEach((button) => {
-      button.addEventListener('click', () => {
+      button.addEventListener('click', (event) => {
         if (!this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
         const channelId = this.currentChannelId;
         const store = getActiveChatStore();
@@ -967,11 +995,22 @@ export class ChatView {
           });
         };
         if (button.dataset.reactionEmoji) { toggle(button.dataset.reactionEmoji); return; }
+        const messageRow = button.closest<HTMLElement>('.chat-message-row');
+        if (this.reactionPicker?.isOpenFor(button)) {
+          this.reactionPicker.close();
+          (event.detail === 0 ? button : messageRow)?.focus({ preventScroll: true });
+          return;
+        }
         this.reactionPicker?.destroy();
         contextMenu.close();
+        messageRow?.classList.remove('chat-message-actions-dismissed');
         const picker = new EmojiPicker({
           container: document.body, anchor: button, emojiOnly: true, floating: true,
-          onSelectEmoji: (emoji) => { picker.close(); toggle(emoji); },
+          onSelectEmoji: (emoji) => {
+            picker.close();
+            if (messageRow) this.dismissMessageToolbar(messageRow);
+            toggle(emoji);
+          },
         });
         this.reactionPicker = picker;
         void picker.open();
@@ -1229,6 +1268,7 @@ export class ChatView {
     // Clear old unbinders
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
+    this.unbindEvents.push(bindChatComposerMotion(this.container));
 
     const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
     const inputContainer = this.container.querySelector('.chat-input-container') as HTMLElement | null;

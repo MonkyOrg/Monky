@@ -13,7 +13,9 @@ const VK_TO_HOOK: Readonly<Record<number, number>> = (() => {
     0xba: UiohookKey.Semicolon, 0xbb: UiohookKey.Equal, 0xbc: UiohookKey.Comma,
     0xbd: UiohookKey.Minus, 0xbe: UiohookKey.Period, 0xbf: UiohookKey.Slash,
     0xc0: UiohookKey.Backquote, 0xdb: UiohookKey.BracketLeft, 0xdc: UiohookKey.Backslash,
-    0xdd: UiohookKey.BracketRight, 0xde: UiohookKey.Quote, 0xdf: 0x007d, 0xe2: 0x0056,
+    0xdd: UiohookKey.BracketRight, 0xde: UiohookKey.Quote, 0xdf: 0x007d,
+    // VK_OEM_102 emits libuiohook's VC_LESSER_GREATER, not its physical scan 0x56.
+    0xe2: 0x0e46,
     0x20: UiohookKey.Space,
   });
   return keys;

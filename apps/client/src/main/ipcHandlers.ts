@@ -6,7 +6,7 @@ import https from 'https';
 import net from 'net';
 import path from 'path';
 import { LanDiscovery } from './lanDiscovery';
-import { globalInputHook } from './globalInputHook';
+import { globalInputHook } from './globalInputHookProcess';
 import { SHORTCUT_IPC } from '@monky/shared';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';

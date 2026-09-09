@@ -37,6 +37,7 @@ import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './cor
 import { soundEffects } from './core/SoundEffects';
 import { soundboardService } from './core/SoundboardService';
 import { keybindService } from './core/KeybindService';
+import { toggleAudioDeafen, toggleMicrophoneMute, toggleSoundboardMute } from './core/voiceControls';
 import { updateService } from './core/UpdateService';
 import { videoService } from './core/VideoService';
 import { webRtcManager } from './core/WebRtcManager';
@@ -59,6 +60,8 @@ import { clientLog } from './core/ClientLogService';
 import { overlayBridgeService } from './core/OverlayBridgeService';
 import { OverlayStageView } from './views/OverlayStageView';
 import { bindBotChatEvents } from './core/botChatEvents';
+import { selectEnhancer } from './core/SelectEnhancer';
+import { initTooltips } from './core/TooltipService';
 
 class App {
   private appContainer: HTMLElement;
@@ -69,6 +72,12 @@ class App {
   constructor() {
     this.appContainer = document.getElementById('app')!;
     installImageFallback();
+    const disposeTooltips = initTooltips();
+    selectEnhancer.init();
+    window.addEventListener('pagehide', () => {
+      selectEnhancer.dispose();
+      disposeTooltips();
+    }, { once: true });
 
     const isOverlay = window.location.search.includes('overlay=1');
     if (isOverlay) {
@@ -241,11 +250,11 @@ class App {
 
     // Tray context menu actions
     window.api?.onTrayToggleMute(() => {
-      this.toggleMuteFromTray();
+      toggleMicrophoneMute();
     });
 
     window.api?.onTrayToggleDeafen(() => {
-      this.toggleDeafenFromTray();
+      toggleAudioDeafen();
     });
   }
 
@@ -271,43 +280,6 @@ class App {
       } finally {
         void window.api?.notifyLeaveComplete();
       }
-    });
-  }
-
-  private toggleMuteFromTray(): void {
-    if (!voiceStore.currentVoiceChannelId) return;
-    const newMuted = !voiceStore.isMuted;
-    voiceStore.setMuted(newMuted);
-    audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-    soundEffects.play(newMuted ? 'mic_mute' : 'mic_unmute');
-
-    // Unmuting the mic while deafened also undeafens the audio output (#62)
-    let undeafened = false;
-    if (!newMuted && voiceStore.isDeafened) {
-      voiceStore.setDeafened(false);
-      audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-      webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
-      undeafened = true;
-    }
-
-    callClient().send(MessageType.VOICE_STATE_UPDATE, {
-      isMuted: newMuted,
-      ...(undeafened ? { isDeafened: false } : {}),
-    });
-  }
-
-  private toggleDeafenFromTray(): void {
-    if (!voiceStore.currentVoiceChannelId) return;
-    const newDeafened = !voiceStore.isDeafened;
-    voiceStore.setDeafened(newDeafened);
-    audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-    // Restore the mic track to its (possibly restored) pre-deafen state (#74)
-    audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-    webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
-    soundEffects.play(newDeafened ? 'deafen' : 'undeafen');
-    callClient().send(MessageType.VOICE_STATE_UPDATE, {
-      isDeafened: newDeafened,
-      isMuted: voiceStore.isMuted,
     });
   }
 
@@ -344,11 +316,11 @@ class App {
 
   private setupGlobalEventListeners(): void {    // Global Keybind Actions (#252)
     appEvents.on('keybind.toggle_mute', () => {
-      this.toggleMuteFromTray();
+      toggleMicrophoneMute();
     });
 
     appEvents.on('keybind.toggle_deafen', () => {
-      this.toggleDeafenFromTray();
+      toggleAudioDeafen();
     });
 
     appEvents.on('keybind.toggle_camera', () => {
@@ -363,18 +335,10 @@ class App {
       }
     });
 
-    // Silencing the soundboard and cutting every sound short are the two things
-    // people reach for mid-call, so both got a shortcut (#517). The event is
-    // re-emitted because `save()` only persists — active playbacks re-read their
-    // volume from `settings.updated`.
-    appEvents.on('keybind.toggle_soundboard_mute', () => {
-      settingsStore.soundboardMuted = !settingsStore.soundboardMuted;
-      settingsStore.save();
-      appEvents.emit('settings.updated');
-    });
+    appEvents.on('keybind.toggle_soundboard_mute', toggleSoundboardMute);
 
     appEvents.on('keybind.stop_soundboard', () => {
-      soundboardService.stopAllFromUi();
+      if (voiceStore.currentVoiceChannelId) soundboardService.stopAllFromUi();
     });
 
     // Language switch (#16): re-render whichever screen is on, so every label

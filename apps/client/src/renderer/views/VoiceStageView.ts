@@ -15,6 +15,8 @@ import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
+import { toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
+import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
 import { showAlert, showConfirm } from './Dialog';
 import { userContextMenu } from './UserContextMenu';
 import { setButtonLoading, isButtonLoading } from '../utils/buttonLoading';
@@ -185,12 +187,10 @@ export class VoiceStageView {
 
           <div style="display: flex; align-items: center; gap: 10px;">
             <!-- Ping / Latency Badge -->
-            <div id="stage-ping-badge" class="stage-ping-badge good">
+            <div id="stage-ping-badge" class="stage-ping-badge good" tabindex="0" data-tooltip-source="ping-tooltip-content">
               <span class="ping-dot"></span>
               <span id="stage-ping-text">-- ms</span>
-              <div class="ping-tooltip">
-                <div id="ping-tooltip-content">${t('stage.pingCalculating')}</div>
-              </div>
+              <div id="ping-tooltip-content" hidden>${t('stage.pingCalculating')}</div>
             </div>
 
             <div id="stage-header-mode-badge-wrapper">
@@ -218,10 +218,10 @@ export class VoiceStageView {
         <!-- Stage Bottom Controls Bar -->
         <div class="stage-call-controls">
           <button id="stage-btn-mic" class="btn btn-icon ${voiceStore.getEffectiveMuted() ? 'danger-active' : ''}" title="${voiceStore.getEffectiveMuted() ? t('stage.unmuteMic') : t('stage.muteMic')}">
-            <span class="material-symbols-outlined">${voiceStore.getEffectiveMuted() ? 'mic_off' : 'mic'}</span>
+            ${renderAudioStateIcon('mic', false, 24)}
           </button>
           <button id="stage-btn-deafen" class="btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}" title="${voiceStore.getEffectiveDeafened() ? t('stage.undeafen') : t('stage.deafen')}">
-            <span class="material-symbols-outlined">${voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones'}</span>
+            ${renderAudioStateIcon('headphones', false, 24)}
           </button>
           <button id="stage-btn-camera" class="btn btn-icon ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${voiceStore.isCameraOn ? t('stage.cameraOff') : t('stage.cameraOn')}">
             <span class="material-symbols-outlined">${voiceStore.isCameraOn ? 'videocam_off' : 'videocam'}</span>
@@ -258,15 +258,17 @@ export class VoiceStageView {
     const btnMic = document.getElementById('stage-btn-mic');
     if (btnMic) {
       btnMic.className = `btn btn-icon ${voiceStore.getEffectiveMuted() ? 'danger-active' : ''}`;
-      btnMic.title = voiceStore.getEffectiveMuted() ? t('stage.unmuteMic') : t('stage.muteMic');
-      btnMic.innerHTML = `<span class="material-symbols-outlined">${voiceStore.getEffectiveMuted() ? 'mic_off' : 'mic'}</span>`;
+      const blocked = voiceStore.serverMuted || voiceStore.serverDeafened;
+      btnMic.title = voiceStore.serverDeafened ? t('permissions.serverDeafened') : voiceStore.serverMuted ? t('permissions.serverMuted')
+        : voiceStore.getEffectiveMuted() ? t('stage.unmuteMic') : t('stage.muteMic');
+      updateAudioStateIcon(btnMic, blocked ? 'mic' : voiceStore.getEffectiveMuted() ? 'mic_off' : 'mic', blocked);
     }
 
     const btnDeafen = document.getElementById('stage-btn-deafen');
     if (btnDeafen) {
       btnDeafen.className = `btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}`;
-      btnDeafen.title = voiceStore.getEffectiveDeafened() ? t('stage.undeafen') : t('stage.deafen');
-      btnDeafen.innerHTML = `<span class="material-symbols-outlined">${voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones'}</span>`;
+      btnDeafen.title = voiceStore.serverDeafened ? t('permissions.serverDeafened') : voiceStore.getEffectiveDeafened() ? t('stage.undeafen') : t('stage.deafen');
+      updateAudioStateIcon(btnDeafen, voiceStore.serverDeafened ? 'headphones' : voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones', voiceStore.serverDeafened);
     }
 
     const btnCam = document.getElementById('stage-btn-camera');
@@ -911,7 +913,6 @@ export class VoiceStageView {
     const isServerDeafened = isLocal ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
     const isSelfMuted = isLocal ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
     const isSelfDeafened = isLocal ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
-    const isMicMuted = isSelfMuted || isServerMuted || isSelfDeafened || isServerDeafened;
     const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
     const { isPeerFailed, isConnecting, isRelayed } = participantConnectionIndicators(p, isSfu, isLocal);
     const avatarSrc = getAvatarUrl(p.user.avatarUrl);
@@ -995,10 +996,7 @@ export class VoiceStageView {
         ${isPeerFailed ? `<span class="material-symbols-outlined md-14 stage-peer-failed-icon" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('stage.peerConnectionFailed')}">link_off</span>` : ''}
         ${isConnecting ? `<span class="material-symbols-outlined md-14 stage-peer-connecting-icon" title="${t(isSfu ? 'main.sfuConnecting' : 'stage.peerConnecting')}">sync</span>` : ''}
         ${isRelayed ? `<span class="material-symbols-outlined md-14" style="color: var(--warning, #f0b232);" title="${t('stage.peerRelayed')}">swap_horiz</span>` : ''}
-        ${isServerDeafened ? `<span class="material-symbols-outlined md-14" style="color: #f0b232;" title="${t('permissions.serverDeafened')}">hearing_disabled</span>` : ''}
-        ${isServerMuted ? `<span class="material-symbols-outlined md-14" style="color: #f0b232;" title="${t('permissions.serverMuted')}">admin_panel_settings</span>` : ''}
-        ${isMicMuted ? `<span class="material-symbols-outlined md-14" style="color: var(--danger);" title="${t('main.micMuted')}">mic_off</span>` : ''}
-        ${isSelfDeafened ? `<span class="material-symbols-outlined md-14" style="color: var(--danger);" title="${t('main.audioMuted')}">headset_off</span>` : ''}
+        ${renderAudioMuteIndicators({ isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened })}
         ${isCamOn ? '<span class="material-symbols-outlined md-14" style="color: var(--accent-primary);">videocam</span>' : ''}
         ${isScreenOn ? '<span class="material-symbols-outlined md-14" style="color: var(--success);">screen_share</span>' : ''}
       </div>
@@ -1386,6 +1384,13 @@ export class VoiceStageView {
 
       if (!pingBadge || !pingText || !this.currentChannelId) return;
 
+      if (voiceStore.isConnecting || voiceStore.isReconnecting) {
+        pingText.textContent = t(voiceStore.isConnecting ? 'main.connecting' : 'main.reconnecting');
+        pingBadge.className = `stage-ping-badge ${voiceStore.isConnecting ? 'connecting' : 'medium'}`;
+        if (tooltipContent) tooltipContent.textContent = t(voiceStore.isConnecting ? 'main.connectingTitle' : 'main.reconnectingTitle');
+        return;
+      }
+
       const isSfu = webRtcManager.isSfuMode();
       const participants = participantManager.getInVoiceChannel(this.currentChannelId);
       const isSolo = participants.length <= 1;
@@ -1402,14 +1407,8 @@ export class VoiceStageView {
       }
 
       const avgPing = await webRtcManager.getAverageP2pPing();
-      if (!pingBadge.isConnected) return;
+      if (!pingBadge.isConnected || voiceStore.isConnecting || voiceStore.isReconnecting) return;
       const indicator = voiceConnectionIndicator(avgPing, voiceStore.isReconnecting);
-      if (voiceStore.isReconnecting) {
-        pingText.textContent = t('main.reconnecting');
-        pingBadge.className = 'stage-ping-badge medium';
-        if (tooltipContent) tooltipContent.textContent = t('main.reconnectingTitle');
-        return;
-      }
 
       if (avgPing !== null) {
         pingText.textContent = `${avgPing} ms`;
@@ -1539,36 +1538,13 @@ export class VoiceStageView {
     const btnLeave = document.getElementById('stage-btn-leave');
 
     btnMic?.addEventListener('click', () => {
-      const newMuted = !voiceStore.isMuted;
-      voiceStore.setMuted(newMuted);
-      audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-      soundEffects.play(newMuted ? 'mic_mute' : 'mic_unmute');
-      // Unmuting the mic while deafened doesn't make sense (you'd talk but not
-      // hear): also undeafen the audio output in that case (#62).
-      let undeafened = false;
-      if (!newMuted && voiceStore.isDeafened) {
-        voiceStore.setDeafened(false);
-        audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-        webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
-        undeafened = true;
-      }
-      callClient().send(MessageType.VOICE_STATE_UPDATE, {
-        isMuted: newMuted,
-        ...(undeafened ? { isDeafened: false } : {}),
-      });
+      toggleMicrophoneMute();
       this.updateControlsUI();
       this.renderParticipants();
     });
 
     btnDeafen?.addEventListener('click', () => {
-      const newDeafened = !voiceStore.isDeafened;
-      voiceStore.setDeafened(newDeafened);
-      audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-      // Restore the mic track to its (possibly restored) pre-deafen state (#74).
-      audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-      webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
-      soundEffects.play(newDeafened ? 'deafen' : 'undeafen');
-      callClient().send(MessageType.VOICE_STATE_UPDATE, { isDeafened: newDeafened, isMuted: voiceStore.isMuted });
+      toggleAudioDeafen();
       this.updateControlsUI();
       this.renderParticipants();
     });
@@ -1669,7 +1645,8 @@ export class VoiceStageView {
     // browsing another server during a call (#400), write it onto the wrong
     // server's participants (#426).
 
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13);
+    const u14 = appEvents.on('voice.connection_changed', () => this.startPingMonitor());
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14);
   }
 
   private updateHeaderModeBadge(): void {

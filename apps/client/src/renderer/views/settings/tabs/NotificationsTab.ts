@@ -1,12 +1,13 @@
 import { settingsStore } from '../../../stores/settingsStore';
 import { soundEffects, getSoundLabels, SoundEffectType } from '../../../core/SoundEffects';
 import { t } from '../../../i18n';
+import { escapeHtml } from '../../../utils/html';
 
 export class NotificationsTab {
   public renderHtml(): string {
     return `
       <!-- Chat Notifications -->
-      <div class="form-group" style="margin-bottom: 16px;">
+      <div data-settings-section="chat-notifications" data-settings-label="${escapeHtml(t('settings.chatNotifications'))}" class="form-group" style="margin-bottom: 16px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">chat</span>
           ${t('settings.chatNotifications')}
@@ -51,7 +52,7 @@ export class NotificationsTab {
       </div>
 
       <!-- Custom Sounds -->
-      <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
+      <div data-settings-section="custom-sounds" data-settings-label="${escapeHtml(t('settings.customSounds'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">music_note</span>
           ${t('settings.customSounds')}

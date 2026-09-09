@@ -6,7 +6,8 @@ import { NetworkClient } from '../src/renderer/core/NetworkClient';
 import { SfuClientEngine } from '../src/renderer/core/webrtc/SfuClientEngine';
 import { RemoteMediaRouter } from '../src/renderer/core/webrtc/RemoteMediaRouter';
 import { settingsStore } from '../src/renderer/stores/settingsStore';
-import { voiceStore } from '../src/renderer/stores/voiceStore';
+import { VoiceStore, voiceStore } from '../src/renderer/stores/voiceStore';
+import { appEvents } from '../src/renderer/core/EventBus';
 import { participantConnectionIndicators, voiceConnectionIndicator } from '../src/renderer/utils/voiceConnection';
 
 function participant(sessionId: string, channelId = 'room'): VoiceRosterParticipant {
@@ -77,8 +78,56 @@ test('RSS glyph is preserved while quality thresholds agree with the call stage,
   assert.equal(voiceConnectionIndicator(120).quality, 'bad');
   for (const ping of [null, -1, NaN]) assert.equal(voiceConnectionIndicator(ping).quality, 'unknown');
   assert.deepEqual(voiceConnectionIndicator(20, true), { quality: 'reconnecting', icon: 'signal_wifi_bad' });
+  assert.deepEqual(voiceConnectionIndicator(null, false, true), { quality: 'connecting', icon: 'sync' });
   for (const ping of [null, -1, NaN, 0, 49, 50, 119, 120, 200]) {
     assert.equal(voiceConnectionIndicator(ping).icon, 'rss_feed');
+  }
+});
+
+test('initial voice connection is distinct from recovery and never starts the reconnection cue', () => {
+  const store = new VoiceStore();
+  const cues: boolean[] = [];
+  let updates = 0;
+  const offCue = appEvents.on('voice.reconnecting_changed', (value: boolean) => cues.push(value));
+  const offUpdate = appEvents.on('voice.connection_changed', () => updates++);
+  try {
+    store.setChannel('room');
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isConnecting, true);
+    assert.equal(store.isReconnecting, false);
+    assert.equal(updates, 1);
+    assert.deepEqual(cues, []);
+    store.setConnectionHealth('connected');
+    assert.equal(store.isConnecting, false);
+    assert.deepEqual(cues, []);
+    store.setConnectionHealth('reconnecting');
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isReconnecting, true, 'rebuilding transports keeps the recovery state');
+    assert.equal(store.isConnecting, false);
+    assert.deepEqual(cues, [true]);
+    store.setConnectionHealth('connected');
+    assert.deepEqual(cues, [true, false]);
+    store.setConnectionHealth('failed');
+    assert.equal(store.isReconnecting, true);
+    store.reset();
+    assert.equal(store.isReconnecting, false);
+    assert.equal(store.isConnecting, false);
+    assert.deepEqual(cues, [true, false, true, false]);
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isConnecting, false, 'late callbacks cannot resurrect a left call');
+    store.setChannel('next-room');
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isConnecting, true);
+    store.setConnectionHealth('failed');
+    store.setChannel('another-room');
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isReconnecting, false, 'switching rooms does not inherit recovery from the old call');
+    assert.equal(store.isConnecting, true);
+    store.setChannel(null);
+    assert.equal(store.isConnecting, false);
+  } finally {
+    offCue();
+    offUpdate();
   }
 });
 

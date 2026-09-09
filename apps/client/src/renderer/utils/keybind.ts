@@ -17,6 +17,12 @@ function modifierForCode(code: string): ShortcutModifier | undefined {
   return SHORTCUT_MODIFIERS.find((modifier) => code.startsWith(modifier));
 }
 
+function heldKey(code: string, key = '', keyCode = 0): string {
+  if (code && code !== 'Unidentified') return code;
+  // keyCode is used only to pair DOM releases, never as a native hook keycode.
+  return keyCode > 0 ? `logical:${keyCode}` : `key:${key.toUpperCase()}`;
+}
+
 /** Records one held chord, not a sequence. Commit only after every key is released. */
 export class ShortcutCapture {
   private held = new Set<string>();
@@ -25,16 +31,27 @@ export class ShortcutCapture {
   private invalid = false;
 
   public keyDown(event: Pick<KeyboardEvent, 'code' | 'key' | 'repeat'>
-    & Partial<Pick<KeyboardEvent, 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>>): ShortcutKeyCombo | null {
+    & Partial<Pick<KeyboardEvent, 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey' | 'keyCode'>>): ShortcutKeyCombo | null {
     if (event.repeat || this.releasing) return this.combo;
-    const modifier = modifierForCode(event.code);
-    this.held.add(event.code);
-    if (!modifier && !Object.hasOwn(SHORTCUT_CODES, event.code)) {
+    let modifier = modifierForCode(event.code);
+    this.held.add(heldKey(event.code, event.key, event.keyCode));
+    let token = modifier ?? `code:${event.code}`;
+    // Virtual/remote keyboards can deliver a valid key without a physical code.
+    // Keep it logical (the legacy format), rather than guessing a US position.
+    if (!event.code || event.code === 'Unidentified') {
+      const logical = parseShortcutTokens(event.key);
+      if (logical && logical.codes.length + logical.modifiers.length === 1) {
+        modifier = logical.modifiers[0];
+        token = modifier ?? (event.key.length === 1 ? event.key.toUpperCase() : event.key);
+      } else {
+        this.invalid = true;
+        return null;
+      }
+    } else if (!modifier && !Object.hasOwn(SHORTCUT_CODES, event.code)) {
       this.invalid = true;
       return null;
     }
-    const token = modifier ?? `code:${event.code}`;
-    const label = modifier ?? (event.code === 'Space' ? t('keybind.space')
+    const label = modifier ?? (event.code === 'Space' || event.key === ' ' ? t('keybind.space')
       : event.code.startsWith('Numpad') ? `Num ${event.key}`
       : event.key === 'Dead' ? event.code : event.key.length === 1 ? event.key.toUpperCase() : event.key);
     this.labels.set(token, label);
@@ -47,8 +64,8 @@ export class ShortcutCapture {
     return this.combo;
   }
 
-  public keyUp(code: string): ShortcutKeyCombo | null {
-    if (!this.held.delete(code)) return null;
+  public keyUp(code: string, key?: string, keyCode?: number): ShortcutKeyCombo | null {
+    if (!this.held.delete(heldKey(code, key, keyCode))) return null;
     this.releasing = true;
     if (this.held.size > 0) return null;
     if (!this.invalid) return this.combo;
@@ -60,9 +77,13 @@ export class ShortcutCapture {
 
   public get combo(): ShortcutKeyCombo | null {
     if (this.invalid || !this.labels.size) return null;
+    const keys = [...this.labels.keys()]
+      .filter((token) => token !== '+' && !SHORTCUT_MODIFIERS.some((modifier) => modifier === token)).sort();
+    // The legacy parser encodes a literal plus as the final "+" token.
+    if (this.labels.has('+')) keys.push('+');
     const tokens = [
       ...SHORTCUT_MODIFIERS.filter((modifier) => this.labels.has(modifier)),
-      ...[...this.labels.keys()].filter((token) => token.startsWith('code:')).sort(),
+      ...keys,
     ];
     return {
       accelerator: tokens.join('+'),
@@ -98,7 +119,7 @@ export function captureShortcut(
     event.preventDefault();
     event.stopImmediatePropagation();
     if (!ready) return;
-    const combo = capture.keyUp(event.code);
+    const combo = capture.keyUp(event.code, event.key, event.keyCode);
     if (combo) onCaptured(combo);
   };
   const blur = () => onCancel();

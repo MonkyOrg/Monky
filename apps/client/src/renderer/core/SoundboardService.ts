@@ -24,7 +24,7 @@ export interface ActiveSoundPlayback {
 
 export class SoundboardService {
   private sounds: SoundItem[] = [];
-  private sinkId: string = '';
+  private sinkId: string = settingsStore.selectedSpeakerId;
   private activePlaybacks: Map<string, ActiveSoundPlayback> = new Map();
 
 
@@ -54,8 +54,10 @@ export class SoundboardService {
 
     // Update speaker device and active audio volume when settings change
     appEvents.on('settings.updated', () => {
-      if (settingsStore.selectedSpeakerId && settingsStore.selectedSpeakerId !== this.sinkId) {
-        this.setSinkId(settingsStore.selectedSpeakerId);
+      if (settingsStore.selectedSpeakerId !== this.sinkId) {
+        void this.setSinkId(settingsStore.selectedSpeakerId).catch((error: unknown) => {
+          console.warn('[SoundboardService] Could not switch speaker:', error);
+        });
       }
       const vol = this.getEffectiveVolume();
       for (const playback of this.activePlaybacks.values()) {
@@ -91,12 +93,11 @@ export class SoundboardService {
     }
   }
 
-  public setSinkId(sinkId: string): void {
+  public async setSinkId(sinkId: string): Promise<void> {
     this.sinkId = sinkId;
     for (const playback of this.activePlaybacks.values()) {
-      if (typeof (playback.audio as any).setSinkId === 'function') {
-        (playback.audio as any).setSinkId(sinkId).catch(() => {});
-      }
+      if (typeof playback.audio.setSinkId !== 'function') throw new Error('Output selection unavailable');
+      await playback.audio.setSinkId(sinkId);
     }
   }
 
@@ -414,7 +415,7 @@ export class SoundboardService {
       const audio = new Audio(dataUrl);
       audio.volume = this.getEffectiveVolume();
 
-      const targetSink = this.sinkId || settingsStore.selectedSpeakerId;
+      const targetSink = this.sinkId;
       if (targetSink && typeof (audio as any).setSinkId === 'function') {
         (audio as any).setSinkId(targetSink).catch(() => {});
       }

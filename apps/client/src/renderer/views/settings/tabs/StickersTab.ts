@@ -1,6 +1,7 @@
 import { settingsStore } from '../../../stores/settingsStore';
 import { stickerService } from '../../../core/StickerService';
 import { t, tCount } from '../../../i18n';
+import { escapeHtml } from '../../../utils/html';
 
 /**
  * Sticker folder settings (#356). Mirrors SoundboardTab: the folder is picked
@@ -10,7 +11,7 @@ import { t, tCount } from '../../../i18n';
 export class StickersTab {
   public renderHtml(): string {
     return `
-      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+      <div data-settings-section="sticker-folder" data-settings-label="${escapeHtml(t('settings.stickerFolder'))}" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
         <span style="font-size: 13px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">mood</span>
           ${t('settings.stickersSection')}

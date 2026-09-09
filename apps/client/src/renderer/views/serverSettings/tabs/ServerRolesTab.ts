@@ -17,7 +17,7 @@ export class ServerRolesTab {
 
     return `
       <div style="display: flex; flex-direction: column; gap: 16px; width: 100%;">
-        <div style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
+        <div data-settings-section="role-badges" data-settings-label="${escapeHtml(t('roles.badgeVisibility'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
           <div>
             <label for="checkbox-show-role-badges" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 2px;">
               <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">visibility</span>
@@ -32,7 +32,7 @@ export class ServerRolesTab {
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow: visible;">
+        <div data-settings-section="roles" data-settings-label="${escapeHtml(t('roles.rolesList'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow: visible;">
           <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
             <div>
               <div style="font-size: 13px; font-weight: 700; margin-bottom: 4px;">${t('roles.rolesList')}</div>
@@ -89,7 +89,7 @@ export class ServerRolesTab {
             <button type="button" class="role-editor-tab-btn" data-role-editor-tab="permissions">${t('roles.permissionsTab')}</button>
             <button type="button" class="role-editor-tab-btn" data-role-editor-tab="members">${t('roles.membersTab')}</button>
           </div>
-          <div id="role-editor-tab-display" class="role-editor-tab-panel" style="display: flex; flex-direction: column; gap: 12px;">
+          <div id="role-editor-tab-display" data-settings-section="role-display" data-settings-label="${escapeHtml(t('roles.displayTab'))}" class="role-editor-tab-panel" style="display: flex; flex-direction: column; gap: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
               <label>${t('roles.roleName')}</label>
               <input id="role-editor-name" type="text" maxlength="32" placeholder="${t('roles.roleNamePlaceholder')}">
@@ -110,10 +110,10 @@ export class ServerRolesTab {
               </label>
             </div>
           </div>
-          <div id="role-editor-tab-permissions" class="role-editor-tab-panel" style="display: none; flex-direction: column; gap: 10px;">
+          <div id="role-editor-tab-permissions" data-settings-section="role-permissions" data-settings-label="${escapeHtml(t('roles.permissionsTab'))}" class="role-editor-tab-panel" style="display: none; flex-direction: column; gap: 10px;">
             ${this.renderPermissionSwitches()}
           </div>
-          <div id="role-editor-tab-members" class="role-editor-tab-panel" style="display: none; flex-direction: column; gap: 10px;">
+          <div id="role-editor-tab-members" data-settings-section="role-members" data-settings-label="${escapeHtml(t('roles.membersTab'))}" class="role-editor-tab-panel" style="display: none; flex-direction: column; gap: 10px;">
             <div id="role-editor-members-panel">${this.renderRoleMembersEditorPanel()}</div>
           </div>
           <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">

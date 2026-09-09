@@ -285,6 +285,8 @@ export interface OverlayParticipantState {
   isSpeaking: boolean;
   isMuted: boolean;
   isDeafened: boolean;
+  serverMuted?: boolean;
+  serverDeafened?: boolean;
   isCameraOn: boolean;
   screenShareIds: string[];
   isLocal: boolean;

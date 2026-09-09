@@ -47,6 +47,7 @@ export function getSoundLabels(): Record<string, string> {
 export class SoundEffectManager {
   private audioMap: Partial<Record<SoundEffectType, HTMLAudioElement>> = {};
   private toneCtx: AudioContext | null = null;
+  private speakerDeviceId: string | null = null;
   // Handle for the repeating reconnection cue (#553): a window.setInterval id
   // while a voice call is reconnecting, or null when it is not.
   private reconnectLoopTimer: number | null = null;
@@ -84,24 +85,26 @@ export class SoundEffectManager {
    * sound effects respect the user's choice instead of the OS default.
    */
   private applySink(audio: HTMLAudioElement): Promise<void> {
-    const deviceId = settingsStore.selectedSpeakerId;
-    if (deviceId && typeof (audio as any).setSinkId === 'function' && (audio as any).sinkId !== deviceId) {
-      return (audio as any).setSinkId(deviceId).catch(() => {
-        /* device may be gone; ignore and fall back to default */
+    const deviceId = this.speakerDeviceId ?? settingsStore.selectedSpeakerId;
+    if (typeof audio.setSinkId === 'function' && audio.sinkId !== deviceId) {
+      return audio.setSinkId(deviceId).catch((error: unknown) => {
+        console.warn('[SoundEffects] Could not apply selected output:', error);
       });
     }
     return Promise.resolve();
   }
 
   /** Reapplies the currently selected speaker to all preloaded sound effects. */
-  public setSinkId(deviceId: string): void {
+  public async setSinkId(deviceId: string): Promise<void> {
+    this.speakerDeviceId = deviceId;
     for (const audio of Object.values(this.audioMap)) {
-      if (audio && typeof (audio as any).setSinkId === 'function') {
-        (audio as any).setSinkId(deviceId).catch(() => {});
+      if (audio) {
+        if (typeof audio.setSinkId !== 'function') throw new Error('Output selection unavailable');
+        await audio.setSinkId(deviceId);
       }
     }
-    if (this.toneCtx && typeof (this.toneCtx as any).setSinkId === 'function') {
-      (this.toneCtx as any).setSinkId(deviceId).catch(() => {});
+    if (this.toneCtx && 'setSinkId' in this.toneCtx && typeof this.toneCtx.setSinkId === 'function') {
+      await this.toneCtx.setSinkId(deviceId);
     }
   }
 
@@ -113,8 +116,11 @@ export class SoundEffectManager {
     if (!this.toneCtx) {
       const Ctor = window.AudioContext || (window as any).webkitAudioContext;
       this.toneCtx = new Ctor();
-      if (settingsStore.selectedSpeakerId && typeof (this.toneCtx as any).setSinkId === 'function') {
-        (this.toneCtx as any).setSinkId(settingsStore.selectedSpeakerId).catch(() => {});
+      const sinkId = this.speakerDeviceId ?? settingsStore.selectedSpeakerId;
+      if (sinkId && 'setSinkId' in this.toneCtx && typeof this.toneCtx.setSinkId === 'function') {
+        this.toneCtx.setSinkId(sinkId).catch((error: unknown) => {
+          console.warn('[SoundEffects] Could not apply tone output:', error);
+        });
       }
     }
     return this.toneCtx!;
