@@ -15,6 +15,8 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_SETTINGS_NAV_PROFILE);
+  // Hosted Windows sessions can disable Chromium's scroll animator independently of matchMedia.
+  app.commandLine.appendSwitch('enable-smooth-scrolling');
   app.on('window-all-closed', () => {});
   let vite;
   let window;
