@@ -87,16 +87,14 @@ if (!process.versions.electron) {
       }
       hoverSamples.push({ id, images });
       window.webContents.sendInputEvent({ type: 'mouseMove', x: 1050, y: 400 });
-      await new Promise((resolve) => setTimeout(resolve, 30));
       await window.webContents.executeJavaScript('window.footerSmoke.hoverLeft()');
     }
     phase = 'native pointer';
     const point = await window.webContents.executeJavaScript('window.footerSmoke.pointerTarget()');
     window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await window.webContents.executeJavaScript('window.footerSmoke.waitForHover()', true);
     await window.webContents.executeJavaScript('window.footerSmoke.pointerHover()');
     window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
-    await new Promise((resolve) => setTimeout(resolve, 40));
     await window.webContents.executeJavaScript('window.footerSmoke.pointerDown()');
     window.webContents.sendInputEvent({ type: 'mouseMove', x: 1050, y: 50 });
     window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: 1050, y: 50 });
@@ -108,10 +106,10 @@ if (!process.versions.electron) {
     for (const id of ['media-btn-camera', 'btn-emoji']) {
       const point = await window.webContents.executeJavaScript(`window.footerSmoke.hoverTarget(${JSON.stringify(id)})`);
       window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      await window.webContents.executeJavaScript('window.footerSmoke.waitForHover()', true);
       await window.webContents.executeJavaScript('window.footerSmoke.reducedHovered()');
       window.webContents.sendInputEvent({ type: 'mouseMove', x: 1050, y: 400 });
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await window.webContents.executeJavaScript('window.footerSmoke.hoverLeft()');
     }
     await motion('no-preference');
     phase = 'cleanup';
@@ -245,7 +243,9 @@ async function setupFooterSmoke() {
       return { x: Math.floor(bounds.x) - 4, y: Math.floor(bounds.y) - 4,
         width: Math.ceil(bounds.width) + 8, height: Math.ceil(bounds.height) + 8 };
     },
-    hoverLeft() {
+    async hoverLeft() {
+      for (let attempt = 0; attempt < 100 && selectedHover.matches(':hover'); attempt++) await delay(20);
+      check(!selectedHover.matches(':hover'), 'Native pointer leave reached the renderer');
       check(animations(selectedHover).length === 0, 'Trusted pointer leave cancels glyph motion');
       check(!selectedHover.querySelector('.control-motion-decoration'), 'Trusted pointer leave removes decoration');
       check(getComputedStyle(glyph(selectedHover)).opacity === '1', 'Trusted pointer leave restores base glyph');
@@ -258,15 +258,15 @@ async function setupFooterSmoke() {
     pointerTarget() {
       const button = root.querySelector('#bar-btn-settings');
       pointerBounds = rect(button);
-      const bounds = button.getBoundingClientRect();
-      return { x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + bounds.height / 2) };
+      return window.footerSmoke.hoverTarget('bar-btn-settings');
     },
     pointerHover() {
       const button = root.querySelector('#bar-btn-settings');
       check(button.matches(':hover') && animations(button).length === 1, 'Native pointer entry triggers actual hover motion');
     },
-    pointerDown() {
+    async pointerDown() {
       const button = root.querySelector('#bar-btn-settings');
+      for (let attempt = 0; attempt < 100 && !button.matches(':active'); attempt++) await delay(20);
       check(button.matches(':active'), 'Native mouse down exercises pressed CSS');
       check(rect(button) === pointerBounds && getComputedStyle(button).transform === 'none',
         'Native press does not shrink or move the hit box');
