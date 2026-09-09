@@ -1,14 +1,16 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { pathToFileURL } = require('node:url');
 const clientRoot = path.resolve(__dirname, '..');
+const releaseNotesOnly = process.argv.includes('--release-notes');
 
 if (!process.versions.electron) {
   const profile = path.join(clientRoot, 'dist-test', `settings-navigation-profile-${process.pid}`);
   fs.mkdirSync(profile, { recursive: true });
   const env = { ...process.env, MONKY_SETTINGS_NAV_PROFILE: profile };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require('electron'), [__filename], { cwd: clientRoot, env, stdio: 'inherit' });
+  const child = spawn(require('electron'), [__filename, ...(releaseNotesOnly ? ['--release-notes'] : [])], { cwd: clientRoot, env, stdio: 'inherit' });
   const cleanup = () => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   child.once('error', error => { console.error(error); cleanup(); process.exitCode = 1; });
   child.once('exit', code => { cleanup(); process.exitCode = code ?? 1; });
@@ -31,6 +33,7 @@ if (!process.versions.electron) {
     const { createServer } = await import('vite');
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'), logLevel: 'error',
+      cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
       server: { host: '127.0.0.1', port: 0, strictPort: true, open: false },
       plugins: [{
         name: 'settings-navigation-fixture',
@@ -52,7 +55,7 @@ if (!process.versions.electron) {
     const address = httpServer.address();
     if (!address || typeof address === 'string') throw new Error('Missing Vite listener');
     window = new BrowserWindow({
-      show: false, width: 1100, height: 850,
+      show: false, width: 1100, height: 850, useContentSize: true,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -61,6 +64,26 @@ if (!process.versions.electron) {
     window.focus();
     window.webContents.focus();
     const evaluate = code => window.webContents.executeJavaScript(code, true);
+    if (releaseNotesOnly) {
+      const repository = path.resolve(clientRoot, '..', '..');
+      const { buildReleaseNotes } = await import(pathToFileURL(path.join(repository, 'scripts', 'generate-changelog.js')).href);
+      const fragments = ['616-friendly-notes.json', '617-copy-version.json']
+        .map(file => JSON.parse(fs.readFileSync(path.join(repository, 'release-notes', file), 'utf8')));
+      const body = buildReleaseNotes(['feat: client notes (#616)\n\n#616: parse bilingual JSON in renderer'], {
+        fragments, repo: 'MonkyOrg/Monky', prevTag: 'v8.3.6-beta', version: '8.3.7-beta',
+      });
+      const checks = await evaluate(`(${runReleaseNotesSmoke.toString()})(${JSON.stringify(body)}, ${JSON.stringify(fragments)})`);
+      await runVersionCopyKeyboardSmoke(window);
+      for (const language of ['pt-BR', 'en']) {
+        await evaluate(`window.releaseNotesFixture.preview(${JSON.stringify(language)})`);
+        fs.writeFileSync(path.join(clientRoot, 'dist-test', `release-notes-${language}.png`),
+          (await window.webContents.capturePage()).toPNG());
+      }
+      await evaluate('window.releaseNotesFixture.cleanup()');
+      console.log(`Release notes and version copy: ${checks} DOM checks plus native Enter/Space, hover and reduced-motion checks passed`);
+      await finish(0);
+      return;
+    }
     const checks = await evaluate(`(${runSettingsNavigationSmoke.toString()})()`);
     console.log(`Settings navigation and emoji scrolling: ${checks} checks passed`);
     for (const kind of ['app', 'server']) {
@@ -115,6 +138,360 @@ if (!process.versions.electron) {
     console.log('Code modal: native two-axis resize, viewport bounds and submission passed');
     await finish(0);
   }).catch(async error => { console.error(error); await finish(1); });
+}
+
+async function runVersionCopyKeyboardSmoke(window) {
+  window.focus();
+  window.webContents.focus();
+  const evaluate = code => window.webContents.executeJavaScript(code, true);
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  for (const surface of ['about', 'changelog']) {
+    const { selector } = await evaluate(`window.releaseNotesFixture.activate(${JSON.stringify(surface)})`);
+    for (const keyCode of ['Return', 'Space']) {
+      const before = await evaluate('window.releaseNotesFixture.copies().length');
+      await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode });
+      window.webContents.sendInputEvent({ type: 'char', keyCode: keyCode === 'Return' ? '\r' : ' ' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
+      await wait(60);
+      const copied = await evaluate('window.releaseNotesFixture.copies()');
+      if (copied.length !== before + 1 || copied.at(-1) !== 'v8.3.7-beta') {
+        const focus = await evaluate(`({
+          focused: document.activeElement?.outerHTML,
+          documentFocused: document.hasFocus(),
+          versionDisabled: document.querySelector(${JSON.stringify(selector)})?.disabled
+        })`);
+        throw new Error(`${surface}/${keyCode}: native keyboard activation must copy exactly the displayed version once: ${JSON.stringify({ before, copied, focus })}`);
+      }
+      if (!await evaluate(`document.querySelector('.chat-copy-toast-label')?.textContent === 'Versão copiada!'`)) {
+        throw new Error(`${surface}/${keyCode}: keyboard copy must use the shared toast`);
+      }
+    }
+    await evaluate(`document.querySelector(${JSON.stringify(selector)}).blur()`);
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: 3, y: 3 });
+    await wait(170);
+    const initial = await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).backgroundColor`);
+    const point = await evaluate(`(() => {
+      const rect = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+      return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
+    })()`);
+    window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+    await wait(180);
+    const hovered = await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).backgroundColor`);
+    if (hovered === initial) throw new Error(`${surface}: version text must have a subtle hover affordance`);
+    await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
+    // A non-activating key changes input modality without racing Tab's focus move.
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Right' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Right' });
+    let focused;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      focused = await evaluate(`(() => {
+        const button = document.querySelector(${JSON.stringify(selector)});
+        return { active: document.activeElement === button, visible: button.matches(':focus-visible'),
+          outline: getComputedStyle(button).outlineWidth, documentFocused: document.hasFocus() };
+      })()`);
+      if (focused.active && focused.visible && focused.outline === '2px') break;
+      await wait(50);
+    }
+    if (!focused.active || !focused.visible || focused.outline !== '2px') {
+      throw new Error(`${surface}: version copy needs a visible keyboard focus indicator: ${JSON.stringify(focused)}`);
+    }
+  }
+  window.webContents.debugger.attach('1.3');
+  try {
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+    });
+    if (!await evaluate(`getComputedStyle(document.querySelector('#changelog-version')).transitionDuration === '0s'`)) {
+      throw new Error('Version hover must respect reduced motion');
+    }
+  } finally {
+    window.webContents.debugger.detach();
+  }
+}
+
+async function runReleaseNotesSmoke(generatedBody, fragments) {
+  const [{ AboutTab }, { ChangelogModal, changelogModal }, { updateService }, { appEvents }, language] = await Promise.all([
+    import('/views/settings/tabs/AboutTab.ts'), import('/views/ChangelogModal.ts'),
+    import('/core/UpdateService.ts'), import('/core/EventBus.ts'), import('/i18n/index.ts'),
+  ]);
+  let checks = 0;
+  const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+  const wait = (ms = 20) => new Promise(resolve => setTimeout(resolve, ms));
+  const deferred = () => {
+    let resolve, reject;
+    const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
+  };
+  const originalApi = window.api;
+  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  const originalLanguage = language.getLanguage();
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
+  const copies = [];
+  const requests = [];
+  const opened = [];
+  const version = '8.3.7-beta';
+  const friendlyResult = { ok: true, version, body: generatedBody, url: 'https://example.com/not-the-release' };
+  let clipboardWork = async () => {};
+  let notesWork = async () => friendlyResult;
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true, value: { writeText: async text => { copies.push(text); await clipboardWork(); } },
+  });
+  window.api = {
+    getAppVersion: async () => version,
+    getReleaseNotes: async tag => { requests.push(tag); return notesWork(); },
+    openExternal: async url => { opened.push(url); return { success: true }; },
+  };
+  language.setLanguage('pt-BR');
+  const about = new AboutTab();
+  const modal = new ChangelogModal();
+  const baselineListeners = appEvents.listeners.get('i18n.language_changed')?.size ?? 0;
+  let root;
+  const mountAbout = () => {
+    about.cleanup();
+    root?.remove();
+    root = document.createElement('main');
+    root.style.cssText = 'padding:24px;max-height:100vh;overflow:auto;width:680px;';
+    root.innerHTML = about.renderHtml();
+    document.body.append(root);
+    about.attachEvents(root);
+    return root.querySelector('#settings-app-version');
+  };
+  const cleanup = () => {
+    modal.close();
+    changelogModal.close();
+    updateService.dismiss();
+    about.cleanup();
+    root?.remove();
+    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+    else delete navigator.clipboard;
+    window.api = originalApi;
+    language.setLanguage(originalLanguage);
+    console.warn = originalWarn;
+    delete window.releaseNotesFixture;
+  };
+  try {
+    let button = mountAbout();
+    check(button.tagName === 'BUTTON' && button.type === 'button' && button.disabled && button.textContent === '…',
+      'About/Updates version is a non-submitting button, disabled until loaded');
+    const versionPending = deferred();
+    window.api.getAppVersion = () => versionPending.promise;
+    const loadingVersion = about.loadAppVersion(root);
+    button.click();
+    check(!copies.length, 'Loading placeholder cannot be copied');
+    versionPending.resolve(version);
+    await loadingVersion;
+    check(button.textContent === `v${version}` && !button.disabled &&
+      button.getAttribute('aria-label') === language.t('versionCopy.copy', { version: `v${version}` }),
+    'Version display is preserved and has an accessible copy label');
+
+    const pendingCopy = deferred();
+    clipboardWork = () => pendingCopy.promise;
+    button.click();
+    await wait();
+    check(copies.at(-1) === `v${version}` && !document.querySelector('.chat-copy-toast'),
+      'Clipboard gets the displayed text, without a premature success toast');
+    pendingCopy.resolve();
+    await wait();
+    check(document.querySelector('.chat-copy-toast')?.getAttribute('role') === 'status' &&
+      document.querySelector('.chat-copy-toast-label')?.textContent === language.t('versionCopy.copied') &&
+      document.querySelector('.chat-copy-toast .material-symbols-outlined')?.textContent === 'check_circle',
+    'Version copy reuses the exact message copy toast and live-region semantics');
+    clipboardWork = async () => {};
+    about.attachEvents(root);
+    about.attachEvents(root);
+    const beforeRebindCopy = copies.length;
+    button.click();
+    await wait();
+    check(copies.length === beforeRebindCopy + 1 && document.querySelectorAll('.chat-copy-toast').length === 1,
+      'Rebinding does not duplicate clipboard calls or stack toasts');
+    await wait(1650);
+    check(!document.querySelector('.chat-copy-toast'), 'Shared copy toast expires after 1600ms');
+
+    const superseded = deferred();
+    clipboardWork = () => superseded.promise;
+    button.click();
+    clipboardWork = async () => { throw new Error('Clipboard denied'); };
+    button.click();
+    await wait();
+    check(!document.querySelector('.chat-copy-toast') &&
+      document.querySelector('.dialog-message')?.textContent === language.t('versionCopy.failed'),
+    'Clipboard rejection reports a localized error, never success');
+    superseded.resolve();
+    await wait();
+    check(!document.querySelector('.chat-copy-toast'), 'An older clipboard completion cannot replace a newer failure with success');
+    document.querySelector('.dialog-card [data-action="confirm"]').click();
+
+    const closingCopy = deferred();
+    clipboardWork = () => closingCopy.promise;
+    button.click();
+    about.cleanup();
+    root.remove();
+    closingCopy.resolve();
+    await wait();
+    check(!document.querySelector('.chat-copy-toast'), 'Closing settings discards late clipboard confirmation');
+    clipboardWork = async () => {};
+    button = mountAbout();
+    window.api.getAppVersion = async () => { throw new Error('No version bridge'); };
+    await about.loadAppVersion(root);
+    check(button.disabled && button.textContent === language.t('versionCopy.unavailable'), 'Version loading errors are visible and not copyable');
+    const closingVersion = deferred();
+    window.api.getAppVersion = () => closingVersion.promise;
+    const staleVersion = about.loadAppVersion(root);
+    about.cleanup();
+    root.remove();
+    closingVersion.resolve('99.9.9');
+    await staleVersion;
+    check(button.disabled, 'Late version loads cannot reactivate closed controls');
+
+    window.api.getAppVersion = async () => version;
+    button = mountAbout();
+    await about.loadAppVersion(root);
+    const openButton = root.querySelector('#btn-view-changelog');
+    openButton.focus();
+    openButton.click();
+    await wait();
+    check(changelogModal.isOpen() && requests.at(-1) === undefined, 'Settings manually reopens the installed-version notes through existing IPC');
+    check(document.querySelector('#changelog-title').textContent === language.t('changelog.titleVersion', { version: `v${version}` }),
+      'Release title retains the displayed version');
+    const text = () => document.querySelector('.changelog-body').textContent;
+    check(fragments.every(fragment => text().includes(fragment['pt-BR'])) && !/#\d+|renderer|JSON|Comparação completa/.test(text()),
+      'Generated PT-BR prose is shown without technical body or issue references');
+    check(document.querySelectorAll('.changelog-group').length === new Set(fragments.map(fragment => fragment.group)).size,
+      'Only nonempty curated groups appear');
+    const requestsBeforeLanguage = requests.length;
+    language.setLanguage('en');
+    check(fragments.every(fragment => text().includes(fragment.en) && !text().includes(fragment['pt-BR'])) &&
+      document.querySelector('.changelog-group-title').textContent.includes("What's new") &&
+      requests.length === requestsBeforeLanguage,
+    'Changing app language updates both prose and headings without refetching or wrong-language fallback');
+    const releaseVersion = document.querySelector('#changelog-version');
+    releaseVersion.click();
+    await wait();
+    check(copies.at(-1) === `v${version}` && document.querySelector('.chat-copy-toast-label').textContent === 'Version copied!',
+      'Release-notes version copies with the same localized toast');
+    document.querySelector('#changelog-github').click();
+    await wait();
+    check(opened.at(-1) === `https://github.com/MonkyOrg/Monky/releases/tag/v${version}`,
+      'Technical details open the installed release, never a remote-supplied URL');
+    changelogModal.close();
+    check(document.activeElement === openButton, 'Closing release notes restores settings keyboard focus');
+
+    const legacy = [
+      '### Downloads', '- setup.exe', '### Changelog', '#### ✨ Novidades', '- #547: add IPC renderer parser',
+      '#### 🐛 Correções', '- #1: mutate SDP', '- #2: fix ICE',
+      '#### 🔧 Outros', '- refactor: internal service', '### More details', '- unrelated item',
+    ].join('\n');
+    notesWork = async () => ({ ok: true, version, body: legacy });
+    await modal.open();
+    check(text().includes(language.t('changelog.legacyIntro')) &&
+      text().includes(language.tCount('changelog.legacy.correcoes', 2)) &&
+      document.querySelectorAll('.changelog-group').length === 3 &&
+      !/#547|SDP|ICE|refactor|setup.exe/.test(text()),
+    'Legacy releases show honest localized group counts without pretending to translate technical prose');
+    modal.close();
+
+    for (const body of ['', '<!-- monky-client-notes:v1\n{broken}\n-->\n' + legacy]) {
+      notesWork = async () => ({ ok: true, version, body });
+      check(!await modal.open({ requireContent: true, celebrate: true }) && !modal.isOpen(),
+        'Automatic update presentation falls back rather than opening empty or invalid notes');
+      await modal.open();
+      check(!/#547|SDP/.test(text()) && text().includes(language.t(body ? 'changelog.invalid' : 'changelog.noHighlights')),
+        'Manual reopening explains missing or malformed friendly notes without a technical fallback dump');
+      modal.close();
+    }
+    notesWork = async () => { throw new Error('offline'); };
+    await modal.open({ tag: `v${version}` });
+    check(text().includes(language.t('changelog.loadFailed')) && !document.querySelector('#changelog-retry').hidden,
+      'Network errors are surfaced with a retry action');
+    notesWork = async () => friendlyResult;
+    document.querySelector('#changelog-retry').click();
+    await wait();
+    check(text().includes(fragments[0].en) && requests.at(-1) === `v${version}` && document.querySelector('#changelog-retry').hidden,
+      'Retry fetches the same version and replaces the error with real notes');
+    window.api.openExternal = async () => ({ success: false });
+    document.querySelector('#changelog-github').click();
+    await wait();
+    check(!document.querySelector('[data-el="link-error"]').hidden &&
+      document.querySelector('[data-el="link-error"]').textContent === language.t('changelog.openFailed'),
+    'Opening GitHub failures are visible, not silently retried in another browser path');
+    window.api.openExternal = async url => { opened.push(url); return { success: true }; };
+    document.querySelector('#changelog-github').click();
+    await wait();
+    check(document.querySelector('[data-el="link-error"]').hidden, 'Successful GitHub retry clears the stale error');
+    modal.close();
+
+    const getNotes = window.api.getReleaseNotes;
+    delete window.api.getReleaseNotes;
+    await modal.open();
+    check(text().includes(language.t('changelog.loadFailed')), 'A missing release-note bridge is surfaced on manual reopening');
+    modal.close();
+    window.api.getReleaseNotes = getNotes;
+
+    const delayed = deferred();
+    notesWork = () => delayed.promise;
+    const stale = modal.open();
+    check(document.querySelector('.changelog-body').getAttribute('aria-busy') === 'true', 'Manual loading state is announced');
+    modal.close();
+    notesWork = async () => friendlyResult;
+    await modal.open();
+    delayed.resolve({ ok: true, version: '99.9.9', body: legacy });
+    check(await stale === false && document.querySelector('#changelog-version').textContent === `v${version}`,
+      'Closed/reopened modals ignore late responses from the previous request');
+    modal.close();
+    const automatic = deferred();
+    notesWork = () => automatic.promise;
+    const beforeAutomatic = requests.length;
+    const first = modal.open({ requireContent: true, celebrate: true });
+    const second = modal.open({ requireContent: true, celebrate: true });
+    check(requests.length === beforeAutomatic + 1 && !modal.isOpen(), 'Concurrent automatic opens share one fetch');
+    modal.close();
+    automatic.resolve(friendlyResult);
+    check((await Promise.all([first, second])).every(shown => !shown) && !modal.isOpen(),
+      'Closing during an automatic fetch never resurrects the modal');
+    notesWork = async () => friendlyResult;
+
+    const outcomes = [{ status: 'success', version, fromVersion: '8.3.6-beta' }, null];
+    window.api.getUpdateOutcome = async () => outcomes.shift() ?? null;
+    await updateService.reportLastInstall();
+    check(changelogModal.isOpen() && document.querySelector('#changelog-title').textContent ===
+      language.t('changelog.updatedTo', { version: `v${version}` }) && !document.querySelector('.update-banner'),
+    'Successful updates keep the once-after-install celebratory presentation without a leftover banner');
+    changelogModal.close();
+    await updateService.reportLastInstall();
+    check(!changelogModal.isOpen(), 'Consumed update outcomes do not present the notes again');
+    check((appEvents.listeners.get('i18n.language_changed')?.size ?? 0) === baselineListeners,
+      'Every modal close unsubscribes the language listener');
+    check(warnings.length >= 4, 'Expected errors are logged for diagnostics');
+
+    language.setLanguage('pt-BR');
+    button = mountAbout();
+    await about.loadAppVersion(root);
+    window.releaseNotesFixture = {
+      copies: () => copies.slice(),
+      activate: async surface => {
+        modal.close();
+        if (surface === 'changelog') await modal.open();
+        const selector = surface === 'about' ? '#settings-app-version' : '#changelog-version';
+        document.querySelector(selector).focus();
+        return { selector };
+      },
+      preview: async locale => {
+        language.setLanguage(locale);
+        await modal.open();
+        document.activeElement?.blur();
+        await document.fonts.ready;
+        await wait(100);
+      },
+      cleanup,
+    };
+    return checks;
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 }
 
 async function runSettingsNavigationSmoke() {

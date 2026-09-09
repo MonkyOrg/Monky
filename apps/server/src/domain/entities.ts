@@ -45,6 +45,11 @@ export interface UserRecord {
   lastSeenAt: number;
 }
 
+export interface VoiceRestrictions {
+  serverMuted: boolean;
+  serverDeafened: boolean;
+}
+
 export interface ChannelRecord {
   botCommandsEnabled: boolean;
   id: string;

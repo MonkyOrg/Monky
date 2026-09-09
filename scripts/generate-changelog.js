@@ -1,10 +1,9 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'node:child_process';
 
 /**
- * Builds the friendly, grouped changelog shown both on the GitHub release and,
- * since #547, inside the client. It turns the raw commit range into three
- * sections — Novidades / Correções / Outros — so a release reads like release
- * notes instead of a flat list of subjects.
+ * Builds the technical GitHub changelog from commit messages. Client notes are
+ * authored separately in bilingual release-notes/*.json fragments: rewriting a
+ * commit subject cannot reliably turn developer jargon into localized copy.
  *
  * The text itself comes from the curated `#NNN: descrição` lines the team keeps
  * in commit bodies; a commit without them falls back to its `- ` bullets and
@@ -33,7 +32,7 @@ const GROUPS = [
   ['outros', '#### 🔧 Outros'],
 ];
 
-const FALLBACK_LINE = '- Melhorias diversas e correções.';
+const FALLBACK_LINE = '- Nenhuma alteração registrada neste intervalo.';
 
 /**
  * Picks the section a commit belongs to from its subject's conventional type.
@@ -61,7 +60,7 @@ export function stripType(subject) {
 }
 
 /**
- * Pulls the user-facing lines out of one commit message.
+ * Pulls the technical changelog lines out of one commit message.
  *
  * Preference order, matching how the team writes commits:
  * 1. Curated `#NNN: descrição` lines from the body (continuation lines that
@@ -161,26 +160,92 @@ export function buildChangelog(commits = [], options = {}) {
   return notes;
 }
 
+const CLIENT_GROUPS = GROUPS.map(([key]) => key);
+const CLIENT_LANGUAGES = ['pt-BR', 'en'];
+const MAX_NOTE_LENGTH = 280;
+
+function validateClientFragment(fragment, source) {
+  if (!fragment || typeof fragment !== 'object' || Array.isArray(fragment) ||
+      !CLIENT_GROUPS.includes(fragment.group)) {
+    throw new Error(`${source}: choose group novidades, correcoes or outros.`);
+  }
+  for (const language of CLIENT_LANGUAGES) {
+    const text = fragment[language];
+    if (typeof text !== 'string' || !text.trim() || text.length > MAX_NOTE_LENGTH ||
+        /[\r\n<>`]|#\d+|https?:\/\/|\[[^\]]+\]\(/i.test(text)) {
+      throw new Error(`${source}: ${language} must be plain, user-facing text (1–${MAX_NOTE_LENGTH} characters, no issue references, code or links).`);
+    }
+  }
+}
+
+/** Both translations travel together; the client never falls back to another language. */
+export function buildClientNotes(fragments = []) {
+  const groups = { novidades: [], correcoes: [], outros: [] };
+  for (const [index, fragment] of fragments.entries()) {
+    validateClientFragment(fragment, `Client note ${index + 1}`);
+    const entry = { 'pt-BR': fragment['pt-BR'].trim(), en: fragment.en.trim() };
+    const group = groups[fragment.group];
+    if (!group.some((note) => note['pt-BR'] === entry['pt-BR'] && note.en === entry.en)) {
+      group.push(entry);
+    }
+  }
+  if (Object.values(groups).some((notes) => notes.length > 100)) {
+    throw new Error('Keep client notes to at most 100 entries per group.');
+  }
+  return { schemaVersion: 1, groups };
+}
+
+/**
+ * The hidden payload precedes Changelog so older clients still extract only
+ * the technical section, never JSON. GitHub keeps showing the detailed notes.
+ */
+export function buildReleaseNotes(commits = [], options = {}) {
+  const payload = JSON.stringify(buildClientNotes(options.fragments ?? []))
+    .replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+  return `<!-- monky-client-notes:v1\n${payload}\n-->\n\n### Changelog\n${buildChangelog(commits, options)}`;
+}
+
+function readGit(args) {
+  return execFileSync('git', ['--no-pager', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+/**
+ * Only fragments added since the previous release belong to this release.
+ * Promotion uses the previous stable tag, so it includes all intervening betas.
+ * Read from HEAD, not the working tree, to match the binaries being released.
+ */
+export function getClientNotesInRange(prevTag, git = readGit) {
+  const args = prevTag
+    ? ['diff', '--no-renames', '--name-only', '-z', '--diff-filter=A', prevTag, 'HEAD', '--', 'release-notes']
+    : ['ls-tree', '-r', '--name-only', '-z', 'HEAD', '--', 'release-notes'];
+  const files = git(args).split('\0')
+    .filter((file) => /^release-notes\/[^/]+\.json$/.test(file))
+    .sort();
+  return files.map((file) => {
+    let fragment;
+    try {
+      fragment = JSON.parse(git(['show', `HEAD:${file}`]));
+    } catch (error) {
+      throw new Error(`Could not read ${file}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    validateClientFragment(fragment, file);
+    return fragment;
+  });
+}
+
 /**
  * Reads commit messages in `${prevTag}..HEAD`, oldest first, merges excluded.
  * Mirrors calculate-version.js's delimiter approach so a body containing blank
  * lines is never split into several commits.
  */
 export function getCommitsInRange(prevTag) {
-  try {
-    const range = prevTag ? `${prevTag}..HEAD` : 'HEAD';
-    const DELIMITER = '---__COMMIT_DELIMITER__---';
-    const output = execSync(`git log --reverse --no-merges ${range} --pretty=format:"%B${DELIMITER}"`, {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'ignore'],
-    });
-    return output
-      .split(DELIMITER)
-      .map((c) => c.trim())
-      .filter(Boolean);
-  } catch (e) {
-    return [];
-  }
+  const range = prevTag ? `${prevTag}..HEAD` : 'HEAD';
+  const DELIMITER = '---__COMMIT_DELIMITER__---';
+  const output = readGit(['log', '--reverse', '--no-merges', range, `--pretty=format:%B${DELIMITER}`]);
+  return output
+    .split(DELIMITER)
+    .map((c) => c.trim())
+    .filter(Boolean);
 }
 
 const isDirectRun =
@@ -199,7 +264,12 @@ if (isDirectRun) {
   const version = getFlag('--version') || process.env.RELEASE_VERSION || '';
   const repo = getFlag('--repo') || process.env.GITHUB_REPOSITORY || '';
 
-  const commits = getCommitsInRange(prevTag);
-  const notes = buildChangelog(commits, { repo, version, prevTag });
-  process.stdout.write(`${notes}\n`);
+  try {
+    const commits = getCommitsInRange(prevTag);
+    const fragments = getClientNotesInRange(prevTag);
+    process.stdout.write(`${buildReleaseNotes(commits, { repo, version, prevTag, fragments })}\n`);
+  } catch (error) {
+    console.error(`Could not generate release notes: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 }

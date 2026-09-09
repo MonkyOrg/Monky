@@ -14,6 +14,7 @@ import { getLanguage, t } from '../i18n';
 import { uploadAttachment, UploadHandle } from '../core/AttachmentUploader';
 import { getAttachmentUrl, formatBytes, fileIconName } from '../utils/attachment';
 import { showAlert, showConfirm } from './Dialog';
+import { showCopyToast } from './CopyToast';
 import { downloadLightboxFile, lightboxModal, LightboxMedia } from './LightboxModal';
 import { linkPreviewService } from '../core/LinkPreviewService';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
@@ -945,22 +946,7 @@ export class ChatView {
       return;
     }
     if (requestId !== this.copyRequestId) return;
-    const toast = document.createElement('div');
-    toast.className = 'chat-copy-toast';
-    toast.setAttribute('role', 'status');
-    toast.setAttribute('aria-atomic', 'true');
-    toast.innerHTML = `
-      <span class="material-symbols-outlined md-18" aria-hidden="true">check_circle</span>
-      <span class="chat-copy-toast-label">${escapeHtml(t('chat.messageCopied'))}</span>
-    `;
-    document.body.appendChild(toast);
-    const clear = () => {
-      window.clearTimeout(timeout);
-      toast.remove();
-      this.clearCopyFeedback = null;
-    };
-    const timeout = window.setTimeout(clear, 1600);
-    this.clearCopyFeedback = clear;
+    this.clearCopyFeedback = showCopyToast(t('chat.messageCopied'));
   }
 
   private jumpToMessage(messageId: string): void {

@@ -17,7 +17,7 @@ export class AudioProcessor {
   private rnnoiseNode: RnnoiseWorkletNode | null = null;
   private destinationNode: MediaStreamAudioDestinationNode | null = null;
 
-  private vadInterval: any = null;
+  private vadInterval: ReturnType<typeof setInterval> | null = null;
   private isSpeaking: boolean = false;
   private vadThreshold: number = settingsStore.vadSensitivity !== undefined ? settingsStore.vadSensitivity : 14;
   private isMuted: boolean = voiceStore.getEffectiveMuted();
@@ -361,6 +361,17 @@ export class AudioProcessor {
     });
     this.unbindPttEvents.push(unbindSettings);
 
+    let channelId = voiceStore.currentVoiceChannelId;
+    let sessionKey = voiceStore.voiceSessionKey;
+    this.unbindPttEvents.push(appEvents.on('voice.channel_changed', () => {
+      if (channelId === voiceStore.currentVoiceChannelId && sessionKey === voiceStore.voiceSessionKey) return;
+      channelId = voiceStore.currentVoiceChannelId;
+      sessionKey = voiceStore.voiceSessionKey;
+      this.resetPttState();
+      this.setSpeaking(false);
+      this.applyTrackEnabled();
+    }));
+
     const handleWindowKeyDown = (e: KeyboardEvent) => {
       if (e.repeat) return;
       if (settingsStore.inputMode !== 'push_to_talk') return;
@@ -432,7 +443,7 @@ export class AudioProcessor {
 
   public handlePttState(active: boolean): void {
     if (settingsStore.inputMode !== 'push_to_talk'
-      || this.isMuted || this.isDeafened || voiceStore.getEffectiveMuted()) {
+      || !this.isMicrophonePermitted()) {
       this.resetPttState();
       this.applyTrackEnabled();
       return;
@@ -444,14 +455,11 @@ export class AudioProcessor {
         clearTimeout(this.pttReleaseTimeout);
         this.pttReleaseTimeout = null;
       }
-      if (!this.isPttActive) {
-        this.isPttActive = true;
-        if (!this.isMuted && !this.isDeafened) {
-          this.setSpeaking(true);
-          soundEffects.playPttTone(true);
-        }
-      }
+      const newlyActive = !this.isPttActive;
+      this.isPttActive = true;
       this.applyTrackEnabled();
+      this.setSpeaking(true);
+      if (newlyActive && voiceStore.microphoneOpen) soundEffects.playPttTone(true);
     } else {
       // Native and focused-window handlers can report the same release.
       // Only the first release starts the tail; duplicates must not extend it.
@@ -460,12 +468,13 @@ export class AudioProcessor {
         this.applyTrackEnabled();
         const delay = Math.max(0, settingsStore.pttReleaseDelay || 0);
         this.pttReleaseTimeout = setTimeout(() => {
+          const wasOpen = voiceStore.microphoneOpen;
           this.isPttActive = false;
           this.pttReleaseTimeout = null;
           if (settingsStore.inputMode === 'push_to_talk') {
             this.applyTrackEnabled();
             this.setSpeaking(false);
-            soundEffects.playPttTone(false);
+            if (wasOpen) soundEffects.playPttTone(false);
           }
         }, delay);
       }
@@ -480,24 +489,38 @@ export class AudioProcessor {
     if (this.inputMode === 'push_to_talk') this.setSpeaking(false);
   }
 
+  private isMicrophonePermitted(): boolean {
+    return voiceStore.currentVoiceChannelId !== null
+      && !this.isMuted && !this.isDeafened && !voiceStore.getEffectiveMuted();
+  }
+
+  private canActivateMicrophone(): boolean {
+    return this.isMicrophonePermitted() && this.graphReady && !this.microphonePublicationPending
+      && [this.rawMicStream, this.localStream || this.rawMicStream].every((stream) =>
+        stream?.getAudioTracks().some((track) => track.readyState === 'live'));
+  }
+
   private publishMicrophoneState(): void {
     const hasEnabledTrack = (stream: MediaStream | null): boolean =>
       stream?.getAudioTracks().some((track) => track.readyState === 'live' && track.enabled) ?? false;
     // A Web Audio destination can stay live after the physical input ends.
-    const open = hasEnabledTrack(this.rawMicStream) && hasEnabledTrack(this.localStream || this.rawMicStream);
-    voiceStore.setMicrophoneState(open, this.isPttPressed);
+    const ready = this.canActivateMicrophone();
+    const open = ready && hasEnabledTrack(this.rawMicStream) && hasEnabledTrack(this.localStream || this.rawMicStream);
+    // An in-call key may stay held during device recovery, but no activity is published before capture is ready.
+    voiceStore.setMicrophoneState(open, ready && this.isPttPressed);
+    if (!open) this.setSpeaking(false);
   }
 
   public applyTrackEnabled(forceState?: boolean): void {
     const isPtt = settingsStore.inputMode === 'push_to_talk';
-    const isMuted = this.isMuted || this.isDeafened || voiceStore.getEffectiveMuted();
-    if (this.inputMode !== settingsStore.inputMode || isMuted) {
+    const canActivate = this.canActivateMicrophone();
+    if (this.inputMode !== settingsStore.inputMode || !this.isMicrophonePermitted()) {
       this.resetPttState();
       this.inputMode = settingsStore.inputMode;
     }
     let enabled: boolean;
 
-    if (isMuted || this.microphonePublicationPending) {
+    if (!canActivate) {
       enabled = false;
     } else if (typeof forceState === 'boolean') {
       enabled = forceState;
@@ -587,8 +610,8 @@ export class AudioProcessor {
 
     this.vadInterval = setInterval(() => {
       const isPtt = settingsStore.inputMode === 'push_to_talk';
-      const effectiveMuted = this.isMuted || this.isDeafened || voiceStore.getEffectiveMuted();
-      if (!this.analyser || effectiveMuted) {
+      if (!this.analyser || !this.canActivateMicrophone() || !voiceStore.microphoneOpen) {
+        silenceCounter = 0;
         if (this.isSpeaking) {
           this.setSpeaking(false);
         }
@@ -640,9 +663,11 @@ export class AudioProcessor {
   }
 
   private setSpeaking(speaking: boolean): void {
-    if (this.isSpeaking !== speaking) {
-      this.isSpeaking = speaking;
-      appEvents.emit('local.speaking', speaking);
+    const active = speaking && this.canActivateMicrophone() && voiceStore.microphoneOpen
+      && (settingsStore.inputMode !== 'push_to_talk' || this.isPttActive);
+    if (this.isSpeaking !== active) {
+      this.isSpeaking = active;
+      appEvents.emit('local.speaking', active);
     }
   }
 
@@ -679,12 +704,11 @@ export class AudioProcessor {
   }
 
   /**
-   * Returns the current microphone input level (0..100) from the active VAD
-   * analyser, or -1 when the microphone is not currently active. Used by the
-   * settings UI to draw a live level meter next to the sensitivity slider.
+   * Returns the live call's input level, or -1 while transmission is disabled.
+   * Microphone settings use a separate local-only preview graph.
    */
   public getInputLevel(): number {
-    if (!this.analyser || this.isMuted) return -1;
+    if (!this.analyser || !this.canActivateMicrophone() || !voiceStore.microphoneOpen) return -1;
     const bufferLength = this.analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
     this.analyser.getByteFrequencyData(dataArray);

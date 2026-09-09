@@ -51,7 +51,7 @@ if (!process.versions.electron) {
     const address = httpServer.address();
     if (!address || typeof address === 'string') throw new Error('Missing Vite listener');
     window = new BrowserWindow({
-      show: false, width: 1100, height: 760,
+      show: false, width: 1100, height: 760, useContentSize: true,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
     });
     window.webContents.on('console-message', (_event, level, message) => {
@@ -73,22 +73,31 @@ if (!process.versions.electron) {
     await new Promise((resolve) => setTimeout(resolve, 50));
     const hoverSamples = [];
     phase = 'distinct trusted hover';
-    for (const id of ['bar-btn-mic', 'bar-btn-deafen', 'bar-btn-settings', 'media-btn-camera',
-      'media-btn-screen', 'media-btn-soundboard', 'btn-attach', 'btn-emoji', 'btn-code']) {
-      window.focus();
-      window.webContents.focus();
-      const point = await window.webContents.executeJavaScript(`window.footerSmoke.hoverTarget(${JSON.stringify(id)})`);
-      window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
-      await window.webContents.executeJavaScript('window.footerSmoke.waitForHover()', true);
-      const images = [];
-      for (const time of [200, 460]) {
-        const crop = await window.webContents.executeJavaScript(`window.footerSmoke.sampleHover(${time})`, true);
-        images.push((await window.webContents.capturePage(crop)).toDataURL());
+    const sampleHovers = async (selectors) => {
+      for (const selector of selectors) {
+        window.focus();
+        window.webContents.focus();
+        const cardPoint = await window.webContents.executeJavaScript(`window.footerSmoke.cardHoverTarget(${JSON.stringify(selector)})`);
+        if (cardPoint) {
+          window.webContents.sendInputEvent({ type: 'mouseMove', ...cardPoint });
+          await window.webContents.executeJavaScript(`window.footerSmoke.waitForCard(${JSON.stringify(selector)})`, true);
+        }
+        const point = await window.webContents.executeJavaScript(`window.footerSmoke.hoverTarget(${JSON.stringify(selector)})`);
+        window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+        await window.webContents.executeJavaScript('window.footerSmoke.waitForHover()', true);
+        const images = [];
+        for (const time of [200, 460]) {
+          const crop = await window.webContents.executeJavaScript(`window.footerSmoke.sampleHover(${time})`, true);
+          images.push((await window.webContents.capturePage(crop)).toDataURL());
+        }
+        hoverSamples.push({ id: selector, images });
+        await window.webContents.executeJavaScript('window.footerSmoke.smoothHoverReturn()', true);
+        window.webContents.sendInputEvent({ type: 'mouseLeave', x: -1, y: -1 });
+        await window.webContents.executeJavaScript('window.footerSmoke.hoverLeft()');
       }
-      hoverSamples.push({ id, images });
-      window.webContents.sendInputEvent({ type: 'mouseMove', x: 1050, y: 400 });
-      await window.webContents.executeJavaScript('window.footerSmoke.hoverLeft()');
-    }
+    };
+    await sampleHovers(['#bar-btn-mic', '#bar-btn-deafen', '#bar-btn-settings', '#media-btn-camera',
+      '#media-btn-screen', '#media-btn-soundboard', '#btn-attach', '#btn-emoji', '#btn-code']);
     phase = 'native pointer';
     const point = await window.webContents.executeJavaScript('window.footerSmoke.pointerTarget()');
     window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
@@ -104,7 +113,7 @@ if (!process.versions.electron) {
     await motion('reduce');
     await window.webContents.executeJavaScript('window.footerSmoke.reduced()', true);
     for (const id of ['media-btn-camera', 'btn-emoji']) {
-      const point = await window.webContents.executeJavaScript(`window.footerSmoke.hoverTarget(${JSON.stringify(id)})`);
+      const point = await window.webContents.executeJavaScript(`window.footerSmoke.hoverTarget(${JSON.stringify(`#${id}`)})`);
       window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
       await window.webContents.executeJavaScript('window.footerSmoke.waitForHover()', true);
       await window.webContents.executeJavaScript('window.footerSmoke.reducedHovered()');
@@ -113,8 +122,33 @@ if (!process.versions.electron) {
     }
     await motion('no-preference');
     phase = 'cleanup';
-    const checks = await window.webContents.executeJavaScript('window.footerSmoke.cleanup()', true);
-    console.log(`Footer/composer controls smoke: ${checks} checks passed (motion, layout, PTT, reduced motion, lifecycle)`);
+    await window.webContents.executeJavaScript('window.footerSmoke.cleanup()', true);
+    phase = 'stage setup';
+    await window.webContents.executeJavaScript(`(${setupStageSmoke.toString()})()`, true);
+    phase = 'stage trusted hover';
+    await sampleHovers(['#stage-btn-mic', '#stage-btn-deafen', '#stage-btn-camera', '#stage-btn-screen',
+      '#stage-btn-overlay', '#stage-btn-soundboard', '#stage-btn-leave', '.stage-watch-btn']);
+    phase = 'stage keyboard';
+    await window.webContents.executeJavaScript('window.stageSmoke.keyboardTarget()');
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+    await window.webContents.executeJavaScript('window.stageSmoke.keyboardFocused()', true);
+    phase = 'stage broadcasting';
+    window.webContents.sendInputEvent({ type: 'mouseLeave', x: -1, y: -1 });
+    await window.webContents.executeJavaScript('window.stageSmoke.shareAndWatch()', true);
+    await sampleHovers(['#stage-btn-screen', '#stage-btn-overlay', '#stage-btn-stop-share', '#btn-stage-quick-stop',
+      '.stage-volume-btn', '.stage-stopwatch-btn', '.stage-fullscreen-btn']);
+    phase = 'stage normal motion';
+    await window.webContents.executeJavaScript('window.stageSmoke.normal()', true);
+    phase = 'stage reduced motion';
+    await motion('reduce');
+    await window.webContents.executeJavaScript('window.stageSmoke.reduced()', true);
+    await motion('no-preference');
+    phase = 'stage cleanup';
+    const stageChecks = await window.webContents.executeJavaScript('window.stageSmoke.cleanup()', true);
+    const checks = await window.webContents.executeJavaScript('window.footerSmoke.checkCount()');
+    console.log(`Footer/composer/stage controls smoke: ${checks + stageChecks} checks passed (motion, layout, PTT, reduced motion, lifecycle)`);
+    window.setContentSize(1100, Math.ceil(hoverSamples.length / 3) * 170 + 40);
     await window.webContents.executeJavaScript(`document.body.innerHTML = '<main id="motion-samples"></main>';
       document.body.style.cssText = 'margin:0;padding:20px;background:#18191d;color:white;overflow:auto';
       document.querySelector('#motion-samples').style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:18px';
@@ -194,10 +228,49 @@ async function setupFooterSmoke() {
   let hoverBounds;
   let hoverText;
   let previousSample;
+  let cardPointerTarget;
 
   window.footerSmoke = {
-    hoverTarget(id) {
-      selectedHover = document.getElementById(id);
+    checkCount: () => checks,
+    async cardHoverTarget(selector) {
+      const control = document.querySelector(selector);
+      const card = control?.closest('.stage-card, .stage-mini-card, .stage-focused-main');
+      if (!card) return null;
+      control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+      await frame();
+      const bounds = card.getBoundingClientRect();
+      const left = Math.max(0, bounds.left), right = Math.min(innerWidth, bounds.right);
+      const top = Math.max(0, bounds.top), bottom = Math.min(innerHeight, bounds.bottom);
+      for (const xFraction of [0.1, 0.9, 0.5]) {
+        for (const yFraction of [0.1, 0.9, 0.5]) {
+          const x = Math.round(left + (right - left) * xFraction);
+          const y = Math.round(top + (bottom - top) * yFraction);
+          const hit = document.elementFromPoint(x, y);
+          if (hit && card.contains(hit) && !hit.closest('button')) {
+            cardPointerTarget = { x, y };
+            return cardPointerTarget;
+          }
+        }
+      }
+      throw new Error(`${selector}: no visible card surface for native hover: ${JSON.stringify({
+        bounds: bounds.toJSON(), viewport: { width: innerWidth, height: innerHeight },
+      })}`);
+    },
+    async waitForCard(selector) {
+      const card = document.querySelector(selector).closest('.stage-card, .stage-mini-card, .stage-focused-main');
+      for (let attempt = 0; attempt < 100 && !card.matches(':hover'); attempt++) await delay(20);
+      check(card.matches(':hover'), `${selector}: native pointer reached its card: ${JSON.stringify({
+        point: cardPointerTarget, bounds: card.getBoundingClientRect().toJSON(),
+        hit: document.elementFromPoint(cardPointerTarget.x, cardPointerTarget.y)?.outerHTML.slice(0, 250),
+        viewport: { width: innerWidth, height: innerHeight },
+      })}`);
+      // Preserve existing card lift/scale; measure the button only once its parent settles.
+      await Promise.all(card.getAnimations().map((animation) => animation.finished));
+      await frame();
+    },
+    hoverTarget(selector) {
+      selectedHover = document.querySelector(selector);
+      check(!!selectedHover, `${selector}: control exists`);
       trustedHover = false;
       selectedHover.addEventListener('pointerenter', (event) => { trustedHover = event.isTrusted; }, { once: true });
       hoverBounds = rect(selectedHover);
@@ -223,17 +296,25 @@ async function setupFooterSmoke() {
         effect.currentTime = time;
       }
       await frame();
-      check(rect(button) === hoverBounds, `${button.id}: trusted hover keeps the target stationary`);
+      check(rect(button) === hoverBounds, `${button.id || button.className}: trusted hover keeps the target stationary`);
       check(glyph(button).textContent === hoverText, `${button.id}: hover does not change real state glyph`);
       const layer = button.querySelector('.control-motion-decoration');
       if (layer) {
         check(layer.getAttribute('aria-hidden') === 'true' && getComputedStyle(layer).pointerEvents === 'none',
           `${button.id}: decoration is inaccessible and cannot intercept pointer events`);
+        const artwork = layer.getBoundingClientRect();
+        const icon = glyph(button).getBoundingClientRect();
+        check(Math.abs(artwork.x + artwork.width / 2 - icon.x - icon.width / 2) < 1.25
+          && Math.abs(artwork.y + artwork.height / 2 - icon.y - icon.height / 2) < 1.25,
+        `${button.id || button.className}: artwork stays centered on the glyph, including text buttons`);
       }
       const expected = {
         'media-btn-camera': 'camera', 'media-btn-screen': 'screen', 'media-btn-soundboard': 'music',
         'btn-attach': 'attachment', 'btn-emoji': 'laugh', 'btn-code': 'code',
-      }[button.id];
+        'stage-btn-camera': 'camera', 'stage-btn-screen': 'screen', 'stage-btn-soundboard': 'music',
+        'stage-btn-overlay': 'overlay', 'stage-btn-stop-share': 'screen', 'btn-stage-quick-stop': 'stop',
+        'stage-watch-btn': 'watch', 'stage-volume-btn': 'volume', 'stage-fullscreen-btn': 'fullscreen',
+      }[button.id || button.classList[0]];
       if (expected) check(layer?.dataset.motion === expected, `${button.id}: its own function-specific artwork is present`);
       const sample = JSON.stringify([glyph(button), ...button.querySelectorAll('.control-motion-decoration svg *')]
         .map((element) => [getComputedStyle(element).transform, getComputedStyle(element).opacity]));
@@ -250,6 +331,38 @@ async function setupFooterSmoke() {
       check(!selectedHover.querySelector('.control-motion-decoration'), 'Trusted pointer leave removes decoration');
       check(getComputedStyle(glyph(selectedHover)).opacity === '1', 'Trusted pointer leave restores base glyph');
     },
+    async smoothHoverReturn(button = selectedHover) {
+      const layer = button.querySelector('.control-motion-decoration');
+      if (!layer || !['screen', 'overlay'].includes(layer.dataset.motion)) return;
+      const effects = button.getAnimations({ subtree: true });
+      const sample = async (time) => {
+        for (const effect of effects) {
+          effect.pause();
+          effect.currentTime = time;
+        }
+        await frame();
+        return [Number(getComputedStyle(glyph(button)).opacity), Number(getComputedStyle(layer).opacity)];
+      };
+      const start = await sample(0);
+      check(start[0] === 1 && start[1] === 0, `${button.id}: animation starts on the exact original icon`);
+      const middle = await sample(380);
+      check(middle[0] === 0 && middle[1] === 1, `${button.id}: function-specific artwork remains clear mid-animation`);
+      const returning = await sample(620);
+      check(returning.every((opacity) => opacity > 0 && opacity < 1)
+        && Math.abs(returning[0] + returning[1] - 1) < 0.001, `${button.id}: artwork blends back instead of cutting`);
+      const end = await sample(759);
+      check(end[0] > 0.999 && end[1] < 0.001, `${button.id}: original icon is restored before animation cleanup`);
+      for (const part of layer.querySelectorAll('[data-arrow], [data-window], [data-stop]')) {
+        const frames = part.getAnimations()[0].effect.getKeyframes();
+        check(frames[0].transform === frames.at(-1).transform && frames[0].opacity === frames.at(-1).opacity,
+          `${button.id}: animated parts return to their starting pose`);
+      }
+      const finished = new Promise((resolve) => animations(button)[0].addEventListener('finish', resolve, { once: true }));
+      for (const effect of effects) effect.finish();
+      await finished;
+      check(!button.querySelector('.control-motion-decoration') && animations(button).length === 0
+        && getComputedStyle(glyph(button)).opacity === '1', `${button.id}: completion leaves only the unchanged real icon`);
+    },
     reducedHovered() {
       check(trustedHover && selectedHover.matches(':hover'), 'Reduced-motion test uses trusted pointer entry');
       check(animations(selectedHover).length === 0 && !selectedHover.querySelector('.control-motion-decoration'),
@@ -258,7 +371,7 @@ async function setupFooterSmoke() {
     pointerTarget() {
       const button = root.querySelector('#bar-btn-settings');
       pointerBounds = rect(button);
-      return window.footerSmoke.hoverTarget('bar-btn-settings');
+      return window.footerSmoke.hoverTarget('#bar-btn-settings');
     },
     pointerHover() {
       const button = root.querySelector('#bar-btn-settings');
@@ -302,6 +415,7 @@ async function setupFooterSmoke() {
       enter(screen);
       check(!!screen.querySelector('[data-stop]') && !screen.querySelector('[data-arrow]'),
         'Active screen hover keeps a stop symbol, not a misleading share arrow');
+      await window.footerSmoke.smoothHoverReturn(screen);
       camera.disabled = true;
       await delay();
       check(animations(camera).length === 0 && !camera.querySelector('.control-motion-decoration'),
@@ -513,6 +627,313 @@ async function setupFooterSmoke() {
       button.dataset.state = 'destroyed';
       await delay();
       check(animations(button).length === 0, 'Destroy removes motion listeners and observer on connected DOM');
+      return checks;
+    },
+  };
+}
+
+async function setupStageSmoke() {
+  const [{ VoiceStageView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
+    { participantManager: participants }, { appEvents }, { screenAudioService },
+    { overlayBridgeService }, { overlayConfigModal }, { soundboardModal }] = await Promise.all([
+    import('/views/VoiceStageView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
+    import('/stores/serverStore.ts'), import('/core/ParticipantManager.ts'), import('/core/EventBus.ts'),
+    import('/core/ScreenAudioService.ts'), import('/core/OverlayBridgeService.ts'),
+    import('/views/OverlayConfigModal.ts'), import('/views/SoundboardModal.ts'),
+  ]);
+  let checks = 0;
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const delay = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+  const root = document.getElementById('app');
+  const local = { id: 'stage-local', sessionId: 'stage-local-session', clientId: 'stage-local-client',
+    nickname: 'Local', status: 'ONLINE', joinedAt: 1 };
+  const remote = { ...local, id: 'stage-remote', sessionId: 'stage-remote-session', nickname: 'Remote' };
+  const channel = { id: 'stage-channel', name: 'Stage motion', type: 'VOICE', position: 0, botCommandsEnabled: true };
+  server.setServerDetails({
+    id: 'stage-server', name: 'Stage fixture', createdAt: 1, maxUsers: 10, voiceStates: {},
+    channels: [channel], members: [local, remote], knownMembers: [local, remote], roles: [], userRoles: [],
+    myPermissions: 2147483647, ownerId: local.id,
+  }, local);
+  settings.screenShareTelemetryEnabled = false;
+  voice.currentVoiceChannelId = channel.id;
+  voice.isMuted = voice.isDeafened = voice.serverMuted = voice.serverDeafened = false;
+  voice.isCameraOn = false;
+  voice.setScreenSharing(false);
+  participants.setUsers([local, remote]);
+  for (const user of [local, remote]) {
+    participants.updateVoiceState({
+      userId: user.id, sessionId: user.sessionId, channelId: channel.id, isSpeaking: false,
+      isMuted: false, isDeafened: false, isCameraOn: user === remote, isScreenSharing: user === remote,
+      screenShareIds: user === remote ? ['remote-share', 'remote-share-two'] : [],
+    });
+  }
+  let capturing = false;
+  let overlayActive = false;
+  const originalCapturing = screenAudioService.getIsCapturing;
+  const originalOverlayActive = overlayBridgeService.isActive;
+  const originalOverlayOpen = overlayConfigModal.open;
+  const originalSoundboardOpen = soundboardModal.open;
+  const actions = { camera: 0, picker: 0, overlay: 0, soundboard: 0, stop: 0, leave: 0, fullscreen: 0 };
+  screenAudioService.getIsCapturing = () => capturing;
+  overlayBridgeService.isActive = () => overlayActive;
+  overlayConfigModal.open = () => { actions.overlay++; };
+  soundboardModal.open = () => { actions.soundboard++; };
+  const offPicker = appEvents.on('modal.open_screenshare_picker', () => {
+    actions.picker++;
+    appEvents.emit('modal.screenshare_picker_opened');
+  });
+  const stage = new VoiceStageView(root);
+  const codecStats = new Map([
+    ['first-capability', { type: 'codec', mimeType: 'video/AV1' }],
+    ['actual-video', { type: 'codec', mimeType: 'video/H264' }],
+    ['audio', { type: 'codec', mimeType: 'audio/opus' }],
+    ['repair', { type: 'codec', mimeType: 'video/rtx' }],
+    ['invalid', { type: 'codec', mimeType: 42 }],
+  ]);
+  check(stage.getCodecName(codecStats) === null, 'Absent RTP codecId must not turn the first capability into a reported codec');
+  check(stage.getCodecName(codecStats, 'missing') === null, 'Missing codec reports stay unknown instead of guessing AV1');
+  check(stage.getCodecName(codecStats, 'actual-video') === 'H264', 'Stage codec comes from the exact RTP reference');
+  check(stage.getCodecName(codecStats, 'first-capability') === 'AV1', 'Referenced AV1 remains visible when it is the actual RTP codec');
+  for (const id of ['audio', 'repair', 'invalid']) {
+    check(stage.getCodecName(codecStats, id) === null, `${id}: non-video, repair and malformed codecs are not reported as screen encoding`);
+  }
+  // Exercise the actual button wiring without physical media, native windows or leaving a real call.
+  stage.toggleCamera = async () => { actions.camera++; };
+  stage.handleStopStreaming = async () => { actions.stop++; };
+  stage.leaveVoice = () => { actions.leave++; };
+  stage.toggleVideoFullscreen = async () => { actions.fullscreen++; };
+  stage.setChannel(channel.id);
+  await document.fonts.ready;
+  await delay(200);
+  const button = (selector) => root.querySelector(selector);
+  const glyph = (control) => control.querySelector(':scope > .audio-state-icon, :scope > .material-symbols-outlined');
+  const animations = (control) => glyph(control).getAnimations();
+  const enter = (control) => control.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' }));
+  const leave = (control) => control.dispatchEvent(new PointerEvent('pointerleave', { pointerType: 'mouse' }));
+  const buttons = () => [...root.querySelectorAll('.voice-stage-container button')];
+  const motionCount = () => buttons().reduce((count, control) => count + animations(control).length, 0);
+  const rect = (element) => JSON.stringify(element.getBoundingClientRect().toJSON());
+  check(motionCount() === 0, 'Actual stage has no autoplay motion');
+  check(button('.stage-watch-btn') && button('.stage-fullscreen-btn'), 'Actual participant media controls render');
+  check(getComputedStyle(button('.screen-audio-badge')).display === 'none', 'Inactive audio badge is hidden');
+
+  window.stageSmoke = {
+    keyboardTarget() {
+      button('#stage-btn-mic').focus();
+    },
+    async keyboardFocused() {
+      const control = button('#stage-btn-deafen');
+      for (let attempt = 0; attempt < 100 && document.activeElement !== control; attempt++) await delay(20);
+      check(document.activeElement === control && control.matches(':focus-visible'), 'Native Tab reaches stage controls');
+      check(animations(control).length === 1, 'Keyboard focus receives semantic stage motion');
+      control.blur();
+      check(animations(control).length === 0, 'Keyboard blur cancels motion');
+    },
+    async shareAndWatch() {
+      voice.isCameraOn = true;
+      capturing = true;
+      overlayActive = true;
+      voice.addScreenShare('local-share');
+      await delay(200);
+      check(button('#stage-btn-stop-share').style.display === 'inline-flex'
+        && button('#btn-stage-quick-stop'), 'Sharing exposes both real stop actions');
+      check(!button('.screen-audio-badge').hidden, 'Active screen audio badge is retained');
+      const watch = button('.stage-watch-btn');
+      watch.click();
+      // The deliberate click can outlive a fixed delay on a slow compositor.
+      await Promise.all((glyph(watch)?.getAnimations() ?? []).map(animation =>
+        animation.finished.catch(error => { if (error.name !== 'AbortError') throw error; })));
+      await delay();
+      check(!!button('.stage-focused-main .stage-volume-btn')
+        && !!button('.stage-mini-card .stage-watch-btn'), 'Watching binds focused controls and remaining mini-card actions');
+      check(motionCount() === 0, 'New participant and banner buttons do not autoplay: ' + JSON.stringify(
+        buttons().filter(control => animations(control).length).map(control => ({
+          id: control.id, classes: control.className, hovered: control.matches(':hover'),
+          focused: control.matches(':focus-visible'),
+          animations: animations(control).map(animation => ({ state: animation.playState, time: animation.currentTime })),
+        }))));
+    },
+    async normal() {
+      for (const selector of ['#stage-btn-camera', '#stage-btn-screen', '#stage-btn-overlay']) {
+        const control = button(selector);
+        const icon = glyph(control);
+        enter(control);
+        const hover = animations(control)[0];
+        const decoration = control.querySelector('.control-motion-decoration');
+        appEvents.emit('voice.state_updated');
+        appEvents.emit('overlay.state_changed');
+        await delay();
+        check(glyph(control) === icon && animations(control)[0] === hover
+          && control.querySelector('.control-motion-decoration') === decoration,
+        `${selector}: unchanged state preserves the glyph and live hover`);
+        leave(control);
+      }
+      const screen = button('#stage-btn-screen');
+      const badge = screen.querySelector('.screen-audio-badge');
+      const badgeBounds = rect(badge);
+      enter(screen);
+      check(!!screen.querySelector('[data-stop]') && !screen.querySelector('[data-arrow]'),
+        'Active stage screen motion uses a stop symbol, never a start-share arrow');
+      check(rect(badge) === badgeBounds && badge.getAnimations().length === 0,
+        'Screen-audio status badge stays stationary');
+      leave(screen);
+      enter(button('#stage-btn-camera'));
+      check(glyph(button('#stage-btn-camera')).textContent === 'videocam_off'
+        && getComputedStyle(glyph(button('#stage-btn-camera'))).opacity === '1',
+      'Camera artwork preserves the visible stop-camera symbol');
+
+      for (const [flag, selector] of [['serverMuted', '#stage-btn-mic'], ['serverDeafened', '#stage-btn-deafen']]) {
+        voice[flag] = true;
+        appEvents.emit('voice.state_updated');
+        await delay();
+        const control = button(selector);
+        enter(control);
+        check(!control.querySelector('[data-audio-block]').hidden
+          && getComputedStyle(glyph(control)).opacity === '1', `${flag}: hover keeps the administrative restriction visible`);
+        voice[flag] = false;
+        appEvents.emit('voice.state_updated');
+        await delay();
+      }
+      for (const [selector, flag] of [['#stage-btn-mic', 'isMuted'], ['#stage-btn-deafen', 'isDeafened']]) {
+        const before = voice[flag];
+        button(selector).click();
+        await delay();
+        check(voice[flag] !== before && animations(button(selector)).length === 1,
+          `${selector}: real toggle still works with a single feedback animation`);
+        button(selector).click();
+        await delay();
+      }
+      for (const [selector, action] of [
+        ['#stage-btn-camera', 'camera'], ['#stage-btn-screen', 'picker'], ['#stage-btn-overlay', 'overlay'],
+        ['#stage-btn-soundboard', 'soundboard'], ['#stage-btn-leave', 'leave'],
+        ['#stage-btn-stop-share', 'stop'], ['#btn-stage-quick-stop', 'stop'], ['.stage-fullscreen-btn', 'fullscreen'],
+      ]) {
+        const control = button(selector);
+        const before = actions[action];
+        const bounds = rect(control);
+        enter(control);
+        control.click();
+        await delay();
+        check(actions[action] === before + 1 && animations(control).length <= 1, `${selector}: dispatches the original action once`);
+        check(rect(control) === bounds, `${selector}: clicking keeps the hit box stationary`);
+      }
+      const volume = button('.stage-volume-btn');
+      volume.click();
+      await delay();
+      enter(volume);
+      check(glyph(volume).textContent === 'volume_off' && volume.querySelector('[data-mute]')
+        && !volume.querySelector('[data-wave-inner]'), 'Muted screen audio animates a mute cross, never sound waves');
+      check(!!button('.stage-focused-main'), 'Volume and fullscreen actions do not toggle tile focus');
+      volume.click();
+      await delay();
+      enter(volume);
+      check(!!volume.querySelector('[data-wave-inner]'), 'Unmuting restores animated sound waves');
+
+      const camera = button('#stage-btn-camera');
+      camera.disabled = true;
+      await delay();
+      enter(camera);
+      check(animations(camera).length === 0 && !camera.querySelector('.control-motion-decoration'),
+        'Loading or disabled stage controls do not animate');
+      camera.disabled = false;
+      const stop = button('#stage-btn-stop-share');
+      enter(stop);
+      voice.isCameraOn = false;
+      capturing = false;
+      voice.setScreenSharing(false);
+      await delay();
+      check(animations(stop).length === 0 && !stop.querySelector('.control-motion-decoration'),
+        'Hiding the stop button cancels its motion');
+      check(!button('#btn-stage-quick-stop'), 'Broadcast banner is removed when sharing stops');
+      check(getComputedStyle(badge).display === 'none', 'Screen-audio badge hides without replacing the main glyph');
+
+      button('.stage-stopwatch-btn').click();
+      await delay();
+      check(!!button('.stage-watch-btn') && !button('.stage-volume-btn'), 'Stop watching restores the gated grid');
+      button('.stage-watch-btn').click();
+      await delay();
+      for (let iteration = 0; iteration < 3; iteration++) {
+        const oldCard = button('.stage-focused-main');
+        const oldButton = oldCard.querySelector('.stage-volume-btn');
+        enter(oldButton);
+        const oldHover = animations(oldButton)[0];
+        stage.renderParticipants();
+        await delay();
+        check(oldHover.playState === 'idle' && !oldButton.querySelector('.control-motion-decoration'),
+          'Replacing participant cards cancels their animations');
+        document.body.append(oldCard);
+        enter(oldButton);
+        oldButton.classList.toggle('active');
+        await delay();
+        check(animations(oldButton).length === 0, 'Removed card listeners and observers stay detached on connected DOM');
+        oldCard.remove();
+        enter(button('.stage-volume-btn'));
+        check(animations(button('.stage-volume-btn')).length === 1, 'Replacement cards bind exactly once');
+      }
+      for (const control of buttons().filter((control) => control.style.display !== 'none')) {
+        enter(control);
+        const animation = animations(control)[0];
+        check(animation && animation.effect.getTiming().iterations === 1
+          && animation.effect.getTiming().duration > 480, 'Every visible stage control has a finite, semantic hover');
+      }
+      await delay(950);
+      check(motionCount() === 0 && !root.querySelector('.control-motion-decoration'), 'All stage hovers finish and remove artwork');
+      for (const selector of ['#stage-btn-overlay', '.stage-volume-btn']) {
+        const control = button(selector);
+        enter(control);
+        animations(control)[0].pause();
+      }
+    },
+    async reduced() {
+      await delay(50);
+      check(matchMedia('(prefers-reduced-motion: reduce)').matches && motionCount() === 0,
+        'Runtime reduced motion cancels stage and participant animations');
+      check(!root.querySelector('.control-motion-decoration'), 'Reduced motion removes stage artwork');
+      for (const control of buttons()) {
+        enter(control);
+        control.focus();
+        control.classList.toggle('active');
+        await delay();
+        check(animations(control).length === 0 && getComputedStyle(control).transitionDuration === '0s',
+          'Reduced motion suppresses stage hover, focus, state and CSS feedback');
+        control.blur();
+      }
+      button('#stage-btn-overlay').click();
+      await delay();
+      check(motionCount() === 0 && actions.overlay === 2, 'Reduced motion preserves actions without click animation');
+    },
+    async cleanup() {
+      await delay(50);
+      check(!matchMedia('(prefers-reduced-motion: reduce)').matches && motionCount() === 0,
+        'Re-enabling motion does not autoplay the stage');
+      for (let iteration = 0; iteration < 3; iteration++) {
+        const oldStage = button('.voice-stage-container');
+        const oldButton = button('#stage-btn-overlay');
+        enter(oldButton);
+        stage.render();
+        check(animations(oldButton).length === 0, 'Stage re-render cancels old motion synchronously');
+        document.body.append(oldStage);
+        enter(oldButton);
+        oldButton.classList.toggle('active');
+        await delay();
+        check(animations(oldButton).length === 0, 'Stage re-render removes old listeners and observer');
+        oldStage.remove();
+        enter(button('#stage-btn-overlay'));
+        check(animations(button('#stage-btn-overlay')).length === 1, 'Stage re-render binds one fresh motion controller');
+      }
+      const control = button('#stage-btn-overlay');
+      stage.destroy();
+      check(animations(control).length === 0 && !root.querySelector('.control-motion-decoration'),
+        'Destroy cancels all stage artwork');
+      enter(control);
+      control.classList.toggle('active');
+      await delay();
+      check(animations(control).length === 0, 'Destroy removes motion listeners and state observer');
+      offPicker();
+      screenAudioService.getIsCapturing = originalCapturing;
+      overlayBridgeService.isActive = originalOverlayActive;
+      overlayConfigModal.open = originalOverlayOpen;
+      soundboardModal.open = originalSoundboardOpen;
       return checks;
     },
   };

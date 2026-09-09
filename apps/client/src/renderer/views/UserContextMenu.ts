@@ -6,7 +6,7 @@ import { settingsStore } from '../stores/settingsStore';
 import { serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { voiceStore } from '../stores/voiceStore';
-import { toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
+import { getVoiceControlModeration, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
 import { webRtcManager } from '../core/WebRtcManager';
 import { appEvents } from '../core/EventBus';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
@@ -30,8 +30,7 @@ export class UserContextMenu {
     const avatarSrc = getAvatarUrl(user.avatarUrl);
     // Sem foto o que se abriria é o logo padrão, então o olho não aparece (#406).
     const hasAvatar = !!user.avatarUrl;
-    // Voice moderation addresses a connection, not a person: prefer the exact
-    // session the menu was opened from, else any session of theirs in voice (#309).
+    // Select a live connection for the action; mute/deafen applies to its user on this server.
     const targetState = this.resolveVoiceTarget(user)?.voiceState;
     const voiceChannels = (serverStore.serverDetails?.channels ?? []).filter((channel) => channel.type === 'VOICE');
     const roleIds = new Set(serverStore.getUserRoleIds(user.id));
@@ -294,13 +293,12 @@ export class UserContextMenu {
     if (mute) {
       mute.textContent = t(voiceStore.isMuted ? 'stage.unmuteMic' : 'stage.muteMic');
       mute.setAttribute('aria-pressed', String(voiceStore.isMuted));
-      mute.title = voiceStore.serverDeafened ? t('permissions.serverDeafened')
-        : voiceStore.serverMuted ? t('permissions.serverMuted') : mute.textContent;
+      mute.title = getVoiceControlModeration().muteReason ?? mute.textContent;
     }
     if (deafen) {
       deafen.textContent = t(voiceStore.isDeafened ? 'main.undeafen' : 'main.deafen');
       deafen.setAttribute('aria-pressed', String(voiceStore.isDeafened));
-      deafen.title = voiceStore.serverDeafened ? t('permissions.serverDeafened') : deafen.textContent;
+      deafen.title = getVoiceControlModeration().deafenReason ?? deafen.textContent;
     }
   }
 

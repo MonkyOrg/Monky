@@ -15,8 +15,9 @@ import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
 import { participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
-import { toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
+import { getVoiceControlModeration, isViewingCallServer, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
 import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
+import { bindStageControlsMotion } from './FooterControlsMotion';
 import { showAlert, showConfirm } from './Dialog';
 import { userContextMenu } from './UserContextMenu';
 import { setButtonLoading, isButtonLoading } from '../utils/buttonLoading';
@@ -228,6 +229,7 @@ export class VoiceStageView {
           </button>
           <button id="stage-btn-screen" class="btn btn-icon ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${voiceStore.isScreenSharing ? t('stage.stopScreenShare') : t('main.shareScreen')}">
             <span class="material-symbols-outlined">${voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share'}</span>
+            <span class="material-symbols-outlined screen-audio-badge" style="font-size: 12px; position: absolute; bottom: 2px; right: 2px; color: var(--success);" hidden>volume_up</span>
           </button>
           <button id="stage-btn-overlay" class="btn btn-icon ${overlayBridgeService.isActive() ? 'broadcasting-pulse active' : ''}" title="${t('overlay.openOverlay')}">
             <span class="material-symbols-outlined">picture_in_picture_alt</span>
@@ -255,27 +257,29 @@ export class VoiceStageView {
   }
 
   public updateControlsUI(): void {
+    const moderation = getVoiceControlModeration();
     const btnMic = document.getElementById('stage-btn-mic');
     if (btnMic) {
       btnMic.className = `btn btn-icon ${voiceStore.getEffectiveMuted() ? 'danger-active' : ''}`;
-      const blocked = voiceStore.serverMuted || voiceStore.serverDeafened;
-      btnMic.title = voiceStore.serverDeafened ? t('permissions.serverDeafened') : voiceStore.serverMuted ? t('permissions.serverMuted')
-        : voiceStore.getEffectiveMuted() ? t('stage.unmuteMic') : t('stage.muteMic');
+      const blocked = moderation.serverMuted || moderation.serverDeafened;
+      btnMic.title = moderation.muteReason ?? (voiceStore.getEffectiveMuted() ? t('stage.unmuteMic') : t('stage.muteMic'));
       updateAudioStateIcon(btnMic, blocked ? 'mic' : voiceStore.getEffectiveMuted() ? 'mic_off' : 'mic', blocked);
     }
 
     const btnDeafen = document.getElementById('stage-btn-deafen');
     if (btnDeafen) {
       btnDeafen.className = `btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}`;
-      btnDeafen.title = voiceStore.serverDeafened ? t('permissions.serverDeafened') : voiceStore.getEffectiveDeafened() ? t('stage.undeafen') : t('stage.deafen');
-      updateAudioStateIcon(btnDeafen, voiceStore.serverDeafened ? 'headphones' : voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones', voiceStore.serverDeafened);
+      btnDeafen.title = moderation.deafenReason ?? (voiceStore.getEffectiveDeafened() ? t('stage.undeafen') : t('stage.deafen'));
+      updateAudioStateIcon(btnDeafen, moderation.serverDeafened ? 'headphones' : voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones', moderation.serverDeafened);
     }
 
     const btnCam = document.getElementById('stage-btn-camera');
     if (btnCam) {
       btnCam.className = `btn btn-icon ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}`;
       btnCam.title = voiceStore.isCameraOn ? t('stage.cameraOff') : t('stage.cameraOn');
-      btnCam.innerHTML = `<span class="material-symbols-outlined">${voiceStore.isCameraOn ? 'videocam_off' : 'videocam'}</span>`;
+      const icon = btnCam.querySelector(':scope > .material-symbols-outlined');
+      const name = voiceStore.isCameraOn ? 'videocam_off' : 'videocam';
+      if (icon && icon.textContent !== name) icon.textContent = name;
     }
 
     const btnScreen = document.getElementById('stage-btn-screen');
@@ -285,10 +289,11 @@ export class VoiceStageView {
       btnScreen.title = voiceStore.isScreenSharing
         ? (hasScreenAudio ? t('stage.stopScreenShareWithAudio') : t('stage.stopScreenShare'))
         : t('main.shareScreen');
-      btnScreen.innerHTML = `
-        <span class="material-symbols-outlined">${voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share'}</span>
-        ${hasScreenAudio ? '<span class="material-symbols-outlined screen-audio-badge" style="font-size: 12px; position: absolute; bottom: 2px; right: 2px; color: var(--success);">volume_up</span>' : ''}
-      `;
+      const icon = btnScreen.querySelector(':scope > .material-symbols-outlined');
+      const name = voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share';
+      if (icon && icon.textContent !== name) icon.textContent = name;
+      const badge = btnScreen.querySelector<HTMLElement>('.screen-audio-badge');
+      if (badge) badge.hidden = !hasScreenAudio;
     }
 
     const btnOverlay = document.getElementById('stage-btn-overlay');
@@ -296,7 +301,6 @@ export class VoiceStageView {
       const isOverlayActive = overlayBridgeService.isActive();
       btnOverlay.className = `btn btn-icon ${isOverlayActive ? 'broadcasting-pulse active' : ''}`;
       btnOverlay.title = isOverlayActive ? t('overlay.overlayActive') : t('overlay.openOverlay');
-      btnOverlay.innerHTML = `<span class="material-symbols-outlined">picture_in_picture_alt</span>`;
     }
 
     const btnStopShare = document.getElementById('stage-btn-stop-share') as HTMLButtonElement | null;
@@ -907,12 +911,13 @@ export class VoiceStageView {
   private renderCardContent(tile: StageTile, isFocused: boolean = false, isMini: boolean = false): string {
     const p = tile.p;
     const isLocal = serverStore.isMySession(p.user.sessionId);
+    const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
     const isCamOn = isLocal ? voiceStore.isCameraOn : (p.voiceState?.isCameraOn ?? false);
     const isScreenOn = isLocal ? voiceStore.isScreenSharing : (p.voiceState?.isScreenSharing ?? false);
-    const isServerMuted = isLocal ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
-    const isServerDeafened = isLocal ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
-    const isSelfMuted = isLocal ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
-    const isSelfDeafened = isLocal ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
+    const isServerMuted = isLocalCall ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
+    const isServerDeafened = isLocalCall ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
+    const isSelfMuted = isLocalCall ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
+    const isSelfDeafened = isLocalCall ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
     const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
     const { isPeerFailed, isConnecting, isRelayed } = participantConnectionIndicators(p, isSfu, isLocal);
     const avatarSrc = getAvatarUrl(p.user.avatarUrl);
@@ -1320,23 +1325,14 @@ export class VoiceStageView {
   }
 
   private getCodecName(stats: RTCStatsReport, codecId?: string): string | null {
-    if (codecId) {
-      const codecReport = stats.get(codecId) as any;
-      const mimeType = typeof codecReport?.mimeType === 'string' ? codecReport.mimeType : '';
-      if (mimeType) {
-        const parts = mimeType.split('/');
-        return parts[parts.length - 1] || mimeType;
-      }
+    const report: unknown = codecId ? stats.get(codecId) : undefined;
+    if (!report || typeof report !== 'object' || !('type' in report) || report.type !== 'codec'
+      || !('mimeType' in report) || typeof report.mimeType !== 'string') {
+      return null;
     }
-    // Fallback: search for codec report in stats
-    let fallbackCodec: string | null = null;
-    stats.forEach((report: any) => {
-      if (!fallbackCodec && report.type === 'codec' && typeof report.mimeType === 'string' && report.mimeType.toLowerCase().startsWith('video/')) {
-        const parts = report.mimeType.split('/');
-        fallbackCodec = parts[parts.length - 1] || report.mimeType;
-      }
-    });
-    return fallbackCodec;
+    const codec = /^video\/([^/]+)$/i.exec(report.mimeType)?.[1];
+    // Capability entries and repair codecs do not identify the encoded video.
+    return codec && !['rtx', 'red', 'ulpfec', 'flexfec-03'].includes(codec.toLowerCase()) ? codec : null;
   }
 
   private computeBitrateKbps(key: string, bytes: number): number | null {
@@ -1530,6 +1526,7 @@ export class VoiceStageView {
   }
 
   private attachEvents(): void {
+    this.unbindEvents.push(bindStageControlsMotion(this.container));
     const btnMic = document.getElementById('stage-btn-mic');
     const btnDeafen = document.getElementById('stage-btn-deafen');
     const btnCam = document.getElementById('stage-btn-camera');

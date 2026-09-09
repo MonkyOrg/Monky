@@ -65,9 +65,10 @@ if (!process.versions.electron) {
 
 async function runMicrophoneStateSmoke() {
   const [{ audioProcessor: audio }, { voiceStore: voice, VoiceStore }, { settingsStore: settings },
-    { appEvents }, routing, { soundEffects }] = await Promise.all([
+    { appEvents }, routing, { soundEffects }, controls] = await Promise.all([
     import('/core/AudioProcessor.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/core/EventBus.ts'), import('/core/sessionRouting.ts'), import('/core/SoundEffects.ts'),
+    import('/core/voiceControls.ts'),
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
@@ -80,7 +81,8 @@ async function runMicrophoneStateSmoke() {
   const source = input.createMediaStreamDestination();
   // Real browser MediaStreamTracks, but no physical capture, speakers or native key injection.
   navigator.mediaDevices.getUserMedia = async () => source.stream.clone();
-  soundEffects.playPttTone = () => {};
+  let tones = 0;
+  soundEffects.playPttTone = () => { tones++; };
   voice.isMuted = false;
   voice.isDeafened = false;
   voice.serverMuted = false;
@@ -92,8 +94,19 @@ async function runMicrophoneStateSmoke() {
   audio.setDeafened(false);
   let notifications = 0;
   const off = appEvents.on('voice.microphone_updated', () => { notifications++; });
+  const offSpeaking = appEvents.on('local.speaking', controls.updateLocalSpeaking);
   try {
     state(false, false, 'no microphone');
+    settings.inputMode = 'push_to_talk';
+    appEvents.emit('settings.updated');
+    audio.handlePttState(true);
+    check(!voice.isSpeaking && !voice.pttPressed && !audio.getLocalAudioStream(),
+      'PTT outside a call must not activate speaking or the held-key indicator');
+    check(tones === 0, 'PTT outside a call does not play a transmission cue');
+    audio.handlePttState(false);
+    settings.inputMode = 'voice_activity';
+    appEvents.emit('settings.updated');
+    voice.setChannel('microphone-state-fixture');
     await audio.startMicrophone();
     state(true, false, 'voice activation opens live tracks even in silence');
     const before = notifications;
@@ -103,12 +116,30 @@ async function runMicrophoneStateSmoke() {
     voice.setSpeaking(true);
     voice.setSpeaking(false);
     state(true, false, 'VAD does not control microphone availability');
+    let samples = 0;
+    audio.analyser.getByteFrequencyData = (buffer) => { samples++; buffer.fill(100); };
+    await delay(90);
+    check(voice.isSpeaking, 'audible voice activates speaking in an unmuted live call');
+    voice.setChannel(null);
+    state(false, false, 'leaving the channel immediately closes the call microphone');
+    check(!voice.isSpeaking && audio.getInputLevel() === -1, 'leaving clears speech and disables call-level readings');
+    const outsideSamples = samples;
+    appEvents.emit('local.speaking', true);
+    await delay(90);
+    check(!voice.isSpeaking && samples === outsideSamples, 'late speech events and analyser frames cannot activate an outside-call indicator');
+    voice.setChannel('microphone-state-fixture');
+    await delay(90);
+    check(voice.isSpeaking, 'returning to a valid voice-activity call resumes speech detection');
+    audio.setMuted(true);
+    check(!voice.isSpeaking, 'muting immediately clears active VAD without waiting for its next frame');
+    audio.setMuted(false);
 
     settings.inputMode = 'push_to_talk';
     appEvents.emit('settings.updated');
     state(false, false, 'PTT starts closed');
     audio.handlePttState(true);
     state(true, true, 'PTT press opens input and output tracks');
+    check(voice.isSpeaking, 'PTT speech becomes active only after the media gate opens');
     check(audio.rawMicStream.getAudioTracks().every((track) => track.enabled), 'raw input enabled');
     check(audio.getLocalAudioStream().getAudioTracks().every((track) => track.enabled), 'output enabled');
     audio.handlePttState(false);
@@ -118,6 +149,18 @@ async function runMicrophoneStateSmoke() {
     check(audio.pttReleaseTimeout === tail, 'duplicate native/window releases do not extend tail');
     await delay(120);
     state(false, false, 'release delay closes tracks');
+    check(!voice.isSpeaking, 'ending the PTT release tail also ends speaking');
+    audio.handlePttState(true);
+    audio.handlePttState(false);
+    voice.setChannel(null);
+    check(!voice.isSpeaking && audio.pttReleaseTimeout === null, 'leaving during a PTT tail immediately clears speech and cancels the tail');
+    const stoppedTones = tones;
+    audio.handlePttState(true);
+    await delay(120);
+    state(false, false, 'PTT cannot reopen a departed channel');
+    check(tones === stoppedTones, 'outside-call input cannot revive PTT audio cues');
+    voice.setChannel('microphone-state-fixture');
+    state(false, false, 'rejoining does not inherit a key held outside the call');
 
     audio.handlePttState(true);
     audio.handlePttState(false);
@@ -163,6 +206,8 @@ async function runMicrophoneStateSmoke() {
     audio.handlePttState(true);
     audio.stopMicrophone();
     state(false, false, 'stopping held PTT resets UI');
+    audio.handlePttState(true);
+    check(!voice.isSpeaking && !voice.pttPressed, 'PTT without live capture stays inactive even with a selected channel');
     await audio.startMicrophone();
     state(false, false, 'restarting never restores held gate');
 
@@ -189,6 +234,9 @@ async function runMicrophoneStateSmoke() {
       const starting = audio.startMicrophone();
       const result = starting.then(() => null, (error) => error);
       await setupPaused;
+      audio.handlePttState(true);
+      check(!voice.isSpeaking && !voice.pttPressed && !voice.microphoneOpen,
+        'PTT stays inactive while microphone graph initialization is pending');
       audio.stopMicrophone();
       resumeSetup();
       const error = await result;
@@ -200,7 +248,6 @@ async function runMicrophoneStateSmoke() {
       audio.setupAudioGraph = setupAudioGraph;
     }
 
-    const controls = await import('/core/voiceControls.ts');
     const { networkClient } = await import('/core/NetworkClient.ts');
     const originalSend = networkClient.send;
     const originalPlay = soundEffects.play;
@@ -217,6 +264,7 @@ async function runMicrophoneStateSmoke() {
       controls.toggleMicrophoneMute();
       check(voice.isMuted && settings.isMuted, 'microphone mute is saved outside a call');
       check(sent.length === 0 && !audio.getLocalAudioStream(), 'pre-mute neither signals a server nor starts capture');
+      voice.setChannel('destroy-fixture');
       await audio.startMicrophone();
       state(false, false, 'microphone starts closed when muted before joining');
       check(audio.rawMicStream.getAudioTracks().every(track => !track.enabled), 'pre-mute also disables the raw input before it can be published');
@@ -285,12 +333,32 @@ async function runMicrophoneStateSmoke() {
     routing.setForegroundContext(true);
     await Promise.resolve();
     check(foreground.length === 1 && foreground[0], 'deferred event reaches foreground UI');
+    const speechEvents = [];
+    const offSpeechRouting = appEvents.on('voice.speaking_changed', (speaking) => {
+      speechEvents.push({ speaking, foreground: routing.isForegroundEvent() });
+    });
+    store.setSpeaking(true);
+    check(!store.isSpeaking && speechEvents.length === 0, 'store rejects speech without a voice channel even with stale open-microphone state');
+    store.currentVoiceChannelId = 'store-speaking-fixture';
+    routing.setForegroundContext(false);
+    store.setSpeaking(true);
+    check(speechEvents.length === 0, 'global speaking notifications are deferred outside background routing');
+    routing.setForegroundContext(true);
+    await Promise.resolve();
+    check(speechEvents.length === 1 && speechEvents[0].speaking && speechEvents[0].foreground,
+      'speaking notifications reach only the restored foreground context');
+    store.setServerMuted(true);
+    check(!store.isSpeaking && speechEvents.at(-1).speaking === false, 'administrative mute clears speaking immediately');
+    store.setSpeaking(true);
+    check(!store.isSpeaking, 'late speech cannot override administrative mute');
+    offSpeechRouting();
     store.reset();
     check(!store.microphoneOpen && !store.pttPressed, 'store reset clears ephemeral state');
     offRouting();
     return checks;
   } finally {
     off();
+    offSpeaking();
     routing.setForegroundContext(true);
     audio.destroy();
     source.stream.getTracks().forEach((track) => track.stop());

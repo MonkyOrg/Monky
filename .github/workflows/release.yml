@@ -291,15 +291,20 @@ jobs:
           PREV_TAG="${{ needs.version.outputs.prev_tag }}"
           echo "Previous tag: ${PREV_TAG:-<none>}"
 
-          # scripts/generate-changelog.js turns the commit range into the
-          # friendly, grouped notes (Novidades / Correções / Outros) shown both
-          # on the release and inside the client (#547). It reads the curated
-          # "#NNN:" lines from commit bodies, falls back to bullets then the
-          # subject, and appends the comparison link.
+          # Technical notes keep commit details, issue references and comparison.
+          # Bilingual release-notes/*.json fragments added in the same range
+          # form a separate hidden payload, used only by the client (#616).
+          # The generator includes the Changelog heading after that payload,
+          # keeping older clients from rendering the JSON.
           NOTES=$(node scripts/generate-changelog.js \
             --prev "$PREV_TAG" \
             --version "${{ needs.version.outputs.version }}" \
             --repo "$GITHUB_REPOSITORY")
+
+          # Promoting a beta from before #616 checks out the old generator.
+          if ! grep -q '^### Changelog$' <<< "$NOTES"; then
+            NOTES=$(printf '### Changelog\n%s' "$NOTES")
+          fi
 
           {
             echo "notes<<CHANGELOG_EOF"
@@ -377,7 +382,6 @@ jobs:
               checksums-sha256.txt
             ```
 
-            ### Changelog
             ${{ steps.changelog.outputs.notes }}
           draft: false
           prerelease: ${{ needs.version.outputs.prerelease }}

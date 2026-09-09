@@ -1,14 +1,32 @@
-import type { AuthSuccessPayload } from '@monky/shared';
+import type { AuthSuccessPayload, VoiceReconnectPayload, VoiceUserJoinedPayload } from '@monky/shared';
 import { MessageType } from '@monky/shared';
-import { networkClient, type NetworkClient } from './NetworkClient';
+import { networkClient, RequestTimeoutError, type NetworkClient } from './NetworkClient';
 import { sessionManager } from './SessionManager';
 import { webRtcManager } from './WebRtcManager';
 import { voiceStore } from '../stores/voiceStore';
 import { clientLog } from './ClientLogService';
+import { audioProcessor } from './AudioProcessor';
+import { appEvents } from './EventBus';
+import { t } from '../i18n';
+import { videoService } from './VideoService';
+import { screenAudioService } from './ScreenAudioService';
 
 interface ClientIdentity {
   publicKey: string;
   clientId: string;
+}
+
+interface VoiceReconnectAdmission {
+  transitionId: string;
+  isCurrent: () => boolean;
+}
+
+let voiceAdmissionGeneration = 0;
+const pendingVoiceAdmissions = new WeakMap<NetworkClient, Promise<void>>();
+let activeVoiceAdmission: { generation: number; sessionKey: string; channelId: string } | null = null;
+
+export function isVoiceAdmissionPending(sessionKey: string, channelId: string): boolean {
+  return activeVoiceAdmission?.sessionKey === sessionKey && activeVoiceAdmission.channelId === channelId;
 }
 
 /**
@@ -61,33 +79,195 @@ export function callClient(): NetworkClient {
 }
 
 /**
- * Rejoins the call on a server the user is not looking at.
- *
- * `MainView.rejoinVoiceChannel` awaits the microphone before sending anything,
- * and everything after that await runs with the globals already restored to the
- * visible server — which would move the call to the wrong server (#400). This
- * path touches no shared global: it talks to the session it was given.
+ * Rejoins a captured server session, even when another server is on screen.
+ * Admission and moderation must be confirmed before acquiring/publishing the
+ * microphone; async continuations never resolve the visible server's proxies.
  */
-export async function rejoinCallOnSession(sessionKey: string, channelId: string): Promise<void> {
-  clientLog.info('CONNECTION', `Rejoining call on session ${sessionKey}`, { channelId });
+export async function rejoinCallOnSession(
+  sessionKey: string,
+  channelId: string,
+  reconnect?: VoiceReconnectAdmission
+): Promise<void> {
+  if (!reconnect && voiceStore.voiceSessionKey !== sessionKey) return;
+  try {
+    await joinCallOnSession(sessionKey, channelId, reconnect);
+  } catch (error) {
+    if (reconnect) throw error;
+    if (error instanceof Error && error.name === 'AbortError') return;
+    appEvents.emit('voice.rejoin_failed', { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+/**
+ * Initial joins, moves and reconnects share one admission boundary. A requested
+ * channel is only an intention until its own correlated response is accepted.
+ */
+export async function joinCallOnSession(
+  sessionKey: string,
+  channelId: string,
+  reconnect?: VoiceReconnectAdmission
+): Promise<void> {
+  clientLog.info('CONNECTION', `Requesting voice admission on session ${sessionKey}`, { channelId });
   const session = sessionManager.get(sessionKey);
-  if (!session) return;
+  if (!session || session.client.getStatus() !== 'CONNECTED') throw new Error(t('voiceReconnect.unavailable'));
+  const mySessionId = session.serverStore.currentUser?.sessionId;
+  const myUserId = session.serverStore.currentUser?.id;
+  if (!mySessionId || !myUserId) throw new Error(t('voiceReconnect.invalidResponse'));
+  const cancelled = () => new DOMException('Voice admission was cancelled', 'AbortError');
+  if (reconnect && (!reconnect.isCurrent() || voiceStore.voiceSessionKey !== sessionKey
+    || voiceStore.currentVoiceChannelId !== channelId)) throw cancelled();
 
-  webRtcManager.closeAllPeers();
-  voiceStore.setChannel(channelId, sessionKey);
-  session.client.send(MessageType.VOICE_JOIN, {
-    channelId,
-    isMuted: voiceStore.isMuted,
-    isDeafened: voiceStore.isDeafened,
-  });
+  const previousKey = voiceStore.voiceSessionKey;
+  const previousChannelId = voiceStore.currentVoiceChannelId;
+  const changingChannel = previousKey !== sessionKey || previousChannelId !== channelId;
+  if (!reconnect) appEvents.emit('voice.join_requested');
+  const generation = ++voiceAdmissionGeneration;
+  const ownsSession = () => sessionManager.get(sessionKey) === session
+    && session.client.getStatus() === 'CONNECTED'
+    && session.serverStore.currentUser?.sessionId === mySessionId;
+  const isCurrent = () => generation === voiceAdmissionGeneration && ownsSession()
+    && voiceStore.voiceSessionKey === sessionKey
+    && voiceStore.currentVoiceChannelId === channelId
+    && (!reconnect || reconnect.isCurrent());
+  const assertCurrent = () => {
+    if (!isCurrent()) throw cancelled();
+  };
 
-  if (webRtcManager.isSfuMode()) {
-    await webRtcManager.initSfuForCurrentChannel();
-  } else {
-    for (const peer of session.participants.getInVoiceChannel(channelId)) {
-      if (session.serverStore.isMySession(peer.user.sessionId)) continue;
-      await webRtcManager.connectToPeer(peer.user.sessionId || peer.user.id, true);
+  // Stop the old physical input before clearing server A's restrictions for B.
+  // Store/UI/PTT updates cannot reopen an ended track, and incoming peer
+  // announcements cannot publish anything while the transports are suspended.
+  audioProcessor.setMuted(true);
+  audioProcessor.stopMicrophone();
+  webRtcManager.suspendForVoiceReconnect(true);
+  const stoppedScreenAudio = changingChannel ? screenAudioService.stop() : null;
+  if (changingChannel) {
+    videoService.stopScreenShare();
+    webRtcManager.clearLocalScreenTracks();
+    voiceStore.setScreenSharing(false);
+    if (previousKey && previousKey !== sessionKey && previousChannelId) {
+      sessionManager.get(previousKey)?.client.send(MessageType.VOICE_LEAVE, { channelId: previousChannelId });
     }
+  }
+  voiceStore.setChannel(channelId, sessionKey);
+  voiceStore.setConnectionHealth('connecting');
+  activeVoiceAdmission = { generation, sessionKey, channelId };
+
+  try {
+    if (stoppedScreenAudio) await stoppedScreenAudio;
+    assertCurrent();
+    // Two requests on one socket must not race the server's async admission.
+    // Other servers remain independent, and a superseded queued join never
+    // reaches the wire. Cleanup of a late admission precedes its successor.
+    const preceding = pendingVoiceAdmissions.get(session.client);
+    const admission = (async () => {
+      if (preceding) await preceding;
+      assertCurrent();
+      const payload = { channelId, isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened };
+      try {
+        const joined = await session.client.sendRequest<VoiceUserJoinedPayload>(
+          reconnect ? MessageType.VOICE_RECONNECT : MessageType.VOICE_JOIN,
+          reconnect ? { ...payload, transitionId: reconnect.transitionId } satisfies VoiceReconnectPayload : payload
+        );
+        assertCurrent();
+        if (joined.sessionId !== mySessionId || joined.userId !== myUserId || joined.channelId !== channelId
+          || joined.voiceState?.sessionId !== mySessionId || joined.voiceState.userId !== myUserId
+          || joined.voiceState.channelId !== channelId || typeof joined.voiceState.serverMuted !== 'boolean'
+          || typeof joined.voiceState.serverDeafened !== 'boolean' || !Array.isArray(joined.participants)) {
+          throw new Error(t('voiceReconnect.invalidResponse'));
+        }
+        return joined;
+      } catch (error) {
+        if (!isCurrent()) {
+          if (ownsSession()) session.client.send(MessageType.VOICE_LEAVE, { channelId });
+          throw cancelled();
+        }
+        if (error instanceof RequestTimeoutError) {
+          throw new Error(t(reconnect ? 'voiceReconnect.timeout' : 'voiceJoin.timeout'));
+        }
+        throw error;
+      }
+    })();
+    const settled = admission.then(() => {}, () => {});
+    pendingVoiceAdmissions.set(session.client, settled);
+    void settled.then(() => {
+      if (pendingVoiceAdmissions.get(session.client) === settled) pendingVoiceAdmissions.delete(session.client);
+    });
+    const joined = await admission;
+    assertCurrent();
+    if (joined.participants) session.participants.reconcileVoiceChannel(channelId, joined.participants);
+    session.participants.updateVoiceState({
+      ...joined.voiceState, isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,
+    });
+    voiceStore.setServerMuted(joined.voiceState.serverMuted);
+    voiceStore.setServerDeafened(joined.voiceState.serverDeafened);
+    if (joined.voiceState.isMuted !== voiceStore.isMuted || joined.voiceState.isDeafened !== voiceStore.isDeafened) {
+      session.client.send(MessageType.VOICE_STATE_UPDATE, {
+        isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,
+      });
+    }
+    audioProcessor.setMuted(voiceStore.getEffectiveMuted());
+    audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
+    webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
+    webRtcManager.setCurrentSessionId(mySessionId);
+
+    let audioTrack: MediaStreamTrack | null = null;
+    let microphoneError: Error | null = null;
+    try {
+      const stream = await audioProcessor.startMicrophone();
+      if (!isCurrent()) {
+        stream.getTracks().forEach((track) => track.stop());
+        assertCurrent();
+      }
+      audioTrack = stream.getAudioTracks()[0] ?? null;
+      if (!audioTrack || audioTrack.readyState !== 'live') throw new Error(t('voiceJoin.noAudioTrack'));
+    } catch (error) {
+      assertCurrent();
+      if (error instanceof Error && error.name === 'AbortError') {
+        // A device selection can supersede capture without cancelling admission.
+        audioTrack = audioProcessor.getLocalAudioStream()?.getAudioTracks().find(track => track.readyState === 'live') ?? null;
+      } else {
+        audioTrack = null;
+        audioProcessor.stopMicrophone();
+        microphoneError = error instanceof Error ? error : new Error(String(error));
+        clientLog.warn('AUDIO', 'Admitted to voice without a microphone', { error: microphoneError.message });
+      }
+    }
+    webRtcManager.resumeAfterVoiceReconnect();
+    await webRtcManager.setLocalAudioTrack(audioTrack);
+    assertCurrent();
+    if (webRtcManager.isSfuMode()) {
+      await webRtcManager.initSfuForCurrentChannel();
+    } else {
+      for (const peer of session.participants.getInVoiceChannel(channelId)) {
+        assertCurrent();
+        if (session.serverStore.isMySession(peer.user.sessionId)) continue;
+        await webRtcManager.connectToPeer(peer.user.sessionId || peer.user.id, true);
+      }
+      voiceStore.setReconnecting(false);
+    }
+    assertCurrent();
+    if (microphoneError) appEvents.emit('voice.microphone_failed', { error: microphoneError.message });
+    if (reconnect) appEvents.emit('voice.mode_switched', { mode: 'p2p' });
+  } catch (error) {
+    if (!isCurrent()) throw cancelled();
+    if (reconnect) throw error;
+    session.client.send(MessageType.VOICE_LEAVE, { channelId });
+    audioProcessor.stopMicrophone();
+    const stopAudio = screenAudioService.stop();
+    videoService.stopCamera();
+    videoService.stopScreenShare();
+    webRtcManager.clearLocalScreenTracks();
+    webRtcManager.closeAllPeers();
+    voiceStore.reset();
+    await stopAudio.catch((stopError: unknown) => {
+      clientLog.error('AUDIO', 'Failed to stop screen audio after rejected admission', {
+        error: stopError instanceof Error ? stopError.message : String(stopError),
+      });
+    });
+    if (generation !== voiceAdmissionGeneration) throw cancelled();
+    throw error;
+  } finally {
+    if (activeVoiceAdmission?.generation === generation) activeVoiceAdmission = null;
   }
 }
 

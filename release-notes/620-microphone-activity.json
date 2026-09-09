@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A luz do microfone perdeu a mania de acender fora de hora: ela só indica fala durante uma chamada. As prévias das configurações continuam funcionando à parte, sem transmitir áudio.",
+  "en": "The microphone indicator no longer lights up out of turn: it only shows speaking during a call. Settings previews still work separately, without sending your audio."
+}

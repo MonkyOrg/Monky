@@ -34,6 +34,7 @@ import { RoleService } from './application/services/RoleService';
 import { SignalingService } from './application/services/SignalingService';
 import { UserService } from './application/services/UserService';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
+import { SqliteVoiceRestrictionRepository } from './infrastructure/database/SqliteVoiceRestrictionRepository';
 import { SqlJsDriver } from './infrastructure/database/SqliteWrapper';
 import {
   SqliteAttachmentRepository,
@@ -200,7 +201,7 @@ async function createFixture() {
     userService,
     channelService,
     chatService,
-    new SignalingService(channelRepo),
+    new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db)),
     serverRepo,
     attachmentService,
     permissions,

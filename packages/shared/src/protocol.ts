@@ -39,6 +39,7 @@ export enum ProtocolErrorCode {
    * degrading to P2P (#515).
    */
   SFU_UNAVAILABLE = 'SFU_UNAVAILABLE',
+  VOICE_RECONNECT_EXPIRED = 'VOICE_RECONNECT_EXPIRED',
 }
 
 export enum MessageType {
@@ -78,6 +79,8 @@ export enum MessageType {
   ROLE_ASSIGN = 'ROLE_ASSIGN',
   ROLE_UNASSIGN = 'ROLE_UNASSIGN',
   VOICE_JOIN = 'VOICE_JOIN',
+  VOICE_RECONNECT = 'VOICE_RECONNECT',
+  VOICE_RECONNECTED = 'VOICE_RECONNECTED',
   VOICE_LEAVE = 'VOICE_LEAVE',
   VOICE_STATE_UPDATE = 'VOICE_STATE_UPDATE',
   ADMIN_MUTE_USER = 'ADMIN_MUTE_USER',
@@ -414,6 +417,17 @@ export interface VoiceJoinPayload {
   isDeafened?: boolean;
 }
 
+export interface VoiceModeTransition {
+  id: string;
+  from: 'sfu';
+  to: 'p2p';
+}
+
+/** One-use admission after a server-requested clean transport teardown (#607). */
+export interface VoiceReconnectPayload extends VoiceJoinPayload {
+  transitionId: string;
+}
+
 export interface VoiceLeavePayload {
   channelId: string;
 }
@@ -534,6 +548,7 @@ export interface ServerSettingsUpdatedPayload {
   showRoleBadgesToEveryone?: boolean;
   /** Current state of the voice/video topology mode ('p2p' | 'sfu') (#515). */
   voiceMode?: VoiceMode;
+  voiceTransition?: VoiceModeTransition;
   iconUrl?: string | null;
   // Current attachment-storage limits + usage, so the settings UI stays in sync (#11).
   attachmentStorage?: AttachmentStorageInfo;
@@ -644,6 +659,8 @@ export interface VoiceUserLeftPayload {
   channelId: string;
   userId: string;
   sessionId: string;
+  /** Only this departure permits automatic re-entry into the same channel. */
+  reconnect?: VoiceModeTransition;
 }
 
 export interface VoiceStateChangedPayload {

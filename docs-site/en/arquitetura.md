@@ -193,7 +193,8 @@ Payload validation uses **zod**, with the schemas in `packages/shared` — the v
 same ones the client uses to validate before sending.
 
 ::: warning The protocol version is exact, not compatible
-`PROTOCOL_VERSION` (currently **3**) must be **identical** on both sides. There is
+`PROTOCOL_VERSION`, defined in `packages/shared/src/constants.ts`, must be
+**identical** on both sides. There is
 no negotiation and no compatibility mode: if the client sends a version different
 from the server's, authentication is refused.
 
@@ -312,6 +313,13 @@ If the SFU process encounters errors or unexpected downtime, clients show a noti
 
 There is no drop to P2P: a mesh where only the side that noticed the failure switches protocol never forms, because the other side keeps answering as an SFU client and discards the incoming offer. That would leave a silent call behind a reassuring notice — so the client reconnects instead of degrading.
 :::
+
+When an administrator explicitly switches from **SFU to P2P**, participants
+are notified and the client tears down its previous transport before
+automatically returning to its own channel. Re-entry uses a temporary,
+one-use authorization tied to that session and channel, respecting current
+permissions and limits. Leaving voluntarily, being removed, or starting
+another call cancels the automatic return.
 
 ### Signaling
 

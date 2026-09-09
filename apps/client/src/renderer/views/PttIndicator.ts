@@ -1,6 +1,7 @@
 import { appEvents } from '../core/EventBus';
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
+import { getVoiceControlModeration } from '../core/voiceControls';
 import { t } from '../i18n';
 import { renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
 
@@ -21,6 +22,7 @@ export function renderMicrophoneButton(): string {
 
 export function bindPttIndicators(container: HTMLElement): () => void {
   const update = () => {
+    const moderation = getVoiceControlModeration();
     const enabled = settingsStore.inputMode === 'push_to_talk';
     const state = !voiceStore.currentVoiceChannelId ? 'inactive'
       : voiceStore.getEffectiveMuted() ? 'muted'
@@ -30,13 +32,11 @@ export function bindPttIndicators(container: HTMLElement): () => void {
     const title = `${label}. ${t('ptt.holdToTalk', { key })} ${t(voiceStore.pttPressed ? 'ptt.pressed' : 'ptt.released')}`;
     container.querySelectorAll<HTMLButtonElement>('[data-microphone-control]').forEach((button) => {
       const muted = voiceStore.getEffectiveMuted();
-      const blocked = voiceStore.serverMuted || voiceStore.serverDeafened;
+      const blocked = moderation.serverMuted || moderation.serverDeafened;
       const showPtt = enabled && !muted;
       const buttonState = muted ? 'muted' : enabled ? state : 'idle';
       const icon = blocked ? 'mic' : muted ? 'mic_off' : enabled && state !== 'open' ? 'keyboard_voice' : 'mic';
-      const muteReason = voiceStore.serverDeafened ? t('permissions.serverDeafened')
-        : voiceStore.serverMuted ? t('permissions.serverMuted')
-        : voiceStore.isDeafened ? t('ptt.deafened') : t('ptt.manualMuted');
+      const muteReason = moderation.muteReason ?? (voiceStore.isDeafened ? t('ptt.deafened') : t('ptt.manualMuted'));
       const action = t(voiceStore.isMuted ? 'main.unmute' : 'main.mute');
       const description = muted ? `${muteReason}. ${action}` : enabled ? `${title}. ${action}` : action;
       button.dataset.ptt = String(showPtt);

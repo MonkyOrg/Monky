@@ -20,6 +20,13 @@ import { settingsStore } from '../stores/settingsStore';
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING';
 
+export class RequestTimeoutError extends Error {
+  constructor(public readonly messageType: MessageType) {
+    super(`Timeout aguardando resposta para ${messageType}`);
+    this.name = 'RequestTimeoutError';
+  }
+}
+
 export interface PendingRequest {
   resolve: (value: any) => void;
   reject: (reason: any) => void;
@@ -375,7 +382,7 @@ export class NetworkClient {
       const timer = setTimeout(() => {
         if (this.pendingRequests.has(requestId)) {
           this.pendingRequests.delete(requestId);
-          reject(new Error(`Timeout aguardando resposta para ${type}`));
+          reject(new RequestTimeoutError(type));
         }
       }, timeoutMs);
 

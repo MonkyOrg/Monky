@@ -199,6 +199,42 @@ Se a sua mudança quebra a compatibilidade entre cliente e servidor, ela
 **precisa** sair como major. Marcar uma breaking change como `feat:` publica uma
 minor, e quem atualizar só um dos lados fica sem conseguir conectar.
 
+### Notas da versão: dois públicos, dois textos
+
+O **changelog técnico do GitHub** continua vindo dos commits: mantenha os
+detalhes, as referências `#123:` no corpo e as informações de compatibilidade.
+O **resumo mostrado no app** vem de arquivos separados, escritos para quem usa
+o Monky, não para quem desenvolve.
+
+Para uma mudança visível no app, adicione um arquivo novo em
+`release-notes/`, como `release-notes/617-copy-version.json`:
+
+```json
+{
+  "group": "novidades",
+  "pt-BR": "Quer compartilhar sua versão do Monky? Clique nela para copiar. Sem decorar os números!",
+  "en": "Need to share your Monky version? Click it to copy. No need to memorize the numbers!"
+}
+```
+
+- Use `novidades`, `correcoes` ou `outros`; grupos vazios não aparecem.
+- Escreva nos **dois idiomas**, com até 280 caracteres por texto. Conte o que a
+  pessoa pode fazer ou o incômodo que deixou de existir. Seja breve, natural e
+  levemente divertido, sem inventar benefícios.
+- Não inclua números de issues, links, código ou instruções de implementação.
+  Mudanças apenas internas podem ficar só no changelog técnico.
+- Mantenha os arquivos publicados: **não os renomeie nem reaproveite** para uma
+  mudança nova. O gerador lê os arquivos adicionados entre a tag anterior e o
+  `HEAD`; promover uma beta usa a tag estável anterior e reúne as notas das betas.
+  Arquivos ainda não commitados não entram na geração de uma release.
+
+`node scripts/test-changelog.js` valida o formato e os arquivos de notas.
+`scripts/generate-changelog.js` publica as traduções em um bloco de dados oculto
+na descrição da release, separado do `Changelog` técnico. O cliente continua
+buscando a tag instalada pela API do GitHub, sem serviço de tradução.
+Releases antigas exibem uma contagem de mudanças identificada como resumo e
+um botão para os detalhes no GitHub; não tentamos traduzir commits automaticamente.
+
 ### O que o CI verifica
 
 Todo PR roda o workflow de **CI**. Além do build, ele tem verificações que barram

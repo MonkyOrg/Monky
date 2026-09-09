@@ -4,6 +4,7 @@ import type {
   OverlaySyncState,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
+import { sessionManager } from './SessionManager';
 import { participantManager, ParticipantViewModel } from './ParticipantManager';
 import { serverStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
@@ -332,13 +333,16 @@ export class OverlayBridgeService {
     if (!this.isOpen || !window.api?.sendOverlaySyncState) return;
 
     const channelId = voiceStore.currentVoiceChannelId;
-    if (!channelId || !serverStore.serverDetails) return;
+    const call = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
+    const callStore = voiceStore.voiceSessionKey ? call?.serverStore : serverStore;
+    const callParticipants = voiceStore.voiceSessionKey ? call?.participants : participantManager;
+    if (!channelId || !callStore?.serverDetails || !callParticipants) return;
 
-    const channel = serverStore.serverDetails.channels.find((c) => c.id === channelId);
+    const channel = callStore.serverDetails.channels.find((c) => c.id === channelId);
     const channelName = channel ? channel.name : 'Voz';
 
-    const participants = participantManager.getInVoiceChannel(channelId);
-    const currentSessionId = serverStore.currentUser?.sessionId || serverStore.currentUser?.id;
+    const participants = callParticipants.getInVoiceChannel(channelId);
+    const currentSessionId = callStore.currentUser?.sessionId || callStore.currentUser?.id;
     const config = settingsStore.getOverlayConfig();
 
     // "Hide me" keeps the local user out of the overlay entirely, so they don't
@@ -446,7 +450,7 @@ export class OverlayBridgeService {
       return {
         sessionId: sidOf(p),
         userId: p.user.id,
-        displayName: participantManager.displayName(p),
+        displayName: callParticipants.displayName(p),
         avatarUrl: getAvatarUrl(p.user.avatarUrl),
         isSpeaking,
         isMuted,
