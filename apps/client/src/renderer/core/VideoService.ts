@@ -2,9 +2,12 @@ import { QUALITY_PRESETS, QualityProfile, QualityPresetType } from '@monky/share
 import { appEvents } from './EventBus';
 import { settingsStore } from '../stores/settingsStore';
 import { clientLog } from './ClientLogService';
+import { getScreenVideoCodecs } from './webrtc/codecPreferences';
 
 export class VideoService {
   private cameraStream: MediaStream | null = null;
+  private cameraCaptureEpoch = 0;
+  private screenCaptureEpoch = 0;
   /**
    * Active screen shares keyed by share id (#253). The share id is the
    * MediaStream id, which is also what gets announced to peers over
@@ -68,6 +71,8 @@ export class VideoService {
 
   public async startCamera(deviceId?: string): Promise<MediaStream> {
     this.stopCamera();
+    const epoch = this.cameraCaptureEpoch;
+    let stream: MediaStream;
 
     const profile = this.getProfile();
     const targetDeviceId = deviceId || settingsStore.selectedCameraId || undefined;
@@ -98,25 +103,31 @@ export class VideoService {
 
     // Attempt chain: exact → ideal (same device) → ideal (any device)
     try {
-      this.cameraStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: exactVideo });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: exactVideo });
     } catch {
       clientLog.info('VIDEO', 'Exact camera constraints not met, falling back to ideal');
       try {
-        this.cameraStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: idealVideo });
+        stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: idealVideo });
       } catch (err: any) {
         if (targetDeviceId) {
           clientLog.warn('VIDEO', 'Could not open specific camera, falling back to default', { error: err.message });
-          this.cameraStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: idealVideoNoDevice });
+          stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: idealVideoNoDevice });
         } else {
           throw err;
         }
       }
     }
+    if (epoch !== this.cameraCaptureEpoch) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new DOMException('Camera capture was cancelled', 'AbortError');
+    }
+    this.cameraStream = stream;
     appEvents.emit('local.camera_started', this.cameraStream);
     return this.cameraStream;
   }
 
   public stopCamera(): void {
+    this.cameraCaptureEpoch++;
     if (this.cameraStream) {
       clientLog.info('VIDEO', 'Stopping camera');
       this.cameraStream.getTracks().forEach((t) => t.stop());
@@ -126,6 +137,9 @@ export class VideoService {
   }
 
   public async startScreenShare(sourceId?: string): Promise<MediaStream> {
+    // Reject unsupported explicit choices before opening an OS capture.
+    getScreenVideoCodecs();
+    const epoch = this.screenCaptureEpoch;
     const profile = this.getProfile();
     clientLog.info('SCREEN_SHARE', 'Starting screen share', {
       hasSourceId: !!sourceId,
@@ -206,6 +220,10 @@ export class VideoService {
       }
     }
 
+    if (epoch !== this.screenCaptureEpoch) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new DOMException('Screen capture was cancelled', 'AbortError');
+    }
     const shareId = stream.id;
     this.screenStreams.set(shareId, stream);
     if (sourceId) {
@@ -236,6 +254,7 @@ export class VideoService {
    * Stops one screen share, or every active share when no id is given (#253).
    */
   public stopScreenShare(shareId?: string): void {
+    if (!shareId) this.screenCaptureEpoch++;
     const ids = shareId ? [shareId] : [...this.screenStreams.keys()];
     clientLog.info('SCREEN_SHARE', `Stopping screen share(s)`, { shareIds: ids });
     for (const id of ids) {

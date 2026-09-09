@@ -2333,6 +2333,47 @@ input:focus, textarea:focus, select:focus {
 .chat-copy-toast .material-symbols-outlined {
   color: var(--success);
 }
+.version-copy {
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: color 140ms ease, background-color 140ms ease;
+}
+.version-copy:hover:not(:disabled),
+.version-copy:focus-visible {
+  color: var(--accent-primary);
+  background: var(--bg-card-hover);
+}
+.version-copy:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+.version-copy:disabled { cursor: default; }
+@media (prefers-reduced-motion: reduce) {
+  .version-copy { transition: none; }
+}
+.changelog-intro,
+.changelog-empty {
+  margin: 4px 0 16px;
+  color: var(--text-secondary);
+}
+.changelog-group { margin: 16px 0; }
+.changelog-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.changelog-group-title .material-symbols-outlined { color: var(--accent-primary); }
+.changelog-group-list { margin: 0; padding-left: 24px; }
+.changelog-group-list li + li { margin-top: 8px; }
+.changelog-error { color: var(--danger); }
 .chat-message-row:focus { outline: none; }
 .chat-message-row:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
 .chat-reply-reference {

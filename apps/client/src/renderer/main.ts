@@ -18,6 +18,7 @@ import {
   ProtocolErrorCode,
   RolesListPayload,
   ServerErrorPayload,
+  ServerSettingsUpdatedPayload,
   UserJoinedPayload,
   UserLeftPayload,
   UserConnectionStatePayload,
@@ -31,13 +32,14 @@ import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
 import { networkClient, type ConnectionStatus } from './core/NetworkClient';
 import { callClient, rejoinCallOnSession } from './core/serverConnection';
+import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeReconnect';
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
 import { soundEffects } from './core/SoundEffects';
 import { soundboardService } from './core/SoundboardService';
 import { keybindService } from './core/KeybindService';
-import { toggleAudioDeafen, toggleMicrophoneMute, toggleSoundboardMute } from './core/voiceControls';
+import { toggleAudioDeafen, toggleMicrophoneMute, toggleSoundboardMute, updateLocalSpeaking } from './core/voiceControls';
 import { updateService } from './core/UpdateService';
 import { videoService } from './core/VideoService';
 import { webRtcManager } from './core/WebRtcManager';
@@ -68,6 +70,66 @@ class App {
   private connectionView!: ConnectionView;
   private mainView!: MainView;
   private rendererReadySignalled = false;
+  private readonly voiceModeReconnect = new VoiceModeReconnect({
+    currentCall: () => {
+      const sessionKey = voiceStore.voiceSessionKey;
+      const channelId = voiceStore.currentVoiceChannelId;
+      const sessionId = sessionKey ? sessionManager.get(sessionKey)?.serverStore.currentUser?.sessionId : undefined;
+      return sessionKey && channelId && sessionId ? { sessionKey, channelId, sessionId } : null;
+    },
+    canReconnect: (call) => {
+      const session = sessionManager.get(call.sessionKey);
+      return session?.client.getStatus() === 'CONNECTED'
+        && session.serverStore.getChannel(call.channelId)?.type === 'VOICE'
+        && session.serverStore.hasPermission(Permission.SPEAK);
+    },
+    notify: () => {
+      void showAlert({ title: t('voiceReconnect.title'), message: t('voiceReconnect.notice'), variant: 'info' });
+    },
+    teardown: async () => {
+      webRtcManager.suspendForVoiceReconnect();
+      audioProcessor.stopMicrophone();
+      videoService.stopCamera();
+      const stopScreenAudio = screenAudioService.stop();
+      videoService.stopScreenShare();
+      voiceStore.setCameraOn(false);
+      voiceStore.setScreenSharing(false);
+      voiceStore.setSpeaking(false);
+      voiceStore.setReconnecting(true);
+      await stopScreenAudio;
+    },
+    rejoin: (call, transitionId, isCurrent) =>
+      rejoinCallOnSession(call.sessionKey, call.channelId, { transitionId, isCurrent }),
+    cancelled: (call) => this.finishVoiceModeReconnect(call),
+    failed: (call, error) => {
+      this.finishVoiceModeReconnect(call);
+      clientLog.error('CONNECTION', 'Automatic voice mode reconnection failed', { error: error.message });
+      void showAlert({
+        title: t('voiceReconnect.failedTitle'),
+        message: t('voiceReconnect.failed', { error: error.message }),
+        variant: 'danger',
+      });
+    },
+    timeoutMessage: () => t('voiceReconnect.timeout'),
+  });
+
+  private finishVoiceModeReconnect(call: VoiceReconnectCall): void {
+    if (voiceStore.voiceSessionKey !== call.sessionKey || voiceStore.currentVoiceChannelId !== call.channelId) return;
+    const session = sessionManager.get(call.sessionKey);
+    if (session?.serverStore.currentUser?.sessionId !== call.sessionId) return;
+    session.client.send(MessageType.VOICE_LEAVE, { channelId: call.channelId });
+    webRtcManager.suspendForVoiceReconnect();
+    audioProcessor.stopMicrophone();
+    videoService.stopCamera();
+    videoService.stopScreenShare();
+    void screenAudioService.stop().catch((error: unknown) => {
+      clientLog.error('SCREEN_SHARE', 'Failed to finish screen audio teardown', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    webRtcManager.closeAllPeers();
+    voiceStore.reset();
+  }
 
   constructor() {
     this.appContainer = document.getElementById('app')!;
@@ -315,6 +377,31 @@ class App {
   }
 
   private setupGlobalEventListeners(): void {    // Global Keybind Actions (#252)
+    appEvents.on('voice.join_requested', () => this.voiceModeReconnect.cancel());
+    appEvents.on('voice.rejoin_failed', (payload: { error: string }) => {
+      void showAlert({
+        title: t('voiceReconnect.failedTitle'),
+        message: t('voiceReconnect.failed', { error: payload.error }),
+        variant: 'danger',
+      });
+    });
+    appEvents.on('voice.microphone_failed', (payload: { error: string }) => {
+      void showAlert({
+        title: t('voiceJoin.microphoneTitle'),
+        message: t('voiceJoin.microphoneUnavailable', { error: payload.error }),
+        variant: 'danger',
+      });
+    });
+    appEvents.on('voice.channel_changed', () => this.voiceModeReconnect.validate());
+    for (const event of ['network.status', `message.${MessageType.ROLES_LIST}`,
+      `message.${MessageType.CHANNEL_DELETED}`, `message.${MessageType.CHANNEL_UPDATED}`]) {
+      appEvents.on(event, () => {
+        // Validation runs after all synchronous handlers have updated the
+        // scoped stores; it reads the captured call, never foreground globals.
+        queueMicrotask(() => this.voiceModeReconnect.validate());
+      });
+    }
+
     appEvents.on('keybind.toggle_mute', () => {
       toggleMicrophoneMute();
     });
@@ -388,8 +475,9 @@ class App {
         const myVoiceState = payload.currentUser.sessionId
           ? payload.server.voiceStates[payload.currentUser.sessionId]
           : undefined;
-        voiceStore.setServerMuted(myVoiceState?.serverMuted ?? false);
-        voiceStore.setServerDeafened(myVoiceState?.serverDeafened ?? false);
+        const resumingChannel = myVoiceState?.channelId === previousVoiceChannelId;
+        voiceStore.setServerMuted(resumingChannel && !!myVoiceState?.serverMuted);
+        voiceStore.setServerDeafened(resumingChannel && !!myVoiceState?.serverDeafened);
         this.syncLocalVoiceMediaState();
 
         webRtcManager.setCurrentSessionId(payload.currentUser.sessionId || payload.currentUser.id);
@@ -492,6 +580,17 @@ class App {
     });
 
     // Protocol Server -> Client Broadcast Handlers
+    appEvents.on(`message.${MessageType.SERVER_SETTINGS_UPDATED}`, (payload: ServerSettingsUpdatedPayload) => {
+      serverStore.updateServerMeta(payload.name, payload.hasPassword, payload.allowSoundboard, payload.iconUrl,
+        payload.attachmentStorage, payload.maxUsers, payload.turnEnabled, payload.allowEveryoneMention,
+        payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone);
+      serverStore.setTurnAvailability(payload.turnAvailability);
+      const origin = currentEventOrigin();
+      if (!origin) return;
+      this.voiceModeReconnect.settingsUpdated(origin, payload);
+      if (voiceStore.voiceSessionKey === origin) void webRtcManager.handleVoiceModeUpdate();
+    });
+
     appEvents.on(`message.${MessageType.USER_JOINED}`, (payload: UserJoinedPayload) => {
       serverStore.addMember(payload.user);
       participantManager.addUser(payload.user);
@@ -644,6 +743,12 @@ class App {
     });
 
     appEvents.on(`message.${MessageType.VOICE_USER_JOINED}`, (payload: VoiceUserJoinedPayload) => {
+      if (serverStore.isMySession(payload.sessionId) && this.eventOwnsCall()
+        && voiceStore.currentVoiceChannelId === payload.channelId) {
+        voiceStore.setServerMuted(payload.voiceState.serverMuted);
+        voiceStore.setServerDeafened(payload.voiceState.serverDeafened);
+        this.syncLocalVoiceMediaState();
+      }
       if (payload.user) participantManager.addUser(payload.user);
       if (payload.participants) {
         participantManager.reconcileVoiceChannel(payload.channelId, payload.participants);
@@ -681,8 +786,16 @@ class App {
 
     appEvents.on(`message.${MessageType.VOICE_USER_LEFT}`, (payload: VoiceUserLeftPayload) => {
       const isMySession = serverStore.isMySession(payload.sessionId);
+      const origin = currentEventOrigin();
+      if (isMySession && origin) {
+        const transition = this.voiceModeReconnect.departed(origin, payload);
+        if (transition) {
+          if (transition === 'reconnect') participantManager.removeVoiceState(payload.sessionId);
+          return;
+        }
+      }
       if (this.eventOwnsCall()) {
-        if (isMySession) {
+        if (isMySession && voiceStore.currentVoiceChannelId === payload.channelId) {
           audioProcessor.stopMicrophone();
           videoService.stopCamera();
           videoService.stopScreenShare();
@@ -724,7 +837,8 @@ class App {
       }
 
       participantManager.updateVoiceState(payload.voiceState);
-      if (serverStore.isMySession(payload.voiceState.sessionId) && this.eventOwnsCall()) {
+      if (serverStore.isMySession(payload.voiceState.sessionId) && this.eventOwnsCall()
+        && voiceStore.currentVoiceChannelId === payload.voiceState.channelId) {
         voiceStore.setServerMuted(payload.voiceState.serverMuted);
         voiceStore.setServerDeafened(payload.voiceState.serverDeafened);
         this.syncLocalVoiceMediaState();
@@ -736,7 +850,8 @@ class App {
       if (current) {
         participantManager.updateVoiceState({ ...current, serverMuted: payload.muted, isSpeaking: false });
       }
-      if (serverStore.isMySession(payload.targetSessionId) && this.eventOwnsCall()) {
+      if (serverStore.isMySession(payload.targetSessionId) && this.eventOwnsCall()
+        && !!voiceStore.currentVoiceChannelId && current?.channelId === voiceStore.currentVoiceChannelId) {
         voiceStore.setServerMuted(payload.muted);
         this.syncLocalVoiceMediaState();
       }
@@ -747,7 +862,8 @@ class App {
       if (current) {
         participantManager.updateVoiceState({ ...current, serverDeafened: payload.deafened });
       }
-      if (serverStore.isMySession(payload.targetSessionId) && this.eventOwnsCall()) {
+      if (serverStore.isMySession(payload.targetSessionId) && this.eventOwnsCall()
+        && !!voiceStore.currentVoiceChannelId && current?.channelId === voiceStore.currentVoiceChannelId) {
         voiceStore.setServerDeafened(payload.deafened);
         this.syncLocalVoiceMediaState();
       }
@@ -787,15 +903,7 @@ class App {
     bindBotChatEvents();
 
     // Local VAD speaking state
-    appEvents.on('local.speaking', (speaking: boolean) => {
-      voiceStore.setSpeaking(speaking);
-      if (serverStore.currentUser) {
-        participantManager.setSpeaking(
-          serverStore.currentUser.sessionId || serverStore.currentUser.id,
-          speaking
-        );
-      }
-    });
+    appEvents.on('local.speaking', updateLocalSpeaking);
 
     // Modals
     appEvents.on('modal.open_screenshare_picker', () => {
@@ -806,6 +914,21 @@ class App {
     // switching to camera, and the OS "stop sharing" button).
     appEvents.on('local.screen_started', () => {
       soundEffects.play('screen_share_start');
+    });
+    appEvents.on('screen.codec_failed', (payload: { error: string; notify: boolean; stopAudio: boolean }) => {
+      if (payload.stopAudio) {
+        void screenAudioService.stop().catch((error: unknown) => {
+          clientLog.error('SCREEN_SHARE', 'Failed to stop audio of a rejected screen', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+      if (!payload.notify) return;
+      void showAlert({
+        title: t('screenShare.errorTitle'),
+        message: t('screenShare.errorMessage', { error: payload.error }),
+        variant: 'danger',
+      });
     });
     appEvents.on('local.screen_stopped', () => {
       soundEffects.play('screen_share_stop');

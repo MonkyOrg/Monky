@@ -1,4 +1,4 @@
-import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from './entities';
+import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
 import type { BotSelector } from '@monky/shared';
 
 export interface IBotSelectorRepository {
@@ -30,6 +30,12 @@ export interface IUserRepository {
   listAll(): Promise<UserRecord[]>;
   /** Registered members, which is what the membership cap counts (#403). */
   count(): Promise<number>;
+}
+
+export interface IVoiceRestrictionRepository {
+  // Synchronous reads/writes keep admission and moderation atomic with the live voice roster.
+  getForUser(userId: string): VoiceRestrictions;
+  save(userId: string, restrictions: VoiceRestrictions): void;
 }
 
 export interface IChannelRepository {

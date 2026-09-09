@@ -1,4 +1,5 @@
 import http from 'http';
+import { randomUUID } from 'node:crypto';
 import { WebSocket, WebSocketServer as WSServer } from 'ws';
 import {
   AdminDeafenUserPayload,
@@ -71,6 +72,8 @@ import {
   CommandRegisteredPayload,
   CommandsListResponsePayload,
   VoiceJoinPayload,
+  VoiceModeTransition,
+  VoiceReconnectPayload,
   VoiceLeavePayload,
   VoiceStateChangedPayload,
   VoiceStateUpdatePayload,
@@ -99,6 +102,7 @@ import {
   botCreateSchema,
   botProfileUpdateSchema,
   commandRegisterSchema,
+  voiceReconnectSchema,
 } from '@monky/shared';
 import { AuthService } from '../../application/services/AuthService';
 import { AttachmentService } from '../../application/services/AttachmentService';
@@ -169,6 +173,13 @@ export class WebSocketServer {
   private reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
   private heartbeatTimer?: NodeJS.Timeout;
   private closing = false;
+  private settingsUpdateQueue: Promise<void> = Promise.resolve();
+  private voiceReconnectGrants = new Map<ClientSession, {
+    transitionId: string;
+    channelId: string;
+    expiresAt: number;
+    inFlight: boolean;
+  }>();
   private botInteractions: BotInteractionHandler;
   private botSelectors?: BotSelectorHandler;
 
@@ -523,12 +534,24 @@ export class WebSocketServer {
         break;
 
       case MessageType.VOICE_JOIN:
+        this.voiceReconnectGrants?.delete(session);
         if (!(await this.requirePermission(session, Permission.SPEAK, requestId))) return;
         if (!(await this.requireChannelAccess(session, (payload as VoiceJoinPayload)?.channelId, requestId))) return;
         await this.handleVoiceJoin(session, payload as VoiceJoinPayload, requestId);
         break;
 
+      case MessageType.VOICE_RECONNECT: {
+        const parsed = voiceReconnectSchema.safeParse(payload);
+        if (!parsed.success) {
+          this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido de reconexão inválido.', requestId);
+          return;
+        }
+        await this.handleVoiceReconnect(session, parsed.data, requestId);
+        break;
+      }
+
       case MessageType.VOICE_LEAVE:
+        this.voiceReconnectGrants?.delete(session);
         await this.handleVoiceLeave(session, payload as VoiceLeavePayload, requestId);
         break;
 
@@ -607,6 +630,11 @@ export class WebSocketServer {
 
       case MessageType.ADMIN_KICK_VOICE:
         if (!(await this.requirePermission(session, Permission.KICK_MEMBERS, requestId))) return;
+        if (this.cancelVoiceReconnect((payload as AdminKickVoicePayload).targetSessionId)
+          && !this.signalingService.getVoiceState((payload as AdminKickVoicePayload).targetSessionId)) {
+          this.broadcast({ type: MessageType.ADMIN_KICK_VOICE, requestId, payload });
+          break;
+        }
         await this.handleAdminKickVoice(session, payload as AdminKickVoicePayload, requestId);
         break;
 
@@ -628,6 +656,7 @@ export class WebSocketServer {
         // Graceful logout: mark the session so the disconnect handler treats it
         // as an intentional leave (immediate USER_LEFT, no reconnecting grace).
         session.intentionalLogout = true;
+        this.voiceReconnectGrants?.delete(session);
         this.botInteractions.disconnect(session);
         break;
 
@@ -1800,7 +1829,21 @@ export class WebSocketServer {
     payload: ServerUpdateSettingsPayload,
     requestId?: string
   ): Promise<void> {
-    if (!session.user) return;
+    // Admins have separate socket queues. Serialize settings across them so a
+    // duplicate save cannot observe the old mode and evict the new call twice.
+    const update = (this.settingsUpdateQueue ?? Promise.resolve()).then(() =>
+      this.applyServerUpdateSettings(session, payload, requestId));
+    this.settingsUpdateQueue = update.catch(() => {});
+    await update;
+  }
+
+  private async applyServerUpdateSettings(
+    session: ClientSession,
+    payload: ServerUpdateSettingsPayload,
+    requestId?: string
+  ): Promise<void> {
+    if (!session.user || !this.isCurrentSession(session)) return;
+    const previousVoiceMode = (await this.serverRepo.getServer())?.voiceMode ?? 'p2p';
 
     // Switching the relay on is the whole intent, so the server installs coturn
     // itself when it is missing rather than sending the operator to a terminal
@@ -1833,8 +1876,7 @@ export class WebSocketServer {
     // state is not a substitute, since creating it binds no RTC port and so
     // proves nothing about the range.
     if (payload.voiceMode === 'sfu') {
-      const current = await this.serverRepo.getServer();
-      if (current?.voiceMode !== 'sfu') {
+      if (previousVoiceMode !== 'sfu') {
         const portProblem = await this.sfuManager.checkPortAvailability();
         if (portProblem) {
           this.sendError(
@@ -1859,6 +1901,9 @@ export class WebSocketServer {
       return;
     }
 
+    const changedMode = result.voiceMode !== undefined && result.voiceMode !== previousVoiceMode;
+    let voiceTransition: VoiceModeTransition | undefined;
+    if (changedMode) this.voiceReconnectGrants.clear();
     if (payload.voiceMode === 'sfu') {
       const ok = await this.sfuManager.init();
       if (!ok) {
@@ -1879,17 +1924,29 @@ export class WebSocketServer {
         // would fail the very request that worked.
         this.sendError(session.ws, ProtocolErrorCode.SFU_UNAVAILABLE, reason);
       }
-    } else if (payload.voiceMode === 'p2p') {
-      // When switching to P2P, cleanly terminate any active SFU channels and evict call participants
+    } else if (changedMode && result.voiceMode === 'p2p') {
+      voiceTransition = { id: randomUUID(), from: 'sfu', to: 'p2p' };
+      // Keep the deliberate full SFU teardown. Admission is granted once to
+      // each exact connection, never to a user ID shared by several devices.
       this.sfuManager.close();
       const evictedStates = this.signalingService.clearAllVoiceStates();
       for (const vs of evictedStates) {
+        const participant = this.findSessionById(vs.sessionId);
+        if (participant) {
+          this.voiceReconnectGrants.set(participant, {
+            transitionId: voiceTransition.id,
+            channelId: vs.channelId,
+            expiresAt: Date.now() + 30000,
+            inFlight: false,
+          });
+        }
         this.broadcast({
           type: MessageType.VOICE_USER_LEFT,
           payload: {
             channelId: vs.channelId,
             userId: vs.userId,
             sessionId: vs.sessionId,
+            reconnect: voiceTransition,
           },
         });
       }
@@ -1909,6 +1966,7 @@ export class WebSocketServer {
       allowMessageEdit: result.allowMessageEdit,
       showRoleBadgesToEveryone: result.showRoleBadgesToEveryone,
       voiceMode: result.voiceMode,
+      voiceTransition,
       iconUrl: result.iconUrl,
       attachmentStorage: result.attachmentStorage,
       maxUsers: result.maxUsers,
@@ -1929,6 +1987,88 @@ export class WebSocketServer {
         result.hasPassword ? 'Ativa' : 'Sem Senha'
       }, Modo de Voz: ${result.voiceMode ?? 'p2p'}, Soundboard: ${result.allowSoundboard ? 'Habilitado' : 'Desabilitado'})`
     );
+  }
+
+  private cancelVoiceReconnect(sessionId: string): boolean {
+    let cancelled = false;
+    for (const session of this.voiceReconnectGrants?.keys() ?? []) {
+      if (session.sessionId === sessionId) {
+        this.voiceReconnectGrants.delete(session);
+        cancelled = true;
+      }
+    }
+    return cancelled;
+  }
+
+  private async handleVoiceReconnect(
+    session: ClientSession,
+    payload: VoiceReconnectPayload,
+    requestId?: string
+  ): Promise<void> {
+    const grant = this.voiceReconnectGrants.get(session);
+    const isCurrent = () => !!grant
+      && this.voiceReconnectGrants.get(session) === grant
+      && grant.expiresAt > Date.now()
+      && this.isCurrentSession(session);
+    if (!session.user || !session.sessionId || !isCurrent() || !grant
+      || grant.inFlight || grant.transitionId !== payload.transitionId || grant.channelId !== payload.channelId
+      || this.signalingService.getVoiceState(session.sessionId)) {
+      this.sendError(session.ws, ProtocolErrorCode.VOICE_RECONNECT_EXPIRED, 'Esta reconexão não é mais válida.', requestId);
+      return;
+    }
+    grant.inFlight = true;
+    let admitted = false;
+    try {
+      if (!(await this.requirePermission(session, Permission.SPEAK, requestId))
+        || !(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
+      if (!isCurrent() || (await this.serverRepo.getServer())?.voiceMode !== 'p2p') {
+        this.sendError(session.ws, ProtocolErrorCode.VOICE_RECONNECT_EXPIRED, 'O modo de voz mudou novamente.', requestId);
+        return;
+      }
+      const result = await this.signalingService.joinVoiceChannel(
+        session.sessionId, session.user.id, payload.channelId, payload.isMuted, payload.isDeafened
+      );
+      admitted = !!result.voiceState;
+      if (!result.success || !result.voiceState) {
+        this.sendError(session.ws, result.errorCode ?? ProtocolErrorCode.CHANNEL_NOT_FOUND,
+          result.errorMessage ?? 'Não foi possível reconectar ao canal.', requestId);
+        return;
+      }
+      if (!isCurrent()) return;
+      if (!(await this.requirePermission(session, Permission.SPEAK, requestId))
+        || !(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
+      if (!isCurrent()) return;
+      const joined: VoiceUserJoinedPayload = {
+        channelId: payload.channelId,
+        sessionId: session.sessionId,
+        userId: session.user.id,
+        voiceState: result.voiceState,
+        user: this.voiceRosterUser(session.user),
+      };
+      await this.broadcastToChannel(payload.channelId, {
+        type: MessageType.VOICE_USER_JOINED,
+        payload: joined,
+      });
+      if (!isCurrent()
+        || !(await this.requirePermission(session, Permission.SPEAK, requestId))
+        || !(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
+      const state = this.signalingService.getVoiceState(session.sessionId);
+      if (!isCurrent() || state?.channelId !== payload.channelId) return;
+      this.send(session.ws, {
+        type: MessageType.VOICE_RECONNECTED,
+        requestId,
+        payload: {
+          ...joined, user: session.user, voiceState: state,
+          participants: this.getVoiceRoster(payload.channelId, session.user.id),
+        } satisfies VoiceUserJoinedPayload,
+      });
+      admitted = false;
+    } finally {
+      if (this.voiceReconnectGrants.get(session) === grant) this.voiceReconnectGrants.delete(session);
+      if (admitted && this.signalingService.getVoiceState(session.sessionId)?.channelId === payload.channelId) {
+        await this.handleVoiceLeave(session, { channelId: payload.channelId });
+      }
+    }
   }
 
   /**
@@ -2089,7 +2229,6 @@ export class WebSocketServer {
     // reach members who cannot see it (#384).
     await this.broadcastToChannel(payload.channelId, {
       type: MessageType.VOICE_USER_JOINED,
-      requestId,
       payload: joinPayload,
     });
     // Capture and send without an await: membership can change while a scoped
@@ -2099,6 +2238,7 @@ export class WebSocketServer {
     if (currentVoiceState?.channelId === payload.channelId) {
       this.send(session.ws, {
         type: MessageType.VOICE_USER_JOINED,
+        requestId,
         payload: {
           ...joinPayload,
           user: session.user,
@@ -2106,6 +2246,13 @@ export class WebSocketServer {
           participants: this.getVoiceRoster(payload.channelId, session.user.id),
         } satisfies VoiceUserJoinedPayload,
       });
+    } else {
+      this.sendError(
+        session.ws,
+        ProtocolErrorCode.BAD_REQUEST,
+        'A entrada no canal de voz foi interrompida',
+        requestId
+      );
     }
   }
 
@@ -2599,27 +2746,27 @@ export class WebSocketServer {
   }
 
   private async handleAdminMuteUser(session: ClientSession, payload: AdminMuteUserPayload, requestId?: string): Promise<void> {
-    const state = this.signalingService.getVoiceState(payload.targetSessionId);
-    if (!state) {
+    const states = this.signalingService.setServerMuted(payload.targetSessionId, payload.muted);
+    if (!states) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Usuário não está em um canal de voz.', requestId);
       return;
     }
-    const updated = this.signalingService.updateVoiceState(payload.targetSessionId, { serverMuted: payload.muted, isSpeaking: false });
-    if (!updated) return;
-    this.broadcast({ type: MessageType.ADMIN_MUTE_USER, requestId, payload });
-    this.broadcast({ type: MessageType.VOICE_STATE_CHANGED, requestId, payload: { voiceState: updated } });
+    for (const voiceState of states) {
+      this.broadcast({ type: MessageType.ADMIN_MUTE_USER, requestId, payload: { ...payload, targetSessionId: voiceState.sessionId } });
+      this.broadcast({ type: MessageType.VOICE_STATE_CHANGED, requestId, payload: { voiceState } });
+    }
   }
 
   private async handleAdminDeafenUser(session: ClientSession, payload: AdminDeafenUserPayload, requestId?: string): Promise<void> {
-    const state = this.signalingService.getVoiceState(payload.targetSessionId);
-    if (!state) {
+    const states = this.signalingService.setServerDeafened(payload.targetSessionId, payload.deafened);
+    if (!states) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Usuário não está em um canal de voz.', requestId);
       return;
     }
-    const updated = this.signalingService.updateVoiceState(payload.targetSessionId, { serverDeafened: payload.deafened, isSpeaking: false });
-    if (!updated) return;
-    this.broadcast({ type: MessageType.ADMIN_DEAFEN_USER, requestId, payload });
-    this.broadcast({ type: MessageType.VOICE_STATE_CHANGED, requestId, payload: { voiceState: updated } });
+    for (const voiceState of states) {
+      this.broadcast({ type: MessageType.ADMIN_DEAFEN_USER, requestId, payload: { ...payload, targetSessionId: voiceState.sessionId } });
+      this.broadcast({ type: MessageType.VOICE_STATE_CHANGED, requestId, payload: { voiceState } });
+    }
   }
 
   private async handleAdminKickVoice(session: ClientSession, payload: AdminKickVoicePayload, requestId?: string): Promise<void> {
@@ -2783,6 +2930,7 @@ export class WebSocketServer {
   }
 
   private handleDisconnect(session: ClientSession): void {
+    this.voiceReconnectGrants?.delete(session);
     const wasConnected = this.sessions.delete(session.ws);
     this.authService.clearChallenge(session.ws);
     this.botInteractions.disconnect(session);
@@ -3209,6 +3357,7 @@ export class WebSocketServer {
   public close(): void {
     if (this.closing) return;
     this.closing = true;
+    this.voiceReconnectGrants?.clear();
     this.botInteractions.close();
     this.botSelectors?.close();
     if (this.heartbeatTimer) {

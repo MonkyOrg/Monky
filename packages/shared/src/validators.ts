@@ -2,6 +2,17 @@ import { z } from 'zod';
 import { LIMITS, PROTOCOL_VERSION } from './constants.js';
 
 export const messageReferenceSchema = z.string().min(1).max(128);
+export const voiceModeTransitionSchema = z.object({
+  id: messageReferenceSchema,
+  from: z.literal('sfu'),
+  to: z.literal('p2p'),
+});
+export const voiceReconnectSchema = z.object({
+  channelId: messageReferenceSchema,
+  transitionId: messageReferenceSchema,
+  isMuted: z.boolean().optional(),
+  isDeafened: z.boolean().optional(),
+});
 export const chatHistoryRequestSchema = z.object({
   channelId: messageReferenceSchema,
   limit: z.number().int().positive().optional(),

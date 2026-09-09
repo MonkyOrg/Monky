@@ -284,6 +284,7 @@ export class SettingsModal {
     this.sectionNavigation = null;
     this.voiceVideoTab.cleanup();
     this.accountTab.cleanup();
+    this.aboutTab.cleanup();
     if (this.modalEl) {
       const handler = (this.modalEl as any)._escHandler;
       if (handler) window.removeEventListener('keydown', handler);

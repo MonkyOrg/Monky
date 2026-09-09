@@ -3,7 +3,8 @@ import {
   VoiceParticipantState,
   WebRtcSignalPayload,
 } from '@monky/shared';
-import { IChannelRepository } from '../../domain/repositories';
+import { IChannelRepository, IVoiceRestrictionRepository } from '../../domain/repositories';
+import type { VoiceRestrictions } from '../../domain/entities';
 import { Logger } from '../../infrastructure/logger/Logger';
 
 export class SignalingService {
@@ -14,7 +15,10 @@ export class SignalingService {
   // person, so the same user can be in voice from two devices at once (#309).
   private voiceStates: Map<string, VoiceParticipantState> = new Map();
 
-  constructor(private channelRepo: IChannelRepository) {}
+  constructor(
+    private channelRepo: IChannelRepository,
+    private voiceRestrictions: IVoiceRestrictionRepository,
+  ) {}
 
   public async joinVoiceChannel(
     sessionId: string,
@@ -63,6 +67,7 @@ export class SignalingService {
     // producers are torn down. Reconnecting into the *same* channel (grace
     // period) is not a change and keeps the share alive.
     const isChannelChange = previousState !== undefined && previousState.channelId !== channelId;
+    const restrictions = this.voiceRestrictions.getForUser(userId);
 
     const newState: VoiceParticipantState = {
       sessionId,
@@ -70,8 +75,7 @@ export class SignalingService {
       channelId,
       isMuted: resolvedMuted,
       isDeafened: resolvedDeafened,
-      serverMuted: previousState?.serverMuted ?? false,
-      serverDeafened: previousState?.serverDeafened ?? false,
+      ...restrictions,
       isSpeaking: false,
       isCameraOn: previousState?.isCameraOn ?? false,
       isScreenSharing: isChannelChange ? false : (previousState?.isScreenSharing ?? false),
@@ -112,7 +116,10 @@ export class SignalingService {
       sessionId: current.sessionId,
       userId: current.userId,
       channelId: current.channelId,
+      serverMuted: current.serverMuted,
+      serverDeafened: current.serverDeafened,
     };
+    if (updated.serverMuted || updated.serverDeafened) updated.isSpeaking = false;
 
     // #253: a participant may broadcast more than one screen at a time, so
     // `screenShareIds` is the real state and `isScreenSharing` is derived from
@@ -128,6 +135,31 @@ export class SignalingService {
 
     this.voiceStates.set(sessionId, updated);
     return updated;
+  }
+
+  public setServerMuted(sessionId: string, muted: boolean): VoiceParticipantState[] | null {
+    return this.setServerRestriction(sessionId, 'serverMuted', muted);
+  }
+
+  public setServerDeafened(sessionId: string, deafened: boolean): VoiceParticipantState[] | null {
+    return this.setServerRestriction(sessionId, 'serverDeafened', deafened);
+  }
+
+  private setServerRestriction(
+    sessionId: string,
+    restriction: keyof VoiceRestrictions,
+    value: boolean,
+  ): VoiceParticipantState[] | null {
+    const target = this.voiceStates.get(sessionId);
+    if (!target) return null;
+    const restrictions = { ...this.voiceRestrictions.getForUser(target.userId), [restriction]: value };
+    // Persist before touching the roster: a failed write must not look like successful moderation.
+    this.voiceRestrictions.save(target.userId, restrictions);
+    return this.getSessionsOfUser(target.userId).map((state) => {
+      const updated = { ...state, ...restrictions, isSpeaking: false };
+      this.voiceStates.set(state.sessionId, updated);
+      return updated;
+    });
   }
 
   /**

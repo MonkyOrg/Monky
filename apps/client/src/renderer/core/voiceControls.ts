@@ -5,6 +5,50 @@ import { audioProcessor } from './AudioProcessor';
 import { webRtcManager } from './WebRtcManager';
 import { callClient } from './serverConnection';
 import { soundEffects } from './SoundEffects';
+import { sessionManager } from './SessionManager';
+import { serverStore } from '../stores/serverStore';
+import { participantManager } from './ParticipantManager';
+import { t } from '../i18n';
+
+export function isViewingCallServer(): boolean {
+  return !voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === sessionManager.getActiveKey();
+}
+
+export function updateLocalSpeaking(speaking: boolean): void {
+  voiceStore.setSpeaking(speaking);
+  const key = voiceStore.voiceSessionKey;
+  const call = key ? sessionManager.get(key) : undefined;
+  const user = key ? call?.serverStore.currentUser : serverStore.currentUser;
+  const participants = key ? call?.participants : participantManager;
+  if (user && participants) {
+    const sessionId = user.sessionId || user.id;
+    const inCall = voiceStore.currentVoiceChannelId !== null
+      && participants.get(sessionId)?.voiceState?.channelId === voiceStore.currentVoiceChannelId;
+    participants.setSpeaking(sessionId, voiceStore.isSpeaking && inCall);
+  }
+}
+
+export function getVoiceControlModeration(): {
+  serverMuted: boolean;
+  serverDeafened: boolean;
+  muteReason: string | null;
+  deafenReason: string | null;
+} {
+  const here = isViewingCallServer();
+  const call = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
+  const server = call?.serverStore.serverDetails?.name ?? call?.host ?? t('voiceModeration.otherServer');
+  const deafenReason = voiceStore.serverDeafened
+    ? here ? t('permissions.serverDeafened') : t('voiceModeration.deafenedElsewhere', { server })
+    : null;
+  return {
+    serverMuted: here && voiceStore.serverMuted,
+    serverDeafened: here && voiceStore.serverDeafened,
+    muteReason: deafenReason ?? (voiceStore.serverMuted
+      ? here ? t('permissions.serverMuted') : t('voiceModeration.mutedElsewhere', { server })
+      : null),
+    deafenReason,
+  };
+}
 
 export function toggleMicrophoneMute(): void {
   const muted = !voiceStore.isMuted;

@@ -208,6 +208,8 @@ async function runAudioDeviceSmoke() {
   voice.currentVoiceChannelId = null;
   voice.isMuted = false;
   voice.serverMuted = false;
+  let speakingEvents = 0;
+  const offSpeaking = appEvents.on('local.speaking', (speaking) => { if (speaking) speakingEvents++; });
   const root = document.createElement('div');
   root.className = 'user-quick-actions';
   root.style.cssText = 'position:fixed;left:12px;bottom:12px';
@@ -254,6 +256,8 @@ async function runAudioDeviceSmoke() {
     await wait();
     check(captures.length === 1 && contexts.length === 1, 'settings and popover reuse one local preview graph');
     check(Number(extra.getAttribute('aria-valuenow')) > 0, 'Shared meter exposes the measured input level accessibly');
+    check(!voice.isSpeaking && speakingEvents === 0,
+      'Quick microphone settings measure local input without activating call-speaking indicators');
     offExtra();
     check(extra.getAttribute('aria-valuenow') === '0', 'Stopping a meter clears its accessible level as well as its bar');
     extra.remove();
@@ -456,6 +460,7 @@ async function runAudioDeviceSmoke() {
     check(frames.size === 0, 'all preview animation callbacks cancelled');
   } finally {
     off();
+    offSpeaking();
     offExtra();
     offApply();
     root.remove();

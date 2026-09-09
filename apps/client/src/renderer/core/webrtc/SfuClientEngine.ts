@@ -25,7 +25,11 @@ import { NetworkClient } from '../NetworkClient';
 import { clientLog } from '../ClientLogService';
 import { appEvents } from '../EventBus';
 import { settingsStore } from '../../stores/settingsStore';
-import { shouldPreferHardwareEncoding, sortVideoCodecs } from './codecPreferences';
+import {
+  explicitScreenCodecMime, ScreenCodecError, selectScreenVideoCodecs,
+  shouldPreferHardwareEncoding, sortVideoCodecs,
+} from './codecPreferences';
+import { t } from '../../i18n';
 
 export interface SfuConsumerTrackEvent {
   producerSessionId: string;
@@ -60,6 +64,7 @@ export class SfuClientEngine {
   private recvTransport: mediasoupTypes.Transport | null = null;
   private channelId: string | null = null;
   private producers: Map<string, mediasoupTypes.Producer> = new Map();
+  private pendingScreenProducers = new Map<string, object>();
   // Last quality profile pushed from WebRtcManager. Applied to every producer's
   // RTP sender so SFU media honors the same bitrate/degradation caps as the P2P
   // path (#568). Null until the first apply.
@@ -333,16 +338,15 @@ export class SfuClientEngine {
    * exactly what makes a game stutter while sharing. This honours the same
    * preference the user picks for P2P calls.
    */
-  private pickVideoCodec(): mediasoupTypes.RtpCodecCapability | undefined {
-    const codecs = this.device?.rtpCapabilities?.codecs;
-    if (!codecs) return undefined;
+  private pickVideoCodec(screen = false): mediasoupTypes.RtpCodecCapability | undefined {
+    // Receive capabilities are not evidence that this device can encode the
+    // same profile. mediasoup exposes the negotiated send set separately.
+    const codecs = this.device?.sendRtpCapabilities?.codecs ?? [];
 
     const videoCodecs = codecs.filter(
       (codec) => codec.kind === 'video' && !/\/(rtx|red|ulpfec|flexfec)/i.test(codec.mimeType)
     );
-    if (videoCodecs.length === 0) return undefined;
-
-    const [best] = sortVideoCodecs(
+    const [best] = (screen ? selectScreenVideoCodecs : sortVideoCodecs)(
       videoCodecs,
       settingsStore?.preferredVideoCodec ?? 'auto',
       shouldPreferHardwareEncoding()
@@ -423,21 +427,40 @@ export class SfuClientEngine {
     }
   }
 
-  public async produceScreenVideo(track: MediaStreamTrack, shareId: string): Promise<mediasoupTypes.Producer | null> {
-    if (!this.sendTransport || !this.canProduceKind('video')) return null;
+  public async produceScreenVideo(track: MediaStreamTrack, shareId: string): Promise<mediasoupTypes.Producer> {
+    if (!this.sendTransport || !this.canProduceKind('video')) throw new Error(t('screenCodec.reconnecting'));
     const key = `screen_video:${shareId}`;
+    const operation = {};
+    const client = this.client;
+    const channelId = this.channelId;
     try {
+      const preferred = settingsStore.preferredVideoCodec;
+      const chosenCodec = this.pickVideoCodec(true);
       this.closeProducer(key);
-      const chosenCodec = this.pickVideoCodec();
+      this.pendingScreenProducers.set(key, operation);
       const producer = await this.produceTrack({
         track,
         codec: chosenCodec,
         appData: { mediaType: 'screen_video', shareId },
       });
+      if (this.pendingScreenProducers.get(key) !== operation) {
+        producer.close();
+        if (channelId) client.send(MessageType.SFU_PRODUCER_CLOSED, { channelId, producerId: producer.id } satisfies SfuProducerClosedPayload);
+        throw new DOMException('Screen producer was stopped or replaced', 'AbortError');
+      }
       this.producers.set(key, producer);
+      const required = explicitScreenCodecMime(preferred);
+      if (required) {
+        const mediaCodecs = producer.rtpParameters.codecs.filter((codec) => !/\/rtx$/i.test(codec.mimeType));
+        if (!mediaCodecs.length || mediaCodecs.some((codec) => codec.mimeType.toLowerCase() !== required)) {
+          this.closeProducer(key);
+          throw new ScreenCodecError(preferred, 'incompatible');
+        }
+      }
       await this.applyProducerQuality(key, producer);
+      if (this.producers.get(key) !== producer) throw new DOMException('Screen producer was replaced', 'AbortError');
       producer.on('transportclose', () => {
-        this.producers.delete(key);
+        if (this.producers.get(key) === producer) this.producers.delete(key);
       });
       console.log(`[SFU Client] Produced screen video track ${track.id} shareId ${shareId} with producerId ${producer.id}`);
       // #566 diagnostics: capture the codec chosen for the SFU screen producer
@@ -449,10 +472,13 @@ export class SfuClientEngine {
         chosenCodec: chosenCodec?.mimeType ?? '(mediasoup default)',
       });
       return producer;
-    } catch (err: any) {
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') throw err;
       console.error('[SFU Client] Failed to produce screen video track:', err);
-      clientLog.error('SFU', 'Failed to produce screen video track', { error: err?.message });
-      return null;
+      clientLog.error('SFU', 'Failed to produce screen video track', { error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      if (this.pendingScreenProducers.get(key) === operation) this.pendingScreenProducers.delete(key);
     }
   }
 
@@ -532,6 +558,10 @@ export class SfuClientEngine {
   public async replaceTrack(key: string, track: MediaStreamTrack | null): Promise<boolean> {
     const producer = this.producers.get(key);
     if (!producer) return false;
+    if (track && key.startsWith('screen_video:')) {
+      await this.produceScreenVideo(track, key.slice('screen_video:'.length));
+      return true;
+    }
     try {
       await producer.replaceTrack({ track });
       return true;
@@ -542,6 +572,7 @@ export class SfuClientEngine {
   }
 
   public closeProducer(key: string): void {
+    this.pendingScreenProducers.delete(key);
     const producer = this.producers.get(key);
     if (producer) {
       try {
@@ -753,6 +784,7 @@ export class SfuClientEngine {
 
   public leave(): void {
     this.joinEpoch++;
+    this.pendingScreenProducers.clear();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
     for (const unsub of this.unsubscribeEvents) {

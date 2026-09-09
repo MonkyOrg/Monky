@@ -193,7 +193,8 @@ A validação dos payloads usa **zod**, com os schemas em `packages/shared` —
 os mesmos que o cliente usa para validar antes de enviar.
 
 ::: warning A versão do protocolo é exata, não compatível
-`PROTOCOL_VERSION` (hoje **3**) precisa ser **idêntica** nos dois lados. Não há
+`PROTOCOL_VERSION`, definida em `packages/shared/src/constants.ts`, precisa ser
+**idêntica** nos dois lados. Não há
 negociação nem modo de compatibilidade: se o cliente manda uma versão diferente
 da do servidor, a autenticação é recusada.
 
@@ -312,6 +313,13 @@ Se o processo SFU sofrer qualquer falha ou indisponibilidade, o cliente avisa em
 
 Não existe queda para P2P: uma malha em que só o lado que percebeu a falha troca de protocolo nunca se forma, porque o outro lado continua respondendo como cliente SFU e descarta a oferta recebida. O resultado seria uma chamada muda por trás de um aviso tranquilizador — por isso o caminho é reconectar, e não degradar.
 :::
+
+Quando um administrador muda explicitamente de **SFU para P2P**, os participantes
+são avisados e o cliente encerra o transporte anterior antes de voltar
+automaticamente ao próprio canal. Essa entrada usa uma autorização temporária,
+de uso único, vinculada à sessão e ao canal, e respeita as permissões e os limites
+atuais. Sair voluntariamente, ser removido ou iniciar outra chamada cancela
+o retorno automático.
 
 ### Sinalização
 

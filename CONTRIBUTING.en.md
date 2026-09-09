@@ -203,6 +203,42 @@ If your change breaks compatibility between client and server, it **must** ship
 as a major. Labelling a breaking change as `feat:` publishes a minor, and anyone
 who updates only one of the two sides can no longer connect.
 
+### Release notes: two audiences, two texts
+
+The **technical GitHub changelog** still comes from commits: keep the details,
+`#123:` references in the body and compatibility information.
+The **in-app recap** comes from separate files written for people who use
+Monky, not for developers.
+
+For a user-visible change, add a new file in `release-notes/`, such as
+`release-notes/617-copy-version.json`:
+
+```json
+{
+  "group": "novidades",
+  "pt-BR": "Quer compartilhar sua versão do Monky? Clique nela para copiar. Sem decorar os números!",
+  "en": "Need to share your Monky version? Click it to copy. No need to memorize the numbers!"
+}
+```
+
+- Use `novidades`, `correcoes` or `outros`; empty groups are omitted.
+- Write in **both languages**, using at most 280 characters per text. Explain
+  what someone can do or which annoyance has gone away. Keep it short, natural
+  and lightly playful, without inventing benefits.
+- Do not include issue numbers, links, code or implementation instructions.
+  Internal-only changes can stay in the technical changelog.
+- Keep published files: **do not rename or reuse them** for a new change.
+  The generator reads files added between the previous tag and `HEAD`;
+  promoting a beta uses the previous stable tag and includes notes from the betas.
+  Uncommitted files are not included when generating a release.
+
+`node scripts/test-changelog.js` validates the format and note files.
+`scripts/generate-changelog.js` publishes the translations in a hidden data
+block in the release description, separate from the technical `Changelog`.
+The client still fetches the installed tag through the GitHub API, with no
+translation service. Older releases display a change count clearly labelled
+as a summary and a button for GitHub details; we do not automatically translate commits.
+
 ### What CI checks
 
 Every PR runs the **CI** workflow. Beyond the build, it has checks that block the

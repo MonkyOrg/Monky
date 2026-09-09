@@ -59,11 +59,27 @@ The meter is a local preview: it does not unmute your microphone or transmit
 your voice. Closing the panel stops the preview. The **Voice settings**
 button opens the corresponding tab directly.
 
+The green speaking border on your avatar and in the channel list only lights
+up during a call with an active, unmuted microphone, respecting PTT. Outside
+a call, only the local meters in open microphone settings keep working.
+These previews do not activate the call's speaking indicator, and pressing
+the PTT shortcut outside a call does not activate it either.
+
 Right-clicking your own name also opens the user menu, both in the lists and
 on your bottom-bar profile. This menu lets you toggle manual microphone
 mute and deafen, including before joining a call. The voice-volume control
 only appears for other users; all other actions still respect server
 permissions. Manual mute never removes an administrator restriction.
+
+Administrative microphone and audio restrictions apply to **the identity on
+that server**, including its other devices. Leaving and rejoining the call,
+switching servers, or restarting the app or server does not remove the
+restriction: an administrator must lift it.
+
+When browsing another server during a call, its lists do not inherit the active
+call's restrictions. Microphone and audio controls still respect that call and
+identify the server that applied the restriction in their tooltips. The overlay
+also continues to show the active call's participants.
 
 ### Tooltips and menus
 
@@ -181,6 +197,11 @@ loses frames. H.264 is hardware accelerated on practically every graphics card
 That is why, on the **Gaming** profile, the **Automatic** codec puts H.264
 first. If you use another profile and the game stutters while sharing, pick
 **H.264 / AVC** under *Preferred Video Codec*.
+
+**Automatic** can negotiate another compatible codec. An explicit choice is
+required for your screen in both P2P and SFU, including when replacing a screen
+or switching voice modes. If it cannot be used, the client explains why rather
+than sending your screen with a different codec.
 
 On Windows, Monky also captures the screen through the **Windows Graphics
 Capture** API, which composites on the GPU and stops delivering frames when

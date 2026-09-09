@@ -1,12 +1,15 @@
 import { settingsStore } from '../../stores/settingsStore';
+import { t } from '../../i18n';
 
 /**
  * Video codec prioritization for WebRTC peer connections.
  *
- * Supports user-customizable preferred codecs with automatic hardware fallback:
+ * Automatic mode can negotiate fallback codecs. An explicit screen codec is
+ * a constraint, not just a position in an SDP preference list (#566):
  * - auto: prioritized as AV1 -> VP9 -> VP8 -> H.264, except on the Gaming preset
  *   (see below)
- * - av1 / vp9 / vp8 / h264: places chosen codec first, keeping all others as fallback
+ * - av1 / vp9 / vp8 / h264: screens advertise only that codec and its RTX;
+ *   WebRtcManager also selects the outgoing encoder with encodings.codec
  */
 
 export type PreferredVideoCodec = 'auto' | 'av1' | 'vp9' | 'vp8' | 'h264';
@@ -23,6 +26,65 @@ export interface CodecCapabilityLike {
   clockRate?: number;
   channels?: number;
   sdpFmtpLine?: string;
+  preferredPayloadType?: number;
+  payloadType?: number;
+}
+
+export class ScreenCodecError extends Error {
+  constructor(
+    public readonly preferred: PreferredVideoCodec,
+    reason: 'unsupported' | 'incompatible' | 'notApplied',
+    public override readonly cause?: unknown
+  ) {
+    const codec = preferred === 'h264' ? 'H.264' : preferred.toUpperCase();
+    super(t(`screenCodec.${reason}`, { codec }));
+    this.name = 'ScreenCodecError';
+  }
+}
+
+export function explicitScreenCodecMime(preferred: PreferredVideoCodec): string | null {
+  return preferred === 'auto' ? null : `video/${preferred}`;
+}
+
+/** Capabilities omit RTX's apt in Chromium; RTP/router capabilities may include it. */
+export function selectScreenVideoCodecs<T extends CodecCapabilityLike>(
+  codecs: T[],
+  preferred: PreferredVideoCodec,
+  preferHardwareEncoding = false
+): T[] {
+  const mime = explicitScreenCodecMime(preferred);
+  if (!mime) return sortVideoCodecs(codecs, 'auto', preferHardwareEncoding);
+  const primary = codecs.filter((codec) => codec.mimeType.toLowerCase() === mime);
+  if (!primary.length) throw new ScreenCodecError(preferred, 'unsupported');
+  const payloads = new Set(primary.map((codec) => codec.preferredPayloadType ?? codec.payloadType));
+  const repairs = codecs.filter((codec) => {
+    if (codec.mimeType.toLowerCase() !== 'video/rtx') return false;
+    const apt = /(?:^|;)\s*apt=(\d+)(?:;|$)/i.exec(codec.sdpFmtpLine ?? '');
+    return !apt || payloads.has(Number(apt[1]));
+  });
+  return [...primary, ...repairs];
+}
+
+export function getScreenVideoCodecs(
+  preferred: PreferredVideoCodec = settingsStore.preferredVideoCodec
+): RTCRtpCodec[] {
+  const codecs = compatibleSendingVideoCodecs();
+  if (!codecs.length && preferred !== 'auto') throw new ScreenCodecError(preferred, 'unsupported');
+  return selectScreenVideoCodecs(codecs, preferred, shouldPreferHardwareEncoding());
+}
+
+function compatibleSendingVideoCodecs(): RTCRtpCodec[] {
+  if (typeof RTCRtpSender === 'undefined' || typeof RTCRtpReceiver === 'undefined'
+    || typeof RTCRtpSender.getCapabilities !== 'function' || typeof RTCRtpReceiver.getCapabilities !== 'function') return [];
+  const send = RTCRtpSender.getCapabilities('video')?.codecs ?? [];
+  const receive = RTCRtpReceiver.getCapabilities('video')?.codecs ?? [];
+  // Use encodable capabilities that setCodecPreferences also accepts. In
+  // Electron 34 H.264 High is 640020 on send but 64001f on receive; passing
+  // the unfiltered send list rejects the entire setting.
+  return send.filter((codec) => receive.some((other) =>
+    codec.mimeType.toLowerCase() === other.mimeType.toLowerCase()
+    && codec.clockRate === other.clockRate && codec.channels === other.channels
+    && codec.sdpFmtpLine === other.sdpFmtpLine));
 }
 
 /**
@@ -87,29 +149,29 @@ export function sortVideoCodecs<T extends CodecCapabilityLike>(
  */
 export function getPrioritizedVideoCodecs(
   preferred: PreferredVideoCodec = settingsStore?.preferredVideoCodec ?? 'auto'
-): CodecCapabilityLike[] {
-  if (typeof RTCRtpReceiver === 'undefined' || typeof (RTCRtpReceiver as any).getCapabilities !== 'function') {
+): RTCRtpCodec[] {
+  if (typeof RTCRtpSender === 'undefined' || typeof RTCRtpSender.getCapabilities !== 'function') {
     return [];
   }
-  const capabilities = (RTCRtpReceiver as any).getCapabilities('video');
-  if (!capabilities || !Array.isArray(capabilities.codecs) || capabilities.codecs.length === 0) {
-    return [];
-  }
-  return sortVideoCodecs(capabilities.codecs, preferred, shouldPreferHardwareEncoding());
+  return sortVideoCodecs(compatibleSendingVideoCodecs(), preferred, shouldPreferHardwareEncoding());
 }
 
 /**
- * Extracts the ordered list of video codec names from the first `m=video`
- * section of an SDP, in the payload-type order that actually drives codec
- * selection. Purely diagnostic: it lets us see which codec a (re)negotiation
- * prioritised at runtime, e.g. to catch H.264 falling back to AV1 after a
- * SFU -> P2P switch (#566). Supporting codecs (rtx/red/ulpfec/flexfec) are
- * dropped so only the real video codecs remain.
+ * Reads one video m-line without modifying the SDP. A MID selects the screen,
+ * rather than the first video m-line (usually the camera). Supporting codecs
+ * are omitted; codecId-linked RTP stats are still required to prove output.
  */
-export function getSdpVideoCodecOrder(sdp: string): string[] {
+export function getSdpVideoCodecOrder(sdp: string, mid?: string): string[] {
   if (!sdp) return [];
   const lines = sdp.split(/\r\n|\r|\n/);
-  const videoIndex = lines.findIndex((line) => line.startsWith('m=video'));
+  const videoIndex = lines.findIndex((line, index) => {
+    if (!line.startsWith('m=video ')) return false;
+    if (mid === undefined) return true;
+    for (let i = index + 1; i < lines.length && !lines[i].startsWith('m='); i++) {
+      if (lines[i] === `a=mid:${mid}`) return true;
+    }
+    return false;
+  });
   if (videoIndex === -1) return [];
 
   const payloadOrder = lines[videoIndex].split(' ').slice(3);
@@ -133,31 +195,55 @@ export function getSdpVideoCodecOrder(sdp: string): string[] {
 }
 
 /**
- * Applies the prioritized video codecs to all video transceivers on a given RTCPeerConnection.
+ * Only local screens are constrained. Camera keeps its preference/fallback
+ * semantics, and remote-only transceivers keep the remote sender's choices.
  */
 export function applyVideoCodecPreferences(
   pc: RTCPeerConnection,
-  preferred: PreferredVideoCodec = settingsStore?.preferredVideoCodec ?? 'auto'
+  preferred: PreferredVideoCodec = settingsStore?.preferredVideoCodec ?? 'auto',
+  screenSenders: Iterable<RTCRtpSender> = []
 ): void {
-  try {
-    const prioritizedCodecs = getPrioritizedVideoCodecs(preferred);
-    if (prioritizedCodecs.length === 0) return;
-
-    for (const transceiver of pc.getTransceivers()) {
-      const isVideo =
-        transceiver.receiver?.track?.kind === 'video' ||
-        transceiver.sender?.track?.kind === 'video' ||
-        (transceiver as any).kind === 'video';
-
-      if (isVideo && typeof (transceiver as any).setCodecPreferences === 'function') {
-        try {
-          (transceiver as any).setCodecPreferences(prioritizedCodecs);
-        } catch {
-          // If browser/device rejects the preferences array, leave default negotiation intact
+  const screens = new Set(screenSenders);
+  for (const transceiver of pc.getTransceivers()) {
+    if (screens.has(transceiver.sender)) {
+      const codecs = getScreenVideoCodecs(preferred);
+      if (preferred === 'auto' && !codecs.length) continue;
+      try {
+        transceiver.setCodecPreferences(codecs);
+      } catch (error) {
+        if (preferred === 'auto') {
+          try { transceiver.setCodecPreferences([]); } catch {}
+          continue;
         }
+        throw new ScreenCodecError(preferred, 'notApplied', error);
+      }
+    } else if (transceiver.sender.track?.kind === 'video') {
+      const codecs = getPrioritizedVideoCodecs(preferred);
+      if (!codecs.length) continue;
+      try {
+        transceiver.setCodecPreferences(codecs);
+      } catch {
+        // Camera remains best-effort; the strict choice belongs to screens.
       }
     }
-  } catch {
-    // Gracefully ignore environments without getTransceivers / setCodecPreferences
+  }
+}
+
+/** Validate the accepted answer's screen m-line, never the camera or capabilities. */
+export function assertScreenCodecNegotiated(
+  transceiver: RTCRtpTransceiver,
+  preferred: PreferredVideoCodec,
+  answerSdp: string
+): void {
+  if (transceiver.mid === null) return;
+  const mime = explicitScreenCodecMime(preferred);
+  if (!mime) return;
+  // This checks compatibility, not the active encoder. On an answerer,
+  // Chromium can send a codec from the remote offer that is absent here;
+  // the sender must also select its encoding.codec explicitly.
+  const primary = getSdpVideoCodecOrder(answerSdp, transceiver.mid);
+  if ((transceiver.currentDirection !== 'sendonly' && transceiver.currentDirection !== 'sendrecv')
+    || primary.length === 0 || primary.some((codec) => `video/${codec}` !== mime)) {
+    throw new ScreenCodecError(preferred, 'incompatible');
   }
 }

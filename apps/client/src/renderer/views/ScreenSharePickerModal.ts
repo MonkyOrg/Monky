@@ -344,10 +344,14 @@ export class ScreenSharePickerModal {
       }
 
       this.close();
-    } catch (err: any) {
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        this.close();
+        return;
+      }
       await showAlert({
         title: t('screenShare.errorTitle'),
-        message: t('screenShare.errorMessage', { error: err.message }),
+        message: t('screenShare.errorMessage', { error: err instanceof Error ? err.message : String(err) }),
         variant: 'danger',
       });
     } finally {

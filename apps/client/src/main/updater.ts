@@ -6,6 +6,7 @@ import { UpdateOutcome, ReleaseNotesResult } from '@monky/shared';
 import { mt } from './i18n';
 import { beginUpdateInstall, consumeUpdateOutcome } from './updateInstall';
 import { updateLog } from './updateLog';
+import { fetchVersionReleaseNotes } from './releaseNotes';
 import {
   cleanVer,
   feedUrlForTag,
@@ -292,29 +293,11 @@ async function downloadMacDmg(mainWindow: BrowserWindow): Promise<CheckResult> {
  * the GitHub call off the renderer.
  */
 async function fetchReleaseNotes(tag?: string): Promise<ReleaseNotesResult> {
-  const wanted = (tag && tag.trim()) || `v${app.getVersion()}`;
-  const normalized = /^v/i.test(wanted) ? wanted : `v${wanted}`;
-  const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'Monky-App' };
-  try {
-    const res = await fetch(
-      `https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${encodeURIComponent(normalized)}`,
-      { headers }
-    );
-    if (!res.ok) {
-      updateLog('fetchReleaseNotes: not ok', { tag: normalized, status: res.status });
-      return { ok: false, error: `HTTP ${res.status}` };
-    }
-    const rel = (await res.json()) as { tag_name?: string; body?: string; html_url?: string };
-    return {
-      ok: true,
-      version: (rel.tag_name ?? normalized).replace(/^v/i, ''),
-      body: typeof rel.body === 'string' ? rel.body : '',
-      url: rel.html_url ?? `https://github.com/${GITHUB_REPO}/releases/tag/${normalized}`,
-    };
-  } catch (e) {
-    updateLog('fetchReleaseNotes FAILED', { tag: normalized, error: msg(e) });
-    return { ok: false, error: msg(e) };
+  const result = await fetchVersionReleaseNotes(app.getVersion(), tag);
+  if (!result.ok) {
+    updateLog('fetchReleaseNotes FAILED', { tag: result.version ?? tag, error: result.error });
   }
+  return result;
 }
 
 // ── Wiring ───────────────────────────────────────────────────────────────

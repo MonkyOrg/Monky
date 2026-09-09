@@ -88,6 +88,7 @@ class ScreenAudioService {
   private frameWatchdog: ReturnType<typeof setTimeout> | null = null;
   private removeFrameListener: (() => void) | null = null;
   private removeErrorListener: (() => void) | null = null;
+  private stopPromise: Promise<void> | null = null;
 
   public async isSupported(): Promise<boolean> {
     return window.api.screenAudioSupported();
@@ -148,6 +149,7 @@ class ScreenAudioService {
   // ────────────────────────────────────────────
 
   public async start(sourceId?: string): Promise<MediaStreamTrack | null> {
+    if (this.stopPromise) await this.stopPromise;
     if (this.isCapturing) return this.outputTrack;
 
     const supported = await this.isSupported();
@@ -223,6 +225,7 @@ class ScreenAudioService {
   // ────────────────────────────────────────────
 
   public async startTestTone(): Promise<MediaStreamTrack | null> {
+    if (this.stopPromise) await this.stopPromise;
     if (this.isCapturing) return this.outputTrack;
 
     await this.setupPipeline();
@@ -261,29 +264,26 @@ class ScreenAudioService {
   //  Stop (both modes)
   // ────────────────────────────────────────────
 
-  public async stop(): Promise<void> {
-    if (!this.isCapturing) return;
-
-    if (this.isTestTone) {
-      if (this.testToneInterval) {
-        clearInterval(this.testToneInterval);
-        this.testToneInterval = null;
+  public stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    if (!this.isCapturing) return Promise.resolve();
+    if (this.outputTrack) this.outputTrack.enabled = false;
+    const client = callClient();
+    const stop = async () => {
+      try {
+        if (!this.isTestTone) await window.api.screenAudioStop();
+      } finally {
+        await webRtcManager.setLocalScreenAudioTrack(null);
+        client.send(MessageType.VOICE_STATE_UPDATE, { isSharingScreenAudio: false });
+        clientLog.info('MEDIA', 'Screen audio stopped', { framesReceived: this.frameCount });
+        this.cleanup();
+        this.isCapturing = false;
+        this.isTestTone = false;
+        appEvents.emit('local.screen_audio_stopped');
       }
-    } else {
-      await window.api.screenAudioStop();
-    }
-
-    await webRtcManager.setLocalScreenAudioTrack(null);
-    callClient().send(MessageType.VOICE_STATE_UPDATE, { isSharingScreenAudio: false });
-
-    const mode = this.isTestTone ? 'test-tone' : 'native';
-    clientLog.info('MEDIA', `Screen audio stopped (${mode})`, { framesReceived: this.frameCount });
-    console.log(`[ScreenAudio] Stopped (${mode}). Frames: ${this.frameCount}`);
-
-    this.cleanup();
-    this.isCapturing = false;
-    this.isTestTone = false;
-    appEvents.emit('local.screen_audio_stopped');
+    };
+    this.stopPromise = stop().finally(() => { this.stopPromise = null; });
+    return this.stopPromise;
   }
 
   public getIsCapturing(): boolean {

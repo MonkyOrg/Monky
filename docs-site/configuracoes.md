@@ -60,12 +60,28 @@ ficam salvas. O medidor é uma prévia local: não desmuta o microfone nem
 transmite sua voz. Fechar o painel encerra a prévia. O botão
 **Configurações de voz** abre diretamente a aba correspondente.
 
+A borda verde de fala no seu avatar e na lista do canal só acende durante
+uma chamada com o microfone ativo e sem mute, respeitando o PTT. Fora de uma
+chamada, apenas os medidores locais nas configurações de microfone abertas
+continuam funcionando. Essas prévias não ativam o indicador de fala da chamada;
+pressionar o atalho de PTT fora dela também não o ativa.
+
 O botão direito no seu próprio nome também abre o menu do usuário, tanto
 nas listas quanto no seu perfil da barra inferior. Nesse menu você pode
 alternar o mute manual do microfone e do áudio, inclusive antes de entrar
 em chamada. O controle de volume de voz só aparece para outros usuários;
 as demais ações continuam respeitando as permissões do servidor.
 Um mute manual nunca remove um bloqueio aplicado por administrador.
+
+Bloqueios administrativos de microfone e áudio valem para **a identidade
+naquele servidor**, incluindo seus outros dispositivos. Sair e entrar na
+chamada, trocar de servidor ou reiniciar o aplicativo ou o servidor não remove
+o bloqueio: um administrador precisa liberá-lo.
+
+Ao navegar em outro servidor durante uma chamada, as listas não herdam os
+bloqueios da chamada ativa. Os controles de microfone e áudio continuam
+respeitando essa chamada e informam no tooltip qual servidor aplicou o bloqueio.
+A sobreposição também continua mostrando os participantes da chamada ativa.
 
 ### Dicas e menus
 
@@ -184,6 +200,11 @@ FPS. H.264 tem aceleração por hardware em praticamente toda placa de vídeo
 Por isso, no perfil **Gaming** o codec **Automático** coloca o H.264 na frente.
 Se você usa outro perfil e sente o jogo travando ao compartilhar, escolha
 **H.264 / AVC** em *Codec de Vídeo Preferido*.
+
+**Automático** pode negociar outro codec compatível. Uma escolha explícita é
+obrigatória para sua tela em P2P e SFU, inclusive ao trocar de tela ou de modo de
+voz. Se ela não puder ser usada, o cliente informa o motivo e não transmite
+usando um codec diferente.
 
 No Windows, o Monky também captura a tela pela API **Windows Graphics Capture**,
 que compõe na GPU e não entrega quadros quando nada muda na tela. Ela precisa do

@@ -5,7 +5,7 @@ import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
 import { sessionManager } from '../core/SessionManager';
 import { isForegroundEvent } from '../core/sessionRouting';
-import { callClient } from '../core/serverConnection';
+import { callClient, isVoiceAdmissionPending, joinCallOnSession, rejoinCallOnSession } from '../core/serverConnection';
 import { participantManager } from '../core/ParticipantManager';
 import { serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
@@ -21,7 +21,7 @@ import { bindPttIndicators, renderMicrophoneButton } from './PttIndicator';
 import { bindAudioDevicePopovers } from './AudioDevicePopover';
 import { bindFooterControlsMotion } from './FooterControlsMotion';
 import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
-import { toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
+import { getVoiceControlModeration, isViewingCallServer, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
 import { VoiceStageView } from './VoiceStageView';
 import { createChannelModal } from './CreateChannelModal';
 import { editChannelModal } from './EditChannelModal';
@@ -90,6 +90,7 @@ export class MainView {
     const canManageServer = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES);
     const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
+    const moderation = getVoiceControlModeration();
 
     this.container.innerHTML = `
       <div class="main-layout">
@@ -182,8 +183,8 @@ export class MainView {
                   </button>
                 </div>
                 <div class="audio-control-group">
-                  <button id="bar-btn-deafen" class="btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}" title="${voiceStore.serverDeafened ? t('permissions.serverDeafened') : voiceStore.getEffectiveDeafened() ? t('main.undeafen') : t('main.deafen')}">
-                    ${renderAudioStateIcon(voiceStore.serverDeafened ? 'headphones' : voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones', voiceStore.serverDeafened)}
+                  <button id="bar-btn-deafen" class="btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}" title="${escapeHtml(moderation.deafenReason ?? (voiceStore.getEffectiveDeafened() ? t('main.undeafen') : t('main.deafen')))}">
+                    ${renderAudioStateIcon(moderation.serverDeafened ? 'headphones' : voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones', moderation.serverDeafened)}
                   </button>
                   <button type="button" class="audio-device-trigger" data-audio-device="output" aria-label="${t('settings.outputDevice')}" title="${t('settings.outputDevice')}">
                     <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
@@ -681,7 +682,7 @@ export class MainView {
     if (voiceListEl) {
       voiceListEl.innerHTML = voiceChannels.map((c) => {
         const inVoice = participantManager.getInVoiceChannel(c.id);
-        const isActive = c.id === voiceStore.currentVoiceChannelId;
+        const isActive = isViewingCallServer() && c.id === voiceStore.currentVoiceChannelId;
         const showRestrictedIcon = permissionsResolved && !canSpeakInVoiceChannels;
         const isRestricted = showRestrictedIcon && !isActive;
 
@@ -703,11 +704,14 @@ export class MainView {
                 ${inVoice.map((p) => {
                   const sessionId = p.user.sessionId || p.user.id;
                   const isLocal = serverStore.isMySession(p.user.sessionId);
-                  const isSpeaking = isLocal ? voiceStore.isSpeaking : p.isSpeaking;
-                  const isServerDeafened = isLocal ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
-                  const isServerMuted = isLocal ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
-                  const isSelfDeafened = isLocal ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
-                  const isSelfMuted = isLocal ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
+                  const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
+                  const isSpeaking = isLocal
+                    ? isLocalCall && p.voiceState?.channelId === voiceStore.currentVoiceChannelId && voiceStore.isSpeaking
+                    : p.isSpeaking;
+                  const isServerDeafened = isLocalCall ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
+                  const isServerMuted = isLocalCall ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
+                  const isSelfDeafened = isLocalCall ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
+                  const isSelfMuted = isLocalCall ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
                   const avatar = getAvatarUrl(p.user.avatarUrl);
                   const displayName = participantManager.displayName(p);
                   const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
@@ -831,8 +835,11 @@ export class MainView {
             iconEl.classList.add('channel-loading');
           }
           item.classList.add('joining');
+          const sessionKey = sessionManager.getActiveKey();
           try {
-            await this.handleJoinVoiceChannel(channelId);
+            if (!await this.handleJoinVoiceChannel(channelId)) return;
+            if (voiceStore.currentVoiceChannelId !== channelId || voiceStore.voiceSessionKey !== sessionKey
+              || sessionManager.getActiveKey() !== sessionKey) return;
             this.setActiveContentView('stage');
             this.voiceStageView?.setChannel(channelId);
             this.updateScreenShareNotice();
@@ -1097,85 +1104,41 @@ export class MainView {
     ]);
   }
 
-  private async handleJoinVoiceChannel(channelId: string, silent: boolean = false): Promise<void> {
-    if (voiceStore.currentVoiceChannelId === channelId) {
-      // Already in this channel, just switch view to stage
-      this.setActiveContentView('stage');
-      this.voiceStageView?.setChannel(channelId);
-      this.updateScreenShareNotice();
-      return;
+  private async handleJoinVoiceChannel(channelId: string, silent: boolean = false): Promise<boolean> {
+    const session = sessionManager.getActive();
+    if (!session) return false;
+    if (voiceStore.currentVoiceChannelId === channelId && voiceStore.voiceSessionKey === session.key) {
+      return !isVoiceAdmissionPending(session.key, channelId);
     }
 
-    if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SPEAK)) {
+    if (this.arePermissionsResolved() && !session.serverStore.hasPermission(Permission.SPEAK)) {
       if (!silent) this.showVoicePermissionDenied();
-      return;
+      return false;
     }
 
-    // If in another channel, close the current mesh locally; the server-side
-    // join handler updates the stored voice state to the new room directly.
-    if (voiceStore.currentVoiceChannelId) {
-      // Switching rooms ends any screen share (#565): it belongs to the room it
-      // started in and must not follow us into the next one.
-      await this.stopLocalScreenSharesForChannelChange();
-      webRtcManager.closeAllPeers();
-      // The call lives on a single server (#400). Joining voice somewhere else
-      // means leaving the previous one for real, otherwise the old server would
-      // keep us listed in a channel we can no longer hear.
-      const previousKey = voiceStore.voiceSessionKey;
-      if (previousKey && previousKey !== sessionManager.getActiveKey()) {
-        sessionManager.get(previousKey)?.client.send(MessageType.VOICE_LEAVE, {
-          channelId: voiceStore.currentVoiceChannelId,
-        });
-      }
-    }
-
-    // Start local mic
     try {
-      const stream = await audioProcessor.startMicrophone();
-      const audioTrack = stream.getAudioTracks()[0];
-      webRtcManager.setLocalAudioTrack(audioTrack);
-    } catch (err) {
-      console.warn('Microphone permission or hardware error:', err);
+      await joinCallOnSession(session.key, channelId);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return false;
+      await showAlert({
+        title: t('voiceJoin.failedTitle'),
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return false;
     }
-
-    voiceStore.setChannel(channelId, sessionManager.getActiveKey());
-    // The peer mesh keys off our session id on the server hosting the call, so
-    // it has to follow the call when it moves between servers (#400).
-    const mySessionId = serverStore.currentUser?.sessionId || serverStore.currentUser?.id;
-    if (mySessionId) webRtcManager.setCurrentSessionId(mySessionId);
-    if (!silent) soundEffects.play('join_voice');
-    networkClient.send(MessageType.VOICE_JOIN, {
-      channelId,
-      isMuted: voiceStore.isMuted,
-      isDeafened: voiceStore.isDeafened,
-    });
-
-    if (webRtcManager.isSfuMode()) {
-      await webRtcManager.initSfuForCurrentChannel();
-    } else {
-      // Connect to all peers already in this voice channel
-      const peersInChannel = participantManager.getInVoiceChannel(channelId);
-      for (const peer of peersInChannel) {
-        const peerSessionId = peer.user.sessionId || peer.user.id;
-        if (!serverStore.isMySession(peer.user.sessionId)) {
-          await webRtcManager.connectToPeer(peerSessionId, true);
-        }
-      }
-    }
+    if (voiceStore.voiceSessionKey !== session.key || voiceStore.currentVoiceChannelId !== channelId) return false;
+    if (!silent && !voiceStore.getEffectiveDeafened()) soundEffects.play('join_voice');
+    return true;
   }
 
   public async rejoinVoiceChannel(channelId: string): Promise<void> {
-    // Being moved to another room ends any screen share (#565); stop the local
-    // capture and producers before tearing the mesh down, otherwise the stale
-    // tracks would be re-announced into the destination on the next join.
-    await this.stopLocalScreenSharesForChannelChange();
-    // Close existing peer connections before moving (#248)
-    webRtcManager.closeAllPeers();
-    // Reset the stored voice channel so handleJoinVoiceChannel performs a full
-    // (re)join instead of early-returning, then reconnect the mesh.
-    voiceStore.setChannel(null);
+    const sessionKey = voiceStore.voiceSessionKey;
+    const session = sessionKey ? sessionManager.get(sessionKey) : undefined;
+    if (!session) return;
+    await rejoinCallOnSession(session.key, channelId);
+    if (sessionManager.getActive() !== session || voiceStore.voiceSessionKey !== session.key
+      || voiceStore.currentVoiceChannelId !== channelId) return;
     this.setActiveContentView('stage');
-    await this.handleJoinVoiceChannel(channelId, true);
     this.voiceStageView?.setChannel(channelId);
     this.renderChannels();
     this.updateScreenShareNotice();
@@ -1268,6 +1231,7 @@ export class MainView {
 
     const renderMemberItem = (m: UserSummary, isOffline: boolean): string => {
       const isLocal = m.id === serverStore.currentUser?.id;
+      const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
       const vm = participantManager.getByUserId(m.id);
       const voiceState = vm?.voiceState;
       // If the member is in a private channel the local user cannot access,
@@ -1277,10 +1241,10 @@ export class MainView {
       const inVoice = !!voiceState && !inPrivateHiddenChannel;
       const isReconnecting = !effectiveOffline && participantManager.isUserReconnecting(m.id);
       const avatar = getAvatarUrl(m.avatarUrl);
-      const isServerDeafened = !effectiveOffline && (isLocal ? voiceStore.serverDeafened : (voiceState?.serverDeafened ?? false));
-      const isServerMuted = !effectiveOffline && (isLocal ? voiceStore.serverMuted : (voiceState?.serverMuted ?? false));
-      const isSelfDeafened = !effectiveOffline && (isLocal ? voiceStore.isDeafened : (voiceState?.isDeafened ?? false));
-      const isSelfMuted = !effectiveOffline && (isLocal ? voiceStore.isMuted : (voiceState?.isMuted ?? false));
+      const isServerDeafened = !effectiveOffline && (isLocalCall ? voiceStore.serverDeafened : (voiceState?.serverDeafened ?? false));
+      const isServerMuted = !effectiveOffline && (isLocalCall ? voiceStore.serverMuted : (voiceState?.serverMuted ?? false));
+      const isSelfDeafened = !effectiveOffline && (isLocalCall ? voiceStore.isDeafened : (voiceState?.isDeafened ?? false));
+      const isSelfMuted = !effectiveOffline && (isLocalCall ? voiceStore.isMuted : (voiceState?.isMuted ?? false));
 
       const statusClass = m.invisible ? 'invisible' : (isReconnecting ? 'reconnecting' : (inVoice ? 'voice' : (effectiveOffline ? 'offline' : 'online')));
       const statusText = m.invisible ? t('main.statusInvisible') : isReconnecting
@@ -1530,9 +1494,10 @@ export class MainView {
 
       const btnDeafenEl = document.getElementById('bar-btn-deafen');
       if (btnDeafenEl) {
+        const moderation = getVoiceControlModeration();
         btnDeafenEl.className = `btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}`;
-        btnDeafenEl.title = voiceStore.serverDeafened ? t('permissions.serverDeafened') : voiceStore.getEffectiveDeafened() ? t('main.undeafen') : t('main.deafen');
-        updateAudioStateIcon(btnDeafenEl, voiceStore.serverDeafened ? 'headphones' : voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones', voiceStore.serverDeafened);
+        btnDeafenEl.title = moderation.deafenReason ?? (voiceStore.getEffectiveDeafened() ? t('main.undeafen') : t('main.deafen'));
+        updateAudioStateIcon(btnDeafenEl, moderation.serverDeafened ? 'headphones' : voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones', moderation.serverDeafened);
       }
 
       const mediaCamEl = document.getElementById('media-btn-camera');
@@ -1580,12 +1545,12 @@ export class MainView {
         if (speaking) avatarEl.classList.add('speaking');
         else avatarEl.classList.remove('speaking');
       }
-      if (serverStore.currentUser) {
+      if (serverStore.currentUser && isViewingCallServer()) {
         const mySessionId = serverStore.currentUser.sessionId || serverStore.currentUser.id;
         const miniEl = document.getElementById(`voice-mini-user-${mySessionId}`);
         if (miniEl) {
-          if (speaking) miniEl.classList.add('speaking');
-          else miniEl.classList.remove('speaking');
+          const inCall = participantManager.get(mySessionId)?.voiceState?.channelId === voiceStore.currentVoiceChannelId;
+          miniEl.classList.toggle('speaking', speaking && inCall);
         }
       }
     });
@@ -1599,8 +1564,6 @@ export class MainView {
     });
 
     const u7 = appEvents.on(`message.${MessageType.SERVER_SETTINGS_UPDATED}`, (payload: any) => {
-      serverStore.updateServerMeta(payload.name, payload.hasPassword, payload.allowSoundboard, payload.iconUrl, payload.attachmentStorage, payload.maxUsers, payload.turnEnabled, payload.allowEveryoneMention, payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone);
-      serverStore.setTurnAvailability(payload.turnAvailability);
       // The store above is the one of whichever server sent this. Everything
       // below writes to the screen and to the saved-server list, so it may only
       // run for the server actually being looked at (#400).

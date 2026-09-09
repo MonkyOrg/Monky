@@ -215,7 +215,7 @@ async function runSettingsNavigationSmoke() {
   for (const key of ['accountTab', 'soundboardTab', 'stickersTab', 'keybindsTab', 'notificationsTab', 'qualityTab', 'logsTab']) {
     modal[key] = { renderHtml: () => '', attachEvents: () => {}, cleanup: () => {} };
   }
-  modal.aboutTab = { renderHtml: () => '', attachEvents: () => {}, loadAppVersion: async () => { versions++; } };
+  modal.aboutTab = { renderHtml: () => '', attachEvents: () => {}, cleanup: () => {}, loadAppVersion: async () => { versions++; } };
   modal.voiceVideoTab = {
     renderHtml: () => '<label for="settings-select-fixture">Device</label><select id="settings-select-fixture" title="Device choice"><option value="one">One</option><option value="two">Two</option></select>',
     attachEvents: () => {}, refreshDevices: async () => {},
@@ -266,7 +266,7 @@ async function runSettingsNavigationSmoke() {
 async function runSidebarPttSmoke() {
   const [{ MainView }, { VoiceStageView }, ptt, { voiceStore: voice }, { settingsStore: settings },
     { appEvents }, { networkClient }, { soundEffects }, language, audioIcons, { OverlayStageView },
-    servers, participants, routing, { userContextMenu }, { initTooltips }, { selectEnhancer }, { webRtcManager }] = await Promise.all([
+    servers, participants, routing, { userContextMenu }, { initTooltips }, { selectEnhancer }, { webRtcManager }, { sessionManager }, { updateLocalSpeaking }] = await Promise.all([
     import('/views/MainView.ts'), import('/views/VoiceStageView.ts'), import('/views/PttIndicator.ts'),
     import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'), import('/core/EventBus.ts'),
     import('/core/NetworkClient.ts'), import('/core/SoundEffects.ts'), import('/i18n/index.ts'),
@@ -274,6 +274,8 @@ async function runSidebarPttSmoke() {
     import('/stores/serverStore.ts'), import('/core/ParticipantManager.ts'), import('/core/sessionRouting.ts'), import('/views/UserContextMenu.ts'),
     import('/core/TooltipService.ts'), import('/core/SelectEnhancer.ts'),
     import('/core/WebRtcManager.ts'),
+    import('/core/SessionManager.ts'),
+    import('/core/voiceControls.ts'),
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
@@ -281,7 +283,7 @@ async function runSidebarPttSmoke() {
   const root = document.getElementById('app');
   root.innerHTML = '<div class="user-quick-actions">' + ptt.renderMicrophoneButton()
     + '<button id="bar-btn-deafen" class="btn btn-icon">' + audioIcons.renderAudioStateIcon('headphones') + '</button></div>'
-    + '<div id="voice-channels-list" style="width:250px"></div><div id="members-list-items"></div>';
+    + '<img id="main-user-avatar"><div id="voice-channels-list" style="width:250px"></div><div id="members-list-items"></div>';
   const view = new MainView(root);
   const stage = new VoiceStageView(document.getElementById('ptt-stage-fixture'));
   const send = networkClient.send;
@@ -348,6 +350,10 @@ async function runSidebarPttSmoke() {
     check(button.getAttribute('aria-pressed') === 'false', 'Waiting for PTT is not manual mute');
     voice.setMicrophoneState(true, true);
     check(button.dataset.state === 'open' && icon() === 'mic' && button.dataset.pressed === 'true', 'Actual MainView binding must remain subscribed after attach cleanup');
+    updateLocalSpeaking(true);
+    check(root.querySelector('#main-user-avatar').classList.contains('speaking')
+      && root.querySelector('#voice-mini-user-ptt-local-session').classList.contains('speaking'),
+      'Live microphone activity lights both the footer avatar and its voice-channel participant');
     const openColor = getComputedStyle(button).color;
     check(openColor !== waitingColor, 'PTT open and waiting states must have different colors');
     const markerStyle = getComputedStyle(marker);
@@ -357,6 +363,10 @@ async function runSidebarPttSmoke() {
     check(button.dataset.state === 'open' && button.dataset.pressed === 'false', 'Release delay remains visibly open without showing a held key');
     voice.setMicrophoneState(false, false);
     check(button.dataset.state === 'closed', 'Releasing the microphone returns the button to waiting');
+    check(!root.querySelector('#main-user-avatar').classList.contains('speaking')
+      && !root.querySelector('#voice-mini-user-ptt-local-session').classList.contains('speaking'),
+      'Closing microphone transmission immediately removes both speaking borders');
+    updateLocalSpeaking(false);
     view.attachEvents();
     button.click();
     check(voice.isMuted && button.dataset.state === 'muted' && icon() === 'mic_off', 'Clicking the reattached button must toggle manual mute exactly once');
@@ -404,6 +414,68 @@ async function runSidebarPttSmoke() {
       && !deafenButton.querySelector('[data-audio-block]').hidden
       && deafenButton.title === language.t('permissions.serverDeafened'), 'Admin deafen uses headphones plus prohibition badge and its own tooltip');
     window.adminAudioPreviewMarkup = button.outerHTML + deafenButton.outerHTML;
+    const originalVoiceSession = voice.voiceSessionKey;
+    const moderatedSession = sessionManager.create('moderated.example', 3000, 'Local');
+    moderatedSession.serverStore.setServerDetails({
+      ...server.serverDetails, id: 'moderated-server', name: 'Server <A>',
+      channels: server.serverDetails.channels.map(channel => ({ ...channel, name: 'Call on A' })),
+    }, localUser);
+    moderatedSession.participants.addUser(localUser);
+    moderatedSession.participants.updateVoiceState({ ...manager.get(localUser.sessionId).voiceState, serverDeafened: true });
+    voice.voiceSessionKey = moderatedSession.key;
+    appEvents.emit('voice.state_updated');
+    view.renderChannels();
+    view.renderMembers();
+    check(channelBlocks() === 0 && memberBlocks() === 0,
+      'A visible server must not inherit administrative badges from a call on another server');
+    check(block.hidden && deafenButton.querySelector('[data-audio-block]').hidden,
+      'Footer must not claim administrative restrictions belong to the server being viewed');
+    check(voice.serverDeafened && voice.getEffectiveMuted() && voice.getEffectiveDeafened(),
+      'Changing the visible server never unmutes the actual call');
+    check(icon() === 'mic_off' && deafenButton.querySelector('[data-audio-icon]').textContent === 'headset_off'
+      && button.title.includes('Server <A>') && deafenButton.title.includes('Server <A>'),
+      'Physical call controls remain muted and identify the actual moderating server safely');
+    const { OverlayBridgeService } = await import('/core/OverlayBridgeService.ts');
+    const bridge = new OverlayBridgeService();
+    bridge.isOpen = true;
+    const originalApi = window.api;
+    let overlaySnapshot;
+    window.api = { ...originalApi, sendOverlaySyncState: async state => { overlaySnapshot = state; } };
+    try {
+      bridge.syncState();
+      check(overlaySnapshot?.channelName === 'Call on A' && overlaySnapshot.participants.length === 1
+        && overlaySnapshot.participants[0].sessionId === localUser.sessionId && overlaySnapshot.participants[0].serverDeafened,
+        'Floating overlay keeps the active call roster and restrictions while a different server is visible');
+    } finally {
+      window.api = originalApi;
+    }
+    voice.setServerDeafened(false);
+    voice.setMicrophoneState(true, false);
+    updateLocalSpeaking(true);
+    check(voice.isSpeaking && moderatedSession.participants.get(localUser.sessionId).isSpeaking
+      && !manager.get(localUser.sessionId).isSpeaking,
+      'Local activity updates the call server instead of the currently visible participant store');
+    check(root.querySelector('#main-user-avatar').classList.contains('speaking')
+      && !root.querySelector('#voice-mini-user-ptt-local-session').classList.contains('speaking'),
+      'The physical call may light the footer, but never a matching user row on another server');
+    view.renderChannels();
+    check(!root.querySelector('#voice-mini-user-ptt-local-session').classList.contains('speaking'),
+      'Rebuilding the visible channel list does not import another server speech state');
+    updateLocalSpeaking(false);
+    voice.setMicrophoneState(false, false);
+    voice.setServerDeafened(true);
+    language.setLanguage('en');
+    appEvents.emit('voice.state_updated');
+    check(button.title.includes('active call') && deafenButton.title.includes('active call'),
+      'Background-call restriction explanations follow the selected language');
+    language.setLanguage('pt-BR');
+    voice.voiceSessionKey = originalVoiceSession;
+    sessionManager.remove(moderatedSession.key);
+    appEvents.emit('voice.state_updated');
+    view.renderChannels();
+    view.renderMembers();
+    check(channelBlocks() === 2 && memberBlocks() === 2 && !block.hidden,
+      'Returning to the owning server restores its administrative indicators');
     voice.setServerDeafened(false);
     check(channelBlocks() === 0 && memberBlocks() === 0, 'Removing admin deafen must clear both lists immediately');
     routing.setForegroundContext(false);
@@ -414,6 +486,27 @@ async function runSidebarPttSmoke() {
     check(channelBlocks() === 1 && memberBlocks() === 1, 'Background moderation must repaint after foreground stores are restored');
     voice.setServerMuted(false);
     check(block.hidden && deafenButton.querySelector('[data-audio-block]').hidden, 'Removing moderation clears both prohibition badges');
+    voice.setMicrophoneState(true, false);
+    updateLocalSpeaking(true);
+    const speakingChannel = voice.currentVoiceChannelId;
+    voice.setChannel(null);
+    updateLocalSpeaking(true);
+    view.renderChannels();
+    check(!voice.isSpeaking && !manager.get(localUser.sessionId).isSpeaking
+      && !root.querySelector('#main-user-avatar').classList.contains('speaking')
+      && !root.querySelector('#voice-mini-user-ptt-local-session').classList.contains('speaking'),
+      'Leaving the call rejects delayed speech and clears both indicators before the roster echo');
+    voice.setChannel(speakingChannel);
+    voice.setMicrophoneState(false, false);
+    const manualMuted = voice.isMuted;
+    voice.setServerMuted(true);
+    voice.setServerDeafened(true);
+    voice.setChannel('ptt-sidebar-fixture', 'other-server');
+    check(!voice.serverMuted && !voice.serverDeafened && voice.isMuted === manualMuted,
+      'Changing call server clears only the old server restrictions, never personal mute');
+    check(block.hidden && deafenButton.querySelector('[data-audio-block]').hidden,
+      'Changing call server clears restriction indicators synchronously');
+    voice.setChannel('ptt-sidebar-fixture');
     voice.setChannel(null);
     check(button.dataset.state === 'inactive' && !marker.hidden, 'PTT mode remains visible outside a call');
     button.click();
@@ -548,6 +641,84 @@ async function runSidebarPttSmoke() {
         && !document.querySelector('.user-context-menu #ctx-volume-slider'),
       'Own profile, channel row and member row must all open the same menu without self volume');
       userContextMenu.close();
+    }
+    const originalJoin = view.handleJoinVoiceChannel;
+    const originalSetView = view.setActiveContentView;
+    const originalActiveKey = sessionManager.getActiveKey;
+    const priorVoiceChannel = voice.currentVoiceChannelId;
+    const priorVoiceKey = voice.voiceSessionKey;
+    let visibleKey = 'stage-entry-fixture';
+    sessionManager.getActiveKey = () => visibleKey;
+    try {
+      for (const outcome of ['denied', 'denied-provisional', 'cancelled', 'different-channel', 'different-server', 'accepted']) {
+        visibleKey = 'stage-entry-fixture';
+        voice.setChannel(null);
+        let resolveJoin;
+        let called = false;
+        const opened = [];
+        view.handleJoinVoiceChannel = async () => {
+          called = true;
+          if (outcome === 'denied-provisional') voice.setChannel('ptt-sidebar-fixture', visibleKey);
+          await new Promise(resolve => { resolveJoin = resolve; });
+          return outcome === 'accepted' || outcome === 'different-server' || outcome === 'different-channel';
+        };
+        view.setActiveContentView = value => { opened.push(value); };
+        root.querySelector('.channel-item[data-channel-type="VOICE"]').click();
+        check(called && opened.length === 0, `${outcome}: stage remains closed while admission is pending`);
+        if (outcome === 'different-channel') voice.setChannel('newer-call', visibleKey);
+        else if (outcome === 'accepted' || outcome === 'different-server') {
+          voice.setChannel('ptt-sidebar-fixture', visibleKey);
+          if (outcome === 'different-server') visibleKey = 'newly-visible-server';
+        } else if (outcome === 'cancelled') voice.reset();
+        resolveJoin();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        check(opened.filter(value => value === 'stage').length === (outcome === 'accepted' ? 1 : 0),
+          `${outcome}: stage opens only for confirmed admission on the still-visible server`);
+      }
+      view.handleJoinVoiceChannel = originalJoin;
+      const session = sessionManager.create('stage-admission-fixture', 0, 'Local');
+      session.serverStore.setServerDetails({ ...server.serverDetails }, localUser);
+      session.serverStore.hasPermission = () => true;
+      session.client.getStatus = () => 'CONNECTED';
+      session.client.send = () => {};
+      const originalActive = sessionManager.getActive;
+      sessionManager.getActive = () => session;
+      visibleKey = session.key;
+      let resolveAdmission;
+      let requests = 0;
+      const opened = [];
+      session.client.sendRequest = () => {
+        requests++;
+        return new Promise(resolve => { resolveAdmission = resolve; });
+      };
+      view.setActiveContentView = value => { opened.push(value); };
+      try {
+        voice.setChannel(null);
+        view.renderChannels();
+        root.querySelector('.channel-item[data-channel-type="VOICE"]').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        check(requests === 1 && voice.currentVoiceChannelId === 'ptt-sidebar-fixture',
+          'Real admission provisions the intended channel while awaiting its response');
+        root.querySelector('.channel-item[data-channel-type="VOICE"]').click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        check(requests === 1 && !opened.includes('stage'),
+          'A second click cannot treat provisional voice membership as a completed admission');
+        voice.reset();
+        resolveAdmission({});
+        await new Promise(resolve => setTimeout(resolve, 0));
+        check(!opened.includes('stage'), 'Cancelling a double-clicked admission must not open the stage');
+      } finally {
+        voice.reset();
+        resolveAdmission?.({});
+        await new Promise(resolve => setTimeout(resolve, 0));
+        sessionManager.getActive = originalActive;
+        sessionManager.remove(session.key);
+      }
+    } finally {
+      view.handleJoinVoiceChannel = originalJoin;
+      view.setActiveContentView = originalSetView;
+      sessionManager.getActiveKey = originalActiveKey;
+      voice.setChannel(priorVoiceChannel, priorVoiceKey);
     }
     const ownProfile = root.querySelector('#user-profile-btn');
     view.destroy();

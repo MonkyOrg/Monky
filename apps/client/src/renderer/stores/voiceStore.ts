@@ -45,6 +45,15 @@ export class VoiceStore {
   public setChannel(channelId: string | null, sessionKey: string | null = null): void {
     clientLog.info('CONNECTION', `Voice channel ${channelId ? 'joined' : 'left'}`, { channelId, sessionKey });
     const wasReconnecting = this.isReconnecting;
+    if (!channelId || channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
+      this.setSpeaking(false);
+    }
+    const clearedModeration = (!channelId || sessionKey !== this.voiceSessionKey)
+      && (this.serverMuted || this.serverDeafened);
+    if (!channelId || sessionKey !== this.voiceSessionKey) {
+      this.serverMuted = false;
+      this.serverDeafened = false;
+    }
     if (channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
       this.isConnecting = false;
       this.isReconnecting = false;
@@ -64,6 +73,7 @@ export class VoiceStore {
     }
     emitOutsideRouting(() => {
       appEvents.emit('voice.channel_changed', channelId);
+      if (clearedModeration) appEvents.emit('voice.state_updated');
       if (wasReconnecting && !this.isReconnecting) appEvents.emit('voice.reconnecting_changed', false);
     });
   }
@@ -71,6 +81,7 @@ export class VoiceStore {
   public setMuted(muted: boolean): void {
     clientLog.info('AUDIO', `Muted: ${muted}`);
     this.isMuted = muted;
+    if (this.getEffectiveMuted()) this.setSpeaking(false);
     settingsStore.isMuted = muted;
     settingsStore.save();
     appEvents.emit('voice.state_updated');
@@ -91,6 +102,7 @@ export class VoiceStore {
     this.isDeafened = deafened;
     settingsStore.isDeafened = deafened;
     settingsStore.isMuted = this.isMuted;
+    if (this.getEffectiveMuted()) this.setSpeaking(false);
     settingsStore.save();
     appEvents.emit('voice.state_updated');
   }
@@ -98,12 +110,14 @@ export class VoiceStore {
   public setServerMuted(muted: boolean): void {
     clientLog.warn('AUDIO', `Server muted: ${muted}`);
     this.serverMuted = muted;
+    if (this.getEffectiveMuted()) this.setSpeaking(false);
     emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
   }
 
   public setServerDeafened(deafened: boolean): void {
     clientLog.warn('AUDIO', `Server deafened: ${deafened}`);
     this.serverDeafened = deafened;
+    if (this.getEffectiveMuted()) this.setSpeaking(false);
     emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
   }
 
@@ -116,10 +130,14 @@ export class VoiceStore {
   }
 
   public setSpeaking(speaking: boolean): void {
-    if (this.isSpeaking !== speaking) {
-      this.isSpeaking = speaking;
-      appEvents.emit('voice.speaking_changed', speaking);
-      appEvents.emit('voice.state_updated');
+    const active = speaking && this.currentVoiceChannelId !== null
+      && this.microphoneOpen && !this.getEffectiveMuted();
+    if (this.isSpeaking !== active) {
+      this.isSpeaking = active;
+      emitOutsideRouting(() => {
+        appEvents.emit('voice.speaking_changed', active);
+        appEvents.emit('voice.state_updated');
+      });
     }
   }
 
@@ -127,6 +145,7 @@ export class VoiceStore {
     if (this.microphoneOpen === open && this.pttPressed === pttPressed) return;
     this.microphoneOpen = open;
     this.pttPressed = pttPressed;
+    if (!open) this.setSpeaking(false);
     emitOutsideRouting(() => appEvents.emit('voice.microphone_updated'));
   }
 
@@ -199,6 +218,7 @@ export class VoiceStore {
   public reset(): void {
     const hadChannel = this.currentVoiceChannelId !== null;
     const wasReconnecting = this.isReconnecting;
+    this.setSpeaking(false);
     this.currentVoiceChannelId = null;
     this.voiceSessionKey = null;
     // Note (#358): isMuted and isDeafened are persistent user privacy states

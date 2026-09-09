@@ -93,6 +93,8 @@ async function runMicrophoneTestSmoke() {
     api: window.api, pttKey: settings.pttKey, storage: localStorage.getItem('monky_settings'),
   };
   const initialListenerCount = Array.from(appEvents.listeners.values()).reduce((count, listeners) => count + listeners.size, 0);
+  let speakingEvents = 0;
+  const offSpeaking = appEvents.on('local.speaking', (speaking) => { if (speaking) speakingEvents++; });
   const sourceContext = new original.AudioContext();
   const source = sourceContext.createMediaStreamDestination();
   const captures = [];
@@ -188,6 +190,8 @@ async function runMicrophoneTestSmoke() {
     tab.startVadMeter(container);
     await wait();
     check(captures.length === 1 && plays.length === 0, 'passive VAD meter never plays audio');
+    check(!voice.isSpeaking && speakingEvents === 0 && Number(container.querySelector('#vad-meter').getAttribute('aria-valuenow')) > 0,
+      'Voice settings keep their local level preview without announcing speech outside a call');
     check(captures[0].requestedConstraints.audio.deviceId.exact === 'mic-test', 'preview captures the selected input');
     button.click();
     await wait();
@@ -464,9 +468,11 @@ async function runMicrophoneTestSmoke() {
     check(contexts.every((context) => context.state === 'closed'), 'all preview contexts closed');
     check(plays.every((element) => element.srcObject === null), 'all playback elements detached');
     check(frames.size === 0, 'all test preview frame callbacks cancelled');
+    offSpeaking();
     const finalListenerCount = Array.from(appEvents.listeners.values()).reduce((count, listeners) => count + listeners.size, 0);
     check(finalListenerCount === initialListenerCount, 'test and tab leave no EventBus listeners');
   } finally {
+    offSpeaking();
     tab.cleanup();
     pttTab?.cleanup();
     pttContainer?.remove();

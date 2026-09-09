@@ -17,6 +17,7 @@ import { SignalingService } from './application/services/SignalingService';
 import { UserService } from './application/services/UserService';
 import { listOnlineHumans } from './application/services/onlineHumans';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
+import { SqliteVoiceRestrictionRepository } from './infrastructure/database/SqliteVoiceRestrictionRepository';
 import {
   SqliteAttachmentRepository,
   SqliteBotRepository,
@@ -229,7 +230,7 @@ export class MonkyServer {
     const permissionService = new PermissionService(serverRepo, roleRepo);
     const roleService = new RoleService(roleRepo, userRepo, permissionService);
 
-    const signalingService = new SignalingService(channelRepo);
+    const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
     const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService);
     const chatService = new ChatService(
       messageRepo,

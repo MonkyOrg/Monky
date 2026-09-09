@@ -3,6 +3,7 @@ import { updateService } from '../../../core/UpdateService';
 import { changelogModal } from '../../ChangelogModal';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { bindVersionCopyButton, renderVersionCopyButton, setVersionCopyButton } from '../../VersionCopyButton';
 
 const IDEAS_URL = 'https://github.com/MonkyOrg/Monky/discussions/categories/ideas';
 const NEW_IDEA_URL = 'https://github.com/MonkyOrg/Monky/discussions/new?category=ideas';
@@ -10,6 +11,8 @@ const NEW_BUG_URL = 'https://github.com/MonkyOrg/Monky/discussions/new?category=
 const DONATE_URL = 'https://buymeacoffee.com/monkyorg';
 
 export class AboutTab {
+  private unbindVersionCopy: (() => void) | null = null;
+
   public renderHtml(): string {
     return `
       <!-- Updates -->
@@ -21,7 +24,7 @@ export class AboutTab {
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <div style="flex: 1;">
             <div style="font-size: 12px; color: var(--text-secondary);">
-              ${t('settings.currentVersion')} <span id="settings-app-version" style="font-family: var(--font-mono);">…</span>
+              ${t('settings.currentVersion')} ${renderVersionCopyButton('settings-app-version')}
             </div>
             <div id="settings-update-status" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;"></div>
           </div>
@@ -130,16 +133,27 @@ export class AboutTab {
   }
 
   public async loadAppVersion(container: HTMLElement): Promise<void> {
+    const verEl = container.querySelector<HTMLButtonElement>('#settings-app-version');
+    if (!verEl) return;
     try {
-      const verEl = container.querySelector<HTMLElement>('#settings-app-version');
-      if (verEl && window.api?.getAppVersion) {
-        const v = await window.api.getAppVersion();
-        verEl.textContent = `v${v}`;
-      }
-    } catch {}
+      if (!window.api?.getAppVersion) throw new Error('App version bridge unavailable');
+      const version = await window.api.getAppVersion();
+      if (!version.trim()) throw new Error('Empty app version');
+      if (container.isConnected) setVersionCopyButton(verEl, `v${version}`);
+    } catch (error) {
+      console.warn('[AboutTab] Could not load app version', error);
+      if (!container.isConnected) return;
+      verEl.disabled = true;
+      verEl.textContent = t('versionCopy.unavailable');
+      verEl.title = t('versionCopy.loadFailed');
+      verEl.setAttribute('aria-label', verEl.title);
+    }
   }
 
   public attachEvents(container: HTMLElement): void {
+    this.cleanup();
+    const versionButton = container.querySelector<HTMLButtonElement>('#settings-app-version');
+    if (versionButton) this.unbindVersionCopy = bindVersionCopyButton(versionButton);
     const btnCheckUpdates = container.querySelector<HTMLButtonElement>('#btn-check-updates');
     const btnViewChangelog = container.querySelector<HTMLButtonElement>('#btn-view-changelog');
     const updateStatus = container.querySelector<HTMLElement>('#settings-update-status');
@@ -224,5 +238,10 @@ export class AboutTab {
     btnSuggest?.addEventListener('click', () => openLink(NEW_IDEA_URL));
     btnVote?.addEventListener('click', () => openLink(IDEAS_URL));
     btnReport?.addEventListener('click', () => openLink(NEW_BUG_URL));
+  }
+
+  public cleanup(): void {
+    this.unbindVersionCopy?.();
+    this.unbindVersionCopy = null;
   }
 }
