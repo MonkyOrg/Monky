@@ -55,7 +55,7 @@ if (!process.versions.electron) {
     const address = httpServer.address();
     if (!address || typeof address === 'string') throw new Error('Missing Vite listener');
     window = new BrowserWindow({
-      show: false, width: 1100, height: 850,
+      show: false, width: 1100, height: 850, useContentSize: true,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -179,11 +179,22 @@ async function runVersionCopyKeyboardSmoke(window) {
     await wait(180);
     const hovered = await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).backgroundColor`);
     if (hovered === initial) throw new Error(`${surface}: version text must have a subtle hover affordance`);
-    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
-    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
     await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
-    if (!await evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).outlineWidth === '2px'`)) {
-      throw new Error(`${surface}: version copy needs a visible keyboard focus indicator`);
+    // A non-activating key changes input modality without racing Tab's focus move.
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Right' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Right' });
+    let focused;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      focused = await evaluate(`(() => {
+        const button = document.querySelector(${JSON.stringify(selector)});
+        return { active: document.activeElement === button, visible: button.matches(':focus-visible'),
+          outline: getComputedStyle(button).outlineWidth, documentFocused: document.hasFocus() };
+      })()`);
+      if (focused.active && focused.visible && focused.outline === '2px') break;
+      await wait(50);
+    }
+    if (!focused.active || !focused.visible || focused.outline !== '2px') {
+      throw new Error(`${surface}: version copy needs a visible keyboard focus indicator: ${JSON.stringify(focused)}`);
     }
   }
   window.webContents.debugger.attach('1.3');

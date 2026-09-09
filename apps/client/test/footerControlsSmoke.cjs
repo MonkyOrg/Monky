@@ -51,7 +51,7 @@ if (!process.versions.electron) {
     const address = httpServer.address();
     if (!address || typeof address === 'string') throw new Error('Missing Vite listener');
     window = new BrowserWindow({
-      show: false, width: 1100, height: 760,
+      show: false, width: 1100, height: 760, useContentSize: true,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
     });
     window.webContents.on('console-message', (_event, level, message) => {
@@ -227,19 +227,42 @@ async function setupFooterSmoke() {
   let hoverBounds;
   let hoverText;
   let previousSample;
+  let cardPointerTarget;
 
   window.footerSmoke = {
     checkCount: () => checks,
-    cardHoverTarget(selector) {
-      const card = document.querySelector(selector)?.closest('.stage-card, .stage-mini-card, .stage-focused-main');
+    async cardHoverTarget(selector) {
+      const control = document.querySelector(selector);
+      const card = control?.closest('.stage-card, .stage-mini-card, .stage-focused-main');
       if (!card) return null;
+      control.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+      await frame();
       const bounds = card.getBoundingClientRect();
-      return { x: Math.round(bounds.x + 12), y: Math.round(bounds.y + 12) };
+      const left = Math.max(0, bounds.left), right = Math.min(innerWidth, bounds.right);
+      const top = Math.max(0, bounds.top), bottom = Math.min(innerHeight, bounds.bottom);
+      for (const xFraction of [0.1, 0.9, 0.5]) {
+        for (const yFraction of [0.1, 0.9, 0.5]) {
+          const x = Math.round(left + (right - left) * xFraction);
+          const y = Math.round(top + (bottom - top) * yFraction);
+          const hit = document.elementFromPoint(x, y);
+          if (hit && card.contains(hit) && !hit.closest('button')) {
+            cardPointerTarget = { x, y };
+            return cardPointerTarget;
+          }
+        }
+      }
+      throw new Error(`${selector}: no visible card surface for native hover: ${JSON.stringify({
+        bounds: bounds.toJSON(), viewport: { width: innerWidth, height: innerHeight },
+      })}`);
     },
     async waitForCard(selector) {
       const card = document.querySelector(selector).closest('.stage-card, .stage-mini-card, .stage-focused-main');
       for (let attempt = 0; attempt < 100 && !card.matches(':hover'); attempt++) await delay(20);
-      check(card.matches(':hover'), `${selector}: native pointer reached its card`);
+      check(card.matches(':hover'), `${selector}: native pointer reached its card: ${JSON.stringify({
+        point: cardPointerTarget, bounds: card.getBoundingClientRect().toJSON(),
+        hit: document.elementFromPoint(cardPointerTarget.x, cardPointerTarget.y)?.outerHTML.slice(0, 250),
+        viewport: { width: innerWidth, height: innerHeight },
+      })}`);
       // Preserve existing card lift/scale; measure the button only once its parent settles.
       await Promise.all(card.getAnimations().map((animation) => animation.finished));
       await frame();
