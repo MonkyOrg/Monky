@@ -182,15 +182,18 @@ export interface VoiceRosterParticipant {
   voiceState: VoiceParticipantState;
 }
 
-export interface VoiceParticipantState {
+export interface VoiceRestrictions {
+  serverMuted: boolean;
+  serverDeafened: boolean;
+}
+
+export interface VoiceParticipantState extends VoiceRestrictions {
   /** The connection this state belongs to (#309). Unique per device. */
   sessionId: string;
   userId: string;
   channelId: string;
   isMuted: boolean;
   isDeafened: boolean;
-  serverMuted: boolean;
-  serverDeafened: boolean;
   isSpeaking: boolean;
   isCameraOn: boolean;
   isScreenSharing: boolean;

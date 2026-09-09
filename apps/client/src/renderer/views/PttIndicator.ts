@@ -29,16 +29,19 @@ export function bindPttIndicators(container: HTMLElement): () => void {
       : voiceStore.microphoneOpen ? 'open' : 'closed';
     const label = `${t('ptt.enabled')} · ${t(`ptt.${state}`)}`;
     const key = settingsStore.pttKey.display;
-    const title = `${label}. ${t('ptt.holdToTalk', { key })} ${t(voiceStore.pttPressed ? 'ptt.pressed' : 'ptt.released')}`;
+    const describePttState = (value: typeof state) => `${t('ptt.enabled')} · ${t(`ptt.${value}`)}. ${t('ptt.holdToTalk', { key })} ${t(voiceStore.pttPressed ? 'ptt.pressed' : 'ptt.released')}`;
+    const title = describePttState(state);
     container.querySelectorAll<HTMLButtonElement>('[data-microphone-control]').forEach((button) => {
-      const muted = voiceStore.getEffectiveMuted();
+      const muted = voiceStore.isMuted || voiceStore.isDeafened;
       const blocked = moderation.serverMuted || moderation.serverDeafened;
       const showPtt = enabled && !muted;
-      const buttonState = muted ? 'muted' : enabled ? state : 'idle';
-      const icon = blocked ? 'mic' : muted ? 'mic_off' : enabled && state !== 'open' ? 'keyboard_voice' : 'mic';
-      const muteReason = moderation.muteReason ?? (voiceStore.isDeafened ? t('ptt.deafened') : t('ptt.manualMuted'));
+      const gateState = state === 'muted' ? 'closed' : state;
+      const buttonState = muted ? 'muted' : enabled ? gateState : 'idle';
+      const icon = muted ? 'mic_off' : enabled && gateState !== 'open' ? 'keyboard_voice' : 'mic';
+      const muteReason = voiceStore.isDeafened ? t('ptt.deafened') : t('ptt.manualMuted');
       const action = t(voiceStore.isMuted ? 'main.unmute' : 'main.mute');
-      const description = muted ? `${muteReason}. ${action}` : enabled ? `${title}. ${action}` : action;
+      const personalDescription = muted ? `${muteReason}. ${action}` : enabled ? `${describePttState(gateState)}. ${action}` : action;
+      const description = [personalDescription, moderation.muteReason].filter(Boolean).join('. ');
       button.dataset.ptt = String(showPtt);
       button.dataset.state = buttonState;
       button.dataset.pressed = String(showPtt && voiceStore.pttPressed);
@@ -70,7 +73,7 @@ export function bindPttIndicators(container: HTMLElement): () => void {
       }
     });
   };
-  const unbind = ['voice.microphone_updated', 'voice.state_updated', 'voice.channel_changed', 'settings.updated', 'i18n.language_changed']
+  const unbind = ['voice.microphone_updated', 'voice.state_updated', 'voice.channel_changed', 'server.voice_restrictions_updated', 'settings.updated', 'i18n.language_changed']
     .map((event) => appEvents.on(event, update));
   update();
   return () => unbind.forEach((off) => off());

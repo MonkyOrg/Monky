@@ -1,8 +1,6 @@
 import {
-  AdminDeafenUserPayload,
   AdminKickVoicePayload,
   AdminMoveUserPayload,
-  AdminMuteUserPayload,
   AuthSuccessPayload,
   ChannelCreatedPayload,
   ChannelDeletedPayload,
@@ -24,6 +22,7 @@ import {
   UserConnectionStatePayload,
   UserUpdatedPayload,
   VoiceStateChangedPayload,
+  VoiceRestrictionsUpdatedPayload,
   VoiceUserJoinedPayload,
   VoiceUserLeftPayload,
   hasEveryoneMention,
@@ -451,6 +450,7 @@ class App {
 
       chatStore.setCommandUsageScope({ serverId: payload.server.id, callerId: payload.currentUser.id });
       serverStore.setServerDetails(payload.server, payload.currentUser);
+      serverStore.updateVoiceRestrictions(payload.currentUser.id, payload.voiceRestrictions);
       // The in-server layout needs more room than the connection card (#342).
       if (isForegroundEvent()) void window.api?.setWindowInServer?.(true);
       // Seed unread @-mention badges, including mentions received while this
@@ -845,28 +845,8 @@ class App {
       }
     });
 
-    appEvents.on(`message.${MessageType.ADMIN_MUTE_USER}`, (payload: AdminMuteUserPayload) => {
-      const current = participantManager.get(payload.targetSessionId)?.voiceState;
-      if (current) {
-        participantManager.updateVoiceState({ ...current, serverMuted: payload.muted, isSpeaking: false });
-      }
-      if (serverStore.isMySession(payload.targetSessionId) && this.eventOwnsCall()
-        && !!voiceStore.currentVoiceChannelId && current?.channelId === voiceStore.currentVoiceChannelId) {
-        voiceStore.setServerMuted(payload.muted);
-        this.syncLocalVoiceMediaState();
-      }
-    });
-
-    appEvents.on(`message.${MessageType.ADMIN_DEAFEN_USER}`, (payload: AdminDeafenUserPayload) => {
-      const current = participantManager.get(payload.targetSessionId)?.voiceState;
-      if (current) {
-        participantManager.updateVoiceState({ ...current, serverDeafened: payload.deafened });
-      }
-      if (serverStore.isMySession(payload.targetSessionId) && this.eventOwnsCall()
-        && !!voiceStore.currentVoiceChannelId && current?.channelId === voiceStore.currentVoiceChannelId) {
-        voiceStore.setServerDeafened(payload.deafened);
-        this.syncLocalVoiceMediaState();
-      }
+    appEvents.on(`message.${MessageType.VOICE_RESTRICTIONS_UPDATED}`, (payload: VoiceRestrictionsUpdatedPayload) => {
+      serverStore.updateVoiceRestrictions(payload.userId, payload);
     });
 
     appEvents.on(`message.${MessageType.ADMIN_KICK_VOICE}`, (payload: AdminKickVoicePayload) => {

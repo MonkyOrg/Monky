@@ -218,10 +218,10 @@ export class VoiceStageView {
 
         <!-- Stage Bottom Controls Bar -->
         <div class="stage-call-controls">
-          <button id="stage-btn-mic" class="btn btn-icon ${voiceStore.getEffectiveMuted() ? 'danger-active' : ''}" title="${voiceStore.getEffectiveMuted() ? t('stage.unmuteMic') : t('stage.muteMic')}">
+          <button id="stage-btn-mic" class="btn btn-icon ${voiceStore.isMuted || voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isMuted}" title="${voiceStore.isMuted ? t('stage.unmuteMic') : t('stage.muteMic')}">
             ${renderAudioStateIcon('mic', false, 24)}
           </button>
-          <button id="stage-btn-deafen" class="btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}" title="${voiceStore.getEffectiveDeafened() ? t('stage.undeafen') : t('stage.deafen')}">
+          <button id="stage-btn-deafen" class="btn btn-icon ${voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isDeafened}" title="${voiceStore.isDeafened ? t('stage.undeafen') : t('stage.deafen')}">
             ${renderAudioStateIcon('headphones', false, 24)}
           </button>
           <button id="stage-btn-camera" class="btn btn-icon ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${voiceStore.isCameraOn ? t('stage.cameraOff') : t('stage.cameraOn')}">
@@ -260,17 +260,20 @@ export class VoiceStageView {
     const moderation = getVoiceControlModeration();
     const btnMic = document.getElementById('stage-btn-mic');
     if (btnMic) {
-      btnMic.className = `btn btn-icon ${voiceStore.getEffectiveMuted() ? 'danger-active' : ''}`;
+      const muted = voiceStore.isMuted || voiceStore.isDeafened;
+      btnMic.className = `btn btn-icon ${muted ? 'danger-active' : ''}`;
       const blocked = moderation.serverMuted || moderation.serverDeafened;
-      btnMic.title = moderation.muteReason ?? (voiceStore.getEffectiveMuted() ? t('stage.unmuteMic') : t('stage.muteMic'));
-      updateAudioStateIcon(btnMic, blocked ? 'mic' : voiceStore.getEffectiveMuted() ? 'mic_off' : 'mic', blocked);
+      btnMic.setAttribute('aria-pressed', String(voiceStore.isMuted));
+      btnMic.title = [t(voiceStore.isMuted ? 'stage.unmuteMic' : 'stage.muteMic'), moderation.muteReason].filter(Boolean).join('. ');
+      updateAudioStateIcon(btnMic, muted ? 'mic_off' : 'mic', blocked);
     }
 
     const btnDeafen = document.getElementById('stage-btn-deafen');
     if (btnDeafen) {
-      btnDeafen.className = `btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}`;
-      btnDeafen.title = moderation.deafenReason ?? (voiceStore.getEffectiveDeafened() ? t('stage.undeafen') : t('stage.deafen'));
-      updateAudioStateIcon(btnDeafen, moderation.serverDeafened ? 'headphones' : voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones', moderation.serverDeafened);
+      btnDeafen.className = `btn btn-icon ${voiceStore.isDeafened ? 'danger-active' : ''}`;
+      btnDeafen.setAttribute('aria-pressed', String(voiceStore.isDeafened));
+      btnDeafen.title = [t(voiceStore.isDeafened ? 'stage.undeafen' : 'stage.deafen'), moderation.deafenReason].filter(Boolean).join('. ');
+      updateAudioStateIcon(btnDeafen, voiceStore.isDeafened ? 'headset_off' : 'headphones', moderation.serverDeafened);
     }
 
     const btnCam = document.getElementById('stage-btn-camera');
@@ -1643,7 +1646,8 @@ export class VoiceStageView {
     // server's participants (#426).
 
     const u14 = appEvents.on('voice.connection_changed', () => this.startPingMonitor());
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14);
+    const u15 = appEvents.on('server.voice_restrictions_updated', () => this.updateControlsUI());
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15);
   }
 
   private updateHeaderModeBadge(): void {

@@ -5,7 +5,10 @@ import path from 'node:path';
 import test from 'node:test';
 import WebSocket from 'ws';
 import type { types as MediasoupTypes } from 'mediasoup';
-import { MessageType, VoiceConnectionHealth, VoiceUserJoinedPayload, SfuProducersListPayload } from '@monky/shared';
+import { AuthSuccessPayload, MessageType, Permission, ProtocolErrorCode, ServerDetails, ServerErrorPayload, UserSummary, VoiceConnectionHealth, VoiceUserJoinedPayload, SfuProducersListPayload, hasPermission } from '@monky/shared';
+import { AuthService } from './application/services/AuthService';
+import { PermissionService } from './application/services/PermissionService';
+import { UserService } from './application/services/UserService';
 import { SignalingService } from './application/services/SignalingService';
 import { ChannelRecord, VoiceRestrictions } from './domain/entities';
 import type { IVoiceRestrictionRepository } from './domain/repositories';
@@ -38,8 +41,8 @@ test('administrative voice restrictions belong to the user on this server, not a
   await service.joinVoiceChannel('one', 'alice', 'room');
   await service.joinVoiceChannel('two', 'alice', 'other-room');
   await service.joinVoiceChannel('bob', 'bob', 'room');
-  assert.equal(service.setServerMuted('one', true)?.length, 2);
-  assert.equal(service.setServerDeafened('two', true)?.length, 2);
+  assert.equal(service.setServerMuted('alice', true).length, 2);
+  assert.equal(service.setServerDeafened('alice', true).length, 2);
   assert.equal(service.getVoiceState('two')?.serverMuted, true);
   assert.equal(service.getVoiceState('one')?.serverDeafened, true);
   assert.equal(service.getVoiceState('bob')?.serverMuted, false);
@@ -51,6 +54,7 @@ test('administrative voice restrictions belong to the user on this server, not a
   assert.equal(forged?.isSpeaking, false);
   service.leaveVoiceChannel('one');
   service.leaveVoiceChannel('two');
+  assert.deepEqual(service.getVoiceRestrictions('alice'), { serverMuted: true, serverDeafened: true });
   const rejoined = await service.joinVoiceChannel('new-session', 'alice', 'room', false, false);
   assert.equal(rejoined.voiceState?.serverMuted, true, 'fresh connection does not bypass mute');
   assert.equal(rejoined.voiceState?.serverDeafened, true, 'fresh connection does not bypass deafen');
@@ -65,13 +69,70 @@ test('administrative voice restrictions belong to the user on this server, not a
   assert.equal(elsewhere.voiceState?.serverMuted, false);
   assert.equal(elsewhere.voiceState?.serverDeafened, false);
 
-  service.setServerMuted('after-mode-switch', false);
+  service.setServerMuted('alice', false);
   assert.equal(service.getVoiceState('after-mode-switch')?.serverDeafened, true, 'unmute does not clear deafen');
-  service.setServerDeafened('after-mode-switch', false);
+  service.setServerDeafened('alice', false);
   service.leaveVoiceChannel('after-mode-switch');
   const cleared = await service.joinVoiceChannel('cleared', 'alice', 'room');
   assert.equal(cleared.voiceState?.serverMuted, false);
   assert.equal(cleared.voiceState?.serverDeafened, false, 'explicit administrative removal persists too');
+});
+
+test('authentication supplies the current identity restriction before voice, after asynchronous ICE setup', async () => {
+  const restrictions = memoryRestrictions();
+  const service = signaling(restrictions);
+  const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  const auth = Object.create(AuthService.prototype) as AuthService;
+  server['authService'] = auth;
+  server['signalingService'] = service;
+  server['sessions'] = new Map();
+  server['sessionSockets'] = new Map();
+  server['reconnectTimers'] = new Map();
+  server['closing'] = false;
+  server['broadcastRolesState'] = async () => {};
+  server['handleCommandsList'] = () => {};
+  const messages: Parameters<WebSocketServer['send']>[1][] = [];
+  server['send'] = (_socket, message) => { messages.push(message); };
+  server['broadcast'] = () => {};
+  const details: ServerDetails = {
+    id: 'server', name: 'Policy fixture', createdAt: 1, maxUsers: 10,
+    channels: [], members: [], voiceStates: {},
+  };
+
+  for (const blocked of [true, false]) {
+    const user: UserSummary = {
+      id: 'alice', sessionId: `alice-${blocked}`, clientId: 'alice-client',
+      nickname: 'Alice', status: 'ONLINE', joinedAt: 1,
+    };
+    const socket = Object.create(WebSocket.prototype) as WebSocket;
+    Object.defineProperty(socket, 'readyState', { value: WebSocket.OPEN });
+    const session: Parameters<WebSocketServer['handleAuthChallengeResponse']>[0] = {
+      ws: socket, isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+    };
+    server['sessions'].set(socket, session);
+    auth.verifyChallengeResponse = async () => ({ success: true, user, serverDetails: details });
+    server['buildIceServersFor'] = async () => {
+      await Promise.resolve();
+      restrictions.save(user.id, { serverMuted: blocked, serverDeafened: blocked });
+      return [];
+    };
+    await server['handleAuthChallengeResponse'](session, { signature: 'fixture' }, `auth-${blocked}`);
+    const response = messages.find((message) => message.requestId === `auth-${blocked}`);
+    assert.equal(response?.type, MessageType.AUTH_SUCCESS);
+    const payload = response?.payload as AuthSuccessPayload;
+    assert.deepEqual(payload.voiceRestrictions, { serverMuted: blocked, serverDeafened: blocked },
+      'the login snapshot must include the latest persisted policy, not a pre-ICE or previous-login value');
+    assert.deepEqual(payload.server.voiceStates, {}, 'restrictions do not require or create voice membership');
+    assert.equal(payload.currentUser.id, 'alice');
+    const beforeDisconnect = messages.length;
+    server['buildIceServersFor'] = async () => {
+      server['sessions'].delete(socket);
+      return [];
+    };
+    await server['handleAuthChallengeResponse'](session, { signature: 'fixture' }, 'disconnected-during-ice');
+    assert.equal(messages.length, beforeDisconnect, 'a departed connection must not receive a late auth snapshot');
+  }
+  assert.deepEqual(service.getVoiceRestrictions('bob'), { serverMuted: false, serverDeafened: false });
 });
 
 test('moderation applied while admission awaits a channel cannot be bypassed by that join', async (t) => {
@@ -82,8 +143,8 @@ test('moderation applied while admission awaits a channel cannot be bypassed by 
   const pending = new Promise<void>((resolve) => { release = resolve; });
   t.mock.method(service['channelRepo'], 'findById', async () => { await pending; return channel; });
   const joining = service.joinVoiceChannel('two', 'alice', 'room', false, false);
-  service.setServerMuted('one', true);
-  service.setServerDeafened('one', true);
+  service.setServerMuted('alice', true);
+  service.setServerDeafened('alice', true);
   release();
   const result = await joining;
   assert.equal(result.voiceState?.serverMuted, true);
@@ -97,33 +158,155 @@ test('failed moderation persistence never updates the live roster or reports suc
     save: () => { throw failure; },
   });
   await service.joinVoiceChannel('one', 'alice', 'room');
-  assert.throws(() => service.setServerMuted('one', true), (error) => error === failure);
+  assert.throws(() => service.setServerMuted('alice', true), (error) => error === failure);
   assert.equal(service.getVoiceState('one')?.serverMuted, false);
-  assert.equal(service.setServerMuted('missing', true), null);
+  service.leaveVoiceChannel('one');
+  assert.throws(() => service.setServerMuted('alice', true), (error) => error === failure);
+  assert.deepEqual(service.getAllVoiceStates(), {});
 });
 
-test('administrative mute and deafen broadcasts cover all connections of the target user', async () => {
+function moderationFixture() {
   const service = signaling();
-  await service.joinVoiceChannel('one', 'alice', 'room');
-  await service.joinVoiceChannel('two', 'alice', 'room');
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
   server['signalingService'] = service;
+  server['closing'] = false;
+  const grants = { bits: Permission.MUTE_MEMBERS | Permission.DEAFEN_MEMBERS };
+  const permissions = Object.create(PermissionService.prototype) as PermissionService;
+  permissions.getUserPermissions = async (id) => id === 'moderator' ? grants.bits : 0;
+  permissions.checkPermission = async (id, permission) => hasPermission(await permissions.getUserPermissions(id), permission);
+  server['permissionService'] = permissions;
+  const users = Object.create(UserService.prototype) as UserService;
+  users.isMember = async (id) => ['alice', 'bob', 'offline', 'moderator'].includes(id);
+  server['userService'] = users;
   const messages: Parameters<WebSocketServer['broadcast']>[0][] = [];
   server['broadcast'] = (message) => { messages.push(message); };
-  const session: Parameters<WebSocketServer['handleAdminMuteUser']>[0] = {
-    ws: Object.create(WebSocket.prototype) as WebSocket, isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+  type Session = Parameters<WebSocketServer['handleMessage']>[0];
+  const clients = ['moderator', 'one', 'two', 'idle', 'bob'].map((id): Session => {
+    const ws = Object.create(WebSocket.prototype) as WebSocket;
+    Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
+    return {
+      ws, sessionId: id, isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+      user: { id: ['moderator', 'bob'].includes(id) ? id : 'alice', clientId: id, sessionId: id, nickname: id, status: 'ONLINE', joinedAt: 1 },
+    };
+  });
+  server['sessions'] = new Map(clients.map((client) => [client.ws, client]));
+  server['sessionSockets'] = new Map(clients.map((client) => [client.sessionId!, client.ws]));
+  const direct: Array<{ socket: WebSocket; message: Parameters<WebSocketServer['send']>[1] }> = [];
+  server['send'] = (socket, message) => { direct.push({ socket, message }); };
+  const session = clients[0];
+  let sequence = 0;
+  const request = async (type: MessageType, payload: unknown) => {
+    const requestId = `moderation-${++sequence}`;
+    await server['handleMessage'](session, { type, payload, requestId });
+    const response = direct.find(({ socket, message }) => socket === session.ws && message.requestId === requestId)?.message;
+    assert.ok(response, 'every valid connection receives a correlated response, including outside voice');
+    return response;
   };
-  await server['handleAdminMuteUser'](session, { targetSessionId: 'one', muted: true }, 'mute-request');
-  assert.deepEqual(messages.filter((message) => message.type === MessageType.ADMIN_MUTE_USER).map((message) => message.payload), [
-    { targetSessionId: 'one', muted: true }, { targetSessionId: 'two', muted: true },
-  ]);
-  assert.equal(messages.filter((message) => message.type === MessageType.VOICE_STATE_CHANGED).length, 2);
-  messages.length = 0;
-  await server['handleAdminDeafenUser'](session, { targetSessionId: 'two', deafened: true }, 'deafen-request');
-  assert.deepEqual(messages.filter((message) => message.type === MessageType.ADMIN_DEAFEN_USER).map((message) => message.payload), [
-    { targetSessionId: 'one', deafened: true }, { targetSessionId: 'two', deafened: true },
-  ]);
-  assert.equal(messages.filter((message) => message.type === MessageType.VOICE_STATE_CHANGED).length, 2);
+  return { server, service, grants, users, clients, session, messages, direct, request };
+}
+
+test('administrative identity changes cover every voice and idle device without exposing other users', async () => {
+  const f = moderationFixture();
+  await f.service.joinVoiceChannel('one', 'alice', 'room');
+  await f.service.joinVoiceChannel('two', 'alice', 'room');
+  const response = await f.request(MessageType.ADMIN_MUTE_USER, { targetUserId: 'alice', muted: true });
+  assert.equal(response.type, MessageType.VOICE_RESTRICTIONS_UPDATED);
+  assert.deepEqual(response.payload, { userId: 'alice', serverMuted: true, serverDeafened: false });
+  assert.equal(f.messages.filter((message) => message.type === MessageType.VOICE_STATE_CHANGED).length, 2);
+  const notifications = f.direct.filter(({ message }) => !message.requestId);
+  assert.deepEqual(notifications.map(({ socket }) => f.clients.find((client) => client.ws === socket)?.sessionId), ['one', 'two', 'idle'],
+    'identity-policy notifications include idle devices and exclude other users');
+  for (const { message } of notifications) {
+    assert.equal(message.type, MessageType.VOICE_RESTRICTIONS_UPDATED);
+    assert.deepEqual(message.payload, { userId: 'alice', serverMuted: true, serverDeafened: false });
+  }
+  f.messages.length = 0;
+  f.direct.length = 0;
+  await f.request(MessageType.ADMIN_DEAFEN_USER, { targetUserId: 'alice', deafened: true });
+  assert.equal(f.messages.length, 2);
+  assert.equal(f.direct.filter(({ message }) => !message.requestId).length, 3);
+  assert.equal(f.service.getVoiceState('two')?.serverDeafened, true);
+  assert.equal(f.service.getVoiceState('one')?.serverMuted, true);
+});
+
+test('administrators can apply and remove restrictions while a member is idle or fully offline', async () => {
+  const f = moderationFixture();
+  for (const userId of ['alice', 'offline']) {
+    for (const enabled of [true, false]) {
+      await f.request(MessageType.ADMIN_MUTE_USER, { targetUserId: userId, muted: enabled });
+      await f.request(MessageType.ADMIN_DEAFEN_USER, { targetUserId: userId, deafened: enabled });
+      const response = await f.request(MessageType.ADMIN_GET_VOICE_RESTRICTIONS, { targetUserId: userId });
+      assert.deepEqual(response.payload, { userId, serverMuted: enabled, serverDeafened: enabled });
+      assert.deepEqual(f.service.getAllVoiceStates(), {}, 'moderating a member must not fabricate voice membership');
+    }
+  }
+  assert.equal(f.messages.length, 0, 'idle moderation does not broadcast fake voice participants');
+  await f.request(MessageType.ADMIN_MUTE_USER, { targetUserId: 'offline', muted: true });
+  const joined = await f.service.joinVoiceChannel('later-device', 'offline', 'room', false, false);
+  assert.equal(joined.voiceState?.serverMuted, true, 'a later join observes the restriction set while offline');
+  assert.equal(joined.voiceState?.isMuted, false, 'personal preferences are not rewritten');
+});
+
+test('voice-policy reads and writes preserve permissions and reject invalid or missing identities', async () => {
+  const f = moderationFixture();
+  const error = (message: Awaited<ReturnType<typeof f.request>>, code: ProtocolErrorCode) => {
+    assert.equal(message.type, MessageType.SERVER_ERROR);
+    assert.equal((message.payload as ServerErrorPayload).code, code);
+  };
+  f.grants.bits = 0;
+  for (const [type, payload] of [
+    [MessageType.ADMIN_GET_VOICE_RESTRICTIONS, { targetUserId: 'alice' }],
+    [MessageType.ADMIN_MUTE_USER, { targetUserId: 'alice', muted: true }],
+    [MessageType.ADMIN_DEAFEN_USER, { targetUserId: 'alice', deafened: true }],
+  ] as const) {
+    error(await f.request(type, payload), ProtocolErrorCode.PERMISSION_DENIED);
+  }
+  f.grants.bits = Permission.MUTE_MEMBERS;
+  assert.equal((await f.request(MessageType.ADMIN_GET_VOICE_RESTRICTIONS, { targetUserId: 'alice' })).type, MessageType.VOICE_RESTRICTIONS_UPDATED);
+  error(await f.request(MessageType.ADMIN_DEAFEN_USER, { targetUserId: 'alice', deafened: true }), ProtocolErrorCode.PERMISSION_DENIED);
+  f.grants.bits = Permission.DEAFEN_MEMBERS;
+  assert.equal((await f.request(MessageType.ADMIN_GET_VOICE_RESTRICTIONS, { targetUserId: 'alice' })).type, MessageType.VOICE_RESTRICTIONS_UPDATED);
+  error(await f.request(MessageType.ADMIN_MUTE_USER, { targetUserId: 'alice', muted: true }), ProtocolErrorCode.PERMISSION_DENIED);
+  f.grants.bits = Permission.MUTE_MEMBERS | Permission.DEAFEN_MEMBERS;
+  for (const [type, payload] of [
+    [MessageType.ADMIN_GET_VOICE_RESTRICTIONS, { targetUserId: 'missing' }],
+    [MessageType.ADMIN_MUTE_USER, { targetUserId: 'missing', muted: true }],
+    [MessageType.ADMIN_DEAFEN_USER, { targetUserId: 'missing', deafened: false }],
+    [MessageType.ADMIN_MUTE_USER, { targetSessionId: 'one', muted: true }],
+    [MessageType.ADMIN_MUTE_USER, { targetUserId: 'alice', muted: 'false' }],
+    [MessageType.ADMIN_DEAFEN_USER, { targetUserId: 'alice', deafened: 1 }],
+  ] as const) {
+    error(await f.request(type, payload), ProtocolErrorCode.BAD_REQUEST);
+  }
+  assert.deepEqual(f.service.getVoiceRestrictions('alice'), { serverMuted: false, serverDeafened: false });
+  assert.equal(f.messages.length, 0);
+});
+
+test('leaving voice during an administrative request does not cancel the identity restriction', async () => {
+  const f = moderationFixture();
+  await f.service.joinVoiceChannel('one', 'alice', 'room');
+  f.users.isMember = async (id) => {
+    f.service.leaveVoiceChannel('one');
+    return id === 'alice';
+  };
+  const response = await f.request(MessageType.ADMIN_MUTE_USER, { targetUserId: 'alice', muted: true });
+  assert.equal(response.type, MessageType.VOICE_RESTRICTIONS_UPDATED);
+  assert.equal(f.service.getVoiceRestrictions('alice').serverMuted, true);
+  assert.deepEqual(f.service.getAllVoiceStates(), {});
+});
+
+test('permissions revoked during member lookup prevent the pending moderation write', async () => {
+  const f = moderationFixture();
+  f.users.isMember = async () => {
+    f.grants.bits = 0;
+    return true;
+  };
+  const response = await f.request(MessageType.ADMIN_MUTE_USER, { targetUserId: 'alice', muted: true });
+  assert.equal(response.type, MessageType.SERVER_ERROR);
+  assert.equal((response.payload as ServerErrorPayload).code, ProtocolErrorCode.PERMISSION_DENIED);
+  assert.equal(f.service.getVoiceRestrictions('alice').serverMuted, false);
+  assert.equal(f.messages.length, 0);
+  assert.equal(f.direct.filter(({ message }) => !message.requestId).length, 0);
 });
 
 test('SQLite voice restrictions survive restart, stay server-scoped and cascade with membership deletion', async () => {
@@ -138,14 +321,17 @@ test('SQLite voice restrictions survive restart, stay server-scoped and cascade 
     ).run('alice', 'alice-device', 'Alice', 1, 1);
     const service = signaling(new SqliteVoiceRestrictionRepository(database.getDb()));
     await service.joinVoiceChannel('one', 'alice', 'room');
-    service.setServerMuted('one', true);
-    service.setServerDeafened('one', true);
+    service.setServerMuted('alice', true);
+    service.setServerDeafened('alice', true);
     service.leaveVoiceChannel('one');
     database.close();
     database = undefined;
     database = await DatabaseConnection.create(filename);
     const restrictions = new SqliteVoiceRestrictionRepository(database.getDb());
     const restored = signaling(restrictions);
+    assert.deepEqual(restored.getVoiceRestrictions('alice'), { serverMuted: true, serverDeafened: true },
+      'a restarted server can report the policy before the user joins voice');
+    assert.deepEqual(restored.getAllVoiceStates(), {});
     const joined = await restored.joinVoiceChannel('new-session', 'alice', 'room');
     assert.equal(joined.voiceState?.serverMuted, true);
     assert.equal(joined.voiceState?.serverDeafened, true);

@@ -34,18 +34,12 @@ export function getVoiceControlModeration(): {
   muteReason: string | null;
   deafenReason: string | null;
 } {
-  const here = isViewingCallServer();
-  const call = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
-  const server = call?.serverStore.serverDetails?.name ?? call?.host ?? t('voiceModeration.otherServer');
-  const deafenReason = voiceStore.serverDeafened
-    ? here ? t('permissions.serverDeafened') : t('voiceModeration.deafenedElsewhere', { server })
-    : null;
+  const { serverMuted, serverDeafened } = serverStore.voiceRestrictions;
+  const deafenReason = serverDeafened ? t('permissions.serverDeafened') : null;
   return {
-    serverMuted: here && voiceStore.serverMuted,
-    serverDeafened: here && voiceStore.serverDeafened,
-    muteReason: deafenReason ?? (voiceStore.serverMuted
-      ? here ? t('permissions.serverMuted') : t('voiceModeration.mutedElsewhere', { server })
-      : null),
+    serverMuted,
+    serverDeafened,
+    muteReason: deafenReason ?? (serverMuted ? t('permissions.serverMuted') : null),
     deafenReason,
   };
 }

@@ -1,5 +1,7 @@
 import { ChannelType, UserStatus, VoiceMode } from '@monky/shared';
 
+export type { VoiceRestrictions } from '@monky/shared';
+
 export interface ServerRecord {
   id: string;
   name: string;
@@ -43,11 +45,6 @@ export interface UserRecord {
   avatarPath: string | null;
   createdAt: number;
   lastSeenAt: number;
-}
-
-export interface VoiceRestrictions {
-  serverMuted: boolean;
-  serverDeafened: boolean;
 }
 
 export interface ChannelRecord {

@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import {
   ADMIN_PERMISSIONS,
   DEFAULT_PERMISSIONS,
@@ -11,6 +12,10 @@ import {
   channelCreateSchema,
   channelUpdateSchema,
   hasPermission,
+  adminVoiceRestrictionsGetSchema,
+  adminMuteUserSchema,
+  adminDeafenUserSchema,
+  voiceRestrictionsUpdatedSchema,
 } from '../src/index.js';
 import './botInteractions.test.js';
 import './reactions.test.js';
@@ -40,7 +45,7 @@ console.assert(QUALITY_PRESETS.GAMING.name === 'Gaming Mode', 'Preset Gaming Mod
 console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version
-console.assert(PROTOCOL_VERSION === 11, 'Versão do protocolo deve ser 11');
+if (PROTOCOL_VERSION !== 12) throw new Error('Versão do protocolo deve ser 12');
 console.assert(LIMITS.SFU_DEFAULT_MIN_PORT === 40000, 'Porta mínima padrão SFU');
 console.assert(LIMITS.SFU_DEFAULT_MAX_PORT === 49151, 'Porta máxima padrão SFU');
 console.assert(
@@ -48,6 +53,17 @@ console.assert(
   'Range UDP do SFU não pode invadir o range de relay do coturn (#515)'
 );
 console.log('✔ Versão do protocolo e limites SFU verificados');
+
+assert.deepEqual(adminMuteUserSchema.parse({ targetUserId: 'member', muted: true }), { targetUserId: 'member', muted: true });
+assert.deepEqual(adminDeafenUserSchema.parse({ targetUserId: 'member', deafened: false }), { targetUserId: 'member', deafened: false });
+assert.equal(adminMuteUserSchema.safeParse({ targetSessionId: 'device', muted: true }).success, false);
+assert.equal(adminMuteUserSchema.safeParse({ targetUserId: 'member', muted: 'false' }).success, false);
+assert.equal(adminDeafenUserSchema.safeParse({ targetUserId: 'member', deafened: 0 }).success, false);
+for (const targetUserId of [undefined, null, {}, '', 'x'.repeat(129)]) {
+  assert.equal(adminVoiceRestrictionsGetSchema.safeParse({ targetUserId }).success, false);
+}
+assert.equal(voiceRestrictionsUpdatedSchema.safeParse({ userId: 'member', serverMuted: true, serverDeafened: false }).success, true);
+assert.equal(voiceRestrictionsUpdatedSchema.safeParse({ userId: 'member', serverMuted: true }).success, false);
 
 console.assert(hasPermission(DEFAULT_PERMISSIONS, Permission.SPEAK) === true, 'Cargo padrão deve poder falar');
 console.assert(hasPermission(DEFAULT_PERMISSIONS, Permission.MANAGE_SERVER) === false, 'Cargo padrão não administra servidor');

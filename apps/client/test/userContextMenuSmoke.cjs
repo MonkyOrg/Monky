@@ -89,6 +89,7 @@ async function runUserContextMenuSmoke() {
   const user = { id: 'menu-local', sessionId: 'local-session', clientId: 'local-client', nickname: '<b>Local</b>', status: 'ONLINE', joinedAt: 1 };
   const second = { ...user, sessionId: 'second-session' };
   const remote = { ...user, id: 'menu-remote', clientId: 'remote-client', sessionId: 'remote-session', nickname: 'Remote' };
+  const offline = { ...remote, id: 'menu-offline', clientId: 'offline-client', sessionId: undefined, nickname: 'Offline', status: 'DISCONNECTED' };
   const state = who => ({
     userId: who.id, sessionId: who.sessionId, channelId: 'room', isMuted: false, isDeafened: false,
     serverMuted: false, serverDeafened: false, isSpeaking: false, isCameraOn: false, isScreenSharing: false,
@@ -103,8 +104,24 @@ async function runUserContextMenuSmoke() {
   const requests = [];
   const sent = [];
   const volumes = [];
+  const policies = new Map();
+  const policy = id => policies.get(id) ?? { serverMuted: false, serverDeafened: false };
   network.send = (type, payload) => sent.push({ type, payload });
-  network.sendRequest = async (type, payload) => { requests.push({ type, payload }); };
+  const request = async (type, payload) => {
+    requests.push({ type, payload });
+    if (type === 'ADMIN_GET_VOICE_RESTRICTIONS') {
+      return { userId: payload.targetUserId, ...policy(payload.targetUserId) };
+    }
+    if (type === 'ADMIN_MUTE_USER' || type === 'ADMIN_DEAFEN_USER') {
+      const updated = { ...policy(payload.targetUserId),
+        ...(type === 'ADMIN_MUTE_USER' ? { serverMuted: payload.muted } : { serverDeafened: payload.deafened }) };
+      policies.set(payload.targetUserId, updated);
+      server.updateVoiceRestrictions(payload.targetUserId, updated);
+      return { userId: payload.targetUserId, ...updated };
+    }
+  };
+  network.sendRequest = request;
+  const open = async target => { menu.open(30, 30, target); await delay(); };
   sounds.play = () => {};
   settings.save = () => {};
   rtc.setPeerVolume = (sessionId, volume) => volumes.push({ sessionId, volume });
@@ -116,7 +133,8 @@ async function runUserContextMenuSmoke() {
     channels: ['room', 'other-room'].map((id, position) => ({
       id, serverId: 'menu-server', name: id, type: 'VOICE', position, createdAt: 1, isPrivate: false, allowedRoleIds: [],
     })),
-    members: [user, second, remote], roles: [], userRoles: [], ownerId: 'owner', myPermissions: 0,
+    members: [user, second, remote], knownMembers: [user, remote, offline],
+    roles: [], userRoles: [], ownerId: 'owner', myPermissions: 0,
   }, user);
   for (const who of [second, user, remote]) { manager.addUser(who); manager.updateVoiceState(state(who)); }
   voice.currentVoiceChannelId = null;
@@ -144,76 +162,154 @@ async function runUserContextMenuSmoke() {
     language.setLanguage('pt-BR');
     check(button('self-mute').textContent === language.t('stage.unmuteMic'), 'Open self buttons follow language');
     voice.setServerMuted(true);
+    server.updateVoiceRestrictions(user.id, voice);
     click('self-mute');
     check(!voice.isMuted && voice.getEffectiveMuted() && voice.serverMuted && audio.isMuted, 'Manual unmute cannot bypass admin microphone block');
     voice.setServerDeafened(true);
+    server.updateVoiceRestrictions(user.id, voice);
     click('self-deafen');
     click('self-deafen');
     check(!voice.isDeafened && voice.getEffectiveDeafened() && voice.serverDeafened, 'Manual undeafen cannot bypass admin deafen');
     check(button('self-deafen').title === language.t('permissions.serverDeafened'), 'Admin deafen explained by tooltip');
     voice.serverMuted = voice.serverDeafened = false;
+    server.updateVoiceRestrictions(user.id, voice);
     voice.currentVoiceChannelId = 'room';
     click('self-mute');
     check(sent.length === 1 && sent[0].payload.isMuted === voice.isMuted, 'In-call manual action sends voice state');
 
     server.myPermissions = 2147483647;
     for (const action of ['server-mute', 'server-deafen', 'kick-voice', 'move-user']) {
-      menu.open(30, 30, user);
+      await open(user);
       click(action);
       await delay();
-      check(requests.at(-1).payload.targetSessionId === user.sessionId, `${action} targets own exact connection, never first same-user device`);
+      if (action === 'server-mute' || action === 'server-deafen') {
+        check(requests.at(-1).payload.targetUserId === user.id && !('targetSessionId' in requests.at(-1).payload),
+          `${action} targets the identity rather than an arbitrary device`);
+      } else {
+        check(requests.at(-1).payload.targetSessionId === user.sessionId,
+          `${action} still targets the exact voice connection`);
+      }
     }
-    menu.open(30, 30, { ...user, sessionId: undefined });
+    await open({ ...user, sessionId: undefined });
     click('server-mute');
     await delay();
-    check(requests.at(-1).payload.targetSessionId === user.sessionId, 'Own profile without session resolves this connection');
-    menu.open(30, 30, user);
+    check(requests.at(-1).payload.targetUserId === user.id, 'Own profile without a session still resolves the correct identity');
+    await open(user);
     manager.removeVoiceState(user.sessionId);
     const count = requests.length;
     click('server-mute');
-    check(requests.length === count && !document.querySelector('.user-context-menu'), 'Departed local session never redirects moderation to another device');
-    menu.open(30, 30, { ...user, sessionId: undefined });
-    check(!button('server-mute') && !!button('self-mute'), 'Pre-call self profile does not expose other-device moderation');
+    await delay();
+    check(requests.length === count + 1 && requests.at(-1).payload.targetUserId === user.id,
+      'Leaving voice while the menu is open does not prevent identity moderation');
+    await open({ ...user, sessionId: undefined });
+    check(!!button('server-mute') && !!button('server-deafen') && !!button('self-mute')
+      && !button('kick-voice') && !button('move-user'),
+      'Pre-call profiles expose identity moderation but never kick or move another device');
     manager.updateVoiceState(state(user));
 
     for (const alias of [{ ...user, id: 'alias-id' }, { ...user, clientId: 'different-client' }]) {
-      menu.open(30, 30, alias);
+      await open(alias);
       check(!!button('self-mute') && !find('#ctx-volume-slider'), 'Self resolves by either user or nonempty client ID');
+      check(requests.at(-1).payload.targetUserId === user.id, 'Self aliases query the canonical authenticated identity');
     }
     connection.clientId = '';
     server.currentUser = { ...user, clientId: '' };
-    menu.open(30, 30, { ...remote, clientId: '' });
+    await open({ ...remote, clientId: '' });
     check(!!find('#ctx-volume-slider') && !button('self-mute'), 'Empty client IDs do not classify strangers as self');
     server.currentUser = user;
     connection.clientId = user.clientId;
 
-    menu.open(30, 30, remote);
+    await open(remote);
     check(!!find('#ctx-volume-slider') && !button('self-mute'), 'Other-user menu retains volume but not local controls');
     find('#ctx-vol-200').click();
     check(volumes.at(-1).sessionId === remote.sessionId && volumes.at(-1).volume === 200, 'Remote boost retains per-session targeting');
     click('server-deafen');
     await delay();
-    check(requests.at(-1).payload.targetSessionId === remote.sessionId, 'Other-user moderation target preserved');
+    check(requests.at(-1).payload.targetUserId === remote.id, 'Other-user moderation targets the member identity');
+
+    for (const target of [offline, { ...remote, sessionId: undefined }]) {
+      manager.removeVoiceState(remote.sessionId);
+      for (const enabled of [true, false]) {
+        for (const [action, field, onLabel, offLabel] of [
+          ['server-mute', 'muted', 'userMenu.serverUnmute', 'userMenu.serverMute'],
+          ['server-deafen', 'deafened', 'userMenu.serverUndeafen', 'userMenu.serverDeafen'],
+        ]) {
+          policies.set(target.id, { ...policy(target.id),
+            [field === 'muted' ? 'serverMuted' : 'serverDeafened']: !enabled });
+          await open(target);
+          check(!!button('server-mute') && !!button('server-deafen') && !button('kick-voice') && !button('move-user'),
+            'Administrative apply/remove remains available for idle and offline members without voice-only actions');
+          check(button(action).textContent === language.t(enabled ? offLabel : onLabel) && !button(action).disabled,
+            'Administrative labels reflect the authoritative saved restriction, not a missing voice participant');
+          click(action);
+          await delay();
+          check(requests.at(-1).payload.targetUserId === target.id && requests.at(-1).payload[field] === enabled,
+            'Both applying and removing a restriction address the offline or idle identity');
+        }
+      }
+    }
+    manager.updateVoiceState(state(remote));
+    const beforeBot = requests.length;
+    await open({ ...remote, id: 'bot-profile', isBot: true });
+    check(!button('server-mute') && !button('server-deafen') && requests.length === beforeBot,
+      'Voice moderation is not offered for bot accounts that cannot join voice');
+
+    let resolvePolicy;
+    network.sendRequest = (type, payload) => type === 'ADMIN_GET_VOICE_RESTRICTIONS'
+      ? new Promise(resolve => { resolvePolicy = resolve; }) : request(type, payload);
+    menu.open(30, 30, remote);
+    check(button('server-mute').disabled && button('server-deafen').disabled,
+      'The menu cannot submit a guessed restriction before the lookup finishes');
+    network.sendRequest = request;
+    await open(user);
+    const ownLabel = button('server-mute').textContent;
+    resolvePolicy({ userId: remote.id, serverMuted: true, serverDeafened: true });
+    await delay();
+    check(find('.context-menu-nickname').textContent === user.nickname && button('server-mute').textContent === ownLabel,
+      'A late lookup never overwrites a newly opened member menu');
+
+    let resolveAction;
+    network.sendRequest = (type, payload) => type === 'ADMIN_MUTE_USER'
+      ? new Promise(resolve => { resolveAction = resolve; }) : request(type, payload);
+    await open(remote);
+    click('server-mute');
+    check(button('server-mute').disabled && button('server-deafen').disabled,
+      'An in-flight administrative action cannot be submitted twice');
+    network.sendRequest = request;
+    await open(user);
+    resolveAction();
+    await delay();
+    check(find('.context-menu-nickname').textContent === user.nickname,
+      'A late administrative acknowledgement does not close a different member menu');
+
+    network.sendRequest = async () => { throw new Error('Policy lookup failed'); };
+    menu.open(30, 30, remote);
+    await delay();
+    check(!document.querySelector('.user-context-menu') && document.querySelector('.modal-backdrop')?.textContent.includes('Policy lookup failed'),
+      'A failed lookup is surfaced instead of guessing an unmuted state');
+    document.querySelector('.modal-backdrop [data-action="confirm"]').click();
+    network.sendRequest = request;
+    await delay();
 
     server.roles = [
       { id: 'custom-role', name: 'Custom', color: '#fff', permissions: 0, position: 1, isDefault: false },
       { id: 'admin-role', name: 'Admin', color: '#fff', permissions: 1 << 11, position: 2, isDefault: false },
     ];
-    menu.open(30, 30, user);
+    await open(user);
     click('toggle-role');
     await delay();
     check(requests.at(-1).payload.userId === user.id, 'Permitted self role assignment remains available');
-    menu.open(30, 30, user);
+    await open(user);
     click('toggle-admin');
     await delay();
     check(requests.at(-1).payload.userId === user.id && requests.at(-1).payload.roleId === 'admin-role',
       'Permitted self administrator assignment retains target and role');
     server.ownerId = user.id;
-    menu.open(30, 30, user);
+    await open(user);
     check(!button('toggle-admin') && !!button('toggle-role'), 'Owner keeps roles but not redundant administrator toggle');
 
     for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
-      menu.open(30, 30, user);
+      await open(user);
       appEvents.emit(event);
       check(!document.querySelector('.user-context-menu'), `${event} closes menu`);
     }

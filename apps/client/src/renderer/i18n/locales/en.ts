@@ -84,6 +84,7 @@ export const en: TranslationMap = {
   'userMenu.moveToChannel': 'Move to channel',
   'userMenu.manageRoles': 'Manage roles',
   'userMenu.actionFailed': 'Could not complete the admin action.',
+  'userMenu.loadingRestrictions': 'Loading restrictions...',
 
   // ── Invite (InviteModal.ts) ──────────────────────────────────────────────
   'invite.title': 'Invite Friends',
@@ -1049,9 +1050,6 @@ export const en: TranslationMap = {
   'permissions.administratorDesc': 'Grants all permissions. Administrators bypass channel restrictions.',
   'permissions.serverMuted': 'Server muted',
   'permissions.serverDeafened': 'Server deafened',
-  'voiceModeration.otherServer': 'another server',
-  'voiceModeration.mutedElsewhere': 'Microphone muted by server {server} (active call)',
-  'voiceModeration.deafenedElsewhere': 'Audio blocked by server {server} (active call)',
 
   // ── Updates (UpdateService.ts) ───────────────────────────────────────────
   'update.available': 'Version <strong>{version}</strong> is available.',

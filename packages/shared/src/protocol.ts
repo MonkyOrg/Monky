@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, WebRtcSignalPayload } from './models.js';
+import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
 import type { BotForm, BotFormValues, CommandValues } from './botInteractions.js';
 
 export enum ProtocolErrorCode {
@@ -85,6 +85,7 @@ export enum MessageType {
   VOICE_STATE_UPDATE = 'VOICE_STATE_UPDATE',
   ADMIN_MUTE_USER = 'ADMIN_MUTE_USER',
   ADMIN_DEAFEN_USER = 'ADMIN_DEAFEN_USER',
+  ADMIN_GET_VOICE_RESTRICTIONS = 'ADMIN_GET_VOICE_RESTRICTIONS',
   ADMIN_KICK_VOICE = 'ADMIN_KICK_VOICE',
   ADMIN_MOVE_USER = 'ADMIN_MOVE_USER',
   MEMBER_KICK = 'MEMBER_KICK',
@@ -191,6 +192,7 @@ export enum MessageType {
   VOICE_USER_JOINED = 'VOICE_USER_JOINED',
   VOICE_USER_LEFT = 'VOICE_USER_LEFT',
   VOICE_STATE_CHANGED = 'VOICE_STATE_CHANGED',
+  VOICE_RESTRICTIONS_UPDATED = 'VOICE_RESTRICTIONS_UPDATED',
   SOUNDBOARD_PLAYED = 'SOUNDBOARD_PLAYED',
   /** Server -> clients in the channel: drop this user's ongoing sound (#499). */
   SOUNDBOARD_STOPPED = 'SOUNDBOARD_STOPPED',
@@ -444,13 +446,17 @@ export interface VoiceStateUpdatePayload {
 }
 
 export interface AdminMuteUserPayload {
-  targetSessionId: string;
+  targetUserId: string;
   muted: boolean;
 }
 
 export interface AdminDeafenUserPayload {
-  targetSessionId: string;
+  targetUserId: string;
   deafened: boolean;
+}
+
+export interface AdminVoiceRestrictionsGetPayload {
+  targetUserId: string;
 }
 
 export interface AdminKickVoicePayload {
@@ -510,6 +516,8 @@ export interface IceServerConfig {
 export interface AuthSuccessPayload {
   server: ServerDetails;
   currentUser: UserSummary;
+  /** Identity-level policy on this server, including when not in voice. */
+  voiceRestrictions: VoiceRestrictions;
   roles?: Role[];
   userRoles?: UserRoleSummary[];
   ownerId?: string | null;
@@ -665,6 +673,10 @@ export interface VoiceUserLeftPayload {
 
 export interface VoiceStateChangedPayload {
   voiceState: VoiceParticipantState;
+}
+
+export interface VoiceRestrictionsUpdatedPayload extends VoiceRestrictions {
+  userId: string;
 }
 
 export interface RolesListPayload {

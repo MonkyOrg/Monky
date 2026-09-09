@@ -76,10 +76,23 @@ that server**, including its other devices. Leaving and rejoining the call,
 switching servers, or restarting the app or server does not remove the
 restriction: an administrator must lift it.
 
-When browsing another server during a call, its lists do not inherit the active
-call's restrictions. Microphone and audio controls still respect that call and
-identify the server that applied the restriction in their tooltips. The overlay
-also continues to show the active call's participants.
+Members with mute or deafen permissions can apply and remove these restrictions
+from the member list's right-click menu, even while the person is outside voice
+or disconnected. The menu fetches the current restriction before enabling the
+action. Kicking from voice and moving channels still require a voice connection.
+
+On the controls, the icon and its color show your personal mute; an administrator
+restriction appears separately as a red prohibition badge, only while viewing
+the corresponding server, even without joining a voice channel. The server sends
+this restriction on connection, including after reopening the app.
+When switching servers, the badge and tooltip reflect only the restrictions of
+the server being viewed. The actual restrictions of a call on another server
+remain enforced.
+In participant lists, personal mute is gray and administrator restrictions remain
+red. The overlay continues to show the active call's participants.
+
+Both client and server must be updated to exchange this information before
+joining voice.
 
 ### Tooltips and menus
 
@@ -160,10 +173,10 @@ With PTT enabled, the **microphone button in the bottom-left corner** gains a
 borderless **PTT** label below the icon: yellow with a voice-input icon while
 waiting for the key and green with an open microphone while transmitting.
 Manual mute or deafen shows only a red crossed-out microphone, without the PTT
-label. An administrator restriction uses a microphone or headphones with a
-small prohibition badge, also without PTT. Controls, participant lists and the
-overlay share this distinction, with a tooltip identifying the server
-restriction. Outside a call, the waiting state is gray.
+label. An administrator restriction adds the red prohibition badge without
+replacing your personal icon or hiding the PTT label. The restriction prevents
+transmission even when your personal mute is off. Outside a call, the waiting
+state is gray.
 
 Clicking the button still toggles **manual mute**. Holding the PTT key does
 not undo that mute: it only opens the microphone when allowed. The state

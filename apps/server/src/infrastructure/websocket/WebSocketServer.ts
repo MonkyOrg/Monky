@@ -76,6 +76,8 @@ import {
   VoiceReconnectPayload,
   VoiceLeavePayload,
   VoiceStateChangedPayload,
+  VoiceRestrictionsUpdatedPayload,
+  VoiceRestrictions,
   VoiceStateUpdatePayload,
   VoiceUserJoinedPayload,
   VoiceUserLeftPayload,
@@ -103,6 +105,10 @@ import {
   botProfileUpdateSchema,
   commandRegisterSchema,
   voiceReconnectSchema,
+  adminVoiceRestrictionsGetSchema,
+  adminMuteUserSchema,
+  adminDeafenUserSchema,
+  hasPermission,
 } from '@monky/shared';
 import { AuthService } from '../../application/services/AuthService';
 import { AttachmentService } from '../../application/services/AttachmentService';
@@ -628,6 +634,10 @@ export class WebSocketServer {
         await this.handleAdminDeafenUser(session, payload as AdminDeafenUserPayload, requestId);
         break;
 
+      case MessageType.ADMIN_GET_VOICE_RESTRICTIONS:
+        await this.handleAdminGetVoiceRestrictions(session, payload, requestId);
+        break;
+
       case MessageType.ADMIN_KICK_VOICE:
         if (!(await this.requirePermission(session, Permission.KICK_MEMBERS, requestId))) return;
         if (this.cancelVoiceReconnect((payload as AdminKickVoicePayload).targetSessionId)
@@ -852,6 +862,8 @@ export class WebSocketServer {
     session.visibleChannelIds = new Set(result.serverDetails.channels.map((c) => c.id));
 
     // Send AUTH_SUCCESS to the connecting client
+    const iceServers = await this.buildIceServersFor(result.user.id, session);
+    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
     const successPayload: AuthSuccessPayload = {
       server: {
         ...result.serverDetails,
@@ -860,11 +872,12 @@ export class WebSocketServer {
         turnAvailability: CoturnManager.describeAvailability(),
       },
       currentUser: result.user,
+      voiceRestrictions: this.signalingService.getVoiceRestrictions(result.user.id),
       roles: result.serverDetails.roles,
       userRoles: result.serverDetails.userRoles,
       ownerId: result.serverDetails.ownerId,
       myPermissions: result.serverDetails.myPermissions,
-      iceServers: await this.buildIceServersFor(result.user.id, session),
+      iceServers,
     };
 
     // Auth and ICE setup await I/O. Refresh the live roster at the send boundary
@@ -1097,6 +1110,7 @@ export class WebSocketServer {
       payload: {
         server: { ...serverDetails, turnAvailability: CoturnManager.describeAvailability() },
         currentUser: botUser,
+        voiceRestrictions: { serverMuted: false, serverDeafened: false },
         roles: [],
         userRoles: [],
         ownerId: serverDetails.ownerId,
@@ -2746,26 +2760,78 @@ export class WebSocketServer {
   }
 
   private async handleAdminMuteUser(session: ClientSession, payload: AdminMuteUserPayload, requestId?: string): Promise<void> {
-    const states = this.signalingService.setServerMuted(payload.targetSessionId, payload.muted);
-    if (!states) {
-      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Usuário não está em um canal de voz.', requestId);
+    const parsed = adminMuteUserSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de moderação inválidos.', requestId);
       return;
     }
-    for (const voiceState of states) {
-      this.broadcast({ type: MessageType.ADMIN_MUTE_USER, requestId, payload: { ...payload, targetSessionId: voiceState.sessionId } });
-      this.broadcast({ type: MessageType.VOICE_STATE_CHANGED, requestId, payload: { voiceState } });
-    }
+    await this.applyVoiceRestriction(session, parsed.data.targetUserId, 'serverMuted', parsed.data.muted, requestId);
   }
 
   private async handleAdminDeafenUser(session: ClientSession, payload: AdminDeafenUserPayload, requestId?: string): Promise<void> {
-    const states = this.signalingService.setServerDeafened(payload.targetSessionId, payload.deafened);
-    if (!states) {
-      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Usuário não está em um canal de voz.', requestId);
+    const parsed = adminDeafenUserSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de moderação inválidos.', requestId);
       return;
     }
+    await this.applyVoiceRestriction(session, parsed.data.targetUserId, 'serverDeafened', parsed.data.deafened, requestId);
+  }
+
+  private async handleAdminGetVoiceRestrictions(session: ClientSession, payload: unknown, requestId?: string): Promise<void> {
+    if (!session.user) return;
+    const permissions = await this.permissionService.getUserPermissions(session.user.id);
+    if (!hasPermission(permissions, Permission.MUTE_MEMBERS) && !hasPermission(permissions, Permission.DEAFEN_MEMBERS)) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Você não tem permissão para executar esta ação.', requestId);
+      return;
+    }
+    const parsed = adminVoiceRestrictionsGetSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de moderação inválidos.', requestId);
+      return;
+    }
+    if (!(await this.userService.isMember(parsed.data.targetUserId))) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Membro não encontrado.', requestId);
+      return;
+    }
+    if (!this.isCurrentSession(session)) return;
+    this.send(session.ws, {
+      type: MessageType.VOICE_RESTRICTIONS_UPDATED,
+      requestId,
+      payload: { userId: parsed.data.targetUserId, ...this.signalingService.getVoiceRestrictions(parsed.data.targetUserId) } satisfies VoiceRestrictionsUpdatedPayload,
+    });
+  }
+
+  private async applyVoiceRestriction(
+    session: ClientSession,
+    userId: string,
+    restriction: keyof VoiceRestrictions,
+    value: boolean,
+    requestId?: string,
+  ): Promise<void> {
+    if (!(await this.userService.isMember(userId))) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Membro não encontrado.', requestId);
+      return;
+    }
+    const permission = restriction === 'serverMuted' ? Permission.MUTE_MEMBERS : Permission.DEAFEN_MEMBERS;
+    if (!(await this.requirePermission(session, permission, requestId))) return;
+    if (!this.isCurrentSession(session)) return;
+    const states = restriction === 'serverMuted'
+      ? this.signalingService.setServerMuted(userId, value)
+      : this.signalingService.setServerDeafened(userId, value);
     for (const voiceState of states) {
-      this.broadcast({ type: MessageType.ADMIN_DEAFEN_USER, requestId, payload: { ...payload, targetSessionId: voiceState.sessionId } });
-      this.broadcast({ type: MessageType.VOICE_STATE_CHANGED, requestId, payload: { voiceState } });
+      this.broadcast({ type: MessageType.VOICE_STATE_CHANGED, payload: { voiceState } });
+    }
+    const updated: VoiceRestrictionsUpdatedPayload = { userId, ...this.signalingService.getVoiceRestrictions(userId) };
+    this.notifyVoiceRestrictions(updated);
+    this.send(session.ws, { type: MessageType.VOICE_RESTRICTIONS_UPDATED, requestId, payload: updated });
+  }
+
+  private notifyVoiceRestrictions({ userId, serverMuted, serverDeafened }: VoiceRestrictionsUpdatedPayload): void {
+    for (const session of this.getSessionsOfUser(userId)) {
+      this.send(session.ws, {
+        type: MessageType.VOICE_RESTRICTIONS_UPDATED,
+        payload: { userId, serverMuted, serverDeafened } satisfies VoiceRestrictionsUpdatedPayload,
+      });
     }
   }
 

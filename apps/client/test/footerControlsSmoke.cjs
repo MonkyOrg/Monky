@@ -508,15 +508,17 @@ async function setupFooterSmoke() {
         'Manual mute still hides PTT text');
       check(animations(button).length === 1, 'Mute click and state update share one animation');
       voice.serverMuted = true;
+      server.updateVoiceRestrictions(server.currentUser.id, voice);
       appEvents.emit('voice.state_updated');
       await delay();
       const badge = button.querySelector('[data-audio-block]');
-      check(!badge.hidden && button.querySelector('[data-audio-icon]').textContent === 'mic',
-        'Admin mute keeps the microphone and prohibition badge');
+      check(!badge.hidden && button.querySelector('[data-audio-icon]').textContent === 'mic_off',
+        'Admin mute keeps the personal crossed-out microphone and adds its prohibition badge');
       check(getComputedStyle(badge).backgroundColor === getComputedStyle(root.querySelector('.user-control-bar')).backgroundColor,
         'Prohibition badge keeps contrasting panel background');
       check(getComputedStyle(glyph(button)).opacity === '1', 'State feedback does not fade the prohibition badge');
       voice.serverMuted = false;
+      server.updateVoiceRestrictions(server.currentUser.id, voice);
       voice.isMuted = false;
       appEvents.emit('voice.state_updated');
       const deafen = root.querySelector('#bar-btn-deafen');
@@ -784,6 +786,7 @@ async function setupStageSmoke() {
 
       for (const [flag, selector] of [['serverMuted', '#stage-btn-mic'], ['serverDeafened', '#stage-btn-deafen']]) {
         voice[flag] = true;
+        server.updateVoiceRestrictions(server.currentUser.id, voice);
         appEvents.emit('voice.state_updated');
         await delay();
         const control = button(selector);
@@ -791,6 +794,7 @@ async function setupStageSmoke() {
         check(!control.querySelector('[data-audio-block]').hidden
           && getComputedStyle(glyph(control)).opacity === '1', `${flag}: hover keeps the administrative restriction visible`);
         voice[flag] = false;
+        server.updateVoiceRestrictions(server.currentUser.id, voice);
         appEvents.emit('voice.state_updated');
         await delay();
       }
