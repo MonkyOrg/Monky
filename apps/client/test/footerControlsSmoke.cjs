@@ -92,7 +92,7 @@ if (!process.versions.electron) {
         }
         hoverSamples.push({ id: selector, images });
         await window.webContents.executeJavaScript('window.footerSmoke.smoothHoverReturn()', true);
-        window.webContents.sendInputEvent({ type: 'mouseMove', x: 1098, y: 2 });
+        window.webContents.sendInputEvent({ type: 'mouseLeave', x: -1, y: -1 });
         await window.webContents.executeJavaScript('window.footerSmoke.hoverLeft()');
       }
     };
@@ -134,6 +134,7 @@ if (!process.versions.electron) {
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
     await window.webContents.executeJavaScript('window.stageSmoke.keyboardFocused()', true);
     phase = 'stage broadcasting';
+    window.webContents.sendInputEvent({ type: 'mouseLeave', x: -1, y: -1 });
     await window.webContents.executeJavaScript('window.stageSmoke.shareAndWatch()', true);
     await sampleHovers(['#stage-btn-screen', '#stage-btn-overlay', '#stage-btn-stop-share', '#btn-stage-quick-stop',
       '.stage-volume-btn', '.stage-stopwatch-btn', '.stage-fullscreen-btn']);
@@ -737,11 +738,20 @@ async function setupStageSmoke() {
       check(button('#stage-btn-stop-share').style.display === 'inline-flex'
         && button('#btn-stage-quick-stop'), 'Sharing exposes both real stop actions');
       check(!button('.screen-audio-badge').hidden, 'Active screen audio badge is retained');
-      button('.stage-watch-btn').click();
+      const watch = button('.stage-watch-btn');
+      watch.click();
+      // The deliberate click can outlive a fixed delay on a slow compositor.
+      await Promise.all((glyph(watch)?.getAnimations() ?? []).map(animation =>
+        animation.finished.catch(error => { if (error.name !== 'AbortError') throw error; })));
       await delay();
       check(!!button('.stage-focused-main .stage-volume-btn')
         && !!button('.stage-mini-card .stage-watch-btn'), 'Watching binds focused controls and remaining mini-card actions');
-      check(motionCount() === 0, 'New participant and banner buttons do not autoplay');
+      check(motionCount() === 0, 'New participant and banner buttons do not autoplay: ' + JSON.stringify(
+        buttons().filter(control => animations(control).length).map(control => ({
+          id: control.id, classes: control.className, hovered: control.matches(':hover'),
+          focused: control.matches(':focus-visible'),
+          animations: animations(control).map(animation => ({ state: animation.playState, time: animation.currentTime })),
+        }))));
     },
     async normal() {
       for (const selector of ['#stage-btn-camera', '#stage-btn-screen', '#stage-btn-overlay']) {
