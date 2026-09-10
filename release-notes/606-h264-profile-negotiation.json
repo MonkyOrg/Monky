@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O compartilhamento de tela em SFU agora respeita a ordem de perfis H.264 do computador, permitindo usar o encoder de hardware em mais casos sem remover o perfil anterior.",
+  "en": "SFU screen sharing now respects the computer's H.264 profile order, allowing hardware encoding in more cases while keeping the previous profile available."
+}

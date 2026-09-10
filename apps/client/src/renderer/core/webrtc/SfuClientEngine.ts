@@ -133,7 +133,12 @@ export class SfuClientEngine {
 
       // 2. Load device
       this.device = new mediasoupClient.Device();
-      await this.device.load({ routerRtpCapabilities: routerCapsResp.rtpCapabilities as any });
+      await this.device.load({
+        routerRtpCapabilities: routerCapsResp.rtpCapabilities,
+        // Preserve native profile order, as in P2P. A router's first H.264
+        // profile can select software even when another has a hardware encoder.
+        preferLocalCodecsOrder: true,
+      });
       if (epoch !== this.joinEpoch) return false;
       console.log(`[SFU Client] Mediasoup Device loaded! Can produce audio: ${this.canProduceKind('audio')}, video: ${this.canProduceKind('video')}`);
 

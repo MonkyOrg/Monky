@@ -43,6 +43,18 @@ const MEDIA_CODECS: RouterRtpCodecCapability[] = [
       'level-asymmetry-allowed': 1,
     },
   },
+  // Keep Constrained Baseline first for existing clients, but also negotiate
+  // Baseline: some hardware encoders do not advertise the constrained profile.
+  {
+    kind: 'video',
+    mimeType: 'video/H264',
+    clockRate: 90000,
+    parameters: {
+      'packetization-mode': 1,
+      'profile-level-id': '42001f',
+      'level-asymmetry-allowed': 1,
+    },
+  },
 ];
 
 export interface SfuManagerOptions {

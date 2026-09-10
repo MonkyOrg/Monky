@@ -8,6 +8,23 @@ import { AuthService } from './application/services/AuthService';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import type { ChannelRecord, ServerRecord, VoiceRestrictions } from './domain/entities';
 
+test('SFU advertises both H264 profiles with distinct RTX and preserves the legacy first profile', async (t) => {
+  const sfu = new SfuManager({ listenIp: '127.0.0.1', announcedIp: '127.0.0.1' });
+  t.after(() => sfu.close());
+  const { codecs = [] } = await sfu.getRouterRtpCapabilities('h264-profiles');
+  const h264 = codecs.filter((codec) => codec.mimeType.toLowerCase() === 'video/h264');
+  assert.deepEqual(h264.map((codec) => codec.parameters?.['profile-level-id']), ['42e01f', '42001f']);
+  assert.equal(new Set(h264.map((codec) => codec.preferredPayloadType)).size, 2);
+  for (const codec of h264) {
+    assert.equal(codec.parameters?.['packetization-mode'], 1);
+    assert.equal(codec.parameters?.['level-asymmetry-allowed'], 1);
+    assert.equal(codecs.filter((repair) => repair.mimeType.toLowerCase() === 'video/rtx'
+      && repair.parameters?.['apt'] === codec.preferredPayloadType).length, 1);
+  }
+  assert.deepEqual(codecs.filter((codec) => !/\/(h264|rtx)$/i.test(codec.mimeType))
+    .map((codec) => codec.mimeType.toLowerCase()), ['audio/opus', 'video/av1', 'video/vp9', 'video/vp8']);
+});
+
 function fixture(restricted = true) {
   let mode: 'sfu' | 'p2p' = 'sfu';
   let allowed = true, exists = true, closes = 0;

@@ -16,11 +16,12 @@ if (!process.versions.electron) {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_SCREEN_CODEC_PROFILE);
   app.commandLine.appendSwitch('allow-loopback-in-peer-connection');
-  let vite, window, worker, router, vp8Router, timeout;
+  let vite, window, worker, sfuManager, router, vp8Router, legacyRouter, timeout;
   const transports = new Map(), producers = new Map();
   const finish = async code => {
     clearTimeout(timeout);
     if (window && !window.isDestroyed()) window.destroy();
+    sfuManager?.close();
     worker?.close();
     if (vite) await vite.close();
     app.exit(code);
@@ -29,12 +30,12 @@ if (!process.versions.electron) {
     const [{ createServer }, mediasoup, { MessageType }] = await Promise.all([
       import('vite'), import('mediasoup'), import('@monky/shared'),
     ]);
+    const { SfuManager } = require(path.join(clientRoot, '..', 'server', 'dist', 'infrastructure', 'sfu', 'SfuManager.js'));
+    sfuManager = new SfuManager({ listenIp: '127.0.0.1', announcedIp: '127.0.0.1' });
+    router = await sfuManager.getOrCreateRouter('room');
     worker = await mediasoup.createWorker({ logLevel: 'error' });
-    router = await worker.createRouter({ mediaCodecs: [
+    legacyRouter = await worker.createRouter({ mediaCodecs: [
       { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 },
-      { kind: 'video', mimeType: 'video/AV1', clockRate: 90000 },
-      { kind: 'video', mimeType: 'video/VP9', clockRate: 90000, parameters: { 'profile-id': 0 } },
-      { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 },
       { kind: 'video', mimeType: 'video/H264', clockRate: 90000,
         parameters: { 'packetization-mode': 1, 'profile-level-id': '42e01f', 'level-asymmetry-allowed': 1 } },
     ] });
@@ -43,7 +44,8 @@ if (!process.versions.electron) {
       { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 },
     ] });
     async function sfuRequest(type, payload) {
-      const currentRouter = payload.channelId === 'vp8-room' ? vp8Router : router;
+      const currentRouter = payload.channelId === 'vp8-room' ? vp8Router
+        : payload.channelId === 'legacy-room' ? legacyRouter : router;
       switch (type) {
         case MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES:
           return { channelId: payload.channelId, rtpCapabilities: currentRouter.rtpCapabilities };
@@ -53,7 +55,7 @@ if (!process.versions.electron) {
             enableUdp: true, enableTcp: false,
           });
           transports.set(transport.id, transport);
-          return { channelId: 'room', transportOptions: {
+          return { channelId: payload.channelId, transportOptions: {
             id: transport.id, iceParameters: transport.iceParameters,
             iceCandidates: transport.iceCandidates, dtlsParameters: transport.dtlsParameters,
           } };
@@ -62,13 +64,23 @@ if (!process.versions.electron) {
           await transports.get(payload.transportId).connect({ dtlsParameters: payload.dtlsParameters });
           return {};
         case MessageType.SFU_GET_PRODUCERS:
-          return { channelId: 'room', participants: [], producers: [] };
+          return { channelId: payload.channelId, participants: [], producers: [] };
         case MessageType.SFU_PRODUCE: {
           const producer = await transports.get(payload.transportId).produce({
             kind: payload.kind, rtpParameters: payload.rtpParameters, appData: payload.appData,
           });
           producers.set(producer.id, producer);
           return { id: producer.id };
+        }
+        case MessageType.SFU_CONSUME: {
+          const consumer = await transports.get(payload.transportId).consume({
+            producerId: payload.producerId, rtpCapabilities: payload.rtpCapabilities, paused: false,
+          });
+          return {
+            channelId: payload.channelId, id: consumer.id, producerId: consumer.producerId,
+            kind: consumer.kind, rtpParameters: consumer.rtpParameters,
+            producerSessionId: 'self', appData: producers.get(payload.producerId).appData,
+          };
         }
         case MessageType.SFU_PRODUCER_CLOSED:
           producers.get(payload.producerId)?.close();
@@ -128,13 +140,13 @@ if (!process.versions.electron) {
     timeout = setTimeout(() => { console.error('Screen codec smoke timed out'); void finish(1); }, 120000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__screen_codec__`);
     const result = await window.webContents.executeJavaScript(
-      `(${runScreenCodecSmoke.toString()})(${JSON.stringify(MessageType)}, ${process.argv.includes('--admission-only')}, ${process.argv.includes('--codecs-only')})`, true);
+      `(${runScreenCodecSmoke.toString()})(${JSON.stringify(MessageType)}, ${process.argv.includes('--admission-only')}, ${process.argv.includes('--codecs-only')}, ${process.argv.includes('--h264-profiles-only')})`, true);
     console.log(`Screen codecs: ${result.checks} checks passed; actual output: ${result.outputs.join(', ')}`);
     await finish(0);
   }).catch(async error => { console.error(error); await finish(1); });
 }
 
-async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
+async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profilesOnly) {
   const [{ WebRtcManager }, { SfuClientEngine }, { NetworkClient }, codecs, { settingsStore: settings },
     { voiceStore: voice }, { videoService }, { appEvents }, { VideoDiagnosticsSampler }] = await Promise.all([
     import('/core/WebRtcManager.ts'), import('/core/webrtc/SfuClientEngine.ts'), import('/core/NetworkClient.ts'),
@@ -182,9 +194,9 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
   settings.qualityPreset = 'NORMAL';
   voice.setChannel('room');
   const sources = [];
-  function source() {
+  function source(width = 160, height = 90) {
     const canvas = document.createElement('canvas');
-    canvas.width = 160; canvas.height = 90;
+    canvas.width = width; canvas.height = height;
     const context = canvas.getContext('2d');
     let frame = 0;
     const draw = () => {
@@ -199,7 +211,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
     sources.push(entry);
     return entry;
   }
-  async function actualCodec(sender, label, expected = required) {
+  async function actualCodec(sender, label, expected = required, expectedProfile) {
     const first = new Map();
     const sampler = new VideoDiagnosticsSampler();
     const sample = await until(async () => {
@@ -213,7 +225,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
         first.set(stat.id, { frames: stat.framesEncoded, bytes: stat.bytesSent });
         if (previous && stat.framesEncoded > previous.frames && stat.bytesSent > previous.bytes) {
           return {
-            codec: codec.mimeType.toLowerCase(), frames: stat.framesEncoded,
+            codec: codec.mimeType.toLowerCase(), fmtp: codec.sdpFmtpLine, frames: stat.framesEncoded,
             diagnostics: diagnostics.find(sample => sample.id === stat.id),
           };
         }
@@ -239,6 +251,10 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
       }));
     }
     check(!expected || sample.codec === expected, `${label}: encoded ${sample.codec}, expected ${expected}`);
+    if (expectedProfile) {
+      check(profileOf(sample.fmtp) === expectedProfile,
+        `${label}: encoded profile ${profileOf(sample.fmtp)}, expected ${expectedProfile}`);
+    }
     check(sample.diagnostics?.codec?.toLowerCase() === sample.codec.split('/')[1]
       && sample.diagnostics.fps > 0 && sample.diagnostics.bitrateKbps > 0,
     `${label}: passive diagnostics read the actual codec and positive interval FPS/bitrate`);
@@ -324,6 +340,11 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
     if (admissionOnly) {
       await testRejoinAdmission();
       await testForegroundAdmission();
+      return { checks, outputs };
+    }
+    if (selected === 'h264') await testH264Profiles();
+    if (profilesOnly) {
+      check(selected === 'h264', 'H.264 must be available for the profile scenarios');
       return { checks, outputs };
     }
     if (selected === 'h264') {
@@ -724,6 +745,88 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
     for (const item of sources) item.stop();
     voice.reset();
     appEvents.clear();
+  }
+
+  function profileOf(fmtp = '') {
+    return /(?:^|;)\s*profile-level-id=([0-9a-f]{6})(?:;|$)/i.exec(fmtp)?.[1].toLowerCase();
+  }
+
+  async function testH264Profiles() {
+    const nativeProfile = capabilities.find(codec => codec.mimeType.toLowerCase() === 'video/h264'
+      && /(?:^|;)\s*packetization-mode=1(?:;|$)/.test(codec.sdpFmtpLine ?? '')
+      && ['42001f', '42e01f'].includes(profileOf(codec.sdpFmtpLine)));
+    check(!!nativeProfile, 'Runtime exposes a sendable Baseline or Constrained Baseline profile');
+    const expectedProfile = profileOf(nativeProfile.sdpFmtpLine);
+    const viewerClient = new NetworkClient();
+    viewerClient.sendRequest = request;
+    viewerClient.send = (type, payload) => { void request(type, payload).catch(error => signalErrors.push(error.message)); };
+    const videos = [];
+    const viewer = new SfuClientEngine(() => viewerClient, () => 'viewer', {
+      onHealthChanged() {}, onRoster() {}, onConsumerClosed() {}, onConnected() {},
+      onConnectionFailed(reason) { signalErrors.push(reason); },
+      onConsumerTrack({ track }) {
+        const video = document.createElement('video');
+        video.autoplay = video.muted = true;
+        video.srcObject = new MediaStream([track]);
+        document.body.append(video);
+        videos.push(video);
+      },
+    });
+    const shared = source(640, 360);
+    try {
+      check(await sfu.join('room'), 'Profile scenarios use the production SFU router');
+      const sendProfiles = sfu.device.sendRtpCapabilities.codecs
+        .filter(codec => codec.mimeType.toLowerCase() === 'video/h264');
+      check(sendProfiles[0].parameters['profile-level-id'] === expectedProfile,
+        'SFU preserves native profile order rather than forcing the router first profile');
+      const { rtpCapabilities } = await request(MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES, { channelId: 'room' });
+      const legacyDevice = new sfu.device.constructor();
+      await legacyDevice.load({ routerRtpCapabilities: rtpCapabilities });
+      const legacyFirst = legacyDevice.sendRtpCapabilities.codecs.find(codec => codec.mimeType.toLowerCase() === 'video/h264');
+      check(legacyFirst.parameters['profile-level-id'] === '42e01f',
+        'An older client that uses router order keeps Constrained Baseline');
+      check(await viewer.join('room'), 'A separate receiving client joins the real SFU fixture');
+      check(JSON.stringify(viewer.device.rtpCapabilities) === JSON.stringify(legacyDevice.rtpCapabilities),
+        'Legacy and updated clients negotiate the same receiving capabilities');
+      let producer = await sfu.produceScreenVideo(shared.stream.getVideoTracks()[0], shared.stream.id);
+      await actualCodec(producer.rtpSender, 'SFU native H264 profile', 'video/h264', expectedProfile);
+      await viewer.consumeRemoteProducer({
+        channelId: 'room', producerId: producer.id, producerSessionId: 'self', kind: 'video',
+        appData: { mediaType: 'screen_video', shareId: shared.stream.id },
+      });
+      const receiver = viewer.getConsumerReceiver('self', 'screen_video');
+      check(!!receiver, 'The SFU receiver is created for the selected H264 profile');
+      await until(async () => {
+        const stats = await receiver.getStats();
+        return [...stats.values()].some(stat => stat.type === 'inbound-rtp' && stat.framesDecoded > 0
+          && profileOf(stats.get(stat.codecId)?.sdpFmtpLine) === expectedProfile);
+      }, 'The selected H264 profile must arrive and decode through the SFU');
+      check(true, 'The receiving client decodes actual SFU video with the negotiated profile');
+      sfu.closeProducer(`screen_video:${shared.stream.id}`);
+
+      // Model a negotiated send set without Baseline; do not invent a codec
+      // absent from that set just because another machine could accelerate it.
+      sfu.device.sendRtpCapabilities.codecs = sfu.device.sendRtpCapabilities.codecs
+        .filter(codec => codec.mimeType.toLowerCase() !== 'video/h264'
+          || codec.parameters['profile-level-id'] === '42e01f');
+      producer = await sfu.produceScreenVideo(shared.stream.getVideoTracks()[0], shared.stream.id);
+      await actualCodec(producer.rtpSender, 'SFU constrained-only send set', 'video/h264', '42e01f');
+      sfu.closeProducer(`screen_video:${shared.stream.id}`);
+      check(shared.stream.getVideoTracks()[0].readyState === 'live', 'Changing producers preserves the capture track');
+      check(await sfu.join('legacy-room'), 'The updated client still joins a legacy Constrained-only server');
+      producer = await sfu.produceScreenVideo(shared.stream.getVideoTracks()[0], shared.stream.id);
+      await actualCodec(producer.rtpSender, 'SFU legacy router', 'video/h264', '42e01f');
+    } finally {
+      sfu.leave();
+      viewer.leave();
+      viewerClient.dispose();
+      shared.stop();
+      for (const video of videos) {
+        video.pause();
+        video.srcObject = null;
+        video.remove();
+      }
+    }
   }
 
   async function testRejoinAdmission() {
