@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build && tsc -p tsconfig.electron.json",
     "start": "electron .",
-    "test": "tsc -p tsconfig.test.json && node dist-test/test/utils.test.js && node --test dist-test/test/botInteractions.test.js dist-test/test/commandUi.test.js dist-test/test/presence.test.js dist-test/test/voiceConnection.test.js dist-test/test/voiceModeReconnect.test.js dist-test/test/shortcuts.test.js dist-test/test/releaseNotes.test.js",
+    "test": "tsc -p tsconfig.test.json && node dist-test/test/utils.test.js && node --test dist-test/test/botInteractions.test.js dist-test/test/commandUi.test.js dist-test/test/presence.test.js dist-test/test/voiceConnection.test.js dist-test/test/voiceModeReconnect.test.js dist-test/test/shortcuts.test.js dist-test/test/releaseNotes.test.js dist-test/test/videoDiagnostics.test.js dist-test/test/videoTelemetry.test.js",
     "test:transport": "tsc -p tsconfig.test.json && node --test dist-test/test/voiceConnection.test.js dist-test/test/voiceModeReconnect.test.js && node test/screenCodecSmoke.cjs",
     "test:bots": "tsc -p tsconfig.test.json && node --test dist-test/test/botInteractions.test.js dist-test/test/commandUi.test.js",
     "test:bots:ui": "node test/commandDomSmoke.cjs",

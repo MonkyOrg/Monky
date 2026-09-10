@@ -5440,7 +5440,9 @@ input:focus, textarea:focus, select:focus {
 .telemetry-overlay {
   position: absolute;
   z-index: 4;
-  max-width: min(220px, calc(100% - 24px));
+  max-width: min(310px, calc(100% - 24px));
+  max-height: calc(100% - 72px);
+  overflow: hidden;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
   background-color: rgba(0, 0, 0, 0.62);
@@ -5586,7 +5588,8 @@ input:focus, textarea:focus, select:focus {
   accent-color: var(--accent-primary);
 }
 
-.stage-fullscreen-btn {
+.stage-fullscreen-btn,
+.stage-diagnostics-btn {
   position: relative;
   bottom: auto;
   right: auto;
@@ -5611,7 +5614,8 @@ input:focus, textarea:focus, select:focus {
   opacity: 1;
 }
 
-.stage-fullscreen-btn:hover {
+.stage-fullscreen-btn:hover,
+.stage-diagnostics-btn:hover {
   background-color: rgba(0, 0, 0, 0.85);
 }
 

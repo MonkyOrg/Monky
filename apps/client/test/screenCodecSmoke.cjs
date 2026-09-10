@@ -136,10 +136,11 @@ if (!process.versions.electron) {
 
 async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
   const [{ WebRtcManager }, { SfuClientEngine }, { NetworkClient }, codecs, { settingsStore: settings },
-    { voiceStore: voice }, { videoService }, { appEvents }] = await Promise.all([
+    { voiceStore: voice }, { videoService }, { appEvents }, { VideoDiagnosticsSampler }] = await Promise.all([
     import('/core/WebRtcManager.ts'), import('/core/webrtc/SfuClientEngine.ts'), import('/core/NetworkClient.ts'),
     import('/core/webrtc/codecPreferences.ts'), import('/stores/settingsStore.ts'),
     import('/stores/voiceStore.ts'), import('/core/VideoService.ts'), import('/core/EventBus.ts'),
+    import('/core/webrtc/videoDiagnostics.ts'),
   ]);
   let checks = 0;
   const outputs = [];
@@ -200,8 +201,10 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
   }
   async function actualCodec(sender, label, expected = required) {
     const first = new Map();
+    const sampler = new VideoDiagnosticsSampler();
     const sample = await until(async () => {
       const report = await sender.getStats();
+      const diagnostics = sampler.sampleOutbound(sender, report, sender.getParameters(), sender.track?.id);
       for (const stat of report.values()) {
         if (stat.type !== 'outbound-rtp' || stat.kind !== 'video' || !stat.codecId || !(stat.framesEncoded > 0)) continue;
         const codec = report.get(stat.codecId);
@@ -209,7 +212,10 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
         const previous = first.get(stat.id);
         first.set(stat.id, { frames: stat.framesEncoded, bytes: stat.bytesSent });
         if (previous && stat.framesEncoded > previous.frames && stat.bytesSent > previous.bytes) {
-          return { codec: codec.mimeType.toLowerCase(), frames: stat.framesEncoded };
+          return {
+            codec: codec.mimeType.toLowerCase(), frames: stat.framesEncoded,
+            diagnostics: diagnostics.find(sample => sample.id === stat.id),
+          };
         }
       }
       return false;
@@ -233,6 +239,9 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
       }));
     }
     check(!expected || sample.codec === expected, `${label}: encoded ${sample.codec}, expected ${expected}`);
+    check(sample.diagnostics?.codec?.toLowerCase() === sample.codec.split('/')[1]
+      && sample.diagnostics.fps > 0 && sample.diagnostics.bitrateKbps > 0,
+    `${label}: passive diagnostics read the actual codec and positive interval FPS/bitrate`);
     outputs.push(`${label}=${sample.codec}`);
     console.log(`CODEC TEST ${label}: ${sample.codec}, ${sample.frames} encoded frames`);
     return sample.codec;
@@ -347,6 +356,19 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
     const first = source();
     await rtc.addLocalScreenTrack(first.stream);
     await actualCodec(rtc.getScreenSendersForShare(first.stream.id)[0], 'P2P initial');
+    const receiverSampler = new VideoDiagnosticsSampler();
+    const receivedDiagnostics = await until(async () => {
+      for (const receiver of remote.getReceivers()) {
+        if (receiver.track.kind !== 'video') continue;
+        const samples = receiverSampler.sampleInbound(receiver, await receiver.getStats(), receiver.track.id);
+        const received = samples.find(sample => sample.fps > 0 && sample.bitrateKbps > 0);
+        if (received) return received;
+      }
+      return null;
+    }, 'Remote diagnostics receive and decode real loopback video');
+    check(receivedDiagnostics.codec?.toLowerCase() === selected && receivedDiagnostics.width === 160
+      && receivedDiagnostics.height === 90 && receivedDiagnostics.encodeTimeMs === null,
+    'Receiving diagnostics report the remote video, not local encoder settings');
     settings.preferredVideoCodec = 'av1';
     await rtc.reapplyCodecPreferences();
     await actualCodec(rtc.getScreenSendersForShare(first.stream.id)[0], 'P2P live AV1', 'video/av1');

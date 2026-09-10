@@ -247,6 +247,7 @@ export class VoiceVideoTab {
             <option value="simple" ${settingsStore.screenShareTelemetryMode === 'simple' ? 'selected' : ''}>${t('settings.telemetryModeSimple')}</option>
             <option value="complete" ${settingsStore.screenShareTelemetryMode === 'complete' ? 'selected' : ''}>${t('settings.telemetryModeComplete')}</option>
           </select>
+          <small style="display: block; margin-top: 6px; color: var(--text-muted);">${t('settings.telemetryHelp')}</small>
         </div>
       </div>
     `;

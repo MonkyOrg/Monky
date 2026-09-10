@@ -637,11 +637,12 @@ async function setupFooterSmoke() {
 async function setupStageSmoke() {
   const [{ VoiceStageView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
     { participantManager: participants }, { appEvents }, { screenAudioService },
-    { overlayBridgeService }, { overlayConfigModal }, { soundboardModal }] = await Promise.all([
+    { overlayBridgeService }, { overlayConfigModal }, { soundboardModal }, { VideoDiagnosticsSampler }] = await Promise.all([
     import('/views/VoiceStageView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/serverStore.ts'), import('/core/ParticipantManager.ts'), import('/core/EventBus.ts'),
     import('/core/ScreenAudioService.ts'), import('/core/OverlayBridgeService.ts'),
     import('/views/OverlayConfigModal.ts'), import('/views/SoundboardModal.ts'),
+    import('/core/webrtc/videoDiagnostics.ts'),
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
@@ -692,12 +693,18 @@ async function setupStageSmoke() {
     ['repair', { type: 'codec', mimeType: 'video/rtx' }],
     ['invalid', { type: 'codec', mimeType: 42 }],
   ]);
-  check(stage.getCodecName(codecStats) === null, 'Absent RTP codecId must not turn the first capability into a reported codec');
-  check(stage.getCodecName(codecStats, 'missing') === null, 'Missing codec reports stay unknown instead of guessing AV1');
-  check(stage.getCodecName(codecStats, 'actual-video') === 'H264', 'Stage codec comes from the exact RTP reference');
-  check(stage.getCodecName(codecStats, 'first-capability') === 'AV1', 'Referenced AV1 remains visible when it is the actual RTP codec');
+  const sampler = new VideoDiagnosticsSampler();
+  const readCodec = codecId => {
+    const stats = new Map(codecStats);
+    stats.set('rtp-video', { id: 'rtp-video', type: 'outbound-rtp', kind: 'video', codecId, timestamp: 1000 });
+    return sampler.sampleOutbound({}, stats)[0]?.codec ?? null;
+  };
+  check(readCodec() === null, 'Absent RTP codecId must not turn the first capability into a reported codec');
+  check(readCodec('missing') === null, 'Missing codec reports stay unknown instead of guessing AV1');
+  check(readCodec('actual-video') === 'H264', 'Stage codec comes from the exact RTP reference');
+  check(readCodec('first-capability') === 'AV1', 'Referenced AV1 remains visible when it is the actual RTP codec');
   for (const id of ['audio', 'repair', 'invalid']) {
-    check(stage.getCodecName(codecStats, id) === null, `${id}: non-video, repair and malformed codecs are not reported as screen encoding`);
+    check(readCodec(id) === null, `${id}: non-video, repair and malformed codecs are not reported as screen encoding`);
   }
   // Exercise the actual button wiring without physical media, native windows or leaving a real call.
   stage.toggleCamera = async () => { actions.camera++; };
@@ -718,6 +725,71 @@ async function setupStageSmoke() {
   check(motionCount() === 0, 'Actual stage has no autoplay motion');
   check(button('.stage-watch-btn') && button('.stage-fullscreen-btn'), 'Actual participant media controls render');
   check(getComputedStyle(button('.screen-audio-badge')).display === 'none', 'Inactive audio badge is hidden');
+  const copyButton = button('.stage-diagnostics-btn');
+  check(copyButton && getComputedStyle(copyButton).display === 'none', 'Video diagnostics controls are hidden when telemetry is off');
+  const originalCollect = stage.collectTelemetrySnapshot;
+  const originalTiles = stage.getTelemetryTiles;
+  const originalClipboard = navigator.clipboard.writeText;
+  const originalTelemetryMode = settings.screenShareTelemetryMode;
+  let copied = '';
+  let copyCount = 0;
+  const diagnosticTile = stage.getTelemetryTiles()[0];
+  const fakeSnapshot = {
+    kind: 'receiver', media: 'camera', transport: 'p2p', sampledAt: new Date().toISOString(),
+    documentVisibility: 'visible',
+    requested: null, capture: null, streams: [], playback: null, readErrors: 0,
+  };
+  try {
+    stage.getTelemetryTiles = () => [diagnosticTile];
+    stage.collectTelemetrySnapshot = async () => structuredClone(fakeSnapshot);
+    navigator.clipboard.writeText = async text => { copied = text; copyCount++; };
+    settings.screenShareTelemetryEnabled = true;
+    settings.screenShareTelemetryMode = 'complete';
+    stage.applyTelemetryOverlayState();
+    check(getComputedStyle(copyButton).display !== 'none', 'Enabling telemetry exposes the actual copy button');
+    enter(copyButton);
+    check(animations(copyButton).length === 1, 'Visible diagnostics controls reuse stage hover feedback');
+    leave(copyButton);
+    for (let sample = 0; sample < 25; sample++) await stage.refreshTelemetry();
+    check(stage.telemetryHistory.get(diagnosticTile.key).length === 20, 'Video diagnostics history is bounded');
+    const focusedBeforeCopy = [...stage.focusedTileKeys];
+    copyButton.click();
+    await delay();
+    const report = JSON.parse(copied);
+    check(report.schemaVersion === 1 && report.history.length === 20 && report.kind === 'receiver',
+      'Actual stage button copies normalized diagnostics and recent history');
+    check(JSON.stringify(stage.focusedTileKeys) === JSON.stringify(focusedBeforeCopy), 'Copy does not change video focus');
+
+    let release;
+    stage.collectTelemetrySnapshot = () => new Promise(resolve => { release = resolve; });
+    const pending = stage.refreshTelemetry();
+    settings.screenShareTelemetryEnabled = false;
+    appEvents.emit('settings.updated');
+    check(stage.telemetryHistory.size === 0 && stage.telemetrySnapshots.size === 0
+      && stage.telemetryEndpoints.size === 0 && stage.telemetryInterval === null,
+    'Disabling diagnostics clears samples, targets and timers');
+    release(structuredClone(fakeSnapshot));
+    await pending;
+    check(stage.telemetrySnapshots.size === 0 && stage.telemetryHistory.size === 0,
+      'A delayed read cannot repopulate diagnostics after they are disabled');
+    check(getComputedStyle(copyButton).display === 'none', 'Disabled diagnostic buttons remain hidden despite their flex styling');
+    stage.renderParticipants();
+    document.body.append(copyButton);
+    const copiedBefore = copyCount;
+    copyButton.click();
+    await delay();
+    check(copyCount === copiedBefore && !document.querySelector('.dialog-card'),
+      'Re-render removes diagnostic click listeners even if the old button stays connected');
+    copyButton.remove();
+  } finally {
+    navigator.clipboard.writeText = originalClipboard;
+    stage.collectTelemetrySnapshot = originalCollect;
+    stage.getTelemetryTiles = originalTiles;
+    settings.screenShareTelemetryEnabled = false;
+    settings.screenShareTelemetryMode = originalTelemetryMode;
+    stage.stopTelemetryMonitor();
+    stage.applyTelemetryOverlayState();
+  }
 
   window.stageSmoke = {
     keyboardTarget() {
@@ -874,7 +946,7 @@ async function setupStageSmoke() {
         enter(button('.stage-volume-btn'));
         check(animations(button('.stage-volume-btn')).length === 1, 'Replacement cards bind exactly once');
       }
-      for (const control of buttons().filter((control) => control.style.display !== 'none')) {
+      for (const control of buttons().filter((control) => !control.hidden && control.style.display !== 'none')) {
         enter(control);
         const animation = animations(control)[0];
         check(animation && animation.effect.getTiming().iterations === 1
