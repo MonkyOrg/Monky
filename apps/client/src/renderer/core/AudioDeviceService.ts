@@ -1,7 +1,13 @@
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { t } from '../i18n';
-import { applyAudioDevice } from './applyAudioDevice';
+import { applyAudioDevice, applyAudioOutputPreferences } from './applyAudioDevice';
+import { audioProcessor } from './AudioProcessor';
+import { finishChatMediaOutputSelection } from './ChatMediaOutput';
+import {
+  AUDIO_OUTPUT_CATEGORIES, copyAudioOutputPreferences, resolveAudioOutput,
+  type AudioOutputPreferences, type NoiseSuppressionMode,
+} from '../utils/audioPreferences';
 
 export type AudioDeviceKind = 'input' | 'output';
 export type AudioDeviceApplier = (kind: AudioDeviceKind, deviceId: string, signal?: AbortSignal) => Promise<void>;
@@ -23,9 +29,9 @@ export function populateAudioDeviceSelect(
   select: HTMLSelectElement,
   kind: AudioDeviceKind,
   devices: MediaDeviceInfo[],
+  selected = selectedAudioDevice(kind),
 ): string {
   const available = devices.filter((device) => device.kind === (kind === 'input' ? 'audioinput' : 'audiooutput'));
-  const selected = selectedAudioDevice(kind);
   select.replaceChildren(new Option(t('audioDevices.systemDefault'), ''));
   for (const [index, device] of available.entries()) {
     if (!device.deviceId || device.deviceId === 'default') continue;
@@ -58,6 +64,8 @@ export async function selectAudioDevice(kind: AudioDeviceKind, deviceId: string,
   if (selecting) throw new Error('Audio device selection already in progress');
   if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
   selecting = true;
+  const previous = selectedAudioDevice(kind);
+  let applied = false;
   try {
     if (kind === 'input' && !voiceStore.currentVoiceChannelId) {
       // Validate before persisting; never attach this local permission probe to a call.
@@ -72,10 +80,81 @@ export async function selectAudioDevice(kind: AudioDeviceKind, deviceId: string,
     }
     if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
     await (applyLiveDevice ?? applyAudioDevice)(kind, deviceId, signal);
+    applied = true;
     if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
     if (kind === 'input') settingsStore.selectedMicrophoneId = deviceId;
     else settingsStore.selectedSpeakerId = deviceId;
     settingsStore.save();
+  } catch (error) {
+    if (kind === 'input') settingsStore.selectedMicrophoneId = previous;
+    else settingsStore.selectedSpeakerId = previous;
+    if (applied) {
+      try {
+        await (applyLiveDevice ?? applyAudioDevice)(kind, previous);
+      } catch (rollbackError) {
+        console.error('[AudioDevices] Could not restore the previous device:', rollbackError);
+      }
+    }
+    throw error;
+  } finally {
+    if (kind === 'output') finishChatMediaOutputSelection();
+    selecting = false;
+  }
+}
+
+export async function selectAudioOutputPreferences(next: AudioOutputPreferences, signal?: AbortSignal): Promise<void> {
+  if (selecting) throw new Error('Audio device selection already in progress');
+  if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
+  selecting = true;
+  const previous = copyAudioOutputPreferences(settingsStore);
+  let applied = false;
+  try {
+    const ids = new Set(AUDIO_OUTPUT_CATEGORIES.map((category) => resolveAudioOutput(next, category)));
+    ids.add(next.selectedSpeakerId);
+    const probe = new Audio();
+    if (typeof probe.setSinkId !== 'function') throw new Error('Output selection unavailable');
+    for (const deviceId of ids) {
+      await probe.setSinkId(deviceId);
+      if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
+    }
+    await applyAudioOutputPreferences(next, signal);
+    applied = true;
+    if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
+    settingsStore.selectedSpeakerId = next.selectedSpeakerId;
+    settingsStore.advancedAudioOutputs = next.advancedAudioOutputs;
+    settingsStore.audioOutputDevices = { ...next.audioOutputDevices };
+    settingsStore.save();
+  } catch (error) {
+    settingsStore.selectedSpeakerId = previous.selectedSpeakerId;
+    settingsStore.advancedAudioOutputs = previous.advancedAudioOutputs;
+    settingsStore.audioOutputDevices = previous.audioOutputDevices;
+    if (applied) await applyAudioOutputPreferences(previous);
+    throw error;
+  } finally {
+    finishChatMediaOutputSelection();
+    selecting = false;
+  }
+}
+
+export async function selectNoiseSuppression(mode: NoiseSuppressionMode, signal?: AbortSignal): Promise<void> {
+  if (selecting) throw new Error('Audio device selection already in progress');
+  if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
+  selecting = true;
+  const previous = settingsStore.noiseSuppressionMode;
+  const previousLastMode = settingsStore.lastNoiseSuppressionMode;
+  let applied = false;
+  try {
+    await audioProcessor.setNoiseSuppression(mode, signal);
+    applied = true;
+    if (signal?.aborted) throw new DOMException('Selection cancelled', 'AbortError');
+    settingsStore.noiseSuppressionMode = mode;
+    if (mode !== 'off') settingsStore.lastNoiseSuppressionMode = mode;
+    settingsStore.save();
+  } catch (error) {
+    settingsStore.noiseSuppressionMode = previous;
+    settingsStore.lastNoiseSuppressionMode = previousLastMode;
+    if (applied) await audioProcessor.setNoiseSuppression(previous);
+    throw error;
   } finally {
     selecting = false;
   }

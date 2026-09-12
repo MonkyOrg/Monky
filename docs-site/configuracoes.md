@@ -11,8 +11,10 @@ Abra pelo ícone de engrenagem na tela de conexão ou na barra inferior.
   de servidor, então ela nunca vai para o disco em texto aberto. Sem essa senha
   não há como recuperar o backup.
 - **Dispositivos** — microfone, alto-falante/fone e câmera, com pré-visualização e atualização da lista.
+- **Efeitos de câmera** — desfoque, fundo virtual com cor ou imagem e chroma key de fundo físico, processados localmente.
 - **Sensibilidade de Voz (VAD)** — ajuste olhando o medidor; deixe o marcador acima do nível em silêncio.
-- **Supressão de Ruído (RNNoise)** — reduz teclado, cliques e ruído ambiente.
+- **Supressão de ruído** — escolha RNNoise, Speex, GTCRN, WebRTC (nativo) ou desative o processamento de ruído.
+- **Saída geral e saídas avançadas** — use o mesmo dispositivo para tudo ou defina saídas para voz, compartilhamentos e mídias do chat.
 - **Perfil de Qualidade e Desempenho** — afeta só o que você transmite.
 - **Comportamento** — manter o Monky na bandeja ao fechar a janela e perguntar
   antes de desligar um servidor hospedado nesta máquina quando você for a última
@@ -33,6 +35,43 @@ A abertura e o fechamento dos submenus, assim como a rolagem das seções e
 das categorias do seletor de emojis, respeitam a
 preferência de movimento reduzido do sistema: quando ativada, o deslocamento
 é imediato, sem animação.
+
+### Configurações do servidor: aplicação imediata
+
+As configurações do servidor não têm uma etapa final de salvar. Switches e
+seleções aplicam imediatamente; nomes, senhas e limites aplicam ao terminar
+a edição, ao sair do campo ou pressionar `Enter`. **Pronto** apenas fecha a
+janela, sem desfazer alterações já aplicadas.
+
+Enquanto houver uma operação pendente, **Pronto**, `X`, `Esc`, o clique fora
+da janela e outras tentativas de fechamento ficam bloqueados. A instalação
+do TURN chegar a 100% não significa que terminou: o aplicativo espera a
+confirmação final do servidor e mostra falhas reais de inicialização.
+
+Erros indicam qual alteração não foi confirmada e permitem corrigir e tentar
+novamente. Se a conexão ou a sessão mudar, reabra as configurações para obter
+o estado atual; uma solicitação sem confirmação não é apresentada como salva.
+Edições de cargos e perfis de bots também são imediatas, mas criação,
+instalação, exclusão e revogação continuam exigindo suas ações explícitas.
+
+### Seletor de cores
+
+A cor da tela física do chroma key, a cor do fundo virtual e as cores dos
+cargos usam o mesmo seletor do Monky. Clique na amostra de cor para abrir
+os controles de matiz, saturação e brilho, as cores predefinidas e o campo
+**HEX**, que aceita três ou seis dígitos.
+
+Soltar o controle após arrastar ou escolher uma cor aplica a seleção.
+Ao digitar um HEX válido, `Enter`, o botão de fechar ou um clique fora
+confirmam a entrada; fechar o seletor não desfaz a cor escolhida. Uma entrada
+inválida é indicada no próprio painel. `Escape` cancela somente a entrada
+ainda em edição e fecha o seletor, sem fechar suas configurações.
+
+O **Conta-gotas** permite escolher uma cor da tela. Durante a seleção,
+`Escape` cancela apenas o conta-gotas, mantendo a cor anterior e o painel
+aberto. Falta de permissão ou falha de captura é informada, sem substituir
+a cor por um valor padrão. Isso não desliga os efeitos nem transmite a
+câmera sem filtro para a chamada.
 
 ### Aparecer offline
 
@@ -129,6 +168,140 @@ após você iniciá-lo e não envia essa prévia para o canal de voz nem altera
 seus estados de mute ou Push to Talk. Se você já estiver em uma chamada
 desmutada, ela continua transmitindo sua voz normalmente. Sair da aba ou
 fechar as configurações encerra o teste.
+
+### Motores de supressão de ruído
+
+Em **Voz e Vídeo → Supressão de ruído**, escolha um motor e compare o resultado
+com **Testar microfone**. A prévia usa o mesmo processamento escolhido para a
+chamada, sem transmitir o teste para outras pessoas.
+
+| Opção | Uso e limites |
+| --- | --- |
+| RNNoise | Motor neural usado por padrão no Monky. |
+| Speex | Filtro clássico de baixo custo, adequado a ruídos constantes. |
+| GTCRN | Rede neural alternativa focada em voz; trabalha internamente em 16 kHz, limitando a fidelidade de música e sons agudos. |
+| WebRTC (nativo) | Supressão integrada ao processamento WebRTC do aplicativo. |
+| Desativada | Sem supressão de ruído; cancelamento de eco e ganho automático continuam ativos. |
+
+Todos os motores processam localmente e seus arquivos acompanham o aplicativo.
+A intensidade percebida varia com o microfone e o ambiente; nenhum motor é
+melhor em todas as situações. A supressão nativa não é aplicada por cima
+dos motores RNNoise, Speex ou GTCRN.
+
+A troca mantém a track enviada à chamada e respeita mute e PTT. O botão rápido
+de supressão desativa o processamento ou restaura o último motor escolhido.
+Use a seta ao lado desse botão para escolher o motor sem sair da tela atual
+ou abrir diretamente suas configurações.
+Uma falha é informada; o app não troca silenciosamente para áudio sem filtro.
+
+### Saídas de áudio por categoria
+
+Em **Voz e Vídeo → Saída geral**, escolha o dispositivo padrão do aplicativo.
+Essa escolha também vale para os vídeos do chat, inclusive no visualizador
+ampliado. A seta do fone nos controles rápidos altera essa mesma saída geral.
+
+O switch **Saídas avançadas** revela seletores para **Canal de voz**,
+**Áudio de compartilhamentos** e **Mídias do chat**. **Usar saída geral**
+acompanha a escolha principal; **Padrão do sistema** escolhe explicitamente
+o dispositivo do sistema, mesmo se a saída geral for outra.
+
+Alertas e soundboard continuam usando a saída geral. Desativar o modo avançado
+volta a usar a saída geral em todas as categorias sem apagar as escolhas
+individuais. As opções ficam salvas e também são respeitadas com volumes
+amplificados acima de 100%. Identificadores de dispositivos não são importados
+de backups de outra máquina.
+
+Se dispositivos salvos forem desconectados e impedirem a aplicação, use
+**Usar padrão do sistema em todas as saídas**. Essa ação explícita redefine a
+saída geral, remove as escolhas por categoria e desativa o modo avançado.
+Ela fica acessível mesmo com os seletores avançados recolhidos, permitindo
+recuperar a configuração quando vários dispositivos desaparecerem juntos.
+
+### Efeitos e prévia da câmera
+
+Em **Voz e Vídeo → Câmera**, a prévia fica ligada por padrão quando esses
+controles são abertos. O controle para ocultá-la fica acima dos efeitos:
+ao desligá-lo, o quadro permanece com a indicação **Visualização desligada**.
+Essa escolha vale para a abertura atual; ao abrir os controles novamente,
+a prévia volta ligada.
+Essa captura é local e não liga a transmissão da câmera na chamada. Quando a
+câmera da chamada já está ligada, ambas usam a mesma captura; ocultar ou fechar
+a prévia não desliga a câmera da chamada.
+Trocar o dispositivo também atualiza a chamada, mesmo com a prévia fechada.
+
+Nos controles rápidos, a seta ao lado da câmera abre a escolha do dispositivo,
+a prévia e os ajustes de efeitos. O painel também dá acesso direto à seção
+correspondente nas configurações.
+
+| Modo | Resultado |
+| --- | --- |
+| Desativado | Vídeo sem efeito de fundo. |
+| Desfoque | Segmentação da pessoa e desfoque do fundo. |
+| Cor | Fundo virtual de uma cor, inclusive verde, sem exigir tela verde física. |
+| Imagem | Uma imagem local como fundo virtual. |
+| Chroma key | Remove uma cor do cenário físico, normalmente uma tela verde, substituindo-a por cor ou imagem. |
+
+Chroma key e fundo virtual verde são coisas diferentes: o primeiro recorta a
+cor escolhida em toda a imagem, inclusive roupas e objetos dessa cor. O vídeo
+da chamada não transmite transparência; o recorte recebe o fundo escolhido.
+Os ajustes de tolerância, borda e redução de reflexo ajudam com telas físicas.
+Branco, preto e cinza também podem ser usados como cor-chave. Nesses tons,
+o brilho participa da comparação para não tratar todos os cinzas como a
+mesma cor.
+A segmentação automática é aproximada e pode falhar em cabelo, contornos e
+iluminação difícil; não a trate como garantia de ocultar informações sensíveis.
+Cada ajuste tem um botão **?** com uma explicação: passe o mouse ou use o
+foco do teclado para consultar a ajuda sem alterar a configuração.
+
+Imagens PNG, JPEG e WebP de até **8 MiB** são aceitas, com limites adicionais de
+dimensões para evitar consumo excessivo. A imagem é normalizada e fica salva
+localmente junto das preferências, não no backup geral de configurações.
+Com **Limitar a 720p / 30 FPS** desligado por padrão, os efeitos seguem tanto
+a **resolução quanto o FPS** do perfil de qualidade selecionado. Ative o switch
+para reduzir o processamento, limitando ambos a até **1280 × 720 e 30 FPS**.
+O limite não aumenta uma resolução ou taxa de quadros inferior, nem amplia
+uma captura menor. A câmera e o processamento também podem reduzir a taxa
+efetiva. Com os efeitos desativados, a qualidade normal da câmera é preservada.
+
+O modelo e o processamento acompanham o aplicativo e funcionam sem uma API
+externa: os frames são processados localmente antes de seguir pela chamada
+P2P ou SFU. Em caso de falha, a câmera é desligada e o erro é mostrado, sem
+voltar silenciosamente ao vídeo sem efeito. Desativar o efeito exige uma
+escolha explícita.
+
+### Favoritos de sons e servidores
+
+Use a estrela para marcar sons no soundboard, tanto na grade/lista quanto
+em **Configurações → Soundboard**, e servidores na lista **Salvos** da Home.
+O filtro **Todos/Favoritos** combina com a busca, sem duplicar os itens.
+Os favoritos aparecem primeiro, em ordem alfabética; os demais aparecem
+depois, também em ordem alfabética. Marcar ou desmarcar move os itens com uma
+transição suave; trocar **Todos/Favoritos** também anima a mudança da lista.
+As animações respeitam a preferência de movimento reduzido do sistema.
+A estrela pode ser acionada com `Enter` ou espaço e não toca o som nem abre
+o servidor.
+
+Favoritos de sons identificam o arquivo pelo caminho completo: arquivos com
+o mesmo nome em pastas diferentes não se confundem. Voltar à pasta anterior
+recupera suas estrelas. Favoritos de servidores acompanham o endereço e a
+porta; renomear preserva a estrela e editar o endereço a transfere.
+Excluir um servidor remove sua marcação.
+
+Essas preferências são locais e não viajam no backup geral. Importar servidores
+preserva estrelas dos endereços mantidos e remove as dos endereços retirados.
+A ordenação preserva os atalhos associados aos sons e não altera a barra
+lateral de servidores.
+
+### Iniciar outro servidor durante uma chamada
+
+Iniciar e visualizar um servidor próprio offline, pela Home ou pela barra
+lateral, não entra automaticamente em voz e não interrompe a chamada atual,
+o microfone, a câmera ou os compartilhamentos. Entrar em outro canal de voz
+continua sendo uma ação separada.
+
+Se outro servidor já estiver hospedado por esta instância do app, ele não será
+desligado implicitamente. Use os controles de hospedagem para pará-lo
+explicitamente quando for seguro, antes de iniciar um servidor diferente.
 
 ### Atalhos de teclado
 

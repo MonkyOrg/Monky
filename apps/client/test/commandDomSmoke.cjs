@@ -17,6 +17,8 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_COMMAND_DOM_PROFILE);
+  app.commandLine.appendSwitch('use-fake-device-for-media-stream');
+  app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
   let vite;
   let window;
   let timeout;
@@ -332,6 +334,7 @@ async function runSettingsNavigationSmoke() {
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   let starts = 0;
+  let cameraActivations = 0;
   let deactivations = 0;
   let cleanups = 0;
   let versions = 0;
@@ -343,17 +346,18 @@ async function runSettingsNavigationSmoke() {
   modal.voiceVideoTab = {
     renderHtml: () => '<label for="settings-select-fixture">Device</label><select id="settings-select-fixture" title="Device choice"><option value="one">One</option><option value="two">Two</option></select>',
     attachEvents: () => {}, refreshDevices: async () => {},
+    activateCameraPreview: () => { cameraActivations++; },
     startVadMeter: () => { starts++; }, deactivate: () => { deactivations++; }, cleanup: () => { cleanups++; },
   };
   try {
     await modal.open();
-    check(starts === 0, 'Opening account settings must not start a hidden microphone meter');
+    check(starts === 0 && cameraActivations === 0, 'Opening account settings must not start hidden media previews');
     modal.close();
     await modal.open('voice_video');
     check(document.querySelector('#tab-panel-voice_video').style.display !== 'none'
       && document.querySelector('#settings-current-tab-title').textContent.includes(t('settings.tabVoiceVideo')),
     'Quick audio settings shortcut opens the voice tab directly');
-    check(starts === 1, 'Visible voice settings starts its meter exactly once');
+    check(starts === 1 && cameraActivations === 1, 'Visible voice settings activates its media previews exactly once');
     const select = document.getElementById('settings-select-fixture');
     select.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' }));
     select.click();
@@ -366,7 +370,8 @@ async function runSettingsNavigationSmoke() {
     modal.switchTab('account');
     check(deactivations === 1 && cleanups === priorCleanup, 'Leaving voice stops media without removing the tab control bindings');
     modal.switchTab('voice_video');
-    check(starts === 2 && cleanups === priorCleanup, 'Returning to voice resumes the meter without duplicating or dropping bindings');
+    check(starts === 2 && cameraActivations === 2 && cleanups === priorCleanup,
+      'Returning to voice resumes its media previews without duplicating or dropping bindings');
     modal.close();
     check(cleanups === priorCleanup + 1, 'Closing settings performs full voice tab cleanup');
     let resolveRefresh;
@@ -374,11 +379,13 @@ async function runSettingsNavigationSmoke() {
     const priorStarts = starts;
     const priorVersions = versions;
     const opening = modal.open('voice_video');
+    const pendingCameraActivations = cameraActivations;
     modal.close();
     resolveRefresh();
     await opening;
-    check(starts === priorStarts && versions === priorVersions && !document.querySelector('.modal-backdrop--settings'),
-      'Closing during async settings setup cannot start a late microphone preview');
+    check(starts === priorStarts && cameraActivations === pendingCameraActivations
+      && versions === priorVersions && !document.querySelector('.modal-backdrop--settings'),
+      'Closing during async settings setup cannot start a late media preview');
     return checks;
   } finally {
     modal.close();
@@ -824,15 +831,22 @@ async function runSidebarPttSmoke() {
       && root.querySelector('.voice-conn-info').title === 'Establishing the voice connection',
       'Initial connection status and tooltip follow the selected language');
     healthChanged('connected');
+    await Promise.resolve();
     window.voiceConnectionPreviewMarkup = previews.join('');
-    check(root.querySelectorAll('.audio-control-group').length === 2
-      && root.querySelectorAll('button.audio-device-trigger').length === 2, 'Actual MainView must render independent microphone and output device arrows');
+    check(root.querySelectorAll('.audio-control-group').length === 4
+      && [...root.querySelectorAll('button.audio-device-trigger')]
+        .map(trigger => trigger.dataset.audioDevice).sort().join(',') === 'camera,input,noise,output',
+      'Actual MainView must render independent microphone, output, camera and noise controls');
     const footerRect = root.querySelector('.user-control-bar').getBoundingClientRect();
     for (const trigger of root.querySelectorAll('button.audio-device-trigger')) {
       const rect = trigger.getBoundingClientRect();
       check(trigger.getAttribute('aria-expanded') === 'false' && rect.width > 0
         && rect.left >= footerRect.left && rect.right <= footerRect.right,
-      'Device arrows must be accessible, visible and contained inside the actual footer');
+      `Device arrow must be accessible, visible and inside its footer: ${JSON.stringify({
+        kind: trigger.dataset.audioDevice, expanded: trigger.getAttribute('aria-expanded'),
+        width: rect.width, left: rect.left, right: rect.right,
+        footerLeft: footerRect.left, footerRight: footerRect.right,
+      })}`);
     }
     navigator.mediaDevices.enumerateDevices = async () => [
       { deviceId: 'default', kind: 'audiooutput', label: 'System output', groupId: 'audio' },

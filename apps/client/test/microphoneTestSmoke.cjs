@@ -33,7 +33,8 @@ if (require.main === module || process.argv[1] === __filename) {
       vite = await createServer({
         configFile: path.join(clientRoot, 'vite.config.ts'),
         logLevel: 'error',
-        server: { host: '127.0.0.1', port: 0, strictPort: true, open: false },
+        cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
+        server: { host: '127.0.0.1', port: 0, strictPort: true, open: false, hmr: false, watch: null },
         plugins: [{
           name: 'microphone-test-fixture',
           configureServer(server) {
@@ -91,6 +92,7 @@ async function runMicrophoneTestSmoke() {
     serverMuted: voice.serverMuted, serverDeafened: voice.serverDeafened,
     ptt: voice.pttPressed, microphoneOpen: voice.microphoneOpen,
     api: window.api, pttKey: settings.pttKey, storage: localStorage.getItem('monky_settings'),
+    visibility: Object.getOwnPropertyDescriptor(document, 'visibilityState'),
   };
   const initialListenerCount = Array.from(appEvents.listeners.values()).reduce((count, listeners) => count + listeners.size, 0);
   let speakingEvents = 0;
@@ -132,6 +134,11 @@ async function runMicrophoneTestSmoke() {
     createMediaStreamSource(stream) {
       this.previewStream = stream;
       return super.createMediaStreamSource(stream);
+    }
+    createMediaStreamDestination() {
+      const destination = super.createMediaStreamDestination();
+      this.previewOutput = destination.stream;
+      return destination;
     }
     createAnalyser() {
       const analyser = super.createAnalyser();
@@ -202,7 +209,8 @@ async function runMicrophoneTestSmoke() {
     button.click();
     await wait();
     check(captures.length === 1 && contexts.length === 1, 'microphone test shares the passive meter capture/graph');
-    check(plays.length === 1 && plays[0].srcObject === captures[0], 'explicit click starts local playback only');
+    check(plays.length === 1 && plays[0].srcObject === contexts[0].previewOutput && plays[0].srcObject !== captures[0],
+      'explicit click plays the processed preview, not the unfiltered raw microphone');
     check(sinks[0].id === 'speaker-test' && sinks[0].audio === plays[0], 'selected output routed before playback');
     check(plays[0].volume === 0.25 && !plays[0].autoplay, 'test has reduced volume and no autoplay');
     check(button.getAttribute('aria-pressed') === 'true' && status.textContent === t('settings.microphoneTestPlaying'), 'playing state is visible');
@@ -244,7 +252,13 @@ async function runMicrophoneTestSmoke() {
     await wait();
     stopped('changing selected output stops test');
     check(status.textContent === t('settings.microphoneTestDeviceChanged') && plays.length === beforeOutputChange, 'device change explains stop without automatic restart');
+    check(container.querySelector('#select-speaker').value === 'changed-output',
+      'The general output selector reflects externally applied output preferences');
     settings.selectedSpeakerId = '';
+    appEvents.emit('settings.updated');
+    await wait();
+    check(container.querySelector('#select-speaker').value === '',
+      'Resetting all outputs also updates the general selector to system default');
     button.click();
     await wait();
     check(sinks.at(-1).id === '', 'explicit restart routes system-default output');
@@ -433,17 +447,23 @@ async function runMicrophoneTestSmoke() {
     pttTab = new VoiceVideoTab();
     pttContainer.innerHTML = pttTab.renderHtml();
     pttTab.attachEvents(pttContainer);
+    for (let attempt = 0; attempt < 100 && pttContainer.querySelector('[data-camera-preview-toggle]').disabled; attempt++) await wait();
     captureMode = 'pending';
-    pttContainer.querySelector('#btn-toggle-cam-preview').click();
-    await wait();
-    check(Boolean(pendingCapture?.constraints.video), 'camera permission can remain pending during tab change');
+    pendingCapture = null;
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    pttContainer.querySelector('#camera-effects').scrollIntoView({ block: 'start', behavior: 'instant' });
+    pttTab.activateCameraPreview();
+    for (let attempt = 0; attempt < 100 && !pendingCapture; attempt++) await wait();
+    check(Boolean(pendingCapture?.constraints.video)
+      && pttContainer.querySelector('[data-camera-preview-toggle]').getAttribute('aria-checked') === 'true',
+    'Showing camera controls starts their default preview and permission may remain pending during tab change');
     pttTab.deactivate();
     const lateCamera = capture();
     pendingCapture.resolve(lateCamera);
     captureMode = 'normal';
     await wait();
     check(lateCamera.getTracks().every((track) => track.readyState === 'ended')
-      && pttContainer.querySelector('#settings-cam-preview').srcObject === null, 'deactivation cancels late camera preview without leaking tracks');
+      && pttContainer.querySelector('#camera-effects-preview').srcObject === null, 'deactivation cancels late camera preview without leaking tracks');
     const record = pttContainer.querySelector('#btn-record-ptt-key');
     record.click();
     const captured = [...nativeCallbacks][0];
@@ -494,6 +514,8 @@ async function runMicrophoneTestSmoke() {
     window.requestAnimationFrame = original.raf;
     window.cancelAnimationFrame = original.cancelRaf;
     navigator.mediaDevices.getUserMedia = original.gum;
+    if (original.visibility) Object.defineProperty(document, 'visibilityState', original.visibility);
+    else Reflect.deleteProperty(document, 'visibilityState');
     navigator.mediaDevices.enumerateDevices = original.enumerate;
     HTMLMediaElement.prototype.play = original.play;
     HTMLMediaElement.prototype.pause = original.pause;

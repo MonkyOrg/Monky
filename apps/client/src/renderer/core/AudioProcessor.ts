@@ -3,10 +3,8 @@ import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { soundEffects } from './SoundEffects';
 import { clientLog } from './ClientLogService';
-import { RnnoiseWorkletNode, loadRnnoise } from '@sapphi-red/web-noise-suppressor';
-import rnnoiseWorkletUrl from '@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url';
-import rnnoiseWasmUrl from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url';
-import rnnoiseSimdWasmUrl from '@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url';
+import { createNoiseSuppressor, destroyNoiseSuppressor, type NoiseSuppressorNode } from './NoiseSuppression';
+import type { NoiseSuppressionMode } from '../utils/audioPreferences';
 
 export class AudioProcessor {
   private rawMicStream: MediaStream | null = null;
@@ -14,7 +12,10 @@ export class AudioProcessor {
   private audioContext: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
   private microphoneSource: MediaStreamAudioSourceNode | null = null;
-  private rnnoiseNode: RnnoiseWorkletNode | null = null;
+  private noiseSuppressorNode: NoiseSuppressorNode | null = null;
+  private noiseSuppressionGeneration = 0;
+  private noiseSuppressionChanging = false;
+  private noiseProcessorFailed = false;
   private destinationNode: MediaStreamAudioDestinationNode | null = null;
 
   private vadInterval: ReturnType<typeof setInterval> | null = null;
@@ -35,9 +36,6 @@ export class AudioProcessor {
   private graphReady = false;
   private microphonePublicationPending = false;
 
-  private cachedWasmBinary: ArrayBuffer | null = null;
-  private isWorkletModuleLoaded: boolean = false;
-
   constructor() {
     this.initPtt();
   }
@@ -51,9 +49,9 @@ export class AudioProcessor {
     const constraints: MediaStreamConstraints = {
       audio: {
         deviceId: targetDeviceId ? { exact: targetDeviceId } : undefined,
+        channelCount: 1,
         echoCancellation: true,
-        // If RNNoise is active, we avoid double-processing artifacts by turning off standard browser NS
-        noiseSuppression: !settingsStore.noiseSuppressionEnabled,
+        noiseSuppression: settingsStore.noiseSuppressionMode === 'browser',
         autoGainControl: true,
       },
       video: false,
@@ -69,8 +67,9 @@ export class AudioProcessor {
         console.warn('[AudioProcessor] Could not open specific mic, falling back to default mic:', err);
         rawStream = await navigator.mediaDevices.getUserMedia({
           audio: {
+            channelCount: 1,
             echoCancellation: true,
-            noiseSuppression: !settingsStore.noiseSuppressionEnabled,
+            noiseSuppression: settingsStore.noiseSuppressionMode === 'browser',
             autoGainControl: true,
           },
           video: false,
@@ -84,9 +83,14 @@ export class AudioProcessor {
       throw new DOMException('Microphone startup was cancelled', 'AbortError');
     }
     this.rawMicStream = rawStream;
+    rawStream.getAudioTracks().forEach((track) => { track.enabled = false; });
 
-    // Setup Web Audio graph (RNNoise + VAD + Destination stream)
-    await this.setupAudioGraph(rawStream);
+    try {
+      await this.setupAudioGraph(rawStream);
+    } catch (error) {
+      if (generation === this.captureGeneration) this.releaseMicrophoneResources();
+      throw error;
+    }
     if (this.rawMicStream !== rawStream) {
       throw new DOMException('Microphone startup was cancelled', 'AbortError');
     }
@@ -120,6 +124,7 @@ export class AudioProcessor {
     replaceTrack: (track: MediaStreamTrack, signal: AbortSignal) => Promise<void | (() => Promise<void>)>,
     signal?: AbortSignal,
   ): Promise<void> {
+    if (this.noiseSuppressionChanging) throw new Error('Noise suppression is being changed');
     this.pendingDeviceSwitch?.abort();
     const preceding = this.deviceSwitchTask;
     const controller = new AbortController();
@@ -191,7 +196,7 @@ export class AudioProcessor {
       } else if (this.audioContext && this.destinationNode && this.analyser && this.localStream !== previous) {
         // Keep the outgoing processed track stable for both P2P and SFU calls.
         source = this.audioContext.createMediaStreamSource(next);
-        if (this.rnnoiseNode) source.connect(this.rnnoiseNode);
+        if (this.noiseSuppressorNode) source.connect(this.noiseSuppressorNode);
         else {
           source.connect(this.destinationNode);
           source.connect(this.analyser);
@@ -235,8 +240,9 @@ export class AudioProcessor {
       void navigator.mediaDevices.getUserMedia({
         audio: {
           deviceId: deviceId ? { exact: deviceId } : undefined,
+          channelCount: 1,
           echoCancellation: true,
-          noiseSuppression: !settingsStore.noiseSuppressionEnabled,
+          noiseSuppression: settingsStore.noiseSuppressionMode === 'browser',
           autoGainControl: true,
         },
         video: false,
@@ -251,20 +257,6 @@ export class AudioProcessor {
     });
   }
 
-  private async loadWasmBinary(): Promise<ArrayBuffer | null> {
-    if (this.cachedWasmBinary) return this.cachedWasmBinary;
-    try {
-      this.cachedWasmBinary = await loadRnnoise({
-        url: rnnoiseWasmUrl,
-        simdUrl: rnnoiseSimdWasmUrl,
-      });
-      return this.cachedWasmBinary;
-    } catch (err) {
-      console.warn('[AudioProcessor] Could not load RNNoise WASM binary:', err);
-      return null;
-    }
-  }
-
   private async setupAudioGraph(rawStream: MediaStream, ensureActive?: () => void): Promise<void> {
     const generation = this.captureGeneration;
     const ensureCurrent = () => {
@@ -273,80 +265,51 @@ export class AudioProcessor {
         throw new DOMException('Microphone startup was cancelled', 'AbortError');
       }
     };
+    const context = new AudioContext({ sampleRate: 48000 });
+    this.audioContext = context;
+    this.analyser = context.createAnalyser();
+    this.analyser.fftSize = 256;
+    this.analyser.smoothingTimeConstant = 0.25;
+    this.destinationNode = context.createMediaStreamDestination();
+    this.microphoneSource = context.createMediaStreamSource(rawStream);
+    let node: NoiseSuppressorNode | null = null;
     try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      // RNNoise operates on 48kHz audio frames
-      this.audioContext = new AudioCtx({ sampleRate: 48000 });
-      this.isWorkletModuleLoaded = false;
-      if (this.audioContext.state !== 'running') {
-        this.audioContext.resume().catch(() => {});
-      }
-
-      this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 256;
-      this.analyser.smoothingTimeConstant = 0.25;
-
-      this.destinationNode = this.audioContext.createMediaStreamDestination();
-      this.microphoneSource = this.audioContext.createMediaStreamSource(rawStream);
-
-      const rnnoiseWanted = settingsStore.noiseSuppressionEnabled;
-      let rnnoiseApplied = false;
-
-      if (rnnoiseWanted) {
-        try {
-          const wasm = await this.loadWasmBinary();
-          ensureCurrent();
-          if (wasm && this.audioContext) {
-            await this.audioContext.audioWorklet.addModule(rnnoiseWorkletUrl);
-            ensureCurrent();
-            this.isWorkletModuleLoaded = true;
-            this.rnnoiseNode = new RnnoiseWorkletNode(this.audioContext, {
-              maxChannels: 1,
-              wasmBinary: wasm,
-            });
-
-            this.microphoneSource.connect(this.rnnoiseNode);
-            this.rnnoiseNode.connect(this.destinationNode);
-            this.rnnoiseNode.connect(this.analyser);
-            rnnoiseApplied = true;
-            clientLog.info('AUDIO', 'RNNoise Neural Noise Suppression initialized');
-            console.log('[AudioProcessor] RNNoise Neural Noise Suppression successfully initialized.');
-          }
-        } catch (rnnoiseErr) {
-          ensureCurrent();
-          clientLog.warn('AUDIO', 'RNNoise initialization failed, using standard routing', {
-            error: rnnoiseErr instanceof Error ? rnnoiseErr.message : String(rnnoiseErr),
-          });
-          console.warn('[AudioProcessor] RNNoise initialization failed, using standard routing:', rnnoiseErr);
-          rnnoiseApplied = false;
-          if (this.rnnoiseNode) {
-            try {
-              this.rnnoiseNode.disconnect();
-            } catch {}
-            this.rnnoiseNode = null;
-          }
-        }
-      }
-
-      if (!rnnoiseApplied) {
-        this.microphoneSource.connect(this.destinationNode);
-        this.microphoneSource.connect(this.analyser);
-        console.log('[AudioProcessor] Standard audio routing initialized.');
-      }
-
-      this.localStream = this.destinationNode.stream;
-      this.applyTrackEnabled();
-      this.startVadLoop();
-    } catch (err) {
+      await context.resume();
       ensureCurrent();
-      clientLog.error('AUDIO', 'AudioContext graph setup failed, falling back to raw stream', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      console.warn('[AudioProcessor] AudioContext graph setup failed, falling back to raw stream:', err);
-      this.releaseAudioGraph();
-      this.localStream = rawStream;
-      this.applyTrackEnabled();
+      node = await createNoiseSuppressor(context, settingsStore.noiseSuppressionMode);
+      ensureCurrent();
+    } catch (error) {
+      destroyNoiseSuppressor(node);
+      ensureCurrent();
+      throw error;
     }
+    this.noiseSuppressorNode = node;
+    this.noiseProcessorFailed = false;
+    this.bindNoiseSuppressorError(node);
+    if (node) {
+      this.microphoneSource.connect(node);
+      node.connect(this.destinationNode);
+      node.connect(this.analyser);
+    } else {
+      this.microphoneSource.connect(this.destinationNode);
+      this.microphoneSource.connect(this.analyser);
+    }
+    this.localStream = this.destinationNode.stream;
+    this.applyTrackEnabled();
+    this.startVadLoop();
+    clientLog.info('AUDIO', 'Microphone processing initialized', { mode: settingsStore.noiseSuppressionMode });
+  }
+
+  private bindNoiseSuppressorError(node: NoiseSuppressorNode | null): void {
+    if (!node) return;
+    node.onprocessorerror = () => {
+      if (this.noiseSuppressorNode !== node) return;
+      this.noiseProcessorFailed = true;
+      this.graphReady = false;
+      this.applyTrackEnabled();
+      clientLog.error('AUDIO', 'Noise suppression processor failed; microphone transmission stopped');
+      appEvents.emit('audio.processing_error');
+    };
   }
 
   private initPtt(): void {
@@ -543,55 +506,86 @@ export class AudioProcessor {
     this.publishMicrophoneState();
   }
 
-  public async setNoiseSuppression(enabled: boolean): Promise<void> {
-    clientLog.info('AUDIO', `Noise suppression ${enabled ? 'enabled' : 'disabled'}`);
-    if (!this.audioContext || !this.microphoneSource || !this.destinationNode || !this.analyser) {
+  public async setNoiseSuppression(mode: NoiseSuppressionMode, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new DOMException('Noise suppression selection was cancelled', 'AbortError');
+    if (this.noiseSuppressionChanging) throw new Error('Noise suppression is already being changed');
+    const generation = ++this.noiseSuppressionGeneration;
+    const context = this.audioContext;
+    const source = this.microphoneSource;
+    const destination = this.destinationNode;
+    const analyser = this.analyser;
+    const raw = this.rawMicStream;
+    if (!raw) {
+      const probe = new AudioContext({ sampleRate: 48000 });
+      let node: NoiseSuppressorNode | null = null;
+      try {
+        node = await createNoiseSuppressor(probe, mode);
+        if (signal?.aborted || generation !== this.noiseSuppressionGeneration || this.rawMicStream) {
+          throw new DOMException('Noise suppression selection was cancelled', 'AbortError');
+        }
+      } finally {
+        destroyNoiseSuppressor(node);
+        await probe.close();
+      }
       return;
     }
-
-    try {
-      // Disconnect previous audio graph nodes
-      try {
-        this.microphoneSource.disconnect();
-      } catch {}
-      if (this.rnnoiseNode) {
-        try {
-          this.rnnoiseNode.disconnect();
-          this.rnnoiseNode.destroy();
-        } catch {}
-        this.rnnoiseNode = null;
+    if ((!this.graphReady && !this.noiseProcessorFailed) || !context || !source || !destination || !analyser || this.pendingDeviceSwitch) {
+      throw new Error('Microphone capture is changing; try again when it is ready');
+    }
+    const ensureCurrent = () => {
+      if (signal?.aborted || generation !== this.noiseSuppressionGeneration ||
+          this.audioContext !== context || this.microphoneSource !== source || this.rawMicStream !== raw) {
+        throw new DOMException('Noise suppression selection was cancelled', 'AbortError');
       }
-
-      if (enabled) {
-        const wasm = await this.loadWasmBinary();
-        if (wasm) {
-          if (!this.isWorkletModuleLoaded) {
-            await this.audioContext.audioWorklet.addModule(rnnoiseWorkletUrl);
-            this.isWorkletModuleLoaded = true;
-          }
-          this.rnnoiseNode = new RnnoiseWorkletNode(this.audioContext, {
-            maxChannels: 1,
-            wasmBinary: wasm,
-          });
-
-          this.microphoneSource.connect(this.rnnoiseNode);
-          this.rnnoiseNode.connect(this.destinationNode);
-          this.rnnoiseNode.connect(this.analyser);
-          console.log('[AudioProcessor] Switched to RNNoise Neural Noise Suppression.');
-          return;
+    };
+    const previous = this.noiseSuppressorNode;
+    const previousBrowserSuppression = settingsStore.noiseSuppressionMode === 'browser';
+    this.noiseSuppressionChanging = true;
+    let next: NoiseSuppressorNode | null = null;
+    let constraintsChanged = false;
+    try {
+      next = await createNoiseSuppressor(context, mode);
+      ensureCurrent();
+      const track = raw.getAudioTracks()[0];
+      if (!track || track.readyState !== 'live') throw new Error('Microphone is no longer available');
+      await track.applyConstraints({ ...track.getConstraints(), noiseSuppression: mode === 'browser' });
+      constraintsChanged = true;
+      ensureCurrent();
+      if (next) {
+        next.connect(destination);
+        next.connect(analyser);
+      }
+      source.disconnect();
+      if (next) source.connect(next);
+      else {
+        source.connect(destination);
+        source.connect(analyser);
+      }
+      this.noiseSuppressorNode = next;
+      this.noiseProcessorFailed = false;
+      this.graphReady = true;
+      this.bindNoiseSuppressorError(next);
+      destroyNoiseSuppressor(previous);
+      this.applyTrackEnabled();
+      clientLog.info('AUDIO', 'Noise suppression changed', { mode });
+    } catch (error) {
+      destroyNoiseSuppressor(next);
+      if (this.rawMicStream === raw && this.microphoneSource === source && constraintsChanged) {
+        const track = raw.getAudioTracks()[0];
+        if (track?.readyState === 'live') {
+          await track.applyConstraints({ ...track.getConstraints(), noiseSuppression: previousBrowserSuppression });
+        }
+        source.disconnect();
+        if (previous) source.connect(previous);
+        else {
+          source.connect(destination);
+          source.connect(analyser);
         }
       }
-
-      // If disabled or RNNoise unavailable, route directly to destination
-      this.microphoneSource.connect(this.destinationNode);
-      this.microphoneSource.connect(this.analyser);
-      console.log('[AudioProcessor] Switched to standard/direct audio routing.');
-    } catch (err) {
-      console.warn('[AudioProcessor] Error switching noise suppression mode:', err);
-      try {
-        this.microphoneSource.connect(this.destinationNode);
-        this.microphoneSource.connect(this.analyser);
-      } catch {}
+      ensureCurrent();
+      throw error;
+    } finally {
+      this.noiseSuppressionChanging = false;
     }
   }
 
@@ -748,17 +742,14 @@ export class AudioProcessor {
   }
 
   private releaseAudioGraph(): void {
+    this.noiseSuppressionGeneration++;
+    this.noiseProcessorFailed = false;
     if (this.vadInterval) {
       clearInterval(this.vadInterval);
       this.vadInterval = null;
     }
-    if (this.rnnoiseNode) {
-      try {
-        this.rnnoiseNode.destroy();
-      } catch {}
-      this.rnnoiseNode = null;
-    }
-    this.isWorkletModuleLoaded = false;
+    destroyNoiseSuppressor(this.noiseSuppressorNode);
+    this.noiseSuppressorNode = null;
     if (this.microphoneSource) {
       try {
         this.microphoneSource.disconnect();

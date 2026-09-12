@@ -96,7 +96,7 @@ Cada responsabilidade grande do cliente vive em uma classe própria, em
 | `NetworkClient` | WebSocket, autenticação, heartbeat e reconexão |
 | `WebRtcManager` | As conexões P2P: mesh, tracks, renegociação |
 | `AudioProcessor` | Microfone, supressão de ruído, detecção de fala |
-| `VideoService` | Câmera e captura de tela |
+| `VideoService` | Captura compartilhada de câmera, efeitos locais e captura de tela |
 | `ScreenAudioService` | Ponte do módulo nativo de áudio de tela para o WebRTC |
 | `ParticipantManager` | Quem está online, em qual canal e com qual estado |
 | `SoundboardService` | Sons e atalhos do soundboard |
@@ -106,8 +106,9 @@ Cada responsabilidade grande do cliente vive em uma classe própria, em
 
 ### O que fica salvo na sua máquina
 
-Não há banco local, mas também não é tudo `localStorage`: o cliente guarda em
-**dois lugares com garantias diferentes**, e a diferença importa.
+O cliente usa `localStorage` para preferências simples, IndexedDB para os
+efeitos e a imagem de fundo da câmera, e armazenamento nativo para a identidade.
+São dados com finalidades e garantias diferentes.
 
 <div class="diagrama">
 
@@ -122,8 +123,26 @@ Não há banco local, mas também não é tudo `localStorage`: o cliente guarda 
 | `monky_nickname` / `monky_avatar` | Sua identidade visual |
 | `monky_saved_servers` | Servidores que você salvou para reconectar |
 | `monky_created_servers` | Servidores que você criou nesta máquina |
+| `monky_favorites` | Favoritos locais de sons por caminho completo e de servidores por endereço/porta |
 | `monky_device_id` | Identifica **este dispositivo** (permite a mesma pessoa em dois aparelhos) |
 | `monky_language` | Idioma da interface |
+
+No IndexedDB `monky-camera-effects`, preferências e uma imagem normalizada
+ficam no mesmo registro transacional. A falha de persistência não troca a
+preferência em memória; dados corrompidos não são interpretados como
+consentimento para transmitir a câmera sem efeito.
+
+A segmentação usa MediaPipe/Selfie Segmenter com modelo e WASM empacotados,
+sem CDN ou envio de frames a uma API. Segmentação, composição e chroma key
+rodam em um worker com `OffscreenCanvas`, com um frame em trânsito por vez.
+O segmentador é criado sob demanda uma vez por worker e reutilizado entre
+desfoque, cor, imagem e chroma; no chroma ele fica ocioso. Desativar os efeitos
+ou encerrar a captura libera o worker e o modelo. Resolução e cadência seguem
+o perfil selecionado. O limitador opcional, desligado por padrão, restringe
+ambas a 1280 × 720 e 30 FPS, sem ampliar uma captura menor ou duplicar frames
+para compensar limitações de captura ou processamento.
+`CameraPublication` coordena substituições e falhas com os publishers
+P2P/SFU; a captura pertence ao `VideoService`, não ao preview ou ao producer.
 
 A **chave privada fica de fora dessa lista de propósito**. Ela é o que prova
 quem você é (veja [Autenticação](#autenticacao-o-servidor-nunca-ve-uma-senha-sua))
@@ -369,10 +388,27 @@ refaz a conexão do zero com aquele par.
 
 </div>
 
-A captura já pede cancelamento de eco e ganho automático ao navegador. A
-supressão de ruído tem um detalhe: quando você liga o **RNNoise** do Monky, a
-supressão nativa do navegador é **desligada** — as duas juntas se atrapalham e o
-resultado fica pior.
+A captura já pede cancelamento de eco e ganho automático ao WebRTC nativo. O
+diagrama ilustra o motor padrão, **RNNoise**; **Speex** e **GTCRN** usam a
+mesma posição na cadeia. Os três rodam em `AudioWorklet`, com WASM empacotado
+pela dependência [`@sapphi-red/web-noise-suppressor`](https://github.com/sapphi-red/web-noise-suppressor).
+Ao selecionar um deles, a supressão nativa é **desligada** para
+evitar processamento duplicado. Também é possível usar somente a supressão
+do **WebRTC (nativo)** ou nenhuma.
+
+`AudioProcessor` prepara o novo motor antes de substituir a conexão interna,
+mantendo a track de destino enviada por P2P ou SFU. A prévia local compartilha
+o fluxo processado da chamada quando possível; quando precisa capturar por
+conta própria, aplica o mesmo motor sem se conectar à saída nem ao WebRTC.
+
+As saídas resolvem preferências gerais e por categoria. Voz e áudio de tela
+têm `AudioContext`s separados em toda a faixa de volume, de 0 a 200%.
+O Chromium compartilha um renderizador nativo entre as tracks WebRTC: os
+elementos de áudio ficam ativos com volume zero para decodificação, e somente
+os grafos por categoria produzem som. A saída nativa compartilhada acompanha
+a voz para manter coerente a referência de cancelamento de eco; ela nunca
+é redirecionada para a saída escolhida para a tela. Os players nativos de chat,
+incluindo o visualizador ampliado, aplicam a saída de mídias antes de reproduzir.
 
 Mudo e ensurdecer desabilitam a track (`enabled = false`) em vez de removê-la.
 Assim não é preciso renegociar a conexão a cada clique no botão de mudo.

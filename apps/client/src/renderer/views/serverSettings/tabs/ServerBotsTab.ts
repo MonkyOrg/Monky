@@ -1,14 +1,15 @@
 import {
   MessageType,
+  Permission,
   botCreateSchema,
   botProfileUpdateSchema,
   type BotInfo,
   type BotCreatedPayload,
   type BotListResponsePayload,
   type BotProfileUpdatedPayload,
+  type BotProfileUpdatePayload,
 } from '@monky/shared';
-import { getActiveNetworkClient, type NetworkClient } from '../../../core/NetworkClient';
-import { isForegroundEvent } from '../../../core/sessionRouting';
+import type { NetworkClient } from '../../../core/NetworkClient';
 import { appEvents } from '../../../core/EventBus';
 import { escapeHtml } from '../../../utils/html';
 import { getAvatarUrl } from '../../../utils/avatar';
@@ -17,6 +18,7 @@ import { showAlert, showConfirm } from '../../Dialog';
 import { pickAndCropImage } from '../../ImageCropModal';
 import { validateBotAvatar } from '../../../utils/botProfile';
 import { botRequestError } from '../../../utils/botInputs';
+import type { ServerSettingsContext } from '../ServerSettingsContext';
 
 /**
  * Bots tab inside Server Settings (#569).
@@ -30,13 +32,15 @@ export class ServerBotsTab {
   private unbind: Array<() => void> = [];
   private root: HTMLElement | null = null;
   private client: NetworkClient | null = null;
+  private context: ServerSettingsContext | null = null;
   private generation = 0;
   private listRequest = 0;
   private createAvatar: string | undefined;
-  private profileAvatar: string | null | undefined;
   private editingBotId: string | null = null;
   private creating = false;
-  private saving = false;
+  private submittedProfileName = '';
+  private dirtyProfileName = false;
+  private hadPermission = false;
   private statusTimer: ReturnType<typeof setTimeout> | null = null;
 
   public renderHtml(): string {
@@ -103,44 +107,60 @@ export class ServerBotsTab {
     `;
   }
 
-  public attachEvents(): void {
+  public attachEvents(container: HTMLElement, context: ServerSettingsContext): void {
     this.detachEvents();
-    const root = document.getElementById('server-bots-tab');
+    const root = container.querySelector<HTMLElement>('#server-bots-tab');
     if (!root) return;
     this.root = root;
-    this.client = getActiveNetworkClient();
+    this.context = context;
+    this.client = context.client;
     const onClick = (event: MouseEvent) => {
       if (!(event.target instanceof HTMLElement) || !this.isAttached()) return;
       const button = event.target.closest<HTMLButtonElement>('button');
-      if (!button || button.disabled) return;
+      if (!button || button.matches(':disabled')) return;
       if (button.id === 'btn-create-bot') void this.handleCreate();
       else if (button.id === 'btn-install-bot') void this.handleInstall();
       else if (button.id === 'btn-copy-token' && this.pendingToken) {
-        void navigator.clipboard.writeText(this.pendingToken).catch(() => {});
+        void navigator.clipboard.writeText(this.pendingToken).catch(() => {
+          if (this.isAttached()) context.operations.reportError('bot-token', t('bots.copyToken'), t('chat.copyFailed'));
+        });
       } else if (button.dataset.photoTarget === 'create' || button.dataset.photoTarget === 'profile') {
         void this.selectPhoto(button.dataset.photoTarget);
       } else if (button.dataset.photoRemove === 'create' || button.dataset.photoRemove === 'profile') {
         this.removePhoto(button.dataset.photoRemove);
       } else if (button.dataset.botEdit) this.editProfile(button.dataset.botEdit);
       else if (button.dataset.botRevoke) void this.revokeBot(button.dataset.botRevoke);
-      else if (button.id === 'btn-save-bot-profile') void this.saveProfile();
-      else if (button.id === 'btn-cancel-bot-profile' && !this.saving) this.closeProfile();
+      else if (button.id === 'btn-done-bot-profile') {
+        this.commitProfileName();
+        if (!context.operations.isPending(`bot-profile:${this.editingBotId}`)) this.closeProfile();
+      }
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Enter' || !(event.target instanceof HTMLInputElement) || !this.isAttached()) return;
       if (event.target.id === 'bot-name-input') { event.preventDefault(); void this.handleCreate(); }
-      else if (event.target.id === 'bot-profile-name') { event.preventDefault(); void this.saveProfile(); }
+      else if (event.target.id === 'bot-profile-name') { event.preventDefault(); this.commitProfileName(); event.target.blur(); }
+    };
+    const onEdit = (event: Event) => {
+      if (!(event.target instanceof HTMLInputElement) || event.target.id !== 'bot-profile-name') return;
+      if (event.type === 'input') this.dirtyProfileName = true;
+      else this.commitProfileName();
     };
     root.addEventListener('click', onClick);
     root.addEventListener('keydown', onKeyDown);
+    root.addEventListener('input', onEdit);
+    root.addEventListener('change', onEdit);
+    root.addEventListener('focusout', onEdit);
     this.unbind.push(
       () => root.removeEventListener('click', onClick),
       () => root.removeEventListener('keydown', onKeyDown),
+      () => root.removeEventListener('input', onEdit),
+      () => root.removeEventListener('change', onEdit),
+      () => root.removeEventListener('focusout', onEdit),
       appEvents.on('server.members_updated', () => {
         if (this.isAttached()) void this.refreshList();
       })
     );
-    void this.refreshList();
+    this.refreshPermissions();
   }
 
   public detachEvents(): void {
@@ -151,26 +171,49 @@ export class ServerBotsTab {
     this.statusTimer = null;
     this.pendingToken = null;
     this.createAvatar = undefined;
-    this.profileAvatar = undefined;
     this.editingBotId = null;
     this.creating = false;
-    this.saving = false;
+    this.submittedProfileName = '';
+    this.dirtyProfileName = false;
+    this.hadPermission = false;
     this.root = null;
     this.client = null;
+    this.context = null;
     this.bots = [];
   }
 
   private isAttached(generation = this.generation, client = this.client): boolean {
     return generation === this.generation && !!this.root?.isConnected && client !== null &&
-      client === this.client && client === getActiveNetworkClient() && isForegroundEvent();
+      client === this.client && this.context?.isCurrent() === true &&
+      this.context.store.hasPermission(Permission.MANAGE_BOTS);
+  }
+
+  public refreshPermissions(): void {
+    const context = this.context;
+    if (!context || !this.root || !context.isCurrent()) return;
+    const allowed = context.store.hasPermission(Permission.MANAGE_BOTS);
+    if (allowed && !this.hadPermission) {
+      this.hadPermission = true;
+      void this.refreshList();
+    } else if (!allowed && this.hadPermission) {
+      this.hadPermission = false;
+      this.pendingToken = null;
+      this.bots = [];
+      this.closeProfile();
+      const reveal = this.root.querySelector<HTMLElement>('#bot-token-reveal');
+      if (reveal) reveal.style.display = 'none';
+      const token = this.root.querySelector('#bot-token-value');
+      if (token) token.textContent = '';
+    }
   }
 
   private async handleInstall(): Promise<void> {
     const client = this.client;
+    const context = this.context;
     const generation = this.generation;
     const urlInput = this.root?.querySelector<HTMLInputElement>('#bot-manifest-url');
     const button = this.root?.querySelector<HTMLButtonElement>('#btn-install-bot');
-    if (!client || button?.disabled) return;
+    if (!client || !context || button?.disabled || context.operations.isPending('bot-install')) return;
     const url = urlInput?.value.trim();
     if (!url) {
       showAlert({ message: t('bots.manifestUrlRequired') });
@@ -191,7 +234,9 @@ export class ServerBotsTab {
 
     try {
       // BOT_INSTALL fetches the manifest and POSTs to the bot — may take longer than default 8s.
-      await client.sendRequest<unknown>(MessageType.BOT_INSTALL, { manifestUrl: url }, undefined, 30000);
+      const result = await context.operations.run('bot-install', t('bots.installTitle'), Permission.MANAGE_BOTS,
+        () => context.request<unknown>(MessageType.BOT_INSTALL, { manifestUrl: url }, Permission.MANAGE_BOTS, 30000));
+      if (!result.ok) throw new Error(result.message);
       if (!this.isAttached(generation, client)) return;
       if (urlInput) urlInput.value = '';
       this.showInstallStatus('success', t('bots.installSuccess'));
@@ -204,7 +249,7 @@ export class ServerBotsTab {
         : raw || t('bots.installError');
       this.showInstallStatus('error', message);
     } finally {
-      if (button && this.isAttached(generation, client)) button.disabled = false;
+      if (button && generation === this.generation) button.disabled = false;
     }
   }
 
@@ -225,16 +270,17 @@ export class ServerBotsTab {
       el.style.background = 'var(--bg-elevated)';
       el.style.color = 'var(--text-muted)';
     }
-    if (type !== 'loading') {
+    if (type === 'success') {
       this.statusTimer = setTimeout(() => { el.style.display = 'none'; this.statusTimer = null; }, 5000);
     }
   }
 
   private async handleCreate(): Promise<void> {
     const client = this.client;
+    const context = this.context;
     const generation = this.generation;
     const nameInput = this.root?.querySelector<HTMLInputElement>('#bot-name-input');
-    if (!client || this.creating) return;
+    if (!client || !context || this.creating) return;
     const name = nameInput?.value.trim();
     const parsed = botCreateSchema.safeParse({ name, avatarBase64: this.createAvatar });
     if (!parsed.success) {
@@ -246,7 +292,10 @@ export class ServerBotsTab {
     if (button) button.disabled = true;
     if (nameInput) nameInput.disabled = true;
     try {
-      const response = await client.sendRequest<BotCreatedPayload>(MessageType.BOT_CREATE, parsed.data);
+      const result = await context.operations.run('bot-create', t('bots.createTitle'), Permission.MANAGE_BOTS,
+        () => context.request<BotCreatedPayload>(MessageType.BOT_CREATE, parsed.data, Permission.MANAGE_BOTS));
+      if (!result.ok) throw new Error(result.message);
+      const response = result.value;
       if (!this.isAttached(generation, client)) return;
       this.pendingToken = response.token;
       const reveal = this.root?.querySelector<HTMLElement>('#bot-token-reveal');
@@ -255,11 +304,13 @@ export class ServerBotsTab {
       if (nameInput) nameInput.value = '';
       this.createAvatar = undefined;
       this.updatePhoto('create', null);
+      this.bots = [...this.bots, response.bot];
+      this.renderBotList();
       void this.refreshList();
     } catch (error) {
       if (this.isAttached(generation, client)) void showAlert({ message: botRequestError(error) });
     } finally {
-      if (this.isAttached(generation, client)) {
+      if (generation === this.generation) {
         this.creating = false;
         if (button) button.disabled = false;
         if (nameInput) nameInput.disabled = false;
@@ -271,7 +322,7 @@ export class ServerBotsTab {
     const client = this.client;
     const generation = this.generation;
     const request = ++this.listRequest;
-    if (!client) return;
+    if (!client || !this.isAttached()) return;
     try {
       const response = await client.sendRequest<BotListResponsePayload>(MessageType.BOT_LIST, {});
       if (!this.isAttached(generation, client) || request !== this.listRequest) return;
@@ -281,7 +332,14 @@ export class ServerBotsTab {
     } catch (error) {
       if (!this.isAttached(generation, client) || request !== this.listRequest) return;
       const container = this.root?.querySelector<HTMLElement>('#bot-list-container');
-      if (container && this.bots.length === 0) container.textContent = botRequestError(error);
+      if (container) {
+        const message = document.createElement('p');
+        message.className = 'bot-error';
+        message.setAttribute('role', 'alert');
+        message.textContent = botRequestError(error);
+        container.querySelector('.bot-error')?.remove();
+        container.prepend(message);
+      }
     }
   }
 
@@ -336,42 +394,50 @@ export class ServerBotsTab {
   }
 
   private async selectPhoto(target: 'create' | 'profile'): Promise<void> {
-    if (this.creating || this.saving) return;
+    const context = this.context;
+    if (this.creating || !context || context.operations.isPending('bot-photo')) return;
     const client = this.client;
     const generation = this.generation;
     const editingBot = this.editingBotId;
-    let image: string | null;
-    try {
-      image = await pickAndCropImage();
-    } catch {
-      if (this.isAttached(generation, client)) void showAlert({ message: t('protocolError.avatarInvalidType') });
-      return;
-    }
-    if (!image || !this.isAttached(generation, client) || (target === 'profile' && this.editingBotId !== editingBot)) return;
-    const error = validateBotAvatar(image);
-    if (error) {
-      void showAlert({ message: t(error === 'size' ? 'protocolError.avatarTooLarge' : 'protocolError.avatarInvalidType') });
-      return;
-    }
-    if (target === 'create') this.createAvatar = image;
-    else this.profileAvatar = image;
-    this.updatePhoto(target, image);
+    await context.operations.run('bot-photo', t('bots.photo'), Permission.MANAGE_BOTS, async () => {
+      const image = await pickAndCropImage();
+      if (!image) return;
+      context.assertAllowed(Permission.MANAGE_BOTS);
+      const error = validateBotAvatar(image);
+      if (error) throw new Error(t(error === 'size' ? 'protocolError.avatarTooLarge' : 'protocolError.avatarInvalidType'));
+      if (target === 'create') {
+        this.createAvatar = image;
+        this.updatePhoto(target, image);
+      } else if (editingBot) {
+        const response = await context.request<BotProfileUpdatedPayload>(
+          MessageType.BOT_UPDATE_PROFILE, { botId: editingBot, avatarBase64: image }, Permission.MANAGE_BOTS,
+        );
+        if (this.isAttached(generation, client)) this.profileUpdated(response);
+      }
+    });
   }
 
   private removePhoto(target: 'create' | 'profile'): void {
-    if (this.creating || this.saving) return;
-    if (target === 'create') this.createAvatar = undefined;
-    else this.profileAvatar = null;
-    this.updatePhoto(target, null);
+    if (this.creating) return;
+    if (target === 'create') {
+      this.createAvatar = undefined;
+      this.updatePhoto(target, null);
+    } else void this.applyProfile({ avatarBase64: null });
   }
 
   private editProfile(botId: string): void {
-    if (this.saving) return;
+    const operations = this.context?.operations;
+    if (operations?.isPending(`bot-profile:${botId}`) ||
+      (this.editingBotId && operations?.isPending(`bot-profile:${this.editingBotId}`))) {
+      this.root?.querySelector<HTMLInputElement>('#bot-profile-name')?.focus();
+      return;
+    }
     const bot = this.bots.find((entry) => entry.id === botId);
     const editor = this.root?.querySelector<HTMLElement>('#bot-profile-editor');
     if (!bot || !editor) return;
     this.editingBotId = botId;
-    this.profileAvatar = undefined;
+    this.submittedProfileName = bot.name;
+    this.dirtyProfileName = false;
     editor.hidden = false;
     editor.innerHTML = `<h3>${t('bots.profileEdit')} · ${escapeHtml(bot.name)}</h3>
       ${this.photoHtml('profile', bot.avatarUrl)}
@@ -379,8 +445,7 @@ export class ServerBotsTab {
       <input id="bot-profile-name" class="input-field" maxlength="32" value="${escapeHtml(bot.name)}">
       <p class="bot-error" id="bot-profile-error" role="alert" hidden></p>
       <div class="bot-command-actions">
-        <button id="btn-save-bot-profile" type="button" class="btn btn-primary">${t('bots.profileSave')}</button>
-        <button id="btn-cancel-bot-profile" type="button" class="btn btn-secondary">${t('common.cancel')}</button>
+        <button id="btn-done-bot-profile" type="button" class="btn btn-secondary">${t('common.done')}</button>
       </div>`;
     editor.querySelector<HTMLInputElement>('#bot-profile-name')?.focus();
     editor.scrollIntoView({ block: 'nearest' });
@@ -388,66 +453,88 @@ export class ServerBotsTab {
 
   private closeProfile(): void {
     this.editingBotId = null;
-    this.profileAvatar = undefined;
+    this.submittedProfileName = '';
+    this.dirtyProfileName = false;
     const editor = this.root?.querySelector<HTMLElement>('#bot-profile-editor');
     if (editor) { editor.innerHTML = ''; editor.hidden = true; }
   }
 
-  private async saveProfile(): Promise<void> {
+  private commitProfileName(): void {
+    const input = this.root?.querySelector<HTMLInputElement>('#bot-profile-name');
+    if (!input || !this.editingBotId || input.value === this.submittedProfileName) return;
+    this.dirtyProfileName = false;
+    this.submittedProfileName = input.value;
+    void this.applyProfile({ name: input.value.trim() });
+  }
+
+  private profileUpdated(response: BotProfileUpdatedPayload): void {
+    this.listRequest++;
+    this.bots = this.bots.map((bot) => bot.id === response.bot.id ? response.bot : bot);
+    this.renderBotList();
+    if (this.editingBotId !== response.bot.id) return;
+    this.updatePhoto('profile', response.bot.avatarUrl);
+  }
+
+  private async applyProfile(patch: BotProfileUpdatePayload): Promise<void> {
     const client = this.client;
+    const context = this.context;
     const generation = this.generation;
     const botId = this.editingBotId;
-    if (!client || !botId || this.saving) return;
+    if (!client || !context || !botId) return;
     const input = this.root?.querySelector<HTMLInputElement>('#bot-profile-name');
     const errorElement = this.root?.querySelector<HTMLElement>('#bot-profile-error');
     const parsed = botProfileUpdateSchema.safeParse({
       botId,
-      name: input?.value.trim(),
-      ...(this.profileAvatar !== undefined ? { avatarBase64: this.profileAvatar } : {}),
+      ...patch,
     });
     if (!parsed.success) {
       if (errorElement) { errorElement.textContent = t('protocolError.botInvalidProfile'); errorElement.hidden = false; }
+      context.operations.reportError(`bot-profile:${botId}`, t('bots.profileEdit'), t('protocolError.botInvalidProfile'));
+      const persisted = this.bots.find((bot) => bot.id === botId);
+      if (input && persisted) { input.value = persisted.name; this.submittedProfileName = persisted.name; }
       return;
     }
-    const button = this.root?.querySelector<HTMLButtonElement>('#btn-save-bot-profile');
-    this.saving = true;
-    if (button) { button.disabled = true; button.textContent = t('bots.profileSaving'); }
-    if (input) input.disabled = true;
+    if (errorElement) errorElement.hidden = true;
     try {
-      const response = await client.sendRequest<BotProfileUpdatedPayload>(MessageType.BOT_UPDATE_PROFILE, parsed.data);
+      const result = await context.operations.run(`bot-profile:${botId}`, t('bots.profileEdit'), Permission.MANAGE_BOTS,
+        () => context.request<BotProfileUpdatedPayload>(MessageType.BOT_UPDATE_PROFILE, parsed.data, Permission.MANAGE_BOTS));
+      if (!result.ok) throw new Error(result.message);
+      const response = result.value;
       if (!this.isAttached(generation, client)) return;
-      this.bots = this.bots.map((bot) => bot.id === response.bot.id ? response.bot : bot);
-      this.renderBotList();
-      this.closeProfile();
-      this.showInstallStatus('success', t('bots.profileSaved'));
+      this.profileUpdated(response);
     } catch (error) {
       if (!this.isAttached(generation, client)) return;
-      if (errorElement) { errorElement.textContent = botRequestError(error); errorElement.hidden = false; }
+      const currentError = this.root?.querySelector<HTMLElement>('#bot-profile-error');
+      if (this.editingBotId === botId && currentError) { currentError.textContent = botRequestError(error); currentError.hidden = false; }
     } finally {
-      if (this.isAttached(generation, client)) {
-        this.saving = false;
-        if (button) { button.disabled = false; button.textContent = t('bots.profileSave'); }
-        if (input) input.disabled = false;
+      if (this.isAttached(generation, client) && this.editingBotId === botId &&
+        !context.operations.isPending(`bot-profile:${botId}`) && !this.dirtyProfileName) {
+        const persisted = this.bots.find((bot) => bot.id === botId);
+        const currentInput = this.root?.querySelector<HTMLInputElement>('#bot-profile-name');
+        if (currentInput && persisted) { currentInput.value = persisted.name; this.submittedProfileName = persisted.name; }
       }
     }
   }
 
   private async revokeBot(botId: string): Promise<void> {
     const client = this.client;
+    const context = this.context;
     const generation = this.generation;
     const bot = this.bots.find((entry) => entry.id === botId);
-    if (!client || !bot) return;
-    const confirmed = await showConfirm({
-      message: t('bots.revokeConfirm', { name: bot.name }),
-      confirmLabel: t('bots.revoke'),
-      variant: 'danger',
+    if (!client || !context || !bot || context.operations.isPending(`bot-revoke:${botId}`)) return;
+    await context.operations.run(`bot-revoke:${botId}`, t('bots.revoke'), Permission.MANAGE_BOTS, async () => {
+      const confirmed = await showConfirm({
+        message: t('bots.revokeConfirm', { name: bot.name }),
+        confirmLabel: t('bots.revoke'), variant: 'danger',
+      });
+      if (!confirmed) return;
+      await context.request<unknown>(MessageType.BOT_REVOKE, { botId }, Permission.MANAGE_BOTS);
+      if (this.isAttached(generation, client)) {
+        this.bots = this.bots.filter((entry) => entry.id !== botId);
+        this.renderBotList();
+        if (this.editingBotId === botId) this.closeProfile();
+        void this.refreshList();
+      }
     });
-    if (!confirmed || !this.isAttached(generation, client)) return;
-    try {
-      await client.sendRequest<unknown>(MessageType.BOT_REVOKE, { botId });
-      if (this.isAttached(generation, client)) void this.refreshList();
-    } catch (error) {
-      if (this.isAttached(generation, client)) void showAlert({ message: botRequestError(error) });
-    }
   }
 }

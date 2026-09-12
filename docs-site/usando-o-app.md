@@ -12,6 +12,11 @@ A chamada acompanha você: se trocar de servidor na coluna da esquerda, ela cont
 
 Na barra de mídia: **Câmera**, **Compartilhar Tela** e **Soundboard**. O compartilhamento permite escolher uma tela inteira ou uma janela específica, com áudio de tela para os participantes.
 
+Em **Configurações → Voz e Vídeo → Câmera**, compare desfoque, fundo virtual
+de cor ou imagem e chroma key de tela física na prévia. Os efeitos são locais
+e valem também para a chamada. Fechar a prévia não desliga uma câmera em uso;
+veja limites e cuidados nas [configurações](/configuracoes).
+
 Quem transmite aparece com selo **LIVE**. Clique no card para destacar ou use tela cheia.
 
 ## Chat
@@ -61,3 +66,8 @@ A pasta fica só na sua máquina: a imagem é enviada ao servidor quando você u
 ## Soundboard
 
 Em **Configurações › Soundboard**, escolha uma pasta com `.mp3`, `.wav` ou `.ogg`. Na chamada, toque pelo botão de soundboard. Volume e mudo local ficam nas mesmas configurações. O anfitrião pode desativar o soundboard do servidor inteiro e, em **Configurações do Servidor › Cargos**, liberar a permissão **Usar soundboard** apenas para os cargos desejados.
+
+Use as estrelas e o filtro **Todos/Favoritos** para localizar sons junto com
+a busca. Os favoritos vêm primeiro, e cada grupo fica em ordem alfabética,
+sem mudar os atalhos associados aos sons. Marcar a estrela não toca o som.
+A mesma ordenação existe na lista de servidores salvos da Home.

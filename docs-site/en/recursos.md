@@ -3,14 +3,19 @@
 - Low-latency voice over WebRTC, straight between participants (P2P Mesh), with no audio routed through the server.
 - Optional SFU mode (`mediasoup`): everyone sends their stream once and the server fans it out, for larger groups and for anyone sharing a high-resolution screen. The app and the CLI ship a capacity estimator to size the host before turning it on.
 - Speech detection (VAD) with adjustable sensitivity and live meter.
-- AI noise suppression (RNNoise).
+- Selectable local noise suppression: RNNoise, Speex, GTCRN or WebRTC (built-in), also available from quick controls.
+- General audio output and an advanced mode with separate devices for voice, screen shares and chat media.
 - Camera with adaptive resolution and bitrate.
+- Local camera effects: blur, color/image virtual backgrounds and physical-screen chroma key, with preview in settings and the camera's quick panel.
 - Screen or window sharing, with audio.
 - Chat with persistent history, avatars and anti-flood protection.
 - Private channels with per-role visibility: members without access never receive the channel from the server, not even its name.
 - Soundboard from a PC folder, with host-side control.
+- Combined favorites and search in the soundboard and Home's saved servers, with favorites first and alphabetical order within each group.
 - Automatic server discovery on the local network.
 - Several servers connected at once: switching servers drops neither your voice call nor your messages.
+- Start and view another owned server without joining voice or implicitly replacing another hosted server.
+- Immediately applied server settings, with dismissal blocked until pending operations are acknowledged.
 - Quality profiles: Economy, Normal, High Quality and Gaming.
 - Self-hosted server with SQLite, `scrypt` password hashing and strict avatar upload validation.
 - Server Monitor in the app: live metrics (uptime, online users, members, channels, messages) and logs with a level filter.

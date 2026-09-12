@@ -1,8 +1,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { runMediaSettingsPopoverSmoke } = require(path.join(__dirname, 'fixtures', 'mediaSettingsPopovers.cjs'));
+const { runColorPickerSmoke, renderColorPickerPreview } = require(path.join(__dirname, 'fixtures', 'colorPicker.cjs'));
 
-module.exports = { runAudioDeviceSmoke };
+module.exports = { runAudioDeviceSmoke, runMediaSettingsPopoverSmoke, runColorPickerSmoke };
 
 if (require.main === module || process.argv[1] === __filename) {
   const clientRoot = path.resolve(__dirname, '..');
@@ -32,7 +34,8 @@ if (require.main === module || process.argv[1] === __filename) {
       vite = await createServer({
         configFile: path.join(clientRoot, 'vite.config.ts'),
         logLevel: 'error',
-        server: { host: '127.0.0.1', port: 0, strictPort: true, open: false },
+        cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
+        server: { host: '127.0.0.1', port: 0, strictPort: true, open: false, hmr: false, watch: null },
         plugins: [{
           name: 'audio-device-fixture',
           configureServer(server) {
@@ -53,14 +56,67 @@ if (require.main === module || process.argv[1] === __filename) {
       const address = httpServer.address();
       if (!address || typeof address === 'string') throw new Error('Missing Vite listener');
       window = new BrowserWindow({
-        show: false,
-        webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
+        show: false, width: 1050, height: 850,
+        webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false,
+          offscreen: !process.argv.includes('--screenshots') },
       });
       window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-      timeout = setTimeout(() => { console.error('Audio device smoke timed out'); void finish(1); }, 45_000);
-      await window.loadURL(`http://127.0.0.1:${address.port}/__audio_devices__`);
-      const checks = await window.webContents.executeJavaScript(`(${runAudioDeviceSmoke.toString()})()`, true);
-      console.log(`Audio device smoke: ${checks} checks passed`);
+      window.webContents.setAudioMuted(true);
+      const origin = `http://127.0.0.1:${address.port}`;
+      const external = [];
+      window.webContents.session.webRequest.onBeforeRequest((details, callback) => {
+        const url = new URL(details.url);
+        const allowed = url.origin === origin || url.protocol === 'blob:' || url.protocol === 'data:';
+        // Vite's injected client probes local HMR even when the server disables it.
+        const localHmr = url.protocol === 'ws:' && url.hostname === '127.0.0.1'
+          && (url.port === String(address.port) || url.port === '0');
+        if (!allowed && !localHmr) external.push(details.url);
+        callback({ cancel: !allowed });
+      });
+      timeout = setTimeout(() => { console.error('Audio/media controls smoke timed out'); void finish(1); }, 90_000);
+      await window.loadURL(`${origin}/__audio_devices__`);
+      if (!process.argv.includes('--color-picker-only')) {
+        const checks = await window.webContents.executeJavaScript(`(${runAudioDeviceSmoke.toString()})()`, true);
+        console.log(`Audio device smoke: ${checks} checks passed`);
+        const mediaChecks = await window.webContents.executeJavaScript(`(${runMediaSettingsPopoverSmoke.toString()})()`, true);
+        console.log(`Quick camera/noise controls: ${mediaChecks} checks passed`);
+      }
+      const colorChecks = await window.webContents.executeJavaScript(`(${runColorPickerSmoke.toString()})()`, true);
+      console.log(`Shared color picker: ${colorChecks} checks passed`);
+      if (process.argv.includes('--color-picker-only') || process.argv.includes('--color-native')) {
+        await window.webContents.executeJavaScript(`(${renderColorPickerPreview.toString()})()`, true);
+        window.webContents.debugger.attach('1.3');
+        try {
+          await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
+          await new Promise(resolve => setTimeout(resolve, 220));
+          const rect = await window.webContents.executeJavaScript(`(() => {
+            const rect = document.querySelector('[data-color-area]').getBoundingClientRect();
+            return { x: rect.left + rect.width * 0.75, y: rect.top + rect.height * 0.25 };
+          })()`);
+          for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+            await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+              type, ...rect, button: type === 'mouseMoved' ? 'none' : 'left', clickCount: type === 'mouseMoved' ? 0 : 1,
+            });
+          }
+          await window.webContents.executeJavaScript(`if (window.colorFixtureSelections.at(-1) !== '#bf3030') throw new Error('Native pointer selection did not preserve the exact SV color'); document.querySelector('[data-color-hue]').focus()`, true);
+          for (const type of ['keyDown', 'keyUp']) {
+            await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', { type, key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 });
+          }
+          await window.webContents.executeJavaScript(`if (document.querySelector('[data-color-hue]').value !== '1' || window.colorFixtureSelections.at(-1) === '#bf3030') throw new Error('Native keyboard hue selection did not apply')`);
+          console.log('Shared color picker: native pointer and keyboard interactions passed');
+          const artifact = process.argv.find(arg => arg.startsWith('--color-artifact='))?.slice('--color-artifact='.length)
+            ?? process.env.MONKY_COLOR_PICKER_ARTIFACT;
+          if (artifact) {
+            await new Promise(resolve => setTimeout(resolve, 120));
+            fs.writeFileSync(artifact, (await window.webContents.capturePage()).toPNG());
+            console.log(`Isolated color picker image: ${artifact}`);
+          }
+        } finally {
+          window.webContents.debugger.detach();
+          await window.webContents.executeJavaScript('window.cleanupColorPickerPreview()');
+        }
+      }
+      if (external.length) throw new Error(`Unexpected external requests: ${external.join(', ')}`);
       if (process.argv.includes('--screenshots')) {
         window.setContentSize(760, 360);
         window.showInactive();
@@ -140,7 +196,8 @@ async function runAudioDeviceSmoke() {
     gum: navigator.mediaDevices.getUserMedia, enumerate: navigator.mediaDevices.enumerateDevices,
     AudioContext: window.AudioContext, raw: audio.getRawMicrophoneStream,
     sink: HTMLMediaElement.prototype.setSinkId, mic: settings.selectedMicrophoneId,
-    speaker: settings.selectedSpeakerId, channel: voice.currentVoiceChannelId,
+    speaker: settings.selectedSpeakerId, noiseMode: settings.noiseSuppressionMode,
+    channel: voice.currentVoiceChannelId,
     muted: voice.isMuted, serverMuted: voice.serverMuted,
     raf: window.requestAnimationFrame, cancelRaf: window.cancelAnimationFrame,
     storage: localStorage.getItem('monky_settings'),
@@ -205,6 +262,7 @@ async function runAudioDeviceSmoke() {
   audio.getRawMicrophoneStream = () => callStream;
   settings.selectedMicrophoneId = '';
   settings.selectedSpeakerId = '';
+  settings.noiseSuppressionMode = 'off';
   voice.currentVoiceChannelId = null;
   voice.isMuted = false;
   voice.serverMuted = false;
@@ -253,7 +311,7 @@ async function runAudioDeviceSmoke() {
     extra.innerHTML = '<div class="vad-meter-fill"></div>';
     root.append(extra);
     offExtra = bindMicrophoneLevelMeter(extra);
-    await wait();
+    for (let attempt = 0; attempt < 50 && Number(extra.getAttribute('aria-valuenow')) === 0; attempt++) await wait();
     check(captures.length === 1 && contexts.length === 1, 'settings and popover reuse one local preview graph');
     check(Number(extra.getAttribute('aria-valuenow')) > 0, 'Shared meter exposes the measured input level accessibly');
     check(!voice.isSpeaking && speakingEvents === 0,
@@ -481,6 +539,7 @@ async function runAudioDeviceSmoke() {
     audio.getRawMicrophoneStream = original.raw;
     settings.selectedMicrophoneId = original.mic;
     settings.selectedSpeakerId = original.speaker;
+    settings.noiseSuppressionMode = original.noiseMode;
     voice.currentVoiceChannelId = original.channel;
     voice.isMuted = original.muted;
     voice.serverMuted = original.serverMuted;

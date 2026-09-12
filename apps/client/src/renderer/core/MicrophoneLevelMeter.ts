@@ -1,6 +1,8 @@
 import { audioProcessor } from './AudioProcessor';
 import { appEvents } from './EventBus';
 import { settingsStore } from '../stores/settingsStore';
+import { createNoiseSuppressor, destroyNoiseSuppressor, type NoiseSuppressorNode } from './NoiseSuppression';
+import type { NoiseSuppressionMode } from '../utils/audioPreferences';
 
 interface MeterSubscriber {
   meter: HTMLElement;
@@ -16,6 +18,10 @@ class MicrophoneLevelMeter {
   private source: MediaStreamAudioSourceNode | null = null;
   private analyser: AnalyserNode | null = null;
   private stream: MediaStream | null = null;
+  private captureStream: MediaStream | null = null;
+  private destination: MediaStreamAudioDestinationNode | null = null;
+  private suppressor: NoiseSuppressorNode | null = null;
+  private mode: NoiseSuppressionMode = settingsStore.noiseSuppressionMode;
   private owned = false;
   private generation = 0;
   private raf: number | null = null;
@@ -37,8 +43,9 @@ class MicrophoneLevelMeter {
       const refresh = () => this.restart();
       this.unbind = [
         appEvents.on('settings.updated', () => {
-          if (this.deviceId === settingsStore.selectedMicrophoneId) return;
+          if (this.deviceId === settingsStore.selectedMicrophoneId && this.mode === settingsStore.noiseSuppressionMode) return;
           this.deviceId = settingsStore.selectedMicrophoneId;
+          this.mode = settingsStore.noiseSuppressionMode;
           this.restart();
         }),
         appEvents.on('voice.channel_changed', refresh),
@@ -91,7 +98,13 @@ class MicrophoneLevelMeter {
     this.removeEnded = null;
     this.source?.disconnect();
     this.analyser?.disconnect();
-    if (this.owned) this.stream?.getTracks().forEach((track) => track.stop());
+    destroyNoiseSuppressor(this.suppressor);
+    this.suppressor = null;
+    this.destination?.stream.getTracks().forEach((track) => track.stop());
+    this.destination?.disconnect();
+    this.destination = null;
+    if (this.owned) this.captureStream?.getTracks().forEach((track) => track.stop());
+    this.captureStream = null;
     this.stream = null;
     this.borrowed = null;
     this.usingRaw = false;
@@ -113,6 +126,7 @@ class MicrophoneLevelMeter {
     this.release();
     if (!this.subscribers.size) return;
     const generation = this.generation;
+    this.mode = settingsStore.noiseSuppressionMode;
     this.borrowed = audioProcessor.getRawMicrophoneStream();
     this.usingRaw = this.canUseRaw(this.borrowed);
     this.starting = true;
@@ -124,10 +138,17 @@ class MicrophoneLevelMeter {
       const live = this.borrowed;
       // Muted call tracks stay untouched. A separate local-only preview still lets
       // the user inspect their input without unmuting personal/admin/PTT gates.
-      const stream = this.usingRaw && live ? live : await navigator.mediaDevices.getUserMedia({
-        audio: this.deviceId ? { deviceId: { exact: this.deviceId } } : true, video: false,
+      const owned = !(this.usingRaw && live);
+      const stream = !owned && live ? audioProcessor.getLocalAudioStream() ?? live : await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: this.deviceId ? { exact: this.deviceId } : undefined,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: this.mode === 'browser',
+          autoGainControl: true,
+        },
+        video: false,
       });
-      const owned = stream !== live;
       if (generation !== this.generation || !this.subscribers.size) {
         if (owned) stream.getTracks().forEach((track) => track.stop());
         return;
@@ -138,13 +159,38 @@ class MicrophoneLevelMeter {
         return;
       }
       this.stream = stream;
+      this.captureStream = stream;
       this.owned = owned;
-      this.context = new AudioContext();
+      this.context = new AudioContext({ sampleRate: 48000 });
       this.source = this.context.createMediaStreamSource(stream);
       this.analyser = this.context.createAnalyser();
       this.analyser.fftSize = 256;
-      // No destination connection: this graph can neither play nor transmit captured audio.
-      this.source.connect(this.analyser);
+      if (owned) {
+        const suppressor = await createNoiseSuppressor(this.context, this.mode);
+        if (generation !== this.generation) {
+          destroyNoiseSuppressor(suppressor);
+          return;
+        }
+        this.suppressor = suppressor;
+        this.destination = this.context.createMediaStreamDestination();
+        if (suppressor) {
+          suppressor.onprocessorerror = () => {
+            if (generation !== this.generation) return;
+            this.release();
+            this.notify(new Error('Microphone preview noise suppression failed'));
+          };
+          this.source.connect(suppressor);
+          suppressor.connect(this.analyser);
+          suppressor.connect(this.destination);
+        } else {
+          this.source.connect(this.analyser);
+          this.source.connect(this.destination);
+        }
+        this.stream = this.destination.stream;
+      } else {
+        this.source.connect(this.analyser);
+      }
+      // No connection to context.destination: only the opt-in loopback can play this stream.
       const ended = () => {
         this.release();
         this.notify(new DOMException('Microphone disconnected', 'NotFoundError'));
@@ -155,7 +201,7 @@ class MicrophoneLevelMeter {
       if (generation !== this.generation) return;
       this.ready = true;
       this.starting = false;
-      for (const subscriber of this.subscribers) subscriber.streamChanged?.(stream);
+      for (const subscriber of this.subscribers) subscriber.streamChanged?.(this.stream);
       if (generation !== this.generation) return;
       this.notify(null);
       if (generation !== this.generation || !this.analyser) return;

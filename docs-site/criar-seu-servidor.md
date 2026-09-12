@@ -2,9 +2,14 @@
 
 Na aba **Meus Servidores › Criar Servidor**, preencha nickname do anfitrião, nome do servidor, porta local, senha opcional, os canais iniciais de texto e voz e, se quiser, um limite de membros.
 
-Clique em **Criar e Iniciar Servidor**. O servidor sobe na sua máquina, escuta em todas as interfaces de rede na porta escolhida e você entra automaticamente.
+Clique em **Criar e Iniciar Servidor**. O servidor sobe na sua máquina, escuta em todas as interfaces de rede na porta escolhida e abre para visualização. Entrar em um canal de voz é uma ação separada.
 
 Servidores criados ficam salvos (até 10). Depois, use **Iniciar**, **Parar** ou **X** na aba *Meus Servidores*.
+
+Iniciar um servidor offline pela Home ou pela barra lateral preserva a chamada
+atual, inclusive câmera, compartilhamentos e mute. Se outro servidor já estiver
+hospedado nesta instância, ele não será substituído: pare-o explicitamente
+quando for seguro antes de iniciar um diferente.
 
 ## Convidar amigos
 
@@ -31,6 +36,11 @@ Ao criar ou administrar o servidor, você escolhe o modo de voz e vídeo:
 ## Administrar
 
 Em **Configurações do Servidor** é possível renomear o servidor, alterar/remover senha, alternar o modo de voz (P2P / SFU), definir ou remover o limite de membros e permitir ou bloquear o soundboard. Os cabeçalhos de canais têm **+** para criar e lixeira para apagar.
+
+As edições aplicam imediatamente, e campos de texto aplicam ao terminar a
+edição. **Pronto** fecha a janela; não há uma etapa final de salvar. Enquanto
+uma operação aguarda confirmação do servidor, o fechamento fica bloqueado.
+Falhas são mostradas e permitem correção e nova tentativa.
 
 O limite conta **membros cadastrados**, não quem está online: uma pessoa ocupa a vaga a partir da primeira entrada, mesmo desconectada. Para liberar a vaga, expulse o membro. Com o limite desligado, o servidor aceita quantas pessoas quiserem entrar.
 

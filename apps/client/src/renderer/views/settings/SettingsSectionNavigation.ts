@@ -240,10 +240,7 @@ export class SettingsSectionNavigation {
         button.textContent = label;
         button.setAttribute('aria-controls', target.id);
         button.addEventListener('click', () => {
-          this.scrollingTo = target;
-          this.select(target);
-          const destination = scrollWithin(this.body, target, 16);
-          if (Math.abs(this.body.scrollTop - destination) < 1) this.scrollingTo = null;
+          this.revealSection(key);
         });
         this.sections.push({ target, key, label, button });
       }
@@ -275,6 +272,21 @@ export class SettingsSectionNavigation {
       if (active) section.button.setAttribute('aria-current', 'location');
       else section.button.removeAttribute('aria-current');
     }
+  }
+
+  public revealSection(key: string): boolean {
+    if (this.destroyed) return false;
+    this.refresh();
+    const section = this.sections.find((entry) => entry.key === key);
+    if (!section) {
+      console.warn('[SettingsSectionNavigation] Section unavailable:', key);
+      return false;
+    }
+    this.scrollingTo = section.target;
+    this.select(section.target);
+    const destination = scrollWithin(this.body, section.target, 16);
+    if (Math.abs(this.body.scrollTop - destination) < 1) this.scrollingTo = null;
+    return true;
   }
 
   public destroy(): void {

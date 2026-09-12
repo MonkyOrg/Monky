@@ -34,7 +34,7 @@ if (!process.versions.electron) {
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'), logLevel: 'error',
       cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
-      server: { host: '127.0.0.1', port: 0, strictPort: true, open: false },
+      server: { host: '127.0.0.1', port: 0, strictPort: true, open: false, hmr: false, watch: null },
       plugins: [{
         name: 'settings-navigation-fixture',
         configureServer(server) {
@@ -710,6 +710,17 @@ async function runSettingsNavigationSmoke() {
   await verifyTabs(document.querySelector('.modal-backdrop--settings'), 'app');
   appModal.close();
   check(!document.querySelector('.settings-section-nav'), 'Closing app settings cleans up its section navigation');
+  for (const section of ['camera', 'noise-suppression']) {
+    await appModal.open('voice_video', section);
+    const modalRoot = document.querySelector('.modal-backdrop--settings');
+    check(modalRoot.querySelector('.settings-tab-btn.active')?.dataset.tab === 'voice_video'
+      && modalRoot.querySelector(`.settings-section-link[data-section-target="${section}"]`)?.getAttribute('aria-current') === 'location',
+    `Quick ${section} navigation opens and selects its requested voice/video subsection`);
+    await settled(() => modalRoot.querySelector('.settings-content-body').scrollTop > 100);
+    check(modalRoot.querySelector('.settings-content-body').scrollTop > 100,
+      `Quick ${section} navigation scrolls the settings body instead of opening its unrelated default section`);
+    appModal.close();
+  }
 
   serverStore.setServerDetails({
     id: 'settings-server', name: 'Settings server', createdAt: 1, maxUsers: 10, voiceStates: {},
@@ -725,7 +736,7 @@ async function runSettingsNavigationSmoke() {
   serverModal.close();
   serverStore.myPermissions = 0;
   serverModal.open('general');
-  check(!document.querySelector('[data-tab="roles"], [data-tab="members"], [data-tab="bots"]'),
+  check(!document.querySelector('[data-tab="roles"]:not([hidden]), [data-tab="members"]:not([hidden]), [data-tab="bots"]:not([hidden])'),
     'Subsection navigation never exposes tabs unavailable to the current permissions');
   serverModal.close();
   check(!document.querySelector('.settings-section-nav'), 'Closing server settings cleans up its section navigation');

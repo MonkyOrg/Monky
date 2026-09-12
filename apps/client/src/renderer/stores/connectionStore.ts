@@ -2,6 +2,7 @@ import { ConnectionStatus } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
 import { VoiceMode } from '@monky/shared';
+import { favoritesStore } from './favoritesStore';
 
 export interface SavedServer {
   host: string;
@@ -95,6 +96,7 @@ export class ConnectionStore {
   }
 
   public loadSavedServers(): void {
+    this.savedServers = [];
     try {
       const raw = localStorage.getItem(ConnectionStore.SAVED_SERVERS_STORAGE_KEY);
       if (raw) {
@@ -116,6 +118,7 @@ export class ConnectionStore {
     }
     this.savedServers.sort((a, b) => b.lastConnected - a.lastConnected);
     this.savedServers = this.savedServers.slice(0, 15);
+    this.syncSavedServerFavorites();
   }
 
   public addSavedServer(server: SavedServer): void {
@@ -140,6 +143,7 @@ export class ConnectionStore {
     this.savedServers.sort((a, b) => b.lastConnected - a.lastConnected);
     // Keep max 15
     this.savedServers = this.savedServers.slice(0, 15);
+    this.syncSavedServerFavorites();
     this.syncRailLayoutWithSavedServers();
     this.saveSavedServers();
     appEvents.emit('connection.saved_servers_changed');
@@ -148,6 +152,7 @@ export class ConnectionStore {
   public removeSavedServer(host: string, port: number): void {
     clientLog.info('STORE', `Removing saved server: ${host}:${port}`);
     this.savedServers = this.savedServers.filter((s) => !(s.host === host && s.port === port));
+    this.syncSavedServerFavorites();
     this.syncRailLayoutWithSavedServers();
     this.saveSavedServers();
     appEvents.emit('connection.saved_servers_changed');
@@ -191,7 +196,15 @@ export class ConnectionStore {
     const idx = this.savedServers.findIndex((s) => s.host === oldHost && s.port === oldPort);
     if (idx >= 0) {
       this.savedServers[idx] = updated;
+      try {
+        favoritesStore.moveServer({ host: oldHost, port: oldPort }, updated);
+      } catch (error: unknown) {
+        clientLog.warn('STORE', 'Could not move the saved server favorite after editing its address', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
+    this.syncSavedServerFavorites();
     this.replaceServerReference(oldHost, oldPort, updated.host, updated.port);
     this.syncRailLayoutWithSavedServers();
     this.saveSavedServers();
@@ -425,6 +438,16 @@ export class ConnectionStore {
     try {
       localStorage.setItem(ConnectionStore.SAVED_SERVERS_STORAGE_KEY, JSON.stringify(this.savedServers));
     } catch (e) {}
+  }
+
+  private syncSavedServerFavorites(): void {
+    try {
+      favoritesStore.retainSavedServers(this.savedServers);
+    } catch (error: unknown) {
+      clientLog.warn('STORE', 'Could not reconcile saved server favorites', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private parseRailNode(node: unknown): RailNode | null {

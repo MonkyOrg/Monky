@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { Logger } from '../logger/Logger';
-import { IDatabaseDriver, SqlJsDriver } from './SqliteWrapper';
+import { type DatabaseCloseOptions, IDatabaseDriver, SqlJsDriver } from './SqliteWrapper';
+import { ServerResourceScope } from '../lifecycle/ServerResourceScope';
 
 export class DatabaseConnection {
   private db: IDatabaseDriver;
@@ -12,15 +13,20 @@ export class DatabaseConnection {
 
   public static async create(dbPath: string): Promise<DatabaseConnection> {
     const driver = await SqlJsDriver.create(dbPath);
+    const resources = new ServerResourceScope();
+    resources.defer('SQLite migrations', () => driver.close({ discardChanges: true }));
     // Note: sql.js runs entirely in-memory (WASM) and is persisted to disk via
     // a manual, debounced export. WAL journal_mode is therefore meaningless here
     // and would be silently ignored, so we do not set it. foreign_keys is still
     // requested to enforce referential integrity when supported by the build.
-    driver.pragma('foreign_keys = ON');
-
-    const conn = new DatabaseConnection(driver);
-    conn.runMigrations();
-    return conn;
+    try {
+      driver.pragma('foreign_keys = ON');
+      const conn = new DatabaseConnection(driver);
+      conn.runMigrations();
+      return conn;
+    } catch (error) {
+      return resources.fail(error);
+    }
   }
 
   public getDb(): IDatabaseDriver {
@@ -74,7 +80,7 @@ export class DatabaseConnection {
     }
   }
 
-  public close(): void {
-    this.db.close();
+  public close(options?: DatabaseCloseOptions): void {
+    this.db.close(options);
   }
 }

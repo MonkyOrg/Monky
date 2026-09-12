@@ -6,6 +6,7 @@ import joinVoiceUrl from '../assets/sounds/Entrando_Na_Call.wav';
 import leaveVoiceUrl from '../assets/sounds/Saindo_Da_Call.wav';
 import { settingsStore } from '../stores/settingsStore';
 import { t } from '../i18n';
+import { setAudioOutputSink } from './AudioOutputSink';
 
 export type SoundEffectType =
   | 'mic_mute'
@@ -73,7 +74,7 @@ export class SoundEffectManager {
     try {
       const audio = new Audio(url);
       audio.volume = 0.6;
-      this.applySink(audio);
+      void this.applySink(audio).catch((error: unknown) => console.warn('[SoundEffects] Could not preload the selected output:', error));
       this.audioMap[key] = audio;
     } catch (e) {
       console.warn(`[SoundEffects] Error preloading sound ${key}:`, e);
@@ -86,12 +87,7 @@ export class SoundEffectManager {
    */
   private applySink(audio: HTMLAudioElement): Promise<void> {
     const deviceId = this.speakerDeviceId ?? settingsStore.selectedSpeakerId;
-    if (typeof audio.setSinkId === 'function' && audio.sinkId !== deviceId) {
-      return audio.setSinkId(deviceId).catch((error: unknown) => {
-        console.warn('[SoundEffects] Could not apply selected output:', error);
-      });
-    }
-    return Promise.resolve();
+    return setAudioOutputSink(audio, deviceId);
   }
 
   /** Reapplies the currently selected speaker to all preloaded sound effects. */
@@ -100,11 +96,11 @@ export class SoundEffectManager {
     for (const audio of Object.values(this.audioMap)) {
       if (audio) {
         if (typeof audio.setSinkId !== 'function') throw new Error('Output selection unavailable');
-        await audio.setSinkId(deviceId);
+        await setAudioOutputSink(audio, deviceId);
       }
     }
     if (this.toneCtx && 'setSinkId' in this.toneCtx && typeof this.toneCtx.setSinkId === 'function') {
-      await this.toneCtx.setSinkId(deviceId);
+      await setAudioOutputSink(this.toneCtx, deviceId);
     }
   }
 
@@ -114,14 +110,7 @@ export class SoundEffectManager {
    */
   private ensureToneCtx(): AudioContext {
     if (!this.toneCtx) {
-      const Ctor = window.AudioContext || (window as any).webkitAudioContext;
-      this.toneCtx = new Ctor();
-      const sinkId = this.speakerDeviceId ?? settingsStore.selectedSpeakerId;
-      if (sinkId && 'setSinkId' in this.toneCtx && typeof this.toneCtx.setSinkId === 'function') {
-        this.toneCtx.setSinkId(sinkId).catch((error: unknown) => {
-          console.warn('[SoundEffects] Could not apply tone output:', error);
-        });
-      }
+      this.toneCtx = new AudioContext({ sinkId: { type: 'none' } });
     }
     return this.toneCtx!;
   }
@@ -137,12 +126,12 @@ export class SoundEffectManager {
    */
   private withRunningToneCtx(schedule: (ctx: AudioContext, now: number) => void): void {
     const ctx = this.ensureToneCtx();
-    const run = () => schedule(ctx, ctx.currentTime);
-    if (ctx.state === 'suspended') {
-      ctx.resume().then(run).catch(() => {});
-    } else {
-      run();
-    }
+    void setAudioOutputSink(ctx, this.speakerDeviceId ?? settingsStore.selectedSpeakerId)
+      .then(async () => {
+        if (ctx.state === 'suspended') await ctx.resume();
+        if (ctx.state !== 'closed') schedule(ctx, ctx.currentTime);
+      })
+      .catch((error: unknown) => console.warn('[SoundEffects] Could not play the tone on the selected output:', error));
   }
 
   /**
@@ -297,11 +286,9 @@ export class SoundEffectManager {
         audio.currentTime = 0;
         // Apply the selected speaker BEFORE playing so the sound doesn't briefly
         // (or entirely) come out of the OS default device (#46).
-        this.applySink(audio).finally(() => {
-          audio.play().catch((err) => {
-            console.debug(`[SoundEffects] Play prevented for ${key}:`, err);
-          });
-        });
+        void this.applySink(audio)
+          .then(() => audio.play())
+          .catch((error: unknown) => console.warn(`[SoundEffects] Could not play ${key} on the selected output:`, error));
       }
     } catch (e) {
       console.warn(`[SoundEffects] Error playing sound ${key}:`, e);

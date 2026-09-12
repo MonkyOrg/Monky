@@ -38,6 +38,8 @@ import { RateLimiter } from './infrastructure/security/RateLimiter';
 import { CoturnManager } from './infrastructure/turn/CoturnManager';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import { closeHttpServer, listenHttpServer } from './infrastructure/lifecycle/httpLifecycle';
+import { ServerResourceScope } from './infrastructure/lifecycle/ServerResourceScope';
 
 export interface ServerConfig {
   port: number;
@@ -183,6 +185,10 @@ export class MonkyServer {
   private sfuManager: SfuManager;
   private serverRepo: SqliteServerRepository;
   private startedAt: number | null = null;
+  private startPromise: Promise<void> | null = null;
+  private readonly startupTasks: Promise<void>[] = [];
+  private stopping = false;
+  private stopped = false;
 
   private constructor(
     private config: ServerConfig,
@@ -195,7 +201,8 @@ export class MonkyServer {
     attachmentService: AttachmentService,
     coturnManager: CoturnManager,
     sfuManager: SfuManager,
-    serverRepo: SqliteServerRepository
+    serverRepo: SqliteServerRepository,
+    private readonly resources: ServerResourceScope,
   ) {
     this.dbConn = dbConn;
     this.httpServer = httpServer;
@@ -210,12 +217,26 @@ export class MonkyServer {
   }
 
   public static async create(config: ServerConfig): Promise<MonkyServer> {
-    const dbPath = path.join(config.dataDir, 'server.db');
-    const dbConn = await DatabaseConnection.create(dbPath);
+    const resources = new ServerResourceScope();
+    let setupComplete = false;
+    try {
+      const dbConn = await DatabaseConnection.create(path.join(config.dataDir, 'server.db'));
+      resources.defer('database', () => dbConn.close({ discardChanges: !setupComplete }));
+      const server = await dbConn.getDb().transactionAsync(() => MonkyServer.createResources(config, dbConn, resources));
+      setupComplete = true;
+      return server;
+    } catch (error) {
+      return resources.fail(error);
+    }
+  }
 
+  private static async createResources(
+    config: ServerConfig, dbConn: DatabaseConnection, resources: ServerResourceScope,
+  ): Promise<MonkyServer> {
     const avatarStorage = new AvatarStorageService(config.dataDir);
     const attachmentStorage = new AttachmentStorageService(config.dataDir);
     const rateLimiter = new RateLimiter();
+    resources.defer('rate limiter', () => rateLimiter.dispose());
 
     const db = dbConn.getDb();
     const serverRepo = new SqliteServerRepository(db);
@@ -391,9 +412,20 @@ export class MonkyServer {
       res.writeHead(404);
       res.end();
     });
+    resources.defer('HTTP listener', () => closeHttpServer(httpServer));
 
     const coturnManager = new CoturnManager(config.dataDir);
+    resources.defer('TURN relay', () => coturnManager.stop());
     const sfuManager = new SfuManager();
+    resources.defer('SFU runtime', () => sfuManager.close());
+    const lanBroadcaster = new LanBroadcaster({
+      serverName: config.serverName || 'Monky Server',
+      serverPort: config.port,
+      discoveryPort: config.discoveryPort,
+    });
+    resources.defer('LAN broadcaster', () => lanBroadcaster.stop());
+    let instance: MonkyServer | undefined;
+    resources.defer('startup tasks', async () => { await instance?.waitForStartupTasks(); });
 
     const wsServer = new WebSocketServer(
       httpServer,
@@ -412,16 +444,11 @@ export class MonkyServer {
       commandRegistry,
       new BotSelectorService(new SqliteBotSelectorRepository(db))
     );
+    resources.defer('WebSocket server', () => wsServer.close());
 
     getOnlineUsers = () => wsServer.getOnlineUsersMap();
 
-    const lanBroadcaster = new LanBroadcaster({
-      serverName: config.serverName || 'Monky Server',
-      serverPort: config.port,
-      discoveryPort: config.discoveryPort,
-    });
-
-    return new MonkyServer(
+    instance = new MonkyServer(
       config,
       dbConn,
       httpServer,
@@ -432,8 +459,10 @@ export class MonkyServer {
       attachmentService,
       coturnManager,
       sfuManager,
-      serverRepo
+      serverRepo,
+      resources,
     );
+    return instance;
   }
 
   private static async handleAttachmentUpload(
@@ -582,20 +611,33 @@ export class MonkyServer {
     fs.createReadStream(filePath).pipe(res);
   }
 
-  public async start(): Promise<void> {
-    return new Promise((resolve) => {
-      this.httpServer.listen(this.config.port, '0.0.0.0', () => {
-        this.startedAt = Date.now();
-        Logger.info('INFO', `Monky Server running on 0.0.0.0:${this.config.port}`);
-        Logger.info('INFO', `Data directory: ${this.config.dataDir}`);
-        void this.attachmentService.reconcile();
-        void this.startTurnIfEnabled();
-        this.lanBroadcaster
-          .start()
-          .catch((error) => Logger.warn('NETWORK', 'LAN discovery broadcast unavailable; continuing without it.', error))
-          .finally(() => resolve());
-      });
-    });
+  public start(): Promise<void> {
+    if (this.stopping || this.stopped) return Promise.reject(new Error('Server shutdown has already started'));
+    if (this.startPromise) return this.startPromise;
+    const attempt = this.startListening();
+    this.startPromise = attempt;
+    void attempt.catch(() => { if (this.startPromise === attempt) this.startPromise = null; });
+    return attempt;
+  }
+
+  private async startListening(): Promise<void> {
+    await listenHttpServer(this.httpServer, this.config.port, '0.0.0.0');
+    if (this.stopping) throw new Error('Server startup was interrupted by shutdown');
+    this.startedAt = Date.now();
+    Logger.info('INFO', `Monky Server running on 0.0.0.0:${this.config.port}`);
+    Logger.info('INFO', `Data directory: ${this.config.dataDir}`);
+    this.startupTasks.push(
+      this.attachmentService.reconcile().catch((error) => Logger.warn('ATTACHMENT', 'Startup reconciliation failed', error)),
+      this.startTurnIfEnabled(),
+    );
+    await this.lanBroadcaster.start()
+      .catch((error) => Logger.warn('NETWORK', 'LAN discovery broadcast unavailable; continuing without it.', error));
+    if (this.stopping) throw new Error('Server startup was interrupted by shutdown');
+  }
+
+  private async waitForStartupTasks(): Promise<void> {
+    // Start owns its rejection; shutdown must still wait until that work settles.
+    await Promise.allSettled([...(this.startPromise ? [this.startPromise] : []), ...this.startupTasks]);
   }
 
   /**
@@ -608,6 +650,7 @@ export class MonkyServer {
   private async startTurnIfEnabled(): Promise<void> {
     try {
       const server = await this.serverRepo.getServer();
+      if (this.stopping) return;
       if (!server?.turnEnabled) return;
 
       // TURN and SFU are mutually exclusive (#515), but the pair was legal
@@ -634,27 +677,13 @@ export class MonkyServer {
   }
 
   public async stop(): Promise<void> {
+    if (this.stopped) return;
+    this.stopping = true;
     Logger.info('INFO', 'Stopping Monky Server...');
-    this.sfuManager.close();
-    await this.coturnManager.stop();
-    await this.lanBroadcaster.stop();
-    this.rateLimiter.dispose();
-    this.wsServer.close();
-    // The desktop host awaits this call before it can start another server, so
-    // the shutdown must be bounded: destroy whatever is still hanging on rather
-    // than waiting on it forever (#333).
-    await new Promise<void>((resolve) => {
-      const forceClose = setTimeout(() => {
-        this.httpServer.closeAllConnections?.();
-      }, LIMITS.SHUTDOWN_GRACE_MS * 2);
-      forceClose.unref?.();
-      this.httpServer.close(() => {
-        clearTimeout(forceClose);
-        resolve();
-      });
-    });
-    this.dbConn.close();
+    await this.resources.close();
+    this.stopped = true;
     this.startedAt = null;
+    this.startupTasks.length = 0;
     Logger.info('INFO', 'Server stopped.');
   }
 

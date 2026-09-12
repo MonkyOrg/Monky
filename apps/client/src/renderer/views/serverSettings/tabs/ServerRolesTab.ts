@@ -1,22 +1,29 @@
-import { Permission, Role, MessageType } from '@monky/shared';
+import { Permission, MessageType, type Role, type RoleUpdatePayload, type RolesListPayload } from '@monky/shared';
 import { serverStore } from '../../../stores/serverStore';
-import { networkClient } from '../../../core/NetworkClient';
 import { getAvatarUrl } from '../../../utils/avatar';
 import { escapeHtml } from '../../../utils/html';
 import { showAlert, showConfirm } from '../../Dialog';
 import { t } from '../../../i18n';
+import type { ServerSettingsContext } from '../ServerSettingsContext';
+import { ServerMembersTab } from './ServerMembersTab';
+import { ColorPicker } from '../../ColorPicker';
+import { COLOR_PRESETS } from '../../../utils/colors';
 
 export class ServerRolesTab {
   private draggedRoleId: string | null = null;
+  private root: HTMLElement | null = null;
+  private context: ServerSettingsContext | null = null;
+  private cleanup: Array<() => void> = [];
+  private stateSignature = '';
+  private membersSignature = '';
+  private dirtyName = false;
+  private submittedName = '';
+  private readonly colorPicker = new ColorPicker({ id: 'role-editor-color', label: 'roles.roleColor' });
 
   public renderHtml(): string {
-    const roles: Role[] = serverStore.getVisibleRoles().sort((a: Role, b: Role) => b.position - a.position);
-    // Counting only live connections made the column lie about roles held by
-    // people who happen to be offline (#477).
-    const members = serverStore.getAllMembersInDisplayOrder();
-
     return `
       <div style="display: flex; flex-direction: column; gap: 16px; width: 100%;">
+        <fieldset class="server-settings-fieldset" data-server-permission="${Permission.MANAGE_SERVER}">
         <div data-settings-section="role-badges" data-settings-label="${escapeHtml(t('roles.badgeVisibility'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
           <div>
             <label for="checkbox-show-role-badges" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 2px;">
@@ -32,6 +39,8 @@ export class ServerRolesTab {
             <span class="toggle-slider"></span>
           </label>
         </div>
+        </fieldset>
+        <fieldset class="server-settings-fieldset" data-server-permission="${Permission.MANAGE_ROLES}" style="display: flex; flex-direction: column; gap: 16px;">
         <div data-settings-section="roles" data-settings-label="${escapeHtml(t('roles.rolesList'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow: visible;">
           <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
             <div>
@@ -51,26 +60,7 @@ export class ServerRolesTab {
                 </tr>
               </thead>
               <tbody>
-                ${roles.map((role: Role) => {
-                  const assignedMembers = members.filter((member) => serverStore.getUserRoleIds(member.id).includes(role.id)).length;
-                  return `
-                    <tr class="role-table-row" data-role-id="${role.id}" draggable="true">
-                      <td>
-                        <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
-                          <span class="material-symbols-outlined md-16" title="${t('roles.dragReorderHint')}" style="color: var(--text-muted); cursor: grab; flex-shrink: 0;">drag_indicator</span>
-                          <span style="width: 12px; height: 12px; border-radius: 50%; background: ${role.color || 'var(--text-muted)'}; border: 1px solid rgba(255, 255, 255, 0.12); flex-shrink: 0;"></span>
-                          <span style="font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(role.name)}</span>
-                          ${role.isDefault ? `<span class="member-badge-you" style="background: rgba(35, 165, 90, 0.18); color: var(--success);">${t('roles.autoBadge')}</span>` : ''}
-                        </div>
-                      </td>
-                      <td style="font-size: 12px; color: var(--text-secondary);">${escapeHtml(this.describeRolePermissions(role))}</td>
-                      <td class="role-member-count" data-role-count="${role.id}" style="font-size: 12px; color: var(--text-secondary);">${assignedMembers}</td>
-                      <td style="text-align: right;">
-                        <button type="button" class="btn btn-secondary role-open-btn" data-role-open="${role.id}">${t('common.edit')}</button>
-                      </td>
-                    </tr>
-                  `;
-                }).join('')}
+                ${this.renderRoleRows()}
               </tbody>
             </table>
           </div>
@@ -80,7 +70,7 @@ export class ServerRolesTab {
           <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
             <div>
               <div id="role-editor-title" style="font-size: 15px; font-weight: 700; color: var(--text-primary);">${t('roles.editorNewTitle')}</div>
-              <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">${t('roles.editorPanelHint')}</div>
+              <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">${t('serverSettings.roleImmediateHint')}</div>
             </div>
           </div>
           <input type="hidden" id="role-editor-id">
@@ -95,9 +85,9 @@ export class ServerRolesTab {
               <input id="role-editor-name" type="text" maxlength="32" placeholder="${t('roles.roleNamePlaceholder')}">
             </div>
             <div style="display: flex; flex-direction: column; gap: 8px;">
-              <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">${t('roles.roleColor')}</div>
+              <label for="role-editor-color" style="font-size: 12px; font-weight: 600; color: var(--text-primary);">${t('roles.roleColor')}</label>
               <div style="font-size: 11px; color: var(--text-muted);">${t('roles.colorPaletteHint')}</div>
-              ${this.renderRoleColorPalette('#5865f2')}
+              ${this.colorPicker.renderHtml(COLOR_PRESETS[0])}
             </div>
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary);">
               <div style="min-width: 0;">
@@ -117,13 +107,31 @@ export class ServerRolesTab {
             <div id="role-editor-members-panel">${this.renderRoleMembersEditorPanel()}</div>
           </div>
           <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">
-            <button type="button" id="btn-role-cancel" class="btn btn-secondary">${t('common.cancel')}</button>
+            <button type="button" id="btn-role-done" class="btn btn-secondary">${t('common.done')}</button>
             <button type="button" id="btn-role-delete" class="btn btn-danger">${t('common.delete')}</button>
             <button type="button" id="btn-role-save" class="btn btn-primary">${t('roles.createRole')}</button>
           </div>
         </div>
+        </fieldset>
       </div>
     `;
+  }
+
+  private renderRoleRows(): string {
+    const roles = serverStore.getVisibleRoles().sort((a, b) => b.position - a.position);
+    const members = serverStore.getAllMembersInDisplayOrder();
+    return roles.map((role) => `
+      <tr class="role-table-row" data-role-id="${role.id}" draggable="true">
+        <td><div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
+          <span class="material-symbols-outlined md-16" title="${t('roles.dragReorderHint')}" style="color: var(--text-muted); cursor: grab;">drag_indicator</span>
+          <span style="width: 12px; height: 12px; border-radius: 50%; background: ${role.color || 'var(--text-muted)'}; flex-shrink: 0;"></span>
+          <span style="font-size: 13px; font-weight: 600;">${escapeHtml(role.name)}</span>
+          ${role.isDefault ? `<span class="member-badge-you">${t('roles.autoBadge')}</span>` : ''}
+        </div></td>
+        <td style="font-size: 12px;">${escapeHtml(this.describeRolePermissions(role))}</td>
+        <td class="role-member-count" data-role-count="${role.id}">${members.filter((member) => serverStore.getUserRoleIds(member.id).includes(role.id)).length}</td>
+        <td style="text-align: right;"><button type="button" class="btn btn-secondary role-open-btn" data-role-open="${role.id}">${t('common.edit')}</button></td>
+      </tr>`).join('');
   }
 
   private describeRolePermissions(role: Role): string {
@@ -138,38 +146,6 @@ export class ServerRolesTab {
     if (role.permissions & Permission.USE_BOT_COMMANDS) labels.push(t('permissions.useBotCommands'));
     if (role.permissions & Permission.SPEAK) labels.push(t('permissions.speak'));
     return labels.slice(0, 3).join(', ') || t('roles.noPermissions');
-  }
-
-  private getRoleColorPalette(): string[] {
-    return [
-      '#5865f2',
-      '#57f287',
-      '#fee75c',
-      '#eb459e',
-      '#ed4245',
-      '#f47b67',
-      '#9b59b6',
-      '#1abc9c',
-      '#3498db',
-      '#e91e63',
-      '#95a5a6',
-      '#e67e22',
-    ];
-  }
-
-  private renderRoleColorPalette(selectedColor: string): string {
-    return `
-      <input type="hidden" id="role-editor-color" value="${selectedColor}">
-      <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary); margin-bottom: 10px;">
-        <span id="role-editor-color-preview" style="width: 16px; height: 16px; border-radius: 50%; background: ${selectedColor}; border: 1px solid rgba(255, 255, 255, 0.14); flex-shrink: 0;"></span>
-        <span id="role-editor-color-code" style="font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono);">${selectedColor}</span>
-      </div>
-      <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px;">
-        ${this.getRoleColorPalette().map((color) => `
-          <button type="button" class="role-color-swatch ${color === selectedColor ? 'active' : ''}" data-role-color="${color}" style="--role-swatch-color: ${color};" title="${color}" aria-label="${color}"></button>
-        `).join('')}
-      </div>
-    `;
   }
 
   private renderPermissionSwitches(): string {
@@ -289,312 +265,313 @@ export class ServerRolesTab {
     });
   }
 
-  public attachEvents(container: HTMLElement, onReload: () => void): void {
-    if (!serverStore.hasPermission(Permission.MANAGE_ROLES)) return;
-
-    const list = container.querySelector('#roles-list') as HTMLElement | null;
-    const editorSection = container.querySelector('#role-editor-section') as HTMLElement | null;
-    const editorTitle = container.querySelector('#role-editor-title') as HTMLElement | null;
-    const editorMembersPanel = container.querySelector('#role-editor-members-panel') as HTMLElement | null;
-    const inputId = container.querySelector('#role-editor-id') as HTMLInputElement | null;
-    const inputName = container.querySelector('#role-editor-name') as HTMLInputElement | null;
-    const inputColor = container.querySelector('#role-editor-color') as HTMLInputElement | null;
-    const inputAutoAssign = container.querySelector('#role-editor-is-default') as HTMLInputElement | null;
-    const colorPreview = container.querySelector('#role-editor-color-preview') as HTMLElement | null;
-    const colorCode = container.querySelector('#role-editor-color-code') as HTMLElement | null;
-    const btnCreateNew = container.querySelector('#btn-role-create-new') as HTMLButtonElement | null;
-    const btnSave = container.querySelector('#btn-role-save') as HTMLButtonElement | null;
-    const btnDelete = container.querySelector('#btn-role-delete') as HTMLButtonElement | null;
-    const btnRoleCancel = container.querySelector('#btn-role-cancel') as HTMLButtonElement | null;
-    const palette = this.getRoleColorPalette();
-
-    const closeActionMenus = () => {
-      container.querySelectorAll('.settings-action-menu.show').forEach((menu) => menu.classList.remove('show'));
-      container.querySelectorAll('.settings-action-submenu-wrap.open').forEach((wrap) => wrap.classList.remove('open'));
-      container.querySelectorAll('.settings-action-menu-wrap.menu-open').forEach((wrap) => wrap.classList.remove('menu-open'));
-      container.querySelectorAll('tr.row-menu-open').forEach((tr) => tr.classList.remove('row-menu-open'));
+  public attachEvents(container: HTMLElement, context: ServerSettingsContext): void {
+    this.detachEvents();
+    this.root = container;
+    this.context = context;
+    this.colorPicker.attachEvents(container, color => {
+      const roleId = this.editorRoleId();
+      if (roleId) this.updateRole(roleId, () => ({ roleId, color }));
+      this.syncColor(color);
+    });
+    const controller = new AbortController();
+    this.cleanup.push(() => controller.abort());
+    const options = { signal: controller.signal };
+    const name = container.querySelector<HTMLInputElement>('#role-editor-name');
+    const commitName = () => {
+      const roleId = this.editorRoleId();
+      if (!name || !roleId) return;
+      this.dirtyName = false;
+      if (name.value === this.submittedName) return;
+      this.submittedName = name.value;
+      const nextName = name.value.trim();
+      this.updateRole(roleId, () => ({ roleId, name: nextName }));
     };
-
-    const syncColorState = (selectedColor: string) => {
-      if (inputColor) inputColor.value = selectedColor;
-      if (colorPreview) colorPreview.style.background = selectedColor;
-      if (colorCode) colorCode.textContent = selectedColor;
-      container.querySelectorAll('.role-color-swatch').forEach((swatch) => {
-        swatch.classList.toggle('active', (swatch as HTMLElement).dataset.roleColor === selectedColor);
-      });
-    };
-
-    const switchEditorTab = (tabName: string) => {
-      container.querySelectorAll('.role-editor-tab-btn').forEach((btn) => {
-        btn.classList.toggle('active', (btn as HTMLElement).dataset.roleEditorTab === tabName);
-      });
-      container.querySelectorAll('.role-editor-tab-panel').forEach((panel) => {
-        const element = panel as HTMLElement;
-        element.style.display = element.id === `role-editor-tab-${tabName}` ? 'flex' : 'none';
-      });
-    };
-
-    const setEditorVisible = (visible: boolean) => {
-      if (editorSection) {
-        editorSection.style.display = visible ? 'flex' : 'none';
-        if (visible) {
-          editorSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }
+    name?.addEventListener('blur', commitName, options);
+    name?.addEventListener('change', commitName, options);
+    name?.addEventListener('input', () => { this.dirtyName = true; }, options);
+    name?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); commitName(); name.blur(); }
+    }, options);
+    const closeMenus = () => {
+      for (const className of ['show', 'open', 'menu-open', 'row-menu-open']) {
+        container.querySelectorAll(`.settings-action-menu.${className}, .settings-action-submenu-wrap.${className}, .settings-action-menu-wrap.${className}, tr.${className}`)
+          .forEach((element) => element.classList.remove(className));
       }
     };
-
-    const resetEditor = (showEditor = false) => {
-      if (inputId) inputId.value = '';
-      if (inputName) inputName.value = '';
-      if (inputAutoAssign) inputAutoAssign.checked = false;
-      container.querySelectorAll('.role-permission-switch').forEach((checkbox) => {
-        (checkbox as HTMLInputElement).checked = false;
-      });
-      syncColorState(palette[0]);
-      if (editorTitle) editorTitle.textContent = t('roles.editorNewTitle');
-      if (editorMembersPanel) editorMembersPanel.innerHTML = this.renderRoleMembersEditorPanel();
-      if (btnSave) btnSave.innerText = t('roles.createRole');
-      if (btnDelete) btnDelete.disabled = true;
-      switchEditorTab('display');
-      setEditorVisible(showEditor);
-    };
-
-    const loadRoleIntoEditor = (role: Role) => {
-      setEditorVisible(true);
-      if (inputId) inputId.value = role.id;
-      if (inputName) inputName.value = role.name;
-      if (inputAutoAssign) inputAutoAssign.checked = role.isDefault;
-      syncColorState(role.color ?? palette[0]);
-      container.querySelectorAll('.role-permission-switch').forEach((checkbox) => {
-        const input = checkbox as HTMLInputElement;
-        const permission = Number(input.dataset.permission || '0');
-        input.checked = (role.permissions & permission) !== 0;
-      });
-      if (editorTitle) editorTitle.textContent = t('roles.editorEditTitle', { name: role.name });
-      if (editorMembersPanel) editorMembersPanel.innerHTML = this.renderRoleMembersEditorPanel(role.id);
-      if (btnSave) btnSave.innerText = t('roles.updateRole');
-      if (btnDelete) {
-        const isProtected = role.isDefault || serverStore.isAdminRole(role);
-        btnDelete.disabled = isProtected && serverStore.currentUser?.id !== serverStore.ownerId;
-      }
-      switchEditorTab('display');
-    };
-
-    resetEditor(false);
-    btnCreateNew?.addEventListener('click', () => resetEditor(true));
-    btnRoleCancel?.addEventListener('click', () => resetEditor(false));
-
-    const rolesBody = list?.querySelector('tbody') as HTMLElement | null;
-    let orderAtDragStart: string[] = [];
-
-    const currentRoleOrder = (): string[] =>
-      Array.from(rolesBody?.querySelectorAll('.role-table-row') ?? []).map(
-        (row) => row.getAttribute('data-role-id') ?? ''
-      );
-
-    list?.querySelectorAll('.role-table-row').forEach((rowEl) => {
-      const row = rowEl as HTMLElement;
-
-      row.addEventListener('dragstart', (e) => {
-        this.draggedRoleId = row.getAttribute('data-role-id');
-        orderAtDragStart = currentRoleOrder();
-        const transfer = (e as DragEvent).dataTransfer;
-        if (transfer) {
-          transfer.effectAllowed = 'move';
-          transfer.setData('text/plain', this.draggedRoleId ?? '');
-        }
-        setTimeout(() => row.classList.add('role-row-dragging'), 0);
-      });
-
-      row.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        const event = e as DragEvent;
-        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-        if (!rolesBody || !this.draggedRoleId) return;
-
-        const dragged = rolesBody.querySelector(
-          `.role-table-row[data-role-id="${this.draggedRoleId}"]`
-        ) as HTMLElement | null;
-        if (!dragged || dragged === row) return;
-
-        const rect = row.getBoundingClientRect();
-        const dropAfter = event.clientY > rect.top + rect.height / 2;
-        const reference = dropAfter ? row.nextElementSibling : row;
-        if (reference === dragged) return;
-
-        this.animateRoleRowsWhile(rolesBody, () => rolesBody.insertBefore(dragged, reference));
-      });
-
-      row.addEventListener('drop', (e) => e.preventDefault());
-
-      row.addEventListener('dragend', () => {
-        row.classList.remove('role-row-dragging');
-        this.draggedRoleId = null;
-
-        const ordered = currentRoleOrder();
-        if (ordered.join() === orderAtDragStart.join()) return;
-
-        void (async () => {
-          for (let i = 0; i < ordered.length; i += 1) {
-            await networkClient.sendRequest(MessageType.ROLE_UPDATE, {
-              roleId: ordered[i],
-              position: ordered.length - i,
-            });
-          }
-        })();
-      });
-    });
-
-    btnSave?.addEventListener('click', async () => {
-      const name = inputName?.value.trim();
-      if (!name) return;
-      let permissions = 0;
-      container.querySelectorAll('.role-permission-switch').forEach((checkbox) => {
-        const input = checkbox as HTMLInputElement;
-        if (input.checked) permissions |= Number(input.dataset.permission || '0');
-      });
-      const roleId = inputId?.value?.trim();
-      const payload = {
-        name,
-        color: inputColor?.value || palette[0],
-        permissions,
-        isDefault: Boolean(inputAutoAssign?.checked),
-      };
-      if (roleId) {
-        await networkClient.sendRequest(MessageType.ROLE_UPDATE, {
-          roleId,
-          ...payload,
-        });
-      } else {
-        await networkClient.sendRequest(MessageType.ROLE_CREATE, payload);
-      }
-      onReload();
-    });
-
-    btnDelete?.addEventListener('click', async () => {
-      const roleId = inputId?.value?.trim();
-      if (!roleId || btnDelete.disabled) return;
-      await networkClient.sendRequest(MessageType.ROLE_DELETE, { roleId });
-      onReload();
-    });
-
     container.addEventListener('click', (event) => {
-      const target = event.target as HTMLElement;
-
-      const roleOpenButton = target.closest('[data-role-open]') as HTMLElement | null;
-      if (roleOpenButton) {
-        const roleId = roleOpenButton.getAttribute('data-role-open');
-        const role = roleId ? serverStore.getRole(roleId) : undefined;
-        if (role) loadRoleIntoEditor(role);
-        return;
-      }
-
-      const tabButton = target.closest('.role-editor-tab-btn') as HTMLElement | null;
-      if (tabButton?.dataset.roleEditorTab) {
-        switchEditorTab(tabButton.dataset.roleEditorTab);
-        return;
-      }
-
-      const swatch = target.closest('.role-color-swatch') as HTMLElement | null;
-      if (swatch?.dataset.roleColor) {
-        syncColorState(swatch.dataset.roleColor);
-        return;
-      }
-
-      const bulkButton = target.closest('.role-members-bulk') as HTMLElement | null;
-      if (bulkButton) {
-        const roleId = bulkButton.getAttribute('data-role-id');
-        if (roleId) {
-          void this.applyBulkRoleChange(container, roleId, bulkButton.getAttribute('data-bulk-assign') === 'true');
-        }
-        return;
-      }
-
-      const menuTrigger = target.closest('.member-actions-trigger') as HTMLElement | null;
-      if (menuTrigger) {
-        event.preventDefault();
-        event.stopPropagation();
-        const wrap = menuTrigger.closest('.settings-action-menu-wrap');
-        const row = menuTrigger.closest('tr');
+      if (!(event.target instanceof HTMLElement) || !context.isCurrent()) return;
+      const target = event.target.closest<HTMLButtonElement>('button');
+      if (!target || target.matches(':disabled')) return;
+      if (target.id === 'btn-role-create-new') this.openEditor();
+      else if (target.id === 'btn-role-done') {
+        name?.blur();
+        if (!context.operations.isPending(`role:${this.editorRoleId()}`) && !context.operations.isPending('role-create')) this.hideEditor();
+      } else if (target.id === 'btn-role-save') this.createRole();
+      else if (target.id === 'btn-role-delete') {
+        const roleId = this.editorRoleId();
+        if (roleId) void context.operations.run(`role:${roleId}`, t('roles.rolesList'), Permission.MANAGE_ROLES,
+          () => context.request<RolesListPayload>(MessageType.ROLE_DELETE, { roleId }, Permission.MANAGE_ROLES));
+      } else if (target.dataset.roleOpen) this.openEditor(context.store.getRole(target.dataset.roleOpen));
+      else if (target.dataset.roleEditorTab) {
+        const tab = target.dataset.roleEditorTab;
+        container.querySelectorAll<HTMLButtonElement>('.role-editor-tab-btn').forEach((button) => button.classList.toggle('active', button === target));
+        container.querySelectorAll<HTMLElement>('.role-editor-tab-panel').forEach((panel) => {
+          panel.style.display = panel.id === `role-editor-tab-${tab}` ? 'flex' : 'none';
+        });
+      } else if (target.classList.contains('role-members-bulk') && target.dataset.roleId) {
+        this.applyBulkRoleChange(container, target.dataset.roleId, target.dataset.bulkAssign === 'true');
+      } else if (target.classList.contains('member-actions-trigger')) {
+        const wrap = target.closest('.settings-action-menu-wrap');
         const menu = wrap?.querySelector('.settings-action-menu');
         const willShow = !menu?.classList.contains('show');
-        closeActionMenus();
+        closeMenus();
         if (willShow) {
           menu?.classList.add('show');
           wrap?.classList.add('menu-open');
-          row?.classList.add('row-menu-open');
+          target.closest('tr')?.classList.add('row-menu-open');
         }
-        return;
-      }
-
-      const submenuTrigger = target.closest('.settings-action-submenu-wrap > .settings-action-menu-item:not([data-member-action])') as HTMLElement | null;
-      if (submenuTrigger) {
-        event.preventDefault();
-        event.stopPropagation();
-        const wrap = submenuTrigger.closest('.settings-action-submenu-wrap');
-        wrap?.classList.toggle('open');
-        return;
-      }
-
-      const menuAction = target.closest('[data-member-action]') as HTMLElement | null;
-      if (menuAction) {
-        event.preventDefault();
-        event.stopPropagation();
-        if (menuAction.hasAttribute('disabled')) return;
-        const userId = menuAction.getAttribute('data-user-id');
-        const roleId = menuAction.getAttribute('data-role-id');
-        const action = menuAction.getAttribute('data-member-action');
-        if (!userId || !action) return;
-
-        void (async () => {
-          if (action === 'kick') {
-            await networkClient.sendRequest(MessageType.MEMBER_KICK, { targetUserId: userId });
-          }
-          if (action === 'toggle-admin' || action === 'toggle-role') {
-            if (!roleId) return;
-            const assigned = serverStore.getUserRoleIds(userId).includes(roleId);
-            await networkClient.sendRequest(assigned ? MessageType.ROLE_UNASSIGN : MessageType.ROLE_ASSIGN, { userId, roleId });
-          }
-          onReload();
-        })();
-        return;
-      }
-
-      if (!target.closest('.settings-action-menu-wrap')) {
-        closeActionMenus();
-      }
-    });
-
+      } else if (target.dataset.memberAction && target.dataset.userId) {
+        const userId = target.dataset.userId;
+        const roleId = target.dataset.roleId;
+        if (target.dataset.memberAction === 'kick') {
+          void context.operations.run(`kick:${userId}`, t('userMenu.kickMember'), Permission.KICK_MEMBERS,
+            () => context.request<unknown>(MessageType.MEMBER_KICK, { targetUserId: userId }, Permission.KICK_MEMBERS));
+        } else if (roleId) {
+          this.assignRole(userId, roleId, !context.store.getUserRoleIds(userId).includes(roleId));
+        }
+        closeMenus();
+      } else if (target.closest('.settings-action-submenu-wrap')) {
+        target.closest('.settings-action-submenu-wrap')?.classList.toggle('open');
+      } else if (!target.closest('.settings-action-menu-wrap')) closeMenus();
+    }, options);
     container.addEventListener('input', (event) => {
-      const target = event.target as HTMLElement;
-      if (target?.id !== 'role-members-search') return;
-      this.filterMemberRows(container, (target as HTMLInputElement).value);
-    });
-
+      if (event.target instanceof HTMLInputElement && event.target.id === 'role-members-search') {
+        this.filterMemberRows(container, event.target.value);
+      }
+    }, options);
     container.addEventListener('change', (event) => {
-      const target = event.target as HTMLElement;
-      if (!(target instanceof HTMLInputElement)) return;
-      if (!target.classList.contains('role-editor-member-switch')) return;
-      const userId = target.getAttribute('data-user-id');
-      const roleId = target.getAttribute('data-role-id');
-      if (!userId || !roleId) return;
-      const shouldAssign = target.checked;
-      target.disabled = true;
-      void (async () => {
-        try {
-          await networkClient.sendRequest(shouldAssign ? MessageType.ROLE_ASSIGN : MessageType.ROLE_UNASSIGN, { userId, roleId });
-          // Reopening the whole modal here (the old `onReload()`) collapsed the
-          // editor and threw the admin back to the role list on every single
-          // member, which is what made assigning several people so painful
-          // (#477). The server broadcast already refreshes the store, so only
-          // the member counter needs a nudge.
-          this.refreshRoleMemberCount(container, roleId);
-        } catch (error) {
-          target.checked = !shouldAssign;
-        } finally {
-          target.disabled = false;
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement) || input.matches(':disabled')) return;
+      const roleId = this.editorRoleId();
+      if (input.classList.contains('role-editor-member-switch') && input.dataset.roleId && input.dataset.userId) {
+        this.assignRole(input.dataset.userId, input.dataset.roleId, input.checked);
+      } else if (roleId && input.id === 'role-editor-is-default') {
+        const isDefault = input.checked;
+        this.updateRole(roleId, () => ({ roleId, isDefault }));
+      } else if (roleId && input.classList.contains('role-permission-switch')) {
+        const bit = Number(input.dataset.permission);
+        const enabled = input.checked;
+        this.updateRole(roleId, (role) => ({
+          roleId, permissions: enabled ? role.permissions | bit : role.permissions & ~bit,
+        }));
+      }
+    }, options);
+    const body = container.querySelector<HTMLElement>('#roles-list tbody');
+    let previousOrder: string[] = [];
+    const order = () => [...container.querySelectorAll<HTMLElement>('.role-table-row')].map((row) => row.dataset.roleId ?? '');
+    container.addEventListener('dragstart', (event) => {
+      const row = event.target instanceof HTMLElement ? event.target.closest<HTMLElement>('.role-table-row') : null;
+      if (!row) return;
+      if (!context.isCurrent() || !context.store.hasPermission(Permission.MANAGE_ROLES) || context.operations.isPending('role-order')) {
+        event.preventDefault();
+        return;
+      }
+      this.draggedRoleId = row.dataset.roleId ?? null;
+      previousOrder = order();
+      row.classList.add('role-row-dragging');
+      event.dataTransfer?.setData('text/plain', this.draggedRoleId ?? '');
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    }, options);
+    container.addEventListener('dragover', (event) => {
+      const row = event.target instanceof HTMLElement ? event.target.closest<HTMLElement>('.role-table-row') : null;
+      if (!body || !row || !this.draggedRoleId) return;
+      const dragged = [...body.querySelectorAll<HTMLElement>('.role-table-row')].find((item) => item.dataset.roleId === this.draggedRoleId);
+      if (!dragged || dragged === row) return;
+      event.preventDefault();
+      const rect = row.getBoundingClientRect();
+      const reference = event.clientY > rect.top + rect.height / 2 ? row.nextElementSibling : row;
+      if (reference !== dragged) this.animateRoleRowsWhile(body, () => body.insertBefore(dragged, reference));
+    }, options);
+    container.addEventListener('drop', (event) => { if (this.draggedRoleId) event.preventDefault(); }, options);
+    container.addEventListener('dragend', () => {
+      if (!this.draggedRoleId) return;
+      this.draggedRoleId = null;
+      container.querySelector('.role-row-dragging')?.classList.remove('role-row-dragging');
+      const ordered = order();
+      this.stateSignature = '';
+      this.membersSignature = '';
+      if (ordered.join() === previousOrder.join()) { this.refreshState(); return; }
+      void context.operations.run('role-order', t('roles.dragReorderHint'), Permission.MANAGE_ROLES, async () => {
+        for (const [index, roleId] of ordered.entries()) {
+          await context.request<RolesListPayload>(
+            MessageType.ROLE_UPDATE, { roleId, position: ordered.length - index }, Permission.MANAGE_ROLES,
+          );
         }
-      })();
+      });
+    }, options);
+    this.hideEditor();
+    this.refreshState();
+  }
+
+  public detachEvents(): void {
+    for (const dispose of this.cleanup) dispose();
+    this.cleanup = [];
+    this.colorPicker.cleanup();
+    this.root = null;
+    this.context = null;
+    this.stateSignature = '';
+    this.draggedRoleId = null;
+    this.dirtyName = false;
+    this.submittedName = '';
+  }
+
+  private editorRoleId(): string {
+    return this.root?.querySelector<HTMLInputElement>('#role-editor-id')?.value ?? '';
+  }
+
+  private hideEditor(): void {
+    this.colorPicker.close(false, false);
+    const editor = this.root?.querySelector<HTMLElement>('#role-editor-section');
+    if (editor) editor.style.display = 'none';
+    const id = this.root?.querySelector<HTMLInputElement>('#role-editor-id');
+    if (id) id.value = '';
+    this.dirtyName = false;
+  }
+
+  private openEditor(role?: Role): void {
+    const root = this.root;
+    if (!root || this.context?.operations.isPending('role-create')) return;
+    const editor = root.querySelector<HTMLElement>('#role-editor-section');
+    const id = root.querySelector<HTMLInputElement>('#role-editor-id');
+    const name = root.querySelector<HTMLInputElement>('#role-editor-name');
+    if (!editor || !id || !name) return;
+    this.colorPicker.close(false, false);
+    editor.style.display = 'flex';
+    id.value = role?.id ?? '';
+    name.value = role?.name ?? '';
+    this.submittedName = name.value;
+    this.dirtyName = false;
+    const auto = root.querySelector<HTMLInputElement>('#role-editor-is-default');
+    if (auto) auto.checked = role?.isDefault ?? false;
+    this.syncColor(role?.color ?? COLOR_PRESETS[0]);
+    root.querySelectorAll<HTMLInputElement>('.role-permission-switch').forEach((input) => {
+      input.checked = Boolean((role?.permissions ?? 0) & Number(input.dataset.permission));
+    });
+    const panel = root.querySelector('#role-editor-members-panel');
+    if (panel) panel.innerHTML = this.renderRoleMembersEditorPanel(role?.id);
+    this.membersSignature = '';
+    const title = root.querySelector('#role-editor-title');
+    if (title) title.textContent = role ? t('roles.editorEditTitle', { name: role.name }) : t('roles.editorNewTitle');
+    root.querySelector<HTMLButtonElement>('[data-role-editor-tab="display"]')?.click();
+    this.refreshState();
+    editor.scrollIntoView({ block: 'nearest' });
+    name.focus();
+  }
+
+  private syncColor(color: string): void {
+    this.colorPicker.setValue(color);
+  }
+
+  private updateRole(roleId: string, patch: (role: Role) => RoleUpdatePayload): void {
+    const context = this.context;
+    if (!context) return;
+    void context.operations.run(`role:${roleId}`, t('roles.rolesList'), Permission.MANAGE_ROLES, async () => {
+      const role = context.store.getRole(roleId);
+      if (!role) throw new Error(t('serverSettings.roleUnavailable'));
+      const payload = patch(role);
+      if (payload.name !== undefined && (!payload.name.trim() || payload.name.length > 32)) {
+        throw new Error(t('serverSettings.roleNameInvalid'));
+      }
+      await context.request<RolesListPayload>(MessageType.ROLE_UPDATE, payload, Permission.MANAGE_ROLES);
+    });
+  }
+
+  private createRole(): void {
+    const context = this.context;
+    const root = this.root;
+    if (!context || !root || this.editorRoleId() || context.operations.isPending('role-create')) return;
+    const name = root.querySelector<HTMLInputElement>('#role-editor-name')?.value.trim() ?? '';
+    const color = root.querySelector<HTMLButtonElement>('#role-editor-color')?.value ?? COLOR_PRESETS[0];
+    const isDefault = Boolean(root.querySelector<HTMLInputElement>('#role-editor-is-default')?.checked);
+    let permissions = 0;
+    root.querySelectorAll<HTMLInputElement>('.role-permission-switch:checked').forEach((input) => { permissions |= Number(input.dataset.permission); });
+    void context.operations.run('role-create', t('roles.createRole'), Permission.MANAGE_ROLES, async () => {
+      if (!name || name.length > 32) throw new Error(t('serverSettings.roleNameInvalid'));
+      await context.request<RolesListPayload>(MessageType.ROLE_CREATE, { name, color, isDefault, permissions }, Permission.MANAGE_ROLES);
+      if (context.isCurrent()) this.hideEditor();
+    });
+  }
+
+  private assignRole(userId: string, roleId: string, assign: boolean): void {
+    const context = this.context;
+    if (!context) return;
+    void context.operations.run(`assignment:${userId}:${roleId}`, t('roles.assignedColumn'), Permission.MANAGE_ROLES, async () => {
+      await context.request<RolesListPayload>(
+        assign ? MessageType.ROLE_ASSIGN : MessageType.ROLE_UNASSIGN, { userId, roleId }, Permission.MANAGE_ROLES,
+      );
+    });
+  }
+
+  public refreshState(): void {
+    const root = this.root;
+    const context = this.context;
+    if (!root || !context?.isCurrent()) return;
+    const { store, operations } = context;
+    const signature = JSON.stringify([store.roles, store.userRoles, store.serverDetails?.members, [...store.knownMembers]]);
+    if (signature !== this.stateSignature && !this.draggedRoleId && !operations.isPending('role-order')) {
+      this.stateSignature = signature;
+      const body = root.querySelector('#roles-list tbody');
+      if (body) body.innerHTML = this.renderRoleRows();
+      const members = root.querySelector('#tab-panel-members > fieldset');
+      if (members) members.innerHTML = new ServerMembersTab().renderHtml();
+    }
+    const roleId = this.editorRoleId();
+    const role = roleId ? store.getRole(roleId) : undefined;
+    const creating = operations.isPending('role-create');
+    const pendingRole = operations.isPending(`role:${roleId}`);
+    const editor = root.querySelector<HTMLElement>('#role-editor-section');
+    editor?.setAttribute('aria-busy', String(creating || pendingRole));
+    if (roleId && !role && !pendingRole) this.hideEditor();
+    const memberSignature = `${roleId}:${signature}`;
+    if (role && this.membersSignature !== memberSignature && !operations.pendingCount) {
+      const panel = root.querySelector('#role-editor-members-panel');
+      const search = root.querySelector<HTMLInputElement>('#role-members-search');
+      const query = search?.value ?? '';
+      const hadFocus = document.activeElement === search;
+      if (panel) panel.innerHTML = this.renderRoleMembersEditorPanel(roleId);
+      const nextSearch = root.querySelector<HTMLInputElement>('#role-members-search');
+      if (nextSearch) { nextSearch.value = query; if (hadFocus) nextSearch.focus(); }
+      this.filterMemberRows(root, query);
+      this.membersSignature = memberSignature;
+    }
+    const save = root.querySelector<HTMLButtonElement>('#btn-role-save');
+    if (save) { save.hidden = Boolean(roleId); save.disabled = creating; }
+    const remove = root.querySelector<HTMLButtonElement>('#btn-role-delete');
+    if (remove) remove.disabled = !role || pendingRole ||
+      ((role.isDefault || store.isAdminRole(role)) && store.currentUser?.id !== store.ownerId);
+    root.querySelectorAll<HTMLInputElement | HTMLButtonElement>('#role-editor-name, #role-editor-is-default, .role-permission-switch').forEach((input) => {
+      input.disabled = creating;
+    });
+    this.colorPicker.setDisabled(creating || !store.hasPermission(Permission.MANAGE_ROLES));
+    if (role && !pendingRole) {
+      const name = root.querySelector<HTMLInputElement>('#role-editor-name');
+      if (name && !this.dirtyName) { name.value = role.name; this.submittedName = name.value; }
+      const auto = root.querySelector<HTMLInputElement>('#role-editor-is-default');
+      if (auto) auto.checked = role.isDefault;
+      this.syncColor(role.color ?? COLOR_PRESETS[0]);
+      root.querySelectorAll<HTMLInputElement>('.role-permission-switch').forEach((input) => {
+        input.checked = Boolean(role.permissions & Number(input.dataset.permission));
+      });
+      const title = root.querySelector('#role-editor-title');
+      if (title) title.textContent = t('roles.editorEditTitle', { name: role.name });
+    }
+    root.querySelectorAll<HTMLInputElement>('.role-editor-member-switch').forEach((input) => {
+      const userId = input.dataset.userId ?? '';
+      const assignedRole = input.dataset.roleId ?? '';
+      const pending = operations.isPending(`assignment:${userId}:${assignedRole}`) || operations.isPending(`bulk:${assignedRole}`);
+      input.setAttribute('aria-busy', String(pending));
+      if (!pending) input.checked = store.getUserRoleIds(userId).includes(assignedRole);
     });
   }
 
@@ -617,23 +594,12 @@ export class ServerRolesTab {
   }
 
   /**
-   * Rewrites the "members" cell of a role straight from the switches on screen,
-   * so the number is right without waiting for the broadcast to land (#477).
-   */
-  private refreshRoleMemberCount(container: HTMLElement, roleId: string): void {
-    const cell = container.querySelector(`[data-role-count="${roleId}"]`);
-    if (!cell) return;
-    const assigned = container.querySelectorAll(
-      `.role-editor-member-switch[data-role-id="${roleId}"]:checked`
-    ).length;
-    cell.textContent = String(assigned);
-  }
-
-  /**
    * Applies one role change to every member matching the current search, so a
    * whole group can be added or removed in one go (#477).
    */
-  private async applyBulkRoleChange(container: HTMLElement, roleId: string, assign: boolean): Promise<void> {
+  private applyBulkRoleChange(container: HTMLElement, roleId: string, assign: boolean): void {
+    const context = this.context;
+    if (!context || context.operations.isPending(`bulk:${roleId}`)) return;
     const switches = (Array.from(
       container.querySelectorAll(`.role-editor-member-switch[data-role-id="${roleId}"]`)
     ) as HTMLInputElement[]).filter((input) => {
@@ -643,31 +609,31 @@ export class ServerRolesTab {
     });
 
     if (switches.length === 0) {
-      await showAlert({ message: t('roles.bulkNothingToDo'), variant: 'warning' });
+      void showAlert({ message: t('roles.bulkNothingToDo'), variant: 'warning' });
       return;
     }
 
-    const confirmed = await showConfirm({
-      title: assign ? t('roles.bulkAssign') : t('roles.bulkUnassign'),
-      message: assign
-        ? t('roles.bulkAssignConfirm', { count: switches.length })
-        : t('roles.bulkUnassignConfirm', { count: switches.length }),
-      variant: assign ? 'info' : 'danger',
-    });
-    if (!confirmed) return;
-
-    for (const input of switches) {
-      const userId = input.getAttribute('data-user-id');
-      if (!userId) continue;
-      try {
-        await networkClient.sendRequest(assign ? MessageType.ROLE_ASSIGN : MessageType.ROLE_UNASSIGN, { userId, roleId });
-        input.checked = assign;
-      } catch (error) {
-        // A member the server refuses (the owner, a higher role) must not stop
-        // the rest of the batch.
+    const userIds = switches.map((input) => input.dataset.userId).filter((id): id is string => Boolean(id));
+    void context.operations.run(`bulk:${roleId}`, t(assign ? 'roles.bulkAssign' : 'roles.bulkUnassign'), Permission.MANAGE_ROLES, async () => {
+      const confirmed = await showConfirm({
+        title: assign ? t('roles.bulkAssign') : t('roles.bulkUnassign'),
+        message: t(assign ? 'roles.bulkAssignConfirm' : 'roles.bulkUnassignConfirm', { count: userIds.length }),
+        variant: assign ? 'info' : 'danger',
+      });
+      if (!confirmed) return;
+      const errors: string[] = [];
+      for (const userId of userIds) {
+        context.assertAllowed(Permission.MANAGE_ROLES);
+        if (context.store.getUserRoleIds(userId).includes(roleId) === assign) continue;
+        try {
+          await context.request<RolesListPayload>(
+            assign ? MessageType.ROLE_ASSIGN : MessageType.ROLE_UNASSIGN, { userId, roleId }, Permission.MANAGE_ROLES,
+          );
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : t('serverSettings.saveError'));
+        }
       }
-    }
-
-    this.refreshRoleMemberCount(container, roleId);
+      if (errors.length) throw new Error(t('serverSettings.bulkFailed', { count: errors.length, error: errors[0] }));
+    });
   }
 }

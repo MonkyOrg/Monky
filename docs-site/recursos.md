@@ -3,14 +3,19 @@
 - Voz de baixa latência via WebRTC, direto entre os participantes (P2P Mesh) e sem o áudio passar pelo servidor.
 - Modo SFU opcional (`mediasoup`): cada pessoa envia seu fluxo uma única vez e o servidor distribui aos demais, para grupos maiores e para quem compartilha tela em alta resolução. O app e a CLI trazem um estimador de capacidade para dimensionar o host antes de ligar.
 - Detecção de fala (VAD) com sensibilidade ajustável e medidor ao vivo.
-- Supressão de ruído com IA (RNNoise).
+- Supressão de ruído local selecionável: RNNoise, Speex, GTCRN ou WebRTC (nativo), também acessível pelos controles rápidos.
+- Saída de áudio geral e modo avançado com dispositivos independentes para voz, compartilhamentos e mídias do chat.
 - Câmera com resolução e bitrate adaptativos.
+- Efeitos locais de câmera: desfoque, fundo virtual de cor/imagem e chroma key de tela física, com prévia nas configurações e no painel rápido da câmera.
 - Compartilhamento de tela ou janela, com áudio.
 - Chat com histórico persistente, avatares e proteção anti-flood.
 - Canais privados com visibilidade por cargo: quem não tem acesso não recebe o canal do servidor, nem o nome.
 - Soundboard a partir de uma pasta do PC, com controle do anfitrião.
+- Favoritos e busca combinados no soundboard e nos servidores salvos da Home, com favoritos no topo e ordem alfabética em cada grupo.
 - Descoberta automática de servidores na rede local.
 - Vários servidores conectados ao mesmo tempo: trocar de servidor não derruba a chamada de voz nem faz você perder mensagens.
+- Iniciar e visualizar outro servidor próprio sem entrar em voz ou substituir implicitamente outro servidor hospedado.
+- Configurações do servidor aplicadas imediatamente, com fechamento bloqueado até a confirmação de operações pendentes.
 - Perfis de qualidade: Econômico, Normal, Alta Qualidade e Gaming.
 - Servidor self-hosted com SQLite, senhas com `scrypt` e validação rigorosa de upload de avatares.
 - Monitor do Servidor no app: métricas ao vivo (tempo ativo, conectados, membros, canais, mensagens) e logs com filtro por nível.

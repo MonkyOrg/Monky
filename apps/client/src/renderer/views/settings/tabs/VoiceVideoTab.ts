@@ -1,17 +1,18 @@
 import { settingsStore } from '../../../stores/settingsStore';
 import { audioProcessor } from '../../../core/AudioProcessor';
-import { videoService } from '../../../core/VideoService';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { bindPttIndicators, renderPttIndicator } from '../../PttIndicator';
 import { bindMicrophoneLevelMeter } from '../../../core/MicrophoneLevelMeter';
 import { audioDeviceError, populateAudioDeviceSelect, selectAudioDevice, selectedAudioDevice } from '../../../core/AudioDeviceService';
 import { MicrophoneTest } from '../../../core/MicrophoneTest';
+import { NoiseSuppressionControl } from '../NoiseSuppressionControl';
+import { AudioOutputControls } from '../AudioOutputControls';
+import { CameraEffectsControl } from '../CameraEffectsControl';
+import { populateCameraDeviceSelect } from '../CameraDeviceSelection';
+import { appEvents } from '../../../core/EventBus';
 
 export class VoiceVideoTab {
-  private previewStream: MediaStream | null = null;
-  private previewOwned = false;
-  private cameraPreviewGeneration = 0;
   private unbindVadMeter: (() => void) | null = null;
   private unbindPttCapture: (() => void) | null = null;
   private unbindPttInput: (() => void) | null = null;
@@ -19,6 +20,9 @@ export class VoiceVideoTab {
   private cancelPttRecording: (() => void) | null = null;
   private unbindInputMode: Array<() => void> = [];
   private microphoneTest: MicrophoneTest | null = null;
+  private noiseSuppressionControl = new NoiseSuppressionControl();
+  private audioOutputControls = new AudioOutputControls();
+  private cameraEffectsControl = new CameraEffectsControl();
 
   public renderHtml(): string {
     return `
@@ -155,36 +159,20 @@ export class VoiceVideoTab {
         </div>
       </div>
 
-      <!-- RNNoise Noise Suppression -->
-      <div data-settings-section="noise-suppression" data-settings-label="${escapeHtml(t('settings.rnnoiseLabel'))}" class="form-group" style="padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-          <div>
-            <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-rnnoise">
-              <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">graphic_eq</span>
-              ${t('settings.rnnoiseLabel')}
-            </label>
-            <div style="font-size: 11px; color: var(--text-muted);">
-              ${t('settings.rnnoiseDesc')}
-            </div>
-          </div>
-          <label class="toggle-switch" aria-label="${t('settings.rnnoiseLabel')}">
-            <input id="checkbox-rnnoise" type="checkbox" ${settingsStore.noiseSuppressionEnabled ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </div>
+      ${this.noiseSuppressionControl.renderHtml()}
 
       <!-- Audio Outputs -->
-      <div class="form-group" id="group-speaker" data-settings-section="output-device" data-settings-label="${escapeHtml(t('settings.outputDevice'))}">
+      <div class="form-group" id="group-speaker" data-settings-section="output-device" data-settings-label="${escapeHtml(t('audioOutputs.general'))}">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">headphones</span>
-          ${t('settings.outputDevice')}
+          ${t('audioOutputs.general')}
         </label>
         <select id="select-speaker">
           <option value="">${t('settings.loadingOutputs')}</option>
         </select>
         <div id="speaker-device-status" class="audio-device-status" role="status"></div>
       </div>
+      ${this.audioOutputControls.renderHtml()}
 
       <!-- Camera Inputs -->
       <div class="form-group" id="group-camera" data-settings-section="camera" data-settings-label="${escapeHtml(t('settings.camera'))}" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
@@ -195,13 +183,8 @@ export class VoiceVideoTab {
         <select id="select-cam">
           <option value="">${t('settings.loadingCameras')}</option>
         </select>
-        <div style="margin-top: 8px;">
-          <button id="btn-toggle-cam-preview" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px;">
-            <span class="material-symbols-outlined md-16" style="margin-right: 4px;">visibility</span>
-            ${t('settings.previewCamera')}
-          </button>
-        </div>
-        <video id="settings-cam-preview" class="settings-cam-preview" autoplay playsinline muted style="display: none;"></video>
+        <div id="camera-device-status" class="audio-device-status" role="status"></div>
+        ${this.cameraEffectsControl.renderHtml()}
       </div>
 
       <!-- Screen Share -->
@@ -286,8 +269,9 @@ export class VoiceVideoTab {
     const selectSpeaker = container.querySelector<HTMLSelectElement>('#select-speaker');
     const selectCam = container.querySelector<HTMLSelectElement>('#select-cam');
     const sliderVad = container.querySelector<HTMLInputElement>('#slider-vad');
-    const checkboxRnnoise = container.querySelector<HTMLInputElement>('#checkbox-rnnoise');
-    const btnToggleCamPreview = container.querySelector<HTMLButtonElement>('#btn-toggle-cam-preview');
+    this.noiseSuppressionControl.attachEvents(container);
+    this.audioOutputControls.attachEvents(container);
+    this.cameraEffectsControl.attachEvents(container);
     const btnRefreshDevices = container.querySelector<HTMLButtonElement>('#btn-refresh-devices');
     const checkboxScreenTelemetry = container.querySelector<HTMLInputElement>('#checkbox-screen-telemetry');
     const selectScreenTelemetryPos = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-position');
@@ -426,6 +410,25 @@ export class VoiceVideoTab {
 
     const selectionAbort = new AbortController();
     this.unbindInputMode.push(() => selectionAbort.abort());
+    this.unbindInputMode.push(appEvents.on('settings.updated', () => {
+      if (!selectCam || selectCam.value === settingsStore.selectedCameraId) return;
+      if (Array.from(selectCam.options).some((option) => option.value === settingsStore.selectedCameraId)) {
+        selectCam.value = settingsStore.selectedCameraId;
+        const status = container.querySelector<HTMLElement>('#camera-device-status');
+        if (status) status.textContent = selectCam.selectedOptions[0]?.disabled ? t('audioDevices.unavailableDevice') : '';
+      } else void this.refreshDevices(container);
+    }));
+    let displayedSpeaker = selectedAudioDevice('output');
+    this.unbindInputMode.push(appEvents.on('settings.updated', () => {
+      const speaker = selectedAudioDevice('output');
+      if (!selectSpeaker || speaker === displayedSpeaker) return;
+      displayedSpeaker = speaker;
+      const value = speaker === 'default' ? '' : speaker;
+      if (Array.from(selectSpeaker.options).some((option) => option.value === value)) selectSpeaker.value = value;
+      else void this.refreshDevices(container);
+      const status = container.querySelector<HTMLElement>('#speaker-device-status');
+      if (status) status.textContent = '';
+    }));
     for (const [kind, select, statusId] of [
       ['input', selectMic, '#mic-device-status'],
       ['output', selectSpeaker, '#speaker-device-status'],
@@ -452,13 +455,22 @@ export class VoiceVideoTab {
     navigator.mediaDevices?.addEventListener('devicechange', onDevices);
     this.unbindInputMode.push(() => navigator.mediaDevices?.removeEventListener('devicechange', onDevices));
 
-    selectCam?.addEventListener('change', () => {
-      settingsStore.selectedCameraId = selectCam.value;
-      settingsStore.save();
-      if (this.previewStream) {
-        this.startCameraPreview(container);
+    const changeCamera = async () => {
+      if (!selectCam) return;
+      const status = container.querySelector<HTMLElement>('#camera-device-status');
+      selectCam.disabled = true;
+      if (status) status.textContent = '';
+      try {
+        await this.cameraEffectsControl.changeDevice(selectCam.value);
+      } finally {
+        if (!selectionAbort.signal.aborted) {
+          selectCam.value = settingsStore.selectedCameraId;
+          selectCam.disabled = false;
+        }
       }
-    });
+    };
+    selectCam?.addEventListener('change', changeCamera);
+    this.unbindInputMode.push(() => selectCam?.removeEventListener('change', changeCamera));
 
     sliderVad?.addEventListener('input', () => {
       const val = parseInt(sliderVad.value, 10);
@@ -467,21 +479,6 @@ export class VoiceVideoTab {
       settingsStore.save();
       audioProcessor.setVadThreshold(val);
       this.updateVadThresholdLine(container, val);
-    });
-
-    checkboxRnnoise?.addEventListener('change', async () => {
-      const enabled = checkboxRnnoise.checked;
-      settingsStore.noiseSuppressionEnabled = enabled;
-      settingsStore.save();
-      await audioProcessor.setNoiseSuppression(enabled);
-    });
-
-    btnToggleCamPreview?.addEventListener('click', () => {
-      if (this.previewStream) {
-        this.stopCameraPreview(container);
-      } else {
-        this.startCameraPreview(container);
-      }
     });
 
     btnRefreshDevices?.addEventListener('click', async () => {
@@ -513,7 +510,7 @@ export class VoiceVideoTab {
       const selectSpeaker = container.querySelector<HTMLSelectElement>('#select-speaker');
       const selectCam = container.querySelector<HTMLSelectElement>('#select-cam');
 
-      const cams = devices.filter((d) => d.kind === 'videoinput');
+      this.audioOutputControls.refreshDevices(devices);
 
       if (selectMic) {
         const message = populateAudioDeviceSelect(selectMic, 'input', devices);
@@ -528,13 +525,13 @@ export class VoiceVideoTab {
       }
 
       if (selectCam) {
-        selectCam.innerHTML = cams
-          .map((d, i) => `<option value="${d.deviceId}" ${d.deviceId === settingsStore.selectedCameraId ? 'selected' : ''}>${d.label || `${t('settings.camera')} ${i + 1}`}</option>`)
-          .join('') || `<option value="">${t('settings.noCameraDetected')}</option>`;
+        const message = populateCameraDeviceSelect(selectCam, devices);
+        const status = container.querySelector<HTMLElement>('#camera-device-status');
+        if (status) status.textContent = message;
       }
     } catch (e) {
       console.warn('[VoiceVideoTab] Error enumerating devices:', e);
-      for (const id of ['#mic-device-status', '#speaker-device-status']) {
+      for (const id of ['#mic-device-status', '#speaker-device-status', '#camera-device-status']) {
         const status = container.querySelector<HTMLElement>(id);
         if (status) status.textContent = audioDeviceError(e);
       }
@@ -565,63 +562,12 @@ export class VoiceVideoTab {
     this.unbindVadMeter = null;
   }
 
-  private async startCameraPreview(container: HTMLElement): Promise<void> {
-    this.stopCameraPreview(container);
-    const generation = this.cameraPreviewGeneration;
-    const video = container.querySelector<HTMLVideoElement>('#settings-cam-preview');
-    const btn = container.querySelector<HTMLButtonElement>('#btn-toggle-cam-preview');
-    if (!video) return;
-
-    try {
-      const liveStream = videoService.getCameraStream();
-      let stream: MediaStream;
-      let owned: boolean;
-      if (liveStream && liveStream.active) {
-        stream = liveStream;
-        owned = false;
-      } else {
-        const deviceId = settingsStore.selectedCameraId || undefined;
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: deviceId ? { deviceId: { exact: deviceId } } : true,
-          audio: false,
-        });
-        owned = true;
-      }
-      if (generation !== this.cameraPreviewGeneration || !video.isConnected) {
-        if (owned) stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-      this.previewStream = stream;
-      this.previewOwned = owned;
-      video.srcObject = stream;
-      video.style.display = 'block';
-      if (btn) {
-        btn.innerHTML = `<span class="material-symbols-outlined md-16" style="margin-right: 4px;">visibility_off</span>${t('settings.stopPreview')}`;
-      }
-    } catch (e) {
-      console.warn('[VoiceVideoTab] Could not start camera preview:', e);
-    }
+  public stopCameraPreview(_container?: HTMLElement): void {
+    this.cameraEffectsControl.stopPreview();
   }
 
-  public stopCameraPreview(container?: HTMLElement): void {
-    this.cameraPreviewGeneration++;
-    const parent = container || document.getElementById('tab-panel-voice_video');
-    const video = parent?.querySelector<HTMLVideoElement>('#settings-cam-preview');
-    const btn = parent?.querySelector<HTMLButtonElement>('#btn-toggle-cam-preview');
-
-    if (this.previewStream && this.previewOwned) {
-      this.previewStream.getTracks().forEach((t) => t.stop());
-    }
-    this.previewStream = null;
-    this.previewOwned = false;
-
-    if (video) {
-      video.srcObject = null;
-      video.style.display = 'none';
-    }
-    if (btn) {
-      btn.innerHTML = `<span class="material-symbols-outlined md-16" style="margin-right: 4px;">visibility</span>${t('settings.previewCamera')}`;
-    }
+  public activateCameraPreview(): void {
+    this.cameraEffectsControl.activate();
   }
 
   public deactivate(): void {
@@ -629,11 +575,14 @@ export class VoiceVideoTab {
     this.unbindPttInput?.();
     if (this.isRecordingPtt) this.cancelPttRecording?.();
     this.stopVadMeter();
-    this.stopCameraPreview();
+    this.cameraEffectsControl.deactivate();
   }
 
   public cleanup(): void {
     this.deactivate();
+    this.noiseSuppressionControl.cleanup();
+    this.audioOutputControls.cleanup();
+    this.cameraEffectsControl.cleanup();
     this.unbindInputMode.forEach((off) => off());
     this.unbindInputMode = [];
     this.cancelPttRecording = null;
