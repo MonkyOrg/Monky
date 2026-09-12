@@ -508,11 +508,48 @@ test('bot ecosystem uses isolated runner metadata and never embeds token values'
   const f = fixture(t);
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state, BOT_TOKEN: 'actual-secret' });
   const context = cliConfig.createCliContext(f.bot);
-  const ecosystemFile = pm2.writeBotEcosystem(context, path.join(f.bot, 'dist', 'index.js'));
+  const entry = path.join(f.bot, 'dist', 'index.js');
+  const ecosystemFile = pm2.writeBotEcosystem(context, entry);
+  assert.equal(path.basename(ecosystemFile), 'ecosystem.bot.config.cjs');
   const content = fs.readFileSync(ecosystemFile, 'utf8');
-  assert.match(content, /MONKY_BOT_CLI_CONFIG_FILE/);
-  assert.match(content, /MONKY_BOT_CLI_ENTRY/);
   assert.doesNotMatch(content, /actual-secret/);
+  const { apps } = require(ecosystemFile);
+  assert.equal(apps.length, 1);
+  assert.equal(apps[0].name, context.processName);
+  assert.equal(apps[0].script, context.runnerScript);
+  assert.equal(apps[0].interpreter, process.execPath);
+  assert.equal(apps[0].cwd, context.homeDir);
+  assert.deepEqual(apps[0].env, {
+    MONKY_BOT_CLI_CONFIG_FILE: context.configFile,
+    MONKY_BOT_CLI_ENTRY: entry,
+  });
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(ecosystemFile).mode & 0o777, 0o600);
+  }
+});
+
+test('updater ecosystem uses a PM2-recognized CommonJS filename and retains its invocation', (t) => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: f.state });
+  const ecosystemFile = pm2.writeUpdaterEcosystem(context, '03:45', true);
+  assert.equal(path.basename(ecosystemFile), 'ecosystem.updater.config.cjs');
+  assert.notEqual(ecosystemFile, context.botEcosystemFile);
+  const { apps } = require(ecosystemFile);
+  assert.equal(apps.length, 1);
+  assert.equal(apps[0].name, context.updaterProcessName);
+  assert.equal(apps[0].script, context.updaterScript);
+  assert.equal(apps[0].interpreter, process.execPath);
+  assert.equal(apps[0].cwd, context.homeDir);
+  assert.deepEqual(apps[0].env, {
+    MONKY_BOT_CLI_PACKAGE_ROOT: context.packageRoot,
+    MONKY_BOT_CLI_UPDATE_CWD: context.cliInvocation.cwd,
+    MONKY_BOT_CLI_UPDATE_ARGS: JSON.stringify([...context.cliInvocation.args, 'update', '--yes']),
+    MONKY_BOT_CLI_SCHEDULE: '03:45',
+    MONKY_BOT_CLI_INCLUDE_BETA: 'true',
+  });
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(ecosystemFile).mode & 0o777, 0o600);
+  }
 });
 
 test('Windows pm2 executes its Node entry without passing arguments through a command shell', (t) => {

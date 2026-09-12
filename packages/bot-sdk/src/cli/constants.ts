@@ -12,8 +12,9 @@ export const DEFAULT_MANUAL_SERVER_URL = 'ws://localhost:3000';
 export const DEFAULT_TOKEN_ENV = 'MONKY_BOT_TOKEN';
 export const DEFAULT_MARKETPLACE_PORT = 7780;
 export const DEFAULT_AUTOUPDATE_SCHEDULE = '04:00';
-export const BOT_ECOSYSTEM_FILE = 'ecosystem.bot.cjs';
-export const UPDATER_ECOSYSTEM_FILE = 'ecosystem.updater.cjs';
+// PM2 recognizes CommonJS ecosystem files by the full .config.cjs suffix.
+export const BOT_ECOSYSTEM_FILE = 'ecosystem.bot.config.cjs';
+export const UPDATER_ECOSYSTEM_FILE = 'ecosystem.updater.config.cjs';
 export const GENERATED_WRAPPER_FILE = 'monky-cli.cjs';
 
 export function color(text: string, code: string): string {
