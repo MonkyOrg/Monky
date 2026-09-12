@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Corrigida uma falha que impedia iniciar bots em segundo plano ou ativar o autoupdate com PM2. O ajuste preserva o perfil e a identidade do bot.",
+  "en": "Fixed an error that prevented bots from starting in the background or enabling autoupdate with PM2. The fix preserves the bot profile and identity."
+}
