@@ -6,6 +6,7 @@ import { matchesSearch } from '../../../utils/search';
 import { sortFavoritesFirst } from '../../../utils/favoriteOrder';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../../../utils/favoriteMotion';
 import { captureShortcut } from '../../../utils/keybind';
+import { appEvents } from '../../../core/EventBus';
 import { favoritesStore, soundFavoriteKey } from '../../../stores/favoritesStore';
 import { clientLog } from '../../../core/ClientLogService';
 import { renderFavoriteToggle, renderFavoritesFilter } from '../../FavoritesControls';
@@ -13,9 +14,16 @@ import { showAlert } from '../../Dialog';
 
 export class SoundboardTab {
   private searchQuery: string = '';
+  private unbindSounds: (() => void) | null = null;
   private favoritesOnly = false;
   private pickingFolder = false;
   private readonly favoriteMotion = new FavoriteListMotion();
+
+  public cleanup(): void {
+    this.unbindSounds?.();
+    this.unbindSounds = null;
+    this.favoriteMotion.cancel();
+  }
 
   public renderHtml(): string {
     this.favoriteMotion.cancel();
@@ -178,13 +186,18 @@ export class SoundboardTab {
   }
 
   public attachEvents(container: HTMLElement): void {
-    this.favoriteMotion.cancel();
+    this.cleanup();
+    this.unbindSounds = appEvents.on('soundboard.sounds_loaded', () => {
+      if (!container.isConnected) return;
+      const info = container.querySelector('#soundboard-folder-info');
+      if (info) info.textContent = tCount('settings.soundsFound', soundboardService.getSounds().length);
+      this.refreshTable(container);
+    });
     const inputPath = container.querySelector<HTMLInputElement>('#input-soundboard-path');
     const btnSelectFolder = container.querySelector<HTMLButtonElement>('#btn-select-soundboard-folder');
     const sliderVol = container.querySelector<HTMLInputElement>('#slider-soundboard-vol');
     const volVal = container.querySelector<HTMLElement>('#soundboard-vol-val');
     const checkboxMute = container.querySelector<HTMLInputElement>('#checkbox-soundboard-mute');
-
     const handlePickFolder = async () => {
       if (this.pickingFolder) return;
       this.pickingFolder = true;
@@ -299,6 +312,8 @@ export class SoundboardTab {
       const scrollTop = table.scrollTop;
       const listScrollTop = table.querySelector('.sb-shortcuts-list')?.scrollTop ?? 0;
       const focused = document.activeElement;
+      const selection = focused instanceof HTMLInputElement && table.contains(focused)
+        ? { id: focused.id, start: focused.selectionStart, end: focused.selectionEnd } : null;
       const buttons = Array.from(table.querySelectorAll<HTMLButtonElement>('.favorite-toggle'));
       const favorite = focused instanceof HTMLButtonElement && buttons.includes(focused) ? focused : null;
       const favoriteIndex = favorite ? buttons.indexOf(favorite) : -1;
@@ -319,6 +334,10 @@ export class SoundboardTab {
         const next = table.querySelector<HTMLButtonElement>(`#${filterId}`);
         next?.focus({ preventScroll: true });
         next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      } else if (selection) {
+        const input = table.querySelector<HTMLInputElement>(`#${selection.id}`);
+        input?.focus({ preventScroll: true });
+        if (selection.start !== null && selection.end !== null) input?.setSelectionRange(selection.start, selection.end);
       }
     }, animate);
   }

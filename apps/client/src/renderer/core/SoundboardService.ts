@@ -29,10 +29,10 @@ interface PendingSoundPlayback {
 
 export class SoundboardService {
   private sounds: SoundItem[] = [];
+  private loadGeneration = 0;
   private sinkId: string = settingsStore.selectedSpeakerId;
   private activePlaybacks: Map<string, ActiveSoundPlayback> = new Map();
   private pendingPlaybacks = new Map<string, PendingSoundPlayback>();
-  private loadGeneration = 0;
 
   constructor() {
     this.setupListeners();
@@ -128,8 +128,8 @@ export class SoundboardService {
       this.syncShortcuts();
       return this.sounds;
     } catch (err) {
-      console.warn('[SoundboardService] Error loading sounds from folder:', err);
       if (!isCurrent()) return this.sounds;
+      console.warn('[SoundboardService] Error loading sounds from folder:', err);
       this.sounds = [];
       appEvents.emit('soundboard.sounds_loaded', this.sounds);
       return [];
@@ -259,11 +259,17 @@ export class SoundboardService {
   }
 
   public async selectFolder(): Promise<string | null> {
-    if (!window.api?.selectSoundboardFolder) return null;
+    if (!window.api?.selectSoundboardFolder) throw new Error(t('botChat.downloadDesktopOnly'));
     const folder = await window.api.selectSoundboardFolder();
     if (folder) {
+      const previousFolder = settingsStore.soundboardFolderPath;
       settingsStore.soundboardFolderPath = folder;
-      settingsStore.save();
+      try {
+        settingsStore.save();
+      } catch (error) {
+        settingsStore.soundboardFolderPath = previousFolder;
+        throw error;
+      }
       await this.loadSounds();
     }
     return folder;

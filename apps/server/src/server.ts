@@ -7,6 +7,8 @@ import { AuthService } from './application/services/AuthService';
 import { AttachmentService } from './application/services/AttachmentService';
 import { BotService } from './application/services/BotService';
 import { BotSelectorService } from './application/services/BotSelectorService';
+import { BotSettingsService } from './application/services/BotSettingsService';
+import { SqliteBotSettingsRepository } from './infrastructure/database/SqliteBotSettingsRepository';
 import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
 import { CommandRegistry } from './application/services/CommandRegistry';
 import { ChannelService } from './application/services/ChannelService';
@@ -442,7 +444,8 @@ export class MonkyServer {
       sfuManager,
       botService,
       commandRegistry,
-      new BotSelectorService(new SqliteBotSelectorRepository(db))
+      new BotSelectorService(new SqliteBotSelectorRepository(db)),
+      new BotSettingsService(new SqliteBotSettingsRepository(db))
     );
     resources.defer('WebSocket server', () => wsServer.close());
 

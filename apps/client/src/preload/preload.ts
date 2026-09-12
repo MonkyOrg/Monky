@@ -1,7 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { SHORTCUT_IPC } from '@monky/shared';
+import { AUDIO_PREVIEW_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS } from '@monky/shared';
 import type {
   ActionShortcutBinding,
+  AudioPreviewCancellation,
+  AudioPreviewInput,
+  AudioPreviewResult,
   AppIdentityImportResult,
   AppIdentityResult,
   BackupCryptoResult,
@@ -25,6 +28,13 @@ import type {
   SoundboardShortcutBinding,
   SoundboardSoundData,
   SoundboardSoundEntry,
+  SoundboardDownloadAvailability,
+  SoundboardDownloadAuthorization,
+  SoundboardDownloadPermit,
+  SoundboardDownloadInput,
+  SoundboardDownloadCancellation,
+  SoundboardDownloadProgress,
+  SoundDownloadResult,
   StickerData,
   StickerEntry,
   StickerSaveResult,
@@ -72,6 +82,13 @@ export interface ElectronApi {
   selectSoundboardFolder: () => Promise<string | null>;
   listSoundboardSounds: (folderPath: string) => Promise<SoundboardSoundEntry[]>;
   readSoundboardSound: (filePath: string) => Promise<SoundboardSoundData | null>;
+  soundDownloadAvailability: (configuredFolder: string) => Promise<SoundboardDownloadAvailability>;
+  authorizeSoundDownload: (input: SoundboardDownloadAuthorization) => Promise<SoundboardDownloadPermit>;
+  downloadSound: (input: SoundboardDownloadInput) => Promise<SoundDownloadResult>;
+  cancelSoundDownload: (key: SoundboardDownloadCancellation) => Promise<boolean>;
+  onSoundDownloadProgress: (cb: (progress: SoundboardDownloadProgress) => void) => () => void;
+  loadAudioPreview: (input: AudioPreviewInput) => Promise<AudioPreviewResult>;
+  cancelAudioPreview: (input: AudioPreviewCancellation) => Promise<boolean>;
   selectStickersFolder: () => Promise<string | null>;
   listStickers: (folderPath: string) => Promise<StickerEntry[]>;
   readSticker: (filePath: string) => Promise<StickerData | null>;
@@ -206,6 +223,17 @@ const api: ElectronApi = {
   selectSoundboardFolder: () => ipcRenderer.invoke('dialog:select-soundboard-folder'),
   listSoundboardSounds: (folderPath) => ipcRenderer.invoke('soundboard:list-sounds', folderPath),
   readSoundboardSound: (filePath) => ipcRenderer.invoke('soundboard:read-sound', filePath),
+  soundDownloadAvailability: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.availability, folder),
+  authorizeSoundDownload: (input) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.authorize, input),
+  downloadSound: (input) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.download, input),
+  cancelSoundDownload: (key) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.cancel, key),
+  loadAudioPreview: (input) => ipcRenderer.invoke(AUDIO_PREVIEW_IPC.load, input),
+  cancelAudioPreview: (input) => ipcRenderer.invoke(AUDIO_PREVIEW_IPC.cancel, input),
+  onSoundDownloadProgress: (cb) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: SoundboardDownloadProgress) => cb(progress);
+    ipcRenderer.on(SOUND_DOWNLOAD_PROGRESS, listener);
+    return () => ipcRenderer.removeListener(SOUND_DOWNLOAD_PROGRESS, listener);
+  },
   selectStickersFolder: () => ipcRenderer.invoke('dialog:select-stickers-folder'),
   listStickers: (folderPath) => ipcRenderer.invoke('stickers:list', folderPath),
   readSticker: (filePath) => ipcRenderer.invoke('stickers:read', filePath),

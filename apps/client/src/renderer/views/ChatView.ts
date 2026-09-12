@@ -30,6 +30,7 @@ import { groupCommands, type CommandGroup } from '../utils/commandCatalog';
 import { renderCommandCatalog } from './commandCatalog';
 import { renderBotCommandContext } from './botResponse';
 import { PublicSelectorView } from './PublicSelectorView';
+import { botSettingsMenuItem } from './BotSettingsModal';
 
 /** How close to the end the feed must be to keep following new messages (#270). */
 const BOTTOM_SCROLL_THRESHOLD_PX = 48;
@@ -72,6 +73,7 @@ export class ChatView {
   private commandActiveIndex = 0;
   private commandQuery = '';
   private botChat: BotChatView | null = null;
+  private commandSelection = 0;
   private publicSelectors: PublicSelectorView | null = null;
   // Files picked for the next message, keyed by a local id (#11).
   private pending: PendingAttachment[] = [];
@@ -367,12 +369,23 @@ export class ChatView {
           participantManager.getByUserId(userId)?.user ||
           serverStore.serverDetails?.members.find((m) => m.id === userId) ||
           serverStore.knownMembers.get(userId);
-        if (targetUser && mouseEvent.target instanceof Element
-          && mouseEvent.target.closest('.chat-author-name, .chat-author-avatar')) {
-          mouseEvent.preventDefault();
-          contextMenu.close();
-          userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, targetUser);
-          return;
+        if (mouseEvent.target instanceof Element && mouseEvent.target.closest('.chat-author-name, .chat-author-avatar')) {
+          if (targetUser) {
+            mouseEvent.preventDefault();
+            contextMenu.close();
+            userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, targetUser);
+            return;
+          }
+          const message = this.currentChannelId
+            ? chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === row.dataset.messageId)
+            : undefined;
+          if (message?.isBot && message.userId === userId) {
+            mouseEvent.preventDefault();
+            userContextMenu.close();
+            contextMenu.open(mouseEvent.clientX, mouseEvent.clientY,
+              [botSettingsMenuItem(userId, getActiveNetworkClient(), getActiveServerStore())]);
+            return;
+          }
         }
 
         // Editing/deleting acts on this specific message, so it takes
@@ -605,7 +618,7 @@ export class ChatView {
       ...messages.map((message) => ({ createdAt: message.createdAt, html: this.renderMessageRow(message) })),
       ...chatStore.getInvocations(this.currentChannelId ?? '').map((invocation) => ({
         createdAt: invocation.createdAt,
-        html: renderBotInvocation(invocation, !this.getBotCommandDeniedReason()),
+        html: renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id),
       })),
     ].filter((item) => item.html !== '').sort((a, b) => a.createdAt - b.createdAt);
     for (const item of items) {
@@ -1397,7 +1410,7 @@ export class ChatView {
       updateComposeLinkPreview();
     }
 
-    const handleSend = () => {
+    const handleSend = (gesture: Event | boolean = false) => {
       if (!input || !this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
       const text = input.value.trim();
       if (chatStore.getCommandDraft(this.currentChannelId)) {
@@ -1412,7 +1425,8 @@ export class ChatView {
           this.updateCommandDropup(input);
           return;
         }
-        if (command.kind === 'command') this.selectCommand(command.command, command.text);
+        if (command.kind === 'command') this.selectCommand(command.command, command.text,
+          typeof gesture === 'boolean' ? gesture : gesture.isTrusted);
         else if (command.kind === 'ambiguous') {
           this.showCommandNotice(t('botChat.commandAmbiguous'));
           this.commandGroups = groupCommands(command.commands, [], getLanguage(), false);
@@ -1597,6 +1611,7 @@ export class ChatView {
     this.syncComposerPermissionState();
 
     input?.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Escape' && !this.mentionActive && !this.commandActive) this.clearReply();
       // While the mention dropup is open, arrows/enter/tab/esc drive it (#14).
       if (this.mentionActive && this.mentionMatches.length > 0) {
@@ -1645,14 +1660,14 @@ export class ChatView {
         }
         if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
           e.preventDefault();
-          this.applyCommand(this.commandActiveIndex);
+          this.applyCommand(this.commandActiveIndex, e.isTrusted);
           return;
         }
       }
 
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        handleSend();
+        handleSend(e.isTrusted);
       }
     });
 
@@ -1775,7 +1790,7 @@ export class ChatView {
       ? { start: focused.selectionStart, end: focused.selectionEnd }
       : undefined;
     const wrapper = document.createElement('div');
-    wrapper.innerHTML = renderBotInvocation(invocation, !this.getBotCommandDeniedReason());
+    wrapper.innerHTML = renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id);
     const card = wrapper.firstElementChild;
     if (!card) {
       previous?.remove();
@@ -2039,7 +2054,7 @@ export class ChatView {
         this.setActiveCommand(Number(item.dataset.cmdIndex), false);
       });
       item.addEventListener('mousedown', (event) => event.preventDefault());
-      item.addEventListener('click', () => this.applyCommand(Number(item.dataset.cmdIndex)));
+      item.addEventListener('click', (event) => this.applyCommand(Number(item.dataset.cmdIndex), event.isTrusted));
     });
     const groupButtons = [...el.querySelectorAll<HTMLButtonElement>('[data-command-group]')];
     groupButtons.forEach((button, index) => {
@@ -2087,7 +2102,7 @@ export class ChatView {
     if (scroll) active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
-  private applyCommand(index: number): void {
+  private applyCommand(index: number, userGesture = false): void {
     const denied = this.getBotCommandDeniedReason();
     if (denied) {
       this.showCommandNotice(denied);
@@ -2101,21 +2116,70 @@ export class ChatView {
       return;
     }
     const typed = parseTypedCommand(input.value, chatStore.getCommands());
-    this.selectCommand(cmd, typed.kind === 'command' || typed.kind === 'ambiguous' ? typed.text : '');
+    this.selectCommand(cmd, typed.kind === 'command' || typed.kind === 'ambiguous' ? typed.text : '', userGesture);
   }
 
-  private selectCommand(command: SlashCommand, text = ''): void {
+  private selectCommand(command: SlashCommand, text = '', userGesture = false): void {
+    this.commandSelection++;
+    if (command.downloadsSound) {
+      void this.prepareDownloadCommand(command, text, userGesture);
+      return;
+    }
+    this.activateCommand(command, text, userGesture, false);
+  }
+
+  private async prepareDownloadCommand(command: SlashCommand, text: string, userGesture: boolean): Promise<void> {
+    const store = getActiveChatStore();
+    const client = getActiveNetworkClient();
+    const connectionId = client.getConnectionId();
+    const channelId = this.currentChannelId;
+    const view = this.botChat;
+    const selection = this.commandSelection;
+    const sourceText = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input')?.value;
+    const current = () => view !== null && this.botChat === view && this.currentChannelId === channelId &&
+      getActiveChatStore() === store && client.getConnectionId() === connectionId &&
+      selection === this.commandSelection && client.getStatus() === 'CONNECTED' &&
+      this.container.querySelector<HTMLTextAreaElement>('#chat-message-input')?.value === sourceText;
+    if (!window.api?.soundDownloadAvailability) {
+      this.showCommandNotice(t('botChat.downloadDesktopOnly'));
+      return;
+    }
+    if (!settingsStore.soundboardFolderPath) {
+      this.closeCommandDropup();
+      this.showCommandNotice(t('botChat.downloadFolderRequired'));
+      return;
+    }
+    try {
+      const availability = await window.api.soundDownloadAvailability(settingsStore.soundboardFolderPath);
+      if (!current()) return;
+      if (availability === 'ready') {
+        this.activateCommand(command, text, userGesture, true);
+        return;
+      }
+      this.closeCommandDropup();
+      this.showCommandNotice(t(availability === 'unavailable' ? 'botChat.downloadWriteFailed'
+        : availability === 'confirmation_required' ? 'botChat.downloadFolderNeedsConfirmation' : 'botChat.downloadFolderRequired'));
+    } catch {
+      if (current()) this.showCommandNotice(t('botChat.downloadWriteFailed'));
+    }
+  }
+
+  private activateCommand(command: SlashCommand, text: string, userGesture: boolean, downloadConsent: boolean): void {
     if (!this.currentChannelId) return;
+    if (this.getBotCommandDeniedReason() || !chatStore.isCommandAvailable(command)) {
+      this.showCommandNotice(this.getBotCommandDeniedReason() ?? t('botChat.commandUnavailable'));
+      return;
+    }
     this.showCommandNotice('');
     this.closeMentionDropup();
     this.closeCommandDropup();
     this.emojiPicker?.close();
-    chatStore.selectCommand(this.currentChannelId, command, text);
+    chatStore.selectCommand(this.currentChannelId, command, text, downloadConsent);
     const draft = chatStore.getCommandDraft(this.currentChannelId);
     if (draft && !command.options?.length && text.trim()) {
       chatStore.setCommandPending(this.currentChannelId, draft, false, t('botChat.unexpectedText'));
     } else if (draft && !command.options?.length) {
-      void this.botChat?.invoke();
+      void this.botChat?.invoke(userGesture);
       return;
     }
     this.botChat?.focusComposer();

@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { runBotSettingsDomSmoke } = require(path.join(__dirname, 'botSettingsDomSmoke.cjs'));
 
 const clientRoot = path.resolve(__dirname, '..');
 const output = path.join(clientRoot, 'dist-test');
@@ -10,7 +11,7 @@ if (!process.versions.electron) {
   const profile = path.join(output, `command-dom-profile-${process.pid}`);
   const env = { ...process.env, MONKY_COMMAND_DOM_PROFILE: profile };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require('electron'), [__filename], { cwd: clientRoot, env, stdio: 'inherit' });
+  const child = spawn(require('electron'), [__filename, ...process.argv.slice(2)], { cwd: clientRoot, env, stdio: 'inherit' });
   const cleanup = () => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   child.once('error', (error) => { console.error(error); cleanup(); process.exitCode = 1; });
   child.once('exit', (code) => { cleanup(); process.exitCode = code ?? 1; });
@@ -24,7 +25,10 @@ if (!process.versions.electron) {
   let timeout;
   const finish = async (code) => {
     clearTimeout(timeout);
-    if (window && !window.isDestroyed()) window.destroy();
+    if (window && !window.isDestroyed()) {
+      if (window.webContents.debugger.isAttached()) window.webContents.debugger.detach();
+      window.destroy();
+    }
     if (vite) await vite.close();
     app.exit(code);
   };
@@ -58,18 +62,46 @@ if (!process.versions.electron) {
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    timeout = setTimeout(() => { console.error('DOM smoke timed out'); void finish(1); }, 45_000);
+    timeout = setTimeout(() => { console.error('DOM smoke timed out'); void finish(1); }, 60_000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__command_dom_smoke__`);
+    window.webContents.debugger.attach('1.3');
+    await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
     window.webContents.focus();
+    if (process.argv.includes('--bot-settings-only')) {
+      const checks = await window.webContents.executeJavaScript(`(${runBotSettingsDomSmoke.toString()})()`, true);
+      await window.webContents.executeJavaScript('document.body.innerHTML = window.botSettingsPreviewMarkup', true);
+      fs.writeFileSync(path.join(output, 'bot-settings.png'), (await window.webContents.capturePage()).toPNG());
+      console.log(`Bot settings DOM smoke: ${checks} checks passed`);
+      await finish(0);
+      return;
+    }
+    const previewChecks = await window.webContents.executeJavaScript(`(${runAudioPreviewLifecycleSmoke.toString()})()`, true);
+    console.log(`Audio preview lifecycle: ${previewChecks} checks passed`);
+    if (process.argv.includes('--autocomplete-only')) {
+      const checks = await window.webContents.executeJavaScript(`(${runAutocompleteDomSmoke.toString()})()`, true);
+      await runLocalDownloadGestureSmoke(window);
+      const preferenceChecks = await window.webContents.executeJavaScript('window.autocompletePreferencesSmoke()', true);
+      await window.webContents.executeJavaScript('window.autocompleteDomCleanup()', true);
+      console.log(`Autocomplete DOM smoke: ${checks} checks passed`);
+      console.log(`Bot preference transport: ${preferenceChecks} checks passed`);
+      await finish(0);
+      return;
+    }
     await window.webContents.executeJavaScript(`(${runDomSmoke.toString()})()`, true);
     fs.writeFileSync(path.join(output, 'command-dom-catalog.png'), (await window.webContents.capturePage()).toPNG());
     const result = await window.webContents.executeJavaScript('window.commandDomCaptureComposer()', true);
     fs.writeFileSync(path.join(output, 'command-dom-composer.png'), (await window.webContents.capturePage()).toPNG());
     await runMessageToolbarPointerSmoke(window);
     await window.webContents.executeJavaScript('window.commandDomCleanup()', true);
+    const autocompleteChecks = await window.webContents.executeJavaScript(`(${runAutocompleteDomSmoke.toString()})()`, true);
+    fs.writeFileSync(path.join(output, 'command-dom-audio-selector.png'), (await window.webContents.capturePage()).toPNG());
+    await runLocalDownloadGestureSmoke(window);
+    const preferenceChecks = await window.webContents.executeJavaScript('window.autocompletePreferencesSmoke()', true);
+    await window.webContents.executeJavaScript('window.autocompleteDomCleanup()', true);
     const sidebarChecks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
     const restrictionChecks = await window.webContents.executeJavaScript(`(${runServerRestrictionSmoke.toString()})()`, true);
     const settingsChecks = await window.webContents.executeJavaScript(`(${runSettingsNavigationSmoke.toString()})()`, true);
+    const botSettingsChecks = await window.webContents.executeJavaScript(`(${runBotSettingsDomSmoke.toString()})()`, true);
     await window.webContents.executeJavaScript(`document.body.innerHTML = '<div class="user-quick-actions" style="justify-content:flex-start;padding:20px;gap:12px;">' + window.adminAudioPreviewMarkup + '</div>'; new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
     fs.writeFileSync(path.join(output, 'admin-audio-icons.png'), (await window.webContents.capturePage({ x: 0, y: 0, width: 140, height: 80 })).toPNG());
     await window.webContents.executeJavaScript(`document.body.innerHTML = '<div style="width:250px;padding:12px;">' + window.adminAudioChannelPreviewMarkup + '</div>'; new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
@@ -79,12 +111,754 @@ if (!process.versions.electron) {
     await window.webContents.executeJavaScript(`document.body.innerHTML = '<div style="display:flex;gap:16px;padding:24px;">' + window.voiceConnectionPreviewMarkup + '</div>'; new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
     fs.writeFileSync(path.join(output, 'voice-connection-states.png'), (await window.webContents.capturePage({ x: 0, y: 0, width: 1020, height: 180 })).toPNG());
     console.log(`Command DOM smoke: ${result.checks} checks passed`);
+    console.log(`Autocomplete DOM smoke: ${autocompleteChecks} checks passed`);
     console.log(`Sidebar PTT smoke: ${sidebarChecks} checks passed`);
     console.log(`Server restriction smoke: ${restrictionChecks} checks passed`);
     console.log(`Settings navigation smoke: ${settingsChecks} checks passed`);
+    console.log(`Bot settings DOM smoke: ${botSettingsChecks} checks passed`);
+    console.log(`Bot preference transport: ${preferenceChecks} checks passed`);
     console.log('Screenshots: dist-test\\command-dom-catalog.png and dist-test\\command-dom-composer.png');
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
+}
+
+async function runAudioPreviewLifecycleSmoke() {
+  const [{ AudioPreviewService }, { renderSelectionChoiceList }, { settingsStore }, { appEvents }] = await Promise.all([
+    import('/core/AudioPreviewService.ts'), import('/utils/selectionChoices.ts'),
+    import('/stores/settingsStore.ts'), import('/core/EventBus.ts'),
+  ]);
+  let checks = 0;
+  const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+  const settle = async () => { for (let index = 0; index < 30; index++) await Promise.resolve(); };
+  const deferred = () => {
+    let resolve, reject;
+    const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
+    return { promise, resolve, reject };
+  };
+  const previous = {
+    api: window.api, Audio: window.Audio, speaker: settingsStore.selectedSpeakerId,
+    advancedOutputs: settingsStore.advancedAudioOutputs, outputDevices: settingsStore.audioOutputDevices,
+    createUrl: URL.createObjectURL, revokeUrl: URL.revokeObjectURL,
+  };
+  const audios = [], routes = [], loads = [], cancels = [], urls = [], revoked = [];
+  let deferRoutes = false;
+  let nextLoad;
+  const ready = () => ({ status: 'ready', data: new Uint8Array([0]), mimeType: 'audio/wav' });
+  class FixtureAudio extends EventTarget {
+    constructor() {
+      super(); this.paused = true; this.sinkId = ''; this.src = ''; this.plays = 0; this.error = null;
+      this.currentTime = 0; this.duration = NaN; this.ended = false; this.listeners = new Map(); audios.push(this);
+    }
+    addEventListener(type, listener, options) {
+      const listeners = this.listeners.get(type) ?? new Set();
+      listeners.add(listener); this.listeners.set(type, listeners);
+      super.addEventListener(type, listener, options);
+    }
+    removeEventListener(type, listener, options) {
+      this.listeners.get(type)?.delete(listener);
+      super.removeEventListener(type, listener, options);
+    }
+    play() {
+      if (this.ended) { this.currentTime = 0; this.ended = false; }
+      this.paused = false; this.plays++; this.dispatchEvent(new Event('play')); return Promise.resolve();
+    }
+    pause() { this.paused = true; this.dispatchEvent(new Event('pause')); }
+    load() {}
+    removeAttribute(name) { if (name === 'src') this.src = ''; }
+    setSinkId(id) {
+      if (!deferRoutes) { this.sinkId = id; return Promise.resolve(); }
+      const wait = deferred();
+      routes.push({ audio: this, id, resolve: () => { this.sinkId = id; wait.resolve(); }, reject: wait.reject });
+      return wait.promise;
+    }
+  }
+  const root = document.createElement('div');
+  document.body.append(root);
+  const service = new AudioPreviewService();
+  const unbind = service.bind(root);
+  try {
+    window.Audio = FixtureAudio;
+    URL.createObjectURL = blob => { const url = previous.createUrl.call(URL, blob); urls.push(url); return url; };
+    URL.revokeObjectURL = url => { revoked.push(url); previous.revokeUrl.call(URL, url); };
+    settingsStore.selectedSpeakerId = '';
+    settingsStore.advancedAudioOutputs = false;
+    window.api = {
+      loadAudioPreview: async input => { loads.push(input); const pending = nextLoad; nextLoad = undefined; return pending ? pending.promise : ready(); },
+      cancelAudioPreview: async input => { cancels.push(input); return true; },
+    };
+    root.innerHTML = ['first', 'second', 'unrelated'].map((id, index) => `<section>${renderSelectionChoiceList({
+      choices: [{ label: id, value: 'same-id', audio: {
+        url: `https://audio.example/${id}.wav`, fileName: `${id}.wav`, ...(index === 0 ? { durationMs: 12_000 } : {}),
+      } }],
+      label: id, header: id, idPrefix: id, keyPrefix: `preview-lifecycle:${id}`,
+      volumeScope: index < 2 ? 'preview-lifecycle-command' : 'another-command',
+      optionAttributes: () => 'data-lifecycle-select',
+    })}</section>`).join('');
+    const controls = index => root.querySelectorAll('[data-audio-choice-controls]')[index];
+    const play = index => controls(index).querySelector('button').click();
+    let submissions = 0;
+    root.addEventListener('click', event => { if (event.target.closest('[data-lifecycle-select]')) submissions++; });
+    play(0);
+    await settle();
+    check(audios[0]?.plays === 1 && audios[0].src.startsWith('blob:'), 'A preview must play only a local Blob after IPC');
+    const sliders = [...root.querySelectorAll('[data-audio-preview-volume]')];
+    const progress = index => controls(index).querySelector('[data-audio-preview-progress]');
+    check(!controls(0).querySelector('input'), 'Individual results must not have their own volume sliders');
+    check(progress(0).value === 0 && progress(0).max === 12, 'Preview metadata supplies a duration before decoding');
+    audios[0].duration = 8.5;
+    audios[0].dispatchEvent(new Event('loadedmetadata'));
+    audios[0].currentTime = 3.25;
+    audios[0].dispatchEvent(new Event('timeupdate'));
+    check(progress(0).value === 3.25 && progress(0).max === 8.5 &&
+      controls(0).querySelector('[data-audio-preview-time]').textContent === '00:03 / 00:08',
+      'Playback progress must follow decoded duration and currentTime, not download bytes');
+    play(0);
+    await settle();
+    check(audios[0].paused && progress(0).value === 3.25, 'Pausing retains the playback position');
+    play(0);
+    await settle();
+    audios[0].currentTime = 8.5;
+    audios[0].ended = true;
+    audios[0].paused = true;
+    audios[0].dispatchEvent(new Event('ended'));
+    check(progress(0).value === progress(0).max, 'An ended preview reaches the end of its progress bar');
+    play(0);
+    await settle();
+    check(progress(0).value === 0 && !audios[0].paused, 'Replay starts its progress again');
+    const slider = sliders[0];
+    slider.value = '27';
+    slider.dispatchEvent(new Event('input', { bubbles: true }));
+    check(audios[0].volume === 0.27 && sliders[1].value === '27' &&
+      root.querySelector('[data-audio-preview-percentage]').textContent === '27%' &&
+      slider.getAttribute('aria-valuetext') === '27%', 'Command-wide volume updates the player, percentage and matching controls');
+    sliders[2].value = '81';
+    sliders[2].dispatchEvent(new Event('input', { bubbles: true }));
+    check(audios[0].volume === 0.27 && slider.value === '27', 'An unrelated command must not change this preview volume');
+    play(1);
+    await settle();
+    check(loads.length === 2 && audios[1]?.plays === 1, 'Equal option IDs with different audio sources must load different previews');
+    check(audios[0].paused && audios[0].src === '' && revoked.includes(urls[0]), 'Replacing a preview must release the old player and Blob');
+    check(audios[1].volume === 0.27, 'Another result in the command inherits its shared volume');
+    check([...audios[0].listeners.values()].every(listeners => listeners.size === 0), 'Replacement removes all media and progress listeners');
+    audios[0].currentTime = 7;
+    audios[0].dispatchEvent(new Event('timeupdate'));
+    check(progress(0).value === 0 && progress(1).value === 0, 'Released media cannot update the old or new progress bars');
+    audios[1].duration = Infinity;
+    audios[1].currentTime = 3;
+    audios[1].dispatchEvent(new Event('durationchange'));
+    check(progress(1).value === 0 && controls(1).querySelector('[data-audio-preview-time]').textContent === '00:03 / --:--',
+      'Unknown or non-finite duration must never produce an invalid progress value');
+    check(submissions === 0, 'Preview and volume controls must never select or submit a choice');
+    service.release(root);
+
+    deferRoutes = true;
+    settingsStore.selectedSpeakerId = 'headphones';
+    play(0);
+    await settle();
+    const old = audios.at(-1);
+    play(1);
+    await settle();
+    const current = audios.at(-1);
+    check(routes.length === 2 && current !== old, 'Fixture must pause two distinct output-routing operations');
+    routes[0].resolve();
+    await settle();
+    check(old.plays === 0 && current.plays === 0, 'A stale routing completion cannot start either the old or the newer pending player');
+    routes[1].resolve();
+    await settle();
+    check(current.plays === 1 && current.sinkId === 'headphones', 'The selected player starts only after its own output is ready');
+    settingsStore.selectedSpeakerId = 'output-one';
+    appEvents.emit('settings.updated');
+    await settle();
+    settingsStore.selectedSpeakerId = 'output-two';
+    appEvents.emit('settings.updated');
+    await settle();
+    check(routes.length === 3 && current.paused, 'Rapid output changes must serialize and pause playback');
+    routes[2].resolve();
+    await settle();
+    check(routes.length === 4 && current.plays === 1, 'An intermediate output must never resume playback');
+    routes[3].resolve();
+    await settle();
+    check(current.sinkId === 'output-two' && current.plays === 2, 'Only the latest selected output may resume');
+    settingsStore.selectedSpeakerId = 'unavailable';
+    appEvents.emit('settings.updated');
+    await settle();
+    routes.at(-1).reject(new Error('Fixture unavailable output'));
+    await settle();
+    check(current.paused && current.src === '' && current.plays === 2 &&
+      controls(1).dataset.audioPreviewState === 'failed', 'Output failures must stop and show an error, never fall back to another speaker');
+
+    deferRoutes = false;
+    settingsStore.selectedSpeakerId = 'shared-output';
+    settingsStore.advancedAudioOutputs = true;
+    settingsStore.audioOutputDevices = { voice: 'voice-output', screen: 'screen-output', media: 'media-output' };
+    play(0);
+    await settle();
+    const media = audios.at(-1);
+    check(media.sinkId === 'media-output' && media.plays === 1, 'Bot previews honor the advanced chat-media output');
+    settingsStore.selectedSpeakerId = 'new-shared-output';
+    settingsStore.audioOutputDevices.voice = 'new-voice-output';
+    appEvents.emit('settings.updated');
+    await settle();
+    check(media.sinkId === 'media-output' && media.plays === 1 && !media.paused,
+      'Unrelated voice or shared output changes do not interrupt a media-specific preview');
+    settingsStore.audioOutputDevices.media = 'new-media-output';
+    appEvents.emit('settings.updated');
+    await settle();
+    check(media.sinkId === 'new-media-output' && media.plays === 2, 'Active previews follow changes to the media output');
+    settingsStore.audioOutputDevices.media = null;
+    appEvents.emit('settings.updated');
+    await settle();
+    check(media.sinkId === 'new-shared-output', 'Inherited media output follows the shared device');
+    settingsStore.audioOutputDevices.media = 'default';
+    appEvents.emit('settings.updated');
+    await settle();
+    check(media.sinkId === '', 'An explicit system-default media output does not inherit the shared device');
+    settingsStore.advancedAudioOutputs = false;
+    appEvents.emit('settings.updated');
+    await settle();
+    check(media.sinkId === 'new-shared-output', 'Disabling advanced outputs restores the shared preview device');
+    service.release(root);
+
+    const beforeLateLoad = audios.length;
+    nextLoad = deferred();
+    const pending = nextLoad;
+    play(0);
+    await settle();
+    const requestId = loads.at(-1).requestId;
+    service.release(root);
+    pending.resolve(ready());
+    await settle();
+    check(cancels.some(entry => entry.requestId === requestId) && audios.length === beforeLateLoad,
+      'Closing a pending preview cancels its exact IPC request and ignores late bytes');
+    check(urls.every(url => revoked.includes(url)), 'Every created preview Blob must be revoked');
+    const routesBeforeRelease = routes.length;
+    settingsStore.selectedSpeakerId = 'after-release';
+    appEvents.emit('settings.updated');
+    await settle();
+    check(routes.length === routesBeforeRelease, 'Released previews must remove their settings listener');
+  } finally {
+    unbind();
+    root.remove();
+    window.api = previous.api;
+    window.Audio = previous.Audio;
+    settingsStore.selectedSpeakerId = previous.speaker;
+    settingsStore.advancedAudioOutputs = previous.advancedOutputs;
+    settingsStore.audioOutputDevices = previous.outputDevices;
+    URL.createObjectURL = previous.createUrl;
+    URL.revokeObjectURL = previous.revokeUrl;
+  }
+  return checks;
+}
+
+async function runAutocompleteDomSmoke() {
+  const [{ ChatView }, chats, servers, networks, { appEvents }, { bindBotChatEvents }, language, { settingsStore }, { botPreferenceScopeFor }] = await Promise.all([
+    import('/views/ChatView.ts'), import('/stores/chatStore.ts'), import('/stores/serverStore.ts'),
+    import('/core/NetworkClient.ts'), import('/core/EventBus.ts'), import('/core/botChatEvents.ts'),
+    import('/i18n/index.ts'), import('/stores/settingsStore.ts'), import('/utils/botSettingsContext.ts'),
+  ]);
+  language.setLanguage('pt-BR');
+  let checks = 0;
+  const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+  const find = selector => {
+    const element = document.querySelector(selector);
+    if (!element) throw new Error(`Missing ${selector}`);
+    return element;
+  };
+  const waitFor = async (predicate) => {
+    for (let attempt = 0; attempt < 150; attempt++) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error('Autocomplete fixture did not settle: ' + JSON.stringify({
+      queries: queries.map(entry => entry.payload.query), invoked: invoked.length,
+      field: root.querySelector('[data-bot-autocomplete]')?.value,
+      menu: root.querySelector('#bot-parameter-options')?.textContent?.slice(0, 200),
+      notice: root.querySelector('#chat-command-notice')?.textContent,
+      error: root.querySelector('.bot-error')?.textContent,
+    }));
+  };
+  const type = (element, value) => { element.focus(); element.value = value; element.dispatchEvent(new Event('input', { bubbles: true })); };
+  const key = (element, value, isComposing = false) => element.dispatchEvent(new KeyboardEvent('keydown', {
+    key: value, isComposing, bubbles: true, cancelable: true,
+  }));
+  const store = chats.createChatStore();
+  const server = servers.createServerStore();
+  const client = networks.createNetworkClient();
+  client.getStatus = () => 'CONNECTED';
+  client.getCurrentServerUrl = () => 'ws://local-fixture.example:46332';
+  chats.setActiveChatStore(store);
+  servers.setActiveServerStore(server);
+  networks.setActiveNetworkClient(client);
+  const caller = { id: 'caller', clientId: 'caller-client', nickname: 'Caller', status: 'ONLINE', joinedAt: 1 };
+  server.setServerDetails({
+    id: 'autocomplete-server', name: 'Autocomplete', createdAt: 1, maxUsers: 10, voiceStates: {},
+    channels: ['one', 'two'].map((id, position) => ({
+      id, serverId: 'autocomplete-server', name: id, type: 'TEXT', position, createdAt: 1,
+      isPrivate: false, allowedRoleIds: [], botCommandsEnabled: true,
+    })),
+    members: [caller], knownMembers: [caller], roles: [], userRoles: [], myPermissions: 2147483647, ownerId: caller.id,
+  }, caller);
+  let command = {
+    name: 'query', botId: 'audio-bot', botName: 'Audio Bot', description: 'Find audio',
+    options: [{ name: 'sound', description: 'Sound', type: 'string', autocomplete: true, required: true,
+      placeholder: 'Digite pelo menos 2 caracteres para pesquisar' }],
+  };
+  const queries = [];
+  const invoked = [];
+  let receivedDownload = null;
+  let downloadInput = null;
+  let resolveDownload = null;
+  let progressListener = null;
+  let availability = 'ready';
+  let pickerCalls = 0;
+  const previewLoads = [];
+  const previewCancels = [];
+  const syntheticWave = () => {
+    const sampleRate = 8000;
+    const samples = 800;
+    const buffer = new ArrayBuffer(44 + samples * 2);
+    const view = new DataView(buffer);
+    const write = (offset, text) => [...text].forEach((char, index) => view.setUint8(offset + index, char.charCodeAt(0)));
+    write(0, 'RIFF');
+    view.setUint32(4, 36 + samples * 2, true);
+    write(8, 'WAVEfmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    write(36, 'data');
+    view.setUint32(40, samples * 2, true);
+    return new Uint8Array(buffer);
+  };
+  const previousApi = window.api;
+  const previousFolder = settingsStore.soundboardFolderPath;
+  const previousExceptions = settingsStore.botDownloadConfirmationExceptions;
+  const previousPreferences = settingsStore.botUserPreferences;
+  const previousStoredSettings = localStorage.getItem('monky_settings');
+  settingsStore.botUserPreferences = {};
+  settingsStore.botDownloadConfirmationExceptions = [];
+  const preferenceScope = botPreferenceScopeFor(client, server, command.botId);
+  settingsStore.saveBotPreferences(preferenceScope, { language: 'pt-BR' });
+  window.api = {
+    ...previousApi,
+    soundDownloadAvailability: async () => availability,
+    selectSoundboardFolder: async () => { pickerCalls++; return 'C:\\isolated-fixture-sounds'; },
+    listSoundboardSounds: async () => [],
+    authorizeSoundDownload: async () => ({ status: 'authorized', token: 'fixture-local-capability' }),
+    downloadSound: async input => {
+      downloadInput = input;
+      return new Promise(resolve => { resolveDownload = resolve; });
+    },
+    cancelSoundDownload: async () => true,
+    onSoundDownloadProgress: callback => { progressListener = callback; return () => { progressListener = null; }; },
+    loadAudioPreview: async input => {
+      previewLoads.push(input);
+      return { status: 'ready', data: syntheticWave(), mimeType: 'audio/wav' };
+    },
+    cancelAudioPreview: async input => { previewCancels.push(input); return true; },
+  };
+  client.send = (messageType, payload, requestId) => {
+    if (messageType === 'COMMAND_AUTOCOMPLETE') queries.push({ payload, requestId, time: Date.now() });
+    if (messageType === 'COMMAND_INVOKE') {
+      invoked.push(payload);
+      const ack = { invocationId: `invocation-${invoked.length}`, channelId: payload.channelId, botId: payload.botId, commandName: payload.commandName };
+      queueMicrotask(() => client.handleIncomingMessage({ type: 'COMMAND_INVOKED', requestId, payload: ack }));
+      if (payload.allowSoundDownload) setTimeout(() => {
+        receivedDownload = {
+          ...ack, downloadId: `download-${invoked.length}`, botName: command.botName, invokerId: caller.id,
+          invokerNickname: caller.nickname, url: 'https://audio.example/authored.mp3', fileName: 'authored.mp3',
+          title: 'Authored sound', createdAt: Date.now(), expiresAt: Date.now() + 60_000,
+        };
+        appEvents.emit('message.COMMAND_SOUND_DOWNLOAD', receivedDownload);
+      }, 0);
+    }
+  };
+  const off = bindBotChatEvents();
+  document.body.innerHTML = '<div id="app"></div>';
+  const root = find('#app');
+  root.style.cssText = 'height:calc(100vh - 24px);width:calc(100vw - 24px);margin:12px;display:flex;flex-direction:column;';
+  const view = new ChatView(root);
+  store.setCommands([command]);
+  server.setSlashCommands([command]);
+  view.setChannel('one');
+  const input = () => find('[data-bot-autocomplete="sound"]');
+  const select = () => { type(find('#chat-message-input'), '/query'); key(find('#chat-message-input'), 'Enter'); };
+  const response = (request, choices) => client.handleIncomingMessage({
+    type: 'COMMAND_AUTOCOMPLETE_RESULT', requestId: request.requestId, payload: { status: 'ok', choices },
+  });
+  const choices = Array.from({ length: 20 }, (_, index) => ({
+    label: `Visible ${index}`,
+    value: `opaque-${index}-${'x'.repeat(490)}`,
+    ...(index === 0 ? {
+      description: 'Generic audio autocomplete',
+      audio: { url: 'https://audio.example.test/autocomplete.wav', fileName: 'autocomplete.wav', durationMs: 2100 },
+    } : {}),
+  }));
+  select();
+  check(store.getInvocations('one').length === 0, 'Selecting a query command must not add a chat card');
+  await document.fonts.ready;
+  const measure = document.createElement('canvas').getContext('2d');
+  const inputStyle = getComputedStyle(input());
+  measure.font = `${inputStyle.fontWeight} ${inputStyle.fontSize} ${inputStyle.fontFamily}`;
+  const placeholderWidth = measure.measureText(input().placeholder).width;
+  const initialWidth = input().getBoundingClientRect().width;
+  check(initialWidth >= placeholderWidth + 3 && initialWidth <= placeholderWidth + 24,
+    `The parameter must fit its placeholder without excessive padding (${initialWidth} vs ${placeholderWidth})`);
+  type(input(), 'a');
+  check(input().getBoundingClientRect().width >= initialWidth - 1, 'Typing a short query must not collapse the placeholder-sized input');
+  await new Promise(resolve => setTimeout(resolve, 270));
+  check(queries.length === 0, 'One character must not trigger a query');
+  type(input(), 'alpha');
+  key(input(), 'Enter');
+  check(invoked.length === 0, 'Typed text without a selected choice must not invoke');
+  await waitFor(() => queries.length === 1);
+  check(JSON.stringify(queries[0].payload.userSettings) === JSON.stringify({ language: 'pt-BR' }),
+    'Autocomplete carries only this bot/server/caller custom preferences');
+  response(queries[0], choices);
+  await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 10);
+  const menuRect = find('#bot-parameter-options').getBoundingClientRect();
+  const composerRect = find('.bot-compact-command-form').getBoundingClientRect();
+  check(menuRect.bottom <= composerRect.top + 1 && menuRect.width >= composerRect.width * 0.95,
+    'The result panel must be above the composer and use its full available width');
+  const choiceList = find('#bot-parameter-options .bot-choice-list');
+  check(choiceList.scrollHeight > choiceList.clientHeight && getComputedStyle(choiceList).overflowY === 'auto',
+    'Long result lists must scroll inside the panel');
+  const beforeAutocompletePreviewInvoke = invoked.length;
+  find('[data-audio-preview-action="toggle"]').click();
+  await waitFor(() => previewLoads.some(entry => entry.url === 'https://audio.example.test/autocomplete.wav'));
+  check(invoked.length === beforeAutocompletePreviewInvoke && store.getCommandDraft('one').values.sound === undefined,
+    'Autocomplete preview play must not select or invoke the command');
+  const autocompleteSlider = find('[data-audio-preview-volume]');
+  check(root.querySelectorAll('[data-audio-preview-volume]').length === 1,
+    'Autocomplete must show one shared volume control, outside the results');
+  check(!!root.querySelector('[data-audio-preview-progress]'), 'Audio results must expose playback progress');
+  autocompleteSlider.value = '41';
+  autocompleteSlider.dispatchEvent(new Event('input', { bubbles: true }));
+  check(find('[data-audio-preview-percentage]').textContent === '41%', 'Autocomplete shows the current shared volume percentage');
+  key(autocompleteSlider, 'ArrowRight');
+  check(invoked.length === beforeAutocompletePreviewInvoke && !!root.querySelector('[data-parameter-option]'),
+    'Autocomplete preview volume must keep the result list open without invoking');
+  type(input(), 'beta');
+  check(root.querySelectorAll('[data-parameter-option]').length === 0, 'Editing removes selectable stale results immediately');
+  key(input(), 'Enter');
+  check(invoked.length === 0, 'Enter while loading must not submit the query as an ID');
+  await waitFor(() => queries.length === 2);
+  check(queries[1].time - queries[0].time >= 495, 'Queries must be throttled independently of debounce');
+  response(queries[1], choices);
+  await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+  check(find('[data-audio-preview-volume]').value === '41', 'Replacing search results keeps the same command volume');
+  key(input(), 'ArrowDown');
+  key(input(), 'Enter');
+  await waitFor(() => invoked.length === 1 && !store.getCommandDraft('one'));
+  check(JSON.stringify(invoked[0].userSettings) === JSON.stringify({ language: 'pt-BR' }),
+    'Command execution carries the same scoped custom preference payload');
+  check(invoked[0].options.sound === choices[1].value, 'Enter selects and invokes exactly once with the opaque value');
+  select();
+  type(input(), 'mouse');
+  await waitFor(() => queries.length === 3);
+  response(queries[2], choices);
+  await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+  find('[data-parameter-option="0"]').click();
+  await waitFor(() => invoked.length === 2 && !store.getCommandDraft('one'));
+  check(invoked[1].options.sound === choices[0].value, 'Mouse selection must also invoke without a second submit');
+  const requiredOnlyOptions = command.options;
+  command = { ...command, options: [...requiredOnlyOptions, { name: 'insert-first', description: 'Insert first', type: 'boolean' }] };
+  store.setCommands([command]);
+  server.setSlashCommands([command]);
+  select();
+  type(input(), 'optional');
+  await waitFor(() => queries.length === 4);
+  response(queries[3], choices);
+  await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+  find('[data-parameter-option="0"]').click();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  check(invoked.length === 2 && store.getCommandDraft('one')?.values.sound === choices[0].value,
+    'Autocomplete selection must not auto-invoke while optional parameters are still available');
+  input().setSelectionRange(input().value.length, input().value.length);
+  key(input(), 'ArrowRight');
+  await waitFor(() => [...root.querySelectorAll('[data-parameter-option] strong')]
+    .some(label => label.textContent === 'insert-first'));
+  find('[data-parameter-option="0"]').click();
+  await waitFor(() => !!root.querySelector('[data-field-name="insert-first"]'));
+  check(document.activeElement.closest('[data-field-name]')?.dataset.fieldName === 'insert-first',
+    'ArrowRight optional selection must add the chip and focus its control after autocomplete');
+  store.clearCommand('one');
+  await waitFor(() => !store.getCommandDraft('one'));
+  command = { ...command, options: requiredOnlyOptions };
+  store.setCommands([command]);
+  server.setSlashCommands([command]);
+  select();
+  const composingInput = input();
+  composingInput.focus();
+  composingInput.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+  type(composingInput, 'composição');
+  key(composingInput, 'Enter', true);
+  command = { ...command, botName: 'Renamed Audio Bot' };
+  store.setCommands([command]);
+  await new Promise(resolve => setTimeout(resolve, 550));
+  check(queries.length === 4 && invoked.length === 2, 'IME composition must neither search nor execute');
+  check(composingInput.isConnected && document.activeElement === composingInput, 'Registry refresh must not replace a composing input');
+  composingInput.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+  await waitFor(() => queries.length === 5);
+  response(queries[4], []);
+  await waitFor(() => find('#bot-parameter-options').textContent.includes('Nenhum resultado'));
+  check(true, 'Empty results are localized in Portuguese');
+  type(input(), 'late');
+  await waitFor(() => queries.length === 6);
+  key(input(), 'Escape');
+  response(queries[5], choices);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  check(find('#bot-parameter-options').hidden, 'A late response must not reopen an escaped menu');
+  type(input(), 'channel');
+  await waitFor(() => queries.length === 7);
+  view.setChannel('two');
+  response(queries[6], choices);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  check(!root.querySelector('[data-parameter-option]'), 'A response from a destroyed channel view must be ignored');
+  view.setChannel('one');
+  language.setLanguage('en');
+  type(input(), 'empty english');
+  await waitFor(() => queries.length === 8);
+  response(queries[7], []);
+  await waitFor(() => find('#bot-parameter-options').textContent.includes('No results'));
+  check(true, 'Empty results are localized in English');
+  key(input(), 'Escape');
+  key(input(), 'Escape');
+  language.setLanguage('pt-BR');
+  command = { ...command, downloadsSound: true };
+  store.setCommands([command]);
+  server.setSlashCommands([command]);
+  settingsStore.soundboardFolderPath = '';
+  select();
+  check(!store.getCommandDraft('one') && pickerCalls === 0 &&
+    find('#chat-command-notice').textContent.includes('Selecione uma pasta'),
+    'Missing folders warn immediately without entering a command or opening a native picker');
+  settingsStore.soundboardFolderPath = 'C:\\isolated-fixture-sounds';
+  availability = 'confirmation_required';
+  select();
+  await waitFor(() => root.querySelector('#chat-command-notice')?.textContent?.includes('Confirme a pasta'));
+  check(!store.getCommandDraft('one'), 'An unconfirmed legacy folder must block composer activation');
+  check(!root.querySelector('#chat-command-notice button'), 'Folder confirmation is handled in settings, not by an inline picker');
+  availability = 'ready';
+  select();
+  await waitFor(() => !!store.getCommandDraft('one'));
+  type(input(), 'local');
+  await waitFor(() => queries.length === 9);
+  response(queries[8], choices);
+  await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+  find('[data-parameter-option="0"]').click();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  check(invoked.length === 2 && !downloadInput, 'A synthetic click may select but must not authorize local I/O');
+  find('[data-command-form]').requestSubmit();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  check(invoked.length === 2, 'Programmatic requestSubmit is not an execution gesture');
+  // Prepare fresh choices for a trusted native mouse click driven by the main fixture.
+  type(input(), 'trusted');
+  await waitFor(() => queries.length === 10);
+  response(queries[9], choices);
+  await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+  window.autocompleteNativeState = () => ({
+    invokes: invoked.length, downloadInput, subscriptions: !!progressListener, pickerCalls,
+    confirmation: !!document.querySelector('.dialog-card'),
+    phase: receivedDownload && store.getInvocation(receivedDownload.invocationId)?.soundDownload?.phase,
+    fileName: receivedDownload && store.getInvocation(receivedDownload.invocationId)?.soundDownload?.fileName,
+  });
+  window.autocompleteNativeFinish = async () => {
+    if (!downloadInput || !resolveDownload || !receivedDownload) throw new Error('Trusted gesture did not authorize download');
+    view.setChannel('two');
+    progressListener?.({ ...downloadInput, receivedBytes: 417, totalBytes: 834 });
+    check(!root.querySelector('.bot-sound-download'), 'Progress must not create a card in the new channel');
+    appEvents.emit('message.COMMAND_FINISHED', {
+      invocationId: receivedDownload.invocationId, channelId: receivedDownload.channelId, reason: 'completed',
+    });
+    check(store.getInvocation(receivedDownload.invocationId).soundDownload.result.status === 'cancelled',
+      'A network finish alone must not claim that the local file was saved');
+    resolveDownload({ status: 'downloaded' });
+    await waitFor(() => store.getInvocation(receivedDownload.invocationId)?.soundDownload?.result?.status === 'downloaded');
+    view.setChannel('one');
+    check(find(`[data-invocation-id="${receivedDownload.invocationId}"] .bot-sound-download`).textContent.includes('Áudio salvo'),
+      'The original channel retains actual download completion');
+    check(!progressListener, 'Terminal download removes its progress listener');
+    check(store.getInvocation(receivedDownload.invocationId).soundDownload.resultOrigin === 'main',
+      'The real Main reply wins even when a network finish overtakes its IPC delivery');
+    return checks;
+  };
+  window.autocompleteNativePrepareKeyboard = async (resetConfirmation = false) => {
+    if (resetConfirmation) settingsStore.resetBotDownloadConfirmations();
+    receivedDownload = null;
+    downloadInput = null;
+    resolveDownload = null;
+    select();
+    await waitFor(() => !!store.getCommandDraft('one'));
+    const before = queries.length;
+    type(input(), 'keyboard');
+    await waitFor(() => queries.length > before);
+    response(queries.at(-1), choices);
+    await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+    input().focus();
+  };
+  window.autocompleteNativeAbort = () => appEvents.emit('message.COMMAND_FINISHED', {
+    invocationId: receivedDownload.invocationId, channelId: receivedDownload.channelId, reason: 'cancelled',
+  });
+  window.autocompleteNativeCancelled = async () => {
+    await waitFor(() => store.getInvocation(receivedDownload.invocationId)?.soundDownload?.result?.status === 'cancelled');
+    check(!downloadInput && !document.querySelector('.dialog-card') && pickerCalls === 0,
+      'Cancelling or ending a pending confirmation closes it without a transfer or folder picker');
+    check(settingsStore.botDownloadConfirmationExceptions.length === 0, 'A cancelled confirmation cannot remember approval');
+  };
+  window.autocompleteDomCleanup = () => {
+    view.destroy(); off(); client.dispose();
+    settingsStore.soundboardFolderPath = previousFolder;
+    settingsStore.botDownloadConfirmationExceptions = previousExceptions;
+    settingsStore.botUserPreferences = previousPreferences;
+    if (previousStoredSettings === null) localStorage.removeItem('monky_settings');
+    else localStorage.setItem('monky_settings', previousStoredSettings);
+    window.api = previousApi;
+    language.setLanguage('pt-BR');
+  };
+  window.autocompletePreferencesSmoke = async () => {
+    const beforeChecks = checks;
+    select();
+    await waitFor(() => !!store.getCommandDraft('one'));
+    let before = queries.length;
+    type(input(), 'preferences');
+    await waitFor(() => queries.length > before);
+    response(queries.at(-1), choices);
+    await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+    before = queries.length;
+    settingsStore.saveBotPreferences(preferenceScope, { language: 'en' });
+    await waitFor(() => queries.length > before);
+    check(queries.at(-1).payload.query === 'preferences' && queries.at(-1).payload.userSettings.language === 'en',
+      'Changing custom preferences cancels/requeries identical autocomplete text with the new values');
+    response(queries.at(-1), choices);
+    await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+    before = queries.length;
+    settingsStore.saveBotPreferences(preferenceScope, { language: 'en' }, false);
+    settingsStore.saveBotPreferences(botPreferenceScopeFor(client, server, 'another-bot'), { language: 'fr' });
+    await new Promise(resolve => setTimeout(resolve, 600));
+    check(queries.length === before, 'Host-only consent and other-bot changes do not restart autocomplete');
+    const summary = {
+      botId: command.botId, name: command.botName, online: true, capabilities: { downloadsSound: true },
+      schemaRevision: 1, revision: 1, hasServerSettings: true, hasUserSettings: true, canConfigure: false,
+    };
+    appEvents.emit('message.BOT_SETTINGS_LIST_RESPONSE', { bots: [summary] });
+    await waitFor(() => queries.length > before);
+    response(queries.at(-1), choices);
+    await waitFor(() => !!root.querySelector('[data-parameter-option]'));
+    before = queries.length;
+    appEvents.emit('message.BOT_SETTINGS_LIST_RESPONSE', { bots: [{ ...summary, revision: 2 }] });
+    await waitFor(() => queries.length > before);
+    check(queries.at(-1).payload.query === 'preferences', 'Shared revision notifications invalidate ordinary-user autocomplete');
+    check(JSON.stringify(queries.at(-1).payload.userSettings) === JSON.stringify({ language: 'en' }),
+      'Host filename confirmation and local I/O choices never enter custom SDK values');
+    response(queries.at(-1), choices);
+    return checks - beforeChecks;
+  };
+  return checks;
+}
+
+async function runLocalDownloadGestureSmoke(window) {
+  window.focus();
+  window.webContents.focus();
+  const click = async (selector) => {
+    const point = await window.webContents.executeJavaScript(`(() => {
+      const element = document.querySelector(${JSON.stringify(selector)});
+      if (!element) throw new Error('Missing native pointer target');
+      const rect = element.getBoundingClientRect();
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+    })()`, true);
+    window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+    window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+    window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+  };
+  const waitFor = async (predicate) => {
+    let state;
+    for (let attempt = 0; attempt < 150; attempt++) {
+      state = await window.webContents.executeJavaScript('window.autocompleteNativeState()', true);
+      if (predicate(state)) return state;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error('Native download state did not settle: ' + JSON.stringify(state));
+  };
+  const enter = () => {
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+  };
+  const confirm = async (invokes, remember, baseName = 'authored') => {
+    const before = await waitFor(state => state.confirmation && state.invokes === invokes);
+    if (before.downloadInput || before.phase !== 'confirming' || before.pickerCalls !== 0) {
+      throw new Error('A real request must await confirmation before native transfer');
+    }
+    if (invokes === 3) fs.writeFileSync(path.join(output, 'command-dom-download-name.png'), (await window.webContents.capturePage()).toPNG());
+    await window.webContents.executeJavaScript(`(() => {
+      const modal = document.querySelector('.dialog-card');
+      if (!modal.textContent.includes('Authored sound') || !modal.textContent.includes('authored.mp3') ||
+          !modal.textContent.includes('C:\\\\isolated-fixture-sounds') || !modal.textContent.includes('audio.example')) {
+        throw new Error('Confirmation must show the resolved title, file, destination and source');
+      }
+      const input = modal.querySelector('[data-dialog-input]');
+      if (input.value !== 'authored' || document.activeElement !== input || modal.querySelector('.dialog-text-suffix').textContent !== '.mp3') {
+        throw new Error('Saving must offer the original basename for editing while preserving the extension');
+      }
+      input.value = '../escape';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      if (!modal.querySelector('[data-action="confirm"]').disabled || modal.querySelector('[data-dialog-input-error]').hidden ||
+          input.getAttribute('aria-invalid') !== 'true') throw new Error('Invalid names must show an error and block saving');
+    })()`, true);
+    enter();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const invalid = await window.webContents.executeJavaScript('window.autocompleteNativeState()', true);
+    if (invalid.downloadInput || !invalid.confirmation) throw new Error('A trusted Enter cannot accept an invalid filename');
+    await window.webContents.executeJavaScript(`(() => {
+      const modal = document.querySelector('.dialog-card');
+      const input = modal.querySelector('[data-dialog-input]');
+      input.value = ${JSON.stringify(baseName)};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      if (modal.querySelector('[data-action="confirm"]').disabled || !modal.querySelector('[data-dialog-input-error]').hidden) {
+        throw new Error('Correcting the filename must clear the error and enable confirmation');
+      }
+      modal.querySelector('[data-action="confirm"]').click();
+      document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    })()`, true);
+    const synthetic = await window.webContents.executeJavaScript('window.autocompleteNativeState()', true);
+    if (synthetic.downloadInput || !synthetic.confirmation) throw new Error('Synthetic acceptance must not authorize a transfer');
+    if (remember) await click('.dialog-card .toggle-switch');
+    await click('.dialog-card [data-action="confirm"]');
+    const accepted = await waitFor(state => !!state.downloadInput);
+    if (accepted.invokes !== invokes || accepted.confirmation || accepted.pickerCalls !== 0) {
+      throw new Error('Acceptance must start exactly the correlated native download');
+    }
+    if (accepted.downloadInput.fileName !== `${baseName}.mp3` || accepted.fileName !== `${baseName}.mp3`) {
+      throw new Error('The chosen filename must reach the native writer and download card with its extension preserved');
+    }
+  };
+  await click('[data-parameter-option="0"] .bot-choice-copy');
+  await confirm(3, false, 'My local audio');
+  await window.webContents.executeJavaScript('window.autocompleteNativeFinish()', true);
+  await window.webContents.executeJavaScript('window.autocompleteNativePrepareKeyboard()', true);
+  enter();
+  await confirm(4, true, 'Another local name');
+  await window.webContents.executeJavaScript('window.autocompleteNativeFinish()', true);
+  await window.webContents.executeJavaScript('window.autocompleteNativePrepareKeyboard()', true);
+  enter();
+  const suppressed = await waitFor(state => !!state.downloadInput);
+  if (suppressed.invokes !== 5 || suppressed.confirmation) throw new Error('Remembered approval should suppress only the next matching dialog');
+  if (suppressed.downloadInput.fileName !== 'authored.mp3') throw new Error('Skipped confirmations must use the bot filename, not a previous custom name');
+  const checks = await window.webContents.executeJavaScript('window.autocompleteNativeFinish()', true);
+  await window.webContents.executeJavaScript('window.autocompleteNativePrepareKeyboard(true)', true);
+  enter();
+  await waitFor(state => state.confirmation);
+  await click('.dialog-card .toggle-switch');
+  await click('.dialog-card [data-action="cancel"]');
+  await window.webContents.executeJavaScript('window.autocompleteNativeCancelled()', true);
+  await window.webContents.executeJavaScript('window.autocompleteNativePrepareKeyboard()', true);
+  enter();
+  await waitFor(state => state.confirmation);
+  await window.webContents.executeJavaScript('window.autocompleteNativeAbort(); window.autocompleteNativeCancelled()', true);
+  console.log(`Local download: trusted consent, opt-out/reset, cancellation and original-channel lifecycle (${checks} combined checks)`);
 }
 
 async function runMessageToolbarPointerSmoke(window) {
@@ -992,6 +1766,13 @@ async function runDomSmoke() {
   const type = (element, value) => { element.focus(); element.value = value; element.dispatchEvent(new Event('input', { bubbles: true })); };
   const key = (element, value) => element.dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true }));
   const frame = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const waitFor = async (predicate) => {
+    for (let attempt = 0; attempt < 80; attempt++) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error('DOM fixture condition did not settle');
+  };
   const option = (name) => {
     const row = [...document.querySelectorAll('[data-parameter-option]')].find((element) => element.querySelector('strong')?.textContent === name);
     if (!row) throw new Error(`Missing parameter choice ${name}`);
@@ -1006,10 +1787,42 @@ async function runDomSmoke() {
   const client = networks.createNetworkClient();
   const sent = [];
   client.getStatus = () => 'CONNECTED';
+  client.getCurrentServerUrl = () => 'wss://command-fixture.example/';
   client.send = (messageType, payload) => sent.push({ type: messageType, payload });
   chats.setActiveChatStore(store);
   servers.setActiveServerStore(server);
   networks.setActiveNetworkClient(client);
+  const previousPreviewApi = window.api;
+  const previewLoads = [];
+  const previewCancels = [];
+  const syntheticWave = () => {
+    const sampleRate = 8000;
+    const samples = 800;
+    const buffer = new ArrayBuffer(44 + samples * 2);
+    const view = new DataView(buffer);
+    const write = (offset, text) => [...text].forEach((char, index) => view.setUint8(offset + index, char.charCodeAt(0)));
+    write(0, 'RIFF');
+    view.setUint32(4, 36 + samples * 2, true);
+    write(8, 'WAVEfmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    write(36, 'data');
+    view.setUint32(40, samples * 2, true);
+    return new Uint8Array(buffer);
+  };
+  window.api = {
+    ...previousPreviewApi,
+    loadAudioPreview: async input => {
+      previewLoads.push(input);
+      return { status: 'ready', data: syntheticWave(), mimeType: 'audio/wav' };
+    },
+    cancelAudioPreview: async input => { previewCancels.push(input); return true; },
+  };
   const unbindBotEvents = botEvents.bindBotChatEvents();
   const refreshRegistry = (commands) => events.appEvents.emit('message.COMMANDS_LIST_RESPONSE', { commands });
   server.setServerDetails({
@@ -1029,7 +1842,11 @@ async function runDomSmoke() {
       { name: 'count', description: 'Repeat count', type: 'integer', required: true, min: 0, max: 10 },
       { name: 'private', description: 'Private playback', type: 'boolean' },
       { name: 'member', description: 'Member', type: 'user' },
-      { name: 'mode', description: 'Playback mode', type: 'string', choices: [{ label: 'Ordered', value: 'ordered' }, { label: 'Shuffle', value: 'shuffle' }] },
+      { name: 'mode', description: 'Playback mode', type: 'string', choices: [
+        { label: 'Ordered', value: 'ordered', description: 'Generic audio choice',
+          audio: { url: 'https://audio.example.test/ordered.wav', fileName: 'ordered.wav', durationMs: 4200 } },
+        { label: 'Shuffle', value: 'shuffle' },
+      ] },
     ],
   };
   const duplicate = { ...command, botId: 'music-two', botName: 'Second Music', botAvatarUrl: null };
@@ -1449,13 +2266,59 @@ async function runDomSmoke() {
   check(find('#chat-command-composer').getBoundingClientRect().height < 180, 'Composer must be compact');
   check(find('#chat-command-composer').getBoundingClientRect().bottom <= innerHeight, 'Composer must remain inside the viewport');
   check(document.querySelectorAll('#chat-command-composer [data-field-name]').length === 2, 'Only required arguments start visible');
-  type(find('#chat-command-composer [data-field-name="song"] [data-bot-input]'), 'A song with spaces and, commas');
-  key(find('#chat-command-composer [data-field-name="song"] [data-bot-input]'), 'Enter');
+  const songInput = find('#chat-command-composer [data-field-name="song"] [data-bot-input]');
+  const songField = songInput.closest('[data-field-name]');
+  songInput.focus();
+  check(songField.classList.contains('focused'), 'Only the actual focused parameter should have its focused state');
+  const compactWidth = songInput.getBoundingClientRect().width;
+  type(songInput, 'A'.repeat(200));
+  check(songInput.getBoundingClientRect().width > compactWidth, 'Parameter inputs grow for longer values as well as placeholders');
+  const argumentsRow = find('.bot-command-arguments');
+  argumentsRow.style.maxWidth = '200px';
+  await frame();
+  const narrowBounds = argumentsRow.getBoundingClientRect();
+  check([...argumentsRow.querySelectorAll('[data-field-name]')].every(field => field.getBoundingClientRect().right <= narrowBounds.right + 1),
+    'Long parameters must wrap within a narrow composer instead of overflowing');
+  argumentsRow.style.removeProperty('max-width');
+  type(songInput, 'A song with spaces and, commas');
+  songInput.setSelectionRange(songInput.value.length, songInput.value.length);
+  key(songInput, 'ArrowRight');
+  check(document.activeElement === find('#chat-command-composer [data-field-name="count"] [data-bot-input]'),
+    'ArrowRight at the end of one parameter must focus the next visible parameter');
+  check(find('#chat-command-composer button[type="submit"]').disabled,
+    'Incomplete required parameters must keep the visual submit button disabled');
+  key(document.activeElement, 'Enter');
   check(sent.every((entry) => entry.type !== 'COMMAND_INVOKE'), 'Invalid required inputs must not execute');
-  type(find('#chat-command-composer [data-field-name="count"] [data-bot-input]'), '0');
-  find('[data-bot-action="optional-parameters"]').click();
+  const countInput = find('#chat-command-composer [data-field-name="count"] [data-bot-input]');
+  const countField = countInput.closest('[data-field-name]');
+  check(getComputedStyle(countInput).borderTopWidth === '0px' && getComputedStyle(countInput).paddingLeft === '2px',
+    'Generic text input styles must not add a second border or oversized padding inside parameter chips');
+  check(countField.classList.contains('invalid') && countInput.getAttribute('aria-invalid') === 'true',
+    'Trying to execute an incomplete command must mark the invalid parameter wrapper');
+  check(!find('[data-field-name="song"]').classList.contains('focused') && countField.classList.contains('focused'),
+    'Moving between parameters must move the focus highlight');
+  type(countInput, '11');
+  check(countField.classList.contains('invalid') &&
+    getComputedStyle(countField).borderTopColor === getComputedStyle(find('[data-command-form] > .bot-error')).color,
+    'An out-of-range value must keep a red parameter border even while focused');
+  type(countInput, '0');
+  check(!countField.classList.contains('invalid') && !countInput.hasAttribute('aria-invalid'),
+    'A valid zero clears the invalid border immediately');
+  check(getComputedStyle(countField).borderTopColor === getComputedStyle(find('[data-bot-action="optional-parameters"]')).color,
+    'A valid focused parameter has the accent border');
+  check(!find('#chat-command-composer button[type="submit"]').disabled,
+    'Completed required parameters must enable command execution visually');
+  countInput.setSelectionRange(0, 0);
+  key(countInput, 'ArrowRight');
+  check(find('#bot-parameter-options').hidden, 'ArrowRight inside text must not open optional parameters early');
+  countInput.setSelectionRange(countInput.value.length, countInput.value.length);
+  countInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', isComposing: true, bubbles: true, cancelable: true }));
+  check(find('#bot-parameter-options').hidden, 'IME ArrowRight must not open optional parameters');
+  key(countInput, 'ArrowRight');
+  check(!find('#bot-parameter-options').hidden, 'ArrowRight at the end of the last parameter must open optional parameters');
   key(find('[data-bot-action="optional-parameters"]'), 'Enter');
   const toggle = find('#chat-command-composer [data-field-name="private"] input');
+  check(document.activeElement === toggle, 'Selecting an optional parameter must add its chip and focus its control');
   check(toggle.type === 'checkbox' && getComputedStyle(toggle).opacity === '0', 'Boolean must use hidden native control');
   check(find('#chat-command-composer .toggle-slider').getBoundingClientRect().width > 0, 'Custom switch must be visible');
   toggle.click();
@@ -1469,6 +2332,24 @@ async function runDomSmoke() {
   find('[data-bot-action="optional-parameters"]').click();
   option('mode').click();
   check(!find('#bot-parameter-options').hidden, 'Focusing choices must open anchored list');
+  const optionPanel = find('#bot-parameter-options').getBoundingClientRect();
+  const commandComposer = find('#chat-command-composer').getBoundingClientRect();
+  check(optionPanel.width >= commandComposer.width - 2, 'Parameter choices must span the full command composer width');
+  check(optionPanel.bottom <= commandComposer.top + 1, 'Parameter choices must render above the command composer');
+  const beforePreviewSent = sent.length;
+  find('#bot-parameter-options [data-audio-preview-action="toggle"]').click();
+  await waitFor(() => previewLoads.length >= 1);
+  check(previewLoads.at(-1).url === 'https://audio.example.test/ordered.wav', 'Audio previews must load through the renderer IPC bridge');
+  check(sent.length === beforePreviewSent && store.getCommandDraft('one').values.mode !== 'ordered',
+    'Preview play must neither invoke a command nor select the option');
+  const previewSlider = find('#bot-parameter-options [data-audio-preview-volume]');
+  check(document.querySelectorAll('#bot-parameter-options [data-audio-preview-volume]').length === 1,
+    'Static command choices must have one command-level volume slider');
+  previewSlider.value = '33';
+  previewSlider.dispatchEvent(new Event('input', { bubbles: true }));
+  key(previewSlider, 'ArrowRight');
+  check(sent.length === beforePreviewSent && !find('#bot-parameter-options').hidden,
+    'Preview volume and slider keyboard handling must not submit or close choices');
   key(find('[data-bot-choice="mode"]'), 'ArrowDown');
   key(find('[data-bot-choice="mode"]'), 'Enter');
   check(store.getCommandDraft('one').values.mode === 'shuffle', 'Choice must keep declared value, not label');
@@ -1598,6 +2479,55 @@ async function runDomSmoke() {
   check(sent.filter((entry) => entry.type === 'COMMAND_SUBMIT').length === beforeDropdown + 1,
     'Dropdown confirmation must submit the selected value');
   store.acknowledgeForm({ invocationId: invocation.invocationId, interactionId: 'dropdown', values: { choice: 'first' } });
+  for (const presentation of ['buttons', 'dropdown']) {
+    const interactionId = `audio-${presentation}`;
+    const form = selectorForm(presentation);
+    form.fields[0].choices[0].audio = { url: 'https://audio.example.test/private.wav', fileName: 'private.wav' };
+    store.receivePrompt({
+      ...invocation, interactionId, botName: command.botName, expiresAt: Date.now() + 60_000, form,
+    });
+    const card = find(`[data-interaction-id="${interactionId}"]`);
+    check(card.querySelectorAll('[data-audio-preview-volume]').length === 1 && !!card.querySelector('[data-audio-preview-progress]'),
+      'Private selectors reuse the shared volume and progress UI');
+    const beforePreview = sent.filter(entry => entry.type === 'COMMAND_SUBMIT').length;
+    card.querySelector('[data-audio-preview-action="toggle"]').click();
+    await waitFor(() => previewLoads.some(entry => entry.url === 'https://audio.example.test/private.wav'));
+    check(sent.filter(entry => entry.type === 'COMMAND_SUBMIT').length === beforePreview,
+      'Private form previews cannot submit or select a value');
+    card.querySelector('[data-bot-select-value="second"]').click();
+    if (presentation === 'dropdown') {
+      check(sent.filter(entry => entry.type === 'COMMAND_SUBMIT').length === beforePreview,
+        'An audio dropdown must still require explicit form submission');
+      card.querySelector('button[type="submit"]').click();
+    }
+    check(sent.filter(entry => entry.type === 'COMMAND_SUBMIT').length === beforePreview + 1 &&
+      sent.at(-1).payload.values.choice === 'second', 'Private audio selectors must submit the declared opaque value once');
+    store.acknowledgeForm({ invocationId: invocation.invocationId, interactionId, values: { choice: 'second' } });
+  }
+  const audioField = name => ({
+    name, label: name, type: 'select', required: true,
+    choices: [{ label: 'Preview', value: 'preview', audio: { url: 'https://audio.example.test/private.wav' } }],
+  });
+  store.receivePrompt({
+    ...invocation, interactionId: 'two-audio-fields', botName: command.botName, expiresAt: Date.now() + 60_000,
+    form: { title: 'Multiple audio fields', fields: [audioField('first'), audioField('second')] },
+  });
+  const audioForm = find('[data-interaction-id="two-audio-fields"]');
+  check(audioForm.querySelectorAll('[data-audio-choice-controls]').length === 2 &&
+    audioForm.querySelectorAll('[data-audio-preview-volume]').length === 1, 'A multi-field form has one shared volume, not one per field');
+  const formVolume = audioForm.querySelector('[data-audio-preview-volume]');
+  formVolume.value = '19';
+  formVolume.dispatchEvent(new Event('input', { bubbles: true }));
+  audioForm.querySelector('[data-field-name="first"] [data-bot-select-value]').click();
+  const updatedAudioForm = find('[data-interaction-id="two-audio-fields"]');
+  check(updatedAudioForm.querySelector('[data-audio-preview-volume]').value === '19' &&
+    updatedAudioForm.querySelectorAll('[data-audio-preview-volume]').length === 1,
+    'Updating a private select field preserves the shared volume without duplicating its toolbar');
+  updatedAudioForm.querySelector('[data-field-name="second"] [data-bot-select-value]').click();
+  find('[data-interaction-id="two-audio-fields"] button[type="submit"]').click();
+  check(sent.at(-1).payload.values.first === 'preview' && sent.at(-1).payload.values.second === 'preview',
+    'Audio form controls leave field submission intact');
+  store.acknowledgeForm({ invocationId: invocation.invocationId, interactionId: 'two-audio-fields', values: { first: 'preview', second: 'preview' } });
   check(!document.querySelector('.bot-inline-form'), 'All completed selectors must disappear');
   const background = chats.createChatStore();
   background.bus = proxies.silentBus;
@@ -1655,9 +2585,20 @@ async function runDomSmoke() {
   const selectorClient = networks.createNetworkClient();
   selectorClient.sessionKey = 'selector-dom';
   selectorClient.getStatus = () => 'CONNECTED';
+  selectorClient.getCurrentServerUrl = () => 'wss://selector-fixture.example/';
+  const { settingsStore: selectorPreferences } = await import('/stores/settingsStore.ts');
+  const { botPreferenceScopeFor } = await import('/utils/botSettingsContext.ts');
+  const previousSelectorPreferences = selectorPreferences.botUserPreferences;
+  const previousSelectorConfirmations = selectorPreferences.botDownloadConfirmationExceptions;
+  const previousSelectorStorage = localStorage.getItem('monky_settings');
+  selectorPreferences.saveBotPreferences(botPreferenceScopeFor(selectorClient, server, 'music-one'), { compact: true }, false);
   let publicSnapshot = {
     id: 'public-selector', botId: 'music-one', channelId: 'one', messageId: 'public-question',
-    title: 'Question <script>not HTML</script>', choices: [{ label: 'A <img>', value: 'a' }, { label: 'B', value: 'b' }],
+    title: 'Question <script>not HTML</script>', choices: [
+      { label: 'A <img>', value: 'a' },
+      { label: 'B', value: 'b', description: 'Durable audio option',
+        audio: { url: 'https://audio.example.test/public.wav', fileName: 'public.wav', durationMs: 1800 } },
+    ],
     presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 2,
     createdAt: 1, closedAt: null, resultMessageId: null, counts: { a: 0, b: 0 }, responseCount: 0, canRespond: true,
   };
@@ -1672,24 +2613,50 @@ async function runDomSmoke() {
   await frame();
   check(selectorFeed.querySelectorAll('[data-selector-value]').length === 2, 'Persisted public selectors must restore buttons from server list');
   check(!selectorFeed.querySelector('img,script'), 'Public selector labels and question must be text, never executable HTML');
+  const beforePublicPreviewRequests = publicRequests.length;
+  check(selectorFeed.querySelectorAll('[data-audio-preview-volume]').length === 1 &&
+    !!selectorFeed.querySelector('[data-audio-preview-progress]'), 'Public selectors reuse a shared volume and per-preview progress');
+  const publicVolume = selectorFeed.querySelector('[data-audio-preview-volume]');
+  publicVolume.value = '52';
+  publicVolume.dispatchEvent(new Event('input', { bubbles: true }));
+  check(selectorFeed.querySelector('[data-audio-preview-percentage]').textContent === '52%' &&
+    publicRequests.length === beforePublicPreviewRequests, 'Public volume updates the percentage without submitting a response');
+  selectorFeed.querySelector('[data-audio-preview-action="toggle"]').click();
+  await waitFor(() => previewLoads.some((entry) => entry.url === 'https://audio.example.test/public.wav'));
+  check(publicRequests.length === beforePublicPreviewRequests, 'Public selector preview play must not submit a response');
+  const existingPreviewControl = selectorFeed.querySelector('[data-audio-choice-controls]');
+  selectorFeed.insertAdjacentHTML('beforeend', '<div data-message-id="unrelated">Another message</div>');
+  await frame();
+  check(existingPreviewControl.isConnected, 'Unrelated messages must not recreate or interrupt an unchanged public preview');
+  events.appEvents.emit('message.SELECTOR_SNAPSHOT', {
+    ...publicSnapshot,
+    choices: [{ label: 'Rejected', value: 'a', audio: { url: 'http://audio.example.test/unsafe.wav' } }],
+  });
+  check(existingPreviewControl.isConnected && !selectorFeed.textContent.includes('Rejected'),
+    'An invalid audio snapshot must not bypass the shared contract by stripping and restoring metadata');
   selectorFeed.querySelector('[data-selector-value="b"]').click();
   await frame();
   check(publicRequests.filter((request) => request.type === 'SELECTOR_RESPOND').length === 1, 'Public option buttons must submit immediately');
-  check(selectorFeed.querySelector('[data-selector-value="b"]').getAttribute('aria-pressed') === 'true', 'Public response ACK must show the selected option');
+  check(JSON.stringify(publicRequests.find((request) => request.type === 'SELECTOR_RESPOND').payload.userSettings) === JSON.stringify({ compact: true }),
+    'Independent public selectors send only their owning bot/caller custom preferences, not host approval');
+  check(sent.filter((request) => request.type === 'COMMAND_SUBMIT').every((request) => !('userSettings' in request.payload)),
+    'Private continuations cannot replace the initial invocation preference snapshot');
+  check(selectorFeed.querySelector('[data-selector-value="b"]').getAttribute('aria-selected') === 'true', 'Public response ACK must show the selected option');
   publicSnapshot = { ...publicSnapshot, presentation: 'dropdown' };
   events.appEvents.emit('message.SELECTOR_SNAPSHOT', publicSnapshot);
-  const dropdown = selectorFeed.querySelector('select');
-  dropdown.value = 'a';
-  dropdown.dispatchEvent(new Event('change', { bubbles: true }));
+  selectorFeed.querySelector('[data-selector-value="a"]').click();
   check(publicRequests.filter((request) => request.type === 'SELECTOR_RESPOND').length === 1, 'Public dropdown selection must wait for Confirm');
   selectorFeed.querySelector('[data-selector-confirm]').click();
   await frame();
   check(publicRequests.filter((request) => request.type === 'SELECTOR_RESPOND').length === 2, 'Confirm must submit a public dropdown once');
   selectorRow();
   await frame();
-  check(!!selectorFeed.querySelector('select'), 'History rerenders must restore public selector controls');
+  check(!!selectorFeed.querySelector('[data-selector-value="a"]'), 'History rerenders must restore public audio selector controls');
+  check(selectorFeed.querySelector('[data-audio-preview-volume]').value === '52', 'A restored persistent selector retains its own volume');
   server.updateChannel({ ...server.getChannel('one'), botCommandsEnabled: false });
-  check(selectorFeed.querySelector('select').disabled, 'Disabled channels must block public selector responses for admins too');
+  check(selectorFeed.querySelector('[data-selector-confirm]').disabled &&
+    selectorFeed.querySelector('[data-selector-value="a"]').dataset.selectorDisabled === 'true',
+    'Disabled channels must block public selector responses for admins too');
   server.updateChannel({ ...server.getChannel('one'), botCommandsEnabled: true });
   publicSnapshot = { ...publicSnapshot, closedAt: Date.now(), canRespond: false };
   language.setLanguage('pt-BR');
@@ -1705,6 +2672,10 @@ async function runDomSmoke() {
   check(publicRequests.length === requestsBeforeDestroy, 'Destroyed public selector views must not send further requests');
   selectorClient.dispose();
   selectorFeed.remove();
+  selectorPreferences.botUserPreferences = previousSelectorPreferences;
+  selectorPreferences.botDownloadConfirmationExceptions = previousSelectorConfirmations;
+  if (previousSelectorStorage === null) localStorage.removeItem('monky_settings');
+  else localStorage.setItem('monky_settings', previousSelectorStorage);
   window.prepareToolbarPointerFixture = async () => {
     const { initTooltips } = await import('/core/TooltipService.ts');
     const offTooltips = initTooltips();
@@ -1724,6 +2695,9 @@ async function runDomSmoke() {
     };
     await frame();
   };
-  window.commandDomCleanup = () => { view.destroy(); unbindBotEvents(); client.dispose(); };
+  window.commandDomCleanup = () => {
+    view.destroy(); unbindBotEvents(); client.dispose();
+    window.api = previousPreviewApi;
+  };
   return { checks };
 }

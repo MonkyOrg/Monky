@@ -1,3 +1,5 @@
+import type { SelectionChoice } from './selection.js';
+
 export type ChannelType = 'VOICE' | 'TEXT';
 
 export type VoiceMode = 'p2p' | 'sfu';
@@ -228,7 +230,9 @@ export interface CommandOption {
   type: CommandOptionType;
   required?: boolean;
   placeholder?: string;
-  choices?: Array<{ label: string; value: string }>;
+  choices?: SelectionChoice[];
+  /** Dynamic suggestions for a string option; mutually exclusive with choices. */
+  autocomplete?: boolean;
   min?: number;
   max?: number;
 }
@@ -244,6 +248,8 @@ export interface SlashCommand {
   botName: string;
   botAvatarUrl?: string | null;
   options?: CommandOption[];
+  /** Requires explicit caller consent for one local soundboard download. */
+  downloadsSound?: boolean;
 }
 
 /** A bot account visible in the management UI. */

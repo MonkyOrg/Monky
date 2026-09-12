@@ -1,5 +1,9 @@
 import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
-import type { BotForm, BotFormValues, CommandValues } from './botInteractions.js';
+import type {
+  BotForm, BotFormValues, BotSettingsContext, BotSettingsDefinition, BotSettingsListResponse,
+  BotSettingsPatch, BotSettingsSnapshot, BotServerSettingsSnapshot, CommandAutocompleteResult, CommandValues,
+} from './botInteractions.js';
+import type { SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
 
 export enum ProtocolErrorCode {
   AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
@@ -27,6 +31,8 @@ export enum ProtocolErrorCode {
   BOT_INTERACTION_INVALID = 'BOT_INTERACTION_INVALID',
   BOT_COMMAND_BUSY = 'BOT_COMMAND_BUSY',
   BOT_INVALID_PROFILE = 'BOT_INVALID_PROFILE',
+  BOT_SETTINGS_INVALID = 'BOT_SETTINGS_INVALID',
+  BOT_SETTINGS_CONFLICT = 'BOT_SETTINGS_CONFLICT',
   /**
    * The relay cannot run on the host. Kept apart from BAD_REQUEST so the
    * client can explain what to do instead of showing a generic message (#429).
@@ -48,6 +54,7 @@ export enum MessageType {
   SELECTOR_UPDATE = 'SELECTOR_UPDATE',
   SELECTOR_CLOSE = 'SELECTOR_CLOSE',
   SELECTOR_RESPOND = 'SELECTOR_RESPOND',
+  SELECTOR_RESPONDED = 'SELECTOR_RESPONDED',
   SELECTOR_FINALIZE = 'SELECTOR_FINALIZE',
   SELECTOR_SNAPSHOT = 'SELECTOR_SNAPSHOT',
   SELECTOR_LIST_RESULT = 'SELECTOR_LIST_RESULT',
@@ -137,6 +144,11 @@ export enum MessageType {
   BOT_REVOKED = 'BOT_REVOKED',
   BOT_UPDATE_PROFILE = 'BOT_UPDATE_PROFILE',
   BOT_PROFILE_UPDATED = 'BOT_PROFILE_UPDATED',
+  BOT_SETTINGS_LIST = 'BOT_SETTINGS_LIST',
+  BOT_SETTINGS_LIST_RESPONSE = 'BOT_SETTINGS_LIST_RESPONSE',
+  BOT_SETTINGS_GET = 'BOT_SETTINGS_GET',
+  BOT_SETTINGS_UPDATE = 'BOT_SETTINGS_UPDATE',
+  BOT_SETTINGS_SNAPSHOT = 'BOT_SETTINGS_SNAPSHOT',
   /** Bot -> server: register slash commands. */
   COMMAND_REGISTER = 'COMMAND_REGISTER',
   /** Server -> bot: commands were registered. */
@@ -145,10 +157,16 @@ export enum MessageType {
   COMMANDS_LIST = 'COMMANDS_LIST',
   /** Server -> client: available slash commands. */
   COMMANDS_LIST_RESPONSE = 'COMMANDS_LIST_RESPONSE',
+  COMMAND_AUTOCOMPLETE = 'COMMAND_AUTOCOMPLETE',
+  COMMAND_AUTOCOMPLETE_RESULT = 'COMMAND_AUTOCOMPLETE_RESULT',
+  COMMAND_AUTOCOMPLETE_CANCEL = 'COMMAND_AUTOCOMPLETE_CANCEL',
   /** Client -> server: invoke a slash command. */
   COMMAND_INVOKE = 'COMMAND_INVOKE',
   COMMAND_INVOKED = 'COMMAND_INVOKED',
   COMMAND_PROMPT = 'COMMAND_PROMPT',
+  COMMAND_SOUND_DOWNLOAD = 'COMMAND_SOUND_DOWNLOAD',
+  COMMAND_SOUND_DOWNLOAD_RESULT = 'COMMAND_SOUND_DOWNLOAD_RESULT',
+  COMMAND_SOUND_DOWNLOAD_CANCEL = 'COMMAND_SOUND_DOWNLOAD_CANCEL',
   COMMAND_SUBMIT = 'COMMAND_SUBMIT',
   COMMAND_SUBMITTED = 'COMMAND_SUBMITTED',
   COMMAND_CANCEL = 'COMMAND_CANCEL',
@@ -843,17 +861,56 @@ export interface CommandRegisterPayload {
     name: string;
     description: string;
     options?: CommandOption[];
+    downloadsSound?: boolean;
   }>;
+  settings?: BotSettingsDefinition;
 }
 
 /** Server -> bot: registration result. */
 export interface CommandRegisteredPayload {
   registered: number;
+  settings: BotServerSettingsSnapshot;
+}
+
+export type BotSettingsListResponsePayload = BotSettingsListResponse;
+export type BotSettingsSnapshotPayload = BotSettingsSnapshot;
+export interface BotSettingsGetPayload { botId: string }
+export interface BotSettingsUpdatePayload extends BotSettingsGetPayload {
+  schemaRevision: number;
+  expectedRevision: number;
+  patch: BotSettingsPatch;
 }
 
 /** Server -> client: available slash commands. */
 export interface CommandsListResponsePayload {
   commands: SlashCommand[];
+}
+
+/** The envelope requestId is required and is remapped before dispatch to the bot. */
+export interface CommandAutocompletePayload {
+  botId: string;
+  commandName: string;
+  channelId: string;
+  optionName: string;
+  query: string;
+  options?: CommandValues;
+  locale?: 'pt-BR' | 'en';
+  userSettings?: BotFormValues;
+}
+
+export interface CommandAutocompleteExecutionPayload {
+  commandName: string;
+  optionName: string;
+  query: string;
+  options: CommandValues;
+  locale: 'pt-BR' | 'en';
+  settings?: BotSettingsContext;
+}
+
+export type CommandAutocompleteResultPayload = CommandAutocompleteResult;
+
+export interface CommandAutocompleteCancelPayload {
+  requestId: string;
 }
 
 /** Client -> server: invoke a slash command. */
@@ -865,13 +922,17 @@ export interface CommandInvokePayload {
   /** Typed options keyed by option name. */
   options?: CommandValues;
   locale?: 'pt-BR' | 'en';
+  /** Consent for one local soundboard download by this invocation only. */
+  allowSoundDownload?: boolean;
+  userSettings?: BotFormValues;
 }
 
 /** Server -> bot: caller identity and invocation ID are assigned by the server. */
-export interface CommandExecutionPayload extends CommandInvokePayload {
+export interface CommandExecutionPayload extends Omit<CommandInvokePayload, 'userSettings'> {
   invocationId: string;
   invokerId: string;
   invokerNickname: string;
+  settings?: BotSettingsContext;
 }
 
 export interface CommandInvokedPayload {
@@ -913,6 +974,31 @@ export interface CommandPromptReceivedPayload extends CommandPromptPayload {
   botName: string;
   botAvatarUrl?: string | null;
   expiresAt: number;
+}
+
+/** Bot -> server. The envelope requestId correlates the eventual result. */
+export interface CommandSoundDownloadPayload extends SoundDownloadRequest {
+  invocationId: string;
+}
+
+/** Server -> originating connection. Identity and downloadId are server-assigned. */
+export interface CommandSoundDownloadReceivedPayload extends CommandSoundDownloadPayload, BotCommandContext {
+  downloadId: string;
+  channelId: string;
+  botId: string;
+  botName: string;
+  botAvatarUrl?: string | null;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface CommandSoundDownloadCancelPayload {
+  invocationId: string;
+  downloadId: string;
+}
+
+export interface CommandSoundDownloadResultPayload extends CommandSoundDownloadCancelPayload {
+  result: SoundDownloadResult;
 }
 
 /** Client -> server -> bot; also acknowledged to the submitting client. */

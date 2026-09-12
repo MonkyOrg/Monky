@@ -18,6 +18,7 @@ import {
   voiceRestrictionsUpdatedSchema,
 } from '../src/index.js';
 import './botInteractions.test.js';
+import './botSettings.test.js';
 import './reactions.test.js';
 
 console.log('=== Início dos Testes Unitários de @monky/shared ===');
@@ -45,7 +46,7 @@ console.assert(QUALITY_PRESETS.GAMING.name === 'Gaming Mode', 'Preset Gaming Mod
 console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version
-if (PROTOCOL_VERSION !== 12) throw new Error('Versão do protocolo deve ser 12');
+if (PROTOCOL_VERSION !== 13) throw new Error('Versão do protocolo deve ser 13');
 console.assert(LIMITS.SFU_DEFAULT_MIN_PORT === 40000, 'Porta mínima padrão SFU');
 console.assert(LIMITS.SFU_DEFAULT_MAX_PORT === 49151, 'Porta máxima padrão SFU');
 console.assert(

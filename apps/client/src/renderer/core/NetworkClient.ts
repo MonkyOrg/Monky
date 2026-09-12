@@ -75,12 +75,14 @@ export class NetworkClient {
    * the matching state bundle when several servers are connected (#400).
    */
   public sessionKey: string = '';
+  private connectionId: string = uuidv4();
   private ws: WebSocket | null = null;
   private connectionTimeout: ReturnType<typeof setTimeout> | null = null;
   private status: ConnectionStatus = 'DISCONNECTED';
   private reconnectAttempt: number = 0;
   private reconnectTimeout: any = null;
   private pendingRequests: Map<string, PendingRequest> = new Map();
+  private retiredRequests = new Set<string>();
   private pendingAuth: PendingAuthRequest | null = null;
   private currentServerUrl: string = '';
   private lastConnectPayload: ConnectState | null = null;
@@ -150,6 +152,26 @@ export class NetworkClient {
     return this.status;
   }
 
+  public getConnectionId(): string { return this.connectionId; }
+
+  public cancelRequest(requestId: string): boolean {
+    const pending = this.pendingRequests.get(requestId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this.pendingRequests.delete(requestId);
+    this.retireRequest(requestId);
+    pending.reject(new DOMException('Request cancelled', 'AbortError'));
+    return true;
+  }
+
+  private retireRequest(requestId: string): void {
+    this.retiredRequests.add(requestId);
+    if (this.retiredRequests.size > 256) {
+      const first = this.retiredRequests.values().next().value;
+      if (first !== undefined) this.retiredRequests.delete(first);
+    }
+  }
+
   /**
    * Emits on the app bus with this client's server as the origin, so the
    * session manager can point the stores at the right bundle before handlers
@@ -201,6 +223,7 @@ export class NetworkClient {
 
       try {
         this.detachSocket(this.ws);
+        this.connectionId = uuidv4();
         this.ws = new WebSocket(this.currentServerUrl);
       } catch (err: any) {
         this.setStatus('DISCONNECTED');
@@ -382,6 +405,7 @@ export class NetworkClient {
       const timer = setTimeout(() => {
         if (this.pendingRequests.has(requestId)) {
           this.pendingRequests.delete(requestId);
+          if (type === MessageType.COMMAND_AUTOCOMPLETE) this.retireRequest(requestId);
           reject(new RequestTimeoutError(type));
         }
       }, timeoutMs);
@@ -393,6 +417,7 @@ export class NetworkClient {
 
   private handleIncomingMessage(message: ProtocolMessage): void {
     const { type, requestId, payload } = message;
+    if (requestId && this.retiredRequests.has(requestId)) return;
 
     if (type === MessageType.PONG) {
       this.lastPongAt = Date.now();

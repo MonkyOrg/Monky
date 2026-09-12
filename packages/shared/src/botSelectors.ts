@@ -1,12 +1,12 @@
 import { z } from 'zod';
 import { LIMITS } from './constants.js';
+import { selectionChoiceSchema } from './selection.js';
+import { botSettingsContextSchema, botSettingsValuesSchema } from './botInteractions.js';
 
 const id = z.string().min(1).max(128);
 const title = z.string().trim().min(1).max(200);
-const choices = z.array(z.object({
-  label: z.string().trim().min(1).max(100),
-  value: z.string().min(1).max(100),
-}).strict()).min(1).max(25).refine((entries) => new Set(entries.map((entry) => entry.value)).size === entries.length);
+const choices = z.array(selectionChoiceSchema).min(1).max(25)
+  .refine((entries) => new Set(entries.map((entry) => entry.value)).size === entries.length);
 const maxResponders = z.number().int().min(1).max(10000);
 const expiresAt = z.number().int().safe().positive();
 
@@ -36,7 +36,14 @@ export const botSelectorPatchSchema = z.object({
 export const botSelectorUpdateSchema = z.object({ id, patch: botSelectorPatchSchema }).strict();
 export const botSelectorIdSchema = z.object({ id }).strict();
 export const botSelectorListSchema = z.object({ channelId: id.optional() }).strict();
-export const botSelectorRespondSchema = z.object({ id, value: z.string().min(1).max(100) }).strict();
+export const botSelectorRespondSchema = z.object({
+  id, value: z.string().min(1).max(100), userSettings: botSettingsValuesSchema.optional(),
+}).strict();
+export const botSelectorRespondedSchema = z.object({
+  id, channelId: id, userId: id, value: z.string().min(1).max(100),
+  settings: botSettingsContextSchema.optional(),
+}).strict();
+export type BotSelectorRespondedPayload = z.infer<typeof botSelectorRespondedSchema>;
 export const botSelectorFinalizeSchema = z.object({
   id, content: z.string().trim().min(1).max(LIMITS.MAX_MESSAGE_LENGTH),
 }).strict();

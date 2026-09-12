@@ -1,0 +1,315 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { EventEmitter } = require('node:events');
+const { test } = require('node:test');
+
+const { runBotCli } = require('../dist/cli');
+const cliConfig = require('../dist/cli/config');
+const keys = require('../dist/cli/keys');
+const lifecycle = require('../dist/cli/commands/lifecycle');
+const pm2 = require('../dist/cli/pm2');
+const processHelpers = require('../dist/cli/process');
+
+function json(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(value, null, 2));
+}
+
+function fixture(t, extraMonkyBot = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-sdk-cli-runtime-'));
+  const bot = path.join(root, 'bot');
+  fs.mkdirSync(path.join(bot, 'dist'), { recursive: true });
+  json(path.join(bot, 'package.json'), {
+    name: '@example/sound-bot',
+    version: '1.2.3',
+    type: 'commonjs',
+    monkyBot: {
+      cliName: 'sound-bot',
+      displayName: 'Sound Bot',
+      entry: 'dist/index.js',
+      modes: ['manual', 'marketplace'],
+      ...extraMonkyBot,
+    },
+  });
+  fs.writeFileSync(path.join(bot, 'dist', 'index.js'), 'module.exports = {};');
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
+  return { root, bot, state: path.join(root, 'state') };
+}
+
+function withEnv(t, updates) {
+  const previous = {};
+  for (const [key, value] of Object.entries(updates)) {
+    previous[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
+
+function captureLogs(t) {
+  const lines = [];
+  t.mock.method(console, 'log', (...args) => lines.push(args.join(' ')));
+  return lines;
+}
+
+test('runBotCli exposes the bot version instead of the SDK version', async (t) => {
+  const f = fixture(t);
+  const lines = captureLogs(t);
+  await runBotCli(f.bot, ['--version']);
+  assert.deepEqual(lines, ['sound-bot 1.2.3']);
+});
+
+test('non-interactive setup writes isolated config and refuses overwrite without --yes', async (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  await runBotCli(f.bot, [
+    'setup',
+    '--non-interactive',
+    '--server-url', 'ws://localhost:3000/socket',
+    '--token-env', 'BOT_TOKEN',
+    '--name', 'Fixture Bot',
+  ]);
+
+  const configFile = path.join(f.state, '.sound-bot', 'config.json');
+  const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  assert.equal(saved.mode, 'manual');
+  assert.equal(saved.botName, 'Fixture Bot');
+  assert.equal(saved.serverUrl, 'ws://localhost:3000/socket');
+  assert.equal(saved.tokenEnv, 'BOT_TOKEN');
+  assert.equal(saved.botDir, path.join(f.state, '.sound-bot', 'bot'));
+
+  await assert.rejects(
+    runBotCli(f.bot, [
+      'setup',
+      '--non-interactive',
+      '--server-url', 'ws://localhost:3000/socket',
+      '--token-env', 'BOT_TOKEN',
+    ]),
+    /Re-run with --yes/
+  );
+});
+
+test('config set switches modes and clears mode-specific fields', async (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  await runBotCli(f.bot, [
+    'setup',
+    '--non-interactive',
+    '--server-url', 'ws://localhost:3000',
+    '--token-env', 'BOT_TOKEN',
+    '--yes',
+  ]);
+
+  await runBotCli(f.bot, ['config', 'set', 'serve-port', '8899']);
+  await runBotCli(f.bot, ['config', 'set', 'public-host', 'bot.example.test']);
+  let current = cliConfig.readConfig(cliConfig.createCliContext(f.bot));
+  assert.equal(current.mode, 'marketplace');
+  assert.equal(current.servePort, 8899);
+  assert.equal(current.publicHost, 'bot.example.test');
+  assert.equal('serverUrl' in current, false);
+  assert.equal('tokenEnv' in current, false);
+
+  await runBotCli(f.bot, ['config', 'set', 'server-url', 'wss://monky.example.test']);
+  await runBotCli(f.bot, ['config', 'set', 'token-env', 'OTHER_TOKEN']);
+  current = cliConfig.readConfig(cliConfig.createCliContext(f.bot));
+  assert.equal(current.mode, 'manual');
+  assert.equal(current.serverUrl, 'wss://monky.example.test/');
+  assert.equal(current.tokenEnv, 'OTHER_TOKEN');
+  assert.equal('servePort' in current, false);
+  assert.equal('publicHost' in current, false);
+});
+
+test('runner loads keys, preserves cwd isolation and maps manual-mode environment variables', async (t) => {
+  const f = fixture(t);
+  withEnv(t, {
+    OUTPUT_FILE: path.join(f.root, 'runner-output.json'),
+    MONKY_BOT_PUBLIC_KEY: undefined,
+    MONKY_BOT_NAME: undefined,
+    MONKY_SERVER_URL: undefined,
+    MONKY_BOT_TOKEN: undefined,
+    MONKY_SERVE: 'true',
+    MONKY_SERVE_PORT: '1234',
+    MONKY_SERVE_PUBLIC_HOST: 'stale.example.test',
+  });
+  const originalCwd = process.cwd();
+  const context = cliConfig.createCliContext(f.bot, { ...process.env, MONKY_BOT_CLI_HOME: f.state });
+  const botDir = path.join(f.state, '.sound-bot', 'runtime');
+  cliConfig.writeConfig(context, cliConfig.manualConfig(context, {
+    botName: 'Runner Bot',
+    botDir,
+    serverUrl: 'ws://runner.example.test',
+    tokenEnv: 'BOT_TOKEN',
+  }));
+  keys.loadOrCreateBotKeys(botDir);
+
+  const output = process.env.OUTPUT_FILE;
+  const entry = path.join(f.bot, 'dist', 'runner-target.cjs');
+  fs.writeFileSync(entry, `
+require('node:fs').writeFileSync(process.env.OUTPUT_FILE, JSON.stringify({
+  cwd: process.cwd(),
+  name: process.env.MONKY_BOT_NAME,
+  serverUrl: process.env.MONKY_SERVER_URL,
+  token: process.env.MONKY_BOT_TOKEN,
+  publicKey: process.env.MONKY_BOT_PUBLIC_KEY,
+  serve: process.env.MONKY_SERVE || null
+}));
+`);
+
+  const runner = require('../dist/cli/runner');
+  try {
+    await runner.runConfiguredBot({
+      ...process.env,
+      BOT_TOKEN: 'secret-token',
+      OUTPUT_FILE: output,
+      MONKY_BOT_CLI_CONFIG_FILE: context.configFile,
+      MONKY_BOT_CLI_ENTRY: entry,
+    });
+  } finally {
+    process.chdir(originalCwd);
+  }
+
+  const snapshot = JSON.parse(fs.readFileSync(output, 'utf8'));
+  assert.equal(snapshot.cwd, botDir);
+  assert.equal(snapshot.name, 'Runner Bot');
+  assert.equal(snapshot.serverUrl, 'ws://runner.example.test/');
+  assert.equal(snapshot.token, 'secret-token');
+  assert.equal(snapshot.serve, null);
+  assert.match(snapshot.publicKey, /^[0-9a-f]{88}$/i);
+});
+
+test('incomplete key directories fail explicitly instead of silently rotating identity', (t) => {
+  const f = fixture(t);
+  const botDir = path.join(f.root, 'broken-runtime');
+  fs.mkdirSync(path.join(botDir, '.keys'), { recursive: true });
+  fs.writeFileSync(path.join(botDir, '.keys', 'public.hex'), 'abcd');
+  assert.throws(() => keys.loadOrCreateBotKeys(botDir), /incomplete or corrupted/i);
+});
+
+test('foreground start uses the SDK runner and never touches pm2', async (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, BOT_TOKEN: 'foreground-secret' });
+  const context = cliConfig.createCliContext(f.bot);
+  cliConfig.writeConfig(context, cliConfig.manualConfig(context, {
+    botName: 'Foreground Bot',
+    botDir: path.join(f.state, '.sound-bot', 'foreground'),
+    serverUrl: 'ws://foreground.example.test',
+    tokenEnv: 'BOT_TOKEN',
+  }));
+
+  const child = new EventEmitter();
+  child.kill = () => true;
+  process.nextTick(() => child.emit('exit', 0, null));
+  const spawn = t.mock.method(processHelpers, 'spawnCommand', () => child);
+  const ensurePm2 = t.mock.method(pm2, 'ensurePm2ForStart', () => {
+    throw new Error('pm2 should not be used in foreground mode');
+  });
+
+  await lifecycle.startCommand(context, ['--foreground']);
+  assert.equal(spawn.mock.callCount(), 1);
+  assert.equal(ensurePm2.mock.callCount(), 0);
+  assert.deepEqual(spawn.mock.calls[0].arguments.slice(0, 2), [process.execPath, [context.runnerScript]]);
+});
+
+test('bot ecosystem uses isolated runner metadata and never embeds token values', (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, BOT_TOKEN: 'actual-secret' });
+  const context = cliConfig.createCliContext(f.bot);
+  const ecosystemFile = pm2.writeBotEcosystem(context, path.join(f.bot, 'dist', 'index.js'));
+  const content = fs.readFileSync(ecosystemFile, 'utf8');
+  assert.match(content, /MONKY_BOT_CLI_CONFIG_FILE/);
+  assert.match(content, /MONKY_BOT_CLI_ENTRY/);
+  assert.doesNotMatch(content, /actual-secret/);
+});
+
+test('Windows pm2 executes its Node entry without passing arguments through a command shell', (t) => {
+  const f = fixture(t);
+  const prefix = path.join(f.root, 'node tools & fixtures');
+  const entry = path.join(prefix, 'node_modules', 'pm2', 'bin', 'pm2');
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  fs.writeFileSync(entry, 'console.log(JSON.stringify(process.argv.slice(2)));');
+  const executable = processHelpers.pm2Command({ PATH: prefix }, 'win32');
+  assert.deepEqual(executable, { command: process.execPath, args: [entry] });
+  const args = ['--lines', '1 & echo should-not-run', '%MONKY_FAKE_VAR%'];
+  const result = processHelpers.runCommand(executable.command, [...executable.args, ...args]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), args);
+});
+
+test('PM2 restarts refresh the service environment and followed logs have no automatic deadline', (t) => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: f.state });
+  t.mock.method(processHelpers, 'pm2Command', () => ({ command: 'test-pm2', args: ['entry'] }));
+  const command = t.mock.method(processHelpers, 'runCommand', () => ({
+    status: 0, signal: null, stdout: '', stderr: '',
+  }));
+  pm2.startOrRestart(context, context.botEcosystemFile);
+  pm2.streamLogs(context, 100, true);
+  pm2.streamLogs(context, 20, false);
+  assert.deepEqual(command.mock.calls[0].arguments[1], [
+    'entry', 'startOrRestart', context.botEcosystemFile, '--update-env',
+  ]);
+  assert.equal(command.mock.calls[1].arguments[2].timeout, 0);
+  assert.equal(command.mock.calls[2].arguments[2].timeout, 120000);
+  assert.ok(command.mock.calls[2].arguments[1].includes('--nostream'));
+});
+
+test('an installed but failing PM2 is not mistaken for a missing dependency', (t) => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: f.state });
+  t.mock.method(processHelpers, 'pm2Command', () => ({ command: 'test-pm2', args: [] }));
+  t.mock.method(processHelpers, 'runCommand', () => ({
+    status: 1, signal: null, stdout: '', stderr: 'Permission denied',
+  }));
+  assert.throws(() => pm2.isPm2Available(context), /pm2 --version failed.*\nPermission denied/);
+});
+
+test('start and restart reject a missing token before consulting or installing PM2', async (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, BOT_TOKEN: undefined });
+  const context = cliConfig.createCliContext(f.bot);
+  cliConfig.writeConfig(context, cliConfig.manualConfig(context, { tokenEnv: 'BOT_TOKEN' }));
+  const ensure = t.mock.method(pm2, 'ensurePm2ForStart', () => assert.fail('must not install PM2'));
+  const requirePm2 = t.mock.method(pm2, 'requirePm2', () => assert.fail('must not invoke PM2'));
+  await assert.rejects(lifecycle.startCommand(context, []), /Missing required environment variable BOT_TOKEN/);
+  assert.throws(() => lifecycle.restartCommand(context, []), /Missing required environment variable BOT_TOKEN/);
+  assert.equal(ensure.mock.callCount(), 0);
+  assert.equal(requirePm2.mock.callCount(), 0);
+});
+
+test('foreground crashes are reported as failures rather than successful exits', async (t) => {
+  const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, BOT_TOKEN: 'fixture-token' });
+  const context = cliConfig.createCliContext(f.bot);
+  cliConfig.writeConfig(context, cliConfig.manualConfig(context, { tokenEnv: 'BOT_TOKEN' }));
+  const child = new EventEmitter();
+  child.kill = () => true;
+  t.mock.method(processHelpers, 'spawnCommand', () => {
+    queueMicrotask(() => child.emit('exit', null, 'SIGSEGV'));
+    return child;
+  });
+  await assert.rejects(lifecycle.startCommand(context, ['--foreground']), /terminated unexpectedly.*SIGSEGV/);
+});
+
+test('CLI configuration follows nickname limits and accepts IPv6 without accepting host ports', (t) => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: f.state });
+  assert.throws(() => cliConfig.validateBotName('x'), /at least 2/);
+  assert.throws(() => cliConfig.validateBotName('x'.repeat(33)), /at most 32/);
+  assert.equal(cliConfig.validateBotName('x'.repeat(32)), 'x'.repeat(32));
+  const longLabel = { ...context, displayName: 'x'.repeat(31) + '\uD83D\uDE03' };
+  assert.equal(cliConfig.manualConfig(longLabel).botName, 'x'.repeat(31));
+  assert.equal(cliConfig.manualConfig({ ...context, displayName: 'x' }).botName, 'x Bot');
+  for (const host of ['localhost', 'bot.example.test', '127.0.0.1', '2001:db8::1', '[2001:db8::1]']) {
+    assert.equal(cliConfig.validatePublicHost(host), host);
+  }
+  for (const host of ['bot.example.test:7780', '[::1]:7780', 'https://bot.example.test', '[127.0.0.1]', 'bot/path']) {
+    assert.throws(() => cliConfig.validatePublicHost(host), /without a scheme or port/);
+  }
+});

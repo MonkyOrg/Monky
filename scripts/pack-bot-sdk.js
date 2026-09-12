@@ -53,11 +53,13 @@ function main() {
 
   // Copy bot-sdk dist.
   fs.cpSync(sdkDist, path.join(staging, 'dist'), { recursive: true });
+  fs.copyFileSync(path.join(ROOT, 'LICENSE'), path.join(staging, 'LICENSE'));
 
   // Bundle @monky/shared.
   const bundledShared = path.join(staging, 'node_modules', '@monky', 'shared');
   fs.mkdirSync(bundledShared, { recursive: true });
   fs.cpSync(sharedDist, path.join(bundledShared, 'dist'), { recursive: true });
+  fs.copyFileSync(path.join(ROOT, 'LICENSE'), path.join(bundledShared, 'LICENSE'));
   fs.writeFileSync(
     path.join(bundledShared, 'package.json'),
     JSON.stringify({
@@ -79,6 +81,7 @@ function main() {
     homepage: 'https://github.com/MonkyOrg/Monky/tree/main/packages/bot-sdk',
     main: sdkPkg.main,
     types: sdkPkg.types,
+    bin: sdkPkg.bin,
     engines: { node: '>=18' },
     dependencies: {
       ...sharedPkg.dependencies,

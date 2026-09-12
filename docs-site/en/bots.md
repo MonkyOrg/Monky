@@ -58,7 +58,7 @@ When creating or editing a text channel, the **Allow bot commands** switch start
 ### Prerequisites
 
 - **Node.js 18+**
-- Client, server, and SDK compatible with **protocol 9**
+- Client, server, and SDK compatible with **protocol 13**
 - The `@monky/bot-sdk` package from the matching release
 
 ::: warning Update together
@@ -87,6 +87,110 @@ npm install https://github.com/MonkyOrg/Monky/releases/download/vX.Y.Z/monky-bot
 ```
 
 </details>
+
+### Automatic bot CLI and packaging
+
+The SDK also provides `monky-bot-sdk`, a build tool that creates a self-contained
+`.tgz` with its **management CLI already generated**. Do not copy the MonkyBot CLI
+into every bot: declare the entry and options in `package.json`.
+
+```json
+{
+  "name": "@my-org/my-bot",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "tsc",
+    "package": "monky-bot-sdk build",
+    "cli": "monky-bot-sdk cli"
+  },
+  "monkyBot": {
+    "cliName": "my-bot",
+    "displayName": "My Bot",
+    "entry": "dist/index.js",
+    "files": ["dist", "assets"],
+    "modes": ["manual"]
+  }
+}
+```
+
+`npm run package` runs the compiler script and produces
+`release/my-bot-1.0.0.tgz`, including the compiled entry, declared resources, SDK
+and the production dependency tree actually installed. `files` accepts relative
+files and directories, not globs; remove `assets` if it does not exist.
+Runtime data, real `.env` files, `.keys` and authenticated registrations are not
+release material. Local dependencies other than SDK/shared must declare their
+own publication files in `package.files`.
+
+Use `monky-bot-sdk build --version 1.1.0-beta --out release` to override the
+artifact version. `--skip-build` packages an existing compilation but still
+validates the entry and SDK. Do not put the tool in the compiler's own `build`
+script: keep compilation and `package` separate to prevent recursion.
+
+On the server, install the `.tgz` with npm:
+
+```text
+npm install -g --offline --ignore-scripts my-bot-1.0.0.tgz
+my-bot setup
+my-bot start
+my-bot status
+my-bot logs
+```
+
+The CLI provides `setup`, `start`, `stop`, `restart`, `status`, `logs` and `config`,
+with a PM2 process and configuration isolated by bot name. `start --foreground`
+runs without PM2 for development. `npm run cli -- setup` uses the same CLI in a
+local checkout after compilation.
+
+In manual mode, `setup` asks for the server and the **token environment variable
+name**, not a token value to save in the configuration. Provide `MONKY_BOT_TOKEN`
+(or the selected variable) in the operator/service environment before `start`
+and `restart`. For automation, use
+`setup --non-interactive --server-url ws://localhost:3000 --token-env MONKY_BOT_TOKEN`.
+Configuration and identity live in `~/.<cliName>`, outside the package;
+`MONKY_BOT_CLI_HOME` changes the base directory while keeping each bot's subdirectory.
+
+The CLI generates/reuses the identity and supplies `MONKY_BOT_PUBLIC_KEY`,
+`MONKY_SERVER_URL`, `MONKY_BOT_TOKEN` and `MONKY_BOT_NAME` to the process. The bot
+entry must consume these variables. Declare `marketplace` in `modes` only if that
+entry also implements the `MONKY_SERVE`/`bot.serve()` flow.
+
+### Optional CLI updates
+
+`update` and enabling `autoupdate` **only work when the author explicitly
+configures GitHub Releases** in the build definition:
+
+```json
+{
+  "monkyBot": {
+    "releases": {
+      "url": "https://github.com/my-org/my-bot/releases",
+      "assetName": "my-bot-{version}.tgz",
+      "tokenEnv": "GH_TOKEN"
+    }
+  }
+}
+```
+
+This snippet extends the previous configuration. Without `releases`, the SDK
+does not infer a source from `repository`, `git origin`, the SDK repository or
+the npm registry. An invalid URL fails rather than enabling another source.
+
+`update --check` only queries; `update` follows stable and `update --beta` includes
+pre-releases. Selection uses semantic versions, without downgrades or reinstalling
+the same version. Auto-update follows the installed channel unless `--beta` is
+explicitly enabled. None of these commands publishes or promotes releases.
+
+Installing an update requires the globally installed CLI in the current npm
+prefix; source checkouts and local installations only support `--check`.
+The SDK verifies the downloaded package name, version and CLI, then installs the
+self-contained archive offline without running installation scripts. Use
+`update --yes` without an interactive terminal. Configuration and identity files
+remain outside the installation.
+
+For a private repository, supply the read token through the indicated environment
+variable, never through the package or URL. `autoupdate off` and `status` remain
+available to administer an old schedule even if a later version removes its
+update source.
 
 ### Basic example
 
@@ -147,6 +251,7 @@ bot.command({
     // ctx.publish()  — explicitly publish a result in the channel
     // ctx.prompt()   — await a private form; may be called in multiple steps
     // ctx.choose()   — await a private choice through buttons or a dropdown
+    // ctx.downloadSound() — await an authorized local soundboard download
     // ctx.signal     — aborts on cancellation, disconnect, timeout or completion
   },
 });
@@ -156,18 +261,133 @@ bot.command({
 
 Typing `/` opens a menu with frequently used commands and sections grouped by bot. Each item identifies the command, its description, and its bot. While browsing, required parameter chips and the optional parameter count help choose a command.
 
-Selecting a command with parameters identifies **which bot and command** are selected in a compact composer with named fields, descriptions, and placeholders. Optional parameters can be added when needed. Submission uses the names declared in `options`; there is no need to join values with commas. Commands without parameters, such as `/ping` and `/enquete`, start their interaction immediately when selected.
+Selecting a command with parameters identifies **which bot and command** are selected in a compact composer with named fields, descriptions, and placeholders. Optional parameters can be added when needed. Submission uses the names declared in `options`; there is no need to join values with commas. Commands without parameters that do not request local downloads, such as `/ping` and `/enquete`, start their interaction immediately when selected.
 
 Usage frequency stays local and is scoped by server and identity. Only counts and recency are stored, never the values entered in parameters.
 
 | Type | Control | Value in `ctx.args` |
 |------|---------|---------------------|
-| `string` | Text; with `choices`, an option selector | `string` |
+| `string` | Text; `choices` for fixed selection or `autocomplete: true` for dynamic suggestions | `string` |
 | `integer` | Whole number, with optional `min` and `max` bounds | `number` |
 | `boolean` | Switch | `boolean` |
 | `user` | Member selector | Member ID (`string`) |
 
 `required: true` prevents submission without a value. An unfilled optional parameter is omitted; valid values such as `false` and `0` are retained. The server validates parameters again before invoking the bot. Two bots can have a command with the same name: selection in chat retains the chosen bot.
+
+Required parameters appear when selecting the command; all must be valid before execution is enabled. Remaining optional parameters appear under `+N`: click it or press **Right arrow at the end of the last field** to list parameters you can add. Selecting one opens its input without executing the command. Inside text, the arrow still moves the caret normally.
+
+### Autocomplete before execution
+
+A `string` option can declare `autocomplete: true`. The command then requires an `autocomplete` callback; do not combine this option with static `choices`.
+
+```ts
+const catalog = [
+  { label: 'Bell', value: 'bell', description: 'Short bell sound' },
+  { label: 'Drum', value: 'drum', description: 'Single drum hit' },
+];
+
+bot.command({
+  name: 'findsound',
+  description: 'Find a sound',
+  options: [
+    { name: 'sound', description: 'Sound', type: 'string', required: true, autocomplete: true },
+  ],
+  autocomplete: ({ query }) =>
+    catalog.filter((choice) => choice.label.toLowerCase().includes(query.toLowerCase())),
+  handler: (ctx) => {
+    ctx.reply(ctx.locale === 'en' ? `Selected: ${ctx.args.sound}` : `Selecionado: ${ctx.args.sound}`);
+  },
+});
+```
+
+The callback receives `{ query, optionName, args, locale, serverId, signal }` and may return a list or a `Promise` of `SelectionChoice` (`{ label, value, description?, audio? }`). `args` contains only the other filled, valid options; missing required options are allowed at this stage. `query` contains the text of the option being edited.
+
+This example keeps the catalog in the bot. For an external source, replace filtering with a **metadata** search, pass `signal` to `fetch`, and validate the response. The callback receives neither an invocation nor reply/download methods. Queries are sent to the selected bot while the person types; they are not published in the channel or persisted in history.
+
+The client debounces for 250 ms; the server allows one search per user every 500 ms, combining their devices. Only the originating connection's latest search remains valid, with a 15-second deadline. Closing the composer, cancellation, losing access, or disconnection aborts the search; stale responses are discarded. Return at most 20 choices with unique values: `label` up to 100 characters, `value` up to 2,000, and `description` up to 500. `query` accepts up to 200 characters; a bot may impose a smaller limit. An empty list means no results.
+
+Arrow keys only navigate. Enter or a click confirms a suggestion. **Without optional parameters, if every required parameter is valid, the same gesture executes the command exactly once.** If optional parameters exist, selection only fills the field: the composer stays open to use `+N`, and a later Enter or the execute button submits. Missing required parameters must be filled before execution. Typing text without a valid choice does not execute the command. Editing the text invalidates the previous selection. `value` is an opaque identifier, not authorization: the handler must validate it again before resolving the result's metadata.
+
+### Selections with audio previews
+
+Any plugin can add `audio` to a `SelectionChoice`. The same contract works for static command choices, autocomplete responses, `select` fields in `ctx.prompt()`, `ctx.choose()`, and persistent `createSelector()` choices. Without `audio`, the option remains a plain selection; no bot-specific component is needed.
+
+```ts
+import type { SelectionChoice } from '@monky/bot-sdk';
+
+const choices: SelectionChoice[] = [
+  {
+    label: 'Bell',
+    value: 'bell',
+    description: 'Short bell sound',
+    audio: {
+      url: 'https://cdn.example.com/sounds/bell.mp3',
+      fileName: 'bell.mp3',
+      durationMs: 1200,
+    },
+  },
+];
+```
+
+`audio.url` is required; `fileName` and `durationMs` are optional. Previews use public HTTPS and the same formats and 3 MiB limit as downloads. The client loads bytes into memory through the native process, validating DNS, redirects, MIME, and audio structure; it never assigns the external URL directly to a renderer player.
+
+Options can have a description, preview button, and a playback progress bar with elapsed/total time. There is **one shared volume control (0–100%) per command**, retained across results and parameters, with a visible percentage. Forms with multiple audio fields also share one control; persistent selectors have their own volume. Listening or adjusting volume **does not select, submit, or save the file to the library**. Only one preview plays at a time, locally through the chat-media output (or the shared output when no category-specific advanced setting is configured); output changes also apply to the active preview, and nothing is broadcast to voice. Closing or changing the selector stops loading/playback and releases resources. Previews do not require a configured folder. Suggestions appear in a scrollable panel above the composer; the fields below fit their placeholder/content, respect available width, and highlight focus or invalid values. Optional parameters can be removed with **×** without losing their draft.
+
+### Authorized local downloads
+
+Declare `downloadsSound: true` when a command may request **one** soundboard download. The composer explains this capability, requires authorization for each execution, and blocks activation with a notice if the folder is not configured or authorized. **Selecting/executing a command never opens a folder picker.** Configure the folder beforehand in soundboard settings; a previously confirmed folder is reused. This does not grant the bot general filesystem access.
+
+```ts
+bot.command({
+  name: 'download-sample',
+  description: 'Download a soundboard sample',
+  downloadsSound: true,
+  handler: async (ctx) => {
+    const result = await ctx.downloadSound({
+      url: 'https://cdn.example.com/sounds/bell.mp3',
+      fileName: 'bell.mp3',
+      title: 'Bell',
+    });
+    if (result === null) return;
+    const en = ctx.locale === 'en';
+    switch (result.status) {
+      case 'downloaded':
+        ctx.reply(en ? 'Sound saved to your soundboard.' : 'Áudio salvo na sua soundboard.');
+        break;
+      case 'exists':
+        ctx.reply(en ? 'That file already exists; nothing was replaced.' : 'O arquivo já existe; nada foi substituído.');
+        break;
+      case 'failed':
+        ctx.reply(en ? `Download failed (${result.reason}).` : `Falha no download (${result.reason}).`);
+        break;
+      case 'cancelled':
+        ctx.reply(en ? 'Download cancelled.' : 'Download cancelado.');
+        break;
+    }
+  },
+});
+```
+
+Replace the example URL with valid public audio. In a catalog bot, resolve the selected `value` into URL, filename, and title only; **do not download audio on the bot**. `ctx.downloadSound()` routes the request to the computer of the connection that initiated the command. Neither server nor bot/VPS receives the file or its local path, and another device belonging to the same user does not inherit the request.
+
+Before starting the transfer, the client confirms the actual request, showing the bot, title, filename, folder, and source. In the same dialog, users can **rename the file**, starting from the original name and preserving its extension. Invalid names block confirmation; existing files are never overwritten. The chosen name appears on the local card but is not sent to the bot/server. The **“Don't ask again”** switch applies only to this bot, server/endpoint, and identity in this local profile; it does not authorize other plugins. When enabled, future downloads use the name suggested by the bot without repeating the confirmation or reusing a previous custom name. To ask again, **right-click the bot → Bot settings → My preferences → Ask for a file name before downloading** and save. This does not reset or change other bots' confirmations. Declining returns `cancelled` without writing or opening a folder picker. Cancellation, disconnection, and expiry also close a pending confirmation.
+
+Chat displays a private card with server-authenticated bot/command/caller attribution, a waiting-for-confirmation state, and then actual client progress. Bytes and percentages stay local; you do not need to send progress messages. Completion is based on the file being written, not the handler ending.
+
+The result, exported as `SoundDownloadResult`, is discriminated by `status`:
+
+| Status | Meaning |
+|--------|---------|
+| `downloaded` | The new file was written |
+| `exists` | The destination already existed and was not changed |
+| `failed` | A typed failure in `reason` |
+| `cancelled` | The local download was cancelled while its invocation still existed |
+
+`failed.reason` can be `no_folder`, `invalid_request`, `invalid_url`, `blocked_url`, `invalid_file_name`, `unsupported_audio`, `too_large`, `http_error`, `network_error`, `write_failed`, or `timeout`. Results contain no path, bytes, or raw system error. `null` means the invocation itself ended, expired, or lost its connection; return from the handler in that case.
+
+Public HTTPS without credentials or fragments and plain filenames up to 128 characters are accepted (`.mp3`, `.wav`, `.ogg`, `.m4a`, `.aac`, or `.webm`); `title` allows up to 100 characters and the URL up to 2,048. The client validates destinations/redirects, content, and size, and never overwrites existing files. The limit is **3 MiB (3,145,728 bytes)**, matching playback, available as `LIMITS.MAX_SOUNDBOARD_FILE_SIZE` in shared and the SDK.
+
+Always `await` the result. Only one request is allowed per invocation, even after `exists`, failure, or cancellation; retrying requires a new authorized execution. The request deadline is two minutes, including the confirmation wait and bounded by the invocation's remaining lifetime. Cancellation, disconnection, or ending the handler interrupts pending work. Ended contexts, commands without authorization, and repeated calls raise an SDK error without initiating another download.
 
 ### Private replies and publishing
 
@@ -323,6 +543,64 @@ bot.command({
 ```
 
 The example accepts only the caller's first valid reaction and removes the listener on response, cancellation, disconnection, or expiry. Ordinary reactions remain independent of this flow.
+
+### Per-bot settings on each server
+
+**Right-click a bot → Bot settings**, including its name/avatar in messages and private cards. The server menu also provides **Bots on this server**, available to every member and including offline bots. The server must be connected; disconnecting a bot does not remove its declarations or saved configuration.
+
+| Scope | Who can change it | Storage |
+|---|---|---|
+| **Behavior on this server** | Administrators/owner or roles with **Configure bot behavior** (`CONFIGURE_BOTS`) | This server's database; affects everyone using that bot there |
+| **My preferences** | The individual user | Local profile, separated by endpoint, server, identity, and bot; not synchronized across devices |
+
+`CONFIGURE_BOTS` is independent of `MANAGE_BOTS`, which still controls registration, profiles, and removal. Unauthorized readers receive neither the shared values nor the shared form. The SDK declares reusable fields; it does not inject HTML or create a global app-settings tab. Bots without shared settings do not show that section.
+
+Declare settings before connecting/serving, using the existing `BotForm` field types:
+
+```ts
+bot.settings({
+  server: {
+    title: 'Behavior',
+    fields: [
+      { name: 'enabled', label: 'Enabled on this server', type: 'boolean', required: true, defaultValue: true },
+      { name: 'limit', label: 'Maximum results', type: 'integer', required: true, min: 1, max: 10, defaultValue: 5 },
+    ],
+  },
+  user: {
+    title: 'My preferences',
+    fields: [
+      { name: 'compact', label: 'Compact replies', type: 'boolean', required: true, defaultValue: false },
+    ],
+  },
+});
+
+bot.command({
+  name: 'preferences',
+  description: 'Show settings for this interaction',
+  handler: async (ctx) => {
+    const { server, user } = ctx.settings;
+    if (server.enabled === false) {
+      ctx.reply('This feature is disabled on this server.');
+      return;
+    }
+    ctx.reply(user.compact === true ? 'Compact mode.' : `Server limit: ${server.limit}.`);
+  },
+});
+
+const detach = bot.onSettingsChanged((settings, { serverId }) => {
+  console.log(serverId, settings.revision);
+});
+const current = bot.getServerSettings('my-server'); // undefined before registration or after disconnect
+// Call detach() when the listener is no longer needed.
+```
+
+Required settings fields need valid defaults; this does not change ordinary command prompt forms. `false` and `0` are preserved. Text, integers, switches, lists, choices, and audio choices reuse the same controls, with an explicit **Save** even for button-style choices. **Restore defaults** prepares a change but does not persist it until saving.
+
+`ctx.settings` is a server-validated snapshot with `server`, `user`, `schemaRevision`, and `serverRevision`. Invocations, autocomplete, and independent selector responses receive the initiating user's preferences. Private continuations keep the original invocation snapshot; later changes apply to new actions. `onSelectorResponse` delivers preferences privately to the owning bot, never in public selector history. Generic messages and reactions do not distribute preferences to every bot.
+
+`getServerSettings()` caches and settings events are isolated by SDK connection/server. Identical reconnects preserve overrides. Shared writes use optimistic revisions: concurrent changes and outdated declarations require a reload instead of silently overwriting another edit. Incompatible shared overrides reject a replacement declaration; reset those fields through the old settings before registering the new version. Incompatible individual preferences are surfaced for review/reset rather than silently discarded. Declarations have an aggregate 64 KiB limit, and values a 16 KiB limit per scope, in addition to existing form limits.
+
+**Local host decisions are not bot configuration.** Download confirmation/renaming is a local preference automatically provided for bots with `downloadsSound` commands. It never appears in `ctx.settings`, cannot be changed by administrators or bots, and does not grant general filesystem access. Folder selection remains in Soundboard. A bot such as Myinstants does not need a `settings()` declaration to offer this preference.
 
 ### Bot photos
 

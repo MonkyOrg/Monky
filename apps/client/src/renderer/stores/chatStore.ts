@@ -12,6 +12,8 @@ import {
   type CommandPromptReceivedPayload,
   type CommandSubmitPayload,
   type SlashCommand,
+  type CommandAutocompleteChoice,
+  type SoundDownloadResult,
 } from '@monky/shared';
 import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
@@ -20,12 +22,16 @@ import {
   commandKey, incrementCommandUsage, readCommandUsage, writeCommandUsage,
   type CommandUsage, type CommandUsageScope, type CommandUsageStorage,
 } from '../utils/commandCatalog';
+import type { AutocompleteInputs } from '../utils/commandAutocomplete';
 
 export interface CommandDraft {
   command: SlashCommand;
   values: BotFormValues;
   visibleOptionalNames: string[];
   pending: boolean;
+  autocomplete: AutocompleteInputs;
+  downloadConsent: boolean;
+  touchedFields?: string[];
   error?: string;
 }
 
@@ -48,6 +54,16 @@ export interface BotInvocation extends CommandInvokedPayload {
   forms: BotFormState[];
   acknowledged: boolean;
   hasResponse: boolean;
+  soundDownload?: {
+    downloadId: string;
+    title: string;
+    fileName: string;
+    receivedBytes: number;
+    totalBytes?: number;
+    phase?: 'confirming' | 'downloading';
+    result?: SoundDownloadResult;
+    resultOrigin?: 'main' | 'client';
+  };
 }
 
 export class ChatStore {
@@ -70,6 +86,7 @@ export class ChatStore {
   private commands: SlashCommand[] = [];
   private commandDrafts: Map<string, CommandDraft> = new Map();
   private invocations: Map<string, BotInvocation> = new Map();
+  private invocationFinished = new Set<(invocation: BotInvocation) => void>();
   private commandUsageScope: CommandUsageScope | null = null;
   private commandUsage: CommandUsage[] = [];
   // Each channel retains at most 250 public and 250 private messages.
@@ -339,6 +356,7 @@ export class ChatStore {
       const changed = wasAvailable !== !!current ||
         (current !== undefined && JSON.stringify(current) !== JSON.stringify(draft.command));
       if (current) {
+        if (JSON.stringify(current.options) !== JSON.stringify(draft.command.options)) draft.autocomplete = {};
         draft.command = current;
         draft.visibleOptionalNames = draft.visibleOptionalNames.filter((name) =>
           current.options?.some((option) => option.name === name && !option.required));
@@ -362,13 +380,15 @@ export class ChatStore {
     return this.commands.some((entry) => entry.botId === command.botId && entry.name === command.name);
   }
 
-  public selectCommand(channelId: string, command: SlashCommand, text = ''): void {
+  public selectCommand(channelId: string, command: SlashCommand, text = '', downloadConsent = false): void {
     if (this.commandDrafts.get(channelId)?.pending) return;
     const values = seedCommandInputs(command, text);
+    const first = command.options?.[0];
+    const autocomplete: AutocompleteInputs = first?.autocomplete ? { [first.name]: { query: text } } : {};
     const visibleOptionalNames = (command.options ?? [])
-      .filter((option) => !option.required && values[option.name] !== undefined)
+      .filter((option) => !option.required && (values[option.name] !== undefined || !!autocomplete[option.name]?.query))
       .map((option) => option.name);
-    this.commandDrafts.set(channelId, { command, values, visibleOptionalNames, pending: false });
+    this.commandDrafts.set(channelId, { command, values, visibleOptionalNames, pending: false, autocomplete, downloadConsent });
     this.clearDraft(channelId);
     this.bus.emit('chat.command_draft_updated', { channelId });
   }
@@ -382,6 +402,54 @@ export class ChatStore {
     if (!draft || draft.pending) return;
     draft.values = values;
     draft.error = undefined;
+  }
+
+  public touchCommandField(channelId: string, name: string): void {
+    const draft = this.commandDrafts.get(channelId);
+    if (!draft || draft.pending || !draft.command.options?.some((option) => option.name === name)) return;
+    draft.touchedFields ??= [];
+    if (!draft.touchedFields.includes(name)) draft.touchedFields.push(name);
+  }
+
+  public setCommandQuery(channelId: string, name: string, query: string): void {
+    const draft = this.commandDrafts.get(channelId);
+    if (!draft || draft.pending) return;
+    draft.autocomplete[name] = { query };
+    delete draft.values[name];
+    draft.error = undefined;
+  }
+
+  public selectCommandChoice(channelId: string, name: string, choice: CommandAutocompleteChoice): void {
+    const draft = this.commandDrafts.get(channelId);
+    if (!draft || draft.pending || !draft.command.options?.some((option) => option.name === name && option.autocomplete)) return;
+    draft.autocomplete[name] = { query: choice.label, selected: { ...choice } };
+    draft.values[name] = choice.value;
+    draft.error = undefined;
+  }
+
+  public onInvocationFinished(listener: (invocation: BotInvocation) => void): () => void {
+    this.invocationFinished.add(listener);
+    return () => this.invocationFinished.delete(listener);
+  }
+
+  public updateSoundDownload(invocationId: string, download: NonNullable<BotInvocation['soundDownload']>): boolean {
+    const invocation = this.invocations.get(invocationId);
+    if (!invocation || invocation.soundDownload?.result ||
+        (invocation.soundDownload && invocation.soundDownload.downloadId !== download.downloadId)) return false;
+    invocation.soundDownload = download;
+    this.notifyInvocation(invocation);
+    return true;
+  }
+
+  public completeSoundDownload(invocation: BotInvocation, downloadId: string, result: SoundDownloadResult): boolean {
+    const download = invocation.soundDownload;
+    if (this.invocations.get(invocation.invocationId) !== invocation || !download ||
+        download.downloadId !== downloadId || download.resultOrigin === 'main') return false;
+    // A network cancellation can overtake the IPC reply after the file was committed.
+    // Only that operation's Main reply may replace a provisional client result.
+    invocation.soundDownload = { ...download, result, resultOrigin: 'main' };
+    this.notifyInvocation(invocation);
+    return true;
   }
 
   public setCommandOptionVisible(channelId: string, name: string, visible: boolean): boolean {
@@ -435,7 +503,10 @@ export class ChatStore {
       ? selected
       : this.commands.find((entry) => entry.botId === payload.botId && entry.name === payload.commandName);
     const invocation: BotInvocation = {
-      ...payload,
+      invocationId: payload.invocationId,
+      channelId: payload.channelId,
+      botId: payload.botId,
+      commandName: payload.commandName,
       botName: definition?.botName ?? payload.commandName,
       botAvatarUrl: definition?.botAvatarUrl,
       createdAt: now,
@@ -544,6 +615,7 @@ export class ChatStore {
     const invocation = this.invocations.get(payload.invocationId);
     if (!invocation || invocation.channelId !== payload.channelId || invocation.status !== 'active') return;
     invocation.status = payload.reason;
+    for (const listener of this.invocationFinished) listener(invocation);
     invocation.cancelPending = false;
     invocation.error = undefined;
     for (const form of invocation.forms) {
@@ -597,6 +669,7 @@ export class ChatStore {
   }
 
   public clear(): void {
+    this.finishAllInvocations('caller_disconnected');
     this.ephemeralMessages.clear();
     this.historicalChannels.clear();
     this.replyDrafts.clear();

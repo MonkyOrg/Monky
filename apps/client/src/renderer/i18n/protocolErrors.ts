@@ -36,6 +36,8 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.BOT_INTERACTION_INVALID]: 'protocolError.botInteractionInvalid',
   [ProtocolErrorCode.BOT_COMMAND_BUSY]: 'protocolError.botCommandBusy',
   [ProtocolErrorCode.BOT_INVALID_PROFILE]: 'protocolError.botInvalidProfile',
+  [ProtocolErrorCode.BOT_SETTINGS_INVALID]: 'botSettings.stalePreferences',
+  [ProtocolErrorCode.BOT_SETTINGS_CONFLICT]: 'botSettings.conflict',
 };
 
 /**

@@ -520,6 +520,27 @@ async function setupNavigationFavoritesSmoke() {
       click('#sb-filter-favorites');
       shortcutCallback('Zap');
       equal(plays.at(-1), sound(firstFolder, 'Zap').filePath, 'Filtered-out sounds still work through their global shortcut');
+      const persistedFolder = localStorage.getItem('monky_settings');
+      const loadedSounds = JSON.stringify(soundboard.getSounds());
+      const folderWrite = Storage.prototype.setItem;
+      nextFolder = secondFolder;
+      Storage.prototype.setItem = function (key, value) {
+        if (key === 'monky_settings') throw new DOMException('Fixture folder storage full', 'QuotaExceededError');
+        return folderWrite.call(this, key, value);
+      };
+      try {
+        click('#sb-btn-change-folder');
+        await until(() => document.querySelector('.dialog-message'), 'Folder persistence error');
+        equal(document.querySelector('.dialog-message').textContent, t('soundboard.chooseFolderFailed'),
+          'Folder persistence failures show the localized folder error');
+        equal(settings.soundboardFolderPath, firstFolder, 'Failed persistence restores the previously configured download folder');
+        equal(JSON.stringify(soundboard.getSounds()), loadedSounds, 'Failed folder selection preserves the loaded sound library');
+        equal(localStorage.getItem('monky_settings'), persistedFolder, 'Failed folder selection preserves the saved configuration');
+        await settleDialog();
+        await until(() => !document.getElementById('sb-btn-change-folder').disabled, 'Folder picker recovers after persistence failure');
+      } finally {
+        Storage.prototype.setItem = folderWrite;
+      }
       nextFolder = secondFolder;
       click('#sb-btn-change-folder');
       await until(() => document.getElementById('sb-folder-path-label')?.textContent === secondFolder, 'Folder switch');

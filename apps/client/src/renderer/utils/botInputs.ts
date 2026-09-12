@@ -14,9 +14,9 @@ import {
   type UserSummary,
 } from '@monky/shared';
 import { t, type TranslationKey } from '../i18n';
-
+import type { AutocompleteInputs } from './commandAutocomplete';
 export type BotInputField = BotFormField | {
-  type: 'user';
+  type: 'user' | 'autocomplete';
   name: string;
   label: string;
   description?: string;
@@ -32,6 +32,7 @@ export function commandInputFields(command: SlashCommand): BotInputField[] {
       return { ...base, type: 'integer', min: option.min, max: option.max, placeholder: option.placeholder };
     }
     if (option.type === 'user') return { ...base, type: 'user', placeholder: option.placeholder };
+    if (option.autocomplete) return { ...base, type: 'autocomplete', placeholder: option.placeholder };
     if (option.choices) return { ...base, type: 'select', choices: option.choices, placeholder: option.placeholder };
     return { ...base, type: 'text', placeholder: option.placeholder, multiline: true };
   });
@@ -80,8 +81,20 @@ export function convertBotInputValues(fields: BotInputField[], inputs: BotFormVa
 export function commandValuesFromInputs(
   command: SlashCommand,
   inputs: BotFormValues,
-  members: Pick<UserSummary, 'id'>[]
+  members: Pick<UserSummary, 'id'>[],
+  autocomplete: AutocompleteInputs = {},
+  visibleOptionalNames?: readonly string[]
 ): BotInputResult<CommandValues> {
+  for (const option of command.options ?? []) {
+    if (!option.autocomplete) continue;
+    const value = inputs[option.name];
+    const hasVisibleQuery = !!autocomplete[option.name]?.query.trim() &&
+      (option.required || visibleOptionalNames === undefined || visibleOptionalNames.includes(option.name));
+    if ((value !== undefined || option.required || hasVisibleQuery) && (!autocomplete[option.name]?.selected ||
+        autocomplete[option.name].selected?.value !== value)) {
+      return { success: false, field: option.name, reason: 'choice' };
+    }
+  }
   const result = validateCommandOptions(
     command.options ?? [],
     convertBotInputValues(commandInputFields(command), inputs)
@@ -92,8 +105,23 @@ export function commandValuesFromInputs(
     if (option.type === 'user' && value !== undefined && !members.some((member) => member.id === value)) {
       return { success: false, field: option.name, reason: 'choice' };
     }
+
   }
   return result;
+}
+
+export function autocompleteCommandOptions(
+  command: SlashCommand, optionName: string, values: BotFormValues,
+  members: Pick<UserSummary, 'id'>[], autocomplete: AutocompleteInputs
+): CommandValues {
+  const options: CommandValues = {};
+  for (const option of command.options ?? []) {
+    if (option.name === optionName || values[option.name] === undefined) continue;
+    const result = commandValuesFromInputs({ ...command, options: [{ ...option, required: false }] },
+      { [option.name]: values[option.name] }, members, autocomplete);
+    if (result.success) Object.assign(options, result.values);
+  }
+  return options;
 }
 
 export function formValuesFromInputs(form: BotForm, inputs: BotFormValues): BotInputResult<BotFormValues> {
@@ -120,7 +148,7 @@ export function seedCommandInputs(command: SlashCommand, text = ''): BotFormValu
   const fields = commandInputFields(command);
   const values = initialBotInputValues(fields);
   const first = fields[0];
-  if (first && text.length > 0) {
+  if (first && first.type !== 'autocomplete' && text.length > 0) {
     // Free text belongs to the first named field, including every space/comma.
     values[first.name] = first.type === 'boolean' && /^(true|false)$/i.test(text.trim())
       ? text.trim().toLowerCase() === 'true'

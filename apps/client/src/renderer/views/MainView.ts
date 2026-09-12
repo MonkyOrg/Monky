@@ -29,6 +29,7 @@ import { editChannelModal } from './EditChannelModal';
 import { settingsModal } from './SettingsModal';
 import { noiseSuppressionToggleTitle } from './settings/NoiseSuppressionControl';
 import { serverSettingsModal } from './ServerSettingsModal';
+import { botSettingsModal } from './BotSettingsModal';
 import { serverMonitorModal } from './ServerMonitorModal';
 import { inviteModal } from './InviteModal';
 import { contextMenu, ContextMenuItem } from './ContextMenu';
@@ -116,6 +117,10 @@ export class MainView {
               <button id="btn-server-monitor" class="server-dropdown-item" title="${t('serverMonitor.title')}" style="display: none;">
                 <span class="material-symbols-outlined md-18">monitoring</span>
                 <span>${t('serverMonitor.title')}</span>
+              </button>
+              <button id="btn-server-bots" class="server-dropdown-item">
+                <span class="material-symbols-outlined md-18" aria-hidden="true">smart_toy</span>
+                <span>${t('botSettings.listTitle')}</span>
               </button>
               <button id="btn-invite-friends" class="server-dropdown-item" title="${t('main.inviteTitle')}">
                 <span class="material-symbols-outlined md-18">person_add</span>
@@ -1365,6 +1370,8 @@ export class MainView {
     const btnInvite = document.getElementById('btn-invite-friends');
     const btnServerSettings = document.getElementById('btn-server-settings');
     const btnServerMonitor = document.getElementById('btn-server-monitor');
+    const btnServerBots = document.getElementById('btn-server-bots');
+    const openServerBots = botSettingsModal.createOpenAction();
     const btnProfile = document.getElementById('user-profile-btn');
     const btnSettings = document.getElementById('bar-btn-settings');
     const btnMic = document.getElementById('bar-btn-mic');
@@ -1376,6 +1383,7 @@ export class MainView {
     btnInvite?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => inviteModal.open()); });
     btnServerSettings?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => serverSettingsModal.open()); });
     btnServerMonitor?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => serverMonitorModal.open()); });
+    btnServerBots?.addEventListener('click', () => { this.closeServerDropdown(); openServerBots(); });
     void this.refreshServerMonitorVisibility();
     btnProfile?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => settingsModal.open()));
     const openOwnUserMenu = (event: MouseEvent) => {

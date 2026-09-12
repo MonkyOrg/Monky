@@ -1,15 +1,20 @@
 import { z } from 'zod';
 import { LIMITS } from './constants.js';
 import type { CommandOption } from './models.js';
+import {
+  createSelectionChoiceSchema,
+  selectionChoicesSchema,
+  selectionDescriptionSchema,
+  selectionLabelSchema,
+} from './selection.js';
 
 const identifier = z.string().min(1).max(128);
 const inputName = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/)
   .refine((name) => !['__proto__', 'constructor', 'prototype'].includes(name));
 const commandName = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,31}$/);
-const label = z.string().trim().min(1).max(100);
-const description = z.string().max(500);
-const choiceSchema = z.object({ label, value: z.string().trim().min(1).max(100) }).strict();
-const choicesSchema = z.array(choiceSchema).min(1).max(LIMITS.MAX_BOT_FORM_CHOICES)
+const label = selectionLabelSchema;
+const description = selectionDescriptionSchema;
+const choicesSchema = selectionChoicesSchema.min(1).max(LIMITS.MAX_BOT_FORM_CHOICES)
   .refine((choices) => new Set(choices.map((choice) => choice.value)).size === choices.length);
 const scalarSchema = z.union([z.string().max(LIMITS.MAX_MESSAGE_LENGTH), z.number().finite(), z.boolean()]);
 const formValueSchema = z.union([
@@ -23,6 +28,30 @@ export type BotFormValues = Record<string, z.infer<typeof formValueSchema>>;
 const commandValuesSchema = z.record(inputName, scalarSchema)
   .refine((values) => Object.keys(values).length <= LIMITS.MAX_OPTIONS_PER_COMMAND);
 
+export const botFormValuesSchema = z.record(inputName, formValueSchema)
+  .refine((values) => Object.keys(values).length <= LIMITS.MAX_BOT_FORM_FIELDS);
+export const botSettingsValuesSchema = botFormValuesSchema.refine(
+  (values) => jsonBytes(values) <= LIMITS.MAX_BOT_SETTINGS_VALUES_BYTES,
+  'Settings values exceed the size limit'
+);
+const settingsRevision = z.number().int().safe().nonnegative();
+export const botServerSettingsSnapshotSchema = z.object({
+  schemaRevision: settingsRevision,
+  revision: settingsRevision,
+  values: botSettingsValuesSchema,
+}).strict();
+export type BotServerSettingsSnapshot = z.infer<typeof botServerSettingsSnapshotSchema>;
+
+export const botSettingsContextSchema = z.object({
+  schemaRevision: settingsRevision,
+  serverRevision: settingsRevision,
+  server: botSettingsValuesSchema,
+  user: botSettingsValuesSchema,
+}).strict();
+export type BotSettingsContext = z.infer<typeof botSettingsContextSchema>;
+
+export const commandRequestIdSchema = identifier;
+
 export const commandOptionSchema = z.object({
   name: inputName,
   description: label,
@@ -30,10 +59,12 @@ export const commandOptionSchema = z.object({
   required: z.boolean().optional(),
   placeholder: z.string().max(150).optional(),
   choices: choicesSchema.optional(),
+  autocomplete: z.boolean().optional(),
   min: z.number().int().safe().optional(),
   max: z.number().int().safe().optional(),
 }).strict().refine((option) =>
   (!option.choices || option.type === 'string') &&
+  (!option.autocomplete || (option.type === 'string' && !option.choices)) &&
   ((option.min === undefined && option.max === undefined) || option.type === 'integer') &&
   (option.min === undefined || option.max === undefined || option.min <= option.max)
 );
@@ -42,14 +73,9 @@ export const commandDefinitionSchema = z.object({
   name: commandName,
   description: label,
   options: z.array(commandOptionSchema).max(LIMITS.MAX_OPTIONS_PER_COMMAND).optional(),
+  downloadsSound: z.boolean().optional(),
 }).strict().refine((command) =>
   new Set(command.options?.map((option) => option.name)).size === (command.options?.length ?? 0)
-);
-
-export const commandRegisterSchema = z.object({
-  commands: z.array(commandDefinitionSchema).max(LIMITS.MAX_COMMANDS_PER_BOT),
-}).strict().refine((payload) =>
-  new Set(payload.commands.map((command) => command.name)).size === payload.commands.length
 );
 
 export const commandInvokeSchema = z.object({
@@ -58,13 +84,54 @@ export const commandInvokeSchema = z.object({
   channelId: identifier,
   options: commandValuesSchema.optional(),
   locale: z.enum(['pt-BR', 'en']).optional(),
+  allowSoundDownload: z.boolean().optional(),
+  userSettings: botSettingsValuesSchema.optional(),
 }).strict();
 
-export const commandExecutionSchema = commandInvokeSchema.extend({
+export const commandExecutionSchema = commandInvokeSchema.omit({ userSettings: true }).extend({
   invocationId: identifier,
   invokerId: identifier,
   invokerNickname: z.string().min(1).max(LIMITS.MAX_NICKNAME_LENGTH),
+  settings: botSettingsContextSchema.optional(),
 });
+
+export const commandAutocompleteChoiceSchema = createSelectionChoiceSchema(
+  z.string().min(1).max(LIMITS.MAX_MESSAGE_LENGTH).refine((value) => value.trim().length > 0)
+);
+export const commandAutocompleteChoicesSchema = z.array(commandAutocompleteChoiceSchema)
+  .max(LIMITS.MAX_BOT_AUTOCOMPLETE_CHOICES)
+  .refine((choices) => new Set(choices.map((choice) => choice.value)).size === choices.length);
+export type CommandAutocompleteChoice = z.infer<typeof commandAutocompleteChoiceSchema>;
+
+export const commandAutocompleteSchema = z.object({
+  botId: identifier,
+  commandName,
+  channelId: identifier,
+  optionName: inputName,
+  query: z.string().max(LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH),
+  options: commandValuesSchema.optional(),
+  locale: z.enum(['pt-BR', 'en']).optional(),
+  userSettings: botSettingsValuesSchema.optional(),
+}).strict();
+export const commandAutocompleteExecutionSchema = commandAutocompleteSchema
+  .omit({ botId: true, channelId: true, userSettings: true })
+  .extend({
+    options: commandValuesSchema,
+    locale: z.enum(['pt-BR', 'en']),
+    settings: botSettingsContextSchema.optional(),
+  });
+export const commandAutocompleteResultSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('ok'),
+    choices: commandAutocompleteChoicesSchema,
+  }).strict(),
+  z.object({
+    status: z.literal('failed'),
+    reason: z.enum(['handler_failed', 'invalid_response', 'timeout']),
+  }).strict(),
+]);
+export type CommandAutocompleteResult = z.infer<typeof commandAutocompleteResultSchema>;
+export const commandAutocompleteCancelSchema = z.object({ requestId: identifier }).strict();
 
 const fieldBase = {
   name: inputName,
@@ -142,14 +209,43 @@ export const botFormSchema = z.object({
 
 export type BotForm = z.infer<typeof botFormSchema>;
 
+export const botSettingsDefinitionSchema = z.object({
+  server: botFormSchema.optional(),
+  user: botFormSchema.optional(),
+}).strict().superRefine((definition, ctx) => {
+  if (jsonBytes(definition) > LIMITS.MAX_BOT_SETTINGS_DEFINITION_BYTES) {
+    ctx.addIssue({ code: 'custom', message: 'Settings declaration exceeds the size limit' });
+  }
+  for (const scope of ['server', 'user'] as const) {
+    const defaults = resolveBotSettingsValues(definition[scope], {});
+    if (!defaults.success) {
+      ctx.addIssue({
+        code: 'custom', message: `Invalid settings default: ${defaults.field} (${defaults.reason})`,
+        path: [scope, 'fields', defaults.field],
+      });
+    }
+  }
+});
+export type BotSettingsDefinition = z.infer<typeof botSettingsDefinitionSchema>;
+
+export const commandRegisterSchema = z.object({
+  commands: z.array(commandDefinitionSchema).max(LIMITS.MAX_COMMANDS_PER_BOT),
+  settings: botSettingsDefinitionSchema.optional(),
+}).strict().refine((payload) =>
+  new Set(payload.commands.map((command) => command.name)).size === payload.commands.length
+);
+
+export const commandRegisteredSchema = z.object({
+  registered: z.number().int().min(0).max(LIMITS.MAX_COMMANDS_PER_BOT),
+  settings: botServerSettingsSnapshotSchema,
+}).strict();
+
 export const commandPromptSchema = z.object({
   invocationId: identifier,
   interactionId: identifier,
   form: botFormSchema,
 }).strict();
 
-export const botFormValuesSchema = z.record(inputName, formValueSchema)
-  .refine((values) => Object.keys(values).length <= LIMITS.MAX_BOT_FORM_FIELDS);
 export const commandSubmitSchema = z.object({
   invocationId: identifier,
   interactionId: identifier,
@@ -201,10 +297,96 @@ export const botRegistrationSchema = z.object({
   serverUrl: z.string().url().max(2048).refine((value) => /^wss?:\/\//.test(value)).optional(),
 });
 
+export const botSettingsSummarySchema = z.object({
+  botId: identifier,
+  name: botCreateSchema.shape.name,
+  avatarUrl: z.string().min(1).max(2048).nullable().optional(),
+  online: z.boolean(),
+  capabilities: z.object({ downloadsSound: z.boolean() }).strict(),
+  schemaRevision: settingsRevision,
+  revision: settingsRevision,
+  hasServerSettings: z.boolean(),
+  hasUserSettings: z.boolean(),
+  canConfigure: z.boolean(),
+}).strict();
+export type BotSettingsSummary = z.infer<typeof botSettingsSummarySchema>;
+
+export const botSettingsSnapshotSchema = z.object({
+  bot: botSettingsSummarySchema,
+  definition: botSettingsDefinitionSchema,
+  server: botServerSettingsSnapshotSchema.optional(),
+}).strict().superRefine((snapshot, ctx) => {
+  const { bot, definition, server } = snapshot;
+  if (!!definition.user !== bot.hasUserSettings ||
+      (!!definition.server && !bot.hasServerSettings) ||
+      (!!definition.server !== !!server) ||
+      (bot.canConfigure && bot.hasServerSettings && !server)) {
+    ctx.addIssue({ code: 'custom', message: 'Inconsistent settings declaration' });
+  }
+  if (server && (server.schemaRevision !== bot.schemaRevision || server.revision !== bot.revision)) {
+    ctx.addIssue({ code: 'custom', message: 'Inconsistent settings revisions', path: ['server'] });
+  }
+  if (definition.server && server) {
+    const validated = validateBotFormValues(definition.server, server.values);
+    if (!validated.success) {
+      ctx.addIssue({ code: 'custom', message: 'Invalid shared settings values', path: ['server', 'values', validated.field] });
+    }
+  }
+});
+export type BotSettingsSnapshot = z.infer<typeof botSettingsSnapshotSchema>;
+
+export const botSettingsListSchema = z.object({}).strict();
+export const botSettingsListResponseSchema = z.object({
+  bots: z.array(botSettingsSummarySchema).max(LIMITS.MAX_BOT_SETTINGS_CATALOG)
+    .refine((bots) => new Set(bots.map((bot) => bot.botId)).size === bots.length, 'Duplicate bot IDs'),
+}).strict();
+export type BotSettingsListResponse = z.infer<typeof botSettingsListResponseSchema>;
+export const botSettingsGetSchema = z.object({ botId: identifier }).strict();
+export const botSettingsPatchSchema = z.record(inputName, formValueSchema.nullable())
+  .refine((patch) => Object.keys(patch).length <= LIMITS.MAX_BOT_FORM_FIELDS &&
+    jsonBytes(patch) <= LIMITS.MAX_BOT_SETTINGS_VALUES_BYTES);
+export type BotSettingsPatch = z.infer<typeof botSettingsPatchSchema>;
+export const botSettingsUpdateSchema = botSettingsGetSchema.extend({
+  schemaRevision: settingsRevision,
+  expectedRevision: settingsRevision,
+  patch: botSettingsPatchSchema,
+}).strict();
+
 export type BotInputError = 'required' | 'type' | 'choice' | 'min' | 'max' | 'duplicate' | 'unknown';
 export type BotInputResult<T> =
   | { success: true; values: T }
   | { success: false; field: string; reason: BotInputError };
+
+function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/** Defaults fill absent keys only; explicit invalid overrides never fall back. */
+export function resolveBotSettingsValues(form: BotForm | undefined, input: unknown): BotInputResult<BotFormValues> {
+  const parsed = botSettingsValuesSchema.safeParse(input === undefined ? {} : input);
+  if (!parsed.success) return { success: false, field: '', reason: 'type' };
+  if (!form) {
+    const field = Object.keys(parsed.data)[0];
+    return field === undefined ? { success: true, values: {} } : { success: false, field, reason: 'unknown' };
+  }
+  const declaration = botFormSchema.safeParse(form);
+  if (!declaration.success) return { success: false, field: '', reason: 'type' };
+  const defaults: BotFormValues = {};
+  for (const field of declaration.data.fields) {
+    if (field.defaultValue !== undefined) defaults[field.name] = field.defaultValue;
+  }
+  const result = validateBotFormValues(declaration.data, { ...defaults, ...parsed.data });
+  if (!result.success) return result;
+  // Keep explicit unset markers so resolving an effective snapshot cannot
+  // accidentally restore the default the user cleared.
+  for (const [name, value] of Object.entries(parsed.data)) {
+    if (value === '' || (Array.isArray(value) && value.length === 0)) result.values[name] = value;
+  }
+  if (!botSettingsValuesSchema.safeParse(result.values).success) {
+    return { success: false, field: '', reason: 'max' };
+  }
+  return result;
+}
 
 function validateField(field: BotFormField, value: BotFormValues[string]): BotInputError | null {
   switch (field.type) {
@@ -256,7 +438,8 @@ export function validateBotFormValues(form: BotForm, input: unknown): BotInputRe
 
 export function validateCommandOptions(
   definitions: CommandOption[],
-  input: unknown
+  input: unknown,
+  settings: { partial?: boolean } = {}
 ): BotInputResult<CommandValues> {
   const parsed = commandValuesSchema.safeParse(input ?? {});
   if (!parsed.success) return { success: false, field: '', reason: 'type' };
@@ -268,7 +451,7 @@ export function validateCommandOptions(
   for (const option of definitions) {
     const value = parsed.data[option.name];
     if (value === undefined || value === '') {
-      if (option.required) return { success: false, field: option.name, reason: 'required' };
+      if (option.required && !settings.partial) return { success: false, field: option.name, reason: 'required' };
       continue;
     }
     let reason: BotInputError | null = null;

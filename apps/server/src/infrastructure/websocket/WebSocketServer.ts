@@ -103,6 +103,9 @@ import {
   authConnectSchema,
   botCreateSchema,
   botProfileUpdateSchema,
+  botSettingsGetSchema,
+  botSettingsListSchema,
+  botSettingsUpdateSchema,
   commandRegisterSchema,
   voiceReconnectSchema,
   adminVoiceRestrictionsGetSchema,
@@ -117,6 +120,7 @@ import { ChatService } from '../../application/services/ChatService';
 import { PermissionService } from '../../application/services/PermissionService';
 import { RoleService } from '../../application/services/RoleService';
 import { BotService } from '../../application/services/BotService';
+import { BotSettingsError, BotSettingsService } from '../../application/services/BotSettingsService';
 import { BotSelectorService } from '../../application/services/BotSelectorService';
 import { BotSelectorHandler } from './BotSelectorHandler';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
@@ -153,6 +157,7 @@ interface ClientSession {
   isBot?: boolean;
   /** The bot record id — set only for bot sessions (#569). */
   botId?: string;
+  botSettingsReady?: boolean;
   /**
    * Channels this connection currently knows about (#384). The server filters
    * private channels out before sending, so it has to remember what each client
@@ -191,6 +196,7 @@ export class WebSocketServer {
   }>();
   private botInteractions: BotInteractionHandler;
   private botSelectors?: BotSelectorHandler;
+  private botSettingsPermissionVersion = 0;
 
   constructor(
     private server: http.Server,
@@ -207,7 +213,8 @@ export class WebSocketServer {
     private sfuManager: SfuManager = new SfuManager(),
     private botService?: BotService,
     private commandRegistry: CommandRegistry = new CommandRegistry(),
-    selectorService?: BotSelectorService
+    selectorService?: BotSelectorService,
+    private botSettings?: BotSettingsService
   ) {
     this.sfuManager.setHealthListener((sessionId, channelId, connectionHealth) => {
       const current = this.signalingService.getVoiceState(sessionId);
@@ -224,6 +231,7 @@ export class WebSocketServer {
       this.botSelectors = new BotSelectorHandler(selectorService, this.channelService, this.userService, {
         sessions: () => this.sessions.values(),
         isCurrent: (session) => this.isCurrentSession(session),
+        accessVersion: () => this.botSettingsPermissionVersion,
         send: (session, message) => this.send(session.ws, message),
         authorizeInvocation: (session, invocationId, channelId) => this.botInteractions.authorizeSelector(session, invocationId, channelId),
         publish: async (bot, channelId, content, messageId, canSend, accessUserId) => {
@@ -240,7 +248,7 @@ export class WebSocketServer {
         broadcastMessage: (message) => this.broadcastToChannel(
           message.channelId, { type: MessageType.CHAT_MESSAGE, payload: message }
         ),
-      });
+      }, this.botSettings);
     }
     this.botInteractions = new BotInteractionHandler({
       isCurrent: (session) => this.isCurrentSession(session),
@@ -249,7 +257,7 @@ export class WebSocketServer {
       sendError: (ws, code, message, requestId) => this.sendError(ws, code, message, requestId),
       broadcastToChannel: (channelId, message, canSend) => this.broadcastToChannel(channelId, message, undefined, canSend),
       publishResponse: (session, response, canSend, requestId) => this.publishBotResponse(session, response, canSend, requestId),
-    }, this.channelService, this.userService, this.commandRegistry);
+    }, this.channelService, this.userService, this.commandRegistry, this.botSettings);
     this.wss = new WSServer({ server: this.server });
     this.setupWss();
     this.startHeartbeat();
@@ -714,6 +722,12 @@ export class WebSocketServer {
         break;
 
       // ── Bot management (#569) ────────────────────────────────────────
+      case MessageType.BOT_SETTINGS_LIST:
+      case MessageType.BOT_SETTINGS_GET:
+      case MessageType.BOT_SETTINGS_UPDATE:
+        await this.handleBotSettings(session, type, payload, requestId);
+        break;
+
       case MessageType.BOT_CREATE:
         if (!(await this.requirePermission(session, Permission.MANAGE_BOTS, requestId))) return;
         await this.handleBotCreate(session, payload, requestId);
@@ -740,7 +754,7 @@ export class WebSocketServer {
 
       // ── Slash commands (#569) ────────────────────────────────────────
       case MessageType.COMMAND_REGISTER:
-        this.handleCommandRegister(session, payload, requestId);
+        await this.handleCommandRegister(session, payload, requestId);
         break;
 
       case MessageType.SELECTOR_CREATE:
@@ -759,6 +773,26 @@ export class WebSocketServer {
 
       case MessageType.COMMAND_INVOKE:
         await this.botInteractions.invoke(session, payload, requestId);
+        break;
+
+      case MessageType.COMMAND_AUTOCOMPLETE:
+        await this.botInteractions.autocomplete(session, payload, requestId);
+        break;
+
+      case MessageType.COMMAND_AUTOCOMPLETE_RESULT:
+        await this.botInteractions.autocompleteResult(session, payload, requestId);
+        break;
+
+      case MessageType.COMMAND_AUTOCOMPLETE_CANCEL:
+        this.botInteractions.cancelAutocomplete(session, payload, requestId);
+        break;
+
+      case MessageType.COMMAND_SOUND_DOWNLOAD:
+        await this.botInteractions.downloadSound(session, payload, requestId);
+        break;
+
+      case MessageType.COMMAND_SOUND_DOWNLOAD_RESULT:
+        await this.botInteractions.downloadSoundResult(session, payload, requestId);
         break;
 
       case MessageType.COMMAND_RESPONSE:
@@ -938,6 +972,7 @@ export class WebSocketServer {
       payload: successPayload,
     });
     this.handleCommandsList(session);
+    await this.sendBotSettingsList(session);
 
     if (this.getSessionsOfUser(result.user.id).some((other) => !!other.invisible !== !!session.invisible)) {
       this.handleUserUpdateVisibility(session, { appearOffline: session.invisible === true });
@@ -1093,6 +1128,7 @@ export class WebSocketServer {
     session.sessionId = sessionId;
     session.isBot = true;
     session.botId = botRecord.id;
+    session.botSettingsReady = false;
 
     // Replace existing bot session if any.
     const existingWs = this.sessionSockets.get(sessionId);
@@ -1166,6 +1202,7 @@ export class WebSocketServer {
 
     // Broadcast the bot joining.
     this.broadcast({ type: MessageType.USER_JOINED, payload: { user: botUser } satisfies UserJoinedPayload }, session.ws);
+    await this.broadcastBotSettings();
     Logger.info('BOT', `Bot "${botRecord.name}" (${botRecord.id}) connected.`);
   }
 
@@ -1206,6 +1243,7 @@ export class WebSocketServer {
       token: result.token,
     };
     this.send(session.ws, { type: MessageType.BOT_CREATED, requestId, payload: createdPayload });
+    await this.broadcastBotSettings();
   }
 
   private async handleBotList(
@@ -1261,6 +1299,7 @@ export class WebSocketServer {
     this.send(session.ws, { type: MessageType.BOT_PROFILE_UPDATED, requestId, payload: updated });
     this.broadcast({ type: MessageType.BOT_PROFILE_UPDATED, payload: updated }, session.ws);
     this.broadcastCommands();
+    await this.broadcastBotSettings();
   }
 
   private async handleBotRevoke(
@@ -1284,6 +1323,7 @@ export class WebSocketServer {
     const revokedPayload: BotRevokedPayload = { botId: payload.botId };
     this.send(session.ws, { type: MessageType.BOT_REVOKED, requestId, payload: revokedPayload });
     this.broadcast({ type: MessageType.BOT_REVOKED, payload: revokedPayload }, session.ws);
+    await this.broadcastBotSettings();
   }
 
   private disconnectBot(botId: string): void {
@@ -1344,6 +1384,7 @@ export class WebSocketServer {
       if (result.revokedBotId) {
         this.disconnectBot(result.revokedBotId);
         this.broadcast({ type: MessageType.BOT_REVOKED, payload: { botId: result.revokedBotId } satisfies BotRevokedPayload });
+        await this.broadcastBotSettings();
       }
       this.sendError(
         session.ws,
@@ -1356,15 +1397,16 @@ export class WebSocketServer {
 
     const installedPayload: BotInstalledPayload = { bot: result.bot };
     this.send(session.ws, { type: MessageType.BOT_INSTALLED, requestId, payload: installedPayload });
+    await this.broadcastBotSettings();
   }
 
   // ── Slash command handlers (#569) ──────────────────────────────────────
 
-  private handleCommandRegister(
+  private async handleCommandRegister(
     session: ClientSession,
     payload: unknown,
     requestId?: string
-  ): void {
+  ): Promise<void> {
     if (!session.user || !session.isBot || !session.botId || !this.isCurrentSession(session)) {
       this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'Apenas bots podem registrar comandos.', requestId);
       return;
@@ -1372,18 +1414,137 @@ export class WebSocketServer {
 
     const parsed = commandRegisterSchema.safeParse(payload);
     if (!parsed.success) {
-      this.sendError(session.ws, ProtocolErrorCode.BOT_INVALID_OPTIONS, 'Definições de comandos inválidas.', requestId);
+      const settingsError = parsed.error.issues.some((issue) => issue.path[0] === 'settings');
+      this.sendError(session.ws, settingsError ? ProtocolErrorCode.BOT_SETTINGS_INVALID : ProtocolErrorCode.BOT_INVALID_OPTIONS,
+        settingsError ? parsed.error.message : 'Definições de comandos inválidas.', requestId);
       return;
     }
-    const registered = this.commandRegistry.register(
-      session.botId, session.user.nickname, parsed.data.commands, session.user.avatarUrl
-    );
-    this.send(session.ws, {
-      type: MessageType.COMMAND_REGISTERED,
-      requestId,
-      payload: { registered } satisfies CommandRegisteredPayload,
+    try {
+      if (!this.botSettings && parsed.data.settings) {
+        throw new BotSettingsError(ProtocolErrorCode.BOT_SETTINGS_INVALID, 'Bot settings are unavailable.');
+      }
+      const settings = this.botSettings?.register(
+        session.botId, parsed.data.settings, parsed.data.commands.some((command) => command.downloadsSound === true)
+      ) ?? { schemaRevision: 0, revision: 0, values: {} };
+      // No await between persistence and registry replacement: validation of both
+      // declarations has completed before either set becomes visible.
+      const registered = this.commandRegistry.register(
+        session.botId, session.user.nickname, parsed.data.commands, session.user.avatarUrl
+      );
+      this.botInteractions.commandsChanged(session.botId);
+      this.send(session.ws, {
+        type: MessageType.COMMAND_REGISTERED, requestId,
+        payload: { registered, settings } satisfies CommandRegisteredPayload,
+      });
+      session.botSettingsReady = true;
+      this.broadcastCommands();
+      await this.broadcastBotSettings(session.botId);
+    } catch (error) {
+      this.sendBotSettingsError(session, error, requestId);
+    }
+  }
+
+  private async handleBotSettings(
+    session: ClientSession, type: MessageType, payload: unknown, requestId?: string
+  ): Promise<void> {
+    if (!session.user || !this.isCurrentSession(session)) return;
+    try {
+      if (!this.botSettings || !this.botService) {
+        throw new BotSettingsError(ProtocolErrorCode.BAD_REQUEST, 'Bot settings are unavailable.');
+      }
+      const settingsService = this.botSettings;
+      if (type === MessageType.BOT_SETTINGS_LIST) {
+        if (session.isBot) throw new BotSettingsError(ProtocolErrorCode.PERMISSION_DENIED, 'Only human members may list bot settings.');
+        if (!botSettingsListSchema.safeParse(payload).success) {
+          throw new BotSettingsError(ProtocolErrorCode.BAD_REQUEST, 'Invalid bot settings list request.');
+        }
+        await this.sendBotSettingsList(session, requestId);
+        return;
+      }
+      const parsed = type === MessageType.BOT_SETTINGS_UPDATE
+        ? botSettingsUpdateSchema.safeParse(payload) : botSettingsGetSchema.safeParse(payload);
+      if (!parsed.success) throw new BotSettingsError(ProtocolErrorCode.BOT_SETTINGS_INVALID, 'Invalid bot settings request.');
+      const { botId } = parsed.data;
+      if (session.isBot && (type !== MessageType.BOT_SETTINGS_GET || botId !== session.botId)) {
+        throw new BotSettingsError(ProtocolErrorCode.PERMISSION_DENIED, 'Bots may only read their own settings.');
+      }
+      const bot = await this.botService.getInfo(botId);
+      if (!bot) throw new BotSettingsError(ProtocolErrorCode.BAD_REQUEST, 'Bot not found.');
+      const handled = await this.withBotSettingsPermission(session, (canConfigure) => {
+        if (type === MessageType.BOT_SETTINGS_UPDATE) {
+          if (!canConfigure) throw new BotSettingsError(ProtocolErrorCode.PERMISSION_DENIED, 'You cannot configure bots.');
+          const update = botSettingsUpdateSchema.parse(parsed.data);
+          const changed = settingsService.update(update);
+          if (changed.revision !== update.expectedRevision) this.botInteractions.settingsChanged(botId);
+          // Cache updates precede new-revision executions on the owning socket.
+          const owner = this.findSessionById(`bot:${botId}`);
+          if (owner?.botSettingsReady && this.isCurrentSession(owner)) {
+            this.send(owner.ws, { type: MessageType.BOT_SETTINGS_SNAPSHOT,
+              payload: settingsService.snapshot(bot, false, true) });
+          }
+        }
+        this.send(session.ws, { type: MessageType.BOT_SETTINGS_SNAPSHOT, requestId,
+          payload: settingsService.snapshot(bot, canConfigure, session.isBot === true) });
+      });
+      if (handled && type === MessageType.BOT_SETTINGS_UPDATE) await this.broadcastBotSettings(botId);
+    } catch (error) {
+      this.sendBotSettingsError(session, error, requestId);
+    }
+  }
+
+  private async sendBotSettingsList(session: ClientSession, requestId?: string): Promise<void> {
+    if (!this.botSettings || !this.botService || !session.user || session.isBot || !this.isCurrentSession(session)) return;
+    const settingsService = this.botSettings;
+    const bots = await this.botService.list();
+    await this.withBotSettingsPermission(session, (canConfigure) => {
+      this.send(session.ws, { type: MessageType.BOT_SETTINGS_LIST_RESPONSE, requestId,
+        payload: settingsService.list(bots, canConfigure) });
     });
-    this.broadcastCommands();
+  }
+
+  private async broadcastBotSettings(changedBotId?: string): Promise<void> {
+    if (!this.botSettings || !this.botService || this.closing) return;
+    const settingsService = this.botSettings;
+    for (const session of this.sessions.values()) {
+      if (!session.user || !this.isCurrentSession(session)) continue;
+      if (!session.isBot) await this.sendBotSettingsList(session);
+      if (!changedBotId || (session.isBot && (session.botId !== changedBotId || !session.botSettingsReady))) continue;
+      const bot = await this.botService.getInfo(changedBotId);
+      if (!bot) continue;
+      await this.withBotSettingsPermission(session, (canConfigure) => {
+        if (!canConfigure && !session.isBot) return;
+        this.send(session.ws, { type: MessageType.BOT_SETTINGS_SNAPSHOT,
+          payload: settingsService.snapshot(bot, canConfigure, session.isBot === true) });
+      });
+    }
+  }
+
+  private sendBotSettingsError(session: ClientSession, error: unknown, requestId?: string): void {
+    if (!this.isCurrentSession(session)) return;
+    if (error instanceof BotSettingsError) {
+      this.sendError(session.ws, error.code, error.message, requestId);
+    } else {
+      Logger.error('BOT', 'Bot settings operation failed.', error);
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, 'Bot settings operation failed.', requestId);
+    }
+  }
+
+  private async withBotSettingsPermission(session: ClientSession, use: (canConfigure: boolean) => void): Promise<boolean> {
+    if (!session.user || !this.isCurrentSession(session)) return false;
+    if (session.isBot) {
+      use(false);
+      return true;
+    }
+    while (this.isCurrentSession(session)) {
+      const version = this.botSettingsPermissionVersion;
+      const allowed = await this.permissionService.checkPermission(session.user.id, Permission.CONFIGURE_BOTS);
+      if (!this.isCurrentSession(session)) return false;
+      if (version !== this.botSettingsPermissionVersion) continue;
+      // Checking and using the grant share one continuation, without another await.
+      use(allowed);
+      return true;
+    }
+    return false;
   }
 
   private handleCommandsList(
@@ -1652,6 +1813,7 @@ export class WebSocketServer {
     session.visibleChannelIds?.add(result.channel.id);
 
     await this.reconcileChannelVisibility();
+    await this.broadcastBotSettings();
   }
 
   private async handleChannelUpdate(
@@ -2761,6 +2923,7 @@ export class WebSocketServer {
   }
 
   private async broadcastRolesState(requestId?: string): Promise<void> {
+    this.botSettingsPermissionVersion++;
     const state = await this.roleService.getRoleState();
     const payload: RolesListPayload = {
       roles: state.roles,
@@ -3082,6 +3245,7 @@ export class WebSocketServer {
     if (session.isBot && session.botId) {
       this.commandRegistry.clearBot(session.botId);
       this.broadcastCommands();
+      void this.broadcastBotSettings().catch((error: unknown) => Logger.error('BOT', 'Failed to publish offline bot settings.', error));
     }
 
     if (!session.user || !session.sessionId) {
@@ -3373,6 +3537,7 @@ export class WebSocketServer {
    * from it, otherwise they would keep talking in a room they can no longer see.
    */
   private async reconcileChannelVisibility(): Promise<void> {
+    this.botSettingsPermissionVersion++;
     const channels = await this.channelService.listChannels();
     const channelsById = new Map(channels.map((channel) => [channel.id, channel]));
 

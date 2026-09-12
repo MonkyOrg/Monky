@@ -20,6 +20,7 @@ export class ContextMenu {
   constructor() {
     appEvents.on('network.disconnected', () => this.close());
     appEvents.on('voice.channel_changed', () => this.close());
+    appEvents.on('session.changed', () => this.close());
   }
 
   public open(x: number, y: number, items: ContextMenuItem[], anchor?: HTMLElement): void {
