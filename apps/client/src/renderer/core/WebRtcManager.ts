@@ -175,6 +175,13 @@ export class WebRtcManager {
   private relayMonitors: Map<string, any> = new Map();
   private localAudioTrack: MediaStreamTrack | null = null;
   private localCameraTrack: MediaStreamTrack | null = null;
+  private cameraTrackRevision = 0;
+  private cameraTrackChange: {
+    track: MediaStreamTrack | null;
+    channelId: string | null;
+    sessionKey: string | null;
+    task: Promise<void>;
+  } | null = null;
   /** Local screen video tracks keyed by share id (#253). */
   private localScreenTracks: Map<string, MediaStreamTrack> = new Map();
   /** The MediaStream wrapper announced to peers for each local share (#253). */
@@ -492,7 +499,17 @@ export class WebRtcManager {
         await this.sfuEngine.produceMic(this.localAudioTrack);
       }
       if (this.localCameraTrack) {
-        await this.sfuEngine.produceCamera(this.localCameraTrack);
+        const track = this.localCameraTrack;
+        try {
+          const producer = await this.sfuEngine.produceCamera(track);
+          if (!producer) throw new Error('SFU camera transport is unavailable');
+        } catch (error) {
+          if (!this.isSfuJoinStale(epoch, channelId) && this.localCameraTrack === track) {
+            this.localCameraTrack = null;
+            videoService.stopCamera();
+            appEvents.emit('camera.publication_failed', error);
+          }
+        }
       }
       for (const [shareId, track] of this.localScreenTracks.entries()) {
         try {
@@ -1454,7 +1471,7 @@ export class WebRtcManager {
     }
   }
 
-  private async sendOffer(session: PeerSession, iceRestart = false): Promise<void> {
+  private async sendOffer(session: PeerSession, iceRestart = false, propagateError = false): Promise<void> {
     if (!this.isCurrentPeer(session)) return;
     // Native "stable" fires before the answer promise resolves and is sent.
     for (let pending = this.nativeTasks.get(session); pending; pending = this.nativeTasks.get(session)) {
@@ -1515,6 +1532,7 @@ export class WebRtcManager {
           queueMicrotask(() => { void this.sendOffer(session); });
         }
       }
+      if (propagateError) throw err;
     } finally {
       if (session.screenNegotiation === negotiation) session.makingOffer = false;
     }
@@ -1890,22 +1908,71 @@ export class WebRtcManager {
     }
   }
 
-  public async setLocalCameraTrack(track: MediaStreamTrack | null): Promise<void> {
-    this.localCameraTrack = track;
-    if (this.voiceReconnectSuspended) return;
-    if (this.isSfuMode()) {
-      if (!this.sfuEngine.isReady()) {
-        await this.initSfuForCurrentChannel();
-      } else if (track) {
-        await this.sfuEngine.produceCamera(track);
-      } else {
-        this.sfuEngine.closeProducer('camera');
-      }
-      return;
+  public async setLocalCameraTrack(track: MediaStreamTrack | null, isCurrent: () => boolean = () => true): Promise<void> {
+    const channelId = voiceStore.currentVoiceChannelId;
+    const sessionKey = voiceStore.voiceSessionKey;
+    const pending = this.cameraTrackChange;
+    if (!track && pending?.track === null && pending.channelId === channelId && pending.sessionKey === sessionKey) {
+      return pending.task;
     }
-    // Camera rides the primary video sender only; screen share has its own
-    // dedicated sender so both can be sent at once (#26).
-    await this.updateVideoTrackAcrossPeers(track);
+    if (track && (track.kind !== 'video' || track.readyState !== 'live' || !isCurrent())) {
+      throw new DOMException('Camera publication was cancelled', 'AbortError');
+    }
+    const revision = ++this.cameraTrackRevision;
+    this.localCameraTrack = track;
+    const ensureCurrent = () => {
+      if (revision !== this.cameraTrackRevision || voiceStore.currentVoiceChannelId !== channelId ||
+          voiceStore.voiceSessionKey !== sessionKey || (track && (
+            this.voiceReconnectSuspended || track.readyState !== 'live' || !isCurrent()))) {
+        throw new DOMException('Camera publication was cancelled', 'AbortError');
+      }
+    };
+    const apply = async () => {
+      try {
+        ensureCurrent();
+        if (!track) this.sfuEngine.closeProducer('camera');
+        if (this.voiceReconnectSuspended) return;
+        if (this.isSfuMode()) {
+          if (!track) return;
+          if (!this.sfuEngine.isReady()) await this.initSfuForCurrentChannel();
+          ensureCurrent();
+          if (!this.sfuEngine.isReady()) throw new Error('SFU camera transport is not ready');
+          const current = this.sfuEngine.getCameraTrack();
+          if (current !== track) {
+            if (current) {
+              if (!await this.sfuEngine.replaceTrack('camera', track)) throw new Error('Could not replace SFU camera');
+            } else if (!await this.sfuEngine.produceCamera(track)) {
+              throw new Error('Could not publish SFU camera');
+            }
+          }
+        } else {
+          await this.updateVideoTrackAcrossPeers(track, ensureCurrent);
+        }
+        ensureCurrent();
+      } catch (error) {
+        if (revision === this.cameraTrackRevision) this.localCameraTrack = null;
+        if (track) {
+          if (this.sfuEngine.getCameraTrack() === track) this.sfuEngine.closeProducer('camera');
+          const cleanup = await Promise.allSettled([...this.peers.values()].map(async (session) => {
+            const sender = this.cameraTransceiver(session)?.sender ?? session.videoSender;
+            if (sender?.track === track && session.pc.connectionState !== 'closed') await sender.replaceTrack(null);
+          }));
+          if (cleanup.some((result) => result.status === 'rejected')) {
+            clientLog.error('VIDEO', 'Could not detach every failed camera sender');
+          }
+        }
+        throw error;
+      }
+    };
+    // Keep an old asynchronous replacement from winning after a newer effect/device.
+    const task = (pending?.task ?? Promise.resolve()).then(apply, apply);
+    const change = { track, channelId, sessionKey, task };
+    this.cameraTrackChange = change;
+    try {
+      await task;
+    } finally {
+      if (this.cameraTrackChange === change) this.cameraTrackChange = null;
+    }
   }
 
   /**
@@ -2235,29 +2302,40 @@ export class WebRtcManager {
     }
   }
 
-  private async updateVideoTrackAcrossPeers(track: MediaStreamTrack | null): Promise<void> {
-    for (const session of this.peers.values()) {
-      try {
-        const transceivers = session.pc.getTransceivers();
-        // Find the primary (camera) video transceiver, never a screen sender.
-        const videoTransceiver = transceivers.find(
-          (t) =>
-            (t.receiver.track.kind === 'video' || t.sender.track?.kind === 'video') &&
-            !this.isScreenVideoSender(session, t.sender)
-        );
+  private cameraTransceiver(session: PeerSession): RTCRtpTransceiver | undefined {
+    return session.pc.getTransceivers().find((transceiver) =>
+      (transceiver.receiver.track.kind === 'video' || transceiver.sender.track?.kind === 'video')
+      && !this.isScreenVideoSender(session, transceiver.sender));
+  }
 
+  private async updateVideoTrackAcrossPeers(track: MediaStreamTrack | null, ensureCurrent: () => void): Promise<void> {
+    for (const session of this.peers.values()) {
+      ensureCurrent();
+      if (session.pc.connectionState === 'closed') continue;
+      try {
+        const videoTransceiver = this.cameraTransceiver(session);
+        let negotiate = false;
         if (videoTransceiver) {
-          videoTransceiver.direction = track ? 'sendrecv' : 'recvonly';
-          await videoTransceiver.sender.replaceTrack(track);
+          const direction = track ? 'sendrecv' : 'recvonly';
+          negotiate = videoTransceiver.direction !== direction;
+          videoTransceiver.direction = direction;
+          session.videoSender = videoTransceiver.sender;
+          if (videoTransceiver.sender.track !== track) await videoTransceiver.sender.replaceTrack(track);
         } else if (track) {
           session.videoSender = session.pc.addTrack(track, new MediaStream([track]));
+          negotiate = true;
         }
-
-        if (session.pc.signalingState === 'stable') {
-          await this.sendOffer(session);
+        ensureCurrent();
+        if (negotiate) {
+          if (!await this.waitForStable(session.pc)) throw new Error('Camera negotiation did not become ready');
+          ensureCurrent();
+          if (!this.isCurrentPeer(session)) continue;
+          await this.sendOffer(session, false, true);
         }
       } catch (err) {
+        if (!this.isCurrentPeer(session)) continue;
         console.warn(`[WebRTC] Error updating video track for peer ${session.peerSessionId}:`, err);
+        throw err;
       }
     }
   }
@@ -2273,6 +2351,10 @@ export class WebRtcManager {
 
   public async setSpeakerDeviceId(deviceId: string): Promise<void> {
     await this.mediaRouter.setSpeakerDeviceId(deviceId);
+  }
+
+  public async setOutputDeviceIds(voiceDeviceId: string, screenDeviceId: string): Promise<void> {
+    await this.mediaRouter.setOutputDeviceIds(voiceDeviceId, screenDeviceId);
   }
 
   private async applyBitrateConstraints(): Promise<void> {
@@ -2500,6 +2582,8 @@ export class WebRtcManager {
   }
 
   public closeAllPeers(): void {
+    this.cameraTrackRevision++;
+    this.cameraTrackChange = null;
     this.voiceReconnectSuspended = false;
     this.abandonSfuSession();
     this.resetSfuReconnect();

@@ -13,6 +13,7 @@ import { chatStore } from '../stores/chatStore';
 import { settingsStore, ChatSoundMode } from '../stores/settingsStore';
 import { connectionStore, SavedServer } from '../stores/connectionStore';
 import { audioProcessor } from '../core/AudioProcessor';
+import { selectNoiseSuppression } from '../core/AudioDeviceService';
 import { webRtcManager } from '../core/WebRtcManager';
 import { videoService } from '../core/VideoService';
 import { screenAudioService } from '../core/ScreenAudioService';
@@ -26,6 +27,7 @@ import { VoiceStageView } from './VoiceStageView';
 import { createChannelModal } from './CreateChannelModal';
 import { editChannelModal } from './EditChannelModal';
 import { settingsModal } from './SettingsModal';
+import { noiseSuppressionToggleTitle } from './settings/NoiseSuppressionControl';
 import { serverSettingsModal } from './ServerSettingsModal';
 import { botSettingsModal } from './BotSettingsModal';
 import { serverMonitorModal } from './ServerMonitorModal';
@@ -158,9 +160,14 @@ export class MainView {
             <div id="overlay-notice-slot"></div>
             <div id="voice-connection-row-slot"></div>
             <div class="user-media-bar" id="user-media-bar">
-              <button id="media-btn-camera" class="btn btn-icon media-bar-btn-lg ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${t('main.toggleCamera')}">
-                <span class="material-symbols-outlined md-18">${voiceStore.isCameraOn ? 'videocam_off' : 'videocam'}</span>
-              </button>
+              <div class="audio-control-group camera-control-group">
+                <button id="media-btn-camera" class="btn btn-icon media-bar-btn-lg ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${t('main.toggleCamera')}">
+                  <span class="material-symbols-outlined md-18">${voiceStore.isCameraOn ? 'videocam_off' : 'videocam'}</span>
+                </button>
+                <button type="button" class="audio-device-trigger" data-audio-device="camera" aria-label="${t('cameraEffects.quickOptions')}" title="${t('cameraEffects.quickOptions')}">
+                  <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
+                </button>
+              </div>
               <button id="media-btn-screen" class="btn btn-icon media-bar-btn-lg ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${t('main.shareScreen')}">
                 <span class="material-symbols-outlined md-18">${voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share'}</span>
               </button>
@@ -290,6 +297,9 @@ export class MainView {
     const serverName = serverStore.serverDetails?.name ?? '';
     const { quality, icon } = voiceConnectionIndicator(null, reconnecting, connecting);
     const statusText = reconnecting ? t('main.reconnecting') : connecting ? t('main.connecting') : t('main.voiceConnected');
+    const noiseMode = settingsStore.noiseSuppressionMode;
+    const noiseEnabled = noiseMode !== 'off';
+    const noiseTitle = escapeHtml(noiseSuppressionToggleTitle(noiseMode));
 
     slot.innerHTML = `
       <div class="voice-connection-row ${connectionClass}" id="voice-connection-row">
@@ -303,9 +313,14 @@ export class MainView {
           <span class="voice-conn-ping" id="sidebar-voice-ping" title="${t('main.averagePing')}">-- ms</span>
         </div>
         <div class="voice-conn-actions">
-          <button id="sidebar-btn-rnnoise" class="btn btn-icon voice-conn-rnnoise ${settingsStore.noiseSuppressionEnabled ? 'rnnoise-active' : ''}" title="${settingsStore.noiseSuppressionEnabled ? t('main.rnnoiseOn') : t('main.rnnoiseOff')}">
-            <span class="material-symbols-outlined md-18">graphic_eq</span>
-          </button>
+          <div class="audio-control-group noise-control-group">
+            <button type="button" id="sidebar-btn-rnnoise" class="btn btn-icon voice-conn-rnnoise ${noiseEnabled ? 'rnnoise-active' : ''}" title="${noiseTitle}" aria-label="${noiseTitle}" aria-pressed="${noiseEnabled}">
+              <span class="material-symbols-outlined md-18">graphic_eq</span>
+            </button>
+            <button type="button" class="audio-device-trigger" data-audio-device="noise" aria-label="${t('audioNoise.quickOptions')}" title="${t('audioNoise.quickOptions')}">
+              <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
+            </button>
+          </div>
           <button id="sidebar-btn-leave-voice" class="btn btn-icon voice-conn-leave" title="${t('main.leaveCall')}">
             <span class="material-symbols-outlined md-18">call_end</span>
           </button>
@@ -313,16 +328,18 @@ export class MainView {
       </div>
     `;
 
-    const btnRnnoise = document.getElementById('sidebar-btn-rnnoise');
+    const btnRnnoise = document.querySelector<HTMLButtonElement>('#sidebar-btn-rnnoise');
     btnRnnoise?.addEventListener('click', async () => {
-      const enabled = !settingsStore.noiseSuppressionEnabled;
-      settingsStore.noiseSuppressionEnabled = enabled;
-      settingsStore.save();
-      await audioProcessor.setNoiseSuppression(enabled);
-
-      if (btnRnnoise) {
-        btnRnnoise.className = `btn btn-icon voice-conn-rnnoise ${enabled ? 'rnnoise-active' : ''}`;
-        btnRnnoise.setAttribute('title', enabled ? t('main.rnnoiseOn') : t('main.rnnoiseOff'));
+      if (!btnRnnoise || btnRnnoise.disabled) return;
+      btnRnnoise.disabled = true;
+      try {
+        const currentMode = settingsStore.noiseSuppressionMode;
+        await selectNoiseSuppression(currentMode === 'off' ? settingsStore.lastNoiseSuppressionMode : 'off');
+      } catch (error: unknown) {
+        console.warn('[MainView] Could not change noise suppression:', error);
+        await showAlert({ title: t('common.error'), message: t('audioNoise.selectionFailed'), variant: 'danger' });
+      } finally {
+        btnRnnoise.disabled = false;
       }
     });
 
@@ -1656,9 +1673,13 @@ export class MainView {
     const u10 = appEvents.on('settings.updated', () => {
       const btnRnnoise = document.getElementById('sidebar-btn-rnnoise');
       if (btnRnnoise) {
-        const enabled = settingsStore.noiseSuppressionEnabled;
+        const mode = settingsStore.noiseSuppressionMode;
+        const enabled = mode !== 'off';
+        const title = noiseSuppressionToggleTitle(mode);
         btnRnnoise.className = `btn btn-icon voice-conn-rnnoise ${enabled ? 'rnnoise-active' : ''}`;
-        btnRnnoise.setAttribute('title', enabled ? t('main.rnnoiseOn') : t('main.rnnoiseOff'));
+        btnRnnoise.setAttribute('title', title);
+        btnRnnoise.setAttribute('aria-label', title);
+        btnRnnoise.setAttribute('aria-pressed', String(enabled));
       }
       // Update the user status indicator when appear-offline changes (#561).
       const dot = document.getElementById('main-user-status-dot');

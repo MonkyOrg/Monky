@@ -10,8 +10,10 @@ Open from the gear icon on the connection screen or bottom bar.
   the saved server list may contain server passwords, so it never reaches the
   disk in the clear. Without that password the backup cannot be recovered.
 - **Devices** — microphone, speaker/headphones and camera, with preview and list refresh.
+- **Camera effects** — blur, color or image virtual backgrounds and physical-background chroma key, processed locally.
 - **Voice sensitivity (VAD)** — adjust while watching the meter; leave the marker above the silent level.
-- **Noise suppression (RNNoise)** — reduces keyboard, clicks and room noise.
+- **Noise suppression** — choose RNNoise, Speex, GTCRN, WebRTC (built-in) or no noise processing.
+- **General and advanced outputs** — use one device for everything or choose outputs for voice, screen shares and chat media.
 - **Quality and performance profile** — affects only what you transmit.
 - **Behaviour** — keep Monky in the system tray when the window is closed, and
   ask before shutting down a server hosted on this machine when you are the last
@@ -32,6 +34,43 @@ Submenu expansion and collapse, as well as scrolling through settings sections
 and emoji-picker categories, respect the
 system's reduced-motion preference: when enabled, navigation is immediate,
 without animation.
+
+### Server settings: immediate application
+
+Server settings have no final save step. Switches and selections apply
+immediately; names, passwords and limits apply when you finish editing,
+leave the field or press `Enter`. **Done** only closes the window and does
+not undo changes already applied.
+
+While an operation is pending, **Done**, `X`, `Esc`, clicking outside the
+window and other dismissal paths are blocked. TURN installation reaching
+100% does not mean it is finished: the application waits for the server's
+final acknowledgement and reports actual initialization failures.
+
+Errors identify the unconfirmed change and allow correction and retry.
+If the connection or session changes, reopen settings to obtain the current
+state; a request without acknowledgement is not presented as saved. Role
+and bot-profile edits also apply immediately, while creation, installation,
+deletion and revocation still require their explicit actions.
+
+### Color picker
+
+The physical chroma-key screen color, virtual background color and role
+colors share Monky's color picker. Click the color swatch to open hue,
+saturation and brightness controls, presets and a **HEX** field that accepts
+three or six digits.
+
+Releasing a dragged control or choosing a preset applies the selection.
+After entering a valid HEX code, `Enter`, the close button or an outside
+click confirms it; closing the picker does not undo the chosen color.
+Invalid input is explained in the panel. `Escape` cancels only unfinished
+input and closes the picker without closing the surrounding settings.
+
+The **Eyedropper** lets you choose a screen color. During sampling, `Escape`
+cancels only the eyedropper, retaining the previous color and keeping the
+panel open. Permission and capture failures are reported without replacing
+the color with a default. Sampling does not disable effects or transmit an
+unprocessed camera to the call.
 
 ### Appear offline
 
@@ -126,6 +165,134 @@ you start the test; this preview is not sent to the voice channel and does
 not change your mute or Push-to-Talk state. If you are already unmuted in a
 call, that call continues transmitting your voice normally. Leaving the tab
 or closing settings stops the test.
+
+### Noise suppression engines
+
+Under **Voice and Video → Noise suppression**, choose an engine and compare
+the result using **Test microphone**. The preview uses the same processing
+selected for calls without transmitting the test to other people.
+
+| Option | Use and limitations |
+| --- | --- |
+| RNNoise | Monky's default neural engine. |
+| Speex | A lightweight classic filter suited to steady noise. |
+| GTCRN | An alternative speech-focused neural network; it runs internally at 16 kHz, limiting music and high-frequency fidelity. |
+| WebRTC (built-in) | Suppression integrated into the application's WebRTC audio processing. |
+| Off | No noise suppression; echo cancellation and automatic gain control remain active. |
+
+All engines run locally and ship their assets with the application. Perceived
+strength depends on the microphone and environment; no engine is best in every
+situation. Built-in suppression is not stacked with RNNoise, Speex or GTCRN.
+
+Switching preserves the outgoing call track and respects mute and PTT. The
+quick suppression button turns processing off or restores the last selected
+engine. Its adjacent arrow lets you choose an engine without leaving the
+current view or open its settings directly. Failures are reported instead of
+silently switching to unfiltered audio.
+
+### Audio outputs by category
+
+Under **Voice and Video → General output**, choose the application's default
+device. This also applies to chat videos, including the expanded media viewer.
+The headphone arrow in quick controls changes this same general output.
+
+The **Advanced outputs** switch reveals selectors for **Voice channel**,
+**Screen share audio** and **Chat media**. **Use general output** follows the
+main selection; **System default** explicitly selects the operating-system
+device even when the general output is different.
+
+Alerts and soundboard playback still use the general output. Turning advanced
+mode off returns every category to general routing without deleting individual
+choices. Preferences are saved and also apply to amplified volumes above 100%.
+Device identifiers are not imported from another computer's backup.
+
+If saved devices disconnect and prevent changes from applying, use
+**Use system default for all outputs**. This explicit action resets the general
+output, clears category choices and turns advanced mode off. It remains
+accessible while advanced selectors are collapsed, allowing recovery even
+when several devices disappear together.
+
+### Camera effects and preview
+
+Under **Voice and Video → Camera**, preview is on by default when these controls
+open. Its visibility control sits above the effects: turning it off retains the
+preview rectangle with a **Preview off** message. This capture stays local and
+does not turn on camera transmission in the call. The visibility choice lasts
+for the current opening; reopening the controls enables preview again.
+If the call camera is already
+on, both share one capture; hiding or closing the preview does not stop it.
+Changing the device also updates the call, even with the preview closed.
+
+In quick controls, the arrow beside the camera opens device selection, preview
+and effect controls, with a button that opens the corresponding settings section.
+
+| Mode | Result |
+| --- | --- |
+| Off | Video without a background effect. |
+| Blur | Person segmentation with a blurred background. |
+| Color | A solid virtual background, including green, without a physical green screen. |
+| Image | A local image used as a virtual background. |
+| Chroma key | Removes a color from the physical scene, usually a green screen, replacing it with a color or image. |
+
+Chroma key differs from a green virtual background: it removes the selected
+color throughout the image, including clothing and objects of that color.
+Call video does not carry transparency; the cutout receives the selected
+replacement background. Tolerance, edge and spill-reduction controls help
+with physical screens. White, black and gray are also valid key colors;
+brightness participates in matching these shades so that all grays are not
+treated as the same color. Automatic segmentation is approximate and can fail
+around hair, edges and difficult lighting; do not treat it as a guarantee
+that sensitive information in the background is hidden.
+Each adjustment has a **?** button with an explanation: hover over it or
+focus it with the keyboard to read the help without changing the setting.
+
+PNG, JPEG and WebP images up to **8 MiB** are accepted, with additional
+dimension limits to prevent excessive resource use. The image is normalized
+and saved locally with the preferences, outside the general settings backup.
+With **Limit to 720p / 30 FPS** off by default, effects follow both the selected
+quality profile's **resolution and FPS**. Enable the switch to reduce processing,
+capping both at **1280 × 720 and 30 FPS**. It never raises a lower resolution or
+frame rate, or upscales a smaller capture. Camera capabilities and processing
+capacity can also reduce the actual frame rate. Turning effects off preserves
+normal camera quality.
+
+The model and processing ship with the application and need no external API:
+frames are processed locally before being sent through the P2P or SFU call.
+If processing fails, the camera stops and reports the error rather than
+silently reverting to unprocessed video. Turning the effect off requires an
+explicit choice.
+
+### Sound and server favorites
+
+Use stars to mark sounds in the soundboard grid/list and under
+**Settings → Soundboard**, or servers in Home's **Saved** list.
+The **All/Favorites** filter combines with search without duplicating items.
+Favorites appear first in alphabetical order, followed by nonfavorites in
+alphabetical order. Starring or unstarring moves items with a smooth
+transition; switching **All/Favorites** also animates the list change.
+Animations respect the system's reduced-motion preference.
+Stars support `Enter` and space without playing a sound or opening a server.
+
+Sound favorites identify the complete file path: matching names in different
+folders are distinct. Returning to a previous folder restores its stars.
+Server favorites follow address and port; renaming preserves the star and
+editing the address transfers it. Deleting a server removes its favorite.
+
+These preferences stay local and do not travel in the general backup.
+Importing servers preserves stars for retained addresses and removes those
+for removed addresses. Sorting preserves each sound's assigned shortcuts and
+does not change the server rail.
+
+### Starting another server during a call
+
+Starting and viewing an owned offline server from Home or the server rail
+does not join voice automatically or interrupt the current call, microphone,
+camera or screen shares. Joining a different voice channel remains a
+separate action.
+
+If this application instance already hosts another server, it will not stop
+it implicitly. Use the hosting controls to stop it explicitly when safe before
+starting a different server.
 
 ### Keyboard shortcuts
 

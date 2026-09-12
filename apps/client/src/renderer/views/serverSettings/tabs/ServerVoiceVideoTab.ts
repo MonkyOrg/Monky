@@ -13,7 +13,7 @@ import { escapeHtml } from '../../../utils/html';
  * A missing coturn is *not* blocking when the server can install it by itself
  * — switching the relay on is what triggers the installation (#431).
  */
-function turnBlockedReason(): string | null {
+export function turnBlockedReason(): string | null {
   // Checked before host support: in SFU mode the server already forwards every
   // stream, so a second relay is pointless no matter what the host can run.
   // The server refuses the combination too, and a toggle that reports success
@@ -64,7 +64,7 @@ export class ServerVoiceVideoTab {
         </label>
       </div>
 
-      <div data-settings-section="turn-relay" data-settings-label="${escapeHtml(t('serverSettings.turnEnabled'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px; ${turnBlocked ? 'opacity: 0.6;' : ''}">
+      <div id="server-turn-section" data-settings-section="turn-relay" data-settings-label="${escapeHtml(t('serverSettings.turnEnabled'))}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-top: 10px;">
         <div>
           <label for="checkbox-turn-enabled" style="font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: ${turnBlocked ? 'not-allowed' : 'pointer'}; margin-bottom: 2px;">
             <span class="material-symbols-outlined md-18" style="color: var(--accent-primary);">swap_horiz</span>
@@ -73,14 +73,7 @@ export class ServerVoiceVideoTab {
           <div style="font-size: 11px; color: var(--text-muted);">
             ${t('serverSettings.turnEnabledDesc')}
           </div>
-          ${turnBlocked ? `<div style="font-size: 11px; color: var(--warning); margin-top: 4px; display: flex; align-items: center; gap: 4px;">
-            <span class="material-symbols-outlined md-14">info</span>
-            <span>${turnBlocked}</span>
-          </div>` : ''}
-          ${turnNotice ? `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px; display: flex; align-items: center; gap: 4px;">
-            <span class="material-symbols-outlined md-14">download</span>
-            <span>${turnNotice}</span>
-          </div>` : ''}
+          <div id="server-turn-notice" style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;" ${turnBlocked || turnNotice ? '' : 'hidden'}>${turnBlocked ?? turnNotice ?? ''}</div>
         </div>
         <label class="toggle-switch" aria-label="${t('serverSettings.turnEnabled')}"${turnBlocked ? ` title="${turnBlocked}"` : ''}>
           <input id="checkbox-turn-enabled" type="checkbox" ${s.turnEnabled ? 'checked' : ''}${turnBlocked ? ' disabled' : ''}>

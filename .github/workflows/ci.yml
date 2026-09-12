@@ -32,7 +32,7 @@ jobs:
         run: |
           npm run build --workspace=apps/server
           npm run test:bots --workspace=apps/server
-          node --test apps/server/dist/test-online-preview.js apps/server/dist/test-voice.js apps/server/dist/test-voice-mode.js
+          node --test apps/server/dist/test-online-preview.js apps/server/dist/test-voice.js apps/server/dist/test-voice-mode.js apps/server/dist/test-server-settings.js apps/server/dist/test-startup-lifecycle.js
           # libuiohook initializes X11 even when the tests inject a passive mock.
           xvfb-run -a npm run test --workspace=apps/client
           node scripts/test-bot-e2e.js
@@ -206,6 +206,8 @@ jobs:
           node apps/client/test/microphoneTestSmoke.cjs
           node apps/client/test/settingsNavigationSmoke.cjs
           node apps/client/test/settingsNavigationSmoke.cjs --release-notes
+          npm run test:settings:ui --workspace=apps/client
+          npm run test:camera --workspace=apps/client
           node apps/client/test/footerControlsSmoke.cjs
           npm run test:transport --workspace=apps/client
 

@@ -4,25 +4,37 @@ import { soundboardService, SoundItem } from '../core/SoundboardService';
 import { settingsStore } from '../stores/settingsStore';
 import { serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
+import { favoritesStore, soundFavoriteKey } from '../stores/favoritesStore';
 import { appEvents } from '../core/EventBus';
-import { t, tCount } from '../i18n';
+import { clientLog } from '../core/ClientLogService';
+import { getLanguage, t, tCount } from '../i18n';
 import { captureShortcut, shortcutIdentity } from '../utils/keybind';
 import { showAlert, showConfirm } from './Dialog';
 import { enableBackdropClose } from '../utils/modal';
 import { matchesSearch as matchesSoundSearch } from '../utils/search';
+import { sortFavoritesFirst } from '../utils/favoriteOrder';
+import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
+import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
 
 export class SoundboardModal {
   private modalEl: HTMLElement | null = null;
   private unbindEvents: Array<() => void> = [];
   private searchQuery: string = '';
   private closeShortcutCapture: (() => void) | null = null;
+  private favoritesOnly = false;
+  private lifecycle = 0;
+  private changingFolder = false;
+  private highlightTimers = new Set<ReturnType<typeof setTimeout>>();
+  private readonly favoriteMotion = new FavoriteListMotion();
 
   public async open(): Promise<void> {
     this.close();
+    const lifecycle = this.lifecycle;
     this.searchQuery = '';
 
     // Ensure sounds are loaded
     await soundboardService.loadSounds();
+    if (lifecycle !== this.lifecycle) return;
     const sounds = soundboardService.getSounds();
     const serverAllows = serverStore.serverDetails?.allowSoundboard !== false;
     const hasSoundboardPermission = serverStore.hasPermission(Permission.USE_SOUNDBOARD);
@@ -55,7 +67,7 @@ export class SoundboardModal {
               <span class="material-symbols-outlined md-14" style="margin-right: 4px;">folder_open</span>
               ${settingsStore.soundboardFolderPath ? t('soundboard.changeFolder') : t('soundboard.chooseFolder')}
             </button>
-            <span id="sb-folder-path-label" style="font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${settingsStore.soundboardFolderPath || ''}">
+            <span id="sb-folder-path-label" style="font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(settingsStore.soundboardFolderPath || '')}">
               ${settingsStore.soundboardFolderPath ? escapeHtml(settingsStore.soundboardFolderPath) : t('soundboard.noFolderSelected')}
             </span>
           </div>
@@ -91,6 +103,7 @@ export class SoundboardModal {
 
           <!-- View Mode Toggle Toolbar (Grid vs List) -->
           <div style="display: flex; align-items: center; justify-content: flex-end; gap: 4px;">
+            <div style="margin-right: auto;">${renderFavoritesFilter('sb-filter', this.favoritesOnly)}</div>
             <button
               id="sb-btn-view-grid"
               type="button"
@@ -98,6 +111,7 @@ export class SoundboardModal {
               style="width: 26px; height: 26px; border-radius: var(--radius-sm); border: 1px solid ${settingsStore.soundboardViewMode === 'grid' ? 'var(--accent-primary)' : 'transparent'}; background: ${settingsStore.soundboardViewMode === 'grid' ? 'rgba(88, 101, 242, 0.15)' : 'transparent'}; color: ${settingsStore.soundboardViewMode === 'grid' ? 'var(--accent-primary)' : 'var(--text-muted)'}; padding: 0;"
               title="${t('soundboard.viewGrid')}"
               aria-label="${t('soundboard.viewGrid')}"
+              aria-pressed="${settingsStore.soundboardViewMode === 'grid'}"
             >
               <span class="material-symbols-outlined md-18">grid_view</span>
             </button>
@@ -108,6 +122,7 @@ export class SoundboardModal {
               style="width: 26px; height: 26px; border-radius: var(--radius-sm); border: 1px solid ${settingsStore.soundboardViewMode === 'list' ? 'var(--accent-primary)' : 'transparent'}; background: ${settingsStore.soundboardViewMode === 'list' ? 'rgba(88, 101, 242, 0.15)' : 'transparent'}; color: ${settingsStore.soundboardViewMode === 'list' ? 'var(--accent-primary)' : 'var(--text-muted)'}; padding: 0;"
               title="${t('soundboard.viewList')}"
               aria-label="${t('soundboard.viewList')}"
+              aria-pressed="${settingsStore.soundboardViewMode === 'list'}"
             >
               <span class="material-symbols-outlined md-18">view_list</span>
             </button>
@@ -154,6 +169,12 @@ export class SoundboardModal {
     document.body.appendChild(this.modalEl);
     this.attachEvents();
     this.setupPlaybackListeners();
+    this.refreshGrid();
+  }
+
+  private filterSounds(sounds: SoundItem[]): SoundItem[] {
+    return sounds.filter(sound => (!this.favoritesOnly || favoritesStore.isSoundFavorite(sound.filePath))
+      && (!this.searchQuery.trim() || matchesSoundSearch(sound.name, this.searchQuery)));
   }
 
   private renderSoundsGrid(sounds: SoundItem[], activeSoundName: string | null = null): string {
@@ -189,13 +210,24 @@ export class SoundboardModal {
       `;
     }
 
-    const filteredSounds = this.searchQuery.trim()
-      ? sounds.filter((s) => matchesSoundSearch(s.name, this.searchQuery))
-      : sounds;
+    if (this.favoritesOnly && !sounds.some(sound => favoritesStore.isSoundFavorite(sound.filePath))) {
+      return `<div class="favorites-empty" role="status">
+        <span class="material-symbols-outlined" aria-hidden="true" style="font-size: 36px;">star</span>
+        <strong>${t('favorites.emptySoundsTitle')}</strong>
+        <span>${t('favorites.emptySoundsDescription')}</span>
+        <button type="button" id="sb-show-all" class="btn btn-secondary">${t('favorites.showAll')}</button>
+      </div>`;
+    }
+
+    const filteredSounds = sortFavoritesFirst(this.filterSounds(sounds), sound => ({
+      favorite: favoritesStore.isSoundFavorite(sound.filePath),
+      name: sound.name,
+      identity: soundFavoriteKey(sound.filePath),
+    }), getLanguage());
 
     if (filteredSounds.length === 0) {
       return `
-        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; min-height: 180px; text-align: center; color: var(--text-muted); gap: 10px;">
+        <div class="favorite-motion-empty" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; min-height: 180px; text-align: center; color: var(--text-muted); gap: 10px;">
           <span class="material-symbols-outlined" style="font-size: 40px; color: var(--text-dim);">search_off</span>
           <div>
             <div style="font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">${t('soundboard.noSearchResultsTitle')}</div>
@@ -223,8 +255,9 @@ export class SoundboardModal {
 
             return `
               <div class="sb-sound-card ${isPlaying ? 'is-playing' : ''}" style="display: flex; flex-direction: column; background: var(--bg-card); border: 1px solid ${isPlaying ? 'var(--accent-primary)' : 'var(--border-color)'}; border-radius: var(--radius-md); overflow: hidden; transition: all 0.15s ease; position: relative;">
+                ${renderFavoriteToggle(soundFavoriteKey(s.filePath), s.name, favoritesStore.isSoundFavorite(s.filePath))}
                 <!-- Play Sound Button -->
-                <button type="button" class="sb-sound-btn" data-filepath="${escapeHtml(s.filePath)}" data-soundname="${escapeHtml(s.name)}" title="Tocar ${escapeHtml(s.name)} (${(s.sizeBytes / 1024).toFixed(0)} KB)" style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 12px 8px 6px; background: transparent; border: none; color: var(--text-primary); cursor: pointer; text-align: center; outline: none; width: 100%;">
+                <button type="button" class="sb-sound-btn" data-filepath="${escapeHtml(s.filePath)}" data-soundname="${escapeHtml(s.name)}" title="${escapeHtml(t('soundboard.playSoundTitle', { name: s.name, size: (s.sizeBytes / 1024).toFixed(0) }))}" style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 28px 8px 6px; background: transparent; border: none; color: var(--text-primary); cursor: pointer; text-align: center; outline: none; width: 100%;">
                   <span class="material-symbols-outlined sb-sound-icon" style="color: var(--accent-primary); font-size: 26px;">${isPlaying ? 'volume_up' : 'play_circle'}</span>
                   <span style="font-size: 12px; font-weight: 600; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; width: 100%; word-break: break-word;">
                     ${escapeHtml(s.name)}
@@ -275,7 +308,7 @@ export class SoundboardModal {
                 tabindex="0"
                 data-filepath="${escapeHtml(s.filePath)}"
                 data-soundname="${escapeHtml(s.name)}"
-                title="Tocar ${escapeHtml(s.name)} (${(s.sizeBytes / 1024).toFixed(0)} KB)"
+                title="${escapeHtml(t('soundboard.playSoundTitle', { name: s.name, size: (s.sizeBytes / 1024).toFixed(0) }))}"
                 style="display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--bg-card); border: 1px solid ${isPlaying ? 'var(--accent-primary)' : 'var(--border-color)'}; border-radius: var(--radius-sm); gap: 10px; cursor: pointer; color: var(--text-primary); text-align: left; outline: none;"
               >
                 <!-- The row itself plays the sound (#499); the shortcut controls
@@ -292,6 +325,7 @@ export class SoundboardModal {
                   </span>
                 </div>
 
+                ${renderFavoriteToggle(soundFavoriteKey(s.filePath), s.name, favoritesStore.isSoundFavorite(s.filePath))}
                 <!-- Shortcut Badge or Add Shortcut Button -->
                 <div style="display: flex; align-items: center; flex-shrink: 0;">
                   ${shortcut && shortcut.display ? `
@@ -317,19 +351,24 @@ export class SoundboardModal {
     `;
   }
 
-  private refreshGrid(): void {
-    if (!this.modalEl) return;
-    const container = this.modalEl.querySelector('#sb-sounds-container');
-    const countBadge = this.modalEl.querySelector('#sb-sound-count');
-    if (container) {
+  private refreshGrid(animate: FavoriteMotionKind | false = false): void {
+    const modal = this.modalEl;
+    if (!modal) return;
+    const container = modal.querySelector<HTMLElement>('#sb-sounds-container');
+    const countBadge = modal.querySelector('#sb-sound-count');
+    if (container) this.favoriteMotion.update(container, '.sb-sound-card, .sb-sound-row', () => {
+      const scrollTop = container.scrollTop;
+      const focused = document.activeElement;
+      const favoriteButtons = Array.from(container.querySelectorAll<HTMLButtonElement>('.favorite-toggle'));
+      const focusedFavorite = focused instanceof HTMLButtonElement && favoriteButtons.includes(focused) ? focused : null;
+      const focusedIndex = focusedFavorite ? favoriteButtons.indexOf(focusedFavorite) : -1;
+      const focusedKey = focusedFavorite?.dataset.favoriteKey;
       const sounds = soundboardService.getSounds();
       const currentPlayback = soundboardService.getCurrentPlayback();
-      const filteredSounds = this.searchQuery.trim()
-        ? sounds.filter((s) => matchesSoundSearch(s.name, this.searchQuery))
-        : sounds;
+      const filteredSounds = this.filterSounds(sounds);
 
       if (countBadge) {
-        if (this.searchQuery.trim() && filteredSounds.length !== sounds.length) {
+        if ((this.favoritesOnly || this.searchQuery.trim()) && filteredSounds.length !== sounds.length) {
           countBadge.textContent = `${filteredSounds.length} / ${sounds.length}`;
         } else {
           countBadge.textContent = tCount('soundboard.soundCount', sounds.length);
@@ -338,12 +377,17 @@ export class SoundboardModal {
 
       container.innerHTML = this.renderSoundsGrid(sounds, currentPlayback.soundName);
       this.attachSoundClickEvents();
-
-      const btnClearSearch = container.querySelector('#sb-btn-clear-search');
-      btnClearSearch?.addEventListener('click', () => {
-        this.clearSearch();
-      });
-    }
+      this.updateActiveButtons();
+      container.scrollTop = scrollTop;
+      if (focusedKey) {
+        const nextButtons = Array.from(container.querySelectorAll<HTMLButtonElement>('.favorite-toggle'));
+        const next = nextButtons.find(button => button.dataset.favoriteKey === focusedKey)
+          ?? nextButtons[Math.min(focusedIndex, nextButtons.length - 1)]
+          ?? modal.querySelector<HTMLButtonElement>('#sb-filter-favorites');
+        next?.focus({ preventScroll: true });
+        next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      }
+    }, animate);
   }
 
   private clearSearch(): void {
@@ -356,6 +400,53 @@ export class SoundboardModal {
     const clearBtn = this.modalEl?.querySelector('#sb-search-clear') as HTMLElement | null;
     if (clearBtn) clearBtn.style.display = 'none';
     this.refreshGrid();
+  }
+
+  private setFavoritesOnly(value: boolean): void {
+    this.favoritesOnly = value;
+    if (this.modalEl) updateFavoritesFilter(this.modalEl, value);
+    this.refreshGrid('filter');
+  }
+
+  private refreshFolderLabel(): void {
+    const folder = settingsStore.soundboardFolderPath;
+    const label = this.modalEl?.querySelector<HTMLElement>('#sb-folder-path-label');
+    if (label) {
+      label.textContent = folder || t('soundboard.noFolderSelected');
+      label.title = folder || '';
+    }
+    const button = this.modalEl?.querySelector<HTMLButtonElement>('#sb-btn-change-folder');
+    if (button) {
+      button.innerHTML = `<span class="material-symbols-outlined md-14" style="margin-right: 4px;">folder_open</span>
+        ${t(folder ? 'soundboard.changeFolder' : 'soundboard.chooseFolder')}`;
+    }
+  }
+
+  private async changeFolder(): Promise<void> {
+    if (this.changingFolder || !this.modalEl) return;
+    const lifecycle = this.lifecycle;
+    this.changingFolder = true;
+    this.modalEl.querySelectorAll<HTMLButtonElement>('#sb-btn-change-folder, #sb-btn-select-folder-empty')
+      .forEach(button => { button.disabled = true; });
+    try {
+      await soundboardService.selectFolder();
+      if (lifecycle !== this.lifecycle) return;
+      this.refreshFolderLabel();
+      this.refreshGrid();
+    } catch (error: unknown) {
+      clientLog.warn('AUDIO', 'Could not select the soundboard folder', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (lifecycle === this.lifecycle) {
+        await showAlert({ title: t('common.error'), message: t('soundboard.chooseFolderFailed'), variant: 'danger' });
+      }
+    } finally {
+      if (lifecycle === this.lifecycle) {
+        this.changingFolder = false;
+        this.modalEl?.querySelectorAll<HTMLButtonElement>('#sb-btn-change-folder, #sb-btn-select-folder-empty')
+          .forEach(button => { button.disabled = false; });
+      }
+    }
   }
 
   private async openKeyCaptureModal(soundName: string): Promise<void> {
@@ -462,7 +553,6 @@ export class SoundboardModal {
     const btnClose = this.modalEl.querySelector('#modal-close');
     const btnFooterClose = this.modalEl.querySelector('#sb-btn-close');
     const btnChangeFolder = this.modalEl.querySelector('#sb-btn-change-folder');
-    const btnSelectEmpty = this.modalEl.querySelector('#sb-btn-select-folder-empty');
     const btnMute = this.modalEl.querySelector('#sb-btn-mute');
     const sliderVol = this.modalEl.querySelector('#sb-slider-volume') as HTMLInputElement | null;
     const volLabel = this.modalEl.querySelector('#sb-volume-label');
@@ -486,24 +576,10 @@ export class SoundboardModal {
       this.clearSearch();
     });
 
-    const handleChangeFolder = async () => {
-      let folder: string | null;
-      try { folder = await soundboardService.selectFolder(); } catch {
-        if (this.modalEl) await showAlert({ message: t('botChat.downloadWriteFailed'), variant: 'danger' });
-        return;
-      }
-      if (folder) {
-        const sounds = soundboardService.getSounds();
-        this.refreshGrid();
-        const folderLabel = this.modalEl?.querySelector('#sb-folder-path-label');
-        if (folderLabel) folderLabel.textContent = folder;
-        const countBadge = this.modalEl?.querySelector('#sb-sound-count');
-        if (countBadge) countBadge.textContent = tCount('soundboard.soundCount', sounds.length);
-      }
-    };
-
-    btnChangeFolder?.addEventListener('click', handleChangeFolder);
-    btnSelectEmpty?.addEventListener('click', handleChangeFolder);
+    btnChangeFolder?.addEventListener('click', () => { void this.changeFolder(); });
+    this.modalEl.querySelectorAll<HTMLButtonElement>('[data-favorites-filter]').forEach(button => {
+      button.addEventListener('click', () => this.setFavoritesOnly(button.dataset.favoritesFilter === 'favorites'));
+    });
 
     btnMute?.addEventListener('click', () => {
       settingsStore.soundboardMuted = !settingsStore.soundboardMuted;
@@ -544,28 +620,61 @@ export class SoundboardModal {
       settingsStore.soundboardVolume = val;
       settingsStore.save();
     });
-
-    this.attachSoundClickEvents();
   }
 
   private attachSoundClickEvents(): void {
     if (!this.modalEl) return;
-    
+    const container = this.modalEl.querySelector('#sb-sounds-container');
+    if (!container) return;
+
+    container.querySelector('#sb-btn-clear-search')?.addEventListener('click', () => this.clearSearch());
+    container.querySelector('#sb-show-all')?.addEventListener('click', () => {
+      this.setFavoritesOnly(false);
+      this.modalEl?.querySelector<HTMLButtonElement>('#sb-filter-all')?.focus();
+    });
+    const emptyFolderButton = container.querySelector<HTMLButtonElement>('#sb-btn-select-folder-empty');
+    if (emptyFolderButton) {
+      emptyFolderButton.disabled = this.changingFolder;
+      emptyFolderButton.addEventListener('click', () => { void this.changeFolder(); });
+    }
+
+    container.querySelectorAll<HTMLButtonElement>('.favorite-toggle').forEach(button => {
+      button.addEventListener('click', async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const key = button.dataset.favoriteKey;
+        if (!key) return;
+        try {
+          favoritesStore.toggleSound(key);
+        } catch (error: unknown) {
+          clientLog.warn('STORE', 'Could not save the sound favorite', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          await showAlert({ title: t('common.error'), message: t('favorites.saveFailed'), variant: 'danger' });
+        }
+      });
+    });
+
     // Play sound click. In list mode the target is the whole row, which is a
     // <div role="button"> rather than a real button (it wraps the shortcut
     // controls, and nesting buttons is invalid), so Enter/Space are wired by
     // hand to keep it reachable from the keyboard (#499).
-    const buttons = this.modalEl.querySelectorAll('.sb-sound-btn');
+    const buttons = container.querySelectorAll<HTMLElement>('.sb-sound-btn');
     buttons.forEach((btn) => {
       const play = async () => {
         const filePath = btn.getAttribute('data-filepath');
         if (!filePath) return;
         await soundboardService.playSound(filePath);
       };
-      btn.addEventListener('click', play);
+      btn.addEventListener('click', event => {
+        if (event.target instanceof Element
+          && event.target.closest('.favorite-toggle, .sb-btn-add-shortcut, .sb-shortcut-badge')) return;
+        void play();
+      });
       if (btn.tagName !== 'BUTTON') {
         btn.addEventListener('keydown', (e) => {
-          const key = (e as KeyboardEvent).key;
+          if (e.target !== btn) return;
+          const key = e.key;
           if (key !== 'Enter' && key !== ' ') return;
           e.preventDefault();
           void play();
@@ -600,12 +709,6 @@ export class SoundboardModal {
   }
 
   private setupPlaybackListeners(): void {
-    this.unbindEvents.push(appEvents.on('soundboard.sounds_loaded', () => {
-      if (!this.modalEl) return;
-      this.refreshGrid();
-      const count = this.modalEl.querySelector('#sb-sound-count');
-      if (count) count.textContent = tCount('soundboard.soundCount', soundboardService.getSounds().length);
-    }));
     // The progress bars themselves now live in the sidebar (#517); what is left
     // here is keeping the grid in sync with what is playing.
     const onPlaybackStarted = () => this.updateActiveButtons();
@@ -618,7 +721,7 @@ export class SoundboardModal {
       }
     };
 
-    const onSoundPlayed = (payload: any) => {
+    const onSoundPlayed = (payload: { soundName: string }) => {
       this.highlightPlayedSound(payload.soundName);
     };
 
@@ -631,6 +734,13 @@ export class SoundboardModal {
       appEvents.off('soundboard.playback_ended', onPlaybackEnded);
       appEvents.off('soundboard.played', onSoundPlayed);
     });
+    this.unbindEvents.push(favoritesStore.subscribe(kind => {
+      if (kind === 'sounds') this.refreshGrid('reorder');
+    }));
+    this.unbindEvents.push(appEvents.on('soundboard.sounds_loaded', () => {
+      this.refreshFolderLabel();
+      this.refreshGrid();
+    }));
   }
 
   private updateViewModeButtons(): void {
@@ -641,6 +751,7 @@ export class SoundboardModal {
 
     if (btnGrid) {
       btnGrid.classList.toggle('active', isGrid);
+      btnGrid.setAttribute('aria-pressed', String(isGrid));
       btnGrid.style.borderColor = isGrid ? 'var(--accent-primary)' : 'transparent';
       btnGrid.style.background = isGrid ? 'rgba(88, 101, 242, 0.15)' : 'transparent';
       btnGrid.style.color = isGrid ? 'var(--accent-primary)' : 'var(--text-muted)';
@@ -648,6 +759,7 @@ export class SoundboardModal {
 
     if (btnList) {
       btnList.classList.toggle('active', !isGrid);
+      btnList.setAttribute('aria-pressed', String(!isGrid));
       btnList.style.borderColor = !isGrid ? 'var(--accent-primary)' : 'transparent';
       btnList.style.background = !isGrid ? 'rgba(88, 101, 242, 0.15)' : 'transparent';
       btnList.style.color = !isGrid ? 'var(--accent-primary)' : 'var(--text-muted)';
@@ -657,7 +769,7 @@ export class SoundboardModal {
   private updateActiveButtons(): void {
     if (!this.modalEl) return;
     const playingNames = soundboardService.getPlayingSoundNames();
-    const buttons = this.modalEl.querySelectorAll('.sb-sound-btn');
+    const buttons = this.modalEl.querySelectorAll('#sb-sounds-container .sb-sound-btn');
     buttons.forEach((btn) => {
       const soundName = btn.getAttribute('data-soundname');
       const icon = btn.querySelector('.sb-sound-icon');
@@ -676,7 +788,7 @@ export class SoundboardModal {
 
   private clearActiveButtons(): void {
     if (!this.modalEl) return;
-    const buttons = this.modalEl.querySelectorAll('.sb-sound-btn');
+    const buttons = this.modalEl.querySelectorAll('#sb-sounds-container .sb-sound-btn');
     buttons.forEach((btn) => {
       btn.classList.remove('is-playing');
       const parentContainer = btn.closest('.sb-sound-card, .sb-sound-row');
@@ -689,19 +801,26 @@ export class SoundboardModal {
 
   private highlightPlayedSound(soundName: string): void {
     if (!this.modalEl) return;
-    const buttons = this.modalEl.querySelectorAll('.sb-sound-btn');
+    const buttons = this.modalEl.querySelectorAll('#sb-sounds-container .sb-sound-btn');
     buttons.forEach((btn) => {
       if (btn.getAttribute('data-soundname') === soundName) {
         const parentContainer = btn.closest('.sb-sound-card, .sb-sound-row') || btn;
         parentContainer.classList.add('playing-pulse');
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          this.highlightTimers.delete(timer);
           parentContainer.classList.remove('playing-pulse');
         }, 800);
+        this.highlightTimers.add(timer);
       }
     });
   }
 
   public close(): void {
+    this.lifecycle++;
+    this.favoriteMotion.cancel();
+    this.changingFolder = false;
+    for (const timer of this.highlightTimers) clearTimeout(timer);
+    this.highlightTimers.clear();
     this.closeShortcutCapture?.();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];

@@ -1,11 +1,13 @@
 import { escapeHtml } from '../utils/html';
 import { sessionManager, sessionKeyFor } from '../core/SessionManager';
-import { openServerSession, showServerSession } from '../core/serverConnection';
+import {
+  assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, showServerSession,
+} from '../core/serverConnection';
+import { ensureHostedServerStarted, findOwnedServer } from '../core/hostedServerStart';
 import { voiceStore } from '../stores/voiceStore';
 import {
   connectionStore,
   SavedServer,
-  CreatedServer,
   RailFolderNode,
   RailNode,
 } from '../stores/connectionStore';
@@ -15,7 +17,6 @@ import { showConfirm, showAlert } from './Dialog';
 import { checkServerOnline, fetchServerPreview } from '../utils/serverStatus';
 import {
   captureHostedServerLeaveState,
-  confirmStopHostedServer,
   promptShutdownAfterLeave,
 } from '../utils/hostedServer';
 import { soundEffects } from '../core/SoundEffects';
@@ -37,7 +38,7 @@ export class ServerRailView {
   private draggedRailItem: DraggedRailItem | null = null;
   private skipNextFolderToggle = false;
   private lastProbeTime = 0;
-  private probeDebounceTimer: any = null;
+  private probeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly PROBE_INTERVAL_MS = 15000;
 
   private static keyOf(host: string, port: number): string {
@@ -158,17 +159,6 @@ export class ServerRailView {
     );
   }
 
-  /**
-   * Returns the created-server entry backing a saved server, when the user is the
-   * one hosting it (created servers always run on this machine).
-   */
-  private findCreatedServer(server: SavedServer): CreatedServer | null {
-    const host = server.host.trim().replace(/^wss?:\/\//, '');
-    const isLocal = host === '127.0.0.1' || host === 'localhost' || host === '::1';
-    if (!isLocal) return null;
-    return (connectionStore.createdServers || []).find((c) => c.port === server.port) || null;
-  }
-
   /** Flags the rail as busy and repaints it, so the click has a visible effect (#332). */
   private setConnecting(key: string | null): void {
     if (this.connectingKey === key) return;
@@ -249,13 +239,13 @@ export class ServerRailView {
     busy: boolean,
     folderId?: string
   ): string {
-    const url = `ws://${srv.host.trim().replace(/^wss?:\/\//, '')}:${srv.port}`;
+    const live = getServerSessionForAddress(srv.host, srv.port);
+    const url = live?.key ?? sessionKeyFor(srv.host, srv.port);
     const isCurrent = url === currentUrl;
     const isConnecting = this.connectingKey === ServerRailView.keyOf(srv.host, srv.port);
     // Servers kept connected while the user looks elsewhere (#400): they may
     // be hosting the call or have collected messages meanwhile. A session that
     // is merely retrying does not count as online.
-    const live = sessionManager.get(url);
     const background = !isCurrent && live?.client.getStatus() === 'CONNECTED' ? live : undefined;
     const hasCall = voiceStore.voiceSessionKey === url;
     // A mention outranks a plain unread, so the row shows the red dot instead
@@ -627,8 +617,7 @@ export class ServerRailView {
   }
 
   private async connectToSavedServer(server: SavedServer): Promise<void> {
-    const targetUrl = sessionKeyFor(server.host, server.port);
-    if (targetUrl === sessionManager.getActiveKey()) return;
+    const targetUrl = getServerSessionForAddress(server.host, server.port)?.key ?? sessionKeyFor(server.host, server.port);
     if (this.connectingKey) return;
 
     // Already connected in the background: switching back is just repointing
@@ -639,19 +628,27 @@ export class ServerRailView {
     // Everything below is async and used to happen with no feedback at all: the
     // online probe alone can hang for 2.5s before the confirmation even shows up
     // (#332). Hold the busy state for the whole attempt and always clear it.
+    const isCurrent = captureServerBrowseIntent();
     this.setConnecting(ServerRailView.keyOf(server.host, server.port));
     try {
-      await this.runConnectToSavedServer(server);
+      await this.runConnectToSavedServer(server, isCurrent);
+    } catch (error: unknown) {
+      await showAlert({
+        title: t('main.serverOfflineTitle'),
+        message: error instanceof Error && error.message ? error.message : t('connection.connectError'),
+        variant: 'danger',
+      });
     } finally {
       this.setConnecting(null);
     }
   }
 
-  private async runConnectToSavedServer(server: SavedServer): Promise<void> {
-    // Probe before tearing anything down: the old flow disconnected first, so a
-    // failed connection dumped the user back on the home screen (#312).
+  private async runConnectToSavedServer(server: SavedServer, isCurrent: () => boolean): Promise<void> {
+    assertServerBrowseAvailable(server.host, server.port);
+    // Probe without changing the visible session or the ongoing call.
     const online = await checkServerOnline(server.host, server.port);
-    const mine = this.findCreatedServer(server);
+    if (!isCurrent()) return;
+    const mine = findOwnedServer(server.host, server.port);
     const label = server.name || server.host;
 
     if (!online && !mine) {
@@ -662,10 +659,7 @@ export class ServerRailView {
       return;
     }
 
-    // Connecting to another server no longer costs anything: the current one
-    // stays connected in the background (#400). Only the destructive path —
-    // booting one of our own servers, which may stop the one we are on — still
-    // asks for confirmation.
+    // Starting is independent of both browsing and the current voice session.
     if (!online && mine) {
       const confirmed = await showConfirm({
         title: t('main.serverOfflineStartTitle'),
@@ -673,24 +667,26 @@ export class ServerRailView {
         confirmLabel: t('main.serverOfflineStartConfirm'),
         variant: 'warning',
       });
-      if (!confirmed) return;
+      if (!confirmed || !isCurrent()) return;
 
-      // Booting one of our own servers may stop the very server we are talking
-      // to, and a socket that dies while `manualDisconnect` is false schedules
-      // an endless reconnect to a server that is never coming back (#312). This
-      // is the one path that still has to close the current session up front.
-      audioProcessor.stopMicrophone();
-      webRtcManager.closeAllPeers();
-      sessionManager.removeAll();
-
-      const started = await this.startOwnServer(mine);
-      if (!started) return;
+      try {
+        await ensureHostedServerStarted(mine);
+        if (!isCurrent()) return;
+      } catch (error: unknown) {
+        await showAlert({
+          title: t('main.serverStartFailedTitle'),
+          message: error instanceof Error && error.message ? error.message : t('main.serverStartFailedMessage'),
+          variant: 'danger',
+        });
+        return;
+      }
     }
 
     try {
       const identity = connectionStore.hasIdentity && connectionStore.clientId && connectionStore.publicKey
         ? { clientId: connectionStore.clientId, publicKey: connectionStore.publicKey }
         : await window.api.getIdentity();
+      if (!isCurrent()) return;
       connectionStore.setIdentity(identity);
       const nickname = connectionStore.savedNickname || t('connection.unknownUser');
       const res = await openServerSession(server.host, server.port, identity, nickname, server.password);
@@ -702,7 +698,7 @@ export class ServerRailView {
         lastConnected: Date.now(),
       });
     } catch (err: unknown) {
-      const message = err instanceof Error
+      const message = err instanceof Error && err.message
         ? err.message
         : t('main.serverOfflineMessage', { name: server.name || server.host });
       // The failed session was already dropped and the previous server restored
@@ -713,47 +709,6 @@ export class ServerRailView {
         title: t('main.serverOfflineTitle'),
         message,
       });
-    }
-  }
-
-  /** Boots one of the user's own servers so they can hop straight into it (#312). */
-  private async startOwnServer(created: CreatedServer): Promise<boolean> {
-    if (!window.api?.hostServerStart) return false;
-
-    try {
-      const status = await window.api.hostServerStatus?.();
-      if (status?.isRunning) {
-        // Somebody else may be on the server that is about to be replaced (#334).
-        if (!(await confirmStopHostedServer())) return false;
-        await window.api.hostServerStop?.();
-      }
-
-      const res = await window.api.hostServerStart({
-        port: created.port,
-        serverName: created.name,
-        password: created.password,
-        initialTextChannel: created.textChannel,
-        initialVoiceChannel: created.voiceChannel,
-        serverId: created.id,
-        maxUsers: created.maxUsers,
-      });
-
-      if (!res.success) {
-        await showAlert({
-          title: t('main.serverStartFailedTitle'),
-          message: res.error || t('main.serverStartFailedMessage'),
-        });
-        return false;
-      }
-
-      connectionStore.saveCreatedServer({ ...created, lastStarted: Date.now() });
-      return true;
-    } catch (err: unknown) {
-      await showAlert({
-        title: t('main.serverStartFailedTitle'),
-        message: err instanceof Error ? err.message : t('main.serverStartFailedMessage'),
-      });
-      return false;
     }
   }
 }

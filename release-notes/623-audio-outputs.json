@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "As mídias do chat agora respeitam a saída de áudio do app. Quer separar tudo? Ative as saídas avançadas para escolher dispositivos de voz, compartilhamentos e chat. Mudar o áudio da tela não leva mais a voz dos participantes junto.",
+  "en": "Chat media now follows the app's audio output. Want separate devices? Enable advanced outputs to route voice, screen shares and chat independently. Changing screen-share output no longer moves everyone's voice along with it."
+}

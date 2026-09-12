@@ -266,8 +266,11 @@ test('saving preferences and the filename prompt is atomic on storage failure', 
   settingsStore.saveBotPreferences(key, { count: 1 }, false);
   const stored = storage.getItem('monky_settings');
   context.mock.method(console, 'warn', () => {});
-  context.mock.method(storage, 'setItem', () => { throw new Error('Fixture storage failure'); });
-  assert.throws(() => settingsStore.saveBotPreferences(key, { count: 2 }, true), /Could not save/);
+  context.mock.method(console, 'error', () => {});
+  const failure = new Error('Fixture storage failure');
+  context.mock.method(storage, 'setItem', () => { throw failure; });
+  assert.throws(() => settingsStore.saveBotPreferences(key, { count: 2 }, true),
+    (error: unknown) => error instanceof Error && /Could not save/.test(error.message) && error.cause === failure);
   assert.deepEqual(settingsStore.getBotUserSettings(key), { count: 1 });
   assert.deepEqual(settingsStore.botDownloadConfirmationExceptions, [key]);
   assert.equal(storage.getItem('monky_settings'), stored);

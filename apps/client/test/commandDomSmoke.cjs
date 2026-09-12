@@ -18,6 +18,8 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_COMMAND_DOM_PROFILE);
+  app.commandLine.appendSwitch('use-fake-device-for-media-stream');
+  app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
   let vite;
   let window;
   let timeout;
@@ -135,6 +137,7 @@ async function runAudioPreviewLifecycleSmoke() {
   };
   const previous = {
     api: window.api, Audio: window.Audio, speaker: settingsStore.selectedSpeakerId,
+    advancedOutputs: settingsStore.advancedAudioOutputs, outputDevices: settingsStore.audioOutputDevices,
     createUrl: URL.createObjectURL, revokeUrl: URL.revokeObjectURL,
   };
   const audios = [], routes = [], loads = [], cancels = [], urls = [], revoked = [];
@@ -178,6 +181,7 @@ async function runAudioPreviewLifecycleSmoke() {
     URL.createObjectURL = blob => { const url = previous.createUrl.call(URL, blob); urls.push(url); return url; };
     URL.revokeObjectURL = url => { revoked.push(url); previous.revokeUrl.call(URL, url); };
     settingsStore.selectedSpeakerId = '';
+    settingsStore.advancedAudioOutputs = false;
     window.api = {
       loadAudioPreview: async input => { loads.push(input); const pending = nextLoad; nextLoad = undefined; return pending ? pending.promise : ready(); },
       cancelAudioPreview: async input => { cancels.push(input); return true; },
@@ -282,6 +286,39 @@ async function runAudioPreviewLifecycleSmoke() {
     await settle();
     check(current.paused && current.src === '' && current.plays === 2 &&
       controls(1).dataset.audioPreviewState === 'failed', 'Output failures must stop and show an error, never fall back to another speaker');
+
+    deferRoutes = false;
+    settingsStore.selectedSpeakerId = 'shared-output';
+    settingsStore.advancedAudioOutputs = true;
+    settingsStore.audioOutputDevices = { voice: 'voice-output', screen: 'screen-output', media: 'media-output' };
+    play(0);
+    await settle();
+    const media = audios.at(-1);
+    check(media.sinkId === 'media-output' && media.plays === 1, 'Bot previews honor the advanced chat-media output');
+    settingsStore.selectedSpeakerId = 'new-shared-output';
+    settingsStore.audioOutputDevices.voice = 'new-voice-output';
+    appEvents.emit('settings.updated');
+    await settle();
+    check(media.sinkId === 'media-output' && media.plays === 1 && !media.paused,
+      'Unrelated voice or shared output changes do not interrupt a media-specific preview');
+    settingsStore.audioOutputDevices.media = 'new-media-output';
+    appEvents.emit('settings.updated');
+    await settle();
+    check(media.sinkId === 'new-media-output' && media.plays === 2, 'Active previews follow changes to the media output');
+    settingsStore.audioOutputDevices.media = null;
+    appEvents.emit('settings.updated');
+    await settle();
+    check(media.sinkId === 'new-shared-output', 'Inherited media output follows the shared device');
+    settingsStore.audioOutputDevices.media = 'default';
+    appEvents.emit('settings.updated');
+    await settle();
+    check(media.sinkId === '', 'An explicit system-default media output does not inherit the shared device');
+    settingsStore.advancedAudioOutputs = false;
+    appEvents.emit('settings.updated');
+    await settle();
+    check(media.sinkId === 'new-shared-output', 'Disabling advanced outputs restores the shared preview device');
+    service.release(root);
+
     const beforeLateLoad = audios.length;
     nextLoad = deferred();
     const pending = nextLoad;
@@ -305,6 +342,8 @@ async function runAudioPreviewLifecycleSmoke() {
     window.api = previous.api;
     window.Audio = previous.Audio;
     settingsStore.selectedSpeakerId = previous.speaker;
+    settingsStore.advancedAudioOutputs = previous.advancedOutputs;
+    settingsStore.audioOutputDevices = previous.outputDevices;
     URL.createObjectURL = previous.createUrl;
     URL.revokeObjectURL = previous.revokeUrl;
   }
@@ -1069,6 +1108,7 @@ async function runSettingsNavigationSmoke() {
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   let starts = 0;
+  let cameraActivations = 0;
   let deactivations = 0;
   let cleanups = 0;
   let versions = 0;
@@ -1080,17 +1120,18 @@ async function runSettingsNavigationSmoke() {
   modal.voiceVideoTab = {
     renderHtml: () => '<label for="settings-select-fixture">Device</label><select id="settings-select-fixture" title="Device choice"><option value="one">One</option><option value="two">Two</option></select>',
     attachEvents: () => {}, refreshDevices: async () => {},
+    activateCameraPreview: () => { cameraActivations++; },
     startVadMeter: () => { starts++; }, deactivate: () => { deactivations++; }, cleanup: () => { cleanups++; },
   };
   try {
     await modal.open();
-    check(starts === 0, 'Opening account settings must not start a hidden microphone meter');
+    check(starts === 0 && cameraActivations === 0, 'Opening account settings must not start hidden media previews');
     modal.close();
     await modal.open('voice_video');
     check(document.querySelector('#tab-panel-voice_video').style.display !== 'none'
       && document.querySelector('#settings-current-tab-title').textContent.includes(t('settings.tabVoiceVideo')),
     'Quick audio settings shortcut opens the voice tab directly');
-    check(starts === 1, 'Visible voice settings starts its meter exactly once');
+    check(starts === 1 && cameraActivations === 1, 'Visible voice settings activates its media previews exactly once');
     const select = document.getElementById('settings-select-fixture');
     select.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' }));
     select.click();
@@ -1103,7 +1144,8 @@ async function runSettingsNavigationSmoke() {
     modal.switchTab('account');
     check(deactivations === 1 && cleanups === priorCleanup, 'Leaving voice stops media without removing the tab control bindings');
     modal.switchTab('voice_video');
-    check(starts === 2 && cleanups === priorCleanup, 'Returning to voice resumes the meter without duplicating or dropping bindings');
+    check(starts === 2 && cameraActivations === 2 && cleanups === priorCleanup,
+      'Returning to voice resumes its media previews without duplicating or dropping bindings');
     modal.close();
     check(cleanups === priorCleanup + 1, 'Closing settings performs full voice tab cleanup');
     let resolveRefresh;
@@ -1111,11 +1153,13 @@ async function runSettingsNavigationSmoke() {
     const priorStarts = starts;
     const priorVersions = versions;
     const opening = modal.open('voice_video');
+    const pendingCameraActivations = cameraActivations;
     modal.close();
     resolveRefresh();
     await opening;
-    check(starts === priorStarts && versions === priorVersions && !document.querySelector('.modal-backdrop--settings'),
-      'Closing during async settings setup cannot start a late microphone preview');
+    check(starts === priorStarts && cameraActivations === pendingCameraActivations
+      && versions === priorVersions && !document.querySelector('.modal-backdrop--settings'),
+      'Closing during async settings setup cannot start a late media preview');
     return checks;
   } finally {
     modal.close();
@@ -1561,15 +1605,22 @@ async function runSidebarPttSmoke() {
       && root.querySelector('.voice-conn-info').title === 'Establishing the voice connection',
       'Initial connection status and tooltip follow the selected language');
     healthChanged('connected');
+    await Promise.resolve();
     window.voiceConnectionPreviewMarkup = previews.join('');
-    check(root.querySelectorAll('.audio-control-group').length === 2
-      && root.querySelectorAll('button.audio-device-trigger').length === 2, 'Actual MainView must render independent microphone and output device arrows');
+    check(root.querySelectorAll('.audio-control-group').length === 4
+      && [...root.querySelectorAll('button.audio-device-trigger')]
+        .map(trigger => trigger.dataset.audioDevice).sort().join(',') === 'camera,input,noise,output',
+      'Actual MainView must render independent microphone, output, camera and noise controls');
     const footerRect = root.querySelector('.user-control-bar').getBoundingClientRect();
     for (const trigger of root.querySelectorAll('button.audio-device-trigger')) {
       const rect = trigger.getBoundingClientRect();
       check(trigger.getAttribute('aria-expanded') === 'false' && rect.width > 0
         && rect.left >= footerRect.left && rect.right <= footerRect.right,
-      'Device arrows must be accessible, visible and contained inside the actual footer');
+      `Device arrow must be accessible, visible and inside its footer: ${JSON.stringify({
+        kind: trigger.dataset.audioDevice, expanded: trigger.getAttribute('aria-expanded'),
+        width: rect.width, left: rect.left, right: rect.right,
+        footerLeft: footerRect.left, footerRight: footerRect.right,
+      })}`);
     }
     navigator.mediaDevices.enumerateDevices = async () => [
       { deviceId: 'default', kind: 'audiooutput', label: 'System output', groupId: 'audio' },

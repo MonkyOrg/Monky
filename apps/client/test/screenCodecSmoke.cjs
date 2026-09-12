@@ -16,6 +16,7 @@ if (!process.versions.electron) {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_SCREEN_CODEC_PROFILE);
   app.commandLine.appendSwitch('allow-loopback-in-peer-connection');
+  app.on('window-all-closed', () => {});
   let vite, window, worker, router, vp8Router, timeout;
   const transports = new Map(), producers = new Map();
   const finish = async code => {
@@ -84,7 +85,7 @@ if (!process.versions.electron) {
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'), logLevel: 'error',
       cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
-      server: { host: '127.0.0.1', port: 0, strictPort: true, open: false },
+      server: { host: '127.0.0.1', port: 0, strictPort: true, open: false, hmr: false, watch: null },
       plugins: [{
         name: 'screen-codec-fixture',
         configureServer(server) {
@@ -665,8 +666,18 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
       check(cancelledScreen.name === 'AbortError' && lateScreen.stream.getTracks().every(track => track.readyState === 'ended'),
         'No stale screen track can appear after the clean rejoin');
       let resolveCamera;
-      navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { resolveCamera = resolve; });
+      let cameraRequests = 0;
+      navigator.mediaDevices.getUserMedia = () => new Promise(resolve => { cameraRequests++; resolveCamera = resolve; });
+      const beforeCapture = videoService.startCamera();
+      videoService.stopCamera();
+      const cancelledBeforeCapture = await expectFailure(() => beforeCapture, 'Camera setup can be cancelled before permission is requested');
+      check(cancelledBeforeCapture.name === 'AbortError' && cameraRequests === 0,
+        'A stopped camera setup does not request hardware after loading saved effects');
       const pendingCamera = videoService.startCamera();
+      for (let attempt = 0; attempt < 200 && !resolveCamera; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      check(typeof resolveCamera === 'function', 'Wait for the actual camera permission boundary before cancelling capture');
       videoService.stopCamera();
       const lateCamera = source();
       resolveCamera(lateCamera.stream);

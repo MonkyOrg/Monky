@@ -1,6 +1,7 @@
 import { t } from '../i18n';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
 import { showAlert } from './Dialog';
+import { playChatMedia } from '../core/ChatMediaOutput';
 
 /**
  * Handler de download que o lightbox espera. Fica aqui porque todo mundo que
@@ -161,7 +162,9 @@ export class LightboxModal {
       }
       currentInlineVideo.pause();
       if (options?.resume && resumeInlineVideoOnClose) {
-        void currentInlineVideo.play().catch(() => undefined);
+        void playChatMedia(currentInlineVideo).catch((error: unknown) => {
+          console.warn('[Lightbox] Could not resume inline media:', error);
+        });
       }
       currentLightboxVideo = null;
       currentInlineVideo = null;
@@ -297,7 +300,9 @@ export class LightboxModal {
             }
           }
           if (shouldResumePlayback) {
-            void video.play().catch(() => undefined);
+            void playChatMedia(video).catch((error: unknown) => {
+              console.warn('[Lightbox] Could not play media:', error);
+            });
           }
         };
         if (video.readyState >= 1) {

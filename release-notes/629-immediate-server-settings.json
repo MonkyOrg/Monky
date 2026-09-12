@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "As configurações do servidor agora são aplicadas ao editar, sem um botão Salvar no final. Enquanto uma operação está pendente, a janela aguarda a confirmação e mostra qualquer problema, sem perder alterações já concluídas.",
+  "en": "Server settings now apply as you edit, with no final Save button. While an operation is pending, the window waits for confirmation and shows any problems without losing changes that already succeeded."
+}

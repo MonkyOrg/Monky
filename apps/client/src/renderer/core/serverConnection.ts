@@ -1,7 +1,7 @@
 import type { AuthSuccessPayload, VoiceReconnectPayload, VoiceUserJoinedPayload } from '@monky/shared';
 import { MessageType } from '@monky/shared';
 import { networkClient, RequestTimeoutError, type NetworkClient } from './NetworkClient';
-import { sessionManager } from './SessionManager';
+import { sessionManager, sessionKeyFor, type ServerSession } from './SessionManager';
 import { webRtcManager } from './WebRtcManager';
 import { voiceStore } from '../stores/voiceStore';
 import { clientLog } from './ClientLogService';
@@ -22,11 +22,40 @@ interface VoiceReconnectAdmission {
 }
 
 let voiceAdmissionGeneration = 0;
+let serverNavigationGeneration = 0;
+const pendingServerOpens = new Map<string, {
+  session: ServerSession;
+  previous: ServerSession | null;
+  promise: Promise<AuthSuccessPayload>;
+}>();
 const pendingVoiceAdmissions = new WeakMap<NetworkClient, Promise<void>>();
 let activeVoiceAdmission: { generation: number; sessionKey: string; channelId: string } | null = null;
 
 export function isVoiceAdmissionPending(sessionKey: string, channelId: string): boolean {
   return activeVoiceAdmission?.sessionKey === sessionKey && activeVoiceAdmission.channelId === channelId;
+}
+
+export function getServerSessionForAddress(host: string, port: number): ServerSession | undefined {
+  const canonicalHost = (value: string) => {
+    return value.trim().replace(/^wss?:\/\//i, '').replace(/^\[(.+)\]$/, '$1').toLowerCase();
+  };
+  const normalizedHost = canonicalHost(host);
+  return sessionManager.get(sessionKeyFor(host, port)) ?? sessionManager.getAll()
+    .find(session => session.port === port && canonicalHost(session.host) === normalizedHost);
+}
+
+export function assertServerBrowseAvailable(host: string, port: number): void {
+  const session = getServerSessionForAddress(host, port);
+  const key = session?.key ?? sessionKeyFor(host, port);
+  if (voiceStore.voiceSessionKey === key && session?.client.getStatus() !== 'CONNECTED') {
+    throw new Error(t('navigation.sessionReconnecting'));
+  }
+}
+
+export function captureServerBrowseIntent(): () => boolean {
+  const generation = serverNavigationGeneration;
+  const previous = sessionManager.getActive();
+  return () => generation === serverNavigationGeneration && sessionManager.getActive() === previous;
 }
 
 /**
@@ -46,22 +75,62 @@ export async function openServerSession(
   password?: string
 ): Promise<AuthSuccessPayload> {
   clientLog.info('CONNECTION', `Opening server session: ${host}:${port}`, { nickname });
-  const previous = sessionManager.getActive();
-  const session = sessionManager.create(host, port, nickname, password);
+  const existing = getServerSessionForAddress(host, port);
+  const key = existing?.key ?? sessionKeyFor(host, port);
+  if (existing?.client.getStatus() === 'CONNECTED') {
+    const { serverDetails, currentUser, voiceRestrictions } = existing.serverStore;
+    if (!serverDetails || !currentUser) throw new Error(t('navigation.sessionNotReady'));
+    serverNavigationGeneration++;
+    sessionManager.activate(key);
+    // Browsing an existing session is not another authentication handshake.
+    return { server: serverDetails, currentUser, voiceRestrictions };
+  }
+  if (voiceStore.voiceSessionKey === key) {
+    // Its own recovery owns the socket and voice admission. A navigation click
+    // must not replace either while that call is reconnecting.
+    assertServerBrowseAvailable(host, port);
+  }
+
+  const generation = ++serverNavigationGeneration;
+  const pending = pendingServerOpens.get(key);
+  const reusable = pending && pending.session === existing ? pending : undefined;
+  const active = sessionManager.getActive();
+  const activeAttempt = active ? pendingServerOpens.get(active.key) : undefined;
+  const previous = active && active.client.getStatus() !== 'CONNECTED' && activeAttempt?.session === active
+    ? activeAttempt.previous
+    : active;
+  const session = reusable?.session
+    ?? sessionManager.create(existing?.host ?? host, existing?.port ?? port, nickname, password);
   sessionManager.activate(session.key);
+  const operation = reusable ?? {
+    session,
+    previous,
+    promise: session.client.connect(session.host, session.port, identity, nickname, password),
+  };
+  pendingServerOpens.set(key, operation);
 
   try {
-    return await session.client.connect(host, port, identity, nickname, password);
+    return await operation.promise;
   } catch (err) {
     clientLog.error('CONNECTION', `Failed to open session ${host}:${port}`, {
       error: err instanceof Error ? err.message : String(err),
     });
-    // The session never really came up; dropping it keeps the rail honest.
-    sessionManager.remove(session.key);
-    if (previous && sessionManager.has(previous.key)) {
-      sessionManager.activate(previous.key);
+    // Only dispose our failed attempt, never a replacement or the call's socket.
+    if (sessionManager.get(key) === session && voiceStore.voiceSessionKey !== key
+      && session.client.getStatus() !== 'CONNECTED') {
+      sessionManager.remove(key);
+    }
+    // A late failure must not take the screen back from a newer navigation.
+    if (generation === serverNavigationGeneration) {
+      const previousSurvives = previous && sessionManager.get(previous.key) === previous
+        && (previous.client.getStatus() === 'CONNECTED' || previous.serverStore.serverDetails);
+      const fallback = previousSurvives ? previous : sessionManager.getAll()
+        .find(candidate => candidate.client.getStatus() === 'CONNECTED');
+      if (fallback) sessionManager.activate(fallback.key);
     }
     throw err;
+  } finally {
+    if (pendingServerOpens.get(key) === operation) pendingServerOpens.delete(key);
   }
 }
 
@@ -286,6 +355,7 @@ export function showServerSession(key: string): boolean {
     return false;
   }
   clientLog.info('CONNECTION', `Showing server session: ${key}`);
+  serverNavigationGeneration++;
   sessionManager.activate(key);
   return true;
 }

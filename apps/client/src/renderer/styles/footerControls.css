@@ -1,7 +1,7 @@
 /* The hit boxes stay stationary; FooterControlsMotion animates only their glyphs. */
 .user-control-bar .user-quick-actions button,
 .user-control-bar .user-quick-actions button:active,
-.user-control-bar .user-media-bar > button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
+.user-control-bar .user-media-bar button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
 .chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-code),
 .voice-stage-container button,
 .voice-stage-container button:is(:hover, :active) {
@@ -10,13 +10,13 @@
 }
 
 .user-control-bar .user-quick-actions button,
-.user-control-bar .user-media-bar > button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
+.user-control-bar .user-media-bar button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
 .chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-code),
 .voice-stage-container button {
   transition: color 120ms ease-out, background-color 120ms ease-out;
 }
 
-.user-control-bar .user-media-bar > .broadcasting-pulse,
+.user-control-bar .user-media-bar .broadcasting-pulse,
 .voice-stage-container .broadcasting-pulse {
   animation: none;
 }
@@ -50,9 +50,97 @@
 
 @media (prefers-reduced-motion: reduce) {
   .user-control-bar .user-quick-actions button,
-  .user-control-bar .user-media-bar > button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
+  .user-control-bar .user-media-bar button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
   .chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-code),
   .voice-stage-container button {
+    transition: none;
+  }
+}
+
+.user-control-bar .user-media-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.user-media-bar .camera-control-group {
+  min-width: 0;
+}
+
+.camera-control-group .audio-device-trigger {
+  height: 40px;
+  flex-shrink: 0;
+}
+
+.user-control-bar .audio-control-group:is(.camera-control-group, .noise-control-group) {
+  --split-control-background: var(--bg-card);
+  --split-control-border: var(--border-color);
+  --split-control-radius: var(--radius-md);
+  background: var(--split-control-background);
+  border-radius: var(--split-control-radius);
+  box-shadow: inset 0 0 0 1px var(--split-control-border);
+  transition: background-color 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+.user-control-bar .audio-control-group:is(.camera-control-group, .noise-control-group):is(:hover, :focus-within),
+.user-control-bar .audio-control-group:is(.camera-control-group, .noise-control-group):has(> .audio-device-trigger[aria-expanded="true"]) {
+  --split-control-background: var(--bg-card-hover);
+}
+
+.user-control-bar .audio-control-group.camera-control-group {
+  --split-control-radius: var(--radius-sm);
+  height: 40px;
+}
+
+.user-control-bar .audio-control-group.noise-control-group {
+  height: 38px;
+}
+
+.user-control-bar .audio-control-group:is(.camera-control-group, .noise-control-group) > .btn-icon {
+  background: transparent;
+  border-color: transparent;
+  border-radius: var(--split-control-radius) 0 0 var(--split-control-radius);
+  box-shadow: none;
+}
+
+.user-control-bar .audio-control-group:is(.camera-control-group, .noise-control-group) > .audio-device-trigger {
+  height: 100%;
+  border-radius: 0 var(--split-control-radius) var(--split-control-radius) 0;
+  background: transparent;
+}
+
+.user-control-bar .noise-control-group:has(> .rnnoise-active) {
+  --split-control-background: color-mix(in srgb, var(--accent-primary) 15%, transparent);
+  --split-control-border: color-mix(in srgb, var(--accent-primary) 45%, transparent);
+}
+
+.user-control-bar .noise-control-group:has(> .rnnoise-active):is(:hover, :focus-within),
+.user-control-bar .noise-control-group:has(> .rnnoise-active):has(> .audio-device-trigger[aria-expanded="true"]) {
+  --split-control-background: color-mix(in srgb, var(--accent-primary) 25%, transparent);
+  --split-control-border: var(--accent-primary);
+}
+
+.user-control-bar .noise-control-group:has(> .rnnoise-active) > .audio-device-trigger {
+  color: var(--accent-primary);
+}
+
+.user-control-bar .user-media-bar .audio-control-group.camera-control-group:has(> .broadcasting-pulse) {
+  --split-control-background: rgba(242, 63, 67, 0.25);
+  --split-control-border: #f23f43;
+  box-shadow: inset 0 0 0 1px var(--split-control-border), 0 0 12px rgba(242, 63, 67, 0.4);
+}
+
+.user-control-bar .camera-control-group > #media-btn-camera.broadcasting-pulse {
+  background-color: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none;
+}
+
+.user-control-bar .camera-control-group:has(> .broadcasting-pulse) > .audio-device-trigger {
+  color: #ff7b72;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .user-control-bar .audio-control-group:is(.camera-control-group, .noise-control-group) {
     transition: none;
   }
 }

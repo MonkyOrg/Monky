@@ -4,7 +4,7 @@ const glyphSelector = ':scope > .audio-state-icon, :scope > .material-symbols-ou
 export function bindFooterControlsMotion(root: HTMLElement): () => void {
   return bindControlGlyphMotion(Array.from(root.querySelectorAll<HTMLButtonElement>(
     '.user-control-bar .user-quick-actions button, '
-      + '.user-control-bar .user-media-bar > button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard)',
+      + '.user-control-bar .user-media-bar button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard)',
   )));
 }
 

@@ -1,45 +1,61 @@
 import path from 'path';
 import fs from 'fs';
 import { app, BrowserWindow } from 'electron';
-import { MonkyServer, ServerConfig, Logger } from '@monky/server';
-import type { HostServerOptions, LogEntry, ServerStats } from '@monky/shared';
-import { mt } from './i18n';
+import { MonkyServer, Logger, type ServerConfig } from '@monky/server';
+import { LIMITS, type HostServerOptions, type IpcEvents, type LogEntry, type ServerStats } from '@monky/shared';
+import { mt, type MainTranslationKey } from './i18n';
 import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from './serverDataDir';
+import { HostedServerCleanupError, HostedServerConflictError, HostedServerLifecycle } from './hostedServerLifecycle';
 
 export type { HostServerOptions };
 
+function errorMessage(error: unknown, fallback: MainTranslationKey): string {
+  return error instanceof Error && error.message ? error.message : mt(fallback);
+}
+
 export class ServerManager {
-  private serverInstance: MonkyServer | null = null;
-  private isRunning: boolean = false;
-  private currentPort: number | null = null;
-  private currentServerId: string | null = null;
   private unsubscribeLogs: (() => void) | null = null;
+  private readonly lifecycle = new HostedServerLifecycle<MonkyServer, HostServerOptions>(
+    (options) => this.createServer(options),
+    () => this.onLifecycleChange(),
+  );
 
   public async startServer(options: HostServerOptions): Promise<{ success: boolean; error?: string }> {
-    if (this.isRunning && this.serverInstance) {
-      // Already serving exactly what was asked for.
-      if (this.currentPort === options.port) {
-        // The caller may know which entry of "Meus Servidores" this instance
-        // belongs to even when whoever started it did not, so keep the most
-        // specific answer instead of leaving the id stale (#333).
-        if (options.serverId && options.serverId !== this.currentServerId) {
-          this.currentServerId = options.serverId;
-          this.notifyStatus();
-        }
-        return { success: true };
-      }
-      // A different server is up: reporting success here would leave the caller
-      // connecting to the wrong instance, so swap it out first.
-      await this.stopServer();
-    }
-
-    if (options.serverId && !isSafeServerId(options.serverId)) {
+    if (
+      !options || !Number.isInteger(options.port) || options.port < LIMITS.MIN_PORT || options.port > LIMITS.MAX_PORT ||
+      typeof options.serverName !== 'string' ||
+      (options.serverId !== undefined && (typeof options.serverId !== 'string' || !isSafeServerId(options.serverId))) ||
+      [options.password, options.initialVoiceChannel, options.initialTextChannel].some(value => value !== undefined && typeof value !== 'string') ||
+      (options.maxUsers !== undefined && (!Number.isSafeInteger(options.maxUsers) || options.maxUsers < 0)) ||
+      (options.voiceMode !== undefined && options.voiceMode !== 'p2p' && options.voiceMode !== 'sfu')
+    ) {
       return { success: false, error: mt('error.startServerFailed') };
     }
 
+    try {
+      await this.lifecycle.start(options);
+      return { success: true };
+    } catch (error) {
+      if (error instanceof HostedServerConflictError) {
+        return { success: false, error: mt('error.hostedServerAlreadyRunning') };
+      }
+      console.error('[ServerManager] Error starting local server:', error);
+      if (error instanceof HostedServerCleanupError) {
+        return {
+          success: false,
+          error: mt('error.startServerCleanupFailed', {
+            startError: errorMessage(error.startError, 'error.startServerFailed'),
+            stopError: errorMessage(error.stopError, 'error.stopServerFailed'),
+          }),
+        };
+      }
+      return { success: false, error: errorMessage(error, 'error.startServerFailed') };
+    }
+  }
+
+  private async createServer(options: HostServerOptions): Promise<MonkyServer> {
     const dataDir = this.resolveDataDir(options.serverId);
     fs.mkdirSync(dataDir, { recursive: true });
-
     const config: ServerConfig = {
       port: options.port,
       dataDir,
@@ -48,28 +64,9 @@ export class ServerManager {
       initialVoiceChannel: options.initialVoiceChannel || 'Geral',
       initialTextChannel: options.initialTextChannel || 'geral',
       maxUsers: options.maxUsers,
+      voiceMode: options.voiceMode,
     };
-
-    try {
-      const server = await MonkyServer.create(config);
-      await server.start();
-      this.serverInstance = server;
-      this.isRunning = true;
-      this.currentPort = options.port;
-      this.currentServerId = options.serverId ?? null;
-      this.startForwardingLogs();
-      console.log(`[ServerManager] Local server started successfully on port ${options.port}`);
-      this.notifyStatus();
-      return { success: true };
-    } catch (err: any) {
-      console.error('[ServerManager] Error starting local server:', err);
-      this.isRunning = false;
-      this.serverInstance = null;
-      this.currentPort = null;
-      this.currentServerId = null;
-      this.notifyStatus();
-      return { success: false, error: err.message || mt('error.startServerFailed') };
-    }
+    return MonkyServer.create(config);
   }
 
   private static baseDataDir(): string {
@@ -94,37 +91,44 @@ export class ServerManager {
    * database outlived the entry and was inherited by the next server created
    * (#364).
    */
-  public deleteServerData(serverId: string): { success: boolean; error?: string } {
+  public async deleteServerData(serverId: string): Promise<{ success: boolean; error?: string }> {
     if (!serverId || !isSafeServerId(serverId)) {
       return { success: false, error: mt('error.deleteServerDataFailed') };
     }
-    // Erasing the database under a live server would leave it writing into
-    // files nobody can find again.
-    if (this.isRunning && this.currentServerId === serverId) {
-      return { success: false, error: mt('error.deleteServerDataRunning') };
-    }
+    return this.lifecycle.runExclusive(() => {
+      // Wait for pending starts and stops before deciding whether data is free.
+      const status = this.getStatus();
+      if (status.isRunning && status.serverId === serverId) {
+        return { success: false, error: mt('error.deleteServerDataRunning') };
+      }
 
-    try {
-      fs.rmSync(serverDataDirFor(ServerManager.baseDataDir(), serverId), { recursive: true, force: true });
-      return { success: true };
-    } catch (err: any) {
-      console.error('[ServerManager] Error deleting server data:', err);
-      return { success: false, error: err.message || mt('error.deleteServerDataFailed') };
-    }
+      try {
+        fs.rmSync(serverDataDirFor(ServerManager.baseDataDir(), serverId), { recursive: true, force: true });
+        return { success: true };
+      } catch (error) {
+        console.error('[ServerManager] Error deleting server data:', error);
+        return { success: false, error: errorMessage(error, 'error.deleteServerDataFailed') };
+      }
+    });
   }
 
   public async stopServer(): Promise<void> {
-    if (this.serverInstance) {
-      console.log('[ServerManager] Stopping local server...');
+    try {
+      await this.lifecycle.stop();
+    } catch (error) {
+      console.error('[ServerManager] Error stopping local server:', error);
+      throw new Error(errorMessage(error, 'error.stopServerFailed'), { cause: error });
+    }
+  }
+
+  private onLifecycleChange(): void {
+    if (this.getStatus().isRunning) {
+      if (!this.unsubscribeLogs) this.startForwardingLogs();
+    } else {
       this.unsubscribeLogs?.();
       this.unsubscribeLogs = null;
-      await this.serverInstance.stop();
-      this.serverInstance = null;
-      this.isRunning = false;
-      this.currentPort = null;
-      this.currentServerId = null;
-      this.notifyStatus();
     }
+    this.notifyStatus();
   }
 
   /**
@@ -134,10 +138,13 @@ export class ServerManager {
    * running (#333).
    */
   private notifyStatus(): void {
-    const status = this.getStatus();
+    this.broadcast('server-host:status-changed', this.getStatus());
+  }
+
+  private broadcast<C extends keyof IpcEvents>(channel: C, ...args: IpcEvents[C]): void {
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) {
-        window.webContents.send('server-host:status-changed', status);
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(channel, ...args);
       }
     }
   }
@@ -150,11 +157,7 @@ export class ServerManager {
   private startForwardingLogs(): void {
     this.unsubscribeLogs?.();
     this.unsubscribeLogs = Logger.subscribe((entry: LogEntry) => {
-      for (const window of BrowserWindow.getAllWindows()) {
-        if (!window.isDestroyed()) {
-          window.webContents.send('server-host:log', entry);
-        }
-      }
+      this.broadcast('server-host:log', entry);
     });
   }
 
@@ -167,8 +170,8 @@ export class ServerManager {
   }
 
   public async getStats(): Promise<ServerStats | null> {
-    if (!this.serverInstance) return null;
-    return this.serverInstance.getStats();
+    const server = this.lifecycle.getServer();
+    return server ? server.getStats() : null;
   }
 
   /**
@@ -177,6 +180,6 @@ export class ServerManager {
    * as it was started from somewhere else (#333).
    */
   public getStatus(): { isRunning: boolean; port: number | null; serverId: string | null } {
-    return { isRunning: this.isRunning, port: this.currentPort, serverId: this.currentServerId };
+    return this.lifecycle.getStatus();
   }
 }

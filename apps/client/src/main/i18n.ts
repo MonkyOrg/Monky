@@ -23,6 +23,11 @@ const CATALOGS = {
     'error.updaterUnavailable': 'Updater indisponível',
     'error.updaterDevMode': 'Atualização automática indisponível em modo de desenvolvimento',
     'error.startServerFailed': 'Falha ao iniciar servidor',
+    'error.stopServerFailed': 'Falha ao parar servidor',
+    'error.hostedServerAlreadyRunning':
+      'Outro servidor já está em execução. Pare-o explicitamente pelos controles de hospedagem quando for seguro e tente novamente.',
+    'error.startServerCleanupFailed':
+      'Não foi possível iniciar nem encerrar completamente o servidor. Tente pará-lo explicitamente antes de iniciar outro. Início: {startError}. Encerramento: {stopError}.',
     'error.deleteServerDataFailed': 'Não foi possível apagar os dados do servidor',
     'error.deleteServerDataRunning': 'Pare o servidor antes de apagar os dados dele',
     'updateInstall.title': 'Atualizando o Monky',
@@ -72,6 +77,11 @@ const CATALOGS = {
     'error.updaterUnavailable': 'Updater unavailable',
     'error.updaterDevMode': 'Automatic updates are unavailable in development mode',
     'error.startServerFailed': 'Failed to start the server',
+    'error.stopServerFailed': 'Failed to stop the server',
+    'error.hostedServerAlreadyRunning':
+      'Another server is already running. Stop it explicitly using the hosting controls when it is safe, then try again.',
+    'error.startServerCleanupFailed':
+      'The server could not start or shut down completely. Try stopping it explicitly before starting another. Start: {startError}. Shutdown: {stopError}.',
     'error.deleteServerDataFailed': 'Could not delete the server data',
     'error.deleteServerDataRunning': 'Stop the server before deleting its data',
     'updateInstall.title': 'Updating Monky',

@@ -1,39 +1,55 @@
 import { appEvents } from '../core/EventBus';
 import { audioDeviceError, populateAudioDeviceSelect, selectAudioDevice, selectedAudioDevice } from '../core/AudioDeviceService';
 import { bindMicrophoneLevelMeter } from '../core/MicrophoneLevelMeter';
-import { t } from '../i18n';
+import { t, type TranslationKey } from '../i18n';
+import { settingsStore } from '../stores/settingsStore';
 import { settingsModal } from './SettingsModal';
+import { CameraEffectsControl } from './settings/CameraEffectsControl';
+import { NoiseSuppressionControl } from './settings/NoiseSuppressionControl';
+import { cameraDeviceSelectionError, populateCameraDeviceSelect } from './settings/CameraDeviceSelection';
+import '../styles/mediaPopovers.css';
 
 let nextId = 0;
+type PopoverKind = 'input' | 'output' | 'camera' | 'noise';
+const labels: Record<PopoverKind, TranslationKey> = {
+  input: 'audioDevices.selectInput', output: 'audioDevices.selectOutput',
+  camera: 'cameraEffects.quickOptions', noise: 'audioNoise.quickOptions',
+};
 
 export function bindAudioDevicePopovers(root: HTMLElement): () => void {
   const unbind: Array<() => void> = [];
+  const toggles = new WeakMap<HTMLButtonElement, () => void>();
   let closePanel: ((restoreFocus?: boolean) => void) | null = null;
 
-  for (const trigger of root.querySelectorAll<HTMLButtonElement>('button[data-audio-device]')) {
+  const prepare = (trigger: HTMLButtonElement) => {
+    if (toggles.has(trigger)) return;
     const kind = trigger.dataset.audioDevice;
-    if (kind !== 'input' && kind !== 'output') continue;
+    if (kind !== 'input' && kind !== 'output' && kind !== 'camera' && kind !== 'noise') return;
     const id = `audio-device-popover-${++nextId}`;
-    const label = t(kind === 'input' ? 'audioDevices.selectInput' : 'audioDevices.selectOutput');
+    const label = () => t(labels[kind]);
     trigger.type = 'button';
     trigger.classList.add('audio-device-trigger');
-    trigger.setAttribute('aria-label', label);
-    trigger.title = label;
+    trigger.setAttribute('aria-label', label());
+    trigger.title = label();
     trigger.setAttribute('aria-haspopup', 'dialog');
     trigger.setAttribute('aria-controls', id);
     trigger.setAttribute('aria-expanded', 'false');
 
     const toggle = () => {
+      if (trigger.disabled) return;
       if (trigger.getAttribute('aria-expanded') === 'true') {
         closePanel?.(true);
         return;
       }
       closePanel?.();
+      trigger.setAttribute('aria-label', label());
+      trigger.title = label();
       const panel = document.createElement('section');
       panel.id = id;
       panel.className = 'audio-device-popover';
+      if (kind === 'camera' || kind === 'noise') panel.classList.add('media-settings-popover', `media-settings-popover--${kind}`);
       panel.setAttribute('role', 'dialog');
-      panel.setAttribute('aria-label', label);
+      panel.setAttribute('aria-label', label());
       const deviceRow = document.createElement('button');
       deviceRow.type = 'button';
       deviceRow.className = 'audio-device-current';
@@ -41,9 +57,11 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       deviceRow.setAttribute('aria-expanded', 'false');
       deviceRow.setAttribute('aria-controls', `${id}-options`);
       deviceRow.innerHTML = '<span class="audio-device-current-text"><strong></strong><span class="audio-device-current-value"></span></span><span class="material-symbols-outlined md-18" aria-hidden="true">chevron_right</span>';
-      deviceRow.querySelector('strong')!.textContent = t(kind === 'input' ? 'audioDevices.inputDevice' : 'audioDevices.outputDevice');
+      deviceRow.querySelector('strong')!.textContent = t(kind === 'camera' ? 'settings.camera'
+        : kind === 'input' ? 'audioDevices.inputDevice' : 'audioOutputs.general');
       const currentValue = deviceRow.querySelector<HTMLElement>('.audio-device-current-value')!;
-      currentValue.textContent = t(kind === 'input' ? 'settings.loadingMics' : 'settings.loadingOutputs');
+      currentValue.textContent = t(kind === 'camera' ? 'settings.loadingCameras'
+        : kind === 'input' ? 'settings.loadingMics' : 'settings.loadingOutputs');
 
       // Preserve the shared device-selection model without opening a native picker.
       const select = document.createElement('select');
@@ -54,12 +72,12 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       options.id = `${id}-options`;
       options.className = 'audio-device-options';
       options.setAttribute('role', 'listbox');
-      options.setAttribute('aria-label', deviceRow.querySelector('strong')!.textContent ?? label);
+      options.setAttribute('aria-label', deviceRow.querySelector('strong')!.textContent ?? label());
       options.hidden = true;
       const status = document.createElement('div');
       status.className = 'audio-device-status';
       status.setAttribute('role', 'status');
-      panel.append(deviceRow, select);
+      if (kind !== 'noise') panel.append(deviceRow, select);
 
       let meter: HTMLElement | null = null;
       if (kind === 'input') {
@@ -75,13 +93,23 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         panel.append(level);
       }
       panel.append(status);
+      const camera = kind === 'camera' ? new CameraEffectsControl(id) : null;
+      const noise = kind === 'noise' ? new NoiseSuppressionControl(id, 'cards') : null;
+      const control = camera ?? noise;
+      if (control) {
+        const controls = document.createElement('div');
+        controls.innerHTML = control.renderHtml();
+        panel.append(controls);
+      }
       const configure = document.createElement('button');
       configure.type = 'button';
       configure.className = 'audio-device-settings';
       configure.innerHTML = '<span class="material-symbols-outlined md-18" aria-hidden="true">settings</span><span></span>';
-      configure.lastElementChild!.textContent = t('audioDevices.voiceSettings');
+      configure.lastElementChild!.textContent = t(kind === 'camera' ? 'cameraEffects.openSettings'
+        : kind === 'noise' ? 'audioNoise.openSettings' : 'audioDevices.voiceSettings');
       panel.append(configure);
-      document.body.append(panel, options);
+      document.body.append(panel);
+      if (kind !== 'noise') document.body.append(options);
       trigger.setAttribute('aria-expanded', 'true');
 
       let closed = false;
@@ -142,17 +170,19 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         }, 180);
       };
       const refresh = async () => {
+        if (kind === 'noise') return;
         const version = ++loading;
         try {
           const devices = await navigator.mediaDevices.enumerateDevices();
           if (closed || version !== loading) return;
-          deviceStatus = populateAudioDeviceSelect(select, kind, devices);
+          deviceStatus = kind === 'camera' ? populateCameraDeviceSelect(select, devices) : populateAudioDeviceSelect(select, kind, devices);
           select.disabled = busy;
           deviceRow.disabled = busy;
           const focused = options.contains(document.activeElement) && document.activeElement instanceof HTMLElement
             ? document.activeElement.dataset.deviceId : undefined;
           const selectedLabel = select.selectedOptions[0]?.textContent ?? t('audioDevices.systemDefault');
-          const system = devices.find((device) => device.kind === (kind === 'input' ? 'audioinput' : 'audiooutput') && device.deviceId === 'default');
+          const system = devices.find((device) => device.kind === (kind === 'camera' ? 'videoinput'
+            : kind === 'input' ? 'audioinput' : 'audiooutput') && device.deviceId === 'default');
           currentValue.textContent = !select.value && system?.label ? `${selectedLabel} (${system.label})` : selectedLabel;
           currentValue.title = currentValue.textContent;
           options.replaceChildren(...Array.from(select.options, (option) => {
@@ -186,18 +216,20 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         }
       };
       const change = async () => {
-        if (busy) return;
+        if (busy || kind === 'noise') return;
         busy = true;
         select.disabled = deviceRow.disabled = true;
         hideOptions();
         selectionStatus = '';
         showStatus();
         try {
-          await selectAudioDevice(kind, select.value, abort.signal);
+          if (camera) await camera.changeDevice(select.value);
+          else if (kind === 'input' || kind === 'output') await selectAudioDevice(kind, select.value, abort.signal);
         } catch (error) {
           if (!closed) {
-            selectionStatus = audioDeviceError(error);
-            select.value = selectedAudioDevice(kind) === 'default' ? '' : selectedAudioDevice(kind);
+            selectionStatus = kind === 'camera' ? cameraDeviceSelectionError(error) : audioDeviceError(error);
+            const selected = kind === 'camera' ? settingsStore.selectedCameraId : selectedAudioDevice(kind);
+            select.value = selected === 'default' ? '' : selected;
           }
         } finally {
           busy = false;
@@ -266,6 +298,8 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       }) : () => {};
       const observer = new MutationObserver(() => { if (!trigger.isConnected || !panel.isConnected) close(); });
       observer.observe(document.body, { childList: true, subtree: true });
+      const size = new ResizeObserver(position);
+      size.observe(panel);
       function close(restoreFocus = false): void {
         if (closed) return;
         closed = true;
@@ -276,6 +310,9 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
         offConnection();
         offChannel();
         observer.disconnect();
+        size.disconnect();
+        camera?.cleanup();
+        noise?.cleanup();
         navigator.mediaDevices?.removeEventListener('devicechange', onDevices);
         document.removeEventListener('pointerdown', outside, true);
         document.removeEventListener('focusin', outside);
@@ -299,7 +336,7 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       options.addEventListener('click', choose);
       configure.addEventListener('click', () => {
         close();
-        void settingsModal.open('voice_video');
+        void settingsModal.open('voice_video', kind === 'camera' ? 'camera' : kind === 'noise' ? 'noise-suppression' : undefined);
       });
       navigator.mediaDevices?.addEventListener('devicechange', onDevices);
       document.addEventListener('pointerdown', outside, true);
@@ -308,13 +345,31 @@ export function bindAudioDevicePopovers(root: HTMLElement): () => void {
       window.addEventListener('resize', position);
       window.addEventListener('scroll', position, true);
       select.addEventListener('change', change);
+      camera?.attachEvents(panel);
+      noise?.attachEvents(panel);
       position();
-      deviceRow.focus();
+      camera?.activate();
+      if (noise) panel.querySelector<HTMLButtonElement>('[data-noise-mode][aria-selected="true"]')?.focus();
+      else deviceRow.focus();
       void refresh();
     };
-    trigger.addEventListener('click', toggle);
-    unbind.push(() => trigger.removeEventListener('click', toggle));
-  }
+    toggles.set(trigger, toggle);
+  };
+  const initialize = () => root.querySelectorAll<HTMLButtonElement>('button[data-audio-device]').forEach(prepare);
+  const click = (event: MouseEvent) => {
+    const trigger = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button[data-audio-device]') : null;
+    if (!trigger || !root.contains(trigger)) return;
+    prepare(trigger);
+    toggles.get(trigger)?.();
+  };
+  initialize();
+  // The connection row (and its noise trigger) is replaced as voice state changes.
+  const triggers = new MutationObserver((records) => {
+    if (records.some((record) => Array.from(record.addedNodes).some((node) => node instanceof Element))) initialize();
+  });
+  triggers.observe(root, { childList: true, subtree: true });
+  root.addEventListener('click', click);
+  unbind.push(() => triggers.disconnect(), () => root.removeEventListener('click', click));
   return () => {
     closePanel?.();
     unbind.forEach((off) => off());

@@ -4,22 +4,18 @@ import { appEvents } from './EventBus';
 import { settingsStore } from '../stores/settingsStore';
 import { t, type TranslationKey } from '../i18n';
 import { formatMediaTime } from '../utils/videoPlayer';
+import { setAudioOutputSink } from './AudioOutputSink';
 
 const DEFAULT_PREVIEW_VOLUME = 60;
 const MAX_PREVIEW_VOLUMES = 256;
 const scopeVolumes = new Map<string, number>();
-
-type AudioElementWithSink = HTMLAudioElement & {
-  setSinkId?: (sinkId: string) => Promise<void>;
-  sinkId?: string;
-};
 
 interface ActivePreview {
   key: string;
   volumeScope: string;
   requestId: string;
   controls: HTMLElement;
-  audio?: AudioElementWithSink;
+  audio?: HTMLAudioElement;
   objectUrl?: string;
   loading: boolean;
   wantsPlayback: boolean;
@@ -173,7 +169,7 @@ export class AudioPreviewService {
     };
     this.active = active;
     active.unbindSettings = appEvents.on('settings.updated', () => {
-      if (!this.isCurrent(active) || !active.audio || active.sinkTarget === settingsStore.selectedSpeakerId) return;
+      if (!this.isCurrent(active) || !active.audio || active.sinkTarget === settingsStore.getAudioOutputDeviceId('media')) return;
       active.audio.pause();
       void this.playActive(active);
     });
@@ -196,7 +192,7 @@ export class AudioPreviewService {
       }
       const bytes = new Uint8Array(result.data.byteLength);
       bytes.set(result.data);
-      const audio: AudioElementWithSink = new Audio();
+      const audio = new Audio();
       const objectUrl = URL.createObjectURL(new Blob([bytes.buffer], { type: result.mimeType }));
       audio.src = objectUrl;
       audio.preload = 'auto';
@@ -262,17 +258,11 @@ export class AudioPreviewService {
     }
   }
 
-  private routeActiveAudio(active: ActivePreview, audio: AudioElementWithSink): Promise<void> {
-    active.sinkTarget = settingsStore.selectedSpeakerId;
+  private routeActiveAudio(active: ActivePreview, audio: HTMLAudioElement): Promise<void> {
+    active.sinkTarget = settingsStore.getAudioOutputDeviceId('media');
     const route = async () => {
       if (!this.isCurrent(active)) return;
-      const sinkId = settingsStore.selectedSpeakerId;
-      if (typeof audio.setSinkId !== 'function') {
-        if (sinkId && sinkId !== 'default') throw new Error('This output device cannot be selected.');
-        return;
-      }
-      if (audio.sinkId === sinkId) return;
-      await audio.setSinkId(sinkId);
+      await setAudioOutputSink(audio, settingsStore.getAudioOutputDeviceId('media'));
     };
     // Older sink changes must finish before a newer one can select the output.
     const routing = active.sinkQueue.then(route, route);
@@ -342,7 +332,7 @@ export class AudioPreviewService {
     this.updateProgress(controls, this.active?.controls === controls ? this.active.audio : undefined);
   }
 
-  private updateProgress(controls: HTMLElement, audio?: AudioElementWithSink): void {
+  private updateProgress(controls: HTMLElement, audio?: HTMLAudioElement): void {
     const hintedDuration = Number(controls.dataset.audioDurationMs) / 1000;
     const duration = audio && Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration :
       Number.isFinite(hintedDuration) && hintedDuration > 0 ? hintedDuration : undefined;

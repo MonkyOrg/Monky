@@ -25,6 +25,8 @@ import { soundboardModal } from './SoundboardModal';
 import { overlayConfigModal } from './OverlayConfigModal';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
 import { t } from '../i18n';
+import { reportCameraError, setLocalCameraState } from '../core/CameraPublication';
+import { isCameraOperationCancelled } from '../utils/cameraEffects';
 
 interface ScreenTelemetrySnapshot {
   kind: 'sender' | 'receiver';
@@ -117,6 +119,8 @@ export class VoiceStageView {
   // it when the broadcast state actually changes, preventing the pulse dot from
   // flickering on frequent voice.state_updated events (#70).
   private broadcastBannerSignature: string | null = null;
+  private cameraToggleEpoch = 0;
+  private cameraTogglePending = false;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -743,7 +747,7 @@ export class VoiceStageView {
       if (tile.kind === 'voice') return;
       const isLocal = sidOf(tile.p) === currentSessionId;
       const stream = isLocal
-        ? (tile.kind === 'screen' ? videoService.getScreenStream(tile.shareId!) : videoService.getCameraStream())
+        ? (tile.kind === 'screen' ? videoService.getScreenStream(tile.shareId!) : videoService.getCameraState().stream)
         : (tile.kind === 'screen' ? this.getRemoteScreenStream(tile) : tile.p.remoteStream);
       if (!stream) return;
       const suffix = tile.kind === 'screen' ? `screen-${tile.shareId}` : tile.kind;
@@ -761,6 +765,26 @@ export class VoiceStageView {
 
     this.applyTelemetryOverlayState();
     this.syncTelemetryMonitor();
+  }
+
+  private refreshLocalCameraVideo(): void {
+    const user = serverStore.currentUser;
+    if (!user) return;
+    const sessionId = user.sessionId || user.id;
+    const state = videoService.getCameraState();
+    for (const id of [`video-${sessionId}-camera`, `video-mini-${sessionId}-camera`]) {
+      const video = document.getElementById(id);
+      if (!(video instanceof HTMLVideoElement) || !this.container.contains(video)) continue;
+      const stream = voiceStore.isCameraOn ? state.stream : null;
+      if (video.srcObject === stream) continue;
+      video.pause();
+      video.srcObject = stream;
+      if (stream) {
+        video.muted = true;
+        this.hideVideoLoadingWhenReady(video, id);
+        void video.play().catch((error: unknown) => console.warn('[VoiceStage] Could not show the local camera:', error));
+      }
+    }
   }
 
   /** Removes the "loading video" overlay once the stream actually renders (#48). */
@@ -1482,10 +1506,11 @@ export class VoiceStageView {
         await screenAudioService.stop();
       }
     } else if (voiceStore.isCameraOn) {
+      this.cameraToggleEpoch++;
+      this.cameraTogglePending = false;
+      setLocalCameraState(false);
       videoService.stopCamera();
       await webRtcManager.setLocalCameraTrack(null);
-      voiceStore.setCameraOn(false);
-      callClient().send(MessageType.VOICE_STATE_UPDATE, { isCameraOn: false });
     }
     this.updateControlsUI();
     this.renderParticipants();
@@ -1499,29 +1524,39 @@ export class VoiceStageView {
    * camera plugged in).
    */
   public async toggleCamera(): Promise<void> {
-    if (voiceStore.isCameraOn) {
+    const epoch = ++this.cameraToggleEpoch;
+    const channelId = voiceStore.currentVoiceChannelId;
+    const sessionKey = voiceStore.voiceSessionKey;
+    const isCurrentCall = () => this.cameraToggleEpoch === epoch && channelId !== null
+      && voiceStore.currentVoiceChannelId === channelId && voiceStore.voiceSessionKey === sessionKey;
+    if (!channelId) return;
+    if (voiceStore.isCameraOn || this.cameraTogglePending) {
+      this.cameraTogglePending = false;
+      setLocalCameraState(false);
       videoService.stopCamera();
-      await webRtcManager.setLocalCameraTrack(null);
-      voiceStore.setCameraOn(false);
-      callClient().send(MessageType.VOICE_STATE_UPDATE, { isCameraOn: false });
+      try {
+        await webRtcManager.setLocalCameraTrack(null);
+      } catch (error) {
+        reportCameraError(error);
+      }
     } else {
+      this.cameraTogglePending = true;
       try {
         const stream = await videoService.startCamera();
         const track = stream.getVideoTracks()[0];
-        await webRtcManager.setLocalCameraTrack(track);
-        voiceStore.setCameraOn(true);
-        callClient().send(MessageType.VOICE_STATE_UPDATE, { isCameraOn: true });
-      } catch (err: any) {
-        // Fully revert local camera state (screen share, if any, is untouched).
-        videoService.stopCamera();
-        await webRtcManager.setLocalCameraTrack(null);
-        voiceStore.setCameraOn(false);
-        callClient().send(MessageType.VOICE_STATE_UPDATE, { isCameraOn: false });
-        await showAlert({
-          title: t('stage.cameraErrorTitle'),
-          message: t('stage.cameraErrorMessage', { error: err?.message || err }),
-          variant: 'danger',
-        });
+        const isCurrent = () => isCurrentCall() && videoService.getCameraStream() === stream;
+        if (!track || !isCurrent()) throw new DOMException('Camera start was cancelled', 'AbortError');
+        await webRtcManager.setLocalCameraTrack(track, isCurrent);
+        if (isCurrent()) setLocalCameraState(true);
+      } catch (error) {
+        if (isCurrentCall() && !isCameraOperationCancelled(error)) {
+          setLocalCameraState(false);
+          videoService.stopCamera();
+          await webRtcManager.setLocalCameraTrack(null).catch(reportCameraError);
+          reportCameraError(error);
+        }
+      } finally {
+        if (this.cameraToggleEpoch === epoch) this.cameraTogglePending = false;
       }
     }
     this.updateControlsUI();
@@ -1601,6 +1636,7 @@ export class VoiceStageView {
       this.updateSpeakingClasses();
       this.applyTelemetryOverlayState();
       this.syncTelemetryMonitor();
+      this.refreshLocalCameraVideo();
     });
 
     const u3 = appEvents.on('participants.speaking_changed', (data: { sessionId: string; speaking: boolean }) => {
@@ -1647,7 +1683,8 @@ export class VoiceStageView {
 
     const u14 = appEvents.on('voice.connection_changed', () => this.startPingMonitor());
     const u15 = appEvents.on('server.voice_restrictions_updated', () => this.updateControlsUI());
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15);
+    const u16 = appEvents.on('camera.state_changed', () => this.refreshLocalCameraVideo());
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16);
   }
 
   private updateHeaderModeBadge(): void {

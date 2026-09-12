@@ -132,6 +132,7 @@ import { CoturnManager } from '../turn/CoturnManager';
 import { describeSfuPortProblem, SfuManager, SfuProducerClosedError } from '../sfu/SfuManager';
 import { checkSfuPreflight, formatSfuPreflightForLog } from '../sfu/SfuPreflight';
 import { Logger } from '../logger/Logger';
+import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
 
 interface ClientSession {
@@ -184,6 +185,8 @@ export class WebSocketServer {
   private reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
   private heartbeatTimer?: NodeJS.Timeout;
   private closing = false;
+  private readonly shutdownResources = new ServerResourceScope();
+  private sfuStartup: Promise<void> = Promise.resolve();
   private settingsUpdateQueue: Promise<void> = Promise.resolve();
   private voiceReconnectGrants = new Map<ClientSession, {
     transitionId: string;
@@ -258,14 +261,16 @@ export class WebSocketServer {
     this.wss = new WSServer({ server: this.server });
     this.setupWss();
     this.startHeartbeat();
-    void this.initSfuIfConfigured();
+    this.sfuStartup = this.initSfuIfConfigured();
   }
 
   private async initSfuIfConfigured(): Promise<void> {
     try {
       const server = await this.serverRepo.getServer();
+      if (this.closing) return;
       if (server?.voiceMode === 'sfu') {
         const ok = await this.sfuManager.init();
+        if (this.closing) return;
         if (!ok) {
           // Silently downgrading a mode the operator deliberately configured
           // is an error, not a warning — the preflight names the part of the
@@ -279,8 +284,8 @@ export class WebSocketServer {
           );
         }
       }
-    } catch (e: any) {
-      Logger.warn('SFU', `Error checking SFU configuration on startup: ${e?.message}`);
+    } catch (error) {
+      Logger.warn('SFU', `Error checking SFU configuration on startup: ${describeFailure(error)}`);
     }
   }
 
@@ -355,7 +360,13 @@ export class WebSocketServer {
     return host.length > 0 ? host : undefined;
   }
 
-  private setupWss(): void {    this.wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
+  private setupWss(): void {
+    // ws forwards HTTP listener errors here before the startup promise sees
+    // them. Log them without throwing or tearing down unrelated live sessions.
+    this.wss.on('error', (error: Error) => {
+      Logger.error('NETWORK', 'WebSocket server error', error);
+    });
+    this.wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       const ip = req.socket.remoteAddress || 'unknown';
       Logger.info('NETWORK', `New connection established from ${ip}`);
 
@@ -373,15 +384,7 @@ export class WebSocketServer {
       });
 
       ws.on('message', (data: Buffer) => {
-        // A bot can reply and immediately finish (or update its profile and
-        // register commands). Preserve wire order across asynchronous handlers.
-        session.messageQueue = session.messageQueue.then(async () => {
-          const message: ProtocolMessage<unknown> = JSON.parse(data.toString('utf8'));
-          await this.handleMessage(session, message);
-        }).catch((err: unknown) => {
-          Logger.error('NETWORK', 'Failed to process message', err);
-          this.sendError(ws, ProtocolErrorCode.BAD_REQUEST, 'Mensagem malformada');
-        });
+        this.receiveMessage(session, data);
       });
 
       ws.on('close', () => {
@@ -393,6 +396,46 @@ export class WebSocketServer {
         this.handleDisconnect(session);
       });
     });
+  }
+
+  private receiveMessage(session: ClientSession, data: Buffer): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data.toString('utf8'));
+    } catch (error) {
+      Logger.error('NETWORK', 'Failed to parse message', error);
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Mensagem malformada');
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || !('type' in parsed) || !('payload' in parsed)) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Mensagem malformada');
+      return;
+    }
+    const type = Object.values(MessageType).find((value) => value === parsed.type);
+    const requestId = 'requestId' in parsed ? parsed.requestId : undefined;
+    if (!type || (requestId !== undefined && typeof requestId !== 'string')) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Mensagem malformada',
+        typeof requestId === 'string' ? requestId : undefined);
+      return;
+    }
+    const message: ProtocolMessage<unknown> = { type, requestId, payload: parsed.payload };
+    const dispatch = async () => {
+      try {
+        await this.handleMessage(session, message);
+      } catch (error) {
+        Logger.error('NETWORK', 'Failed to process message', error);
+        this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR,
+          'Não foi possível concluir a operação. Verifique o log do servidor.', requestId);
+      }
+    };
+    // TURN installation can hold the mutation queue for minutes. Heartbeats
+    // cannot wait behind it: the desktop otherwise reconnects after 12 seconds.
+    if (type === MessageType.PING) {
+      void dispatch();
+      return;
+    }
+    // Preserve wire order for mutations, including bot reply/finish sequences.
+    session.messageQueue = session.messageQueue.then(dispatch);
   }
 
   private async handleMessage(session: ClientSession, message: ProtocolMessage): Promise<void> {
@@ -971,11 +1014,12 @@ export class WebSocketServer {
       }
       const server = await this.serverRepo.getServer();
       if (!server?.turnSecret) {
-        Logger.warn('NETWORK', 'TURN relay enabled without a shared secret; leaving it off.');
-        return;
+        throw new Error('O relay TURN não pôde iniciar: a chave compartilhada não está disponível.');
       }
       const started = await this.coturnManager.start(server.turnSecret);
-      if (!started) return;
+      if (!started || !this.coturnManager.isRunning()) {
+        throw new Error('O coturn não iniciou ou encerrou antes de ficar pronto. Verifique o log do servidor.');
+      }
 
       // Verify the relay is actually reachable. A VPS whose firewall blocks
       // port 3478 will silently swallow TURN allocations, and the only sign is
@@ -984,10 +1028,11 @@ export class WebSocketServer {
       // misconfiguration before anyone tries to call.
       const portProblem = await CoturnManager.checkPortReachability();
       if (portProblem) {
-        Logger.warn('NETWORK', `TURN relay started but may not work: ${portProblem}`);
+        throw new Error(portProblem);
       }
     } catch (error) {
       Logger.error('NETWORK', 'Failed to apply the TURN relay state', error);
+      throw error;
     }
   }
 
@@ -2019,7 +2064,9 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !this.isCurrentSession(session)) return;
+    if (!(await this.requirePermission(session, Permission.MANAGE_SERVER, requestId)) || !this.isCurrentSession(session)) return;
     const previousVoiceMode = (await this.serverRepo.getServer())?.voiceMode ?? 'p2p';
+    if (!this.isCurrentSession(session)) return;
 
     // Switching the relay on is the whole intent, so the server installs coturn
     // itself when it is missing rather than sending the operator to a terminal
@@ -2032,6 +2079,11 @@ export class WebSocketServer {
     // apt-get) only to switch it off moments later — or, on a host that cannot
     // run a relay at all, refuse the SFU switch outright (#515).
     if (payload.turnEnabled === true && payload.voiceMode !== 'sfu') {
+      if (previousVoiceMode === 'sfu' && payload.voiceMode !== 'p2p') {
+        this.sendError(session.ws, ProtocolErrorCode.TURN_UNAVAILABLE,
+          'O relay TURN não pode ser ativado no modo SFU.', requestId);
+        return;
+      }
       const blocked = await this.ensureRelayCanRun(session);
       if (blocked) {
         this.sendError(session.ws, ProtocolErrorCode.TURN_UNAVAILABLE, blocked, requestId);
@@ -2064,10 +2116,28 @@ export class WebSocketServer {
           return;
         }
       }
+      const ok = await this.sfuManager.init();
+      if (!ok) {
+        const preflight = checkSfuPreflight();
+        const diagnosis = preflight.ok ? '' : ` ${formatSfuPreflightForLog(preflight)}`;
+        const reason = `${this.sfuManager.getLastError() || 'SFU worker failed to initialize'}${diagnosis}`.trim();
+        Logger.error('SFU', `SFU initialization failed on mode change: ${reason}`);
+        this.sfuManager.close();
+        this.sendError(session.ws, ProtocolErrorCode.SFU_UNAVAILABLE, reason, requestId);
+        return;
+      }
     }
 
-    const result = await this.authService.updateServerSettings(payload);
+    // Installation and the shared settings queue can both take minutes. A
+    // permission/session valid before waiting must not authorize a later write.
+    const stillAllowed = await this.requirePermission(session, Permission.MANAGE_SERVER, requestId);
+    if (!stillAllowed || !this.isCurrentSession(session)) {
+      if (payload.voiceMode === 'sfu' && previousVoiceMode !== 'sfu') this.sfuManager.close();
+      return;
+    }
+    let result = await this.authService.updateServerSettings(payload);
     if (!result.success) {
+      if (payload.voiceMode === 'sfu' && previousVoiceMode !== 'sfu') this.sfuManager.close();
       this.sendError(
         session.ws,
         ProtocolErrorCode.BAD_REQUEST,
@@ -2080,27 +2150,7 @@ export class WebSocketServer {
     const changedMode = result.voiceMode !== undefined && result.voiceMode !== previousVoiceMode;
     let voiceTransition: VoiceModeTransition | undefined;
     if (changedMode) this.voiceReconnectGrants.clear();
-    if (payload.voiceMode === 'sfu') {
-      const ok = await this.sfuManager.init();
-      if (!ok) {
-        // The admin is watching this switch right now, so the reason travels
-        // to the client instead of staying in the server log. Nothing is
-        // downgraded here: clients keep retrying the SFU on their own until
-        // the worker comes up.
-        const preflight = checkSfuPreflight();
-        const diagnosis = preflight.ok ? '' : ` ${formatSfuPreflightForLog(preflight)}`;
-        Logger.error(
-          'SFU',
-          `SFU initialization failed on mode change: ${this.sfuManager.getLastError()}.${diagnosis}`
-        );
-        const reason =
-          `${this.sfuManager.getLastError() || 'SFU worker failed to initialize'}${diagnosis}`.trim();
-        // Deliberately uncorrelated: the settings change itself succeeded and
-        // is confirmed by the broadcast below, so tying this to the requestId
-        // would fail the very request that worked.
-        this.sendError(session.ws, ProtocolErrorCode.SFU_UNAVAILABLE, reason);
-      }
-    } else if (changedMode && result.voiceMode === 'p2p') {
+    if (changedMode && result.voiceMode === 'p2p') {
       voiceTransition = { id: randomUUID(), from: 'sfu', to: 'p2p' };
       // Keep the deliberate full SFU teardown. Admission is granted once to
       // each exact connection, never to a user ID shared by several devices.
@@ -2128,10 +2178,27 @@ export class WebSocketServer {
       }
     }
 
+    let relayError: string | undefined;
     if (payload.turnEnabled !== undefined || payload.voiceMode !== undefined) {
       // Also runs on a plain mode change: switching to SFU forces the relay off
       // in AuthService, and coturn has to actually stop (#515).
-      await this.applyTurnState(Boolean(result.turnEnabled));
+      try {
+        await this.applyTurnState(Boolean(result.turnEnabled));
+      } catch (error) {
+        relayError = error instanceof Error && error.message.trim() ? error.message : 'Não foi possível aplicar o estado do relay TURN.';
+        // A failed start used to acknowledge turnEnabled=true even with no
+        // process. Publish actual persisted truth before rejecting the request.
+        const running = this.coturnManager.isRunning();
+        if (running !== Boolean(result.turnEnabled)) {
+          const reconciled = await this.authService.updateServerSettings({ turnEnabled: running });
+          if (!reconciled.success) {
+            this.sendError(session.ws, ProtocolErrorCode.TURN_UNAVAILABLE,
+              `${relayError} ${reconciled.errorMessage ?? 'Não foi possível atualizar o estado persistido.'}`, requestId);
+            return;
+          }
+          result = reconciled;
+        }
+      }
     }
 
     const broadcastPayload: ServerSettingsUpdatedPayload = {
@@ -2153,9 +2220,12 @@ export class WebSocketServer {
     // Broadcast updated server settings to all clients
     this.broadcast({
       type: MessageType.SERVER_SETTINGS_UPDATED,
-      requestId,
+      requestId: relayError ? undefined : requestId,
       payload: broadcastPayload,
     });
+    if (relayError) {
+      this.sendError(session.ws, ProtocolErrorCode.TURN_UNAVAILABLE, relayError, requestId);
+    }
 
     Logger.info(
       'INFO',
@@ -3585,40 +3655,78 @@ export class WebSocketServer {
     });
   }
 
-  public close(): void {
-    if (this.closing) return;
-    this.closing = true;
-    this.voiceReconnectGrants?.clear();
-    this.botInteractions.close();
-    this.botSelectors?.close();
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
+  public close(): Promise<void> {
+    if (!this.closing) {
+      this.closing = true;
+      const pending = [this.sfuStartup, this.settingsUpdateQueue, ...[...this.sessions.values()].map(session => session.messageQueue)];
+      this.shutdownResources.defer('SFU runtime', () => this.sfuManager.close());
+      this.shutdownResources.defer('voice state', () => {
+        for (const sessionId of Object.keys(this.signalingService.getAllVoiceStates())) {
+          this.signalingService.leaveVoiceChannel(sessionId);
+        }
+      });
+      this.shutdownResources.defer('pending WebSocket work', async () => { await Promise.allSettled(pending); });
+      this.shutdownResources.defer('WebSocket transport', () => this.closeTransport());
+      this.shutdownResources.defer('bot selectors', () => this.botSelectors?.close());
+      this.shutdownResources.defer('bot interactions', () => this.botInteractions.close());
+      this.shutdownResources.defer('WebSocket timers', () => {
+        this.voiceReconnectGrants.clear();
+        if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = undefined;
+        for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
+        this.reconnectTimers.clear();
+      });
     }
-    for (const timer of this.reconnectTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.reconnectTimers.clear();
-    // Let connected clients know the host is shutting the server down so they can
-    // show a friendly notice and return to the home screen instead of silently
-    // trying to reconnect forever.
-    this.broadcast({
-      type: MessageType.SERVER_SHUTDOWN,
-      payload: { reason: 'O anfitrião encerrou o servidor.' },
-    });
-    for (const ws of this.sessions.keys()) {
-      ws.close();
-    }
-    // Closing gracefully lets clients show the shutdown notice, but a peer that
-    // never answers the close frame would keep its socket — and the HTTP server
-    // waiting on it — alive for the ws library's 30s close timeout. Unref'd so
-    // it can never hold the process open by itself (#333).
-    const forceClose = setTimeout(() => {
-      for (const ws of this.sessions.keys()) {
-        if (ws.readyState !== WebSocket.CLOSED) ws.terminate();
+    return this.shutdownResources.close();
+  }
+
+  private closeTransport(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      // Give peers time to receive SERVER_SHUTDOWN, but never keep upgraded
+      // sockets alive for ws's default 30-second close timeout.
+      const forceClose = setTimeout(() => {
+        try {
+          this.terminatePeers();
+        } catch (error) {
+          reject(error);
+        }
+      }, LIMITS.SHUTDOWN_GRACE_MS);
+      forceClose.unref?.();
+      try {
+        this.broadcast({
+          type: MessageType.SERVER_SHUTDOWN,
+          payload: { reason: 'O anfitrião encerrou o servidor.' },
+        });
+        for (const ws of this.sessions.keys()) ws.close();
+        this.wss.close((error) => {
+          clearTimeout(forceClose);
+          if (error) reject(error);
+          else resolve();
+        });
+      } catch (error) {
+        clearTimeout(forceClose);
+        try {
+          this.terminatePeers();
+        } catch (cleanupError) {
+          reject(new AggregateError([error, cleanupError], `WebSocket shutdown failed: ${describeFailure(error)}; ${describeFailure(cleanupError)}`));
+          return;
+        }
+        reject(error);
       }
-    }, LIMITS.SHUTDOWN_GRACE_MS);
-    forceClose.unref?.();
-    this.sfuManager?.close();
-    this.wss.close();
+    });
+  }
+
+  private terminatePeers(): void {
+    const errors: unknown[] = [];
+    for (const ws of this.sessions.keys()) {
+      try {
+        if (ws.readyState !== WebSocket.CLOSED) ws.terminate();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(errors, `Failed to terminate WebSocket peers: ${errors.map(describeFailure).join('; ')}`);
+    }
   }
 }

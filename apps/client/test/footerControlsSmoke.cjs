@@ -15,6 +15,7 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_FOOTER_TEST_PROFILE);
+  app.on('window-all-closed', () => {});
   let vite, window, timeout;
   let phase = 'startup';
   const finish = async (code) => {
@@ -29,7 +30,8 @@ if (!process.versions.electron) {
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'),
       logLevel: 'error',
-      server: { host: '127.0.0.1', port: 0, strictPort: true, open: false },
+      cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
+      server: { host: '127.0.0.1', port: 0, strictPort: true, open: false, hmr: false, watch: null },
       plugins: [{ name: 'footer-controls-fixture', configureServer(server) {
         server.middlewares.use((req, res, next) => {
           if (req.url !== '/__footer_controls__') return next();
@@ -174,6 +176,7 @@ async function setupFooterSmoke() {
   ]);
   networkClient.send = () => {};
   soundEffects.play = () => {};
+  navigator.mediaDevices.getUserMedia = async () => { throw new Error('Footer fixture does not permit hardware capture'); };
   navigator.mediaDevices.enumerateDevices = async () => [
     { deviceId: 'default', kind: 'audiooutput', label: 'System output', groupId: 'audio' },
   ];
@@ -181,7 +184,8 @@ async function setupFooterSmoke() {
     nickname: 'Footer', status: 'ONLINE', joinedAt: 1 };
   server.setServerDetails({
     id: 'footer-server', name: 'Footer fixture', createdAt: 1, maxUsers: 10, voiceStates: {},
-    channels: [], members: [user], knownMembers: [user], roles: [], userRoles: [],
+    channels: [{ id: 'footer-voice', name: 'Footer voice', type: 'VOICE', position: 0, botCommandsEnabled: true }],
+    members: [user], knownMembers: [user], roles: [], userRoles: [],
     myPermissions: 2147483647, ownerId: user.id,
   }, user);
   settings.inputMode = 'push_to_talk';
@@ -390,6 +394,30 @@ async function setupFooterSmoke() {
       check(composerMotionCount() === 0, 'Composer buttons do not animate at rest');
       const camera = root.querySelector('#media-btn-camera');
       const screen = root.querySelector('#media-btn-screen');
+      const cameraArrow = root.querySelector('[data-audio-device="camera"]');
+      const noiseArrow = root.querySelector('[data-audio-device="noise"]');
+      check(cameraArrow?.parentElement === camera.parentElement && noiseArrow?.parentElement.contains(root.querySelector('#sidebar-btn-rnnoise')),
+        'Camera and noise quick chevrons sit beside, not inside, their existing primary toggles');
+      check(cameraArrow?.getAttribute('aria-haspopup') === 'dialog' && noiseArrow?.getAttribute('aria-haspopup') === 'dialog',
+        'New footer quick selectors expose the established accessible dialog affordance');
+      check(Math.abs(camera.parentElement.getBoundingClientRect().width - screen.getBoundingClientRect().width) < 1
+        && cameraArrow.getBoundingClientRect().height === camera.getBoundingClientRect().height,
+      'Camera plus chevron keeps an equal-width media group and full-height stationary hit boxes');
+      const checkJoinedControl = (primary, arrow, name) => {
+        const mainStyle = getComputedStyle(primary);
+        const arrowStyle = getComputedStyle(arrow);
+        const groupStyle = getComputedStyle(primary.parentElement);
+        check(Math.abs(primary.getBoundingClientRect().right - arrow.getBoundingClientRect().left) < 0.5
+          && primary.getBoundingClientRect().height === arrow.getBoundingClientRect().height,
+        `${name}: primary action and chevron share a flush, full-height edge`);
+        check(mainStyle.backgroundColor === 'rgba(0, 0, 0, 0)' && arrowStyle.backgroundColor === 'rgba(0, 0, 0, 0)'
+          && mainStyle.borderRightColor === 'rgba(0, 0, 0, 0)' && groupStyle.boxShadow !== 'none',
+        `${name}: only the shared group paints its background and border`);
+        check(mainStyle.borderTopRightRadius === '0px' && arrowStyle.borderTopLeftRadius === '0px',
+          `${name}: no rounded seam separates the chevron from the primary action`);
+      };
+      checkJoinedControl(camera, cameraArrow, 'Camera');
+      checkJoinedControl(root.querySelector('#sidebar-btn-rnnoise'), noiseArrow, 'Noise suppression');
       const cameraGlyph = glyph(camera);
       enter(camera);
       const cameraHover = animations(camera)[0];
@@ -409,6 +437,13 @@ async function setupFooterSmoke() {
       await delay(200);
       check(camera.getAnimations().length === 0 && screen.getAnimations().length === 0,
         'Active media retains static status styling without perpetual button pulses');
+      checkJoinedControl(camera, cameraArrow, 'Active camera');
+      const activeCameraBackground = getComputedStyle(camera.parentElement).backgroundColor;
+      cameraArrow.setAttribute('aria-expanded', 'true');
+      await delay(200);
+      check(getComputedStyle(camera.parentElement).backgroundColor === activeCameraBackground,
+        'Opening camera options retains the shared active-camera status surface');
+      cameraArrow.setAttribute('aria-expanded', 'false');
       enter(camera);
       check(getComputedStyle(glyph(camera)).opacity === '1'
         && glyph(camera).textContent === 'videocam_off', 'Camera hover never hides the stop-camera glyph');
@@ -710,6 +745,11 @@ async function setupStageSmoke() {
   const button = (selector) => root.querySelector(selector);
   const glyph = (control) => control.querySelector(':scope > .audio-state-icon, :scope > .material-symbols-outlined');
   const animations = (control) => glyph(control).getAnimations();
+  const finishAnimations = async (items) => {
+    await Promise.all(items.map(animation =>
+      animation.finished.catch(error => { if (error.name !== 'AbortError') throw error; })));
+    await delay();
+  };
   const enter = (control) => control.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' }));
   const leave = (control) => control.dispatchEvent(new PointerEvent('pointerleave', { pointerType: 'mouse' }));
   const buttons = () => [...root.querySelectorAll('.voice-stage-container button')];
@@ -736,16 +776,16 @@ async function setupStageSmoke() {
       capturing = true;
       overlayActive = true;
       voice.addScreenShare('local-share');
-      await delay(200);
+      await delay();
+      await finishAnimations(['#stage-btn-camera', '#stage-btn-screen', '#stage-btn-overlay']
+        .flatMap(selector => animations(button(selector))));
       check(button('#stage-btn-stop-share').style.display === 'inline-flex'
         && button('#btn-stage-quick-stop'), 'Sharing exposes both real stop actions');
       check(!button('.screen-audio-badge').hidden, 'Active screen audio badge is retained');
+      check(motionCount() === 0, 'Only changed existing controls receive broadcasting feedback, not new stop buttons');
       const watch = button('.stage-watch-btn');
       watch.click();
-      // The deliberate click can outlive a fixed delay on a slow compositor.
-      await Promise.all((glyph(watch)?.getAnimations() ?? []).map(animation =>
-        animation.finished.catch(error => { if (error.name !== 'AbortError') throw error; })));
-      await delay();
+      await finishAnimations(glyph(watch)?.getAnimations() ?? []);
       check(!!button('.stage-focused-main .stage-volume-btn')
         && !!button('.stage-mini-card .stage-watch-btn'), 'Watching binds focused controls and remaining mini-card actions');
       check(motionCount() === 0, 'New participant and banner buttons do not autoplay: ' + JSON.stringify(
@@ -880,7 +920,7 @@ async function setupStageSmoke() {
         check(animation && animation.effect.getTiming().iterations === 1
           && animation.effect.getTiming().duration > 480, 'Every visible stage control has a finite, semantic hover');
       }
-      await delay(950);
+      await finishAnimations(buttons().flatMap(control => animations(control)));
       check(motionCount() === 0 && !root.querySelector('.control-motion-decoration'), 'All stage hovers finish and remove artwork');
       for (const selector of ['#stage-btn-overlay', '.stage-volume-btn']) {
         const control = button(selector);

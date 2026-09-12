@@ -12,6 +12,11 @@ The call follows you: switching servers in the left column keeps it running, and
 
 On the media bar: **Camera**, **Share Screen** and **Soundboard**. Screen sharing lets you choose a whole screen or a specific window, with screen audio sent to participants.
 
+Under **Settings → Voice and Video → Camera**, preview blur, color or image
+virtual backgrounds and physical-screen chroma key. Effects run locally and
+also apply to the call. Closing the preview does not stop a camera in use;
+see limitations and precautions in [settings](/en/configuracoes).
+
 Whoever broadcasts shows a **LIVE** badge. Click the card to spotlight it or use fullscreen.
 
 ## Chat
@@ -61,3 +66,8 @@ The folder stays on your machine: the image is uploaded to the server when you u
 ## Soundboard
 
 Under **Settings › Soundboard**, choose a folder containing `.mp3`, `.wav` or `.ogg`. In the call, play sounds from the soundboard button. Volume and local mute live in the same settings. The host can disable the soundboard for the whole server and, under **Server Settings › Roles**, grant the **Use soundboard** permission only to the desired roles.
+
+Use stars and the **All/Favorites** filter together with search to find sounds,
+with favorites first and alphabetical order within each group, without changing
+the shortcuts assigned to sounds. Starring does not play the sound.
+The same ordering applies to Home's saved-server list.
