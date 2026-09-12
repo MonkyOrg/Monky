@@ -63,6 +63,8 @@ import { OverlayStageView } from './views/OverlayStageView';
 import { bindBotChatEvents } from './core/botChatEvents';
 import { selectEnhancer } from './core/SelectEnhancer';
 import { initTooltips } from './core/TooltipService';
+import { bindCameraPublication } from './core/CameraPublication';
+import { cameraEffectErrorMessage } from './utils/cameraEffectErrors';
 
 class App {
   private appContainer: HTMLElement;
@@ -376,6 +378,15 @@ class App {
   }
 
   private setupGlobalEventListeners(): void {    // Global Keybind Actions (#252)
+    const unbindCameraPublication = bindCameraPublication();
+    window.addEventListener('pagehide', unbindCameraPublication, { once: true });
+    appEvents.on<unknown>('camera.error_notice', (error) => {
+      void showAlert({
+        title: t('stage.cameraErrorTitle'),
+        message: cameraEffectErrorMessage(error),
+        variant: 'danger',
+      });
+    });
     appEvents.on('voice.join_requested', () => this.voiceModeReconnect.cancel());
     appEvents.on('voice.rejoin_failed', (payload: { error: string }) => {
       void showAlert({
@@ -388,6 +399,13 @@ class App {
       void showAlert({
         title: t('voiceJoin.microphoneTitle'),
         message: t('voiceJoin.microphoneUnavailable', { error: payload.error }),
+        variant: 'danger',
+      });
+    });
+    appEvents.on('audio.processing_error', () => {
+      void showAlert({
+        title: t('audioNoise.title'),
+        message: t('audioNoise.processingFailed'),
         variant: 'danger',
       });
     });

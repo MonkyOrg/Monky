@@ -96,7 +96,7 @@ Every large client responsibility lives in its own class, under
 | `NetworkClient` | WebSocket, authentication, heartbeat and reconnection |
 | `WebRtcManager` | The P2P connections: mesh, tracks, renegotiation |
 | `AudioProcessor` | Microphone, noise suppression, speech detection |
-| `VideoService` | Camera and screen capture |
+| `VideoService` | Shared camera capture, local effects and screen capture |
 | `ScreenAudioService` | Bridges the native screen-audio module into WebRTC |
 | `ParticipantManager` | Who is online, in which channel and in what state |
 | `SoundboardService` | Soundboard clips and shortcuts |
@@ -106,8 +106,9 @@ Every large client responsibility lives in its own class, under
 
 ### What is stored on your machine
 
-There is no local database, but it is not all `localStorage` either: the client
-stores in **two places with different guarantees**, and the difference matters.
+The client uses `localStorage` for simple preferences, IndexedDB for camera
+effects and the background image, and native storage for identity.
+These stores have different purposes and guarantees.
 
 <div class="diagrama">
 
@@ -122,8 +123,26 @@ stores in **two places with different guarantees**, and the difference matters.
 | `monky_nickname` / `monky_avatar` | Your visual identity |
 | `monky_saved_servers` | Servers you saved to reconnect to |
 | `monky_created_servers` | Servers you created on this machine |
+| `monky_favorites` | Local sound favorites by full path and server favorites by address/port |
 | `monky_device_id` | Identifies **this device** (lets the same person use two machines) |
 | `monky_language` | Interface language |
+
+In the `monky-camera-effects` IndexedDB database, preferences and one normalized
+image share a transactional record. Persistence failure does not change the
+in-memory preference; corrupt data is not interpreted as consent to transmit
+the camera without an effect.
+
+Segmentation uses MediaPipe/Selfie Segmenter with bundled model and WASM assets,
+without a CDN or frames sent to an API. Segmentation, compositing and chroma key
+run in an `OffscreenCanvas` worker, with at most one frame in flight.
+The segmenter is created lazily once per worker and reused across blur, color,
+image and chroma transitions; it stays idle during chroma. Turning effects off
+or ending capture releases the worker and model. Resolution and frame cadence
+follow the selected profile. The optional limiter, off by default, caps both at
+1280 × 720 and 30 FPS without upscaling a smaller capture or duplicating frames
+to compensate for capture or processing limitations.
+`CameraPublication` coordinates replacements and failures with P2P/SFU
+publishers; capture belongs to `VideoService`, not to the preview or producer.
 
 The **private key is deliberately absent from that list**. It is what proves who
 you are (see [Authentication](#authentication-the-server-never-sees-a-password-of-yours))
@@ -368,10 +387,25 @@ the connection to that peer from scratch.
 
 </div>
 
-Capture already asks the browser for echo cancellation and automatic gain. Noise
-suppression has one subtlety: when you turn on Monky's **RNNoise**, the browser's
-native suppression is **turned off** — the two together fight each other and the
-result is worse.
+Capture already requests built-in WebRTC echo cancellation and automatic gain. The
+diagram shows the default **RNNoise** engine; **Speex** and **GTCRN** occupy the
+same point in the graph. All three run in `AudioWorklet`, with WASM bundled by
+the existing [`@sapphi-red/web-noise-suppressor`](https://github.com/sapphi-red/web-noise-suppressor)
+dependency. Selecting one **disables** built-in suppression to avoid stacking
+processors. **WebRTC (built-in)** suppression and no suppression are also available.
+
+`AudioProcessor` prepares the next engine before replacing the internal
+connection, preserving the destination track sent through P2P or SFU. Local
+preview shares the processed call stream when possible; when it needs its own
+capture, it applies the same engine without connecting to speakers or WebRTC.
+
+Outputs resolve general and per-category preferences. Voice and screen audio
+have separate `AudioContext`s across the entire 0–200% volume range.
+Chromium shares a native renderer between WebRTC tracks: audio elements stay
+active at zero volume for decoding, and only the category graphs produce sound.
+The shared native output follows voice to align the echo-cancellation reference;
+it is never redirected to the chosen screen output. Native chat players,
+including the expanded viewer, apply the media output before starting playback.
 
 Mute and deafen disable the track (`enabled = false`) instead of removing it. That
 way there is no need to renegotiate the connection on every click of the mute

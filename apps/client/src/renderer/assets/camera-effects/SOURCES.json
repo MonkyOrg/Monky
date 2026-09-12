@@ -1,0 +1,29 @@
+{
+  "engine": {
+    "package": "@mediapipe/tasks-vision",
+    "version": "0.10.35",
+    "license": "Apache-2.0",
+    "source": "https://github.com/google-ai-edge/mediapipe",
+    "packageMetadata": "https://registry.npmjs.org/@mediapipe/tasks-vision/0.10.35",
+    "documentation": "https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter/web_js",
+    "wasmAssets": [
+      "@mediapipe/tasks-vision/vision_wasm_module_internal.js",
+      "@mediapipe/tasks-vision/vision_wasm_module_internal.wasm"
+    ],
+    "selection": "Maintained Tasks API, local CPU inference in an OffscreenCanvas module worker. Version 0.10.35 has module-worker support without the telemetry added in 1.0.1. No API key or runtime CDN."
+  },
+  "model": {
+    "file": "selfie_segmenter_landscape.tflite",
+    "version": "float16/1",
+    "source": "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/1/selfie_segmenter_landscape.tflite",
+    "license": "Apache-2.0",
+    "licenseEvidence": "The official Google model card, page 1, explicitly states: LICENSED UNDER Apache License, Version 2.0.",
+    "modelCard": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Selfie%20Segmentation.pdf",
+    "overview": "https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter",
+    "input": "144 x 256, RGB; person/background selfie segmentation, not physical chroma key",
+    "bytes": 250177,
+    "sha256": "490e9ea734313e0de10fa0cd9e3c6133e36ea4db2b7a49bde9ef019f72796b8e"
+  },
+  "packaging": "Vite ?url imports emit the model and the two package WASM assets into dist. This directory's LICENSE and SOURCES.json are also imported as assets so the packaged application includes redistribution notices. Dev and packaged paths are local, relative to the module worker; no remote inference, uploads or model downloads occur at runtime.",
+  "limits": "Effects follow the selected camera profile resolution and frame rate within actual source capability. The optional, default-off quality limiter caps both at 1280x720 and 30 fps without upscaling smaller sources or increasing lower profiles. At most one frame is in flight. Segmentation is an approximation: use physical chroma or switch the camera off when background concealment is critical."
+}

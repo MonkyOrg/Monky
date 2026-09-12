@@ -65,6 +65,7 @@ export class SfuClientEngine {
   private channelId: string | null = null;
   private producers: Map<string, mediasoupTypes.Producer> = new Map();
   private pendingScreenProducers = new Map<string, object>();
+  private pendingCameraProducer: object | null = null;
   // Last quality profile pushed from WebRtcManager. Applied to every producer's
   // RTP sender so SFU media honors the same bitrate/degradation caps as the P2P
   // path (#568). Null until the first apply.
@@ -404,26 +405,47 @@ export class SfuClientEngine {
       console.warn(`[SFU Client] Cannot produce camera: sendTransport=${!!this.sendTransport}, canProduceVideo=${this.canProduceKind('video')}`);
       return null;
     }
+    this.closeProducer('camera');
+    const operation = {};
+    const client = this.client;
+    const channelId = this.channelId;
+    this.pendingCameraProducer = operation;
+    let producer: mediasoupTypes.Producer | null = null;
     try {
-      this.closeProducer('camera');
       console.log(`[SFU Client] Producing camera track ${track.id}...`);
-      const producer = await this.produceTrack({
+      producer = await this.produceTrack({
         track,
         codec: this.pickVideoCodec(),
         appData: { mediaType: 'camera' },
       });
+      if (this.pendingCameraProducer !== operation || track.readyState !== 'live') {
+        throw new DOMException('Camera producer was stopped or replaced', 'AbortError');
+      }
       this.producers.set('camera', producer);
       await this.applyProducerQuality('camera', producer);
+      if (this.pendingCameraProducer !== operation || this.producers.get('camera') !== producer || producer.closed) {
+        throw new DOMException('Camera producer was stopped or replaced', 'AbortError');
+      }
+      const current = producer;
       producer.on('transportclose', () => {
-        this.producers.delete('camera');
+        if (this.producers.get('camera') === current) this.producers.delete('camera');
       });
       console.log(`[SFU Client] Produced camera video track ${track.id} with producerId ${producer.id}`);
       clientLog.info('SFU', `Produced camera video track ${track.id} with producerId ${producer.id}`);
       return producer;
-    } catch (err: any) {
+    } catch (err) {
+      if (producer) {
+        if (this.producers.get('camera') === producer) this.producers.delete('camera');
+        if (!producer.closed) {
+          producer.close();
+          if (channelId) client.send(MessageType.SFU_PRODUCER_CLOSED, { channelId, producerId: producer.id } satisfies SfuProducerClosedPayload);
+        }
+      }
       console.error('[SFU Client] Failed to produce camera track:', err);
-      clientLog.error('SFU', 'Failed to produce camera track', { error: err?.message });
-      return null;
+      clientLog.error('SFU', 'Failed to produce camera track', { error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      if (this.pendingCameraProducer === operation) this.pendingCameraProducer = null;
     }
   }
 
@@ -564,14 +586,15 @@ export class SfuClientEngine {
     }
     try {
       await producer.replaceTrack({ track });
-      return true;
-    } catch (err: any) {
-      clientLog.error('SFU', `Failed to replace track for producer ${key}`, { error: err?.message });
+      return this.producers.get(key) === producer && !producer.closed;
+    } catch (err) {
+      clientLog.error('SFU', `Failed to replace track for producer ${key}`, { error: err instanceof Error ? err.message : String(err) });
       return false;
     }
   }
 
   public closeProducer(key: string): void {
+    if (key === 'camera') this.pendingCameraProducer = null;
     this.pendingScreenProducers.delete(key);
     const producer = this.producers.get(key);
     if (producer) {
@@ -746,6 +769,10 @@ export class SfuClientEngine {
     return (producer as any)?.rtpSender ?? null;
   }
 
+  public getCameraTrack(): MediaStreamTrack | null {
+    return this.producers.get('camera')?.track ?? null;
+  }
+
   public getScreenSender(shareId: string): RTCRtpSender | null {
     const producer = this.producers.get(`screen_video:${shareId}`);
     return (producer as any)?.rtpSender ?? null;
@@ -784,6 +811,7 @@ export class SfuClientEngine {
 
   public leave(): void {
     this.joinEpoch++;
+    this.pendingCameraProducer = null;
     this.pendingScreenProducers.clear();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;

@@ -24,8 +24,9 @@ export class OverlayBridgeService {
   private isWebRtcReady = false;
   private localPeerConnection: RTCPeerConnection | null = null;
   private videoSenders: RTCRtpSender[] = [];
+  private pendingVideoUpdates = new WeakMap<RTCRtpSender, { track: MediaStreamTrack; task: Promise<void> }>();
+  private cameraSubscriptions: Array<() => void> = [];
   private dummyTrack: MediaStreamTrack | null = null;
-  private currentAssignedTracks: Array<string | null> = new Array(MAX_VIDEO_SLOTS).fill(null);
   private unbindListeners: Array<() => void> = [];
   private lastActiveSpeakerSessionId: string | null = null;
   private syncThrottleTimer: number | null = null;
@@ -63,7 +64,6 @@ export class OverlayBridgeService {
           } else if (signal.type === 'answer') {
             await this.localPeerConnection.setRemoteDescription(new RTCSessionDescription(signal));
             this.isWebRtcReady = true;
-            this.currentAssignedTracks = new Array(MAX_VIDEO_SLOTS).fill(null);
             this.syncState();
           }
         } catch (e) {
@@ -230,6 +230,29 @@ export class OverlayBridgeService {
     }, 50);
   }
 
+  private updateVideoSender(index: number, track: MediaStreamTrack): void {
+    const sender = this.videoSenders[index];
+    const connection = this.localPeerConnection;
+    if (!this.isWebRtcReady || !sender || !connection) return;
+    const pending = this.pendingVideoUpdates.get(sender);
+    if (pending?.track === track || (!pending && sender.track === track)) return;
+    const apply = async () => {
+      if (!this.isWebRtcReady || this.localPeerConnection !== connection || this.videoSenders[index] !== sender
+        || this.pendingVideoUpdates.get(sender) !== update) return;
+      await sender.replaceTrack(track.readyState === 'live' ? track : this.getOrCreateDummyTrack());
+    };
+    const task = (pending?.task ?? Promise.resolve()).then(apply, apply);
+    const update = { track, task };
+    this.pendingVideoUpdates.set(sender, update);
+    const clear = () => {
+      if (this.pendingVideoUpdates.get(sender) === update) this.pendingVideoUpdates.delete(sender);
+    };
+    void task.then(clear, (error: unknown) => {
+      clear();
+      if (this.localPeerConnection === connection) console.error(`[OverlayBridge] Could not replace video slot ${index}:`, error);
+    });
+  }
+
   private getOrCreateDummyTrack(): MediaStreamTrack {
     if (this.dummyTrack && this.dummyTrack.readyState === 'live') {
       return this.dummyTrack;
@@ -249,12 +272,16 @@ export class OverlayBridgeService {
 
   private initLocalPeerConnection(): void {
     this.teardownLocalPeerConnection();
+    const sync = () => this.throttledSyncState();
+    this.cameraSubscriptions.push(
+      appEvents.on('camera.state_changed', sync),
+      appEvents.on('local.camera_replaced', sync),
+    );
 
     try {
       this.localPeerConnection = new RTCPeerConnection({ iceServers: [] });
       this.isWebRtcReady = false;
       this.videoSenders = [];
-      this.currentAssignedTracks = new Array(MAX_VIDEO_SLOTS).fill(null);
 
       const dummyTrack = this.getOrCreateDummyTrack();
 
@@ -318,6 +345,8 @@ export class OverlayBridgeService {
   }
 
   private teardownLocalPeerConnection(): void {
+    this.cameraSubscriptions.forEach((unsubscribe) => unsubscribe());
+    this.cameraSubscriptions = [];
     if (this.localPeerConnection) {
       try {
         this.localPeerConnection.close();
@@ -326,7 +355,7 @@ export class OverlayBridgeService {
     }
     this.isWebRtcReady = false;
     this.videoSenders = [];
-    this.currentAssignedTracks = new Array(MAX_VIDEO_SLOTS).fill(null);
+    this.pendingVideoUpdates = new WeakMap();
   }
 
   public syncState(): void {
@@ -375,11 +404,12 @@ export class OverlayBridgeService {
     }
 
     let nextSlotIndex = 0;
-    const nextAssignedTracks: Array<string | null> = new Array(MAX_VIDEO_SLOTS).fill(null);
 
     const participantStates: OverlayParticipantState[] = visibleParticipants.map((p) => {
       const isLocal = sidOf(p) === currentSessionId;
-      const isCamOn = isLocal ? voiceStore.isCameraOn : (p.voiceState?.isCameraOn ?? false);
+      const isCamOn = isLocal
+        ? voiceStore.isCameraOn && videoService.getCameraState().status === 'ready'
+        : (p.voiceState?.isCameraOn ?? false);
       const isSpeaking = isLocal ? voiceStore.isSpeaking : p.isSpeaking;
       const isMuted = isLocal ? voiceStore.getEffectiveMuted() : (p.voiceState?.isMuted ?? false);
       const isDeafened = isLocal ? voiceStore.getEffectiveDeafened() : (p.voiceState?.isDeafened ?? false);
@@ -402,20 +432,12 @@ export class OverlayBridgeService {
       if (!config.minimalistMode) {
         // Atribuir slot para Câmera
         if (isCamOn && nextSlotIndex < MAX_VIDEO_SLOTS) {
-          const stream = isLocal ? videoService.getCameraStream() : p.remoteStream;
+          const stream = isLocal ? videoService.getCameraState().stream : p.remoteStream;
           const videoTrack = stream?.getVideoTracks()[0] || null;
           if (videoTrack && videoTrack.readyState === 'live') {
             videoSlotIndex = nextSlotIndex;
-            nextAssignedTracks[nextSlotIndex] = videoTrack.id;
 
-            if (this.isWebRtcReady && this.videoSenders[nextSlotIndex]) {
-              const currentSenderTrack = this.videoSenders[nextSlotIndex].track;
-              if (!currentSenderTrack || currentSenderTrack.id !== videoTrack.id || this.currentAssignedTracks[nextSlotIndex] !== videoTrack.id) {
-                this.videoSenders[nextSlotIndex].replaceTrack(videoTrack).catch((err) => {
-                  console.error(`[OverlayBridge] replaceTrack FAILED slot=${nextSlotIndex}:`, err);
-                });
-              }
-            }
+            this.updateVideoSender(nextSlotIndex, videoTrack);
             nextSlotIndex++;
           }
         }
@@ -432,14 +454,8 @@ export class OverlayBridgeService {
               const videoTrack = stream?.getVideoTracks()[0] || null;
               if (videoTrack && videoTrack.readyState === 'live') {
                 screenSlotIndexes[shareId] = nextSlotIndex;
-                nextAssignedTracks[nextSlotIndex] = videoTrack.id;
 
-                if (this.isWebRtcReady && this.videoSenders[nextSlotIndex]) {
-                  const currentSenderTrack = this.videoSenders[nextSlotIndex].track;
-                  if (!currentSenderTrack || currentSenderTrack.id !== videoTrack.id || this.currentAssignedTracks[nextSlotIndex] !== videoTrack.id) {
-                    this.videoSenders[nextSlotIndex].replaceTrack(videoTrack).catch(() => {});
-                  }
-                }
+                this.updateVideoSender(nextSlotIndex, videoTrack);
                 nextSlotIndex++;
               }
             }
@@ -469,17 +485,9 @@ export class OverlayBridgeService {
     if (this.isWebRtcReady) {
       const dummyTrack = this.getOrCreateDummyTrack();
       for (let i = nextSlotIndex; i < MAX_VIDEO_SLOTS; i++) {
-        if (this.videoSenders[i]) {
-          const currentSenderTrack = this.videoSenders[i].track;
-          if (currentSenderTrack?.id !== dummyTrack.id) {
-            this.videoSenders[i].replaceTrack(dummyTrack).catch(() => {});
-          }
-        }
-        nextAssignedTracks[i] = null;
+        this.updateVideoSender(i, dummyTrack);
       }
     }
-
-    this.currentAssignedTracks = nextAssignedTracks;
 
     const syncState: OverlaySyncState = {
       channelId,

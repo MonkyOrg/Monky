@@ -31,7 +31,7 @@ export class SettingsModal {
   private logsTab = new LogsTab();
   private aboutTab = new AboutTab();
 
-  public async open(tab?: 'voice_video'): Promise<void> {
+  public async open(tab?: 'voice_video', section?: 'camera' | 'noise-suppression'): Promise<void> {
     this.close();
     if (tab) this.activeTab = tab;
 
@@ -149,6 +149,10 @@ export class SettingsModal {
     this.attachEvents();
     this.sectionNavigation = new SettingsSectionNavigation(this.modalEl);
     this.sectionNavigation.setTab(this.activeTab);
+    if (this.activeTab === 'voice_video') {
+      if (section) this.sectionNavigation.revealSection(section);
+      this.voiceVideoTab.activateCameraPreview();
+    }
     const modal = this.modalEl;
     await this.voiceVideoTab.refreshDevices(modal);
     if (this.modalEl !== modal) return;
@@ -260,12 +264,13 @@ export class SettingsModal {
       header.innerHTML = this.getTabHeaderTitle(tab);
     }
 
+    this.sectionNavigation?.setTab(tab);
     if (tab === 'voice_video') {
       this.voiceVideoTab.startVadMeter(this.modalEl);
+      this.voiceVideoTab.activateCameraPreview();
     } else {
       this.voiceVideoTab.deactivate();
     }
-    this.sectionNavigation?.setTab(tab);
   }
 
   private showError(msg: string): void {

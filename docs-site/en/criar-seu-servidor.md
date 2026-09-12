@@ -2,9 +2,14 @@
 
 Under **My Servers › Create Server**, fill in the host nickname, server name, local port, optional password, the starting text and voice channels and, if you want, a member limit.
 
-Click **Create and Start Server**. The server starts on your machine, listens on every network interface on the chosen port, and you join automatically.
+Click **Create and Start Server**. The server starts on your machine, listens on every network interface on the chosen port, and opens for browsing. Joining a voice channel is a separate action.
 
 Created servers are saved (up to 10). Later, use **Start**, **Stop** or **X** under *My Servers*.
+
+Starting an offline server from Home or the server rail preserves the current
+call, including camera, screen shares and mute. If this instance already hosts
+another server, it will not replace it: stop that server explicitly when safe
+before starting a different one.
 
 ## Invite friends
 
@@ -31,6 +36,11 @@ When creating or managing a server, you choose the media topology:
 ## Administer
 
 Under **Server Settings** you can rename the server, change/remove the password, toggle voice mode (P2P / SFU), set or remove the member limit and allow or block the soundboard. Channel headers have **+** to create and a bin icon to delete.
+
+Edits apply immediately, with text fields applying when editing finishes.
+**Done** closes the window; there is no final save step. Dismissal stays
+blocked while an operation awaits the server's acknowledgement. Failures
+are shown and allow correction and retry.
 
 The limit counts **registered members**, not who is online: a person takes the seat from their first join onwards, even while disconnected. To free the seat, kick the member. With the limit off, the server accepts as many people as want to join.
 

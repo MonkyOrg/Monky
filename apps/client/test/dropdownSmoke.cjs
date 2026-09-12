@@ -209,12 +209,21 @@ async function runDropdownSmoke() {
     fixture.replaceChildren(container);
     for (const tab of [new AccountTab(), new LogsTab(), new VoiceVideoTab()]) {
       container.innerHTML = tab.renderHtml();
+      const conditionalGroups = [...container.querySelectorAll('[hidden]')]
+        .filter(group => group.querySelector('select'));
+      for (const group of conditionalGroups) {
+        const select = group.querySelector('select');
+        key(select, 'Enter');
+        check(!popup(), `${select.id} cannot open inside a hidden settings group`);
+        group.hidden = false;
+      }
       for (const select of container.querySelectorAll('select')) {
         open(select);
         check(getComputedStyle(select).appearance === 'none' && getComputedStyle(select).backgroundImage !== 'none', `${select.id} uses themed native trigger`);
         check(rows().length === select.options.length, `${select.id} retains all existing options`);
         key(select, 'Escape');
       }
+      for (const group of conditionalGroups) group.hidden = true;
     }
     const mic = container.querySelector('#select-mic');
     settings.selectedMicrophoneId = 'usb';

@@ -5,6 +5,7 @@ import * as mediasoup from 'mediasoup';
 import type { RouterRtpCodecCapability, TransportListenInfo } from 'mediasoup/node/lib/types.js';
 import { LIMITS, aggregateTransportHealth, VoiceConnectionHealth } from '@monky/shared';
 import { getPublicIp } from '../discovery/ServerIpScanner';
+import { describeFailure } from '../lifecycle/ServerResourceScope';
 
 const MEDIA_CODECS: RouterRtpCodecCapability[] = [
   {
@@ -158,6 +159,9 @@ export class SfuManager {
   private isInitialized = false;
   private isAvailable = false;
   private initializationError: string | null = null;
+  private initializationPromise: Promise<boolean> | null = null;
+  private generation = 0;
+  private readonly retiringWorkers = new Set<mediasoup.types.Worker>();
 
   private readonly rtcMinPort: number;
   private readonly rtcMaxPort: number;
@@ -268,28 +272,43 @@ export class SfuManager {
     });
   }
 
-  public async init(): Promise<boolean> {
-    if (this.isInitialized) {
-      return this.isAvailable;
-    }
+  public init(): Promise<boolean> {
+    if (this.initializationPromise) return this.initializationPromise;
+    if (this.isInitialized) return Promise.resolve(this.isAvailable);
+    const attempt = this.initializeWorker(this.generation);
+    this.initializationPromise = attempt;
+    const settled = () => { if (this.initializationPromise === attempt) this.initializationPromise = null; };
+    void attempt.then(settled, settled);
+    return attempt;
+  }
 
+  private async initializeWorker(generation: number): Promise<boolean> {
+    let worker: mediasoup.types.Worker | null = null;
     try {
       if (!this.announcedIp && !this.detectedPublicIp) {
         getPublicIp().then((ip) => {
-          if (ip) {
+          if (ip && generation === this.generation) {
             this.detectedPublicIp = ip;
             console.log(`[SFU] Auto-detected public IP for WebRTC candidates: ${ip}`);
           }
         }).catch(() => {});
       }
 
-      this.worker = await mediasoup.createWorker({
+      worker = await mediasoup.createWorker({
         rtcMinPort: this.rtcMinPort,
         rtcMaxPort: this.rtcMaxPort,
         logLevel: 'warn',
       });
 
-      this.worker.on('died', (error) => {
+      if (generation !== this.generation) {
+        this.retiringWorkers.add(worker);
+        worker.close();
+        this.retiringWorkers.delete(worker);
+        return false;
+      }
+      this.worker = worker;
+      worker.on('died', (error) => {
+        if (this.worker !== worker) return;
         console.error('[SFU] mediasoup Worker died:', error);
         this.isAvailable = false;
         this.initializationError = error?.message || 'Worker died unexpectedly';
@@ -300,11 +319,14 @@ export class SfuManager {
       this.initializationError = null;
       console.log(`[SFU] mediasoup Worker initialized on UDP ports ${this.rtcMinPort}-${this.rtcMaxPort}`);
       return true;
-    } catch (err: any) {
-      this.isInitialized = true;
-      this.isAvailable = false;
-      this.initializationError = err?.message || String(err);
-      console.warn('[SFU] Failed to start mediasoup worker:', this.initializationError);
+    } catch (error) {
+      if (worker && generation !== this.generation) throw error;
+      if (generation === this.generation) {
+        this.isInitialized = true;
+        this.isAvailable = false;
+        this.initializationError = describeFailure(error);
+      }
+      console.warn('[SFU] Failed to start mediasoup worker:', describeFailure(error));
       return false;
     }
   }
@@ -834,19 +856,35 @@ export class SfuManager {
   }
 
   public close(): void {
+    this.generation++;
+    this.initializationPromise = null;
+    const errors: unknown[] = [];
     for (const router of this.routers.values()) {
-      router.close();
+      try {
+        router.close();
+      } catch (error) {
+        errors.push(error);
+      }
     }
     this.routers.clear();
     this.transports.clear();
     this.producers.clear();
     this.consumers.clear();
 
-    if (this.worker && !this.worker.died) {
-      this.worker.close();
+    if (this.worker) this.retiringWorkers.add(this.worker);
+    for (const worker of this.retiringWorkers) {
+      try {
+        if (!worker.died) worker.close();
+        this.retiringWorkers.delete(worker);
+        if (this.worker === worker) this.worker = null;
+      } catch (error) {
+        errors.push(error);
+      }
     }
-    this.worker = null;
     this.isInitialized = false;
     this.isAvailable = false;
+    if (errors.length > 0) {
+      throw new AggregateError(errors, `SFU cleanup failed: ${errors.map(describeFailure).join('; ')}`);
+    }
   }
 }
