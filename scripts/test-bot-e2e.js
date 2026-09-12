@@ -135,7 +135,8 @@ try {
   await otherDevice.authenticate('Owner', ownerKeys);
   const channelId = auth.server.channels.find((channel) => channel.type === 'TEXT')?.id;
   assert.ok(channelId);
-  const created = await owner.request(MessageType.BOT_CREATE, { name: 'Before profile sync' });
+  const created = await owner.request(MessageType.BOT_CREATE, {});
+  assert.equal(created.bot.profilePending, true);
   const botId = created.bot.id;
   const botKeys = identity();
   const avatar = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJfcAAAAASUVORK5CYII=';
@@ -384,18 +385,20 @@ try {
     const soundBotRoot = path.resolve(soundBotArgument);
     const entry = path.join(soundBotRoot, 'dist', 'index.js');
     assert.ok(fs.statSync(entry).isFile(), 'Build the sound bot before running its integration check.');
-    const account = await owner.request(MessageType.BOT_CREATE, { name: 'Private sound bot' });
+    const account = await owner.request(MessageType.BOT_CREATE, {});
     const workingDir = path.join(dataDir, 'sound-bot');
     fs.mkdirSync(workingDir);
     const env = {
       ...process.env, NODE_PATH: '', NODE_OPTIONS: '',
       MONKY_SERVER_URL: url, MONKY_BOT_TOKEN: account.token, MONKY_BOT_PUBLIC_KEY: identity().publicKey,
+      MONKY_SERVE: 'false',
       MONKY_BOT_NAME: 'Private sound bot', MONKY_BOT_CLI_HOME: path.join(workingDir, 'profiles'),
     };
     let args = [entry];
+    let launcher;
     if (useCli) {
       const pkg = JSON.parse(fs.readFileSync(path.join(soundBotRoot, 'package.json'), 'utf8'));
-      const launcher = path.join(soundBotRoot, pkg.bin[pkg.monkyBot.cliName]);
+      launcher = path.join(soundBotRoot, pkg.bin[pkg.monkyBot.cliName]);
       const setup = spawnSync(process.execPath, [launcher, 'setup', '--non-interactive',
         '--server-url', url, '--token-env', 'MONKY_BOT_TOKEN', '--bot-dir', workingDir], {
         cwd: workingDir, env, encoding: 'utf8', timeout: 15000,
@@ -434,12 +437,37 @@ process.on('message', (message) => {
       await runtime.exited;
       if (useCli) assert.equal(runtime.child.exitCode, 0, runtime.output);
     };
-    const waitForSoundBot = async (runtime, previous = new Set()) => Promise.race([
+    const waitForSoundBot = async (runtime, previous = new Set(), botId = account.bot.id) => Promise.race([
       owner.wait((message) => !previous.has(message) && message.type === MessageType.COMMANDS_LIST_RESPONSE &&
-        message.payload.commands?.some((command) => command.botId === account.bot.id &&
+        message.payload.commands?.some((command) => command.botId === botId &&
           command.name === 'query' && command.downloadsSound), 'sound bot command discovery', 15000),
       runtime.exited.then(() => { throw new Error(`Sound bot exited before discovery: ${runtime.output}`); }),
     ]);
+    const waitForSoundManifest = async (runtime, manifestUrl) => {
+      let timer;
+      let onData;
+      try {
+        await Promise.race([
+          new Promise((resolve, reject) => {
+            onData = () => {
+              if (runtime.output.includes(`Manifest: ${manifestUrl}`)) resolve();
+            };
+            timer = setTimeout(() => reject(new Error(`Sound bot manifest startup timed out: ${runtime.output}`)), 10000);
+            runtime.child.stdout.on('data', onData);
+            onData();
+          }),
+          runtime.exited.then(() => { throw new Error(`Sound bot exited before manifest startup: ${runtime.output}`); }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+        runtime.child.stdout.off('data', onData);
+      }
+      const response = await fetch(manifestUrl, { signal: AbortSignal.timeout(5000) });
+      assert.equal(response.status, 200, runtime.output);
+      const manifest = await response.json();
+      assert.ok(manifest.commands.some((command) => command.name === 'query'));
+      return manifest;
+    };
     let runtime = startSoundBot();
     try {
       await waitForSoundBot(runtime);
@@ -477,6 +505,39 @@ process.on('message', (message) => {
         await waitForSoundBot(runtime, previous);
         assert.equal(fs.readFileSync(publicKeyFile, 'utf8'), publicKey);
         console.log('Generated CLI foreground start, clean shutdown and restart preserve the bot identity.');
+
+        await stopSoundBot(runtime);
+        const manifestPort = await freePort();
+        const manifestUrl = `http://127.0.0.1:${manifestPort}/manifest`;
+        const setup = spawnSync(process.execPath, [launcher, 'setup', '--non-interactive',
+          '--mode', 'marketplace', '--serve-port', String(manifestPort),
+          '--public-host', '127.0.0.1', '--yes'], {
+          cwd: workingDir, env, encoding: 'utf8', timeout: 15000,
+        });
+        if (setup.error) throw setup.error;
+        assert.equal(setup.status, 0, setup.stderr);
+        env.MONKY_SERVE_HOST = '127.0.0.1';
+        runtime = startSoundBot();
+        await waitForSoundManifest(runtime, manifestUrl);
+        const beforeInstall = new Set(owner.messages);
+        const installed = await owner.request(MessageType.BOT_INSTALL, { manifestUrl });
+        await waitForSoundBot(runtime, beforeInstall, installed.bot.id);
+        const registrationsFile = path.join(workingDir, '.keys', 'registrations.json');
+        const registrations = JSON.parse(fs.readFileSync(registrationsFile, 'utf8'));
+        assert.equal(registrations.publicKey, publicKey.trim());
+        assert.equal(registrations.registrations.length, 1);
+        for (const registration of registrations.registrations) {
+          assert.equal(runtime.output.includes(registration.token), false, 'The runtime must not print a registration token.');
+        }
+        await stopSoundBot(runtime);
+        const beforeRestart = new Set(owner.messages);
+        runtime = startSoundBot();
+        await waitForSoundManifest(runtime, manifestUrl);
+        await waitForSoundBot(runtime, beforeRestart, installed.bot.id);
+        assert.equal(fs.readFileSync(publicKeyFile, 'utf8'), publicKey);
+        assert.deepEqual(JSON.parse(fs.readFileSync(registrationsFile, 'utf8')), registrations);
+        assert.match(runtime.output, /Saved registrations: 1/);
+        console.log('Generated CLI marketplace manifest installation and restart preserve authenticated registrations and identity.');
       }
       console.log('External sound bot runtime: packaged SDK, authentication, live search, selection and caller-only download request passed; no audio body requested.');
     } finally {
@@ -495,7 +556,7 @@ process.on('message', (message) => {
     const marketplaceRestart = process.argv.includes('--marketplace-restart');
     const manifestPort = marketplaceRestart ? await freePort() : 0;
     const manifestUrl = `http://127.0.0.1:${manifestPort}/manifest`;
-    const officialAccount = marketplaceRestart ? null : await owner.request(MessageType.BOT_CREATE, { name: 'Official before sync' });
+    const officialAccount = marketplaceRestart ? null : await owner.request(MessageType.BOT_CREATE, {});
     let officialId = officialAccount?.bot.id;
     let officialOutput = '';
     const startOfficial = async () => {
@@ -764,8 +825,21 @@ process.on('message', (message) => {
         screenshotDir: process.env.MONKY_UI_ARTIFACTS,
         sendBackgroundMessage: () => owner.send(MessageType.CHAT_SEND, { channelId, content: 'A concurrent ordinary message' }),
         refreshRegistry: async () => {
-          const unrelated = await owner.request(MessageType.BOT_CREATE, { name: 'Unrelated offline bot' });
-          await owner.request(MessageType.BOT_UPDATE_PROFILE, { botId: unrelated.bot.id, name: 'Refreshed offline bot' });
+          const unrelated = await owner.request(MessageType.BOT_CREATE, {});
+          const publisher = new BotClient({
+            serverUrl: url, token: unrelated.token, publicKey: identity().publicKey,
+            name: 'Refreshed offline bot', autoReconnect: false,
+          });
+          const errors = [];
+          publisher.on('error', (error) => errors.push(error));
+          try {
+            const connected = once(publisher, 'connected');
+            publisher.connect();
+            await connected;
+          } finally {
+            await publisher.close();
+          }
+          assert.deepEqual(errors, []);
         },
         verifySelfTarget: () => {
           const context = [...contexts.values()].find((candidate) => candidate.invokerNickname === 'UI Tester');

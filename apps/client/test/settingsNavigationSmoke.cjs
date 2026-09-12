@@ -732,7 +732,13 @@ async function runSettingsNavigationSmoke() {
   serverModal.rolesTab.attachEvents = () => {};
   serverModal.botsTab.attachEvents = () => {};
   serverModal.open();
-  await verifyTabs(document.querySelector('.modal-backdrop'), 'server');
+  const serverRoot = document.querySelector('.modal-backdrop');
+  await verifyTabs(serverRoot, 'server');
+  serverRoot.querySelector('[data-tab="bots"]').click();
+  await wait();
+  check(JSON.stringify(Array.from(serverRoot.querySelectorAll('.settings-section-nav[aria-hidden="false"] .settings-section-link'))
+    .map(link => link.dataset.sectionTarget)) === JSON.stringify(['install-bot', 'manual-link-bot', 'bots']),
+  'Server bots navigation indexes the URL flow first and keeps the collapsed advanced section reachable');
   serverModal.close();
   serverStore.myPermissions = 0;
   serverModal.open('general');

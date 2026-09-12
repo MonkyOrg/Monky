@@ -10,6 +10,19 @@ export interface GitHubReleaseSource {
   tokenEnv: string;
 }
 
+export interface HttpsUpdateSource {
+  type: 'https';
+  url: string;
+  tokenEnv?: string;
+}
+
+export interface FileUpdateSource {
+  type: 'file';
+  path: string;
+}
+
+export type BotUpdateSource = HttpsUpdateSource | FileUpdateSource;
+
 export interface BotPackageDefinition {
   cliName: string;
   displayName: string;
@@ -18,6 +31,7 @@ export interface BotPackageDefinition {
   files: string[];
   modes: BotMode[];
   releases?: GitHubReleaseSource;
+  updateSource?: BotUpdateSource;
 }
 
 export interface BotPackageManifest extends Record<string, unknown> {
@@ -61,8 +75,70 @@ export function relativeBotPath(value: unknown, label: string): string {
 }
 
 function rejectUnknown(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
-  const key = Object.keys(value).find((entry) => !allowed.includes(entry));
-  if (key) throw new Error(`Unknown ${label} property: ${key}.`);
+  if (Object.keys(value).some((entry) => !allowed.includes(entry))) {
+    throw new Error(`Unknown ${label} property.`);
+  }
+}
+
+function updateTokenEnv(value: unknown, label: string): string {
+  const tokenEnv = stringValue(value, label, 100);
+  if (!/^[A-Z_][A-Z0-9_]*$/.test(tokenEnv)) {
+    throw new Error('Update credentials must be supplied through a named environment variable.');
+  }
+  return tokenEnv;
+}
+
+export function httpsUpdateUrl(value: unknown): string {
+  const message = 'monkyBot.updateSource.url must be an HTTPS .tgz URL without credentials, query parameters or fragments.';
+  let url: URL;
+  try {
+    const address = stringValue(value, 'monkyBot.updateSource.url', 2048);
+    if (!/^https:\/\//i.test(address) || /[\\\u0000-\u0020\u007f?#]/.test(address) ||
+        /^https:\/\/[^/]*@/i.test(address)) throw new Error(message);
+    url = new URL(address);
+  } catch {
+    throw new Error(message);
+  }
+  if (url.protocol !== 'https:' || !url.hostname || url.username || url.password ||
+      url.search || url.hash || !/\.tgz$/i.test(url.pathname)) {
+    throw new Error(message);
+  }
+  return url.toString();
+}
+
+function fileUpdatePath(value: unknown): string {
+  const file = stringValue(value, 'monkyBot.updateSource.path', 4096);
+  if (!/\.tgz$/i.test(file) || /[\u0000-\u001f\u007f*?]/.test(file) || file.includes('://')) {
+    throw new Error('monkyBot.updateSource.path must name a local .tgz file, not a URL or glob.');
+  }
+  if (process.platform === 'win32') {
+    const withoutDrive = file.replace(/^[A-Za-z]:[\\/]/, '');
+    if (/^[\\/]/.test(file) || /[<>:"|]/.test(withoutDrive) ||
+        withoutDrive.split(/[\\/]/).some((part) =>
+          /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part) || (/[. ]$/.test(part) && part !== '.' && part !== '..'))) {
+      throw new Error('Use a Windows drive-absolute or package-relative .tgz path; root-relative, UNC and device paths are unsupported.');
+    }
+  } else if (/^[A-Za-z]:/.test(file) || file.includes('\\') || file.startsWith('//')) {
+    throw new Error('Use a native absolute or package-relative .tgz path, not a Windows or network path.');
+  }
+  return file;
+}
+
+function updateSource(value: unknown): BotUpdateSource | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new Error('monkyBot.updateSource must be an object or omitted.');
+  if (value.type === 'https') {
+    rejectUnknown(value, ['type', 'url', 'tokenEnv'], 'monkyBot.updateSource');
+    const url = httpsUpdateUrl(value.url);
+    const tokenEnv = value.tokenEnv === undefined
+      ? undefined : updateTokenEnv(value.tokenEnv, 'monkyBot.updateSource.tokenEnv');
+    return { type: 'https', url, ...(tokenEnv ? { tokenEnv } : {}) };
+  }
+  if (value.type === 'file') {
+    rejectUnknown(value, ['type', 'path'], 'monkyBot.updateSource');
+    return { type: 'file', path: fileUpdatePath(value.path) };
+  }
+  throw new Error('Unsupported monkyBot.updateSource.type. Use https or file, or configure GitHub through monkyBot.releases.');
 }
 
 export function releaseAssetName(definition: BotPackageDefinition, version: string): string {
@@ -75,7 +151,12 @@ function releaseSource(value: unknown, cliName: string): GitHubReleaseSource | u
   if (!isRecord(value)) throw new Error('monkyBot.releases must be an object or omitted.');
   rejectUnknown(value, ['url', 'assetName', 'tokenEnv'], 'monkyBot.releases');
   let url: URL;
-  try { url = new URL(stringValue(value.url, 'monkyBot.releases.url', 2048)); } catch {
+  try {
+    const address = stringValue(value.url, 'monkyBot.releases.url', 2048);
+    if (!/^https:\/\//i.test(address) || /[\\\u0000-\u0020\u007f?#]/.test(address) ||
+        /^https:\/\/[^/]*@/i.test(address)) throw new Error('Invalid release URL.');
+    url = new URL(address);
+  } catch {
     throw new Error('monkyBot.releases.url must point to a GitHub repository or its releases page.');
   }
   const match = /^\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)(?:\/releases)?\/?$/.exec(url.pathname);
@@ -91,8 +172,7 @@ function releaseSource(value: unknown, cliName: string): GitHubReleaseSource | u
       /^(con|prn|aux|nul|com[1-9]|lpt[1-9])\./i.test(assetName)) {
     throw new Error('The release asset must be a safe .tgz filename, optionally containing one {version} placeholder.');
   }
-  const tokenEnv = value.tokenEnv === undefined ? 'GH_TOKEN' : stringValue(value.tokenEnv, 'monkyBot.releases.tokenEnv', 100);
-  if (!/^[A-Z_][A-Z0-9_]*$/.test(tokenEnv)) throw new Error('The GitHub token must be supplied through a named environment variable.');
+  const tokenEnv = value.tokenEnv === undefined ? 'GH_TOKEN' : updateTokenEnv(value.tokenEnv, 'monkyBot.releases.tokenEnv');
   return { url: `https://github.com/${repository}/releases`, repository, assetName, tokenEnv };
 }
 
@@ -113,7 +193,7 @@ export function loadBotProject(packageRoot: string): BotProject {
   const manifest: BotPackageManifest = { ...input, name, version: input.version };
   const raw = input.monkyBot === undefined ? {} : input.monkyBot;
   if (!isRecord(raw)) throw new Error('package.monkyBot must contain an object.');
-  rejectUnknown(raw, ['cliName', 'displayName', 'entry', 'buildScript', 'files', 'modes', 'releases'], 'monkyBot');
+  rejectUnknown(raw, ['cliName', 'displayName', 'entry', 'buildScript', 'files', 'modes', 'releases', 'updateSource'], 'monkyBot');
   const cliName = stringValue(raw.cliName ?? name.split('/').pop(), 'monkyBot.cliName', 64);
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(cliName)) throw new Error('monkyBot.cliName must be a safe executable name.');
   const displayName = stringValue(raw.displayName ?? cliName, 'monkyBot.displayName', 32);
@@ -139,10 +219,18 @@ export function loadBotProject(packageRoot: string): BotProject {
     return mode;
   });
   if (new Set(modes).size !== modes.length) throw new Error('monkyBot.modes must not contain duplicates.');
+  if (raw.releases !== undefined && raw.updateSource !== undefined) {
+    throw new Error('Configure either monkyBot.releases or monkyBot.updateSource, not both.');
+  }
   const releases = releaseSource(raw.releases, cliName);
+  const source = updateSource(raw.updateSource);
   return {
     root, manifest,
-    definition: { cliName, displayName, entry, buildScript, files, modes, ...(releases ? { releases } : {}) },
+    definition: {
+      cliName, displayName, entry, buildScript, files, modes,
+      ...(releases ? { releases } : {}),
+      ...(source ? { updateSource: source } : {}),
+    },
   };
 }
 

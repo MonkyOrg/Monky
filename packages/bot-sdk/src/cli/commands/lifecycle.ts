@@ -9,6 +9,7 @@ import {
   resolveInstalledEntry,
   sanitizeConfig,
   validateBotName,
+  validateBotToken,
   validatePublicHost,
   validateServerUrl,
   validateServePort,
@@ -128,11 +129,9 @@ function parseLogsOptions(args: string[]): { lines: number; follow: boolean } {
 function applyConfigChange(context: CliContext, config: BotConfig, key: string, value: string): BotConfig {
   if (key === 'mode') {
     if (value === 'manual') {
-      return manualConfig(context, {
+      return manualConfig(context, config.mode === 'manual' ? config : {
         botName: config.botName,
         botDir: config.botDir,
-        serverUrl: config.mode === 'manual' ? config.serverUrl : DEFAULT_MANUAL_SERVER_URL,
-        tokenEnv: config.mode === 'manual' ? config.tokenEnv : 'MONKY_BOT_TOKEN',
       });
     }
     if (value === 'marketplace') {
@@ -157,10 +156,16 @@ function applyConfigChange(context: CliContext, config: BotConfig, key: string, 
   }
   if (key === 'server-url') {
     return manualConfig(context, {
+      ...(config.mode === 'manual' ? config : { botName: config.botName, botDir: config.botDir }),
+      serverUrl: validateServerUrl(value),
+    });
+  }
+  if (key === 'bot-token') {
+    return manualConfig(context, {
       botName: config.botName,
       botDir: config.botDir,
-      serverUrl: validateServerUrl(value),
-      tokenEnv: config.mode === 'manual' ? config.tokenEnv : 'MONKY_BOT_TOKEN',
+      serverUrl: config.mode === 'manual' ? config.serverUrl : DEFAULT_MANUAL_SERVER_URL,
+      botToken: validateBotToken(value),
     });
   }
   if (key === 'token-env') {
@@ -195,6 +200,7 @@ function normalizedConfigKey(key: string): string {
     botName: 'name',
     botDir: 'bot-dir',
     serverUrl: 'server-url',
+    botToken: 'bot-token',
     tokenEnv: 'token-env',
     servePort: 'serve-port',
     publicHost: 'public-host',
@@ -230,6 +236,15 @@ export async function startCommand(context: CliContext, args: string[]): Promise
   startOrRestart(context, writeBotEcosystem(context, entry));
   saveProcessList(context);
   console.log(`${context.displayName} iniciado em background.`);
+  console.log(`Modo: ${config.mode}`);
+  if (config.mode === 'manual') {
+    console.log(`Servidor: ${config.serverUrl}`);
+  } else {
+    const host = config.publicHost.includes(':') && !config.publicHost.startsWith('[')
+      ? `[${config.publicHost}]` : config.publicHost;
+    console.log(`Manifest: http://${host}:${config.servePort}/manifest`);
+  }
+  console.log(`Comandos úteis: ${context.cliName} status, logs, restart, stop.`);
 }
 
 export function stopCommand(context: CliContext, args: string[]): void {
@@ -279,6 +294,7 @@ export function statusCommand(context: CliContext, args: string[]): void {
       console.log(`Memória: ${(processInfo.monit.memory / 1024 / 1024).toFixed(1)} MB`);
     }
     if (processInfo.monit?.cpu !== undefined) console.log(`CPU: ${processInfo.monit.cpu}%`);
+    if (processInfo.pm2_env?.restart_time !== undefined) console.log(`Restarts: ${processInfo.pm2_env.restart_time}`);
   }
   if (!config) {
     console.log(`Configuração: ausente (${context.configFile})`);
@@ -311,11 +327,12 @@ export function configCommand(context: CliContext, args: string[]): void {
   const key = normalizedConfigKey(args[1] ?? '');
   const value = args.slice(2).join(' ').trim();
   if (!key || !value) {
-    throw new Error(`Usage: ${context.cliName} config set <mode|name|bot-dir|server-url|token-env|serve-port|public-host> <value>`);
+    throw new Error(`Usage: ${context.cliName} config set <mode|botName|botDir|serverUrl|botToken|tokenEnv|servePort|publicHost> <value>`);
   }
   const next = applyConfigChange(context, config, key, value);
   writeConfig(context, next);
   console.log('Configuração atualizada.');
+  console.log(`Reinicie o bot para aplicar: ${context.cliName} restart`);
 }
 
 export function autoUpdateStatusCommand(context: CliContext): void {

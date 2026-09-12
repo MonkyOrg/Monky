@@ -3851,17 +3851,6 @@ input:focus, textarea:focus, select:focus {
   outline: 2px solid var(--accent-primary);
   outline-offset: 3px;
 }
-.bot-profile-editor {
-  padding: 14px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-}
-.bot-profile-editor h3 {
-  margin: 0 0 10px;
-  font-size: 14px;
-}
-
 .modal-card.bot-settings-card {
   width: min(740px, calc(100vw - 32px));
   max-width: 740px;
@@ -3966,47 +3955,6 @@ input:focus, textarea:focus, select:focus {
   min-height: 1.5em;
   margin-top: 12px;
 }
-.bot-profile-editor > label {
-  display: block;
-  margin-bottom: 6px;
-  font-size: 12px;
-}
-.bot-profile-editor > input {
-  width: 100%;
-}
-.bot-profile-photo-row {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  margin-bottom: 12px;
-}
-.bot-profile-photo {
-  position: relative;
-  width: 56px;
-  height: 56px;
-  flex-shrink: 0;
-  padding: 0;
-  border: 1px solid var(--border-color);
-  border-radius: 50%;
-  background: var(--bg-elevated);
-  cursor: pointer;
-}
-.bot-profile-photo img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border-radius: inherit;
-}
-.bot-profile-photo > span {
-  position: absolute;
-  bottom: 0;
-  right: -4px;
-  padding: 3px;
-  border-radius: 50%;
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-}
-
 .mention-item.active .mention-nick {
   color: #fff;
 }

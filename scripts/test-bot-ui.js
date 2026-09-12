@@ -168,6 +168,8 @@ export async function exerciseOfficialBotUi(ui, { screenshotDir, sendBackgroundM
     await ui.click('#chat-command-composer [data-bot-action="optional-parameters"]');
     await chooseParameter(name);
   };
+  await ui.evaluate('document.fonts.ready.then(() => true)');
+  await ui.input('#chat-message-input', '');
   const normalHeight = await ui.evaluate('document.querySelector("#chat-message-input").clientHeight');
 
   await ui.input('#chat-message-input', '/');
@@ -210,8 +212,8 @@ export async function exerciseOfficialBotUi(ui, { screenshotDir, sendBackgroundM
   verifySelfTarget();
   await ui.click('.bot-interaction-card [data-bot-action="cancel-invocation"]:not(:disabled)');
   await ui.wait(`!document.querySelector(${JSON.stringify(field('answer'))})`, 'cancelled guided command');
-  assert.ok(await ui.evaluate(`document.querySelector('#chat-message-input').clientHeight >= ${normalHeight}`),
-    'The normal composer must regain its usable height');
+  await ui.wait(`document.querySelector('#chat-message-input').clientHeight >= ${normalHeight}`,
+    'normal composer regains its usable height');
   const initialInvocations = await ui.evaluate('document.querySelectorAll(".bot-interaction-card").length');
   await select('ping');
   await ui.wait('document.querySelector("#chat-messages-feed").innerText.includes("Pong")', 'the selected bot reply');
@@ -237,7 +239,11 @@ export async function exerciseOfficialBotUi(ui, { screenshotDir, sendBackgroundM
   await addOptional('lados');
   await ui.input(field('lados'), '1');
   const beforeInvalid = await ui.evaluate('document.querySelectorAll(".bot-interaction-card").length');
-  await ui.click('#chat-command-composer button[type="submit"]');
+  assert.equal(await ui.evaluate('document.querySelector("#chat-command-composer button[type=submit]")?.disabled'), true,
+    'Invalid parameters must disable the visual submit button');
+  await ui.key('Enter');
+  assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(field('lados'))})?.getAttribute('aria-invalid')`), 'true',
+    'Keyboard submission must identify the invalid parameter without executing');
   assert.equal(await ui.evaluate('document.querySelectorAll(".bot-interaction-card").length'), beforeInvalid,
     'Invalid parameters must not execute or count as usage');
   await ui.input(field('lados'), '20');
@@ -289,8 +295,13 @@ export async function exerciseOfficialBotUi(ui, { screenshotDir, sendBackgroundM
   await screenshot('bot-replies');
 
   await select('8ball');
+  await ui.input(field('pergunta'), '');
   const beforeMissingQuestion = await ui.evaluate('document.querySelectorAll(".bot-response-bubble").length');
-  await ui.click('#chat-command-composer button[type="submit"]');
+  assert.equal(await ui.evaluate('document.querySelector("#chat-command-composer button[type=submit]")?.disabled'), true,
+    'A missing required question must disable the visual submit button');
+  await ui.key('Enter');
+  assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(field('pergunta'))})?.getAttribute('aria-invalid')`), 'true',
+    'Keyboard submission must identify the missing required question');
   assert.equal(await ui.evaluate('document.querySelectorAll(".bot-response-bubble").length'), beforeMissingQuestion,
     '8ball must not execute without its required question');
   await ui.input(field('pergunta'), 'Will this required question work?');
@@ -366,6 +377,9 @@ export async function exerciseBotUi(serverUrl, exercise) {
     devtools = new DevTools(socket);
     await devtools.call('Runtime.enable');
     await devtools.call('Network.enable');
+    await devtools.call('Emulation.setDeviceMetricsOverride', {
+      width: 1280, height: 900, deviceScaleFactor: 1, mobile: false,
+    });
     await devtools.wait('!!document.querySelector("#btn-onboard-create")', 'fresh identity onboarding');
     await devtools.click('#btn-onboard-create');
     await devtools.wait('!!document.querySelector("#onboarding-skip")', 'connection onboarding');

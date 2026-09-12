@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Vincular bots ficou mais simples: use a URL do manifest, com token manual reservado às opções avançadas. Nome e avatar agora são fornecidos pelo próprio bot, sem edição no aplicativo. Atualize aplicativo, servidor e bots juntos para manter a compatibilidade.",
+  "en": "Linking bots is simpler: use the manifest URL, with manual tokens reserved for advanced options. Names and avatars now come from the bot itself and cannot be edited in the app. Update the app, server, and bots together to keep them compatible."
+}

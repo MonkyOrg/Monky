@@ -134,6 +134,8 @@ export interface BotRecord {
   id: string;
   /** Human-readable name shown in the member list. */
   name: string;
+  /** True until a newly reserved manual link receives the bot's identity. */
+  profilePending: boolean;
   /** Token hash (bcrypt or sha256-hex); the plain token is never stored. */
   tokenHash: string;
   avatarPath: string | null;

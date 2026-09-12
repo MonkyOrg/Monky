@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readConfigFile, type BotConfig } from './config';
-import { loadBotKeys } from './keys';
+import { keyPaths, loadBotKeys } from './keys';
 
 export interface RuntimeEnvironmentPlan {
   values: Record<string, string>;
@@ -26,17 +26,21 @@ export function createRuntimeEnvironment(
     MONKY_BOT_NAME: config.botName,
   };
   if (config.mode === 'manual') {
-    const token = inheritedEnv[config.tokenEnv];
+    const token = config.botToken === undefined ? inheritedEnv[config.tokenEnv] : config.botToken;
     if (typeof token !== 'string' || !token.trim()) {
       throw new Error(`Missing required environment variable ${config.tokenEnv} for manual mode.`);
     }
     values.MONKY_SERVER_URL = config.serverUrl;
     values.MONKY_BOT_TOKEN = token;
-    return { values, clear: ['MONKY_SERVE', 'MONKY_SERVE_PORT', 'MONKY_SERVE_PUBLIC_HOST'] };
+    return {
+      values,
+      clear: ['MONKY_SERVE', 'MONKY_SERVE_PORT', 'MONKY_SERVE_HOST', 'MONKY_SERVE_PUBLIC_HOST', 'MONKY_BOT_REGISTRATION_FILE'],
+    };
   }
   values.MONKY_SERVE = 'true';
   values.MONKY_SERVE_PORT = String(config.servePort);
   values.MONKY_SERVE_PUBLIC_HOST = config.publicHost;
+  values.MONKY_BOT_REGISTRATION_FILE = keyPaths(config.botDir).registrationsFile;
   return { values, clear: ['MONKY_SERVER_URL', 'MONKY_BOT_TOKEN'] };
 }
 

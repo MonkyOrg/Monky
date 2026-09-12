@@ -16,7 +16,8 @@ function json(file, value) {
 }
 
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-sdk-tooling-'));
+  const root = fs.mkdtempSync(path.join(__dirname, '.monky-sdk-tooling-'));
+  t.mock.method(os, 'tmpdir', () => root);
   const source = path.join(root, 'bot with spaces');
   const output = path.join(root, 'package');
   fs.mkdirSync(source);
@@ -62,6 +63,7 @@ test('project metadata defaults are portable and do not infer update configurati
   const project = loadBotProject(f.source);
   assert.equal(project.definition.cliName, 'sound-bot');
   assert.equal(project.definition.releases, undefined);
+  assert.equal(project.definition.updateSource, undefined);
   assert.deepEqual(project.definition.modes, ['manual']);
   assert.deepEqual(project.definition.files, ['dist']);
 });
@@ -86,6 +88,81 @@ test('release sources are explicit GitHub-only URLs with optional asset and envi
   ]) {
     botAt(f.source, { monkyBot: { releases } });
     assert.throws(() => loadBotProject(f.source));
+  }
+});
+
+test('HTTPS and file update sources are author metadata, explicit and mutually exclusive with releases', (t) => {
+  const f = fixture(t);
+  const sources = [
+    { type: 'https', url: 'https://downloads.example.test/bots/sound-bot.tgz' },
+    { type: 'https', url: 'https://downloads.example.test:8443/bot.tgz', tokenEnv: 'BOT_UPDATE_TOKEN' },
+    { type: 'file', path: '../releases/sound-bot.tgz' },
+    { type: 'file', path: path.join(f.root, 'release files', 'sound-bot.tgz') },
+  ];
+  for (const updateSource of sources) {
+    botAt(f.source, { monkyBot: { updateSource } });
+    const { definition } = loadBotProject(f.source);
+    assert.deepEqual(definition.updateSource, updateSource);
+    assert.equal(definition.releases, undefined);
+    assert.equal(releaseAssetName(definition, '1.2.4'), 'sound-bot-1.2.4.tgz');
+  }
+  botAt(f.source, { monkyBot: {
+    releases: { url: 'https://github.com/example/sound-bot/releases' },
+    updateSource: sources[0],
+  } });
+  assert.throws(() => loadBotProject(f.source), /not both/);
+});
+
+test('update definitions reject malformed origins and credentials without exposing their values', (t) => {
+  const f = fixture(t);
+  const secret = 'fixture-update-credential';
+  const malformed = [
+    null, [], 'https://downloads.example.test/bot.tgz', {},
+    { type: 'npm', name: 'sound-bot' },
+    { type: 'github', url: 'https://github.com/example/sound-bot' },
+    { type: 'https', url: 'http://downloads.example.test/bot.tgz' },
+    { type: 'https', url: `https://${secret}@downloads.example.test/bot.tgz` },
+    { type: 'https', url: `https://user:${secret}@downloads.example.test/bot.tgz` },
+    { type: 'https', url: `https://downloads.example.test/bot.tgz?token=${secret}` },
+    { type: 'https', url: `https://downloads.example.test/bot.tgz#${secret}` },
+    { type: 'https', url: 'https://downloads.example.test/bot.zip' },
+    { type: 'https', url: 'https://downloads.example.test/bot.tgz?' },
+    { type: 'https', url: 'https://downloads.example.test/bot.tgz#' },
+    { type: 'https', url: 'https://@downloads.example.test/bot.tgz' },
+    { type: 'https', url: 'https:\\\\downloads.example.test\\bot.tgz' },
+    { type: 'https', url: 'https://downloads.example.test/bot.tgz', token: secret },
+    { type: 'https', url: 'https://downloads.example.test/bot.tgz', tokenEnv: secret },
+    { type: 'https', url: 'https://downloads.example.test/bot.tgz', path: 'other.tgz' },
+    { type: 'file', path: '' },
+    { type: 'file', path: 'https://downloads.example.test/bot.tgz' },
+    { type: 'file', path: 'file:///bot.tgz' },
+    { type: 'file', path: '*.tgz' },
+    { type: 'file', path: 'bot.zip' },
+    { type: 'file', path: 'bot\u0000.tgz' },
+    { type: 'file', path: 'C:bot.tgz' },
+    { type: 'file', path: '\\\\server\\share\\bot.tgz' },
+    { type: 'file', path: 'bot.tgz', tokenEnv: 'BOT_UPDATE_TOKEN' },
+    { type: 'file', path: 'bot.tgz', url: 'https://downloads.example.test/bot.tgz' },
+    { type: 'https', url: 'https://downloads.example.test/bot.tgz', [secret]: true },
+  ];
+  if (process.platform === 'win32') {
+    malformed.push(
+      { type: 'file', path: '/opt/releases/bot.tgz' },
+      { type: 'file', path: '\\releases\\bot.tgz' },
+      { type: 'file', path: 'C:\\releases\\NUL.tgz' },
+      { type: 'file', path: 'C:\\releases\\name:stream.tgz' },
+      { type: 'file', path: '\\\\?\\C:\\releases\\bot.tgz' }
+    );
+  } else {
+    malformed.push({ type: 'file', path: 'C:\\releases\\bot.tgz' });
+  }
+  for (const updateSource of malformed) {
+    botAt(f.source, { monkyBot: { updateSource } });
+    assert.throws(() => loadBotProject(f.source), (error) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message.includes(secret), false);
+      return true;
+    });
   }
 });
 
@@ -207,4 +284,27 @@ test('private files inside a runtime directory, compiler recursion and incompati
   delete require.cache[require.resolve(entry)];
   fs.writeFileSync(entry, 'exports.PROTOCOL_VERSION = 13;');
   assert.throws(() => buildBotPackage({ root: f.source, out: f.output }), /reusable CLI/);
+});
+
+test('packaged bots retain the author update source for GitHub, HTTPS and local archives', (t) => {
+  const f = fixture(t);
+  const declarations = [
+    { releases: { url: 'https://github.com/example/sound-bot/releases', assetName: 'sound-{version}.tgz', tokenEnv: 'BOT_RELEASE_TOKEN' } },
+    { updateSource: { type: 'https', url: 'https://downloads.example.test/sound-bot.tgz', tokenEnv: 'BOT_UPDATE_TOKEN' } },
+    { updateSource: { type: 'file', path: '../bot-updates/sound-bot.tgz' } },
+  ];
+  for (const [index, declaration] of declarations.entries()) {
+    botAt(f.source, { monkyBot: { cliName: 'sound-bot', displayName: 'Sound Bot', ...declaration } });
+    const result = buildBotPackage({ root: f.source, out: f.output, skipBuild: true });
+    const unpacked = path.join(f.root, `source-${index}`);
+    fs.mkdirSync(unpacked);
+    require('tar').x({ file: result.file, cwd: unpacked, sync: true });
+    const packageRoot = path.join(unpacked, 'package');
+    const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
+    assert.deepEqual(pkg.monkyBot.releases, declaration.releases);
+    assert.deepEqual(pkg.monkyBot.updateSource, declaration.updateSource);
+    const installed = loadBotProject(packageRoot);
+    assert.deepEqual(installed.definition.updateSource, declaration.updateSource);
+    assert.equal(installed.definition.releases?.repository, declaration.releases ? 'example/sound-bot' : undefined);
+  }
 });

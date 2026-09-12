@@ -88,6 +88,29 @@ function makeBot(t, server, options = {}) {
   return { bot, errors };
 }
 
+test('manual authentication announces the bot-owned name before profile and command publication', { timeout: 10000 }, async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server, { name: 'Author Bot' });
+  const connected = once(bot, 'connected');
+  bot.connect();
+  await connected;
+  const auth = await server.next(MessageType.AUTH_CONNECT);
+  assert.equal(auth.payload.nickname, 'Author Bot');
+  const profile = await server.next(MessageType.BOT_UPDATE_PROFILE);
+  assert.equal(profile.payload.name, 'Author Bot');
+  assert.deepEqual(errors, []);
+});
+
+test('a bot can explicitly remove its previous avatar through the SDK', { timeout: 10000 }, async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server, { name: 'No Photo Bot', avatarBase64: null });
+  const connected = once(bot, 'connected');
+  bot.connect();
+  await connected;
+  assert.equal((await server.next(MessageType.BOT_UPDATE_PROFILE)).payload.avatarBase64, null);
+  assert.deepEqual(errors, []);
+});
+
 test('selection metadata is preserved in command choices, autocomplete, forms and selectors', { timeout: 10000 }, async (t) => {
   const server = await makeServer(t);
   const { bot, errors } = makeBot(t, server);
@@ -612,6 +635,7 @@ test('marketplace manifest and registration carry the profile and serve real HTT
     body: JSON.stringify({ serverId: 'marketplace', serverName: 'Server', serverUrl: wsServer.url, token: 'token' }),
   });
   assert.equal(registration.status, 200);
+  assert.equal((await wsServer.next(MessageType.AUTH_CONNECT)).payload.nickname, 'Photo Bot');
   await wsServer.next(MessageType.COMMAND_REGISTER);
   const profile = await wsServer.next(MessageType.BOT_UPDATE_PROFILE);
   assert.equal(profile.payload.name, 'Photo Bot');
@@ -1215,7 +1239,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 13);
+  assert.equal(PROTOCOL_VERSION, 14);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

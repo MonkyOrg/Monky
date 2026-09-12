@@ -264,13 +264,15 @@ export const commandResponseSchema = commandCancelSchema.extend({
 });
 
 const avatarSchema = z.string().min(1).max(Math.ceil(LIMITS.MAX_AVATAR_SIZE * 4 / 3) + 256);
-export const botCreateSchema = z.object({
+export const botIdentitySchema = z.object({
   name: z.string().trim().min(LIMITS.MIN_NICKNAME_LENGTH).max(LIMITS.MAX_NICKNAME_LENGTH),
   avatarBase64: avatarSchema.optional(),
 }).strict();
+export type BotIdentity = z.infer<typeof botIdentitySchema>;
+export const botCreateSchema = z.object({}).strict();
 export const botProfileUpdateSchema = z.object({
   botId: identifier.optional(),
-  name: botCreateSchema.shape.name.optional(),
+  name: botIdentitySchema.shape.name.optional(),
   avatarBase64: avatarSchema.nullable().optional(),
 }).strict().refine((profile) => profile.name !== undefined || profile.avatarBase64 !== undefined);
 
@@ -283,7 +285,7 @@ const httpUrl = z.string().url().max(2048).refine((value) => {
   }
 });
 export const botManifestSchema = z.object({
-  name: botCreateSchema.shape.name,
+  name: botIdentitySchema.shape.name,
   description: description.optional(),
   icon: avatarSchema.optional(),
   commands: z.array(z.object({ name: commandName, description: label })).max(LIMITS.MAX_COMMANDS_PER_BOT).optional(),
@@ -299,7 +301,7 @@ export const botRegistrationSchema = z.object({
 
 export const botSettingsSummarySchema = z.object({
   botId: identifier,
-  name: botCreateSchema.shape.name,
+  name: botIdentitySchema.shape.name,
   avatarUrl: z.string().min(1).max(2048).nullable().optional(),
   online: z.boolean(),
   capabilities: z.object({ downloadsSound: z.boolean() }).strict(),

@@ -28,7 +28,7 @@ ${color('COMANDOS', ANSI.bold)}
   status                        Mostra estado do processo e configuração
   logs [--lines N] [--no-follow]
   config                        Exibe a configuração atual
-  config set <k> <v>            Ajusta mode, name, bot-dir, server-url, token-env, serve-port, public-host
+  config set <k> <v>             Ajusta mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
   update [--check] [--beta] [--yes]
   autoupdate on [HH:MM] [--beta]
   autoupdate off
@@ -39,7 +39,12 @@ ${color('OPÇÕES GLOBAIS', ANSI.bold)}
   --help, -h                    Exibe esta ajuda
 
 ${color('SETUP NÃO INTERATIVO', ANSI.bold)}
-  ${context.cliName} setup --non-interactive --server-url ws://localhost:3000 --token-env MONKY_BOT_TOKEN [--name "Meu Bot"] [--bot-dir C:\\Bots\\${context.cliName}] [--yes]
+  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
+  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-ou-domínio> [--serve-port 7780] [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
+
+${color('ORIGEM DAS ATUALIZAÇÕES', ANSI.bold)}
+  Definida pelo autor no package.json: monkyBot.releases (GitHub recomendado)
+  ou monkyBot.updateSource (URL HTTPS de .tgz ou caminho local de .tgz).
 `.trim());
 }
 

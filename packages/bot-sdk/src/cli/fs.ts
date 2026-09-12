@@ -13,7 +13,7 @@ export function applyMode(target: string, mode: number): void {
   try {
     fs.chmodSync(target, mode);
   } catch (error: unknown) {
-    if (!isIgnorablePermissionError(error)) throw error;
+    if (process.platform !== 'win32' || !isIgnorablePermissionError(error)) throw error;
   }
 }
 

@@ -5,9 +5,10 @@ import {
   ProtocolErrorCode,
   BotInfo,
   UserSummary,
-  botCreateSchema,
+  botIdentitySchema,
   botManifestSchema,
   botProfileUpdateSchema,
+  type BotIdentity,
 } from '@monky/shared';
 import { BotRecord } from '../../domain/entities';
 import { IBotRepository, IServerRepository } from '../../domain/repositories';
@@ -45,16 +46,12 @@ export class BotService {
     return createHash('sha256').update(token, 'utf8').digest('hex');
   }
 
-  async create(
-    name: string,
-    createdByUserId: string,
-    avatarBase64?: string
-  ): Promise<BotCreateResult> {
-    return this.mutate(() => this.createBot(name, createdByUserId, avatarBase64));
+  async create(createdByUserId: string): Promise<BotCreateResult> {
+    return this.mutate(() => this.createBot(createdByUserId));
   }
 
-  private async createBot(name: string, createdByUserId: string, avatarBase64?: string): Promise<BotCreateResult> {
-    const parsed = botCreateSchema.safeParse({ name, avatarBase64 });
+  private async createBot(createdByUserId: string, identity?: BotIdentity): Promise<BotCreateResult> {
+    const parsed = botIdentitySchema.safeParse(identity ?? { name: 'Bot' });
     if (!parsed.success) {
       return {
         success: false,
@@ -90,6 +87,7 @@ export class BotService {
     const record: BotRecord = {
       id,
       name: parsed.data.name,
+      profilePending: identity === undefined,
       tokenHash,
       avatarPath,
       boundPublicKey: null,
@@ -103,7 +101,9 @@ export class BotService {
       Logger.error('BOT', 'Failed to create bot.', error);
       return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar o bot.' };
     }
-    Logger.info('BOT', `Bot "${record.name}" (${id}) created by user ${createdByUserId}.`);
+    Logger.info('BOT', record.profilePending
+      ? `Bot link (${id}) reserved by user ${createdByUserId}; waiting for the bot identity.`
+      : `Bot "${record.name}" (${id}) linked by user ${createdByUserId}.`);
 
     return {
       success: true,
@@ -143,7 +143,10 @@ export class BotService {
       }
 
       const updates: Partial<BotRecord> = {};
-      if (parsed.data.name !== undefined) updates.name = parsed.data.name;
+      if (parsed.data.name !== undefined) {
+        updates.name = parsed.data.name;
+        updates.profilePending = false;
+      }
       const avatarBase64 = parsed.data.avatarBase64;
       if (avatarBase64 === null) {
         updates.avatarPath = null;
@@ -236,8 +239,11 @@ export class BotService {
     }
     const manifest = parsed.data;
 
-    // 2. Create the bot (reuse the existing create flow).
-    const createResult = await this.create(manifest.name, createdByUserId, manifest.icon);
+    // Only metadata supplied by the bot can initialize a linked identity.
+    const createResult = await this.mutate(() => this.createBot(createdByUserId, {
+      name: manifest.name,
+      ...(manifest.icon !== undefined ? { avatarBase64: manifest.icon } : {}),
+    }));
     if (!createResult.success) return createResult;
 
     // 3. POST the token to the bot's registration endpoint.
@@ -310,6 +316,7 @@ export class BotService {
       createdByUserId: record.createdByUserId,
       bound: record.boundPublicKey !== null,
       online: onlineBots.has(record.id),
+      profilePending: record.profilePending,
     };
   }
 
