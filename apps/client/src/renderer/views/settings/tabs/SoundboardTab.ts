@@ -4,9 +4,14 @@ import { t, tCount } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { matchesSearch } from '../../../utils/search';
 import { captureShortcut } from '../../../utils/keybind';
+import { appEvents } from '../../../core/EventBus';
+import { showAlert } from '../../Dialog';
 
 export class SoundboardTab {
   private searchQuery: string = '';
+  private unbindSounds: (() => void) | null = null;
+
+  public cleanup(): void { this.unbindSounds?.(); this.unbindSounds = null; }
 
   public renderHtml(): string {
     return `
@@ -20,7 +25,7 @@ export class SoundboardTab {
       <div class="form-group" style="margin-bottom: 12px;">
         <label>${t('settings.soundFolder')}</label>
         <div style="display: flex; gap: 8px; align-items: center;">
-          <input id="input-soundboard-path" type="text" readonly value="${settingsStore.soundboardFolderPath || ''}" placeholder="${t('settings.noFolderPlaceholder')}" style="flex: 1; font-size: 12px; cursor: pointer;">
+          <input id="input-soundboard-path" type="text" readonly value="${escapeHtml(settingsStore.soundboardFolderPath || '')}" placeholder="${t('settings.noFolderPlaceholder')}" style="flex: 1; font-size: 12px; cursor: pointer;">
           <button type="button" id="btn-select-soundboard-folder" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px; white-space: nowrap;">
             <span class="material-symbols-outlined md-14" style="margin-right: 4px;">folder_open</span>
             ${t('soundboard.chooseFolder')}
@@ -148,20 +153,38 @@ export class SoundboardTab {
   }
 
   public attachEvents(container: HTMLElement): void {
+    this.cleanup();
+    this.unbindSounds = appEvents.on('soundboard.sounds_loaded', () => {
+      if (!container.isConnected) return;
+      const info = container.querySelector('#soundboard-folder-info');
+      if (info) info.textContent = tCount('settings.soundsFound', soundboardService.getSounds().length);
+      const table = container.querySelector('#soundboard-shortcuts-table-container');
+      if (table) {
+        const focused = document.activeElement;
+        const selection = focused instanceof HTMLInputElement && table.contains(focused)
+          ? { id: focused.id, start: focused.selectionStart, end: focused.selectionEnd } : null;
+        table.innerHTML = this.renderShortcutsTable();
+        this.attachShortcutButtons(container);
+        if (selection) {
+          const input = container.querySelector<HTMLInputElement>(`#${selection.id}`);
+          input?.focus();
+          if (selection.start !== null && selection.end !== null) input?.setSelectionRange(selection.start, selection.end);
+        }
+      }
+    });
     const inputPath = container.querySelector<HTMLInputElement>('#input-soundboard-path');
     const btnSelectFolder = container.querySelector<HTMLButtonElement>('#btn-select-soundboard-folder');
     const sliderVol = container.querySelector<HTMLInputElement>('#slider-soundboard-vol');
     const volVal = container.querySelector<HTMLElement>('#soundboard-vol-val');
     const checkboxMute = container.querySelector<HTMLInputElement>('#checkbox-soundboard-mute');
-
     const handlePickFolder = async () => {
-      if (!window.api?.selectSoundboardFolder) return;
-      const folder = await window.api.selectSoundboardFolder();
+      let folder: string | null;
+      try { folder = await soundboardService.selectFolder(); } catch {
+        if (container.isConnected) await showAlert({ message: t('botChat.downloadWriteFailed'), variant: 'danger' });
+        return;
+      }
       if (folder) {
-        settingsStore.soundboardFolderPath = folder;
-        settingsStore.save();
         if (inputPath) inputPath.value = folder;
-        await soundboardService.loadSounds();
         const info = container.querySelector<HTMLElement>('#soundboard-folder-info');
         if (info) {
           info.textContent = tCount('settings.soundsFound', soundboardService.getSounds().length);

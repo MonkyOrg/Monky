@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import http from 'http';
+import { isDeepStrictEqual } from 'util';
 import WebSocket from 'ws';
 import {
   LIMITS,
@@ -11,37 +12,58 @@ import {
   botManifestSchema,
   botProfileUpdateSchema,
   botRegistrationSchema,
+  botSettingsContextSchema,
+  botSettingsDefinitionSchema,
+  botSettingsSnapshotSchema,
   botChatMessageSchema,
   chatReactionSchema,
   chatReactionEventSchema,
   messageContentSchema,
   messageReferenceSchema,
   commandDefinitionSchema,
+  commandAutocompleteCancelSchema,
+  commandAutocompleteChoicesSchema,
+  commandAutocompleteExecutionSchema,
   commandExecutionSchema,
   commandFinishedSchema,
+  commandRegisteredSchema,
   commandResponseSchema,
+  commandRequestIdSchema,
+  commandSoundDownloadResultSchema,
+  soundDownloadRequestSchema,
   commandSubmitSchema,
+  resolveBotSettingsValues,
   validateBotFormValues,
   validateCommandOptions,
 } from '@monky/shared';
 import { RegistrationStore, type BotRegistration } from './RegistrationStore';
 import {
   botSelectorCreateSchema, botSelectorPatchSchema, botSelectorSchema,
-  botSelectorFinalizeSchema,
+  botSelectorFinalizeSchema, botSelectorRespondedSchema,
   type BotSelector, type BotSelectorCreate, type BotSelectorPatch,
+  type BotSelectorRespondedPayload,
 } from '@monky/shared';
 import type {
   BotForm,
   BotFormValues,
   BotManifest,
   BotProfileUpdatePayload,
+  BotServerSettingsSnapshot,
+  BotSettingsContext,
+  BotSettingsDefinition,
   CommandExecutionPayload,
+  CommandAutocompleteChoice,
+  CommandAutocompleteExecutionPayload,
+  CommandAutocompleteResultPayload,
   CommandOption,
   CommandResponsePayload,
   CommandValues,
+  SoundDownloadRequest,
+  SoundDownloadResult,
   ChatMessage,
   ChatSendPayload,
   ChatReactionEventPayload,
+  SelectionChoice,
 } from '@monky/shared';
 
 export interface BotOptions {
@@ -62,7 +84,21 @@ export interface CommandDefinition {
   name: string;
   description: string;
   options?: CommandOption[];
+  downloadsSound?: boolean;
+  autocomplete?: (
+    ctx: CommandAutocompleteContext
+  ) => CommandAutocompleteChoice[] | Promise<CommandAutocompleteChoice[]>;
   handler: (ctx: CommandContext) => void | Promise<void>;
+}
+
+export interface CommandAutocompleteContext {
+  query: string;
+  optionName: string;
+  args: CommandValues;
+  locale: 'pt-BR' | 'en';
+  serverId: string;
+  readonly settings: BotSettingsContext;
+  signal: AbortSignal;
 }
 
 export interface CommandContext {
@@ -73,6 +109,8 @@ export interface CommandContext {
   invokerNickname: string;
   serverId: string;
   locale: 'pt-BR' | 'en';
+  /** Immutable preferences captured for this invocation, including subsequent prompts. */
+  readonly settings: BotSettingsContext;
   /** Named, typed values: integer and boolean options are not strings. */
   args: CommandValues;
   /** Aborted on cancellation, timeout, disconnection or completion. */
@@ -86,6 +124,8 @@ export interface CommandContext {
   prompt: (form: BotForm) => Promise<BotFormValues | null>;
   /** Ask one private choice; buttons submit immediately, dropdowns require confirmation. */
   choose: (choice: BotChoice) => Promise<string | null>;
+  /** Request one caller-authorized local soundboard download; never downloads on the bot. */
+  downloadSound: (request: SoundDownloadRequest) => Promise<SoundDownloadResult | null>;
   /** Publish durable channel controls, independent of this invocation's lifetime. */
   createSelector: (input: Omit<BotSelectorCreate, 'channelId' | 'invokerId' | 'invocationId'>) => Promise<BotSelector>;
 }
@@ -93,9 +133,16 @@ export interface CommandContext {
 export interface BotChoice {
   title: string;
   description?: string;
-  choices: Array<{ label: string; value: string }>;
+  choices: SelectionChoice[];
   presentation?: 'dropdown' | 'buttons';
   submitLabel?: string;
+}
+
+export type BotSelectorResponseEvent = Omit<BotSelectorRespondedPayload, 'settings'>;
+
+export interface BotSelectorResponseContext {
+  readonly serverId: string;
+  readonly settings: BotSettingsContext;
 }
 
 interface PendingPrompt {
@@ -108,6 +155,19 @@ interface PendingPrompt {
 interface Invocation {
   controller: AbortController;
   prompt: PendingPrompt | null;
+  download: PendingSoundDownload | null;
+  downloadUsed: boolean;
+}
+
+interface PendingSoundDownload {
+  requestId: string;
+  resolve: (result: SoundDownloadResult | null) => void;
+  reject: (error: Error) => void;
+}
+
+interface AutocompleteExecution {
+  controller: AbortController;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface PendingRegistration {
@@ -124,10 +184,13 @@ interface ServerConnection {
   token: string;
   ws: WebSocket | null;
   connected: boolean;
+  botId: string | null;
+  serverSettings: BotServerSettingsSnapshot | undefined;
   disposed: boolean;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   profileRequestId: string | null;
   invocations: Map<string, Invocation>;
+  autocompletes: Map<string, AutocompleteExecution>;
   pendingRegistration: PendingRegistration | null;
   registrationPromise: Promise<void> | null;
 }
@@ -150,6 +213,30 @@ function readMessage(value: unknown): IncomingMessage {
   return { type: value.type, requestId: value.requestId, payload: value.payload };
 }
 
+function freezeData<T>(value: T): T {
+  if (typeof value === 'object' && value !== null) {
+    for (const child of Object.values(value)) freezeData(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function immutableCopy<T>(value: T): T {
+  return freezeData(structuredClone(value));
+}
+
+function checkedSettingsValues(
+  form: BotForm | undefined, values: BotFormValues, scope: 'server' | 'user'
+): BotFormValues {
+  // Server contexts are already resolved: never fill defaults or discard explicit
+  // empty optional values in the exposed data. Normalized values only aid comparisons.
+  const result = form ? validateBotFormValues(form, values) : resolveBotSettingsValues(undefined, values);
+  if (!result.success) {
+    throw new Error(`Invalid bot ${scope} settings: ${result.field} (${result.reason}).`);
+  }
+  return result.values;
+}
+
 /**
  * A bot may serve many servers and many callers concurrently. Each invocation
  * owns its form promise and abort signal; handlers never share conversation state.
@@ -164,6 +251,7 @@ export class BotClient extends EventEmitter {
   private options: BotOptions;
   private profile: BotProfileUpdatePayload = {};
   private commands = new Map<string, CommandDefinition>();
+  private settingsDefinition: BotSettingsDefinition | undefined;
   private connections = new Map<string, ServerConnection>();
   private httpServers = new Set<http.Server>();
   private startingServers = new Set<Promise<http.Server>>();
@@ -189,13 +277,57 @@ export class BotClient extends EventEmitter {
       name: def.name.toLowerCase(),
       description: def.description,
       options: def.options,
+      downloadsSound: def.downloadsSound,
     });
     if (typeof def.handler !== 'function') throw new TypeError('A command handler is required.');
+    if ((def.autocomplete !== undefined && typeof def.autocomplete !== 'function') ||
+        (definition.options?.some((option) => option.autocomplete) && !def.autocomplete)) {
+      throw new TypeError('String options with autocomplete require an autocomplete handler.');
+    }
     if (!this.commands.has(definition.name) && this.commands.size >= LIMITS.MAX_COMMANDS_PER_BOT) {
       throw new Error(`A bot may register at most ${LIMITS.MAX_COMMANDS_PER_BOT} commands.`);
     }
-    this.commands.set(definition.name, { ...definition, handler: def.handler });
+    this.commands.set(definition.name, { ...definition, autocomplete: def.autocomplete, handler: def.handler });
     return this;
+  }
+
+  /** Declare custom settings before connecting or starting a marketplace listener. */
+  settings(definition: BotSettingsDefinition): this {
+    if (this.closing) throw new Error('This bot client has been closed.');
+    if (this.connections.size || this.httpServers.size || this.startingServers.size) {
+      throw new Error('Declare bot settings before connecting or serving; disconnect first to change them.');
+    }
+    this.settingsDefinition = immutableCopy(botSettingsDefinitionSchema.parse(definition));
+    return this;
+  }
+
+  /** The latest shared values, never a caller's personal preferences. */
+  getServerSettings(serverId: string): BotServerSettingsSnapshot | undefined {
+    const conn = this.connections.get(serverId);
+    if (this.closing || !conn?.connected || conn.disposed || conn.ws?.readyState !== WebSocket.OPEN ||
+        !conn.serverSettings) return undefined;
+    return immutableCopy(conn.serverSettings);
+  }
+
+  onSettingsChanged(
+    listener: (snapshot: BotServerSettingsSnapshot, context: { readonly serverId: string }) => void
+  ): () => void {
+    const handler = (snapshot: BotServerSettingsSnapshot, context: { serverId: string }) => {
+      listener(immutableCopy(snapshot), immutableCopy(context));
+    };
+    this.on('settingsChanged', handler);
+    return () => { this.off('settingsChanged', handler); };
+  }
+
+  /** Private responder preferences; these are not part of public selector snapshots. */
+  onSelectorResponse(
+    listener: (event: BotSelectorResponseEvent, context: BotSelectorResponseContext) => void
+  ): () => void {
+    const handler = (event: BotSelectorResponseEvent, context: BotSelectorResponseContext) => {
+      listener(immutableCopy(event), immutableCopy(context));
+    };
+    this.on('selectorResponse', handler);
+    return () => { this.off('selectorResponse', handler); };
   }
 
   async createSelector(serverId: string, input: BotSelectorCreate): Promise<BotSelector> {
@@ -389,10 +521,13 @@ export class BotClient extends EventEmitter {
       serverId, serverUrl, token,
       ws: null,
       connected: false,
+      botId: null,
+      serverSettings: undefined,
       disposed: false,
       reconnectTimer: null,
       profileRequestId: null,
       invocations: new Map(),
+      autocompletes: new Map(),
       pendingMessages: new Map(),
       pendingRegistration: null,
       registrationPromise: null,
@@ -404,6 +539,8 @@ export class BotClient extends EventEmitter {
 
   private openSocket(conn: ServerConnection): void {
     if (conn.disposed || this.connections.get(conn.serverId) !== conn) return;
+    conn.botId = null;
+    conn.serverSettings = undefined;
     const ws = new WebSocket(conn.serverUrl);
     conn.ws = ws;
     const isCurrent = () => conn.ws === ws && !conn.disposed;
@@ -436,6 +573,8 @@ export class BotClient extends EventEmitter {
       if (!isCurrent()) return;
       conn.ws = null;
       conn.connected = false;
+      conn.botId = null;
+      conn.serverSettings = undefined;
       conn.profileRequestId = null;
       this.rejectRegistration(conn, new Error('The connection closed before the bot registration completed.'));
       this.clearInvocations(conn);
@@ -460,6 +599,8 @@ export class BotClient extends EventEmitter {
     const ws = conn.ws;
     conn.ws = null;
     conn.connected = false;
+    conn.botId = null;
+    conn.serverSettings = undefined;
     conn.profileRequestId = null;
     this.rejectRegistration(conn, new Error('The bot registration was interrupted.'));
     this.clearInvocations(conn);
@@ -468,6 +609,7 @@ export class BotClient extends EventEmitter {
   }
 
   private clearInvocations(conn: ServerConnection): void {
+    for (const requestId of conn.autocompletes.keys()) this.clearAutocomplete(conn, requestId);
     for (const [id, request] of this.selectorRequests) {
       if (request.conn !== conn) continue;
       clearTimeout(request.timer);
@@ -475,11 +617,37 @@ export class BotClient extends EventEmitter {
       request.reject(new Error('The bot disconnected before the selector acknowledgement.'));
     }
     for (const invocation of conn.invocations.values()) {
-      invocation.controller.abort();
-      invocation.prompt?.resolve(null);
-      invocation.prompt = null;
+      this.clearInvocation(invocation);
     }
     conn.invocations.clear();
+  }
+
+  private clearInvocation(invocation: Invocation): void {
+    invocation.controller.abort();
+    invocation.prompt?.resolve(null);
+    invocation.prompt = null;
+    invocation.download?.resolve(null);
+    invocation.download = null;
+  }
+
+  private clearAutocomplete(conn: ServerConnection, requestId: string): void {
+    const pending = conn.autocompletes.get(requestId);
+    if (!pending) return;
+    conn.autocompletes.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.controller.abort();
+  }
+
+  private rejectSoundDownload(conn: ServerConnection, requestId: string | undefined, error: Error): boolean {
+    if (!requestId) return false;
+    for (const invocation of conn.invocations.values()) {
+      if (invocation.download?.requestId !== requestId) continue;
+      const pending = invocation.download;
+      invocation.download = null;
+      pending.reject(error);
+      return true;
+    }
+    return false;
   }
 
   private handleMessage(conn: ServerConnection, msg: IncomingMessage): void {
@@ -495,13 +663,76 @@ export class BotClient extends EventEmitter {
       return;
     }
     switch (msg.type) {
+      case MessageType.COMMAND_REGISTERED: {
+        const parsed = commandRegisteredSchema.safeParse(msg.payload);
+        if (!parsed.success) {
+          this.reportError(new Error('The server sent an invalid bot settings registration acknowledgement.'), conn);
+          return;
+        }
+        try {
+          this.updateServerSettings(conn, parsed.data.settings);
+        } catch (error) {
+          this.reportError(error, conn);
+        }
+        return;
+      }
+      case MessageType.BOT_SETTINGS_SNAPSHOT: {
+        const parsed = botSettingsSnapshotSchema.safeParse(msg.payload);
+        if (!parsed.success) {
+          this.reportError(new Error('The server sent an invalid bot settings snapshot.'), conn);
+          return;
+        }
+        const snapshot = parsed.data;
+        if (conn.botId !== null && snapshot.bot.botId !== conn.botId) {
+          this.reportError(new Error('The settings snapshot belongs to another bot.'), conn);
+          return;
+        }
+        if (JSON.stringify(snapshot.definition) !== JSON.stringify(this.settingsDefinition ?? {}) ||
+            snapshot.bot.hasServerSettings !== !!this.settingsDefinition?.server) {
+          this.reportError(new Error('The settings snapshot does not match the bot settings declaration.'), conn);
+          return;
+        }
+        try {
+          this.updateServerSettings(conn, snapshot.server ?? {
+            schemaRevision: snapshot.bot.schemaRevision, revision: snapshot.bot.revision, values: {},
+          });
+        } catch (error) {
+          this.reportError(error, conn);
+        }
+        return;
+      }
+      case MessageType.SELECTOR_RESPONDED: {
+        const parsed = botSelectorRespondedSchema.safeParse(msg.payload);
+        if (!parsed.success) {
+          this.reportError(new Error('The server sent an invalid selector response.'), conn);
+          return;
+        }
+        try {
+          const { settings, ...event } = parsed.data;
+          const context = this.captureSettingsContext(conn, settings);
+          this.emit('selectorResponse', immutableCopy(event),
+            immutableCopy({ serverId: conn.serverId, settings: context }));
+        } catch (error) {
+          this.reportError(error, conn);
+        }
+        return;
+      }
       case MessageType.SELECTOR_SNAPSHOT: {
         const parsed = botSelectorSchema.safeParse(msg.payload);
         if (parsed.success) this.emit('selectorUpdate', { serverId: conn.serverId, selector: parsed.data });
         else this.reportError(new Error('Invalid selector snapshot.'), conn);
         return;
       }
-      case MessageType.AUTH_SUCCESS:
+      case MessageType.AUTH_SUCCESS: {
+        const currentUser = isRecord(msg.payload) ? msg.payload.currentUser : undefined;
+        if (currentUser !== undefined) {
+          const botId = commandRequestIdSchema.safeParse(isRecord(currentUser) ? currentUser.id : undefined);
+          if (!botId.success) {
+            this.reportError(new Error('The server sent an invalid authenticated bot identity.'), conn);
+            return;
+          }
+          conn.botId = botId.data;
+        }
         conn.connected = true;
         if (conn.pendingRegistration) {
           void this.registrationStore.save(conn.pendingRegistration.registration).then(() => {
@@ -524,6 +755,7 @@ export class BotClient extends EventEmitter {
           this.completeAuthentication(conn);
         }
         return;
+      }
       case MessageType.BOT_PROFILE_UPDATED:
         if (conn.profileRequestId && msg.requestId === conn.profileRequestId) {
           conn.profileRequestId = null;
@@ -535,6 +767,7 @@ export class BotClient extends EventEmitter {
       case MessageType.SERVER_ERROR: {
         const error = new Error(isRecord(msg.payload) && typeof msg.payload.message === 'string'
           ? msg.payload.message : 'The Monky server rejected the bot request.');
+        if (this.rejectSoundDownload(conn, msg.requestId, error)) return;
         const pendingMessage = msg.requestId ? conn.pendingMessages.get(msg.requestId) : undefined;
         if (pendingMessage && msg.requestId) {
           clearTimeout(pendingMessage.timer);
@@ -595,6 +828,42 @@ export class BotClient extends EventEmitter {
         void this.runCommand(conn, parsed.data).catch((error) => this.reportError(error, conn));
         return;
       }
+      case MessageType.COMMAND_AUTOCOMPLETE: {
+        const correlation = commandRequestIdSchema.safeParse(msg.requestId);
+        const parsed = commandAutocompleteExecutionSchema.safeParse(msg.payload);
+        if (!correlation.success || !parsed.success) {
+          this.reportError(new Error('The server sent an invalid autocomplete request.'), conn);
+          if (correlation.success && conn.connected) {
+            this.sendToConn(conn, {
+              type: MessageType.COMMAND_AUTOCOMPLETE_RESULT, requestId: correlation.data,
+              payload: { status: 'failed', reason: 'invalid_response' },
+            });
+          }
+          return;
+        }
+        void this.runAutocomplete(conn, correlation.data, parsed.data).catch((error) => this.reportError(error, conn));
+        return;
+      }
+      case MessageType.COMMAND_AUTOCOMPLETE_CANCEL: {
+        const parsed = commandAutocompleteCancelSchema.safeParse(msg.payload);
+        if (parsed.success) this.clearAutocomplete(conn, parsed.data.requestId);
+        else this.reportError(new Error('The server sent an invalid autocomplete cancellation.'), conn);
+        return;
+      }
+      case MessageType.COMMAND_SOUND_DOWNLOAD_RESULT: {
+        const parsed = commandSoundDownloadResultSchema.safeParse(msg.payload);
+        if (!parsed.success) {
+          const error = new Error('The server sent an invalid sound download result.');
+          if (!this.rejectSoundDownload(conn, msg.requestId, error)) this.reportError(error, conn);
+          return;
+        }
+        const invocation = conn.invocations.get(parsed.data.invocationId);
+        const pending = invocation?.download;
+        if (!invocation || !pending || pending.requestId !== msg.requestId) return;
+        invocation.download = null;
+        pending.resolve(parsed.data.result);
+        return;
+      }
       case MessageType.COMMAND_SUBMITTED: {
         const parsed = commandSubmitSchema.safeParse(msg.payload);
         if (!parsed.success) {
@@ -619,9 +888,7 @@ export class BotClient extends EventEmitter {
         const invocation = conn.invocations.get(parsed.data.invocationId);
         if (invocation) {
           conn.invocations.delete(parsed.data.invocationId);
-          invocation.controller.abort();
-          invocation.prompt?.resolve(null);
-          invocation.prompt = null;
+          this.clearInvocation(invocation);
         }
         return;
       }
@@ -703,16 +970,141 @@ export class BotClient extends EventEmitter {
     this.sendToConn(conn, {
       type: MessageType.COMMAND_REGISTER,
       payload: {
-        commands: [...this.commands.values()].map(({ name, description, options }) => ({
-          name, description, options: options ?? [],
+        commands: [...this.commands.values()].map(({ name, description, options, downloadsSound }) => ({
+          name, description, options: options ?? [], downloadsSound,
         })),
+        settings: this.settingsDefinition,
       },
     });
+  }
+
+  private updateServerSettings(conn: ServerConnection, snapshot: BotServerSettingsSnapshot): void {
+    if (!conn.connected || conn.disposed) throw new Error('Bot settings arrived before authentication.');
+    const values = checkedSettingsValues(this.settingsDefinition?.server, snapshot.values, 'server');
+    const current = conn.serverSettings;
+    if (current) {
+      if (snapshot.schemaRevision < current.schemaRevision || snapshot.revision < current.revision) {
+        throw new Error('The server sent a stale bot settings snapshot.');
+      }
+      if (snapshot.schemaRevision === current.schemaRevision && snapshot.revision === current.revision) {
+        if (!isDeepStrictEqual(values, checkedSettingsValues(this.settingsDefinition?.server, current.values, 'server'))) {
+          throw new Error('The server sent conflicting values for the same bot settings revision.');
+        }
+        return;
+      }
+    }
+    conn.serverSettings = immutableCopy(snapshot);
+    this.emit('settingsChanged', immutableCopy(snapshot), Object.freeze({ serverId: conn.serverId }));
+  }
+
+  private captureSettingsContext(conn: ServerConnection, input: BotSettingsContext | undefined): BotSettingsContext {
+    if (!conn.connected || conn.disposed) throw new Error('Bot settings arrived before authentication.');
+    const current = conn.serverSettings;
+    const configured = !!(this.settingsDefinition?.server || this.settingsDefinition?.user);
+    if (input === undefined) {
+      if (configured) throw new Error('The server omitted the bot settings context.');
+      return immutableCopy({
+        schemaRevision: current?.schemaRevision ?? 0, serverRevision: current?.revision ?? 0, server: {}, user: {},
+      });
+    }
+    const parsed = botSettingsContextSchema.safeParse(input);
+    if (!parsed.success) throw new Error('The server sent an invalid bot settings context.');
+    const context = parsed.data;
+    const values = checkedSettingsValues(this.settingsDefinition?.server, context.server, 'server');
+    checkedSettingsValues(this.settingsDefinition?.user, context.user, 'user');
+    if (configured && !current) throw new Error('The bot settings context arrived before settings were hydrated.');
+    if (current) {
+      if (context.schemaRevision !== current.schemaRevision || context.serverRevision !== current.revision) {
+        throw new Error('The bot settings context has stale or inconsistent revisions.');
+      }
+      if (!isDeepStrictEqual(values, checkedSettingsValues(this.settingsDefinition?.server, current.values, 'server'))) {
+        throw new Error('The bot settings context does not match the shared server values.');
+      }
+    }
+    return immutableCopy(context);
+  }
+
+  private async runAutocomplete(
+    conn: ServerConnection, requestId: string, payload: CommandAutocompleteExecutionPayload
+  ): Promise<void> {
+    if (!conn.connected || conn.disposed || conn.autocompletes.has(requestId)) return;
+    const def = this.commands.get(payload.commandName);
+    const option = def?.options?.find((item) => item.name === payload.optionName);
+    const values = validateCommandOptions(def?.options ?? [], payload.options, { partial: true });
+    const sendResult = (result: CommandAutocompleteResultPayload) => {
+      this.sendToConn(conn, { type: MessageType.COMMAND_AUTOCOMPLETE_RESULT, requestId, payload: result });
+    };
+    let settings: BotSettingsContext;
+    try {
+      settings = this.captureSettingsContext(conn, payload.settings);
+    } catch (error) {
+      this.reportError(error, conn);
+      sendResult({ status: 'failed', reason: 'invalid_response' });
+      return;
+    }
+    if (!def?.autocomplete || !option?.autocomplete || option.type !== 'string' || !values.success ||
+        Object.prototype.hasOwnProperty.call(payload.options, payload.optionName)) {
+      sendResult({ status: 'failed', reason: 'invalid_response' });
+      return;
+    }
+    if (conn.autocompletes.size >= LIMITS.MAX_BOT_AUTOCOMPLETE_REQUESTS) {
+      sendResult({ status: 'failed', reason: 'handler_failed' });
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      if (conn.autocompletes.get(requestId) !== pending) return;
+      this.clearAutocomplete(conn, requestId);
+      if (conn.connected && !conn.disposed && conn.ws?.readyState === WebSocket.OPEN) {
+        try {
+          sendResult({ status: 'failed', reason: 'timeout' });
+        } catch (error) {
+          this.reportError(error, conn);
+        }
+      }
+    }, LIMITS.BOT_AUTOCOMPLETE_TIMEOUT_MS);
+    timer.unref();
+    const pending: AutocompleteExecution = { controller, timer };
+    conn.autocompletes.set(requestId, pending);
+    const isCurrent = () => conn.autocompletes.get(requestId) === pending &&
+      conn.connected && !conn.disposed && conn.ws?.readyState === WebSocket.OPEN;
+    try {
+      const ctx: CommandAutocompleteContext = {
+        query: payload.query, optionName: payload.optionName, args: values.values,
+        locale: payload.locale, serverId: conn.serverId, signal: controller.signal, settings,
+      };
+      Object.defineProperty(ctx, 'settings', { writable: false, configurable: false });
+      const choices = await def.autocomplete(ctx);
+      if (!isCurrent()) return;
+      const parsed = commandAutocompleteChoicesSchema.safeParse(choices);
+      sendResult(parsed.success
+        ? { status: 'ok', choices: parsed.data }
+        : { status: 'failed', reason: 'invalid_response' });
+    } catch (error) {
+      if (!isCurrent()) return;
+      this.reportError(error, conn);
+      sendResult({ status: 'failed', reason: 'handler_failed' });
+    } finally {
+      if (conn.autocompletes.get(requestId) === pending) this.clearAutocomplete(conn, requestId);
+    }
   }
 
   private async runCommand(conn: ServerConnection, payload: CommandExecutionPayload): Promise<void> {
     const def = this.commands.get(payload.commandName);
     if (conn.invocations.has(payload.invocationId)) return;
+    let settings: BotSettingsContext;
+    try {
+      if (conn.botId !== null && payload.botId !== conn.botId) {
+        throw new Error('The command invocation belongs to another bot.');
+      }
+      settings = this.captureSettingsContext(conn, payload.settings);
+    } catch (error) {
+      this.sendToConn(conn, {
+        type: MessageType.COMMAND_FINISH, payload: { invocationId: payload.invocationId, failed: true },
+      });
+      this.reportError(error, conn);
+      return;
+    }
     if (!def || conn.invocations.size >= LIMITS.MAX_BOT_INVOCATIONS) {
       this.sendToConn(conn, {
         type: MessageType.COMMAND_FINISH,
@@ -730,7 +1122,9 @@ export class BotClient extends EventEmitter {
       this.reportError(new Error(`Invalid command option: ${validated.field} (${validated.reason}).`), conn);
       return;
     }
-    const invocation: Invocation = { controller: new AbortController(), prompt: null };
+    const invocation: Invocation = {
+      controller: new AbortController(), prompt: null, download: null, downloadUsed: false,
+    };
     conn.invocations.set(payload.invocationId, invocation);
     const requireActive = () => {
       if (invocation.controller.signal.aborted || conn.invocations.get(payload.invocationId) !== invocation) {
@@ -752,11 +1146,35 @@ export class BotClient extends EventEmitter {
       invokerNickname: payload.invokerNickname,
       serverId: conn.serverId,
       locale: payload.locale ?? 'pt-BR',
+      settings,
       args: validated.values,
       signal: invocation.controller.signal,
       reply: (content) => reply(content, true),
       replyEphemeral: (content) => reply(content, true),
       publish: (content) => reply(content, false),
+      downloadSound: (request) => {
+        requireActive();
+        if (!def.downloadsSound || payload.allowSoundDownload !== true) {
+          throw new Error('This command is not authorized to download a local sound.');
+        }
+        if (invocation.downloadUsed) throw new Error('Only one sound download may be requested per invocation.');
+        const input = soundDownloadRequestSchema.parse(request);
+        const requestId = randomUUID();
+        invocation.downloadUsed = true;
+        return new Promise((resolve, reject) => {
+          invocation.download = { requestId, resolve, reject };
+          try {
+            this.sendToConn(conn, {
+              type: MessageType.COMMAND_SOUND_DOWNLOAD,
+              requestId,
+              payload: { invocationId: payload.invocationId, ...input },
+            });
+          } catch (error) {
+            invocation.download = null;
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
+        });
+      },
       createSelector: (input) => {
         requireActive();
         return this.createSelector(conn.serverId, {
@@ -797,6 +1215,7 @@ export class BotClient extends EventEmitter {
         });
       },
     };
+    Object.defineProperty(ctx, 'settings', { writable: false, configurable: false });
     let failed = false;
     try {
       await def.handler(ctx);
@@ -806,9 +1225,7 @@ export class BotClient extends EventEmitter {
     } finally {
       if (conn.invocations.get(payload.invocationId) === invocation) {
         conn.invocations.delete(payload.invocationId);
-        invocation.controller.abort();
-        invocation.prompt?.resolve(null);
-        invocation.prompt = null;
+        this.clearInvocation(invocation);
         if (conn.connected && conn.ws?.readyState === WebSocket.OPEN && !conn.disposed) {
           this.sendToConn(conn, {
             type: MessageType.COMMAND_FINISH,
@@ -993,10 +1410,23 @@ export interface ServeOptions {
   publicHost?: string;
 }
 
-export { MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
-export type { BotSelector, BotSelectorCreate, BotSelectorPatch, BotSelectorPublic } from '@monky/shared';
+export { LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
+export {
+  botSettingsDefinitionSchema, botSettingsContextSchema, botServerSettingsSnapshotSchema,
+  botSettingsSnapshotSchema, botSettingsValuesSchema, botSelectorRespondedSchema, resolveBotSettingsValues,
+} from '@monky/shared';
+export { runBotCli } from './cli';
+export { buildBotPackage, type BuildBotOptions, type BuiltBotPackage } from './tooling/build';
+export type { BotPackageDefinition, GitHubReleaseSource } from './tooling/config';
+export type {
+  BotSelector, BotSelectorCreate, BotSelectorPatch, BotSelectorPublic, BotSelectorRespondedPayload,
+} from '@monky/shared';
 export type {
   BotForm, BotFormField, BotFormValues, BotManifest,
+  BotSettingsDefinition, BotSettingsContext, BotServerSettingsSnapshot, BotSettingsSnapshot, BotSettingsSummary,
+  BotInputResult,
   ChatMessage, ChatReactionEventPayload, MessageReaction,
   SlashCommand, CommandOption, CommandValue, CommandValues, CommandResponsePayload,
+  CommandAutocompleteChoice, SoundDownloadRequest, SoundDownloadResult, SoundDownloadFailureReason,
+  AudioPreviewSource, SelectionChoice,
 } from '@monky/shared';

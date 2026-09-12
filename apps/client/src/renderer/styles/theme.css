@@ -3316,21 +3316,44 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
   gap: 5px;
   min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
   min-height: 30px;
   padding: 3px 5px;
   border: 1px solid var(--border-color);
   border-radius: 5px;
   background: var(--bg-elevated);
 }
-.bot-inline-argument:has(.bot-argument-text) {
-  flex: 1 1 220px;
-}
-.bot-inline-argument:has(.bot-argument-choice) {
-  flex: 0 1 240px;
-}
 .bot-inline-argument.focused,
 .bot-inline-argument:focus-within {
   border-color: var(--accent-primary);
+  box-shadow: 0 0 0 1px var(--accent-primary);
+}
+.bot-inline-argument.invalid {
+  border-color: var(--danger);
+}
+.bot-inline-argument.invalid.focused,
+.bot-inline-argument.invalid:focus-within {
+  box-shadow: 0 0 0 1px var(--danger);
+}
+.bot-argument-size {
+  display: inline-grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  flex: 0 1 auto;
+  font-size: 13px;
+  line-height: 22px;
+}
+.bot-argument-size > * {
+  grid-area: 1 / 1;
+}
+.bot-argument-measure {
+  min-width: 0;
+  height: 0;
+  padding: 0 6px;
+  overflow: hidden;
+  visibility: hidden;
+  white-space: pre;
 }
 .bot-argument-name {
   color: var(--text-secondary);
@@ -3338,11 +3361,11 @@ input:focus, textarea:focus, select:focus {
   font-size: 11px;
   flex-shrink: 0;
 }
+.bot-inline-argument input.bot-argument-input,
 .bot-argument-input,
 .bot-argument-choice {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
-  width: 100%;
   padding: 1px 2px;
   border: 0;
   outline: none;
@@ -3357,8 +3380,15 @@ input:focus, textarea:focus, select:focus {
   min-height: 24px;
   max-height: 72px;
 }
-.bot-argument-number {
-  width: 70px;
+.bot-argument-input {
+  field-sizing: content;
+  width: 100%;
+}
+.bot-argument-input:focus,
+.bot-argument-choice:focus {
+  border: 0;
+  box-shadow: none;
+  outline: none;
 }
 .bot-argument-choice {
   display: flex;
@@ -3390,11 +3420,12 @@ input:focus, textarea:focus, select:focus {
 .bot-parameter-menu {
   position: absolute;
   bottom: calc(100% + 8px);
-  width: 320px;
-  max-width: calc(100% - 8px);
-  max-height: 260px;
-  overflow-y: auto;
-  padding: 5px;
+  left: 0;
+  right: 0;
+  width: 100%;
+  max-height: min(48vh, 360px);
+  overflow: hidden;
+  padding: 0;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   background: var(--bg-panel);
@@ -3402,12 +3433,72 @@ input:focus, textarea:focus, select:focus {
   overscroll-behavior: contain;
   z-index: 61;
 }
+.bot-choice-panel {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.bot-parameter-menu:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+}
+.bot-choice-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 10px;
+  padding: 10px 12px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.bot-choice-list {
+  display: grid;
+  gap: 2px;
+  min-height: 0;
+  max-height: min(42vh, 310px);
+  overflow-y: auto;
+  padding: 0 8px 8px;
+  overscroll-behavior: contain;
+}
+.bot-autocomplete-status {
+  margin: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.bot-local-download-cue {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  margin: 4px 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.bot-sound-download {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+.bot-sound-download small {
+  color: var(--text-muted);
+}
+.bot-sound-download progress {
+  width: 100%;
+  accent-color: var(--accent-primary);
+}
 .bot-parameter-option {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 8px;
+  min-width: 0;
+  padding: 8px 10px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -3415,14 +3506,19 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-primary);
   cursor: pointer;
 }
+.bot-parameter-option:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -2px;
+}
 .bot-parameter-option.active {
   background: var(--bg-elevated);
   box-shadow: inset 2px 0 var(--accent-primary);
 }
-.bot-parameter-option > span {
+.bot-choice-copy {
   display: grid;
   gap: 3px;
   min-width: 0;
+  flex: 1;
 }
 .bot-parameter-option strong {
   font-size: 12px;
@@ -3438,6 +3534,113 @@ input:focus, textarea:focus, select:focus {
   border-radius: 50%;
   object-fit: cover;
 }
+.bot-choice-count {
+  flex-shrink: 0;
+  min-width: 28px;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  text-align: right;
+}
+.bot-choice-audio-controls {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 min(250px, 42%);
+  min-width: min(180px, 100%);
+  margin-left: auto;
+}
+.bot-choice-audio-play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 50%;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.bot-choice-audio-play:focus-visible,
+.bot-preview-volume-control input:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+.bot-preview-volume-control {
+  width: 230px;
+  max-width: 100%;
+  flex-shrink: 0;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.bot-fields > .bot-preview-volume-control {
+  margin-left: auto;
+}
+.bot-choice-audio-timeline {
+  display: grid;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.bot-choice-audio-progress {
+  appearance: none;
+  border: 0;
+  width: 100%;
+  height: 5px;
+  accent-color: var(--accent-primary);
+}
+.bot-choice-audio-progress::-webkit-progress-bar {
+  border-radius: var(--radius-full);
+  background: var(--border-color);
+}
+.bot-choice-audio-progress::-webkit-progress-value {
+  border-radius: var(--radius-full);
+  background: var(--accent-primary);
+}
+.bot-choice-audio-caption {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.bot-choice-audio-time {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+}
+.bot-choice-audio-status {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-field-choice-list .bot-choice-list,
+.public-bot-selector-audio .bot-choice-list {
+  max-height: 260px;
+}
+.bot-field-choice-list .bot-choice-panel,
+.public-bot-selector-audio .bot-choice-panel {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+.public-bot-selector-audio {
+  display: grid;
+  gap: 10px;
+}
+.public-bot-selector-audio [data-selector-disabled="true"] {
+  cursor: default;
+  opacity: 0.65;
+}
+.public-bot-selector-audio [data-selector-confirm] {
+  justify-self: start;
+}
 .bot-inline-argument .toggle-switch:has(input:focus-visible),
 .bot-add-parameters:focus-visible,
 .bot-remove-argument:focus-visible,
@@ -3451,6 +3654,18 @@ input:focus, textarea:focus, select:focus {
   }
   .command-row-bot {
     max-width: 80px;
+  }
+  .bot-parameter-menu {
+    max-height: min(55vh, 420px);
+  }
+  .bot-selection-choice.has-audio {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .bot-choice-audio-controls {
+    flex: 1 1 100%;
+    min-width: 0;
+    margin-left: 0;
   }
 }
 .bot-interaction-card {
@@ -3616,7 +3831,7 @@ input:focus, textarea:focus, select:focus {
   overflow-wrap: anywhere;
 }
 .bot-error {
-  color: var(--danger-color);
+  color: var(--danger);
   font-size: 12px;
   line-height: 1.5;
   margin: 8px 0;
@@ -3645,6 +3860,111 @@ input:focus, textarea:focus, select:focus {
 .bot-profile-editor h3 {
   margin: 0 0 10px;
   font-size: 14px;
+}
+
+.modal-card.bot-settings-card {
+  width: min(740px, calc(100vw - 32px));
+  max-width: 740px;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+.bot-settings-card .modal-header,
+.bot-settings-card .modal-footer {
+  flex-shrink: 0;
+}
+.bot-settings-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.bot-settings-list {
+  display: grid;
+  gap: 8px;
+}
+.bot-settings-entry {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 14px;
+  text-align: left;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.bot-settings-entry:hover,
+.bot-settings-entry:focus-visible {
+  border-color: var(--accent-primary);
+}
+.bot-settings-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.bot-settings-identity img,
+.bot-settings-entry img {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.bot-settings-name {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.bot-settings-server,
+.bot-settings-description,
+.bot-settings-presence {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.bot-settings-entry .bot-settings-presence {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.bot-settings-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 16px 0;
+}
+.bot-settings-tabs [aria-selected="true"] {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+  background: var(--bg-hover);
+}
+.bot-settings-card .bot-choice-buttons [aria-pressed="true"] {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+  background: var(--bg-hover);
+}
+.bot-settings-form fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.bot-settings-host-preference {
+  margin: 16px 0;
+}
+.bot-settings-card .modal-footer {
+  flex-wrap: wrap;
+}
+.bot-settings-card [data-settings-save] {
+  margin-left: auto;
+}
+.bot-settings-card .bot-field[aria-invalid="true"] .input-field {
+  border-color: var(--danger);
+}
+.bot-settings-card .bot-settings-message {
+  min-height: 1.5em;
+  margin-top: 12px;
 }
 .bot-profile-editor > label {
   display: block;
@@ -6827,6 +7147,52 @@ button[data-loading="1"]::after {
   line-height: 1.5;
   color: var(--text-secondary);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.dialog-text-field {
+  display: grid;
+  gap: 7px;
+  margin-top: 16px;
+  font-size: 13px;
+}
+
+.dialog-text-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dialog-text-input-row input {
+  min-width: 0;
+  flex: 1;
+}
+
+.dialog-text-input-row input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.dialog-text-suffix {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+}
+
+.dialog-text-field small,
+.dialog-option-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.dialog-option-hint {
+  margin: 8px 0 0;
+}
+
+.dialog-input-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
 }
 
 /* Opt-out checkbox of a confirmation dialog, e.g. "não perguntar novamente" (#334). */

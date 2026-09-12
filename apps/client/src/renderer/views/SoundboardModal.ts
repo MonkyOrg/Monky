@@ -7,7 +7,7 @@ import { voiceStore } from '../stores/voiceStore';
 import { appEvents } from '../core/EventBus';
 import { t, tCount } from '../i18n';
 import { captureShortcut, shortcutIdentity } from '../utils/keybind';
-import { showConfirm } from './Dialog';
+import { showAlert, showConfirm } from './Dialog';
 import { enableBackdropClose } from '../utils/modal';
 import { matchesSearch as matchesSoundSearch } from '../utils/search';
 
@@ -487,9 +487,12 @@ export class SoundboardModal {
     });
 
     const handleChangeFolder = async () => {
-      const folder = await soundboardService.selectFolder();
+      let folder: string | null;
+      try { folder = await soundboardService.selectFolder(); } catch {
+        if (this.modalEl) await showAlert({ message: t('botChat.downloadWriteFailed'), variant: 'danger' });
+        return;
+      }
       if (folder) {
-        await soundboardService.loadSounds();
         const sounds = soundboardService.getSounds();
         this.refreshGrid();
         const folderLabel = this.modalEl?.querySelector('#sb-folder-path-label');
@@ -597,6 +600,12 @@ export class SoundboardModal {
   }
 
   private setupPlaybackListeners(): void {
+    this.unbindEvents.push(appEvents.on('soundboard.sounds_loaded', () => {
+      if (!this.modalEl) return;
+      this.refreshGrid();
+      const count = this.modalEl.querySelector('#sb-sound-count');
+      if (count) count.textContent = tCount('soundboard.soundCount', soundboardService.getSounds().length);
+    }));
     // The progress bars themselves now live in the sidebar (#517); what is left
     // here is keeping the grid in sync with what is playing.
     const onPlaybackStarted = () => this.updateActiveButtons();

@@ -117,6 +117,11 @@ export class BotService {
     return records.map((r) => this.toBotInfo(r));
   }
 
+  async getInfo(botId: string): Promise<BotInfo | null> {
+    const record = await this.botRepo.findById(botId);
+    return record ? this.toBotInfo(record) : null;
+  }
+
   async updateProfile(botId: string, profile: unknown): Promise<BotProfileResult> {
     const parsed = botProfileUpdateSchema.safeParse(profile);
     if (!parsed.success) {

@@ -30,6 +30,7 @@ export function renderCommandCatalog(groups: CommandGroup[], activeIndex: number
         <div class="command-row-copy">
           <div class="command-row-title"><strong>/${escapeHtml(command.name)}</strong>${renderCommandParameters(command)}</div>
           <div class="command-row-description">${escapeHtml(command.description)}</div>
+          ${command.downloadsSound ? `<div class="bot-local-download-cue">${t('botChat.localDownload')}</div>` : ''}
         </div>
         <span class="command-row-bot">${escapeHtml(command.botName)}</span>
       </div>`;

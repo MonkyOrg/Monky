@@ -24,6 +24,7 @@ export interface ActiveSoundPlayback {
 
 export class SoundboardService {
   private sounds: SoundItem[] = [];
+  private loadGeneration = 0;
   private sinkId: string = settingsStore.selectedSpeakerId;
   private activePlaybacks: Map<string, ActiveSoundPlayback> = new Map();
 
@@ -102,6 +103,7 @@ export class SoundboardService {
   }
 
   public async loadSounds(): Promise<SoundItem[]> {
+    const generation = ++this.loadGeneration;
     const folder = settingsStore.soundboardFolderPath;
     if (!folder || !window.api?.listSoundboardSounds) {
       this.sounds = [];
@@ -110,11 +112,14 @@ export class SoundboardService {
     }
 
     try {
-      this.sounds = await window.api.listSoundboardSounds(folder);
+      const sounds = await window.api.listSoundboardSounds(folder);
+      if (generation !== this.loadGeneration || folder !== settingsStore.soundboardFolderPath) return this.sounds;
+      this.sounds = sounds;
       appEvents.emit('soundboard.sounds_loaded', this.sounds);
       this.syncShortcuts();
       return this.sounds;
     } catch (err) {
+      if (generation !== this.loadGeneration || folder !== settingsStore.soundboardFolderPath) return this.sounds;
       console.warn('[SoundboardService] Error loading sounds from folder:', err);
       this.sounds = [];
       appEvents.emit('soundboard.sounds_loaded', this.sounds);
@@ -237,7 +242,7 @@ export class SoundboardService {
   }
 
   public async selectFolder(): Promise<string | null> {
-    if (!window.api?.selectSoundboardFolder) return null;
+    if (!window.api?.selectSoundboardFolder) throw new Error(t('botChat.downloadDesktopOnly'));
     const folder = await window.api.selectSoundboardFolder();
     if (folder) {
       settingsStore.soundboardFolderPath = folder;

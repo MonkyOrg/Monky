@@ -7,6 +7,18 @@ import { currentEventOrigin } from '../core/sessionRouting';
 import type { ServerStore } from '../stores/serverStore';
 import { getLanguage, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { audioPreviewService } from '../core/AudioPreviewService';
+import { botUserSettingsPayload } from '../utils/botSettingsContext';
+import {
+  choicesHaveAudio,
+  renderSelectionChoiceList,
+  type RenderableSelectionChoice,
+} from '../utils/selectionChoices';
+
+function parsePublicSelector(input: unknown): BotSelectorPublic | null {
+  const parsed = botSelectorPublicSchema.safeParse(input);
+  return parsed.success ? parsed.data : null;
+}
 
 /** Channel controls are rebuilt from server snapshots, never invocation memory. */
 export class PublicSelectorView {
@@ -14,6 +26,7 @@ export class PublicSelectorView {
   private drafts = new Map<string, string>();
   private pending = new Set<string>();
   private errors = new Map<string, string>();
+  private rendered = new Map<string, string>();
   private unbind: Array<() => void> = [];
   private observer: MutationObserver;
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -28,17 +41,19 @@ export class PublicSelectorView {
   ) {
     this.feed.addEventListener('click', this.onClick);
     this.feed.addEventListener('change', this.onChange);
+    this.feed.addEventListener('keydown', this.onKeyDown);
+    this.unbind.push(audioPreviewService.bind(feed));
     this.unbind.push(
       appEvents.on('message.SELECTOR_SNAPSHOT', (payload: unknown) => {
         if (!this.isOrigin()) return;
-        const result = botSelectorPublicSchema.safeParse(payload);
-        if (result.success && result.data.channelId === channelId) {
-          this.snapshots.set(result.data.id, result.data);
+        const result = parsePublicSelector(payload);
+        if (result && result.channelId === channelId) {
+          this.snapshots.set(result.id, result);
           this.refresh();
         }
       }),
       appEvents.on('network.connected', () => { if (this.isOrigin()) void this.load(); }),
-      appEvents.on('network.status', () => { if (this.isOrigin()) this.refresh(); }),
+      appEvents.on('network.status', () => { if (this.isOrigin()) { audioPreviewService.release(this.feed); this.refresh(); } }),
       appEvents.on('server.updated', () => { if (this.isOrigin()) { this.refresh(); void this.load(); } }),
       appEvents.on('server.roles_updated', () => { if (this.isOrigin()) { this.refresh(); void this.load(); } }),
     );
@@ -65,8 +80,8 @@ export class PublicSelectorView {
       this.feed.querySelector('[data-selector-load-error]')?.remove();
       this.snapshots.clear();
       for (const entry of result.selectors) {
-        const parsed = botSelectorPublicSchema.safeParse(entry);
-        if (parsed.success && parsed.data.channelId === this.channelId) this.snapshots.set(parsed.data.id, parsed.data);
+        const parsed = parsePublicSelector(entry);
+        if (parsed && parsed.channelId === this.channelId) this.snapshots.set(parsed.id, parsed);
       }
       this.refresh();
     } catch (error: unknown) {
@@ -89,7 +104,12 @@ export class PublicSelectorView {
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
     this.expiryTimer = null;
     for (const controls of this.feed.querySelectorAll<HTMLElement>('[data-public-selector]')) {
-      if (!this.snapshots.has(controls.dataset.publicSelector ?? '')) controls.remove();
+      const id = controls.dataset.publicSelector ?? '';
+      if (!this.snapshots.has(id)) {
+        audioPreviewService.release(controls);
+        controls.remove();
+        this.rendered.delete(id);
+      }
     }
     let nextExpiry = Infinity;
     for (const selector of this.snapshots.values()) {
@@ -102,6 +122,7 @@ export class PublicSelectorView {
       if (question && question.textContent !== selector.title) question.textContent = selector.title;
       let controls = body.querySelector<HTMLElement>('[data-public-selector]');
       if (!controls) {
+        this.rendered.delete(selector.id);
         controls = document.createElement('section');
         controls.dataset.publicSelector = selector.id;
         controls.className = 'bot-inline-form public-bot-selector';
@@ -117,7 +138,28 @@ export class PublicSelectorView {
         this.server.hasPermission(Permission.SEND_MESSAGES) && this.server.hasPermission(Permission.USE_BOT_COMMANDS);
       const disabled = closed || !permitted || !selector.canRespond || this.pending.has(selector.id);
       const selected = this.drafts.get(selector.id) ?? selector.ownResponse ?? selector.choices[0]?.value ?? '';
-      const choices = selector.presentation === 'buttons'
+      const renderKey = JSON.stringify([selector, selected, disabled, closed, this.errors.get(selector.id), getLanguage()]);
+      if (this.rendered.get(selector.id) === renderKey) continue;
+      const selectorChoices: RenderableSelectionChoice[] = selector.choices.map((choice) => ({
+        ...choice, count: selector.counts[choice.value] ?? 0,
+      }));
+      const hasAudio = choicesHaveAudio(selectorChoices);
+      const choices = hasAudio
+        ? `<div class="public-bot-selector-audio" data-selector-presentation="${selector.presentation}">
+          ${renderSelectionChoiceList({
+            choices: selectorChoices,
+            selectedValue: selected,
+            label: t('botSelector.choose'),
+            header: t('botSelector.choose'),
+            idPrefix: `public-selector-${selector.id}`,
+            keyPrefix: `selector:${selector.id}`,
+            volumeScope: JSON.stringify(['selector', this.server.serverDetails?.id, selector.id]),
+            optionAttributes: (choice) => `data-selector-value="${escapeHtml(choice.value)}" ${disabled ? 'aria-disabled="true" data-selector-disabled="true"' : ''}`,
+          })}
+          ${selector.presentation === 'dropdown' ? `<button type="button" class="btn btn-primary" data-selector-confirm ${disabled ? 'disabled' : ''}>
+            ${escapeHtml(t('common.confirm'))}</button>` : ''}
+        </div>`
+        : selector.presentation === 'buttons'
         ? `<div class="bot-choice-buttons">${selector.choices.map((choice) =>
           `<button type="button" class="btn ${selector.ownResponse === choice.value ? 'btn-primary' : 'btn-secondary'}"
             data-selector-value="${escapeHtml(choice.value)}" aria-pressed="${selector.ownResponse === choice.value}"
@@ -144,18 +186,21 @@ export class PublicSelectorView {
           : t('botSelector.responses', { count: selector.responseCount })}</p>
         <p class="bot-field-description">${escapeHtml(conditions)}</p>
         <p class="bot-error" role="alert" ${this.errors.has(selector.id) ? '' : 'hidden'}>${escapeHtml(this.errors.get(selector.id) ?? '')}</p>`;
-      if (controls.innerHTML !== html) {
+      if (this.rendered.get(selector.id) !== renderKey) {
         const focused = document.activeElement instanceof HTMLElement && controls.contains(document.activeElement)
           ? document.activeElement : null;
         const focusedValue = focused?.dataset.selectorValue;
         const wasDropdown = focused?.hasAttribute('data-selector-dropdown');
+        audioPreviewService.release(controls);
         controls.innerHTML = html;
+        this.rendered.set(selector.id, renderKey);
         const target = wasDropdown ? controls.querySelector<HTMLElement>('[data-selector-dropdown]')
           : [...controls.querySelectorAll<HTMLElement>('[data-selector-value]')]
             .find((element) => element.dataset.selectorValue === focusedValue);
         if (focused && target) target.focus();
       }
     }
+    audioPreviewService.prune(this.feed);
     if (Number.isFinite(nextExpiry)) {
       this.expiryTimer = setTimeout(() => this.refresh(), Math.min(2_147_483_647, Math.max(1, nextExpiry - Date.now())));
     }
@@ -169,14 +214,41 @@ export class PublicSelectorView {
 
   private onClick = (event: MouseEvent): void => {
     if (!(event.target instanceof Element)) return;
-    const button = event.target.closest<HTMLButtonElement>('button[data-selector-value],button[data-selector-confirm]');
-    if (!button || button.disabled) return;
-    const controls = button.closest<HTMLElement>('[data-public-selector]');
+    if (event.defaultPrevented || audioPreviewService.ownsEventTarget(event.target)) return;
+    const target = event.target.closest<HTMLElement>('[data-selector-value],[data-selector-confirm]');
+    if (!target || target.dataset.selectorDisabled === 'true' ||
+        (target instanceof HTMLButtonElement && target.disabled)) return;
+    const controls = target.closest<HTMLElement>('[data-public-selector]');
     const id = controls?.dataset.publicSelector;
-    const value = button.dataset.selectorValue ?? controls?.querySelector<HTMLSelectElement>('select')?.value;
-    if (!id || value === undefined) return;
+    const selector = id ? this.snapshots.get(id) : undefined;
+    if (!id || !selector) return;
+    const value = target.dataset.selectorValue ?? controls?.querySelector<HTMLSelectElement>('select')?.value
+      ?? this.drafts.get(id) ?? selector.ownResponse ?? selector.choices[0]?.value;
+    if (value === undefined) return;
     event.preventDefault();
+    if (target.dataset.selectorValue !== undefined && selector?.presentation === 'dropdown') {
+      this.drafts.set(id, value);
+      this.refresh();
+      return;
+    }
     void this.respond(id, value);
+  };
+
+  private onKeyDown = (event: KeyboardEvent): void => {
+    if (!(event.target instanceof HTMLElement) || audioPreviewService.ownsEventTarget(event.target)) return;
+    const option = event.target.closest<HTMLElement>('[data-selector-value]');
+    if (!option || option.dataset.selectorDisabled === 'true') return;
+    const options = [...(option.parentElement?.querySelectorAll<HTMLElement>('[data-selector-value]:not([data-selector-disabled="true"])') ?? [])];
+    const index = options.indexOf(option);
+    if (index < 0) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight' || event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+      event.preventDefault();
+      const next = (index + ((event.key === 'ArrowDown' || event.key === 'ArrowRight') ? 1 : -1) + options.length) % options.length;
+      options[next]?.focus();
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      option.click();
+    }
   };
 
   private async respond(id: string, value: string): Promise<void> {
@@ -185,9 +257,13 @@ export class PublicSelectorView {
     this.errors.delete(id);
     this.refresh();
     try {
-      const result = await this.client.sendRequest<unknown>(MessageType.SELECTOR_RESPOND, { id, value });
-      const parsed = botSelectorPublicSchema.parse(result);
+      const selector = this.snapshots.get(id);
+      if (!selector) throw new Error(t('botSelector.responseFailed'));
+      const result = await this.client.sendRequest<unknown>(MessageType.SELECTOR_RESPOND,
+        { id, value, ...botUserSettingsPayload(this.client, this.server, selector.botId) });
+      const parsed = parsePublicSelector(result);
       if (this.destroyed) return;
+      if (!parsed) throw new Error(t('botSelector.responseFailed'));
       this.snapshots.set(id, parsed);
       this.drafts.delete(id);
     } catch (error: unknown) {
@@ -203,10 +279,13 @@ export class PublicSelectorView {
     this.observer.disconnect();
     this.feed.removeEventListener('click', this.onClick);
     this.feed.removeEventListener('change', this.onChange);
+    this.feed.removeEventListener('keydown', this.onKeyDown);
     for (const unbind of this.unbind) unbind();
+    audioPreviewService.release(this.feed);
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
     this.snapshots.clear();
     this.drafts.clear();
     this.errors.clear();
+    this.rendered.clear();
   }
 }

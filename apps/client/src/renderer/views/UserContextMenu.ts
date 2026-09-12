@@ -3,7 +3,7 @@ import { escapeHtml } from '../utils/html';
 import { avatarFileExtension, getAvatarUrl } from '../utils/avatar';
 import { renderRoleOption } from '../utils/roleOption';
 import { settingsStore } from '../stores/settingsStore';
-import { serverStore } from '../stores/serverStore';
+import { getActiveServerStore, serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { voiceStore } from '../stores/voiceStore';
 import { getVoiceControlModeration, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
@@ -15,6 +15,7 @@ import { showAlert } from './Dialog';
 import { downloadLightboxFile, lightboxModal } from './LightboxModal';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
 import { t } from '../i18n';
+import { botSettingsMenuItem } from './BotSettingsModal';
 
 export class UserContextMenu {
   private menuEl: HTMLElement | null = null;
@@ -71,6 +72,11 @@ export class UserContextMenu {
       </div>
 
       <div class="context-menu-divider"></div>
+
+      ${user.isBot ? `<button type="button" class="btn btn-secondary" data-action="bot-settings">
+        <span class="material-symbols-outlined md-18" aria-hidden="true">settings</span>
+        ${t('botSettings.title')}
+      </button>` : ''}
 
       ${isSelf ? `
       <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -393,6 +399,14 @@ export class UserContextMenu {
 
   private attachEvents(user: UserSummary): void {
     if (!this.menuEl) return;
+
+    if (user.isBot) {
+      const settingsAction = botSettingsMenuItem(user.id, getActiveNetworkClient(), getActiveServerStore());
+      this.menuEl.querySelector('[data-action="bot-settings"]')?.addEventListener('click', () => {
+        this.close();
+        settingsAction.onClick();
+      });
+    }
 
     for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
       this.unbindGlobalListeners.push(appEvents.on(event, () => this.close()));

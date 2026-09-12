@@ -6,7 +6,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { WebSocketServer } = require('ws');
-const { BotClient, MessageType, PROTOCOL_VERSION, ProtocolErrorCode } = require('../dist/index.js');
+const {
+  BotClient, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, resolveBotSettingsValues,
+} = require('../dist/index.js');
 
 const form = {
   title: 'Your choice',
@@ -62,6 +64,7 @@ async function makeServer(t, handlers = {}) {
     url: `ws://127.0.0.1:${server.address().port}`,
     next,
     frames,
+    disconnect: () => socket.close(),
     startClosing: () => { socket.pause(); socket.close(); },
     resumeClosing: () => socket.resume(),
     send: (type, payload, requestId) => socket.send(JSON.stringify({ type, payload, requestId })),
@@ -84,6 +87,62 @@ function makeBot(t, server, options = {}) {
   t.after(() => bot.close());
   return { bot, errors };
 }
+
+test('selection metadata is preserved in command choices, autocomplete, forms and selectors', { timeout: 10000 }, async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const preview = { url: 'https://cdn.example.test/effect.mp3', fileName: 'effect.mp3', durationMs: 1200 };
+  const choice = { label: 'Effect', value: 'effect', description: 'Short effect', audio: preview };
+  let selected;
+  let selector;
+  bot.command({
+    name: 'sound', description: 'Sound',
+    options: [
+      { name: 'static', description: 'Static', type: 'string', required: true, choices: [choice] },
+      { name: 'query', description: 'Query', type: 'string', autocomplete: true },
+    ],
+    autocomplete: async () => [{ ...choice, value: `/instant/${'a'.repeat(503)}` }],
+    handler: async (ctx) => {
+      selected = await ctx.choose({ title: 'Pick', choices: [choice], presentation: 'buttons' });
+      selector = await ctx.createSelector({
+        id: 'sound-selector', title: 'Pick publicly', choices: [choice],
+        presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 1,
+      });
+    },
+  });
+  const connected = once(bot, 'connected');
+  bot.connect({ serverId: 'selection-server' });
+  await connected;
+
+  const registered = await server.next(MessageType.COMMAND_REGISTER);
+  assert.deepEqual(registered.payload.commands[0].options[0].choices[0], choice);
+
+  server.send(MessageType.COMMAND_AUTOCOMPLETE, {
+    commandName: 'sound', optionName: 'query', query: 'eff', options: { static: 'effect' }, locale: 'en',
+  }, 'autocomplete-one');
+  assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload, {
+    status: 'ok', choices: [{ ...choice, value: `/instant/${'a'.repeat(503)}` }],
+  });
+
+  server.invoke('caller-one', 'sound', { options: { static: 'effect' } });
+  const prompt = await server.next(MessageType.COMMAND_PROMPT);
+  assert.deepEqual(prompt.payload.form.fields[0].choices[0], choice);
+  server.send(MessageType.COMMAND_SUBMITTED, {
+    invocationId: 'caller-one', interactionId: prompt.payload.interactionId, values: { choice: 'effect' },
+  });
+  const created = await server.next(MessageType.SELECTOR_CREATE);
+  assert.deepEqual(created.payload.choices[0], choice);
+  const { invocationId, ...selectorDefinition } = created.payload;
+  const snapshot = {
+    ...selectorDefinition, botId: 'bot-one', messageId: 'selector-message',
+    createdAt: 1, closedAt: null, responses: {}, resultMessageId: null, sourceInvocationId: invocationId,
+  };
+  server.send(MessageType.SELECTOR_SNAPSHOT, snapshot, created.requestId);
+  assert.equal((await server.next(MessageType.COMMAND_FINISH)).payload.failed, false);
+  assert.equal(selected, 'effect');
+  assert.deepEqual(selector.choices[0], choice);
+  assert.deepEqual(errors, []);
+});
 
 function registrationFile(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-sdk-registrations-'));
@@ -765,4 +824,906 @@ test('a protocol mismatch can recover after the server is updated', { timeout: 1
   assert.equal(bot.serverCount, 1);
   assert.equal(errors.length, 1);
   assert.match(errors[0].message, /Update the server/);
+});
+
+const autocompleteOptions = [
+  { name: 'sound', description: 'Sound', type: 'string', autocomplete: true, required: true },
+  { name: 'count', description: 'Count', type: 'integer', min: 0, max: 10 },
+  { name: 'enabled', description: 'Enabled', type: 'boolean' },
+];
+const soundDownloadRequest = { url: 'https://example.com/sound.mp3', fileName: 'sound.mp3', title: 'Sound' };
+
+function autocompleteRequest(query, options = {}) {
+  return { commandName: 'search', optionName: 'sound', query, options, locale: 'en' };
+}
+
+async function sdkBarrier(server) {
+  server.send(MessageType.PING, {});
+  await server.next(MessageType.PONG);
+}
+
+test('autocomplete registration and callbacks preserve typed partial options without invoking commands', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  assert.throws(() => bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions, handler: () => {},
+  }), /autocomplete handler/);
+  const value = `/instant/${'x'.repeat(503)}`;
+  let context;
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions, downloadsSound: true,
+    autocomplete: (ctx) => {
+      context = ctx;
+      return [{ label: 'Sound', value, description: 'Audio' }];
+    },
+    handler: () => assert.fail('Autocomplete must not invoke the command'),
+  });
+  bot.connect({ serverId: 'autocomplete-server' });
+  const registration = await server.next(MessageType.COMMAND_REGISTER);
+  assert.equal(registration.payload.commands[0].downloadsSound, true);
+  assert.equal(registration.payload.commands[0].options[0].autocomplete, true);
+  assert.equal('autocomplete' in registration.payload.commands[0], false);
+  server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('hello', { count: 0, enabled: false }), 'query');
+  const result = await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT);
+  assert.equal(result.requestId, 'query');
+  assert.deepEqual(result.payload, { status: 'ok', choices: [{ label: 'Sound', value, description: 'Audio' }] });
+  assert.equal(context.query, 'hello');
+  assert.equal(context.optionName, 'sound');
+  assert.equal(context.locale, 'en');
+  assert.equal(context.serverId, 'autocomplete-server');
+  assert.deepEqual(context.args, { count: 0, enabled: false });
+  assert.equal(context.signal.aborted, true);
+  assert.equal('invokerId' in context, false);
+  assert.equal('downloadSound' in context, false);
+  assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_FINISH), false);
+  assert.deepEqual(errors, []);
+});
+
+test('autocomplete cancellation and disconnect isolate identical request IDs across servers and suppress late results', async (t) => {
+  const first = await makeServer(t);
+  const second = await makeServer(t);
+  const { bot, errors } = makeBot(t, first);
+  const pending = new Map();
+  let count = 0;
+  let ready;
+  let thirdReady;
+  const bothStarted = new Promise((resolve) => { ready = resolve; });
+  const thirdStarted = new Promise((resolve) => { thirdReady = resolve; });
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions, handler: () => {},
+    autocomplete: (ctx) => new Promise((resolve) => {
+      pending.set(ctx.serverId, { ctx, resolve });
+      count += 1;
+      if (count === 2) ready();
+      if (count === 3) thirdReady();
+    }),
+  });
+  bot.connect({ serverId: 'first' });
+  bot.connect({ serverId: 'second', serverUrl: second.url });
+  await Promise.all([first.next(MessageType.COMMAND_REGISTER), second.next(MessageType.COMMAND_REGISTER)]);
+  first.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('first'), 'same');
+  second.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('second'), 'same');
+  await bothStarted;
+  first.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('duplicate'), 'same');
+  first.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: 'same' });
+  await sdkBarrier(first);
+  assert.equal(count, 2, 'A duplicate correlation must not launch another callback.');
+  assert.equal(pending.get('first').ctx.signal.aborted, true);
+  assert.equal(pending.get('second').ctx.signal.aborted, false);
+  pending.get('first').resolve([{ label: 'Old', value: 'old' }]);
+  pending.get('second').resolve([{ label: 'Current', value: 'current' }]);
+  assert.equal((await second.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload.choices[0].value, 'current');
+  await sdkBarrier(first);
+  assert.equal(first.frames.some((frame) => frame.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT), false);
+  first.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('disconnect'), 'disconnected');
+  await thirdStarted;
+  bot.disconnect('first');
+  assert.equal(pending.get('first').ctx.signal.aborted, true);
+  pending.get('first').resolve([]);
+  await sdkBarrier(second);
+  assert.deepEqual(errors, []);
+});
+
+test('autocomplete reports source errors, rejects invalid choices and bounds its own timeout', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  let timedContext;
+  let finish;
+  let started;
+  const began = new Promise((resolve) => { started = resolve; });
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions, handler: () => {},
+    autocomplete: (ctx) => {
+      if (ctx.query === 'throw') throw new Error('Source failed');
+      if (ctx.query === 'invalid') return [{ label: 'Duplicate', value: 'same' }, { label: 'Duplicate', value: 'same' }];
+      if (ctx.query === 'empty') return [];
+      timedContext = ctx;
+      started();
+      return new Promise((resolve) => { finish = resolve; });
+    },
+  });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  for (const [query, expected] of [
+    ['throw', { status: 'failed', reason: 'handler_failed' }],
+    ['invalid', { status: 'failed', reason: 'invalid_response' }],
+    ['empty', { status: 'ok', choices: [] }],
+  ]) {
+    server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest(query), query);
+    assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload, expected);
+  }
+  server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('bad args', { sound: 'edited option' }), 'invalid-option');
+  assert.equal((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload.reason, 'invalid_response');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('timeout'), 'timed');
+    await began;
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_TIMEOUT_MS);
+    const expired = await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT);
+    assert.deepEqual(expired.payload, { status: 'failed', reason: 'timeout' });
+    assert.equal(timedContext.signal.aborted, true);
+    finish([{ label: 'Late', value: 'late' }]);
+    await sdkBarrier(server);
+    assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT), false);
+  } finally {
+    t.mock.timers.reset();
+  }
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /Source failed/);
+});
+
+test('sound downloads await structured outcomes, remain private and consume one request per invocation', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  t.mock.method(globalThis, 'fetch', () => assert.fail('The SDK must not download audio'));
+  const outcomes = new Map();
+  bot.command({
+    name: 'download', description: 'Download', downloadsSound: true,
+    handler: async (ctx) => {
+      const pending = ctx.downloadSound(soundDownloadRequest);
+      assert.throws(() => ctx.downloadSound(soundDownloadRequest), /Only one/);
+      const result = await pending;
+      outcomes.set(ctx.invocationId, result);
+      assert.throws(() => ctx.downloadSound(soundDownloadRequest), /Only one/);
+      if (result) ctx.reply(result.status);
+    },
+  });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  assert.equal(LIMITS.MAX_SOUNDBOARD_FILE_SIZE, 3 * 1024 * 1024);
+  assert.equal('downloadSound' in bot, false);
+  const results = [
+    { status: 'downloaded' }, { status: 'exists' },
+    { status: 'failed', reason: 'too_large' }, { status: 'cancelled' },
+    { status: 'failed', reason: 'timeout' },
+  ];
+  for (const [index, result] of results.entries()) {
+    const invocationId = `download-${index}`;
+    server.invoke(invocationId, 'download', { allowSoundDownload: true });
+    const request = await server.next(MessageType.COMMAND_SOUND_DOWNLOAD);
+    assert.deepEqual(request.payload, { ...soundDownloadRequest, invocationId });
+    assert.ok(request.requestId);
+    assert.equal(outcomes.has(invocationId), false);
+    assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_FINISH && frame.payload.invocationId === invocationId), false);
+    server.send(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+      invocationId: 'forged-invocation', downloadId: 'download-id', result,
+    }, request.requestId);
+    await sdkBarrier(server);
+    assert.equal(outcomes.has(invocationId), false);
+    server.send(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, { invocationId, downloadId: 'download-id', result }, request.requestId);
+    const response = await server.next(MessageType.COMMAND_RESPONSE);
+    assert.equal(response.payload.ephemeral, true);
+    assert.equal(response.payload.content, result.status);
+    await server.next(MessageType.COMMAND_FINISH);
+    assert.deepEqual(outcomes.get(invocationId), result);
+  }
+  assert.deepEqual(errors, []);
+});
+
+test('sound downloads reject missing consent, invalid metadata and server errors without leaking another invocation', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  let context;
+  bot.command({
+    name: 'download', description: 'Download', downloadsSound: true,
+    handler: async (ctx) => {
+      context = ctx;
+      assert.throws(() => ctx.downloadSound({ ...soundDownloadRequest, fileName: '..\\escape.mp3' }));
+      await ctx.downloadSound(soundDownloadRequest);
+    },
+  });
+  bot.command({
+    name: 'plain', description: 'Not a downloader',
+    handler: async (ctx) => { await ctx.downloadSound(soundDownloadRequest); },
+  });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  for (const [invocationId, commandName, extra] of [
+    ['no-consent', 'download', {}], ['undeclared', 'plain', { allowSoundDownload: true }],
+  ]) {
+    server.invoke(invocationId, commandName, extra);
+    assert.equal((await server.next(MessageType.COMMAND_FINISH)).payload.failed, true);
+    assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_SOUND_DOWNLOAD), false);
+  }
+  server.invoke('denied', 'download', { allowSoundDownload: true });
+  const request = await server.next(MessageType.COMMAND_SOUND_DOWNLOAD);
+  server.send(MessageType.SERVER_ERROR, { code: ProtocolErrorCode.PERMISSION_DENIED, message: 'Download denied.' }, request.requestId);
+  assert.equal((await server.next(MessageType.COMMAND_FINISH)).payload.failed, true);
+  assert.equal(context.signal.aborted, true);
+  assert.throws(() => context.downloadSound(soundDownloadRequest), /already ended/);
+  server.invoke('invalid-result', 'download', { allowSoundDownload: true });
+  const invalid = await server.next(MessageType.COMMAND_SOUND_DOWNLOAD);
+  server.send(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+    invocationId: 'invalid-result', downloadId: 'download-id', result: { status: 'downloaded', filePath: 'private-path' },
+  }, invalid.requestId);
+  assert.equal((await server.next(MessageType.COMMAND_FINISH)).payload.failed, true);
+  assert.equal(errors.length, 4);
+});
+
+test('sound download cancellation, completion and disconnection settle pending handlers with null', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const outcomes = new Map();
+  const contexts = new Map();
+  const completed = new EventEmitter();
+  bot.command({
+    name: 'download', description: 'Download', downloadsSound: true,
+    handler: async (ctx) => {
+      contexts.set(ctx.invocationId, ctx);
+      outcomes.set(ctx.invocationId, await ctx.downloadSound(soundDownloadRequest));
+      completed.emit('done');
+    },
+  });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  for (const reason of ['cancelled', 'expired', 'bot_disconnected', 'caller_disconnected', 'failed', 'completed']) {
+    server.invoke(reason, 'download', { allowSoundDownload: true });
+    await server.next(MessageType.COMMAND_SOUND_DOWNLOAD);
+    const done = once(completed, 'done');
+    server.send(MessageType.COMMAND_FINISHED, { invocationId: reason, channelId: 'channel-one', reason });
+    await done;
+    assert.equal(outcomes.get(reason), null);
+    assert.equal(contexts.get(reason).signal.aborted, true);
+    assert.throws(() => contexts.get(reason).downloadSound(soundDownloadRequest), /already ended/);
+  }
+  server.invoke('disconnected', 'download', { allowSoundDownload: true });
+  await server.next(MessageType.COMMAND_SOUND_DOWNLOAD);
+  const disconnected = once(completed, 'done');
+  await bot.close();
+  await disconnected;
+  assert.equal(outcomes.get('disconnected'), null);
+  assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_FINISH), false);
+  assert.deepEqual(errors, []);
+});
+
+test('sound downloads correlate identical invocation IDs on different servers and clean unawaited requests', async (t) => {
+  const first = await makeServer(t);
+  const second = await makeServer(t);
+  const { bot, errors } = makeBot(t, first);
+  const results = new Map();
+  let unawaited;
+  bot.command({
+    name: 'download', description: 'Download', downloadsSound: true,
+    handler: async (ctx) => { results.set(ctx.serverId, await ctx.downloadSound(soundDownloadRequest)); },
+  });
+  bot.command({
+    name: 'unawaited', description: 'Unawaited', downloadsSound: true,
+    handler: (ctx) => { unawaited = ctx.downloadSound(soundDownloadRequest); },
+  });
+  bot.connect({ serverId: 'first' });
+  bot.connect({ serverId: 'second', serverUrl: second.url });
+  await Promise.all([first.next(MessageType.COMMAND_REGISTER), second.next(MessageType.COMMAND_REGISTER)]);
+  first.invoke('same', 'download', { allowSoundDownload: true });
+  second.invoke('same', 'download', { allowSoundDownload: true });
+  const [firstRequest, secondRequest] = await Promise.all([
+    first.next(MessageType.COMMAND_SOUND_DOWNLOAD), second.next(MessageType.COMMAND_SOUND_DOWNLOAD),
+  ]);
+  first.send(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+    invocationId: 'same', downloadId: 'second-download', result: { status: 'exists' },
+  }, secondRequest.requestId);
+  await sdkBarrier(first);
+  assert.equal(results.size, 0);
+  first.send(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+    invocationId: 'same', downloadId: 'first-download', result: { status: 'downloaded' },
+  }, firstRequest.requestId);
+  second.send(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+    invocationId: 'same', downloadId: 'second-download', result: { status: 'exists' },
+  }, secondRequest.requestId);
+  await Promise.all([first.next(MessageType.COMMAND_FINISH), second.next(MessageType.COMMAND_FINISH)]);
+  assert.deepEqual(results.get('first'), { status: 'downloaded' });
+  assert.deepEqual(results.get('second'), { status: 'exists' });
+  first.invoke('unawaited', 'unawaited', { allowSoundDownload: true });
+  await first.next(MessageType.COMMAND_SOUND_DOWNLOAD);
+  await first.next(MessageType.COMMAND_FINISH);
+  assert.equal(await unawaited, null);
+  assert.deepEqual(errors, []);
+});
+
+function settingsDefinition() {
+  return {
+    server: {
+      title: 'Shared settings',
+      fields: [
+        { name: 'enabled', label: 'Enabled', type: 'boolean', required: true, defaultValue: true },
+        { name: 'limit', label: 'Limit', type: 'integer', required: true, min: 0, max: 20, defaultValue: 2 },
+        { name: 'labels', label: 'Labels', type: 'string-list', maxItems: 3, maxLength: 30, defaultValue: ['general'] },
+        { name: 'note', label: 'Note', type: 'text', maxLength: 100, defaultValue: 'Shared note' },
+      ],
+    },
+    user: {
+      title: 'Personal preferences',
+      fields: [
+        {
+          name: 'tone', label: 'Tone', type: 'select', required: true, defaultValue: 'brief',
+          choices: [{ label: 'Brief', value: 'brief' }, { label: 'Full', value: 'full' }],
+        },
+        { name: 'muted', label: 'Muted', type: 'boolean', required: true, defaultValue: false },
+        { name: 'aliases', label: 'Aliases', type: 'string-list', maxItems: 3, maxLength: 30, defaultValue: ['default'] },
+        { name: 'note', label: 'Note', type: 'text', maxLength: 100, defaultValue: 'Personal note' },
+      ],
+    },
+  };
+}
+
+function serverSettings(values = {}, schemaRevision = 2, revision = 3) {
+  return {
+    schemaRevision, revision,
+    values: { enabled: true, limit: 2, labels: ['general'], note: 'Shared note', ...values },
+  };
+}
+
+function executionSettings(snapshot, user = {}) {
+  return structuredClone({
+    schemaRevision: snapshot.schemaRevision, serverRevision: snapshot.revision,
+    server: snapshot.values, user: { tone: 'brief', muted: false, aliases: ['default'], note: 'Personal note', ...user },
+  });
+}
+
+function detailedSettings(snapshot, definition = settingsDefinition(), botId = 'bot-one') {
+  return structuredClone({
+    bot: {
+      botId, name: 'Settings bot', online: true, capabilities: { downloadsSound: false },
+      schemaRevision: snapshot.schemaRevision, revision: snapshot.revision,
+      hasServerSettings: !!definition.server, hasUserSettings: !!definition.user, canConfigure: !!definition.server,
+    },
+    definition, ...(definition.server ? { server: snapshot } : {}),
+  });
+}
+
+function makeSettingsServer(t) {
+  return makeServer(t, {
+    authenticate: (ws) => ws.send(JSON.stringify({
+      type: MessageType.AUTH_SUCCESS, payload: { currentUser: { id: 'bot-one' } },
+    })),
+  });
+}
+
+async function hydrateSettings(server, snapshot, registered = 1) {
+  server.send(MessageType.COMMAND_REGISTERED, { registered, settings: snapshot });
+  await sdkBarrier(server);
+}
+
+function assertDeepFrozen(value) {
+  if (value === null || typeof value !== 'object') return;
+  assert.equal(Object.isFrozen(value), true);
+  for (const child of Object.values(value)) assertDeepFrozen(child);
+}
+
+test('settings validate defaults, register cloned declarations and hydrate immutable snapshots', { timeout: 10000 }, async (t) => {
+  const server = await makeSettingsServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const declaration = settingsDefinition();
+  const expected = structuredClone(declaration);
+  const snapshot = serverSettings();
+  assert.equal(PROTOCOL_VERSION, 13);
+  assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
+  assert.equal(bot.settings(declaration), bot);
+  const invalid = settingsDefinition();
+  delete invalid.user.fields[0].defaultValue;
+  assert.throws(() => bot.settings(invalid), /default/i);
+  assert.throws(() => bot.settings({ ...declaration, downloadPath: 'C:\\private\\sounds' }));
+  declaration.server.fields[2].defaultValue.push('changed after declaration');
+  declaration.user.fields[0].choices[0].label = 'Changed';
+  bot.command({ name: 'ping', description: 'Ping', handler: () => {} });
+
+  const first = [];
+  const second = [];
+  const stopFirst = bot.onSettingsChanged((value, context) => {
+    assertDeepFrozen(value);
+    assertDeepFrozen(context);
+    assert.equal(Reflect.set(value.values, 'limit', 19), false);
+    assert.throws(() => value.values.labels.push('mutation'));
+    first.push({ value, context });
+  });
+  const stopSecond = bot.onSettingsChanged((value, context) => second.push({ value, context }));
+  let connectedSnapshot = 'not connected';
+  bot.on('connected', ({ serverId }) => { connectedSnapshot = bot.getServerSettings(serverId); });
+  const connected = once(bot, 'connected');
+  bot.connect({ serverId: 'settings-server' });
+  assert.equal(bot.getServerSettings('settings-server'), undefined);
+  assert.throws(() => bot.settings({}), /before connecting or serving/);
+  await connected;
+  assert.equal(connectedSnapshot, undefined, 'Connected must not wait for the registration acknowledgement.');
+  const registration = await server.next(MessageType.COMMAND_REGISTER);
+  assert.deepEqual(registration.payload.settings, expected);
+  assert.equal(bot.getServerSettings('missing-server'), undefined);
+  await hydrateSettings(server, snapshot);
+  assert.deepEqual(first, [{ value: snapshot, context: { serverId: 'settings-server' } }]);
+  assert.deepEqual(second, first);
+  assert.notEqual(first[0].value, second[0].value);
+  assert.notEqual(first[0].value.values.labels, second[0].value.values.labels);
+  const value = bot.getServerSettings('settings-server');
+  assertDeepFrozen(value);
+  assert.deepEqual(value, snapshot);
+  assert.notEqual(value, bot.getServerSettings('settings-server'));
+  assert.notEqual(value.values.labels, first[0].value.values.labels);
+  assert.equal(Reflect.set(value, 'revision', 100), false);
+  assert.equal(Reflect.deleteProperty(value.values, 'enabled'), false);
+
+  await hydrateSettings(server, { ...snapshot, values: { note: 'Shared note', labels: ['general'], limit: 2, enabled: true } });
+  assert.equal(first.length, 1, 'Equivalent repeated acknowledgements must not notify again.');
+  const updated = serverSettings({ limit: 4, labels: ['updated'] }, 2, 4);
+  server.send(MessageType.BOT_SETTINGS_SNAPSHOT, detailedSettings(updated));
+  await sdkBarrier(server);
+  assert.deepEqual(bot.getServerSettings('settings-server'), updated);
+  assert.equal(first.length, 2);
+  assert.deepEqual(value, snapshot, 'Previously returned snapshots cannot change.');
+  stopFirst();
+  const newest = serverSettings({ limit: 5 }, 2, 5);
+  server.send(MessageType.BOT_SETTINGS_SNAPSHOT, detailedSettings(newest));
+  await sdkBarrier(server);
+  assert.equal(first.length, 2);
+  assert.equal(second.length, 3);
+  stopSecond();
+  assert.equal(bot.listenerCount('settingsChanged'), 0);
+  assert.deepEqual(errors, []);
+});
+
+test('settings declarations are static while a port-zero marketplace fixture is starting or serving', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  bot.settings(settingsDefinition());
+  const starting = bot.serve({ name: 'Settings fixture', host: '127.0.0.1', port: 0 });
+  assert.throws(() => bot.settings({}), /before connecting or serving/);
+  const listener = await starting;
+  assert.equal((await fetch(`http://127.0.0.1:${listener.address().port}/manifest`)).status, 200);
+  assert.throws(() => bot.settings({}), /before connecting or serving/);
+  await bot.close();
+  assert.throws(() => bot.settings({}), /closed/);
+  assert.deepEqual(errors, []);
+});
+
+test('settings snapshots reject stale, conflicting, malformed and wrong-bot data without replacing the cache', { timeout: 10000 }, async (t) => {
+  const server = await makeSettingsServer(t);
+  const { bot, errors } = makeBot(t, server);
+  bot.settings(settingsDefinition());
+  const changes = [];
+  const origins = [];
+  bot.onSettingsChanged((snapshot) => changes.push(snapshot));
+  bot.on('error', (_error, context) => origins.push(context));
+  bot.connect({ serverId: 'settings-server' });
+  await server.next(MessageType.COMMAND_REGISTER);
+  const snapshot = serverSettings();
+  await hydrateSettings(server, snapshot, 0);
+  const changedDefinition = settingsDefinition();
+  changedDefinition.server.title = 'Different declaration';
+  const inconsistent = detailedSettings(serverSettings({}, 2, 4));
+  inconsistent.bot.revision = 5;
+  const redacted = detailedSettings(snapshot);
+  delete redacted.definition.server;
+  delete redacted.server;
+  redacted.bot.canConfigure = false;
+  const invalid = [
+    [MessageType.COMMAND_REGISTERED, { registered: 0 }],
+    [MessageType.COMMAND_REGISTERED, { registered: 0, settings: { ...snapshot, values: {} } }],
+    [MessageType.COMMAND_REGISTERED, { registered: 0, settings: { ...snapshot, revision: -1 } }],
+    [MessageType.COMMAND_REGISTERED, { registered: 0, settings: serverSettings({ limit: 21 }, 2, 4) }],
+    [MessageType.COMMAND_REGISTERED, { registered: 0, settings: serverSettings({ labels: ['same', 'SAME'] }, 2, 4) }],
+    [MessageType.COMMAND_REGISTERED, { registered: 0, settings: serverSettings({ hostPath: 'C:\\private' }, 2, 4) }],
+    [MessageType.COMMAND_REGISTERED, { registered: 0, settings: serverSettings({ enabled: false }) }],
+    [MessageType.BOT_SETTINGS_SNAPSHOT, detailedSettings(serverSettings({}, 2, 2))],
+    [MessageType.BOT_SETTINGS_SNAPSHOT, detailedSettings(serverSettings({}, 1, 4))],
+    [MessageType.BOT_SETTINGS_SNAPSHOT, detailedSettings(serverSettings({}, 2, 4), settingsDefinition(), 'another-bot')],
+    [MessageType.BOT_SETTINGS_SNAPSHOT, detailedSettings(serverSettings({}, 2, 4), changedDefinition)],
+    [MessageType.BOT_SETTINGS_SNAPSHOT, inconsistent],
+    [MessageType.BOT_SETTINGS_SNAPSHOT, redacted],
+    [MessageType.BOT_SETTINGS_SNAPSHOT, { ...detailedSettings(snapshot), userSettings: { note: 'private' } }],
+    [MessageType.BOT_SETTINGS_SNAPSHOT, snapshot],
+    [MessageType.COMMAND_REGISTERED, {
+      registered: 0, settings: serverSettings({ note: 'x'.repeat(LIMITS.MAX_BOT_SETTINGS_VALUES_BYTES + 1) }, 2, 4),
+    }],
+  ];
+  for (const [index, [type, payload]] of invalid.entries()) {
+    server.send(type, payload);
+    await sdkBarrier(server);
+    assert.equal(errors.length, index + 1, `Invalid settings case ${index} must be reported.`);
+    assert.deepEqual(origins[index], { serverId: 'settings-server' });
+    assert.deepEqual(bot.getServerSettings('settings-server'), snapshot);
+    assert.equal(changes.length, 1);
+  }
+  const newer = serverSettings({ limit: 6 }, 3, 6);
+  server.send(MessageType.BOT_SETTINGS_SNAPSHOT, detailedSettings(newer));
+  await sdkBarrier(server);
+  assert.deepEqual(bot.getServerSettings('settings-server'), newer);
+  assert.equal(changes.length, 2);
+});
+
+test('settings and preferences isolate identical command, autocomplete and selector IDs across servers', { timeout: 10000 }, async (t) => {
+  const first = await makeSettingsServer(t);
+  const second = await makeSettingsServer(t);
+  const { bot, errors } = makeBot(t, first);
+  bot.settings(settingsDefinition());
+  const commands = new Map();
+  const autocompletes = new Map();
+  const responses = [];
+  const observers = [];
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions,
+    handler: (ctx) => { commands.set(ctx.serverId, ctx); ctx.reply('OK'); },
+    autocomplete: (ctx) => { autocompletes.set(ctx.serverId, ctx); return []; },
+  });
+  const stop = bot.onSelectorResponse((event, context) => {
+    assertDeepFrozen(event);
+    assertDeepFrozen(context);
+    assert.equal(Reflect.set(event, 'value', 'changed'), false);
+    assert.equal(Reflect.set(context.settings.user, 'tone', 'changed'), false);
+    responses.push({ event, context });
+  });
+  const stopObserver = bot.onSelectorResponse((event, context) => observers.push({ event, context }));
+  const firstSnapshot = serverSettings({ limit: 1, labels: ['first'] });
+  const secondSnapshot = serverSettings({ limit: 9, labels: ['second'] }, 5, 9);
+  const expected = new Map([
+    ['first', executionSettings(firstSnapshot, { note: 'first preference', aliases: ['first'] })],
+    ['second', executionSettings(secondSnapshot, { tone: 'full', muted: true, note: 'second preference', aliases: ['second'] })],
+  ]);
+  bot.connect({ serverId: 'first' });
+  bot.connect({ serverId: 'second', serverUrl: second.url });
+  for (const [server, snapshot] of [[first, firstSnapshot], [second, secondSnapshot]]) {
+    assert.deepEqual((await server.next(MessageType.COMMAND_REGISTER)).payload.settings, settingsDefinition());
+    await hydrateSettings(server, snapshot);
+  }
+  for (const [serverId, server] of [['first', first], ['second', second]]) {
+    const settings = expected.get(serverId);
+    server.invoke('same-invocation', 'search', { options: { sound: 'selected' }, settings });
+    server.send(MessageType.COMMAND_AUTOCOMPLETE, { ...autocompleteRequest('same'), settings }, 'same-request');
+    server.send(MessageType.SELECTOR_RESPONDED, {
+      id: 'same-selector', channelId: 'same-channel', userId: 'same-human', value: serverId, settings,
+    });
+    assert.deepEqual((await server.next(MessageType.COMMAND_RESPONSE)).payload, {
+      invocationId: 'same-invocation', content: 'OK', ephemeral: true,
+    });
+    await server.next(MessageType.COMMAND_FINISH);
+    assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload, { status: 'ok', choices: [] });
+    await sdkBarrier(server);
+  }
+  for (const [serverId, settings] of expected) {
+    const command = commands.get(serverId);
+    const autocomplete = autocompletes.get(serverId);
+    assert.deepEqual(command.settings, settings);
+    assert.deepEqual(autocomplete.settings, settings);
+    assertDeepFrozen(command.settings);
+    assertDeepFrozen(autocomplete.settings);
+    assert.notEqual(command.settings, autocomplete.settings);
+    assert.notEqual(command.settings.server, bot.getServerSettings(serverId).values);
+    assert.equal(Reflect.set(command, 'settings', {}), false);
+    assert.equal(Reflect.set(autocomplete, 'settings', {}), false);
+    assert.equal('userSettings' in command, false);
+    assert.equal('user' in bot.getServerSettings(serverId), false);
+    const response = responses.find((entry) => entry.context.serverId === serverId);
+    assert.deepEqual(response, {
+      event: { id: 'same-selector', channelId: 'same-channel', userId: 'same-human', value: serverId },
+      context: { serverId, settings },
+    });
+  }
+  assert.deepEqual(observers, responses);
+  assert.notEqual(observers[0].event, responses[0].event);
+  assert.notEqual(observers[0].context.settings.user.aliases, responses[0].context.settings.user.aliases);
+  stop();
+  first.send(MessageType.SELECTOR_RESPONDED, {
+    id: 'same-selector', channelId: 'same-channel', userId: 'same-human', value: 'changed',
+    settings: executionSettings(firstSnapshot, { tone: 'full' }),
+  });
+  await sdkBarrier(first);
+  assert.equal(responses.length, 2);
+  assert.equal(observers.length, 3);
+  stopObserver();
+  assert.equal(bot.listenerCount('selectorResponse'), 0);
+
+  const reaction = once(bot, 'reactionAdded');
+  first.send(MessageType.CHAT_REACTION_ADDED, {
+    channelId: 'same-channel', messageId: 'message', emoji: '👍', userId: 'same-human', userNickname: 'Human',
+  });
+  assert.deepEqual((await reaction)[1], { serverId: 'first' });
+  const message = once(bot, 'message');
+  first.send(MessageType.CHAT_MESSAGE, { id: 'message', content: 'Unrelated chat' });
+  assert.deepEqual((await message)[1], { serverId: 'first' });
+  assert.deepEqual(bot.getServerSettings('second'), secondSnapshot);
+  assert.deepEqual(errors, []);
+});
+
+test('settings contexts stay immutable through prompts, choices and sound download continuations without propagating preferences', { timeout: 10000 }, async (t) => {
+  const server = await makeSettingsServer(t);
+  const { bot, errors } = makeBot(t, server);
+  bot.settings(settingsDefinition());
+  const captured = [];
+  let context;
+  bot.command({
+    name: 'wizard', description: 'Settings wizard', downloadsSound: true,
+    handler: async (ctx) => {
+      context = ctx;
+      captured.push(ctx.settings);
+      assert.throws(() => ctx.reply({ content: 'Not text', userSettings: ctx.settings.user }));
+      assert.throws(() => ctx.prompt({ ...form, userSettings: ctx.settings.user }));
+      assert.throws(() => ctx.downloadSound({ ...soundDownloadRequest, filePath: 'C:\\private\\local.mp3' }));
+      assert.deepEqual(await ctx.prompt(form), { answer: 'Continue' });
+      captured.push(ctx.settings);
+      assert.equal(await ctx.choose({ title: 'Continue?', choices: [{ label: 'Yes', value: 'yes' }] }), 'yes');
+      captured.push(ctx.settings);
+      assert.deepEqual(await ctx.downloadSound(soundDownloadRequest), { status: 'downloaded' });
+      captured.push(ctx.settings);
+      ctx.reply('Done');
+    },
+  });
+  bot.connect({ serverId: 'settings-server' });
+  const registration = await server.next(MessageType.COMMAND_REGISTER);
+  assert.equal(registration.payload.commands[0].downloadsSound, true);
+  const snapshot = serverSettings();
+  await hydrateSettings(server, snapshot);
+  const settings = executionSettings(snapshot, { note: 'private invocation preference', aliases: ['private-alias'] });
+  server.invoke('stable-settings', 'wizard', { settings, allowSoundDownload: true });
+  const outbound = [];
+  const prompt = await server.next(MessageType.COMMAND_PROMPT);
+  outbound.push(prompt);
+  assertDeepFrozen(context.settings);
+  assert.equal(Reflect.set(context.settings.user.aliases, 0, 'mutated'), false);
+  assert.equal(Reflect.set(context, 'settings', {}), false);
+  for (const revision of [4, 5, 6]) {
+    const updated = serverSettings({ limit: revision }, 2, revision);
+    server.send(MessageType.BOT_SETTINGS_SNAPSHOT, detailedSettings(updated));
+    await sdkBarrier(server);
+    assert.deepEqual(bot.getServerSettings('settings-server'), updated);
+    assert.deepEqual(context.settings, settings);
+    if (revision === 4) {
+      server.send(MessageType.COMMAND_SUBMITTED, {
+        invocationId: 'stable-settings', interactionId: prompt.payload.interactionId, values: { answer: 'Ignored' },
+        userSettings: { note: 'Must not refresh invocation preferences' },
+      });
+      await sdkBarrier(server);
+      assert.equal(errors.length, 1);
+      assert.equal(captured.length, 1);
+      server.send(MessageType.COMMAND_SUBMITTED, {
+        invocationId: 'stable-settings', interactionId: prompt.payload.interactionId, values: { answer: 'Continue' },
+      });
+      outbound.push(await server.next(MessageType.COMMAND_PROMPT));
+    } else if (revision === 5) {
+      server.send(MessageType.COMMAND_SUBMITTED, {
+        invocationId: 'stable-settings', interactionId: outbound[1].payload.interactionId, values: { choice: 'yes' },
+      });
+      outbound.push(await server.next(MessageType.COMMAND_SOUND_DOWNLOAD));
+    } else {
+      server.send(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+        invocationId: 'stable-settings', downloadId: 'download', result: { status: 'downloaded' },
+      }, outbound[2].requestId);
+    }
+  }
+  outbound.push(await server.next(MessageType.COMMAND_RESPONSE));
+  outbound.push(await server.next(MessageType.COMMAND_FINISH));
+  assert.equal(outbound.at(-1).payload.failed, false);
+  assert.equal(captured.length, 4);
+  for (const value of captured) {
+    assert.equal(value, captured[0]);
+    assert.deepEqual(value, settings);
+  }
+  assert.equal(context.signal.aborted, true);
+  for (const frame of outbound) {
+    for (const field of ['settings', 'userSettings', 'filePath', 'downloadPath', 'localFileName']) {
+      assert.equal(field in frame.payload, false);
+    }
+  }
+  assert.equal(JSON.stringify(outbound).includes('private invocation preference'), false);
+  assert.equal(JSON.stringify(outbound).includes('private-alias'), false);
+  assert.equal(JSON.stringify(outbound).includes('C:\\\\private'), false);
+  assert.equal(errors.length, 1);
+});
+
+test('settings reject unhydrated, missing, malformed and stale interaction contexts instead of supplying defaults', { timeout: 10000 }, async (t) => {
+  const server = await makeSettingsServer(t);
+  const { bot, errors } = makeBot(t, server);
+  bot.settings(settingsDefinition());
+  const calls = [];
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions,
+    handler: (ctx) => { calls.push(ctx.settings); },
+    autocomplete: (ctx) => { calls.push(ctx.settings); return []; },
+  });
+  bot.onSelectorResponse((_event, context) => calls.push(context.settings));
+  bot.connect({ serverId: 'settings-server' });
+  await server.next(MessageType.COMMAND_REGISTER);
+  const snapshot = serverSettings();
+  const valid = executionSettings(snapshot);
+  const sendAll = async (extra, id) => {
+    server.invoke(`command-${id}`, 'search', { options: { sound: 'selected' }, ...extra });
+    server.send(MessageType.COMMAND_AUTOCOMPLETE, { ...autocompleteRequest('query'), ...extra }, `autocomplete-${id}`);
+    server.send(MessageType.SELECTOR_RESPONDED, {
+      id: 'selector', channelId: 'channel', userId: 'user', value: 'yes', ...extra,
+    });
+    const result = await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT);
+    await sdkBarrier(server);
+    return result.payload;
+  };
+  assert.deepEqual(await sendAll({ settings: valid }, 'unhydrated'), { status: 'failed', reason: 'invalid_response' });
+  assert.equal(errors.length, 3);
+  assert.equal(calls.length, 0);
+  await hydrateSettings(server, snapshot);
+  const invalid = [
+    undefined, null, {},
+    { ...valid, server: {} },
+    { ...valid, user: { muted: false } },
+    { ...valid, user: { ...valid.user, muted: 'false' } },
+    { ...valid, user: { ...valid.user, tone: 'not-a-choice' } },
+    { ...valid, user: { ...valid.user, aliases: ['same', 'SAME'] } },
+    { ...valid, server: { ...valid.server, limit: 21 } },
+    { ...valid, server: { ...valid.server, limit: 4 } },
+    { ...valid, server: { ...valid.server, hostPath: 'C:\\private' } },
+    { ...valid, user: { ...valid.user, localFileName: 'private.mp3' } },
+    { ...valid, schemaRevision: 1 },
+    { ...valid, schemaRevision: 3 },
+    { ...valid, serverRevision: 2 },
+    { ...valid, serverRevision: 4 },
+    { ...valid, serverRevision: Number.MAX_SAFE_INTEGER + 1 },
+    { ...valid, server: [] },
+    { ...valid, user: { ...valid.user, note: 'x'.repeat(LIMITS.MAX_BOT_SETTINGS_VALUES_BYTES + 1) } },
+    { ...valid, userSettings: { note: 'raw preferences' } },
+  ];
+  for (const [index, settings] of invalid.entries()) {
+    assert.deepEqual(await sendAll({ settings }, index), { status: 'failed', reason: 'invalid_response' });
+    assert.equal(errors.length, 3 * (index + 2), `Invalid settings context ${index} must be reported for all three handlers.`);
+    assert.equal(calls.length, 0);
+    assert.deepEqual(bot.getServerSettings('settings-server'), snapshot);
+  }
+  const errorCount = errors.length;
+  assert.deepEqual(await sendAll({
+    settings: valid, userSettings: { downloadPath: 'C:\\private', localFileName: 'private.mp3' },
+  }, 'raw-preferences'), { status: 'failed', reason: 'invalid_response' });
+  assert.equal(errors.length, errorCount + 3);
+  server.invoke('wrong-bot', 'search', { botId: 'another-bot', options: { sound: 'selected' }, settings: valid });
+  await sdkBarrier(server);
+  assert.equal(errors.length, errorCount + 4);
+  assert.equal(calls.length, 0);
+
+  const cleared = serverSettings({ labels: [], note: '' }, 2, 4);
+  server.send(MessageType.BOT_SETTINGS_SNAPSHOT, detailedSettings(cleared));
+  await sdkBarrier(server);
+  const emptyOptional = executionSettings(cleared, { aliases: [], note: '' });
+  assert.deepEqual(await sendAll({ settings: emptyOptional }, 'empty-optional'), { status: 'ok', choices: [] });
+  assert.equal(calls.length, 3);
+  for (const settings of calls) {
+    assert.deepEqual(settings, emptyOptional, 'Explicit optional empty values must not turn back into defaults.');
+    assertDeepFrozen(settings);
+  }
+  const omittedOptional = {
+    schemaRevision: 2, serverRevision: 4, server: { enabled: true, limit: 2 }, user: { tone: 'brief', muted: false },
+  };
+  assert.deepEqual(await sendAll({ settings: omittedOptional }, 'omitted-optional'), { status: 'ok', choices: [] });
+  for (const settings of calls.slice(3)) assert.deepEqual(settings, omittedOptional);
+  assert.equal(errors.length, errorCount + 4);
+});
+
+test('settings clear on teardown and automatic reconnect while other servers retain their snapshots', { timeout: 10000 }, async (t) => {
+  const first = await makeSettingsServer(t);
+  const second = await makeSettingsServer(t);
+  const { bot, errors } = makeBot(t, first, { autoReconnect: true });
+  bot.settings(settingsDefinition());
+  const hydrationAtConnect = [];
+  bot.on('connected', ({ serverId }) => hydrationAtConnect.push(bot.getServerSettings(serverId)));
+  bot.connect({ serverId: 'first' });
+  bot.connect({ serverId: 'second', serverUrl: second.url });
+  await Promise.all([first.next(MessageType.COMMAND_REGISTER), second.next(MessageType.COMMAND_REGISTER)]);
+  const old = serverSettings({ limit: 8 }, 8, 8);
+  const other = serverSettings({ limit: 9 }, 9, 9);
+  await Promise.all([hydrateSettings(first, old, 0), hydrateSettings(second, other, 0)]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const disconnected = once(bot, 'disconnected');
+    first.disconnect();
+    assert.deepEqual((await disconnected)[0], { serverId: 'first' });
+    assert.equal(bot.getServerSettings('first'), undefined);
+    assert.deepEqual(bot.getServerSettings('second'), other);
+    assert.throws(() => bot.settings({}), /before connecting or serving/);
+    t.mock.timers.tick(5000);
+    const registration = await first.next(MessageType.COMMAND_REGISTER);
+    assert.deepEqual(registration.payload.settings, settingsDefinition());
+    assert.equal(bot.getServerSettings('first'), undefined);
+    const fresh = serverSettings({ limit: 1 }, 1, 1);
+    await hydrateSettings(first, fresh, 0);
+    assert.deepEqual(bot.getServerSettings('first'), fresh, 'Reconnection must not retain an old revision watermark.');
+    assert.deepEqual(bot.getServerSettings('second'), other);
+    assert.deepEqual(hydrationAtConnect, [undefined, undefined, undefined]);
+  } finally {
+    t.mock.timers.reset();
+  }
+  bot.disconnect('first');
+  assert.equal(bot.getServerSettings('first'), undefined);
+  assert.deepEqual(bot.getServerSettings('second'), other);
+  bot.disconnect();
+  assert.equal(bot.getServerSettings('second'), undefined);
+  assert.equal(bot.settings({}), bot);
+  bot.connect({ serverId: 'first' });
+  assert.deepEqual((await first.next(MessageType.COMMAND_REGISTER)).payload.settings, {});
+  await hydrateSettings(first, { schemaRevision: 10, revision: 10, values: {} }, 0);
+  await bot.close();
+  assert.equal(bot.getServerSettings('first'), undefined);
+  assert.deepEqual(errors, []);
+});
+
+test('settings-free bots remain compatible without acknowledgements or execution preferences', { timeout: 10000 }, async (t) => {
+  for (const declaration of [undefined, {}]) {
+    await t.test(declaration ? 'explicit empty settings' : 'no settings declaration', async (t) => {
+      const server = await makeServer(t);
+      const { bot, errors } = makeBot(t, server);
+      if (declaration) bot.settings(declaration);
+      const contexts = [];
+      bot.command({
+        name: 'search', description: 'Search', options: autocompleteOptions,
+        handler: (ctx) => { contexts.push(ctx.settings); },
+        autocomplete: (ctx) => { contexts.push(ctx.settings); return []; },
+      });
+      bot.onSelectorResponse((_event, context) => contexts.push(context.settings));
+      bot.connect({ serverId: 'legacy' });
+      const registration = await server.next(MessageType.COMMAND_REGISTER);
+      assert.equal('settings' in registration.payload, declaration !== undefined);
+      assert.equal(bot.getServerSettings('legacy'), undefined);
+      for (const hydrated of [false, true]) {
+        if (hydrated) await hydrateSettings(server, { schemaRevision: 7, revision: 8, values: {} });
+        server.invoke(`legacy-${hydrated}`, 'search', { options: { sound: 'selected' } });
+        server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('legacy'), `legacy-${hydrated}`);
+        server.send(MessageType.SELECTOR_RESPONDED, { id: 'selector', channelId: 'channel', userId: 'user', value: 'yes' });
+        await server.next(MessageType.COMMAND_FINISH);
+        assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload, { status: 'ok', choices: [] });
+        await sdkBarrier(server);
+        for (const context of contexts.slice(hydrated ? 3 : 0)) {
+          assert.deepEqual(context, {
+            schemaRevision: hydrated ? 7 : 0, serverRevision: hydrated ? 8 : 0, server: {}, user: {},
+          });
+          assertDeepFrozen(context);
+        }
+      }
+      assert.equal(contexts.length, 6);
+      assert.notEqual(contexts[0].user, contexts[1].user);
+      assert.deepEqual(errors, []);
+    });
+  }
+});
+
+test('settings with only one declared scope do not fabricate values for the other scope', { timeout: 10000 }, async (t) => {
+  for (const scope of ['server', 'user']) {
+    await t.test(`${scope}-only settings`, async (t) => {
+      const server = await makeSettingsServer(t);
+      const { bot, errors } = makeBot(t, server);
+      const declaration = { [scope]: settingsDefinition()[scope] };
+      bot.settings(declaration);
+      let context;
+      bot.command({ name: 'scope', description: 'Scope', handler: (ctx) => { context = ctx.settings; } });
+      bot.connect({ serverId: 'scope-server' });
+      await server.next(MessageType.COMMAND_REGISTER);
+      const snapshot = scope === 'server' ? serverSettings() : { schemaRevision: 2, revision: 3, values: {} };
+      await hydrateSettings(server, snapshot);
+      const settings = executionSettings(snapshot);
+      if (scope === 'server') settings.user = {};
+      server.invoke('scope', 'scope', { settings });
+      await server.next(MessageType.COMMAND_FINISH);
+      assert.deepEqual(context, settings);
+      const updated = { ...snapshot, revision: 4 };
+      server.send(MessageType.BOT_SETTINGS_SNAPSHOT, detailedSettings(updated, declaration));
+      await sdkBarrier(server);
+      assert.deepEqual(bot.getServerSettings('scope-server'), updated);
+      const undeclaredScope = scope === 'server' ? 'user' : 'server';
+      server.invoke('undeclared-scope', 'scope', {
+        settings: { ...settings, serverRevision: 4, [undeclaredScope]: { note: 'Not declared' } },
+      });
+      assert.equal((await server.next(MessageType.COMMAND_FINISH)).payload.failed, true);
+      assert.equal(errors.length, 1);
+      assert.deepEqual(context, settings);
+    });
+  }
 });

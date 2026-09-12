@@ -5,12 +5,12 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const { WebSocket } = require('ws');
 const { MonkyServer } = require('../apps/server/dist/server.js');
-const { BotClient, MessageType, PROTOCOL_VERSION } = require('../packages/bot-sdk/dist/index.js');
+const { BotClient, LIMITS, MessageType, PROTOCOL_VERSION } = require('../packages/bot-sdk/dist/index.js');
 
 function identity() {
   const pair = generateKeyPairSync('ed25519');
@@ -69,9 +69,9 @@ class Peer {
     });
   }
 
-  async request(type, payload, expectedError = false) {
+  async request(type, payload, expectedError = false, timeoutMs = 5000) {
     const requestId = randomUUID();
-    const result = this.wait((message) => message.requestId === requestId, type);
+    const result = this.wait((message) => message.requestId === requestId, type, timeoutMs);
     this.send(type, payload, requestId);
     const response = await result;
     assert.equal(response.type === MessageType.SERVER_ERROR, expectedError, JSON.stringify(response.payload));
@@ -191,6 +191,26 @@ try {
       if (second !== null) ctx.reply(`${first}:${second}`);
     },
   });
+  const soundChoiceId = `opaque:${'x'.repeat(500)}`;
+  const soundContexts = new Map();
+  bot.command({
+    name: 'sound', description: 'Local sound download', downloadsSound: true,
+    options: [{ name: 'audio', description: 'Audio', type: 'string', required: true, autocomplete: true }],
+    autocomplete: (ctx) => {
+      assert.equal(ctx.optionName, 'audio');
+      assert.equal(ctx.locale, 'en');
+      assert.deepEqual(ctx.args, {});
+      return [{ label: `Sound ${ctx.query}`, value: soundChoiceId }];
+    },
+    handler: async (ctx) => {
+      soundContexts.set(ctx.invocationId, ctx);
+      assert.equal(ctx.args.audio, soundChoiceId);
+      const result = await ctx.downloadSound({
+        url: 'https://example.com/fixture.wav', fileName: 'fixture.wav', title: 'Fixture sound',
+      });
+      if (result !== null) ctx.reply(`download:${result.status}`);
+    },
+  });
   bot.connect({ serverId: 'e2e' });
   await owner.wait((message) => message.type === MessageType.COMMANDS_LIST_RESPONSE &&
     message.payload.commands?.some((command) => command.botId === botId && command.name === 'guided'), 'command discovery');
@@ -294,6 +314,175 @@ try {
     message.payload.invocationId === choiceCall.invocationId), false);
   await owner.finished(choiceCall.invocationId);
   assert.deepEqual(sdkErrors, []);
+
+  const suggestions = await owner.request(MessageType.COMMAND_AUTOCOMPLETE, {
+    botId, channelId, commandName: 'sound', optionName: 'audio', query: 'fixture', locale: 'en',
+  });
+  assert.equal(suggestions.status, 'ok');
+  assert.deepEqual(suggestions.choices, [{ label: 'Sound fixture', value: soundChoiceId }]);
+  assert.equal(owner.messages.some((message) => message.type === MessageType.COMMAND_SOUND_DOWNLOAD), false);
+  const soundInput = {
+    botId, channelId, commandName: 'sound', options: { audio: soundChoiceId }, locale: 'en',
+  };
+  await owner.request(MessageType.COMMAND_INVOKE, soundInput, true);
+  const soundCall = await owner.request(MessageType.COMMAND_INVOKE, { ...soundInput, allowSoundDownload: true });
+  const download = await owner.wait((message) => message.type === MessageType.COMMAND_SOUND_DOWNLOAD &&
+    message.payload.invocationId === soundCall.invocationId, 'authorized local sound download');
+  assert.equal(download.payload.botId, botId);
+  assert.equal(download.payload.botName, 'Identity Bot');
+  assert.equal(download.payload.commandName, 'sound');
+  assert.equal(download.payload.invokerId, auth.currentUser.id);
+  assert.equal(download.payload.invokerNickname, 'Owner');
+  assert.equal(download.payload.channelId, channelId);
+  assert.equal(download.payload.fileName, 'fixture.wav');
+  assert.equal(download.payload.folderPath, undefined);
+  assert.equal(owner.messages.some((message) => message.type === MessageType.COMMAND_FINISHED &&
+    message.payload.invocationId === soundCall.invocationId), false, 'SDK must await the local download result.');
+  for (const peer of [bob, otherDevice]) {
+    assert.equal(peer.messages.some((message) => message.type === MessageType.COMMAND_SOUND_DOWNLOAD), false);
+    await peer.request(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+      invocationId: soundCall.invocationId, downloadId: download.payload.downloadId, result: { status: 'downloaded' },
+    }, true);
+  }
+  const downloadResult = {
+    invocationId: soundCall.invocationId, downloadId: download.payload.downloadId, result: { status: 'downloaded' },
+  };
+  await owner.request(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, downloadResult);
+  const downloaded = await owner.wait((message) => message.type === MessageType.COMMAND_RESPONSE &&
+    message.payload.invocationId === soundCall.invocationId, 'download completion');
+  assert.equal(downloaded.payload.content, 'download:downloaded');
+  assert.equal(downloaded.payload.ephemeral, true);
+  await owner.finished(soundCall.invocationId);
+  await owner.request(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, downloadResult, true);
+  assert.equal(bob.messages.some((message) => message.type === MessageType.COMMAND_RESPONSE &&
+    message.payload.invocationId === soundCall.invocationId), false);
+  assert.equal(otherDevice.messages.some((message) => message.type === MessageType.COMMAND_RESPONSE &&
+    message.payload.invocationId === soundCall.invocationId), false);
+
+  const cancelledSound = await owner.request(MessageType.COMMAND_INVOKE, { ...soundInput, allowSoundDownload: true });
+  const pendingSound = await owner.wait((message) => message.type === MessageType.COMMAND_SOUND_DOWNLOAD &&
+    message.payload.invocationId === cancelledSound.invocationId, 'pending sound to cancel');
+  await owner.request(MessageType.COMMAND_CANCEL, { invocationId: cancelledSound.invocationId });
+  await owner.wait((message) => message.type === MessageType.COMMAND_SOUND_DOWNLOAD_CANCEL &&
+    message.payload.downloadId === pendingSound.payload.downloadId, 'native download cancellation');
+  await owner.finished(cancelledSound.invocationId);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(soundContexts.get(cancelledSound.invocationId).signal.aborted, true);
+  await owner.request(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+    invocationId: cancelledSound.invocationId, downloadId: pendingSound.payload.downloadId, result: { status: 'downloaded' },
+  }, true);
+  assert.deepEqual(sdkErrors, []);
+  console.log('Real autocomplete and local-download protocol: opaque choice, explicit consent, caller/device isolation, awaited result, replay rejection and cancellation passed.');
+
+  const soundBotIndex = process.argv.indexOf('--sound-bot');
+  const soundBotCliIndex = process.argv.indexOf('--sound-bot-cli');
+  if (soundBotIndex !== -1 || soundBotCliIndex !== -1) {
+    assert.ok(soundBotIndex === -1 || soundBotCliIndex === -1, 'Choose the direct executable or generated CLI, not both.');
+    const useCli = soundBotCliIndex !== -1;
+    const soundBotArgument = process.argv[(useCli ? soundBotCliIndex : soundBotIndex) + 1];
+    assert.ok(soundBotArgument, 'Pass the sound bot directory after --sound-bot or --sound-bot-cli.');
+    const soundBotRoot = path.resolve(soundBotArgument);
+    const entry = path.join(soundBotRoot, 'dist', 'index.js');
+    assert.ok(fs.statSync(entry).isFile(), 'Build the sound bot before running its integration check.');
+    const account = await owner.request(MessageType.BOT_CREATE, { name: 'Private sound bot' });
+    const workingDir = path.join(dataDir, 'sound-bot');
+    fs.mkdirSync(workingDir);
+    const env = {
+      ...process.env, NODE_PATH: '', NODE_OPTIONS: '',
+      MONKY_SERVER_URL: url, MONKY_BOT_TOKEN: account.token, MONKY_BOT_PUBLIC_KEY: identity().publicKey,
+      MONKY_BOT_NAME: 'Private sound bot', MONKY_BOT_CLI_HOME: path.join(workingDir, 'profiles'),
+    };
+    let args = [entry];
+    if (useCli) {
+      const pkg = JSON.parse(fs.readFileSync(path.join(soundBotRoot, 'package.json'), 'utf8'));
+      const launcher = path.join(soundBotRoot, pkg.bin[pkg.monkyBot.cliName]);
+      const setup = spawnSync(process.execPath, [launcher, 'setup', '--non-interactive',
+        '--server-url', url, '--token-env', 'MONKY_BOT_TOKEN', '--bot-dir', workingDir], {
+        cwd: workingDir, env, encoding: 'utf8', timeout: 15000,
+      });
+      if (setup.error) throw setup.error;
+      assert.equal(setup.status, 0, setup.stderr);
+      const stopBridge = path.join(workingDir, 'cli-stop-bridge.cjs');
+      fs.writeFileSync(stopBridge, `
+process.on('message', (message) => {
+  if (message !== 'monky-e2e-stop') return;
+  process.emit('SIGTERM');
+  if (process.connected) process.disconnect();
+});
+`);
+      args = ['--no-global-search-paths', '--require', stopBridge, launcher, 'start', '--foreground'];
+    }
+    const startSoundBot = () => {
+      const child = spawn(process.execPath, args, {
+        cwd: workingDir, env, stdio: useCli ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
+      });
+      const runtime = { child, exited: new Promise((resolve) => child.once('close', resolve)), output: '' };
+      const capture = (chunk) => { runtime.output = (runtime.output + chunk.toString()).slice(-10000); };
+      child.stdout.on('data', capture);
+      child.stderr.on('data', capture);
+      child.on('error', (error) => capture(error.message));
+      return runtime;
+    };
+    const stopSoundBot = async (runtime) => {
+      if (runtime.child.exitCode === null && runtime.child.signalCode === null) {
+        if (useCli && runtime.child.connected) {
+          await new Promise((resolve, reject) => runtime.child.send('monky-e2e-stop', (error) => error ? reject(error) : resolve()));
+        } else {
+          runtime.child.kill();
+        }
+      }
+      await runtime.exited;
+      if (useCli) assert.equal(runtime.child.exitCode, 0, runtime.output);
+    };
+    const waitForSoundBot = async (runtime, previous = new Set()) => Promise.race([
+      owner.wait((message) => !previous.has(message) && message.type === MessageType.COMMANDS_LIST_RESPONSE &&
+        message.payload.commands?.some((command) => command.botId === account.bot.id &&
+          command.name === 'query' && command.downloadsSound), 'sound bot command discovery', 15000),
+      runtime.exited.then(() => { throw new Error(`Sound bot exited before discovery: ${runtime.output}`); }),
+    ]);
+    let runtime = startSoundBot();
+    try {
+      await waitForSoundBot(runtime);
+      await new Promise((resolve) => setTimeout(resolve, LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS));
+      const found = await owner.request(MessageType.COMMAND_AUTOCOMPLETE, {
+        botId: account.bot.id, channelId, commandName: 'query', optionName: 'audio', query: 'brasil', locale: 'pt-BR',
+      }, false, 20000);
+      assert.equal(found.status, 'ok', runtime.output);
+      assert.ok(found.choices.length > 0 && found.choices.length <= 10);
+      const invocation = await owner.request(MessageType.COMMAND_INVOKE, {
+        botId: account.bot.id, channelId, commandName: 'query',
+        options: { audio: found.choices[0].value }, locale: 'pt-BR', allowSoundDownload: true,
+      });
+      const request = await owner.wait((message) => message.type === MessageType.COMMAND_SOUND_DOWNLOAD &&
+        message.payload.invocationId === invocation.invocationId, 'sound bot resolved metadata', 20000);
+      assert.equal(request.payload.botId, account.bot.id);
+      assert.equal(new URL(request.payload.url).protocol, 'https:');
+      assert.ok(request.payload.fileName.length <= 128);
+      assert.ok(request.payload.title.length > 0);
+      assert.equal(otherDevice.messages.some((message) => message.type === MessageType.COMMAND_SOUND_DOWNLOAD &&
+        message.payload.invocationId === invocation.invocationId), false);
+      // This optional live-source check resolves metadata only; no third-party audio body is requested.
+      await owner.request(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+        invocationId: invocation.invocationId, downloadId: request.payload.downloadId, result: { status: 'cancelled' },
+      });
+      await owner.finished(invocation.invocationId);
+      assert.doesNotMatch(runtime.output, /MODULE_NOT_FOUND|Missing MONKY_/);
+      assert.equal(runtime.output.includes(account.token), false, 'The runtime must not print its token.');
+      if (useCli) {
+        const publicKeyFile = path.join(workingDir, '.keys', 'public.hex');
+        const publicKey = fs.readFileSync(publicKeyFile, 'utf8');
+        await stopSoundBot(runtime);
+        const previous = new Set(owner.messages);
+        runtime = startSoundBot();
+        await waitForSoundBot(runtime, previous);
+        assert.equal(fs.readFileSync(publicKeyFile, 'utf8'), publicKey);
+        console.log('Generated CLI foreground start, clean shutdown and restart preserve the bot identity.');
+      }
+      console.log('External sound bot runtime: packaged SDK, authentication, live search, selection and caller-only download request passed; no audio body requested.');
+    } finally {
+      await stopSoundBot(runtime);
+    }
+  }
 
   const officialIndex = process.argv.indexOf('--official-bot');
   if (officialIndex !== -1) {

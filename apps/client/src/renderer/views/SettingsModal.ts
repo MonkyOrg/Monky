@@ -283,6 +283,7 @@ export class SettingsModal {
     this.sectionNavigation?.destroy();
     this.sectionNavigation = null;
     this.voiceVideoTab.cleanup();
+    this.soundboardTab.cleanup();
     this.accountTab.cleanup();
     this.aboutTab.cleanup();
     if (this.modalEl) {

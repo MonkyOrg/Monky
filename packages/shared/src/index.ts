@@ -23,6 +23,8 @@ export * from './lruCache.js';
 export * from './logging.js';
 export * from './capacity.js';
 export * from './botInteractions.js';
+export * from './selection.js';
+export * from './soundDownloads.js';
 export * from './reactions.js';
 export * from './botMessages.js';
 export * from './botSelectors.js';

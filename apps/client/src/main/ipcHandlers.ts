@@ -7,7 +7,12 @@ import net from 'net';
 import path from 'path';
 import { LanDiscovery } from './lanDiscovery';
 import { globalInputHook } from './globalInputHookProcess';
-import { SHORTCUT_IPC } from '@monky/shared';
+import {
+  AUDIO_PREVIEW_IPC, LIMITS, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS,
+  type AudioPreviewResult, type SoundDownloadResult, type SoundboardDownloadPermit, type SoundboardDownloadAvailability,
+} from '@monky/shared';
+import { SoundboardDownloads } from './soundboardDownload';
+import { AudioPreviews } from './audioPreviews';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
@@ -348,6 +353,39 @@ export function setupIpcHandlers(
   const lanDiscovery = new LanDiscovery(mainWindow);
   globalInputHook.init(mainWindow);
   const overlayManager = options?.overlayManager || new OverlayManager(mainWindow);
+  const soundDownloads = new SoundboardDownloads(path.join(app.getPath('userData'), 'soundboard-folder.json'));
+  const audioPreviews = new AudioPreviews();
+  const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
+    event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.availability, async (event, folder: unknown): Promise<SoundboardDownloadAvailability> =>
+    ownsSoundDownload(event) ? soundDownloads.availability(folder) : 'unavailable');
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.authorize, async (event, input: unknown): Promise<SoundboardDownloadPermit> =>
+    ownsSoundDownload(event) ? soundDownloads.authorize(event.sender.id, input) : { status: 'failed', reason: 'invalid_request' });
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.download, async (event, input: unknown): Promise<SoundDownloadResult> => {
+    if (!ownsSoundDownload(event)) return { status: 'failed', reason: 'invalid_request' };
+    try {
+      return await soundDownloads.download(event.sender.id, input, (progress) => {
+        if (!event.sender.isDestroyed()) event.sender.send(SOUND_DOWNLOAD_PROGRESS, progress);
+      });
+    } catch (error) {
+      console.warn('[Soundboard] Could not clean up the local download:', error);
+      return { status: 'failed', reason: 'write_failed' };
+    }
+  });
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.cancel, (event, key: unknown) =>
+    ownsSoundDownload(event) && soundDownloads.cancel(event.sender.id, key));
+  ipcMain.handle(AUDIO_PREVIEW_IPC.load, async (event, input: unknown): Promise<AudioPreviewResult> =>
+    ownsSoundDownload(event) ? audioPreviews.load(event.sender.id, input) : { status: 'failed', reason: 'invalid_request' });
+  ipcMain.handle(AUDIO_PREVIEW_IPC.cancel, (event, input: unknown) =>
+    ownsSoundDownload(event) && audioPreviews.cancel(event.sender.id, input));
+  const soundDownloadOwner = mainWindow.webContents.id;
+  const stopSoundDownloads = () => {
+    soundDownloads.cancelOwner(soundDownloadOwner);
+    audioPreviews.cancelOwner(soundDownloadOwner);
+  };
+  mainWindow.webContents.on('did-start-loading', stopSoundDownloads);
+  mainWindow.webContents.on('render-process-gone', stopSoundDownloads);
+  mainWindow.webContents.once('destroyed', stopSoundDownloads);
 
   // Overlay (#169)
   ipcMain.handle('overlay:open', (_event, config: OverlayConfig) => {
@@ -656,7 +694,8 @@ export function setupIpcHandlers(
   });
 
   // Soundboard Folder Selection
-  ipcMain.handle('dialog:select-soundboard-folder', async () => {
+  ipcMain.handle('dialog:select-soundboard-folder', async (event) => {
+    if (!ownsSoundDownload(event)) throw new Error(mt('error.confirmSoundboardFolder'));
     const result = await dialog.showOpenDialog(mainWindow, {
       title: mt('dialog.selectSoundboardFolder'),
       properties: ['openDirectory'],
@@ -665,7 +704,12 @@ export function setupIpcHandlers(
     if (result.canceled || result.filePaths.length === 0) {
       return null;
     }
-    return result.filePaths[0];
+    try {
+      return await soundDownloads.confirmFolder(result.filePaths[0]);
+    } catch (error) {
+      console.warn('[Soundboard] Could not persist the confirmed folder:', error);
+      throw new Error(mt('error.confirmSoundboardFolder'));
+    }
   });
 
   // Soundboard List Sounds
@@ -716,15 +760,16 @@ export function setupIpcHandlers(
       if (!stat || !stat.isFile()) {
         return null;
       }
-      if (stat.size > 3 * 1024 * 1024) {
+      if (stat.size > LIMITS.MAX_SOUNDBOARD_FILE_SIZE) {
         throw new Error(mt('error.audioFileTooLarge'));
       }
       const buffer = await fs.promises.readFile(filePath);
       const ext = path.extname(filePath).toLowerCase();
-      let mime = 'audio/mp3';
+      let mime = 'audio/mpeg';
       if (ext === '.wav') mime = 'audio/wav';
       else if (ext === '.ogg') mime = 'audio/ogg';
-      else if (ext === '.m4a' || ext === '.aac') mime = 'audio/mp4';
+      else if (ext === '.m4a') mime = 'audio/mp4';
+      else if (ext === '.aac') mime = 'audio/aac';
       else if (ext === '.webm') mime = 'audio/webm';
 
       return {
@@ -1249,6 +1294,9 @@ export function setupIpcHandlers(
   }
 
   mainWindow.on('closed', () => {
+    stopSoundDownloads();
+    for (const channel of Object.values(SOUND_DOWNLOAD_IPC)) ipcMain.removeHandler(channel);
+    for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);
     clearAudioBufferAccumulator();
     void lanDiscovery.stop();
     globalInputHook.destroy();

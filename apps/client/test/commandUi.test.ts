@@ -14,9 +14,12 @@ import {
   visibleCommandFields, visibleCommandValues,
 } from '../src/renderer/utils/botInputs';
 import { renderCommandCatalog, renderCommandParameters } from '../src/renderer/views/commandCatalog';
-import { commandParameterChoices, renderCompactCommand, renderParameterChoices } from '../src/renderer/views/commandComposer';
+import { commandParameterChoices, commandParameterError, renderCompactCommand, renderParameterChoices } from '../src/renderer/views/commandComposer';
 import { renderBotCommandContext } from '../src/renderer/views/botResponse';
+import { renderBotFields } from '../src/renderer/views/botFields';
+import { renderBotInvocation } from '../src/renderer/views/BotChatView';
 import { setLanguage } from '../src/renderer/i18n';
+import { commandPreviewVolumeScope, type SelectionChoice } from '../src/renderer/utils/selectionChoices';
 
 class MemoryUsageStorage implements CommandUsageStorage {
   public values = new Map<string, string>();
@@ -372,6 +375,10 @@ test('compact composer uses inline controls and anchored declared/member choices
   assert.equal(html.includes('class="bot-fields"'), false);
   assert.equal(html.includes('<select'), false);
   assert.equal((html.match(/type="submit"/g) ?? []).length, 1);
+  assert.match(html, /bot-command-run" disabled/);
+  store.setCommandValues('channel', { song: 'Multiword title', count: '0' });
+  const readyHtml = renderCompactCommand(draft, 'channel', [member], true, true);
+  assert.doesNotMatch(readyHtml, /bot-command-run" disabled/);
   assert.equal(store.getInvocations('channel').length, 0);
   const fields = commandInputFields(command);
   const userField = fields.find((field) => field.name === 'member');
@@ -382,6 +389,134 @@ test('compact composer uses inline controls and anchored declared/member choices
   const choices = renderParameterChoices([{ value: 'real-value', label: '<script>unsafe</script>' }], 0, 'Options');
   assert.ok(choices.includes('role="listbox"'));
   assert.equal(choices.includes('<script>'), false);
+});
+
+test('generic selection choices render reusable audio previews without changing submitted values', () => {
+  const audioChoices: SelectionChoice[] = [
+    {
+      label: 'Generic preview',
+      value: 'stable-id',
+      description: 'Reusable outside any specific bot',
+      audio: { url: 'https://cdn.example.test/preview.ogg', fileName: 'preview.ogg', durationMs: 12_345 },
+    },
+    { label: 'Plain option', value: 'plain' },
+    { label: 'Another preview', value: 'another', audio: { url: 'https://cdn.example.test/another.ogg' } },
+  ];
+  const audioCommand: SlashCommand & {
+    options: [{
+      name: 'clip';
+      description: 'Clip';
+      type: 'string';
+      required: true;
+      choices: SelectionChoice[];
+    }];
+  } = {
+    name: 'preview', description: 'Preview audio', botId: 'generic-bot', botName: 'Generic Bot',
+    options: [{ name: 'clip', description: 'Clip', type: 'string', required: true, choices: audioChoices }],
+  };
+  const field = commandInputFields(audioCommand)[0];
+  assert.ok(field.type === 'select');
+  assert.equal(field.choices[0].audio?.url, 'https://cdn.example.test/preview.ogg');
+  assert.deepEqual(commandValuesFromInputs(audioCommand, { clip: 'stable-id' }, []), {
+    success: true, values: { clip: 'stable-id' },
+  });
+  const menu = renderParameterChoices(field.choices, 0, 'Clip choices');
+  assert.ok(menu.includes('data-audio-preview-action="toggle"'));
+  assert.ok(menu.includes('data-audio-url="https://cdn.example.test/preview.ogg"'));
+  assert.ok(menu.includes('type="range"'));
+  assert.ok(menu.includes('0:12'));
+  assert.equal((menu.match(/data-audio-preview-volume\s/g) ?? []).length, 1);
+  assert.equal((menu.match(/data-audio-preview-progress\s/g) ?? []).length, 2);
+  assert.ok(menu.includes('data-audio-preview-percentage>60%</output>'));
+  const form = renderBotFields([
+    { ...field, label: 'Clip', presentation: 'buttons' },
+    { ...field, name: 'second-clip', label: 'Second clip', presentation: 'dropdown' },
+  ], {}, {
+    prefix: 'generic-form', disabled: false,
+  });
+  assert.ok(form.includes('data-bot-select-value="stable-id"'));
+  assert.ok(form.includes('data-bot-select-submit="true"'));
+  assert.equal(form.includes('<select'), false);
+  assert.equal((form.match(/data-audio-preview-volume\s/g) ?? []).length, 1, 'Multiple audio fields share one form volume control');
+  assert.equal((form.match(/data-audio-preview-progress\s/g) ?? []).length, 4);
+});
+
+test('command parameter errors reuse validation, retain optional removal and allow false and zero', () => {
+  const store = usageStore(new MemoryUsageStorage(), 'server');
+  store.selectCommand('channel', command);
+  for (const name of ['private', 'member', 'mode']) store.setCommandOptionVisible('channel', name, true);
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  const fields = commandInputFields(command);
+  const error = (name: string) => {
+    const field = fields.find((entry) => entry.name === name);
+    assert.ok(field);
+    return commandParameterError(draft, field, [member]);
+  };
+  assert.equal(error('count'), undefined, 'Untouched missing values should not start with an error');
+  store.touchCommandField('channel', 'count');
+  assert.ok(error('count'));
+  for (const count of ['11', '-1', '2.5', 'word']) {
+    store.setCommandValues('channel', { song: 'Song', count });
+    assert.ok(error('count'));
+    assert.match(renderCompactCommand(draft, 'channel', [member], true, true), /required invalid" data-field-name="count"/);
+  }
+  store.setCommandValues('channel', { song: 'Song', count: 0, private: false, mode: 'unknown', member: 'departed' });
+  assert.equal(error('count'), undefined);
+  assert.equal(error('private'), undefined);
+  assert.ok(error('mode'));
+  assert.ok(error('member'));
+  const html = renderCompactCommand(draft, 'channel', [member], true, true);
+  assert.ok(html.includes('data-remove-parameter="mode"'));
+  assert.ok(html.includes('bot-argument-measure'));
+  assert.ok(html.includes('Enter the full title'));
+  store.setCommandOptionVisible('channel', 'mode', false);
+  assert.doesNotMatch(renderCompactCommand(draft, 'channel', [member], true, true), /data-field-name="mode"/);
+});
+
+test('autocomplete errors wait for interaction and disappear after selecting a valid choice', () => {
+  const query: SlashCommand = {
+    ...command, options: [{ name: 'audio', description: 'Audio', type: 'string', required: true, autocomplete: true }],
+  };
+  const store = usageStore(new MemoryUsageStorage(), 'server', [query]);
+  store.selectCommand('channel', query);
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  const field = commandInputFields(query)[0];
+  store.setCommandQuery('channel', 'audio', 'searching');
+  assert.equal(commandParameterError(draft, field, []), undefined);
+  store.touchCommandField('channel', 'audio');
+  assert.ok(commandParameterError(draft, field, []));
+  store.selectCommandChoice('channel', 'audio', { label: 'Result', value: 'opaque-id' });
+  assert.equal(commandParameterError(draft, field, []), undefined);
+});
+
+test('preview volume scope belongs to the command, independently of fields and other commands or servers', () => {
+  const scope = commandPreviewVolumeScope('server', 'bot', 'query');
+  for (const other of [
+    commandPreviewVolumeScope('another-server', 'bot', 'query'),
+    commandPreviewVolumeScope('server', 'another-bot', 'query'),
+    commandPreviewVolumeScope('server', 'bot', 'another-command'),
+  ]) assert.notEqual(scope, other);
+  const choices = [{ label: 'Preview', value: 'id', audio: { url: 'https://cdn.example.test/clip.mp3' } }];
+  for (const field of ['first', 'second']) {
+    const html = renderParameterChoices(choices, 0, field, `command:${field}`, scope);
+    assert.ok(html.includes('data-audio-volume-scope="[&quot;command&quot;,&quot;server&quot;,&quot;bot&quot;,&quot;query&quot;]"'));
+  }
+});
+
+test('download confirmation phase shows pending copy without transfer progress', () => {
+  const html = renderBotInvocation({
+    invocationId: 'download-confirming', channelId: 'channel', botId: 'music-bot', commandName: 'play',
+    botName: 'Music Bot', createdAt: 1, expiresAt: Date.now() + 60_000, status: 'active',
+    cancelPending: false, forms: [], acknowledged: true, hasResponse: false,
+    soundDownload: {
+      downloadId: 'download', title: 'Sound title', fileName: 'sound.mp3', receivedBytes: 0,
+      phase: 'confirming',
+    },
+  });
+  assert.ok(html.includes('Aguardando sua confirmação para baixar.'));
+  assert.equal(html.includes('<progress'), false);
 });
 
 test('flat attribution maps to distinct nested caller snapshots for private and public bot messages', () => {

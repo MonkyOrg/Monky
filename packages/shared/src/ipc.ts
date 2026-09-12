@@ -4,6 +4,7 @@
  */
 
 import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
+import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
 
 export interface DesktopSource {
   id: string;
@@ -35,6 +36,66 @@ export interface SoundboardSoundData {
   dataUrl: string;
   sizeBytes: number;
 }
+
+export interface SoundboardDownloadKey {
+  connectionId: string;
+  invocationId: string;
+  downloadId: string;
+}
+
+export interface SoundboardDownloadAuthorization {
+  connectionId: string;
+  invocationId: string;
+  configuredFolder: string;
+  expiresAt: number;
+}
+
+export type SoundboardDownloadAvailability = 'ready' | 'no_folder' | 'confirmation_required' | 'unavailable';
+
+export type SoundboardDownloadPermit =
+  | { status: 'authorized'; token: string }
+  | { status: 'failed'; reason: 'no_folder' | 'invalid_request' | 'write_failed' };
+
+export interface SoundboardDownloadInput extends SoundboardDownloadKey, SoundDownloadRequest {
+  token: string;
+  expiresAt: number;
+}
+
+export interface SoundboardDownloadProgress extends SoundboardDownloadKey {
+  receivedBytes: number;
+  totalBytes?: number;
+}
+
+export type SoundboardDownloadCancellation = Omit<SoundboardDownloadKey, 'downloadId'> & { downloadId?: string };
+
+export const SOUND_DOWNLOAD_IPC = {
+  availability: 'soundboard:download-availability',
+  authorize: 'soundboard:authorize-download',
+  download: 'soundboard:download-sound',
+  cancel: 'soundboard:cancel-download',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const SOUND_DOWNLOAD_PROGRESS = 'soundboard:download-progress' satisfies keyof IpcEvents;
+
+export interface AudioPreviewInput {
+  requestId: string;
+  url: string;
+  fileName?: string;
+}
+
+export interface AudioPreviewCancellation {
+  requestId: string;
+}
+
+export type AudioPreviewResult =
+  | { status: 'ready'; data: Uint8Array; mimeType: string }
+  | { status: 'cancelled' }
+  | { status: 'failed'; reason: SoundDownloadFailureReason };
+
+export const AUDIO_PREVIEW_IPC = {
+  load: 'audio-preview:load',
+  cancel: 'audio-preview:cancel',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 /** One custom sticker image found in the user's stickers folder (#356). */
 export interface StickerEntry {
@@ -382,6 +443,12 @@ export interface IpcInvokeChannels {
   // Soundboard
   'soundboard:list-sounds': { args: [folderPath: string]; returnType: SoundboardSoundEntry[] };
   'soundboard:read-sound': { args: [filePath: string]; returnType: SoundboardSoundData | null };
+  'soundboard:download-availability': { args: [configuredFolder: string]; returnType: SoundboardDownloadAvailability };
+  'soundboard:authorize-download': { args: [input: SoundboardDownloadAuthorization]; returnType: SoundboardDownloadPermit };
+  'soundboard:download-sound': { args: [input: SoundboardDownloadInput]; returnType: SoundDownloadResult };
+  'soundboard:cancel-download': { args: [key: SoundboardDownloadCancellation]; returnType: boolean };
+  'audio-preview:load': { args: [input: AudioPreviewInput]; returnType: AudioPreviewResult };
+  'audio-preview:cancel': { args: [input: AudioPreviewCancellation]; returnType: boolean };
   'soundboard:register-shortcuts': { args: [shortcuts: SoundboardShortcutBinding[]]; returnType: boolean };
 
   // Figurinhas do chat (#356)
@@ -443,6 +510,7 @@ export interface IpcEvents {
   'lan:found': [server: DiscoveredLanServer];
   'lan:lost': [server: DiscoveredLanServer];
   'soundboard:shortcut-triggered': [soundName: string];
+  'soundboard:download-progress': [progress: SoundboardDownloadProgress];
   'shortcut:action-triggered': [action: string];
   'ptt:state-changed': [active: boolean];
   'ptt:captured': [binding: PttKeyBinding];

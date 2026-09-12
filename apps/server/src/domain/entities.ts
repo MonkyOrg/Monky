@@ -143,3 +143,12 @@ export interface BotRecord {
   createdByUserId: string;
   createdAt: number;
 }
+
+export interface BotSettingsRecord {
+  botId: string;
+  definition: import('@monky/shared').BotSettingsDefinition;
+  serverOverrides: import('@monky/shared').BotFormValues;
+  schemaRevision: number;
+  revision: number;
+  downloadsSound: boolean;
+}

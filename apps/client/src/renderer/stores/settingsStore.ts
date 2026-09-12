@@ -8,6 +8,8 @@ import {
   OverlayPosition,
   OverlayBounds,
   OverlayConfig,
+  botSettingsValuesSchema,
+  type BotFormValues,
 } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 
@@ -24,6 +26,7 @@ export type ChatSoundMode = 'inherit' | 'all' | 'mentions' | 'none';
 export type ResolvedChatSoundMode = 'all' | 'mentions' | 'none';
 
 const CHAT_SOUND_MODES: ChatSoundMode[] = ['inherit', 'all', 'mentions', 'none'];
+const MAX_BOT_PREFERENCE_SCOPES = 256;
 
 export class SettingsStore {
   public qualityPreset: QualityPresetType = 'NORMAL';
@@ -55,6 +58,8 @@ export class SettingsStore {
   public userVolumes: Record<string, number> = {};
   public noiseSuppressionEnabled: boolean = true;
   public soundboardFolderPath: string = '';
+  public botDownloadConfirmationExceptions: string[] = [];
+  public botUserPreferences: Record<string, BotFormValues> = {};
   public soundboardVolume: number = 80; // 0 - 100
   public soundboardMuted: boolean = false;
   /** Folder the user picked for custom chat stickers (#356). */
@@ -98,6 +103,9 @@ export class SettingsStore {
   }
 
   public load(): void {
+    this.botDownloadConfirmationExceptions = [];
+    this.botUserPreferences = {};
+    if (typeof localStorage === 'undefined') return;
     try {
       const raw = localStorage.getItem('monky_settings');
       if (raw) {
@@ -111,6 +119,19 @@ export class SettingsStore {
         }
         if (typeof this.soundboardFolderPath !== 'string') {
           this.soundboardFolderPath = '';
+        }
+        if (!Array.isArray(this.botDownloadConfirmationExceptions) ||
+            this.botDownloadConfirmationExceptions.length > MAX_BOT_PREFERENCE_SCOPES ||
+            this.botDownloadConfirmationExceptions.some((key: unknown) => typeof key !== 'string' || !key || key.length > 2048)) {
+          console.warn('[Settings] Invalid bot download confirmations; confirmation is required again.');
+          this.botDownloadConfirmationExceptions = [];
+        }
+        if (!this.botUserPreferences || typeof this.botUserPreferences !== 'object' || Array.isArray(this.botUserPreferences) ||
+            Object.keys(this.botUserPreferences).length > MAX_BOT_PREFERENCE_SCOPES ||
+            Object.entries(this.botUserPreferences).some(([key, values]) => !key || key.length > 2048 ||
+              !botSettingsValuesSchema.safeParse(values).success)) {
+          console.warn('[Settings] Invalid individual bot preferences; saved overrides were discarded.');
+          this.botUserPreferences = {};
         }
         if (typeof this.stickersFolderPath !== 'string') {
           this.stickersFolderPath = '';
@@ -228,7 +249,11 @@ export class SettingsStore {
           this.overlaySavedBounds = null;
         }
       }
-    } catch (e) {}
+    } catch (error) {
+      this.botDownloadConfirmationExceptions = [];
+      this.botUserPreferences = {};
+      console.warn('[Settings] Could not load settings; bot downloads require confirmation:', error);
+    }
   }
 
   public getOverlayConfig(): OverlayConfig {
@@ -370,7 +395,49 @@ export class SettingsStore {
     return this.getGlobalChatSoundMode();
   }
 
-  public save(): void {
+  public suppressBotDownloadConfirmation(key: string): void {
+    this.saveBotPreferences(key, this.getBotUserSettings(key), false);
+  }
+
+  public getBotUserSettings(key: string): BotFormValues {
+    return Object.hasOwn(this.botUserPreferences, key) ? structuredClone(this.botUserPreferences[key]) : {};
+  }
+
+  public saveBotPreferences(key: string, values: BotFormValues, confirmFileName?: boolean): void {
+    if (!key || key.length > 2048 || (confirmFileName !== undefined && typeof confirmFileName !== 'boolean')) {
+      throw new Error('Invalid individual bot preference scope.');
+    }
+    const parsed = botSettingsValuesSchema.safeParse(values);
+    if (!parsed.success) throw new Error('Invalid individual bot preferences.');
+    const previousPreferences = this.botUserPreferences;
+    const previousConfirmations = this.botDownloadConfirmationExceptions;
+    const customChanged = JSON.stringify(this.getBotUserSettings(key)) !== JSON.stringify(parsed.data);
+    const entries = Object.entries(previousPreferences).filter(([scope]) => scope !== key);
+    if (Object.keys(parsed.data).length) entries.push([key, structuredClone(parsed.data)]);
+    this.botUserPreferences = Object.fromEntries(entries.slice(-MAX_BOT_PREFERENCE_SCOPES));
+    if (confirmFileName !== undefined) {
+      const confirmations = previousConfirmations.filter((scope) => scope !== key);
+      if (!confirmFileName) confirmations.push(key);
+      this.botDownloadConfirmationExceptions = confirmations.slice(-MAX_BOT_PREFERENCE_SCOPES);
+    }
+    if (!this.save()) {
+      this.botUserPreferences = previousPreferences;
+      this.botDownloadConfirmationExceptions = previousConfirmations;
+      throw new Error('Could not save individual bot preferences.');
+    }
+    appEvents.emit('bot.preferences_updated', { scope: key, customChanged });
+  }
+
+  public resetBotDownloadConfirmations(): void {
+    const previous = this.botDownloadConfirmationExceptions;
+    this.botDownloadConfirmationExceptions = [];
+    if (!this.save()) {
+      this.botDownloadConfirmationExceptions = previous;
+      throw new Error('Could not restore bot download confirmations.');
+    }
+  }
+
+  public save(): boolean {
     try {
       localStorage.setItem('monky_settings', JSON.stringify({
         qualityPreset: this.qualityPreset,
@@ -390,6 +457,8 @@ export class SettingsStore {
         isMuted: this.isMuted,
         isDeafened: this.isDeafened,
         soundboardFolderPath: this.soundboardFolderPath,
+        botDownloadConfirmationExceptions: this.botDownloadConfirmationExceptions,
+        botUserPreferences: this.botUserPreferences,
         soundboardVolume: this.soundboardVolume,
         soundboardMuted: this.soundboardMuted,
         stickersFolderPath: this.stickersFolderPath,
@@ -422,7 +491,11 @@ export class SettingsStore {
         overlaySavedBounds: this.overlaySavedBounds,
       }));
       appEvents.emit('settings.updated');
-    } catch (e) {}
+      return true;
+    } catch (error) {
+      console.warn('[Settings] Could not save settings:', error);
+      return false;
+    }
   }
 }
 

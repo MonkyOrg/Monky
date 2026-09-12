@@ -1,5 +1,13 @@
 import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord, VoiceRestrictions } from './entities';
 import type { BotSelector } from '@monky/shared';
+import type { BotSettingsRecord } from './entities';
+
+export interface IBotSettingsRepository {
+  /** Existing bots without a declaration return an empty revision-zero record. */
+  findById(botId: string): BotSettingsRecord | undefined;
+  save(record: BotSettingsRecord): void;
+  transaction<T>(operation: () => T): T;
+}
 
 export interface IBotSelectorRepository {
   findById(id: string): BotSelector | undefined;
