@@ -109,6 +109,7 @@ if (!process.versions.electron) {
     await window.webContents.executeJavaScript('window.footerSmoke.pointerDown()');
     window.webContents.sendInputEvent({ type: 'mouseMove', x: 1050, y: 50 });
     window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: 1050, y: 50 });
+    await window.webContents.executeJavaScript('window.footerSmoke.hoverLeft()', true);
     phase = 'normal motion';
     await window.webContents.executeJavaScript('window.footerSmoke.normal()', true);
     phase = 'reduced motion';
@@ -217,15 +218,43 @@ async function setupFooterSmoke() {
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   const delay = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
   const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+  const finishAnimations = async (items, { allowCancellation = true } = {}) => {
+    let timeout;
+    try {
+      await Promise.race([
+        (async () => {
+          await Promise.all(items.map(animation => animation.finished.catch(error => {
+            if (!allowCancellation || error.name !== 'AbortError') throw error;
+          })));
+          // The finish handlers remove artwork after the finished promises settle.
+          await frame();
+        })(),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('Control animations did not finish: ' + JSON.stringify(
+            items.map(animation => ({
+              button: animation.effect?.target?.closest('button')?.id,
+              state: animation.playState, pending: animation.pending,
+              time: animation.currentTime, rate: animation.playbackRate,
+              timing: animation.effect?.getTiming(),
+            })),
+          ))), 10_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
   const mic = () => root.querySelector('#bar-btn-mic');
   const glyph = (button) => button.querySelector(':scope > .audio-state-icon, :scope > .material-symbols-outlined');
   const animations = (button) => glyph(button).getAnimations();
   const enter = (button) => button.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' }));
   const rect = (element) => JSON.stringify(element.getBoundingClientRect().toJSON());
-  const motionCount = () => [...root.querySelectorAll('.user-quick-actions button, .user-media-bar button')]
+  const footerButtons = () => [...root.querySelectorAll('.user-quick-actions button, .user-media-bar button')];
+  const motionCount = () => footerButtons()
     .reduce((count, button) => count + animations(button).length, 0);
   const composerButtons = () => [...composer.querySelectorAll('#btn-attach, #btn-emoji, #btn-code')];
   const composerMotionCount = () => composerButtons().reduce((count, button) => count + animations(button).length, 0);
+  const controlAnimations = () => [...footerButtons(), ...composerButtons()].flatMap(animations);
   let pointerBounds;
   let selectedHover;
   let trustedHover = false;
@@ -236,6 +265,7 @@ async function setupFooterSmoke() {
 
   window.footerSmoke = {
     checkCount: () => checks,
+    finishAnimations,
     async cardHoverTarget(selector) {
       const control = document.querySelector(selector);
       const card = control?.closest('.stage-card, .stage-mini-card, .stage-focused-main');
@@ -389,7 +419,7 @@ async function setupFooterSmoke() {
         'Native press does not shrink or move the hit box');
     },
     async normal() {
-      await delay(350);
+      await finishAnimations(controlAnimations());
       check(motionCount() === 0, 'No autoplay motion on initial render');
       check(composerMotionCount() === 0, 'Composer buttons do not animate at rest');
       const camera = root.querySelector('#media-btn-camera');
@@ -434,13 +464,13 @@ async function setupFooterSmoke() {
         'Media state updates preserve stop-camera/stop-share meanings');
       check(!camera.querySelector('.control-motion-decoration') && animations(camera).length === 1,
         'State change replaces camera hover with short feedback');
-      await delay(200);
+      await finishAnimations([camera.parentElement, screen].flatMap(control => control.getAnimations({ subtree: true })));
       check(camera.getAnimations().length === 0 && screen.getAnimations().length === 0,
         'Active media retains static status styling without perpetual button pulses');
       checkJoinedControl(camera, cameraArrow, 'Active camera');
       const activeCameraBackground = getComputedStyle(camera.parentElement).backgroundColor;
       cameraArrow.setAttribute('aria-expanded', 'true');
-      await delay(200);
+      await finishAnimations(camera.parentElement.getAnimations({ subtree: true }));
       check(getComputedStyle(camera.parentElement).backgroundColor === activeCameraBackground,
         'Opening camera options retains the shared active-camera status surface');
       cameraArrow.setAttribute('aria-expanded', 'false');
@@ -458,7 +488,7 @@ async function setupFooterSmoke() {
       camera.disabled = false;
       voice.isCameraOn = voice.isScreenSharing = false;
       appEvents.emit('voice.state_updated');
-      await delay(200);
+      await finishAnimations(controlAnimations());
       for (const button of composerButtons()) {
         const bounds = rect(button);
         const inputBounds = rect(composer.querySelector('textarea'));
@@ -488,7 +518,7 @@ async function setupFooterSmoke() {
         await delay();
         check(animations(button).length === 0, 'Send and floating message actions are outside composer motion scope');
       }
-      await delay(350);
+      await finishAnimations(controlAnimations());
       const disabled = composer.querySelector('#btn-code');
       disabled.disabled = true;
       enter(disabled);
@@ -530,7 +560,7 @@ async function setupFooterSmoke() {
         await delay();
         check(animations(button).length <= 1, 'Rapid PTT never accumulates animations');
       }
-      await delay(350);
+      await finishAnimations(controlAnimations());
       check(motionCount() === 0, 'Rapid PTT settles without lingering motion');
       appEvents.emit('voice.state_updated');
       appEvents.emit('voice.microphone_updated');
@@ -561,7 +591,7 @@ async function setupFooterSmoke() {
       await delay();
       check(voice.isDeafened && animations(deafen).length === 1, 'Deafen click animates and still changes state');
       deafen.click();
-      await delay(350);
+      await finishAnimations(controlAnimations());
 
       const arrow = root.querySelector('[data-audio-device="output"]');
       const arrowBounds = rect(arrow);
@@ -583,10 +613,18 @@ async function setupFooterSmoke() {
       enter(root.querySelector('#bar-btn-disconnect'));
       check(animations(root.querySelector('#bar-btn-disconnect')).length === 1, 'Disconnect icon also sways');
       check(getComputedStyle(button).transitionDuration.includes('0.12s'), 'Color state feedback is animated');
-      for (const control of [...root.querySelectorAll('.user-quick-actions button, .user-media-bar button'), ...composerButtons()]) {
+      const hoverControls = [...footerButtons(), ...composerButtons()];
+      for (const control of hoverControls) {
         enter(control);
       }
-      await delay(950);
+      // A slower animation timeline exposes assertions that incorrectly rely on wall-clock sleeps.
+      for (const effect of hoverControls.flatMap(control => control.getAnimations({ subtree: true }))) {
+        effect.updatePlaybackRate(0.25);
+      }
+      const hovers = controlAnimations();
+      check(hovers.length > 0 && hovers.every(animation => animation.effect.getTiming().iterations === 1),
+        'Footer and composer hovers are finite one-shot animations');
+      await finishAnimations(hovers, { allowCancellation: false });
       check(motionCount() === 0 && composerMotionCount() === 0, 'Every function-specific hover ends without looping');
       check(!document.querySelector('.control-motion-decoration'), 'Completed hover artwork is removed automatically');
       // Keep real active motion alive while the host changes the OS media feature.
@@ -745,11 +783,7 @@ async function setupStageSmoke() {
   const button = (selector) => root.querySelector(selector);
   const glyph = (control) => control.querySelector(':scope > .audio-state-icon, :scope > .material-symbols-outlined');
   const animations = (control) => glyph(control).getAnimations();
-  const finishAnimations = async (items) => {
-    await Promise.all(items.map(animation =>
-      animation.finished.catch(error => { if (error.name !== 'AbortError') throw error; })));
-    await delay();
-  };
+  const finishAnimations = window.footerSmoke.finishAnimations;
   const enter = (control) => control.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' }));
   const leave = (control) => control.dispatchEvent(new PointerEvent('pointerleave', { pointerType: 'mouse' }));
   const buttons = () => [...root.querySelectorAll('.voice-stage-container button')];
