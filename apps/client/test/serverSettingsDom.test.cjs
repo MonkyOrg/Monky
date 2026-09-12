@@ -65,14 +65,20 @@ if (!process.versions.electron) {
     });
     browser.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     timeout = setTimeout(() => { console.error('Server settings DOM regression timed out'); void finish(1); }, 90000);
-    await browser.loadURL(`http://127.0.0.1:${address.port}/__server_settings_regression__`);
-    const checks = await browser.webContents.executeJavaScript(`(${runRegression.toString()})()`, true);
-    console.log(`Server settings DOM: ${checks} checks passed`);
+    for (const language of ['pt-BR', 'en']) {
+      await browser.loadURL(`http://127.0.0.1:${address.port}/__server_settings_regression__`);
+      await browser.webContents.executeJavaScript('localStorage.clear(); sessionStorage.clear();', true);
+      const checks = await browser.webContents.executeJavaScript(
+        `(${runRegression.toString()})(${JSON.stringify(language)})`, true);
+      console.log(`Server settings DOM (${language}): ${checks} checks passed`);
+    }
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
 }
 
-async function runRegression() {
+async function runRegression(language) {
+  const { setLanguage, t } = await import('/i18n/index.ts');
+  setLanguage(language);
   const [{ ServerSettingsModal }, stores, network, { appEvents }] = await Promise.all([
     import('/views/ServerSettingsModal.ts'), import('/stores/serverStore.ts'),
     import('/core/NetworkClient.ts'), import('/core/EventBus.ts'),
@@ -340,8 +346,9 @@ async function runRegression() {
   await flush();
   check(field('.role-editor-member-switch[data-user-id="bob"]').checked, 'Role assignment retries preserve the editor');
   field('[data-role-editor-tab="permissions"]').click();
-  check(field('.role-permission-switch[data-permission="8192"]').closest('div').textContent.includes('gerar token de vínculo avançado') &&
-    !field('.role-permission-switch[data-permission="8192"]').closest('div').textContent.includes('editar o perfil'),
+  const managementCopy = field('.role-permission-switch[data-permission="8192"]').closest('div').textContent;
+  check(managementCopy.includes(t('permissions.manageBotsDesc')) && managementCopy.includes('token') &&
+    !/editar o perfil|editing their profiles/i.test(managementCopy),
   'MANAGE_BOTS permission copy no longer claims admins can edit bot profiles');
   change('.role-permission-switch[data-permission="32"]', true);
   await flush();
@@ -436,7 +443,7 @@ async function runRegression() {
   check(Array.from(document.querySelectorAll('#server-bots-tab [data-settings-section]')).map((section) => section.dataset.settingsSection).join(',') ===
     'install-bot,manual-link-bot,bots', 'Bot linking keeps the URL flow first and the advanced manual section searchable');
   check(field('.bot-list-item[data-bot-id="bot-a"]').textContent.includes('Helper') &&
-    !field('.bot-list-item[data-bot-id="bot-a"]').textContent.includes('Aguardando conexão do bot'),
+    !field('.bot-list-item[data-bot-id="bot-a"]').textContent.includes(t('bots.pendingIdentity')),
   'Existing offline bots keep their published read-only identity');
   check(field('#manual-bot-link-panel').hidden && field('#btn-toggle-manual-link').getAttribute('aria-expanded') === 'false',
     'Manual link starts collapsed behind an advanced disclosure');
@@ -459,16 +466,16 @@ async function runRegression() {
   acknowledge('BOT_CREATE');
   await flush();
   const createdBot = field('.bot-list-item[data-bot-id="created-bot"]');
-  check(field('#bot-token-value').textContent === 'non-secret-test-token' && createdBot.textContent.includes('Aguardando conexão do bot') &&
+  check(field('#bot-token-value').textContent === 'non-secret-test-token' && createdBot.textContent.includes(t('bots.pendingIdentity')) &&
     !createdBot.textContent.includes('Bot') && field('[data-bot-configure="created-bot"]').matches(':disabled'),
-  'Manual linking preserves the one-time token while pending bots show a generic waiting identity');
+  'Manual linking reveals the token once while pending bots show a generic waiting identity');
   bots = bots.map((entry) => entry.id === 'created-bot' ? {
     ...entry, name: 'Published helper', avatarUrl: 'data:image/png;base64,BB==', online: true, bound: true, profilePending: false,
   } : entry);
   appEvents.emit('server.members_updated');
   await flush();
   check(field('.bot-list-item[data-bot-id="created-bot"]').textContent.includes('Published helper') &&
-    !field('.bot-list-item[data-bot-id="created-bot"]').textContent.includes('Aguardando conexão do bot') &&
+    !field('.bot-list-item[data-bot-id="created-bot"]').textContent.includes(t('bots.pendingIdentity')) &&
     field('.bot-list-item[data-bot-id="created-bot"] img').src.startsWith('data:image/png;base64,BB==') &&
     !field('[data-bot-configure="created-bot"]').matches(':disabled'),
   'Pending manual links update live to the bot-provided name and avatar when the profile is published');
