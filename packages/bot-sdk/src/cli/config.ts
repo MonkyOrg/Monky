@@ -20,13 +20,16 @@ import {
   type BotProject,
 } from '../tooling/config';
 
-export interface ManualBotConfig {
+export type ManualBotCredentials =
+  | { botToken: string; tokenEnv?: never }
+  | { botToken?: never; tokenEnv: string };
+
+export type ManualBotConfig = {
   mode: 'manual';
   botName: string;
   botDir: string;
   serverUrl: string;
-  tokenEnv: string;
-}
+} & ManualBotCredentials;
 
 export interface MarketplaceBotConfig {
   mode: 'marketplace';
@@ -83,7 +86,7 @@ export function configFilePath(cliName: string, env: NodeJS.ProcessEnv = process
 }
 
 export function defaultBotDir(context: CliContext): string {
-  return path.join(context.homeDir, 'bot');
+  return context.homeDir;
 }
 
 export function normalizeBotDir(value: string): string {
@@ -108,10 +111,26 @@ export function validateTokenEnv(value: unknown): string {
   return tokenEnv;
 }
 
+export function validateBotToken(value: unknown): string {
+  return stringValue(value, 'bot token', 2048);
+}
+
+function validateManualCredentials(input: { botToken?: unknown; tokenEnv?: unknown }): ManualBotCredentials {
+  if (input.botToken !== undefined) {
+    if (input.tokenEnv !== undefined) throw new Error('Configure either botToken or tokenEnv, not both.');
+    return { botToken: validateBotToken(input.botToken) };
+  }
+  return { tokenEnv: validateTokenEnv(input.tokenEnv) };
+}
+
 export function validateServerUrl(value: unknown): string {
   let url: URL;
   try {
-    url = new URL(stringValue(value, 'server URL', 2048));
+    const address = stringValue(value, 'server URL', 2048);
+    if (!address.includes('://') && (/^[a-z][a-z\d+.-]*:[/\\]/i.test(address) || address.startsWith('/'))) {
+      throw new Error('Malformed server address.');
+    }
+    url = new URL(address.includes('://') ? address : `ws://${address}`);
   } catch {
     throw new Error('The server URL must be a valid ws:// or wss:// URL.');
   }
@@ -156,7 +175,7 @@ function parseCommonConfig(raw: Record<string, unknown>): { botName: string; bot
 
 export function validateConfig(value: unknown, label = 'Bot config'): BotConfig {
   if (!isRecord(value)) throw new Error(`${label} must contain an object.`);
-  rejectUnknown(value, ['mode', 'botName', 'botDir', 'serverUrl', 'tokenEnv', 'servePort', 'publicHost'], label);
+  rejectUnknown(value, ['mode', 'botName', 'botDir', 'serverUrl', 'botToken', 'tokenEnv', 'servePort', 'publicHost'], label);
   const common = parseCommonConfig(value);
   if (value.mode === 'manual') {
     return {
@@ -164,7 +183,7 @@ export function validateConfig(value: unknown, label = 'Bot config'): BotConfig 
       botName: common.botName,
       botDir: common.botDir,
       serverUrl: validateServerUrl(value.serverUrl),
-      tokenEnv: validateTokenEnv(value.tokenEnv),
+      ...validateManualCredentials(value),
     };
   }
   if (value.mode === 'marketplace') {
@@ -232,7 +251,7 @@ function defaultBotName(context: CliContext): string {
 
 export function manualConfig(
   context: CliContext,
-  input: { botName?: string; botDir?: string; serverUrl?: string; tokenEnv?: string } = {}
+  input: { botName?: string; botDir?: string; serverUrl?: string; botToken?: string; tokenEnv?: string } = {}
 ): ManualBotConfig {
   ensureModeSupported(context, 'manual');
   return {
@@ -240,7 +259,9 @@ export function manualConfig(
     botName: validateBotName(input.botName ?? defaultBotName(context)),
     botDir: normalizeBotDir(input.botDir ?? defaultBotDir(context)),
     serverUrl: validateServerUrl(input.serverUrl ?? DEFAULT_MANUAL_SERVER_URL),
-    tokenEnv: validateTokenEnv(input.tokenEnv ?? DEFAULT_TOKEN_ENV),
+    ...validateManualCredentials(input.botToken === undefined && input.tokenEnv === undefined
+      ? { tokenEnv: DEFAULT_TOKEN_ENV }
+      : input),
   };
 }
 
@@ -265,7 +286,7 @@ export function sanitizeConfig(config: BotConfig): Record<string, unknown> {
       botName: config.botName,
       botDir: config.botDir,
       serverUrl: config.serverUrl,
-      tokenEnv: config.tokenEnv,
+      ...(config.botToken === undefined ? { tokenEnv: config.tokenEnv } : { botToken: '[redacted]' }),
     }
     : {
       mode: config.mode,

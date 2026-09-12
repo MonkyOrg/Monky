@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { loadBotProject } from '../tooling/config';
 import { DEFAULT_AUTOUPDATE_SCHEDULE } from './constants';
 import { parseVersion } from './updateReleases';
+import { configuredUpdateSource } from './updateSources';
 
 export interface AutoUpdateSettings {
   packageRoot: string;
@@ -57,20 +58,23 @@ export function shouldIncludeBeta(installedVersion: string, explicit: boolean): 
 
 export function runAutoUpdateOnce(settings: AutoUpdateSettings, env: NodeJS.ProcessEnv = process.env): void {
   const project = loadBotProject(settings.packageRoot);
-  if (!project.definition.releases) {
-    throw new Error('Auto-update is disabled because this bot no longer configures a GitHub Releases source.');
-  }
+  configuredUpdateSource(project);
   const includeBeta = shouldIncludeBeta(project.manifest.version, settings.includeBeta);
   const args = [...settings.updateArgs];
   if (includeBeta) args.push('--beta');
-  const result = spawnSync(process.execPath, args, {
-    cwd: settings.updateCwd,
-    env,
-    shell: false,
-    stdio: 'inherit',
-    windowsHide: true,
-  });
-  if (result.error) throw result.error;
+  let result: ReturnType<typeof spawnSync>;
+  try {
+    result = spawnSync(process.execPath, args, {
+      cwd: settings.updateCwd,
+      env,
+      shell: false,
+      stdio: 'inherit',
+      windowsHide: true,
+    });
+  } catch {
+    throw new Error('Could not start the configured bot update command.');
+  }
+  if (result.error) throw new Error('Could not start the configured bot update command.');
   if (result.status !== 0) throw new Error(`Auto-update command failed with status ${result.status ?? result.signal}.`);
 }
 

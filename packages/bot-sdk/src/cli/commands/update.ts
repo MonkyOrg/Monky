@@ -13,13 +13,8 @@ import {
   writeBotEcosystem,
   writeUpdaterEcosystem,
 } from '../pm2';
-import {
-  compareVersions,
-  downloadReleaseAsset,
-  fetchLatestRelease,
-  readPackageManifestFromTarball,
-  withTemporaryDownload,
-} from '../updateReleases';
+import { compareVersions } from '../updateReleases';
+import { configuredUpdateSource, withUpdateCandidate } from '../updateSources';
 
 function promptYesNo(question: string, defaultYes: boolean): Promise<boolean> {
   const hint = defaultYes ? '[Y/n]' : '[y/N]';
@@ -35,14 +30,6 @@ function promptYesNo(question: string, defaultYes: boolean): Promise<boolean> {
       resolve(['y', 'yes', 's', 'sim'].includes(normalized));
     });
   });
-}
-
-function releasesOrThrow(context: CliContext) {
-  const source = context.project.definition.releases;
-  if (!source) {
-    throw new Error(`Updates are not configured for ${context.displayName}. Configure package.json.monkyBot.releases with an explicit GitHub Releases URL.`);
-  }
-  return source;
 }
 
 function parseUpdateArgs(args: string[]): { includeBeta: boolean; checkOnly: boolean; assumeYes: boolean } {
@@ -62,13 +49,18 @@ function parseUpdateArgs(args: string[]): { includeBeta: boolean; checkOnly: boo
       assumeYes = true;
       continue;
     }
-    throw new Error(`Unknown update option: ${argument}`);
+    throw new Error('Unknown update option. Use --beta, --check or --yes.');
   }
   return { includeBeta, checkOnly, assumeYes };
 }
 
 function requireGlobalInstall(context: CliContext): void {
-  const globalRoot = runNpm(['root', '--global']).trim();
+  let globalRoot: string;
+  try {
+    globalRoot = runNpm(['root', '--global']).trim();
+  } catch {
+    throw new Error('Could not determine the active npm global prefix.');
+  }
   const installedRoot = path.join(globalRoot, ...context.project.manifest.name.split('/'));
   if (!path.isAbsolute(globalRoot) || !fs.existsSync(installedRoot) ||
       fs.realpathSync(installedRoot) !== fs.realpathSync(context.packageRoot)) {
@@ -76,60 +68,76 @@ function requireGlobalInstall(context: CliContext): void {
   }
 }
 
-export async function updateCommand(context: CliContext, args: string[]): Promise<void> {
-  const source = releasesOrThrow(context);
-  const options = parseUpdateArgs(args);
-  const latest = await fetchLatestRelease(source, context.project.definition, options.includeBeta, process.env);
-  console.log(`Versão instalada: ${context.version}`);
-  if (!latest) {
-    console.log('Nenhuma release instalável encontrada no canal solicitado.');
-    return;
-  }
-  const comparison = compareVersions(latest.version, context.version);
-  if (comparison <= 0) {
-    console.log(comparison === 0
-      ? 'Você já está na versão mais recente desse canal.'
-      : 'A release encontrada é mais antiga do que a instalada; downgrade bloqueado.');
-    return;
-  }
-  console.log(`Nova versão disponível: ${latest.version}`);
-  if (latest.htmlUrl) console.log(latest.htmlUrl);
-  if (options.checkOnly) return;
-  requireGlobalInstall(context);
-  if (!options.assumeYes && !process.stdin.isTTY) {
-    throw new Error('Use update --yes to install a release non-interactively, or --check to inspect it.');
-  }
-  if (!options.assumeYes && !(await promptYesNo(`Atualizar ${context.cliName} para ${latest.version}?`, true))) {
-    console.log('Atualização cancelada.');
-    return;
-  }
-
-  const wasRunning = findProcess(context)?.pm2_env?.status === 'online';
-  await withTemporaryDownload(context.cliName, async (directory) => {
-    const file = path.join(directory, latest.assetName);
-    await downloadReleaseAsset(source, latest, file, process.env);
-    const manifest = readPackageManifestFromTarball(file);
-    if (manifest.name !== context.project.manifest.name || manifest.version !== latest.version || manifest.cliName !== context.cliName) {
-      throw new Error('The downloaded release asset does not match the expected bot package.');
-    }
-    runNpm(['install', '-g', '--ignore-scripts', '--offline', '--no-audit', '--no-fund', file], {
-      stdio: 'inherit',
-      timeout: 300_000,
-    });
+function requireExternalRuntimeData(context: CliContext): void {
+  const config = readConfig(context);
+  const roots = [path.resolve(context.packageRoot), context.project.root];
+  const isInsidePackage = (directory: string): boolean => roots.some((root) => {
+    const relative = path.relative(root, directory);
+    return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
   });
-  const refreshed = createCliContext(context.packageRoot);
-  if (refreshed.version !== latest.version || refreshed.cliName !== context.cliName ||
-      refreshed.project.manifest.name !== context.project.manifest.name) {
-    throw new Error('npm completed, but the installed bot does not match the expected release. The running process was not restarted.');
+  for (const directory of [context.homeDir, ...(config ? [config.botDir] : [])]) {
+    if (isInsidePackage(path.resolve(directory)) ||
+        (fs.existsSync(directory) && isInsidePackage(fs.realpathSync(directory)))) {
+      throw new Error('The bot config or runtime directory is inside its installed package. Move it outside the package before updating to preserve the profile and keys.');
+    }
   }
-  console.log(`Atualizado para ${latest.version}.`);
-  if (wasRunning) {
-    const config = readConfig(refreshed);
-    if (!config) throw new Error('The bot package was updated, but the config disappeared before the process could be restarted.');
-    startOrRestart(refreshed, writeBotEcosystem(refreshed, resolveInstalledEntry(refreshed)));
-    saveProcessList(refreshed);
-    console.log('Processo reiniciado com a mesma configuração.');
-  }
+}
+
+export async function updateCommand(context: CliContext, args: string[]): Promise<void> {
+  configuredUpdateSource(context.project);
+  const options = parseUpdateArgs(args);
+  await withUpdateCandidate(context.project, options.includeBeta, async (latest) => {
+    console.log(`Versão instalada: ${context.version}`);
+    if (!latest) {
+      console.log('Nenhuma release instalável encontrada no canal solicitado.');
+      return;
+    }
+    const comparison = compareVersions(latest.version, context.version);
+    if (comparison <= 0) {
+      console.log(comparison === 0
+        ? 'Você já está na versão mais recente desse canal.'
+        : 'A release encontrada é mais antiga do que a instalada; downgrade bloqueado.');
+      return;
+    }
+    console.log(`Nova versão disponível: ${latest.version}`);
+    if (latest.htmlUrl) console.log(latest.htmlUrl);
+    if (options.checkOnly) return;
+    requireGlobalInstall(context);
+    if (!options.assumeYes && !process.stdin.isTTY) {
+      throw new Error('Use update --yes to install a release non-interactively, or --check to inspect it.');
+    }
+    if (!options.assumeYes && !(await promptYesNo(`Atualizar ${context.cliName} para ${latest.version}?`, true))) {
+      console.log('Atualização cancelada.');
+      return;
+    }
+
+    requireExternalRuntimeData(context);
+    const wasRunning = findProcess(context)?.pm2_env?.status === 'online';
+    await latest.withVerifiedArchive((file) => {
+      try {
+        runNpm(['install', '-g', '--ignore-scripts', '--offline', '--no-audit', '--no-fund', file], {
+          stdio: 'pipe',
+          timeout: 300_000,
+        });
+      } catch {
+        // npm diagnostics can contain environment credentials or authenticated registry URLs.
+        throw new Error('The offline npm installation failed. The running bot was not restarted.');
+      }
+    });
+    const refreshed = createCliContext(context.packageRoot);
+    if (refreshed.version !== latest.version || refreshed.cliName !== context.cliName ||
+        refreshed.project.manifest.name !== context.project.manifest.name) {
+      throw new Error('npm completed, but the installed bot does not match the expected release. The running process was not restarted.');
+    }
+    console.log(`Atualizado para ${latest.version}.`);
+    if (wasRunning) {
+      const config = readConfig(refreshed);
+      if (!config) throw new Error('The bot package was updated, but the config disappeared before the process could be restarted.');
+      startOrRestart(refreshed, writeBotEcosystem(refreshed, resolveInstalledEntry(refreshed)));
+      saveProcessList(refreshed);
+      console.log('Processo reiniciado com a mesma configuração.');
+    }
+  });
 }
 
 function parseAutoUpdateArgs(args: string[]): { action: 'on' | 'off' | 'status'; schedule: string; includeBeta: boolean } {
@@ -154,14 +162,14 @@ function parseAutoUpdateArgs(args: string[]): { action: 'on' | 'off' | 'status';
         schedule = argument;
         continue;
       }
-      throw new Error(`Unknown autoupdate option: ${argument}`);
+      throw new Error('Unknown autoupdate option. Use HH:MM and/or --beta.');
     }
     return { action, schedule, includeBeta };
   }
   if (action === 'status' && args.length === 1) {
     return { action, schedule: DEFAULT_AUTOUPDATE_SCHEDULE, includeBeta: false };
   }
-  throw new Error(`Unknown autoupdate subcommand: ${action}`);
+  throw new Error('Unknown autoupdate subcommand. Use on, off or status.');
 }
 
 export async function autoUpdateCommand(context: CliContext, args: string[]): Promise<void> {
@@ -178,7 +186,7 @@ export async function autoUpdateCommand(context: CliContext, args: string[]): Pr
     console.log('Auto-update desativado.');
     return;
   }
-  releasesOrThrow(context);
+  configuredUpdateSource(context.project);
   requirePm2(context, 'enable auto-update');
   startOrRestart(context, writeUpdaterEcosystem(context, parsed.schedule, parsed.includeBeta));
   saveProcessList(context);

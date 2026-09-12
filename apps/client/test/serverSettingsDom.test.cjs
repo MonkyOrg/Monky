@@ -82,9 +82,46 @@ async function runRegression() {
   const listenerCount = () => [...appEvents.listeners.values()].reduce((total, listeners) => total + listeners.size, 0);
   const initialListeners = listenerCount();
   const flush = async () => { for (let index = 0; index < 20; index++) await Promise.resolve(); };
+  const settle = async (predicate, message) => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(message);
+  };
   const member = (id) => ({ id, clientId: `${id}-key`, sessionId: `${id}-session`, nickname: id, status: 'ONLINE', joinedAt: 1 });
   const store = new stores.ServerStore();
   const role = { id: 'editors', serverId: 'server-a', name: 'Editors', color: '#5865f2', position: 1, permissions: 16, isDefault: false, createdAt: 1 };
+  const botInfo = (overrides = {}) => ({
+    id: 'bot-a',
+    name: 'Helper',
+    createdAt: 1,
+    createdByUserId: 'admin',
+    avatarUrl: null,
+    online: false,
+    bound: true,
+    profilePending: false,
+    ...overrides,
+  });
+  const botSettingsSnapshot = (botId) => {
+    const bot = bots.find((entry) => entry.id === botId);
+    if (!bot) throw new Error(`Unknown bot snapshot: ${botId}`);
+    return {
+      bot: {
+        botId,
+        name: bot.name,
+        avatarUrl: bot.profilePending ? null : bot.avatarUrl,
+        online: bot.online,
+        capabilities: { downloadsSound: false },
+        schemaRevision: 1,
+        revision: 1,
+        hasServerSettings: false,
+        hasUserSettings: false,
+        canConfigure: true,
+      },
+      definition: {},
+    };
+  };
   store.setServerDetails({
     id: 'server-a', name: 'Server A', createdAt: 1, maxUsers: 0, hasPassword: false,
     iconUrl: 'data:image/png;base64,AA==', voiceMode: 'p2p', turnEnabled: false,
@@ -97,10 +134,12 @@ async function runRegression() {
   const client = new network.NetworkClient();
   client.sessionKey = 'server-a';
   client.getStatus = () => 'CONNECTED';
+  client.getCurrentServerUrl = () => 'wss://server-a.example/';
   const requests = [];
-  let bots = [{ id: 'bot-a', name: 'Helper', createdAt: 1, avatarUrl: null, online: false, bound: true }];
+  let bots = [botInfo()];
   client.sendRequest = (type, payload) => {
     if (type === 'BOT_LIST') return Promise.resolve({ bots: structuredClone(bots) });
+    if (type === 'BOT_SETTINGS_GET') return Promise.resolve(botSettingsSnapshot(payload.botId));
     return new Promise((resolve, reject) => { requests.push({ type, payload: structuredClone(payload), resolve, reject, done: false }); });
   };
   const pendingRequest = (type) => {
@@ -138,15 +177,9 @@ async function runRegression() {
       store.updateRoles([...store.roles, { ...role, ...payload, id: 'created-role' }], store.userRoles);
     } else if (type === 'ROLE_DELETE') {
       store.updateRoles(store.roles.filter((entry) => entry.id !== payload.roleId), store.userRoles);
-    } else if (type === 'BOT_UPDATE_PROFILE') {
-      bots = bots.map((entry) => entry.id === payload.botId ? {
-        ...entry, ...(payload.name === undefined ? {} : { name: payload.name }),
-        ...(payload.avatarBase64 === undefined ? {} : { avatarUrl: payload.avatarBase64 }),
-      } : entry);
-      result = { bot: bots.find((entry) => entry.id === payload.botId) };
     } else if (type === 'BOT_REVOKE') bots = bots.filter((entry) => entry.id !== payload.botId);
     else if (type === 'BOT_CREATE') {
-      const bot = { id: 'created-bot', name: payload.name, createdAt: 1, avatarUrl: null, online: false, bound: false };
+      const bot = botInfo({ id: 'created-bot', name: 'Bot', online: false, bound: false, profilePending: true });
       bots.push(bot);
       result = { bot, token: 'non-secret-test-token' };
     }
@@ -307,6 +340,9 @@ async function runRegression() {
   await flush();
   check(field('.role-editor-member-switch[data-user-id="bob"]').checked, 'Role assignment retries preserve the editor');
   field('[data-role-editor-tab="permissions"]').click();
+  check(field('.role-permission-switch[data-permission="8192"]').closest('div').textContent.includes('gerar token de vínculo avançado') &&
+    !field('.role-permission-switch[data-permission="8192"]').closest('div').textContent.includes('editar o perfil'),
+  'MANAGE_BOTS permission copy no longer claims admins can edit bot profiles');
   change('.role-permission-switch[data-permission="32"]', true);
   await flush();
   check(pendingRequest('ROLE_UPDATE').payload.permissions === 48, 'Permission switches apply only the requested bit against current permissions');
@@ -397,36 +433,45 @@ async function runRegression() {
   check(!store.getRole('created-role') && mainBackdrop() === original, 'Role deletion does not reopen or dismiss settings');
   tab('bots');
   await flush();
-  field('[data-bot-edit="bot-a"]').click();
-  change('#bot-profile-name', 'Renamed helper');
+  check(Array.from(document.querySelectorAll('#server-bots-tab [data-settings-section]')).map((section) => section.dataset.settingsSection).join(',') ===
+    'install-bot,manual-link-bot,bots', 'Bot linking keeps the URL flow first and the advanced manual section searchable');
+  check(field('.bot-list-item[data-bot-id="bot-a"]').textContent.includes('Helper') &&
+    !field('.bot-list-item[data-bot-id="bot-a"]').textContent.includes('Aguardando conexão do bot'),
+  'Existing offline bots keep their published read-only identity');
+  check(field('#manual-bot-link-panel').hidden && field('#btn-toggle-manual-link').getAttribute('aria-expanded') === 'false',
+    'Manual link starts collapsed behind an advanced disclosure');
+  check(!document.querySelector('#bot-name-input, #bot-profile-editor, #bot-profile-name, [data-bot-edit], [data-photo-target], [data-photo-remove]'),
+    'Bot management no longer renders admin identity editors or manual name/avatar inputs');
+  field('[data-bot-configure="bot-a"]').click();
+  await settle(() => document.querySelector('.bot-settings-modal .bot-settings-name')?.textContent === 'Helper',
+    'Bot settings did not open from the management row');
+  check(document.querySelector('.bot-settings-modal .bot-settings-name')?.textContent === 'Helper',
+    'Behavior settings remain reachable from bot management without exposing profile editing');
+  document.querySelector('.bot-settings-modal [data-settings-close]').click();
   await flush();
-  check(locked() && pendingRequest('BOT_UPDATE_PROFILE').payload.name === 'Renamed helper', 'Bot profile names apply on change and own the modal guard');
-  const editingName = field('#bot-profile-name');
-  field('[data-bot-edit="bot-a"]').click();
-  check(field('#bot-profile-name') === editingName && editingName.value === 'Renamed helper',
-    'Reopening a pending bot profile keeps the edited input instead of restoring an obsolete name');
-  acknowledge('BOT_UPDATE_PROFILE');
-  await flush();
-  check(field('#bot-profile-name').value === 'Renamed helper' && !field('#btn-save-bot-profile'), 'Bot profile has no staged Save workflow');
-  const profileRequests = requests.filter((request) => request.type === 'BOT_UPDATE_PROFILE').length;
-  field('#btn-done-bot-profile').click();
-  await flush();
-  check(field('#bot-profile-editor').hidden && requests.filter((request) => request.type === 'BOT_UPDATE_PROFILE').length === profileRequests,
-    'Done after reopening and acknowledgement never submits the old bot name');
-  field('[data-bot-edit="bot-a"]').click();
-  check(field('#bot-profile-name').value === 'Renamed helper', 'The reopened editor reflects the acknowledged bot name');
-  field('[data-photo-remove="profile"]').click();
-  await flush();
-  check(pendingRequest('BOT_UPDATE_PROFILE').payload.avatarBase64 === null && locked(), 'Bot photo removal is immediate, not a draft');
-  acknowledge('BOT_UPDATE_PROFILE');
-  await flush();
-  change('#bot-name-input', 'Created bot');
+  field('#btn-toggle-manual-link').click();
+  check(!field('#manual-bot-link-panel').hidden && field('#btn-toggle-manual-link').getAttribute('aria-expanded') === 'true',
+    'Advanced manual link can be revealed on demand');
   field('#btn-create-bot').click();
   await flush();
-  check(locked() && field('#bot-name-input').disabled, 'Explicit bot creation retains its pending protection');
+  check(locked() && JSON.stringify(pendingRequest('BOT_CREATE').payload) === '{}',
+    'Advanced manual linking sends only the empty approved BOT_CREATE payload');
   acknowledge('BOT_CREATE');
   await flush();
-  check(field('#bot-token-value').textContent === 'non-secret-test-token' && field('[data-bot-edit="created-bot"]'), 'Bot creation preserves one-time token reveal and the created bot');
+  const createdBot = field('.bot-list-item[data-bot-id="created-bot"]');
+  check(field('#bot-token-value').textContent === 'non-secret-test-token' && createdBot.textContent.includes('Aguardando conexão do bot') &&
+    !createdBot.textContent.includes('Bot') && field('[data-bot-configure="created-bot"]').matches(':disabled'),
+  'Manual linking preserves the one-time token while pending bots show a generic waiting identity');
+  bots = bots.map((entry) => entry.id === 'created-bot' ? {
+    ...entry, name: 'Published helper', avatarUrl: 'data:image/png;base64,BB==', online: true, bound: true, profilePending: false,
+  } : entry);
+  appEvents.emit('server.members_updated');
+  await flush();
+  check(field('.bot-list-item[data-bot-id="created-bot"]').textContent.includes('Published helper') &&
+    !field('.bot-list-item[data-bot-id="created-bot"]').textContent.includes('Aguardando conexão do bot') &&
+    field('.bot-list-item[data-bot-id="created-bot"] img').src.startsWith('data:image/png;base64,BB==') &&
+    !field('[data-bot-configure="created-bot"]').matches(':disabled'),
+  'Pending manual links update live to the bot-provided name and avatar when the profile is published');
   field('[data-bot-revoke="created-bot"]').click();
   await flush();
   check(locked(), 'Bot revocation confirmation is tracked');
@@ -434,7 +479,7 @@ async function runRegression() {
   await flush();
   acknowledge('BOT_REVOKE');
   await flush();
-  check(!field('[data-bot-edit="created-bot"]') && !locked(), 'Acknowledged revocation updates the list');
+  check(!document.querySelector('[data-bot-configure="created-bot"]') && !locked(), 'Acknowledged unlinking updates the list');
   change('#bot-manifest-url', 'https://example.invalid/bot.json');
   field('#btn-install-bot').click();
   await flush();
@@ -442,7 +487,50 @@ async function runRegression() {
   acknowledge('BOT_INSTALL');
   await flush();
   check(!locked() && field('#bot-manifest-url').value === '', 'Successful installation releases the guard after acknowledgement');
-  tab('notifications');
+  field('#btn-create-bot').click();
+  await flush();
+  const revokedCreate = pendingRequest('BOT_CREATE');
+  store.myPermissions = 0;
+  appEvents.emit('server.updated');
+  await flush();
+  check(field('#bot-token-reveal').style.display === 'none' && field('#bot-token-value').textContent === '',
+    'Permission loss clears any visible token while hiding bot management controls');
+  revokedCreate.done = true;
+  revokedCreate.resolve({ bot: botInfo({ id: 'created-bot', name: 'Bot', bound: false, profilePending: true }), token: 'revoked-secret-token' });
+  await flush();
+  check(!locked() && field('#bot-token-value').textContent === '' && !document.querySelector('.bot-list-item[data-bot-id="created-bot"]'),
+    'Revoked bot-management permission prevents late manual-link tokens and pending identities from leaking into the stale tab');
+  store.myPermissions = 0xFFFFFFFF;
+  appEvents.emit('server.updated');
+  await flush();
+  field('#btn-create-bot').click();
+  await flush();
+  const pendingBotCreate = pendingRequest('BOT_CREATE');
+  const previousToken = field('#bot-token-value').textContent;
+  const otherBotStore = new stores.ServerStore();
+  otherBotStore.setServerDetails({ ...store.serverDetails, id: 'server-bots-b', name: 'Server B' }, member('admin'));
+  const otherBotClient = new network.NetworkClient();
+  otherBotClient.getStatus = () => 'CONNECTED';
+  otherBotClient.sendRequest = () => Promise.resolve({});
+  stores.setActiveServerStore(otherBotStore);
+  network.setActiveNetworkClient(otherBotClient);
+  appEvents.emit('session.changed', { key: 'server-bots-b' });
+  check(locked() && modal.close() === false, 'A pending manual link still owns the dismissal lock during session replacement');
+  pendingBotCreate.done = true;
+  pendingBotCreate.resolve({ bot: botInfo({ id: 'created-bot', name: 'Bot', bound: false, profilePending: true }), token: 'late-secret-token' });
+  await flush();
+  check(!locked() && field('#bot-token-value').textContent === previousToken &&
+    !document.querySelector('.bot-list-item[data-bot-id="created-bot"]'),
+    'A replaced view cannot leak a late manual-link token or apply its stale pending identity');
+  check(!requests.some((request) => request.type === 'BOT_UPDATE_PROFILE'),
+    'No admin bot-management path sends BOT_UPDATE_PROFILE anymore');
+  bots = bots.filter((entry) => entry.id !== 'created-bot');
+  check(modal.close() === true && !mainBackdrop(), 'The stale manual-link view can close after its acknowledgement settles');
+  stores.setActiveServerStore(store);
+  network.setActiveNetworkClient(client);
+  otherBotClient.dispose();
+  modal.open('notifications');
+  await flush();
   const { settingsStore } = await import('/stores/settingsStore.ts');
   const originalSetter = settingsStore.setServerChatSoundOverride;
   const localWrites = [];

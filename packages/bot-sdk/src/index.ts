@@ -74,8 +74,8 @@ export interface BotOptions {
   autoReconnect?: boolean;
   /** Optional profile to synchronize, including already-added bot accounts. */
   name?: string;
-  /** Image bytes encoded as base64 or a data URI, not a remote URL. */
-  avatarBase64?: string;
+  /** Image bytes encoded as base64 or a data URI; null removes the previous photo. */
+  avatarBase64?: string | null;
   /** Private JSON file for authenticated marketplace registrations; survives close/restart. */
   registrationFile?: string;
 }
@@ -552,7 +552,7 @@ export class BotClient extends EventEmitter {
         payload: {
           protocolVersion: PROTOCOL_VERSION,
           publicKey: this.options.publicKey,
-          nickname: 'bot',
+          nickname: this.profile.name ?? 'bot',
           password: '',
           botToken: conn.token,
         },
@@ -1416,8 +1416,17 @@ export {
   botSettingsSnapshotSchema, botSettingsValuesSchema, botSelectorRespondedSchema, resolveBotSettingsValues,
 } from '@monky/shared';
 export { runBotCli } from './cli';
+export {
+  validateBotName,
+  validateBotToken,
+  validateServerUrl as validateBotServerUrl,
+  validatePublicHost as validateBotPublicHost,
+  validateServePort as validateBotServePort,
+} from './cli/config';
 export { buildBotPackage, type BuildBotOptions, type BuiltBotPackage } from './tooling/build';
-export type { BotPackageDefinition, GitHubReleaseSource } from './tooling/config';
+export type {
+  BotPackageDefinition, GitHubReleaseSource, BotUpdateSource, HttpsUpdateSource, FileUpdateSource,
+} from './tooling/config';
 export type {
   BotSelector, BotSelectorCreate, BotSelectorPatch, BotSelectorPublic, BotSelectorRespondedPayload,
 } from '@monky/shared';

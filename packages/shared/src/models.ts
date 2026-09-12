@@ -262,6 +262,8 @@ export interface BotInfo {
   /** Whether TOFU binding is complete (first connection done). */
   bound: boolean;
   online: boolean;
+  /** A manual link awaiting the bot's first identity announcement. */
+  profilePending: boolean;
 }
 
 // ── End bot types ─────────────────────────────────────────────────────────

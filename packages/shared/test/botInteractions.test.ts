@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { botSelectorCreateSchema, botSelectorPublicSchema, botSelectorSchema } from '../src/botSelectors.js';
 import {
   botFormSchema,
+  botCreateSchema,
+  botIdentitySchema,
   botManifestSchema,
   commandDefinitionSchema,
   commandInvokeSchema,
@@ -164,6 +166,15 @@ assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'file:/
 assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'http://user:pass@host/register' }).success, false);
 assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'http://localhost:7780/register' }).success, true);
 assert.equal(botProfileUpdateSchema.safeParse({ avatarBase64: null }).success, true);
+assert.deepEqual(botCreateSchema.parse({}), {});
+for (const input of [null, { name: 'Client name' }, { avatarBase64: 'AAAA' }, { profilePending: false }]) {
+  assert.equal(botCreateSchema.safeParse(input).success, false);
+}
+assert.deepEqual(botIdentitySchema.parse({ name: ' Bot identity ', avatarBase64: 'AAAA' }), {
+  name: 'Bot identity', avatarBase64: 'AAAA',
+});
+assert.equal(botIdentitySchema.safeParse({ name: 'x' }).success, false);
+assert.equal(botProfileUpdateSchema.safeParse({ name: 'Bot', profilePending: false }).success, false);
 
 for (const presentation of ['dropdown', 'buttons']) {
   const selector = botFormSchema.parse({

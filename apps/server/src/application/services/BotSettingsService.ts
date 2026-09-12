@@ -83,6 +83,7 @@ export class BotSettingsService {
   list(bots: BotInfo[], canConfigure: boolean): BotSettingsListResponse {
     const summaries: BotSettingsSummary[] = [];
     for (const bot of bots) {
+      if (bot.profilePending) continue;
       const record = this.repository.findById(bot.id);
       // A bot may be revoked while the asynchronous identity list is being read.
       if (record) summaries.push(this.summary(bot, record, canConfigure));
@@ -91,6 +92,9 @@ export class BotSettingsService {
   }
 
   snapshot(bot: BotInfo, canConfigure: boolean, owningBot = false): BotSettingsSnapshot {
+    if (bot.profilePending) {
+      throw new BotSettingsError(ProtocolErrorCode.BAD_REQUEST, 'This bot link is awaiting the bot identity.');
+    }
     const record = this.require(bot.id);
     const readServer = canConfigure || owningBot;
     return botSettingsSnapshotSchema.parse({

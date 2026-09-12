@@ -28,41 +28,47 @@ User sees the response
 
 ## Two ways to add a bot
 
-### 1. Manual (token)
+### 1. Via URL (recommended)
 
-Ideal for internal bots on a specific server.
+This is the default flow, including for private bots. The endpoint must be
+reachable by the Monky server; it does not need a public catalogue listing.
 
-1. In the client, go to **Server Settings → Bots**
-2. Enter a name, optionally choose a photo, and click **Create**
-3. Copy the token (shown **only once**)
-4. Use the token in your bot code to connect
-
-### 2. Via URL (Marketplace)
-
-Ideal for distributed bots that serve multiple servers.
-
-1. The bot developer publishes an **HTTP manifest** (name, description, registration URL)
+1. The bot serves an **HTTP manifest** containing its identity, description, and registration URL
 2. In the client, go to **Server Settings → Bots**
-3. Paste the manifest URL in the "Add Bot from URL" field and click **Add**
-4. The server fetches the manifest, creates the bot, and sends the token automatically
+3. Paste the manifest URL in the URL-linking section and confirm
+4. The server validates the bot-provided identity and sends the link token automatically
 5. The bot auto-connects and registers its commands
+
+### 2. Manual token connection (advanced)
+
+Use this when the bot can only make outbound connections and has no HTTP
+endpoint reachable by the Monky server.
+
+1. In the client, open **Server Settings → Bots → Advanced**
+2. Generate a manual link without entering a name or avatar
+3. Copy the token (shown **only once**) into the bot's setup/code
+4. The link waits for the bot to connect; the bot announces its name during authentication and publishes its avatar through the SDK
+
+**Only the bot controls its name and avatar.** The client links bots, configures
+their behavior, and unlinks them; it does not edit their identity. Existing
+profiles, links, tokens, and keys are preserved when upgrading.
 
 ## Creating your own bot
 
 ### Permissions and channels
 
-In **Server Settings → Roles**, **Add and manage bots** controls who can register, configure, or remove bots; **Use bot commands** controls who can use their commands and interactions. Command access is initially enabled for existing members and roles.
+In **Server Settings → Roles**, **Add and manage bots** controls linking and unlinking; **Configure bots** controls shared behavior settings. Neither permission allows changing a bot's name or avatar. **Use bot commands** controls who can use commands and interactions, and is initially enabled for existing members and roles.
 
 When creating or editing a text channel, the **Allow bot commands** switch starts enabled. Turning it off blocks commands and responses to forms and selectors in that channel, **including for administrators**. Typing `/` displays the reason. Permission changes also affect interactions that are already open; ordinary messages and reactions continue to follow their own permissions.
 
 ### Prerequisites
 
 - **Node.js 18+**
-- Client, server, and SDK compatible with **protocol 13**
+- Client, server, and SDK compatible with **protocol 14**
 - The `@monky/bot-sdk` package from the matching release
 
 ::: warning Update together
-The command protocol has changed: update the **client, server, and bot** together. Different protocol versions cannot connect. In the new SDK, `ctx.args` contains typed values and `ctx.reply()` is private; use `ctx.publish()` only for results that should appear for the channel.
+Protocol 14 changes manual linking: `BOT_CREATE` accepts only `{}`, and management receives `profilePending` while a bot has not announced its identity. Update the **client, server, and bot** together; different versions cannot connect. The database preserves existing identities, and only the authenticated bot may publish profile changes. `ctx.args` contains typed values and `ctx.reply()` is private; use `ctx.publish()` only for channel-visible results.
 :::
 
 ### SDK Installation
@@ -141,23 +147,52 @@ with a PM2 process and configuration isolated by bot name. `start --foreground`
 runs without PM2 for development. `npm run cli -- setup` uses the same CLI in a
 local checkout after compilation.
 
-In manual mode, `setup` asks for the server and the **token environment variable
-name**, not a token value to save in the configuration. Provide `MONKY_BOT_TOKEN`
-(or the selected variable) in the operator/service environment before `start`
-and `restart`. For automation, use
-`setup --non-interactive --server-url ws://localhost:3000 --token-env MONKY_BOT_TOKEN`.
+Setup follows MonkyBot's flow: mode, working directory, mode-specific settings,
+and bot name. **URL installation is the default** for bots supporting both modes;
+manual token connection is advanced. Reconfiguration preserves the existing
+mode and working directory instead of migrating existing installations.
+
+Manual setup asks for the server and **bot token**. Bare `IP:port` addresses use
+`ws://`; explicit `ws://` and `wss://` URLs are supported. Invalid fields are
+requested again without restarting the wizard. Token input is hidden, excluded
+from prompt history, and stored only in the local configuration (file mode `600`,
+directory mode `700` on Linux). `config` and `status` redact its value.
+
+Automation can still use
+`setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN`.
+This stores only the environment variable name; provide its value before
+`start` and `restart`. Existing `tokenEnv` profiles remain compatible.
+`config set botToken` and `config set tokenEnv` switch credential sources rather
+than retaining both. Prefer setup to avoid putting a token in shell history.
+
+Marketplace setup asks for a manifest port and public hostname/IP, without a
+manual token. For automation:
+`setup --non-interactive --mode marketplace --public-host bot.example.com --serve-port 7781`.
+The endpoint must be reachable by installing Monky servers; `localhost` only
+works for servers on the same machine.
 Configuration and identity live in `~/.<cliName>`, outside the package;
 `MONKY_BOT_CLI_HOME` changes the base directory while keeping each bot's subdirectory.
+The `botName`, `botDir`, `serverUrl`, `botToken`, `servePort`, and `publicHost`
+configuration aliases follow MonkyBot; `restart --fresh` recreates the managed
+process without deleting its profile.
 
 The CLI generates/reuses the identity and supplies `MONKY_BOT_PUBLIC_KEY`,
 `MONKY_SERVER_URL`, `MONKY_BOT_TOKEN` and `MONKY_BOT_NAME` to the process. The bot
 entry must consume these variables. Declare `marketplace` in `modes` only if that
-entry also implements the `MONKY_SERVE`/`bot.serve()` flow.
+entry also implements the `MONKY_SERVE`/`bot.serve()` flow. In that mode, the runner
+also supplies `MONKY_SERVE_PORT`, `MONKY_SERVE_PUBLIC_HOST`, and
+`MONKY_BOT_REGISTRATION_FILE`. Pass the latter as `registrationFile` to `BotClient`
+to restore authenticated links after restarting. Preserve the entire `.keys`
+directory; it contains identity keys and linked-server tokens.
+The SDK exports `validateBotServerUrl`, `validateBotServePort`, and
+`validateBotPublicHost` so bot entries can reuse the CLI validators.
 
 ### Optional CLI updates
 
-`update` and enabling `autoupdate` **only work when the author explicitly
-configures GitHub Releases** in the build definition:
+`update` and enabling `autoupdate` **only work when the bot author explicitly
+configures an update source** in the build's `package.json`, not through operator
+setup. **GitHub Releases is recommended**, with version history and stable/beta
+selection using the existing package format:
 
 ```json
 {
@@ -171,21 +206,60 @@ configures GitHub Releases** in the build definition:
 }
 ```
 
-This snippet extends the previous configuration. Without `releases`, the SDK
+As alternatives, replace `releases` with one of these definitions inside `monkyBot`:
+
+```json
+{
+  "updateSource": {
+    "type": "https",
+    "url": "https://downloads.example.com/my-bot.tgz",
+    "tokenEnv": "BOT_UPDATE_TOKEN"
+  }
+}
+```
+
+```json
+{
+  "updateSource": {
+    "type": "file",
+    "path": "../bot-updates/my-bot.tgz"
+  }
+}
+```
+
+For HTTPS, `tokenEnv` is optional. When declared, its environment value is required
+and sent as a Bearer token. Configured URLs cannot embed credentials, query strings,
+or fragments; redirects stay on the same HTTPS origin, including its port.
+The author must keep the archive at that URL up to date.
+
+Relative file paths resolve from the **installed** `package.json`, never from the
+terminal or PM2 working directory. Prefer portable relative paths across platforms;
+absolute paths must be native to the environment. There is no tilde/environment
+expansion. The source must be a readable regular `.tgz` file, not a symbolic link;
+the CLI copies a private snapshot before inspection and installation.
+
+Configure exactly one source: `releases` or `updateSource`. Without either, the SDK
 does not infer a source from `repository`, `git origin`, the SDK repository or
 the npm registry. An invalid URL fails rather than enabling another source.
 
-`update --check` only queries; `update` follows stable and `update --beta` includes
+`update --check` never installs or restarts. GitHub checks query metadata only;
+HTTPS/file checks fetch or copy an archive to inspect its version, then discard it.
+`update` follows stable and `update --beta` includes
 pre-releases. Selection uses semantic versions, without downgrades or reinstalling
 the same version. Auto-update follows the installed channel unless `--beta` is
-explicitly enabled. None of these commands publishes or promotes releases.
+explicitly enabled. Single-archive sources offer only the version in that file;
+stable mode does not install it if it is a beta. Use the self-contained `.tgz`
+generated by the SDK, not a GitHub source ZIP. None of these commands publishes
+or promotes releases.
 
 Installing an update requires the globally installed CLI in the current npm
 prefix; source checkouts and local installations only support `--check`.
 The SDK verifies the downloaded package name, version and CLI, then installs the
 self-contained archive offline without running installation scripts. Use
 `update --yes` without an interactive terminal. Configuration and identity files
-remain outside the installation.
+remain outside the installation. Installation is refused if configuration/runtime
+data is inside the installed package, to avoid deleting it during replacement.
+Transfers are bounded to 200 MiB and 60 seconds.
 
 For a private repository, supply the read token through the indicated environment
 variable, never through the package or URL. `autoupdate off` and `status` remain
@@ -201,6 +275,7 @@ const bot = new BotClient({
   serverUrl: 'ws://your-server:3000',
   token: 'YOUR_BOT_TOKEN',
   publicKey: 'YOUR_ED25519_PUBLIC_KEY_HEX',
+  name: 'My Bot',
 });
 
 bot.command({
@@ -548,12 +623,15 @@ The example accepts only the caller's first valid reaction and removes the liste
 
 **Right-click a bot → Bot settings**, including its name/avatar in messages and private cards. The server menu also provides **Bots on this server**, available to every member and including offline bots. The server must be connected; disconnecting a bot does not remove its declarations or saved configuration.
 
+Manual reservations still awaiting their first identity appear only in bot
+management, not in this catalogue of linked bots.
+
 | Scope | Who can change it | Storage |
 |---|---|---|
 | **Behavior on this server** | Administrators/owner or roles with **Configure bot behavior** (`CONFIGURE_BOTS`) | This server's database; affects everyone using that bot there |
 | **My preferences** | The individual user | Local profile, separated by endpoint, server, identity, and bot; not synchronized across devices |
 
-`CONFIGURE_BOTS` is independent of `MANAGE_BOTS`, which still controls registration, profiles, and removal. Unauthorized readers receive neither the shared values nor the shared form. The SDK declares reusable fields; it does not inject HTML or create a global app-settings tab. Bots without shared settings do not show that section.
+`CONFIGURE_BOTS` is independent of `MANAGE_BOTS`, which controls linking and unlinking, not identity. Only the authenticated bot can change its name and avatar. Unauthorized readers receive neither the shared values nor the shared form. The SDK declares reusable fields; it does not inject HTML or create a global app-settings tab. Bots without shared settings do not show that section.
 
 Declare settings before connecting/serving, using the existing `BotForm` field types:
 
@@ -604,7 +682,8 @@ Required settings fields need valid defaults; this does not change ordinary comm
 
 ### Bot photos
 
-Bot management lets you choose or replace a photo. A bot can also synchronize its own profile through the SDK:
+The bot process owns its name and photo, not client-side management. Its operator
+can configure the CLI's `botName`; bot code publishes the identity through the SDK:
 
 ```ts
 import { readFileSync } from 'node:fs';
@@ -617,7 +696,14 @@ const bot = new BotClient({
 });
 ```
 
-In marketplace mode, `serve({ name, icon, ... })` accepts the same image in `icon`. Supply **base64 or a data URI**, not an image URL. The server validates the format and size and hosts the photo. The SDK profile is reapplied on connection, including already-added bots; if it specifies a photo, that photo replaces a manual edit on the next reconnect. The official MonkyBot includes the Monky logo in its package.
+In marketplace mode, `serve({ name, icon, ... })` accepts the same image in `icon`.
+Supply **base64 or a data URI**, not an image URL. The server validates format/size
+and hosts the photo. `avatarBase64: null` explicitly removes a previous photo;
+omitting the field preserves it. The SDK announces its name during initial
+authentication and reapplies its profile on connection, including existing links.
+Photo failures are reported without hiding the bot's commands. Administrators
+cannot override identity through the client or profile API. The official MonkyBot
+includes the Monky logo in its package.
 
 ## Marketplace mode (multi-server)
 
@@ -768,8 +854,8 @@ See the [Monky Bot repository](https://github.com/MonkyOrg/MonkyBot) for install
 | `serverUrl` | `string` | Manual mode | Server WebSocket URL |
 | `token` | `string` | Manual mode | Bot token |
 | `autoReconnect` | `boolean` | — | Auto-reconnect (default: `true`) |
-| `name` | `string` | — | Name to synchronize in the profile |
-| `avatarBase64` | `string` | — | Base64 or data URI photo, synchronized on connection |
+| `name` | `string` | — | Bot-published name, including initial authentication |
+| `avatarBase64` | `string \| null` | — | Base64/data URI photo; `null` removes the previous photo |
 | `registrationFile` | `string` | — | Private marketplace registration file, restored by `serve()` |
 
 ### `ServeOptions`

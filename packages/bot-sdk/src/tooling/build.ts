@@ -54,6 +54,7 @@ function publishedDefinition(definition: BotPackageDefinition): Record<string, u
     files: definition.files,
     modes: definition.modes,
     ...(releases ? { releases: { url: releases.url, assetName: releases.assetName, tokenEnv: releases.tokenEnv } } : {}),
+    ...(definition.updateSource ? { updateSource: definition.updateSource } : {}),
   };
 }
 

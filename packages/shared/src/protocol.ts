@@ -816,11 +816,8 @@ export interface SfuProducersListPayload {
 
 // ── Bot & Slash Command Payloads (#569) ───────────────────────────────────
 
-/** Admin -> server: create a new bot account. */
-export interface BotCreatePayload {
-  name: string;
-  avatarBase64?: string;
-}
+/** Admin -> server: reserve a manual token link without defining the bot's identity. */
+export type BotCreatePayload = Record<string, never>;
 
 /** Server -> admin: bot created with its one-time token. */
 export interface BotCreatedPayload {
@@ -844,7 +841,7 @@ export interface BotRevokedPayload {
   botId: string;
 }
 
-/** Bots update themselves; administrators supply the botId to edit another bot. */
+/** Only bots update their own identity; botId, when present, must refer to themselves. */
 export interface BotProfileUpdatePayload {
   botId?: string;
   name?: string;

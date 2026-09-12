@@ -102,6 +102,7 @@ import {
   canAccessChannel,
   authConnectSchema,
   botCreateSchema,
+  botIdentitySchema,
   botProfileUpdateSchema,
   botSettingsGetSchema,
   botSettingsListSchema,
@@ -1094,8 +1095,15 @@ export class WebSocketServer {
       return;
     }
 
+    const nickname = botIdentitySchema.shape.name.safeParse(payload.nickname);
+    if (!nickname.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BOT_INVALID_PROFILE,
+        'O bot precisa informar um nome válido na autenticação.', requestId);
+      return;
+    }
+
     const publicKey = payload.publicKey;
-    const botRecord = await this.botService.validateToken(payload.botToken, publicKey);
+    let botRecord = await this.botService.validateToken(payload.botToken, publicKey);
     if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
     if (!botRecord) {
       this.send(session.ws, {
@@ -1107,6 +1115,20 @@ export class WebSocketServer {
         } satisfies AuthFailedPayload,
       });
       return;
+    }
+
+    if (botRecord.profilePending) {
+      const result = await this.botService.updateProfile(botRecord.id, { name: nickname.data });
+      if (!result.success) {
+        this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
+        return;
+      }
+      botRecord = await this.botService.findById(botRecord.id);
+      if (!botRecord) {
+        this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'O vínculo do bot foi revogado.', requestId);
+        return;
+      }
+      if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
     }
 
     // Build a synthetic UserSummary for the bot.
@@ -1217,16 +1239,11 @@ export class WebSocketServer {
 
     const parsed = botCreateSchema.safeParse(payload);
     if (!parsed.success) {
-      const code = parsed.error.issues.some((issue) => issue.path[0] === 'avatarBase64' && issue.code === 'too_big')
-        ? ProtocolErrorCode.AVATAR_TOO_LARGE : ProtocolErrorCode.BOT_INVALID_PROFILE;
-      this.sendError(session.ws, code, 'Nome ou avatar do bot inválido.', requestId);
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST,
+        'O vínculo não aceita nome ou avatar definidos pelo cliente.', requestId);
       return;
     }
-    const result = await this.botService.create(
-      parsed.data.name,
-      session.user.id,
-      parsed.data.avatarBase64
-    );
+    const result = await this.botService.create(session.user.id);
 
     if (!result.success) {
       this.sendError(
@@ -1258,6 +1275,11 @@ export class WebSocketServer {
 
   private async handleBotUpdateProfile(session: ClientSession, payload: unknown, requestId?: string): Promise<void> {
     if (!session.user || !this.botService) return;
+    if (!session.isBot || !session.botId) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED,
+        'Nome e avatar são definidos exclusivamente pelo próprio bot.', requestId);
+      return;
+    }
     const parsed = botProfileUpdateSchema.safeParse(payload);
     if (!parsed.success) {
       const code = parsed.error.issues.some((issue) => issue.path[0] === 'avatarBase64' && issue.code === 'too_big')
@@ -1265,19 +1287,10 @@ export class WebSocketServer {
       this.sendError(session.ws, code, 'Perfil do bot inválido.', requestId);
       return;
     }
-    let botId = parsed.data.botId;
-    if (session.isBot) {
-      if (!session.botId || (botId !== undefined && botId !== session.botId)) {
-        this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bots só podem editar o próprio perfil.', requestId);
-        return;
-      }
-      botId = session.botId;
-    } else {
-      if (!(await this.requirePermission(session, Permission.MANAGE_BOTS, requestId))) return;
-      if (!botId) {
-        this.sendError(session.ws, ProtocolErrorCode.BOT_INVALID_PROFILE, 'Informe o bot a editar.', requestId);
-        return;
-      }
+    const botId = session.botId;
+    if (parsed.data.botId !== undefined && parsed.data.botId !== botId) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bots só podem editar o próprio perfil.', requestId);
+      return;
     }
     if (!this.isCurrentSession(session)) return;
     const result = await this.botService.updateProfile(botId, parsed.data);
