@@ -1,7 +1,7 @@
 import { LIMITS, commandAutocompleteResultSchema, type CommandAutocompleteChoice } from '@monky/shared';
 
 export const AUTOCOMPLETE_MIN_QUERY = 2;
-export const AUTOCOMPLETE_MAX_QUERY = 100;
+export const AUTOCOMPLETE_MAX_QUERY = LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH;
 export const AUTOCOMPLETE_VISIBLE_CHOICES = 10;
 
 export interface AutocompleteInput {
@@ -79,7 +79,7 @@ export class CommandAutocomplete {
           if (generation === this.generation && !request.signal.aborted) {
             this.update({ status: 'failed', query, choices: [], error: error instanceof Error ? error.message : undefined });
           }
-        }).finally(() => { if (this.request === request) this.request = null; });
+        });
       }, Math.max(0, delay));
     };
     schedule();

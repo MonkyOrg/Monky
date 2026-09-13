@@ -155,11 +155,11 @@ export class NetworkClient {
   public getConnectionId(): string { return this.connectionId; }
 
   public cancelRequest(requestId: string): boolean {
+    this.retireRequest(requestId);
     const pending = this.pendingRequests.get(requestId);
     if (!pending) return false;
     clearTimeout(pending.timer);
     this.pendingRequests.delete(requestId);
-    this.retireRequest(requestId);
     pending.reject(new DOMException('Request cancelled', 'AbortError'));
     return true;
   }
@@ -405,7 +405,7 @@ export class NetworkClient {
       const timer = setTimeout(() => {
         if (this.pendingRequests.has(requestId)) {
           this.pendingRequests.delete(requestId);
-          if (type === MessageType.COMMAND_AUTOCOMPLETE) this.retireRequest(requestId);
+          if (type === MessageType.COMMAND_AUTOCOMPLETE || type === MessageType.COMMAND_AUDIO_PREVIEW) this.retireRequest(requestId);
           reject(new RequestTimeoutError(type));
         }
       }, timeoutMs);

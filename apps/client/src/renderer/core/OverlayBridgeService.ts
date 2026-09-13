@@ -9,6 +9,7 @@ import { participantManager, ParticipantViewModel } from './ParticipantManager';
 import { serverStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
+import { isParticipantSpeaking } from '../utils/voiceConnection';
 import { videoService } from './VideoService';
 import { getAvatarUrl } from '../utils/avatar';
 import { applyVideoCodecPreferences } from './webrtc/codecPreferences';
@@ -383,8 +384,7 @@ export class OverlayBridgeService {
     // Detectar orador ativo
     let currentSpeakerSessionId: string | null = null;
     for (const p of visibleParticipants) {
-      const isLocal = sidOf(p) === currentSessionId;
-      const isSpeaking = isLocal ? voiceStore.isSpeaking : p.isSpeaking;
+      const isSpeaking = isParticipantSpeaking(p, callStore);
       if (isSpeaking) {
         currentSpeakerSessionId = sidOf(p);
         this.lastActiveSpeakerSessionId = currentSpeakerSessionId;
@@ -410,7 +410,7 @@ export class OverlayBridgeService {
       const isCamOn = isLocal
         ? voiceStore.isCameraOn && videoService.getCameraState().status === 'ready'
         : (p.voiceState?.isCameraOn ?? false);
-      const isSpeaking = isLocal ? voiceStore.isSpeaking : p.isSpeaking;
+      const isSpeaking = isParticipantSpeaking(p, callStore);
       const isMuted = isLocal ? voiceStore.getEffectiveMuted() : (p.voiceState?.isMuted ?? false);
       const isDeafened = isLocal ? voiceStore.getEffectiveDeafened() : (p.voiceState?.isDeafened ?? false);
       const serverMuted = isLocal ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);

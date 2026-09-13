@@ -1,4 +1,5 @@
 import { MessageType } from '@monky/shared';
+import { BotScreenStore, setActiveBotScreenStore } from '../stores/botScreenStore';
 import { appEvents } from './EventBus';
 import { clientLog } from './ClientLogService';
 import {
@@ -12,7 +13,7 @@ import {
   type ParticipantManager,
 } from './ParticipantManager';
 import { silentBus } from './activeProxy';
-import { setEventOrigin, setForegroundContext, setSessionEventRouter, isForegroundEvent, currentEventOrigin } from './sessionRouting';
+import { setEventOrigin, setForegroundContext, setSessionEventRouter, isForegroundEvent, currentEventOrigin, emitOutsideRouting } from './sessionRouting';
 import {
   createChatStore,
   setActiveChatStore,
@@ -23,6 +24,15 @@ import {
   setActiveServerStore,
   type ServerStore,
 } from '../stores/serverStore';
+
+const VOICE_CONTEXT_EVENTS = new Set([
+  'network.connected', 'network.status',
+  ...[
+    MessageType.VOICE_USER_JOINED, MessageType.VOICE_USER_LEFT, MessageType.VOICE_STATE_CHANGED,
+    MessageType.USER_JOINED, MessageType.USER_LEFT, MessageType.USER_UPDATED,
+    MessageType.ROLES_LIST, MessageType.CHANNEL_UPDATED, MessageType.CHANNEL_DELETED,
+  ].map((type) => `message.${type}`),
+]);
 
 /**
  * Everything that belongs to one server: its connection plus the state built
@@ -35,6 +45,7 @@ export interface ServerSession {
   client: NetworkClient;
   serverStore: ServerStore;
   chatStore: ChatStore;
+  botScreenStore: BotScreenStore;
   participants: ParticipantManager;
   /** Credentials kept so the rail can show the session and reconnect it. */
   host: string;
@@ -121,6 +132,7 @@ export class SessionManager {
       client,
       serverStore: createServerStore(),
       chatStore: createChatStore(),
+      botScreenStore: new BotScreenStore(key),
       participants: createParticipantManager(),
       host,
       port,
@@ -147,6 +159,7 @@ export class SessionManager {
     this.activeKey = key;
     session.serverStore.bus = appEvents;
     session.chatStore.bus = appEvents;
+    session.botScreenStore.bus = appEvents;
     session.participants.bus = appEvents;
 
     this.applyBundle(session);
@@ -185,12 +198,14 @@ export class SessionManager {
     setActiveNetworkClient(session.client);
     setActiveServerStore(session.serverStore);
     setActiveChatStore(session.chatStore);
+    setActiveBotScreenStore(session.botScreenStore);
     setActiveParticipantManager(session.participants);
   }
 
   private mute(session: ServerSession): void {
     session.serverStore.bus = silentBus;
     session.chatStore.bus = silentBus;
+    session.botScreenStore.bus = silentBus;
     session.participants.bus = silentBus;
   }
 
@@ -217,6 +232,7 @@ export class SessionManager {
       } finally {
         setEventOrigin(previousOrigin);
       }
+      this.notifyVoiceContext(sessionKey, event);
       return;
     }
 
@@ -231,11 +247,18 @@ export class SessionManager {
       setEventOrigin(previousOrigin);
       this.applyBundle(previousBundle);
     }
+    this.notifyVoiceContext(sessionKey, event);
 
     // The background bundle notified nobody, so the rail is told separately
     // that this server now has something worth a badge (#400).
     if (event === `message.${MessageType.CHAT_MESSAGE}`) {
       appEvents.emit('session.background_activity', { key: session.key });
+    }
+  }
+
+  private notifyVoiceContext(key: string, event: string): void {
+    if (VOICE_CONTEXT_EVENTS.has(event)) {
+      emitOutsideRouting(() => appEvents.emit('session.voice_context_updated', { key }));
     }
   }
 }

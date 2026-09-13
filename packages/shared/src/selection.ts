@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LIMITS } from './constants.js';
 import { soundDownloadFileNameSchema } from './soundDownloads.js';
 
 export const AUDIO_PREVIEW_MAX_DURATION_MS = 60 * 60 * 1000;
@@ -15,11 +16,18 @@ export const audioPreviewUrlSchema = z.string().url().max(2048).refine((value) =
   }
 });
 
-export const audioPreviewSourceSchema = z.object({
+export const audioPreviewResourceIdSchema = z.string().min(1).max(128)
+  .refine((value) => value === value.trim() && value.length > 0);
+
+export const audioPreviewSourceSchema = z.union([z.object({
   url: audioPreviewUrlSchema,
   fileName: soundDownloadFileNameSchema.optional(),
   durationMs: z.number().int().positive().max(AUDIO_PREVIEW_MAX_DURATION_MS).optional(),
-}).strict();
+}).strict(), z.object({
+  resourceId: audioPreviewResourceIdSchema,
+  fileName: soundDownloadFileNameSchema.optional(),
+  durationMs: z.number().int().positive().max(LIMITS.BOT_AUDIO_PREVIEW_MAX_DURATION_MS).optional(),
+}).strict()]);
 
 export const createSelectionChoiceSchema = (value: z.ZodType<string>) => z.object({
   label: selectionLabelSchema,

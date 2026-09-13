@@ -21,6 +21,8 @@ jobs:
           cache: npm
       - name: Install dependencies without native build scripts
         run: npm ci --ignore-scripts
+      - name: Prepare the SFU worker for real voice transport tests
+        run: npm rebuild mediasoup
       - name: Build shared contracts
         run: npm run build --workspace=packages/shared
       - name: Test bot contracts and SDK
@@ -197,6 +199,8 @@ jobs:
         shell: bash
         run: |
           npm run test:bots:ui --workspace=apps/client
+          npm run test:screens --workspace=apps/client
+          node packages/bot-sdk/test-browser/voiceRendererSmoke.cjs
           node apps/client/test/userContextMenuSmoke.cjs
           node apps/client/test/audioDeviceSmoke.cjs
           node apps/client/test/liveAudioDeviceSmoke.cjs

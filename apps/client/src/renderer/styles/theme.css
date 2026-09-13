@@ -2,6 +2,49 @@
    user-agent da a [hidden], e o app usa `display: flex` em classes genericas
    como .form-group. Sem esta regra, esconder um elemento pelo atributo `hidden`
    simplesmente nao funciona onde ele mais e usado (#534). */
+.bot-screen-header, .bot-screen-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bot-screen-header {
+  justify-content: space-between;
+  padding: 6px 10px;
+}
+
+.bot-screen-header strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bot-screen-controls {
+  flex-shrink: 0;
+}
+
+.bot-screen-notice {
+  margin: 0;
+  padding: 0 10px 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.bot-screen-frame {
+  display: block;
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+}
+
+.bot-command-voice-error, .command-voice-reason {
+  color: var(--warning);
+  font-size: 12px;
+}
+
 [hidden] {
   display: none !important;
 }
@@ -3722,12 +3765,15 @@ input:focus, textarea:focus, select:focus {
   margin-bottom: 7px;
   color: var(--text-muted);
   font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .bot-invoker-avatar {
   width: 18px;
   height: 18px;
   border-radius: 50%;
   object-fit: cover;
+  flex-shrink: 0;
 }
 .bot-response-main {
   display: flex;
@@ -3735,12 +3781,24 @@ input:focus, textarea:focus, select:focus {
   gap: 10px;
 }
 .bot-response-bubble {
+  flex: 0 1 auto;
+  width: max-content;
+  max-width: 100%;
   min-width: 0;
   padding: 10px 12px;
   border: 1px solid var(--border-color);
   border-left: 3px solid var(--accent-primary);
   border-radius: var(--radius-md);
   background: var(--bg-card);
+  overflow-wrap: anywhere;
+}
+.bot-response-bubble .chat-author-header {
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.bot-response-bubble .chat-message-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .bot-fields {
   display: grid;
@@ -5276,6 +5334,117 @@ input:focus, textarea:focus, select:focus {
   position: relative;
 }
 
+#stage-content-area, #stage-participants-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#stage-content-area {
+  position: relative;
+  overflow: hidden;
+}
+
+.stage-bot-screen-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+[data-bot-screen-slot] {
+  pointer-events: none;
+}
+
+.stage-bot-screen-layer > .stage-bot-screen-card {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: auto;
+  aspect-ratio: auto;
+  min-width: 0;
+  max-width: none;
+  min-height: 0;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  cursor: default;
+  transform: none;
+}
+
+.stage-bot-screen-card .bot-screen-header {
+  flex-wrap: wrap;
+}
+
+.stage-bot-screen-card .bot-screen-header strong {
+  flex: 1;
+}
+
+.stage-bot-screen-card .bot-screen-controls {
+  gap: 4px;
+}
+
+.stage-bot-screen-card .bot-screen-controls .btn {
+  padding: 4px 6px;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.bot-screen-body, .bot-screen-placeholder {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.bot-screen-placeholder {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px;
+}
+
+.bot-screen-placeholder p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+}
+
+.stage-mini-card .bot-screen-notice,
+.stage-mini-card .bot-screen-placeholder p,
+.stage-mini-card .bot-screen-controls .bot-screen-control-label {
+  display: none;
+}
+
+.stage-mini-card .bot-screen-frame {
+  pointer-events: none;
+}
+
+.stage-mini-card .bot-screen-header {
+  padding: 2px 4px;
+  gap: 2px;
+}
+
+.stage-mini-card .bot-screen-header strong {
+  font-size: 11px;
+}
+
+.stage-mini-card .bot-screen-placeholder {
+  padding: 4px;
+}
+
+.stage-mini-card .bot-screen-placeholder .btn {
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+.stage-bot-screen-card:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  background: var(--bg-card);
+}
+
 .stage-grid {
   flex: 1;
   display: flex;
@@ -5383,6 +5552,18 @@ input:focus, textarea:focus, select:focus {
 
 .stage-focused-main.is-zoomed .stage-video-element {
   will-change: transform;
+}
+
+.stage-focus-error {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  z-index: 60;
+  padding: 8px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
 }
 
 .stage-focus-hint-badge {

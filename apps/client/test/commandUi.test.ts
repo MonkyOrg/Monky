@@ -20,6 +20,7 @@ import { renderBotFields } from '../src/renderer/views/botFields';
 import { renderBotInvocation } from '../src/renderer/views/BotChatView';
 import { setLanguage } from '../src/renderer/i18n';
 import { commandPreviewVolumeScope, type SelectionChoice } from '../src/renderer/utils/selectionChoices';
+import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
 
 class MemoryUsageStorage implements CommandUsageStorage {
   public values = new Map<string, string>();
@@ -45,6 +46,50 @@ const member: UserSummary = {
   id: 'member-one', clientId: 'member-client', nickname: 'Alice', status: 'ONLINE', joinedAt: 1,
   avatarUrl: 'http://127.0.0.1:9900/avatars/alice.png',
 };
+
+test('voice denial explains catalog and composer gating without disabling editing or unrelated commands', () => {
+  const store = createChatStore();
+  const music = { ...command, voiceRequirement: 'same-bot-channel' as const };
+  store.setCommands([music]);
+  store.selectCommand('channel', music);
+  const draft = store.getCommandDraft('channel')!;
+  for (const locale of ['pt-BR', 'en'] as const) {
+    setLanguage(locale);
+    const required = translateProtocolError('BOT_VOICE_REQUIRED');
+    const mismatch = translateProtocolError('BOT_VOICE_CHANNEL_MISMATCH');
+    assert.match(required, locale === 'en' ? /voice channel.*device/i : /canal de voz.*dispositivo/i);
+    assert.match(mismatch, locale === 'en' ? /already in another voice channel/i : /já está em outro canal de voz/i);
+    const markup = renderCompactCommand(draft, 'channel', [member], true, true, mismatch);
+    assert.ok(markup.includes(mismatch));
+    assert.match(markup, /class="btn btn-primary bot-command-run" disabled/);
+    assert.doesNotMatch(markup, /data-bot-input[^>]*disabled/);
+    assert.doesNotMatch(markup, /data-bot-action="cancel-command"[^>]*disabled/);
+    const catalog = renderCommandCatalog(groupCommands([music, { ...command, name: 'utility' }], [], locale), 0,
+      (entry) => entry.voiceRequirement ? required : undefined);
+    assert.equal(catalog.match(/aria-disabled="true"/g)?.length, 1);
+  }
+  setLanguage('pt-BR');
+});
+
+test('changing voice context clears selected opaque choices while preserving editable queries and utility drafts', () => {
+  const store = createChatStore();
+  const music: SlashCommand = {
+    ...command, voiceRequirement: 'same-bot-channel',
+    options: [{ name: 'track', description: 'Track', type: 'string', required: true, autocomplete: true }],
+  };
+  store.selectCommand('voice-command', music, 'query');
+  store.setCommandVoiceContext('voice-command', 'first-room');
+  store.selectCommandChoice('voice-command', 'track', { label: 'Generated fixture', value: 'opaque-id' });
+  assert.equal(store.setCommandVoiceContext('voice-command', 'first-room'), false);
+  assert.equal(store.getCommandDraft('voice-command')?.values.track, 'opaque-id');
+  assert.equal(store.setCommandVoiceContext('voice-command', 'other-room'), true);
+  assert.deepEqual(store.getCommandDraft('voice-command')?.autocomplete.track, { query: 'Generated fixture' });
+  assert.equal(store.getCommandDraft('voice-command')?.values.track, undefined);
+  store.selectCommand('utility', { ...music, voiceRequirement: undefined });
+  store.selectCommandChoice('utility', 'track', { label: 'Fixture', value: 'other-id' });
+  assert.equal(store.setCommandVoiceContext('utility', 'outside-voice'), false);
+  assert.equal(store.getCommandDraft('utility')?.values.track, 'other-id');
+});
 
 function usageStore(storage: CommandUsageStorage, serverId: string, commands = [command, otherBot], callerId = member.id) {
   const store = createChatStore(storage);
@@ -416,7 +461,9 @@ test('generic selection choices render reusable audio previews without changing 
   };
   const field = commandInputFields(audioCommand)[0];
   assert.ok(field.type === 'select');
-  assert.equal(field.choices[0].audio?.url, 'https://cdn.example.test/preview.ogg');
+  const audio = field.choices[0].audio;
+  assert.ok(audio && 'url' in audio);
+  assert.equal(audio.url, 'https://cdn.example.test/preview.ogg');
   assert.deepEqual(commandValuesFromInputs(audioCommand, { clip: 'stable-id' }, []), {
     success: true, values: { clip: 'stable-id' },
   });
@@ -428,6 +475,12 @@ test('generic selection choices render reusable audio previews without changing 
   assert.equal((menu.match(/data-audio-preview-volume\s/g) ?? []).length, 1);
   assert.equal((menu.match(/data-audio-preview-progress\s/g) ?? []).length, 2);
   assert.ok(menu.includes('data-audio-preview-percentage>60%</output>'));
+  const lazyMenu = renderParameterChoices([{
+    label: 'Lazy clip', value: 'canonical-track', audio: { resourceId: 'opaque-preview', fileName: 'clip.ogg', durationMs: 10_000 },
+  }], 0, 'Lazy choices');
+  assert.ok(lazyMenu.includes('data-audio-resource-id="opaque-preview"'));
+  assert.ok(!lazyMenu.includes('data-audio-url='));
+  assert.ok(lazyMenu.includes('data-audio-preview-action="toggle"'));
   const form = renderBotFields([
     { ...field, label: 'Clip', presentation: 'buttons' },
     { ...field, name: 'second-clip', label: 'Second clip', presentation: 'dropdown' },

@@ -124,6 +124,8 @@ import { BotService } from '../../application/services/BotService';
 import { BotSettingsError, BotSettingsService } from '../../application/services/BotSettingsService';
 import { BotSelectorService } from '../../application/services/BotSelectorService';
 import { BotSelectorHandler } from './BotSelectorHandler';
+import { BotScreenHandler } from './BotScreenHandler';
+import { BotScreenService } from '../../application/services/BotScreenService';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
 import { SignalingService } from '../../application/services/SignalingService';
 import { UserService } from '../../application/services/UserService';
@@ -135,6 +137,7 @@ import { checkSfuPreflight, formatSfuPreflightForLog } from '../sfu/SfuPreflight
 import { Logger } from '../logger/Logger';
 import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
+import { botVoiceJoinSchema, botVoiceChannelSchema, botVoiceSignalSchema } from '@monky/shared';
 
 interface ClientSession {
   ws: WebSocket;
@@ -156,6 +159,11 @@ interface ClientSession {
   invisible?: boolean;
   /** True when this connection is a bot, not a human user (#569). */
   isBot?: boolean;
+  botVoiceTransports?: Map<string, { channelId: string; direction: 'send' | 'recv' }>;
+  botVoiceJoinAttempt?: object;
+  botVoiceGrant?: {
+    channelId: string; creatorUserId: string; originChannelId: string; accessVersion: number;
+  };
   /** The bot record id — set only for bot sessions (#569). */
   botId?: string;
   botSettingsReady?: boolean;
@@ -197,7 +205,9 @@ export class WebSocketServer {
   }>();
   private botInteractions: BotInteractionHandler;
   private botSelectors?: BotSelectorHandler;
+  private botScreens?: BotScreenHandler;
   private botSettingsPermissionVersion = 0;
+  private botScreenAccessVersion = 0;
 
   constructor(
     private server: http.Server,
@@ -252,6 +262,7 @@ export class WebSocketServer {
       }, this.botSettings);
     }
     this.botInteractions = new BotInteractionHandler({
+      getVoiceChannelId: (sessionId) => this.signalingService.getVoiceState(sessionId)?.channelId ?? null,
       isCurrent: (session) => this.isCurrentSession(session),
       findBot: (botId) => this.findSessionById(`bot:${botId}`),
       send: (ws, message) => this.send(ws, message),
@@ -259,6 +270,18 @@ export class WebSocketServer {
       broadcastToChannel: (channelId, message, canSend) => this.broadcastToChannel(channelId, message, undefined, canSend),
       publishResponse: (session, response, canSend, requestId) => this.publishBotResponse(session, response, canSend, requestId),
     }, this.channelService, this.userService, this.commandRegistry, this.botSettings);
+    if (this.botService) {
+      this.botScreens = new BotScreenHandler(new BotScreenService(), this.channelService, this.userService, {
+        sessions: () => this.sessions.values(),
+        isCurrent: (session) => this.isCurrentSession(session),
+        accessVersion: () => this.botScreenAccessVersion,
+        getVoiceChannelId: (sessionId) => this.signalingService.getVoiceState(sessionId)?.channelId ?? null,
+        send: (session, message) => this.send(session.ws, message),
+        authorizeInvocation: (session, invocationId, channelId) =>
+          this.botInteractions.authorizeVoiceScreen(session, invocationId, channelId),
+      });
+    }
+    this.signalingService.setVoiceMembershipListener(() => this.voiceMembershipChanged());
     this.wss = new WSServer({ server: this.server });
     this.setupWss();
     this.startHeartbeat();
@@ -331,6 +354,7 @@ export class WebSocketServer {
     const targets = this.getSessionsOfUser(userId);
     for (const target of targets) {
       this.botInteractions.disconnect(target);
+      this.disconnectBotScreens(target);
       if (target.sessionId) this.sessionSockets.delete(target.sessionId);
       try {
         target.ws.close();
@@ -592,9 +616,11 @@ export class WebSocketServer {
         break;
 
       case MessageType.VOICE_JOIN:
+        if (session.isBot && !botVoiceJoinSchema.safeParse(payload).success) {
+          this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid voice join.', requestId);
+          return;
+        }
         this.voiceReconnectGrants?.delete(session);
-        if (!(await this.requirePermission(session, Permission.SPEAK, requestId))) return;
-        if (!(await this.requireChannelAccess(session, (payload as VoiceJoinPayload)?.channelId, requestId))) return;
         await this.handleVoiceJoin(session, payload as VoiceJoinPayload, requestId);
         break;
 
@@ -609,6 +635,10 @@ export class WebSocketServer {
       }
 
       case MessageType.VOICE_LEAVE:
+        if (session.isBot && !botVoiceChannelSchema.safeParse(payload).success) {
+          this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid voice leave.', requestId);
+          return;
+        }
         this.voiceReconnectGrants?.delete(session);
         await this.handleVoiceLeave(session, payload as VoiceLeavePayload, requestId);
         break;
@@ -720,6 +750,7 @@ export class WebSocketServer {
         session.intentionalLogout = true;
         this.voiceReconnectGrants?.delete(session);
         this.botInteractions.disconnect(session);
+        this.disconnectBotScreens(session);
         break;
 
       // ── Bot management (#569) ────────────────────────────────────────
@@ -758,6 +789,15 @@ export class WebSocketServer {
         await this.handleCommandRegister(session, payload, requestId);
         break;
 
+      case MessageType.BOT_SCREEN_CREATE:
+      case MessageType.BOT_SCREEN_UPDATE:
+      case MessageType.BOT_SCREEN_CLOSE:
+      case MessageType.BOT_SCREEN_LIST:
+      case MessageType.BOT_SCREEN_ACTION:
+        if (this.botScreens) await this.botScreens.handle(session, type, payload, requestId);
+        else this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Programmable screens are unavailable.', requestId);
+        break;
+
       case MessageType.SELECTOR_CREATE:
       case MessageType.SELECTOR_LIST:
       case MessageType.SELECTOR_UPDATE:
@@ -776,6 +816,10 @@ export class WebSocketServer {
         await this.botInteractions.invoke(session, payload, requestId);
         break;
 
+      case MessageType.BOT_VOICE_CONTEXT:
+        await this.botInteractions.getVoiceContext(session, payload, requestId);
+        break;
+
       case MessageType.COMMAND_AUTOCOMPLETE:
         await this.botInteractions.autocomplete(session, payload, requestId);
         break;
@@ -786,6 +830,18 @@ export class WebSocketServer {
 
       case MessageType.COMMAND_AUTOCOMPLETE_CANCEL:
         this.botInteractions.cancelAutocomplete(session, payload, requestId);
+        break;
+
+      case MessageType.COMMAND_AUDIO_PREVIEW:
+        await this.botInteractions.audioPreview(session, payload, requestId);
+        break;
+
+      case MessageType.COMMAND_AUDIO_PREVIEW_RESULT:
+        await this.botInteractions.audioPreviewResult(session, payload, requestId);
+        break;
+
+      case MessageType.COMMAND_AUDIO_PREVIEW_CANCEL:
+        this.botInteractions.cancelAudioPreview(session, payload, requestId);
         break;
 
       case MessageType.COMMAND_SOUND_DOWNLOAD:
@@ -897,6 +953,7 @@ export class WebSocketServer {
       const staleSession = this.sessions.get(existingWs);
       if (staleSession) {
         this.botInteractions.disconnect(staleSession);
+        this.disconnectBotScreens(staleSession);
         this.authService.clearChallenge(existingWs);
         staleSession.replaced = true;
         this.sessions.delete(existingWs);
@@ -1157,7 +1214,9 @@ export class WebSocketServer {
     if (existingWs && existingWs !== session.ws) {
       const stale = this.sessions.get(existingWs);
       if (stale) {
+        if (stale.user && stale.sessionId) this.announceVoiceLeave(stale.user, stale.sessionId);
         this.botInteractions.disconnect(stale);
+        this.disconnectBotScreens(stale);
         this.authService.clearChallenge(existingWs);
         stale.replaced = true;
         this.sessions.delete(existingWs);
@@ -1168,9 +1227,15 @@ export class WebSocketServer {
     }
     this.sessionSockets.set(sessionId, session.ws);
 
-    // Build a minimal ServerDetails for the bot.
+    // Headless clients need the same actual media mode, ICE and scoped roster as humans.
     const server = await this.serverRepo.getServer();
     const channels = server ? await this.channelService.listChannels() : [];
+    const access = await this.channelService.getAccessContext(botRecord.id);
+    const visibleChannels = channels.filter((channel) => canAccessChannel(channel, access.permissions, access.roleIds));
+    const visibleChannelIds = new Set(visibleChannels.map((channel) => channel.id));
+    const voiceStates = Object.fromEntries(Object.entries(this.signalingService.getAllVoiceStates())
+      .filter(([, state]) => visibleChannelIds.has(state.channelId)));
+    const iceServers = await this.buildIceServersFor(botRecord.id, session);
     const serverDetails = {
       id: server?.id ?? '',
       name: server?.name ?? '',
@@ -1181,26 +1246,29 @@ export class WebSocketServer {
       allowEveryoneMention: false,
       allowMessageEdit: false,
       showRoleBadgesToEveryone: false,
-      voiceMode: 'p2p' as const,
+      voiceMode: server?.voiceMode ?? 'p2p',
       hostSpecs: { cpuCores: 0, ramTotalGb: 0 },
-      turnEnabled: false,
+      turnEnabled: server?.turnEnabled ?? false,
       maxBots: server?.maxBots ?? LIMITS.MAX_BOTS_DEFAULT,
       iconUrl: null,
-      channels: channels.filter((channel) => canAccessChannel(channel, 0, [])).map((c) => ({
+      channels: visibleChannels.map((c) => ({
         id: c.id, serverId: c.serverId, name: c.name, type: c.type,
         position: c.position, createdAt: c.createdAt,
         maxParticipants: c.maxParticipants, isPrivate: c.isPrivate,
         botCommandsEnabled: c.botCommandsEnabled,
         allowedRoleIds: c.allowedRoleIds,
       })),
-      members: [botUser],
+      members: [botUser, ...Object.values(voiceStates).flatMap((state) => {
+        const user = this.findSessionById(state.sessionId)?.user;
+        return user && user.id !== botUser.id ? [this.voiceRosterUser(user)] : [];
+      })],
       knownMembers: [botUser],
       mentionedChannelIds: [],
-      voiceStates: {},
+      voiceStates,
       roles: [],
       userRoles: [],
       ownerId: server?.ownerUserId ?? null,
-      myPermissions: 0,
+      myPermissions: access.permissions,
       attachmentStorage: { maxFileBytes: 0, maxTotalBytes: 0, usedBytes: 0 },
     };
     session.visibleChannelIds = new Set(serverDetails.channels.map((channel) => channel.id));
@@ -1213,12 +1281,12 @@ export class WebSocketServer {
       payload: {
         server: { ...serverDetails, turnAvailability: CoturnManager.describeAvailability() },
         currentUser: botUser,
-        voiceRestrictions: { serverMuted: false, serverDeafened: false },
+        voiceRestrictions: this.signalingService.getVoiceRestrictions(botRecord.id),
         roles: [],
         userRoles: [],
         ownerId: serverDetails.ownerId,
-        myPermissions: 0,
-        iceServers: [],
+        myPermissions: access.permissions,
+        iceServers,
       } satisfies AuthSuccessPayload,
     });
 
@@ -1346,6 +1414,7 @@ export class WebSocketServer {
       const botSession = this.sessions.get(botWs);
       if (botSession) {
         this.botInteractions.disconnect(botSession);
+        this.disconnectBotScreens(botSession);
         if (botSession.user && botSession.sessionId) this.finalizeSessionLeave(botSession.user, botSession.sessionId);
         botSession.replaced = true;
         this.sessions.delete(botWs);
@@ -1938,6 +2007,7 @@ export class WebSocketServer {
     const strandedParticipants = this.signalingService.getParticipantsInChannel(payload.channelId);
     for (const participant of strandedParticipants) {
       this.signalingService.leaveVoiceChannel(participant.sessionId);
+      this.closeSfuSession(participant.sessionId, payload.channelId);
       const leavePayload: VoiceUserLeftPayload = {
         channelId: payload.channelId,
         userId: participant.userId,
@@ -2162,7 +2232,16 @@ export class WebSocketServer {
 
     const changedMode = result.voiceMode !== undefined && result.voiceMode !== previousVoiceMode;
     let voiceTransition: VoiceModeTransition | undefined;
-    if (changedMode) this.voiceReconnectGrants.clear();
+    if (changedMode) {
+      this.voiceReconnectGrants.clear();
+      for (const session of this.sessions.values()) {
+        if (!session.isBot) continue;
+        session.botVoiceJoinAttempt = undefined;
+        session.botVoiceGrant = undefined;
+        const state = session.sessionId && this.signalingService.getVoiceState(session.sessionId);
+        if (state) this.evictFromVoiceChannel(state.sessionId, state.channelId);
+      }
+    }
     if (changedMode && result.voiceMode === 'p2p') {
       voiceTransition = { id: randomUUID(), from: 'sfu', to: 'p2p' };
       // Keep the deliberate full SFU teardown. Admission is granted once to
@@ -2431,11 +2510,35 @@ export class WebSocketServer {
 
   private async handleVoiceJoin(
     session: ClientSession,
-    payload: VoiceJoinPayload,
+    payload: VoiceJoinPayload & { invocationId?: string },
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    const attempt = {};
+    if (session.isBot) session.botVoiceJoinAttempt = attempt;
+    const accessVersion = this.botSettingsPermissionVersion;
+    if (!(await this.requirePermission(session, Permission.SPEAK, requestId))) return;
+    let authorization: Awaited<ReturnType<BotInteractionHandler['authorizeVoiceJoin']>>;
+    if (session.isBot && payload.invocationId !== undefined) {
+      authorization = await this.botInteractions.authorizeVoiceJoin(session, payload.invocationId, payload.channelId);
+      if (!authorization) {
+        this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'The invocation no longer authorizes entry into this voice room.', requestId);
+        return;
+      }
+    } else if (!(await this.requireChannelAccess(session, payload.channelId, requestId))) return;
     const isSfu = (await this.serverRepo.getServer())?.voiceMode === 'sfu';
+    const isCurrent = () => this.isCurrentSession(session) && (!session.isBot ||
+      (session.botVoiceJoinAttempt === attempt && accessVersion === this.botSettingsPermissionVersion &&
+        (!authorization || authorization.isCurrent())));
+    if (!isCurrent()) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Voice admission changed; retry with the current caller context.', requestId);
+      return;
+    }
+    const previous = this.signalingService.getVoiceState(session.sessionId);
+    if (session.isBot && previous && previous.channelId !== payload.channelId) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Leave the current voice channel before joining another.', requestId);
+      return;
+    }
 
     const result = await this.signalingService.joinVoiceChannel(
       session.sessionId,
@@ -2452,6 +2555,32 @@ export class WebSocketServer {
         requestId
       );
       return;
+    }
+    const departed = result.previousVoiceState;
+    if (departed && departed.channelId !== payload.channelId) {
+      // The old room may not see the destination. Retire its peers explicitly,
+      // before announcing arrival, rather than relying on a visible JOIN.
+      await this.broadcastToChannel(departed.channelId, {
+        type: MessageType.VOICE_USER_LEFT,
+        payload: {
+          channelId: departed.channelId, userId: departed.userId, sessionId: departed.sessionId,
+        } satisfies VoiceUserLeftPayload,
+      });
+    }
+    if (!isCurrent()) {
+      if (this.signalingService.getVoiceState(session.sessionId) === result.voiceState) {
+        this.evictFromVoiceChannel(session.sessionId, payload.channelId);
+      }
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Voice admission changed; retry with the current caller context.', requestId);
+      return;
+    }
+    if (session.isBot) {
+      // The command authorizes admission only. Playback can outlive it; the
+      // channel-scoped grant is subsequently checked against the creator's ACLs.
+      session.botVoiceGrant = authorization ? {
+        channelId: payload.channelId, creatorUserId: authorization.creatorUserId,
+        originChannelId: authorization.originChannelId, accessVersion,
+      } : undefined;
     }
     if (isSfu) {
       result.voiceState = this.signalingService.updateVoiceState(session.sessionId, {
@@ -2534,6 +2663,8 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    session.botVoiceJoinAttempt = undefined;
+    session.botVoiceGrant = undefined;
 
     const previous = this.signalingService.leaveVoiceChannel(session.sessionId);
     if (previous) {
@@ -2555,6 +2686,17 @@ export class WebSocketServer {
         payload: leavePayload,
       });
     }
+    // A correlated acknowledgement is required even after an administrative
+    // removal or a failed admission. It makes headless teardown idempotent.
+    if (session.isBot && requestId) {
+      this.send(session.ws, {
+        type: MessageType.VOICE_USER_LEFT, requestId,
+        payload: {
+          channelId: previous?.channelId ?? payload.channelId,
+          userId: session.user.id, sessionId: session.sessionId,
+        } satisfies VoiceUserLeftPayload,
+      });
+    }
   }
 
   private async handleVoiceStateUpdate(
@@ -2562,26 +2704,27 @@ export class WebSocketServer {
     payload: VoiceStateUpdatePayload,
     requestId?: string
   ): Promise<void> {
-    if (!session.user || !session.sessionId) return;
+    const sessionId = session.sessionId;
+    if (!session.user || !sessionId) return;
 
-    const current = this.signalingService.getVoiceState(session.sessionId);
+    const current = this.signalingService.getVoiceState(sessionId);
     const effectivePayload: VoiceStateUpdatePayload = { ...payload };
     if (current?.serverMuted) {
       effectivePayload.isSpeaking = false;
     }
 
     // Health is server-observed; renderer payloads cannot overwrite it.
-    const updated = this.signalingService.updateVoiceState(session.sessionId, {
+    const updated = this.signalingService.updateVoiceState(sessionId, {
       ...effectivePayload,
       connectionHealth: current?.connectionHealth,
     });
     if (updated) {
       const changedPayload: VoiceStateChangedPayload = { voiceState: updated };
-      this.broadcast({
+      await this.broadcastToChannel(updated.channelId, {
         type: MessageType.VOICE_STATE_CHANGED,
         requestId,
         payload: changedPayload,
-      });
+      }, undefined, () => this.signalingService.getVoiceState(sessionId) === updated);
     }
   }
 
@@ -2591,6 +2734,10 @@ export class WebSocketServer {
     requestId?: string
   ): void {
     if (!session.user || !session.sessionId) return;
+    if (session.isBot && !botVoiceSignalSchema.safeParse(payload).success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid or oversized voice signal.', requestId);
+      return;
+    }
 
     // Enforce that fromSessionId matches the authenticated connection
     payload.fromSessionId = session.sessionId;
@@ -2611,12 +2758,34 @@ export class WebSocketServer {
   }
 
   // SFU Handlers (#515)
+  private async authorizeBotVoiceMedia(
+    session: ClientSession, payload: unknown, requestId?: string, transportId?: string
+  ): Promise<boolean> {
+    const parsed = botVoiceChannelSchema.safeParse(payload);
+    if (!parsed.success || !session.sessionId ||
+        this.signalingService.getVoiceState(session.sessionId)?.channelId !== parsed.data.channelId) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Join the voice channel before creating media.', requestId);
+      return false;
+    }
+    if (!(await this.requirePermission(session, Permission.SPEAK, requestId)) ||
+        (!this.hasBotVoiceGrant(session, parsed.data.channelId) &&
+          !(await this.requireChannelAccess(session, parsed.data.channelId, requestId)))) return false;
+    if (!this.isCurrentSession(session) ||
+        this.signalingService.getVoiceState(session.sessionId)?.channelId !== parsed.data.channelId) return false;
+    if (transportId !== undefined && session.botVoiceTransports?.get(transportId)?.channelId !== parsed.data.channelId) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Transport does not belong to this bot voice connection.', requestId);
+      return false;
+    }
+    return true;
+  }
+
   private async handleSfuGetRouterRtpCapabilities(
     session: ClientSession,
     payload: SfuGetRouterRtpCapabilitiesPayload,
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId))) return;
     try {
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) requested router capabilities for channel ${payload.channelId}`);
       if (!this.sfuManager.isReady()) {
@@ -2643,6 +2812,11 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId))) return;
+    if (session.isBot && payload.direction !== 'send') {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Bot voice supports send transports only.', requestId);
+      return;
+    }
     try {
       if (!this.sfuManager.isReady()) {
         await this.sfuManager.init();
@@ -2685,6 +2859,18 @@ export class WebSocketServer {
         payload.direction,
         session.requestHost
       );
+      if (session.isBot) {
+        if (!this.isCurrentSession(session) ||
+            this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId) {
+          // A replacement bot uses the same logical session ID. Reap only the
+          // allocation that just completed, never the replacement's transport.
+          this.sfuManager.discardPendingTransport(transportOptions.id);
+          return;
+        }
+        session.botVoiceTransports ??= new Map();
+        session.botVoiceTransports.clear();
+        session.botVoiceTransports.set(transportOptions.id, { channelId: payload.channelId, direction: payload.direction });
+      }
       this.send(session.ws, {
         type: MessageType.SFU_WEBRTC_TRANSPORT_CREATED,
         requestId,
@@ -2706,6 +2892,7 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId))) return;
     try {
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) connecting transport ${payload.transportId}`);
       await this.sfuManager.connectWebRtcTransport(payload.transportId, payload.dtlsParameters);
@@ -2729,6 +2916,13 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId))) return;
+    const voiceRestrictions = session.isBot ? this.signalingService.getVoiceRestrictions(session.user.id) : undefined;
+    if (session.isBot && (payload.kind !== 'audio' || payload.appData?.mediaType !== 'mic' ||
+        voiceRestrictions?.serverMuted || voiceRestrictions?.serverDeafened)) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bot microphone is not permitted.', requestId);
+      return;
+    }
     try {
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) producing ${payload.kind} (${payload.appData?.mediaType}) in channel ${payload.channelId}`);
       const { id } = await this.sfuManager.produce(
@@ -2739,6 +2933,11 @@ export class WebSocketServer {
         payload.rtpParameters,
         payload.appData || {}
       );
+      if (session.isBot && (!this.isCurrentSession(session) ||
+          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId)) {
+        this.sfuManager.closeProducer(id);
+        return;
+      }
 
       this.send(session.ws, {
         type: MessageType.SFU_PRODUCED,
@@ -2782,6 +2981,10 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    if (session.isBot) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bot voice is send-only.', requestId);
+      return;
+    }
     try {
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) consuming producer ${payload.producerId}`);
       const consumed = await this.sfuManager.consume(
@@ -2821,6 +3024,12 @@ export class WebSocketServer {
     payload: SfuProducerClosedPayload
   ): void {
     if (!session.user || !session.sessionId) return;
+    if (session.isBot && !this.sfuManager.getProducersInChannel(payload.channelId).some(
+      (producer) => producer.producerId === payload.producerId && producer.producerSessionId === session.sessionId
+    )) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Producer does not belong to this bot.');
+      return;
+    }
     console.log(`[SFU Server:WS] User ${session.user.nickname} closed producer ${payload.producerId}`);
     this.sfuManager.closeProducer(payload.producerId);
     void this.broadcastToChannel(payload.channelId, {
@@ -2835,6 +3044,7 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId))) return;
     try {
       const channelProducers = this.sfuManager.getProducersInChannel(payload.channelId);
       console.log(`[SFU Server:WS] User ${session.user.nickname} requested producers list for channel ${payload.channelId} (found ${channelProducers.length})`);
@@ -2866,6 +3076,10 @@ export class WebSocketServer {
     payload: SfuConsumerSetPausedPayload
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    if (session.isBot) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bot voice is send-only.');
+      return;
+    }
     await this.sfuManager.setConsumerPaused(payload.consumerId, payload.paused);
   }
 
@@ -3035,7 +3249,7 @@ export class WebSocketServer {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de moderação inválidos.', requestId);
       return;
     }
-    if (!(await this.userService.isMember(parsed.data.targetUserId))) {
+    if (!(await this.isVoiceIdentity(parsed.data.targetUserId))) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Membro não encontrado.', requestId);
       return;
     }
@@ -3054,7 +3268,7 @@ export class WebSocketServer {
     value: boolean,
     requestId?: string,
   ): Promise<void> {
-    if (!(await this.userService.isMember(userId))) {
+    if (!(await this.isVoiceIdentity(userId))) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Membro não encontrado.', requestId);
       return;
     }
@@ -3064,12 +3278,17 @@ export class WebSocketServer {
     const states = restriction === 'serverMuted'
       ? this.signalingService.setServerMuted(userId, value)
       : this.signalingService.setServerDeafened(userId, value);
-    for (const voiceState of states) {
-      this.broadcast({ type: MessageType.VOICE_STATE_CHANGED, payload: { voiceState } });
-    }
     const updated: VoiceRestrictionsUpdatedPayload = { userId, ...this.signalingService.getVoiceRestrictions(userId) };
     this.notifyVoiceRestrictions(updated);
+    await Promise.all(states.map((voiceState) => this.broadcastToChannel(voiceState.channelId, {
+      type: MessageType.VOICE_STATE_CHANGED,
+      payload: { voiceState } satisfies VoiceStateChangedPayload,
+    }, undefined, () => this.signalingService.getVoiceState(voiceState.sessionId) === voiceState)));
     this.send(session.ws, { type: MessageType.VOICE_RESTRICTIONS_UPDATED, requestId, payload: updated });
+  }
+
+  private async isVoiceIdentity(userId: string): Promise<boolean> {
+    return await this.userService.isMember(userId) || !!(await this.botService?.findById(userId));
   }
 
   private notifyVoiceRestrictions({ userId, serverMuted, serverDeafened }: VoiceRestrictionsUpdatedPayload): void {
@@ -3103,7 +3322,8 @@ export class WebSocketServer {
 
   private async handleAdminMoveUser(session: ClientSession, payload: AdminMoveUserPayload, requestId?: string): Promise<void> {
     const previous = this.signalingService.getVoiceState(payload.targetSessionId);
-    if (!previous) {
+    const target = this.findSessionById(payload.targetSessionId);
+    if (!previous || !target?.user) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Usuário não está em um canal de voz.', requestId);
       return;
     }
@@ -3129,6 +3349,7 @@ export class WebSocketServer {
       return;
     }
 
+    this.closeSfuSession(previous.sessionId, previous.channelId);
     this.broadcast({ type: MessageType.ADMIN_MOVE_USER, requestId, payload });
     this.broadcast({
       type: MessageType.VOICE_USER_LEFT,
@@ -3145,7 +3366,8 @@ export class WebSocketServer {
         userId: previous.userId,
         sessionId: previous.sessionId,
         voiceState: joinResult.voiceState,
-      },
+        user: this.voiceRosterUser(target.user),
+      } satisfies VoiceUserJoinedPayload,
     });
   }
 
@@ -3242,10 +3464,13 @@ export class WebSocketServer {
   }
 
   private handleDisconnect(session: ClientSession): void {
+    session.botVoiceJoinAttempt = undefined;
+    session.botVoiceGrant = undefined;
     this.voiceReconnectGrants?.delete(session);
     const wasConnected = this.sessions.delete(session.ws);
     this.authService.clearChallenge(session.ws);
     this.botInteractions.disconnect(session);
+    this.disconnectBotScreens(session);
 
     // If this session was replaced by a newer connection of the same device, it
     // is a stale/zombie socket. Do not broadcast USER_LEFT nor touch the
@@ -3332,6 +3557,12 @@ export class WebSocketServer {
    * producer with nobody behind it and sits there consuming a ghost (#527).
    */
   private closeSfuSession(sessionId: string, channelId: string): void {
+    const session = this.findSessionById(sessionId);
+    if (session) {
+      session.botVoiceJoinAttempt = undefined;
+      session.botVoiceGrant = undefined;
+      session.botVoiceTransports?.clear();
+    }
     if (!this.sfuManager) return;
     const { closedProducerIds } = this.sfuManager.closeSession(sessionId);
     for (const producerId of closedProducerIds) {
@@ -3433,7 +3664,8 @@ export class WebSocketServer {
     channel: { isPrivate: boolean; allowedRoleIds: string[] },
     message: ProtocolMessage,
     ignoreWs?: WebSocket,
-    canSend?: () => boolean
+    canSend?: () => boolean,
+    voiceChannelId?: string
   ): Promise<void> {
     if (!channel.isPrivate) {
       if (!canSend || canSend()) this.broadcast(message, ignoreWs);
@@ -3444,7 +3676,8 @@ export class WebSocketServer {
     if (canSend && !canSend()) return;
     const raw = JSON.stringify(message);
     for (const [ws, session] of this.sessions.entries()) {
-      if (ws !== ignoreWs && ws.readyState === WebSocket.OPEN && session.user && !session.replaced && allowedUserIds.has(session.user.id)) {
+      if (ws !== ignoreWs && ws.readyState === WebSocket.OPEN && session.user && !session.replaced &&
+          (allowedUserIds.has(session.user.id) || (voiceChannelId && this.hasBotVoiceGrant(session, voiceChannelId)))) {
         ws.send(raw);
       }
     }
@@ -3525,6 +3758,13 @@ export class WebSocketServer {
     return false;
   }
 
+  private hasBotVoiceGrant(session: ClientSession, channelId: string): boolean {
+    return !!session.isBot && !!session.sessionId && this.isCurrentSession(session) &&
+      session.botVoiceGrant?.channelId === channelId &&
+      session.botVoiceGrant.accessVersion === this.botSettingsPermissionVersion &&
+      this.signalingService.getVoiceState(session.sessionId)?.channelId === channelId;
+  }
+
   /**
    * Scopes an event to the members allowed into the channel it belongs to
    * (#384). A deleted channel no longer has an audience; broadcasting it to
@@ -3538,7 +3778,10 @@ export class WebSocketServer {
   ): Promise<void> {
     const channel = await this.channelService.getChannelSummary(channelId);
     if (!channel) return;
-    await this.broadcastToChannelAudience(channel, message, ignoreWs, canSend);
+    const isVoiceEvent = message.type === MessageType.VOICE_USER_JOINED ||
+      message.type === MessageType.VOICE_USER_LEFT || message.type === MessageType.VOICE_STATE_CHANGED ||
+      message.type === MessageType.SFU_PRODUCER_CLOSED;
+    await this.broadcastToChannelAudience(channel, message, ignoreWs, canSend, isVoiceEvent ? channelId : undefined);
   }
 
   /**
@@ -3551,20 +3794,49 @@ export class WebSocketServer {
    */
   private async reconcileChannelVisibility(): Promise<void> {
     this.botSettingsPermissionVersion++;
+    this.botScreenAccessVersion++;
+    const accessVersion = this.botSettingsPermissionVersion;
+    await this.botScreens?.revokeInvalid();
     const channels = await this.channelService.listChannels();
     const channelsById = new Map(channels.map((channel) => [channel.id, channel]));
 
     const contexts = new Map<string, { permissions: number; roleIds: string[] }>();
     const userIds = new Set<string>();
+    const grantCreators = new Set<string>();
+    const members = new Set<string>();
     for (const session of this.sessions.values()) {
       if (session.user) userIds.add(session.user.id);
+      if (session.botVoiceGrant) {
+        userIds.add(session.botVoiceGrant.creatorUserId);
+        grantCreators.add(session.botVoiceGrant.creatorUserId);
+      }
     }
     await Promise.all(
       Array.from(userIds).map(async (userId) => {
         contexts.set(userId, await this.channelService.getAccessContext(userId));
+        if (grantCreators.has(userId) && await this.userService.isMember(userId)) members.add(userId);
       })
     );
     this.botInteractions.reconcileAccess(channelsById, contexts);
+
+    if (accessVersion === this.botSettingsPermissionVersion) for (const session of this.sessions.values()) {
+      const grant = session.botVoiceGrant;
+      if (!grant || !session.sessionId) continue;
+      const creator = contexts.get(grant.creatorUserId);
+      const bot = session.user && contexts.get(session.user.id);
+      const voice = channelsById.get(grant.channelId);
+      const origin = channelsById.get(grant.originChannelId);
+      const valid = members.has(grant.creatorUserId) && creator && bot &&
+        hasPermission(bot.permissions, Permission.SPEAK) && hasPermission(creator.permissions, Permission.SPEAK) &&
+        hasPermission(creator.permissions, Permission.SEND_MESSAGES) && hasPermission(creator.permissions, Permission.USE_BOT_COMMANDS) &&
+        voice?.type === 'VOICE' && origin?.type === 'TEXT' && origin.botCommandsEnabled &&
+        canAccessChannel(voice, creator.permissions, creator.roleIds) && canAccessChannel(origin, creator.permissions, creator.roleIds);
+      if (valid) grant.accessVersion = accessVersion;
+      else {
+        session.botVoiceGrant = undefined;
+        this.evictFromVoiceChannel(session.sessionId, grant.channelId);
+      }
+    }
 
     for (const [ws, session] of this.sessions.entries()) {
       if (!session.user || ws.readyState !== WebSocket.OPEN) continue;
@@ -3591,7 +3863,7 @@ export class WebSocketServer {
 
       for (const channelId of previouslyVisible) {
         if (nowVisible.has(channelId)) continue;
-        if (session.sessionId) this.evictFromVoiceChannel(session.sessionId, channelId);
+        if (session.sessionId && !this.hasBotVoiceGrant(session, channelId)) this.evictFromVoiceChannel(session.sessionId, channelId);
         this.send(ws, {
           type: MessageType.CHANNEL_DELETED,
           payload: { channelId } as ChannelDeletedPayload,
@@ -3600,6 +3872,23 @@ export class WebSocketServer {
 
       session.visibleChannelIds = nowVisible;
     }
+  }
+
+  private voiceMembershipChanged(): void {
+    // Voice admission grants track ACL changes only. A participant moving must
+    // revoke viewer/command context without invalidating the bot's media grant.
+    this.botScreenAccessVersion++;
+    this.botInteractions.voiceChanged();
+    void this.botScreens?.revokeInvalid()
+      .catch((error: unknown) => Logger.error('BOT', 'Failed to reconcile voice miniapp access.', error));
+  }
+
+  private disconnectBotScreens(session: BotInteractionSession): void {
+    this.botScreenAccessVersion++;
+    const screens = this.botScreens;
+    if (!screens) return;
+    void screens.disconnect(session).then(() => screens.revokeInvalid())
+      .catch((error: unknown) => Logger.error('BOT', 'Failed to clean up disconnected bot screens.', error));
   }
 
   /**
@@ -3612,6 +3901,7 @@ export class WebSocketServer {
     if (!participant) return;
 
     this.signalingService.leaveVoiceChannel(sessionId);
+    this.closeSfuSession(sessionId, channelId);
     const leavePayload: VoiceUserLeftPayload = {
       channelId,
       userId: participant.userId,
@@ -3671,6 +3961,11 @@ export class WebSocketServer {
   public close(): Promise<void> {
     if (!this.closing) {
       this.closing = true;
+      this.signalingService.setVoiceMembershipListener(undefined);
+      for (const session of this.sessions.values()) {
+        session.botVoiceJoinAttempt = undefined;
+        session.botVoiceGrant = undefined;
+      }
       const pending = [this.sfuStartup, this.settingsUpdateQueue, ...[...this.sessions.values()].map(session => session.messageQueue)];
       this.shutdownResources.defer('SFU runtime', () => this.sfuManager.close());
       this.shutdownResources.defer('voice state', () => {
@@ -3681,6 +3976,7 @@ export class WebSocketServer {
       this.shutdownResources.defer('pending WebSocket work', async () => { await Promise.allSettled(pending); });
       this.shutdownResources.defer('WebSocket transport', () => this.closeTransport());
       this.shutdownResources.defer('bot selectors', () => this.botSelectors?.close());
+      this.shutdownResources.defer('bot screens', () => this.botScreens?.close());
       this.shutdownResources.defer('bot interactions', () => this.botInteractions.close());
       this.shutdownResources.defer('WebSocket timers', () => {
         this.voiceReconnectGrants.clear();

@@ -31,6 +31,8 @@ import { renderCommandCatalog } from './commandCatalog';
 import { renderBotCommandContext } from './botResponse';
 import { PublicSelectorView } from './PublicSelectorView';
 import { botSettingsMenuItem } from './BotSettingsModal';
+import { commandVoiceError } from '../utils/botVoice';
+import { translateProtocolError } from '../i18n/protocolErrors';
 
 /** How close to the end the feed must be to keep following new messages (#270). */
 const BOTTOM_SCROLL_THRESHOLD_PX = 48;
@@ -75,6 +77,7 @@ export class ChatView {
   private botChat: BotChatView | null = null;
   private commandSelection = 0;
   private publicSelectors: PublicSelectorView | null = null;
+  private voiceNoticeCommand: SlashCommand | null = null;
   // Files picked for the next message, keyed by a local id (#11).
   private pending: PendingAttachment[] = [];
   /** Message currently open in the inline editor, if any (#504). */
@@ -128,7 +131,7 @@ export class ChatView {
     const channel = serverStore.serverDetails.channels.find((c) => c.id === this.currentChannelId);
     const channelName = channel ? channel.name : 'geral';
 
-    this.container.innerHTML = `
+    const markup = `
       <div class="chat-container">
         <div id="chat-drop-overlay" class="chat-drop-overlay">
           <div class="drop-inner">
@@ -178,6 +181,7 @@ export class ChatView {
         </div>
       </div>
     `;
+    this.container.innerHTML = markup;
 
     this.renderMessages({ forceScroll: true });
     this.attachEvents();
@@ -618,7 +622,7 @@ export class ChatView {
       ...messages.map((message) => ({ createdAt: message.createdAt, html: this.renderMessageRow(message) })),
       ...chatStore.getInvocations(this.currentChannelId ?? '').map((invocation) => ({
         createdAt: invocation.createdAt,
-        html: renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id),
+        html: renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id, this.getVoiceCommandDeniedReason(invocation)),
       })),
     ].filter((item) => item.html !== '').sort((a, b) => a.createdAt - b.createdAt);
     for (const item of items) {
@@ -1658,9 +1662,10 @@ export class ChatView {
           this.setActiveCommand((this.commandActiveIndex - 1 + this.commandMatches.length) % this.commandMatches.length);
           return;
         }
-        if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+        const selectWithSpace = e.key === ' ' && !e.ctrlKey && !e.altKey && !e.metaKey;
+        if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey) || selectWithSpace) {
           e.preventDefault();
-          this.applyCommand(this.commandActiveIndex, e.isTrusted);
+          this.applyCommand(this.commandActiveIndex, e.isTrusted, !selectWithSpace);
           return;
         }
       }
@@ -1741,6 +1746,19 @@ export class ChatView {
     const u6 = appEvents.on('chat.commands_updated', () => {
       if (input && !chatStore.getCommandDraft(this.currentChannelId ?? '')) this.updateCommandDropup(input);
     });
+    const updateVoiceCommands = () => {
+      if (this.commandActive) this.renderCommandDropup();
+      const command = this.voiceNoticeCommand;
+      if (command) {
+        this.showCommandNotice(this.getVoiceCommandDeniedReason(command) ?? '');
+        this.voiceNoticeCommand = command;
+      }
+    };
+    this.unbindEvents.push(
+      appEvents.on('voice.channel_changed', updateVoiceCommands),
+      appEvents.on('participants.updated', updateVoiceCommands),
+      appEvents.on('session.voice_context_updated', updateVoiceCommands),
+    );
     this.unbindEvents.push(appEvents.on('chat.reactions_updated', (message: ChatMessage) => {
       if (message.channelId === this.currentChannelId) this.updateReactionRow(message);
     }), () => { this.reactionPicker?.destroy(); this.reactionPicker = null; });
@@ -1790,7 +1808,7 @@ export class ChatView {
       ? { start: focused.selectionStart, end: focused.selectionEnd }
       : undefined;
     const wrapper = document.createElement('div');
-    wrapper.innerHTML = renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id);
+    wrapper.innerHTML = renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id, this.getVoiceCommandDeniedReason(invocation));
     const card = wrapper.firstElementChild;
     if (!card) {
       previous?.remove();
@@ -1817,6 +1835,7 @@ export class ChatView {
   }
 
   private showCommandNotice(message: string): void {
+    this.voiceNoticeCommand = null;
     const notice = this.container.querySelector<HTMLElement>('#chat-command-notice');
     if (notice) {
       notice.textContent = message;
@@ -1982,14 +2001,19 @@ export class ChatView {
 
   // ── Slash command dropup (#569) ──────────────────────────────────────
 
-  private getBotCommandDeniedReason(): string | undefined {
+  private getVoiceCommandDeniedReason(command: Pick<SlashCommand, 'botId' | 'voiceRequirement'>): string | undefined {
+    const error = commandVoiceError(command, getActiveNetworkClient(), getActiveServerStore());
+    return error ? translateProtocolError(error) : undefined;
+  }
+
+  private getBotCommandDeniedReason(command?: SlashCommand): string | undefined {
     const channel = serverStore.serverDetails?.channels.find((candidate) => candidate.id === this.currentChannelId);
     if (!channel || channel.type !== 'TEXT' || !channel.botCommandsEnabled) {
       return t('botChat.commandsDisabledInChannel');
     }
     if (!serverStore.hasPermission(Permission.USE_BOT_COMMANDS)) return t('botChat.commandsPermissionDenied');
     if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) return t('chat.sendPermissionDenied');
-    return undefined;
+    return command ? this.getVoiceCommandDeniedReason(command) : undefined;
   }
 
   private updateCommandDropup(input: HTMLTextAreaElement): void {
@@ -2042,7 +2066,7 @@ export class ChatView {
       el.style.display = 'block';
       return;
     }
-    el.innerHTML = renderCommandCatalog(this.commandGroups, this.commandActiveIndex);
+    el.innerHTML = renderCommandCatalog(this.commandGroups, this.commandActiveIndex, (command) => this.getVoiceCommandDeniedReason(command));
     el.style.display = 'block';
     const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
     input?.setAttribute('role', 'combobox');
@@ -2102,7 +2126,7 @@ export class ChatView {
     if (scroll) active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
-  private applyCommand(index: number, userGesture = false): void {
+  private applyCommand(index: number, userGesture = false, autoInvoke = true): void {
     const denied = this.getBotCommandDeniedReason();
     if (denied) {
       this.showCommandNotice(denied);
@@ -2116,19 +2140,25 @@ export class ChatView {
       return;
     }
     const typed = parseTypedCommand(input.value, chatStore.getCommands());
-    this.selectCommand(cmd, typed.kind === 'command' || typed.kind === 'ambiguous' ? typed.text : '', userGesture);
+    this.selectCommand(cmd, typed.kind === 'command' || typed.kind === 'ambiguous' ? typed.text : '', userGesture, autoInvoke);
   }
 
-  private selectCommand(command: SlashCommand, text = '', userGesture = false): void {
+  private selectCommand(command: SlashCommand, text = '', userGesture = false, autoInvoke = true): void {
     this.commandSelection++;
-    if (command.downloadsSound) {
-      void this.prepareDownloadCommand(command, text, userGesture);
+    const denied = this.getBotCommandDeniedReason(command);
+    if (denied) {
+      this.showCommandNotice(denied);
+      this.voiceNoticeCommand = command;
       return;
     }
-    this.activateCommand(command, text, userGesture, false);
+    if (command.downloadsSound) {
+      void this.prepareDownloadCommand(command, text, userGesture, autoInvoke);
+      return;
+    }
+    this.activateCommand(command, text, userGesture, false, autoInvoke);
   }
 
-  private async prepareDownloadCommand(command: SlashCommand, text: string, userGesture: boolean): Promise<void> {
+  private async prepareDownloadCommand(command: SlashCommand, text: string, userGesture: boolean, autoInvoke: boolean): Promise<void> {
     const store = getActiveChatStore();
     const client = getActiveNetworkClient();
     const connectionId = client.getConnectionId();
@@ -2153,7 +2183,7 @@ export class ChatView {
       const availability = await window.api.soundDownloadAvailability(settingsStore.soundboardFolderPath);
       if (!current()) return;
       if (availability === 'ready') {
-        this.activateCommand(command, text, userGesture, true);
+        this.activateCommand(command, text, userGesture, true, autoInvoke);
         return;
       }
       this.closeCommandDropup();
@@ -2164,10 +2194,10 @@ export class ChatView {
     }
   }
 
-  private activateCommand(command: SlashCommand, text: string, userGesture: boolean, downloadConsent: boolean): void {
+  private activateCommand(command: SlashCommand, text: string, userGesture: boolean, downloadConsent: boolean, autoInvoke: boolean): void {
     if (!this.currentChannelId) return;
-    if (this.getBotCommandDeniedReason() || !chatStore.isCommandAvailable(command)) {
-      this.showCommandNotice(this.getBotCommandDeniedReason() ?? t('botChat.commandUnavailable'));
+    if (this.getBotCommandDeniedReason(command) || !chatStore.isCommandAvailable(command)) {
+      this.showCommandNotice(this.getBotCommandDeniedReason(command) ?? t('botChat.commandUnavailable'));
       return;
     }
     this.showCommandNotice('');
@@ -2178,7 +2208,7 @@ export class ChatView {
     const draft = chatStore.getCommandDraft(this.currentChannelId);
     if (draft && !command.options?.length && text.trim()) {
       chatStore.setCommandPending(this.currentChannelId, draft, false, t('botChat.unexpectedText'));
-    } else if (draft && !command.options?.length) {
+    } else if (draft && !command.options?.length && autoInvoke) {
       void this.botChat?.invoke(userGesture);
       return;
     }

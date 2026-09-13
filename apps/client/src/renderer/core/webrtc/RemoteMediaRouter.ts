@@ -277,7 +277,9 @@ export class RemoteMediaRouter {
     if (!isScreenAudio) audioEl.muted = isDeaf;
     this.ensurePlaybackPipeline(sessionId, audioEl, pipelineMap, track);
     const pipeline = pipelineMap.get(sessionId);
-    if (pipeline) pipeline.gain.gain.value = audioEl.muted ? 0 : clamped / 100;
+    const state = isScreenAudio ? undefined : this.getVoiceParticipants().get(sessionId)?.voiceState;
+    const senderMuted = state?.isMuted || state?.isDeafened || state?.serverMuted || state?.serverDeafened;
+    if (pipeline) pipeline.gain.gain.value = audioEl.muted || senderMuted ? 0 : clamped / 100;
   }
 
   private ensurePlaybackPipeline(

@@ -1278,6 +1278,10 @@ export class WebRtcManager {
 
     // Remote Track handler (Audio & Video)
     pc.ontrack = (event) => {
+      if (!this.isCurrentPeer(session)) {
+        event.track.stop();
+        return;
+      }
       console.log(`[WebRTC] Received remote track (${event.track.kind}) from ${peerSessionId}`);
 
       // Check if this is a screen audio track — either by known stream ID
@@ -1343,7 +1347,8 @@ export class WebRtcManager {
 
       if (event.track.kind === 'audio') {
         this.mediaRouter.ensureVoiceAudioElement(peerSessionId, remoteStream);
-        this.vadMonitor.setupRemoteVad(peerSessionId, () => this.peers.get(peerSessionId));
+        this.vadMonitor.setupRemoteReceiverVad(peerSessionId, () =>
+          this.isCurrentPeer(session) ? event.receiver : null);
       }
 
       if (event.track.kind === 'video') {
@@ -1366,11 +1371,13 @@ export class WebRtcManager {
       }
 
       event.track.onended = () => {
+        if (!this.isCurrentPeer(session)) return;
         remoteStream.removeTrack(event.track);
         this.voiceParticipants.setRemoteStream(peerSessionId, remoteStream);
       };
 
       event.track.onunmute = () => {
+        if (!this.isCurrentPeer(session) || !remoteStream.getTrackById(event.track.id)) return;
         this.voiceParticipants.setRemoteStream(peerSessionId, remoteStream);
         if (event.track.kind === 'audio') {
           this.mediaRouter.ensureVoiceAudioElement(peerSessionId, remoteStream);
@@ -1392,6 +1399,7 @@ export class WebRtcManager {
     };
 
     pc.oniceconnectionstatechange = () => {
+      if (!this.isCurrentPeer(session)) return;
       const iceState = pc.iceConnectionState;
       clientLog.info('WEBRTC', `Peer ${peerSessionId} ICE state: ${iceState}`);
       console.log(`[WebRTC] Peer ${peerSessionId} ICE state: ${iceState}`);
@@ -1420,6 +1428,7 @@ export class WebRtcManager {
     };
 
     pc.onconnectionstatechange = () => {
+      if (!this.isCurrentPeer(session)) return;
       const state = pc.connectionState;
       clientLog.info('WEBRTC', `Peer ${peerSessionId} connection state: ${state}`);
       console.log(`[WebRTC] Peer ${peerSessionId} state: ${state}`);
@@ -2554,15 +2563,24 @@ export class WebRtcManager {
     }
 
     const session = this.peers.get(peerSessionId);
-    this.mediaRouter.cleanupPeerMedia(peerSessionId, session);
-
     if (session) {
-      this.clearPeerTimers(session);
-      try {
-        session.pc.close();
-      } catch {}
+      // Retire authority before stopping tracks: queued native callbacks must
+      // never recreate playback for this session after a leave or replacement.
       this.peers.delete(peerSessionId);
+      this.clearPeerTimers(session);
+      session.pc.ontrack = null;
+      session.pc.onicecandidate = null;
+      session.pc.oniceconnectionstatechange = null;
+      session.pc.onconnectionstatechange = null;
+      for (const stream of [session.remoteStream, ...session.remoteScreenStreams.values()]) {
+        for (const track of stream.getTracks()) {
+          track.onended = null;
+          track.onunmute = null;
+        }
+      }
     }
+    this.mediaRouter.cleanupPeerMedia(peerSessionId, session);
+    session?.pc.close();
   }
 
   public suspendForVoiceReconnect(preserveLocalTracks = false): void {

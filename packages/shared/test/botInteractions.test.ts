@@ -14,6 +14,10 @@ import {
   commandAutocompleteExecutionSchema,
   commandAutocompleteResultSchema,
   commandAutocompleteCancelSchema,
+  commandAudioPreviewSchema,
+  commandAudioPreviewExecutionSchema,
+  commandAudioPreviewResultSchema,
+  commandAudioPreviewCancelSchema,
   commandRequestIdSchema,
   commandSoundDownloadSchema,
   commandSoundDownloadReceivedSchema,
@@ -66,7 +70,48 @@ assert.deepEqual(botSelectorPublicSchema.parse({
 }).choices[0].audio, preview);
 
 assert.equal(commandDefinitionSchema.safeParse({ name: '8ball', description: 'Question' }).success, true);
+for (const voiceRequirement of ['joined', 'same-bot-channel'] as const) {
+  const command = { name: 'voice', description: 'Voice command', voiceRequirement };
+  assert.deepEqual(commandDefinitionSchema.parse(command), command);
+  assert.deepEqual(commandRegisterSchema.parse({ commands: [command] }).commands[0], command);
+}
+for (const voiceRequirement of ['any', '', true, null]) {
+  assert.equal(commandDefinitionSchema.safeParse({ name: 'voice', description: 'Voice', voiceRequirement }).success, false);
+}
 assert.deepEqual(audioPreviewSourceSchema.parse(preview), preview);
+const lazyAudio = { resourceId: 'provider-clip', fileName: 'preview.ogg', durationMs: 10_000 };
+assert.deepEqual(audioPreviewSourceSchema.parse(lazyAudio), lazyAudio);
+for (const invalid of [
+  { ...lazyAudio, url: preview.url }, { resourceId: '' }, { resourceId: ' padded ' },
+  { resourceId: 'x'.repeat(129) }, { ...lazyAudio, durationMs: 10_001 }, { ...lazyAudio, fileName: '..\\clip.ogg' },
+]) assert.equal(audioPreviewSourceSchema.safeParse(invalid).success, false);
+const lazyRequest = {
+  botId: 'bot', channelId: 'chat', commandName: 'play', optionName: 'track',
+  autocompleteRequestId: 'current-search', resourceId: 'opaque-server-token',
+};
+assert.deepEqual(commandAudioPreviewSchema.parse(lazyRequest), lazyRequest);
+for (const invalid of [
+  { ...lazyRequest, invokerId: 'forged' }, { ...lazyRequest, url: preview.url },
+  { ...lazyRequest, autocompleteRequestId: undefined }, { ...lazyRequest, optionName: 'constructor' },
+]) assert.equal(commandAudioPreviewSchema.safeParse(invalid).success, false);
+const lazyExecution = { commandName: 'play', optionName: 'track', resourceId: 'provider-clip', locale: 'en' };
+assert.deepEqual(commandAudioPreviewExecutionSchema.parse(lazyExecution), lazyExecution);
+assert.equal(commandAudioPreviewExecutionSchema.safeParse({ ...lazyExecution, serverId: 'forged' }).success, false);
+assert.deepEqual(commandAudioPreviewCancelSchema.parse({ requestId: 'preview-request' }), { requestId: 'preview-request' });
+assert.equal(commandAudioPreviewCancelSchema.safeParse({ requestId: 'preview-request', userId: 'forged' }).success, false);
+const lazyResult = { status: 'ok', mimeType: 'audio/ogg', audioBase64: Buffer.from([0, 1, 2]).toString('base64') };
+assert.deepEqual(commandAudioPreviewResultSchema.parse(lazyResult), lazyResult);
+assert.equal(commandAudioPreviewResultSchema.safeParse({
+  ...lazyResult, audioBase64: Buffer.alloc(LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES).toString('base64'),
+}).success, true);
+for (const audioBase64 of [
+  '', 'https://audio.example/clip.ogg', '!!!!', 'AAAA====', 'AA=A', 'AB==', 'AAB=',
+  Buffer.alloc(LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES + 1).toString('base64'),
+]) assert.equal(commandAudioPreviewResultSchema.safeParse({ ...lazyResult, audioBase64 }).success, false);
+assert.equal(commandAudioPreviewResultSchema.safeParse({ ...lazyResult, mimeType: 'text/html' }).success, false);
+assert.equal(commandAudioPreviewResultSchema.safeParse({ ...lazyResult, fileName: 'injected.ogg' }).success, false);
+assert.deepEqual(commandAudioPreviewResultSchema.parse({ status: 'failed', reason: 'handler_failed' }),
+  { status: 'failed', reason: 'handler_failed' });
 for (const badAudio of [
   { ...preview, url: 'http://cdn.example.test/audio.mp3' },
   { ...preview, url: 'https://user@cdn.example.test/audio.mp3' },

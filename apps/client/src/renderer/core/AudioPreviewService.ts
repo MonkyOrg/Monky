@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { SoundDownloadFailureReason } from '@monky/shared';
+import { LIMITS, commandAudioPreviewResultSchema, type AudioPreviewFailureReason, type AudioPreviewResult } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { settingsStore } from '../stores/settingsStore';
 import { t, type TranslationKey } from '../i18n';
@@ -14,6 +14,9 @@ interface ActivePreview {
   key: string;
   volumeScope: string;
   requestId: string;
+  controller: AbortController;
+  maxDurationMs?: number;
+  stopTimer?: ReturnType<typeof setTimeout>;
   controls: HTMLElement;
   audio?: HTMLAudioElement;
   objectUrl?: string;
@@ -23,9 +26,12 @@ interface ActivePreview {
   sinkQueue: Promise<void>;
   unbindAudio: () => void;
   unbindSettings: () => void;
+  deniedReason?: () => string | undefined;
 }
 
-const FAILURE_KEYS: Record<SoundDownloadFailureReason, TranslationKey> = {
+export type AudioPreviewLoader = (resourceId: string, requestId: string, signal: AbortSignal) => Promise<unknown>;
+
+const FAILURE_KEYS: Record<AudioPreviewFailureReason, TranslationKey> = {
   no_folder: 'botChat.downloadNoFolder',
   invalid_request: 'botChat.downloadInvalidRequest',
   invalid_url: 'botChat.downloadInvalidUrl',
@@ -37,6 +43,10 @@ const FAILURE_KEYS: Record<SoundDownloadFailureReason, TranslationKey> = {
   network_error: 'botChat.downloadNetworkError',
   write_failed: 'botChat.downloadWriteFailed',
   timeout: 'botChat.downloadTimeout',
+  handler_failed: 'botChat.audioPreviewProviderFailed',
+  invalid_response: 'botChat.audioPreviewInvalidResponse',
+  busy: 'botChat.audioPreviewBusy',
+  expired: 'botChat.audioPreviewExpired',
 };
 
 export function getAudioPreviewVolume(scope: string): number {
@@ -58,8 +68,8 @@ function stopEvent(event: Event): void {
 export class AudioPreviewService {
   private active: ActivePreview | null = null;
 
-  public bind(root: HTMLElement): () => void {
-    const click = (event: MouseEvent) => this.onClick(event);
+  public bind(root: HTMLElement, loadResource?: AudioPreviewLoader, deniedReason?: (controls: HTMLElement) => string | undefined): () => void {
+    const click = (event: MouseEvent) => this.onClick(event, loadResource, deniedReason);
     const input = (event: Event) => this.onVolumeInput(event);
     const keydown = (event: KeyboardEvent) => this.onKeyDown(event);
     root.addEventListener('click', click, true);
@@ -95,14 +105,14 @@ export class AudioPreviewService {
     if (!stillVisible) this.release(scope);
   }
 
-  private onClick(event: MouseEvent): void {
+  private onClick(event: MouseEvent, loadResource?: AudioPreviewLoader, deniedReason?: (controls: HTMLElement) => string | undefined): void {
     if (!(event.target instanceof Element)) return;
     const toggle = event.target.closest<HTMLButtonElement>('[data-audio-preview-action="toggle"]');
     const range = event.target.closest<HTMLInputElement>('[data-audio-preview-volume]');
     if (toggle) {
       stopEvent(event);
       const controls = toggle.closest<HTMLElement>('[data-audio-choice-controls]');
-      if (controls) void this.toggle(controls);
+      if (controls) void this.toggle(controls, loadResource, deniedReason);
     } else if (range) {
       event.stopPropagation();
       event.stopImmediatePropagation();
@@ -144,11 +154,18 @@ export class AudioPreviewService {
     }
   }
 
-  private async toggle(controls: HTMLElement): Promise<void> {
+  private async toggle(controls: HTMLElement, loadResource?: AudioPreviewLoader, deniedReason?: (controls: HTMLElement) => string | undefined): Promise<void> {
     const key = controls.dataset.audioKey;
     const url = controls.dataset.audioUrl;
+    const resourceId = controls.dataset.audioResourceId;
     const volumeScope = controls.dataset.audioVolumeScope;
-    if (!key || !url || !volumeScope || !controls.isConnected) return;
+    if (!key || (!url && !resourceId) || (url && resourceId) || !volumeScope || !controls.isConnected) return;
+    const denied = deniedReason?.(controls);
+    if (denied) {
+      this.release(controls);
+      this.setControlsState(controls, 'failed', denied);
+      return;
+    }
     if (this.active?.key === key) {
       const active = this.active;
       if (!active.audio) {
@@ -164,8 +181,11 @@ export class AudioPreviewService {
     this.stopActive(true);
     const requestId = uuidv4();
     const active: ActivePreview = {
-      key, volumeScope, requestId, controls, loading: true, wantsPlayback: true, sinkQueue: Promise.resolve(),
+      key, volumeScope, requestId, controls, controller: new AbortController(),
+      maxDurationMs: resourceId ? LIMITS.BOT_AUDIO_PREVIEW_MAX_DURATION_MS : undefined,
+      loading: true, wantsPlayback: true, sinkQueue: Promise.resolve(),
       unbindAudio: () => {}, unbindSettings: () => {},
+      deniedReason: deniedReason ? () => deniedReason(controls) : undefined,
     };
     this.active = active;
     active.unbindSettings = appEvents.on('settings.updated', () => {
@@ -175,9 +195,23 @@ export class AudioPreviewService {
     });
     this.setControlsState(controls, 'loading', t('botChat.audioPreviewLoading'));
     try {
-      const result = await window.api?.loadAudioPreview?.({
-        requestId, url, fileName: controls.dataset.audioFileName,
-      });
+      let result: AudioPreviewResult | undefined;
+      if (resourceId) {
+        const response = loadResource
+          ? await loadResource(resourceId, requestId, active.controller.signal) : undefined;
+        if (!this.isCurrent(active)) return;
+        const parsed = commandAudioPreviewResultSchema.safeParse(response);
+        if (!parsed.success) result = { status: 'failed', reason: 'invalid_response' };
+        else if (parsed.data.status === 'failed') result = parsed.data;
+        else result = await window.api?.loadAudioPreview?.({
+          requestId, audioBase64: parsed.data.audioBase64, mimeType: parsed.data.mimeType,
+          fileName: controls.dataset.audioFileName,
+        });
+      } else if (url) {
+        result = await window.api?.loadAudioPreview?.({
+          requestId, url, fileName: controls.dataset.audioFileName,
+        });
+      }
       if (!this.isCurrent(active)) return;
       active.loading = false;
       if (!result || result.status === 'failed') {
@@ -197,15 +231,31 @@ export class AudioPreviewService {
       audio.src = objectUrl;
       audio.preload = 'auto';
       audio.volume = getAudioPreviewVolume(volumeScope) / 100;
-      const update = () => { if (this.isCurrent(active)) this.updateControls(); };
-      const ended = () => { if (this.isCurrent(active)) { active.wantsPlayback = false; this.updateControls(); } };
+      const update = () => {
+        if (!this.isCurrent(active)) return;
+        if (audio.paused) clearTimeout(active.stopTimer);
+        this.updateControls();
+      };
+      const ended = () => {
+        if (!this.isCurrent(active)) return;
+        clearTimeout(active.stopTimer);
+        active.wantsPlayback = false;
+        this.updateControls();
+      };
       const failed = () => this.failActive(active, 'botChat.audioPreviewPlaybackFailed', audio.error);
       audio.addEventListener('ended', ended);
       audio.addEventListener('pause', update);
       audio.addEventListener('play', update);
       audio.addEventListener('error', failed);
       const progressEvents = ['timeupdate', 'loadedmetadata', 'durationchange', 'seeked'] as const;
-      const progress = () => { if (this.isCurrent(active)) this.updateProgress(controls, audio); };
+      const progress = () => {
+        if (!this.isCurrent(active)) return;
+        if (active.maxDurationMs !== undefined && audio.currentTime * 1000 >= active.maxDurationMs) {
+          active.wantsPlayback = false;
+          audio.pause();
+        }
+        this.updateProgress(controls, audio);
+      };
       for (const event of progressEvents) audio.addEventListener(event, progress);
       active.unbindAudio = () => {
         audio.removeEventListener('ended', ended);
@@ -218,12 +268,18 @@ export class AudioPreviewService {
       active.objectUrl = objectUrl;
       await this.playActive(active);
     } catch (error) {
-      this.failActive(active, 'botChat.audioPreviewPlaybackFailed', error);
+      this.failActive(active, resourceId ? 'botChat.audioPreviewProviderFailed' : 'botChat.audioPreviewPlaybackFailed', error);
     }
   }
 
   private isCurrent(active: ActivePreview): boolean {
     if (this.active !== active) return false;
+    const denied = active.deniedReason?.();
+    if (denied) {
+      this.stopActive(true, false);
+      this.setControlsState(active.controls, 'failed', denied);
+      return false;
+    }
     if (active.controls.isConnected) return true;
     this.stopActive(true);
     return false;
@@ -248,7 +304,17 @@ export class AudioPreviewService {
     }
     if (!this.isCurrent(active) || active.sinkQueue !== routing || !active.wantsPlayback) return;
     try {
+      if (active.maxDurationMs !== undefined && audio.currentTime * 1000 >= active.maxDurationMs) audio.currentTime = 0;
       await audio.play();
+      if (this.isCurrent(active) && active.maxDurationMs !== undefined && active.wantsPlayback) {
+        clearTimeout(active.stopTimer);
+        active.stopTimer = setTimeout(() => {
+          if (!this.isCurrent(active)) return;
+          active.wantsPlayback = false;
+          audio.pause();
+          this.updateControls();
+        }, Math.max(0, active.maxDurationMs - audio.currentTime * 1000));
+      }
     } catch (error) {
       if (this.isCurrent(active) && active.wantsPlayback && active.sinkQueue === routing) {
         active.wantsPlayback = false;
@@ -274,6 +340,8 @@ export class AudioPreviewService {
     const active = this.active;
     if (!active) return;
     this.active = null;
+    active.controller.abort();
+    clearTimeout(active.stopTimer);
     active.unbindSettings();
     active.unbindAudio();
     if (active.loading && cancelRequest) {
@@ -334,8 +402,11 @@ export class AudioPreviewService {
 
   private updateProgress(controls: HTMLElement, audio?: HTMLAudioElement): void {
     const hintedDuration = Number(controls.dataset.audioDurationMs) / 1000;
-    const duration = audio && Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration :
+    const sourceDuration = audio && Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration :
       Number.isFinite(hintedDuration) && hintedDuration > 0 ? hintedDuration : undefined;
+    const duration = controls.dataset.audioResourceId
+      ? Math.min(sourceDuration ?? LIMITS.BOT_AUDIO_PREVIEW_MAX_DURATION_MS / 1000, LIMITS.BOT_AUDIO_PREVIEW_MAX_DURATION_MS / 1000)
+      : sourceDuration;
     const elapsed = audio && Number.isFinite(audio.currentTime) ? Math.max(0, audio.currentTime) : 0;
     const current = duration === undefined ? elapsed : audio?.ended ? duration : Math.min(elapsed, duration);
     const progress = controls.querySelector<HTMLProgressElement>('[data-audio-preview-progress]');

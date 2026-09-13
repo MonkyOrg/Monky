@@ -106,7 +106,9 @@ ${escapeHtml(text)}</textarea>`;
   </div>`;
 }
 
-export function renderCompactCommand(draft: CommandDraft, channelId: string, members: UserSummary[], canSend: boolean, available: boolean): string {
+export function renderCompactCommand(
+  draft: CommandDraft, channelId: string, members: UserSummary[], canSend: boolean, available: boolean, voiceError?: string,
+): string {
   const fields = visibleCommandFields(draft.command, draft.visibleOptionalNames);
   const optionalCount = (draft.command.options ?? []).filter((option) =>
     !option.required && !draft.visibleOptionalNames.includes(option.name)).length;
@@ -136,12 +138,13 @@ export function renderCompactCommand(draft: CommandDraft, channelId: string, mem
         ${optionalCount ? `<button type="button" class="bot-add-parameters" data-bot-action="optional-parameters" aria-haspopup="listbox"
           aria-expanded="false" title="${t('botChat.addParameters')}" ${disabled ? 'disabled' : ''}>${optionalParameterLabel(optionalCount)}</button>` : ''}
       </div>
-      <button type="submit" class="btn btn-primary bot-command-run" ${disabled || !available || !canExecute ? 'disabled' : ''}
+      <button type="submit" class="btn btn-primary bot-command-run" ${disabled || !available || !canExecute || voiceError ? 'disabled' : ''}
         title="${t(draft.pending ? 'botChat.invoking' : 'botChat.execute')}" aria-label="${t(draft.pending ? 'botChat.invoking' : 'botChat.execute')}">
         <span class="material-symbols-outlined md-18">${draft.pending ? 'hourglass_empty' : 'send'}</span>
       </button>
     </div>
     ${draft.command.downloadsSound ? `<p class="bot-local-download-cue"><span class="material-symbols-outlined md-16" aria-hidden="true">download</span>${t('botChat.localDownload')}</p>` : ''}
+    <p class="bot-command-voice-error" role="status" ${voiceError ? '' : 'hidden'}>${escapeHtml(voiceError ?? '')}</p>
     <p class="bot-error" role="alert" ${draft.error || !available ? '' : 'hidden'}>${escapeHtml(draft.error ?? (!available ? t('botChat.commandUnavailable') : ''))}</p>
     <div class="bot-parameter-menu" id="bot-parameter-options" hidden></div>
   </form>`;

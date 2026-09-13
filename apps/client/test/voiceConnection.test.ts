@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType } from '@monky/shared';
 import { ParticipantManager } from '../src/renderer/core/ParticipantManager';
 import { NetworkClient } from '../src/renderer/core/NetworkClient';
 import { SfuClientEngine } from '../src/renderer/core/webrtc/SfuClientEngine';
 import { RemoteMediaRouter } from '../src/renderer/core/webrtc/RemoteMediaRouter';
+import { RemoteVadMonitor } from '../src/renderer/core/webrtc/RemoteVadMonitor';
 import { settingsStore } from '../src/renderer/stores/settingsStore';
 import { VoiceStore, voiceStore } from '../src/renderer/stores/voiceStore';
 import { appEvents } from '../src/renderer/core/EventBus';
-import { participantConnectionIndicators, voiceConnectionIndicator } from '../src/renderer/utils/voiceConnection';
+import { sessionManager } from '../src/renderer/core/SessionManager';
+import { createServerStore, getActiveServerStore, setActiveServerStore } from '../src/renderer/stores/serverStore';
+import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../src/renderer/utils/voiceConnection';
 
 function participant(sessionId: string, channelId = 'room'): VoiceRosterParticipant {
   return {
@@ -31,6 +34,248 @@ test('authoritative join/rejoin roster repairs missing users and ghosts without 
   assert.equal(manager.get('live'), live, 'keep existing media-bearing view models');
   assert.equal(manager.get('ghost')?.voiceState, undefined);
   assert.equal(manager.getInVoiceChannel('other').length, 1);
+});
+
+test('human and bot speaking share the same muted/deafened and departed-session gates', () => {
+  for (const isBot of [false, true]) {
+    const manager = new ParticipantManager();
+    const entry = participant(isBot ? 'bot:voice' : 'human:voice');
+    entry.user.isBot = isBot;
+    manager.reconcileVoiceChannel('room', [entry]);
+    const model = manager.get(entry.voiceState.sessionId);
+    assert.ok(model);
+    manager.setSpeaking(entry.voiceState.sessionId, true);
+    assert.equal(model.isSpeaking, true);
+    for (const flag of ['isMuted', 'isDeafened', 'serverMuted', 'serverDeafened'] as const) {
+      manager.updateVoiceState({ ...entry.voiceState, isSpeaking: true, [flag]: true });
+      assert.equal(model.isSpeaking, false, `${flag} clears a published speaking state`);
+      manager.setSpeaking(entry.voiceState.sessionId, true);
+      assert.equal(model.isSpeaking, false, `${flag} also rejects late RTP activity`);
+      manager.updateVoiceState({ ...entry.voiceState, isSpeaking: true });
+      assert.equal(model.isSpeaking, true, 'unmuted published activity uses the normal participant state');
+    }
+    manager.removeVoiceState(entry.voiceState.sessionId);
+    manager.setSpeaking(entry.voiceState.sessionId, true);
+    assert.equal(model.isSpeaking, false, 'late activity cannot revive a departed session');
+  }
+});
+
+test('local speaking uses current physical audio flags without reviving a departed session', () => {
+  const manager = new ParticipantManager();
+  const entry = participant('self');
+  entry.voiceState.serverDeafened = true;
+  manager.reconcileVoiceChannel('room', [entry]);
+  const physicalAudio = new VoiceStore();
+  physicalAudio.isMuted = false;
+  physicalAudio.isDeafened = false;
+  manager.setSpeaking('self', true, physicalAudio);
+  assert.equal(manager.get('self')?.isSpeaking, true, 'an older muted echo cannot suppress current local capture');
+  assert.equal(manager.get('self')?.voiceState?.serverDeafened, true, 'local activity does not rewrite server state');
+  for (const flag of ['isMuted', 'isDeafened', 'serverMuted', 'serverDeafened'] as const) {
+    physicalAudio[flag] = true;
+    manager.setSpeaking('self', true, physicalAudio);
+    assert.equal(manager.get('self')?.isSpeaking, false, `${flag} still gates the physical microphone`);
+    physicalAudio[flag] = false;
+  }
+  manager.removeVoiceState('self');
+  manager.setSpeaking('self', true, physicalAudio);
+  assert.equal(manager.get('self')?.isSpeaking, false);
+});
+
+function speakingFixture(t: TestContext) {
+  const previousServer = getActiveServerStore();
+  const physical = {
+    currentVoiceChannelId: voiceStore.currentVoiceChannelId, voiceSessionKey: voiceStore.voiceSessionKey,
+    isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,
+    serverMuted: voiceStore.serverMuted, serverDeafened: voiceStore.serverDeafened,
+    isSpeaking: voiceStore.isSpeaking,
+  };
+  const local = participant('listener');
+  const bot = participant('bot:voice');
+  bot.user.isBot = true;
+  bot.voiceState.isSpeaking = true;
+  const call = sessionManager.create('speaking-ui-fixture', 9001, 'Listener');
+  call.serverStore.currentUser = local.user;
+  call.participants.reconcileVoiceChannel('room', [local, bot]);
+  Object.assign(voiceStore, {
+    currentVoiceChannelId: 'room', voiceSessionKey: call.key,
+    isMuted: false, isDeafened: false, serverMuted: false, serverDeafened: false, isSpeaking: false,
+  });
+  setActiveServerStore(call.serverStore);
+  t.after(() => {
+    Object.assign(voiceStore, physical);
+    setActiveServerStore(previousServer);
+    sessionManager.remove(call.key);
+  });
+  const model = call.participants.get(bot.voiceState.sessionId);
+  assert.ok(model);
+  return { call, local, bot, model };
+}
+
+test('speaking UI is limited to the physical listening room without erasing published activity', (t) => {
+  const { call, local, bot, model } = speakingFixture(t);
+  assert.equal(isParticipantSpeaking(model), true);
+  for (const channel of [null, 'another-room']) {
+    voiceStore.currentVoiceChannelId = channel;
+    assert.equal(isParticipantSpeaking(model), false);
+    assert.equal(model.isSpeaking, true);
+    assert.equal(model.voiceState?.isSpeaking, true);
+  }
+  voiceStore.currentVoiceChannelId = 'room';
+  call.participants.updateVoiceState({ ...bot.voiceState, channelId: 'another-room' });
+  assert.equal(isParticipantSpeaking(model), false, 'a different room on the same server is not audible here');
+  call.participants.updateVoiceState(bot.voiceState);
+  call.participants.removeVoiceState(local.voiceState.sessionId);
+  assert.equal(isParticipantSpeaking(model), false, 'a room ID alone does not establish physical membership');
+  call.participants.updateVoiceState(local.voiceState);
+  assert.equal(isParticipantSpeaking(model), true, 'rejoining restores the projection from existing metadata');
+  voiceStore.voiceSessionKey = 'missing-session';
+  assert.equal(isParticipantSpeaking(model), false);
+  assert.equal(model.voiceState?.isSpeaking, true);
+});
+
+test('speaking UI rejects another server, participant object or physical device with matching account IDs', (t) => {
+  const { call, local, bot, model } = speakingFixture(t);
+  const otherServer = createServerStore();
+  const otherParticipants = new ParticipantManager();
+  otherParticipants.reconcileVoiceChannel('room', [local, bot]);
+  const foreignModel = otherParticipants.get(bot.voiceState.sessionId);
+  assert.ok(foreignModel);
+  assert.equal(isParticipantSpeaking(foreignModel, call.serverStore), false, 'colliding session IDs do not cross stores');
+  assert.equal(isParticipantSpeaking(model, otherServer), false);
+  setActiveServerStore(otherServer);
+  assert.equal(isParticipantSpeaking(model), false, 'foreground rows do not inherit a background call');
+  assert.equal(isParticipantSpeaking(model, call.serverStore), true, 'the overlay may project the actual background call');
+  call.serverStore.currentUser = { ...local.user, sessionId: 'another-device' };
+  assert.equal(isParticipantSpeaking(model, call.serverStore), false, 'another device on the account cannot authorize this device');
+  call.serverStore.currentUser = local.user;
+  model.voiceState = { ...bot.voiceState, sessionId: 'wrong-speaker' };
+  assert.equal(isParticipantSpeaking(model, call.serverStore), false, 'voice state must identify the participant being rendered');
+});
+
+test('one speaking bot cannot turn a muted human or a silent bot green', (t) => {
+  const { call, model } = speakingFixture(t);
+  const human = participant('human');
+  human.voiceState.isMuted = true;
+  human.voiceState.isSpeaking = true;
+  const quietBot = participant('bot:quiet');
+  quietBot.user.isBot = true;
+  for (const entry of [human, quietBot]) {
+    call.participants.addUser(entry.user);
+    call.participants.updateVoiceState(entry.voiceState);
+  }
+  assert.equal(isParticipantSpeaking(model), true);
+  assert.equal(isParticipantSpeaking(call.participants.get('human')), false);
+  assert.equal(isParticipantSpeaking(call.participants.get('bot:quiet')), false);
+  call.participants.updateVoiceState({ ...human.voiceState, isMuted: false });
+  assert.equal(isParticipantSpeaking(call.participants.get('human')), true, 'independent real human activity remains visible');
+  assert.equal(isParticipantSpeaking(call.participants.get('bot:quiet')), false);
+});
+
+test('speaking UI respects sender restrictions and listener deafen but not listener microphone mute', (t) => {
+  const { call, bot, model } = speakingFixture(t);
+  for (const flag of ['isMuted', 'serverMuted', 'isDeafened', 'serverDeafened'] as const) {
+    call.participants.updateVoiceState({ ...bot.voiceState, [flag]: true });
+    assert.equal(isParticipantSpeaking(model), false, `${flag} gates that sender`);
+    assert.equal(model.voiceState?.isSpeaking, true, 'visual masking preserves authoritative metadata');
+    call.participants.updateVoiceState(bot.voiceState);
+  }
+  for (const flag of ['isMuted', 'serverMuted'] as const) {
+    voiceStore[flag] = true;
+    assert.equal(isParticipantSpeaking(model), true, `${flag} does not deafen the listener`);
+    voiceStore[flag] = false;
+  }
+  for (const flag of ['isDeafened', 'serverDeafened'] as const) {
+    voiceStore[flag] = true;
+    assert.equal(isParticipantSpeaking(model), false, `${flag} hides activity while not listening`);
+    assert.equal(model.isSpeaking, true);
+    assert.equal(model.voiceState?.isSpeaking, true);
+    voiceStore[flag] = false;
+    assert.equal(isParticipantSpeaking(model), true, 'undeafen needs no fabricated speech event');
+  }
+});
+
+test('local visual speech uses physical flags rather than older server echoes', (t) => {
+  const { call, local } = speakingFixture(t);
+  call.participants.updateVoiceState({ ...local.voiceState, serverMuted: true, isSpeaking: false });
+  const model = call.participants.get(local.voiceState.sessionId);
+  voiceStore.isSpeaking = true;
+  assert.equal(isParticipantSpeaking(model), true);
+  assert.equal(model?.voiceState?.serverMuted, true);
+  for (const flag of ['isMuted', 'serverMuted', 'isDeafened', 'serverDeafened'] as const) {
+    voiceStore[flag] = true;
+    assert.equal(isParticipantSpeaking(model), false);
+    voiceStore[flag] = false;
+  }
+  voiceStore.isSpeaking = false;
+  call.participants.updateVoiceState({ ...local.voiceState, isSpeaking: true });
+  assert.equal(isParticipantSpeaking(model), false, 'a stale echo cannot light the closed physical microphone');
+});
+
+function audioStats(audioLevel: number): RTCStatsReport {
+  return new Map([['voice', { id: 'voice', type: 'inbound-rtp', timestamp: 1, kind: 'audio', audioLevel }]]);
+}
+
+test('remote VAD preserves published speech, samples ordinary human audio and obeys server mute', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const manager = new ParticipantManager();
+  const entry = participant('peer');
+  entry.voiceState.isSpeaking = true;
+  manager.reconcileVoiceChannel('room', [entry]);
+  let level = 0;
+  const receiver = {
+    track: { readyState: 'live' } satisfies Pick<MediaStreamTrack, 'readyState'>,
+    getStats: async () => audioStats(level),
+  };
+  const vad = new RemoteVadMonitor(() => manager);
+  t.after(() => vad.cleanupAll());
+  vad.setupRemoteReceiverVad('peer', () => receiver);
+  const tick = async () => { t.mock.timers.tick(150); await Promise.resolve(); };
+  for (let i = 0; i < 8; i++) await tick();
+  assert.equal(manager.get('peer')?.isSpeaking, true, 'zero receiver telemetry cannot erase published transmission');
+  manager.updateVoiceState({ ...entry.voiceState, isSpeaking: false });
+  level = 0.3;
+  await tick();
+  assert.equal(manager.get('peer')?.isSpeaking, true, 'human RTP activity works without a published flag');
+  level = 0;
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(manager.get('peer')?.isSpeaking, false, 'ordinary RTP silence still clears human activity');
+  manager.updateVoiceState({ ...entry.voiceState, serverMuted: true });
+  level = 0.3;
+  await tick();
+  assert.equal(manager.get('peer')?.isSpeaking, false, 'server mute overrides both activity sources');
+});
+
+test('retired asynchronous VAD samples cannot revive a rejoined participant or overlap sampling', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const manager = new ParticipantManager();
+  const entry = participant('peer');
+  manager.reconcileVoiceChannel('room', [entry]);
+  let complete: ((stats: RTCStatsReport) => void) | undefined;
+  const pendingStats = new Promise<RTCStatsReport>(resolve => { complete = resolve; });
+  let samples = 0;
+  const receiver = {
+    track: { readyState: 'live' } satisfies Pick<MediaStreamTrack, 'readyState'>,
+    getStats: () => { samples++; return pendingStats; },
+  };
+  const vad = new RemoteVadMonitor(() => manager);
+  t.after(() => vad.cleanupAll());
+  vad.setupRemoteReceiverVad('peer', () => receiver);
+  t.mock.timers.tick(150);
+  t.mock.timers.tick(300);
+  assert.equal(samples, 1, 'a slow native getStats call is never overlapped');
+  vad.cleanupRemoteVad('peer');
+  manager.removeVoiceState('peer');
+  manager.reconcileVoiceChannel('room', [entry]);
+  const nextReceiver = { ...receiver, getStats: async () => audioStats(0) };
+  vad.setupRemoteReceiverVad('peer', () => nextReceiver);
+  if (!complete) throw new Error('The deferred VAD sample was not created');
+  complete(audioStats(0.5));
+  await Promise.resolve();
+  assert.equal(manager.get('peer')?.isSpeaking, false, 'the old timer cannot affect the new voice lifetime');
+  t.mock.timers.tick(150);
+  await Promise.resolve();
+  assert.equal(manager.get('peer')?.isSpeaking, false);
 });
 
 test('SFU health badges are visible to local users, remote users and observers, independently of signaling', () => {
@@ -406,6 +651,23 @@ test('remote WebRTC output changes keep default voice separate from screen speak
     assert.equal(voice.volume, 0, 'the microphone decoder element never becomes an audible second path');
     assert.equal(otherVoice.volume, 0);
     assert.equal(router.getScreenAudioElement('peer')?.volume, 0);
+  }
+  for (const isBot of [false, true]) {
+    const peer = participant('peer');
+    peer.user.isBot = isBot;
+    manager.reconcileVoiceChannel('room', [peer]);
+    for (const flag of ['isMuted', 'isDeafened', 'serverMuted', 'serverDeafened'] as const) {
+      manager.updateVoiceState({ ...peer.voiceState, [flag]: true });
+      router.applyUserVolumes();
+      assert.equal(contexts[0].gains[0].gain.value, 0, `${flag} gates incoming human and bot voice`);
+      router.setPeerVolume('peer', 200);
+      assert.equal(contexts[0].gains[0].gain.value, 0, 'local amplification cannot bypass a voice restriction');
+      assert.equal(contexts[0].gains[1].gain.value, 1, 'another participant is unaffected');
+      assert.equal(contexts[1].gains[0].gain.value, 2, 'screen playback remains independently controlled');
+      manager.updateVoiceState(peer.voiceState);
+      router.applyUserVolumes();
+      assert.equal(contexts[0].gains[0].gain.value, 1);
+    }
   }
   await router.setOutputDeviceIds('', 'other-screen-speakers');
   assert.deepEqual(contexts.map(context => context.sinkId), ['', 'other-screen-speakers']);

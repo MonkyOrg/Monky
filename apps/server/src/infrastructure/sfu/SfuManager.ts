@@ -499,6 +499,14 @@ export class SfuManager {
     };
   }
 
+  /** Reaps an allocation abandoned before its response, without touching a newer bot session. */
+  public discardPendingTransport(transportId: string): void {
+    const record = this.transports.get(transportId);
+    if (!record) return;
+    this.transports.delete(transportId);
+    record.transport.close();
+  }
+
   /**
    * Closes whatever this session already had for one direction in a channel,
    * and reports the producers that went with it.

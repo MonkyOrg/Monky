@@ -15,6 +15,7 @@
   "dependencies": {
     "@monky/shared": "*",
     "tar": "^7.5.22",
+    "werift": "^0.24.4",
     "ws": "^8.14.2"
   },
   "devDependencies": {

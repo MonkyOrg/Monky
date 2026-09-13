@@ -179,7 +179,14 @@ function moderationFixture() {
   users.isMember = async (id) => ['alice', 'bob', 'offline', 'moderator'].includes(id);
   server['userService'] = users;
   const messages: Parameters<WebSocketServer['broadcast']>[0][] = [];
+  const channelBroadcasts: string[] = [];
   server['broadcast'] = (message) => { messages.push(message); };
+  server['broadcastToChannel'] = async (channelId, message, _ignoreWs, canSend) => {
+    if (!canSend || canSend()) {
+      channelBroadcasts.push(channelId);
+      messages.push(message);
+    }
+  };
   type Session = Parameters<WebSocketServer['handleMessage']>[0];
   const clients = ['moderator', 'one', 'two', 'idle', 'bob'].map((id): Session => {
     const ws = Object.create(WebSocket.prototype) as WebSocket;
@@ -202,7 +209,7 @@ function moderationFixture() {
     assert.ok(response, 'every valid connection receives a correlated response, including outside voice');
     return response;
   };
-  return { server, service, grants, users, clients, session, messages, direct, request };
+  return { server, service, grants, users, clients, session, messages, channelBroadcasts, direct, request };
 }
 
 test('administrative identity changes cover every voice and idle device without exposing other users', async () => {
@@ -213,6 +220,7 @@ test('administrative identity changes cover every voice and idle device without 
   assert.equal(response.type, MessageType.VOICE_RESTRICTIONS_UPDATED);
   assert.deepEqual(response.payload, { userId: 'alice', serverMuted: true, serverDeafened: false });
   assert.equal(f.messages.filter((message) => message.type === MessageType.VOICE_STATE_CHANGED).length, 2);
+  assert.deepEqual(f.channelBroadcasts, ['room', 'room']);
   const notifications = f.direct.filter(({ message }) => !message.requestId);
   assert.deepEqual(notifications.map(({ socket }) => f.clients.find((client) => client.ws === socket)?.sessionId), ['one', 'two', 'idle'],
     'identity-policy notifications include idle devices and exclude other users');
@@ -227,6 +235,33 @@ test('administrative identity changes cover every voice and idle device without 
   assert.equal(f.direct.filter(({ message }) => !message.requestId).length, 3);
   assert.equal(f.service.getVoiceState('two')?.serverDeafened, true);
   assert.equal(f.service.getVoiceState('one')?.serverMuted, true);
+});
+
+test('voice restrictions reach the affected devices before room audience resolution completes', async (t) => {
+  const f = moderationFixture();
+  await f.service.joinVoiceChannel('one', 'alice', 'room');
+  const original = f.server['broadcastToChannel'].bind(f.server);
+  let release!: () => void;
+  let started!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  t.after(release);
+  f.server['broadcastToChannel'] = async (...args) => {
+    started();
+    await gate;
+    await original(...args);
+  };
+  const pending = f.request(MessageType.ADMIN_MUTE_USER, { targetUserId: 'alice', muted: true });
+  await waiting;
+  const notifications = f.direct.filter(({ message }) => !message.requestId);
+  assert.equal(notifications.length, 3);
+  for (const { message } of notifications) {
+    assert.equal(message.type, MessageType.VOICE_RESTRICTIONS_UPDATED);
+    assert.deepEqual(message.payload, { userId: 'alice', serverMuted: true, serverDeafened: false });
+  }
+  assert.equal(f.messages.length, 0);
+  release();
+  assert.equal((await pending).type, MessageType.VOICE_RESTRICTIONS_UPDATED);
 });
 
 test('administrators can apply and remove restrictions while a member is idle or fully offline', async () => {
@@ -351,6 +386,8 @@ test('SQLite voice restrictions survive restart, stay server-scoped and cascade 
 
 test('voice join snapshot is captured after async broadcast and includes peers who arrived during it', async () => {
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+  server['requirePermission'] = async () => true;
+  server['requireChannelAccess'] = async () => true;
   const service = signaling();
   const sfu = new SfuManager();
   server['signalingService'] = service;
@@ -360,11 +397,14 @@ test('voice join snapshot is captured after async broadcast and includes peers w
     createServer: async () => {}, updateServer: async () => {},
   };
   type Session = Parameters<WebSocketServer['handleVoiceJoin']>[0];
-  const makeSession = (id: string): Session => ({
-    ws: Object.create(WebSocket.prototype) as WebSocket, sessionId: id, isAlive: true, ip: '127.0.0.1',
-    messageQueue: Promise.resolve(),
-    user: { id, sessionId: id, clientId: id, nickname: id, status: 'ONLINE', joinedAt: 1 },
-  });
+  const makeSession = (id: string): Session => {
+    const ws = Object.create(WebSocket.prototype) as WebSocket;
+    Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
+    return {
+      ws, sessionId: id, isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+      user: { id, sessionId: id, clientId: id, nickname: id, status: 'ONLINE', joinedAt: 1 },
+    };
+  };
   const self = makeSession('self');
   const peer = makeSession('peer');
   const late = makeSession('late');

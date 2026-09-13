@@ -13,6 +13,7 @@ import {
   type CommandSubmitPayload,
   type SlashCommand,
   type CommandAutocompleteChoice,
+  type CommandVoiceRequirement,
   type SoundDownloadResult,
 } from '@monky/shared';
 import { appEvents, EventBus } from '../core/EventBus';
@@ -33,6 +34,8 @@ export interface CommandDraft {
   downloadConsent: boolean;
   touchedFields?: string[];
   error?: string;
+  voiceContext?: string;
+  voiceContextRevision?: number;
 }
 
 export interface BotFormState {
@@ -54,6 +57,7 @@ export interface BotInvocation extends CommandInvokedPayload {
   forms: BotFormState[];
   acknowledged: boolean;
   hasResponse: boolean;
+  voiceRequirement?: CommandVoiceRequirement;
   soundDownload?: {
     downloadId: string;
     title: string;
@@ -427,6 +431,27 @@ export class ChatStore {
     draft.error = undefined;
   }
 
+  public setCommandVoiceContext(channelId: string, context: string): boolean {
+    const draft = this.commandDrafts.get(channelId);
+    if (!draft?.command.voiceRequirement || draft.voiceContext === context) return false;
+    draft.voiceContext = context;
+    draft.voiceContextRevision = (draft.voiceContextRevision ?? 0) + 1;
+    for (const [name, input] of Object.entries(draft.autocomplete)) {
+      draft.autocomplete[name] = { query: input.query };
+      delete draft.values[name];
+    }
+    return true;
+  }
+
+  public refreshVoiceCommandContexts(contextFor: (command: SlashCommand) => string): void {
+    for (const [channelId, draft] of this.commandDrafts) {
+      if (!draft.command.voiceRequirement || !this.setCommandVoiceContext(channelId, contextFor(draft.command))) continue;
+      draft.pending = false;
+      draft.error = undefined;
+      this.bus.emit('chat.command_draft_updated', { channelId });
+    }
+  }
+
   public onInvocationFinished(listener: (invocation: BotInvocation) => void): () => void {
     this.invocationFinished.add(listener);
     return () => this.invocationFinished.delete(listener);
@@ -482,6 +507,8 @@ export class ChatStore {
     const invocation = this.ensureInvocation(payload, command, now);
     if (invocation.botId !== payload.botId || invocation.channelId !== payload.channelId) return invocation;
     invocation.commandName = payload.commandName;
+    const definition = command ?? this.commands.find((entry) => entry.botId === payload.botId && entry.name === payload.commandName);
+    invocation.voiceRequirement = definition?.voiceRequirement ?? invocation.voiceRequirement;
     if (!invocation.acknowledged) {
       invocation.acknowledged = true;
       const known = this.commands.find((entry) => entry.botId === payload.botId && entry.name === payload.commandName);
@@ -509,6 +536,7 @@ export class ChatStore {
       commandName: payload.commandName,
       botName: definition?.botName ?? payload.commandName,
       botAvatarUrl: definition?.botAvatarUrl,
+      voiceRequirement: definition?.voiceRequirement,
       createdAt: now,
       expiresAt: now + LIMITS.BOT_INTERACTION_TIMEOUT_MS,
       status: 'active',

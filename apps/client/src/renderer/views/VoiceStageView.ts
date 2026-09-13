@@ -1,11 +1,11 @@
-import { MessageType } from '@monky/shared';
+import { MessageType, type BotScreen } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
 import { callClient } from '../core/serverConnection';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
 import { screenAudioService } from '../core/ScreenAudioService';
-import { serverStore } from '../stores/serverStore';
+import { getActiveServerStore, serverStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { voiceStore, VoiceStore } from '../stores/voiceStore';
 import { audioProcessor } from '../core/AudioProcessor';
@@ -14,7 +14,7 @@ import { webRtcManager } from '../core/WebRtcManager';
 import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
-import { participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
+import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
 import { getVoiceControlModeration, isViewingCallServer, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
 import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
 import { bindStageControlsMotion } from './FooterControlsMotion';
@@ -27,6 +27,9 @@ import { overlayBridgeService } from '../core/OverlayBridgeService';
 import { t } from '../i18n';
 import { reportCameraError, setLocalCameraState } from '../core/CameraPublication';
 import { isCameraOperationCancelled } from '../utils/cameraEffects';
+import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
+import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
+import { BotScreenView } from './BotScreenView';
 
 interface ScreenTelemetrySnapshot {
   kind: 'sender' | 'receiver';
@@ -54,14 +57,14 @@ interface TelemetryByteSample {
  * two independent tiles (#26). Participants with no video get a single 'voice'
  * (avatar) tile.
  */
-type StageTileKind = 'voice' | 'camera' | 'screen';
-interface StageTile {
+interface ParticipantStageTile {
   p: ParticipantViewModel;
-  kind: StageTileKind;
+  kind: 'voice' | 'camera' | 'screen';
   key: string; // `${sessionId}:${kind}` (+ `:${shareId}` for screens) — stable identity for focus/DOM keys
   /** Which screen share this tile renders, for 'screen' tiles only (#253). */
   shareId?: string;
 }
+type StageTile = ParticipantStageTile | { kind: 'miniapp'; key: string; screen: BotScreen };
 
 /** Tiles address a connection rather than a person: someone may join twice (#309). */
 function sidOf(p: ParticipantViewModel): string {
@@ -98,6 +101,8 @@ export class VoiceStageView {
   private currentChannelId: string | null = null;
   private unbindEvents: Array<() => void> = [];
   private focusedTileKeys: string[] = [];
+  private focusEpoch = 0;
+  private focusError: HTMLElement | null = null;
   /** Zoom/pan state of the focused screen share, reset when focus changes (#271). */
   private focusZoom = { scale: 1, x: 0, y: 0 };
   private focusZoomTileKey: string | null = null;
@@ -121,18 +126,154 @@ export class VoiceStageView {
   private broadcastBannerSignature: string | null = null;
   private cameraToggleEpoch = 0;
   private cameraTogglePending = false;
+  private botScreens = new Map<string, BotScreenView>();
+  private botVoiceContext: BotVoiceContext | null = null;
+  private botScreenLayoutObserver: ResizeObserver | null = null;
 
   constructor(container: HTMLElement) {
     this.container = container;
   }
 
   public setChannel(channelId: string | null): void {
+    if (channelId === this.currentChannelId && this.container.querySelector('.voice-stage-container')) {
+      this.refreshBotScreens();
+      return;
+    }
+    this.focusEpoch++;
+    this.clearFocusError();
+    this.closeBotScreens();
     this.currentChannelId = channelId;
     this.focusedTileKeys = [];
     if (!channelId) {
       this.stopTelemetryMonitor();
     }
     this.render();
+  }
+
+  public hasOpenBotScreen(): boolean { return [...this.botScreens.values()].some((view) => view.isWatching); }
+
+  public isWatchingBotScreen(id: string): boolean { return this.botScreens.get(id)?.isWatching ?? false; }
+
+  public watchBotScreen(id: string, focus = false): void {
+    this.refreshBotScreens();
+    const view = this.botScreens.get(id);
+    if (!view) return;
+    const open = () => {
+      if (this.botScreens.get(id) !== view) return;
+      try {
+        view.open();
+        if (view.isWatching) this.botVoiceContext?.session.botScreenStore.setInvitationDismissed(id, false);
+        this.positionBotScreens();
+        appEvents.emit('stage.bot_screens_changed');
+      } catch (error: unknown) {
+        console.warn('[Voice stage] Could not open the miniapp.', error);
+        void showAlert({ title: t('common.error'), message: t('botScreen.openError'), variant: 'danger' });
+      }
+    };
+    if (focus) this.setFocusedTiles([`miniapp:${id}`], { afterRender: open });
+    else open();
+  }
+
+  private closeBotScreen(id: string): void {
+    const view = this.botScreens.get(id);
+    if (!view?.isWatching) return;
+    this.botVoiceContext?.session.botScreenStore.setInvitationDismissed(id, true);
+    view.leave();
+    this.positionBotScreens();
+    appEvents.emit('stage.bot_screens_changed');
+  }
+
+  private closeBotScreens(): void {
+    this.botScreenLayoutObserver?.disconnect();
+    for (const view of this.botScreens.values()) view.destroy();
+    const changed = this.botScreens.size > 0;
+    this.botScreens.clear();
+    this.botVoiceContext = null;
+    this.focusedTileKeys = this.focusedTileKeys.filter((key) => !key.startsWith('miniapp:'));
+    if (changed) appEvents.emit('stage.bot_screens_changed');
+  }
+
+  private refreshBotScreens(): void {
+    const context = getBotVoiceContext();
+    const previous = this.botVoiceContext;
+    if (!context || context.channelId !== this.currentChannelId ||
+        context.session.serverStore !== getActiveServerStore()) {
+      this.closeBotScreens();
+      return;
+    }
+    if (previous && (context.session !== previous.session || context.channelId !== previous.channelId ||
+        context.user.sessionId !== previous.user.sessionId)) this.closeBotScreens();
+    const host = this.container.querySelector<HTMLElement>('#stage-bot-screens');
+    if (!host) return;
+    this.botVoiceContext = context;
+    const screens = context.session.botScreenStore.list(context.channelId);
+    for (const [id, view] of this.botScreens) {
+      if (!screens.some((screen) => screen.id === id)) {
+        view.destroy();
+        this.botScreens.delete(id);
+      }
+    }
+    for (const screen of screens) {
+      let view = this.botScreens.get(screen.id);
+      if (!view) {
+        view = new BotScreenView(screen, context,
+          () => this.watchBotScreen(screen.id),
+          () => this.closeBotScreen(screen.id),
+          () => {
+            const key = `miniapp:${screen.id}`;
+            if (this.focusedTileKeys.includes(key)) this.setFocusedTiles([]);
+            else this.toggleFocus(key);
+          });
+        this.botScreens.set(screen.id, view);
+      } else view.update(screen);
+      if (view.element.parentElement !== host) host.append(view.element);
+    }
+    host.hidden = this.botScreens.size === 0;
+  }
+
+  private syncBotScreenLayout(): void {
+    const area = this.container.querySelector<HTMLElement>('#stage-content-area');
+    if (!area) return;
+    for (const [id, view] of this.botScreens) {
+      view.setLayout(this.focusedTileKeys.includes(`miniapp:${id}`),
+        this.focusedTileKeys.length > 0 && !this.focusedTileKeys.includes(`miniapp:${id}`));
+    }
+    this.botScreenLayoutObserver?.disconnect();
+    if (this.botScreens.size > 0) {
+      this.botScreenLayoutObserver ??= new ResizeObserver(() => this.positionBotScreens());
+      this.botScreenLayoutObserver.observe(area);
+      for (const slot of area.querySelectorAll('[data-bot-screen-slot]')) this.botScreenLayoutObserver.observe(slot);
+    }
+    this.positionBotScreens();
+  }
+
+  private positionBotScreens(): void {
+    const area = this.container.querySelector<HTMLElement>('#stage-content-area');
+    if (!area) return;
+    const bounds = area.getBoundingClientRect();
+    for (const [id, view] of this.botScreens) {
+      if (document.fullscreenElement === view.element) {
+        Object.assign(view.element.style, { left: '0', top: '0', width: '100vw', height: '100vh', clipPath: 'none' });
+        continue;
+      }
+      const slot = area.querySelector<HTMLElement>(`[data-bot-screen-slot="${CSS.escape(id)}"]`);
+      if (!slot) { view.element.hidden = true; continue; }
+      const rect = slot.getBoundingClientRect();
+      const viewport = (slot.closest('.stage-focused-strip, .stage-grid') ?? area).getBoundingClientRect();
+      const top = Math.max(bounds.top, viewport.top);
+      const right = Math.min(bounds.right, viewport.right);
+      const bottom = Math.min(bounds.bottom, viewport.bottom);
+      const left = Math.max(bounds.left, viewport.left);
+      view.element.hidden = rect.width === 0 || rect.height === 0 || rect.right <= left ||
+        rect.left >= right || rect.bottom <= top || rect.top >= bottom;
+      // Grid/focus/filmstrip own the slots. Anchoring the live views here avoids
+      // reparenting an iframe, which destroys its browsing context in Chromium.
+      Object.assign(view.element.style, {
+        left: `${rect.left - bounds.left}px`, top: `${rect.top - bounds.top}px`,
+        width: `${rect.width}px`, height: `${rect.height}px`,
+        clipPath: `inset(${Math.max(0, top - rect.top)}px ${Math.max(0, rect.right - right)}px ${Math.max(0, rect.bottom - bottom)}px ${Math.max(0, left - rect.left)}px)`,
+      });
+    }
   }
 
   /**
@@ -152,20 +293,20 @@ export class VoiceStageView {
     const shareIds = this.getShareIds(participant, false);
     if (shareIds.length === 0) return;
 
-    for (const shareId of shareIds) {
-      this.watchingShareKeys.add(`${sessionId}:screen:${shareId}`);
-    }
-    this.mutedScreenSessionIds.delete(sessionId);
-    this.focusedTileKeys = [`${sessionId}:screen:${shareIds[0]}`];
-    this.renderParticipants();
+    this.setFocusedTiles([`${sessionId}:screen:${shareIds[0]}`], { beforeRender: () => {
+      for (const shareId of shareIds) this.watchingShareKeys.add(`${sessionId}:screen:${shareId}`);
+      this.mutedScreenSessionIds.delete(sessionId);
+    } });
   }
 
   public render(): void {
+    if (this.focusError) this.focusError.textContent = t('stage.fullscreenExitError');
     this.stopPingMonitor();
     this.stopTelemetryMonitor(false);
     this.unbindListeners();
 
     if (!this.currentChannelId || !serverStore.serverDetails) {
+      this.closeBotScreens();
       this.container.innerHTML = `
         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 12px;">
           <span class="material-symbols-outlined md-36" style="color: var(--text-dim); font-size: 48px;">volume_up</span>
@@ -182,7 +323,7 @@ export class VoiceStageView {
     // Fresh DOM below means the (empty) banner wrapper must be repopulated by
     // updateControlsUI(), so drop the cached signature (#70).
     this.broadcastBannerSignature = null;
-    this.container.innerHTML = `
+    const markup = `
       <div class="voice-stage-container">
         <div class="content-header">
           <div class="channel-title-container">
@@ -218,7 +359,10 @@ export class VoiceStageView {
         <div id="stage-broadcast-banner-wrapper" style="display: none;"></div>
 
         <!-- Participants Container (Grid or Focused) -->
-        <div id="stage-content-area" style="flex: 1; min-height: 0; display: flex; flex-direction: column;"></div>
+        <div id="stage-content-area">
+          <div id="stage-participants-area"></div>
+          <div id="stage-bot-screens" class="stage-bot-screen-layer" hidden></div>
+        </div>
 
         <!-- Stage Bottom Controls Bar -->
         <div class="stage-call-controls">
@@ -252,6 +396,11 @@ export class VoiceStageView {
         </div>
       </div>
     `;
+    if (!this.hasOpenBotScreen() ||
+        !replaceAroundLiveChild(this.container, markup, '.voice-stage-container', '#stage-content-area')) {
+      this.closeBotScreens();
+      this.container.innerHTML = markup;
+    }
 
     this.renderParticipants();
     this.updateControlsUI();
@@ -363,19 +512,17 @@ export class VoiceStageView {
   }
 
   private updateSpeakingClasses(): void {
-    if (!this.currentChannelId) return;
-    const participants = participantManager.getInVoiceChannel(this.currentChannelId);
-    participants.forEach((p) => {
-      const isLocal = serverStore.isMySession(p.user.sessionId);
-      const isSpeaking = isLocal ? voiceStore.isSpeaking : p.isSpeaking;
-      this.setCardSpeaking(sidOf(p), isSpeaking);
-    });
+    for (const card of this.container.querySelectorAll<HTMLElement>('[data-session-id][data-kind]')) {
+      if (card.dataset.sessionId) this.setCardSpeaking(card.dataset.sessionId);
+    }
   }
 
-  private setCardSpeaking(sessionId: string, isSpeaking: boolean): void {
+  private setCardSpeaking(sessionId: string): void {
     // Update every non-screen tile for the session (it may show a voice or
     // camera tile; the screen tile never pulses on speech — #26).
-    const cards = document.querySelectorAll(`[data-session-id="${sessionId}"][data-kind]:not([data-kind="screen"])`);
+    const isSpeaking = this.currentChannelId === voiceStore.currentVoiceChannelId
+      && isParticipantSpeaking(participantManager.get(sessionId));
+    const cards = this.container.querySelectorAll(`[data-session-id="${CSS.escape(sessionId)}"]:is([data-kind="voice"], [data-kind="camera"])`);
     cards.forEach((card) => {
       if (isSpeaking) {
         card.classList.add('speaking');
@@ -402,6 +549,9 @@ export class VoiceStageView {
         tiles.push({ p, kind: 'screen', key: `${sidOf(p)}:screen:${shareId}`, shareId });
       }
       if (!isCamOn && shareIds.length === 0) tiles.push({ p, kind: 'voice', key: `${sidOf(p)}:voice` });
+    }
+    for (const [id, view] of this.botScreens) {
+      tiles.push({ kind: 'miniapp', key: `miniapp:${id}`, screen: view.snapshot });
     }
     return tiles;
   }
@@ -433,17 +583,66 @@ export class VoiceStageView {
    */
   private toggleFocus(tileKey: string): void {
     const isFocused = this.focusedTileKeys.includes(tileKey);
+    this.setFocusedTiles(isFocused
+      ? this.focusedTileKeys.filter((key) => key !== tileKey)
+      : [...this.focusedTileKeys, tileKey].slice(-MAX_FOCUSED_TILES));
+  }
 
-    if (this.focusedTileKeys.length > 0) {
-      if (isFocused) {
-        this.focusedTileKeys = this.focusedTileKeys.filter((key) => key !== tileKey);
-      } else {
-        this.focusedTileKeys = [...this.focusedTileKeys, tileKey].slice(-MAX_FOCUSED_TILES);
-      }
+  private clearFocusError(): void {
+    this.focusError?.remove();
+    this.focusError = null;
+  }
+
+  private setFocusedTiles(
+    tileKeys: string[],
+    hooks?: { beforeRender?: () => void; afterRender?: () => void },
+  ): void {
+    const root = this.container.querySelector('.voice-stage-container');
+    if (!root) return;
+    const epoch = ++this.focusEpoch;
+    const channelId = this.currentChannelId;
+    const displayedServer = getActiveServerStore();
+    const sessionId = displayedServer.currentUser?.sessionId;
+    const voiceSessionKey = voiceStore.voiceSessionKey;
+    const current = () => epoch === this.focusEpoch && this.currentChannelId === channelId
+      && getActiveServerStore() === displayedServer && displayedServer.currentUser?.sessionId === sessionId
+      && voiceStore.voiceSessionKey === voiceSessionKey
+      && root.isConnected && this.container.querySelector('.voice-stage-container') === root;
+    const commit = () => {
+      if (!current()) return;
+      this.clearFocusError();
+      this.focusedTileKeys = tileKeys;
+      hooks?.beforeRender?.();
+      this.renderParticipants();
+      hooks?.afterRender?.();
+    };
+    const leavingFocus = this.focusedTileKeys.some((key) => !tileKeys.includes(key));
+    const fullscreen = document.fullscreenElement;
+    if (!leavingFocus || !fullscreen ||
+        (!this.container.contains(fullscreen) && !fullscreen.contains(root))) {
+      commit();
       return;
     }
-
-    this.focusedTileKeys = [tileKey];
+    // Preserve live content and the current layout until native fullscreen has actually exited.
+    void Promise.resolve().then(() => {
+      if (current() && document.fullscreenElement === fullscreen) return document.exitFullscreen();
+    }).then(() => {
+      if (!current()) return;
+      const active = document.fullscreenElement;
+      if (active && (this.container.contains(active) || active.contains(root))) {
+        throw new Error('The voice stage is still in fullscreen.');
+      }
+      commit();
+    }).catch((error: unknown) => {
+      console.warn('[VoiceStageView] Could not exit fullscreen before changing focus:', error);
+      if (!current()) return;
+      this.clearFocusError();
+      this.focusError = document.createElement('p');
+      this.focusError.className = 'bot-error stage-focus-error';
+      this.focusError.setAttribute('role', 'alert');
+      this.focusError.textContent = t('stage.fullscreenExitError');
+      (this.container.contains(fullscreen) ? fullscreen : root).append(this.focusError);
+    });
   }
 
   /**
@@ -452,7 +651,7 @@ export class VoiceStageView {
    * `screenShareIds` list, so their tile is keyed by LEGACY_SHARE_ID and has to
    * fall back to whichever single screen stream arrived for that user.
    */
-  private getRemoteScreenStream(tile: StageTile): MediaStream | undefined {
+  private getRemoteScreenStream(tile: ParticipantStageTile): MediaStream | undefined {
     const streams = tile.p.remoteScreenStreams;
     if (tile.shareId === LEGACY_SHARE_ID) {
       return streams.values().next().value;
@@ -462,9 +661,17 @@ export class VoiceStageView {
 
   /** Stable, unique DOM id fragment for a tile — screens differ by share (#253). */
   private tileDomId(tile: StageTile): string {
+    if (tile.kind === 'miniapp') return `bot-screen-${tile.screen.id}`;
     return tile.kind === 'screen'
       ? `${sidOf(tile.p)}-screen-${tile.shareId}`
       : `${sidOf(tile.p)}-${tile.kind}`;
+  }
+
+  private tileAttributes(tile: StageTile): string {
+    const common = `id="card-${escapeHtml(this.tileDomId(tile))}" data-kind="${tile.kind}" data-tile-key="${escapeHtml(tile.key)}"`;
+    return tile.kind === 'miniapp'
+      ? `${common} data-bot-screen-slot="${escapeHtml(tile.screen.id)}" aria-hidden="true"`
+      : `${common} data-session-id="${escapeHtml(sidOf(tile.p))}"`;
   }
 
   /** True when at least one of the participant's shares was opted into (#253). */
@@ -477,12 +684,13 @@ export class VoiceStageView {
   private isTileSpeaking(tile: StageTile): boolean {
     // The speaking glow reflects the microphone; a pure screen tile shouldn't
     // pulse when the user talks (their camera/voice tile already does).
-    if (tile.kind === 'screen') return false;
-    return serverStore.isMySession(tile.p.user.sessionId) ? voiceStore.isSpeaking : tile.p.isSpeaking;
+    if (tile.kind === 'screen' || tile.kind === 'miniapp') return false;
+    return this.currentChannelId === voiceStore.currentVoiceChannelId && isParticipantSpeaking(tile.p);
   }
 
   public renderParticipants(): void {
-    const area = document.getElementById('stage-content-area');
+    this.refreshBotScreens();
+    const area = this.container.querySelector<HTMLElement>('#stage-participants-area');
     if (!area || !this.currentChannelId) return;
 
     const participants = participantManager.getInVoiceChannel(this.currentChannelId);
@@ -536,11 +744,11 @@ export class VoiceStageView {
         <div class="stage-focused-layout">
           <div class="stage-focused-stack ${focusedTiles.length > 1 ? 'stage-focused-stack--split' : ''}">
             ${focusedTiles.map((focusedTile) => `
-              <div class="stage-focused-main ${this.isTileSpeaking(focusedTile) ? 'speaking' : ''}" id="card-${this.tileDomId(focusedTile)}" data-session-id="${sidOf(focusedTile.p)}" data-kind="${focusedTile.kind}" data-tile-key="${focusedTile.key}">
-                <div class="stage-focus-hint-badge">
+              <div class="stage-focused-main ${this.isTileSpeaking(focusedTile) ? 'speaking' : ''}" ${this.tileAttributes(focusedTile)}>
+                ${focusedTile.kind === 'miniapp' ? '' : `<div class="stage-focus-hint-badge">
                   <span class="material-symbols-outlined md-14">zoom_in</span>
                   <span>${t('stage.focusMode')}</span>
-                </div>
+                </div>`}
                 ${this.renderCardContent(focusedTile, true)}
               </div>
             `).join('')}
@@ -550,7 +758,7 @@ export class VoiceStageView {
             <div class="stage-focused-strip">
               ${otherTiles.map((tile) => {
                 return `
-                  <div class="stage-mini-card ${tile.kind === 'voice' ? '' : 'stage-mini-card--video'} ${this.isTileSpeaking(tile) ? 'speaking' : ''}" id="card-${this.tileDomId(tile)}" data-session-id="${sidOf(tile.p)}" data-kind="${tile.kind}" data-tile-key="${tile.key}" title="${t('stage.focusOn', { name: escapeHtml(participantManager.displayName(tile.p)) })}">
+                  <div class="stage-mini-card ${tile.kind === 'voice' ? '' : 'stage-mini-card--video'} ${this.isTileSpeaking(tile) ? 'speaking' : ''}" ${this.tileAttributes(tile)} title="${t('stage.focusOn', { name: escapeHtml(tile.kind === 'miniapp' ? tile.screen.title : participantManager.displayName(tile.p)) })}">
                     ${this.renderCardContent(tile, false, true)}
                   </div>
                 `;
@@ -564,7 +772,7 @@ export class VoiceStageView {
         <div class="stage-grid" id="stage-grid">
           ${tiles.map((tile) => {
             return `
-              <div class="stage-card ${tile.kind === 'voice' ? '' : 'stage-card--video'} ${this.isTileSpeaking(tile) ? 'speaking' : ''}" id="card-${this.tileDomId(tile)}" data-session-id="${sidOf(tile.p)}" data-kind="${tile.kind}" data-tile-key="${tile.key}" title="${t('stage.focusHint')}">
+              <div class="stage-card ${tile.kind === 'voice' ? '' : 'stage-card--video'} ${this.isTileSpeaking(tile) ? 'speaking' : ''}" ${this.tileAttributes(tile)} title="${t('stage.focusHint')}">
                 ${this.renderCardContent(tile, false, false)}
               </div>
             `;
@@ -598,7 +806,6 @@ export class VoiceStageView {
         const tileKey = card.getAttribute('data-tile-key');
         if (tileKey) {
           this.toggleFocus(tileKey);
-          this.renderParticipants();
         }
       });
 
@@ -636,10 +843,10 @@ export class VoiceStageView {
         const sessionId = btn.getAttribute('data-watch-session');
         const shareId = btn.getAttribute('data-watch-share');
         if (!sessionId || !shareId) return;
-        this.watchingShareKeys.add(`${sessionId}:screen:${shareId}`);
-        this.mutedScreenSessionIds.delete(sessionId);
-        this.focusedTileKeys = [`${sessionId}:screen:${shareId}`];
-        this.renderParticipants();
+        this.setFocusedTiles([`${sessionId}:screen:${shareId}`], { beforeRender: () => {
+          this.watchingShareKeys.add(`${sessionId}:screen:${shareId}`);
+          this.mutedScreenSessionIds.delete(sessionId);
+        } });
       });
     });
 
@@ -653,9 +860,9 @@ export class VoiceStageView {
         const shareId = btn.getAttribute('data-stopwatch-share');
         if (!sessionId || !shareId) return;
         const tileKey = `${sessionId}:screen:${shareId}`;
-        this.watchingShareKeys.delete(tileKey);
-        this.focusedTileKeys = this.focusedTileKeys.filter((key) => key !== tileKey);
-        this.renderParticipants();
+        this.setFocusedTiles(this.focusedTileKeys.filter((key) => key !== tileKey), {
+          beforeRender: () => { this.watchingShareKeys.delete(tileKey); },
+        });
       });
     });
 
@@ -744,7 +951,7 @@ export class VoiceStageView {
     // remoteStream / cameraStream; each screen share rides its own stream keyed
     // by share id so every tile shows independent video (#26, #253).
     tiles.forEach((tile) => {
-      if (tile.kind === 'voice') return;
+      if (tile.kind === 'voice' || tile.kind === 'miniapp') return;
       const isLocal = sidOf(tile.p) === currentSessionId;
       const stream = isLocal
         ? (tile.kind === 'screen' ? videoService.getScreenStream(tile.shareId!) : videoService.getCameraState().stream)
@@ -765,6 +972,7 @@ export class VoiceStageView {
 
     this.applyTelemetryOverlayState();
     this.syncTelemetryMonitor();
+    this.syncBotScreenLayout();
   }
 
   private refreshLocalCameraVideo(): void {
@@ -936,6 +1144,7 @@ export class VoiceStageView {
   }
 
   private renderCardContent(tile: StageTile, isFocused: boolean = false, isMini: boolean = false): string {
+    if (tile.kind === 'miniapp') return '';
     const p = tile.p;
     const isLocal = serverStore.isMySession(p.user.sessionId);
     const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
@@ -1107,9 +1316,9 @@ export class VoiceStageView {
    * (#493). Built the same way as `buildStageTiles` so the keys match the
    * overlays already in the DOM (#340).
    */
-  private getTelemetryTiles(): StageTile[] {
+  private getTelemetryTiles(): ParticipantStageTile[] {
     if (!this.currentChannelId) return [];
-    const tiles: StageTile[] = [];
+    const tiles: ParticipantStageTile[] = [];
     for (const p of participantManager.getInVoiceChannel(this.currentChannelId)) {
       const isLocal = serverStore.isMySession(p.user.sessionId);
       const isCamOn = isLocal ? voiceStore.isCameraOn : (p.voiceState?.isCameraOn ?? false);
@@ -1178,7 +1387,7 @@ export class VoiceStageView {
     }
   }
 
-  private async collectTelemetrySnapshot(tile: StageTile): Promise<ScreenTelemetrySnapshot | null> {
+  private async collectTelemetrySnapshot(tile: ParticipantStageTile): Promise<ScreenTelemetrySnapshot | null> {
     const isLocal = serverStore.isMySession(tile.p.user.sessionId);
     return isLocal
       ? this.collectSenderTelemetry(tile.key, tile.shareId ?? null)
@@ -1270,7 +1479,7 @@ export class VoiceStageView {
    * matched by the routed track, so a peer sharing two screens (or a screen
    * plus a camera) reports separate numbers on each tile.
    */
-  private async collectReceiverTelemetry(tile: StageTile): Promise<ScreenTelemetrySnapshot | null> {
+  private async collectReceiverTelemetry(tile: ParticipantStageTile): Promise<ScreenTelemetrySnapshot | null> {
     const sessionId = sidOf(tile.p);
     const stream = tile.kind === 'camera' ? tile.p.remoteStream : this.getRemoteScreenStream(tile);
     const track = stream?.getVideoTracks()[0];
@@ -1479,11 +1688,12 @@ export class VoiceStageView {
    * sidebar voice-connection row (#60). No confirmation is shown (#59).
    */
   public leaveVoice(): void {
-    if (!this.currentChannelId) return;
+    const channelId = voiceStore.currentVoiceChannelId;
+    if (!channelId) return;
     this.stopPingMonitor();
     this.stopTelemetryMonitor();
     soundEffects.play('leave_voice');
-    callClient().send(MessageType.VOICE_LEAVE, { channelId: this.currentChannelId });
+    callClient().send(MessageType.VOICE_LEAVE, { channelId });
     audioProcessor.stopMicrophone();
     videoService.stopCamera();
     videoService.stopScreenShare();
@@ -1640,13 +1850,11 @@ export class VoiceStageView {
     });
 
     const u3 = appEvents.on('participants.speaking_changed', (data: { sessionId: string; speaking: boolean }) => {
-      this.setCardSpeaking(data.sessionId, data.speaking);
+      this.setCardSpeaking(data.sessionId);
     });
 
-    const u4 = appEvents.on('voice.speaking_changed', (speaking: boolean) => {
-      if (serverStore.currentUser) {
-        this.setCardSpeaking(serverStore.currentUser.sessionId || serverStore.currentUser.id, speaking);
-      }
+    const u4 = appEvents.on('voice.speaking_changed', () => {
+      this.updateSpeakingClasses();
     });
 
     // Clear the screen-share button loading once the picker modal is open (or
@@ -1684,7 +1892,27 @@ export class VoiceStageView {
     const u14 = appEvents.on('voice.connection_changed', () => this.startPingMonitor());
     const u15 = appEvents.on('server.voice_restrictions_updated', () => this.updateControlsUI());
     const u16 = appEvents.on('camera.state_changed', () => this.refreshLocalCameraVideo());
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16);
+    const u17 = appEvents.on('voice.bot_screens_updated', () => this.renderParticipants());
+    const u18 = appEvents.on('voice.channel_changed', () => {
+      this.focusEpoch++;
+      this.clearFocusError();
+      this.renderParticipants();
+    });
+    const u19 = appEvents.on('session.voice_context_updated', () => this.renderParticipants());
+    const u20 = appEvents.on('server.updated', () => this.renderParticipants());
+    const u21 = appEvents.on('server.roles_updated', () => this.renderParticipants());
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21);
+    const area = this.container.querySelector('#stage-content-area');
+    const position = () => {
+      this.positionBotScreens();
+      if (!document.fullscreenElement) this.clearFocusError();
+    };
+    area?.addEventListener('scroll', position, true);
+    document.addEventListener('fullscreenchange', position);
+    this.unbindEvents.push(() => {
+      area?.removeEventListener('scroll', position, true);
+      document.removeEventListener('fullscreenchange', position);
+    });
   }
 
   private updateHeaderModeBadge(): void {
@@ -1702,13 +1930,17 @@ export class VoiceStageView {
   }
 
   private unbindListeners(): void {
+    this.botScreenLayoutObserver?.disconnect();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
   }
 
   public destroy(): void {
+    this.focusEpoch++;
+    this.clearFocusError();
     this.stopPingMonitor();
     this.stopTelemetryMonitor();
     this.unbindListeners();
+    this.closeBotScreens();
   }
 }

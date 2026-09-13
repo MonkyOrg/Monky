@@ -237,6 +237,8 @@ export interface CommandOption {
   max?: number;
 }
 
+export type CommandVoiceRequirement = 'joined' | 'same-bot-channel';
+
 /** A registered slash command. */
 export interface SlashCommand {
   /** Unique per bot; the command name without the leading `/`. */
@@ -250,6 +252,8 @@ export interface SlashCommand {
   options?: CommandOption[];
   /** Requires explicit caller consent for one local soundboard download. */
   downloadsSound?: boolean;
+  /** Enforced for invocation, autocomplete and private previews on the caller's device. */
+  voiceRequirement?: CommandVoiceRequirement;
 }
 
 /** A bot account visible in the management UI. */

@@ -78,7 +78,16 @@ async function runUserContextMenuSmoke() {
     import('/stores/connectionStore.ts'),
   ]);
   let checks = 0;
-  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  let lastClose;
+  const originalClose = menu.close;
+  menu.close = function() {
+    if (document.querySelector('.user-context-menu')) lastClose = new Error('Menu closed').stack;
+    return originalClose.call(this);
+  };
+  const check = (condition, message) => {
+    if (!condition) throw new Error(`${message} (check ${checks}; actions: ${[...document.querySelectorAll('.user-context-menu [data-action]')].map(button => button.dataset.action).join(',')})\n${lastClose}`);
+    checks++;
+  };
   const delay = () => new Promise(resolve => setTimeout(resolve, 20));
   const find = selector => document.querySelector(`.user-context-menu ${selector}`);
   const button = action => find(`[data-action="${action}"]`);
@@ -227,6 +236,32 @@ async function runUserContextMenuSmoke() {
     await delay();
     check(requests.at(-1).payload.targetUserId === remote.id, 'Other-user moderation targets the member identity');
 
+    const musicBot = {
+      ...remote, id: 'menu-music-bot', clientId: 'bot-menu-music',
+      sessionId: 'bot:menu-music-bot', nickname: 'Music bot', isBot: true,
+    };
+    manager.addUser(musicBot);
+    manager.updateVoiceState(state(musicBot));
+    for (const action of ['server-mute', 'server-deafen']) {
+      await open(musicBot);
+      check(!!button('bot-settings') && !!button('server-mute') && !!button('server-deafen'),
+        'Bot settings coexist with administrative voice controls');
+      click(action);
+      await delay();
+      check(requests.at(-1).payload.targetUserId === musicBot.id,
+        'Bot voice moderation targets the bot account rather than a human or session ID');
+    }
+    manager.removeVoiceState(musicBot.sessionId);
+    await open({ ...musicBot, sessionId: undefined, status: 'DISCONNECTED' });
+    check(button('server-mute').textContent === language.t('userMenu.serverUnmute') &&
+      button('server-deafen').textContent === language.t('userMenu.serverUndeafen'),
+    'Bot moderation remains visible with its saved values after leaving voice');
+    server.myPermissions = 0;
+    await open(musicBot);
+    check(!button('server-mute') && !button('server-deafen') && !!button('bot-settings'),
+      'Adding bot voice support does not bypass moderator permissions');
+    server.myPermissions = 2147483647;
+
     for (const target of [offline, { ...remote, sessionId: undefined }]) {
       manager.removeVoiceState(remote.sessionId);
       for (const enabled of [true, false]) {
@@ -250,9 +285,10 @@ async function runUserContextMenuSmoke() {
     }
     manager.updateVoiceState(state(remote));
     const beforeBot = requests.length;
-    await open({ ...remote, id: 'bot-profile', isBot: true });
-    check(!button('server-mute') && !button('server-deafen') && requests.length === beforeBot,
-      'Voice moderation is not offered for bot accounts that cannot join voice');
+    await open({ ...remote, id: 'bot-profile', sessionId: undefined, isBot: true });
+    check(!!button('server-mute') && !!button('server-deafen') && requests.length === beforeBot + 1 &&
+      requests.at(-1).payload.targetUserId === 'bot-profile',
+    'Bot profiles load their own restrictions even without an active voice connection');
 
     let resolvePolicy;
     network.sendRequest = (type, payload) => type === 'ADMIN_GET_VOICE_RESTRICTIONS'
@@ -332,6 +368,7 @@ async function runUserContextMenuSmoke() {
     return checks;
   } finally {
     menu.close();
+    menu.close = originalClose;
     network.send = originals.send;
     network.sendRequest = originals.request;
     sounds.play = originals.play;

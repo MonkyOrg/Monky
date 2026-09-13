@@ -6,7 +6,7 @@ import {
   botSettingsUpdateSchema, botSelectorRespondSchema, botSelectorRespondedSchema,
   commandInvokeSchema, commandExecutionSchema, commandAutocompleteSchema,
   commandAutocompleteExecutionSchema, commandRegisterSchema, commandSubmitSchema,
-  resolveBotSettingsValues,
+  resolveBotSettingsValues, localizeBotSettingsForm,
 } from '../src/index.js';
 
 const definition = botSettingsDefinitionSchema.parse({
@@ -55,6 +55,32 @@ assert.equal(botSettingsDefinitionSchema.safeParse({ user: {
 assert.equal(botSettingsDefinitionSchema.safeParse({ host: { confirmFileName: false } }).success, false);
 assert.equal(commandRegisterSchema.safeParse({ commands: [], settings: definition }).success, true);
 
+const localizedDefinition = botSettingsDefinitionSchema.parse({
+  ...definition,
+  localizations: {
+    'pt-BR': {
+      server: { title: 'Comportamento', fields: { count: { label: 'Quantidade', description: 'Quantidade neste servidor' } } },
+      user: { title: 'Preferencias', fields: { compact: { label: 'Compacto' } } },
+    },
+  },
+});
+const localizedForm = localizeBotSettingsForm(localizedDefinition, 'server', 'pt-BR');
+assert.equal(localizedForm?.title, 'Comportamento');
+assert.equal(localizedForm?.fields[0].label, 'Quantidade');
+assert.deepEqual(resolveBotSettingsValues(localizedForm, {}), { success: true, values: { count: 2 } });
+assert.equal(localizedDefinition.server?.fields[0].label, 'Count');
+assert.equal(localizeBotSettingsForm(localizedDefinition, 'server', 'en'), localizedDefinition.server);
+assert.equal(localizeBotSettingsForm({}, 'server', 'en'), undefined);
+assert.equal(botSettingsDefinitionSchema.safeParse({
+  ...definition, localizations: { en: { server: { fields: { unknown: { label: 'Unknown' } } } } },
+}).success, false);
+assert.equal(botSettingsDefinitionSchema.safeParse({
+  user: definition.user, localizations: { en: { server: { title: 'Undeclared' } } },
+}).success, false);
+assert.equal(botSettingsDefinitionSchema.safeParse({
+  ...definition, localizations: { es: { server: { title: 'Unsupported' } } },
+}).success, false);
+
 const bot = {
   botId: 'bot', name: 'Bot', online: false, capabilities: { downloadsSound: true },
   schemaRevision: 1, revision: 2, hasServerSettings: true, hasUserSettings: true, canConfigure: false,
@@ -81,13 +107,15 @@ assert.equal(botSettingsUpdateSchema.safeParse({ botId: 'bot', schemaRevision: 1
 const invoke = { commandName: 'run', botId: 'bot', channelId: 'channel', userSettings: { compact: false } };
 assert.equal(commandInvokeSchema.safeParse(invoke).success, true);
 const settings = { schemaRevision: 1, serverRevision: 2, server: { count: 3 }, user: { compact: false } };
-assert.equal(commandExecutionSchema.safeParse({
+const execution = {
   commandName: 'run', botId: 'bot', channelId: 'channel', invocationId: 'inv',
   invokerId: 'user', invokerNickname: 'User', settings,
-}).success, true);
-assert.equal(commandExecutionSchema.safeParse({
-  ...invoke, invocationId: 'inv', invokerId: 'user', invokerNickname: 'User',
-}).success, false);
+  invokerSessionId: 'user:device', invokerVoiceChannelId: null,
+};
+assert.equal(commandExecutionSchema.safeParse(execution).success, true);
+assert.equal(commandExecutionSchema.safeParse({ ...execution, ...invoke }).success, false);
+assert.equal(commandExecutionSchema.safeParse({ ...execution, invokerSessionId: undefined }).success, false);
+assert.equal(commandExecutionSchema.safeParse({ ...execution, invokerVoiceChannelId: undefined }).success, false);
 assert.equal(commandAutocompleteSchema.safeParse({ ...invoke, optionName: 'query', query: '' }).success, true);
 assert.equal(commandAutocompleteExecutionSchema.safeParse({
   commandName: 'run', optionName: 'query', query: '', options: {}, locale: 'en', settings,

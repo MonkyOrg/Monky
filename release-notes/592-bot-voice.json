@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "MonkyBot ganha /play, prévias, fila e retomada silenciosa do áudio. Erros críticos e fim da fila são avisados no chat. A saída por inatividade é configurável. Bots respeitam mutes; o indicador de áudio aparece apenas para quem está na mesma sala.",
+  "en": "MonkyBot adds /play, previews, a queue, and silent audio recovery. Critical errors and queue completion appear in chat. Voice idle timeout is configurable. Bots respect local/server mute; activity indicators only appear in your current voice room."
+}

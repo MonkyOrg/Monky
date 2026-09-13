@@ -1,4 +1,27 @@
 import type { ParticipantViewModel } from '../core/ParticipantManager';
+import { sessionManager } from '../core/SessionManager';
+import { getActiveServerStore, type ServerStore } from '../stores/serverStore';
+import { voiceStore } from '../stores/voiceStore';
+
+export function isParticipantSpeaking(
+  participant: ParticipantViewModel | undefined,
+  displayedServer: ServerStore = getActiveServerStore(),
+): boolean {
+  const channelId = voiceStore.currentVoiceChannelId;
+  const call = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
+  const localSessionId = call?.serverStore.currentUser?.sessionId;
+  const sessionId = participant?.user.sessionId;
+  if (!participant || !channelId || !call || !localSessionId || !sessionId ||
+      call.serverStore !== displayedServer || call.participants.get(sessionId) !== participant ||
+      call.participants.get(localSessionId)?.voiceState?.channelId !== channelId ||
+      participant.voiceState?.channelId !== channelId || participant.voiceState.sessionId !== sessionId ||
+      voiceStore.getEffectiveDeafened()) return false;
+
+  const local = sessionId === localSessionId;
+  const state = local ? voiceStore : participant.voiceState;
+  return (local ? voiceStore.isSpeaking : participant.isSpeaking) &&
+    !state.isMuted && !state.isDeafened && !state.serverMuted && !state.serverDeafened;
+}
 
 export function voiceConnectionIndicator(ping: number | null, reconnecting = false, connecting = false) {
   if (reconnecting) return { quality: 'reconnecting', icon: 'signal_wifi_bad' } as const;

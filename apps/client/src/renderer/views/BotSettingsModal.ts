@@ -1,6 +1,6 @@
 import {
-  MessageType, Permission, botSettingsListResponseSchema, botSettingsSnapshotSchema, resolveBotSettingsValues,
-  type BotForm, type BotFormValues, type BotSettingsPatch, type BotSettingsSnapshot, type BotSettingsSummary,
+  MessageType, Permission, botSettingsListResponseSchema, botSettingsSnapshotSchema, localizeBotSettingsForm, resolveBotSettingsValues,
+  type BotForm, type BotFormValues, type BotSettingsDefinition, type BotSettingsPatch, type BotSettingsSnapshot, type BotSettingsSummary,
 } from '@monky/shared';
 import { v4 as uuidv4 } from 'uuid';
 import { appEvents } from '../core/EventBus';
@@ -9,7 +9,7 @@ import { currentEventOrigin } from '../core/sessionRouting';
 import { audioPreviewService } from '../core/AudioPreviewService';
 import { getActiveServerStore, type ServerStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
-import { t } from '../i18n';
+import { getLanguage, SUPPORTED_LANGUAGES, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { getAvatarUrl } from '../utils/avatar';
 import { enableBackdropClose } from '../utils/modal';
@@ -247,7 +247,15 @@ export class BotSettingsModal {
   private refreshAuthorization(render = true): void {
     if (!this.snapshot) return;
     if (!this.canConfigure() && (this.snapshot.server || this.snapshot.definition.server)) {
-      this.snapshot = { ...this.snapshot, definition: { user: this.snapshot.definition.user }, server: undefined };
+      const definition: BotSettingsDefinition = { user: this.snapshot.definition.user };
+      for (const { code } of SUPPORTED_LANGUAGES) {
+        const user = this.snapshot.definition.localizations?.[code]?.user;
+        if (user) {
+          definition.localizations ??= {};
+          definition.localizations[code] = { user };
+        }
+      }
+      this.snapshot = { ...this.snapshot, definition, server: undefined };
       delete this.drafts.server;
       if (this.scope === 'server') this.scope = 'user';
       if (render) this.render();
@@ -299,7 +307,9 @@ export class BotSettingsModal {
     this.render();
   }
 
-  private form(): BotForm | undefined { return this.snapshot?.definition[this.scope]; }
+  private form(): BotForm | undefined {
+    return this.snapshot ? localizeBotSettingsForm(this.snapshot.definition, this.scope, getLanguage()) : undefined;
+  }
   private blocked(): boolean {
     return this.loading || this.loadFailed || this.saving || this.schemaStale ||
       (this.scope === 'server' ? this.serverStale : this.userStale);

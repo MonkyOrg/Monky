@@ -65,11 +65,13 @@ Ao criar ou editar um canal de texto, o switch **Permitir comandos de bots** vem
 ### Pré-requisitos
 
 - **Node.js 18+**
-- Cliente, servidor e SDK compatíveis com o **protocolo 14**
+- Cliente, servidor e SDK compatíveis com o **protocolo 15**
 - O pacote `@monky/bot-sdk` da release correspondente
 
 ::: warning Atualização conjunta
-O protocolo 14 altera o vínculo manual: `BOT_CREATE` recebe somente `{}` e a administração recebe `profilePending` para indicar uma identidade ainda não anunciada. Atualize **cliente, servidor e bot** juntos; versões diferentes não se conectam. O banco preserva as identidades existentes, e somente o próprio bot pode publicar alterações de perfil. `ctx.args` contém valores tipados e `ctx.reply()` é privado; use `ctx.publish()` somente para resultados que devem aparecer para o canal.
+O protocolo 15 acrescenta voz, telas programáveis e prévias de áudio sob demanda. Atualize **cliente, servidor e bot** juntos; versões com protocolos diferentes não se conectam.
+
+As regras de vínculo do protocolo 14 são mantidas: `BOT_CREATE` recebe somente `{}` e a administração recebe `profilePending` para indicar uma identidade ainda não anunciada. O banco preserva as identidades existentes, e somente o próprio bot pode publicar alterações de perfil. `ctx.args` contém valores tipados e `ctx.reply()` é privado; use `ctx.publish()` somente para resultados que devem aparecer para o canal.
 :::
 
 ### Instalação do SDK
@@ -346,6 +348,9 @@ bot.command({
     // ctx.channelId  — canal onde foi invocado
     // ctx.invokerId  — ID do usuário
     // ctx.invokerNickname — apelido
+    // ctx.invokerSessionId — conexão/dispositivo que iniciou o comando
+    // ctx.invokerVoiceChannelId — sala de voz inicial, não um estado vivo
+    // ctx.getVoiceChannel() — consulta a sala atual da conexão original no servidor
     // ctx.serverId   — ID do servidor (útil em modo multi-servidor)
     // ctx.args       — argumentos { nome: string | number | boolean }
     // ctx.locale     — idioma de quem chamou ('pt-BR' ou 'en')
@@ -353,6 +358,7 @@ bot.command({
     // ctx.publish()  — publica explicitamente um resultado no canal
     // ctx.prompt()   — aguarda um formulário privado; pode ser chamado em etapas
     // ctx.choose()   — aguarda uma opção privada, por botões ou dropdown
+    // ctx.createScreen() — cria uma tela compartilhada independente do handler
     // ctx.downloadSound() — aguarda um download local autorizado de soundboard
     // ctx.signal     — aborta ao cancelar, desconectar, expirar ou concluir
   },
@@ -361,9 +367,9 @@ bot.command({
 
 ### Parâmetros guiados no chat
 
-Ao digitar `/`, o menu mostra os comandos utilizados com mais frequência e os agrupa por bot. Cada item identifica o comando, sua descrição e o bot responsável. Ao navegar, os parâmetros obrigatórios e a quantidade de opcionais ajudam a escolher o comando.
+Ao digitar `/`, o menu mostra os comandos utilizados com mais frequência e os agrupa por bot. Cada item identifica o comando, sua descrição e o bot responsável. Ao navegar, os parâmetros obrigatórios e a quantidade de opcionais ajudam a escolher o comando. Pressionar **Espaço** seleciona o comando destacado no menu e abre seu compositor, sem executá-lo. Espaços no texto comum ou nos parâmetros continuam sendo texto.
 
-Ao selecionar um comando com parâmetros, o compositor compacto identifica **qual bot e comando** estão selecionados e apresenta campos nomeados com descrição e placeholder. Parâmetros opcionais podem ser adicionados quando necessários. O envio usa os nomes declarados em `options`; não é necessário juntar valores com vírgulas. Comandos sem parâmetros que não solicitam download local, como `/ping` e `/enquete`, iniciam a interação imediatamente ao serem selecionados.
+Ao selecionar um comando com parâmetros, o compositor compacto identifica **qual bot e comando** estão selecionados e apresenta campos nomeados com descrição e placeholder. Parâmetros opcionais podem ser adicionados quando necessários. O envio usa os nomes declarados em `options`; não é necessário juntar valores com vírgulas. Comandos sem parâmetros que não solicitam download local, como `/ping` e `/enquete`, iniciam a interação imediatamente ao serem selecionados por clique, Enter ou Tab; a seleção com Espaço aguarda uma confirmação de envio.
 
 A frequência de uso é local e separada por servidor e identidade. Apenas contagens e recência são guardadas, nunca os valores preenchidos nos parâmetros.
 
@@ -402,7 +408,7 @@ bot.command({
 });
 ```
 
-O callback recebe `{ query, optionName, args, locale, serverId, signal }` e pode retornar uma lista ou uma `Promise` de `SelectionChoice` (`{ label, value, description?, audio? }`). `args` contém somente as outras opções já preenchidas e válidas; obrigatórios ainda ausentes são permitidos nessa etapa. `query` contém o texto da opção editada.
+O callback recebe `{ query, optionName, args, locale, serverId, signal, settings }` e pode retornar uma lista ou uma `Promise` de `SelectionChoice` (`{ label, value, description?, audio? }`). `args` contém somente as outras opções já preenchidas e válidas; obrigatórios ainda ausentes são permitidos nessa etapa. `query` contém o texto da opção editada. `settings` é um snapshot imutável das configurações do servidor e preferências dessa pessoa.
 
 No exemplo, o catálogo é local ao bot. Para uma fonte externa, substitua a filtragem por uma busca de **metadados**, passe `signal` ao `fetch` e valide o retorno. O callback não recebe uma invocação nem métodos de resposta/download. As consultas são enviadas ao bot selecionado enquanto a pessoa digita; não são publicadas no canal nem persistidas no histórico.
 
@@ -412,7 +418,7 @@ Setas apenas navegam. Enter ou clique confirmam uma sugestão. **Sem parâmetros
 
 ### Seleção com prévia de áudio
 
-Qualquer plugin pode acrescentar `audio` a uma `SelectionChoice`. O mesmo contrato funciona em escolhas estáticas de comandos, respostas de autocomplete, campos `select` de `ctx.prompt()`, `ctx.choose()` e seletores persistentes de `createSelector()`. Sem `audio`, a opção continua sendo uma seleção comum; não é preciso criar um componente específico para cada bot.
+Qualquer plugin pode acrescentar `audio` a uma `SelectionChoice`. A variante `audio.url` funciona em escolhas estáticas de comandos, respostas de autocomplete, campos `select` de `ctx.prompt()`, `ctx.choose()` e seletores persistentes de `createSelector()`. A variante sob demanda, `audio.resourceId`, é destinada às escolhas do autocomplete atual. Sem `audio`, a opção continua sendo uma seleção comum; não é preciso criar um componente específico para cada bot.
 
 ```ts
 import type { SelectionChoice } from '@monky/bot-sdk';
@@ -431,9 +437,55 @@ const choices: SelectionChoice[] = [
 ];
 ```
 
-`audio.url` é obrigatório; `fileName` e `durationMs` são opcionais. A prévia usa HTTPS público e os mesmos formatos e limite de 3 MiB do download. O cliente carrega os bytes em memória pelo processo nativo, validando DNS, redirecionamentos, MIME e estrutura do áudio; não usa a URL externa diretamente no player do renderer.
+Na variante acima, `audio.url` é obrigatório; `fileName` e `durationMs` são opcionais. A prévia usa HTTPS público e os mesmos formatos e limite de 3 MiB do download. O cliente carrega os bytes em memória pelo processo nativo, validando DNS, redirecionamentos, MIME e estrutura do áudio; não usa a URL externa diretamente no player do renderer. Essa variante continua funcionando sem mudanças, inclusive para fontes como MyInstants.
 
 As opções podem ter descrição, botão de prévia e barra de progresso com tempo decorrido/duração. Há **um controle de volume compartilhado (0–100%) por comando**, mantido ao trocar resultados ou parâmetros, com porcentagem visível. Formulários com vários campos de áudio também usam um único controle; seletores persistentes têm seu próprio volume. Ouvir ou ajustar o volume **não seleciona, envia nem baixa o arquivo para a biblioteca**. Só uma prévia toca por vez, localmente, na saída de mídia do chat (ou na saída geral quando não há configuração avançada específica); mudanças dessa saída também se aplicam à prévia em andamento, e nada é transmitido ao canal de voz. Fechar ou trocar o seletor interrompe carregamento/reprodução e libera os recursos. A prévia não exige pasta configurada. Sugestões aparecem num painel rolável acima do compositor; os campos abaixo se ajustam ao placeholder/conteúdo, respeitam a largura disponível e destacam foco ou valores inválidos. Parâmetros opcionais podem ser removidos pelo **×**, sem perder o rascunho.
+
+#### Áudio gerado somente ao ouvir
+
+Quando a fonte não oferece um pequeno arquivo HTTPS público, retorne `audio: { resourceId, fileName?, durationMs? }` no autocomplete e declare `audioPreview` no comando. **Nunca combine `url` e `resourceId`.** `resourceId` tem até 128 caracteres; ele identifica um recurso do provider, não uma URL para o cliente buscar.
+
+O exemplo lê um arquivo **autoral, com no máximo 10 segundos e 256 KiB**, que você deve fornecer em `audio/bell.ogg` ao lado do módulo. Para gerar clipes dinamicamente, substitua somente o corpo de `loadPreview`: obtenção dos bytes, resolução da mídia e conversão devem acontecer no processo do bot, respeitando o `signal`, nunca durante o autocomplete. A busca de metadados continua no callback `autocomplete`.
+
+```ts
+import { readFile } from 'node:fs/promises';
+import type { CommandAudioPreviewContext, CommandAudioPreviewData } from '@monky/bot-sdk';
+
+const previews = new Map([
+  ['bell', { label: 'Bell', file: new URL('./audio/bell.ogg', import.meta.url) }],
+]);
+
+async function loadPreview(ctx: CommandAudioPreviewContext): Promise<CommandAudioPreviewData> {
+  const source = previews.get(ctx.resourceId);
+  if (!source) throw new Error('Unknown preview resource');
+  return { bytes: await readFile(source.file, { signal: ctx.signal }), mimeType: 'audio/ogg' };
+}
+
+bot.command({
+  name: 'preview-sample',
+  description: 'Choose an audio sample',
+  options: [{ name: 'sound', description: 'Sound', type: 'string', required: true, autocomplete: true }],
+  autocomplete: ({ query }) => [...previews].filter(([, source]) =>
+    source.label.toLowerCase().includes(query.toLowerCase())
+  ).map(([id, source]) => ({
+    label: source.label, value: id,
+    audio: { resourceId: id, fileName: `${id}.ogg`, durationMs: 10_000 },
+  })),
+  audioPreview: loadPreview,
+  handler: (ctx) => {
+    if (typeof ctx.args.sound !== 'string' || !previews.has(ctx.args.sound)) throw new Error('Unknown sample');
+    ctx.reply(`Selected: ${ctx.args.sound}`);
+  },
+});
+```
+
+`CommandDefinition.audioPreview` aceita um retorno direto ou uma `Promise<CommandAudioPreviewData>`. O contexto exportado `CommandAudioPreviewContext` contém `resourceId`, `serverId`, `optionName`, `locale` (`'pt-BR' | 'en'`), `signal` e `settings` imutável, capturado na mesma busca. Não contém invocação, fila, métodos de publicação ou download. `CommandAudioPreviewData` contém apenas `bytes: Uint8Array` (um `Buffer` também serve) e `mimeType: 'audio/ogg' | 'audio/mpeg' | 'audio/wav'`.
+
+- Só o botão de ouvir chama o provider. Digitar, navegar ou selecionar não gera o clipe; ouvir não executa o comando nem modifica a fila.
+- O transporte usa o **WebSocket já autenticado**, pessoa → servidor → bot → pessoa. Não exige `serve()`, hospedagem pública, URL assinada ou porta adicional. O servidor troca os IDs do provider por tokens efêmeros vinculados à mesma pessoa, dispositivo, canal, bot, comando, opção e busca; apenas escolhas anunciadas e ainda válidas podem ser ouvidas.
+- O prazo de geração é **30 segundos**; o limite é **256 KiB de bytes** (base64 somente no transporte) e **10 segundos de reprodução**. O processo nativo valida MIME, tamanho e estrutura antes de criar a fonte local do player. Isso não relaxa as proteções HTTPS/DNS/redirecionamento da variante URL.
+- As escolhas lazy expiram após **60 segundos**, ou antes ao mudar a consulta/opção/comando, fechar, perder acesso, alterar configurações ou desconectar. Trocar de prévia cancela a anterior. Propague `signal` também para subprocessos e libere seus recursos.
+- Há até **4 providers simultâneos por `BotClient`** e 100 solicitações pendentes por servidor. Um provider que ignora o abort continua ocupando sua vaga até concluir. Erros, timeout, bytes vazios, MIME inválido e excesso de tamanho retornam falha explícita; erros lançados pelo provider também chegam ao evento `error` do SDK.
 
 ### Downloads locais autorizados
 
@@ -677,6 +729,15 @@ bot.settings({
       { name: 'compact', label: 'Respostas compactas', type: 'boolean', required: true, defaultValue: false },
     ],
   },
+  localizations: {
+    en: {
+      server: {
+        title: 'Behavior',
+        fields: { enabled: { label: 'Enabled on this server' }, limit: { label: 'Maximum results' } },
+      },
+      user: { title: 'My preferences', fields: { compact: { label: 'Compact replies' } } },
+    },
+  },
 });
 
 bot.command({
@@ -700,6 +761,10 @@ const current = bot.getServerSettings('meu-servidor'); // undefined antes de reg
 ```
 
 Campos obrigatórios de configurações precisam de defaults válidos; essa regra não muda os formulários de perguntas durante comandos. `false` e `0` são preservados. Textos, inteiros, switches, listas, escolhas e escolhas com prévia usam os mesmos controles, com **Salvar** explícito inclusive em escolhas apresentadas como botões. **Restaurar padrões** prepara a alteração, mas só persiste ao salvar.
+
+`localizations` é opcional e aceita `pt-BR` e `en`, seguindo o idioma escolhido no app. Cada escopo pode traduzir `title`, `description` e, em `fields`, o `label` e a `description` de campos já declarados. As traduções não alteram nomes, tipos, valores padrão ou validação; textos não traduzidos usam a declaração original. O formulário compartilhado e suas traduções só são enviados a quem pode configurá-lo.
+
+No MonkyBot, **Comportamento neste servidor → Música → Tempo de inatividade (segundos)** controla a saída por fila ociosa ou sala vazia: padrão de 60 segundos, de 1 a 600, salvo por servidor. Alterar durante uma espera considera o tempo já decorrido. A variável de ambiente `MONKY_MUSIC_GRACE_SECONDS` apenas define o padrão do host; não substitui a configuração compartilhada.
 
 `ctx.settings` é um snapshot validado pelo servidor, com `server`, `user`, `schemaRevision` e `serverRevision`. Invocações, autocomplete e respostas a seletores independentes recebem as preferências de quem iniciou aquela ação. Perguntas privadas do mesmo comando conservam o snapshot original; alterações posteriores valem para novas ações. `onSelectorResponse` entrega preferências somente ao bot proprietário, sem incluí-las no histórico público do seletor. Mensagens ou reações genéricas não transmitem preferências a todos os bots.
 
@@ -844,7 +909,7 @@ No modo marketplace, o TOFU binding acontece automaticamente durante a instalaç
 
 ## Monky Bot (bot oficial)
 
-O [**Monky Bot**](https://github.com/MonkyOrg/MonkyBot) é o bot de referência mantido pela organização. Ele serve como exemplo prático e inclui comandos utilitários:
+O [**Monky Bot**](https://github.com/MonkyOrg/MonkyBot) é o bot de referência mantido pela organização. Ele serve como exemplo prático e inclui comandos utilitários e de música:
 
 | Comando | Descrição |
 |---------|-----------|
@@ -853,9 +918,111 @@ O [**Monky Bot**](https://github.com/MonkyOrg/MonkyBot) é o bot de referência 
 | `/moeda` | Cara ou coroa |
 | `/8ball <pergunta>` | Bola mágica; a pergunta é obrigatória |
 | `/enquete` | Formulário privado; publica a votação no canal sem revisão e encerra por tempo e/ou total de votantes |
+| `/play <nome ou URL>` | Autocomplete de músicas por nome ou link de vídeo individual do YouTube, com prévia local sob demanda e seleção para adicionar à fila |
+| `/queue` | Mostra a fila |
+| `/nowplaying` | Mostra a música atual |
+| `/pause` e `/resume` | Pausa e continua a reprodução, sem reiniciar a faixa |
+| `/skip` | Passa para a próxima faixa |
+| `/remove <posição>` | Remove uma faixa da fila |
+| `/clear` | Limpa as próximas faixas sem interromper a atual |
+| `/stop` | Interrompe a reprodução e limpa a fila |
+| `/leave` | Interrompe, limpa a fila e desconecta da voz |
+| `/jogo-da-velha` | Abre uma partida compartilhada, com dois jogadores e espectadores |
 | `/ajuda` | Lista todos os comandos |
 
+Há uma fila independente por servidor e um canal de voz ativo para cada fila. Todos os comandos de música, a busca e a prévia privada exigem estar em voz, inclusive `/queue` e `/nowplaying`. O primeiro `/play` leva o bot à sala de quem pediu; se ele já estiver em outra sala, o pedido é recusado com uma orientação para entrar nela. Não há cargo de DJ, mas as permissões gerais de comandos do Monky continuam valendo. A reprodução não pertence ao handler de `/play`: concluir ou expirar aquele comando não encerra as músicas já adicionadas.
+
+A música usa somente `/play`, não um `/query` separado. A busca reutiliza o autocomplete de 250/500 ms; o botão de ouvir gera até 10 segundos apenas para essa pessoa, sem adicionar à fila. Selecionar o resultado e executar `/play` é a ação que adiciona a música.
+
+A busca, a resolução das fontes e a conversão do áudio acontecem **no processo externo do MonkyBot**, não no servidor Monky nem no computador de quem pediu a música. Isso é diferente de `ctx.downloadSound()`, que solicita um download local autorizado para a soundboard.
+
+Nesta primeira versão, Spotify, playlists, álbuns e transmissões ao vivo não são suportados. A integração de YouTube por extração não é uma API oficial de áudio para bots e pode deixar de funcionar por restrições ou mudanças da plataforma. Use somente conteúdo cuja reprodução você esteja autorizado a realizar e respeite os [termos e políticas do YouTube](https://developers.google.com/youtube/terms/developer-policies). Os pré-requisitos de mídia e as mensagens de indisponibilidade estão documentados no repositório do bot.
+
 Consulte o [repositório do Monky Bot](https://github.com/MonkyOrg/MonkyBot) para instruções de instalação e uso.
+
+## Voz para bots
+
+O SDK separa a conexão de voz da fonte de áudio. `bot.joinVoice(serverId, channelId, options?)` cria a conexão P2P ou SFU apropriada ao servidor; decodificar uma música, manter a fila e controlar o ritmo de reprodução são responsabilidades do processo do bot. Bots de texto não precisam iniciar conexões de mídia.
+
+O bot entra com os estados pessoais de mute e deafen desligados; restrições administrativas existentes continuam valendo. O SDK atual transmite áudio, mas ainda não oferece uma API para receber a voz dos participantes ([#642](https://github.com/MonkyOrg/Monky/issues/642)). Essa limitação não é representada como um deafen escolhido pelo bot.
+
+Declare `voiceRequirement: 'joined'` em comandos que exigem voz ou `'same-bot-channel'` quando também é necessário estar na sala do bot, caso ele já esteja conectado à voz. Sem esse campo, os comandos mantêm o comportamento normal. Cliente e servidor aplicam a regra à execução, ao autocomplete e à prévia; o servidor usa a conexão exata da pessoa, não outro dispositivo da mesma conta. Sair ou mudar de sala cancela o trabalho pendente e invalida escolhas/prévias, sem transferir o pedido para outra sala nem interromper músicas já aceitas.
+
+O contexto de comando contém `invokerSessionId` e `invokerVoiceChannelId` autenticados pelo servidor. Eles descrevem a execução inicial; o segundo é `null` quando a conexão que chamou o comando não está em voz. **O campo não é um getter vivo.** Depois de uma busca, formulário ou outra espera, use `await ctx.getVoiceChannel()` para consultar novamente a sala da conexão original no servidor. Não procure a sala somente por `invokerId`: a mesma pessoa pode estar conectada em dois dispositivos, em salas diferentes.
+
+```ts
+bot.command({
+  name: 'join',
+  description: 'Entra na sua sala de voz',
+  voiceRequirement: 'same-bot-channel',
+  handler: async (ctx) => {
+    const channelId = await ctx.getVoiceChannel();
+    if (channelId === null) {
+      ctx.reply(ctx.locale === 'en' ? 'Join a voice room first.' : 'Entre em uma sala de voz primeiro.');
+      return;
+    }
+    await bot.joinVoice(ctx.serverId, channelId, { invocationId: ctx.invocationId });
+    ctx.reply(ctx.locale === 'en' ? 'Connected to voice.' : 'Conectado à voz.');
+  },
+});
+```
+
+Passe `invocationId` ao entrar pela solicitação de uma pessoa: o servidor confirma novamente a conexão, a sala atual e a autorização, inclusive para salas privadas. Trocar ou sair de sala entre a consulta e a entrada invalida o pedido. Essa capacidade é específica da voz e não dá acesso geral ao chat privado. A entrada sem invocação continua exigindo o acesso do próprio bot ao canal. Antes de alterar uma fila existente, revalide também a sala de quem solicitou a ação; terminar o comando que iniciou a reprodução não encerra a conexão de voz.
+
+Use `bot.getVoiceConnection(serverId)` para obter a conexão daquele servidor e `await bot.leaveVoice(serverId)` para encerrá-la. Cada conexão expõe `channelId` e `humanParticipantCount`. O evento `voiceParticipantsChanged` entrega `{ serverId, channelId, humanParticipantCount }`; `voiceDisconnected` também informa o motivo em `reason`. Registre listeners uma vez e remova-os ao encerrar o bot.
+
+`await connection.writeOpus(frame)` transmite **um pacote Opus bruto de 20 ms, com relógio de 48 kHz**, não um arquivo Ogg, MP3 ou bytes PCM. A fonte deve extrair os pacotes e enviá-los no ritmo de reprodução, sem descarregar o arquivo inteiro de uma vez. Mantenha a reprodução em uma sessão independente da invocação e interrompa a fonte ao sair da voz ou perder a conexão. `/pause` deve suspender o avanço da fonte; simplesmente parar de transmitir enquanto ela continua lendo perderia a posição.
+
+A transmissão usa o mesmo indicador de fala dos demais participantes. O SDK publica mudanças de atividade, não um evento por pacote, e limpa o indicador quando a transmissão fica ociosa, é silenciada ou termina. Cada pessoa também pode mutar o bot apenas para si: isso não muda o áudio dos demais nem a reprodução ou a fila.
+
+Quando a fonte for pausada ou encerrada, `connection.stopSpeaking()` limpa o indicador imediatamente, sem fechar a conexão nem alterar preferências de mute. Esse método não substitui pausar ou encerrar a própria fonte de áudio.
+
+Mute/deafen administrativo tem outra semântica: enquanto a conexão estiver bloqueada, `writeOpus()` valida e descarta os pacotes, sem enviá-los nem gerar uma falha de mídia. Continue respeitando a cadência de 20 ms. No MonkyBot, a música e a fila avançam normalmente em silêncio; liberar o bloqueio devolve o som na posição atual. Uma pausa manual não é desfeita por essa mudança. Pacotes inválidos, conexões encerradas e falhas reais de transporte continuam produzindo erros.
+
+## Telas programáveis compartilhadas
+
+Uma tela é um miniapp HTML/CSS/JavaScript apresentado **no palco de voz**. Quem está na sala recebe um convite no mesmo canto dos avisos de compartilhamento de tela e escolhe se quer visualizar. Não há card de miniapp no chat nem abertura automática. Diferentemente dos formulários privados de `ctx.prompt()`, ele aceita vários participantes e continua ativo depois que o handler do comando termina. O `/jogo-da-velha` do MonkyBot demonstra dois jogadores e espectadores; as regras continuam no bot, não no JavaScript de quem está vendo a tela.
+
+O cartão permanece no palco junto de câmeras e compartilhamentos, mesmo com a visualização fechada. **Abrir miniapp** inicia a visualização local; **Sair do miniapp** a encerra e devolve o cartão ao estado fechado, sem encerrar o miniapp para os demais. Focar ou voltar à grade só altera o layout: não recarrega a tela nem muda quem ocupa as vagas de jogador. Abrir uma tela para assistir não equivale a entrar na partida.
+
+Dentro de um comando, `ctx.createScreen()` consulta a sala de voz atual de quem chamou e associa o miniapp àquela sala e à invocação, inclusive em sala privada autorizada. `screen.channelId` é sempre um **canal de voz**, não `ctx.channelId` (o canal de texto do comando). Sem voz, a criação é recusada. O bot não precisa estar conectado ao áudio para oferecer um miniapp. A API avulsa `bot.createScreen(serverId, input)` exige acesso do próprio bot; passar `invocationId` permite a autorização específica da invocação. Isso não concede acesso geral a mensagens privadas.
+
+```ts
+bot.command({
+  name: 'tela',
+  description: 'Abre uma tela compartilhada',
+  voiceRequirement: 'joined',
+  handler: async (ctx) => {
+    await ctx.createScreen({
+      title: ctx.locale === 'en' ? 'Shared screen' : 'Tela compartilhada',
+      html: `<main id="message"></main><script>
+        window.monkyScreen.onState(state => {
+          document.getElementById('message').textContent = state.message;
+        });
+      </script>`,
+      state: { message: ctx.locale === 'en' ? 'Hello, everyone!' : 'Olá, pessoal!' },
+    });
+  },
+});
+```
+
+No documento isolado, o bridge `window.monkyScreen` fornece:
+
+| API da tela | Comportamento |
+|-------------|---------------|
+| `viewer` | Contexto local imutável com `id`, `nickname` e `locale` (`pt-BR` ou `en`) da pessoa que abriu a tela |
+| `onState((state, revision) => ...)` | Entrega o estado inicial e as atualizações; retorna uma função de unsubscribe |
+| `sendAction(action, payload)` | Envia uma intenção vinculada à revisão atual; retorna se o bridge aceitou o envio, não se o bot aceitou a ação |
+
+Leia `window.monkyScreen.viewer.locale` dentro do callback de `onState()` para traduzir os controles de cada pessoa. Trocar o idioma no aplicativo também aciona esse callback, sem mudar o estado/revisão compartilhados nem recriar o iframe. Não escolha o idioma dos controles a partir do estado público ou do idioma de quem criou a tela.
+
+O evento `screenAction` do SDK entrega `{ serverId, screenId, channelId, userId, userNickname, action, payload, revision, actionId }`. Use a identidade autenticada desse envelope, nunca um jogador/usuário informado em `payload`. Valide a ação e suas regras no bot antes de chamar `await bot.updateScreen(serverId, id, { state, expectedRevision })`. Uma atualização aceita incrementa `revision` e chega aos participantes; uma revisão antiga é rejeitada em vez de sobrescrever uma alteração concorrente. O HTML permanece o mesmo durante as atualizações de estado.
+
+Use `listScreens(serverId, channelId)` com o ID da sala de voz para obter snapshots atuais e `closeScreen(serverId, id)` para encerrar. O evento `screenRemoved` entrega `{ serverId, id, channelId }`: remova também o estado correspondente do jogo no bot. Registre listeners uma vez e remova-os ao encerrar. O cliente recupera os miniapps ativos ao entrar na sala; sair, mudar de sala ou desconectar fecha a visualização local e revoga ações. Fechar a visualização não termina a partida dos demais.
+
+**Estado compartilhado, sem segredos:** os participantes autorizados que estão naquela sala de voz recebem o HTML e o estado JSON. O servidor também verifica a presença na sala para listar e interagir; estar em outro canal ou em voz em outro dispositivo não autoriza esta conexão. Interações exigem `USE_BOT_COMMANDS`. Não inclua tokens, caminhos locais ou informações secretas de um jogador. A tela não recebe Node.js, preload, IPC, acesso ao DOM do cliente ou autorização para rede, navegação, popups e downloads. Inclua os recursos visuais no documento em vez de depender de CDNs ou requisições externas.
+
+Os limites são 128 KiB de HTML, 64 KiB de estado e 8 KiB por ação; JSON aceita até 12 níveis e 8.192 nós. Há até quatro miniapps por sala de voz, 16 por bot e 64 por servidor, com limites de frequência e deduplicação de ações. Eles vivem em memória e são removidos ao reiniciar/desconectar o bot ou perder a autorização de acesso à sala. Sair da sala, inclusive deixá-la vazia, não apaga automaticamente o estado. No jogo da velha, estado e vagas são preservados até o bot encerrar ou expirar a partida após 30 minutos. Para recuperar uma partida após reiniciar o próprio bot, persista o domínio do jogo fora da tela e crie uma nova tela autorizada.
 
 ## Referência rápida da API
 
@@ -869,6 +1036,13 @@ Consulte o [repositório do Monky Bot](https://github.com/MonkyOrg/MonkyBot) par
 | `bot.disconnect(serverId?)` | Desconecta de um ou todos os servidores |
 | `bot.close()` | Encerra conexões e servidores HTTP do bot |
 | `bot.serve(options)` | Inicia servidor HTTP para marketplace |
+| `bot.joinVoice(serverId, channelId, { invocationId }?)` | Conecta à voz, com autorização da invocação quando fornecida |
+| `bot.getVoiceConnection(serverId)` | Obtém a conexão de voz ativa daquele servidor |
+| `bot.leaveVoice(serverId)` | Encerra a conexão e libera os recursos de mídia |
+| `bot.createScreen(serverId, input)` | Cria um miniapp de HTML e estado JSON em uma sala de voz |
+| `bot.updateScreen(serverId, id, { state, expectedRevision })` | Atualiza o estado sem perder alterações concorrentes |
+| `bot.listScreens(serverId, channelId)` | Obtém os miniapps ativos autorizados daquela sala de voz |
+| `bot.closeScreen(serverId, id)` | Encerra a tela para todos os participantes |
 | `bot.serverCount` | Número de servidores conectados |
 | `bot.serverIds` | IDs dos servidores conectados |
 | `bot.registeredServerCount` | Quantidade de vínculos autenticados conhecidos, inclusive offline |

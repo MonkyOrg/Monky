@@ -38,6 +38,10 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.BOT_INVALID_PROFILE]: 'protocolError.botInvalidProfile',
   [ProtocolErrorCode.BOT_SETTINGS_INVALID]: 'botSettings.stalePreferences',
   [ProtocolErrorCode.BOT_SETTINGS_CONFLICT]: 'botSettings.conflict',
+  [ProtocolErrorCode.BOT_SCREEN_CONFLICT]: 'botScreen.actionError',
+  [ProtocolErrorCode.BOT_SCREEN_NOT_FOUND]: 'botScreen.loadError',
+  [ProtocolErrorCode.BOT_VOICE_REQUIRED]: 'protocolError.botVoiceRequired',
+  [ProtocolErrorCode.BOT_VOICE_CHANNEL_MISMATCH]: 'protocolError.botVoiceChannelMismatch',
 };
 
 /**

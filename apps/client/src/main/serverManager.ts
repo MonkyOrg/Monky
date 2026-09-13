@@ -143,7 +143,8 @@ export class ServerManager {
 
   private broadcast<C extends keyof IpcEvents>(channel: C, ...args: IpcEvents[C]): void {
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed() && !window.webContents.isCrashed()
+        && !window.webContents.mainFrame.isDestroyed() && !window.webContents.mainFrame.detached) {
         window.webContents.send(channel, ...args);
       }
     }

@@ -36,7 +36,8 @@ function productionDependencies(pkg: Record<string, unknown>): Map<string, boole
 }
 
 function lookupPaths(requester: string, name: string): string[] {
-  return createRequire(path.join(requester, 'package.json')).resolve.paths(name) ?? [];
+  // A declared npm polyfill such as "buffer" must not resolve as a Node builtin.
+  return createRequire(path.join(requester, 'package.json')).resolve.paths(`${name}/package.json`) ?? [];
 }
 
 export function resolvePackage(requester: string, name: string): string | null {
@@ -70,7 +71,8 @@ export function copyRuntimePath(sourceRoot: string, relative: string, destinatio
     dereference: true,
     filter: (file) => {
       const name = path.relative(sourceRoot, file);
-      if (name.split(path.sep).includes('node_modules')) return false;
+      // Rebuild root dependencies, but preserve packaged source-local module aliases.
+      if (name.split(path.sep)[0] === 'node_modules') return false;
       if (isPrivateRuntimePath(name)) {
         if (projectFile) throw new Error(`Refusing to package private runtime data: ${name}.`);
         return false;
@@ -165,7 +167,15 @@ export function bundleDependencies(
     }
     fs.writeFileSync(path.join(destination, 'package.json'),
       JSON.stringify(sanitizedPackage(pkg, Object.fromEntries(children)), null, 2) + '\n');
-    if (!pkg.exports) {
+    if (pkg.name.startsWith('@types/') && !pkg.main && !pkg.exports) {
+      const declarations = typeof pkg.types === 'string' ? pkg.types
+        : typeof pkg.typings === 'string' ? pkg.typings : 'index.d.ts';
+      const entry = path.resolve(destination, declarations);
+      if (!inside(destination, entry) || !fs.existsSync(entry) ||
+          !fs.statSync(entry).isFile() || fs.statSync(entry).size === 0) {
+        throw new Error(`Missing declaration entry for "${name}".`);
+      }
+    } else if (!pkg.exports) {
       try { createRequire(path.join(destination, 'package.json')).resolve(destination); } catch {
         throw new Error(`Missing runtime entry for "${name}".`);
       }

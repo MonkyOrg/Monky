@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { LIMITS } from './constants.js';
 import type { CommandOption } from './models.js';
 import {
+  audioPreviewResourceIdSchema,
   createSelectionChoiceSchema,
   selectionChoicesSchema,
   selectionDescriptionSchema,
@@ -74,6 +75,7 @@ export const commandDefinitionSchema = z.object({
   description: label,
   options: z.array(commandOptionSchema).max(LIMITS.MAX_OPTIONS_PER_COMMAND).optional(),
   downloadsSound: z.boolean().optional(),
+  voiceRequirement: z.enum(['joined', 'same-bot-channel']).optional(),
 }).strict().refine((command) =>
   new Set(command.options?.map((option) => option.name)).size === (command.options?.length ?? 0)
 );
@@ -91,6 +93,8 @@ export const commandInvokeSchema = z.object({
 export const commandExecutionSchema = commandInvokeSchema.omit({ userSettings: true }).extend({
   invocationId: identifier,
   invokerId: identifier,
+  invokerSessionId: identifier,
+  invokerVoiceChannelId: identifier.nullable(),
   invokerNickname: z.string().min(1).max(LIMITS.MAX_NICKNAME_LENGTH),
   settings: botSettingsContextSchema.optional(),
 });
@@ -132,6 +136,53 @@ export const commandAutocompleteResultSchema = z.discriminatedUnion('status', [
 ]);
 export type CommandAutocompleteResult = z.infer<typeof commandAutocompleteResultSchema>;
 export const commandAutocompleteCancelSchema = z.object({ requestId: identifier }).strict();
+
+export const commandAudioPreviewSchema = z.object({
+  botId: identifier,
+  commandName,
+  channelId: identifier,
+  optionName: inputName,
+  autocompleteRequestId: identifier,
+  resourceId: audioPreviewResourceIdSchema,
+}).strict();
+export type CommandAudioPreviewPayload = z.infer<typeof commandAudioPreviewSchema>;
+
+export const commandAudioPreviewExecutionSchema = z.object({
+  commandName,
+  optionName: inputName,
+  resourceId: audioPreviewResourceIdSchema,
+  locale: z.enum(['pt-BR', 'en']),
+  settings: botSettingsContextSchema.optional(),
+}).strict();
+export type CommandAudioPreviewExecutionPayload = z.infer<typeof commandAudioPreviewExecutionSchema>;
+
+export const commandAudioPreviewMimeSchema = z.enum(['audio/ogg', 'audio/mpeg', 'audio/wav']);
+export type CommandAudioPreviewMimeType = z.infer<typeof commandAudioPreviewMimeSchema>;
+export const commandAudioPreviewBase64Schema = z.string().min(4)
+  .max(Math.ceil(LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES / 3) * 4)
+  .refine((value) => {
+    if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return false;
+    const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+    const size = value.length / 4 * 3 - padding;
+    if (size < 1 || size > LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES) return false;
+    const last = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+      .indexOf(value[value.length - padding - 1]);
+    return padding === 0 || (last & (padding === 2 ? 15 : 3)) === 0;
+  });
+export const commandAudioPreviewResultSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('ok'),
+    audioBase64: commandAudioPreviewBase64Schema,
+    mimeType: commandAudioPreviewMimeSchema,
+  }).strict(),
+  z.object({
+    status: z.literal('failed'),
+    reason: z.enum(['handler_failed', 'invalid_response', 'timeout', 'too_large', 'unsupported_audio', 'busy', 'expired']),
+  }).strict(),
+]);
+export type CommandAudioPreviewResult = z.infer<typeof commandAudioPreviewResultSchema>;
+export type CommandAudioPreviewFailureReason = Extract<CommandAudioPreviewResult, { status: 'failed' }>['reason'];
+export const commandAudioPreviewCancelSchema = z.object({ requestId: identifier }).strict();
 
 const fieldBase = {
   name: inputName,
@@ -209,9 +260,26 @@ export const botFormSchema = z.object({
 
 export type BotForm = z.infer<typeof botFormSchema>;
 
+const botSettingsFormLocalizationSchema = z.object({
+  title: label.optional(),
+  description: description.optional(),
+  fields: z.record(inputName, z.object({
+    label: label.optional(),
+    description: description.optional(),
+  }).strict()).optional(),
+}).strict();
+const botSettingsLocalizationSchema = z.object({
+  server: botSettingsFormLocalizationSchema.optional(),
+  user: botSettingsFormLocalizationSchema.optional(),
+}).strict();
+
 export const botSettingsDefinitionSchema = z.object({
   server: botFormSchema.optional(),
   user: botFormSchema.optional(),
+  localizations: z.object({
+    'pt-BR': botSettingsLocalizationSchema.optional(),
+    en: botSettingsLocalizationSchema.optional(),
+  }).strict().optional(),
 }).strict().superRefine((definition, ctx) => {
   if (jsonBytes(definition) > LIMITS.MAX_BOT_SETTINGS_DEFINITION_BYTES) {
     ctx.addIssue({ code: 'custom', message: 'Settings declaration exceeds the size limit' });
@@ -225,8 +293,44 @@ export const botSettingsDefinitionSchema = z.object({
       });
     }
   }
+  for (const locale of ['pt-BR', 'en'] as const) {
+    for (const scope of ['server', 'user'] as const) {
+      const localized = definition.localizations?.[locale]?.[scope];
+      if (!localized) continue;
+      const form = definition[scope];
+      if (!form) {
+        ctx.addIssue({ code: 'custom', message: 'Localized settings scope is not declared', path: ['localizations', locale, scope] });
+        continue;
+      }
+      for (const name of Object.keys(localized.fields ?? {})) {
+        if (!form.fields.some((field) => field.name === name)) {
+          ctx.addIssue({ code: 'custom', message: 'Unknown localized settings field', path: ['localizations', locale, scope, 'fields', name] });
+        }
+      }
+    }
+  }
 });
 export type BotSettingsDefinition = z.infer<typeof botSettingsDefinitionSchema>;
+
+export function localizeBotSettingsForm(
+  definition: BotSettingsDefinition,
+  scope: 'server' | 'user',
+  locale: 'pt-BR' | 'en',
+): BotForm | undefined {
+  const form = definition[scope];
+  const localized = definition.localizations?.[locale]?.[scope];
+  if (!form || !localized) return form;
+  return {
+    ...form,
+    title: localized.title ?? form.title,
+    description: localized.description ?? form.description,
+    fields: form.fields.map((field) => ({
+      ...field,
+      label: localized.fields?.[field.name]?.label ?? field.label,
+      description: localized.fields?.[field.name]?.description ?? field.description,
+    })),
+  };
+}
 
 export const commandRegisterSchema = z.object({
   commands: z.array(commandDefinitionSchema).max(LIMITS.MAX_COMMANDS_PER_BOT),

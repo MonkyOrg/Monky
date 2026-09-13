@@ -3,6 +3,7 @@ import {
   MessageType,
   Permission,
   botSettingsListResponseSchema,
+  commandAutocompleteCancelSchema,
   type BotFormValues,
   type CommandFinishedPayload,
   type CommandInvokedPayload,
@@ -10,11 +11,13 @@ import {
   type CommandSubmitPayload,
   type CommandAutocompletePayload,
   type CommandAutocompleteResultPayload,
+  type CommandAudioPreviewPayload,
+  type SlashCommand,
 } from '@monky/shared';
 import { v4 as uuidv4 } from 'uuid';
 import { appEvents } from '../core/EventBus';
 import { type NetworkClient } from '../core/NetworkClient';
-import { getActiveChatStore, type BotInvocation, type ChatStore } from '../stores/chatStore';
+import { getActiveChatStore, type BotInvocation, type ChatStore, type CommandDraft } from '../stores/chatStore';
 import { type ServerStore } from '../stores/serverStore';
 import { getLanguage, t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
@@ -45,6 +48,8 @@ import { botPreferenceScopeFor, botUserSettingsPayload } from '../utils/botSetti
 import { botSettingsMenuItem } from './BotSettingsModal';
 import { contextMenu } from './ContextMenu';
 import { currentEventOrigin } from '../core/sessionRouting';
+import { commandVoiceContextKey, commandVoiceError } from '../utils/botVoice';
+import { translateProtocolError } from '../i18n/protocolErrors';
 
 const FINISH_KEYS: Record<Exclude<BotInvocation['status'], 'active'>, TranslationKey> = {
   completed: 'botChat.completed',
@@ -64,14 +69,14 @@ export function renderBotIdentity(name: string, avatarUrl?: string | null): stri
   </div>`;
 }
 
-export function renderBotInvocation(invocation: BotInvocation, canSend = true, serverId?: string): string {
+export function renderBotInvocation(invocation: BotInvocation, canSend = true, serverId?: string, voiceError?: string): string {
   const visibleForms = invocation.forms.filter((state) => state.status !== 'submitted');
   // The attributed reply already represents a completed text-only command.
   if (invocation.status === 'completed' && visibleForms.length === 0 && invocation.hasResponse && !invocation.soundDownload) return '';
   const active = invocation.status === 'active';
   const volumeScope = commandPreviewVolumeScope(serverId, invocation.botId, invocation.commandName);
   const forms = visibleForms.map((state) => {
-    const editable = active && !invocation.cancelPending && state.status === 'editing' && canSend;
+    const editable = active && !invocation.cancelPending && state.status === 'editing' && canSend && !voiceError;
     const buttonsOnly = state.form.fields.length === 1 &&
       state.form.fields[0].type === 'select' && state.form.fields[0].presentation === 'buttons';
     return `<form class="bot-inline-form" data-interaction-id="${escapeHtml(state.interactionId)}" novalidate>
@@ -93,6 +98,7 @@ export function renderBotInvocation(invocation: BotInvocation, canSend = true, s
     ${renderBotIdentity(invocation.botName, invocation.botAvatarUrl)}
     ${invocation.commandName ? `<div class="bot-command-name">/${escapeHtml(invocation.commandName)}</div>` : ''}
     ${forms}
+    ${voiceError && active ? `<p class="bot-command-voice-error" role="status">${escapeHtml(voiceError)}</p>` : ''}
     ${download ? `<div class="bot-sound-download">
       <strong>${escapeHtml(download.title)}</strong><small>${escapeHtml(download.fileName)}</small>
       ${!download.result && !downloadConfirming ? `<progress ${download.totalBytes ? `value="${download.receivedBytes}" max="${download.totalBytes}"` : ''}></progress>` : ''}
@@ -134,10 +140,15 @@ export class BotChatView {
   private suppressChoiceFocus = false;
   private autocomplete: CommandAutocomplete;
   private autocompleteField: string | null = null;
+  private autocompleteRequest: { requestId: string; connectionId: string; payload: CommandAutocompletePayload } | null = null;
   private composing = false;
   private deferredRender = false;
   private submitGesture = false;
   private settingsRevisions = new Map<string, string>();
+  private voiceEpoch = 0;
+  private voiceDraft: CommandDraft | null = null;
+  private voiceContextRevision = 0;
+  private invocationVoiceContexts = new Map<string, string>();
 
   constructor(
     private store: ChatStore,
@@ -165,7 +176,9 @@ export class BotChatView {
       root.addEventListener('focusout', this.onBlur);
       root.addEventListener('compositionstart', this.onCompositionStart);
       root.addEventListener('compositionend', this.onCompositionEnd);
-      this.unbind.push(audioPreviewService.bind(root));
+      this.unbind.push(audioPreviewService.bind(root, root === composer
+        ? (resourceId, requestId, signal) => this.previewAutocomplete(resourceId, requestId, signal) : undefined,
+      (controls) => this.previewVoiceError(controls)));
       this.unbind.push(() => {
         root.removeEventListener('input', this.onInput);
         root.removeEventListener('change', this.onInput);
@@ -202,9 +215,18 @@ export class BotChatView {
           this.renderComposer();
         }
       }),
+      appEvents.on('message.COMMAND_AUTOCOMPLETE_CANCEL', (payload: unknown) => {
+        const origin = currentEventOrigin();
+        if (!this.isCurrent() || (origin !== null && origin !== this.client.sessionKey)) return;
+        const parsed = commandAutocompleteCancelSchema.safeParse(payload);
+        if (parsed.success && parsed.data.requestId === this.autocompleteRequest?.requestId) this.closeParameterMenu();
+      }),
       appEvents.on('server.updated', () => this.refreshPermissions()),
       appEvents.on('server.members_updated', () => this.refreshMembers()),
       appEvents.on('user.updated', () => this.refreshMembers()),
+      appEvents.on('voice.channel_changed', () => this.refreshVoiceEligibility()),
+      appEvents.on('participants.updated', () => this.refreshVoiceEligibility()),
+      appEvents.on('session.voice_context_updated', () => this.refreshVoiceEligibility()),
       appEvents.on('bot.preferences_updated', ({ scope, customChanged }: { scope: string; customChanged: boolean }) => {
         const draft = this.store.getCommandDraft(this.channelId);
         if (!customChanged || !this.isCurrent() || !this.canSend() || !draft ||
@@ -255,7 +277,52 @@ export class BotChatView {
       this.server.hasPermission(Permission.SEND_MESSAGES) && this.client.getStatus() === 'CONNECTED';
   }
 
+  private voiceError(command: Pick<SlashCommand, 'botId' | 'voiceRequirement'>): string | undefined {
+    const code = commandVoiceError(command, this.client, this.server);
+    return code ? translateProtocolError(code) : undefined;
+  }
+
+  private previewVoiceError(controls: HTMLElement): string | undefined {
+    const command = this.composer.contains(controls) ? this.store.getCommandDraft(this.channelId)?.command
+      : this.store.getInvocation(controls.closest<HTMLElement>('[data-invocation-id]')?.dataset.invocationId ?? '');
+    return command ? this.voiceError(command) : undefined;
+  }
+
+  private refreshVoiceEligibility(): void {
+    if (!this.isCurrent()) return;
+    const draft = this.store.getCommandDraft(this.channelId);
+    if (draft?.command.voiceRequirement &&
+        this.store.setCommandVoiceContext(this.channelId, commandVoiceContextKey(draft.command, this.client, this.server))) {
+      this.closeParameterMenu();
+      if (draft.pending) this.store.setCommandPending(this.channelId, draft, false, this.voiceError(draft.command) ?? t('botChat.voiceContextChanged'));
+      else this.renderComposer();
+    }
+    const invocations = this.store.getInvocations(this.channelId);
+    const liveIds = new Set(invocations.map((invocation) => invocation.invocationId));
+    for (const id of this.invocationVoiceContexts.keys()) if (!liveIds.has(id)) this.invocationVoiceContexts.delete(id);
+    for (const invocation of invocations) {
+      if (!invocation.voiceRequirement) continue;
+      const context = commandVoiceContextKey(invocation, this.client, this.server);
+      if (this.invocationVoiceContexts.get(invocation.invocationId) === context) continue;
+      this.invocationVoiceContexts.set(invocation.invocationId, context);
+      const card = [...this.feed.querySelectorAll<HTMLElement>('[data-invocation-id]')]
+        .find((element) => element.dataset.invocationId === invocation.invocationId);
+      if (card) audioPreviewService.release(card);
+      this.onInvocationChanged(invocation);
+    }
+  }
+
   public renderComposer(): void {
+    const currentDraft = this.store.getCommandDraft(this.channelId);
+    if (currentDraft?.command.voiceRequirement) {
+      this.store.setCommandVoiceContext(this.channelId, commandVoiceContextKey(currentDraft.command, this.client, this.server));
+      if (this.voiceDraft !== currentDraft || this.voiceContextRevision !== currentDraft.voiceContextRevision) {
+        this.voiceEpoch++;
+        this.voiceDraft = currentDraft;
+        this.voiceContextRevision = currentDraft.voiceContextRevision ?? 0;
+        this.closeParameterMenu();
+      }
+    }
     if (this.composing) { this.deferredRender = true; return; }
     this.deferredRender = false;
     const active = document.activeElement;
@@ -281,7 +348,7 @@ export class BotChatView {
     }
     const available = this.store.isCommandAvailable(draft.command);
     this.composer.innerHTML = renderCompactCommand(
-      draft, this.channelId, this.server.getHumanMembersInDisplayOrder(), this.canSend(), available
+      draft, this.channelId, this.server.getHumanMembersInDisplayOrder(), this.canSend(), available, this.voiceError(draft.command)
     );
     this.onComposerChanged();
     if (menu?.kind === 'autocomplete') this.openAutocomplete(menu.fieldName);
@@ -314,6 +381,7 @@ export class BotChatView {
 
   private refreshPermissions(): void {
     if (!this.isCurrent()) return;
+    this.refreshVoiceEligibility();
     this.renderComposer();
     for (const invocation of this.store.getInvocations(this.channelId)) this.onInvocationChanged(invocation);
     audioPreviewService.prune(this.feed);
@@ -345,7 +413,7 @@ export class BotChatView {
       values: form.values,
       context: {
         prefix: `${invocation.invocationId}-${form.interactionId}`,
-        disabled: !this.canSend() || invocation.status !== 'active' || invocation.cancelPending || form.status !== 'editing',
+        disabled: !this.canSend() || !!this.voiceError(invocation) || invocation.status !== 'active' || invocation.cancelPending || form.status !== 'editing',
         volumeScope: commandPreviewVolumeScope(this.server.serverDetails?.id, invocation.botId, invocation.commandName),
       },
       save: (values) => this.store.setFormValues(invocation.invocationId, form.interactionId, values),
@@ -435,7 +503,10 @@ export class BotChatView {
       draft.autocomplete,
       draft.visibleOptionalNames
     ).success;
-    button.disabled = draft.pending || !this.canSend() || !this.store.isCommandAvailable(draft.command) || !canExecute;
+    const voiceError = this.voiceError(draft.command);
+    button.disabled = draft.pending || !this.canSend() || !this.store.isCommandAvailable(draft.command) || !canExecute || !!voiceError;
+    const notice = this.composer.querySelector<HTMLElement>('.bot-command-voice-error');
+    if (notice) { notice.textContent = voiceError ?? ''; notice.hidden = !voiceError; }
   }
 
   private updateArgumentMeasure(input: HTMLInputElement | HTMLTextAreaElement): void {
@@ -553,6 +624,11 @@ export class BotChatView {
     const choice = this.menuChoices[index];
     const draft = this.store.getCommandDraft(this.channelId);
     if (!menu || !choice || !draft || draft.pending) return;
+    if (menu.kind === 'autocomplete' && this.voiceError(draft.command)) {
+      this.closeParameterMenu();
+      this.refreshVoiceEligibility();
+      return;
+    }
     this.closeParameterMenu();
     if (menu.kind === 'optional') {
       if (this.store.setCommandOptionVisible(this.channelId, choice.value, true)) this.focusParameter(choice.value);
@@ -651,7 +727,7 @@ export class BotChatView {
 
   private openAutocomplete(name: string): void {
     const draft = this.store.getCommandDraft(this.channelId);
-    if (!draft || draft.pending || !this.canSend() || !this.store.isCommandAvailable(draft.command) ||
+    if (!draft || draft.pending || !this.canSend() || this.voiceError(draft.command) || !this.store.isCommandAvailable(draft.command) ||
         !draft.command.options?.some((option) => option.name === name && option.autocomplete)) return;
     if (this.autocompleteField !== name) {
       this.closeParameterMenu();
@@ -664,7 +740,7 @@ export class BotChatView {
   private async queryAutocomplete(query: string, signal: AbortSignal): Promise<CommandAutocompleteResultPayload> {
     const draft = this.store.getCommandDraft(this.channelId);
     const optionName = this.autocompleteField;
-    if (!draft || !optionName || draft.pending || !this.isCurrent() || !this.canSend()) {
+    if (signal.aborted || !draft || !optionName || draft.pending || !this.isCurrent() || !this.canSend() || this.voiceError(draft.command)) {
       throw new DOMException('Autocomplete closed', 'AbortError');
     }
     const requestId = uuidv4();
@@ -680,27 +756,74 @@ export class BotChatView {
     const response = this.client.sendRequest<CommandAutocompleteResultPayload>(
       MessageType.COMMAND_AUTOCOMPLETE, payload, requestId, LIMITS.BOT_AUTOCOMPLETE_TIMEOUT_MS
     );
+    const active = { requestId, connectionId, payload };
+    this.autocompleteRequest = active;
     const cancel = () => {
-      if (this.client.cancelRequest(requestId) && this.client.getStatus() === 'CONNECTED' &&
-          this.client.getConnectionId() === connectionId) {
+      if (this.autocompleteRequest === active) this.autocompleteRequest = null;
+      this.client.cancelRequest(requestId);
+      if (this.client.getStatus() === 'CONNECTED' && this.client.getConnectionId() === connectionId) {
         this.client.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId });
       }
     };
     signal.addEventListener('abort', cancel, { once: true });
     if (signal.aborted) cancel();
-    try { return await response; } finally { signal.removeEventListener('abort', cancel); }
+    try {
+      // The signal also owns the returned choices, until a new query or close.
+      const result = await response;
+      if (signal.aborted || this.voiceError(draft.command)) throw new DOMException('Voice context changed', 'AbortError');
+      return result;
+    } catch (error) {
+      signal.removeEventListener('abort', cancel);
+      if (!signal.aborted) cancel();
+      throw error;
+    }
+  }
+
+  private async previewAutocomplete(resourceId: string, requestId: string, signal: AbortSignal): Promise<unknown> {
+    const active = this.autocompleteRequest;
+    const draft = this.store.getCommandDraft(this.channelId);
+    if (signal.aborted || !active || !draft || !this.isCurrent() || !this.canSend() || this.voiceError(draft.command) || draft.pending ||
+        !this.store.isCommandAvailable(draft.command) || this.client.getConnectionId() !== active.connectionId ||
+        this.parameterMenu?.kind !== 'autocomplete' || this.autocompleteField !== active.payload.optionName ||
+        draft.command.botId !== active.payload.botId || draft.command.name !== active.payload.commandName ||
+        draft.autocomplete[active.payload.optionName]?.query !== active.payload.query ||
+        !this.menuChoices.some((choice) => choice.audio && 'resourceId' in choice.audio && choice.audio.resourceId === resourceId)) {
+      return { status: 'failed', reason: 'expired' };
+    }
+    const payload: CommandAudioPreviewPayload = {
+      botId: active.payload.botId, commandName: active.payload.commandName, channelId: this.channelId,
+      optionName: active.payload.optionName, autocompleteRequestId: active.requestId, resourceId,
+    };
+    const cancel = () => {
+      this.client.cancelRequest(requestId);
+      if (this.client.getStatus() === 'CONNECTED' && this.client.getConnectionId() === active.connectionId) {
+        this.client.send(MessageType.COMMAND_AUDIO_PREVIEW_CANCEL, { requestId });
+      }
+    };
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+      return await this.client.sendRequest<unknown>(
+        MessageType.COMMAND_AUDIO_PREVIEW, payload, requestId, LIMITS.BOT_AUDIO_PREVIEW_TIMEOUT_MS + 1000
+      );
+    } catch (error) {
+      if (!signal.aborted) cancel();
+      throw error;
+    } finally {
+      signal.removeEventListener('abort', cancel);
+    }
   }
 
   private renderAutocomplete(state: AutocompleteState): void {
     const fieldName = this.autocompleteField;
     const draft = this.store.getCommandDraft(this.channelId);
-    if (!fieldName || !draft || !this.isCurrent() || this.composing || draft.pending ||
+    if (!fieldName || !draft || !this.isCurrent() || this.composing || draft.pending || this.voiceError(draft.command) ||
         (draft.autocomplete[fieldName]?.query ?? '') !== state.query) return;
     this.parameterMenu = { kind: 'autocomplete', fieldName, activeIndex: state.choices.length ? 0 : -1 };
     this.menuChoices = state.choices;
     const trigger = this.parameterMenuTrigger();
     const menu = this.composer.querySelector<HTMLElement>('#bot-parameter-options');
     if (!trigger || !menu) return;
+    audioPreviewService.release(this.composer);
     const keys = {
       idle: 'botChat.autocompleteHint', loading: 'botChat.autocompleteLoading',
       empty: 'botChat.autocompleteEmpty', failed: 'botChat.autocompleteError', ready: 'botChat.parameterChoices',
@@ -746,6 +869,8 @@ export class BotChatView {
     const binding = this.fieldBinding(event.target);
     if (!binding || binding.context.disabled) return;
     if (event.target instanceof HTMLInputElement && event.target.dataset.botAutocomplete) {
+      // Edits arrive via input; replacing this field can emit a stale change on blur.
+      if (event.type === 'change') return;
       const name = event.target.dataset.botAutocomplete;
       if (event instanceof InputEvent && event.isComposing) {
         this.composing = true;
@@ -912,6 +1037,12 @@ export class BotChatView {
     const draft = this.store.getCommandDraft(this.channelId);
     if (!draft || draft.pending || !this.canSend()) return;
     const command = draft.command;
+    const voiceError = this.voiceError(command);
+    if (voiceError) {
+      this.closeParameterMenu();
+      this.store.setCommandPending(this.channelId, draft, false, voiceError);
+      return;
+    }
     if (!this.store.isCommandAvailable(command)) {
       this.store.setCommandPending(this.channelId, draft, false, t('botChat.commandUnavailable'));
       return;
@@ -934,6 +1065,7 @@ export class BotChatView {
       locale: getLanguage(),
     };
     const connectionId = this.client.getConnectionId();
+    const voiceEpoch = this.voiceEpoch;
     const folder = settingsStore.soundboardFolderPath;
     if (command.downloadsSound && (!userGesture || !draft.downloadConsent)) {
       this.store.setCommandPending(this.channelId, draft, false, t('botChat.downloadNeedsGesture'));
@@ -953,9 +1085,17 @@ export class BotChatView {
       }
       if (this.store.getCommandDraft(this.channelId) !== draft || !draft.pending ||
           this.client.getConnectionId() !== connectionId || !this.canSend()) return;
+      if (voiceEpoch !== this.voiceEpoch || this.voiceError(command)) {
+        this.store.setCommandPending(this.channelId, draft, false, this.voiceError(command) ?? t('botChat.voiceContextChanged'));
+        return;
+      }
       const ack = await this.client.sendRequest<CommandInvokedPayload>(MessageType.COMMAND_INVOKE,
         { ...payload, ...botUserSettingsPayload(this.client, this.server, command.botId) });
-      if (this.store.getCommandDraft(this.channelId) !== draft || !draft.pending) return;
+      if (this.store.getCommandDraft(this.channelId) !== draft || !draft.pending || voiceEpoch !== this.voiceEpoch) return;
+      if (this.voiceError(command)) {
+        this.store.setCommandPending(this.channelId, draft, false, this.voiceError(command));
+        return;
+      }
       if (!ack || typeof ack.invocationId !== 'string' || !ack.invocationId || ack.invocationId.length > 128 ||
           ack.botId !== command.botId || ack.commandName !== command.name || ack.channelId !== this.channelId ||
           this.client.getConnectionId() !== connectionId || this.client.getStatus() !== 'CONNECTED') {
@@ -966,14 +1106,16 @@ export class BotChatView {
       if (command.downloadsSound) localSoundDownloads.authorize(this.client, this.store, this.server, command, ack, connectionId, folder, userGesture);
       this.store.clearCommand(this.channelId, draft);
     } catch (error) {
-      if (draft.pending) this.store.setCommandPending(this.channelId, draft, false, botRequestError(error));
+      if (this.store.getCommandDraft(this.channelId) === draft && draft.pending && voiceEpoch === this.voiceEpoch) {
+        this.store.setCommandPending(this.channelId, draft, false, botRequestError(error));
+      }
     }
   }
 
   private async submitForm(invocationId: string, interactionId: string): Promise<void> {
     const invocation = this.store.getInvocation(invocationId);
     const form = invocation?.forms.find((state) => state.interactionId === interactionId);
-    if (!invocation || !form || form.status !== 'editing' || !this.canSend()) return;
+    if (!invocation || !form || form.status !== 'editing' || !this.canSend() || this.voiceError(invocation)) return;
     const result = formValuesFromInputs(form.form, form.values);
     if (!result.success) {
       this.store.failFormSubmit(invocationId, interactionId, botInputError(form.form.fields, result.field, result.reason));

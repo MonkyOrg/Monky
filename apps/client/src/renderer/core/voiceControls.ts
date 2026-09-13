@@ -24,7 +24,8 @@ export function updateLocalSpeaking(speaking: boolean): void {
     const sessionId = user.sessionId || user.id;
     const inCall = voiceStore.currentVoiceChannelId !== null
       && participants.get(sessionId)?.voiceState?.channelId === voiceStore.currentVoiceChannelId;
-    participants.setSpeaking(sessionId, voiceStore.isSpeaking && inCall);
+    // Physical capture can already be unmuted while its older server echo is still muted.
+    participants.setSpeaking(sessionId, voiceStore.isSpeaking && inCall, voiceStore);
   }
 }
 

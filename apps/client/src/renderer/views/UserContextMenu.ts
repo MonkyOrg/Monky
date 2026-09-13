@@ -39,8 +39,8 @@ export class UserContextMenu {
       .filter((role) => !role.isDefault && !serverStore.isAdminRole(role))
       .sort((a, b) => b.position - a.position);
 
-    const canMuteMembers = !user.isBot && serverStore.hasPermission(Permission.MUTE_MEMBERS);
-    const canDeafenMembers = !user.isBot && serverStore.hasPermission(Permission.DEAFEN_MEMBERS);
+    const canMuteMembers = serverStore.hasPermission(Permission.MUTE_MEMBERS);
+    const canDeafenMembers = serverStore.hasPermission(Permission.DEAFEN_MEMBERS);
     const canKickMembers = !!targetState && serverStore.hasPermission(Permission.KICK_MEMBERS);
     const canMoveMembers = !!targetState && serverStore.hasPermission(Permission.MOVE_MEMBERS) && voiceChannels.length > 0;
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES) && manageableRoles.length > 0;

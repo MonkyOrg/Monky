@@ -75,19 +75,39 @@ if (!process.versions.electron) {
       await finish(0);
       return;
     }
+    const musicKeyboardChecks = await runMusicCommandNativeSmoke(window);
+    console.log(`Native music selection: ${musicKeyboardChecks} checks passed`);
+    const voiceChecks = await window.webContents.executeJavaScript(`(${runVoiceCommandDomSmoke.toString()})()`, true);
+    console.log(`Voice command gates: ${voiceChecks} checks passed`);
+    if (process.argv.includes('--voice-only')) { await finish(0); return; }
     const previewChecks = await window.webContents.executeJavaScript(`(${runAudioPreviewLifecycleSmoke.toString()})()`, true);
     console.log(`Audio preview lifecycle: ${previewChecks} checks passed`);
+    const nativePreviewChecks = await runNativeAudioPreviewSmoke(`http://127.0.0.1:${address.port}/__command_dom_smoke__`);
+    console.log(`Native lazy Ogg preview: ${nativePreviewChecks} checks passed`);
     if (process.argv.includes('--autocomplete-only')) {
       const checks = await window.webContents.executeJavaScript(`(${runAutocompleteDomSmoke.toString()})()`, true);
       await runLocalDownloadGestureSmoke(window);
       const preferenceChecks = await window.webContents.executeJavaScript('window.autocompletePreferencesSmoke()', true);
+      const lazyChecks = await window.webContents.executeJavaScript('window.autocompleteLazyPreviewSmoke()', true);
       await window.webContents.executeJavaScript('window.autocompleteDomCleanup()', true);
       console.log(`Autocomplete DOM smoke: ${checks} checks passed`);
       console.log(`Bot preference transport: ${preferenceChecks} checks passed`);
+      console.log(`Lazy autocomplete previews: ${lazyChecks} checks passed`);
       await finish(0);
       return;
     }
     await window.webContents.executeJavaScript(`(${runDomSmoke.toString()})()`, true);
+    for (const withArguments of [true, false]) {
+      await window.webContents.executeJavaScript(`window.commandSpaceFixture.prepare(${withArguments})`, true);
+      await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyDown', key: ' ', code: 'Space', text: ' ', unmodifiedText: ' ',
+        windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32,
+      });
+      await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32,
+      });
+      await window.webContents.executeJavaScript('window.commandSpaceFixture.verify()', true);
+    }
     fs.writeFileSync(path.join(output, 'command-dom-catalog.png'), (await window.webContents.capturePage()).toPNG());
     const result = await window.webContents.executeJavaScript('window.commandDomCaptureComposer()', true);
     fs.writeFileSync(path.join(output, 'command-dom-composer.png'), (await window.webContents.capturePage()).toPNG());
@@ -97,6 +117,7 @@ if (!process.versions.electron) {
     fs.writeFileSync(path.join(output, 'command-dom-audio-selector.png'), (await window.webContents.capturePage()).toPNG());
     await runLocalDownloadGestureSmoke(window);
     const preferenceChecks = await window.webContents.executeJavaScript('window.autocompletePreferencesSmoke()', true);
+    const lazyChecks = await window.webContents.executeJavaScript('window.autocompleteLazyPreviewSmoke()', true);
     await window.webContents.executeJavaScript('window.autocompleteDomCleanup()', true);
     const sidebarChecks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
     const restrictionChecks = await window.webContents.executeJavaScript(`(${runServerRestrictionSmoke.toString()})()`, true);
@@ -117,9 +138,103 @@ if (!process.versions.electron) {
     console.log(`Settings navigation smoke: ${settingsChecks} checks passed`);
     console.log(`Bot settings DOM smoke: ${botSettingsChecks} checks passed`);
     console.log(`Bot preference transport: ${preferenceChecks} checks passed`);
+    console.log(`Lazy autocomplete previews: ${lazyChecks} checks passed`);
     console.log('Screenshots: dist-test\\command-dom-catalog.png and dist-test\\command-dom-composer.png');
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
+}
+
+function authoredOggPreview() {
+  const page = (packets, sequence, flags, granule) => {
+    const header = Buffer.alloc(27 + packets.length);
+    header.write('OggS'); header[5] = flags; header.writeBigUInt64LE(BigInt(granule), 6);
+    header.writeUInt32LE(1, 14); header.writeUInt32LE(sequence, 18); header[26] = packets.length;
+    packets.forEach((packet, index) => { header[27 + index] = packet.length; });
+    const bytes = Buffer.concat([header, ...packets]);
+    let crc = 0;
+    for (const byte of bytes) {
+      crc ^= byte << 24;
+      for (let bit = 0; bit < 8; bit++) crc = ((crc << 1) ^ ((crc & 0x80000000) ? 0x04c11db7 : 0)) >>> 0;
+    }
+    bytes.writeUInt32LE(crc, 22);
+    return bytes;
+  };
+  const header = Buffer.alloc(19);
+  header.write('OpusHead'); header[8] = 1; header[9] = 2; header.writeUInt32LE(48000, 12);
+  const tags = Buffer.alloc(16); tags.write('OpusTags');
+  return Buffer.concat([
+    page([header], 0, 2, 0), page([tags], 1, 0, 0),
+    page(Array.from({ length: 25 }, () => Buffer.from([0xf8, 0xff, 0xfe])), 2, 4, 25 * 960),
+  ]);
+}
+
+async function runNativeAudioPreviewSmoke(url) {
+  const { BrowserWindow, ipcMain } = require('electron');
+  const { AUDIO_PREVIEW_IPC } = require('@monky/shared');
+  const { AudioPreviews } = require(path.join(clientRoot, 'dist-electron', 'main', 'audioPreviews.js'));
+  const previews = new AudioPreviews({
+    resolve: async () => { throw new Error('A byte preview must never resolve external DNS'); },
+    request: async () => { throw new Error('A byte preview must never fetch an external URL'); },
+  });
+  const nativeWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false, offscreen: true,
+      preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.js'),
+    },
+  });
+  const owner = nativeWindow.webContents.id;
+  const owns = event => event.sender === nativeWindow.webContents && event.senderFrame === nativeWindow.webContents.mainFrame;
+  ipcMain.handle(AUDIO_PREVIEW_IPC.load, (event, input) => owns(event)
+    ? previews.load(owner, input) : { status: 'failed', reason: 'invalid_request' });
+  ipcMain.handle(AUDIO_PREVIEW_IPC.cancel, (event, input) => owns(event) && previews.cancel(owner, input));
+  try {
+    await nativeWindow.loadURL(url);
+    return await nativeWindow.webContents.executeJavaScript(`(${async function (audioBase64) {
+      const [{ AudioPreviewService }, { renderSelectionChoiceList }] = await Promise.all([
+        import('/core/AudioPreviewService.ts'), import('/utils/selectionChoices.ts'),
+      ]);
+      let checks = 0;
+      const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+      check(typeof require === 'undefined' && typeof process === 'undefined', 'Native preview renderer remains isolated');
+      const input = { requestId: 'native-clip', audioBase64, mimeType: 'audio/ogg', fileName: 'authored.ogg' };
+      const validated = await window.api.loadAudioPreview(input);
+      check(validated.status === 'ready' && validated.mimeType === 'audio/ogg', 'Real typed IPC validates authored Ogg bytes');
+      const decoder = new OfflineAudioContext(2, 48000, 48000);
+      const decoded = await decoder.decodeAudioData(new Uint8Array(validated.data).buffer);
+      check(decoded.numberOfChannels === 2 && decoded.sampleRate === 48000 && Math.abs(decoded.duration - 0.5) < 0.01,
+        'Electron decodes the actual stereo 48 kHz Opus preview');
+      for (const extra of [
+        { audioBase64: btoa('<html>not audio</html>') }, { mimeType: 'audio/mpeg' },
+        { audioBase64: 'AB==' }, { url: 'https://127.0.0.1/untrusted.ogg' },
+      ]) check((await window.api.loadAudioPreview({ ...input, ...extra })).status === 'failed', 'Native IPC rejects malformed audio and mixed URL/byte inputs');
+      const root = document.getElementById('app');
+      root.innerHTML = renderSelectionChoiceList({
+        choices: [{ label: 'Authored Opus', value: 'track', audio: { resourceId: 'opaque', durationMs: 500 } }],
+        label: 'Preview', header: 'Preview', idPrefix: 'native', keyPrefix: 'native', optionAttributes: () => '',
+      });
+      let calls = 0;
+      const service = new AudioPreviewService();
+      const unbind = service.bind(root, async () => { calls++; return { status: 'ok', audioBase64, mimeType: 'audio/ogg' }; });
+      try {
+        check(calls === 0, 'Rendering a lazy audio choice does not request its provider');
+        root.querySelector('[data-audio-preview-action]').click();
+        for (let attempt = 0; attempt < 100 && !service.active?.audio; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+        const audio = service.active?.audio;
+        check(calls === 1 && audio?.src.startsWith('blob:'), 'Preview click reuses native validation and only a local Blob source');
+        for (let attempt = 0; attempt < 100 && audio.paused; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+        check(!audio.paused && !audio.error, 'The actual isolated Electron player starts the native-validated Opus clip');
+        unbind();
+        check(audio.paused && !audio.getAttribute('src') && service.active === null, 'Closing releases the real player and its source');
+      } finally { unbind(); }
+      return checks;
+    }.toString()})(${JSON.stringify(authoredOggPreview().toString('base64'))})`, true);
+  } finally {
+    previews.cancelOwner(owner);
+    ipcMain.removeHandler(AUDIO_PREVIEW_IPC.load);
+    ipcMain.removeHandler(AUDIO_PREVIEW_IPC.cancel);
+    nativeWindow.destroy();
+  }
 }
 
 async function runAudioPreviewLifecycleSmoke() {
@@ -175,7 +290,12 @@ async function runAudioPreviewLifecycleSmoke() {
   const root = document.createElement('div');
   document.body.append(root);
   const service = new AudioPreviewService();
-  const unbind = service.bind(root);
+  const providers = [];
+  const unbind = service.bind(root, (resourceId, requestId, signal) => {
+    const pending = deferred();
+    providers.push({ resourceId, requestId, signal, ...pending });
+    return pending.promise;
+  });
   try {
     window.Audio = FixtureAudio;
     URL.createObjectURL = blob => { const url = previous.createUrl.call(URL, blob); urls.push(url); return url; };
@@ -336,6 +456,34 @@ async function runAudioPreviewLifecycleSmoke() {
     appEvents.emit('settings.updated');
     await settle();
     check(routes.length === routesBeforeRelease, 'Released previews must remove their settings listener');
+    root.innerHTML = renderSelectionChoiceList({
+      choices: [{ label: 'Lazy clip', value: 'canonical', audio: { resourceId: 'opaque', durationMs: 10_000 } }],
+      label: 'Lazy', header: 'Lazy', idPrefix: 'lazy', keyPrefix: 'lazy', volumeScope: 'preview-lifecycle-command',
+      optionAttributes: () => 'data-lifecycle-select',
+    });
+    check(providers.length === 0, 'Lazy rendering cannot start extraction');
+    play(0);
+    await settle();
+    providers[0].resolve({ status: 'ok', audioBase64: 'AAAA', mimeType: 'audio/wav' });
+    await settle();
+    const lazyAudio = audios.at(-1);
+    check(lazyAudio.volume === 0.27 && lazyAudio.sinkId === 'after-release', 'Lazy clips reuse command volume and media output routing');
+    lazyAudio.duration = 30;
+    lazyAudio.currentTime = 10;
+    lazyAudio.dispatchEvent(new Event('timeupdate'));
+    check(lazyAudio.paused && progress(0).max === 10 && progress(0).value === 10, 'Lazy playback is capped at ten seconds even for oversized duration metadata');
+    play(0);
+    await settle();
+    check(!lazyAudio.paused && lazyAudio.currentTime === 0 && providers.length === 1, 'Replaying a generated clip reuses only its current local bytes');
+    service.release(root);
+    play(0);
+    await settle();
+    const beforeCancelledProvider = audios.length;
+    service.release(root);
+    check(providers[1].signal.aborted, 'Closing propagates AbortSignal to a pending lazy loader');
+    providers[1].resolve({ status: 'ok', audioBase64: 'AAAA', mimeType: 'audio/wav' });
+    await settle();
+    check(audios.length === beforeCancelledProvider && urls.every(url => revoked.includes(url)), 'Cancelled lazy bytes cannot resurrect playback or leak Blobs');
   } finally {
     unbind();
     root.remove();
@@ -348,6 +496,399 @@ async function runAudioPreviewLifecycleSmoke() {
     URL.revokeObjectURL = previous.revokeUrl;
   }
   return checks;
+}
+
+async function runMusicCommandNativeSmoke(window) {
+  await window.webContents.executeJavaScript(`(${runVoiceCommandDomSmoke.toString()})(true)`, true);
+  const key = async (key, code, virtualKey, text) => {
+    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyDown', key, code, windowsVirtualKeyCode: virtualKey, nativeVirtualKeyCode: virtualKey,
+      ...(text ? { text, unmodifiedText: text } : {}),
+    });
+    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyUp', key, code, windowsVirtualKeyCode: virtualKey, nativeVirtualKeyCode: virtualKey,
+    });
+  };
+  try {
+    const scenarios = [
+      { control: 'Enter' },
+      { control: 'Enter', botJoins: true },
+      { control: 'Tab' },
+      { control: 'click' },
+      { control: 'Enter', optional: true },
+      { control: 'Enter', unrestricted: true },
+    ];
+    for (const scenario of scenarios) {
+      window.webContents.sendInputEvent({ type: 'mouseLeave', x: -1, y: -1 });
+      await window.webContents.executeJavaScript(`window.musicCommandNativeFixture.prepare(${JSON.stringify(scenario)})`, true);
+      await window.webContents.debugger.sendCommand('Input.insertText', { text: '/play' });
+      await key(' ', 'Space', 32, ' ');
+      await window.webContents.debugger.sendCommand('Input.insertText', { text: 'generated music' });
+      await window.webContents.executeJavaScript('window.musicCommandNativeFixture.results()', true);
+      await key('ArrowDown', 'ArrowDown', 40);
+      if (scenario.control === 'click') {
+        const point = await window.webContents.executeJavaScript('window.musicCommandNativeFixture.choicePoint()', true);
+        await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+        await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+          type: 'mousePressed', button: 'left', clickCount: 1, ...point,
+        });
+        await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+          type: 'mouseReleased', button: 'left', clickCount: 1, ...point,
+        });
+      } else if (scenario.control === 'Tab') {
+        await key('Tab', 'Tab', 9, '\t');
+      } else {
+        await key('Enter', 'Enter', 13, '\r');
+      }
+      if (scenario.optional) {
+        await window.webContents.executeJavaScript('window.musicCommandNativeFixture.verifyOptional()', true);
+        await key('Enter', 'Enter', 13, '\r');
+      }
+      await window.webContents.executeJavaScript('window.musicCommandNativeFixture.verify()', true);
+    }
+    return await window.webContents.executeJavaScript('window.musicCommandNativeFixture.checks()', true);
+  } finally {
+    await window.webContents.executeJavaScript('window.musicCommandNativeFixture.cleanup()', true);
+  }
+}
+
+async function runVoiceCommandDomSmoke(nativeMusic = false) {
+  const [{ ChatView }, { sessionManager }, { voiceStore }, { appEvents }, { bindBotVoiceCommandEvents }, language,
+    { audioPreviewService }, routing] = await Promise.all([
+    import('/views/ChatView.ts'), import('/core/SessionManager.ts'), import('/stores/voiceStore.ts'), import('/core/EventBus.ts'),
+    import('/core/botVoiceCommandEvents.ts'), import('/i18n/index.ts'), import('/core/AudioPreviewService.ts'),
+    import('/core/sessionRouting.ts'),
+  ]);
+  let checks = 0;
+  const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+  const waitFor = async (predicate, message) => {
+    for (let i = 0; i < 200; i++) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 15));
+    }
+    throw new Error(message + ': ' + JSON.stringify({
+      query: document.querySelector('[data-bot-autocomplete]')?.value,
+      notice: document.querySelector('.bot-command-voice-error')?.textContent,
+      menu: document.querySelector('#bot-parameter-options')?.textContent,
+      channel: voiceStore.currentVoiceChannelId, session: voiceStore.voiceSessionKey,
+      invoked: invoked.length, draftError: store.getCommandDraft('chat')?.error,
+      selected: store.getCommandDraft('chat')?.autocomplete.track?.selected?.value,
+    }));
+  };
+  const type = (element, value) => {
+    if (!element) throw new Error(`Missing voice command input for ${value}`);
+    element.focus(); element.value = value; element.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  language.setLanguage('pt-BR');
+  sessionManager.install();
+  const session = sessionManager.create('voice-command-dom', 7345, 'Caller');
+  const { client, serverStore: server, chatStore: store, participants } = session;
+  const user = { id: 'caller', clientId: 'caller', sessionId: 'this-device', nickname: 'Caller', status: 'ONLINE', joinedAt: 1 };
+  const bot = { id: 'music-bot', clientId: 'music-bot', sessionId: 'bot-device', nickname: 'Bot', status: 'ONLINE', joinedAt: 1, isBot: true };
+  const state = (person, channelId) => ({
+    sessionId: person.sessionId, userId: person.id, channelId, isMuted: false, isDeafened: false, isSpeaking: false,
+    isScreenSharing: false, isSharingScreenAudio: false, isCameraOn: false, serverMuted: false, serverDeafened: false,
+  });
+  server.setServerDetails({
+    id: 'voice-command-server', name: 'Voice commands', createdAt: 1, maxUsers: 10, members: [user, bot], voiceStates: {},
+    channels: ['chat', 'other-chat', 'voice', 'other'].map((id, position) => ({
+      id, serverId: 'voice-command-server', name: id, type: id.endsWith('chat') ? 'TEXT' : 'VOICE',
+      position, createdAt: 1, botCommandsEnabled: true, isPrivate: false, allowedRoleIds: [],
+    })), knownMembers: [user, bot], ownerId: user.id, myPermissions: 0xffffffff, roles: [], userRoles: [],
+  }, user);
+  participants.setUsers([user, bot]);
+  client.getStatus = () => 'CONNECTED';
+  client.getConnectionId = () => 'voice-dom-connection';
+  client.getCurrentServerUrl = () => session.key;
+  const music = {
+    name: 'melody', botId: bot.id, botName: 'Bot', description: 'Voice fixture', voiceRequirement: 'same-bot-channel',
+    options: [
+      { name: 'track', type: 'string', description: 'Track', required: true, autocomplete: true },
+      { name: 'next', type: 'boolean', description: 'Next' },
+    ],
+  };
+  const utility = { ...music, name: 'utility', voiceRequirement: undefined };
+  const mini = { ...music, name: 'mini', voiceRequirement: 'joined', options: [] };
+  const directRequired = { ...music, name: 'direct', options: [{
+    name: 'track', type: 'string', description: 'Track', required: true,
+    choices: [{ label: 'Generated fixture', value: 'generated', audio: { url: 'https://fixture.example/generated.wav', fileName: 'generated.wav' } }],
+  }] };
+  store.setCommands([music, utility, mini, directRequired]); server.setSlashCommands([music, utility, mini, directRequired]);
+  sessionManager.activate(session.key);
+  const queries = [], previews = [], cancellations = [], invoked = [], loads = [], nativeCancels = [];
+  let joinBotOnInvoke = false;
+  client.send = (type, payload, requestId) => {
+    if (type === 'COMMAND_AUTOCOMPLETE') queries.push({ payload, requestId });
+    if (type === 'COMMAND_AUDIO_PREVIEW') previews.push({ payload, requestId });
+    if (type === 'COMMAND_AUTOCOMPLETE_CANCEL' || type === 'COMMAND_AUDIO_PREVIEW_CANCEL') cancellations.push({ type, payload });
+    if (type === 'COMMAND_INVOKE') {
+      invoked.push(payload);
+      if (joinBotOnInvoke) moveBot('voice');
+      queueMicrotask(() => client.handleIncomingMessage({ type: 'COMMAND_INVOKED', requestId,
+        payload: { invocationId: `voice-invoke-${invoked.length}`, botId: payload.botId, commandName: payload.commandName, channelId: payload.channelId } }));
+    }
+  };
+  const sendRequest = client.sendRequest.bind(client);
+  client.sendRequest = (type, ...args) => type === 'SELECTOR_LIST' ? Promise.resolve({ selectors: [] }) : sendRequest(type, ...args);
+  const previousApi = window.api;
+  const NativeAudio = window.Audio;
+  const played = [];
+  window.Audio = function (...args) { const audio = new NativeAudio(...args); played.push(audio); return audio; };
+  const wave = new Uint8Array(44 + 8000 * 5 * 2);
+  const wav = new DataView(wave.buffer);
+  const write = (offset, value) => [...value].forEach((character, index) => wav.setUint8(offset + index, character.charCodeAt(0)));
+  write(0, 'RIFF'); wav.setUint32(4, wave.length - 8, true); write(8, 'WAVEfmt ');
+  wav.setUint32(16, 16, true); wav.setUint16(20, 1, true); wav.setUint16(22, 1, true);
+  wav.setUint32(24, 8000, true); wav.setUint32(28, 16000, true); wav.setUint16(32, 2, true); wav.setUint16(34, 16, true);
+  write(36, 'data'); wav.setUint32(40, wave.length - 44, true);
+  window.api = {
+    ...previousApi,
+    loadAudioPreview: async request => { loads.push(request); return { status: 'ready', data: wave, mimeType: 'audio/wav' }; },
+    cancelAudioPreview: async request => { nativeCancels.push(request); return true; },
+  };
+  const off = bindBotVoiceCommandEvents();
+  const root = document.getElementById('app');
+  const view = new ChatView(root); view.setChannel('chat');
+  const input = () => root.querySelector('[data-bot-autocomplete]');
+  const join = channelId => {
+    participants.updateVoiceState(state(user, channelId));
+    voiceStore.setChannel(channelId, session.key); appEvents.emit('participants.updated');
+  };
+  const leave = () => { voiceStore.setChannel(null); participants.removeVoiceState(user.sessionId); appEvents.emit('participants.updated'); };
+  const moveBot = channelId => routing.routeSessionEvent(session.key, 'message.VOICE_STATE_CHANGED', () => {
+    if (channelId) participants.updateVoiceState(state(bot, channelId)); else participants.removeVoiceState(bot.sessionId);
+  });
+  const reply = (request, payload, type = 'COMMAND_AUTOCOMPLETE_RESULT') =>
+    client.handleIncomingMessage({ type, requestId: request.requestId, payload });
+  const prepare = async (query, lazy = true) => {
+    const before = queries.length;
+    type(input(), query);
+    await waitFor(() => queries.length > before, `Voice autocomplete did not start (${query})`);
+    reply(queries.at(-1), { status: 'ok', choices: [{
+      label: 'Generated fixture', value: 'opaque-track',
+      audio: lazy ? { resourceId: 'fixture-resource', fileName: 'generated.wav' } : { url: 'https://fixture.example/generated.wav', fileName: 'generated.wav' },
+    }] });
+    await waitFor(() => !!root.querySelector('[data-parameter-option]'), 'Voice autocomplete did not render');
+  };
+  const listen = () => root.querySelector('[data-audio-preview-action=toggle]').click();
+  const binary = [];
+  for (let offset = 0; offset < wave.length; offset += 16384) binary.push(String.fromCharCode(...wave.subarray(offset, offset + 16384)));
+  const ready = { status: 'ok', audioBase64: btoa(binary.join('')), mimeType: 'audio/wav' };
+  const nativeListeners = [];
+  const cleanup = () => {
+    nativeListeners.forEach(unbind => unbind());
+    view.destroy(); off(); audioPreviewService.release(); voiceStore.reset(); sessionManager.removeAll();
+    // Later fixtures install standalone stores instead of SessionManager bundles.
+    routing.setSessionEventRouter((_sessionKey, _event, emit) => emit());
+    window.Audio = NativeAudio; window.api = previousApi; language.setLanguage('pt-BR');
+    delete window.musicCommandNativeFixture;
+  };
+  if (nativeMusic) {
+    const command = { ...music, name: 'play', options: [{ ...music.options[0], name: 'busca' }] };
+    store.setCommands([command]); server.setSlashCommands([command]);
+    const choices = [0, 1].map(index => ({
+      label: `Generated music ${index + 1}`, value: `https://www.youtube.com/watch?v=generated0${index}`,
+      audio: { resourceId: `generated-${index}`, fileName: `generated-${index}.ogg` },
+    }));
+    let beforeQueries = 0;
+    let beforeInvocations = 0;
+    let scenario;
+    const events = [];
+    for (const eventName of ['input', 'change', 'keydown', 'focusout']) {
+      const listener = event => {
+        const draft = store.getCommandDraft('chat');
+        events.push({
+          event: eventName, key: event.key, trusted: event.isTrusted, target: event.target.id,
+          value: event.target.value, query: draft?.autocomplete.busca?.query,
+          selected: draft?.autocomplete.busca?.selected?.value, pending: draft?.pending,
+        });
+      };
+      root.addEventListener(eventName, listener, true);
+      nativeListeners.push(() => root.removeEventListener(eventName, listener, true));
+    }
+    window.musicCommandNativeFixture = {
+      prepare: nextScenario => {
+        scenario = nextScenario;
+        store.clearCommand('chat'); moveBot(null); join('voice');
+        const currentCommand = {
+          ...command, voiceRequirement: scenario.unrestricted ? undefined : command.voiceRequirement,
+          options: [...command.options, ...(scenario.optional ? [music.options[1]] : [])],
+        };
+        store.setCommands([currentCommand]); server.setSlashCommands([currentCommand]);
+        joinBotOnInvoke = !!scenario.botJoins;
+        beforeQueries = queries.length; beforeInvocations = invoked.length; events.length = 0;
+        root.querySelector('#chat-message-input').focus();
+      },
+      results: async () => {
+        await waitFor(() => queries.length > beforeQueries, 'Native music search did not start');
+        reply(queries.at(-1), { status: 'ok', choices });
+        await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 2, 'Native music choices did not render');
+      },
+      choicePoint: () => {
+        const box = root.querySelector('[data-parameter-option="1"] .bot-choice-copy').getBoundingClientRect();
+        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      },
+      verifyOptional: () => {
+        check(invoked.length === beforeInvocations, 'Native selection leaves optional parameters open for editing');
+        check(store.getCommandDraft('chat')?.autocomplete.busca?.selected?.value === choices[1].value,
+          'A native blur must not discard the selected URL while optional parameters remain open');
+      },
+      verify: async () => {
+        try {
+          await waitFor(() => invoked.length === beforeInvocations + 1 && !store.getCommandDraft('chat'),
+            'First native Enter must select the highlighted music and close the composer');
+        } catch (error) {
+          throw new Error(`${error.message}\nScenario: ${JSON.stringify(scenario)}\nNative events: ${JSON.stringify(events)}`);
+        }
+        check(invoked.at(-1).options.busca === choices[1].value, 'Native selection sends the highlighted music URL exactly once');
+        check(events.some(event => event.event === 'input' && event.trusted), 'Search uses native user input, not synthetic value assignment');
+        if (scenario.control !== 'click') {
+          check(events.some(event => event.event === 'change' && event.trusted && event.selected === choices[1].value),
+            'The stale native change is exercised after selecting the URL, without clearing the selection');
+        }
+      },
+      checks: () => checks,
+      cleanup,
+    };
+    return;
+  }
+  try {
+    const chatInput = root.querySelector('#chat-message-input');
+    type(chatInput, '/mel');
+    check(root.querySelector('[data-cmd-index]')?.getAttribute('aria-disabled') === 'true' &&
+      root.querySelector('#command-dropup').textContent.includes('canal de voz'), 'Catalog explains voice denial before selecting');
+    root.querySelector('[data-cmd-index]').click();
+    check(!store.getCommandDraft('chat') && !chatInput.disabled && chatInput.value === '/mel',
+      'Blocked command selection does not trap ordinary composition');
+    store.selectCommand('chat', directRequired);
+    root.querySelector('[data-bot-choice]').click(); listen();
+    check(loads.length === 0 && root.querySelector('[data-audio-preview-status]').textContent.includes('canal de voz'),
+      'Direct HTTPS previews also require voice when command metadata requires it');
+    store.clearCommand('chat');
+    store.selectCommand('chat', music, 'offline');
+    type(input(), 'still offline');
+    root.querySelector('[data-command-form]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 550));
+    check(queries.length === 0 && previews.length === 0 && invoked.length === 0, 'Outside voice blocks query, preview and execute');
+    check(!input().disabled && !root.querySelector('[data-bot-action=cancel-command]').disabled &&
+      root.querySelector('.bot-command-run').disabled, 'Voice denial keeps command editing and clearing available');
+    join('voice');
+    type(input(), 'pending leave');
+    await waitFor(() => queries.length === 1, 'Pending voice query did not start');
+    const pendingQuery = queries.at(-1);
+    leave();
+    reply(pendingQuery, { status: 'ok', choices: [{ label: 'Stale fixture', value: 'stale-id' }] });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(!root.querySelector('[data-parameter-option]'), 'Late voice suggestions cannot reappear after leaving');
+    join('voice');
+    await prepare('joined');
+    check(previews.length === 0 && loads.length === 0, 'Query results never start private audio without listen');
+    listen();
+    const old = previews.at(-1);
+    const oldQuery = queries.at(-1);
+    leave();
+    check(cancellations.some(entry => entry.type === 'COMMAND_AUDIO_PREVIEW_CANCEL' && entry.payload.requestId === old.requestId) &&
+      cancellations.some(entry => entry.type === 'COMMAND_AUTOCOMPLETE_CANCEL' && entry.payload.requestId === oldQuery.requestId),
+    'Leaving cancels both lazy provider and completed autocomplete authority');
+    reply(old, ready, 'COMMAND_AUDIO_PREVIEW_RESULT');
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(loads.length === 0, 'Late private preview never reaches native playback');
+    join('voice');
+    await prepare('playing');
+    listen(); reply(previews.at(-1), ready, 'COMMAND_AUDIO_PREVIEW_RESULT');
+    await waitFor(() => played.length > 0 && !played.at(-1).paused, 'Generated voice preview did not play');
+    const activeAudio = played.at(-1);
+    moveBot('other');
+    check(activeAudio.paused && nativeCancels.length > 0, 'Bot room mismatch stops running private playback');
+    check(root.querySelector('.bot-command-voice-error').textContent.includes('já está em outro canal de voz'),
+      'Mismatch is a localized, explicit explanation');
+    language.setLanguage('en'); view.render();
+    check(root.querySelector('.bot-command-voice-error').textContent.includes('already in another voice channel'), 'Mismatch follows selected English language');
+    const beforeQueries = queries.length;
+    type(input(), 'wrong room');
+    root.querySelector('[data-command-form]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 550));
+    check(queries.length === beforeQueries && invoked.length === 0, 'Mismatch blocks every music command path');
+    store.clearCommand('chat'); store.selectCommand('chat', mini);
+    root.querySelector('[data-command-form]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => invoked.length === 1 && !store.getCommandDraft('chat'), 'Joined-only miniapp should not require the bot in voice');
+    check(invoked[0].commandName === 'mini', 'Voice policy comes from metadata, not command names or bot IDs');
+    moveBot(null); store.selectCommand('chat', music);
+    await prepare('choose before moving');
+    root.querySelector('[data-parameter-option]').click();
+    check(store.getCommandDraft('chat').values.track === 'opaque-track', 'A current suggestion can be selected');
+    join('other');
+    check(store.getCommandDraft('chat').values.track === undefined &&
+      store.getCommandDraft('chat').autocomplete.track.query === 'Generated fixture', 'Moving invalidates opaque selections while keeping editable text');
+    const beforeEligibleQuery = queries.length;
+    type(input(), 'eligible pending query');
+    await waitFor(() => queries.length > beforeEligibleQuery, 'Eligible room query did not start');
+    const eligibleQuery = queries.at(-1);
+    join('voice');
+    check(root.querySelector('.bot-command-voice-error').hidden &&
+      cancellations.some(entry => entry.type === 'COMMAND_AUTOCOMPLETE_CANCEL' && entry.payload.requestId === eligibleQuery.requestId),
+    'An eligible room-to-room move cancels the original search authority');
+    reply(eligibleQuery, { status: 'ok', choices: [{ label: 'Wrong room result', value: 'wrong-room' }] });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(!root.querySelector('[data-parameter-option]') && queries.length === beforeEligibleQuery + 1,
+      'Moving while eligible neither displays stale choices nor silently retargets the search');
+    await prepare('eligible pending preview');
+    const loadsBeforeMove = loads.length;
+    listen();
+    const eligiblePreview = previews.at(-1);
+    join('other');
+    reply(eligiblePreview, ready, 'COMMAND_AUDIO_PREVIEW_RESULT');
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(root.querySelector('.bot-command-voice-error').hidden && loads.length === loadsBeforeMove &&
+      cancellations.some(entry => entry.type === 'COMMAND_AUDIO_PREVIEW_CANCEL' && entry.payload.requestId === eligiblePreview.requestId),
+    'An eligible room move cancels pending preview work and rejects its late audio');
+    await prepare('eligible playing preview');
+    const playedBeforeMove = played.length;
+    listen(); reply(previews.at(-1), ready, 'COMMAND_AUDIO_PREVIEW_RESULT');
+    await waitFor(() => played.length > playedBeforeMove && !played.at(-1).paused, 'Eligible preview did not start');
+    const eligibleAudio = played.at(-1);
+    join('voice');
+    check(eligibleAudio.paused && root.querySelector('.bot-command-voice-error').hidden,
+      'Changing rooms stops current playback even when the bot is not in voice and the caller stays eligible');
+    join('other');
+    await prepare('hidden selection');
+    root.querySelector('[data-parameter-option]').click();
+    view.setChannel('other-chat');
+    leave(); join('other');
+    check(store.getCommandDraft('chat').values.track === undefined, 'Hidden channel drafts are invalidated even on leave/rejoin to the same room');
+    view.setChannel('chat'); store.clearCommand('chat'); leave();
+    store.selectCommand('chat', utility);
+    await prepare('utility outside voice', false);
+    const lazyBefore = previews.length;
+    listen();
+    await waitFor(() => played.length > 1 && !played.at(-1).paused, 'Direct utility preview did not play');
+    const utilityAudio = played.at(-1);
+    join('voice'); leave();
+    check(!utilityAudio.paused && previews.length === lazyBefore && loads.at(-1).url === 'https://fixture.example/generated.wav',
+      'Unrestricted direct HTTPS preview is unaffected by voice changes');
+    root.querySelector('[data-parameter-option]').click();
+    root.querySelector('[data-command-form]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await waitFor(() => invoked.length === 2, 'Utility command should work outside voice');
+    check(invoked[1].commandName === 'utility', 'Unrelated commands remain executable without voice');
+    const singleChoiceMusic = { ...music, options: [music.options[0]] };
+    store.setCommands([singleChoiceMusic]); server.setSlashCommands([singleChoiceMusic]);
+    for (const botJoins of [false, true]) {
+      store.clearCommand('chat');
+      moveBot(null); join('voice');
+      store.selectCommand('chat', singleChoiceMusic);
+      await prepare(botJoins ? 'music admission on Enter' : 'music Enter');
+      joinBotOnInvoke = botJoins;
+      const before = invoked.length;
+      input().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      await waitFor(() => invoked.length === before + 1 && !store.getCommandDraft('chat'),
+        `Enter must confirm a voice-bound music choice without leaving its title as an unsubmitted parameter (bot joins: ${botJoins})`);
+      check(invoked.at(-1).options.track === 'opaque-track',
+        'Music Enter sends the selected option value rather than its displayed title');
+    }
+    return checks;
+  } finally {
+    cleanup();
+  }
 }
 
 async function runAutocompleteDomSmoke() {
@@ -417,6 +958,9 @@ async function runAutocompleteDomSmoke() {
   const authorizedFolders = [];
   const previewLoads = [];
   const previewCancels = [];
+  const lazyRequests = [];
+  const lazyCancels = [];
+  const queryCancels = [];
   const syntheticWave = () => {
     const sampleRate = 8000;
     const samples = 800;
@@ -474,6 +1018,9 @@ async function runAutocompleteDomSmoke() {
   };
   client.send = (messageType, payload, requestId) => {
     if (messageType === 'COMMAND_AUTOCOMPLETE') queries.push({ payload, requestId, time: Date.now() });
+    if (messageType === 'COMMAND_AUTOCOMPLETE_CANCEL') queryCancels.push(payload);
+    if (messageType === 'COMMAND_AUDIO_PREVIEW') lazyRequests.push({ payload, requestId });
+    if (messageType === 'COMMAND_AUDIO_PREVIEW_CANCEL') lazyCancels.push(payload);
     if (messageType === 'COMMAND_INVOKE') {
       invoked.push(payload);
       const ack = { invocationId: `invocation-${invoked.length}`, channelId: payload.channelId, botId: payload.botId, commandName: payload.commandName };
@@ -867,6 +1414,85 @@ async function runAutocompleteDomSmoke() {
     check(JSON.stringify(queries.at(-1).payload.userSettings) === JSON.stringify({ language: 'en' }),
       'Host filename confirmation and local I/O choices never enter custom SDK values');
     response(queries.at(-1), choices);
+    return checks - beforeChecks;
+  };
+  window.autocompleteLazyPreviewSmoke = async () => {
+    const beforeChecks = checks;
+    const { audioPreviewService } = await import('/core/AudioPreviewService.ts');
+    store.clearCommand('one');
+    command = { ...command, downloadsSound: false, options: [...requiredOnlyOptions, { name: 'next', description: 'Next', type: 'boolean' }] };
+    store.setCommands([command]);
+    server.setSlashCommands([command]);
+    select();
+    const beforeInvoked = invoked.length;
+    const lazyChoices = ['first', 'second'].map(value => ({
+      label: value, value: `canonical-${value}`, audio: { resourceId: `opaque-${value}`, fileName: 'clip.wav', durationMs: 1000 },
+    }));
+    const prepare = async query => {
+      const before = queries.length;
+      type(input(), query);
+      await waitFor(() => queries.length > before);
+      response(queries.at(-1), lazyChoices);
+      await waitFor(() => root.querySelectorAll('[data-audio-resource-id]').length === 2);
+    };
+    const reply = (request, payload) => client.handleIncomingMessage({ type: 'COMMAND_AUDIO_PREVIEW_RESULT', requestId: request.requestId, payload });
+    const ready = { status: 'ok', audioBase64: btoa(String.fromCharCode(...syntheticWave())), mimeType: 'audio/wav' };
+    const play = index => root.querySelectorAll('[data-audio-preview-action]')[index].click();
+    await prepare('lazy first');
+    check(lazyRequests.length === 0, 'Autocomplete metadata never invokes the lazy provider');
+    let beforeLoads = previewLoads.length;
+    play(0);
+    await waitFor(() => lazyRequests.length === 1);
+    const old = lazyRequests.at(-1);
+    check(old.payload.autocompleteRequestId === queries.at(-1).requestId && old.payload.resourceId === 'opaque-first' &&
+      old.payload.channelId === 'one' && old.payload.botId === command.botId && previewLoads.length === beforeLoads,
+      'Only clicking listen sends the exact autocomplete authority, without a remote audio URL');
+    const oldQuery = queries.at(-1).requestId;
+    type(input(), 'lazy changing');
+    check(lazyCancels.some(cancel => cancel.requestId === old.requestId) && queryCancels.some(cancel => cancel.requestId === oldQuery),
+      'Editing cancels both provider and completed search authority immediately, before debounce');
+    reply(old, ready);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(previewLoads.length === beforeLoads, 'Late audio from older typing must not reach native playback');
+    await prepare('lazy current');
+    play(0);
+    const first = lazyRequests.at(-1);
+    play(1);
+    const second = lazyRequests.at(-1);
+    check(first !== second && lazyCancels.some(cancel => cancel.requestId === first.requestId),
+      'Switching preview results cancels the previous provider');
+    reply(first, ready);
+    reply(second, ready);
+    await waitFor(() => previewLoads.length > beforeLoads);
+    check(previewLoads.length === beforeLoads + 1 && previewLoads.at(-1).audioBase64 === ready.audioBase64 &&
+      !('url' in previewLoads.at(-1)), 'Only the current provider result enters the typed byte-validation IPC');
+    check(invoked.length === beforeInvoked && !store.getCommandDraft('one').values.sound,
+      'Lazy previews never select, invoke, download, or mutate the command queue');
+    for (const locale of ['pt-BR', 'en']) {
+      language.setLanguage(locale);
+      await prepare(`lazy error ${locale}`);
+      play(0);
+      reply(lazyRequests.at(-1), { status: 'failed', reason: 'handler_failed' });
+      await waitFor(() => root.querySelector('[data-audio-preview-state="failed"]'));
+      check(root.querySelector('[data-audio-preview-state="failed"]').textContent.includes(language.t('botChat.audioPreviewProviderFailed')),
+        `Provider errors use the ${locale} translation`);
+    }
+    audioPreviewService.release(root);
+    play(0);
+    const invalidated = lazyRequests.at(-1);
+    client.handleIncomingMessage({ type: 'COMMAND_AUTOCOMPLETE_CANCEL', payload: { requestId: queries.at(-1).requestId } });
+    check(find('#bot-parameter-options').hidden && lazyCancels.some(cancel => cancel.requestId === invalidated.requestId),
+      'Server expiry, disconnect, or access invalidation closes the choice and aborts its provider');
+    await prepare('lazy close');
+    play(0);
+    const closing = lazyRequests.at(-1);
+    find('[data-bot-action="cancel-command"]').click();
+    check(lazyCancels.some(cancel => cancel.requestId === closing.requestId) && audioPreviewService.active === null,
+      'Closing the command frees pending lazy playback and its request');
+    reply(closing, ready);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(invoked.length === beforeInvoked, 'No lazy lifecycle transition invokes a command');
+    language.setLanguage('pt-BR');
     return checks - beforeChecks;
   };
   return checks;
@@ -1303,6 +1929,9 @@ async function runSidebarPttSmoke() {
     + '<img id="main-user-avatar"><div id="voice-channels-list" style="width:250px"></div><div id="members-list-items"></div>';
   const view = new MainView(root);
   const stage = new VoiceStageView(document.getElementById('ptt-stage-fixture'));
+  const fixtureSession = sessionManager.create('ptt-controls.example', 3001, 'Local');
+  fixtureSession.client.getStatus = () => 'CONNECTED';
+  sessionManager.activate(fixtureSession.key);
   const send = networkClient.send;
   const play = soundEffects.play;
   const enumerateDevices = navigator.mediaDevices.enumerateDevices;
@@ -1310,6 +1939,7 @@ async function runSidebarPttSmoke() {
   soundEffects.play = () => {};
   settings.inputMode = 'push_to_talk';
   voice.currentVoiceChannelId = 'ptt-sidebar-fixture';
+  voice.voiceSessionKey = fixtureSession.key;
   voice.isMuted = voice.isDeafened = voice.serverMuted = voice.serverDeafened = false;
   voice.setMicrophoneState(false, false);
   language.setLanguage('pt-BR');
@@ -1317,10 +1947,8 @@ async function runSidebarPttSmoke() {
   selectEnhancer.init();
   const localUser = { id: 'ptt-local-user', sessionId: 'ptt-local-session', clientId: 'ptt-local-client', nickname: 'Local', status: 'ONLINE', joinedAt: 1 };
   const remoteUser = { ...localUser, id: 'ptt-remote-user', sessionId: 'ptt-remote-session', clientId: 'ptt-remote-client', nickname: 'Remote' };
-  const server = servers.createServerStore();
-  const manager = participants.createParticipantManager();
-  servers.setActiveServerStore(server);
-  participants.setActiveParticipantManager(manager);
+  const server = fixtureSession.serverStore;
+  const manager = fixtureSession.participants;
   server.setServerDetails({
     id: 'ptt-server', name: 'PTT fixture', createdAt: 1, maxUsers: 10, voiceStates: {},
     channels: [{ id: voice.currentVoiceChannelId, serverId: 'ptt-server', name: 'Voice', type: 'VOICE', position: 0, createdAt: 1, isPrivate: false, allowedRoleIds: [] }],
@@ -1342,6 +1970,111 @@ async function runSidebarPttSmoke() {
     view.renderChannels();
     view.renderMembers();
     view.attachEvents();
+    {
+      const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+      const channelId = voice.currentVoiceChannelId;
+      const bot = { ...remoteUser, id: 'speaking-bot', sessionId: 'bot:speaking', nickname: 'Music bot', isBot: true };
+      const quietBot = { ...bot, id: 'quiet-bot', sessionId: 'bot:quiet', nickname: 'Silent bot' };
+      const botState = { ...remoteState, sessionId: bot.sessionId, userId: bot.id, isSpeaking: true };
+      for (const user of [bot, quietBot]) manager.addUser(user);
+      manager.updateVoiceState(botState);
+      manager.updateVoiceState({ ...botState, sessionId: quietBot.sessionId, userId: quietBot.id, isSpeaking: false });
+      manager.updateVoiceState({ ...remoteState, isMuted: true, isSpeaking: true });
+      stage.setChannel(channelId);
+      await frame();
+      const speaking = (id, expected, reason) => {
+        const row = root.querySelector(`#voice-mini-user-${CSS.escape(id)}`);
+        const card = document.querySelector(`#ptt-stage-fixture [data-session-id="${CSS.escape(id)}"][data-kind="voice"]`);
+        check(!!row && row.classList.contains('speaking') === expected, `Sidebar: ${reason}`);
+        check(!!card && card.classList.contains('speaking') === expected, `Stage: ${reason}`);
+      };
+      const decoy = document.createElement('div');
+      decoy.dataset.sessionId = bot.sessionId;
+      decoy.dataset.kind = 'voice';
+      document.body.append(decoy);
+      const foreign = sessionManager.create('speaking-other.example', 9002, 'Other device');
+      const originalApi = window.api;
+      try {
+        speaking(bot.sessionId, true, 'The actual transmitting bot is green in the listening room');
+        speaking(remoteUser.sessionId, false, 'A bot cannot light a muted human with published speaking metadata');
+        speaking(quietBot.sessionId, false, 'A bot cannot light another silent bot');
+        appEvents.emit('participants.speaking_changed', { sessionId: bot.sessionId, speaking: true });
+        check(!decoy.classList.contains('speaking'), 'Stage activity cannot mutate another surface with the same session ID');
+        manager.updateVoiceState({ ...remoteState, isSpeaking: true });
+        await frame();
+        speaking(remoteUser.sessionId, true, 'Independent human speech remains visible');
+        appEvents.emit('participants.speaking_changed', { sessionId: remoteUser.sessionId, speaking: false });
+        speaking(remoteUser.sessionId, true, 'A delayed inactive event cannot erase newer speech');
+        manager.updateVoiceState(remoteState);
+        appEvents.emit('participants.speaking_changed', { sessionId: remoteUser.sessionId, speaking: true });
+        speaking(remoteUser.sessionId, false, 'A delayed active event cannot light a now-silent human');
+        appEvents.emit('voice.speaking_changed', true);
+        speaking(localUser.sessionId, false, 'A stale local event cannot borrow the bot activity');
+        check(!root.querySelector('#main-user-avatar').classList.contains('speaking'),
+          'The microphone footer also recomputes current activity instead of trusting a stale event');
+        for (const flag of ['isMuted', 'serverMuted']) {
+          voice[flag] = true;
+          appEvents.emit('voice.state_updated');
+          speaking(bot.sessionId, true, 'Muting only the listening microphone does not hide remote activity');
+          voice[flag] = false;
+        }
+        for (const flag of ['isDeafened', 'serverDeafened']) {
+          voice[flag] = true;
+          appEvents.emit('voice.state_updated');
+          speaking(bot.sessionId, false, 'A deafened listener does not show remote speaking rings');
+          check(manager.get(bot.sessionId).isSpeaking && manager.get(bot.sessionId).voiceState.isSpeaking,
+            'Deafen masks the visual projection without erasing real bot activity');
+          voice[flag] = false;
+          appEvents.emit('voice.state_updated');
+          speaking(bot.sessionId, true, 'Undeafen restores current activity without a new bot event');
+        }
+        voice.setChannel(null);
+        speaking(bot.sessionId, false, 'An observer outside voice cannot see speaking rings');
+        voice.setChannel('another-room', fixtureSession.key);
+        speaking(bot.sessionId, false, 'A different physical voice room cannot inherit speaking rings');
+        voice.setChannel(channelId, fixtureSession.key);
+        speaking(bot.sessionId, true, 'Rejoining projects the unchanged current room activity');
+        foreign.client.getStatus = () => 'CONNECTED';
+        foreign.serverStore.setServerDetails({ ...server.serverDetails, id: 'foreign-speaking', name: 'Other server' }, localUser);
+        for (const user of [localUser, bot]) foreign.participants.addUser({ ...user });
+        foreign.participants.updateVoiceState({ ...manager.get(localUser.sessionId).voiceState });
+        foreign.participants.updateVoiceState({ ...botState });
+        sessionManager.activate(foreign.key);
+        view.renderChannels();
+        stage.renderParticipants();
+        speaking(bot.sessionId, false, 'Another server with matching session IDs stays dark');
+        appEvents.emit('participants.speaking_changed', { sessionId: bot.sessionId, speaking: true });
+        speaking(bot.sessionId, false, 'Late background activity cannot light the other server');
+        const { OverlayBridgeService } = await import('/core/OverlayBridgeService.ts');
+        const bridge = new OverlayBridgeService();
+        bridge.isOpen = true;
+        let snapshot;
+        window.api = { ...originalApi, sendOverlaySyncState: async state => { snapshot = state; } };
+        bridge.syncState();
+        check(snapshot?.participants.find(person => person.sessionId === bot.sessionId)?.isSpeaking === true
+          && snapshot.participants.find(person => person.sessionId === quietBot.sessionId)?.isSpeaking === false,
+          'Overlay uses the actual background call and preserves separate bot identities');
+        voice.isDeafened = true;
+        bridge.syncState();
+        check(snapshot.participants.every(person => !person.isSpeaking),
+          'Overlay follows the same listener-deafen projection');
+        check(manager.get(bot.sessionId).voiceState.isSpeaking,
+          'Changing foreground server and overlay scope never rewrites published speech');
+      } finally {
+        window.api = originalApi;
+        sessionManager.activate(fixtureSession.key);
+        sessionManager.remove(foreign.key);
+        decoy.remove();
+        voice.isMuted = voice.isDeafened = voice.serverMuted = voice.serverDeafened = false;
+        voice.setChannel(channelId, fixtureSession.key);
+        manager.removeVoiceState(bot.sessionId);
+        manager.removeVoiceState(quietBot.sessionId);
+        manager.updateVoiceState(remoteState);
+        view.renderChannels();
+        stage.renderParticipants();
+        await frame();
+      }
+    }
     const channelBlocks = () => root.querySelectorAll('#voice-mini-user-ptt-local-session [data-audio-block]:not([hidden])').length;
     const memberBlocks = () => root.querySelectorAll('.member-item[data-user-id="ptt-local-user"] [data-audio-block]:not([hidden])').length;
     manager.updateVoiceState({ ...remoteState, serverMuted: true, serverDeafened: true });
@@ -1673,7 +2406,7 @@ async function runSidebarPttSmoke() {
     voice.setMicrophoneState(true, true);
     button.click();
     check(button.dataset.state === previousState && !voice.isMuted, 'Destroy must release microphone state and click listeners');
-    voice.currentVoiceChannelId = 'ptt-sidebar-fixture';
+    voice.setChannel('ptt-sidebar-fixture', fixtureSession.key);
     document.getElementById('ptt-stage-fixture').style.display = 'none';
     view.render();
     language.setLanguage('pt-BR');
@@ -1853,10 +2586,11 @@ async function runSidebarPttSmoke() {
     userContextMenu.close();
     stage.destroy();
     view.destroy();
-    networkClient.send = send;
+    fixtureSession.client.send = send;
     soundEffects.play = play;
     navigator.mediaDevices.enumerateDevices = enumerateDevices;
     voice.reset();
+    sessionManager.remove(fixtureSession.key);
     root.remove();
     document.getElementById('ptt-stage-fixture').remove();
   }
@@ -1876,7 +2610,9 @@ async function runDomSmoke() {
     return element;
   };
   const type = (element, value) => { element.focus(); element.value = value; element.dispatchEvent(new Event('input', { bubbles: true })); };
-  const key = (element, value) => element.dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true }));
+  const key = (element, value, options = {}) => element.dispatchEvent(new KeyboardEvent('keydown', {
+    ...options, key: value, bubbles: true, cancelable: true,
+  }));
   const frame = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const waitFor = async (predicate) => {
     for (let attempt = 0; attempt < 80; attempt++) {
@@ -2333,13 +3069,20 @@ async function runDomSmoke() {
   const exactPing = { ...ping, botId: 'zeta', botName: 'Zeta Bot' };
   const botNameMatch = { ...ping, name: 'start', botId: 'ping-bot', botName: 'Ping Bot' };
   refreshRegistry([exactPing, botNameMatch]);
-  for (const selectKey of ['Enter', 'Tab']) {
+  for (const selectKey of ['Enter', 'Tab', ' ']) {
     type(find('#chat-message-input'), '/ping');
+    const before = sent.filter(entry => entry.type === 'COMMAND_INVOKE').length;
     key(find('#chat-message-input'), selectKey);
     check(store.getCommandDraft('one')?.command.botId === exactPing.botId,
       `${selectKey} must prefer a unique exact command over an unrelated bot-name match`);
-    check(sent.at(-1)?.type === 'COMMAND_INVOKE' && sent.at(-1)?.payload.botId === exactPing.botId,
-      `${selectKey} must immediately invoke the exact no-argument command`);
+    if (selectKey === ' ') {
+      check(sent.filter(entry => entry.type === 'COMMAND_INVOKE').length === before &&
+        !store.getCommandDraft('one').pending,
+      'Space selects a no-argument command without invoking it');
+    } else {
+      check(sent.at(-1)?.type === 'COMMAND_INVOKE' && sent.at(-1)?.payload.botId === exactPing.botId,
+        `${selectKey} must immediately invoke the exact no-argument command`);
+    }
     store.setCommandPending('one', store.getCommandDraft('one'), false);
     find('[data-bot-action="cancel-command"]').click();
   }
@@ -2352,6 +3095,30 @@ async function runDomSmoke() {
   check(sent.at(-1)?.payload.commandName === 'start', 'Explicit selection must invoke the no-argument command');
   store.setCommandPending('one', store.getCommandDraft('one'), false);
   find('[data-bot-action="cancel-command"]').click();
+  type(find('#chat-message-input'), '/ping');
+  key(find('#chat-message-input'), 'ArrowDown');
+  const beforeSpace = sent.filter(entry => entry.type === 'COMMAND_INVOKE').length;
+  check(!key(find('#chat-message-input'), ' '), 'Space must consume selection instead of inserting a trailing space');
+  check(store.getCommandDraft('one')?.command.name === 'start',
+    'Space must select the highlighted command rather than overriding keyboard navigation with an exact match');
+  check(sent.filter(entry => entry.type === 'COMMAND_INVOKE').length === beforeSpace,
+    'A highlighted no-argument command must not execute on Space');
+  find('[data-bot-action="cancel-command"]').click();
+  for (const options of [{ isComposing: true }, { keyCode: 229 }, { ctrlKey: true }, { altKey: true }, { metaKey: true }]) {
+    type(find('#chat-message-input'), '/pi');
+    check(key(find('#chat-message-input'), ' ', options) && !store.getCommandDraft('one'),
+      'Space used by composition or a modified shortcut must not select a command');
+  }
+  type(find('#chat-message-input'), '/no-such-command');
+  check(key(find('#chat-message-input'), ' ') && !store.getCommandDraft('one'),
+    'Space remains ordinary input when no command matches');
+  type(find('#chat-message-input'), '/pi');
+  key(find('#chat-message-input'), 'Escape');
+  check(key(find('#chat-message-input'), ' ') && !store.getCommandDraft('one'),
+    'A dismissed command picker must not capture Space');
+  type(find('#chat-message-input'), 'ordinary message');
+  check(key(find('#chat-message-input'), ' ') && !store.getCommandDraft('one'),
+    'Normal chat spaces must not activate commands');
   sent.length = 0;
   refreshRegistry([command, duplicate, ping]);
   type(find('#chat-message-input'), '/');
@@ -2379,6 +3146,8 @@ async function runDomSmoke() {
   check(find('#chat-command-composer').getBoundingClientRect().bottom <= innerHeight, 'Composer must remain inside the viewport');
   check(document.querySelectorAll('#chat-command-composer [data-field-name]').length === 2, 'Only required arguments start visible');
   const songInput = find('#chat-command-composer [data-field-name="song"] [data-bot-input]');
+  check(key(songInput, ' ') && sent.every(entry => entry.type !== 'COMMAND_INVOKE'),
+    'Spaces in command parameters remain ordinary text rather than selecting or executing a command');
   const songField = songInput.closest('[data-field-name]');
   songInput.focus();
   check(songField.classList.contains('focused'), 'Only the actual focused parameter should have its focused state');
@@ -2659,6 +3428,46 @@ async function runDomSmoke() {
   check(find('.bot-response-bubble .chat-author-name').textContent === command.botName, 'Bot identity must remain separate from caller');
   check(find('.bot-response-bubble .bot-private-cue').textContent.includes('você'), 'Private response must retain its badge');
   check(getComputedStyle(find('.bot-response-bubble')).borderLeftWidth === '3px', 'Bot response must have accented card');
+  const queueTitles = [
+    'The Cinematic Orchestra - To Build a Home (Live at the Royal Albert Hall, London, 2008) - Remastered Extended Performance',
+    'Pink Floyd - Shine On You Crazy Diamond (Parts I-IX) - The Complete Live Performance with Extended Instrumental Introduction',
+    'Chillhop Music - A Very Long Late-Night Study Session with Rain, Soft Piano and Uninterrupted Instrumental Music',
+    'ContinuousSessionRecording'.repeat(14),
+  ];
+  store.addMessage(inputs.botCommandMessage({
+    ...invocation, commandName: 'queue', messageId: 'queue-layout',
+    content: '**Queue**\n\n' + queueTitles.map((title, index) => `${index + 1}. **${title}**`).join('\n'),
+    createdAt: Date.now(), botName: command.botName, botAvatarUrl: command.botAvatarUrl, ephemeral: false,
+    invokerId: otherCaller.id, invokerNickname: otherCaller.nickname, invokerAvatarUrl: null,
+  }));
+  const originalWidth = container.style.width;
+  try {
+    for (const width of [960, 520, 320]) {
+      container.style.width = `${width}px`;
+      await frame();
+      const queue = find('[data-message-id="queue-layout"] .bot-response-bubble');
+      const text = queue.querySelector('.chat-message-text');
+      const main = queue.parentElement;
+      const feed = find('#chat-messages-feed');
+      check(queueTitles.every(title => text.textContent.includes(title)),
+        `Queue retains every complete long title and unbroken word at ${width}px`);
+      check(queue.scrollWidth <= queue.clientWidth + 1 && text.scrollWidth <= text.clientWidth + 1
+        && feed.scrollWidth <= feed.clientWidth + 1,
+        `Long queue titles wrap without horizontal overflow at ${width}px`);
+      check(queue.getBoundingClientRect().right <= main.getBoundingClientRect().right + 1,
+        `Queue card stays within available chat width at ${width}px`);
+      if (width === 960) {
+        const tiny = find('[data-message-id="attributed"] .bot-response-bubble');
+        check(queue.getBoundingClientRect().width > main.clientWidth * 0.85,
+          'Long response cards grow to the available chat width instead of a narrow fixed card');
+        check(tiny.getBoundingClientRect().width < queue.getBoundingClientRect().width * 0.75,
+          'A short bot response keeps its natural width instead of filling the chat');
+      }
+    }
+  } finally {
+    container.style.width = originalWidth;
+    await frame();
+  }
   type(find('#chat-message-input'), '/');
   const usageBeforeOffline = JSON.stringify(store.getCommandUsage());
   refreshRegistry([duplicate]);
@@ -2788,6 +3597,32 @@ async function runDomSmoke() {
   selectorPreferences.botDownloadConfirmationExceptions = previousSelectorConfirmations;
   if (previousSelectorStorage === null) localStorage.removeItem('monky_settings');
   else localStorage.setItem('monky_settings', previousSelectorStorage);
+  let spaceCommand, beforeSpaceInvocations;
+  window.commandSpaceFixture = {
+    prepare(withArguments) {
+      store.clearCommand('one');
+      view.setChannel('one');
+      spaceCommand = withArguments ? command : ping;
+      refreshRegistry([spaceCommand]);
+      type(find('#chat-message-input'), `/${spaceCommand.name.slice(0, 2)}`);
+      beforeSpaceInvocations = sent.filter(entry => entry.type === 'COMMAND_INVOKE').length;
+    },
+    async verify() {
+      await frame();
+      const draft = store.getCommandDraft('one');
+      check(draft?.command.name === spaceCommand.name && draft.command.botId === spaceCommand.botId,
+        'Trusted Space keydown/keyup selects the highlighted partial command');
+      check(sent.filter(entry => entry.type === 'COMMAND_INVOKE').length === beforeSpaceInvocations && !draft.pending,
+        'Trusted Space must not execute a command, including on keyup after focus changes');
+      if (spaceCommand.options.length) {
+        check(document.activeElement?.matches('[data-bot-input]') && document.activeElement.value === '',
+          'Space focuses the first parameter without inserting the selection keystroke into its value');
+      }
+      store.clearCommand('one');
+      refreshRegistry([command, duplicate, ping]);
+      type(find('#chat-message-input'), '/');
+    },
+  };
   window.prepareToolbarPointerFixture = async () => {
     const { initTooltips } = await import('/core/TooltipService.ts');
     const offTooltips = initTooltips();
@@ -2810,6 +3645,7 @@ async function runDomSmoke() {
   window.commandDomCleanup = () => {
     view.destroy(); unbindBotEvents(); client.dispose();
     window.api = previousPreviewApi;
+    delete window.commandSpaceFixture;
   };
   return { checks };
 }
