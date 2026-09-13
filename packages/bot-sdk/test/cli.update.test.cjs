@@ -313,8 +313,7 @@ test('update installs a verified local tarball and restarts the same managed bot
     return '';
   });
   t.mock.method(pm2, 'findProcess', () => ({ pm2_env: { status: 'online' } }));
-  const restarted = t.mock.method(pm2, 'startOrRestart', () => {});
-  const saved = t.mock.method(pm2, 'saveProcessList', () => {});
+  const restarted = t.mock.method(pm2, 'restartBotProcess', async () => {});
 
   await updates.updateCommand(context, ['--yes']);
   assert.equal(npmCalls.length, 2);
@@ -322,7 +321,7 @@ test('update installs a verified local tarball and restarts the same managed bot
   assert.deepEqual(npmCalls[1].slice(0, 4), ['install', '-g', '--ignore-scripts', '--offline']);
   assert.ok(path.isAbsolute(npmCalls[1][npmCalls[1].length - 1]));
   assert.equal(restarted.mock.callCount(), 1);
-  assert.equal(saved.mock.callCount(), 1);
+  assert.deepEqual(restarted.mock.calls[0].arguments[1], cliConfig.readConfig(context));
 });
 
 test('autoupdate on checks for explicit releases before consulting pm2', async (t) => {
@@ -666,8 +665,7 @@ for (const type of ['https', 'file']) {
       createTarball(f.file, botManifest('9.0.0'));
       return { pm2_env: { status: 'online' } };
     });
-    const restarted = t.mock.method(pm2, 'startOrRestart', () => {});
-    const saved = t.mock.method(pm2, 'saveProcessList', () => {});
+    const restarted = t.mock.method(pm2, 'restartBotProcess', async () => {});
     await updates.updateCommand(context, ['--yes']);
     assert.equal(npmCalls.length, 2);
     assert.deepEqual(npmCalls[1].args.slice(0, -1), [
@@ -675,7 +673,7 @@ for (const type of ['https', 'file']) {
     ]);
     assert.equal(npmCalls[1].options.stdio, 'pipe');
     assert.equal(restarted.mock.callCount(), 1);
-    assert.equal(saved.mock.callCount(), 1);
+    assert.deepEqual(restarted.mock.calls[0].arguments[1], cliConfig.readConfig(context));
     for (const [file, contents] of preserved) assert.deepEqual(fs.readFileSync(file), contents);
     assert.equal(fs.existsSync(snapshot), false);
     assert.equal(releases.readPackageManifestFromTarball(f.file).version, '9.0.0');
@@ -881,7 +879,7 @@ test('npm failure output is captured and never exposes credentials or restarts t
   const output = [];
   t.mock.method(console, 'log', (...args) => output.push(args.join(' ')));
   t.mock.method(pm2, 'findProcess', () => ({ pm2_env: { status: 'online' } }));
-  t.mock.method(pm2, 'startOrRestart', () => assert.fail('must not restart'));
+  t.mock.method(pm2, 'restartBotProcess', () => assert.fail('must not restart'));
   t.mock.method(toolingProcess, 'runNpm', (args, options) => {
     if (args[0] === 'root') return f.globalRoot;
     assert.equal(options.stdio, 'pipe');

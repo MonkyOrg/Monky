@@ -170,6 +170,20 @@ manual token. For automation:
 `setup --non-interactive --mode marketplace --public-host bot.example.com --serve-port 7781`.
 The endpoint must be reachable by installing Monky servers; `localhost` only
 works for servers on the same machine.
+
+Each bot on the same machine needs a **separate port**, for example `7780` and
+`7781`. `/manifest` is an endpoint served by each process, not a shared file.
+The CLI checks whether it can bind the local port before saving. If another bot
+or service occupies it, interactive setup explains the conflict and asks for
+another port instead of changing it automatically. Non-interactive setup and
+port changes through `config set` fail without overwriting the previous config.
+
+If the bot itself is using the port, run `my-bot stop` before repeating setup;
+its configuration and keys are preserved. `start` also checks the port before
+launching a stopped bot; `restart` stops only its own managed process before
+checking, including after updates. This local check does not validate firewall
+rules or reserve the port until the next `start`.
+
 Configuration and identity live in `~/.<cliName>`, outside the package;
 `MONKY_BOT_CLI_HOME` changes the base directory while keeping each bot's subdirectory.
 The `botName`, `botDir`, `serverUrl`, `botToken`, `servePort`, and `publicHost`

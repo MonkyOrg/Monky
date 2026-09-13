@@ -173,6 +173,19 @@ O host e a porta precisam ser acessíveis pelos servidores Monky que vão instal
 o bot. `localhost` só atende servidores na mesma máquina. Declare ambos os modos
 em `monkyBot.modes` para oferecer a escolha.
 
+Cada bot na mesma máquina precisa de uma **porta exclusiva**, por exemplo `7780`
+e `7781`. `/manifest` é um endpoint de cada processo, não um arquivo compartilhado.
+O CLI verifica se consegue usar a porta local antes de salvar; se outro bot ou
+serviço já a ocupa, o setup explica o conflito e pede outra, sem trocar a porta
+automaticamente. O setup não interativo e alterações de porta por `config set`
+falham sem sobrescrever a configuração anterior.
+
+Se o próprio bot estiver usando a porta, execute `meu-bot stop` antes de refazer
+o setup; a configuração e as chaves são preservadas. `start` também verifica a
+porta antes de iniciar um processo parado; `restart` libera apenas seu processo
+gerenciado antes da checagem, inclusive após atualizações. Essa checagem local
+não verifica regras de firewall e não reserva a porta até o próximo `start`.
+
 Configuração e identidade ficam em `~/.<cliName>`, fora do pacote;
 `MONKY_BOT_CLI_HOME` muda a pasta-base, preservando o subdiretório de cada bot.
 Refazer o setup preserva o diretório de trabalho e a identidade existentes.

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O setup de bots agora avisa quando a porta do manifest est\u00e1 ocupada. Pastas de \u00e1udio j\u00e1 salvas podem ser autorizadas para downloads de bots sem selecionar a pasta novamente.",
+  "en": "Bot setup now warns when the manifest port is already in use. Previously saved audio folders can be authorized for bot downloads without selecting the folder again."
+}

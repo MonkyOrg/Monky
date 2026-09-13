@@ -359,6 +359,28 @@ export function setupIpcHandlers(
     event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
   ipcMain.handle(SOUND_DOWNLOAD_IPC.availability, async (event, folder: unknown): Promise<SoundboardDownloadAvailability> =>
     ownsSoundDownload(event) ? soundDownloads.availability(folder) : 'unavailable');
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.confirmFolder, async (event, folder: unknown): Promise<boolean> => {
+    if (!ownsSoundDownload(event)) return false;
+    try {
+      return await soundDownloads.confirmConfiguredFolder(folder, async (canonical) => {
+        if (mainWindow.isDestroyed() || !ownsSoundDownload(event)) return false;
+        const result = await dialog.showMessageBox(mainWindow, {
+          type: 'question',
+          title: mt('dialog.confirmSoundboardFolderTitle'),
+          message: mt('dialog.confirmSoundboardFolderMessage'),
+          detail: mt('dialog.confirmSoundboardFolderDetail', { folder: canonical }),
+          buttons: [mt('dialog.allowSoundboardDownloads'), mt('dialog.cancelSoundboardFolder')],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        });
+        return result.response === 0 && !mainWindow.isDestroyed() && ownsSoundDownload(event);
+      });
+    } catch (error: unknown) {
+      console.warn('[Soundboard] Could not authorize downloads in the configured folder:', error);
+      throw new Error(mt('error.confirmSoundboardFolder'));
+    }
+  });
   ipcMain.handle(SOUND_DOWNLOAD_IPC.authorize, async (event, input: unknown): Promise<SoundboardDownloadPermit> =>
     ownsSoundDownload(event) ? soundDownloads.authorize(event.sender.id, input) : { status: 'failed', reason: 'invalid_request' });
   ipcMain.handle(SOUND_DOWNLOAD_IPC.download, async (event, input: unknown): Promise<SoundDownloadResult> => {
