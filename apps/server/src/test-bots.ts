@@ -263,7 +263,7 @@ async function createFixture() {
     return { peer, keys, auth };
   };
   const dispose = async () => {
-    wsServer.close();
+    await wsServer.close();
     await Promise.all(peers.map((peer) => peer.close()));
     await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
     rateLimiter.dispose();
@@ -1249,7 +1249,7 @@ test('bot settings reject stale sessions and recheck permissions changed during 
     return allowed;
   });
 
-  test('lazy audio preview settings reuse only the authorized search snapshot and invalidate on shared changes', async (t) => {
+  await t.test('lazy audio preview settings reuse only the authorized search snapshot and invalidate on shared changes', async (t) => {
     const f = await createSettingsFixture(t);
     const queryId = randomUUID();
     f.alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE, {

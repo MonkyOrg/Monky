@@ -195,6 +195,18 @@ jobs:
       - name: Build workspaces
         run: npm run build
 
+      - name: Install FFmpeg for generated voice fixtures
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              choco install ffmpeg --yes --no-progress --limit-output
+            else
+              brew install ffmpeg
+            fi
+          fi
+          ffmpeg -hide_banner -version
+
       - name: Exercise client DOM and microphone state in Electron
         shell: bash
         run: |

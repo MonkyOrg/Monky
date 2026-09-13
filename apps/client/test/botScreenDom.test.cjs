@@ -101,6 +101,8 @@ if (!process.versions.electron) {
         webPreferences: {
           contextIsolation: true, nodeIntegration: false, nodeIntegrationInSubFrames: false,
           sandbox: false, backgroundThrottling: false, offscreen: true,
+          // Exercise real HTML fullscreen without macOS Spaces transitions on a hidden window.
+          disableHtmlFullscreenWindowResize: true,
           partition: `voice-screen-${id}`,
           preload: path.join(clientRoot, 'dist-electron', 'preload', 'preload.js'),
         },
