@@ -215,6 +215,10 @@ jobs:
       - name: Build bot-sdk
         run: npm run build --workspace=packages/bot-sdk
 
+      - name: Prepare the SFU worker for SDK voice tests
+        if: hashFiles('packages/bot-sdk/test/voice-transport.test.js') != ''
+        run: npm rebuild mediasoup
+
       - name: Test bot-sdk interactions
         if: hashFiles('packages/bot-sdk/test/client.test.cjs') != ''
         run: npm run test --workspace=packages/bot-sdk
