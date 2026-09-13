@@ -8,9 +8,9 @@ import {
   deleteProcess,
   findProcess,
   requirePm2,
+  restartBotProcess,
   saveProcessList,
   startOrRestart,
-  writeBotEcosystem,
   writeUpdaterEcosystem,
 } from '../pm2';
 import { compareVersions } from '../updateReleases';
@@ -133,8 +133,7 @@ export async function updateCommand(context: CliContext, args: string[]): Promis
     if (wasRunning) {
       const config = readConfig(refreshed);
       if (!config) throw new Error('The bot package was updated, but the config disappeared before the process could be restarted.');
-      startOrRestart(refreshed, writeBotEcosystem(refreshed, resolveInstalledEntry(refreshed)));
-      saveProcessList(refreshed);
+      await restartBotProcess(refreshed, config, resolveInstalledEntry(refreshed));
       console.log('Processo reiniciado com a mesma configuração.');
     }
   });

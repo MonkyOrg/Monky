@@ -91,6 +91,267 @@ test('a previously selected folder alias resolves to the confirmed directory wit
   assert.equal(await restored.availability(alias), 'confirmation_required');
 });
 
+test('reselecting the identical saved folder repairs legacy authorization without changing the directory or its permissions', async (context) => {
+  const f = await fixture(context);
+  const configuredFolder = f.folder;
+  const existingSound = path.join(configuredFolder, 'existing.mp3');
+  await fs.writeFile(existingSound, mp3(true));
+  await fs.access(configuredFolder, constants.W_OK);
+  const contents = await fs.readdir(configuredFolder);
+  assert.equal(await f.manager.availability(configuredFolder), 'confirmation_required');
+  const beforeReselection = new SoundboardDownloads(path.join(f.root, 'soundboard-folder.json'), f.transport);
+  assert.equal(await beforeReselection.availability(configuredFolder), 'confirmation_required',
+    'reloading the client alone does not invent native write permission for the saved preference');
+
+  assert.equal(await f.manager.confirmFolder(configuredFolder), await fs.realpath(configuredFolder),
+    'the existing native picker receives exactly the same already configured path');
+  assert.equal(await f.manager.availability(configuredFolder), 'ready');
+  assert.deepEqual(await fs.readdir(configuredFolder), contents);
+  assert.deepEqual(await fs.readFile(existingSound), mp3(true));
+  const afterRestart = new SoundboardDownloads(path.join(f.root, 'soundboard-folder.json'), f.transport);
+  context.after(() => afterRestart.cancelOwner(1));
+  for (const connectionId of ['before-reconnect', 'after-reconnect']) {
+    assert.equal(await afterRestart.availability(configuredFolder), 'ready');
+    const permit = await afterRestart.authorize(1, {
+      connectionId, invocationId: 'query', configuredFolder, expiresAt: Date.now() + 60_000,
+    });
+    assert.equal(permit.status, 'authorized');
+    afterRestart.cancelOwner(1);
+  }
+  assert.equal(f.requests.length, 0, 'folder repair never contacts the bot, server or audio provider');
+});
+
+test('a saved legacy folder gains persistent download permission only after explicit native confirmation', async (context) => {
+  const f = await fixture(context);
+  const canonical = await fs.realpath(f.folder);
+  assert.equal(await f.manager.availability(f.folder), 'confirmation_required');
+  assert.equal(await f.manager.confirmConfiguredFolder(f.folder, async (folder) => {
+    assert.equal(folder, canonical, 'the native dialog names the existing folder, not a fallback');
+    return false;
+  }), false);
+  assert.equal(await f.manager.availability(f.folder), 'confirmation_required');
+  assert.deepEqual(await fs.readdir(f.root), ['sounds'], 'cancellation must not persist a permission');
+  assert.equal(f.requests.length, 0);
+
+  assert.equal(await f.manager.confirmConfiguredFolder(f.folder, async (folder) => {
+    assert.equal(folder, canonical);
+    return true;
+  }), true);
+  const restored = new SoundboardDownloads(path.join(f.root, 'soundboard-folder.json'), f.transport);
+  context.after(() => restored.cancelOwner(1));
+  assert.equal(await restored.availability(f.folder), 'ready');
+  assert.equal(await restored.confirmConfiguredFolder(f.folder, async () => {
+    assert.fail('a persisted native permission must not require another confirmation after restarting');
+  }), true);
+  const permit = await restored.authorize(1, {
+    connectionId: 'server-a', invocationId: 'query', configuredFolder: f.folder, expiresAt: Date.now() + 60_000,
+  });
+  assert.equal(permit.status, 'authorized');
+  if (permit.status !== 'authorized') throw new Error('Missing restored permit');
+  const request = {
+    connectionId: 'server-a', invocationId: 'query', downloadId: 'legacy-download', token: permit.token,
+    url: 'https://audio.example/sound.mp3', fileName: 'legacy.mp3', title: 'Authored legacy sound',
+    expiresAt: Date.now() + 60_000,
+  };
+  assert.deepEqual(await restored.download(1, { ...request, connectionId: 'server-b' }, () => {}),
+    { status: 'failed', reason: 'invalid_request' });
+  assert.equal(f.requests.length, 0, 'another server cannot use the original invocation permission');
+  assert.deepEqual(await restored.download(1, request, () => {}), { status: 'downloaded' });
+  assert.deepEqual(await fs.readFile(path.join(f.folder, 'legacy.mp3')), mp3(true));
+});
+
+test('confirmation validates saved paths and write permission without changing the previous authorization', async (context) => {
+  const f = await fixture(context);
+  await f.manager.confirmFolder(f.folder);
+  const config = path.join(f.root, 'soundboard-folder.json');
+  const saved = await fs.readFile(config, 'utf8');
+  const file = path.join(f.root, 'not-a-directory');
+  await fs.writeFile(file, '');
+  let approvals = 0;
+  const approve = async () => { approvals++; return true; };
+  for (const folder of [null, 123, {}, '', 'relative-folder', `${f.folder}\0`, `${f.folder}\nforged`, file, path.join(f.root, 'missing')]) {
+    await assert.rejects(f.manager.confirmConfiguredFolder(folder, approve));
+  }
+  const access = fs.access;
+  const denied = context.mock.method(fs, 'access', async (folder: Parameters<typeof fs.access>[0], mode?: number) => {
+    if (folder === await fs.realpath(f.folder)) throw Object.assign(new Error('Denied'), { code: 'EACCES' });
+    await access(folder, mode);
+  });
+  await assert.rejects(f.manager.confirmConfiguredFolder(f.folder, approve), { code: 'EACCES' });
+  denied.mock.restore();
+  assert.equal(approvals, 0);
+  assert.equal(await fs.readFile(config, 'utf8'), saved);
+  assert.equal(await f.manager.availability(f.folder), 'ready');
+});
+
+test('retargeting a saved folder alias during native confirmation cannot authorize another directory', async (context) => {
+  const f = await fixture(context);
+  const alias = path.join(f.root, 'legacy-alias');
+  const other = path.join(f.root, 'other-sounds');
+  await fs.mkdir(other);
+  await fs.symlink(f.folder, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal(await f.manager.confirmConfiguredFolder(alias, async () => {
+    await fs.unlink(alias);
+    await fs.symlink(other, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    return true;
+  }), false);
+  assert.equal(await f.manager.availability(other), 'confirmation_required');
+  assert.equal(await f.manager.availability(f.folder), 'confirmation_required');
+  assert.equal((await fs.readdir(f.root)).includes('soundboard-folder.json'), false);
+  assert.equal(f.requests.length, 0);
+});
+
+test('a late confirmation cannot replace a newly selected folder or open duplicate native confirmations', async (context) => {
+  const f = await fixture(context);
+  const other = path.join(f.root, 'new-selection');
+  await fs.mkdir(other);
+  let resolveApproval: (approved: boolean) => void = () => {};
+  let entered: () => void = () => {};
+  const showing = new Promise<void>((resolve) => { entered = resolve; });
+  const confirmation = f.manager.confirmConfiguredFolder(f.folder, () => {
+    entered();
+    return new Promise<boolean>((resolve) => { resolveApproval = resolve; });
+  });
+  context.after(() => resolveApproval(false));
+  await showing;
+  assert.equal(await f.manager.confirmConfiguredFolder(other, async () => {
+    assert.fail('only one native folder confirmation may be open');
+  }), false);
+  await f.manager.confirmFolder(other);
+  resolveApproval(true);
+  assert.equal(await confirmation, false);
+  assert.equal(await f.manager.availability(other), 'ready');
+  assert.equal(await f.manager.availability(f.folder), 'confirmation_required');
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root, 'soundboard-folder.json'), 'utf8')),
+    { folder: await fs.realpath(other) });
+});
+
+test('a stale folder write paused during sync cannot overwrite a newer selection', async (context) => {
+  for (const source of ['saved-confirmation', 'folder-picker'] as const) {
+    await context.test(source, async (nested) => {
+      const f = await fixture(nested);
+      const other = path.join(f.root, 'newer-selection');
+      await fs.mkdir(other);
+      let entered: () => void = () => {};
+      let release: () => void = () => {};
+      const paused = new Promise<void>(resolve => { entered = resolve; });
+      const resume = new Promise<void>(resolve => { release = resolve; });
+      const open = fs.open;
+      let firstStage = true;
+      nested.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+        const handle = await open(...args);
+        if (firstStage && typeof args[0] === 'string' && args[0].endsWith('.writing')) {
+          firstStage = false;
+          const sync = handle.sync.bind(handle);
+          nested.mock.method(handle, 'sync', async () => {
+            await sync();
+            entered();
+            await resume;
+          });
+        }
+        return handle;
+      });
+      const oldWrite = source === 'saved-confirmation'
+        ? f.manager.confirmConfiguredFolder(f.folder, async () => true) : f.manager.confirmFolder(f.folder);
+      let oldResult: boolean | string | null;
+      try {
+        await paused;
+        assert.equal(await f.manager.confirmFolder(other), await fs.realpath(other));
+        assert.equal(await f.manager.availability(other), 'ready');
+      } finally {
+        release();
+        oldResult = await oldWrite;
+      }
+      assert.equal(await f.manager.availability(other), 'ready', 'a late A write must not restore A after B was saved');
+      assert.equal(await f.manager.availability(f.folder), 'confirmation_required');
+      assert.equal(oldResult, source === 'saved-confirmation' ? false : null, 'superseded writes cannot claim success');
+      assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root, 'soundboard-folder.json'), 'utf8')),
+        { folder: await fs.realpath(other) });
+      assert.equal((await fs.readdir(f.root)).some(name => name.endsWith('.writing')), false);
+      assert.equal(f.requests.length, 0);
+    });
+  }
+});
+
+test('folder renames are ordered and a failed commit cannot poison the next selection', async (context) => {
+  for (const failFirst of [false, true]) {
+    await context.test(failFirst ? 'first rename fails' : 'first rename succeeds', async (nested) => {
+      const f = await fixture(nested);
+      const other = path.join(f.root, 'newer-selection');
+      await fs.mkdir(other);
+      const config = path.join(f.root, 'soundboard-folder.json');
+      let entered: () => void = () => {};
+      let release: () => void = () => {};
+      let secondPrepared: () => void = () => {};
+      const paused = new Promise<void>(resolve => { entered = resolve; });
+      const resume = new Promise<void>(resolve => { release = resolve; });
+      const prepared = new Promise<void>(resolve => { secondPrepared = resolve; });
+      const open = fs.open;
+      const rename = fs.rename;
+      let stages = 0;
+      let renames = 0;
+      nested.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+        const handle = await open(...args);
+        if (typeof args[0] === 'string' && args[0].endsWith('.writing') && ++stages === 2) {
+          const close = handle.close.bind(handle);
+          nested.mock.method(handle, 'close', async () => {
+            await close();
+            secondPrepared();
+          });
+        }
+        return handle;
+      });
+      nested.mock.method(fs, 'rename', async (...args: Parameters<typeof fs.rename>) => {
+        if (args[1] === config && ++renames === 1) {
+          entered();
+          await resume;
+          if (failFirst) throw Object.assign(new Error('Fixture rename failure'), { code: 'EROFS' });
+        }
+        await rename(...args);
+      });
+      const oldWrite = f.manager.confirmConfiguredFolder(f.folder, async () => true);
+      const firstResult = failFirst ? assert.rejects(oldWrite, { code: 'EROFS' }) : oldWrite;
+      await paused;
+      const newWrite = f.manager.confirmFolder(other);
+      try {
+        await prepared;
+        await flush();
+        assert.equal(renames, 1, 'another selection cannot rename over a commit still in flight');
+      } finally {
+        release();
+        await Promise.all([firstResult, newWrite]);
+      }
+      assert.equal(await newWrite, await fs.realpath(other));
+      assert.equal(await f.manager.availability(other), 'ready');
+      assert.equal(await f.manager.availability(f.folder), 'confirmation_required');
+      assert.equal(await new SoundboardDownloads(config).availability(other), 'ready');
+      assert.deepEqual(JSON.parse(await fs.readFile(config, 'utf8')), { folder: await fs.realpath(other) });
+      assert.equal((await fs.readdir(f.root)).some(name => name.endsWith('.writing')), false);
+      assert.equal(f.requests.length, 0);
+    });
+  }
+});
+
+test('failed confirmation persistence keeps the original saved folder and cleans up staging files', async (context) => {
+  const f = await fixture(context);
+  await f.manager.confirmFolder(f.folder);
+  const other = path.join(f.root, 'other-sounds');
+  await fs.mkdir(other);
+  const config = path.join(f.root, 'soundboard-folder.json');
+  const saved = await fs.readFile(config, 'utf8');
+  const rename = fs.rename;
+  context.mock.method(fs, 'rename', async (from: Parameters<typeof fs.rename>[0], to: Parameters<typeof fs.rename>[1]) => {
+    if (to === config) throw Object.assign(new Error('Read-only config'), { code: 'EROFS' });
+    await rename(from, to);
+  });
+  await assert.rejects(f.manager.confirmConfiguredFolder(other, async () => true), { code: 'EROFS' });
+  assert.equal(await fs.readFile(config, 'utf8'), saved);
+  assert.equal(await f.manager.availability(f.folder), 'ready');
+  assert.equal(await f.manager.availability(other), 'confirmation_required');
+  assert.equal((await fs.readdir(f.root)).some(name => name.endsWith('.writing')), false);
+  assert.equal(f.requests.length, 0);
+});
+
 test('audio previews infer a supported MIME, return only authored bytes and never create files or require a sound folder', async (context) => {
   const f = await fixture(context, { request: async () => ({
     status: 200, headers: { 'content-type': 'audio/x-wav; charset=binary' }, body: Readable.from([wav()]),

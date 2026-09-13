@@ -3,7 +3,8 @@ import { BOT_ECOSYSTEM_FILE, UPDATER_ECOSYSTEM_FILE } from './constants';
 import { ensurePrivateDirectory, writePrivateFile } from './fs';
 import { runNpm } from '../tooling/process';
 import { pm2Command, runCommand, type CommandResult } from './process';
-import { type CliContext } from './config';
+import { type BotConfig, type CliContext } from './config';
+import { assertManifestPortAvailable, getManifestBindHost } from './ports';
 
 export interface Pm2Process {
   name?: string;
@@ -13,6 +14,7 @@ export interface Pm2Process {
     status?: string;
     pm_uptime?: number;
     restart_time?: number;
+    MONKY_SERVE_HOST?: string;
     env?: Record<string, unknown>;
   };
 }
@@ -130,6 +132,24 @@ export function startOrRestart(context: CliContext, ecosystemFile: string): void
   const result = runPm2(context, ['startOrRestart', ecosystemFile, '--update-env'], { stdio: 'inherit', timeout: 120_000 });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`pm2 startOrRestart failed (${result.status ?? result.signal}).`);
+}
+
+export async function restartBotProcess(
+  context: CliContext,
+  config: BotConfig,
+  entry: string,
+  fresh = false
+): Promise<void> {
+  if (config.mode === 'marketplace') {
+    const current = findProcess(context);
+    if (current?.pm2_env?.status === 'online') {
+      stopProcess(context, context.processName);
+    }
+    await assertManifestPortAvailable(config.servePort, context.cliName, getManifestBindHost(current?.pm2_env));
+  }
+  if (fresh) deleteProcess(context, context.processName);
+  startOrRestart(context, writeBotEcosystem(context, entry));
+  saveProcessList(context);
 }
 
 export function saveProcessList(context: CliContext): void {

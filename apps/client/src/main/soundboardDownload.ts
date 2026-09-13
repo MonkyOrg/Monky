@@ -40,8 +40,11 @@ type CheckedFolder =
 export class SoundboardDownloads {
   private confirmedFolder: string | null = null;
   private folderGeneration = 0;
+  private folderSelection = 0;
+  private folderCommit: Promise<void> = Promise.resolve();
   private loaded: Promise<void> | null = null;
   private loadFailed = false;
+  private confirmingConfiguredFolder = false;
   private grants = new Map<string, Grant>();
   private targets = new Set<string>();
   private ownerGeneration = new Map<number, number>();
@@ -61,22 +64,62 @@ export class SoundboardDownloads {
     })();
   }
 
-  public async confirmFolder(folder: string): Promise<string> {
+  public async confirmFolder(folder: string): Promise<string | null> {
+    const selection = ++this.folderSelection;
     await this.load();
     const canonical = await fs.realpath(folder);
-    if (!(await fs.stat(canonical)).isDirectory()) throw new SoundDownloadError('no_folder');
+    return this.persistConfirmedFolder(canonical, selection);
+  }
+
+  public async confirmConfiguredFolder(configuredFolder: unknown, approve: (folder: string) => Promise<boolean>): Promise<boolean> {
+    if (typeof configuredFolder !== 'string' || !path.isAbsolute(configuredFolder) ||
+        configuredFolder.length > 4096 || /[\x00-\x1f\x7f]/.test(configuredFolder)) {
+      throw new SoundDownloadError('no_folder');
+    }
+    if (this.confirmingConfiguredFolder) return false;
+    this.confirmingConfiguredFolder = true;
+    try {
+      const selection = this.folderSelection;
+      const availability = await this.availability(configuredFolder);
+      if (selection !== this.folderSelection) return false;
+      if (availability === 'ready') return true;
+      const canonical = await fs.realpath(configuredFolder);
+      if (!(await fs.lstat(canonical)).isDirectory()) throw new SoundDownloadError('no_folder');
+      await fs.access(canonical, constants.W_OK);
+      if (selection !== this.folderSelection) return false;
+      // A legacy renderer preference is not write permission: Main must obtain native consent.
+      if (!await approve(canonical)) return false;
+      const current = await fs.realpath(configuredFolder);
+      if (selection !== this.folderSelection || !samePath(current, canonical)) return false;
+      return (await this.persistConfirmedFolder(canonical, ++this.folderSelection)) !== null;
+    } finally {
+      this.confirmingConfiguredFolder = false;
+    }
+  }
+
+  private async persistConfirmedFolder(canonical: string, selection: number): Promise<string | null> {
+    if (selection !== this.folderSelection) return null;
+    if (!(await fs.lstat(canonical)).isDirectory()) throw new SoundDownloadError('no_folder');
+    await fs.access(canonical, constants.W_OK);
+    if (selection !== this.folderSelection) return null;
     const staging = `${this.configFile}.${randomUUID()}.writing`;
     let created = false;
     try {
       const handle = await fs.open(staging, 'wx');
       created = true;
       try { await handle.writeFile(JSON.stringify({ folder: canonical })); await handle.sync(); } finally { await handle.close(); }
-      await fs.rename(staging, this.configFile);
-      created = false;
-      this.confirmedFolder = canonical;
-      this.folderGeneration++;
-      this.loadFailed = false;
-      return canonical;
+      // An in-flight rename cannot be cancelled; publish file and state in the same ordered commit.
+      const commit = this.folderCommit.then(async () => {
+        if (selection !== this.folderSelection) return null;
+        await fs.rename(staging, this.configFile);
+        created = false;
+        this.confirmedFolder = canonical;
+        this.folderGeneration++;
+        this.loadFailed = false;
+        return canonical;
+      });
+      this.folderCommit = commit.then(() => {}, () => {});
+      return await commit;
     } finally {
       if (created) await fs.unlink(staging);
     }

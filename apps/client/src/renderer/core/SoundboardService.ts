@@ -275,6 +275,14 @@ export class SoundboardService {
     return folder;
   }
 
+  public async confirmConfiguredFolder(): Promise<boolean> {
+    if (!window.api?.confirmSoundboardFolder) throw new Error(t('botChat.downloadDesktopOnly'));
+    const folder = settingsStore.soundboardFolderPath;
+    if (!folder) return false;
+    const confirmed = await window.api.confirmSoundboardFolder(folder);
+    return confirmed && folder === settingsStore.soundboardFolderPath;
+  }
+
   public async playSound(filePath: string): Promise<boolean> {
     if (!window.api?.readSoundboardSound) return false;
 

@@ -411,6 +411,10 @@ async function runAutocompleteDomSmoke() {
   let progressListener = null;
   let availability = 'ready';
   let pickerCalls = 0;
+  let approveFolder = false;
+  const confirmedFolders = [];
+  const checkedFolders = [];
+  const authorizedFolders = [];
   const previewLoads = [];
   const previewCancels = [];
   const syntheticWave = () => {
@@ -444,10 +448,18 @@ async function runAutocompleteDomSmoke() {
   settingsStore.saveBotPreferences(preferenceScope, { language: 'pt-BR' });
   window.api = {
     ...previousApi,
-    soundDownloadAvailability: async () => availability,
+    soundDownloadAvailability: async folder => { checkedFolders.push(folder); return availability; },
+    confirmSoundboardFolder: async folder => {
+      confirmedFolders.push(folder);
+      if (approveFolder) availability = 'ready';
+      return approveFolder;
+    },
     selectSoundboardFolder: async () => { pickerCalls++; return 'C:\\isolated-fixture-sounds'; },
     listSoundboardSounds: async () => [],
-    authorizeSoundDownload: async () => ({ status: 'authorized', token: 'fixture-local-capability' }),
+    authorizeSoundDownload: async input => {
+      authorizedFolders.push(input.configuredFolder);
+      return { status: 'authorized', token: 'fixture-local-capability' };
+    },
     downloadSound: async input => {
       downloadInput = input;
       return new Promise(resolve => { resolveDownload = resolve; });
@@ -637,14 +649,110 @@ async function runAutocompleteDomSmoke() {
     find('#chat-command-notice').textContent.includes('Selecione uma pasta'),
     'Missing folders warn immediately without entering a command or opening a native picker');
   settingsStore.soundboardFolderPath = 'C:\\isolated-fixture-sounds';
+  settingsStore.save();
+  settingsStore.soundboardFolderPath = '';
+  settingsStore.load(false);
+  check(settingsStore.soundboardFolderPath === 'C:\\isolated-fixture-sounds',
+    'A saved legacy sound folder survives settings restoration before selecting /query');
   availability = 'confirmation_required';
   select();
   await waitFor(() => root.querySelector('#chat-command-notice')?.textContent?.includes('Confirme a pasta'));
   check(!store.getCommandDraft('one'), 'An unconfirmed legacy folder must block composer activation');
   check(!root.querySelector('#chat-command-notice button'), 'Folder confirmation is handled in settings, not by an inline picker');
-  availability = 'ready';
+  const { SoundboardTab } = await import('/views/settings/tabs/SoundboardTab.ts');
+  const folderSettings = document.createElement('section');
+  document.body.appendChild(folderSettings);
+  const soundboardTab = new SoundboardTab();
+  folderSettings.innerHTML = soundboardTab.renderHtml();
+  soundboardTab.attachEvents(folderSettings);
+  await waitFor(() => folderSettings.querySelector('#btn-confirm-soundboard-folder')?.hidden === false);
+  check(find('#input-soundboard-path').value === settingsStore.soundboardFolderPath,
+    'Settings keeps the saved audio folder instead of asking for a replacement');
+  const savedFolderSettings = localStorage.getItem('monky_settings');
+  find('#btn-confirm-soundboard-folder').click();
+  await waitFor(() => confirmedFolders.length === 1 && !find('#btn-confirm-soundboard-folder').disabled);
+  check(availability === 'confirmation_required' && localStorage.getItem('monky_settings') === savedFolderSettings,
+    'Cancelling native approval neither authorizes downloads nor changes the saved folder');
+  for (const locale of ['en', 'pt-BR']) {
+    language.setLanguage(locale);
+    folderSettings.innerHTML = soundboardTab.renderHtml();
+    soundboardTab.attachEvents(folderSettings);
+    await waitFor(() => find('#btn-confirm-soundboard-folder').hidden === false);
+    check(find('#btn-confirm-soundboard-folder').textContent.trim() === language.t('soundboard.confirmFolder'),
+      'The saved-folder action follows the active locale after remounting settings');
+  }
+  const { clientLog } = await import('/core/ClientLogService.ts');
+  const originalWarn = clientLog.warn;
+  const originalAvailability = window.api.soundDownloadAvailability;
+  const verificationWarnings = [];
+  const confirmationsBeforeCheckFailure = confirmedFolders.length;
+  const authorizationsBeforeCheckFailure = authorizedFolders.length;
+  clientLog.warn = (category, message, details) => { verificationWarnings.push({ category, message, details }); };
+  window.api.soundDownloadAvailability = async () => { throw new Error('Fixture authorization IPC disconnected'); };
+  try {
+    for (const locale of ['en', 'pt-BR']) {
+      language.setLanguage(locale);
+      folderSettings.innerHTML = soundboardTab.renderHtml();
+      soundboardTab.attachEvents(folderSettings);
+      await waitFor(() => find('#soundboard-download-folder-status').textContent.length > 0);
+      check(find('#soundboard-download-folder-status').textContent === language.t('soundboard.downloadFolderCheckFailed'),
+        'IPC failures must report an authorization-check error, not claim the folder is unwritable');
+      check(find('#btn-confirm-soundboard-folder').hidden &&
+        find('#input-soundboard-path').value === settingsStore.soundboardFolderPath &&
+        localStorage.getItem('monky_settings') === savedFolderSettings,
+      'A failed authorization check keeps the saved path without reporting success or offering authorization');
+    }
+    check(verificationWarnings.some(entry => entry.category === 'AUDIO' &&
+      entry.details?.error === 'Fixture authorization IPC disconnected'),
+    'Authorization-check warnings retain the original IPC error for diagnosis');
+    check(confirmedFolders.length === confirmationsBeforeCheckFailure && authorizedFolders.length === authorizationsBeforeCheckFailure,
+      'A failed folder check cannot confirm a directory or issue a download capability');
+  } finally {
+    clientLog.warn = originalWarn;
+    window.api.soundDownloadAvailability = originalAvailability;
+  }
+  folderSettings.innerHTML = soundboardTab.renderHtml();
+  soundboardTab.attachEvents(folderSettings);
+  await waitFor(() => find('#btn-confirm-soundboard-folder').hidden === false);
+  const originalFolder = settingsStore.soundboardFolderPath;
+  const checkAvailability = window.api.soundDownloadAvailability;
+  let finishStaleCheck;
+  window.api.soundDownloadAvailability = folder => {
+    checkedFolders.push(folder);
+    return folder === originalFolder ? new Promise(resolve => { finishStaleCheck = resolve; }) : Promise.resolve('ready');
+  };
+  soundboardTab.attachEvents(folderSettings);
+  settingsStore.soundboardFolderPath = 'C:\\updated-fixture-sounds';
+  settingsStore.save();
+  await waitFor(() => find('#btn-confirm-soundboard-folder').hidden &&
+    find('#input-soundboard-path').value === settingsStore.soundboardFolderPath);
+  finishStaleCheck('confirmation_required');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  check(find('#btn-confirm-soundboard-folder').hidden &&
+    find('#soundboard-download-folder-status').textContent === language.t('soundboard.downloadFolderReady'),
+    'A late check for the old folder cannot overwrite the received settings update');
+  window.api.soundDownloadAvailability = checkAvailability;
+  settingsStore.soundboardFolderPath = originalFolder;
+  settingsStore.save();
+  await waitFor(() => find('#btn-confirm-soundboard-folder').hidden === false);
+  approveFolder = true;
+  find('#btn-confirm-soundboard-folder').click();
+  await waitFor(() => find('#btn-confirm-soundboard-folder').hidden);
+  check(confirmedFolders.length === 2 && confirmedFolders.every(folder => folder === settingsStore.soundboardFolderPath),
+    'Native confirmation receives only the already configured local folder');
+  check(pickerCalls === 0 && localStorage.getItem('monky_settings') === savedFolderSettings,
+    'Confirming the saved folder needs no picker, changes no preferences, and preserves its exact path');
+  soundboardTab.cleanup();
+  folderSettings.remove();
+  const checksAfterSettingsClosed = checkedFolders.length;
+  appEvents.emit('settings.updated');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  check(checkedFolders.length === checksAfterSettingsClosed,
+    'Closing settings removes folder update listeners instead of continuing background checks');
   select();
   await waitFor(() => !!store.getCommandDraft('one'));
+  check(checkedFolders.at(-1) === settingsStore.soundboardFolderPath,
+    '/query checks the restored folder after receiving its native confirmation');
   type(input(), 'local');
   await waitFor(() => queries.length === 9);
   response(queries[8], choices);
@@ -668,6 +776,10 @@ async function runAutocompleteDomSmoke() {
   });
   window.autocompleteNativeFinish = async () => {
     if (!downloadInput || !resolveDownload || !receivedDownload) throw new Error('Trusted gesture did not authorize download');
+    check(authorizedFolders.at(-1) === settingsStore.soundboardFolderPath,
+      'The command authorizes the saved local folder, not a bot or server preference');
+    check(!JSON.stringify(invoked.at(-1)).includes(settingsStore.soundboardFolderPath),
+      'The local folder never enters command payloads sent to the server or SDK');
     view.setChannel('two');
     progressListener?.({ ...downloadInput, receivedBytes: 417, totalBytes: 834 });
     check(!root.querySelector('.bot-sound-download'), 'Progress must not create a card in the new channel');

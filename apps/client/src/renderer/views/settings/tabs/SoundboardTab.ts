@@ -11,10 +11,15 @@ import { favoritesStore, soundFavoriteKey } from '../../../stores/favoritesStore
 import { clientLog } from '../../../core/ClientLogService';
 import { renderFavoriteToggle, renderFavoritesFilter } from '../../FavoritesControls';
 import { showAlert } from '../../Dialog';
+import type { SoundboardDownloadAvailability } from '@monky/shared';
 
 export class SoundboardTab {
   private searchQuery: string = '';
   private unbindSounds: (() => void) | null = null;
+  private unbindSettings: (() => void) | null = null;
+  private unbindFolderControls: (() => void) | null = null;
+  private folderContainer: HTMLElement | null = null;
+  private folderCheckGeneration = 0;
   private favoritesOnly = false;
   private pickingFolder = false;
   private readonly favoriteMotion = new FavoriteListMotion();
@@ -22,6 +27,12 @@ export class SoundboardTab {
   public cleanup(): void {
     this.unbindSounds?.();
     this.unbindSounds = null;
+    this.unbindSettings?.();
+    this.unbindSettings = null;
+    this.unbindFolderControls?.();
+    this.unbindFolderControls = null;
+    this.folderContainer = null;
+    this.folderCheckGeneration++;
     this.favoriteMotion.cancel();
   }
 
@@ -47,6 +58,10 @@ export class SoundboardTab {
         <div id="soundboard-folder-info" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
           ${settingsStore.soundboardFolderPath ? tCount('settings.soundsFound', soundboardService.getSounds().length) : t('soundboard.formatsBadge')}
         </div>
+        <p id="soundboard-download-folder-status" role="status" aria-live="polite" style="font-size: 12px; color: var(--text-muted); margin-top: 8px;" hidden></p>
+        <button type="button" id="btn-confirm-soundboard-folder" class="btn btn-secondary" style="font-size: 12px;" hidden>
+          ${t('soundboard.confirmFolder')}
+        </button>
       </div>
 
       <div data-settings-section="soundboard-volume" data-settings-label="${escapeHtml(t('settings.soundboardVolume'))}" class="form-group" style="margin-bottom: 12px;">
@@ -187,21 +202,30 @@ export class SoundboardTab {
 
   public attachEvents(container: HTMLElement): void {
     this.cleanup();
+    this.folderContainer = container;
     this.unbindSounds = appEvents.on('soundboard.sounds_loaded', () => {
       if (!container.isConnected) return;
       const info = container.querySelector('#soundboard-folder-info');
       if (info) info.textContent = tCount('settings.soundsFound', soundboardService.getSounds().length);
       this.refreshTable(container);
+      void this.refreshFolderDownloadState(container);
     });
     const inputPath = container.querySelector<HTMLInputElement>('#input-soundboard-path');
     const btnSelectFolder = container.querySelector<HTMLButtonElement>('#btn-select-soundboard-folder');
+    const btnConfirmFolder = container.querySelector<HTMLButtonElement>('#btn-confirm-soundboard-folder');
     const sliderVol = container.querySelector<HTMLInputElement>('#slider-soundboard-vol');
     const volVal = container.querySelector<HTMLElement>('#soundboard-vol-val');
     const checkboxMute = container.querySelector<HTMLInputElement>('#checkbox-soundboard-mute');
+    let observedFolder = settingsStore.soundboardFolderPath;
+    this.unbindSettings = appEvents.on('settings.updated', () => {
+      if (observedFolder === settingsStore.soundboardFolderPath) return;
+      observedFolder = settingsStore.soundboardFolderPath;
+      if (inputPath) inputPath.value = observedFolder;
+      void this.refreshFolderDownloadState(container);
+    });
     const handlePickFolder = async () => {
       if (this.pickingFolder) return;
-      this.pickingFolder = true;
-      if (btnSelectFolder) btnSelectFolder.disabled = true;
+      this.setPickingFolder(true);
       try {
         const folder = await soundboardService.selectFolder();
         if (!folder || !container.isConnected) return;
@@ -219,13 +243,38 @@ export class SoundboardTab {
           await showAlert({ title: t('common.error'), message: t('soundboard.chooseFolderFailed'), variant: 'danger' });
         }
       } finally {
-        this.pickingFolder = false;
-        if (btnSelectFolder) btnSelectFolder.disabled = false;
+        this.setPickingFolder(false);
+        if (this.folderContainer) await this.refreshFolderDownloadState(this.folderContainer);
+      }
+    };
+    const handleConfirmFolder = async () => {
+      if (this.pickingFolder) return;
+      this.setPickingFolder(true);
+      try {
+        await soundboardService.confirmConfiguredFolder();
+      } catch (error: unknown) {
+        clientLog.warn('AUDIO', 'Could not authorize downloads in the configured soundboard folder', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (this.folderContainer === container && container.isConnected) {
+          await showAlert({ title: t('common.error'), message: t('soundboard.confirmFolderFailed'), variant: 'danger' });
+        }
+      } finally {
+        this.setPickingFolder(false);
+        if (this.folderContainer) await this.refreshFolderDownloadState(this.folderContainer);
       }
     };
 
     btnSelectFolder?.addEventListener('click', handlePickFolder);
     inputPath?.addEventListener('click', handlePickFolder);
+    btnConfirmFolder?.addEventListener('click', handleConfirmFolder);
+    this.unbindFolderControls = () => {
+      btnSelectFolder?.removeEventListener('click', handlePickFolder);
+      inputPath?.removeEventListener('click', handlePickFolder);
+      btnConfirmFolder?.removeEventListener('click', handleConfirmFolder);
+    };
+    this.setPickingFolder(this.pickingFolder);
+    void this.refreshFolderDownloadState(container);
 
     sliderVol?.addEventListener('input', () => {
       const val = parseInt(sliderVol.value, 10);
@@ -241,6 +290,42 @@ export class SoundboardTab {
     });
 
     this.attachShortcutButtons(container);
+  }
+
+  private setPickingFolder(picking: boolean): void {
+    this.pickingFolder = picking;
+    this.folderContainer?.querySelectorAll<HTMLButtonElement>('#btn-select-soundboard-folder, #btn-confirm-soundboard-folder')
+      .forEach(button => { button.disabled = picking; });
+  }
+
+  private async refreshFolderDownloadState(container: HTMLElement): Promise<void> {
+    if (this.folderContainer !== container || !container.isConnected) return;
+    const generation = ++this.folderCheckGeneration;
+    const folder = settingsStore.soundboardFolderPath;
+    const status = container.querySelector<HTMLElement>('#soundboard-download-folder-status');
+    const confirm = container.querySelector<HTMLButtonElement>('#btn-confirm-soundboard-folder');
+    if (!status || !confirm) return;
+    if (!folder || !window.api?.soundDownloadAvailability) {
+      status.hidden = true;
+      confirm.hidden = true;
+      return;
+    }
+    let availability: SoundboardDownloadAvailability | null = null;
+    try {
+      availability = await window.api.soundDownloadAvailability(folder);
+    } catch (error: unknown) {
+      clientLog.warn('AUDIO', 'Could not check soundboard download authorization', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (generation !== this.folderCheckGeneration || this.folderContainer !== container ||
+        !container.isConnected || settingsStore.soundboardFolderPath !== folder) return;
+    status.hidden = false;
+    status.textContent = t(availability === null ? 'soundboard.downloadFolderCheckFailed'
+      : availability === 'ready' ? 'soundboard.downloadFolderReady'
+      : availability === 'confirmation_required' ? 'soundboard.downloadFolderNeedsConfirmation' : 'soundboard.downloadFolderUnavailable');
+    confirm.hidden = availability !== 'confirmation_required' || !window.api?.confirmSoundboardFolder;
+    confirm.disabled = this.pickingFolder;
   }
 
   public attachShortcutButtons(container: HTMLElement): void {

@@ -22,12 +22,12 @@ import {
 import { DEFAULT_MANUAL_SERVER_URL, DEFAULT_MARKETPLACE_PORT } from '../constants';
 import { loadOrCreateBotKeys } from '../keys';
 import {
-  deleteProcess,
   ensurePm2ForStart,
   findProcess,
   isPm2Available,
   listProcesses,
   requirePm2,
+  restartBotProcess,
   saveProcessList,
   startOrRestart,
   stopProcess,
@@ -35,6 +35,7 @@ import {
   updaterEnvironment,
   writeBotEcosystem,
 } from '../pm2';
+import { assertManifestPortAvailable, getManifestBindHost } from '../ports';
 import { spawnCommand } from '../process';
 import { createRuntimeEnvironment } from '../runner';
 import { loadBotProject } from '../../tooling/config';
@@ -213,7 +214,16 @@ export async function startCommand(context: CliContext, args: string[]): Promise
   const invalid = args.find((argument) => !['--foreground'].includes(argument));
   if (invalid) throw new Error(`Unknown start option: ${invalid}`);
   const config = loadConfigOrThrow(context);
-  const entry = ensureRuntimeState(context, config);
+  const manualEntry = config.mode === 'manual' ? ensureRuntimeState(context, config) : null;
+  const current = foreground ? null : findProcess(context);
+  if (current?.pm2_env?.status === 'online') {
+    console.log(`${context.displayName} já está rodando (PID ${current.pid ?? 'desconhecido'}).`);
+    return;
+  }
+  if (config.mode === 'marketplace') {
+    await assertManifestPortAvailable(config.servePort, context.cliName, getManifestBindHost(current?.pm2_env));
+  }
+  const entry = manualEntry ?? ensureRuntimeState(context, config);
   if (foreground) {
     const child = spawnCommand(process.execPath, [context.runnerScript], {
       cwd: context.homeDir,
@@ -228,11 +238,6 @@ export async function startCommand(context: CliContext, args: string[]): Promise
     return;
   }
   ensurePm2ForStart(context);
-  const current = findProcess(context);
-  if (current?.pm2_env?.status === 'online') {
-    console.log(`${context.displayName} já está rodando (PID ${current.pid ?? 'desconhecido'}).`);
-    return;
-  }
   startOrRestart(context, writeBotEcosystem(context, entry));
   saveProcessList(context);
   console.log(`${context.displayName} iniciado em background.`);
@@ -260,16 +265,14 @@ export function stopCommand(context: CliContext, args: string[]): void {
   console.log(`${context.displayName} parado.`);
 }
 
-export function restartCommand(context: CliContext, args: string[]): void {
+export async function restartCommand(context: CliContext, args: string[]): Promise<void> {
   const fresh = args.includes('--fresh');
   const invalid = args.find((argument) => !['--fresh'].includes(argument));
   if (invalid) throw new Error(`Unknown restart option: ${invalid}`);
   const config = loadConfigOrThrow(context);
   const entry = ensureRuntimeState(context, config);
   requirePm2(context, 'restart the bot');
-  if (fresh) deleteProcess(context, context.processName);
-  startOrRestart(context, writeBotEcosystem(context, entry));
-  saveProcessList(context);
+  await restartBotProcess(context, config, entry, fresh);
   console.log(`${context.displayName} reiniciado.`);
 }
 
@@ -312,7 +315,7 @@ export function logsCommand(context: CliContext, args: string[]): void {
   streamLogs(context, lines, follow);
 }
 
-export function configCommand(context: CliContext, args: string[]): void {
+export async function configCommand(context: CliContext, args: string[]): Promise<void> {
   if (!args.length || args[0] === 'show') {
     const config = readConfig(context);
     if (!config) {
@@ -330,6 +333,10 @@ export function configCommand(context: CliContext, args: string[]): void {
     throw new Error(`Usage: ${context.cliName} config set <mode|botName|botDir|serverUrl|botToken|tokenEnv|servePort|publicHost> <value>`);
   }
   const next = applyConfigChange(context, config, key, value);
+  if (next.mode === 'marketplace' &&
+      (config.mode !== 'marketplace' || next.servePort !== config.servePort)) {
+    await assertManifestPortAvailable(next.servePort, context.cliName);
+  }
   writeConfig(context, next);
   console.log('Configuração atualizada.');
   console.log(`Reinicie o bot para aplicar: ${context.cliName} restart`);

@@ -83,6 +83,7 @@ export interface ElectronApi {
   listSoundboardSounds: (folderPath: string) => Promise<SoundboardSoundEntry[]>;
   readSoundboardSound: (filePath: string) => Promise<SoundboardSoundData | null>;
   soundDownloadAvailability: (configuredFolder: string) => Promise<SoundboardDownloadAvailability>;
+  confirmSoundboardFolder: (configuredFolder: string) => Promise<boolean>;
   authorizeSoundDownload: (input: SoundboardDownloadAuthorization) => Promise<SoundboardDownloadPermit>;
   downloadSound: (input: SoundboardDownloadInput) => Promise<SoundDownloadResult>;
   cancelSoundDownload: (key: SoundboardDownloadCancellation) => Promise<boolean>;
@@ -224,6 +225,7 @@ const api: ElectronApi = {
   listSoundboardSounds: (folderPath) => ipcRenderer.invoke('soundboard:list-sounds', folderPath),
   readSoundboardSound: (filePath) => ipcRenderer.invoke('soundboard:read-sound', filePath),
   soundDownloadAvailability: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.availability, folder),
+  confirmSoundboardFolder: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.confirmFolder, folder),
   authorizeSoundDownload: (input) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.authorize, input),
   downloadSound: (input) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.download, input),
   cancelSoundDownload: (key) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.cancel, key),

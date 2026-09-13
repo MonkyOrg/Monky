@@ -1,6 +1,7 @@
 import os from 'node:os';
 import readline from 'node:readline';
 import { Writable } from 'node:stream';
+import { assertManifestPortAvailable } from '../ports';
 import {
   ANSI,
   color,
@@ -34,9 +35,11 @@ type NonInteractiveSetupInput = {
   | { mode: 'marketplace'; servePort: number; publicHost: string }
 );
 
+const SETUP_CANCELLED_MESSAGE = 'Setup cancelado; a configuração não foi alterada.';
+
 function prompt(rl: readline.Interface, question: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const onClose = (): void => reject(new Error('Setup cancelado; a configuração não foi alterada.'));
+    const onClose = (): void => reject(new Error(SETUP_CANCELLED_MESSAGE));
     rl.once('close', onClose);
     rl.question(question, (answer) => {
       rl.off('close', onClose);
@@ -63,11 +66,11 @@ function promptModes(modes: readonly SetupMode[]): SetupMode[] {
   return preferredOrder.filter((mode) => modes.includes(mode));
 }
 
-async function validatedPrompt<T>(ask: Ask, question: string, validate: (value: string) => T, secret = false): Promise<T> {
+async function validatedPrompt<T>(ask: Ask, question: string, validate: (value: string) => T | Promise<T>, secret = false): Promise<T> {
   while (true) {
     const answer = await ask(question, secret);
     try {
-      return validate(answer);
+      return await validate(answer);
     } catch (error: unknown) {
       if (!(error instanceof Error)) throw error;
       console.error(color(error.message, ANSI.red));
@@ -145,6 +148,9 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     const config = input.mode === 'manual'
       ? manualConfig(context, input)
       : marketplaceConfig(context, input);
+    if (config.mode === 'marketplace') {
+      await assertManifestPortAvailable(config.servePort, context.cliName);
+    }
     writeConfig(context, config);
     console.log(`Configuração salva em ${context.configFile}.`);
     if (config.mode === 'manual') {
@@ -168,8 +174,11 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     },
   });
   const rl = readline.createInterface({ input: process.stdin, output, terminal: true, historySize: 0 });
+  let closed = false;
+  rl.once('close', () => { closed = true; });
   rl.on('SIGINT', () => rl.close());
   const ask: Ask = async (question, secret = false) => {
+    if (closed) throw new Error(SETUP_CANCELLED_MESSAGE);
     const answer = prompt(rl, question);
     muted = secret;
     try {
@@ -248,7 +257,11 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
       console.log();
       const defaultPort = current.mode === 'marketplace' ? current.servePort : DEFAULT_MARKETPLACE_PORT;
       const servePort = await validatedPrompt(ask, `Porta do manifest [${defaultPort}]: `,
-        (answer) => validateServePort(answer || String(defaultPort)));
+        async (answer) => {
+          const port = validateServePort(answer || String(defaultPort));
+          await assertManifestPortAvailable(port, context.cliName);
+          return port;
+        });
       const detectedIp = localIpv4();
       console.log(`Informe o IP ou domínio público desta máquina.${detectedIp ? ` (IP local detectado: ${detectedIp})` : ''}`);
       const defaultHost = existing?.mode === 'marketplace' ? existing.publicHost : '';
@@ -262,6 +275,10 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     config = { ...config, botName: await validatedPrompt(ask, `Nome do bot [${current.botName}]: `,
       (answer) => validateBotName(answer || current.botName)) };
 
+    if (config.mode === 'marketplace') {
+      await assertManifestPortAvailable(config.servePort, context.cliName);
+    }
+    if (closed) throw new Error(SETUP_CANCELLED_MESSAGE);
     writeConfig(context, config);
     console.log();
     console.log(color('Configuração salva!', ANSI.green));

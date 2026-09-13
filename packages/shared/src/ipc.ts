@@ -70,6 +70,7 @@ export type SoundboardDownloadCancellation = Omit<SoundboardDownloadKey, 'downlo
 
 export const SOUND_DOWNLOAD_IPC = {
   availability: 'soundboard:download-availability',
+  confirmFolder: 'soundboard:confirm-download-folder',
   authorize: 'soundboard:authorize-download',
   download: 'soundboard:download-sound',
   cancel: 'soundboard:cancel-download',
@@ -444,6 +445,7 @@ export interface IpcInvokeChannels {
   'soundboard:list-sounds': { args: [folderPath: string]; returnType: SoundboardSoundEntry[] };
   'soundboard:read-sound': { args: [filePath: string]; returnType: SoundboardSoundData | null };
   'soundboard:download-availability': { args: [configuredFolder: string]; returnType: SoundboardDownloadAvailability };
+  'soundboard:confirm-download-folder': { args: [configuredFolder: string]; returnType: boolean };
   'soundboard:authorize-download': { args: [input: SoundboardDownloadAuthorization]; returnType: SoundboardDownloadPermit };
   'soundboard:download-sound': { args: [input: SoundboardDownloadInput]; returnType: SoundDownloadResult };
   'soundboard:cancel-download': { args: [key: SoundboardDownloadCancellation]; returnType: boolean };

@@ -72,7 +72,7 @@ export async function runBotCli(packageRoot: string, args: string[] = process.ar
     return;
   }
   if (command === 'restart') {
-    restartCommand(context, rest);
+    await restartCommand(context, rest);
     return;
   }
   if (command === 'status') {
@@ -84,7 +84,7 @@ export async function runBotCli(packageRoot: string, args: string[] = process.ar
     return;
   }
   if (command === 'config') {
-    configCommand(context, rest);
+    await configCommand(context, rest);
     return;
   }
   if (command === 'update') {
