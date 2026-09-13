@@ -72,7 +72,8 @@ async function makeServer(t, handlers = {}) {
       type: MessageType.COMMAND_INVOKE,
       payload: {
         invocationId, commandName, botId: 'bot-one', channelId: 'channel-one',
-        invokerId: invocationId, invokerNickname: 'Caller', locale: 'en', ...extra,
+        invokerId: invocationId, invokerNickname: 'Caller', locale: 'en',
+        invokerSessionId: `session-${invocationId}`, invokerVoiceChannelId: null, ...extra,
       },
     })),
   };
@@ -108,6 +109,203 @@ test('a bot can explicitly remove its previous avatar through the SDK', { timeou
   bot.connect();
   await connected;
   assert.equal((await server.next(MessageType.BOT_UPDATE_PROFILE)).payload.avatarBase64, null);
+  assert.deepEqual(errors, []);
+});
+
+async function makeVoiceContextFixture(t) {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  let release, started;
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const ready = new Promise((resolve) => { started = resolve; });
+  bot.command({ name: 'voicecontext', description: 'Refresh caller room', handler: async (ctx) => {
+    ctx.signal.addEventListener('abort', release, { once: true });
+    started(ctx);
+    await waiting;
+  } });
+  const connected = once(bot, 'connected');
+  bot.connect({ serverId: 'voice-context-server' });
+  await connected;
+  server.invoke('voice-context-invocation', 'voicecontext', { invokerVoiceChannelId: 'original-room' });
+  return { server, bot, errors, ctx: await ready, release };
+}
+
+test('command voice requirements survive SDK validation and wire registration without affecting ordinary commands', async (t) => {
+  const server = await makeServer(t);
+  const { bot } = makeBot(t, server);
+  for (const voiceRequirement of ['joined', 'same-bot-channel']) {
+    bot.command({ name: voiceRequirement, description: 'Voice command', voiceRequirement, handler() {} });
+  }
+  bot.command({ name: 'plain', description: 'No voice required', handler() {} });
+  assert.throws(() => bot.command({ name: 'invalid', description: 'Invalid', voiceRequirement: 'elsewhere', handler() {} }));
+  bot.connect();
+  const registration = await server.next(MessageType.COMMAND_REGISTER);
+  assert.deepEqual(registration.payload.commands.map(({ name, voiceRequirement }) => ({ name, voiceRequirement })), [
+    { name: 'joined', voiceRequirement: 'joined' },
+    { name: 'same-bot-channel', voiceRequirement: 'same-bot-channel' },
+    { name: 'plain', voiceRequirement: undefined },
+  ]);
+});
+
+test('miniapp context creation targets the live voice room, never the command text channel or stale snapshot', async (t) => {
+  const f = await makeVoiceContextFixture(t);
+  const created = f.ctx.createScreen({ id: 'game', title: 'Game', html: '<p>Game</p>', state: {} });
+  const lookup = await f.server.next(MessageType.BOT_VOICE_CONTEXT);
+  f.server.send(MessageType.BOT_VOICE_CONTEXT_RESULT, {
+    invocationId: f.ctx.invocationId, voiceChannelId: 'current-voice',
+  }, lookup.requestId);
+  const request = await f.server.next(MessageType.BOT_SCREEN_CREATE);
+  assert.equal(request.payload.channelId, 'current-voice');
+  assert.equal(request.payload.invocationId, f.ctx.invocationId);
+  assert.notEqual(request.payload.channelId, f.ctx.channelId);
+  assert.notEqual(request.payload.channelId, f.ctx.invokerVoiceChannelId);
+  f.server.send(MessageType.BOT_SCREEN_SNAPSHOT, {
+    id: 'game', channelId: 'current-voice', title: 'Game', html: '<p>Game</p>', state: {},
+    botId: 'bot-one', revision: 0, createdAt: 1,
+  }, request.requestId);
+  assert.equal((await created).channelId, 'current-voice');
+  f.release();
+  await f.server.next(MessageType.COMMAND_FINISH);
+  assert.deepEqual(f.errors, []);
+});
+
+test('miniapp context cannot create outside voice or after cancellation during the membership lookup', async (t) => {
+  for (const cancel of [false, true]) await t.test(cancel ? 'cancelled' : 'outside voice', async (subtest) => {
+    const f = await makeVoiceContextFixture(subtest);
+    const rejected = assert.rejects(
+      f.ctx.createScreen({ title: 'Game', html: '<p>Game</p>', state: {} }),
+      cancel ? /interaction ended/ : /must join a voice channel/,
+    );
+    const lookup = await f.server.next(MessageType.BOT_VOICE_CONTEXT);
+    if (cancel) f.server.send(MessageType.COMMAND_FINISHED, {
+      invocationId: f.ctx.invocationId, channelId: f.ctx.channelId, reason: 'cancelled',
+    });
+    else f.server.send(MessageType.BOT_VOICE_CONTEXT_RESULT, {
+      invocationId: f.ctx.invocationId, voiceChannelId: null,
+    }, lookup.requestId);
+    await rejected;
+    assert.equal(f.server.frames.some((frame) => frame.type === MessageType.BOT_SCREEN_CREATE), false);
+    if (!cancel) {
+      f.release();
+      await f.server.next(MessageType.COMMAND_FINISH);
+    }
+    assert.deepEqual(f.errors, []);
+  });
+});
+
+test('voice context refresh is correlated, coalesced and does not rewrite its invocation snapshot', async (t) => {
+  const f = await makeVoiceContextFixture(t);
+  const first = f.ctx.getVoiceChannel();
+  assert.equal(f.ctx.getVoiceChannel(), first);
+  const frame = await f.server.next(MessageType.BOT_VOICE_CONTEXT);
+  assert.deepEqual(frame.payload, { invocationId: 'voice-context-invocation' });
+  f.server.send(MessageType.BOT_VOICE_CONTEXT_RESULT, {
+    invocationId: 'voice-context-invocation', voiceChannelId: 'room-after-choice',
+  }, frame.requestId);
+  assert.equal(await first, 'room-after-choice');
+  assert.equal(f.ctx.invokerVoiceChannelId, 'original-room');
+  const second = f.ctx.getVoiceChannel();
+  const next = await f.server.next(MessageType.BOT_VOICE_CONTEXT);
+  f.server.send(MessageType.BOT_VOICE_CONTEXT_RESULT, { invocationId: 'voice-context-invocation', voiceChannelId: null }, next.requestId);
+  assert.equal(await second, null);
+  f.release();
+  await f.server.next(MessageType.COMMAND_FINISH);
+  await assert.rejects(f.ctx.getVoiceChannel(), /already ended/);
+  assert.deepEqual(f.errors, []);
+});
+
+test('voice context surfaces malformed, mismatched and server-rejected responses', async (t) => {
+  const f = await makeVoiceContextFixture(t);
+  for (const result of [
+    { invocationId: 'another-invocation', voiceChannelId: 'room' },
+    { invocationId: 'voice-context-invocation', voiceChannelId: 42 },
+  ]) {
+    const rejected = assert.rejects(f.ctx.getVoiceChannel(), /Invalid voice context/);
+    const frame = await f.server.next(MessageType.BOT_VOICE_CONTEXT);
+    f.server.send(MessageType.BOT_VOICE_CONTEXT_RESULT, result, frame.requestId);
+    await rejected;
+  }
+  const rejected = assert.rejects(f.ctx.getVoiceChannel(), /permission revoked/);
+  const frame = await f.server.next(MessageType.BOT_VOICE_CONTEXT);
+  f.server.send(MessageType.SERVER_ERROR, { message: 'permission revoked' }, frame.requestId);
+  await rejected;
+  f.release();
+  await f.server.next(MessageType.COMMAND_FINISH);
+  assert.deepEqual(f.errors, []);
+});
+
+test('voice context times out at eight seconds and releases the request for a retry', async (t) => {
+  const f = await makeVoiceContextFixture(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const rejected = assert.rejects(f.ctx.getVoiceChannel(), /8 seconds/);
+    const expired = await f.server.next(MessageType.BOT_VOICE_CONTEXT);
+    t.mock.timers.tick(8001);
+    await rejected;
+    const retry = f.ctx.getVoiceChannel();
+    const frame = await f.server.next(MessageType.BOT_VOICE_CONTEXT);
+    f.server.send(MessageType.BOT_VOICE_CONTEXT_RESULT, {
+      invocationId: 'voice-context-invocation', voiceChannelId: 'expired-room',
+    }, expired.requestId);
+    f.server.send(MessageType.BOT_VOICE_CONTEXT_RESULT, {
+      invocationId: 'voice-context-invocation', voiceChannelId: 'retry-room',
+    }, frame.requestId);
+    assert.equal(await retry, 'retry-room');
+  } finally { t.mock.timers.reset(); }
+  f.release();
+  await f.server.next(MessageType.COMMAND_FINISH);
+  assert.deepEqual(f.errors, []);
+});
+
+test('voice context cancellation and disconnect reject pending refreshes and ignore late results', async (t) => {
+  for (const reason of ['cancelled', 'disconnected']) await t.test(reason, async (subtest) => {
+    const f = await makeVoiceContextFixture(subtest);
+    const rejected = assert.rejects(f.ctx.getVoiceChannel(), /interaction ended/);
+    const frame = await f.server.next(MessageType.BOT_VOICE_CONTEXT);
+    if (reason === 'cancelled') {
+      f.server.send(MessageType.COMMAND_FINISHED, {
+        invocationId: 'voice-context-invocation', channelId: 'channel-one', reason: 'cancelled',
+      });
+
+    } else f.server.disconnect();
+    await rejected;
+    assert.equal(f.ctx.signal.aborted, true);
+    await assert.rejects(f.ctx.getVoiceChannel(), /already ended/);
+    if (reason === 'cancelled') f.server.send(MessageType.BOT_VOICE_CONTEXT_RESULT, {
+      invocationId: 'voice-context-invocation', voiceChannelId: 'late-room',
+    }, frame.requestId);
+    assert.deepEqual(f.errors, []);
+  });
+});
+
+test('voice context responses cannot cross server connections with identical invocation IDs', async (t) => {
+  const first = await makeServer(t);
+  const second = await makeServer(t);
+  const { bot, errors } = makeBot(t, first);
+  const results = new Map();
+  bot.command({ name: 'voicecontext', description: 'Refresh caller room', handler: async (ctx) => {
+    results.set(ctx.serverId, await ctx.getVoiceChannel());
+  } });
+  bot.connect({ serverId: 'first' });
+  bot.connect({ serverId: 'second', serverUrl: second.url });
+  await Promise.all([first.next(MessageType.COMMAND_REGISTER), second.next(MessageType.COMMAND_REGISTER)]);
+  first.invoke('same-invocation', 'voicecontext');
+  second.invoke('same-invocation', 'voicecontext');
+  const [firstRequest, secondRequest] = await Promise.all([
+    first.next(MessageType.BOT_VOICE_CONTEXT), second.next(MessageType.BOT_VOICE_CONTEXT),
+  ]);
+  second.send(MessageType.BOT_VOICE_CONTEXT_RESULT, {
+    invocationId: 'same-invocation', voiceChannelId: 'forged-cross-server-room',
+  }, firstRequest.requestId);
+  first.send(MessageType.BOT_VOICE_CONTEXT_RESULT, {
+    invocationId: 'same-invocation', voiceChannelId: 'first-room',
+  }, firstRequest.requestId);
+  second.send(MessageType.BOT_VOICE_CONTEXT_RESULT, {
+    invocationId: 'same-invocation', voiceChannelId: 'second-room',
+  }, secondRequest.requestId);
+  await Promise.all([first.next(MessageType.COMMAND_FINISH), second.next(MessageType.COMMAND_FINISH)]);
+  assert.equal(results.get('first'), 'first-room');
+  assert.equal(results.get('second'), 'second-room');
   assert.deepEqual(errors, []);
 });
 
@@ -866,6 +1064,186 @@ async function sdkBarrier(server) {
   await server.next(MessageType.PONG);
 }
 
+const previewBytes = () => {
+  const bytes = Buffer.alloc(48);
+  bytes.write('RIFF'); bytes.writeUInt32LE(40, 4); bytes.write('WAVEfmt ', 8);
+  bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
+  bytes.writeUInt32LE(8000, 24); bytes.writeUInt32LE(16000, 28); bytes.writeUInt16LE(2, 32);
+  bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(4, 40);
+  return bytes;
+};
+const previewRequest = (resourceId = 'clip') => ({
+  commandName: 'search', optionName: 'sound', resourceId, locale: 'en',
+});
+
+test('lazy audio previews run only on explicit requests, with immutable settings and no command or HTTP server', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  let context;
+  let calls = 0;
+  const choice = { label: 'Authored clip', value: 'canonical-track', audio: { resourceId: 'clip', fileName: 'clip.wav', durationMs: 10_000 } };
+  assert.throws(() => bot.command({
+    name: 'invalid', description: 'Invalid', audioPreview: true, handler: () => {},
+  }), /preview provider/);
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions,
+    autocomplete: () => [choice],
+    audioPreview: (ctx) => { calls++; context = ctx; return { bytes: previewBytes(), mimeType: 'audio/wav' }; },
+    handler: () => assert.fail('A preview cannot invoke or mutate a command'),
+  });
+  bot.connect({ serverId: 'preview-server' });
+  const registration = await server.next(MessageType.COMMAND_REGISTER);
+  assert.equal('audioPreview' in registration.payload.commands[0], false);
+  server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('clip'), 'search');
+  assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload.choices, [choice]);
+  assert.equal(calls, 0);
+  server.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest(), 'listen');
+  const result = await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT);
+  assert.equal(result.requestId, 'listen');
+  assert.deepEqual(result.payload, { status: 'ok', mimeType: 'audio/wav', audioBase64: previewBytes().toString('base64') });
+  assert.equal(calls, 1);
+  assert.equal(context.resourceId, 'clip');
+  assert.equal(context.optionName, 'sound');
+  assert.equal(context.locale, 'en');
+  assert.equal(context.serverId, 'preview-server');
+  assert.equal(context.signal.aborted, true);
+  assertDeepFrozen(context.settings);
+  assert.equal(Reflect.set(context, 'settings', {}), false);
+  assert.equal('invocationId' in context, false);
+  assert.equal('reply' in context, false);
+  assert.equal('downloadSound' in context, false);
+  assert.equal(bot.httpServers.size, 0);
+  assert.equal(bot.audioPreviewWork, 0);
+  assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_FINISH), false);
+  assert.deepEqual(errors, []);
+});
+
+test('lazy audio preview cancellation and disconnect isolate matching IDs across server connections', async (t) => {
+  const first = await makeServer(t);
+  const second = await makeServer(t);
+  const { bot, errors } = makeBot(t, first);
+  const work = new Map();
+  let calls = 0;
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions, autocomplete: () => [],
+    handler: () => assert.fail('A preview must not execute the command'),
+    audioPreview: (ctx) => new Promise((resolve) => { calls++; work.set(ctx.serverId, { ctx, resolve }); }),
+  });
+  t.after(() => { for (const pending of work.values()) pending.resolve({ bytes: previewBytes(), mimeType: 'audio/wav' }); });
+  bot.connect({ serverId: 'first' });
+  bot.connect({ serverId: 'second', serverUrl: second.url });
+  await Promise.all([first.next(MessageType.COMMAND_REGISTER), second.next(MessageType.COMMAND_REGISTER)]);
+  first.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest(), 'same');
+  second.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest(), 'same');
+  await Promise.all([sdkBarrier(first), sdkBarrier(second)]);
+  first.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest('duplicate'), 'same');
+  first.send(MessageType.COMMAND_AUDIO_PREVIEW_CANCEL, { requestId: 'another' });
+  await sdkBarrier(first);
+  assert.equal(calls, 2);
+  assert.equal(work.get('first').ctx.signal.aborted, false);
+  first.send(MessageType.COMMAND_AUDIO_PREVIEW_CANCEL, { requestId: 'same' });
+  await sdkBarrier(first);
+  assert.equal(work.get('first').ctx.signal.aborted, true);
+  assert.equal(work.get('second').ctx.signal.aborted, false);
+  work.get('first').resolve({ bytes: previewBytes(), mimeType: 'audio/wav' });
+  work.get('second').resolve({ bytes: previewBytes(), mimeType: 'audio/wav' });
+  assert.equal((await second.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).requestId, 'same');
+  await sdkBarrier(first);
+  assert.equal(first.frames.some((frame) => frame.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT), false);
+  first.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest(), 'disconnect');
+  await sdkBarrier(first);
+  bot.disconnect('first');
+  assert.equal(work.get('first').ctx.signal.aborted, true);
+  work.get('first').resolve({ bytes: previewBytes(), mimeType: 'audio/wav' });
+  await sdkBarrier(second);
+  assert.equal(bot.audioPreviewWork, 0);
+  assert.deepEqual(errors, []);
+});
+
+test('lazy audio preview providers report errors, validate bytes and MIME, and abort on timeout', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  let timed;
+  let finish;
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions, autocomplete: () => [],
+    handler: () => {},
+    audioPreview: (ctx) => {
+      if (ctx.resourceId === 'throw') throw new Error('Clip generation failed');
+      if (ctx.resourceId === 'empty') return { bytes: new Uint8Array(), mimeType: 'audio/ogg' };
+      if (ctx.resourceId === 'array') return { bytes: [1, 2, 3], mimeType: 'audio/ogg' };
+      if (ctx.resourceId === 'large') return { bytes: new Uint8Array(LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES + 1), mimeType: 'audio/ogg' };
+      if (ctx.resourceId === 'mime') return { bytes: previewBytes(), mimeType: 'text/html' };
+      timed = ctx;
+      return new Promise((resolve) => { finish = resolve; });
+    },
+  });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  for (const [resource, reason] of [
+    ['throw', 'handler_failed'], ['empty', 'invalid_response'], ['array', 'invalid_response'],
+    ['large', 'too_large'], ['mime', 'unsupported_audio'],
+  ]) {
+    server.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest(resource), resource);
+    assert.deepEqual((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload, { status: 'failed', reason });
+  }
+  server.send(MessageType.COMMAND_AUDIO_PREVIEW, { ...previewRequest(), optionName: 'count' }, 'wrong-option');
+  assert.equal((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload.reason, 'invalid_response');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    server.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest('timeout'), 'timed');
+    await sdkBarrier(server);
+    t.mock.timers.tick(LIMITS.BOT_AUDIO_PREVIEW_TIMEOUT_MS);
+    assert.deepEqual((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload, { status: 'failed', reason: 'timeout' });
+    assert.equal(timed.signal.aborted, true);
+    assert.equal(bot.audioPreviewWork, 1, 'An unsettled aborted provider retains its concurrency slot');
+    finish({ bytes: previewBytes(), mimeType: 'audio/wav' });
+    await sdkBarrier(server);
+    assert.equal(bot.audioPreviewWork, 0);
+    assert.equal([...bot.connections.values()][0].audioPreviews.size, 0);
+    assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT), false);
+  } finally {
+    finish?.({ bytes: previewBytes(), mimeType: 'audio/wav' });
+    t.mock.timers.reset();
+  }
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /Clip generation failed/);
+});
+
+test('lazy audio preview concurrency stays bounded even when providers ignore cancellation', async (t) => {
+  const server = await makeServer(t);
+  const { bot } = makeBot(t, server);
+  const work = [];
+  let immediate = false;
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions, autocomplete: () => [], handler: () => {},
+    audioPreview: (ctx) => immediate ? { bytes: previewBytes(), mimeType: 'audio/wav' } :
+      new Promise((resolve) => { work.push({ ctx, resolve }); }),
+  });
+  t.after(() => { for (const pending of work) pending.resolve({ bytes: previewBytes(), mimeType: 'audio/wav' }); });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  for (let index = 0; index < LIMITS.MAX_BOT_AUDIO_PREVIEW_HANDLERS; index++) {
+    server.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest(), `work-${index}`);
+  }
+  await sdkBarrier(server);
+  assert.equal(work.length, LIMITS.MAX_BOT_AUDIO_PREVIEW_HANDLERS);
+  for (let index = 0; index < work.length; index++) {
+    server.send(MessageType.COMMAND_AUDIO_PREVIEW_CANCEL, { requestId: `work-${index}` });
+  }
+  await sdkBarrier(server);
+  assert.ok(work.every((pending) => pending.ctx.signal.aborted));
+  server.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest(), 'full');
+  assert.deepEqual((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload, { status: 'failed', reason: 'busy' });
+  assert.equal(work.length, LIMITS.MAX_BOT_AUDIO_PREVIEW_HANDLERS);
+  for (const pending of work) pending.resolve({ bytes: previewBytes(), mimeType: 'audio/wav' });
+  await sdkBarrier(server);
+  immediate = true;
+  server.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest(), 'released');
+  assert.equal((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload.status, 'ok');
+  assert.equal(bot.audioPreviewWork, 0);
+});
+
 test('autocomplete registration and callbacks preserve typed partial options without invoking commands', async (t) => {
   const server = await makeServer(t);
   const { bot, errors } = makeBot(t, server);
@@ -1239,7 +1617,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 14);
+  assert.equal(PROTOCOL_VERSION, 15);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();
@@ -1372,19 +1750,21 @@ test('settings snapshots reject stale, conflicting, malformed and wrong-bot data
   assert.equal(changes.length, 2);
 });
 
-test('settings and preferences isolate identical command, autocomplete and selector IDs across servers', { timeout: 10000 }, async (t) => {
+test('settings and preferences isolate identical command, autocomplete, audio preview and selector IDs across servers', { timeout: 10000 }, async (t) => {
   const first = await makeSettingsServer(t);
   const second = await makeSettingsServer(t);
   const { bot, errors } = makeBot(t, first);
   bot.settings(settingsDefinition());
   const commands = new Map();
   const autocompletes = new Map();
+  const previews = new Map();
   const responses = [];
   const observers = [];
   bot.command({
     name: 'search', description: 'Search', options: autocompleteOptions,
     handler: (ctx) => { commands.set(ctx.serverId, ctx); ctx.reply('OK'); },
     autocomplete: (ctx) => { autocompletes.set(ctx.serverId, ctx); return []; },
+    audioPreview: (ctx) => { previews.set(ctx.serverId, ctx); return { bytes: previewBytes(), mimeType: 'audio/wav' }; },
   });
   const stop = bot.onSelectorResponse((event, context) => {
     assertDeepFrozen(event);
@@ -1410,6 +1790,7 @@ test('settings and preferences isolate identical command, autocomplete and selec
     const settings = expected.get(serverId);
     server.invoke('same-invocation', 'search', { options: { sound: 'selected' }, settings });
     server.send(MessageType.COMMAND_AUTOCOMPLETE, { ...autocompleteRequest('same'), settings }, 'same-request');
+    server.send(MessageType.COMMAND_AUDIO_PREVIEW, { ...previewRequest(), settings }, 'same-preview');
     server.send(MessageType.SELECTOR_RESPONDED, {
       id: 'same-selector', channelId: 'same-channel', userId: 'same-human', value: serverId, settings,
     });
@@ -1418,19 +1799,25 @@ test('settings and preferences isolate identical command, autocomplete and selec
     });
     await server.next(MessageType.COMMAND_FINISH);
     assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload, { status: 'ok', choices: [] });
+    assert.equal((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload.status, 'ok');
     await sdkBarrier(server);
   }
   for (const [serverId, settings] of expected) {
     const command = commands.get(serverId);
     const autocomplete = autocompletes.get(serverId);
+    const preview = previews.get(serverId);
     assert.deepEqual(command.settings, settings);
     assert.deepEqual(autocomplete.settings, settings);
+    assert.deepEqual(preview.settings, settings);
     assertDeepFrozen(command.settings);
     assertDeepFrozen(autocomplete.settings);
+    assertDeepFrozen(preview.settings);
     assert.notEqual(command.settings, autocomplete.settings);
+    assert.notEqual(preview.settings, autocomplete.settings);
     assert.notEqual(command.settings.server, bot.getServerSettings(serverId).values);
     assert.equal(Reflect.set(command, 'settings', {}), false);
     assert.equal(Reflect.set(autocomplete, 'settings', {}), false);
+    assert.equal(Reflect.set(preview, 'settings', {}), false);
     assert.equal('userSettings' in command, false);
     assert.equal('user' in bot.getServerSettings(serverId), false);
     const response = responses.find((entry) => entry.context.serverId === serverId);

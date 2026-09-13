@@ -183,11 +183,15 @@ if (!process.versions.electron) {
 
 async function setupFooterSmoke() {
   const [{ MainView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
-    { appEvents }, { networkClient }, { soundEffects }, { bindChatComposerMotion }] = await Promise.all([
+    { appEvents }, { networkClient }, { soundEffects }, { bindChatComposerMotion }, { sessionManager }] = await Promise.all([
     import('/views/MainView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/serverStore.ts'), import('/core/EventBus.ts'),
     import('/core/NetworkClient.ts'), import('/core/SoundEffects.ts'), import('/views/FooterControlsMotion.ts'),
+    import('/core/SessionManager.ts'),
   ]);
+  sessionManager.install();
+  const session = sessionManager.create('footer.test', 7890, 'Footer');
+  sessionManager.activate(session.key);
   networkClient.send = () => {};
   soundEffects.play = () => {};
   navigator.mediaDevices.getUserMedia = async () => { throw new Error('Footer fixture does not permit hardware capture'); };
@@ -204,7 +208,7 @@ async function setupFooterSmoke() {
   }, user);
   settings.inputMode = 'push_to_talk';
   voice.isMuted = voice.isDeafened = voice.serverMuted = voice.serverDeafened = false;
-  voice.currentVoiceChannelId = 'footer-voice';
+  voice.setChannel('footer-voice', session.key);
   voice.setMicrophoneState(false, false);
   const root = document.getElementById('app');
   const view = new MainView(root);
@@ -714,6 +718,8 @@ async function setupFooterSmoke() {
       button.dataset.state = 'destroyed';
       await delay();
       check(animations(button).length === 0, 'Destroy removes motion listeners and observer on connected DOM');
+      voice.setChannel(null);
+      sessionManager.remove(session.key);
       return checks;
     },
   };
@@ -722,12 +728,16 @@ async function setupFooterSmoke() {
 async function setupStageSmoke() {
   const [{ VoiceStageView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
     { participantManager: participants }, { appEvents }, { screenAudioService },
-    { overlayBridgeService }, { overlayConfigModal }, { soundboardModal }] = await Promise.all([
+    { overlayBridgeService }, { overlayConfigModal }, { soundboardModal }, { sessionManager }] = await Promise.all([
     import('/views/VoiceStageView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/serverStore.ts'), import('/core/ParticipantManager.ts'), import('/core/EventBus.ts'),
     import('/core/ScreenAudioService.ts'), import('/core/OverlayBridgeService.ts'),
     import('/views/OverlayConfigModal.ts'), import('/views/SoundboardModal.ts'),
+    import('/core/SessionManager.ts'),
   ]);
+  const session = sessionManager.create('stage.test', 7890, 'Local');
+  session.client.send = () => {};
+  sessionManager.activate(session.key);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   const delay = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -742,7 +752,7 @@ async function setupStageSmoke() {
     myPermissions: 2147483647, ownerId: local.id,
   }, local);
   settings.screenShareTelemetryEnabled = false;
-  voice.currentVoiceChannelId = channel.id;
+  voice.setChannel(channel.id, session.key);
   voice.isMuted = voice.isDeafened = voice.serverMuted = voice.serverDeafened = false;
   voice.isCameraOn = false;
   voice.setScreenSharing(false);
@@ -1024,6 +1034,8 @@ async function setupStageSmoke() {
       overlayBridgeService.isActive = originalOverlayActive;
       overlayConfigModal.open = originalOverlayOpen;
       soundboardModal.open = originalSoundboardOpen;
+      voice.setChannel(null);
+      sessionManager.remove(session.key);
       return checks;
     },
   };

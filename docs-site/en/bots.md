@@ -64,11 +64,13 @@ When creating or editing a text channel, the **Allow bot commands** switch start
 ### Prerequisites
 
 - **Node.js 18+**
-- Client, server, and SDK compatible with **protocol 14**
+- Client, server, and SDK compatible with **protocol 15**
 - The `@monky/bot-sdk` package from the matching release
 
 ::: warning Update together
-Protocol 14 changes manual linking: `BOT_CREATE` accepts only `{}`, and management receives `profilePending` while a bot has not announced its identity. Update the **client, server, and bot** together; different versions cannot connect. The database preserves existing identities, and only the authenticated bot may publish profile changes. `ctx.args` contains typed values and `ctx.reply()` is private; use `ctx.publish()` only for channel-visible results.
+Protocol 15 adds voice, programmable screens, and on-demand audio previews. Update the **client, server, and bot** together; different protocol versions cannot connect.
+
+Protocol 14's linking rules are preserved: `BOT_CREATE` accepts only `{}`, and management receives `profilePending` while a bot has not announced its identity. The database preserves existing identities, and only the authenticated bot may publish profile changes. `ctx.args` contains typed values and `ctx.reply()` is private; use `ctx.publish()` only for channel-visible results.
 :::
 
 ### SDK Installation
@@ -333,6 +335,9 @@ bot.command({
     // ctx.channelId  — channel where it was invoked
     // ctx.invokerId  — user ID
     // ctx.invokerNickname — nickname
+    // ctx.invokerSessionId — connection/device that started the command
+    // ctx.invokerVoiceChannelId — initial voice room, not live state
+    // ctx.getVoiceChannel() — query the original connection's current room from the server
     // ctx.serverId   — server ID (useful in multi-server mode)
     // ctx.args       — arguments { name: string | number | boolean }
     // ctx.locale     — caller's language ('pt-BR' or 'en')
@@ -340,6 +345,7 @@ bot.command({
     // ctx.publish()  — explicitly publish a result in the channel
     // ctx.prompt()   — await a private form; may be called in multiple steps
     // ctx.choose()   — await a private choice through buttons or a dropdown
+    // ctx.createScreen() — create a shared screen independent of the handler
     // ctx.downloadSound() — await an authorized local soundboard download
     // ctx.signal     — aborts on cancellation, disconnect, timeout or completion
   },
@@ -348,9 +354,9 @@ bot.command({
 
 ### Guided parameters in chat
 
-Typing `/` opens a menu with frequently used commands and sections grouped by bot. Each item identifies the command, its description, and its bot. While browsing, required parameter chips and the optional parameter count help choose a command.
+Typing `/` opens a menu with frequently used commands and sections grouped by bot. Each item identifies the command, its description, and its bot. While browsing, required parameter chips and the optional parameter count help choose a command. Pressing **Space** selects the highlighted command and opens its composer without executing it. Spaces in ordinary messages or parameter fields remain text.
 
-Selecting a command with parameters identifies **which bot and command** are selected in a compact composer with named fields, descriptions, and placeholders. Optional parameters can be added when needed. Submission uses the names declared in `options`; there is no need to join values with commas. Commands without parameters that do not request local downloads, such as `/ping` and `/enquete`, start their interaction immediately when selected.
+Selecting a command with parameters identifies **which bot and command** are selected in a compact composer with named fields, descriptions, and placeholders. Optional parameters can be added when needed. Submission uses the names declared in `options`; there is no need to join values with commas. Commands without parameters that do not request local downloads, such as `/ping` and `/enquete`, start their interaction immediately when selected with a click, Enter or Tab; selecting with Space waits for an explicit submission.
 
 Usage frequency stays local and is scoped by server and identity. Only counts and recency are stored, never the values entered in parameters.
 
@@ -389,7 +395,7 @@ bot.command({
 });
 ```
 
-The callback receives `{ query, optionName, args, locale, serverId, signal }` and may return a list or a `Promise` of `SelectionChoice` (`{ label, value, description?, audio? }`). `args` contains only the other filled, valid options; missing required options are allowed at this stage. `query` contains the text of the option being edited.
+The callback receives `{ query, optionName, args, locale, serverId, signal, settings }` and may return a list or a `Promise` of `SelectionChoice` (`{ label, value, description?, audio? }`). `args` contains only the other filled, valid options; missing required options are allowed at this stage. `query` contains the text of the option being edited. `settings` is an immutable snapshot of server settings and this person's preferences.
 
 This example keeps the catalog in the bot. For an external source, replace filtering with a **metadata** search, pass `signal` to `fetch`, and validate the response. The callback receives neither an invocation nor reply/download methods. Queries are sent to the selected bot while the person types; they are not published in the channel or persisted in history.
 
@@ -399,7 +405,7 @@ Arrow keys only navigate. Enter or a click confirms a suggestion. **Without opti
 
 ### Selections with audio previews
 
-Any plugin can add `audio` to a `SelectionChoice`. The same contract works for static command choices, autocomplete responses, `select` fields in `ctx.prompt()`, `ctx.choose()`, and persistent `createSelector()` choices. Without `audio`, the option remains a plain selection; no bot-specific component is needed.
+Any plugin can add `audio` to a `SelectionChoice`. The `audio.url` variant works for static command choices, autocomplete responses, `select` fields in `ctx.prompt()`, `ctx.choose()`, and persistent `createSelector()` choices. The on-demand `audio.resourceId` variant is intended for current autocomplete choices. Without `audio`, the option remains a plain selection; no bot-specific component is needed.
 
 ```ts
 import type { SelectionChoice } from '@monky/bot-sdk';
@@ -418,9 +424,55 @@ const choices: SelectionChoice[] = [
 ];
 ```
 
-`audio.url` is required; `fileName` and `durationMs` are optional. Previews use public HTTPS and the same formats and 3 MiB limit as downloads. The client loads bytes into memory through the native process, validating DNS, redirects, MIME, and audio structure; it never assigns the external URL directly to a renderer player.
+In the variant above, `audio.url` is required; `fileName` and `durationMs` are optional. Previews use public HTTPS and the same formats and 3 MiB limit as downloads. The client loads bytes into memory through the native process, validating DNS, redirects, MIME, and audio structure; it never assigns the external URL directly to a renderer player. This variant continues to work unchanged, including sources such as MyInstants.
 
 Options can have a description, preview button, and a playback progress bar with elapsed/total time. There is **one shared volume control (0–100%) per command**, retained across results and parameters, with a visible percentage. Forms with multiple audio fields also share one control; persistent selectors have their own volume. Listening or adjusting volume **does not select, submit, or save the file to the library**. Only one preview plays at a time, locally through the chat-media output (or the shared output when no category-specific advanced setting is configured); output changes also apply to the active preview, and nothing is broadcast to voice. Closing or changing the selector stops loading/playback and releases resources. Previews do not require a configured folder. Suggestions appear in a scrollable panel above the composer; the fields below fit their placeholder/content, respect available width, and highlight focus or invalid values. Optional parameters can be removed with **×** without losing their draft.
+
+#### Generate audio only when listening
+
+When a source does not provide a small public HTTPS audio file, return `audio: { resourceId, fileName?, durationMs? }` from autocomplete and declare `audioPreview` on the command. **Never combine `url` and `resourceId`.** `resourceId` is up to 128 characters; it identifies a provider resource, not a URL for the client to fetch.
+
+This example reads an **authored file, at most 10 seconds and 256 KiB**, which you must provide at `audio/bell.ogg` alongside the module. To generate clips dynamically, replace only the body of `loadPreview`: media fetching, source resolution, and conversion belong in the bot process, respecting `signal`, never in autocomplete. Metadata search remains in the `autocomplete` callback.
+
+```ts
+import { readFile } from 'node:fs/promises';
+import type { CommandAudioPreviewContext, CommandAudioPreviewData } from '@monky/bot-sdk';
+
+const previews = new Map([
+  ['bell', { label: 'Bell', file: new URL('./audio/bell.ogg', import.meta.url) }],
+]);
+
+async function loadPreview(ctx: CommandAudioPreviewContext): Promise<CommandAudioPreviewData> {
+  const source = previews.get(ctx.resourceId);
+  if (!source) throw new Error('Unknown preview resource');
+  return { bytes: await readFile(source.file, { signal: ctx.signal }), mimeType: 'audio/ogg' };
+}
+
+bot.command({
+  name: 'preview-sample',
+  description: 'Choose an audio sample',
+  options: [{ name: 'sound', description: 'Sound', type: 'string', required: true, autocomplete: true }],
+  autocomplete: ({ query }) => [...previews].filter(([, source]) =>
+    source.label.toLowerCase().includes(query.toLowerCase())
+  ).map(([id, source]) => ({
+    label: source.label, value: id,
+    audio: { resourceId: id, fileName: `${id}.ogg`, durationMs: 10_000 },
+  })),
+  audioPreview: loadPreview,
+  handler: (ctx) => {
+    if (typeof ctx.args.sound !== 'string' || !previews.has(ctx.args.sound)) throw new Error('Unknown sample');
+    ctx.reply(`Selected: ${ctx.args.sound}`);
+  },
+});
+```
+
+`CommandDefinition.audioPreview` accepts a direct value or a `Promise<CommandAudioPreviewData>`. The exported `CommandAudioPreviewContext` contains `resourceId`, `serverId`, `optionName`, `locale` (`'pt-BR' | 'en'`), `signal`, and immutable `settings` captured in the same search. It has no invocation, queue, publish, or download methods. `CommandAudioPreviewData` contains only `bytes: Uint8Array` (a `Buffer` also works) and `mimeType: 'audio/ogg' | 'audio/mpeg' | 'audio/wav'`.
+
+- Only the listen button calls the provider. Typing, navigating, or selecting does not generate the clip; listening neither executes a command nor changes the queue.
+- Transport uses the **existing authenticated WebSocket**, person → server → bot → person. It requires no `serve()`, public hosting, signed URL, or additional port. The server replaces provider IDs with ephemeral tokens tied to the same person, device, channel, bot, command, option, and search; only advertised, still-valid choices can be previewed.
+- Generation has a **30-second** deadline; limits are **256 KiB of bytes** (base64 only on the wire) and **10 seconds of playback**. The native process validates MIME, size, and structure before creating the player's local source. This does not relax the URL variant's HTTPS/DNS/redirect protections.
+- Lazy choices expire after **60 seconds**, or sooner when the query/option/command changes, the menu closes, access is lost, settings change, or a connection disconnects. Switching previews cancels the previous one. Pass `signal` to subprocesses too and release their resources.
+- Up to **4 providers run concurrently per `BotClient`**, with 100 pending requests per server. A provider that ignores abort retains its slot until it settles. Errors, timeout, empty bytes, invalid MIME, and size overflow return explicit failures; exceptions thrown by providers also reach the SDK's `error` event.
 
 ### Authorized local downloads
 
@@ -664,6 +716,15 @@ bot.settings({
       { name: 'compact', label: 'Compact replies', type: 'boolean', required: true, defaultValue: false },
     ],
   },
+  localizations: {
+    'pt-BR': {
+      server: {
+        title: 'Comportamento',
+        fields: { enabled: { label: 'Ativado neste servidor' }, limit: { label: 'Quantidade máxima' } },
+      },
+      user: { title: 'Minhas preferências', fields: { compact: { label: 'Respostas compactas' } } },
+    },
+  },
 });
 
 bot.command({
@@ -687,6 +748,10 @@ const current = bot.getServerSettings('my-server'); // undefined before registra
 ```
 
 Required settings fields need valid defaults; this does not change ordinary command prompt forms. `false` and `0` are preserved. Text, integers, switches, lists, choices, and audio choices reuse the same controls, with an explicit **Save** even for button-style choices. **Restore defaults** prepares a change but does not persist it until saving.
+
+Optional `localizations` supports `pt-BR` and `en`, following the language selected in the app. Each scope may translate `title`, `description` and, under `fields`, the `label` and `description` of declared fields. Translations never change names, types, defaults or validation; missing text falls back to the original declaration. Shared forms and their translations are only sent to people authorized to configure them.
+
+In MonkyBot, **Behavior on this server → Music → Idle timeout (seconds)** controls departure after an idle queue or an empty room: 60 seconds by default, from 1 to 600, saved per server. Changing it during a pending timeout preserves elapsed inactivity. The `MONKY_MUSIC_GRACE_SECONDS` environment variable only supplies the host default, not a replacement for shared configuration.
 
 `ctx.settings` is a server-validated snapshot with `server`, `user`, `schemaRevision`, and `serverRevision`. Invocations, autocomplete, and independent selector responses receive the initiating user's preferences. Private continuations keep the original invocation snapshot; later changes apply to new actions. `onSelectorResponse` delivers preferences privately to the owning bot, never in public selector history. Generic messages and reactions do not distribute preferences to every bot.
 
@@ -831,7 +896,7 @@ In marketplace mode, TOFU binding happens automatically during installation.
 
 ## Monky Bot (official bot)
 
-[**Monky Bot**](https://github.com/MonkyOrg/MonkyBot) is the reference bot maintained by the organization. It serves as a practical example and includes utility commands:
+[**Monky Bot**](https://github.com/MonkyOrg/MonkyBot) is the reference bot maintained by the organization. It serves as a practical example and includes utility and music commands:
 
 | Command | Description |
 |---------|-------------|
@@ -840,9 +905,111 @@ In marketplace mode, TOFU binding happens automatically during installation.
 | `/moeda` | Coin flip |
 | `/8ball <question>` | Magic 8-ball; the question is required |
 | `/enquete` | Private form; publishes voting to the channel without review and closes by time and/or voter count |
+| `/play <name or URL>` | Autocomplete tracks by name or individual YouTube video link, with on-demand local previews and selection to enqueue |
+| `/queue` | Show the queue |
+| `/nowplaying` | Show the current track |
+| `/pause` and `/resume` | Pause and continue playback without restarting the track |
+| `/skip` | Advance to the next track |
+| `/remove <position>` | Remove a queued track |
+| `/clear` | Clear upcoming tracks without interrupting the current one |
+| `/stop` | Stop playback and clear the queue |
+| `/leave` | Stop, clear the queue, and disconnect from voice |
+| `/jogo-da-velha` | Open a shared tic-tac-toe game with two players and spectators |
 | `/ajuda` | List all commands |
 
+Each server has an independent queue and one active voice channel for that queue. All music commands, searches and private previews require voice membership, including `/queue` and `/nowplaying`. The first `/play` brings the bot to the caller's room; if it is already in another room, the request is rejected with instructions to join it. No DJ role is required, but Monky's general command permissions still apply. Playback does not belong to the `/play` handler: finishing or expiring that invocation does not end tracks that are already queued.
+
+Music uses only `/play`, not a separate `/query`. Search reuses the 250/500 ms autocomplete; listening generates up to 10 seconds for that person only, without adding to the queue. Selecting a result and executing `/play` is what adds the track.
+
+Search, source resolution, and audio conversion run **in the external MonkyBot process**, not on the Monky server or the requesting user's computer. This differs from `ctx.downloadSound()`, which requests an authorized local soundboard download.
+
+This first version does not support Spotify, playlists, albums, or live streams. Extracting YouTube media is not an official audio API for bots and may stop working because of platform restrictions or changes. Only play content you are authorized to use and respect [YouTube's terms and policies](https://developers.google.com/youtube/terms/developer-policies). The bot repository documents media prerequisites and unavailability messages.
+
 See the [Monky Bot repository](https://github.com/MonkyOrg/MonkyBot) for installation and usage instructions.
+
+## Bot voice
+
+The SDK separates the voice connection from the audio source. `bot.joinVoice(serverId, channelId, options?)` creates the server's appropriate P2P or SFU connection; decoding tracks, maintaining the queue, and pacing playback belong to the bot process. Text-only bots do not need to start media connections.
+
+The bot joins with its personal mute and deafen states off; existing administrative restrictions still apply. The current SDK transmits audio but does not yet offer an API to receive participants' voices ([#642](https://github.com/MonkyOrg/Monky/issues/642)). That limitation is not represented as the bot choosing to deafen itself.
+
+Declare `voiceRequirement: 'joined'` for commands that require voice, or `'same-bot-channel'` when callers must also share the bot's room if it has already joined voice. Omitting this field preserves ordinary command behavior. Client and server apply the rule to execution, autocomplete and previews; the server checks that exact person's connection, not another device on the same account. Leaving or moving cancels pending work and invalidates choices/previews, without retargeting the request to another room or interrupting already accepted playback.
+
+Command contexts contain server-authenticated `invokerSessionId` and `invokerVoiceChannelId`. They describe the initial execution; the latter is `null` when the connection invoking the command is not in voice. **The field is not a live getter.** After a search, form, or other wait, use `await ctx.getVoiceChannel()` to query the original connection's current room from the server. Do not look up the room by `invokerId` alone: the same person may be connected on two devices in different rooms.
+
+```ts
+bot.command({
+  name: 'join',
+  description: 'Join your voice room',
+  voiceRequirement: 'same-bot-channel',
+  handler: async (ctx) => {
+    const channelId = await ctx.getVoiceChannel();
+    if (channelId === null) {
+      ctx.reply(ctx.locale === 'en' ? 'Join a voice room first.' : 'Entre em uma sala de voz primeiro.');
+      return;
+    }
+    await bot.joinVoice(ctx.serverId, channelId, { invocationId: ctx.invocationId });
+    ctx.reply(ctx.locale === 'en' ? 'Connected to voice.' : 'Conectado à voz.');
+  },
+});
+```
+
+Pass `invocationId` when joining at a person's request: the server rechecks the connection, current room, and authorization, including private rooms. Moving or leaving between the query and join invalidates the request. This capability is voice-specific and does not grant general private-chat access. Joining without an invocation still requires the bot's own channel access. Before changing an existing queue, also revalidate the requesting person's room; finishing the command that started playback does not close the voice connection.
+
+Use `bot.getVoiceConnection(serverId)` to obtain that server's connection and `await bot.leaveVoice(serverId)` to close it. Each connection exposes `channelId` and `humanParticipantCount`. The `voiceParticipantsChanged` event provides `{ serverId, channelId, humanParticipantCount }`; `voiceDisconnected` also includes a `reason`. Register listeners once and remove them when shutting down the bot.
+
+`await connection.writeOpus(frame)` sends **one raw 20 ms Opus packet with a 48 kHz clock**, not an Ogg file, MP3, or PCM bytes. The source must extract packets and pace them instead of sending an entire file at once. Keep playback in a session independent of the command invocation and stop the source when leaving voice or losing the connection. `/pause` must suspend the source's progress; stopping transmission while it keeps reading would lose the playback position.
+
+Transmission uses the same speaking indicator as other participants. The SDK publishes activity transitions, not one event per packet, and clears the indicator when transmission becomes idle, is suppressed, or ends. Each person may also mute the bot only for themselves: this does not change anyone else's audio, playback, or the queue.
+
+When the source is paused or stopped, `connection.stopSpeaking()` clears the indicator immediately without closing the connection or changing mute preferences. This method does not replace pausing or stopping the audio source itself.
+
+Administrative mute/deafen has different semantics: while the connection is restricted, `writeOpus()` validates and discards packets without transmitting them or raising a media failure. Continue pacing at 20 ms. In MonkyBot, the track and queue advance normally in silence; lifting the restriction restores sound at the current position. This does not undo a manual pause. Invalid packets, closed connections, and actual transport failures still produce errors.
+
+## Shared programmable screens
+
+A screen is an HTML/CSS/JavaScript miniapp displayed **on the voice stage**. People in the room receive an invitation in the same corner as screen-sharing notices and choose whether to view it. There is no miniapp chat card or automatic opening. Unlike private `ctx.prompt()` forms, it accepts multiple participants and remains active after its command handler finishes. MonkyBot's `/jogo-da-velha` demonstrates two players and spectators; its rules remain in the bot, not in a viewer's JavaScript.
+
+The tile stays on the stage alongside cameras and screen shares, even when its view is closed. **Open miniapp** starts local viewing; **Leave miniapp** ends it and returns the tile to its closed state without closing the miniapp for anyone else. Focusing or returning to the grid only changes the layout: it does not reload the screen or change player seats. Opening a screen to watch is not the same as joining its game.
+
+Inside a command, `ctx.createScreen()` queries the caller's current voice room and binds the miniapp to that room and invocation, including authorized private rooms. `screen.channelId` always identifies a **voice channel**, not `ctx.channelId` (the command's text channel). Creation without voice membership is rejected. The bot does not need an audio connection to host a miniapp. Standalone `bot.createScreen(serverId, input)` requires the bot's own access; supplying `invocationId` enables invocation-scoped authorization. This does not grant general access to private messages.
+
+```ts
+bot.command({
+  name: 'screen',
+  description: 'Open a shared screen',
+  voiceRequirement: 'joined',
+  handler: async (ctx) => {
+    await ctx.createScreen({
+      title: ctx.locale === 'en' ? 'Shared screen' : 'Tela compartilhada',
+      html: `<main id="message"></main><script>
+        window.monkyScreen.onState(state => {
+          document.getElementById('message').textContent = state.message;
+        });
+      </script>`,
+      state: { message: ctx.locale === 'en' ? 'Hello, everyone!' : 'Olá, pessoal!' },
+    });
+  },
+});
+```
+
+Inside the isolated document, the `window.monkyScreen` bridge provides:
+
+| Screen API | Behavior |
+|------------|----------|
+| `viewer` | Frozen local context with `id`, `nickname`, and `locale` (`pt-BR` or `en`) for the person opening the screen |
+| `onState((state, revision) => ...)` | Delivers initial state and updates; returns an unsubscribe function |
+| `sendAction(action, payload)` | Sends an intent bound to the current revision; returns whether the bridge accepted sending it, not whether the bot accepted the action |
+
+Read `window.monkyScreen.viewer.locale` inside the `onState()` callback to translate each person's controls. Changing the app language also triggers this callback without changing shared state/revision or recreating the iframe. Do not derive the controls' language from public state or the screen creator's language.
+
+The SDK's `screenAction` event delivers `{ serverId, screenId, channelId, userId, userNickname, action, payload, revision, actionId }`. Use the authenticated identity in this envelope, never a player/user supplied in `payload`. Validate the action and game rules in the bot before calling `await bot.updateScreen(serverId, id, { state, expectedRevision })`. An accepted update increments `revision` and reaches participants; an old revision is rejected rather than overwriting a concurrent change. HTML remains unchanged during state updates.
+
+Use `listScreens(serverId, channelId)` with the voice room's ID to obtain current snapshots and `closeScreen(serverId, id)` to close a screen. The `screenRemoved` event delivers `{ serverId, id, channelId }`: also release the corresponding game state in the bot. Register listeners once and remove them on shutdown. The client restores active miniapps when joining their room; leaving, moving or disconnecting closes local viewing and revokes actions. Closing a view does not end other participants' game.
+
+**Shared state, no secrets:** authorized participants currently in that voice room receive the HTML and JSON state. The server also checks room membership when listing screens or acting; another channel or another device in voice does not authorize this connection. Actions require `USE_BOT_COMMANDS`. Never include tokens, local paths, or a player's secret information. Screens receive no Node.js, preload, IPC, access to the client's DOM, or permission for networking, navigation, popups, and downloads. Embed visual resources in the document instead of relying on CDNs or external requests.
+
+Limits are 128 KiB of HTML, 64 KiB of state, and 8 KiB per action; JSON allows up to 12 levels and 8,192 nodes. There may be up to four miniapps per voice room, 16 per bot, and 64 per server, with rate limits and action deduplication. They live in memory and are removed on bot restart/disconnection or loss of room authorization. Leaving the room, even emptying it, does not automatically delete state. Tic-tac-toe preserves state and player seats until the bot closes the game or its 30-minute expiry. To recover a game after restarting your bot, persist its domain state outside the screen and create a new authorized screen.
 
 ## Quick API reference
 
@@ -856,6 +1023,13 @@ See the [Monky Bot repository](https://github.com/MonkyOrg/MonkyBot) for install
 | `bot.disconnect(serverId?)` | Disconnect from one or all servers |
 | `bot.close()` | Close the bot's connections and HTTP servers |
 | `bot.serve(options)` | Start HTTP server for marketplace |
+| `bot.joinVoice(serverId, channelId, { invocationId }?)` | Join voice, using invocation authorization when supplied |
+| `bot.getVoiceConnection(serverId)` | Obtain that server's active voice connection |
+| `bot.leaveVoice(serverId)` | Close the connection and release media resources |
+| `bot.createScreen(serverId, input)` | Create an HTML and JSON-state miniapp in a voice room |
+| `bot.updateScreen(serverId, id, { state, expectedRevision })` | Update state without losing concurrent changes |
+| `bot.listScreens(serverId, channelId)` | Obtain that voice room's authorized active miniapps |
+| `bot.closeScreen(serverId, id)` | Close the screen for all participants |
 | `bot.serverCount` | Number of connected servers |
 | `bot.serverIds` | Connected server IDs |
 | `bot.registeredServerCount` | Number of known authenticated registrations, including offline |

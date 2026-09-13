@@ -29,7 +29,11 @@ export enum ProtocolErrorCode {
   BOT_INVALID_OPTIONS = 'BOT_INVALID_OPTIONS',
   BOT_INTERACTION_EXPIRED = 'BOT_INTERACTION_EXPIRED',
   BOT_INTERACTION_INVALID = 'BOT_INTERACTION_INVALID',
+  BOT_SCREEN_CONFLICT = 'BOT_SCREEN_CONFLICT',
+  BOT_SCREEN_NOT_FOUND = 'BOT_SCREEN_NOT_FOUND',
   BOT_COMMAND_BUSY = 'BOT_COMMAND_BUSY',
+  BOT_VOICE_REQUIRED = 'BOT_VOICE_REQUIRED',
+  BOT_VOICE_CHANNEL_MISMATCH = 'BOT_VOICE_CHANNEL_MISMATCH',
   BOT_INVALID_PROFILE = 'BOT_INVALID_PROFILE',
   BOT_SETTINGS_INVALID = 'BOT_SETTINGS_INVALID',
   BOT_SETTINGS_CONFLICT = 'BOT_SETTINGS_CONFLICT',
@@ -58,6 +62,17 @@ export enum MessageType {
   SELECTOR_FINALIZE = 'SELECTOR_FINALIZE',
   SELECTOR_SNAPSHOT = 'SELECTOR_SNAPSHOT',
   SELECTOR_LIST_RESULT = 'SELECTOR_LIST_RESULT',
+  BOT_SCREEN_CREATE = 'BOT_SCREEN_CREATE',
+  BOT_SCREEN_UPDATE = 'BOT_SCREEN_UPDATE',
+  BOT_SCREEN_CLOSE = 'BOT_SCREEN_CLOSE',
+  BOT_SCREEN_LIST = 'BOT_SCREEN_LIST',
+  BOT_SCREEN_SNAPSHOT = 'BOT_SCREEN_SNAPSHOT',
+  BOT_SCREEN_LIST_RESULT = 'BOT_SCREEN_LIST_RESULT',
+  BOT_SCREEN_ACTION = 'BOT_SCREEN_ACTION',
+  BOT_SCREEN_ACTION_EVENT = 'BOT_SCREEN_ACTION_EVENT',
+  BOT_SCREEN_REMOVED = 'BOT_SCREEN_REMOVED',
+  BOT_VOICE_CONTEXT = 'BOT_VOICE_CONTEXT',
+  BOT_VOICE_CONTEXT_RESULT = 'BOT_VOICE_CONTEXT_RESULT',
   // Client -> Server
   AUTH_CONNECT = 'AUTH_CONNECT',
   AUTH_CHALLENGE_RESPONSE = 'AUTH_CHALLENGE_RESPONSE',
@@ -160,6 +175,9 @@ export enum MessageType {
   COMMAND_AUTOCOMPLETE = 'COMMAND_AUTOCOMPLETE',
   COMMAND_AUTOCOMPLETE_RESULT = 'COMMAND_AUTOCOMPLETE_RESULT',
   COMMAND_AUTOCOMPLETE_CANCEL = 'COMMAND_AUTOCOMPLETE_CANCEL',
+  COMMAND_AUDIO_PREVIEW = 'COMMAND_AUDIO_PREVIEW',
+  COMMAND_AUDIO_PREVIEW_RESULT = 'COMMAND_AUDIO_PREVIEW_RESULT',
+  COMMAND_AUDIO_PREVIEW_CANCEL = 'COMMAND_AUDIO_PREVIEW_CANCEL',
   /** Client -> server: invoke a slash command. */
   COMMAND_INVOKE = 'COMMAND_INVOKE',
   COMMAND_INVOKED = 'COMMAND_INVOKED',
@@ -435,6 +453,8 @@ export interface VoiceJoinPayload {
   channelId: string;
   isMuted?: boolean;
   isDeafened?: boolean;
+  /** Bot-only admission scoped to the originating command invocation. */
+  invocationId?: string;
 }
 
 export interface VoiceModeTransition {
@@ -859,6 +879,7 @@ export interface CommandRegisterPayload {
     description: string;
     options?: CommandOption[];
     downloadsSound?: boolean;
+    voiceRequirement?: SlashCommand['voiceRequirement'];
   }>;
   settings?: BotSettingsDefinition;
 }
@@ -929,6 +950,8 @@ export interface CommandExecutionPayload extends Omit<CommandInvokePayload, 'use
   invocationId: string;
   invokerId: string;
   invokerNickname: string;
+  invokerSessionId: string;
+  invokerVoiceChannelId: string | null;
   settings?: BotSettingsContext;
 }
 

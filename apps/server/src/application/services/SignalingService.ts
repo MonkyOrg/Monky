@@ -14,11 +14,16 @@ export class SignalingService {
   // Map of sessionId -> VoiceParticipantState. Keyed per connection, not per
   // person, so the same user can be in voice from two devices at once (#309).
   private voiceStates: Map<string, VoiceParticipantState> = new Map();
+  private voiceMembershipListener?: () => void;
 
   constructor(
     private channelRepo: IChannelRepository,
     private voiceRestrictions: IVoiceRestrictionRepository,
   ) {}
+
+  public setVoiceMembershipListener(listener: (() => void) | undefined): void {
+    this.voiceMembershipListener = listener;
+  }
 
   public async joinVoiceChannel(
     sessionId: string,
@@ -31,6 +36,7 @@ export class SignalingService {
     errorCode?: ProtocolErrorCode;
     errorMessage?: string;
     voiceState?: VoiceParticipantState;
+    previousVoiceState?: VoiceParticipantState;
     existingParticipants?: VoiceParticipantState[];
   }> {
     const channel = await this.channelRepo.findById(channelId);
@@ -84,11 +90,13 @@ export class SignalingService {
     };
 
     this.voiceStates.set(sessionId, newState);
+    this.voiceMembershipListener?.();
     Logger.info('WEBRTC', `Session ${sessionId} joined voice channel ${channelId}`);
 
     return {
       success: true,
       voiceState: newState,
+      previousVoiceState: previousState,
       existingParticipants,
     };
   }
@@ -97,6 +105,7 @@ export class SignalingService {
     const current = this.voiceStates.get(sessionId);
     if (current) {
       this.voiceStates.delete(sessionId);
+      this.voiceMembershipListener?.();
       Logger.info('WEBRTC', `Session ${sessionId} left voice channel ${current.channelId}`);
       return current;
     }
@@ -206,6 +215,7 @@ export class SignalingService {
   public clearAllVoiceStates(): VoiceParticipantState[] {
     const list = Array.from(this.voiceStates.values());
     this.voiceStates.clear();
+    if (list.length) this.voiceMembershipListener?.();
     return list;
   }
 

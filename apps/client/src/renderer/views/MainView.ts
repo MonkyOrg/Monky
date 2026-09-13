@@ -1,6 +1,7 @@
 import { MessageType, Permission, UserSummary, canAccessChannel } from '@monky/shared';
 import type { ChannelType } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
+import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
 import { sessionManager } from '../core/SessionManager';
@@ -43,12 +44,13 @@ import { soundboardModal } from './SoundboardModal';
 import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
-import { participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
+import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
 import { serverRailView } from './ServerRailView';
 import { soundboardPlayersBar } from './SoundboardPlayersBar';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
 import logoUrl from '../assets/Logo.png';
 import { t, tCount } from '../i18n';
+import { getBotVoiceContext } from '../utils/botVoice';
 
 export class MainView {
   private container: HTMLElement;
@@ -71,6 +73,8 @@ export class MainView {
     const changed = this.activeContentView !== view;
     this.activeContentView = view;
     if (changed) {
+      if (view === 'chat') this.voiceStageView?.destroy();
+      else this.chatView?.destroy();
       appEvents.emit('stage.visibility_changed', view === 'stage');
     }
   }
@@ -79,7 +83,8 @@ export class MainView {
     this.container = container;
   }
 
-  public render(): void {
+  public render(preserveBotScreen = false): void {
+    const preserve = preserveBotScreen && this.activeContentView === 'stage' && this.callIsHere() && this.voiceStageView?.hasOpenBotScreen();
     this.unbindListeners();
     this.stopSidebarPing();
 
@@ -95,7 +100,7 @@ export class MainView {
     const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
     const moderation = getVoiceControlModeration();
 
-    this.container.innerHTML = `
+    const markup = `
       <div class="main-layout">
         <!-- Server Rail: saved servers + home (#29) -->
         <div class="server-rail" id="server-rail"></div>
@@ -225,6 +230,8 @@ export class MainView {
         </div>
       </div>
     `;
+    const preserved = preserve && replaceAroundLiveChild(this.container, markup, '.main-layout', '#main-center-stage');
+    if (!preserved) this.container.innerHTML = markup;
 
     this.renderChannels();
     this.renderMembers();
@@ -236,20 +243,23 @@ export class MainView {
     // Re-rendering happens on every server switch now (#400), so the previous
     // views must be torn down or their event listeners and ping timers would
     // pile up on each switch.
-    this.chatView?.destroy();
-    this.voiceStageView?.destroy();
-    this.chatView = new ChatView(centerStageEl);
-    this.voiceStageView = new VoiceStageView(centerStageEl);
+    if (preserved) this.voiceStageView?.render();
+    else {
+      this.chatView?.destroy();
+      this.voiceStageView?.destroy();
+      this.chatView = new ChatView(centerStageEl);
+      this.voiceStageView = new VoiceStageView(centerStageEl);
+    }
 
     // A re-render (e.g. after switching languages, #16) must not drop someone
     // who is watching the voice stage back into the text channel. The session
     // check keeps the stage hidden when the call belongs to another server the
     // user has walked away from (#400).
     if (this.activeContentView === 'stage' && this.callIsHere()) {
-      this.voiceStageView.setChannel(voiceStore.currentVoiceChannelId);
+      this.voiceStageView?.setChannel(voiceStore.currentVoiceChannelId);
     } else if (serverStore.activeTextChannelId) {
       this.setActiveContentView('chat');
-      this.chatView.setChannel(serverStore.activeTextChannelId);
+      this.chatView?.setChannel(serverStore.activeTextChannelId);
     }
 
     this.attachEvents();
@@ -284,7 +294,8 @@ export class MainView {
     const slot = document.getElementById('voice-connection-row-slot');
     if (!slot) return;
 
-    const vc = serverStore.serverDetails?.channels.find((c) => c.id === voiceStore.currentVoiceChannelId);
+    const session = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
+    const vc = session?.serverStore.getChannel(voiceStore.currentVoiceChannelId ?? '');
     if (!voiceStore.currentVoiceChannelId || !vc) {
       slot.innerHTML = '';
       this.stopSidebarPing();
@@ -294,7 +305,7 @@ export class MainView {
     const reconnecting = voiceStore.isReconnecting;
     const connecting = voiceStore.isConnecting;
     const connectionClass = reconnecting ? 'reconnecting' : connecting ? 'connecting' : '';
-    const serverName = serverStore.serverDetails?.name ?? '';
+    const serverName = session?.serverStore.serverDetails?.name ?? '';
     const { quality, icon } = voiceConnectionIndicator(null, reconnecting, connecting);
     const statusText = reconnecting ? t('main.reconnecting') : connecting ? t('main.connecting') : t('main.voiceConnected');
     const noiseMode = settingsStore.noiseSuppressionMode;
@@ -357,10 +368,11 @@ export class MainView {
       if (!pingEl) return;
       const isSfu = webRtcManager.isSfuMode();
       const channelId = voiceStore.currentVoiceChannelId;
-      const participants = participantManager.getInVoiceChannel(voiceStore.currentVoiceChannelId || '');
+      const sessionKey = voiceStore.voiceSessionKey;
+      const participants = (sessionKey ? sessionManager.get(sessionKey)?.participants.getInVoiceChannel(channelId ?? '') : undefined) ?? [];
       const pending = voiceStore.isConnecting || voiceStore.isReconnecting;
       const avg = pending ? null : participants.length <= 1 && !isSfu ? 0 : await webRtcManager.getAverageP2pPing();
-      if (!pingEl.isConnected || channelId !== voiceStore.currentVoiceChannelId) return;
+      if (!pingEl.isConnected || channelId !== voiceStore.currentVoiceChannelId || sessionKey !== voiceStore.voiceSessionKey) return;
       pingEl.textContent = avg !== null ? `${avg} ms` : '-- ms';
       const { quality, icon } = voiceConnectionIndicator(avg, voiceStore.isReconnecting, voiceStore.isConnecting);
       const signal = document.querySelector<HTMLElement>('.voice-conn-signal');
@@ -389,19 +401,28 @@ export class MainView {
     }
   }
 
+  private updateParticipantSpeaking(sessionId?: string): void {
+    for (const row of this.container.querySelectorAll<HTMLElement>('.voice-participant-mini[data-session-id]')) {
+      const id = row.dataset.sessionId;
+      if (!id || (sessionId && id !== sessionId)) continue;
+      row.classList.toggle('speaking', isParticipantSpeaking(participantManager.get(id)));
+    }
+  }
+
   /**
    * Remote participants broadcasting their screen in the voice channel the
    * local user is currently connected to (#282).
    */
   private getRemoteScreenSharers(): Array<{ id: string; nickname: string }> {
     const channelId = voiceStore.currentVoiceChannelId;
-    if (!channelId) return [];
-    return participantManager
+    const session = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
+    if (!channelId || !session) return [];
+    return session.participants
       .getInVoiceChannel(channelId)
-      .filter((p) => !serverStore.isMySession(p.user.sessionId) && (p.voiceState?.isScreenSharing ?? false))
+      .filter((p) => !session.serverStore.isMySession(p.user.sessionId) && (p.voiceState?.isScreenSharing ?? false))
       .map((p) => ({
         id: p.user.sessionId || p.user.id,
-        nickname: participantManager.displayName(p),
+        nickname: session.participants.displayName(p),
       }));
   }
 
@@ -417,11 +438,19 @@ export class MainView {
 
     const sharers = this.getRemoteScreenSharers();
     const isSelfSharing = voiceStore.isScreenSharing;
-    const signature = `${this.activeContentView}|${isSelfSharing}|${sharers.map((s) => `${s.id}:${s.nickname}`).join(',')}`;
+    const voice = getBotVoiceContext();
+    const screens = voice ? voice.session.botScreenStore.list(voice.channelId)
+      .filter((screen) => !this.voiceStageView?.isWatchingBotScreen(screen.id)
+        && !voice.session.botScreenStore.isInvitationDismissed(screen.id)) : [];
+    const loadFailed = voice?.session.botScreenStore.loadFailed ?? false;
+    const signature = JSON.stringify([
+      this.activeContentView, isSelfSharing, sharers, voice?.session.key, voice?.channelId,
+      screens.map((screen) => [screen.id, screen.title]), loadFailed,
+    ]);
     if (signature === this.screenShareNoticeSignature) return;
     this.screenShareNoticeSignature = signature;
 
-    if (this.activeContentView === 'stage' || (sharers.length === 0 && !isSelfSharing)) {
+    if ((this.activeContentView === 'stage' || (sharers.length === 0 && !isSelfSharing)) && screens.length === 0 && !loadFailed) {
       slot.innerHTML = '';
       return;
     }
@@ -429,7 +458,7 @@ export class MainView {
     const parts: string[] = [];
 
     // Local user sharing notice with stop button (#416)
-    if (isSelfSharing) {
+    if (isSelfSharing && this.activeContentView !== 'stage') {
       parts.push(`
         <div class="screenshare-notice screenshare-notice--self">
           <span class="material-symbols-outlined md-16 screenshare-notice-icon">screen_share</span>
@@ -440,7 +469,7 @@ export class MainView {
     }
 
     // Remote sharers notice
-    if (sharers.length > 0) {
+    if (sharers.length > 0 && this.activeContentView !== 'stage') {
       const names = sharers.map((s) => escapeHtml(s.nickname));
       let label: string;
       if (names.length === 1) {
@@ -464,7 +493,32 @@ export class MainView {
       `);
     }
 
+    for (const screen of screens) {
+      const label = escapeHtml(t('botScreen.invitation', { title: screen.title }));
+      parts.push(`
+        <div class="screenshare-notice bot-screen-invitation">
+          <span class="material-symbols-outlined md-16 screenshare-notice-icon" aria-hidden="true">apps</span>
+          <span class="screenshare-notice-text" title="${label}">${label}</span>
+          <button type="button" class="screenshare-notice-btn" data-watch-bot-screen="${escapeHtml(screen.id)}"
+            aria-label="${escapeHtml(t('botScreen.open', { title: screen.title }))}">${t('botScreen.watch')}</button>
+        </div>
+      `);
+    }
+    if (loadFailed) {
+      parts.push(`<div class="screenshare-notice bot-screen-invitation">
+        <span class="screenshare-notice-text" role="status">${t('botScreen.loadError')}</span>
+        <button type="button" class="screenshare-notice-btn" data-reload-bot-screens>${t('botScreen.retry')}</button>
+      </div>`);
+    }
     slot.innerHTML = parts.join('');
+    slot.querySelectorAll<HTMLButtonElement>('[data-watch-bot-screen]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const current = getBotVoiceContext();
+        if (!voice || current?.session !== voice.session || current.channelId !== voice.channelId) return;
+        this.openVoiceStage(undefined, button.dataset.watchBotScreen);
+      });
+    });
+    slot.querySelector('[data-reload-bot-screens]')?.addEventListener('click', () => appEvents.emit('voice.bot_screens_reload'));
 
     // Stop self-sharing handler
     document.getElementById('screenshare-self-stop-btn')?.addEventListener('click', async () => {
@@ -523,12 +577,16 @@ export class MainView {
    * Switches the center area to the voice stage, optionally opting into a
    * specific remote screen share on the way in (#282).
    */
-  private openVoiceStage(watchSessionId?: string): void {
+  private openVoiceStage(watchSessionId?: string, botScreenId?: string): void {
     const channelId = voiceStore.currentVoiceChannelId;
-    if (!channelId) return;
+    const sessionKey = voiceStore.voiceSessionKey;
+    if (!channelId || !sessionKey || !sessionManager.get(sessionKey)) return;
+    // A notice can belong to the background call, never to the current text tab.
+    if (sessionManager.getActiveKey() !== sessionKey) sessionManager.activate(sessionKey);
     this.setActiveContentView('stage');
     this.voiceStageView?.setChannel(channelId);
     if (watchSessionId) this.voiceStageView?.watchScreenShare(watchSessionId);
+    if (botScreenId) this.voiceStageView?.watchBotScreen(botScreenId, true);
     this.renderChannels();
     this.updateScreenShareNotice();
   }
@@ -727,9 +785,7 @@ export class MainView {
                   const sessionId = p.user.sessionId || p.user.id;
                   const isLocal = serverStore.isMySession(p.user.sessionId);
                   const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
-                  const isSpeaking = isLocal
-                    ? isLocalCall && p.voiceState?.channelId === voiceStore.currentVoiceChannelId && voiceStore.isSpeaking
-                    : p.isSpeaking;
+                  const isSpeaking = isParticipantSpeaking(p);
                   const isServerDeafened = isLocalCall ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
                   const isServerMuted = isLocalCall ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
                   const isSelfDeafened = isLocalCall ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
@@ -1526,6 +1582,7 @@ export class MainView {
         if (voiceStore.isSpeaking) avatarEl.classList.add('speaking');
         else avatarEl.classList.remove('speaking');
       }
+      this.updateParticipantSpeaking();
       updateDeafenControl();
 
       const mediaCamEl = document.getElementById('media-btn-camera');
@@ -1567,28 +1624,16 @@ export class MainView {
       }
     });
 
-    const u5 = appEvents.on('voice.speaking_changed', (speaking: boolean) => {
+    const u5 = appEvents.on('voice.speaking_changed', () => {
       const avatarEl = document.getElementById('main-user-avatar');
       if (avatarEl) {
-        if (speaking) avatarEl.classList.add('speaking');
-        else avatarEl.classList.remove('speaking');
+        avatarEl.classList.toggle('speaking', voiceStore.isSpeaking);
       }
-      if (serverStore.currentUser && isViewingCallServer()) {
-        const mySessionId = serverStore.currentUser.sessionId || serverStore.currentUser.id;
-        const miniEl = document.getElementById(`voice-mini-user-${mySessionId}`);
-        if (miniEl) {
-          const inCall = participantManager.get(mySessionId)?.voiceState?.channelId === voiceStore.currentVoiceChannelId;
-          miniEl.classList.toggle('speaking', speaking && inCall);
-        }
-      }
+      this.updateParticipantSpeaking();
     });
 
     const u6 = appEvents.on('participants.speaking_changed', (data: { sessionId: string; speaking: boolean }) => {
-      const miniEl = document.getElementById(`voice-mini-user-${data.sessionId}`);
-      if (miniEl) {
-        if (data.speaking) miniEl.classList.add('speaking');
-        else miniEl.classList.remove('speaking');
-      }
+      this.updateParticipantSpeaking(data.sessionId);
     });
 
     const u7 = appEvents.on(`message.${MessageType.SERVER_SETTINGS_UPDATED}`, (payload: any) => {
@@ -1716,8 +1761,14 @@ export class MainView {
     // so the icon, colour and status text track the live state (#553).
     const u16 = appEvents.on('voice.connection_changed', () => this.updateVoiceConnectionRow());
     const u17 = appEvents.on('server.voice_restrictions_updated', updateDeafenControl);
+    const u18 = appEvents.on('voice.bot_screens_updated', () => this.updateScreenShareNotice());
+    const u19 = appEvents.on('stage.bot_screens_changed', () => this.updateScreenShareNotice());
+    const u20 = appEvents.on('session.voice_context_updated', () => {
+      this.updateScreenShareNotice();
+      this.updateParticipantSpeaking();
+    });
 
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20);
   }
 
   /** True when the given text channel is the one currently visible on screen (#14). */

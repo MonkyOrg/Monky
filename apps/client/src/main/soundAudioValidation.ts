@@ -100,7 +100,10 @@ function isWav(bytes: Buffer): boolean {
 function isOgg(bytes: Buffer): boolean {
   let offset = 0;
   let pages = 0;
-  let codec = false;
+  let codec: 'opus' | 'vorbis' | undefined;
+  let audio = false;
+  let packets = 0;
+  let parts: Buffer[] = [];
   while (offset + 27 <= bytes.length) {
     if (bytes.toString('ascii', offset, offset + 4) !== 'OggS' || bytes[offset + 4] !== 0) return false;
     const segments = bytes[offset + 26];
@@ -108,12 +111,28 @@ function isOgg(bytes: Buffer): boolean {
     if (start > bytes.length) return false;
     const length = bytes.subarray(offset + 27, start).reduce((sum, size) => sum + size, 0);
     if (start + length > bytes.length) return false;
-    if (pages === 0) codec = (length >= 19 && bytes.toString('ascii', start, start + 8) === 'OpusHead') ||
-      (length >= 30 && bytes[start] === 1 && bytes.toString('ascii', start + 1, start + 7) === 'vorbis');
+    let cursor = start;
+    for (const size of bytes.subarray(offset + 27, start)) {
+      parts.push(bytes.subarray(cursor, cursor + size));
+      cursor += size;
+      if (size === 255) continue;
+      const packet = Buffer.concat(parts);
+      parts = [];
+      if (packets === 0) {
+        if (packet.length >= 19 && packet.toString('ascii', 0, 8) === 'OpusHead') codec = 'opus';
+        else if (packet.length >= 30 && packet[0] === 1 && packet.toString('ascii', 1, 7) === 'vorbis') codec = 'vorbis';
+        else return false;
+      } else if (packet.length > 0) {
+        // Identification/comments/setup packets alone are not playable audio.
+        audio ||= codec === 'opus'
+          ? !['OpusHead', 'OpusTags'].includes(packet.toString('ascii', 0, 8)) : (packet[0] & 1) === 0;
+      }
+      packets++;
+    }
     offset = start + length;
     pages++;
   }
-  return codec && pages >= 2 && offset === bytes.length;
+  return codec !== undefined && audio && parts.length === 0 && pages >= 2 && offset === bytes.length;
 }
 
 function isM4a(bytes: Buffer): boolean {

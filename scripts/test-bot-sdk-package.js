@@ -20,6 +20,12 @@ try {
     (async () => {
       assert.equal(PROTOCOL_VERSION, ${PROTOCOL_VERSION});
       const bot = new BotClient({ publicKey: 'a'.repeat(64), autoReconnect: false });
+      for (const method of [
+        'joinVoice', 'leaveVoice', 'getVoiceConnection',
+        'createScreen', 'updateScreen', 'closeScreen', 'listScreens',
+      ]) {
+        assert.equal(typeof bot[method], 'function', method + ' must be available in the packaged SDK.');
+      }
       bot.command({
         name: '8ball', description: 'Packaged command',
         options: [{ name: 'question', description: 'Question', type: 'string', required: true }],

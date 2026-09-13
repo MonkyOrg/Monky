@@ -17,19 +17,23 @@ export function renderCommandParameters(command: SlashCommand): string {
   </span>`;
 }
 
-export function renderCommandCatalog(groups: CommandGroup[], activeIndex: number): string {
+export function renderCommandCatalog(
+  groups: CommandGroup[], activeIndex: number, deniedReason: (command: SlashCommand) => string | undefined = () => undefined,
+): string {
   let index = 0;
   let activeGroup = '';
   const sections = groups.map((group, groupIndex) => {
     const start = index;
     const rows = group.commands.map((command) => {
       const rowIndex = index++;
+      const denied = deniedReason(command);
       return `<div id="command-option-${rowIndex}" class="command-row ${rowIndex === activeIndex ? 'active' : ''}"
-        role="option" aria-selected="${rowIndex === activeIndex}" data-cmd-index="${rowIndex}">
+        role="option" aria-selected="${rowIndex === activeIndex}" ${denied ? 'aria-disabled="true"' : ''} data-cmd-index="${rowIndex}">
         <img class="command-row-avatar" src="${escapeHtml(getAvatarUrl(command.botAvatarUrl))}" alt="" data-fallback="avatar">
         <div class="command-row-copy">
           <div class="command-row-title"><strong>/${escapeHtml(command.name)}</strong>${renderCommandParameters(command)}</div>
           <div class="command-row-description">${escapeHtml(command.description)}</div>
+          ${denied ? `<div class="bot-error command-voice-reason">${escapeHtml(denied)}</div>` : ''}
           ${command.downloadsSound ? `<div class="bot-local-download-cue">${t('botChat.localDownload')}</div>` : ''}
         </div>
         <span class="command-row-bot">${escapeHtml(command.botName)}</span>

@@ -51,6 +51,8 @@ function fixture(create) {
     isDestroyed: () => false,
     webContents: {
       isDestroyed: () => false,
+      isCrashed: () => false,
+      mainFrame: { isDestroyed: () => false, detached: false },
       send: (channel, ...args) => events.push({ channel, args: structuredClone(args) }),
     },
   };
@@ -63,6 +65,20 @@ function fixture(create) {
           fakeWindow,
           { isDestroyed: () => true, webContents: { send: () => assert.fail('Destroyed window must be skipped') } },
           { isDestroyed: () => false, webContents: { isDestroyed: () => true, send: () => assert.fail('Destroyed renderer must be skipped') } },
+          { isDestroyed: () => false, webContents: {
+            isDestroyed: () => false, isCrashed: () => true,
+            send: () => assert.fail('A crashed renderer may retain its WebContents but cannot receive IPC'),
+          } },
+          { isDestroyed: () => false, webContents: {
+            isDestroyed: () => false, isCrashed: () => false,
+            mainFrame: { isDestroyed: () => true },
+            send: () => assert.fail('A destroyed render frame cannot receive IPC'),
+          } },
+          { isDestroyed: () => false, webContents: {
+            isDestroyed: () => false, isCrashed: () => false,
+            mainFrame: { isDestroyed: () => false, detached: true },
+            send: () => assert.fail('A detached render frame cannot receive IPC'),
+          } },
         ],
       },
     }],

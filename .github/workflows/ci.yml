@@ -21,6 +21,8 @@ jobs:
           cache: npm
       - name: Install dependencies without native build scripts
         run: npm ci --ignore-scripts
+      - name: Prepare the SFU worker for real voice transport tests
+        run: npm rebuild mediasoup
       - name: Build shared contracts
         run: npm run build --workspace=packages/shared
       - name: Test bot contracts and SDK
@@ -35,6 +37,7 @@ jobs:
           node --test apps/server/dist/test-online-preview.js apps/server/dist/test-voice.js apps/server/dist/test-voice-mode.js apps/server/dist/test-server-settings.js apps/server/dist/test-startup-lifecycle.js
           # libuiohook initializes X11 even when the tests inject a passive mock.
           xvfb-run -a npm run test --workspace=apps/client
+          npm exec -- tsc -p apps/client/tsconfig.electron.json
           node scripts/test-bot-e2e.js
       - name: Exercise an isolated SDK installation
         run: |
@@ -193,10 +196,24 @@ jobs:
       - name: Build workspaces
         run: npm run build
 
+      - name: Install FFmpeg for generated voice fixtures
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              choco install ffmpeg --yes --no-progress --limit-output
+            else
+              brew install ffmpeg
+            fi
+          fi
+          ffmpeg -hide_banner -version
+
       - name: Exercise client DOM and microphone state in Electron
         shell: bash
         run: |
           npm run test:bots:ui --workspace=apps/client
+          npm run test:screens --workspace=apps/client
+          node packages/bot-sdk/test-browser/voiceRendererSmoke.cjs
           node apps/client/test/userContextMenuSmoke.cjs
           node apps/client/test/audioDeviceSmoke.cjs
           node apps/client/test/liveAudioDeviceSmoke.cjs

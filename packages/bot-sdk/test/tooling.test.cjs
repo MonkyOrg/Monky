@@ -31,7 +31,7 @@ function moduleAt(directory, name, version, extra = {}, code = `module.exports =
   fs.writeFileSync(path.join(directory, 'index.js'), code);
 }
 
-function botAt(directory, extra = {}) {
+function botAt(directory, extra = {}, installedSdkRoot) {
   json(path.join(directory, 'package.json'), {
     name: '@fixture/sound-bot', version: '1.2.3', type: 'module',
     dependencies: { '@monky/bot-sdk': '*' },
@@ -41,6 +41,11 @@ function botAt(directory, extra = {}) {
   fs.mkdirSync(path.join(directory, 'dist'), { recursive: true });
   fs.writeFileSync(path.join(directory, 'dist', 'index.js'), 'console.log("bot runtime");');
   const sdk = path.join(directory, 'node_modules', '@monky', 'bot-sdk');
+  if (installedSdkRoot) {
+    fs.mkdirSync(path.dirname(sdk), { recursive: true });
+    fs.symlinkSync(installedSdkRoot, sdk, process.platform === 'win32' ? 'junction' : 'dir');
+    return;
+  }
   json(path.join(sdk, 'package.json'), {
     name: '@monky/bot-sdk', version: '1.0.0', main: 'dist/index.js',
     scripts: { postinstall: 'should never run while installing the release' },
@@ -217,6 +222,67 @@ test('workspace dependencies resolve from their real workspace, not a different 
   bundleDependencies(f.source, f.output);
   const installed = createRequire(path.join(f.output, 'node_modules', '@monky', 'bot-sdk', 'package.json'));
   assert.equal(installed('./dist/index.js'), '2.0.0');
+});
+
+test('voice dependencies preserve npm polyfills and declaration-only packages', (t) => {
+  const f = fixture(t);
+  json(path.join(f.source, 'package.json'), { dependencies: { voice: '*' } });
+  const voice = path.join(f.source, 'node_modules', 'voice');
+  moduleAt(voice, 'voice', '1.0.0', { dependencies: { buffer: '*', '@types/media': '*' } },
+    'module.exports = require("buffer/");');
+  moduleAt(path.join(f.source, 'node_modules', 'buffer'), 'buffer', '6.0.3');
+  const declarations = path.join(f.source, 'node_modules', '@types', 'media');
+  json(path.join(declarations, 'package.json'), { name: '@types/media', version: '1.0.0', types: 'index.d.ts' });
+  assert.throws(() => bundleDependencies(f.source, f.output), /Missing declaration entry/);
+  fs.writeFileSync(path.join(declarations, 'index.d.ts'), 'export interface Frame { samples: number }');
+  assert.equal(bundleDependencies(f.source, f.output).packageCount, 3);
+  const fromVoice = createRequire(path.join(f.output, 'node_modules', 'voice', 'package.json'));
+  assert.equal(fromVoice('./index.js'), '6.0.3');
+  assert.ok(fs.existsSync(path.join(f.output, 'node_modules', 'voice', 'node_modules', '@types', 'media', 'index.d.ts')));
+});
+
+test('source-local module aliases survive bundling without copying private runtime data', (t) => {
+  const f = fixture(t);
+  json(path.join(f.source, 'package.json'), { dependencies: { voice: '*' } });
+  const voice = path.join(f.source, 'node_modules', 'voice');
+  moduleAt(voice, 'voice', '1.0.0', { main: 'src/index.js' });
+  const aliases = path.join(voice, 'src', 'node_modules', 'internal');
+  fs.mkdirSync(aliases, { recursive: true });
+  fs.writeFileSync(path.join(voice, 'src', 'index.js'), 'module.exports = require("internal/value");');
+  fs.writeFileSync(path.join(aliases, 'value.js'), 'module.exports = "voice alias";');
+  fs.writeFileSync(path.join(aliases, '.env'), 'TEST_PRIVATE_DATA=exclude');
+  bundleDependencies(f.source, f.output);
+  const fromVoice = createRequire(path.join(f.output, 'node_modules', 'voice', 'package.json'));
+  assert.equal(fromVoice('./src/index.js'), 'voice alias');
+  assert.equal(fs.existsSync(path.join(f.output, 'node_modules', 'voice', 'src', 'node_modules', 'internal', '.env')), false);
+});
+
+test('the real SDK voice dependency tree survives packaging and offline installation', { timeout: 120000 }, (t) => {
+  const f = fixture(t);
+  botAt(f.source, {}, path.resolve(__dirname, '..'));
+  const result = buildBotPackage({ root: f.source, out: f.output, skipBuild: true });
+  assert.ok(result.packageCount > 1);
+  const install = path.join(f.root, 'isolated voice install');
+  runNpm(['install', '--prefix', install, '--cache', path.join(f.root, 'empty cache'), '--offline',
+    '--ignore-scripts', '--no-audit', '--no-fund', result.file], { cwd: f.root });
+  const packageRoot = path.join(install, 'node_modules', '@fixture', 'sound-bot');
+  const packagedSdk = path.join(packageRoot, 'node_modules', '@monky', 'bot-sdk', 'package.json');
+  const loaded = spawnSync(process.execPath, ['--no-global-search-paths', '-e', `
+    const fromSdk = require('node:module').createRequire(${JSON.stringify(packagedSdk)});
+    const { RTCPeerConnection } = fromSdk('werift');
+    const { BotClient } = fromSdk('./dist/index.js');
+    if (typeof BotClient.prototype.joinVoice !== 'function') throw new Error('Missing voice API');
+    const peer = new RTCPeerConnection({ iceServers: [] });
+    peer.close().catch(error => { console.error(error); process.exitCode = 1; });
+  `], { cwd: install, env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', timeout: 15000 });
+  if (loaded.error) throw loaded.error;
+  assert.equal(loaded.status, 0, loaded.stderr);
+  const cli = spawnSync(process.execPath, ['--no-global-search-paths', path.join(packageRoot, 'monky-cli.cjs'), '--version'], {
+    cwd: install, env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', timeout: 15000,
+  });
+  if (cli.error) throw cli.error;
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.match(cli.stdout, /1\.2\.3/);
 });
 
 test('only optional missing dependencies may be omitted', (t) => {

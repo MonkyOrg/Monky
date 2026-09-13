@@ -61,6 +61,8 @@ import { clientLog } from './core/ClientLogService';
 import { overlayBridgeService } from './core/OverlayBridgeService';
 import { OverlayStageView } from './views/OverlayStageView';
 import { bindBotChatEvents } from './core/botChatEvents';
+import { bindBotScreenEvents } from './core/botScreenEvents';
+import { bindBotVoiceCommandEvents } from './core/botVoiceCommandEvents';
 import { selectEnhancer } from './core/SelectEnhancer';
 import { initTooltips } from './core/TooltipService';
 import { bindCameraPublication } from './core/CameraPublication';
@@ -449,7 +451,7 @@ class App {
     // built into the templates comes back in the new language.
     appEvents.on('i18n.language_changed', () => {
       if (serverStore.serverDetails) {
-        this.mainView.render();
+        this.mainView.render(true);
       } else {
         this.connectionView.render();
       }
@@ -899,6 +901,8 @@ class App {
 
     // ── Bot infrastructure (#569) ────────────────────────────────────────
     bindBotChatEvents();
+    bindBotScreenEvents();
+    bindBotVoiceCommandEvents();
 
     // Local VAD speaking state
     appEvents.on('local.speaking', updateLocalSpeaking);

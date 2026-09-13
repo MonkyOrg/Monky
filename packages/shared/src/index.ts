@@ -13,6 +13,7 @@ export type { QualityPresetType, QualityProfile } from './constants.js';
 
 export * from './models.js';
 export * from './voiceHealth.js';
+export * from './botVoice.js';
 export * from './protocol.js';
 export * from './validators.js';
 export * from './identity.js';
@@ -28,3 +29,4 @@ export * from './soundDownloads.js';
 export * from './reactions.js';
 export * from './botMessages.js';
 export * from './botSelectors.js';
+export * from './botScreens.js';

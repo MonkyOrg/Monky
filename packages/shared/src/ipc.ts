@@ -5,6 +5,7 @@
 
 import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
 import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
+import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
 
 export interface DesktopSource {
   id: string;
@@ -78,20 +79,24 @@ export const SOUND_DOWNLOAD_IPC = {
 
 export const SOUND_DOWNLOAD_PROGRESS = 'soundboard:download-progress' satisfies keyof IpcEvents;
 
-export interface AudioPreviewInput {
+export type AudioPreviewInput = {
   requestId: string;
-  url: string;
   fileName?: string;
-}
+} & (
+  | { url: string; audioBase64?: never; mimeType?: never }
+  | { audioBase64: string; mimeType: CommandAudioPreviewMimeType; url?: never }
+);
 
 export interface AudioPreviewCancellation {
   requestId: string;
 }
 
+export type AudioPreviewFailureReason = SoundDownloadFailureReason | CommandAudioPreviewFailureReason;
+
 export type AudioPreviewResult =
   | { status: 'ready'; data: Uint8Array; mimeType: string }
   | { status: 'cancelled' }
-  | { status: 'failed'; reason: SoundDownloadFailureReason };
+  | { status: 'failed'; reason: AudioPreviewFailureReason };
 
 export const AUDIO_PREVIEW_IPC = {
   load: 'audio-preview:load',

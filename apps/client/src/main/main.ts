@@ -15,8 +15,10 @@ import { updateLog } from './updateLog';
 import { ServerManager } from './serverManager';
 import { TrayManager } from './trayManager';
 import { ClientLogger } from './clientLogger';
+import { bindRendererDiagnostics } from './rendererDiagnostics';
 import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
+import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
 
 import fs from 'fs';
 
@@ -110,17 +112,19 @@ ipcMain.handle('app:leave-complete', () => {
 
 function bindMainWindowNavigationGuards(): void {
   if (!mainWindow) return;
+  bindBotScreenIsolation(mainWindow.webContents);
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+  mainWindow.webContents.setWindowOpenHandler(({ url, referrer }) => {
+    if (!isBotScreenUrl(referrer.url) && /^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!mainWindow) return;
+    if (isBotScreenFrame(event.initiator)) { event.preventDefault(); return; }
     if (url === mainWindow.webContents.getURL()) return;
     event.preventDefault();
-    void shell.openExternal(url);
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
   });
 }
 
@@ -173,6 +177,7 @@ function createWindow(deferShow = false): void {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
       sandbox: false, // needed for custom desktopCapturer / preload access
       webSecurity: true,
       backgroundThrottling: false, // Keep audio and WebRTC processing smoothly when minimized/hidden
@@ -198,6 +203,7 @@ function createWindow(deferShow = false): void {
     category: 'APP',
     message: `Application started — version ${app.getVersion()}, platform ${process.platform} ${process.arch}`,
   });
+  bindRendererDiagnostics(mainWindow.webContents, clientLogger);
 
   setupIpcHandlers(mainWindow, serverManager, trayManager, {
     setMinimizeToTray: (enabled: boolean) => {
@@ -361,9 +367,15 @@ if (!gotTheLock) {
     );
 
     // Allow media/DRM permissions required by embedded players.
-    session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    installBotScreenRequestGuard(session.defaultSession);
+    session.defaultSession.setPermissionCheckHandler((_contents, permission, origin, details) => {
       const allowed = ['media', 'mediaKeySystem', 'fullscreen', 'clipboard-read', 'clipboard-sanitized-write'];
-      callback(allowed.includes(permission));
+      return allowed.includes(permission) &&
+        !(isBotScreenUrl(details.requestingUrl ?? '') || (!details.isMainFrame && (!origin || origin === 'null')));
+    });
+    session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+      const allowed = ['media', 'mediaKeySystem', 'fullscreen', 'clipboard-read', 'clipboard-sanitized-write'];
+      callback(!isBotScreenUrl(details.requestingUrl) && allowed.includes(permission));
     });
 
     createWindow(isInstallSplashActive());

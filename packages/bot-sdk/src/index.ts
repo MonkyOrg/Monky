@@ -3,6 +3,12 @@ import { EventEmitter } from 'events';
 import http from 'http';
 import { isDeepStrictEqual } from 'util';
 import WebSocket from 'ws';
+import { BotVoiceConnection } from './voice/BotVoiceConnection';
+import { BotScreenClient } from './BotScreenClient';
+import { botVoiceAuthSchema, botVoiceContextResultSchema, botVoiceJoinOptionsSchema, type BotVoiceAuth, type BotVoiceJoinOptions } from '@monky/shared';
+export type { BotVoiceJoinOptions } from '@monky/shared';
+export { BotVoiceConnection } from './voice/BotVoiceConnection';
+export { BotScreenClient } from './BotScreenClient';
 import {
   LIMITS,
   MessageType,
@@ -24,6 +30,9 @@ import {
   commandAutocompleteCancelSchema,
   commandAutocompleteChoicesSchema,
   commandAutocompleteExecutionSchema,
+  commandAudioPreviewCancelSchema,
+  commandAudioPreviewExecutionSchema,
+  commandAudioPreviewMimeSchema,
   commandExecutionSchema,
   commandFinishedSchema,
   commandRegisteredSchema,
@@ -46,6 +55,9 @@ import {
 import type {
   BotForm,
   BotFormValues,
+  BotScreen,
+  BotScreenCreate,
+  BotScreenPatch,
   BotManifest,
   BotProfileUpdatePayload,
   BotServerSettingsSnapshot,
@@ -55,9 +67,13 @@ import type {
   CommandAutocompleteChoice,
   CommandAutocompleteExecutionPayload,
   CommandAutocompleteResultPayload,
+  CommandAudioPreviewExecutionPayload,
+  CommandAudioPreviewMimeType,
+  CommandAudioPreviewResult,
   CommandOption,
   CommandResponsePayload,
   CommandValues,
+  CommandVoiceRequirement,
   SoundDownloadRequest,
   SoundDownloadResult,
   ChatMessage,
@@ -85,9 +101,13 @@ export interface CommandDefinition {
   description: string;
   options?: CommandOption[];
   downloadsSound?: boolean;
+  voiceRequirement?: CommandVoiceRequirement;
   autocomplete?: (
     ctx: CommandAutocompleteContext
   ) => CommandAutocompleteChoice[] | Promise<CommandAutocompleteChoice[]>;
+  audioPreview?: (
+    ctx: CommandAudioPreviewContext
+  ) => CommandAudioPreviewData | Promise<CommandAudioPreviewData>;
   handler: (ctx: CommandContext) => void | Promise<void>;
 }
 
@@ -101,11 +121,31 @@ export interface CommandAutocompleteContext {
   signal: AbortSignal;
 }
 
+export interface CommandAudioPreviewContext {
+  resourceId: string;
+  serverId: string;
+  locale: 'pt-BR' | 'en';
+  optionName: string;
+  /** Aborted on cancellation, timeout, disconnection or completion. */
+  signal: AbortSignal;
+  readonly settings: BotSettingsContext;
+}
+
+export interface CommandAudioPreviewData {
+  bytes: Uint8Array;
+  mimeType: CommandAudioPreviewMimeType;
+}
+
 export interface CommandContext {
   invocationId: string;
   commandName: string;
   channelId: string;
   invokerId: string;
+  invokerSessionId: string;
+  /** Voice room captured when the invocation began; use getVoiceChannel after awaits. */
+  invokerVoiceChannelId: string | null;
+  /** Revalidate this exact human session's current room with the server. */
+  getVoiceChannel: () => Promise<string | null>;
   invokerNickname: string;
   serverId: string;
   locale: 'pt-BR' | 'en';
@@ -128,6 +168,8 @@ export interface CommandContext {
   downloadSound: (request: SoundDownloadRequest) => Promise<SoundDownloadResult | null>;
   /** Publish durable channel controls, independent of this invocation's lifetime. */
   createSelector: (input: Omit<BotSelectorCreate, 'channelId' | 'invokerId' | 'invocationId'>) => Promise<BotSelector>;
+  /** Open a shared miniapp in the caller's current voice room, independent of this command's lifetime. */
+  createScreen: (input: Omit<BotScreenCreate, 'channelId' | 'invocationId'>) => Promise<BotScreen>;
 }
 
 export interface BotChoice {
@@ -157,6 +199,15 @@ interface Invocation {
   prompt: PendingPrompt | null;
   download: PendingSoundDownload | null;
   downloadUsed: boolean;
+  voiceContext: PendingVoiceContext | null;
+}
+
+interface PendingVoiceContext {
+  requestId: string;
+  promise: Promise<string | null>;
+  resolve: (channelId: string | null) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface PendingSoundDownload {
@@ -178,6 +229,9 @@ interface PendingRegistration {
 }
 
 interface ServerConnection {
+  voiceAuth?: BotVoiceAuth;
+  voice?: BotVoiceConnection;
+  voiceJoin?: Promise<BotVoiceConnection>;
   pendingMessages: Map<string, { resolve: (message: ChatMessage) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>;
   serverId: string;
   serverUrl: string;
@@ -191,6 +245,7 @@ interface ServerConnection {
   profileRequestId: string | null;
   invocations: Map<string, Invocation>;
   autocompletes: Map<string, AutocompleteExecution>;
+  audioPreviews: Map<string, AutocompleteExecution>;
   pendingRegistration: PendingRegistration | null;
   registrationPromise: Promise<void> | null;
 }
@@ -200,6 +255,15 @@ interface IncomingMessage {
   requestId?: string;
   payload?: unknown;
 }
+
+const RESOURCE_RESPONSES = new Set<string>([
+  MessageType.SERVER_ERROR,
+  MessageType.SELECTOR_SNAPSHOT,
+  MessageType.SELECTOR_LIST_RESULT,
+  MessageType.BOT_SCREEN_SNAPSHOT,
+  MessageType.BOT_SCREEN_LIST_RESULT,
+  MessageType.BOT_SCREEN_REMOVED,
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -242,7 +306,9 @@ function checkedSettingsValues(
  * owns its form promise and abort signal; handlers never share conversation state.
  */
 export class BotClient extends EventEmitter {
-  private selectorRequests = new Map<string, {
+  private audioPreviewWork = 0;
+  private voiceCleanup = new Set<Promise<void>>();
+  private resourceRequests = new Map<string, {
     conn: ServerConnection;
     resolve: (value: unknown) => void;
     reject: (error: Error) => void;
@@ -259,6 +325,81 @@ export class BotClient extends EventEmitter {
   private closePromise: Promise<void> | null = null;
   private registrationStore: RegistrationStore;
   private registrationsRestored = false;
+  private screens = new BotScreenClient({
+    request: (serverId, type, payload) => this.requestResource(serverId, type, payload),
+    report: (serverId, event) => this.emit('screenAction', { serverId, ...event }),
+    removed: (serverId, event) => this.emit('screenRemoved', { serverId, ...event }),
+    error: (serverId, error) => this.reportError(error, this.connections.get(serverId)),
+  });
+
+  createScreen(serverId: string, input: BotScreenCreate): Promise<BotScreen> {
+    return this.screens.createScreen(serverId, input);
+  }
+
+  updateScreen(serverId: string, id: string, patch: BotScreenPatch): Promise<BotScreen> {
+    return this.screens.updateScreen(serverId, id, patch);
+  }
+
+  closeScreen(serverId: string, id: string): Promise<void> {
+    return this.screens.closeScreen(serverId, id);
+  }
+
+  listScreens(serverId: string, channelId: string): Promise<BotScreen[]> {
+    return this.screens.listScreens(serverId, channelId);
+  }
+
+  joinVoice(serverId: string, channelId: string, options: BotVoiceJoinOptions = {}): Promise<BotVoiceConnection> {
+    const conn = this.requireConnection(serverId);
+    const parsed = botVoiceJoinOptionsSchema.safeParse(options);
+    if (!parsed.success) return Promise.reject(new Error('Invalid voice join options.'));
+    if (!conn.voiceAuth) return Promise.reject(new Error('Server did not supply valid authenticated voice metadata.'));
+    if (!channelId || channelId.length > 256) return Promise.reject(new Error('Invalid voice channel ID.'));
+    if (conn.voice) {
+      if (conn.voice.isClosed) return Promise.reject(new Error('Voice connection is closing; await leaveVoice before rejoining.'));
+      if (conn.voice.channelId !== channelId) return Promise.reject(new Error('Leave the current voice channel before joining another.'));
+      return conn.voiceJoin ?? Promise.resolve(conn.voice);
+    }
+    const voice = new BotVoiceConnection(channelId, conn.voiceAuth, {
+      send: (message) => {
+        if (!conn.connected || conn.ws?.readyState !== WebSocket.OPEN) throw new Error('Voice signaling disconnected.');
+        this.sendToConn(conn, message);
+      },
+      participants: (humanParticipantCount) => this.emit('voiceParticipantsChanged', {
+        serverId: conn.serverId, channelId, humanParticipantCount,
+      }),
+      disconnected: (reason) => {
+        if (conn.voice === voice) {
+          conn.voice = undefined;
+          conn.voiceJoin = undefined;
+        }
+        this.emit('voiceDisconnected', { serverId: conn.serverId, channelId, reason });
+      },
+      error: (error) => this.reportError(error, conn),
+    });
+    conn.voice = voice;
+    const joining = voice.join(parsed.data).then(() => voice).finally(() => {
+      if (conn.voice === voice) conn.voiceJoin = undefined;
+    });
+    conn.voiceJoin = joining;
+    return joining;
+  }
+
+  getVoiceConnection(serverId: string): BotVoiceConnection | undefined {
+    return this.connections.get(serverId)?.voice;
+  }
+
+  async leaveVoice(serverId: string): Promise<void> {
+    await this.connections.get(serverId)?.voice?.close();
+  }
+
+  private disposeVoice(conn: ServerConnection, reason: string): void {
+    conn.voiceAuth = undefined;
+    if (!conn.voice) return;
+    const cleanup = conn.voice.disconnect(reason);
+    this.voiceCleanup.add(cleanup);
+    void cleanup.catch((error: unknown) => this.reportError(error, conn))
+      .finally(() => this.voiceCleanup.delete(cleanup));
+  }
 
   constructor(options: BotOptions) {
     super();
@@ -278,16 +419,22 @@ export class BotClient extends EventEmitter {
       description: def.description,
       options: def.options,
       downloadsSound: def.downloadsSound,
+      voiceRequirement: def.voiceRequirement,
     });
     if (typeof def.handler !== 'function') throw new TypeError('A command handler is required.');
     if ((def.autocomplete !== undefined && typeof def.autocomplete !== 'function') ||
         (definition.options?.some((option) => option.autocomplete) && !def.autocomplete)) {
       throw new TypeError('String options with autocomplete require an autocomplete handler.');
     }
+    if (def.audioPreview !== undefined && typeof def.audioPreview !== 'function') {
+      throw new TypeError('An audio preview provider must be a function.');
+    }
     if (!this.commands.has(definition.name) && this.commands.size >= LIMITS.MAX_COMMANDS_PER_BOT) {
       throw new Error(`A bot may register at most ${LIMITS.MAX_COMMANDS_PER_BOT} commands.`);
     }
-    this.commands.set(definition.name, { ...definition, autocomplete: def.autocomplete, handler: def.handler });
+    this.commands.set(definition.name, {
+      ...definition, autocomplete: def.autocomplete, audioPreview: def.audioPreview, handler: def.handler,
+    });
     return this;
   }
 
@@ -332,45 +479,45 @@ export class BotClient extends EventEmitter {
 
   async createSelector(serverId: string, input: BotSelectorCreate): Promise<BotSelector> {
     const parsed = botSelectorCreateSchema.parse({ ...input, id: input.id ?? randomUUID() });
-    return botSelectorSchema.parse(await this.requestSelector(serverId, MessageType.SELECTOR_CREATE, parsed));
+    return botSelectorSchema.parse(await this.requestResource(serverId, MessageType.SELECTOR_CREATE, parsed));
   }
 
   async listSelectors(serverId: string): Promise<BotSelector[]> {
-    const result = await this.requestSelector(serverId, MessageType.SELECTOR_LIST, {});
+    const result = await this.requestResource(serverId, MessageType.SELECTOR_LIST, {});
     if (!isRecord(result) || !Array.isArray(result.selectors)) throw new Error('Invalid selector list.');
     return result.selectors.map((entry) => botSelectorSchema.parse(entry));
   }
 
   async updateSelector(serverId: string, id: string, patch: BotSelectorPatch): Promise<BotSelector> {
-    return botSelectorSchema.parse(await this.requestSelector(serverId, MessageType.SELECTOR_UPDATE,
+    return botSelectorSchema.parse(await this.requestResource(serverId, MessageType.SELECTOR_UPDATE,
       { id, patch: botSelectorPatchSchema.parse(patch) }));
   }
 
   async closeSelector(serverId: string, id: string): Promise<BotSelector> {
-    return botSelectorSchema.parse(await this.requestSelector(serverId, MessageType.SELECTOR_CLOSE, { id }));
+    return botSelectorSchema.parse(await this.requestResource(serverId, MessageType.SELECTOR_CLOSE, { id }));
   }
 
   async finalizeSelector(serverId: string, id: string, content: string): Promise<BotSelector> {
-    return botSelectorSchema.parse(await this.requestSelector(serverId, MessageType.SELECTOR_FINALIZE,
+    return botSelectorSchema.parse(await this.requestResource(serverId, MessageType.SELECTOR_FINALIZE,
       botSelectorFinalizeSchema.parse({ id, content })));
   }
 
-  private requestSelector(serverId: string, type: MessageType, payload: unknown): Promise<unknown> {
+  private requestResource(serverId: string, type: MessageType, payload: unknown): Promise<unknown> {
     const conn = this.connections.get(serverId);
     if (!conn?.connected) return Promise.reject(new Error('The bot is not connected to this server.'));
-    if (this.selectorRequests.size >= 100) return Promise.reject(new Error('Too many selector requests.'));
+    if (this.resourceRequests.size >= 100) return Promise.reject(new Error('Too many pending bot resource requests.'));
     const requestId = randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.selectorRequests.delete(requestId);
-        reject(new Error('Selector acknowledgement timed out. Retry with the same selector id.'));
+        this.resourceRequests.delete(requestId);
+        reject(new Error('Bot resource acknowledgement timed out.'));
       }, 8000);
-      this.selectorRequests.set(requestId, { conn, resolve, reject, timer });
+      this.resourceRequests.set(requestId, { conn, resolve, reject, timer });
       try {
         this.sendToConn(conn, { type, requestId, payload });
       } catch (error) {
         clearTimeout(timer);
-        this.selectorRequests.delete(requestId);
+        this.resourceRequests.delete(requestId);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -479,6 +626,7 @@ export class BotClient extends EventEmitter {
     this.closing = true;
     this.closePromise = Promise.resolve().then(async () => {
       this.disconnect();
+      await Promise.all([...this.voiceCleanup]);
       await Promise.allSettled([...this.startingServers]);
       await Promise.all([...this.httpServers].map((server) => new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => server.closeAllConnections(), LIMITS.SHUTDOWN_GRACE_MS);
@@ -528,6 +676,7 @@ export class BotClient extends EventEmitter {
       profileRequestId: null,
       invocations: new Map(),
       autocompletes: new Map(),
+      audioPreviews: new Map(),
       pendingMessages: new Map(),
       pendingRegistration: null,
       registrationPromise: null,
@@ -571,6 +720,7 @@ export class BotClient extends EventEmitter {
     });
     ws.on('close', () => {
       if (!isCurrent()) return;
+      this.disposeVoice(conn, 'disconnected');
       conn.ws = null;
       conn.connected = false;
       conn.botId = null;
@@ -593,6 +743,7 @@ export class BotClient extends EventEmitter {
   }
 
   private teardownConnection(conn: ServerConnection): void {
+    this.disposeVoice(conn, 'disconnected');
     conn.disposed = true;
     if (conn.reconnectTimer) clearTimeout(conn.reconnectTimer);
     conn.reconnectTimer = null;
@@ -610,11 +761,12 @@ export class BotClient extends EventEmitter {
 
   private clearInvocations(conn: ServerConnection): void {
     for (const requestId of conn.autocompletes.keys()) this.clearAutocomplete(conn, requestId);
-    for (const [id, request] of this.selectorRequests) {
+    for (const requestId of conn.audioPreviews.keys()) this.clearAudioPreview(conn, requestId);
+    for (const [id, request] of this.resourceRequests) {
       if (request.conn !== conn) continue;
       clearTimeout(request.timer);
-      this.selectorRequests.delete(id);
-      request.reject(new Error('The bot disconnected before the selector acknowledgement.'));
+      this.resourceRequests.delete(id);
+      request.reject(new Error('The bot disconnected before the resource acknowledgement.'));
     }
     for (const invocation of conn.invocations.values()) {
       this.clearInvocation(invocation);
@@ -628,12 +780,72 @@ export class BotClient extends EventEmitter {
     invocation.prompt = null;
     invocation.download?.resolve(null);
     invocation.download = null;
+    if (invocation.voiceContext) {
+      clearTimeout(invocation.voiceContext.timer);
+      invocation.voiceContext.reject(new Error('The bot interaction ended before voice context was refreshed.'));
+      invocation.voiceContext = null;
+    }
+  }
+
+  private requestVoiceContext(conn: ServerConnection, invocationId: string, invocation: Invocation): Promise<string | null> {
+    if (invocation.controller.signal.aborted || conn.invocations.get(invocationId) !== invocation) {
+      return Promise.reject(new Error('This bot interaction has already ended.'));
+    }
+    if (invocation.voiceContext) return invocation.voiceContext.promise;
+    const requestId = randomUUID();
+    let resolve!: (channelId: string | null) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<string | null>((done, fail) => { resolve = done; reject = fail; });
+    const timer = setTimeout(() => {
+      if (invocation.voiceContext?.requestId !== requestId) return;
+      invocation.voiceContext = null;
+      reject(new Error('Voice context request timed out after 8 seconds.'));
+    }, 8000);
+    invocation.voiceContext = { requestId, promise, resolve, reject, timer };
+    try {
+      if (!conn.connected || conn.ws?.readyState !== WebSocket.OPEN) throw new Error('Voice context signaling disconnected.');
+      this.sendToConn(conn, { type: MessageType.BOT_VOICE_CONTEXT, requestId, payload: { invocationId } });
+    } catch (error) {
+      clearTimeout(timer);
+      invocation.voiceContext = null;
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    return promise;
+  }
+
+  private handleVoiceContext(conn: ServerConnection, msg: IncomingMessage): boolean {
+    if (!msg.requestId || (msg.type !== MessageType.BOT_VOICE_CONTEXT_RESULT && msg.type !== MessageType.SERVER_ERROR)) return false;
+    for (const [invocationId, invocation] of conn.invocations) {
+      const pending = invocation.voiceContext;
+      if (pending?.requestId !== msg.requestId) continue;
+      clearTimeout(pending.timer);
+      invocation.voiceContext = null;
+      if (msg.type === MessageType.SERVER_ERROR) {
+        pending.reject(new Error(isRecord(msg.payload) && typeof msg.payload.message === 'string'
+          ? msg.payload.message : 'The server rejected the voice context request.'));
+      } else {
+        const parsed = botVoiceContextResultSchema.safeParse(msg.payload);
+        if (!parsed.success || parsed.data.invocationId !== invocationId) {
+          pending.reject(new Error('Invalid voice context response.'));
+        } else pending.resolve(parsed.data.voiceChannelId);
+      }
+      return true;
+    }
+    return false;
   }
 
   private clearAutocomplete(conn: ServerConnection, requestId: string): void {
     const pending = conn.autocompletes.get(requestId);
     if (!pending) return;
     conn.autocompletes.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.controller.abort();
+  }
+
+  private clearAudioPreview(conn: ServerConnection, requestId: string): void {
+    const pending = conn.audioPreviews.get(requestId);
+    if (!pending) return;
+    conn.audioPreviews.delete(requestId);
     clearTimeout(pending.timer);
     pending.controller.abort();
   }
@@ -651,17 +863,23 @@ export class BotClient extends EventEmitter {
   }
 
   private handleMessage(conn: ServerConnection, msg: IncomingMessage): void {
-    const selectorRequest = msg.requestId ? this.selectorRequests.get(msg.requestId) : undefined;
-    if (selectorRequest?.conn === conn && msg.requestId &&
-        (msg.type === MessageType.SERVER_ERROR || msg.type === MessageType.SELECTOR_SNAPSHOT || msg.type === MessageType.SELECTOR_LIST_RESULT)) {
-      clearTimeout(selectorRequest.timer);
-      this.selectorRequests.delete(msg.requestId);
+    if (this.handleVoiceContext(conn, msg)) return;
+    if (conn.voice?.handle(msg)) return;
+    if (msg.type === MessageType.SERVER_SETTINGS_UPDATED && conn.voiceAuth && isRecord(msg.payload) &&
+        (msg.payload.voiceMode === 'p2p' || msg.payload.voiceMode === 'sfu')) {
+      conn.voiceAuth = { ...conn.voiceAuth, server: { voiceMode: msg.payload.voiceMode } };
+    }
+    const resourceRequest = msg.requestId ? this.resourceRequests.get(msg.requestId) : undefined;
+    if (resourceRequest?.conn === conn && msg.requestId && RESOURCE_RESPONSES.has(msg.type)) {
+      clearTimeout(resourceRequest.timer);
+      this.resourceRequests.delete(msg.requestId);
       if (msg.type === MessageType.SERVER_ERROR) {
         const payload = isRecord(msg.payload) ? msg.payload : {};
-        selectorRequest.reject(new Error(typeof payload.message === 'string' ? payload.message : 'Selector request failed.'));
-      } else selectorRequest.resolve(msg.payload);
+        resourceRequest.reject(new Error(typeof payload.message === 'string' ? payload.message : 'Bot resource request failed.'));
+      } else resourceRequest.resolve(msg.payload);
       return;
     }
+    if (this.screens.handle(conn.serverId, msg.type, msg.payload)) return;
     switch (msg.type) {
       case MessageType.COMMAND_REGISTERED: {
         const parsed = commandRegisteredSchema.safeParse(msg.payload);
@@ -724,6 +942,8 @@ export class BotClient extends EventEmitter {
         return;
       }
       case MessageType.AUTH_SUCCESS: {
+        const voiceAuth = botVoiceAuthSchema.safeParse(msg.payload);
+        conn.voiceAuth = voiceAuth.success ? voiceAuth.data : undefined;
         const currentUser = isRecord(msg.payload) ? msg.payload.currentUser : undefined;
         if (currentUser !== undefined) {
           const botId = commandRequestIdSchema.safeParse(isRecord(currentUser) ? currentUser.id : undefined);
@@ -850,6 +1070,28 @@ export class BotClient extends EventEmitter {
         else this.reportError(new Error('The server sent an invalid autocomplete cancellation.'), conn);
         return;
       }
+      case MessageType.COMMAND_AUDIO_PREVIEW: {
+        const correlation = commandRequestIdSchema.safeParse(msg.requestId);
+        const parsed = commandAudioPreviewExecutionSchema.safeParse(msg.payload);
+        if (!correlation.success || !parsed.success) {
+          this.reportError(new Error('The server sent an invalid audio preview request.'), conn);
+          if (correlation.success && conn.connected) {
+            this.sendToConn(conn, {
+              type: MessageType.COMMAND_AUDIO_PREVIEW_RESULT, requestId: correlation.data,
+              payload: { status: 'failed', reason: 'invalid_response' },
+            });
+          }
+          return;
+        }
+        void this.runAudioPreview(conn, correlation.data, parsed.data).catch((error) => this.reportError(error, conn));
+        return;
+      }
+      case MessageType.COMMAND_AUDIO_PREVIEW_CANCEL: {
+        const parsed = commandAudioPreviewCancelSchema.safeParse(msg.payload);
+        if (parsed.success) this.clearAudioPreview(conn, parsed.data.requestId);
+        else this.reportError(new Error('The server sent an invalid audio preview cancellation.'), conn);
+        return;
+      }
       case MessageType.COMMAND_SOUND_DOWNLOAD_RESULT: {
         const parsed = commandSoundDownloadResultSchema.safeParse(msg.payload);
         if (!parsed.success) {
@@ -970,8 +1212,8 @@ export class BotClient extends EventEmitter {
     this.sendToConn(conn, {
       type: MessageType.COMMAND_REGISTER,
       payload: {
-        commands: [...this.commands.values()].map(({ name, description, options, downloadsSound }) => ({
-          name, description, options: options ?? [], downloadsSound,
+        commands: [...this.commands.values()].map(({ name, description, options, downloadsSound, voiceRequirement }) => ({
+          name, description, options: options ?? [], downloadsSound, voiceRequirement,
         })),
         settings: this.settingsDefinition,
       },
@@ -1077,7 +1319,9 @@ export class BotClient extends EventEmitter {
       const choices = await def.autocomplete(ctx);
       if (!isCurrent()) return;
       const parsed = commandAutocompleteChoicesSchema.safeParse(choices);
-      sendResult(parsed.success
+      const supported = parsed.success && (def.audioPreview ||
+        !parsed.data.some((choice) => choice.audio && 'resourceId' in choice.audio));
+      sendResult(parsed.success && supported
         ? { status: 'ok', choices: parsed.data }
         : { status: 'failed', reason: 'invalid_response' });
     } catch (error) {
@@ -1086,6 +1330,77 @@ export class BotClient extends EventEmitter {
       sendResult({ status: 'failed', reason: 'handler_failed' });
     } finally {
       if (conn.autocompletes.get(requestId) === pending) this.clearAutocomplete(conn, requestId);
+    }
+  }
+
+  private async runAudioPreview(
+    conn: ServerConnection, requestId: string, payload: CommandAudioPreviewExecutionPayload
+  ): Promise<void> {
+    if (!conn.connected || conn.disposed || conn.audioPreviews.has(requestId)) return;
+    const sendResult = (result: CommandAudioPreviewResult) => {
+      this.sendToConn(conn, { type: MessageType.COMMAND_AUDIO_PREVIEW_RESULT, requestId, payload: result });
+    };
+    const def = this.commands.get(payload.commandName);
+    const option = def?.options?.find((item) => item.name === payload.optionName);
+    if (!def?.audioPreview || !option?.autocomplete || option.type !== 'string') {
+      sendResult({ status: 'failed', reason: 'invalid_response' });
+      return;
+    }
+    // Aborted providers still occupy a slot until their promise settles. A
+    // provider that ignores AbortSignal cannot create unbounded background work.
+    if (this.audioPreviewWork >= LIMITS.MAX_BOT_AUDIO_PREVIEW_HANDLERS) {
+      sendResult({ status: 'failed', reason: 'busy' });
+      return;
+    }
+    let settings: BotSettingsContext;
+    try {
+      settings = this.captureSettingsContext(conn, payload.settings);
+    } catch (error) {
+      this.reportError(error, conn);
+      sendResult({ status: 'failed', reason: 'invalid_response' });
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      if (conn.audioPreviews.get(requestId) !== pending) return;
+      this.clearAudioPreview(conn, requestId);
+      if (conn.connected && !conn.disposed && conn.ws?.readyState === WebSocket.OPEN) {
+        try { sendResult({ status: 'failed', reason: 'timeout' }); }
+        catch (error) { this.reportError(error, conn); }
+      }
+    }, LIMITS.BOT_AUDIO_PREVIEW_TIMEOUT_MS);
+    timer.unref();
+    const pending: AutocompleteExecution = { controller, timer };
+    conn.audioPreviews.set(requestId, pending);
+    this.audioPreviewWork++;
+    const isCurrent = () => conn.audioPreviews.get(requestId) === pending &&
+      conn.connected && !conn.disposed && conn.ws?.readyState === WebSocket.OPEN;
+    try {
+      const ctx: CommandAudioPreviewContext = {
+        resourceId: payload.resourceId, optionName: payload.optionName, serverId: conn.serverId,
+        locale: payload.locale, settings, signal: controller.signal,
+      };
+      Object.defineProperty(ctx, 'settings', { writable: false, configurable: false });
+      const data: unknown = await def.audioPreview(ctx);
+      if (!isCurrent()) return;
+      if (!isRecord(data) || !(data.bytes instanceof Uint8Array) || data.bytes.byteLength === 0 ||
+          Object.keys(data).some((key) => key !== 'bytes' && key !== 'mimeType')) {
+        sendResult({ status: 'failed', reason: 'invalid_response' });
+      } else if (data.bytes.byteLength > LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES) {
+        sendResult({ status: 'failed', reason: 'too_large' });
+      } else {
+        const mime = commandAudioPreviewMimeSchema.safeParse(data.mimeType);
+        sendResult(mime.success ? {
+          status: 'ok', audioBase64: Buffer.from(data.bytes).toString('base64'), mimeType: mime.data,
+        } : { status: 'failed', reason: 'unsupported_audio' });
+      }
+    } catch (error) {
+      if (!isCurrent()) return;
+      this.reportError(error, conn);
+      sendResult({ status: 'failed', reason: 'handler_failed' });
+    } finally {
+      this.audioPreviewWork--;
+      if (conn.audioPreviews.get(requestId) === pending) this.clearAudioPreview(conn, requestId);
     }
   }
 
@@ -1123,7 +1438,7 @@ export class BotClient extends EventEmitter {
       return;
     }
     const invocation: Invocation = {
-      controller: new AbortController(), prompt: null, download: null, downloadUsed: false,
+      controller: new AbortController(), prompt: null, download: null, downloadUsed: false, voiceContext: null,
     };
     conn.invocations.set(payload.invocationId, invocation);
     const requireActive = () => {
@@ -1144,6 +1459,9 @@ export class BotClient extends EventEmitter {
       channelId: payload.channelId,
       invokerId: payload.invokerId,
       invokerNickname: payload.invokerNickname,
+      invokerSessionId: payload.invokerSessionId,
+      invokerVoiceChannelId: payload.invokerVoiceChannelId,
+      getVoiceChannel: () => this.requestVoiceContext(conn, payload.invocationId, invocation),
       serverId: conn.serverId,
       locale: payload.locale ?? 'pt-BR',
       settings,
@@ -1179,6 +1497,15 @@ export class BotClient extends EventEmitter {
         requireActive();
         return this.createSelector(conn.serverId, {
           ...input, channelId: payload.channelId, invokerId: payload.invokerId, invocationId: payload.invocationId,
+        });
+      },
+      createScreen: async (input) => {
+        requireActive();
+        const channelId = await ctx.getVoiceChannel();
+        requireActive();
+        if (!channelId) throw new Error('The caller must join a voice channel before creating a miniapp.');
+        return this.createScreen(conn.serverId, {
+          ...input, channelId, invocationId: payload.invocationId,
         });
       },
       choose: async (choice) => {
@@ -1429,13 +1756,14 @@ export type {
 } from './tooling/config';
 export type {
   BotSelector, BotSelectorCreate, BotSelectorPatch, BotSelectorPublic, BotSelectorRespondedPayload,
+  BotScreen, BotScreenCreate, BotScreenPatch, BotScreenActionEvent, BotScreenJson, BotScreenRemoved,
 } from '@monky/shared';
 export type {
   BotForm, BotFormField, BotFormValues, BotManifest,
   BotSettingsDefinition, BotSettingsContext, BotServerSettingsSnapshot, BotSettingsSnapshot, BotSettingsSummary,
   BotInputResult,
   ChatMessage, ChatReactionEventPayload, MessageReaction,
-  SlashCommand, CommandOption, CommandValue, CommandValues, CommandResponsePayload,
-  CommandAutocompleteChoice, SoundDownloadRequest, SoundDownloadResult, SoundDownloadFailureReason,
+  SlashCommand, CommandOption, CommandValue, CommandValues, CommandVoiceRequirement, CommandResponsePayload,
+  CommandAutocompleteChoice, CommandAudioPreviewMimeType, SoundDownloadRequest, SoundDownloadResult, SoundDownloadFailureReason,
   AudioPreviewSource, SelectionChoice,
 } from '@monky/shared';

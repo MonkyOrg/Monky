@@ -75,9 +75,10 @@ async function runBotSettingsDomSmoke() {
   const definition = {
     user: {
       title: 'Personal options',
+      description: 'Personal options stored on this device.',
       fields: [
         { name: 'enabled', label: 'Enabled', type: 'boolean', required: true, defaultValue: false },
-        { name: 'count', label: 'Count', type: 'integer', required: true, defaultValue: 0, min: 0, max: 5 },
+        { name: 'count', label: 'Count', description: 'How many items to use.', type: 'integer', required: true, defaultValue: 0, min: 0, max: 5 },
         { name: 'mode', label: 'Mode', type: 'select', presentation: 'buttons', required: true, defaultValue: 'one',
           choices: [{ label: 'One', value: 'one' }, { label: 'Two', value: 'two' }] },
         { name: 'names', label: 'Names', type: 'string-list', required: true, defaultValue: ['first'], minItems: 1, maxItems: 3 },
@@ -86,11 +87,34 @@ async function runBotSettingsDomSmoke() {
       ],
     },
     server: {
-      title: 'Shared options',
+      title: 'Music settings',
+      description: 'Music behavior shared by everyone on this server.',
       fields: [
         { name: 'enabled', label: 'Enabled for everyone', type: 'boolean', required: true, defaultValue: true },
         { name: 'rate', label: 'Rate', type: 'integer', required: true, defaultValue: 5, min: 1, max: 10 },
+        { name: 'music_idle_seconds', label: 'Idle timeout (seconds)', description: 'Leave voice after 1 to 600 idle seconds.',
+          type: 'integer', required: true, defaultValue: 60, min: 1, max: 600 },
       ],
+    },
+    localizations: {
+      'pt-BR': {
+        user: {
+          title: 'Preferências pessoais', description: 'Opções pessoais salvas neste dispositivo.',
+          fields: {
+            enabled: { label: 'Ativado' },
+            count: { label: 'Quantidade', description: 'Quantidade de itens de 0 a 5.' },
+            names: { label: 'Nomes' },
+          },
+        },
+        server: {
+          title: 'Configurações de música', description: 'Comportamento da música compartilhado neste servidor.',
+          fields: {
+            rate: { label: 'Taxa' },
+            music_idle_seconds: { label: 'Tempo de inatividade (segundos)', description: 'Sair da voz após 1 a 600 segundos sem atividade.' },
+          },
+        },
+      },
+      en: { user: { title: 'Your preferences', fields: { count: { label: 'Item count' } } } },
     },
   };
   let revision = 1;
@@ -102,6 +126,20 @@ async function runBotSettingsDomSmoke() {
   let completeRequest = null;
   let failNext = false;
   const canConfigure = () => server.hasPermission(Permission.CONFIGURE_BOTS);
+  const visibleDefinition = () => {
+    const visible = {
+      ...(userDefinition ? { user: userDefinition } : {}),
+      ...(canConfigure() ? { server: definition.server } : {}),
+    };
+    const localizations = {};
+    for (const [locale, forms] of Object.entries(definition.localizations)) {
+      const scopes = {};
+      for (const scope of ['user', 'server']) if (visible[scope] && forms[scope]) scopes[scope] = forms[scope];
+      if (Object.keys(scopes).length) localizations[locale] = scopes;
+    }
+    if (Object.keys(localizations).length) visible.localizations = localizations;
+    return visible;
+  };
   const summary = id => ({
     botId: id, name: id === 'audio-bot' ? 'Audio <bot>' : 'Generic bot', avatarUrl: null, online: false,
     capabilities: { downloadsSound: id === 'audio-bot' }, schemaRevision, revision,
@@ -110,14 +148,11 @@ async function runBotSettingsDomSmoke() {
   });
   const snapshot = id => ({
     bot: summary(id),
-    definition: id === 'audio-bot' ? {} : {
-      ...(userDefinition ? { user: userDefinition } : {}),
-      ...(canConfigure() ? { server: definition.server } : {}),
-    },
+    definition: id === 'audio-bot' ? {} : visibleDefinition(),
     ...(canConfigure() && id === 'generic-bot' ? {
       server: {
         schemaRevision, revision,
-        values: id === 'audio-bot' ? {} : { enabled: true, rate: 5, ...overrides },
+        values: id === 'audio-bot' ? {} : { enabled: true, rate: 5, music_idle_seconds: 60, ...overrides },
       },
     } : {}),
   });
@@ -167,6 +202,14 @@ async function runBotSettingsDomSmoke() {
     find('[data-settings-bot="generic-bot"]').click();
     await settle(() => !!document.querySelector('#bot-settings-user-count'));
     check(!document.querySelector('[data-settings-scope="server"]'), 'Shared behavior is omitted without configure permission');
+    check(find('#bot-settings-form h3').textContent === 'Preferências pessoais' &&
+      find('#bot-settings-form fieldset > .bot-field-description').textContent === 'Opções pessoais salvas neste dispositivo.',
+      'Personal form title and description follow declared app-language metadata');
+    check(find('label[for="bot-settings-user-count"]').textContent.includes('Quantidade') &&
+      find('[data-field-name="count"] .bot-field-description').textContent === 'Quantidade de itens de 0 a 5.',
+      'Personal field labels and descriptions are localized rather than hardcoded');
+    check(!Object.values(modal.snapshot.definition.localizations).some(forms => forms.server),
+      'Unauthorized snapshots contain no localized server scope');
     check(find('#bot-settings-user-enabled').checked === false && find('#bot-settings-user-count').value === '0',
       'False and zero defaults are displayed without truthiness fallback');
     check(document.querySelectorAll('[data-audio-preview-volume]').length === 1 &&
@@ -176,10 +219,39 @@ async function runBotSettingsDomSmoke() {
     check(find('[data-bot-select-value="two"]').getAttribute('aria-pressed') === 'true', 'Persistent button choices show selection');
     find('[data-field-name="names"] [data-field-action="add"]').click();
     type('#bot-settings-user-names-1', 'second');
+    toggle('#bot-settings-user-enabled', true);
+    type('#bot-settings-user-count', '3');
+    find('#bot-settings-user-names-1').focus();
+    find('#bot-settings-user-names-1').setSelectionRange(1, 4, 'backward');
+    const personalDraft = structuredClone(modal.drafts.user);
+    const definitionBeforeLanguage = structuredClone(definition);
+    const requestsBeforeLanguage = requests.length;
+    language.setLanguage('en');
+    check(find('#bot-settings-form h3').textContent === 'Your preferences' &&
+      find('label[for="bot-settings-user-count"]').textContent.includes('Item count'),
+      'English overrides are selected from the current app language');
+    check(find('[data-field-name="count"] .bot-field-description').textContent === 'How many items to use.',
+      'Missing translated properties fall back to the declared base form');
+    equal(modal.drafts.user, personalDraft, 'Language changes preserve unsaved personal values and dirty state');
+    check(find('#bot-settings-user-enabled').checked && find('#bot-settings-user-count').value === '3' &&
+      find('[data-bot-select-value="two"]').getAttribute('aria-pressed') === 'true' &&
+      find('#bot-settings-user-names-1').value === 'second', 'Localized fields retain boolean, numeric, select and list drafts');
+    check(document.activeElement?.id === 'bot-settings-user-names-1' &&
+      document.activeElement.selectionStart === 1 && document.activeElement.selectionEnd === 4 &&
+      document.activeElement.selectionDirection === 'backward', 'Relocalization preserves focused text and caret selection');
+    language.setLanguage('pt-BR');
+    check(find('#bot-settings-form h3').textContent === 'Preferências pessoais',
+      'Switching back relocalizes the existing modal');
+    equal(modal.drafts.user, personalDraft, 'Returning to Portuguese does not reset the draft');
+    equal(definition, definitionBeforeLanguage, 'Localization never mutates field definitions or defaults');
+    check(requests.length === requestsBeforeLanguage, 'Relocalization makes no settings request or implicit save');
+    equal(settingsStore.getBotUserSettings(userKey), {}, 'Unsaved localized settings remain outside persistence');
+    toggle('#bot-settings-user-enabled', false);
     type('#bot-settings-user-count', '6');
     await submit();
     check(find('.bot-settings-message').getAttribute('role') === 'alert' &&
       find('[data-field-name="count"]').getAttribute('aria-invalid') === 'true', 'Invalid settings are visibly rejected');
+    check(find('.bot-settings-message').textContent.includes('Quantidade'), 'Validation errors use the currently localized field label');
     equal(settingsStore.getBotUserSettings(userKey), {}, 'Invalid settings cannot reach persistence');
     type('#bot-settings-user-count', '2');
     await submit();
@@ -215,17 +287,49 @@ async function runBotSettingsDomSmoke() {
     check(!server.hasPermission(Permission.MANAGE_BOTS), 'Configure-only role has no installation/profile management grant');
     await modal.open('generic-bot');
     find('[data-settings-scope="server"]').click();
+    check(find('#bot-settings-form h3').textContent === 'Configurações de música' &&
+      find('label[for="bot-settings-server-music_idle_seconds"]').textContent.includes('Tempo de inatividade'),
+      'Server music settings use declared Portuguese titles and labels');
+    const idle = find('#bot-settings-server-music_idle_seconds');
+    const idleField = modal.form().fields.find(field => field.name === 'music_idle_seconds');
+    check(idle.inputMode === 'numeric' && idle.value === '60' && idleField.type === 'integer' &&
+      idleField.defaultValue === 60 && idleField.min === 1 && idleField.max === 600 &&
+      idle.closest('[data-field-name]').textContent.includes(language.t('botChat.minimum', { value: 1 })) &&
+      idle.closest('[data-field-name]').textContent.includes(language.t('botChat.maximum', { value: 600 })),
+      'Localized idle timeout retains the shared numeric control, integer type, default 60 and visible 1..600 limits');
+    type('#bot-settings-server-music_idle_seconds', '120');
     type('#bot-settings-server-rate', '7');
+    const serverDraft = structuredClone(modal.drafts.server);
+    const requestsBeforeServerLanguage = requests.length;
+    language.setLanguage('en');
+    check(find('#bot-settings-form h3').textContent === 'Music settings' &&
+      find('label[for="bot-settings-server-music_idle_seconds"]').textContent.includes('Idle timeout (seconds)') &&
+      find('[data-field-name="music_idle_seconds"] .bot-field-description').textContent === 'Leave voice after 1 to 600 idle seconds.',
+      'A base-English server form remains the fallback without an English localization block');
+    equal(modal.drafts.server, serverDraft, 'Relocalization preserves unsaved shared values and revisions');
+    check(find('#bot-settings-server-music_idle_seconds').value === '120' &&
+      find('#bot-settings-server-rate').value === '7', 'Shared input values survive the language change');
+    language.setLanguage('pt-BR');
+    equal(modal.drafts.server, serverDraft, 'Portuguese restores labels without replacing the server draft');
+    check(requests.length === requestsBeforeServerLanguage, 'Changing shared-form language never sends a save');
+    for (const invalidIdle of ['0', '601', '1.5']) {
+      type('#bot-settings-server-music_idle_seconds', invalidIdle);
+      await submit();
+      check(requests.length === requestsBeforeServerLanguage &&
+        find('[data-field-name="music_idle_seconds"]').getAttribute('aria-invalid') === 'true',
+        'Localized idle timeout rejects invalid integer/range input: ' + invalidIdle);
+    }
+    type('#bot-settings-server-music_idle_seconds', '120');
     await submit();
     const update = requests.filter(request => request.type === MessageType.BOT_SETTINGS_UPDATE).at(-1);
-    equal(update.payload.patch, { rate: 7 }, 'Shared saves patch only changed fields');
+    equal(update.payload.patch, { rate: 7, music_idle_seconds: 120 }, 'Shared saves preserve typed values and patch only changed fields');
     check(update.payload.expectedRevision === 1 && update.payload.schemaRevision === 1,
       'Shared writes carry both optimistic concurrency revisions');
     equal(settingsStore.getBotUserSettings(userKey), {}, 'Shared writes never mutate personal preferences');
     find('[data-settings-defaults]').click();
     await submit();
     equal(requests.filter(request => request.type === MessageType.BOT_SETTINGS_UPDATE).at(-1).payload.patch,
-      { enabled: null, rate: null }, 'Shared defaults remove overrides rather than materializing defaults');
+      { enabled: null, rate: null, music_idle_seconds: null }, 'Shared defaults remove overrides rather than materializing defaults');
     type('#bot-settings-server-rate', '8');
     revision++;
     appEvents.emit('message.BOT_SETTINGS_LIST_RESPONSE', { bots: [summary('audio-bot'), summary('generic-bot')] });
@@ -235,10 +339,21 @@ async function runBotSettingsDomSmoke() {
     find('[data-settings-reload]').click();
     await settle(() => !!document.querySelector('#bot-settings-server-rate') && !find('[data-settings-save]').disabled);
     check(find('#bot-settings-server-rate').value === '5', 'Explicit reload accepts current shared values');
+    find('[data-settings-scope="user"]').click();
+    type('#bot-settings-user-count', '4');
+    find('[data-settings-scope="server"]').click();
     server.myPermissions &= ~Permission.CONFIGURE_BOTS;
     appEvents.emit('server.roles_updated');
     check(!document.querySelector('[data-settings-scope="server"]') && !modal.snapshot.server && !modal.drafts.server,
       'Permission loss removes shared controls and private values from memory');
+    check(!Object.values(modal.snapshot.definition.localizations ?? {}).some(forms => forms.server),
+      'Permission loss also removes localized private server declarations');
+    check(find('#bot-settings-form h3').textContent === 'Preferências pessoais' && find('#bot-settings-user-count').value === '4',
+      'Permission loss preserves localized personal controls and unsaved values');
+    language.setLanguage('en');
+    check(find('#bot-settings-form h3').textContent === 'Your preferences' && find('#bot-settings-user-count').value === '4',
+      'Remaining personal localizations stay available after permission loss');
+    language.setLanguage('pt-BR');
 
     await modal.open('generic-bot');
     type('#bot-settings-user-count', '3');

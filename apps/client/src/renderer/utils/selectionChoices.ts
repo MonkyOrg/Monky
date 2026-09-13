@@ -62,7 +62,8 @@ function renderAudioControls(choice: RenderableSelectionChoice, key: string, vol
   if (!audio) return '';
   const duration = audioDurationLabel(audio.durationMs);
   return `<div class="bot-choice-audio-controls" data-audio-choice-controls data-audio-key="${escapeHtml(key)}" data-audio-label="${escapeHtml(choice.label)}"
-    data-audio-url="${escapeHtml(audio.url)}" ${audio.fileName ? `data-audio-file-name="${escapeHtml(audio.fileName)}"` : ''}
+    ${'url' in audio ? `data-audio-url="${escapeHtml(audio.url)}"` : `data-audio-resource-id="${escapeHtml(audio.resourceId)}"`}
+    ${audio.fileName ? `data-audio-file-name="${escapeHtml(audio.fileName)}"` : ''}
     data-audio-volume-scope="${escapeHtml(volumeScope)}" ${audio.durationMs ? `data-audio-duration-ms="${audio.durationMs}"` : ''}
     data-audio-preview-state="idle">
     <button type="button" class="bot-choice-audio-play" data-audio-preview-action="toggle"
@@ -91,7 +92,8 @@ export function renderSelectionChoiceList(options: SelectionChoiceListOptions): 
       ${options.choices.map((choice, index) => {
         const selected = options.selectedValue !== undefined ? choice.value === options.selectedValue : index === activeIndex;
         const audio = choiceAudio(choice);
-        const key = JSON.stringify([options.keyPrefix, choice.value, audio?.url, audio?.fileName]);
+        const key = JSON.stringify([options.keyPrefix, choice.value,
+          audio && ('url' in audio ? audio.url : audio.resourceId), audio?.fileName]);
         return `<div class="bot-parameter-option bot-selection-choice ${selected ? 'active' : ''} ${audio ? 'has-audio' : ''}"
           id="${escapeHtml(options.idPrefix)}-${index}" role="option" tabindex="${selected ? '0' : '-1'}" aria-selected="${selected}"
           data-selection-choice ${options.optionAttributes(choice, index)}>

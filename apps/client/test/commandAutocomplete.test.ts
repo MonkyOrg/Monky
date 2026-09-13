@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MessageType, ProtocolErrorCode, type SlashCommand } from '@monky/shared';
+import { LIMITS, MessageType, ProtocolErrorCode, type SlashCommand } from '@monky/shared';
 import { CommandAutocomplete, type AutocompleteState } from '../src/renderer/utils/commandAutocomplete';
 import { commandValuesFromInputs } from '../src/renderer/utils/botInputs';
 import { createChatStore } from '../src/renderer/stores/chatStore';
@@ -78,10 +78,12 @@ test('autocomplete clears stale choices immediately, ignores late successes/erro
   requests.get('new')?.resolve({ status: 'ok', choices: [{ label: 'New label', value: 'opaque-id' }] });
   await flush();
   assert.equal(states.at(-1)?.choices[0]?.value, 'opaque-id');
+  assert.equal(requests.get('new')?.signal.aborted, false, 'Completed results retain a cancellable choice context');
   requests.get('old')?.reject(new Error('late error'));
   await flush();
   assert.equal(states.at(-1)?.status, 'ready');
   controller.setQuery('closing');
+  assert.equal(requests.get('new')?.signal.aborted, true, 'Changing a finished query invalidates its lazy preview authority');
   context.mock.timers.tick(500);
   controller.close();
   const count = states.length;
@@ -95,7 +97,7 @@ test('autocomplete clears stale choices immediately, ignores late successes/erro
   assert.equal(requests.has('cancel timer'), false);
 });
 
-test('autocomplete respects 2..100 query characters and displays at most ten validated choices', async (context) => {
+test('autocomplete respects the shared query limit and displays at most ten validated choices', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   let calls = 0;
   let state: AutocompleteState = { status: 'idle', choices: [], query: '' };
@@ -108,15 +110,42 @@ test('autocomplete respects 2..100 query characters and displays at most ten val
   context.mock.timers.tick(1000);
   assert.equal(calls, 0);
   assert.equal(state.status, 'idle');
-  controller.setQuery('x'.repeat(101));
+  controller.setQuery('x'.repeat(LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH + 1));
   context.mock.timers.tick(1000);
   assert.equal(calls, 0);
   assert.equal(state.status, 'failed');
-  controller.setQuery('xx');
+  controller.setQuery('x'.repeat(LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH));
   context.mock.timers.tick(250);
   await flush();
   assert.equal(calls, 1);
   assert.equal(state.choices.length, 10);
+});
+
+test('autocomplete preserves full YouTube URLs longer than the old 100-character input limit', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const query = `https://www.youtube.com/watch?feature=${'x'.repeat(110)}&v=abcdefghijk`;
+  assert.ok(query.length > 100 && query.length <= LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH);
+  const sent: string[] = [];
+  const controller = new CommandAutocomplete({}, async (value) => {
+    sent.push(value);
+    return { status: 'ok', choices: [] };
+  }, () => {});
+  context.after(() => controller.close());
+  controller.setQuery(query);
+  context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
+  await flush();
+  assert.deepEqual(sent, [query]);
+  const command: SlashCommand = {
+    name: 'play', description: 'Play', botId: 'bot', botName: 'Bot',
+    options: [{ name: 'busca', description: 'Search', type: 'string', required: true, autocomplete: true }],
+  };
+  const store = createChatStore();
+  store.bus = new EventBus();
+  store.selectCommand('text', command, query);
+  const draft = store.getCommandDraft('text');
+  assert.ok(draft);
+  const markup = renderCompactCommand(draft, 'text', [], true, true);
+  assert.ok(markup.includes(`maxlength="${LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH}"`));
 });
 
 test('only a selected opaque value is submitted; seeded/edited text and labels are not IDs', () => {
@@ -213,4 +242,26 @@ test('cancelled autocomplete requests release timers and late server errors are 
   assert.equal(errors, 0);
   unbind();
   client.dispose();
+});
+
+test('timed out lazy preview requests retire late replies and errors', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const client = createNetworkClient();
+  client.send = () => {};
+  let events = 0;
+  const unbind = [
+    appEvents.on(`message.${MessageType.SERVER_ERROR}`, () => { events++; }),
+    appEvents.on(`message.${MessageType.COMMAND_AUDIO_PREVIEW_RESULT}`, () => { events++; }),
+  ];
+  context.after(() => { unbind.forEach((off) => off()); client.dispose(); });
+  const request = client.sendRequest<unknown>(MessageType.COMMAND_AUDIO_PREVIEW, {}, 'expired-preview', 30_000);
+  const rejection = assert.rejects(request);
+  context.mock.timers.tick(30_000);
+  await rejection;
+  const handle = Reflect.get(client, 'handleIncomingMessage');
+  assert.equal(typeof handle, 'function');
+  for (const type of [MessageType.SERVER_ERROR, MessageType.COMMAND_AUDIO_PREVIEW_RESULT]) {
+    Reflect.apply(handle, client, [{ type, requestId: 'expired-preview', payload: { status: 'failed', reason: 'timeout' } }]);
+  }
+  assert.equal(events, 0);
 });

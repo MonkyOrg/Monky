@@ -97,12 +97,26 @@ export class BotSettingsService {
     }
     const record = this.require(bot.id);
     const readServer = canConfigure || owningBot;
+    const definition: BotSettingsDefinition = {
+      ...(record.definition.user ? { user: record.definition.user } : {}),
+      ...(readServer && record.definition.server ? { server: record.definition.server } : {}),
+    };
+    if (record.definition.localizations) {
+      const localizations: NonNullable<BotSettingsDefinition['localizations']> = {};
+      for (const locale of ['pt-BR', 'en'] as const) {
+        const localized = record.definition.localizations[locale];
+        if (!localized) continue;
+        const scopes = {
+          ...(definition.user && localized.user ? { user: localized.user } : {}),
+          ...(definition.server && localized.server ? { server: localized.server } : {}),
+        };
+        if (Object.keys(scopes).length) localizations[locale] = scopes;
+      }
+      if (Object.keys(localizations).length) definition.localizations = localizations;
+    }
     return botSettingsSnapshotSchema.parse({
       bot: this.summary(bot, record, canConfigure),
-      definition: {
-        ...(record.definition.user ? { user: record.definition.user } : {}),
-        ...(readServer && record.definition.server ? { server: record.definition.server } : {}),
-      },
+      definition,
       ...(readServer && record.definition.server ? { server: this.serverSnapshot(record) } : {}),
     });
   }

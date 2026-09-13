@@ -443,6 +443,67 @@ test('preview requests use the same private-address and redirect defenses as sav
   assert.equal(f.requests.length, 0);
 });
 
+test('lazy preview bytes pass native MIME and content validation without network or filesystem operations', async (context) => {
+  const f = await fixture(context, {
+    resolve: async () => assert.fail('Lazy previews must not resolve external hosts'),
+    request: async () => assert.fail('Lazy previews must not fetch remote URLs'),
+  });
+  const previews = new AudioPreviews(f.transport);
+  const input = { requestId: 'lazy', audioBase64: wav().toString('base64'), mimeType: 'audio/wav' };
+  const ready = await previews.load(1, input);
+  assert.equal(ready.status, 'ready');
+  if (ready.status !== 'ready') throw new Error('Missing native audio validation');
+  assert.deepEqual(Buffer.from(ready.data), wav());
+  assert.equal(ready.mimeType, 'audio/wav');
+  const maximum = Buffer.alloc(LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES);
+  wav().copy(maximum);
+  maximum.writeUInt32LE(maximum.length - 8, 4);
+  maximum.writeUInt32LE(maximum.length - 44, 40);
+  const boundary = await previews.load(1, { ...input, audioBase64: maximum.toString('base64') });
+  assert.equal(boundary.status, 'ready', 'Exactly 256 KiB is accepted');
+  if (boundary.status === 'ready') assert.equal(boundary.data.byteLength, LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES);
+  for (const [extra, reason] of [
+    [{ url: 'https://127.0.0.1/forged.wav' }, 'invalid_request'],
+    [{ resourceId: 'unresolved' }, 'invalid_request'],
+    [{ audioBase64: '' }, 'invalid_request'],
+    [{ audioBase64: 'AB==' }, 'invalid_request'],
+    [{ audioBase64: Buffer.from('<html>fake audio</html>').toString('base64') }, 'unsupported_audio'],
+    [{ audioBase64: wav().subarray(0, 44).toString('base64') }, 'unsupported_audio'],
+    [{ audioBase64: Buffer.alloc(LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES + 1).toString('base64') }, 'too_large'],
+    [{ mimeType: 'audio/mpeg' }, 'unsupported_audio'],
+    [{ mimeType: 'audio/x-wav' }, 'unsupported_audio'],
+    [{ fileName: 'different.ogg' }, 'unsupported_audio'],
+    [{ fileName: '..\\escape.wav' }, 'invalid_file_name'],
+  ] as const) {
+    assert.deepEqual(await previews.load(1, { ...input, ...extra }), { status: 'failed', reason });
+  }
+  assert.deepEqual(await fs.readdir(f.folder), []);
+  assert.deepEqual(f.requests, []);
+});
+
+test('native lazy preview replacement aborts a previous HTTPS load only for its owner', async (context) => {
+  const signals: AbortSignal[] = [];
+  const previews = new AudioPreviews({
+    resolve: async (_host, signal) => new Promise((_resolve, reject) => {
+      signals.push(signal);
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }),
+    request: async () => assert.fail('Cancelled requests cannot fetch'),
+  });
+  context.after(() => { previews.cancelOwner(1); previews.cancelOwner(2); });
+  const first = previews.load(1, { requestId: 'url-one', url: 'https://audio.example/one.wav' });
+  const other = previews.load(2, { requestId: 'url-two', url: 'https://audio.example/two.wav' });
+  await flush();
+  const lazy = await previews.load(1, { requestId: 'lazy', audioBase64: wav().toString('base64'), mimeType: 'audio/wav' });
+  assert.equal(lazy.status, 'ready');
+  assert.deepEqual(await first, { status: 'cancelled' });
+  assert.equal(signals[0].aborted, true);
+  assert.equal(signals[1].aborted, false);
+  previews.cancelOwner(2);
+  assert.deepEqual(await other, { status: 'cancelled' });
+  assert.equal(previews.cancel(1, { requestId: 'lazy' }), false, 'In-memory validation leaves no active native request');
+});
+
 test('preview MIME, signature and size limits fail explicitly without filesystem side effects', async (context) => {
   const scenarios = [
     { mime: 'text/html', bytes: mp3(), reason: 'unsupported_audio' },
@@ -830,6 +891,7 @@ test('supported AAC, Ogg, M4A and WebM containers require an audio signature, no
   opusHead.write('OpusHead'); opusHead[8] = 1; opusHead[9] = 1;
   const ogg = Buffer.concat([oggPage(opusHead), oggPage(Buffer.from([0xf8, 0xff, 0xfe]))]);
   assert.equal(isSoundAudio(ogg, 'authored.ogg'), true);
+  assert.equal(isSoundAudio(Buffer.concat([oggPage(opusHead), oggPage(Buffer.from('OpusTags'))]), 'headers.ogg'), false);
   assert.equal(isSoundAudio(oggPage(Buffer.from('<html>not audio</html>')), 'authored.ogg'), false);
   const box = (name: string, ...payloads: Buffer[]) => {
     const data = Buffer.concat(payloads);
