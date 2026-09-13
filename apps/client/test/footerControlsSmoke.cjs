@@ -64,6 +64,21 @@ if (!process.versions.electron) {
     const motion = (value) => window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
       features: [{ name: 'prefers-reduced-motion', value }],
     });
+    const verifyReducedMotion = async (fixture) => {
+      let settled = false;
+      let failure;
+      const verification = window.webContents.executeJavaScript(`window.${fixture}.reduced()`, true).then(
+        () => { settled = true; },
+        (error) => { settled = true; failure = error; },
+      );
+      await window.webContents.executeJavaScript('void 0');
+      // Delay the stimulus, not the assertion: paused animations must wait for real cancellation.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      if (settled) throw failure ?? new Error(`${fixture}: reduced-motion verification completed before the media change`);
+      await motion('reduce');
+      await verification;
+      if (failure) throw failure;
+    };
     phase = 'loading fixture';
     await window.loadURL(`http://127.0.0.1:${address.port}/__footer_controls__`);
     await motion('no-preference');
@@ -113,8 +128,7 @@ if (!process.versions.electron) {
     phase = 'normal motion';
     await window.webContents.executeJavaScript('window.footerSmoke.normal()', true);
     phase = 'reduced motion';
-    await motion('reduce');
-    await window.webContents.executeJavaScript('window.footerSmoke.reduced()', true);
+    await verifyReducedMotion('footerSmoke');
     for (const id of ['media-btn-camera', 'btn-emoji']) {
       const point = await window.webContents.executeJavaScript(`window.footerSmoke.hoverTarget(${JSON.stringify(`#${id}`)})`);
       window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
@@ -144,8 +158,7 @@ if (!process.versions.electron) {
     phase = 'stage normal motion';
     await window.webContents.executeJavaScript('window.stageSmoke.normal()', true);
     phase = 'stage reduced motion';
-    await motion('reduce');
-    await window.webContents.executeJavaScript('window.stageSmoke.reduced()', true);
+    await verifyReducedMotion('stageSmoke');
     await motion('no-preference');
     phase = 'stage cleanup';
     const stageChecks = await window.webContents.executeJavaScript('window.stageSmoke.cleanup()', true);
@@ -636,8 +649,7 @@ async function setupFooterSmoke() {
       animations(camera)[0].pause();
     },
     async reduced() {
-      await frame();
-      await delay(30);
+      await finishAnimations(controlAnimations());
       check(matchMedia('(prefers-reduced-motion: reduce)').matches, 'Real reduced-motion media feature updated at runtime');
       check(motionCount() === 0, 'Runtime reduced motion cancels in-flight glyph animations');
       check(composerMotionCount() === 0, 'Runtime reduced motion cancels composer animations too');
@@ -963,7 +975,7 @@ async function setupStageSmoke() {
       }
     },
     async reduced() {
-      await delay(50);
+      await finishAnimations(buttons().flatMap(animations));
       check(matchMedia('(prefers-reduced-motion: reduce)').matches && motionCount() === 0,
         'Runtime reduced motion cancels stage and participant animations');
       check(!root.querySelector('.control-motion-decoration'), 'Reduced motion removes stage artwork');
@@ -981,7 +993,7 @@ async function setupStageSmoke() {
       check(motionCount() === 0 && actions.overlay === 2, 'Reduced motion preserves actions without click animation');
     },
     async cleanup() {
-      await delay(50);
+      await finishAnimations(buttons().flatMap(animations));
       check(!matchMedia('(prefers-reduced-motion: reduce)').matches && motionCount() === 0,
         'Re-enabling motion does not autoplay the stage');
       for (let iteration = 0; iteration < 3; iteration++) {
