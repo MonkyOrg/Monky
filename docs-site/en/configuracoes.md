@@ -21,6 +21,20 @@ Open from the gear icon on the connection screen or bottom bar.
 - **Updates** — current version and manual check.
 - **Community** — shortcuts for ideas, voting and bugs.
 
+### Enter the server when Monky opens
+
+On Home, select or enter the server and enable **Enter when Monky opens**,
+next to **Join Server**. The choice is saved only after a successful connection.
+There is a single destination: connecting to another server with the switch
+enabled replaces the previous one. A failed attempt leaves the saved destination unchanged.
+
+The preference applies to future launches until you turn that same switch off;
+turning it off disables automatic entry immediately, without having to connect.
+It never starts stopped servers or joins voice. When migrating older settings
+with multiple destinations, only the most recent choice is kept. A short
+animation accompanies the transition from Home to the server, unless reduced
+motion is enabled.
+
 ### Section navigation
 
 In app and server settings, selecting a category expands its section shortcuts
@@ -52,6 +66,12 @@ If the connection or session changes, reopen settings to obtain the current
 state; a request without acknowledgement is not presented as saved. Role
 and bot-profile edits also apply immediately, while creation, installation,
 deletion and revocation still require their explicit actions.
+
+Warnings about incompatible or unverified bots appear in
+**Server Settings → Bots**, next to the bot that needs attention,
+rather than on Home cards. The server dropdown no longer repeats a
+**Bots on this server** entry. Personal preferences remain available through the
+bot's own menu in the member list.
 
 ### Color picker
 

@@ -1,18 +1,21 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BOT_SCREEN_LIMITS, MessageType, ProtocolErrorCode, type BotScreen, type SlashCommand, type VoiceParticipantState } from '@monky/shared';
+import { BOT_SCREEN_LIMITS, MessageType, ProtocolErrorCode, type BotScreen, type BotScreenRemoved, type SlashCommand, type VoiceParticipantState } from '@monky/shared';
 import { EventBus, appEvents } from '../src/renderer/core/EventBus';
 import { sessionManager, type ServerSession } from '../src/renderer/core/SessionManager';
 import { bindBotScreenEvents } from '../src/renderer/core/botScreenEvents';
-import { BotScreenStore } from '../src/renderer/stores/botScreenStore';
+import { BotScreenStore, type VoiceBotScreensUpdated } from '../src/renderer/stores/botScreenStore';
 import { isForegroundEvent, routeSessionEvent } from '../src/renderer/core/sessionRouting';
 import { botScreenDocument } from '../src/renderer/views/BotScreenFrame';
 import { voiceStore } from '../src/renderer/stores/voiceStore';
 import { commandVoiceError, commandVoiceContextKey, getBotVoiceContext } from '../src/renderer/utils/botVoice';
 
 const snapshot = (id = 'game', revision = 0): BotScreen => ({
-  id, botId: 'bot', channelId: 'voice', title: 'Game', html: '<script>play()</script>',
+  id, instanceId: `${id}-instance`, creatorUserId: 'alice', botId: 'bot', channelId: 'voice', title: 'Game', html: '<script>play()</script>',
   state: { count: revision }, revision, createdAt: 0,
+});
+const removal = (id = 'game', channelId = 'voice', instanceId = `${id}-instance`): BotScreenRemoved => ({
+  id, instanceId, channelId, reason: 'ended', endedByUserId: 'alice',
 });
 
 test('screen stores preserve revisions, bind channel ownership and have a finite cache', () => {
@@ -29,9 +32,9 @@ test('screen stores preserve revisions, bind channel ownership and have a finite
   assert.equal(store.list('voice').length, BOT_SCREEN_LIMITS.activePerServer);
   store.replace('voice', [snapshot('restored', 4)]);
   assert.deepEqual(store.list('voice').map((screen) => screen.id), ['restored']);
-  store.remove('restored', 'other');
+  store.remove(removal('restored', 'other'));
   assert.ok(store.get('restored'));
-  store.remove('restored', 'voice');
+  store.remove(removal('restored'));
   assert.equal(store.list('voice').length, 0);
 });
 
@@ -50,12 +53,12 @@ test('explicit local exit dismisses only that invitation until reopening or endi
   store.replace('voice', [snapshot('game', 4), snapshot('new')]);
   assert.equal(store.isInvitationDismissed('game'), true, 'snapshots and list refreshes preserve the exit');
   assert.equal(store.isInvitationDismissed('new'), false, 'another app still invites normally');
-  store.remove('game', 'wrong-room');
+  store.remove(removal('game', 'wrong-room'));
   assert.equal(store.isInvitationDismissed('game'), true);
   store.setInvitationDismissed('game', false);
   assert.equal(store.isInvitationDismissed('game'), false, 'explicit reopening reverses the local exit');
   store.setInvitationDismissed('game', true);
-  store.remove('game', 'voice');
+  store.remove(removal());
   assert.equal(store.isInvitationDismissed('game'), false);
   store.setInvitationDismissed('new', true);
   store.replace('voice', []);
@@ -71,6 +74,24 @@ test('explicit local exit dismisses only that invitation until reopening or endi
   assert.equal(store.isInvitationDismissed('absent'), false);
 });
 
+test('reusing a miniapp ID starts a fresh invitation and stale removals cannot destroy it', () => {
+  const store = new BotScreenStore();
+  store.upsert(snapshot('game', 5));
+  store.setInvitationDismissed('game', true);
+  const replacement = { ...snapshot(), instanceId: 'replacement', createdAt: 1 };
+  store.upsert(replacement);
+  assert.equal(store.get('game')?.revision, 0);
+  assert.equal(store.isInvitationDismissed('game'), false);
+  store.remove(removal());
+  store.upsert(snapshot('game', 99));
+  assert.deepEqual(store.get('game'), replacement);
+  store.setInvitationDismissed('game', true);
+  store.replace('voice', [{ ...replacement, instanceId: 'third-instance', createdAt: 2 }]);
+  assert.equal(store.isInvitationDismissed('game'), false);
+  store.remove(removal('game', 'voice', 'third-instance'));
+  assert.equal(store.get('game'), undefined);
+});
+
 test('screen init JSON cannot break out into the trusted or author script document', () => {
   const document = botScreenDocument({ ...snapshot(), state: { text: '</script><script>ESCAPE()</script>' } }, { id: 'alice', nickname: '</script>', locale: 'en' });
   assert.equal(document.includes('<script>ESCAPE()'), false);
@@ -78,6 +99,34 @@ test('screen init JSON cannot break out into the trusted or author script docume
   assert.ok(document.includes("default-src 'none'"));
   assert.ok(document.includes("connect-src 'none'"));
   assert.ok(document.includes('"locale":"en"'));
+});
+
+test('viewer updates describe only the exact removed instance and never replay duplicate notices', () => {
+  const store = new BotScreenStore('toast-lifetime');
+  store.bus = new EventBus();
+  voiceStore.setChannel('voice', 'toast-lifetime');
+  const updates: VoiceBotScreensUpdated[] = [];
+  const off = appEvents.on<VoiceBotScreensUpdated>('voice.bot_screens_updated', (update) => updates.push(update));
+  try {
+    store.upsert(snapshot());
+    assert.equal(updates.at(-1)?.removed, undefined);
+    const ended = removal();
+    store.remove(ended);
+    assert.deepEqual(updates.at(-1), { key: 'toast-lifetime', channelId: 'voice', removed: ended });
+    const version = store.version;
+    store.remove(ended);
+    assert.equal(store.version, version + 1, 'duplicate removals still invalidate pending lists');
+    assert.equal(updates.at(-1)?.removed, undefined, 'an unseen or duplicate removal is not a new viewer notice');
+    store.upsert({ ...snapshot(), instanceId: 'replacement', createdAt: 1 });
+    const count = updates.length;
+    store.remove(ended);
+    assert.equal(updates.length, count, 'an old instance cannot notify about its replacement');
+    store.clear();
+    assert.equal(updates.at(-1)?.removed, undefined, 'disconnect and view reset are not human END notices');
+  } finally {
+    off();
+    voiceStore.reset();
+  }
 });
 
 function voiceState(sessionId: string, userId = 'alice', channelId = 'voice'): VoiceParticipantState {
@@ -132,12 +181,41 @@ test('background voice snapshots notify global UI only after restoring the visib
     assert.equal(repaints, 1);
     assert.equal(b.botScreenStore.get('late-a'), undefined);
     routeSessionEvent(b.key, `message.${MessageType.BOT_SCREEN_REMOVED}`, () =>
-      appEvents.emit(`message.${MessageType.BOT_SCREEN_REMOVED}`, { id: 'game', channelId: 'voice' }));
+      appEvents.emit(`message.${MessageType.BOT_SCREEN_REMOVED}`, removal()));
     await Promise.resolve();
     assert.equal(repaints, 2);
     assert.equal(b.botScreenStore.list('voice').length, 0);
   } finally {
     off(); unbind(); voiceStore.reset(); sessionManager.removeAll();
+  }
+});
+
+test('end of an unseen instance invalidates an in-flight room list before it can restore an invitation', async (testContext) => {
+  sessionManager.install();
+  const session = sessionManager.create('end-before-list', 7800, 'alice');
+  seed(session);
+  testContext.mock.method(session.client, 'getStatus', () => 'CONNECTED');
+  let finishList: (value: unknown) => void = () => { throw new Error('No pending list.'); };
+  let requests = 0;
+  testContext.mock.method(session.client, 'sendRequest', () => {
+    requests++;
+    return requests === 1 ? new Promise((resolve) => { finishList = resolve; })
+      : Promise.resolve({ channelId: 'voice', screens: [] });
+  });
+  sessionManager.activate(session.key);
+  voiceStore.setChannel('voice', session.key);
+  const unbind = bindBotScreenEvents();
+  try {
+    assert.equal(requests, 1);
+    routeSessionEvent(session.key, `message.${MessageType.BOT_SCREEN_REMOVED}`, () =>
+      appEvents.emit(`message.${MessageType.BOT_SCREEN_REMOVED}`, removal()));
+    finishList({ channelId: 'voice', screens: [snapshot()] });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(requests, 2);
+    assert.equal(session.botScreenStore.get('game'), undefined);
+    assert.equal(session.botScreenStore.isInvitationDismissed('game'), false);
+  } finally {
+    unbind(); voiceStore.reset(); sessionManager.removeAll();
   }
 });
 

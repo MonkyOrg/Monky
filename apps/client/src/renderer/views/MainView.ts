@@ -30,8 +30,8 @@ import { editChannelModal } from './EditChannelModal';
 import { settingsModal } from './SettingsModal';
 import { noiseSuppressionToggleTitle } from './settings/NoiseSuppressionControl';
 import { serverSettingsModal } from './ServerSettingsModal';
-import { botSettingsModal } from './BotSettingsModal';
 import { serverMonitorModal } from './ServerMonitorModal';
+import '../styles/connectionTransition.css';
 import { inviteModal } from './InviteModal';
 import { contextMenu, ContextMenuItem } from './ContextMenu';
 import { showConfirm, showAlert } from './Dialog';
@@ -99,6 +99,7 @@ export class MainView {
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES);
     const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
     const moderation = getVoiceControlModeration();
+    const enteringFromHome = this.container.querySelector('.connection-layout') !== null;
 
     const markup = `
       <div class="main-layout">
@@ -122,10 +123,6 @@ export class MainView {
               <button id="btn-server-monitor" class="server-dropdown-item" title="${t('serverMonitor.title')}" style="display: none;">
                 <span class="material-symbols-outlined md-18">monitoring</span>
                 <span>${t('serverMonitor.title')}</span>
-              </button>
-              <button id="btn-server-bots" class="server-dropdown-item">
-                <span class="material-symbols-outlined md-18" aria-hidden="true">smart_toy</span>
-                <span>${t('botSettings.listTitle')}</span>
               </button>
               <button id="btn-invite-friends" class="server-dropdown-item" title="${t('main.inviteTitle')}">
                 <span class="material-symbols-outlined md-18">person_add</span>
@@ -272,6 +269,24 @@ export class MainView {
 
     const soundboardSlot = document.getElementById('soundboard-players-slot');
     if (soundboardSlot) soundboardPlayersBar.mount(soundboardSlot);
+    if (enteringFromHome) this.animateServerEntry();
+  }
+
+  private animateServerEntry(): void {
+    const layout = this.container.querySelector<HTMLElement>('.main-layout');
+    if (!layout || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const stop = () => {
+      layout.removeEventListener('animationend', finish);
+      layout.removeEventListener('animationcancel', finish);
+      layout.classList.remove('main-layout--entering');
+    };
+    const finish = (event: AnimationEvent) => {
+      if (event.target === layout && event.animationName === 'monky-server-entry') stop();
+    };
+    layout.addEventListener('animationend', finish);
+    layout.addEventListener('animationcancel', finish);
+    layout.classList.add('main-layout--entering');
+    this.unbindEvents.push(stop);
   }
 
   /**
@@ -445,7 +460,7 @@ export class MainView {
     const loadFailed = voice?.session.botScreenStore.loadFailed ?? false;
     const signature = JSON.stringify([
       this.activeContentView, isSelfSharing, sharers, voice?.session.key, voice?.channelId,
-      screens.map((screen) => [screen.id, screen.title]), loadFailed,
+      screens.map((screen) => [screen.id, screen.instanceId, screen.title]), loadFailed,
     ]);
     if (signature === this.screenShareNoticeSignature) return;
     this.screenShareNoticeSignature = signature;
@@ -500,6 +515,7 @@ export class MainView {
           <span class="material-symbols-outlined md-16 screenshare-notice-icon" aria-hidden="true">apps</span>
           <span class="screenshare-notice-text" title="${label}">${label}</span>
           <button type="button" class="screenshare-notice-btn" data-watch-bot-screen="${escapeHtml(screen.id)}"
+            data-bot-screen-instance="${escapeHtml(screen.instanceId)}"
             aria-label="${escapeHtml(t('botScreen.open', { title: screen.title }))}">${t('botScreen.watch')}</button>
         </div>
       `);
@@ -515,7 +531,10 @@ export class MainView {
       button.addEventListener('click', () => {
         const current = getBotVoiceContext();
         if (!voice || current?.session !== voice.session || current.channelId !== voice.channelId) return;
-        this.openVoiceStage(undefined, button.dataset.watchBotScreen);
+        const id = button.dataset.watchBotScreen;
+        const screen = id ? current.session.botScreenStore.get(id) : undefined;
+        if (!screen || screen.instanceId !== button.dataset.botScreenInstance) return;
+        this.openVoiceStage(undefined, screen.id);
       });
     });
     slot.querySelector('[data-reload-bot-screens]')?.addEventListener('click', () => appEvents.emit('voice.bot_screens_reload'));
@@ -1281,6 +1300,7 @@ export class MainView {
     if (btnSettings) {
       (btnSettings as HTMLElement).style.display = (canManageServer || canManageRoles || canManageBots) ? '' : 'none';
     }
+    this.refreshServerMonitorVisibility();
   }
 
   private renderMembers(): void {
@@ -1399,19 +1419,14 @@ export class MainView {
     }
   }
 
-  private async refreshServerMonitorVisibility(): Promise<void> {
-    const btn = document.getElementById('btn-server-monitor');
+  private refreshServerMonitorVisibility(): void {
+    const btn = this.container.querySelector<HTMLElement>('#btn-server-monitor');
     if (!btn) return;
-
-    // Only makes sense for the server this machine is hosting (#GUI retirement).
-    let isHosting = false;
-    try {
-      const status = await window.api?.hostServerStatus?.();
-      isHosting = Boolean(status?.isRunning);
-    } catch {
-      isHosting = false;
-    }
-    btn.style.display = isHosting ? '' : 'none';
+    const session = sessionManager.getActive();
+    const user = session?.serverStore.currentUser;
+    const allowed = session?.client.getStatus() === 'CONNECTED' && user && !user.isBot
+      && session.serverStore.hasPermission(Permission.VIEW_SERVER_MONITOR);
+    btn.style.display = allowed ? '' : 'none';
   }
 
   private attachEvents(): void {
@@ -1426,8 +1441,6 @@ export class MainView {
     const btnInvite = document.getElementById('btn-invite-friends');
     const btnServerSettings = document.getElementById('btn-server-settings');
     const btnServerMonitor = document.getElementById('btn-server-monitor');
-    const btnServerBots = document.getElementById('btn-server-bots');
-    const openServerBots = botSettingsModal.createOpenAction();
     const btnProfile = document.getElementById('user-profile-btn');
     const btnSettings = document.getElementById('bar-btn-settings');
     const btnMic = document.getElementById('bar-btn-mic');
@@ -1438,9 +1451,14 @@ export class MainView {
     btnAddVoice?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => createChannelModal.open('VOICE')));
     btnInvite?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => inviteModal.open()); });
     btnServerSettings?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => serverSettingsModal.open()); });
-    btnServerMonitor?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => serverMonitorModal.open()); });
-    btnServerBots?.addEventListener('click', () => { this.closeServerDropdown(); openServerBots(); });
-    void this.refreshServerMonitorVisibility();
+    btnServerMonitor?.addEventListener('click', (e) => {
+      this.closeServerDropdown();
+      const session = sessionManager.getActive();
+      withButtonLoading(e.currentTarget as HTMLElement, () => session
+        ? serverMonitorModal.openRemote(session)
+        : showAlert({ title: t('serverMonitor.title'), message: t('serverMonitor.disconnected'), variant: 'warning' }));
+    });
+    this.refreshServerMonitorVisibility();
     btnProfile?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => settingsModal.open()));
     const openOwnUserMenu = (event: MouseEvent) => {
       event.preventDefault();
@@ -1679,6 +1697,7 @@ export class MainView {
     });
 
     const u7d = appEvents.on('session.changed', (payload: { key: string | null }) => {
+      this.refreshServerMonitorVisibility();
       // A null key means every server is gone and the connection screen is
       // taking over. The DOM check covers the mirror case: while the connection
       // screen is up, activating a session (a connection starting) must not
@@ -1767,8 +1786,9 @@ export class MainView {
       this.updateScreenShareNotice();
       this.updateParticipantSpeaking();
     });
+    const u21 = appEvents.on('network.status', () => this.refreshServerMonitorVisibility());
 
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21);
   }
 
   /** True when the given text channel is the one currently visible on screen (#14). */

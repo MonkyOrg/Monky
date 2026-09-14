@@ -1,5 +1,5 @@
 import { escapeHtml } from '../utils/html';
-import { LIMITS, MessageType, parseBotCompatibility } from '@monky/shared';
+import { LIMITS, MessageType } from '@monky/shared';
 import { connectionStore, type CreatedServer, type SavedServer } from '../stores/connectionStore';
 import { favoritesStore, savedServerFavoriteKey } from '../stores/favoritesStore';
 import {
@@ -7,6 +7,7 @@ import {
 } from '../core/serverConnection';
 import { ensureHostedServerStarted, findOwnedServer } from '../core/hostedServerStart';
 import { clientLog } from '../core/ClientLogService';
+import { appEvents } from '../core/EventBus';
 import { getAvatarUrl } from '../utils/avatar';
 import { settingsModal } from './SettingsModal';
 import { settingsStore } from '../stores/settingsStore';
@@ -20,9 +21,8 @@ import { checkServerOnline } from '../utils/serverStatus';
 import { sortFavoritesFirst, type FavoriteOrderEntry } from '../utils/favoriteOrder';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
-import { bindServerAutoEntryControls, renderServerAutoEntryToggle } from './ServerAutoEntryControls';
+import { renderServerAutoEntryToggle } from './ServerAutoEntryControls';
 import { parseHomeVoicePreview } from '../utils/voicePreview';
-import '../styles/bot-compatibility.css';
 import { onboardingWizard } from './OnboardingWizard';
 import logoUrl from '../assets/Logo.png';
 import { getLanguage, t } from '../i18n';
@@ -53,6 +53,8 @@ export class ConnectionView {
   private contentResizeObserver: ResizeObserver | null = null;
   private savedFavoritesOnly = false;
   private connectionPending = false;
+  private autoEntrySelected = false;
+  private autoEntryPersistedKey: string | null = null;
   private readonly savedFavoriteMotion = new FavoriteListMotion();
   private readonly unbind: Array<() => void> = [];
   private readonly previewControllers = new Set<AbortController>();
@@ -64,10 +66,16 @@ export class ConnectionView {
     connectionStore.loadUserProfile();
     connectionStore.loadSavedServers();
     connectionStore.loadCreatedServers();
+    this.syncAutoEntryPreference();
+    const startupServer = connectionStore.savedServers.find(server => settingsStore.isServerAutoEntryEnabled(server));
+    if (startupServer) {
+      this.selectedSavedHost = startupServer.host;
+      this.selectedSavedPort = startupServer.port;
+    }
     this.selectedAvatarBase64 = connectionStore.savedAvatarBase64 || '';
     this.setupLanDiscoveryListeners();
     this.setupHostedServerListener();
-    this.unbind.push(bindServerAutoEntryControls(this.container, message => this.showError(message)));
+    this.unbind.push(appEvents.on('settings.updated', () => this.syncAutoEntryPreference()));
     void this.syncHostedServerStatus();
   }
 
@@ -372,7 +380,6 @@ export class ConnectionView {
                             <span class="material-symbols-outlined md-16">close</span>
                           </button>
                           </div>
-                          ${renderServerAutoEntryToggle(s)}
                         </div>
                       </div>
                     `;
@@ -407,10 +414,13 @@ export class ConnectionView {
               <input id="join-password" type="password" placeholder="••••••••" value="${escapeHtml(selectedSaved?.password || '')}">
             </div>
 
-            <button type="submit" id="btn-submit-join" class="btn btn-primary" style="width: 100%; margin-top: 8px;">
-              <span class="material-symbols-outlined md-18" style="margin-right: 6px;">login</span>
-              ${t('connection.tabJoin')}
-            </button>
+            <div class="connection-submit-row">
+              ${renderServerAutoEntryToggle(this.autoEntrySelected)}
+              <button type="submit" id="btn-submit-join" class="btn btn-primary">
+                <span class="material-symbols-outlined md-18" style="margin-right: 6px;">login</span>
+                ${t('connection.tabJoin')}
+              </button>
+            </div>
           </form>
 
           <!-- Tab 2: Meus Servidores -->
@@ -538,6 +548,27 @@ export class ConnectionView {
     if (notice) notice.innerHTML = this.startupNotices.map(item => `<p>${escapeHtml(item)}</p>`).join('');
   }
 
+  private syncAutoEntryPreference(): void {
+    const key = settingsStore.autoEntryServerKeys[0] ?? null;
+    // Unrelated settings changes must not erase an unsaved choice in the form.
+    if (key === this.autoEntryPersistedKey) return;
+    this.autoEntryPersistedKey = key;
+    this.autoEntrySelected = key !== null;
+    const input = this.container.querySelector<HTMLInputElement>('#join-auto-entry');
+    if (input) input.checked = this.autoEntrySelected;
+  }
+
+  private showAutoEntrySaveError(error: unknown): void {
+    clientLog.warn('STORE', 'Could not save automatic server entry', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    if (this.container.querySelector('.connection-layout')) {
+      this.showError(t('autoEntry.saveFailed'));
+    } else {
+      void showAlert({ title: t('autoEntry.section'), message: t('autoEntry.saveFailed'), variant: 'danger' });
+    }
+  }
+
   public suspend(): void {
     this.previewGeneration++;
     for (const controller of this.previewControllers) controller.abort();
@@ -601,7 +632,6 @@ export class ConnectionView {
       if (!isCurrent()) return;
       connectionStore.setIdentity(identity);
       const result = await openServerSession('127.0.0.1', server.port, identity, nickname, server.password);
-      await this.updateSessionAvatar('127.0.0.1', server.port, avatar);
 
       connectionStore.addSavedServer({
         host: '127.0.0.1',
@@ -612,6 +642,7 @@ export class ConnectionView {
         lastConnected: Date.now(),
       });
       await window.api?.maximize?.();
+      await this.updateSessionAvatar('127.0.0.1', server.port, avatar);
     } finally {
       this.setConnectionPending(false);
     }
@@ -633,6 +664,8 @@ export class ConnectionView {
     this.connectionPending = pending;
     this.container.querySelectorAll<HTMLButtonElement>('#btn-submit-join, #btn-submit-host, .btn-start-created-server')
       .forEach(button => { button.disabled = pending; });
+    const autoEntry = this.container.querySelector<HTMLInputElement>('#join-auto-entry');
+    if (autoEntry) autoEntry.disabled = pending;
   }
 
   private attachSavedFavoriteEvents(): void {
@@ -848,17 +881,6 @@ export class ConnectionView {
     info: unknown
   ): void {
     const preview = parseHomeVoicePreview(info);
-    const compatibility = parseBotCompatibility(
-      info && typeof info === 'object' && 'botCompatibility' in info ? info.botCompatibility : undefined
-    );
-    const botAdvisory = [
-      compatibility?.incompatibleBots ? t('connection.botCompatibilityMismatch', {
-        count: compatibility.incompatibleBots, protocol: compatibility.protocolVersion,
-      }) : '',
-      compatibility?.uncheckedBots ? t('connection.botCompatibilityUnchecked', {
-        count: compatibility.uncheckedBots, protocol: compatibility.protocolVersion,
-      }) : '',
-    ].filter(Boolean).join(' ');
     // The cap counts registered members, not who happens to be online, so the
     // two numbers are shown separately instead of as one misleading "3/20" (#403).
     const max = preview.maxUsers !== null && preview.maxUsers > 0 ? preview.maxUsers : null;
@@ -885,7 +907,6 @@ export class ConnectionView {
           ? t('connection.voicePreviewUnavailable')
           : t('connection.voiceUsersCount', { count: preview.count }))}${membersLabel}</span>
       </div>
-      ${botAdvisory ? `<div class="bot-compatibility-warning" role="note">${escapeHtml(botAdvisory)}</div>` : ''}
     `;
   }
 
@@ -1017,6 +1038,7 @@ export class ConnectionView {
     const host = (document.getElementById('join-host') as HTMLInputElement).value.trim();
     const port = parseInt((document.getElementById('join-port') as HTMLInputElement).value, 10);
     const password = (document.getElementById('join-password') as HTMLInputElement).value;
+    const rememberAtStartup = this.autoEntrySelected;
 
     const avatar = this.selectedAvatarBase64;
     connectionStore.saveUserProfile(nickname, avatar);
@@ -1049,19 +1071,29 @@ export class ConnectionView {
       connectionStore.setIdentity(identity);
 
       const res = await openServerSession(host, port, identity, nickname, password);
-      await this.updateSessionAvatar(host, port, avatar);
 
-      connectionStore.addSavedServer({
+      const savedServer: SavedServer = {
         host,
         port,
         name: res.server.name,
         serverId: res.server.id,
         password: password || undefined,
         lastConnected: Date.now(),
-      });
+      };
+      connectionStore.addSavedServer(savedServer);
+      this.selectedSavedHost = host;
+      this.selectedSavedPort = port;
+      if (rememberAtStartup) {
+        try {
+          settingsStore.setServerAutoEntry(savedServer, true);
+        } catch (error: unknown) {
+          this.showAutoEntrySaveError(error);
+        }
+      }
 
-      await window.api?.stopLanDiscovery?.();
       await window.api?.maximize?.();
+      await this.updateSessionAvatar(host, port, avatar);
+      await window.api?.stopLanDiscovery?.();
     } catch (err: unknown) {
       this.showError(err instanceof Error && err.message ? err.message : t('connection.connectError'));
     } finally {
@@ -1086,6 +1118,19 @@ export class ConnectionView {
     const monitorCreatedButtons = this.container.querySelectorAll('.btn-monitor-created-server');
     const removeCreatedButtons = this.container.querySelectorAll('.btn-remove-created-server');
     const importIdentityButton = document.getElementById('btn-import-existing-identity');
+    const autoEntry = this.container.querySelector<HTMLInputElement>('#join-auto-entry');
+
+    autoEntry?.addEventListener('change', () => {
+      const previous = this.autoEntrySelected;
+      this.autoEntrySelected = autoEntry.checked;
+      try {
+        if (!autoEntry.checked) settingsStore.clearServerAutoEntry();
+      } catch (error: unknown) {
+        this.autoEntrySelected = previous;
+        autoEntry.checked = previous;
+        this.showAutoEntrySaveError(error);
+      }
+    });
 
     // Sync and save nickname as user types
     const handleNickChange = (val: string) => {
@@ -1242,7 +1287,7 @@ export class ConnectionView {
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        void serverMonitorModal.open();
+        void serverMonitorModal.openLocal();
       });
     });
 
@@ -1270,7 +1315,7 @@ export class ConnectionView {
     savedServerItems.forEach((item) => {
       item.addEventListener('click', (e) => {
         if (e.target instanceof Element
-          && e.target.closest('.favorite-toggle, .server-auto-entry-control, .btn-delete-saved-srv, .btn-edit-saved-srv')) return;
+          && e.target.closest('.favorite-toggle, .btn-delete-saved-srv, .btn-edit-saved-srv')) return;
 
         const host = item.getAttribute('data-host');
         const port = parseInt(item.getAttribute('data-port') || '3000', 10);

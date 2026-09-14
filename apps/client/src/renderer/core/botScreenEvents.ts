@@ -79,7 +79,7 @@ export function bindBotScreenEvents(events: EventBus = appEvents): () => void {
     }),
     events.on(`message.${MessageType.BOT_SCREEN_REMOVED}`, (payload: unknown) => {
       const parsed = botScreenRemovedSchema.safeParse(payload);
-      if (parsed.success) botScreenStore.remove(parsed.data.id, parsed.data.channelId);
+      if (parsed.success) botScreenStore.remove(parsed.data);
     }),
     events.on('network.status', (status: ConnectionStatus) => {
       if (status !== 'CONNECTED') botScreenStore.clear();

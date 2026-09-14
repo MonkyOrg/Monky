@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { localizeCommand, type BotCommandMessagePayload, type SlashCommand, type UserSummary } from '@monky/shared';
+import { getCommandPresentation, localizeCommand, type BotCommandMessagePayload, type SlashCommand, type UserSummary } from '@monky/shared';
 import { createChatStore } from '../src/renderer/stores/chatStore';
 import { createServerStore, setActiveServerStore } from '../src/renderer/stores/serverStore';
 import { EventBus } from '../src/renderer/core/EventBus';
 import {
   COMMAND_USAGE_STORAGE_KEY, MAX_COMMAND_USAGE_ENTRIES, MAX_COMMAND_USAGE_SCOPES,
-  groupCommands, incrementCommandUsage, readCommandUsage, writeCommandUsage,
+  filterCommands, findCommandsByInputName, groupCommands, incrementCommandUsage, readCommandUsage, writeCommandUsage,
   type CommandUsage, type CommandUsageStorage,
 } from '../src/renderer/utils/commandCatalog';
 import {
   botCommandMessage, commandInputFields, commandValuesFromInputs, formatCommandContext,
-  visibleCommandFields, visibleCommandValues,
+  parseTypedCommand, visibleCommandFields, visibleCommandValues,
 } from '../src/renderer/utils/botInputs';
 import { renderCommandCatalog, renderCommandParameters } from '../src/renderer/views/commandCatalog';
 import { commandParameterChoices, commandParameterError, renderCompactCommand, renderParameterChoices } from '../src/renderer/views/commandComposer';
@@ -51,6 +51,7 @@ test('per-bot command metadata is localized for display without translating subm
   const localized: SlashCommand = {
     ...command,
     localizations: { 'pt-BR': {
+      name: 'tocar', aliases: ['musica'],
       description: 'Escolha a música',
       options: {
         song: { label: 'Música', description: 'Título da música', placeholder: 'Digite o título' },
@@ -64,6 +65,9 @@ test('per-bot command metadata is localized for display without translating subm
   assert.ok(catalog.includes('Escolha a música'));
   assert.ok(catalog.includes('Choose what to play'));
   assert.ok(catalog.includes('/play'));
+  assert.ok(catalog.includes('/tocar'));
+  assert.ok(catalog.includes('data-command-name="play"'));
+  assert.ok(!catalog.includes('data-command-name="tocar"'));
   assert.ok(catalog.includes('Música'));
   const store = createChatStore();
   store.selectCommand('channel', localized);
@@ -73,6 +77,8 @@ test('per-bot command metadata is localized for display without translating subm
   const markup = renderCompactCommand({ ...draft, command: translated }, 'channel', [member], true, true);
   assert.match(markup, /data-field-name="song"/);
   assert.match(markup, /name="song"/);
+  assert.match(markup, /data-command-name="play"/);
+  assert.ok(markup.includes('<strong>/tocar</strong>'));
   assert.ok(markup.includes('>Música</label>'));
   assert.ok(markup.includes('placeholder="Digite o título"'));
   const choices = commandInputFields(translated).find((field) => field.name === 'mode');
@@ -84,6 +90,97 @@ test('per-bot command metadata is localized for display without translating subm
     { success: true, values: { song: 'Private song', count: 1, mode: 'shuffle' } });
   assert.deepEqual(localized, original);
   assert.deepEqual(draft.command, original);
+});
+
+test('catalog filtering and sorting use each bot locale while frequency and IDs remain canonical', () => {
+  const first: SlashCommand = {
+    ...command, name: 'able', localizations: { 'pt-BR': { name: 'zulu', aliases: ['musica'] }, en: { aliases: ['audio'] } },
+  };
+  const last: SlashCommand = {
+    ...command, name: 'zebra', localizations: { 'pt-BR': { name: 'alpha' } },
+  };
+  const commands = [first, last, { ...first, botId: 'english' }, { ...last, botId: 'english' }];
+  const localeFor = (entry: SlashCommand) => entry.botId === 'english' ? 'en' as const : 'pt-BR' as const;
+  const groups = groupCommands(commands, [
+    { botId: first.botId, commandName: first.name, count: 10, lastUsedAt: 1 },
+  ], 'en', true, localeFor);
+  assert.deepEqual(groups.find((group) => group.id === `bot:${command.botId}`)?.commands.map((entry) => entry.name), ['zebra', 'able']);
+  assert.deepEqual(groups.find((group) => group.id === 'bot:english')?.commands.map((entry) => entry.name), ['able', 'zebra']);
+  assert.equal(groups[0].commands[0], first);
+  assert.deepEqual(filterCommands(commands, 'MUSICa', localeFor), [first]);
+  assert.deepEqual(filterCommands(commands, 'aud', localeFor), [commands[2]]);
+  assert.deepEqual(filterCommands(commands, 'zul', localeFor), [first]);
+  assert.deepEqual(filterCommands(commands, 'abl', localeFor), [first, commands[2]]);
+  assert.deepEqual(filterCommands(commands, 'Music Bot', localeFor), commands);
+  assert.deepEqual(filterCommands(commands, 'unavailable', localeFor), []);
+});
+
+test('slash input accepts only canonical and selected-locale names while preserving cross-bot ambiguity', () => {
+  const localized: SlashCommand = {
+    ...command, localizations: {
+      'pt-BR': { name: 'tocar', aliases: ['musica'] }, en: { name: 'listen', aliases: ['audio'] },
+    },
+  };
+  const duplicate: SlashCommand = { ...localized, botId: 'duplicate' };
+  const localeFor = (entry: SlashCommand) => entry.botId === 'duplicate' ? 'en' as const : 'pt-BR' as const;
+  for (const input of ['play', 'TOCAR', 'musica']) {
+    assert.deepEqual(parseTypedCommand(`/${input} Keep  spaces,\nand lines`, [localized], localeFor), {
+      kind: 'command', command: localized, text: 'Keep  spaces,\nand lines',
+    });
+  }
+  assert.deepEqual(parseTypedCommand('/audio', [localized], localeFor), { kind: 'unavailable' });
+  assert.deepEqual(parseTypedCommand('/listen', [localized], localeFor), { kind: 'unavailable' });
+  assert.deepEqual(parseTypedCommand('/audio Selected', [localized, duplicate], localeFor), {
+    kind: 'command', command: duplicate, text: 'Selected',
+  });
+  assert.deepEqual(parseTypedCommand('/play Input', [localized, duplicate], localeFor), {
+    kind: 'ambiguous', commands: [localized, duplicate], text: 'Input',
+  });
+  assert.deepEqual(parseTypedCommand('/musica Input', [localized, duplicate], () => 'pt-BR'), {
+    kind: 'ambiguous', commands: [localized, duplicate], text: 'Input',
+  });
+  const otherCanonical = { ...duplicate, name: 'tocar', localizations: undefined };
+  assert.deepEqual(findCommandsByInputName([localized, otherCanonical], 'tocar', () => 'pt-BR'), [localized, otherCanonical]);
+});
+
+test('stale same-bot aliases cannot shadow a canonical name regardless of registry ordering', () => {
+  const canonical = { ...command, name: 'stop' };
+  const shadow: SlashCommand = { ...command, localizations: { 'pt-BR': { name: 'stop', aliases: ['halt'] } } };
+  for (const commands of [[shadow, canonical], [canonical, shadow]]) {
+    assert.deepEqual(parseTypedCommand('/stop', commands, () => 'pt-BR'), { kind: 'command', command: canonical, text: '' });
+  }
+  const aliasCollision: SlashCommand = { ...canonical, localizations: { 'pt-BR': { aliases: ['halt'] } } };
+  assert.deepEqual(parseTypedCommand('/halt', [shadow, aliasCollision], () => 'pt-BR'), {
+    kind: 'ambiguous', commands: [shadow, aliasCollision], text: '',
+  });
+});
+
+test('rendering another locale preserves selected canonical command, optional fields and entered values', () => {
+  const localized: SlashCommand = {
+    ...command, localizations: {
+      'pt-BR': { name: 'tocar', options: { song: { label: 'Música' }, mode: { label: 'Modo', choices: { shuffle: { label: 'Aleatório' } } } } },
+      en: { name: 'listen', options: { song: { label: 'Song' }, mode: { label: 'Mode' } } },
+    },
+  };
+  const store = createChatStore();
+  store.selectCommand('channel', localized);
+  store.setCommandOptionVisible('channel', 'mode', true);
+  store.setCommandValues('channel', { song: 'Never translate this value', count: '2', mode: 'shuffle' });
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  const original = structuredClone(draft);
+  for (const locale of ['pt-BR', 'en'] as const) {
+    const markup = renderCompactCommand(draft, 'channel', [member], true, true, undefined, locale);
+    assert.ok(markup.includes(`<strong>/${locale === 'en' ? 'listen' : 'tocar'}</strong>`));
+    assert.ok(markup.includes('Never translate this value'));
+    assert.match(markup, /data-command-name="play"/);
+    assert.match(markup, /data-field-name="mode"/);
+    assert.ok(markup.includes(locale === 'en' ? 'Shuffle' : 'Aleatório'));
+    assert.deepEqual(commandValuesFromInputs(draft.command, draft.values, [member]), {
+      success: true, values: { song: 'Never translate this value', count: 2, mode: 'shuffle' },
+    });
+  }
+  assert.deepEqual(draft, original);
 });
 
 test('legacy command options keep compact identifier labels when no display label is declared', () => {
@@ -649,6 +746,46 @@ test('flat attribution maps to distinct nested caller snapshots for private and 
     assert.equal(message.userAvatarUrl, payload.botAvatarUrl);
     payload.invokerNickname = 'Changed after dispatch';
     assert.equal(message.botCommand?.invokerNickname, member.nickname);
+  }
+});
+
+test('each recipient localizes private, public and persisted invocation attribution without rewriting snapshots', () => {
+  const localized: SlashCommand = { ...command, localizations: { 'pt-BR': { name: 'tocar' }, en: { name: 'listen' } } };
+  try {
+    for (const ephemeral of [true, false]) {
+      const message = botCommandMessage({
+        invocationId: 'invocation', commandName: 'play', invokerId: member.id, invokerNickname: member.nickname,
+        messageId: 'message', channelId: 'channel', botId: localized.botId, botName: localized.botName,
+        content: 'Never translate reply content', createdAt: 1, ephemeral,
+      });
+      const store = createChatStore();
+      store.setHistory('channel', [message]);
+      const snapshot = structuredClone(store.getMessages('channel')[0]);
+      for (const locale of ['pt-BR', 'en'] as const) {
+        setLanguage(locale);
+        const presentation = getCommandPresentation(localized, locale);
+        const markup = renderBotCommandContext(snapshot, presentation);
+        assert.ok(markup.includes(locale === 'pt-BR' ? 'Alice usou /tocar' : 'Alice used /listen'));
+        assert.match(markup, /data-command-name="play"/);
+        assert.equal(snapshot.botCommand?.commandName, 'play');
+        assert.equal(snapshot.content, 'Never translate reply content');
+      }
+      assert.deepEqual(store.getMessages('channel')[0], snapshot);
+    }
+    const invocation = {
+      invocationId: 'active', channelId: 'channel', botId: localized.botId, commandName: localized.name,
+      botName: localized.botName, createdAt: 1, expiresAt: Date.now() + 60_000, status: 'active' as const,
+      cancelPending: false, forms: [], acknowledged: true, hasResponse: false,
+    };
+    const markup = renderBotInvocation(invocation, true, 'server', undefined, getCommandPresentation(localized, 'pt-BR'));
+    assert.ok(markup.includes('<div class="bot-command-name">/tocar</div>'));
+    assert.match(markup, /data-command-name="play"/);
+    assert.equal(invocation.commandName, 'play');
+    assert.ok(renderBotCommandContext({ botCommand: {
+      invocationId: 'offline', commandName: 'play', invokerId: member.id, invokerNickname: member.nickname,
+    } }).includes('/play'), 'Absent bot metadata falls back to the persisted canonical command');
+  } finally {
+    setLanguage('pt-BR');
   }
 });
 

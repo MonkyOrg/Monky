@@ -2,6 +2,7 @@ import {
   LIMITS,
   MessageType,
   Permission,
+  getCommandPresentation,
   localizeCommand,
   botSettingsListResponseSchema,
   commandAutocompleteCancelSchema,
@@ -13,6 +14,7 @@ import {
   type CommandAutocompletePayload,
   type CommandAutocompleteResultPayload,
   type CommandAudioPreviewPayload,
+  type CommandPresentation,
   type SlashCommand,
 } from '@monky/shared';
 import { v4 as uuidv4 } from 'uuid';
@@ -71,7 +73,9 @@ export function renderBotIdentity(name: string, avatarUrl?: string | null): stri
   </div>`;
 }
 
-export function renderBotInvocation(invocation: BotInvocation, canSend = true, serverId?: string, voiceError?: string): string {
+export function renderBotInvocation(
+  invocation: BotInvocation, canSend = true, serverId?: string, voiceError?: string, presentation?: CommandPresentation,
+): string {
   const visibleForms = invocation.forms.filter((state) => state.status !== 'submitted');
   // The attributed reply already represents a completed text-only command.
   if (invocation.status === 'completed' && visibleForms.length === 0 && invocation.hasResponse && !invocation.soundDownload) return '';
@@ -96,9 +100,10 @@ export function renderBotInvocation(invocation: BotInvocation, canSend = true, s
   const download = invocation.soundDownload;
   const downloadConfirming = download?.phase === 'confirming' && !download.result;
   const waiting = active && !download && !invocation.forms.some((form) => form.status === 'editing' || form.status === 'submitting');
-  return `<section class="bot-interaction-card" data-invocation-id="${escapeHtml(invocation.invocationId)}">
+  return `<section class="bot-interaction-card" data-invocation-id="${escapeHtml(invocation.invocationId)}"
+    data-bot-id="${escapeHtml(invocation.botId)}" data-command-name="${escapeHtml(invocation.commandName)}">
     ${renderBotIdentity(invocation.botName, invocation.botAvatarUrl)}
-    ${invocation.commandName ? `<div class="bot-command-name">/${escapeHtml(invocation.commandName)}</div>` : ''}
+    ${invocation.commandName ? `<div class="bot-command-name">/${escapeHtml(presentation?.displayName ?? invocation.commandName)}</div>` : ''}
     ${forms}
     ${voiceError && active ? `<p class="bot-command-voice-error" role="status">${escapeHtml(voiceError)}</p>` : ''}
     ${download ? `<div class="bot-sound-download">
@@ -360,8 +365,9 @@ export class BotChatView {
     }
     const available = this.store.isCommandAvailable(draft.command);
     this.composer.innerHTML = renderCompactCommand(
-      { ...draft, command: this.localizedCommand(draft.command) }, this.channelId,
-      this.server.getHumanMembersInDisplayOrder(), this.canSend(), available, this.voiceError(draft.command)
+      draft, this.channelId,
+      this.server.getHumanMembersInDisplayOrder(), this.canSend(), available, this.voiceError(draft.command),
+      botLocaleFor(this.client, this.server, draft.command.botId),
     );
     this.onComposerChanged();
     if (menu?.kind === 'autocomplete') this.openAutocomplete(menu.fieldName);
@@ -473,7 +479,8 @@ export class BotChatView {
     this.focusedParameter = field?.name ?? null;
     const label = this.composer.querySelector<HTMLElement>('[data-parameter-hint-name]');
     const description = this.composer.querySelector<HTMLElement>('[data-parameter-hint-description]');
-    if (label) label.textContent = field ? commandParameterLabel(command, field.name) : `/${command.name}`;
+    if (label) label.textContent = field ? commandParameterLabel(command, field.name) :
+      `/${getCommandPresentation(command, botLocaleFor(this.client, this.server, command.botId)).displayName}`;
     if (description) {
       description.textContent = field ? commandParameterHint(field) : command.description;
       description.title = description.textContent;

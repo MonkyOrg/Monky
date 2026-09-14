@@ -77,6 +77,9 @@ if (!process.versions.electron) {
     }
     const musicKeyboardChecks = await runMusicCommandNativeSmoke(window);
     console.log(`Native music selection: ${musicKeyboardChecks} checks passed`);
+    const localizedCommandChecks = await window.webContents.executeJavaScript(`(${runLocalizedCommandDomSmoke.toString()})()`, true);
+    console.log(`Localized command names: ${localizedCommandChecks} checks passed`);
+    if (process.argv.includes('--localized-commands-only')) { await finish(0); return; }
     const voiceChecks = await window.webContents.executeJavaScript(`(${runVoiceCommandDomSmoke.toString()})()`, true);
     console.log(`Voice command gates: ${voiceChecks} checks passed`);
     if (process.argv.includes('--voice-only')) { await finish(0); return; }
@@ -498,6 +501,260 @@ async function runAudioPreviewLifecycleSmoke() {
   return checks;
 }
 
+async function runLocalizedCommandDomSmoke() {
+  const [{ ChatView }, chats, servers, networks, { appEvents }, { bindBotChatEvents }, language,
+    { settingsStore }, { botPreferenceScopeFor }] = await Promise.all([
+    import('/views/ChatView.ts'), import('/stores/chatStore.ts'), import('/stores/serverStore.ts'),
+    import('/core/NetworkClient.ts'), import('/core/EventBus.ts'), import('/core/botChatEvents.ts'),
+    import('/i18n/index.ts'), import('/stores/settingsStore.ts'), import('/utils/botSettingsContext.ts'),
+  ]);
+  const previous = {
+    chat: chats.getActiveChatStore(), server: servers.getActiveServerStore(), client: networks.getActiveNetworkClient(),
+    locale: language.getLanguage(), preferences: settingsStore.botUserPreferences, locales: settingsStore.botLocalePreferences,
+    stored: localStorage.getItem('monky_settings'),
+  };
+  let checks = 0;
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const root = document.getElementById('app');
+  const find = selector => {
+    const element = root.querySelector(selector);
+    if (!element) throw new Error(`Missing localized command element ${selector}`);
+    return element;
+  };
+  const frame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const type = (element, value) => {
+    element.focus(); element.value = value; element.setSelectionRange?.(value.length, value.length);
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const key = (element, value) => element.dispatchEvent(new KeyboardEvent('keydown', {
+    key: value, bubbles: true, cancelable: true,
+  }));
+  const command = {
+    name: 'play', description: 'Play a track', botId: 'localized-music', botName: 'Localized music',
+    options: [
+      { name: 'track', label: 'Track', description: 'Track title', type: 'string', required: true },
+      { name: 'count', label: 'Count', description: 'Repeat count', type: 'integer', required: true, min: 1, max: 10 },
+      { name: 'enabled', label: 'Enabled', description: 'Enabled', type: 'boolean' },
+      { name: 'mode', label: 'Mode', description: 'Mode', type: 'string', choices: [{ value: 'shuffle', label: 'Shuffle' }] },
+    ],
+    localizations: {
+      'pt-BR': {
+        name: 'tocar', aliases: ['musica'], description: 'Reproduzir uma faixa',
+        options: {
+          track: { label: 'Música', placeholder: 'Título da música' }, count: { label: 'Quantidade' },
+          enabled: { label: 'Ativado' }, mode: { label: 'Modo', choices: { shuffle: { label: 'Aleatório' } } },
+        },
+      },
+      en: { name: 'listen', aliases: ['audio'] },
+    },
+  };
+  const secondary = { ...command, botId: 'secondary-music', botName: 'Second music' };
+  const stop = {
+    name: 'stop', description: 'Stop', botId: command.botId, botName: command.botName, options: [],
+    localizations: { 'pt-BR': { name: 'parar' }, en: { name: 'halt' } },
+  };
+  const help = {
+    ...stop, name: 'help', description: 'Help', localizations: { 'pt-BR': { name: 'ajuda', aliases: ['comandos'] } },
+  };
+  const commands = [command, secondary, stop, help];
+  const clients = [];
+  const activate = recipient => {
+    chats.setActiveChatStore(recipient.store);
+    servers.setActiveServerStore(recipient.server);
+    networks.setActiveNetworkClient(recipient.client);
+  };
+  const createRecipient = id => {
+    const store = chats.createChatStore(), server = servers.createServerStore(), client = networks.createNetworkClient();
+    clients.push(client);
+    const recipient = { store, server, client, invoked: [] };
+    activate(recipient);
+    const user = { id, clientId: id, nickname: id === 'alice' ? 'Alice' : 'Bob', status: 'ONLINE', joinedAt: 1 };
+    server.setServerDetails({
+      id: 'localized-command-server', name: 'Localized commands', createdAt: 1, maxUsers: 10, voiceStates: {},
+      channels: [{ id: 'chat', serverId: 'localized-command-server', name: 'chat', type: 'TEXT', position: 0,
+        createdAt: 1, isPrivate: false, allowedRoleIds: [], botCommandsEnabled: true }],
+      members: [user], knownMembers: [user], roles: [], userRoles: [], myPermissions: 2147483647, ownerId: id,
+    }, user);
+    client.getStatus = () => 'CONNECTED';
+    client.getConnectionId = () => `localized-${id}`;
+    client.getCurrentServerUrl = () => 'wss://localized-command.example/';
+    client.send = (messageType, payload, requestId) => {
+      if (messageType !== 'COMMAND_INVOKE') return;
+      recipient.invoked.push(payload);
+      queueMicrotask(() => client.handleIncomingMessage({
+        type: 'COMMAND_INVOKED', requestId, payload: {
+          invocationId: `localized-${recipient.invoked.length}`, botId: payload.botId,
+          commandName: payload.commandName, channelId: payload.channelId,
+        },
+      }));
+    };
+    const sendRequest = client.sendRequest.bind(client);
+    client.sendRequest = (messageType, ...args) => messageType === 'SELECTOR_LIST'
+      ? Promise.resolve({ selectors: [] }) : sendRequest(messageType, ...args);
+    store.setCommands(commands); server.setSlashCommands(commands);
+    return recipient;
+  };
+  const preference = (recipient, botId, locale, custom = 'en') =>
+    settingsStore.saveBotPreferences(botPreferenceScopeFor(recipient.client, recipient.server, botId), { locale: custom }, undefined, locale);
+  let view;
+  const off = bindBotChatEvents();
+  try {
+    language.setLanguage('en');
+    const alice = createRecipient('alice');
+    preference(alice, command.botId, 'pt-BR', 'en');
+    preference(alice, secondary.botId, 'en', 'pt-BR');
+    view = new ChatView(root); view.setChannel('chat');
+    type(find('#chat-message-input'), '/');
+    const section = find('[data-command-section="bot:localized-music"]');
+    check([...section.querySelectorAll('.command-row-title strong')].map(row => row.textContent).join(',') === '/ajuda,/parar,/tocar',
+      'Catalog sorts by localized display names rather than canonical IDs');
+    check(find('[data-command-section="bot:secondary-music"] .command-row-title strong').textContent === '/listen',
+      'A second bot independently uses its client-owned locale preference');
+    check(section.querySelector('[data-command-name="play"]').dataset.botId === command.botId,
+      'Catalog rows keep canonical command and bot IDs');
+    type(find('#chat-message-input'), '/musica');
+    check(root.querySelectorAll('[data-cmd-index]').length === 1 && find('.command-row-title strong').textContent === '/tocar',
+      'A selected-locale alias filters to the canonical command');
+    type(find('#chat-message-input'), '/audio');
+    check(root.querySelectorAll('[data-cmd-index]').length === 1 &&
+      find('[data-cmd-index]').dataset.botId === secondary.botId, 'Aliases in an inactive locale are not accepted for the first bot');
+    type(find('#chat-message-input'), '/play Seed  values');
+    find('#btn-send-message').click();
+    check(!alice.store.getCommandDraft('chat') && !alice.invoked.length &&
+      root.querySelectorAll('[data-command-section^="bot:"]').length === 2,
+    'Canonical input shared by two bots shows disambiguation without invoking either');
+    check(!find('#chat-command-notice').hidden, 'Ambiguous input explains that a bot must be selected');
+    preference(alice, secondary.botId, 'pt-BR');
+    type(find('#chat-message-input'), '/musica Alias  values');
+    find('#btn-send-message').click();
+    check(!alice.store.getCommandDraft('chat') && root.querySelectorAll('[data-command-section^="bot:"]').length === 2,
+      'Localized aliases shared by two bots keep cross-bot disambiguation');
+    find('[data-command-section="bot:secondary-music"] [data-cmd-index]').click();
+    check(alice.store.getCommandDraft('chat')?.command.botId === secondary.botId &&
+      alice.store.getCommandDraft('chat').values.track === 'Alias  values', 'Picking a bot keeps the alias arguments and exact canonical target');
+    alice.store.clearCommand('chat');
+    preference(alice, secondary.botId, 'en', 'pt-BR');
+    type(find('#chat-message-input'), '/aj');
+    key(find('#chat-message-input'), ' ');
+    check(alice.store.getCommandDraft('chat')?.command.name === 'help' && !alice.invoked.length,
+      'Space completes a localized no-argument command without executing it');
+    check(find('.bot-command-token strong').textContent === '/ajuda' && find('[data-parameter-hint-name]').textContent === '/ajuda',
+      'Both the no-argument chip and its hint use the display name');
+    alice.store.clearCommand('chat');
+    type(find('#chat-message-input'), '/musica Keep  spaces,\nand lines');
+    find('#btn-send-message').click();
+    const draft = alice.store.getCommandDraft('chat');
+    check(draft?.command.name === 'play' && draft.command.botId === command.botId && draft.values.track === 'Keep  spaces,\nand lines',
+      'Slash parsing resolves the localized alias before seeding unchanged argument text');
+    type(find('[name="count"][data-bot-input]'), '02');
+    alice.store.setCommandOptionVisible('chat', 'enabled', true);
+    alice.store.setCommandOptionVisible('chat', 'mode', true);
+    const toggle = find('[name="enabled"][data-bot-input]');
+    toggle.click(); toggle.click();
+    find('[data-bot-choice="mode"]').click();
+    find('[data-parameter-option]').click();
+    const values = JSON.stringify(draft.values);
+    const track = find('[name="track"][data-bot-input]');
+    track.focus(); track.setSelectionRange(2, 9, 'backward');
+    preference(alice, command.botId, 'en', 'pt-BR');
+    await frame();
+    check(alice.store.getCommandDraft('chat') === draft && JSON.stringify(draft.values) === values,
+      'Changing the per-bot language preserves the original draft and all parameter values');
+    check(find('.bot-command-token strong').textContent === '/listen' &&
+      find('[data-command-form]').dataset.commandName === 'play', 'A translated chip never changes the canonical dataset target');
+    check(find('[data-field-name="track"] .bot-argument-name').textContent === 'Track' &&
+      find('[data-bot-choice="mode"]').textContent.includes('Shuffle') && draft.values.mode === 'shuffle',
+    'Parameter and choice labels translate while wire field names and values remain unchanged');
+    check(document.activeElement === find('[name="track"][data-bot-input]') &&
+      document.activeElement.selectionStart === 2 && document.activeElement.selectionEnd === 9,
+    'Language changes preserve the focused parameter and caret selection');
+    language.setLanguage('pt-BR');
+    check(find('.bot-command-token strong').textContent === '/listen', 'An explicit per-bot locale overrides the application language');
+    preference(alice, command.botId, 'auto', 'en');
+    check(find('.bot-command-token strong').textContent === '/tocar', 'Automatic names follow app language, never custom userSettings.locale');
+    language.setLanguage('en');
+    check(find('.bot-command-token strong').textContent === '/listen' && JSON.stringify(draft.values) === values,
+      'Automatic app-language changes keep selected canonical IDs and values');
+    const composing = find('[name="track"][data-bot-input]');
+    composing.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    type(composing, 'Unchanged composition text');
+    language.setLanguage('pt-BR');
+    check(composing.isConnected, 'Language changes defer composer replacement during IME composition');
+    composing.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    await frame();
+    check(find('.bot-command-token strong').textContent === '/tocar' && draft.values.track === 'Unchanged composition text',
+      'After composition ends, localized labels refresh without losing input');
+    find('[data-command-form] button[type="submit"]').click();
+    await frame();
+    check(alice.invoked.length === 1 && !alice.store.getCommandDraft('chat'), 'The localized command submits exactly once');
+    const invoked = alice.invoked[0];
+    check(invoked.commandName === 'play' && invoked.botId === command.botId && invoked.locale === 'pt-BR' &&
+      invoked.userSettings.locale === 'en', 'Only client-owned locale preference controls execution locale');
+    check(JSON.stringify(invoked.options) === JSON.stringify({
+      track: 'Unchanged composition text', count: 2, enabled: false, mode: 'shuffle',
+    }), 'The execution payload keeps canonical field names, converted scalars and opaque choice values');
+    appEvents.emit('message.COMMAND_PROMPT', {
+      invocationId: 'localized-1', interactionId: 'private-form', channelId: 'chat', botId: command.botId, botName: command.botName,
+      expiresAt: Date.now() + 60_000, form: { title: 'Private form', fields: [{ name: 'answer', label: 'Answer', type: 'text' }] },
+    });
+    const response = (messageId, ephemeral, botId = command.botId) => ({
+      invocationId: 'localized-1', commandName: 'play', invokerId: 'alice', invokerNickname: 'Alice',
+      messageId, channelId: 'chat', botId, botName: 'Music', content: 'Reply content is not translated', createdAt: Date.now(), ephemeral,
+    });
+    appEvents.emit('message.COMMAND_RESPONSE', response('private-response', true));
+    appEvents.emit('message.COMMAND_RESPONSE', response('public-response', false));
+    appEvents.emit('message.COMMAND_RESPONSE', response('other-bot-response', false, secondary.botId));
+    const label = id => find(`[data-message-id="${id}"] [data-command-context-label]`);
+    check(label('private-response').textContent === 'Alice usou /tocar' && label('public-response').textContent === 'Alice usou /tocar',
+      'Private and public live replies localize attribution for their recipient');
+    check(label('other-bot-response').textContent === 'Alice usou /listen', 'Every bot in the same feed resolves its own preference');
+    check(find('.bot-command-name').textContent === '/tocar', 'The private invocation card also uses the display name');
+    const publicRow = find('[data-message-id="public-response"].chat-message-row');
+    const privateForm = find('[data-interaction-id="private-form"]');
+    type(privateForm.querySelector('[data-bot-input]'), 'Retain private form input');
+    preference(alice, command.botId, 'en', 'pt-BR');
+    check(publicRow === find('[data-message-id="public-response"].chat-message-row') &&
+      privateForm === find('[data-interaction-id="private-form"]') &&
+      privateForm.querySelector('[data-bot-input]').value === 'Retain private form input',
+    'Refreshing attribution is surgical: it retains message media/rows and private form controls');
+    check(label('private-response').textContent === 'Alice usou /listen' && label('public-response').textContent === 'Alice usou /listen' &&
+      find('.bot-command-name').textContent === '/listen', 'Locale updates refresh existing replies and invocation headings');
+    const history = alice.store.getMessages('chat').filter(message => !message.isEphemeral).map(message => structuredClone(message));
+    alice.store.setHistory('chat', history);
+    check(label('public-response').textContent === 'Alice usou /listen' && label('private-response').textContent === 'Alice usou /listen',
+      'Persisted public history and retained private replies share recipient-local presentation');
+    check(history.every(message => message.botCommand.commandName === 'play' && message.content === 'Reply content is not translated'),
+      'No recipient display label leaks into persisted canonical attribution or reply content');
+    appEvents.emit('message.COMMANDS_LIST_RESPONSE', { commands: [] });
+    check(label('public-response').textContent === 'Alice usou /play', 'Missing/offline metadata falls back to the canonical historical ID');
+    appEvents.emit('message.COMMANDS_LIST_RESPONSE', { commands });
+    check(label('public-response').textContent === 'Alice usou /listen', 'A restored catalog re-localizes existing historical attribution');
+    preference(alice, command.botId, 'pt-BR', 'en');
+    view.destroy();
+    const bob = createRecipient('bob');
+    language.setLanguage('en');
+    preference(bob, command.botId, 'auto', 'pt-BR');
+    bob.store.setHistory('chat', history);
+    view = new ChatView(root); view.setChannel('chat');
+    check(label('public-response').textContent === 'Alice used /listen' && !root.querySelector('[data-message-id="private-response"]'),
+      'Another recipient sees their own name translation, never the caller locale or private replies');
+    view.destroy();
+    activate(alice);
+    view = new ChatView(root); view.setChannel('chat');
+    check(label('public-response').textContent === 'Alice used /tocar',
+      'Returning to the first recipient retains their independent per-bot locale');
+  } finally {
+    view?.destroy(); off(); clients.forEach(client => client.dispose());
+    chats.setActiveChatStore(previous.chat); servers.setActiveServerStore(previous.server); networks.setActiveNetworkClient(previous.client);
+    settingsStore.botUserPreferences = previous.preferences; settingsStore.botLocalePreferences = previous.locales;
+    if (previous.stored === null) localStorage.removeItem('monky_settings');
+    else localStorage.setItem('monky_settings', previous.stored);
+    language.setLanguage(previous.locale);
+    root.replaceChildren();
+  }
+  return checks;
+}
+
 async function runMusicCommandNativeSmoke(window) {
   await window.webContents.executeJavaScript(`(${runVoiceCommandDomSmoke.toString()})(true)`, true);
   const key = async (key, code, virtualKey, text) => {
@@ -517,11 +774,15 @@ async function runMusicCommandNativeSmoke(window) {
       { control: 'click' },
       { control: 'Enter', optional: true },
       { control: 'Enter', unrestricted: true },
+      { control: 'Enter', input: '/tocar' },
+      { control: 'Enter', input: '/musica' },
+      { control: 'Enter', input: '/listen', locale: 'en' },
+      { control: 'Enter', optional: true, input: '/tocar', changeLocale: 'en' },
     ];
     for (const scenario of scenarios) {
       window.webContents.sendInputEvent({ type: 'mouseLeave', x: -1, y: -1 });
       await window.webContents.executeJavaScript(`window.musicCommandNativeFixture.prepare(${JSON.stringify(scenario)})`, true);
-      await window.webContents.debugger.sendCommand('Input.insertText', { text: '/play' });
+      await window.webContents.debugger.sendCommand('Input.insertText', { text: scenario.input ?? '/play' });
       await key(' ', 'Space', 32, ' ');
       await window.webContents.debugger.sendCommand('Input.insertText', { text: 'generated music' });
       await window.webContents.executeJavaScript('window.musicCommandNativeFixture.results()', true);
@@ -684,7 +945,13 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     delete window.musicCommandNativeFixture;
   };
   if (nativeMusic) {
-    const command = { ...music, name: 'play', options: [{ ...music.options[0], name: 'busca' }] };
+    const command = {
+      ...music, name: 'play', options: [{ ...music.options[0], name: 'busca' }],
+      localizations: {
+        'pt-BR': { name: 'tocar', aliases: ['musica'], options: { busca: { label: 'Busca' } } },
+        en: { name: 'listen', options: { busca: { label: 'Search' } } },
+      },
+    };
     store.setCommands([command]); server.setSlashCommands([command]);
     const choices = [0, 1].map(index => ({
       label: `Generated music ${index + 1}`, value: `https://www.youtube.com/watch?v=generated0${index}`,
@@ -710,6 +977,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
       prepare: nextScenario => {
         scenario = nextScenario;
         store.clearCommand('chat'); moveBot(null); join('voice');
+        language.setLanguage(scenario.locale ?? 'pt-BR');
         const currentCommand = {
           ...command, voiceRequirement: scenario.unrestricted ? undefined : command.voiceRequirement,
           options: [...command.options, ...(scenario.optional ? [music.options[1]] : [])],
@@ -721,6 +989,9 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
       },
       results: async () => {
         await waitFor(() => queries.length > beforeQueries, 'Native music search did not start');
+        check(queries.at(-1).payload.commandName === 'play' && queries.at(-1).payload.optionName === 'busca' &&
+          queries.at(-1).payload.locale === (scenario.locale ?? 'pt-BR'),
+        'Localized names and labels keep autocomplete canonical command/option IDs and client-owned locale');
         reply(queries.at(-1), { status: 'ok', choices });
         await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 2, 'Native music choices did not render');
       },
@@ -732,6 +1003,15 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
         check(invoked.length === beforeInvocations, 'Native selection leaves optional parameters open for editing');
         check(store.getCommandDraft('chat')?.autocomplete.busca?.selected?.value === choices[1].value,
           'A native blur must not discard the selected URL while optional parameters remain open');
+        if (scenario.changeLocale) {
+          const draft = store.getCommandDraft('chat');
+          language.setLanguage(scenario.changeLocale);
+          check(store.getCommandDraft('chat') === draft && draft.command.name === 'play' &&
+            draft.values.busca === choices[1].value && draft.autocomplete.busca.selected?.value === choices[1].value,
+          'Changing language mid-composition preserves the selected music value and canonical command');
+          check(root.querySelector('.bot-command-token strong').textContent === '/listen',
+            'A selected native music command refreshes its display name in the new locale');
+        }
       },
       verify: async () => {
         try {
@@ -741,6 +1021,8 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
           throw new Error(`${error.message}\nScenario: ${JSON.stringify(scenario)}\nNative events: ${JSON.stringify(events)}`);
         }
         check(invoked.at(-1).options.busca === choices[1].value, 'Native selection sends the highlighted music URL exactly once');
+        check(invoked.at(-1).commandName === 'play' && invoked.at(-1).botId === command.botId,
+          'Canonical IDs survive localized name/alias selection with a native first Enter');
         check(events.some(event => event.event === 'input' && event.trusted), 'Search uses native user input, not synthetic value assignment');
         if (scenario.control !== 'click') {
           check(events.some(event => event.event === 'change' && event.trusted && event.selected === choices[1].value),

@@ -5,6 +5,7 @@ import type { CommandOption } from './models.js';
 
 export const BOT_LOCALES = ['pt-BR', 'en'] as const;
 export type BotLocale = typeof BOT_LOCALES[number];
+export const commandNameSchema = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,31}$/);
 
 export function normalizeBotLocale(value: unknown): BotLocale | undefined {
   if (typeof value !== 'string') return undefined;
@@ -36,6 +37,9 @@ export const botFieldLocalizationSchema = botChoiceLocalizationSchema.extend({
 }).strict();
 
 const commandLocalizationSchema = z.object({
+  name: commandNameSchema.optional(),
+  aliases: z.array(commandNameSchema).max(8)
+    .refine((aliases) => new Set(aliases).size === aliases.length, 'Duplicate command aliases').optional(),
   description: selectionLabelSchema.optional(),
   options: z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/)
     .refine((name) => !['__proto__', 'constructor', 'prototype'].includes(name)), botFieldLocalizationSchema)
@@ -46,7 +50,27 @@ export const commandLocalizationsSchema = z.object({
   en: commandLocalizationSchema.optional(),
 }).strict();
 export type CommandLocalizations = z.infer<typeof commandLocalizationsSchema>;
+export type CommandLocalization = z.infer<typeof commandLocalizationSchema>;
 export type BotFieldLocalization = z.infer<typeof botFieldLocalizationSchema>;
+
+export interface CommandPresentation {
+  readonly canonicalName: string;
+  readonly displayName: string;
+  readonly inputNames: readonly string[];
+}
+
+/** Presentation and accepted input names are local; the command's wire ID never changes. */
+export function getCommandPresentation(
+  command: { name: string; localizations?: CommandLocalizations }, requested: unknown,
+): CommandPresentation {
+  const localized = command.localizations?.[resolveBotLocale(requested)];
+  const displayName = localized?.name ?? command.name;
+  return {
+    canonicalName: command.name,
+    displayName,
+    inputNames: [...new Set([command.name, displayName, ...(localized?.aliases ?? [])])],
+  };
+}
 
 export function localizeBotChoices(
   choices: SelectionChoice[], localized: BotFieldLocalization['choices'],

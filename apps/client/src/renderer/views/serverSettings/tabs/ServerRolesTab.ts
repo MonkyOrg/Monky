@@ -140,6 +140,7 @@ export class ServerRolesTab {
     }
     const labels: string[] = [];
     if (role.permissions & Permission.MANAGE_SERVER) labels.push(t('permissions.manageServer'));
+    if (role.permissions & Permission.VIEW_SERVER_MONITOR) labels.push(t('permissions.viewServerMonitor'));
     if (role.permissions & Permission.MANAGE_CHANNELS) labels.push(t('permissions.manageChannels'));
     if (role.permissions & Permission.MANAGE_ROLES) labels.push(t('permissions.manageRoles'));
     if (role.permissions & Permission.MANAGE_BOTS) labels.push(t('permissions.manageBots'));
@@ -153,6 +154,7 @@ export class ServerRolesTab {
     const items: Array<{ key: Permission; label: string; description: string }> = [
       { key: Permission.MANAGE_CHANNELS, label: t('permissions.manageChannels'), description: t('permissions.manageChannelsDesc') },
       { key: Permission.MANAGE_SERVER, label: t('permissions.manageServer'), description: t('permissions.manageServerDesc') },
+      { key: Permission.VIEW_SERVER_MONITOR, label: t('permissions.viewServerMonitor'), description: t('permissions.viewServerMonitorDesc') },
       { key: Permission.MANAGE_ROLES, label: t('permissions.manageRoles'), description: t('permissions.manageRolesDesc') },
       { key: Permission.KICK_MEMBERS, label: t('permissions.kickMembers'), description: t('permissions.kickMembersDesc') },
       { key: Permission.SPEAK, label: t('permissions.speak'), description: t('permissions.speakDesc') },

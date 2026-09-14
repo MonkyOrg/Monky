@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "O monitor do servidor pode ser acessado remotamente, inclusive em VPS, por administradores e cargos com permiss\u00e3o expl\u00edcita de visualiza\u00e7\u00e3o. Os logs remotos ocultam dados sens\u00edveis, e limpar a tela n\u00e3o apaga o hist\u00f3rico do servidor.",
+  "en": "The server monitor is available remotely, including on VPS hosts, to administrators and roles with explicit viewing permission. Remote logs hide sensitive details, and clearing the view never deletes the server's history."
+}

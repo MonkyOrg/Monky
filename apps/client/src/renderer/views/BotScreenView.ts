@@ -1,4 +1,4 @@
-import { MessageType, Permission, botScreenSchema, type BotScreen, type BotScreenAction } from '@monky/shared';
+import { MessageType, Permission, botScreenSchema, botScreenRemovedSchema, type BotScreen, type BotScreenAction } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import { getLanguage, t, type TranslationKey } from '../i18n';
 import { botRequestError } from '../utils/botInputs';
@@ -12,6 +12,7 @@ export class BotScreenView {
   private title = document.createElement('strong');
   private openButton = document.createElement('button');
   private close = document.createElement('button');
+  private endButton = document.createElement('button');
   private focus = document.createElement('button');
   private fullscreen = document.createElement('button');
   private notice = document.createElement('p');
@@ -22,7 +23,8 @@ export class BotScreenView {
   private destroyed = false;
   private focused = false;
   private requestId: string | null = null;
-  private unbindLanguage: () => void;
+  private endRequestId: string | null = null;
+  private unbind: Array<() => void>;
 
   constructor(
     private screen: BotScreen,
@@ -40,7 +42,7 @@ export class BotScreenView {
     this.title.textContent = screen.title;
     const controls = document.createElement('div');
     controls.className = 'bot-screen-controls';
-    for (const button of [this.openButton, this.focus, this.fullscreen, this.close]) {
+    for (const button of [this.openButton, this.focus, this.fullscreen, this.close, this.endButton]) {
       button.type = 'button';
       button.className = 'btn btn-secondary';
     }
@@ -49,9 +51,12 @@ export class BotScreenView {
     this.focus.dataset.botScreenAction = 'focus';
     this.fullscreen.dataset.botScreenAction = 'fullscreen';
     this.close.dataset.botScreenAction = 'close';
+    this.endButton.dataset.botScreenAction = 'end';
+    this.endButton.className = 'btn btn-danger';
     this.openButton.addEventListener('click', (event) => { event.stopPropagation(); onOpen(); });
     this.focus.addEventListener('click', (event) => { event.stopPropagation(); onFocus(); });
     this.close.addEventListener('click', (event) => { event.stopPropagation(); onClose(); });
+    this.endButton.addEventListener('click', (event) => { event.stopPropagation(); void this.end(); });
     this.fullscreen.addEventListener('click', (event) => { event.stopPropagation(); void this.toggleFullscreen(); });
     this.element.addEventListener('click', (event) => {
       if (event.target instanceof Element && event.target.closest('button, iframe')) return;
@@ -61,7 +66,7 @@ export class BotScreenView {
     this.error.className = 'bot-error';
     this.error.setAttribute('role', 'alert');
     this.error.hidden = true;
-    controls.append(this.focus, this.fullscreen, this.close);
+    controls.append(this.focus, this.fullscreen, this.close, this.endButton);
     header.append(this.title, controls);
     this.body.className = 'bot-screen-body';
     this.placeholder.className = 'bot-screen-placeholder';
@@ -69,11 +74,17 @@ export class BotScreenView {
     this.body.append(this.placeholder);
     this.element.append(header, this.notice, this.body, this.error);
     this.localize();
-    this.unbindLanguage = appEvents.on('i18n.language_changed', () => this.localize());
+    this.unbind = [
+      appEvents.on('i18n.language_changed', () => this.localize()),
+      appEvents.on('server.roles_updated', () => this.localize()),
+      appEvents.on('server.updated', () => this.localize()),
+      appEvents.on('session.voice_context_updated', () => this.localize()),
+    ];
   }
 
   get snapshot(): BotScreen { return this.screen; }
   get isWatching(): boolean { return this.frame !== null; }
+  get isEnding(): boolean { return this.endRequestId !== null; }
 
   open(): void {
     if (this.frame || !this.canRead()) return;
@@ -97,7 +108,7 @@ export class BotScreenView {
   }
 
   update(screen: BotScreen): void {
-    if (this.destroyed || screen.id !== this.screen.id) return;
+    if (this.destroyed || screen.id !== this.screen.id || screen.instanceId !== this.screen.instanceId) return;
     this.screen = screen;
     this.title.textContent = screen.title;
     this.element.setAttribute('aria-label', screen.title);
@@ -118,8 +129,10 @@ export class BotScreenView {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    if (this.endRequestId) this.context.session.client.cancelRequest(this.endRequestId);
+    this.endRequestId = null;
     this.leave();
-    this.unbindLanguage();
+    for (const unbind of this.unbind) unbind();
     this.element.remove();
   }
 
@@ -127,6 +140,11 @@ export class BotScreenView {
     const current = getBotVoiceContext();
     return !this.destroyed && current?.session === this.context.session &&
       current.channelId === this.screen.channelId && current.user.sessionId === this.context.user.sessionId;
+  }
+
+  private canEnd(): boolean {
+    return this.canRead() && (this.context.user.id === this.screen.creatorUserId ||
+      this.context.session.serverStore.isAdminMember(this.context.user.id));
   }
 
   private localize(): void {
@@ -148,6 +166,10 @@ export class BotScreenView {
     };
     label(this.openButton, 'botScreen.openView', 'smart_display');
     label(this.close, 'botScreen.close', 'visibility_off');
+    label(this.endButton, this.endRequestId ? 'botScreen.ending' : 'botScreen.end', 'stop_circle');
+    this.endButton.title = t('botScreen.endHint');
+    this.endButton.hidden = !this.canEnd();
+    this.endButton.disabled = this.endRequestId !== null;
     label(this.focus, this.focused ? 'botScreen.unfocus' : 'botScreen.focus', this.focused ? 'grid_view' : 'center_focus_strong');
     label(this.fullscreen, 'stage.fullscreen', 'fullscreen', false);
     this.close.hidden = !this.isWatching;
@@ -165,9 +187,46 @@ export class BotScreenView {
     }
   }
 
+  private async end(): Promise<void> {
+    if (this.endRequestId || !this.canRead()) return;
+    if (!this.canEnd()) {
+      this.error.textContent = t('botChat.commandsPermissionDenied');
+      this.error.hidden = false;
+      return;
+    }
+    const { session } = this.context;
+    const ref = { id: this.screen.id, instanceId: this.screen.instanceId };
+    if (session.botScreenStore.get(ref.id)?.instanceId !== ref.instanceId) return;
+    const requestId = crypto.randomUUID();
+    this.endRequestId = requestId;
+    this.localize();
+    try {
+      const removed = botScreenRemovedSchema.parse(await session.client.sendRequest<unknown>(
+        MessageType.BOT_SCREEN_END, ref, requestId,
+      ));
+      if (!this.canRead() || this.endRequestId !== requestId) return;
+      if (removed.id !== ref.id || removed.instanceId !== ref.instanceId ||
+          removed.channelId !== this.context.channelId || removed.reason !== 'ended') {
+        throw new Error('The miniapp end response does not match the request.');
+      }
+      session.botScreenStore.remove(removed);
+    } catch (error: unknown) {
+      if (!this.canRead() || this.endRequestId !== requestId) return;
+      this.error.textContent = botRequestError(error);
+      this.error.hidden = false;
+      appEvents.emit('voice.bot_screens_reload');
+    } finally {
+      if (this.endRequestId === requestId) {
+        this.endRequestId = null;
+        if (!this.destroyed) this.localize();
+      }
+    }
+  }
+
   private async act(action: BotScreenAction): Promise<void> {
     const { session } = this.context;
-    if (!this.frame || this.requestId || action.id !== this.screen.id || !this.canRead()) return;
+    if (!this.frame || this.requestId || this.endRequestId || action.id !== this.screen.id ||
+        action.instanceId !== this.screen.instanceId || !this.canRead()) return;
     if (!session.serverStore.hasPermission(Permission.USE_BOT_COMMANDS)) {
       this.error.textContent = t('botChat.commandsPermissionDenied');
       this.error.hidden = false;
@@ -180,6 +239,7 @@ export class BotScreenView {
         MessageType.BOT_SCREEN_ACTION, action, requestId,
       ));
       if (!this.canRead() || this.requestId !== requestId || screen.id !== this.screen.id ||
+          screen.instanceId !== this.screen.instanceId || session.botScreenStore.get(screen.id)?.instanceId !== screen.instanceId ||
           screen.channelId !== this.context.channelId || screen.botId !== this.screen.botId) return;
       session.botScreenStore.upsert(screen);
       this.error.hidden = true;

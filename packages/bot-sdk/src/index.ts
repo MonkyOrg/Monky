@@ -27,6 +27,7 @@ import {
   messageContentSchema,
   messageReferenceSchema,
   commandDefinitionSchema,
+  commandDefinitionsSchema,
   commandAutocompleteCancelSchema,
   commandAutocompleteChoicesSchema,
   commandAutocompleteExecutionSchema,
@@ -58,6 +59,7 @@ import type {
   BotLocale,
   BotFormValues,
   BotScreen,
+  BotScreenRef,
   BotScreenCreate,
   BotScreenPatch,
   BotManifest,
@@ -340,12 +342,12 @@ export class BotClient extends EventEmitter {
     return this.screens.createScreen(serverId, input);
   }
 
-  updateScreen(serverId: string, id: string, patch: BotScreenPatch): Promise<BotScreen> {
-    return this.screens.updateScreen(serverId, id, patch);
+  updateScreen(serverId: string, ref: BotScreenRef, patch: BotScreenPatch): Promise<BotScreen> {
+    return this.screens.updateScreen(serverId, ref, patch);
   }
 
-  closeScreen(serverId: string, id: string): Promise<void> {
-    return this.screens.closeScreen(serverId, id);
+  closeScreen(serverId: string, ref: BotScreenRef): Promise<void> {
+    return this.screens.closeScreen(serverId, ref);
   }
 
   listScreens(serverId: string, channelId: string): Promise<BotScreen[]> {
@@ -437,6 +439,13 @@ export class BotClient extends EventEmitter {
     if (!this.commands.has(definition.name) && this.commands.size >= LIMITS.MAX_COMMANDS_PER_BOT) {
       throw new Error(`A bot may register at most ${LIMITS.MAX_COMMANDS_PER_BOT} commands.`);
     }
+    commandDefinitionsSchema.parse([
+      ...[...this.commands.values()].filter((command) => command.name !== definition.name)
+        .map(({ name, description, options, localizations, downloadsSound, voiceRequirement }) => ({
+          name, description, options, localizations, downloadsSound, voiceRequirement,
+        })),
+      definition,
+    ]);
     this.commands.set(definition.name, {
       ...definition, autocomplete: def.autocomplete, audioPreview: def.audioPreview, handler: def.handler,
     });
@@ -1746,7 +1755,7 @@ export { LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky
 export {
   botSettingsDefinitionSchema, botSettingsContextSchema, botServerSettingsSnapshotSchema,
   botSettingsSnapshotSchema, botSettingsValuesSchema, botSelectorRespondedSchema, resolveBotSettingsValues,
-  BOT_LOCALES, botLocaleSchema, normalizeBotLocale, resolveBotLocale, localizeCommand,
+  BOT_LOCALES, botLocaleSchema, normalizeBotLocale, resolveBotLocale, localizeCommand, getCommandPresentation,
 } from '@monky/shared';
 export { runBotCli } from './cli';
 export {
@@ -1762,10 +1771,11 @@ export type {
 } from './tooling/config';
 export type {
   BotSelector, BotSelectorCreate, BotSelectorPatch, BotSelectorPublic, BotSelectorRespondedPayload,
-  BotScreen, BotScreenCreate, BotScreenPatch, BotScreenActionEvent, BotScreenJson, BotScreenRemoved,
+  BotScreen, BotScreenRef, BotScreenCreate, BotScreenPatch, BotScreenActionEvent, BotScreenJson, BotScreenRemoved,
 } from '@monky/shared';
 export type {
-  BotForm, BotFormField, BotFormValues, BotManifest, BotLocale, CommandLocalizations, BotFieldLocalization,
+  BotForm, BotFormField, BotFormValues, BotManifest, BotLocale, CommandLocalization, CommandLocalizations,
+  CommandPresentation, BotFieldLocalization,
   BotSettingsDefinition, BotSettingsContext, BotServerSettingsSnapshot, BotSettingsSnapshot, BotSettingsSummary,
   BotInputResult,
   ChatMessage, ChatReactionEventPayload, MessageReaction,

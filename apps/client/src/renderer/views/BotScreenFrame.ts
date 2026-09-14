@@ -136,7 +136,7 @@ export class BotScreenFrame {
   }
 
   update(screen: BotScreen): void {
-    if (this.destroyed || screen.id !== this.snapshot.id || screen.channelId !== this.snapshot.channelId ||
+    if (this.destroyed || screen.id !== this.snapshot.id || screen.instanceId !== this.snapshot.instanceId || screen.channelId !== this.snapshot.channelId ||
         screen.botId !== this.snapshot.botId || screen.revision <= this.snapshot.revision) return;
     this.snapshot = screen;
     if (this.connected) this.channel.port1.postMessage({ type: 'state', state: screen.state, revision: screen.revision } satisfies FrameUpdate);
@@ -177,7 +177,7 @@ export class BotScreenFrame {
     if (!event.data || typeof event.data !== 'object' || !('action' in event.data) || !('payload' in event.data) ||
         !('revision' in event.data) || Object.keys(event.data).some((key) => key !== 'action' && key !== 'payload' && key !== 'revision')) return;
     const parsed = botScreenActionSchema.safeParse({
-      id: this.snapshot.id, action: event.data.action, payload: event.data.payload,
+      id: this.snapshot.id, instanceId: this.snapshot.instanceId, action: event.data.action, payload: event.data.payload,
       // Use the revision actually rendered in the child, not a newer state still in transit to it.
       revision: event.data.revision, actionId: crypto.randomUUID(),
     });

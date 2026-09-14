@@ -1,8 +1,14 @@
-import { BOT_SCREEN_LIMITS, type BotScreen } from '@monky/shared';
+import { BOT_SCREEN_LIMITS, type BotScreen, type BotScreenRemoved } from '@monky/shared';
 import { appEvents, type EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { emitOutsideRouting } from '../core/sessionRouting';
 import { voiceStore } from './voiceStore';
+
+export interface VoiceBotScreensUpdated {
+  key: string;
+  channelId: string | null;
+  removed?: BotScreenRemoved;
+}
 
 export class BotScreenStore {
   public bus: EventBus = appEvents;
@@ -30,7 +36,8 @@ export class BotScreenStore {
   upsert(screen: BotScreen): void {
     const previous = this.screens.get(screen.id);
     if (previous && (previous.channelId !== screen.channelId || previous.botId !== screen.botId ||
-        previous.revision >= screen.revision)) return;
+        (previous.instanceId === screen.instanceId ? previous.revision >= screen.revision : previous.createdAt > screen.createdAt))) return;
+    if (previous && previous.instanceId !== screen.instanceId) this.dismissedInvitations.delete(screen.id);
     if (!previous && this.screens.size >= BOT_SCREEN_LIMITS.activePerServer) {
       const oldest = this.screens.keys().next().value;
       if (oldest !== undefined) {
@@ -43,6 +50,9 @@ export class BotScreenStore {
   }
 
   replace(channelId: string, screens: BotScreen[]): void {
+    for (const screen of screens) {
+      if (this.screens.get(screen.id)?.instanceId !== screen.instanceId) this.dismissedInvitations.delete(screen.id);
+    }
     for (const screen of this.list(channelId)) this.screens.delete(screen.id);
     for (const screen of screens) {
       if (screen.channelId === channelId && this.screens.size < BOT_SCREEN_LIMITS.activePerServer) this.screens.set(screen.id, screen);
@@ -53,11 +63,13 @@ export class BotScreenStore {
     this.changed(channelId);
   }
 
-  remove(id: string, channelId: string): void {
-    if (this.screens.get(id)?.channelId !== channelId) return;
-    this.screens.delete(id);
-    this.dismissedInvitations.delete(id);
-    this.changed(channelId);
+  remove(removed: BotScreenRemoved): void {
+    const current = this.screens.get(removed.id);
+    if (current && (current.channelId !== removed.channelId || current.instanceId !== removed.instanceId)) return;
+    this.screens.delete(removed.id);
+    this.dismissedInvitations.delete(removed.id);
+    // Even an unseen removal invalidates a list response already in flight.
+    this.changed(removed.channelId, current ? removed : undefined);
   }
 
   clear(): void {
@@ -74,11 +86,14 @@ export class BotScreenStore {
     this.changed(null);
   }
 
-  private changed(channelId: string | null): void {
+  private changed(channelId: string | null, removed?: BotScreenRemoved): void {
     this.version++;
     this.bus.emit('bot.screens_updated', { channelId });
     if (this.sessionKey && this.sessionKey === voiceStore.voiceSessionKey) {
-      emitOutsideRouting(() => appEvents.emit('voice.bot_screens_updated', { key: this.sessionKey, channelId }));
+      const update: VoiceBotScreensUpdated = {
+        key: this.sessionKey, channelId, ...(removed ? { removed } : {}),
+      };
+      emitOutsideRouting(() => appEvents.emit('voice.bot_screens_updated', update));
     }
   }
 }

@@ -522,7 +522,8 @@ try {
     message.payload.id === screenCall.invocationId), false, 'Another device outside voice cannot receive a miniapp.');
   const actionReceived = once(bot, 'screenAction', { signal: AbortSignal.timeout(5000) });
   const screenAction = {
-    id: screenCall.invocationId, action: 'increment', payload: { userId: auth.currentUser.id },
+    id: screenCall.invocationId, instanceId: publicScreen.payload.instanceId,
+    action: 'increment', payload: { userId: auth.currentUser.id },
     revision: 0, actionId: randomUUID(),
   };
   await bob.request(MessageType.BOT_SCREEN_ACTION, screenAction);
@@ -532,8 +533,8 @@ try {
   assert.equal(screenEvent.userNickname, 'Bob');
   await bob.request(MessageType.BOT_SCREEN_ACTION, { ...screenAction, userId: auth.currentUser.id }, true);
   const screenUpdates = await Promise.allSettled([
-    bot.updateScreen('e2e', screenCall.invocationId, { state: { count: 1 }, expectedRevision: 0 }),
-    bot.updateScreen('e2e', screenCall.invocationId, { state: { count: 2 }, expectedRevision: 0 }),
+    bot.updateScreen('e2e', publicScreen.payload, { state: { count: 1 }, expectedRevision: 0 }),
+    bot.updateScreen('e2e', publicScreen.payload, { state: { count: 2 }, expectedRevision: 0 }),
   ]);
   assert.equal(screenUpdates.filter((result) => result.status === 'fulfilled').length, 1);
   assert.equal(screenUpdates.filter((result) => result.status === 'rejected').length, 1);
@@ -547,8 +548,11 @@ try {
   }, true);
   assert.equal(staleScreenAction.code, 'BOT_SCREEN_CONFLICT');
   const screenRemoved = once(bot, 'screenRemoved', { signal: AbortSignal.timeout(5000) });
-  await bot.closeScreen('e2e', screenCall.invocationId);
-  assert.deepEqual((await screenRemoved)[0], { serverId: 'e2e', id: screenCall.invocationId, channelId: screenRoom });
+  await bot.closeScreen('e2e', publicScreen.payload);
+  assert.deepEqual((await screenRemoved)[0], {
+    serverId: 'e2e', id: screenCall.invocationId, instanceId: publicScreen.payload.instanceId,
+    channelId: screenRoom, reason: 'closed',
+  });
   await bob.wait((message) => message.type === MessageType.BOT_SCREEN_REMOVED &&
     message.payload.id === screenCall.invocationId, 'screen close delivered to other viewers');
   await owner.request(MessageType.CHANNEL_DELETE, { channelId: screenRoom });
@@ -813,7 +817,7 @@ process.on('message', (message) => {
   if (process.connected) process.disconnect();
 });
 `);
-      args = ['--no-global-search-paths', '--require', stopBridge, launcher, 'start', '--foreground'];
+      args = ['--no-global-search-paths', '--require', stopBridge, launcher, 'start', '--foreground', '--locale', 'en'];
     }
     const startSoundBot = () => {
       const child = spawn(process.execPath, args, {
@@ -1154,7 +1158,7 @@ process.on('message', (message) => {
       message.type === MessageType.BOT_SCREEN_SNAPSHOT && message.payload.id === gameInvocation.invocationId &&
       message.payload.revision === revision, `official game revision ${revision}`).then((message) => message.payload);
     const actInGame = (peer, action, payload, revision) => peer.request(MessageType.BOT_SCREEN_ACTION, {
-      id: gameInvocation.invocationId, action, payload, revision, actionId: randomUUID(),
+      id: gameInvocation.invocationId, instanceId: initialGame.instanceId, action, payload, revision, actionId: randomUUID(),
     });
     const initialGame = await gameRevision(spectator, 0);
     assert.equal(initialGame.channelId, gameRoom);
@@ -1181,6 +1185,31 @@ process.on('message', (message) => {
     }
     assert.equal(finalGame.state.winner, 'X');
     assert.deepEqual((await gameRevision(bob, 6)).state, finalGame.state);
+    const deniedEnd = await bob.request(MessageType.BOT_SCREEN_END, {
+      id: finalGame.id, instanceId: finalGame.instanceId,
+    }, true);
+    assert.equal(deniedEnd.code, 'PERMISSION_DENIED', 'Being a player does not grant permission to end someone else\'s miniapp.');
+    for (const [endingPeer, endingUserId] of [[bob, bobAuth.currentUser.id], [owner, auth.currentUser.id]]) {
+      const created = await invokeOfficial(bob, 'jogo-da-velha');
+      await bob.finished(created.invocationId);
+      const snapshot = await owner.wait((message) => message.type === MessageType.BOT_SCREEN_SNAPSHOT &&
+        message.payload.id === created.invocationId, 'non-administrator creator miniapp');
+      assert.equal(snapshot.payload.creatorUserId, bobAuth.currentUser.id);
+      const ref = { id: snapshot.payload.id, instanceId: snapshot.payload.instanceId };
+      const ended = await endingPeer.request(MessageType.BOT_SCREEN_END, ref);
+      assert.deepEqual(ended, {
+        ...ref, channelId: gameRoom, reason: 'ended', endedByUserId: endingUserId,
+      });
+      for (const peer of [owner, bob, spectator]) {
+        await peer.wait((message) => message.type === MessageType.BOT_SCREEN_REMOVED &&
+          message.payload.id === ref.id && message.payload.instanceId === ref.instanceId &&
+          message.payload.reason === 'ended', 'creator/admin END delivered to every viewer');
+      }
+      const remaining = await owner.request(MessageType.BOT_SCREEN_LIST, { channelId: gameRoom });
+      assert.equal(remaining.screens.some((screen) => screen.id === ref.id), false);
+      assert.equal(remaining.screens.some((screen) => screen.instanceId === finalGame.instanceId), true,
+        'Ending another miniapp must preserve the original game.');
+    }
     await owner.request(MessageType.CHANNEL_DELETE, { channelId: gameRoom });
     for (const peer of [owner, bob, spectator]) {
       await peer.wait((message) => message.type === MessageType.BOT_SCREEN_REMOVED &&
@@ -1188,7 +1217,7 @@ process.on('message', (message) => {
     }
     spectator.ws.close();
     await once(spectator.ws, 'close');
-    console.log('Official multiplayer game: authenticated players, spectator isolation, turns, synchronized win and channel cleanup passed.');
+    console.log('Official multiplayer game: authenticated players, spectator isolation, turns, synchronized win, creator/admin END and channel cleanup passed.');
 
     const eightballDefinition = registered.commands.find((command) => command.botId === officialId && command.name === '8ball');
     assert.equal(eightballDefinition.options.find((option) => option.name === 'pergunta').required, true);

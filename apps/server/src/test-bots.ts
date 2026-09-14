@@ -30,6 +30,8 @@ import {
   botSettingsListResponseSchema,
   botSelectorRespondedSchema,
   botVoiceJoinedSchema,
+  botScreenSchema,
+  botScreenRemovedSchema,
   type BotSettingsDefinition,
   type BotSettingsPatch,
 } from '@monky/shared';
@@ -317,6 +319,140 @@ async function createPrivateVoiceFixture(t: TestContext, mode: 'p2p' | 'sfu' = '
   return { ...f, connectBot: f.bot, owner, caller, bot, botId, token, role, textId, voiceId, publicVoiceId, botSessionId,
     invocationId: text(invocation.payload.invocationId) };
 }
+
+test('miniapp end uses authenticated creator identity, real owner permissions and terminal invocation routing', async (t) => {
+  const f = await createPrivateVoiceFixture(t);
+  const otherDevice = await f.human('Private voice caller', f.caller.keys);
+  const create = async (invocationId: string) => {
+    const response = await f.bot.peer.request(MessageType.BOT_SCREEN_CREATE, {
+      id: 'reusable-game', channelId: f.voiceId, invocationId,
+      title: 'Private game', html: '<p>Game</p>', state: { turn: 'X' },
+    });
+    assert.equal(response.type, MessageType.BOT_SCREEN_SNAPSHOT);
+    return botScreenSchema.parse(response.payload);
+  };
+  const first = await create(f.invocationId);
+  const firstRef = { id: first.id, instanceId: first.instanceId };
+  assert.equal(first.creatorUserId, f.caller.id);
+  assert.notEqual(first.creatorUserId, text(record(f.bot.auth.payload.currentUser).id));
+  await f.owner.peer.error(MessageType.BOT_SCREEN_END, firstRef, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await otherDevice.peer.error(MessageType.BOT_SCREEN_END, firstRef, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await otherDevice.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  await f.caller.peer.request(MessageType.VOICE_LEAVE, { channelId: f.voiceId });
+  await f.caller.peer.close();
+  const ended = botScreenRemovedSchema.parse((await otherDevice.peer.request(MessageType.BOT_SCREEN_END, firstRef)).payload);
+  assert.equal(ended.reason, 'ended');
+  assert.equal(ended.reason === 'ended' && ended.endedByUserId, f.caller.id);
+  assert.deepEqual((await f.bot.peer.wait((message) =>
+    message.type === MessageType.BOT_SCREEN_REMOVED && message.payload.instanceId === first.instanceId)).payload, ended);
+  await f.bot.peer.error(MessageType.BOT_SCREEN_UPDATE, { ...firstRef, state: {}, expectedRevision: 0 }, ProtocolErrorCode.BOT_SCREEN_NOT_FOUND);
+
+  const invocation = await otherDevice.peer.request(MessageType.COMMAND_INVOKE, {
+    botId: f.botId, channelId: f.textId, commandName: 'play',
+  });
+  assert.equal(invocation.type, MessageType.COMMAND_INVOKED);
+  const invocationId = text(invocation.payload.invocationId);
+  const second = await create(invocationId);
+  assert.notEqual(second.instanceId, first.instanceId);
+  const secondRef = { id: second.id, instanceId: second.instanceId };
+  await otherDevice.peer.error(MessageType.BOT_SCREEN_END, firstRef, ProtocolErrorCode.BOT_SCREEN_NOT_FOUND);
+  f.bot.peer.send(MessageType.COMMAND_PROMPT, {
+    invocationId, interactionId: 'pending-game-option',
+    form: { title: 'Game option', fields: [{ name: 'answer', label: 'Answer', type: 'text' }] },
+  });
+  await otherDevice.peer.wait((message) =>
+    message.type === MessageType.COMMAND_PROMPT && message.payload.invocationId === invocationId);
+  await f.owner.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  assert.equal(await f.permissions.getUserPermissions(f.owner.id), 0xFFFFFFFF);
+  const ownerEnded = botScreenRemovedSchema.parse((await f.owner.peer.request(MessageType.BOT_SCREEN_END, secondRef)).payload);
+  assert.equal(ownerEnded.reason === 'ended' && ownerEnded.endedByUserId, f.owner.id);
+  for (const peer of [otherDevice.peer, f.bot.peer]) {
+    const finished = await peer.wait((message) =>
+      message.type === MessageType.COMMAND_FINISHED && message.payload.invocationId === invocationId);
+    assert.equal(finished.payload.reason, 'cancelled');
+  }
+  await otherDevice.peer.error(MessageType.COMMAND_SUBMIT, {
+    invocationId, interactionId: 'pending-game-option', values: { answer: 'late' },
+  }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  for (const id of ['reusable-game', 'stale-command-new-id']) {
+    await f.bot.peer.error(MessageType.BOT_SCREEN_CREATE, {
+      id, channelId: f.voiceId, invocationId, title: 'Stale game', html: 'Game', state: {},
+    }, ProtocolErrorCode.PERMISSION_DENIED);
+  }
+  await f.bot.peer.error(MessageType.COMMAND_FINISH, { invocationId }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  assert.deepEqual(records((await otherDevice.peer.request(MessageType.BOT_SCREEN_LIST, { channelId: f.voiceId })).payload.screens), []);
+});
+
+test('miniapp end rejects admin revocation committed before its role broadcast', { timeout: 15000 }, async (t) => {
+  const f = await createPrivateVoiceFixture(t);
+  const moderator = await f.human('Miniapp moderator');
+  const adminRole = await f.roleRepo.findByName('Admin');
+  assert.ok(adminRole && !adminRole.isDefault);
+  await f.owner.peer.request(MessageType.ROLE_ASSIGN, { userId: moderator.id, roleId: adminRole.id });
+  assert.equal((await moderator.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId })).type,
+    MessageType.VOICE_USER_JOINED);
+  const screen = botScreenSchema.parse((await f.bot.peer.request(MessageType.BOT_SCREEN_CREATE, {
+    id: 'role-fenced-game', channelId: f.voiceId, invocationId: f.invocationId,
+    title: 'Role fence', html: '<p>Game</p>', state: { turn: 'X' },
+  })).payload);
+  await moderator.peer.wait((message) =>
+    message.type === MessageType.BOT_SCREEN_SNAPSHOT && message.payload.id === screen.id);
+
+  let authorizationRead!: () => void;
+  let resumeAuthorization!: () => void;
+  let rolePersisted!: () => void;
+  let resumeRoleWrite!: () => void;
+  const authorizationReady = new Promise<void>((resolve) => { authorizationRead = resolve; });
+  const authorizationGate = new Promise<void>((resolve) => { resumeAuthorization = resolve; });
+  const persistenceReady = new Promise<void>((resolve) => { rolePersisted = resolve; });
+  const persistenceGate = new Promise<void>((resolve) => { resumeRoleWrite = resolve; });
+  const getAccess = f.channelService.getAccessContext.bind(f.channelService);
+  let reads = 0;
+  t.mock.method(f.channelService, 'getAccessContext', async (userId: string) => {
+    const context = await getAccess(userId);
+    // Sweep and room admission read first; hold the actual END administrator check.
+    if (userId === moderator.id && ++reads === 3) {
+      authorizationRead();
+      await authorizationGate;
+    }
+    return context;
+  });
+  const unassignRole = f.roleRepo.unassignRole.bind(f.roleRepo);
+  t.mock.method(f.roleRepo, 'unassignRole', async (userId: string, roleId: string) => {
+    await unassignRole(userId, roleId);
+    if (userId === moderator.id && roleId === adminRole.id) {
+      rolePersisted();
+      await persistenceGate;
+    }
+  });
+
+  const ending = moderator.peer.request(MessageType.BOT_SCREEN_END, { id: screen.id, instanceId: screen.instanceId });
+  let mutation: Promise<Received> | undefined;
+  try {
+    await authorizationReady;
+    mutation = f.owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: moderator.id, roleId: adminRole.id });
+    await persistenceReady;
+    assert.equal(f.permissions.getRoleAccessVersion(), null, 'the repository write is held before RoleService and WS publication finish');
+    assert.equal(await f.permissions.checkPermission(moderator.id, Permission.ADMINISTRATOR), false);
+    resumeAuthorization();
+    const response = await ending;
+    resumeRoleWrite();
+    await mutation;
+    assert.equal(response.type, MessageType.SERVER_ERROR, 'a stale administrator grant must not end the shared game');
+    assert.equal(response.payload.code, ProtocolErrorCode.BOT_COMMAND_BUSY);
+    await f.bot.peer.barrier();
+    assert.equal(f.bot.peer.messages.some((message) =>
+      message.type === MessageType.BOT_SCREEN_REMOVED && message.payload.instanceId === screen.instanceId), false);
+    assert.equal(f.bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_FINISHED && message.payload.invocationId === f.invocationId), false);
+    const listed = await f.bot.peer.request(MessageType.BOT_SCREEN_LIST, { channelId: f.voiceId });
+    assert.equal(records(listed.payload.screens)[0]?.instanceId, screen.instanceId);
+  } finally {
+    resumeAuthorization();
+    resumeRoleWrite();
+    await Promise.allSettled(mutation ? [ending, mutation] : [ending]);
+  }
+});
 
 test('private invocation voice grants allow only room media, retain rosters and revoke on role loss', { timeout: 30000 }, async (t) => {
   for (const mode of ['p2p', 'sfu'] as const) await t.test(mode, async (subtest) => {
@@ -939,7 +1075,7 @@ test('voice-bound bot interactions protect commands, searches, previews and exac
   await caller.peer.error(MessageType.BOT_SCREEN_LIST, { channelId: firstRoom }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
   await caller.peer.error(MessageType.COMMAND_INVOKE, commandInput('queue'), ProtocolErrorCode.BOT_VOICE_REQUIRED);
   assert.equal((await bot.peer.request(MessageType.BOT_SCREEN_UPDATE, {
-    id: 'voice-game', expectedRevision: 0, state: { turn: 'O' },
+    id: 'voice-game', instanceId: screen.payload.instanceId, expectedRevision: 0, state: { turn: 'O' },
   })).type, MessageType.BOT_SCREEN_SNAPSHOT);
 
   await bot.peer.request(MessageType.VOICE_LEAVE, { channelId: firstRoom });

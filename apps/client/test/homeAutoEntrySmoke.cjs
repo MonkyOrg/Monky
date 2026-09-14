@@ -6,7 +6,7 @@ const clientRoot = path.resolve(__dirname, '..');
 if (!process.versions.electron) {
   const assert = require('node:assert/strict');
   const { test } = require('node:test');
-  test('Home auto-entry, settings synchronization and voice-only previews', { timeout: 150_000 }, async () => {
+  test('Single-server startup, connection transitions and voice-only Home previews', { timeout: 150_000 }, async () => {
     const profile = path.join(clientRoot, 'dist-test', `home-auto-entry-profile-${process.pid}`);
     fs.mkdirSync(profile, { recursive: true });
     const env = { ...process.env, MONKY_HOME_AUTO_ENTRY_PROFILE: profile };
@@ -53,7 +53,7 @@ if (!process.versions.electron) {
           if (id === '/home-auto-entry-shared.js') return '\0home-auto-entry-shared';
         },
         load(id) {
-          if (id === '\0home-auto-entry-shared') return "export { MessageType, PROTOCOL_VERSION } from '@monky/shared';";
+          if (id === '\0home-auto-entry-shared') return "export { MessageType, Permission, PROTOCOL_VERSION } from '@monky/shared';";
         },
         transform(code, id) {
           if (path.normalize(id.split('?')[0]) === mainPath) {
@@ -95,21 +95,26 @@ if (!process.versions.electron) {
       phase = name;
       await evaluate(`window.homeAutoEntrySmoke.${name}()`);
     }
+    for (const reduced of [false, true]) {
+      phase = `connection transition (reduced motion: ${reduced})`;
+      await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: reduced ? 'reduce' : 'no-preference' }],
+      });
+      await evaluate(`window.homeAutoEntrySmoke.transitions(${reduced})`);
+    }
     phase = 'native switch keyboard';
-    for (const surface of ['home', 'settings']) {
-      for (let press = 0; press < 2; press++) {
-        await evaluate(`window.homeAutoEntrySmoke.focusSwitch(${JSON.stringify(surface)})`);
-        window.focus();
-        window.webContents.focus();
-        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
-        window.webContents.sendInputEvent({ type: 'char', keyCode: ' ' });
-        window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
-        await evaluate('window.homeAutoEntrySmoke.checkKeyboard()');
-      }
+    for (let press = 0; press < 2; press++) {
+      await evaluate('window.homeAutoEntrySmoke.focusSwitch()');
+      window.focus();
+      window.webContents.focus();
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+      window.webContents.sendInputEvent({ type: 'char', keyCode: ' ' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+      await evaluate('window.homeAutoEntrySmoke.checkKeyboard()');
     }
     phase = 'cleanup';
     const checks = await evaluate('window.homeAutoEntrySmoke.cleanup()');
-    console.log(`Home auto-entry smoke: ${checks} checks passed (startup/auth, background routing, cancellation, persistence, settings, voice previews, keyboard, cleanup)`);
+    console.log(`Home auto-entry smoke: ${checks} checks passed (single destination, startup/auth, background routing, cancellation, persistence, transitions, reduced motion, voice previews, keyboard, cleanup)`);
     await finish(0);
   }).catch(async error => {
     console.error(`Home auto-entry smoke failed during ${phase}`, error);
@@ -192,7 +197,7 @@ async function setupHomeAutoEntrySmoke() {
     import('/views/SettingsModal.ts'), import('/core/EventBus.ts'), import('/i18n/index.ts'),
     import('/home-auto-entry-shared.js'),
   ]);
-  const { MessageType, PROTOCOL_VERSION } = shared;
+  const { MessageType, Permission, PROTOCOL_VERSION } = shared;
   const sockets = [];
   const sent = [];
   const behaviors = new Map();
@@ -303,6 +308,8 @@ async function setupHomeAutoEntrySmoke() {
   const app = new HomeTestApp();
   const root = document.getElementById('app');
   const rendered = [];
+  const renderRealMain = app.mainView.render.bind(app.mainView);
+  const destroyRealMain = app.mainView.destroy.bind(app.mainView);
   app.mainView.render = () => {
     const active = sessions.getActive();
     rendered.push(active?.key ?? null);
@@ -314,19 +321,19 @@ async function setupHomeAutoEntrySmoke() {
   identityGate.resolve(true);
   await until(() => app.autoEntryService.running !== null, 'renderer did not start automatic entry after prerequisites');
   await app.autoEntryService.start();
-  equal(sockets.map(socket => socket.port), [5101, 5102], 'real renderer startup connects each opted-in server once');
-  equal(sessions.getActiveKey(), sessionKeyFor(first.host, first.port), 'first startup server remains foreground');
-  equal(serverStore.serverDetails?.id, 'server-5101', 'background auth restores the foreground proxy');
-  equal(sessions.getAll().map(session => session.serverStore.serverDetails?.id), ['server-5101', 'server-5102'], 'auth payloads stay in their own store');
-  equal(rendered, [sessionKeyFor(first.host, first.port)], 'background auth does not redraw Home or steal navigation');
+  equal(sockets.map(socket => socket.port), [5102], 'legacy multi-server startup connects only the last configured destination');
+  equal(sessions.getActiveKey(), sessionKeyFor(second.host, second.port), 'the chosen startup server becomes foreground');
+  equal(serverStore.serverDetails?.id, 'server-5102', 'the chosen server owns the active proxy');
+  equal(sessions.getAll().map(session => session.serverStore.serverDetails?.id), ['server-5102'], 'no older opted-in server is opened');
+  equal(rendered, [sessionKeyFor(second.host, second.port)], 'startup renders the chosen server once');
   equal(identityCalls, 1, 'startup reuses the already-loaded identity rather than generating another');
-  equal(signatures.length, 2, 'every server uses the existing challenge-response authentication');
+  equal(signatures.length, 1, 'the destination uses the existing challenge-response authentication');
   for (const message of sent.filter(message => message.type === MessageType.AUTH_CONNECT)) {
     equal(message.payload.password, `fixture-password-${message.port}`, 'saved server password reaches only its own handshake');
     equal(message.payload.publicKey, identity.publicKey, 'saved identity is preserved');
     equal(message.payload.protocolVersion, PROTOCOL_VERSION, 'normal protocol admission is preserved');
   }
-  equal(sent.filter(message => message.type === MessageType.USER_UPDATE_AVATAR).map(message => message.port), [5101, 5102], 'avatars update captured sessions');
+  equal(sent.filter(message => message.type === MessageType.USER_UPDATE_AVATAR).map(message => message.port), [5102], 'avatars update the captured destination');
   check(!mediaCalls.some(call => call === 'audio.startMicrophone' || call === 'voice.rejoin'), 'startup never starts microphone or rejoins voice');
   check(!sent.some(message => [MessageType.VOICE_JOIN, MessageType.VOICE_RECONNECT].includes(message.type)), 'startup never sends voice admission');
   equal(hostsStarted.length, 0, 'startup never starts a server process');
@@ -354,9 +361,13 @@ async function setupHomeAutoEntrySmoke() {
     connection.savedNickname = 'Fixture';
     connection.setIdentity(identity);
     connection.savedAvatarBase64 = '';
+    app.connectionView.selectedSavedHost = null;
+    app.connectionView.selectedSavedPort = null;
+    app.connectionView.autoEntrySelected = false;
+    app.connectionView.autoEntryPersistedKey = null;
     settings.onboardingCompleted = true;
     settings.autoEntryServerKeys = [];
-    if (enabled) for (const server of servers) settings.setServerAutoEntry(server, true);
+    if (enabled && servers.length) settings.setServerAutoEntry(servers[0], true);
     settings.save();
     notices.length = 0;
     behaviors.clear();
@@ -367,8 +378,15 @@ async function setupHomeAutoEntrySmoke() {
     localStorage.setItem('monky_saved_servers', JSON.stringify(servers));
   };
   const home = app.connectionView;
+  const selectSavedServer = server => {
+    const card = [...root.querySelectorAll('#home-saved-servers .saved-server-item')]
+      .find(item => item.dataset.host === server.host && Number(item.dataset.port) === server.port);
+    check(!!card, 'fixture server has a selectable Home card');
+    card.click();
+  };
   let keyboardInput = null;
   let keyboardPrevious = false;
+  let keyboardHost = null;
   window.homeAutoEntrySmoke = {
     async connections() {
       const a = saved('a.test', 5201);
@@ -390,7 +408,9 @@ async function setupHomeAutoEntrySmoke() {
       await service().start();
       equal(sockets.length, baseline, 'legacy servers need an authenticated logical identity before automatic entry');
       equal(notices.length, 1, 'legacy identity verification has a manual-entry hint');
-      reset([a, b, { ...a, host: 'A.TEST' }]);
+      reset([a, b], false);
+      await navigation.openServerSession(a.host, a.port, identity, 'Fixture', a.password);
+      settings.setServerAutoEntry(b, true);
       gates.set(b.port, deferred());
       const multi = service();
       const connecting = multi.start();
@@ -400,20 +420,20 @@ async function setupHomeAutoEntrySmoke() {
       mediaCalls.length = 0;
       gates.get(b.port).resolve();
       await connecting;
-      equal(sockets.slice(baseline).map(socket => socket.port), [a.port, b.port], 'canonical duplicates never create duplicate sessions');
-      equal(sessions.getActive()?.port, a.port, 'multiple opted-in servers retain the first foreground server');
+      equal(sockets.slice(baseline).map(socket => socket.port), [a.port, b.port], 'automatic entry opens only its configured destination alongside a manual session');
+      equal(sessions.getActive()?.port, a.port, 'automatic entry preserves the manually selected foreground server');
       equal(mediaCalls, [], 'background entry never tears down an existing call');
       equal(voice.currentVoiceChannelId, 'voice-5201', 'voice stays on the existing server');
       equal(serverStore.serverDetails?.id, 'server-5201', 'background protocol events do not change active stores');
 
-      reset([a, { ...saved('alias.test', 5203), serverId: a.serverId }]);
+      reset([a, { ...a, host: 'A.TEST' }]);
       const aliasesStart = sockets.length;
       await service().start();
-      equal(sockets.slice(aliasesStart).map(socket => socket.port), [a.port], 'different saved aliases for one authenticated server never create rival sessions');
+      equal(sockets.slice(aliasesStart).map(socket => socket.port), [a.port], 'canonical duplicate saved addresses never create rival sessions');
 
       reset([{ ...a, serverId: 'previous-server-identity' }, b]);
       await service().start();
-      equal(sessions.getAll().map(session => session.port), [b.port], 'unexpected server identity is disconnected before proceeding');
+      equal(sessions.getAll().length, 0, 'unexpected server identity is disconnected without falling back to another saved server');
       check(!settings.isServerAutoEntryEnabled(a), 'changed server identity disables the preference');
       equal(connection.savedServers.find(server => server.port === a.port)?.serverId, undefined, 'changed server identity requires fresh manual confirmation');
       equal(notices.length, 1, 'server identity changes are reported');
@@ -426,16 +446,17 @@ async function setupHomeAutoEntrySmoke() {
         behaviors.set(a.port, failure);
         const before = sockets.length;
         await service(70).start();
-        equal(sockets.slice(before).map(socket => socket.port), [a.port, b.port], `${failure}: each endpoint gets one bounded attempt`);
-        equal(sessions.getAll().map(session => session.port), [b.port], `${failure}: failed session is removed, next server can enter`);
-        equal(sessions.getActive()?.port, b.port, `${failure}: first successful server becomes foreground`);
+        equal(sockets.slice(before).map(socket => socket.port), [a.port], `${failure}: only the chosen endpoint gets one bounded attempt`);
+        equal(sessions.getAll().length, 0, `${failure}: the failed session is removed without opening other saved servers`);
+        equal(sessions.getActive(), null, `${failure}: Home remains available for a manual retry`);
         equal(notices.length, 1, `${failure}: failure is reported without a retry prompt`);
         window.dispatchEvent(new Event('online'));
         await tick();
-        equal(sockets.length - before, 2, `${failure}: no automatic failure/retry storm`);
+        equal(sockets.length - before, 1, `${failure}: no automatic failure/retry storm`);
         equal(hostsStarted.length, 0, `${failure}: owned stopped servers are never started silently`);
       }
       reset([a, b]);
+      settings.setServerAutoEntry(b, true);
       const existing = sessions.create(a.host, a.port, 'Fixture');
       existing.client.status = 'RECONNECTING';
       sessions.activate(existing.key);
@@ -444,7 +465,9 @@ async function setupHomeAutoEntrySmoke() {
       equal(sockets.slice(before).map(socket => socket.port), [b.port], 'existing reconnect owner is not replaced');
       equal(existing.client.getStatus(), 'RECONNECTING', 'background entry preserves a recovering session');
 
-      reset([a, { ...b, serverId: a.serverId }]);
+      const alias = { ...b, serverId: a.serverId };
+      reset([a, alias]);
+      settings.setServerAutoEntry(alias, true);
       const pendingExisting = sessions.create(a.host, a.port, 'Fixture');
       pendingExisting.client.status = 'CONNECTING';
       sessions.activate(pendingExisting.key);
@@ -456,7 +479,9 @@ async function setupHomeAutoEntrySmoke() {
       const a = saved('cancel-a.test', 5301);
       const b = saved('cancel-b.test', 5302);
       const c = saved('cancel-c.test', 5303);
-      reset([a, b, c]);
+      reset([a, b, c], false);
+      await navigation.openServerSession(a.host, a.port, identity, 'Fixture', a.password);
+      settings.setServerAutoEntry(b, true);
       gates.set(b.port, deferred());
       const before = sockets.length;
       const queue = service();
@@ -467,10 +492,10 @@ async function setupHomeAutoEntrySmoke() {
       gates.get(b.port).resolve();
       await tick();
       equal(sessions.getAll().length, 0, 'logout closes a pending background handshake and all completed sessions');
-      equal(sockets.slice(before).map(socket => socket.port), [a.port, b.port], 'logout cancels the remaining startup queue');
+      equal(sockets.slice(before).map(socket => socket.port), [b.port], 'logout cancels the only automatic destination');
       await queue.start();
       home.render();
-      equal(sockets.length - before, 2, 'Home does not restart a cancelled queue');
+      equal(sockets.length - before, 1, 'Home does not restart a cancelled automatic entry');
 
       reset([a, b]);
       gates.set(a.port, deferred());
@@ -484,19 +509,21 @@ async function setupHomeAutoEntrySmoke() {
       equal(sockets.length - initialCount, 1, 'logout during the first handshake does not connect later opted-in servers');
       equal(sessions.getAll().length, 0, 'first pending handshake does not leave a ghost session');
 
-      for (const action of ['disable', 'remove']) {
+      for (const action of ['disable', 'remove', 'replace']) {
         reset([a, b]);
         gates.set(a.port, deferred());
         const start = sockets.length;
         const pending = service().start();
         await until(() => sockets.length > start, 'pending entry was not created');
         if (action === 'disable') settings.setServerAutoEntry(a, false);
-        else connection.removeSavedServer(a.host, a.port);
+        else if (action === 'remove') connection.removeSavedServer(a.host, a.port);
+        else settings.setServerAutoEntry(b, true);
         await pending;
         gates.get(a.port).resolve();
         await tick();
-        equal(sessions.getAll().map(session => session.port), [b.port], `${action}: only the cancelled target is removed`);
+        equal(sessions.getAll().length, 0, `${action}: cancellation does not auto-connect another saved server`);
         equal(settings.isServerAutoEntryEnabled(a), false, `${action}: preference remains disabled`);
+        equal(settings.isServerAutoEntryEnabled(b), action === 'replace', `${action}: a replacement applies to the next launch only`);
       }
 
       reset([a, b]);
@@ -559,32 +586,78 @@ async function setupHomeAutoEntrySmoke() {
       reset([a, b], false);
       home.render();
       const homeInput = () => root.querySelector('[data-server-auto-entry]');
-      const inputFor = (container, server) => [...container.querySelectorAll('[data-server-auto-entry]')]
-        .find(input => input.dataset.serverAutoEntry === JSON.stringify([server.host, server.port]));
+      equal(root.querySelectorAll('[data-server-auto-entry]').length, 1, 'Home has exactly one startup switch');
       check(!homeInput().checked, 'Home switch defaults off');
       check(homeInput().closest('.toggle-switch'), 'Home uses an accessible toggle-switch, not a standalone checkbox');
+      check(homeInput().closest('.connection-submit-row').contains(root.querySelector('#btn-submit-join')), 'the switch sits next to Connect');
+      equal(root.querySelectorAll('.saved-server-item [data-server-auto-entry]').length, 0, 'saved server cards do not repeat the control');
       delete b.serverId;
+      selectSavedServer(a);
+      homeInput().click();
+      equal(home.selectedSavedHost, a.host, 'changing the switch does not navigate or select another card');
+      equal(settings.autoEntryServerKeys, [], 'enabling is a draft until a successful connection verifies its destination');
+      settings.save();
+      check(homeInput().checked, 'unrelated settings writes preserve the draft');
+      setLanguage('en');
       home.render();
-      check(inputFor(root, b).disabled, 'legacy favorites cannot opt in until a manual connection verifies their identity');
-      connection.rememberSavedServerIdentity(b.host, b.port, 'server-5402');
-      check(!inputFor(root, b).disabled, 'authenticated server identity unlocks automatic entry without changing other preferences');
-      const target = inputFor(root, a);
-      target.click();
-      equal(home.selectedSavedHost, null, 'using an auto-entry switch never selects/connects its card');
-      check(settings.isServerAutoEntryEnabled(a), 'Home toggle persists opt-in');
+      check(homeInput().checked, 'language changes and rerenders preserve the draft');
+
+      behaviors.set(a.port, 'password');
+      await home.submitJoinForm();
+      equal(settings.autoEntryServerKeys, [], 'a rejected connection never persists its destination');
+      check(homeInput().checked, 'a failed connection keeps the choice available for a manual retry');
+      behaviors.delete(a.port);
+      const gate = deferred();
+      gates.set(a.port, gate);
+      const connecting = home.submitJoinForm();
+      await until(() => navigation.getServerSessionForAddress(a.host, a.port)?.client.getStatus() === 'CONNECTING', 'manual remembered connection did not start');
+      check(homeInput().disabled, 'the captured choice cannot be changed during authentication');
+      equal(settings.autoEntryServerKeys, [], 'an incomplete handshake is not a saved startup destination');
+      gate.resolve();
+      await connecting;
+      check(settings.isServerAutoEntryEnabled(a), 'successful manual authentication persists the chosen destination');
+      equal(settings.autoEntryServerKeys.length, 1, 'only one destination is persisted');
       const current = localStorage.getItem('monky_settings');
       check(current.includes(JSON.stringify([a.host, a.port]).replaceAll('"', '\\"')), 'stored settings include the canonical server identity');
+      sessions.removeAll();
+      await tick();
+      home.render();
+      selectSavedServer(b);
+      check(!homeInput().disabled && homeInput().checked, 'the same switch can remember a new or legacy server after connecting');
+      behaviors.set(b.port, 'password');
+      await home.submitJoinForm();
+      check(settings.isServerAutoEntryEnabled(a), 'failing to enter a replacement leaves the last verified destination intact');
+      behaviors.delete(b.port);
+      await home.submitJoinForm();
+      check(settings.isServerAutoEntryEnabled(b) && !settings.isServerAutoEntryEnabled(a), 'a successful replacement is exclusive');
+      equal(connection.savedServers.find(server => server.port === b.port)?.serverId, `server-${b.port}`, 'the saved replacement has an authenticated server identity');
+      sessions.removeAll();
+      await tick();
+      home.render();
+      selectSavedServer(a);
+      const saveBeforeFailure = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key, value) {
+        if (key === 'monky_settings') throw new Error('Fixture full storage after authentication');
+        return saveBeforeFailure.call(this, key, value);
+      };
+      try {
+        await home.submitJoinForm();
+        equal(sessions.getActive()?.port, a.port, 'preference persistence does not undo a successful connection');
+        check(settings.isServerAutoEntryEnabled(b) && !settings.isServerAutoEntryEnabled(a), 'failed replacement persistence retains the previous destination');
+        equal(document.querySelector('.dialog-card .dialog-message')?.textContent, t('autoEntry.saveFailed'), 'post-auth persistence failures remain visible after Home is replaced');
+      } finally { Storage.prototype.setItem = saveBeforeFailure; }
+      document.querySelector('.dialog-card [data-action="confirm"]')?.click();
+      sessions.removeAll();
+      await tick();
+      home.render();
       await settingsModal.open();
       const modal = document.querySelector('.modal-backdrop--settings');
-      check(inputFor(modal, a).checked, 'settings reads the same preference as Home');
-      check(modal.querySelectorAll('[data-settings-section="automatic-entry"]').length === 1, 'auto-entry section has a unique navigation id');
+      equal(modal.querySelectorAll('[data-server-auto-entry]').length, 0, 'Account no longer duplicates the startup switch');
+      equal(modal.querySelectorAll('[data-settings-section="automatic-entry"]').length, 0, 'the removed section has no settings-navigation anchor');
       const labels = [...modal.querySelectorAll('[data-settings-section]')].map(section => section.dataset.settingsSection);
       equal(new Set(labels).size, labels.length, 'settings section identifiers remain unique');
-      inputFor(modal, a).click();
-      check(!target.checked && !settings.isServerAutoEntryEnabled(a), 'settings toggle synchronizes Home immediately');
-      target.click();
-      check(inputFor(modal, a).checked, 'Home toggle synchronizes an already-open settings panel');
       check(!favorites.isServerFavorite(a), 'automatic entry never changes the independent favorite star');
+      settingsModal.close();
 
       const storageSet = Storage.prototype.setItem;
       Storage.prototype.setItem = function (key, value) {
@@ -592,35 +665,34 @@ async function setupHomeAutoEntrySmoke() {
         return storageSet.call(this, key, value);
       };
       try {
-        inputFor(modal, a).click();
-        check(inputFor(modal, a).checked && target.checked, 'failed writes roll both visible switches back');
-        check(modal.querySelector('#settings-error-banner').textContent.length > 0, 'failed writes are visible in settings');
+        homeInput().click();
+        check(homeInput().checked && settings.isServerAutoEntryEnabled(b), 'a failed disable rolls the switch and persisted destination back');
+        check(root.querySelector('#error-banner').textContent.length > 0, 'failed writes are visible on Home');
       } finally { Storage.prototype.setItem = storageSet; }
-      settingsModal.close();
       settings.load();
       home.render();
-      check(inputFor(root, a).checked, 'opt-in survives settings rehydration and Home rerender');
+      check(homeInput().checked, 'the preference survives settings rehydration and Home rerender');
       for (const language of ['pt-BR', 'en']) {
         setLanguage(language);
-        await settingsModal.open();
-        const panel = document.querySelector('.modal-backdrop--settings');
-        const section = panel.querySelector('[data-settings-section="automatic-entry"]');
-        equal(section.dataset.settingsLabel, t('autoEntry.section'), 'section navigation uses the translated label');
-        check(!section.dataset.settingsLabel.startsWith('autoEntry.'), 'automatic-entry catalog keys must be integrated');
-        equal(inputFor(panel, a).getAttribute('aria-label'), t('autoEntry.serverLabel', { name: a.name }), 'translated server labels are escaped without losing content');
-        check(!section.querySelector('fixture'), 'saved server names cannot inject HTML into settings');
-        settingsModal.close();
+        equal(homeInput().getAttribute('aria-label'), t('autoEntry.label'), 'the single switch follows the selected language');
+        equal(homeInput().closest('label').title, t('autoEntry.description'), 'the hint explains when and how the destination is remembered');
+        check(!root.querySelector('fixture'), 'saved server names cannot inject HTML into Home');
       }
       home.render();
       const beforeSettings = bus.listeners.get('settings.updated')?.size ?? 0;
       const beforeServers = bus.listeners.get('connection.saved_servers_changed')?.size ?? 0;
       for (let index = 0; index < 3; index++) { await settingsModal.open(); settingsModal.close(); }
-      equal(bus.listeners.get('settings.updated')?.size ?? 0, beforeSettings, 'closing settings releases auto-entry settings listeners');
+      equal(bus.listeners.get('settings.updated')?.size ?? 0, beforeSettings, 'opening and closing settings does not leak preference listeners');
       equal(bus.listeners.get('connection.saved_servers_changed')?.size ?? 0, beforeServers, 'closing settings releases saved-server listeners');
       await settingsModal.open();
       connection.removeSavedServer(b.host, b.port);
-      equal(document.querySelectorAll('.modal-backdrop--settings [data-server-auto-entry]').length, 1, 'settings list refreshes when a favorite is deleted elsewhere');
+      check(!homeInput().checked && settings.autoEntryServerKeys.length === 0, 'removing the remembered destination clears the sole switch');
       settingsModal.close();
+      home.render();
+      homeInput().click();
+      equal(settings.autoEntryServerKeys, [], 'enabling again requires another successful connection');
+      homeInput().click();
+      equal(settings.autoEntryServerKeys, [], 'disabling an unsaved choice does not create a destination');
     },
     async previews() {
       const node = document.createElement('div');
@@ -637,11 +709,8 @@ async function setupHomeAutoEntrySmoke() {
         voiceUserCount: 0, voiceUsers: [],
         botCompatibility: { protocolVersion: PROTOCOL_VERSION, incompatibleBots: 2, uncheckedBots: 1 },
       });
-      const advisory = node.querySelector('.bot-compatibility-warning');
-      check(advisory?.getAttribute('role') === 'note', 'bot compatibility is a persistent, non-interactive card advisory');
-      check(advisory.textContent.includes(t('connection.botCompatibilityMismatch', { count: 2, protocol: PROTOCOL_VERSION })), 'mismatch advisory names the actual server protocol');
-      check(advisory.textContent.includes(t('connection.botCompatibilityUnchecked', { count: 1, protocol: PROTOCOL_VERSION })), 'unverified bots remain distinct from incompatible bots');
-      check(node.textContent.includes(t('connection.voiceUsersCount', { count: 0 })), 'bot advisory never changes voice occupancy');
+      check(!node.querySelector('.bot-compatibility-warning'), 'incompatible and unverified bot advisories are not rendered on Home');
+      check(node.textContent.includes(t('connection.voiceUsersCount', { count: 0 })), 'compatibility metadata never changes voice occupancy');
       for (const botCompatibility of [undefined, null, {}, { protocolVersion: PROTOCOL_VERSION, incompatibleBots: -1, uncheckedBots: 2 },
         { protocolVersion: PROTOCOL_VERSION, incompatibleBots: 0, uncheckedBots: 0 }]) {
         home.renderServerPreview(node, 'preview.test', '5501', { voiceUserCount: 0, voiceUsers: [], botCompatibility });
@@ -670,22 +739,135 @@ async function setupHomeAutoEntrySmoke() {
       window.fetch = async () => new Response('{}', { status: 503 });
       home.render();
     },
-    async focusSwitch(surface) {
-      if (surface === 'settings' && !document.querySelector('.modal-backdrop--settings')) await settingsModal.open();
-      if (surface === 'home') settingsModal.close();
-      const container = surface === 'home' ? root : document.querySelector('.modal-backdrop--settings');
-      keyboardInput = container.querySelector('[data-server-auto-entry]');
+    async transitions(reduced) {
+      const server = saved('transition.test', 5601);
+      reset([server], false);
+      home.render();
+      selectSavedServer(server);
+      const mockRender = app.mainView.render;
+      const mockDestroy = app.mainView.destroy;
+      let layout, entry, initialOpacity;
+      app.mainView.render = () => {
+        renderRealMain();
+        layout = root.querySelector('.main-layout');
+        entry = layout?.getAnimations().find(animation => animation.animationName === 'monky-server-entry');
+        initialOpacity = layout ? Number(getComputedStyle(layout).opacity) : null;
+      };
+      app.mainView.destroy = destroyRealMain;
+      try {
+        await home.submitJoinForm();
+        check(!!layout, 'real authenticated navigation renders the server layout');
+        equal(matchMedia('(prefers-reduced-motion: reduce)').matches, reduced, 'native reduced-motion preference is exercised');
+        check(!root.querySelector('#btn-server-bots'), 'the server dropdown no longer duplicates the Bots settings entry');
+        root.querySelector('#server-dropdown-toggle').click();
+        check(root.querySelector('#server-dropdown-menu').style.display !== 'none', 'navigation remains interactive during the entry effect');
+        if (reduced) {
+          check(!entry, 'reduced motion disables the entry animation');
+          equal(initialOpacity, 1, 'reduced motion presents the server immediately');
+        } else {
+          check(!!entry && initialOpacity < 1, 'normal entry starts with a real fade instead of an abrupt replacement');
+          await entry.finished;
+          equal(getComputedStyle(layout).opacity, '1', 'the transition reaches full opacity');
+          equal(getComputedStyle(layout).transform, 'none', 'no transform remains after entry');
+          await until(() => !layout.classList.contains('main-layout--entering'), 'finished entry retained its animation class');
+          check(!layout.getAnimations().some(animation => animation.animationName === 'monky-server-entry'), 'completed entry cannot replay when system motion preferences change');
+        }
+        app.mainView.render();
+        check(!layout.classList.contains('main-layout--entering') && !entry, 'in-server rerenders do not replay the connection animation');
+        const session = sessions.getActive();
+        const store = session.serverStore;
+        const ownerId = store.ownerId;
+        const previousRoles = store.roles;
+        const previousUserRoles = store.userRoles;
+        const hostedStatus = window.api.hostServerStatus;
+        const { serverMonitorModal } = await import('/views/ServerMonitorModal.ts');
+        const openRemote = serverMonitorModal.openRemote;
+        const openLocal = serverMonitorModal.openLocal;
+        let localProbes = 0, monitoredSession = null;
+        window.api.hostServerStatus = async () => {
+          localProbes++;
+          return { isRunning: true, port: 9999, serverId: 'unrelated-local-server' };
+        };
+        serverMonitorModal.openRemote = async captured => { monitoredSession = captured; };
+        serverMonitorModal.openLocal = async () => { throw new Error('Remote menu must never open the local monitor'); };
+        const monitorButton = () => root.querySelector('#btn-server-monitor');
+        const setPermissions = permissions => {
+          store.ownerId = 'another-owner';
+          store.updateRoles([{
+            id: 'monitor-fixture-role', name: 'Monitor fixture', color: '#5865f2',
+            permissions, position: 1, isDefault: false,
+          }], [{ userId: store.currentUser.id, roleIds: ['monitor-fixture-role'] }]);
+        };
+        try {
+          check(monitorButton().style.display !== 'none', 'the remote server owner can monitor without hosting locally');
+          setPermissions(Permission.MANAGE_SERVER);
+          equal(monitorButton().style.display, 'none', 'managing a server alone does not grant monitor access even if another local server is running');
+          setPermissions(Permission.VIEW_SERVER_MONITOR);
+          check(monitorButton().style.display !== 'none', 'granting the dedicated permission updates the menu immediately');
+          monitorButton().click();
+          await tick();
+          check(monitoredSession === session, 'the remote menu passes the captured connected session to the modal');
+          setPermissions(0);
+          equal(monitorButton().style.display, 'none', 'revocation hides the monitor without reconnecting');
+          setPermissions(Permission.ADMINISTRATOR);
+          check(monitorButton().style.display !== 'none', 'administrators inherit remote monitor access');
+          store.currentUser.isBot = true;
+          bus.emit('server.updated');
+          equal(monitorButton().style.display, 'none', 'a bot principal cannot expose the human monitor even with administrator bits');
+          store.currentUser.isBot = false;
+          session.client.status = 'RECONNECTING';
+          bus.emit('network.status', 'RECONNECTING');
+          equal(monitorButton().style.display, 'none', 'a disconnected or recovering session cannot monitor');
+          session.client.status = 'CONNECTED';
+          bus.emit('network.status', 'CONNECTED');
+          check(monitorButton().style.display !== 'none', 'a recovered authorized session restores the entry');
+          equal(localProbes, 0, 'remote visibility never probes unrelated local hosting');
+        } finally {
+          window.api.hostServerStatus = hostedStatus;
+          serverMonitorModal.openRemote = openRemote;
+          serverMonitorModal.openLocal = openLocal;
+          store.currentUser.isBot = false;
+          session.client.status = 'CONNECTED';
+          store.ownerId = ownerId;
+          store.updateRoles(previousRoles, previousUserRoles);
+        }
+        if (!reduced) {
+          destroyRealMain();
+          home.render();
+          app.mainView.render();
+          const leaving = entry;
+          const completion = leaving.finished.then(() => 'finished', error => {
+            if (error.name !== 'AbortError') throw error;
+            return 'cancelled';
+          });
+          destroyRealMain();
+          home.render();
+          equal(await completion, 'cancelled', 'leaving cancels the old layout animation without timers or stale DOM');
+        }
+      } finally {
+        destroyRealMain();
+        app.mainView.render = mockRender;
+        app.mainView.destroy = mockDestroy;
+        sessions.removeAll();
+        await tick();
+        home.render();
+      }
+    },
+    async focusSwitch() {
+      settingsModal.close();
+      keyboardInput = root.querySelector('[data-server-auto-entry]');
       keyboardPrevious = keyboardInput.checked;
+      keyboardHost = home.selectedSavedHost;
       keyboardInput.scrollIntoView({ block: 'center', behavior: 'instant' });
       keyboardInput.focus();
-      check(document.activeElement === keyboardInput, `${surface}: switch is keyboard focusable`);
+      check(document.activeElement === keyboardInput, 'Home switch is keyboard focusable');
     },
     async checkKeyboard() {
       await tick();
       equal(keyboardInput.checked, !keyboardPrevious, 'native Space toggles the focused switch');
-      const address = JSON.parse(keyboardInput.dataset.serverAutoEntry);
-      equal(settings.isServerAutoEntryEnabled({ host: address[0], port: address[1] }), !keyboardPrevious, 'keyboard change persists');
-      equal(home.selectedSavedHost, null, 'keyboard toggles do not navigate the Home card');
+      equal(home.autoEntrySelected, !keyboardPrevious, 'native keyboard changes update the connection-form choice');
+      equal(settings.autoEntryServerKeys, [], 'a keyboard choice is not persisted before connection');
+      equal(home.selectedSavedHost, keyboardHost, 'keyboard toggles do not navigate the Home card');
     },
     cleanup() {
       for (const instance of services) instance.dispose();

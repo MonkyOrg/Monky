@@ -10,11 +10,13 @@ import {
   type BotInputResult,
   type ChatMessage,
   type CommandValues,
+  type CommandPresentation,
   type SlashCommand,
   type UserSummary,
 } from '@monky/shared';
-import { t, type TranslationKey } from '../i18n';
+import { getLanguage, t, type TranslationKey } from '../i18n';
 import type { AutocompleteInputs } from './commandAutocomplete';
+import { findCommandsByInputName, type CommandLocaleResolver } from './commandCatalog';
 export type BotInputField = BotFormField | {
   type: 'user' | 'autocomplete';
   name: string;
@@ -137,10 +139,12 @@ export type TypedCommand =
   | { kind: 'ambiguous'; commands: SlashCommand[]; text: string }
   | { kind: 'command'; command: SlashCommand; text: string };
 
-export function parseTypedCommand(text: string, commands: SlashCommand[]): TypedCommand {
+export function parseTypedCommand(
+  text: string, commands: SlashCommand[], localeFor: CommandLocaleResolver = () => getLanguage(),
+): TypedCommand {
   const match = /^\/([a-z0-9_-]+)(?:\s+([\s\S]*))?$/i.exec(text.trimStart());
   if (!match) return { kind: 'chat' };
-  const matches = commands.filter((command) => command.name === match[1].toLowerCase());
+  const matches = findCommandsByInputName(commands, match[1], localeFor);
   if (matches.length === 0) return { kind: 'unavailable' };
   const input = match[2] ?? '';
   if (matches.length > 1) return { kind: 'ambiguous', commands: matches, text: input };
@@ -204,6 +208,8 @@ export function botCommandMessage(payload: BotCommandMessagePayload): ChatMessag
   };
 }
 
-export function formatCommandContext(context: BotCommandContext): string {
-  return t('botChat.usedCommand', { nickname: context.invokerNickname, command: context.commandName });
+export function formatCommandContext(context: BotCommandContext, presentation?: CommandPresentation): string {
+  return t('botChat.usedCommand', {
+    nickname: context.invokerNickname, command: presentation?.displayName ?? context.commandName,
+  });
 }

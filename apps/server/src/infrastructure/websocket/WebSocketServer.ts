@@ -126,6 +126,8 @@ import { BotSelectorService } from '../../application/services/BotSelectorServic
 import { BotSelectorHandler } from './BotSelectorHandler';
 import { BotScreenHandler } from './BotScreenHandler';
 import { BotScreenService } from '../../application/services/BotScreenService';
+import type { ServerMonitorService } from '../../application/services/ServerMonitorService';
+import { ServerMonitorHandler } from './ServerMonitorHandler';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
 import { SignalingService } from '../../application/services/SignalingService';
 import { UserService } from '../../application/services/UserService';
@@ -206,6 +208,7 @@ export class WebSocketServer {
   private botInteractions: BotInteractionHandler;
   private botSelectors?: BotSelectorHandler;
   private botScreens?: BotScreenHandler;
+  private readonly serverMonitor?: ServerMonitorHandler;
   private botSettingsPermissionVersion = 0;
   private botScreenAccessVersion = 0;
 
@@ -225,7 +228,8 @@ export class WebSocketServer {
     private botService?: BotService,
     private commandRegistry: CommandRegistry = new CommandRegistry(),
     selectorService?: BotSelectorService,
-    private botSettings?: BotSettingsService
+    private botSettings?: BotSettingsService,
+    monitorService?: ServerMonitorService,
   ) {
     this.sfuManager.setHealthListener((sessionId, channelId, connectionHealth) => {
       const current = this.signalingService.getVoiceState(sessionId);
@@ -279,6 +283,14 @@ export class WebSocketServer {
         send: (session, message) => this.send(session.ws, message),
         authorizeInvocation: (session, invocationId, channelId) =>
           this.botInteractions.authorizeVoiceScreen(session, invocationId, channelId),
+        endInvocation: (session, invocationId) => this.botInteractions.endScreenInvocation(session, invocationId),
+      });
+    }
+    if (monitorService) {
+      this.serverMonitor = new ServerMonitorHandler(monitorService, this.permissionService, {
+        isCurrent: (session) => this.isCurrentSession(session),
+        accessVersion: () => this.botSettingsPermissionVersion,
+        send: (session, message) => this.send(session.ws, message),
       });
     }
     this.signalingService.setVoiceMembershipListener(() => this.voiceMembershipChanged());
@@ -753,6 +765,14 @@ export class WebSocketServer {
         this.disconnectBotScreens(session);
         break;
 
+      case MessageType.SERVER_MONITOR_GET:
+        if (this.serverMonitor) {
+          await this.serverMonitor.handle(session, payload, requestId);
+        } else {
+          this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, 'Server monitoring is unavailable.', requestId);
+        }
+        break;
+
       // ── Bot management (#569) ────────────────────────────────────────
       case MessageType.BOT_SETTINGS_LIST:
       case MessageType.BOT_SETTINGS_GET:
@@ -792,6 +812,7 @@ export class WebSocketServer {
       case MessageType.BOT_SCREEN_CREATE:
       case MessageType.BOT_SCREEN_UPDATE:
       case MessageType.BOT_SCREEN_CLOSE:
+      case MessageType.BOT_SCREEN_END:
       case MessageType.BOT_SCREEN_LIST:
       case MessageType.BOT_SCREEN_ACTION:
         if (this.botScreens) await this.botScreens.handle(session, type, payload, requestId);
@@ -3969,6 +3990,7 @@ export class WebSocketServer {
   public close(): Promise<void> {
     if (!this.closing) {
       this.closing = true;
+      this.serverMonitor?.close();
       this.signalingService.setVoiceMembershipListener(undefined);
       for (const session of this.sessions.values()) {
         session.botVoiceJoinAttempt = undefined;

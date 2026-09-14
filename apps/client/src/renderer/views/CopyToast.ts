@@ -2,15 +2,15 @@ import { escapeHtml } from '../utils/html';
 
 let clearActiveToast: (() => void) | null = null;
 
-/** The same confirmation for message and version copies; never stack toasts. */
-export function showCopyToast(message: string): () => void {
+/** Transient feedback shares one slot; never stack toasts. */
+function showToast(message: string, icon: 'check_circle' | 'info', durationMs: number): () => void {
   clearActiveToast?.();
   const toast = document.createElement('div');
   toast.className = 'chat-copy-toast';
   toast.setAttribute('role', 'status');
   toast.setAttribute('aria-atomic', 'true');
   toast.innerHTML = `
-    <span class="material-symbols-outlined md-18" aria-hidden="true">check_circle</span>
+    <span class="material-symbols-outlined md-18" aria-hidden="true">${icon}</span>
     <span class="chat-copy-toast-label">${escapeHtml(message)}</span>
   `;
   document.body.appendChild(toast);
@@ -19,7 +19,15 @@ export function showCopyToast(message: string): () => void {
     toast.remove();
     if (clearActiveToast === clear) clearActiveToast = null;
   };
-  const timeout = window.setTimeout(clear, 1600);
+  const timeout = window.setTimeout(clear, durationMs);
   clearActiveToast = clear;
   return clear;
+}
+
+export function showCopyToast(message: string): () => void {
+  return showToast(message, 'check_circle', 1600);
+}
+
+export function showInfoToast(message: string): () => void {
+  return showToast(message, 'info', 3200);
 }

@@ -14,6 +14,7 @@ export type { QualityPresetType, QualityProfile } from './constants.js';
 export * from './models.js';
 export * from './voiceHealth.js';
 export * from './releaseCompatibility.js';
+export * from './serverMonitor.js';
 export * from './botVoice.js';
 export * from './protocol.js';
 export * from './validators.js';

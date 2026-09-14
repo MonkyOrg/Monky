@@ -25,7 +25,7 @@ if (!process.versions.electron) {
 } else {
   const assert = require('node:assert/strict');
   const { app, BrowserWindow, ipcMain } = require('electron');
-  const { SHORTCUT_IPC } = require('@monky/shared');
+  const { SHORTCUT_IPC, Permission } = require('@monky/shared');
   const { bindBotScreenIsolation, installBotScreenRequestGuard } = require('../dist-electron/main/botScreenIsolation.js');
   app.setPath('userData', process.env.MONKY_SCREEN_PROFILE);
   let vite;
@@ -60,11 +60,27 @@ if (!process.versions.electron) {
     }
     throw new Error(`Timed out: ${description}`);
   };
-  const run = (window, script) => window.webContents.executeJavaScript(script, true);
+  const run = async (window, script) => {
+    try { return await window.webContents.executeJavaScript(script, true); }
+    catch (error) {
+      console.error('Failed miniapp renderer snippet:', script.slice(0, 1500));
+      throw error;
+    }
+  };
   const frames = (window) => window.webContents.mainFrame.frames.filter((frame) => frame.url.startsWith('about:srcdoc'));
   const gameFrame = async (window, id = 'game') => {
-    for (const frame of frames(window)) if (await frame.executeJavaScript('window.gameId') === id) return frame;
-    return undefined;
+    let initializedFrame;
+    await waitFor(async () => {
+      for (const frame of frames(window)) {
+        if (await frame.executeJavaScript('window.gameId') === id) {
+          initializedFrame = frame;
+          return true;
+        }
+      }
+      return false;
+    }, `initialized ${id} frame`);
+    assert.ok(initializedFrame);
+    return initializedFrame;
   };
 
   app.whenReady().then(async () => {
@@ -114,7 +130,8 @@ if (!process.versions.electron) {
       await window.loadURL(url);
       window.webContents.debugger.attach('1.3');
       await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
-      await run(window, `(${setupVoiceStage.toString()})(${JSON.stringify(id)},${JSON.stringify(locale)})`);
+      const setupError = await run(window, `(${setupVoiceStage.toString()})(${JSON.stringify(id)},${JSON.stringify(locale)},${Permission.ADMINISTRATOR}).then(() => null, error => ({ message: String(error), stack: error.stack }))`);
+      assert.equal(setupError, null, JSON.stringify(setupError));
       assert.equal(frames(window).length, 0);
       assert.equal(await run(window, 'window.screenFixture.listRequests()'), 0);
       assert.equal(await run(window, '!!document.querySelector("#chat-bot-screens, .bot-screen-cards, .bot-screen-card")'), false);
@@ -132,6 +149,7 @@ if (!process.versions.electron) {
     assert.equal(await run(aliceWindow, '!!document.querySelector("#stage-participants-area .stage-focused-main[data-kind=screen]") && !document.querySelector("#stage-participants-area [data-kind=screen] .screen-locked")'), true);
     assert.equal(frames(aliceWindow).length, 0, 'Watching a screen does not opt into miniapps');
     assert.equal(await run(aliceWindow, 'document.querySelectorAll("[data-bot-screen-id]").length'), 4, 'Every room miniapp has a persistent stage tile before opt-in');
+    assert.equal(await run(aliceWindow, '!document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").hidden'), true, 'The creator can end a miniapp before opening its iframe');
     assert.equal(await run(aliceWindow, 'document.querySelectorAll("#stage-participants-area [data-bot-screen-slot]").length'), 4, 'Miniapps participate in the ordinary stage filmstrip');
     assert.equal(await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=open]").textContent.includes("Abrir miniapp")'), true);
     await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=fullscreen]").click()');
@@ -147,6 +165,11 @@ if (!process.versions.electron) {
     for (const window of windows) await waitFor(() => frames(window).length === 1, 'opted-in stage frame');
     let alice = await gameFrame(aliceWindow);
     let spectator = await gameFrame(spectatorWindow);
+    assert.equal(await run(spectatorWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").hidden'), true, 'Ordinary viewers cannot end the shared miniapp');
+    await run(spectatorWindow, 'window.screenFixture.setAdmin(true)');
+    assert.equal(await run(spectatorWindow, '!document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").hidden'), true, 'An administrator gains the control immediately');
+    await run(spectatorWindow, 'window.screenFixture.setAdmin(false); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").click()');
+    assert.equal(await run(spectatorWindow, 'document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").hidden && !window.screenFixture.sent.some(entry => entry.type === "BOT_SCREEN_END")'), true, 'Revocation hides the control and stale/programmatic clicks cannot send END');
     await waitFor(async () => await alice.executeJavaScript('document.querySelector("#state")?.textContent === "0"'), 'game bootstrap');
     for (const window of windows) {
       assert.equal(await run(window, '!!document.querySelector(".voice-stage-container #stage-content-area .stage-bot-screen-card iframe")'), true);
@@ -264,6 +287,7 @@ if (!process.versions.electron) {
     assert.equal(await run(aliceWindow, 'document.querySelectorAll("[data-bot-screen-id]").length'), 4, 'Leaving a view retains its tile');
     assert.equal(await run(aliceWindow, '!document.querySelector("[data-bot-screen-id=second] iframe") && !document.querySelector("[data-bot-screen-id=second] .bot-screen-placeholder").hidden'), true);
     assert.equal(await run(aliceWindow, 'window.screenFixture.sent.some(entry => entry.type === "BOT_SCREEN_CLOSE")'), false);
+    assert.equal(await run(aliceWindow, 'window.screenFixture.sent.some(entry => entry.type === "BOT_SCREEN_END")'), false, 'Local Leave never sends shared END');
     assert.equal(await run(aliceWindow, '!!document.querySelector("[data-watch-bot-screen=second]")'), false, 'Explicit exit does not immediately invite the viewer back');
     await run(aliceWindow, 'window.screenFixture.resolveReload(); window.screenFixture.redraw(); window.screenFixture.setLanguage("pt-BR")');
     assert.equal(await run(aliceWindow, '!!document.querySelector("[data-watch-bot-screen=second]")'), false, 'Pending snapshots, redraws and locale changes preserve explicit exit');
@@ -344,18 +368,96 @@ if (!process.versions.electron) {
     await run(aliceWindow, 'window.screenFixture.reconnect()');
     await waitFor(async () => await run(aliceWindow, 'document.querySelectorAll("[data-watch-bot-screen]").length === 4'), 'reconnected list');
     assert.equal(frames(aliceWindow).length, 0);
+    const endedSnapshot = await run(aliceWindow, 'window.screenFixture.snapshot()');
+    await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]").click(); window.screenFixture.delayReload(); window.screenFixture.delayEnd(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").click(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").click()');
+    await waitFor(async () => await run(aliceWindow, 'window.screenFixture.endPending()'), 'pending explicit end');
+    assert.equal(await run(aliceWindow, 'document.querySelector("[data-bot-screen-action=end]").disabled'), true);
+    assert.equal(await run(aliceWindow, 'window.screenFixture.sent.filter(entry => entry.type === "BOT_SCREEN_END").length'), 1, 'Duplicate End clicks are coalesced');
+    await run(aliceWindow, 'window.screenFixture.resolveEnd(); window.screenFixture.resolveReload()');
+    await waitFor(() => frames(aliceWindow).length === 0, 'END destroys the iframe and message ports');
+    await waitFor(async () => await run(aliceWindow, '!document.querySelector("[data-bot-screen-id=game], [data-watch-bot-screen=game]") && window.screenFixture.cachedScreens() === 3'), 'END invalidates the stage tile, invitation and delayed list');
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".chat-copy-toast")'), false, 'The local End action does not notify its initiator again');
+    const ended = await run(aliceWindow, 'window.screenFixture.lastRemoval()');
+    assert.deepEqual(ended, {
+      id: 'game', instanceId: endedSnapshot.instanceId, channelId: 'voice', reason: 'ended', endedByUserId: 'alice',
+    });
+    const spectatorTitle = await run(spectatorWindow, 'window.screenFixture.snapshot().title');
+    await run(spectatorWindow, 'document.querySelector("[data-bot-screen-id=game]").requestFullscreen()');
+    await run(spectatorWindow, `window.screenFixture.remove(${JSON.stringify(ended)})`);
+    await waitFor(() => frames(spectatorWindow).length === 0, 'authoritative removal tears down another viewer');
+    await waitFor(async () => await run(spectatorWindow, '!document.fullscreenElement && !!document.querySelector(".chat-copy-toast")'), 'an ended fullscreen miniapp leaves a visible viewer notice');
+    assert.equal(await run(spectatorWindow, 'document.querySelector(".chat-copy-toast-label").textContent'), `The miniapp "${spectatorTitle}" has ended.`);
+    assert.equal(await run(spectatorWindow, 'document.querySelector(".chat-copy-toast").getAttribute("role")'), 'status');
+    await run(spectatorWindow, 'document.querySelector(".chat-copy-toast").dataset.noticeMarker = "first"');
+    await run(spectatorWindow, `window.screenFixture.remove(${JSON.stringify(ended)})`);
+    assert.equal(await run(spectatorWindow, 'document.querySelector(".chat-copy-toast").dataset.noticeMarker'), 'first', 'Duplicate delivery cannot replace or restart a notice');
+    assert.equal(await run(spectatorWindow, '!!document.querySelector("[data-bot-screen-id=game], [data-watch-bot-screen=game]")'), false);
+    const replacement = { ...endedSnapshot, instanceId: 'fresh-instance', createdAt: endedSnapshot.createdAt + 1, revision: 0 };
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(replacement)})`);
+    assert.equal(frames(aliceWindow).length, 0, 'A replacement with the same logical ID needs fresh opt-in');
+    await run(aliceWindow, 'window.retiredMiniappInvitation = document.querySelector("[data-watch-bot-screen=game]")');
+    const currentReplacement = { ...replacement, instanceId: 'current-instance', createdAt: replacement.createdAt + 1 };
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(currentReplacement)})`);
+    assert.equal(await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]") !== window.retiredMiniappInvitation'), true, 'Replacing an instance retires its invitation even when the title is unchanged');
+    await run(aliceWindow, 'window.retiredMiniappInvitation.click(); delete window.retiredMiniappInvitation');
+    assert.equal(await run(aliceWindow, 'document.querySelectorAll("[data-bot-screen-id=game] iframe").length'), 0, 'A stale invitation cannot opt into the new instance');
+    await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=game]").click()');
+    await waitFor(() => frames(aliceWindow).length === 1, 'open new instance');
+    const replacementFrame = await gameFrame(aliceWindow);
+    await run(aliceWindow, `window.screenFixture.remove(${JSON.stringify(ended)})`);
+    assert.equal(await gameFrame(aliceWindow), replacementFrame, 'A late old-instance removal cannot close the replacement');
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".chat-copy-toast")'), false, 'A stale instance cannot produce a viewer notice');
+    await run(aliceWindow, 'window.screenFixture.delayEnd(); document.querySelector("[data-bot-screen-id=game] [data-bot-screen-action=end]").click()');
+    await waitFor(async () => await run(aliceWindow, 'window.screenFixture.endPending()'), 'background end pending');
+    await run(aliceWindow, 'window.screenFixture.browseOtherServer(); window.screenFixture.resolveEnd()');
+    await waitFor(async () => await run(aliceWindow, 'window.screenFixture.cachedScreens() === 3'), 'background END reaches the owning store');
+    assert.equal(await run(aliceWindow, 'window.screenFixture.otherServerHasGame() && document.querySelector("#server-name-title").textContent === "Other server"'), true, 'Late END never removes another server instance or navigates away');
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".chat-copy-toast")'), false, 'Background teardown does not leak a notice into another server');
+    await run(aliceWindow, 'window.screenFixture.setLanguage("pt-BR")');
+    const noticeScreen = { ...endedSnapshot, id: 'toast-check', instanceId: 'notice-pt',
+      title: '<b>Jogo & aviso</b>', createdAt: endedSnapshot.createdAt + 3, revision: 0 };
+    await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(noticeScreen)})`);
+    await waitFor(async () => await run(aliceWindow, '!!document.querySelector("[data-watch-bot-screen=toast-check]")'), 'viewer notice fixture invitation');
+    await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=toast-check]").click()');
+    await waitFor(() => frames(aliceWindow).length === 1, 'viewer notice fixture opened');
+    const noticeEnd = { id: noticeScreen.id, instanceId: noticeScreen.instanceId, channelId: 'voice',
+      reason: 'ended', endedByUserId: 'alice' };
+    await run(aliceWindow, `window.screenFixture.remove(${JSON.stringify(noticeEnd)})`);
+    assert.equal(await run(aliceWindow, 'document.querySelector(".chat-copy-toast-label")?.textContent'),
+      `O miniapp "${noticeScreen.title}" foi encerrado.`, 'Another device ending the same account miniapp still notifies this viewer in PT-BR');
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".chat-copy-toast b")'), false, 'Miniapp titles cannot inject toast markup');
+    await run(aliceWindow, 'window.screenFixture.browseOtherServer()');
+    assert.equal(await run(aliceWindow, '!!document.querySelector(".chat-copy-toast")'), false, 'Leaving the stage clears its toast and timer');
+    for (const mode of ['invitation-only', 'local-leave', 'bot-closed']) {
+      const screen = { ...noticeScreen, instanceId: mode, createdAt: noticeScreen.createdAt + 1 };
+      await run(aliceWindow, `window.screenFixture.receive(${JSON.stringify(screen)})`);
+      if (mode !== 'invitation-only') {
+        await run(aliceWindow, 'document.querySelector("[data-watch-bot-screen=toast-check]").click()');
+        await waitFor(() => frames(aliceWindow).length === 1, 'non-notifying removal fixture opened');
+      }
+      if (mode === 'local-leave') {
+        await run(aliceWindow, 'document.querySelector("[data-bot-screen-id=toast-check] [data-bot-screen-action=close]").click()');
+      }
+      const removed = mode === 'bot-closed'
+        ? { id: screen.id, instanceId: screen.instanceId, channelId: 'voice', reason: 'closed' }
+        : { ...noticeEnd, instanceId: screen.instanceId };
+      await run(aliceWindow, `window.screenFixture.remove(${JSON.stringify(removed)})`);
+      assert.equal(await run(aliceWindow, '!!document.querySelector(".chat-copy-toast")'), false, `${mode} does not notify a viewer`);
+      await waitFor(() => frames(aliceWindow).length === 0, 'non-notifying fixture teardown');
+    }
+    await waitFor(async () => await run(spectatorWindow, '!document.querySelector(".chat-copy-toast")'), 'viewer notice expires automatically');
     for (const window of windows) {
       assert.deepEqual(await run(window, 'window.screenFixture.errors'), [], 'No unhandled renderer lifecycle errors');
       assert.equal(await run(window, 'window.screenFixture.destroy()'), true, 'view and lifecycle listeners are removed');
       await waitFor(() => frames(window).length === 0, 'final teardown');
     }
     assert.deepEqual(nativeErrors, [], 'No native client-log errors during stage lifecycle');
-    console.log('Voice stage DOM: focused/idempotent invitations, miniapp-only hint removal, native miniapp/stage/camera/screen fullscreen-to-grid, rejected/stale fullscreen exits, four persistent placeholders, live frames/locale/seats, sandbox, background isolation and teardown passed.');
+    console.log('Voice stage DOM: creator/admin END, live permission revocation, duplicate/delayed END, shared removal, stale-instance and background isolation; existing local leave/watch, fullscreen, locale, seats, sandbox and teardown passed.');
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
 }
 
-async function setupVoiceStage(id, locale) {
+async function setupVoiceStage(id, locale, adminPermission) {
   const errors = [];
   const onError = event => errors.push(event.message);
   const onRejection = event => errors.push(String(event.reason));
@@ -382,14 +484,15 @@ async function setupVoiceStage(id, locale) {
   const seed = (entry, self, name) => {
     entry.serverStore.setServerDetails({
       id: entry.key, name, createdAt: 1, maxUsers: 10, channels: structuredClone(channels), members: [self, remote],
-      knownMembers: [self, remote], voiceStates: {}, roles: [], userRoles: [], ownerId: self.id, myPermissions: 0xffffffff,
+      knownMembers: [self, remote], voiceStates: {}, roles: [], userRoles: [], ownerId: 'server-owner', myPermissions: 0xffffffff,
     }, self);
     entry.participants.setUsers([self, remote]);
   };
   seed(session, user, 'Voice server');
   seed(other, { ...user, id: 'foreign-user', sessionId: 'foreign-device' }, 'Other server');
   const screens = new Map(['game', 'second', 'third', 'fourth'].map((screenId) => [screenId, {
-    id: screenId, botId: 'bot', channelId: 'voice', title: screenId === 'game' ? 'Voice game <not markup>' : screenId,
+    id: screenId, instanceId: `${screenId}-instance`, creatorUserId: 'alice',
+    botId: 'bot', channelId: 'voice', title: screenId === 'game' ? 'Voice game <not markup>' : screenId,
     revision: 0, createdAt: 1, state: { count: 0, players: ['alice', 'bob'] },
     html: `<style>body{background:#162033;color:white;font:16px sans-serif;margin:12px}</style><p id="label"></p><p id="state"></p><script>
       window.gameId = ${JSON.stringify(screenId)}; window.gameToken = Math.random(); window.renders = 0;
@@ -405,6 +508,9 @@ async function setupVoiceStage(id, locale) {
   let requests = 0;
   let holdList = false;
   let resolveList;
+  let holdEnd = false;
+  let resolveEnd;
+  let lastRemoval;
   let safeNotifications = true;
   const actions = [];
   const sent = [];
@@ -429,6 +535,19 @@ async function setupVoiceStage(id, locale) {
       }
       return result;
     }
+    if (type === 'BOT_SCREEN_END') {
+      sent.push({ type, payload: structuredClone(payload) });
+      if (holdEnd) {
+        holdEnd = false;
+        await new Promise(resolve => { resolveEnd = () => { resolveEnd = undefined; resolve(); }; });
+      }
+      const screen = screens.get(payload.id);
+      if (!screen || screen.instanceId !== payload.instanceId) throw new Error('Screen instance not found.');
+      if (id !== screen.creatorUserId && !session.serverStore.isAdminMember(id)) throw new Error('Permission denied.');
+      const removed = { id: screen.id, instanceId: screen.instanceId, channelId: screen.channelId, reason: 'ended', endedByUserId: id };
+      remove(removed);
+      return removed;
+    }
     if (type !== 'BOT_SCREEN_ACTION') throw new Error(`Unexpected request: ${type}`);
     actions.push({ actor: id, ...payload });
     let screen = screens.get(payload.id);
@@ -452,6 +571,11 @@ async function setupVoiceStage(id, locale) {
     screens.set(snapshot.id, snapshot);
     routing.routeSessionEvent(session.key, 'message.BOT_SCREEN_SNAPSHOT', () => appEvents.emit('message.BOT_SCREEN_SNAPSHOT', snapshot));
   };
+  const remove = (removed) => {
+    if (screens.get(removed.id)?.instanceId === removed.instanceId) screens.delete(removed.id);
+    lastRemoval = removed;
+    routing.routeSessionEvent(session.key, 'message.BOT_SCREEN_REMOVED', () => appEvents.emit('message.BOT_SCREEN_REMOVED', removed));
+  };
   const join = (channelId) => {
     session.participants.updateVoiceState(state(user, channelId));
     session.participants.updateVoiceState(state(remote, channelId, { isCameraOn: true, isScreenSharing: true, screenShareIds: ['generated-share'] }));
@@ -459,7 +583,18 @@ async function setupVoiceStage(id, locale) {
     appEvents.emit('participants.updated');
   };
   window.screenFixture = {
-    actions, sent, join, receive, errors,
+    actions, sent, join, receive, remove, errors,
+    lastRemoval: () => structuredClone(lastRemoval),
+    otherServerHasGame: () => !!other.botScreenStore.get('game'),
+    delayEnd() { holdEnd = true; },
+    endPending: () => typeof resolveEnd === 'function',
+    resolveEnd() { resolveEnd(); },
+    setAdmin(enabled) {
+      session.serverStore.roles = enabled ? [{ id: 'admin-role', name: 'Admin', color: null, position: 1, permissions: adminPermission, isDefault: false, createdAt: 1 }] : [];
+      session.serverStore.userRoles = enabled ? [{ userId: id, roleIds: ['admin-role'] }] : [];
+      session.serverStore.recalculateMyPermissions();
+      appEvents.emit('server.roles_updated');
+    },
     listRequests: () => requests,
     screenCount: () => screens.size,
     cachedScreens: () => session.botScreenStore.list('voice').length,

@@ -73,24 +73,34 @@ export const botScreenCreateSchema = z.object({
   invocationId: id.optional(),
 }).strict();
 export const botScreenPatchSchema = z.object({ state: botScreenStateSchema, expectedRevision: revision }).strict();
-export const botScreenUpdateSchema = botScreenPatchSchema.extend({ id }).strict();
 export const botScreenIdSchema = z.object({ id }).strict();
+/** A logical ID can be reused, but operations must address the exact server-created instance. */
+export const botScreenRefSchema = botScreenIdSchema.extend({ instanceId: id }).strict();
+export const botScreenUpdateSchema = botScreenPatchSchema.merge(botScreenRefSchema).strict();
 export const botScreenListSchema = z.object({ channelId: id }).strict();
 export const botScreenSchema = botScreenCreateSchema.omit({ invocationId: true }).extend({
-  id, botId: id, revision, createdAt: z.number().int().nonnegative().safe(),
+  id, instanceId: id, botId: id, creatorUserId: id.optional(), revision,
+  createdAt: z.number().int().nonnegative().safe(),
 }).strict();
 export const botScreenListResultSchema = z.object({
   channelId: id, screens: z.array(botScreenSchema).max(BOT_SCREEN_LIMITS.activePerChannel),
 }).strict();
 export const botScreenActionSchema = z.object({
-  id, action: z.string().min(1).max(64).regex(/^[a-zA-Z][a-zA-Z0-9_.:-]*$/),
+  id, instanceId: id, action: z.string().min(1).max(64).regex(/^[a-zA-Z][a-zA-Z0-9_.:-]*$/),
   payload: botScreenActionJsonSchema, revision, actionId: id,
 }).strict();
 export const botScreenActionEventSchema = botScreenActionSchema.omit({ id: true }).extend({
   screenId: id, channelId: id, userId: id, userNickname: z.string().min(1).max(128),
 }).strict();
-export const botScreenRemovedSchema = z.object({ id, channelId: id }).strict();
+export const botScreenRemovedSchema = z.discriminatedUnion('reason', [
+  botScreenRefSchema.extend({ channelId: id, reason: z.literal('ended'), endedByUserId: id }).strict(),
+  botScreenRefSchema.extend({ channelId: id, reason: z.literal('closed') }).strict(),
+  botScreenRefSchema.extend({ channelId: id, reason: z.literal('access_revoked') }).strict(),
+  botScreenRefSchema.extend({ channelId: id, reason: z.literal('bot_disconnected') }).strict(),
+  botScreenRefSchema.extend({ channelId: id, reason: z.literal('view_revoked') }).strict(),
+]);
 export type BotScreen = z.infer<typeof botScreenSchema>;
+export type BotScreenRef = z.infer<typeof botScreenRefSchema>;
 export type BotScreenCreate = z.infer<typeof botScreenCreateSchema>;
 export type BotScreenPatch = z.infer<typeof botScreenPatchSchema>;
 export type BotScreenAction = z.infer<typeof botScreenActionSchema>;

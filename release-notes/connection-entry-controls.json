@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "A entrada autom\u00e1tica tem um \u00fanico switch junto ao bot\u00e3o de entrar e lembra s\u00f3 o servidor escolhido. A transi\u00e7\u00e3o ao entrar ficou mais suave, e os avisos de bots incompat\u00edveis ficam nas configura\u00e7\u00f5es do servidor.",
+  "en": "Automatic entry has a single switch next to Join Server and remembers only the chosen server. Entering a server is smoother, and incompatible-bot warnings now stay in Server Settings."
+}

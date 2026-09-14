@@ -8,6 +8,7 @@ const path = require('node:path');
 const { WebSocketServer } = require('ws');
 const {
   BotClient, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, resolveBotSettingsValues,
+  getCommandPresentation, localizeCommand,
 } = require('../dist/index.js');
 
 const form = {
@@ -154,7 +155,10 @@ test('localized metadata preserves canonical identifiers and contexts normalize 
   bot.command({
     name: 'query', description: 'Search for a sound',
     options: [{ name: 'audio', label: 'Sound', description: 'Search', type: 'string', autocomplete: true }],
-    localizations: { 'pt-BR': { description: 'Pesquise um áudio', options: { audio: { label: 'Áudio', placeholder: 'Pesquisar' } } } },
+    localizations: {
+      'pt-BR': { name: 'buscar', aliases: ['som'], description: 'Pesquise um áudio', options: { audio: { label: 'Áudio', placeholder: 'Pesquisar' } } },
+      en: { name: 'search', aliases: ['sound'] },
+    },
     autocomplete: (ctx) => { locales.push(ctx.locale); return [{ label: 'Sound', value: 'opaque' }]; },
     audioPreview: (ctx) => { locales.push(ctx.locale); return { bytes: new Uint8Array([1, 2, 3]), mimeType: 'audio/ogg' }; },
     handler: (ctx) => { locales.push(ctx.locale); ctx.reply(ctx.locale === 'en' ? 'English response' : 'Resposta em português'); },
@@ -166,6 +170,13 @@ test('localized metadata preserves canonical identifiers and contexts normalize 
   assert.equal(command.options[0].name, 'audio');
   assert.equal(command.options[0].label, 'Sound');
   assert.equal(command.localizations['pt-BR'].options.audio.label, 'Áudio');
+  assert.deepEqual(getCommandPresentation(command, 'pt-BR'), {
+    canonicalName: 'query', displayName: 'buscar', inputNames: ['query', 'buscar', 'som'],
+  });
+  assert.deepEqual(getCommandPresentation(command, 'en-US'), {
+    canonicalName: 'query', displayName: 'search', inputNames: ['query', 'search', 'sound'],
+  });
+  assert.equal(localizeCommand(command, 'pt-BR').name, 'query');
   server.invoke('locale-invocation', 'query', { locale: 'en-US' });
   assert.equal((await server.next(MessageType.COMMAND_RESPONSE)).payload.content, 'English response');
   await server.next(MessageType.COMMAND_FINISH);
@@ -176,6 +187,73 @@ test('localized metadata preserves canonical identifiers and contexts normalize 
     { commandName: 'query', optionName: 'audio', resourceId: 'opaque', locale: 'en-US' }, 'locale-preview');
   assert.equal((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload.status, 'ok');
   assert.deepEqual(locales, ['en', 'en', 'en']);
+  assert.deepEqual(errors, []);
+});
+
+test('localized command input collisions are rejected atomically by SDK command registration and replacement', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const play = {
+    name: 'play', description: 'Play',
+    localizations: { 'pt-BR': { name: 'tocar', aliases: ['musica'] } },
+    handler: ctx => ctx.reply('Original handler'),
+  };
+  bot.command(play);
+  for (const candidate of [
+    { name: 'tocar', description: 'Canonical shadow' },
+    { name: 'stop', description: 'Localized name collision', localizations: { 'pt-BR': { name: 'tocar' } } },
+    { name: 'stop', description: 'Alias collision', localizations: { 'pt-BR': { aliases: ['musica'] } } },
+    { name: 'stop', description: 'Canonical alias shadow', localizations: { en: { aliases: ['play'] } } },
+  ]) assert.throws(() => bot.command({ ...candidate, handler() {} }), /ambiguous/);
+  bot.command({ name: 'stop', description: 'Stop', handler() {} });
+  assert.throws(() => bot.command({
+    ...play, localizations: { en: { name: 'stop' } }, handler() {},
+  }), /ambiguous/);
+  bot.command({
+    name: 'first', description: 'First', localizations: { 'pt-BR': { aliases: ['shared'] } }, handler() {},
+  });
+  bot.command({
+    name: 'second', description: 'Second', localizations: { en: { aliases: ['shared'] } }, handler() {},
+  });
+  bot.connect();
+  const registration = await server.next(MessageType.COMMAND_REGISTER);
+  assert.deepEqual(registration.payload.commands.map(command => command.name), ['play', 'stop', 'first', 'second']);
+  assert.deepEqual(registration.payload.commands[0].localizations, play.localizations);
+  server.invoke('collision-handler', 'play');
+  assert.equal((await server.next(MessageType.COMMAND_RESPONSE)).payload.content, 'Original handler');
+  await server.next(MessageType.COMMAND_FINISH);
+  assert.deepEqual(errors, []);
+});
+
+test('SDK help replies explicitly use localized display names and descriptions without userSettings locale', async (t) => {
+  const server = await makeSettingsServer(t);
+  const { bot, errors } = makeBot(t, server);
+  bot.settings({ user: { title: 'Custom preferences', fields: [{ name: 'locale', label: 'Legacy value', type: 'text' }] } });
+  const commands = [{
+    name: 'play', description: 'Play a track',
+    localizations: { 'pt-BR': { name: 'tocar', aliases: ['musica'], description: 'Reproduzir uma faixa' } },
+    handler() {},
+  }];
+  commands.forEach(command => bot.command(command));
+  bot.command({
+    name: 'help', description: 'Help',
+    handler: ctx => ctx.reply(commands.map(command =>
+      `/${getCommandPresentation(command, ctx.locale).displayName} — ${localizeCommand(command, ctx.locale).description}`
+    ).join('\n')),
+  });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  await hydrateSettings(server, { schemaRevision: 0, revision: 0, values: {} }, 2);
+  for (const [locale, content] of [['pt-BR', '/tocar — Reproduzir uma faixa'], ['en-US', '/play — Play a track']]) {
+    server.invoke(`help-${locale}`, 'help', {
+      locale, settings: { schemaRevision: 0, serverRevision: 0, server: {}, user: { locale: locale === 'pt-BR' ? 'en' : 'pt-BR' } },
+    });
+    const response = await server.next(MessageType.COMMAND_RESPONSE);
+    assert.equal(response.payload.content, content);
+    assert.equal(response.payload.ephemeral, true);
+    await server.next(MessageType.COMMAND_FINISH);
+  }
+  assert.equal(commands[0].name, 'play');
   assert.deepEqual(errors, []);
 });
 
@@ -192,7 +270,8 @@ test('miniapp context creation targets the live voice room, never the command te
   assert.notEqual(request.payload.channelId, f.ctx.channelId);
   assert.notEqual(request.payload.channelId, f.ctx.invokerVoiceChannelId);
   f.server.send(MessageType.BOT_SCREEN_SNAPSHOT, {
-    id: 'game', channelId: 'current-voice', title: 'Game', html: '<p>Game</p>', state: {},
+    id: 'game', instanceId: 'game-instance', creatorUserId: f.ctx.invokerId,
+    channelId: 'current-voice', title: 'Game', html: '<p>Game</p>', state: {},
     botId: 'bot-one', revision: 0, createdAt: 1,
   }, request.requestId);
   assert.equal((await created).channelId, 'current-voice');
@@ -1649,7 +1728,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 16);
+  assert.equal(PROTOCOL_VERSION, 17);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

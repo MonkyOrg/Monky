@@ -1,6 +1,6 @@
-import { LIMITS, type BotFormValues, type UserSummary } from '@monky/shared';
+import { LIMITS, getCommandPresentation, localizeCommand, type BotLocale, type BotFormValues, type UserSummary } from '@monky/shared';
 import type { CommandDraft } from '../stores/chatStore';
-import { t } from '../i18n';
+import { getLanguage, t } from '../i18n';
 import { getAvatarUrl } from '../utils/avatar';
 import { escapeHtml } from '../utils/html';
 import {
@@ -114,7 +114,10 @@ ${escapeHtml(text)}</textarea>`;
 
 export function renderCompactCommand(
   draft: CommandDraft, channelId: string, members: UserSummary[], canSend: boolean, available: boolean, voiceError?: string,
+  locale: BotLocale = getLanguage(),
 ): string {
+  draft = { ...draft, command: localizeCommand(draft.command, locale) };
+  const presentation = getCommandPresentation(draft.command, locale);
   const fields = visibleCommandFields(draft.command, draft.visibleOptionalNames);
   const optionalCount = (draft.command.options ?? []).filter((option) =>
     !option.required && !draft.visibleOptionalNames.includes(option.name)).length;
@@ -127,9 +130,10 @@ export function renderCompactCommand(
     draft.visibleOptionalNames
   ).success;
   const hint = fields[0] ? commandParameterHint(fields[0]) : draft.command.description;
-  return `<form class="bot-compact-command-form" data-command-form novalidate>
+  return `<form class="bot-compact-command-form" data-command-form
+    data-bot-id="${escapeHtml(draft.command.botId)}" data-command-name="${escapeHtml(draft.command.name)}" novalidate>
     <div class="bot-command-hint">
-      <strong data-parameter-hint-name>${escapeHtml(fields[0] ? commandParameterLabel(draft.command, fields[0].name) : `/${draft.command.name}`)}</strong>
+      <strong data-parameter-hint-name>${escapeHtml(fields[0] ? commandParameterLabel(draft.command, fields[0].name) : `/${presentation.displayName}`)}</strong>
       <span data-parameter-hint-description>${escapeHtml(hint)}</span>
       <span class="bot-private-cue" title="${t('botChat.private')}"><span class="material-symbols-outlined md-14">lock</span><span>${t('botChat.private')}</span></span>
       <button type="button" class="bot-command-close" data-bot-action="cancel-command" title="${t('botChat.cancelCommand')}"
@@ -138,7 +142,7 @@ export function renderCompactCommand(
     <div class="bot-inline-command">
       <img class="bot-command-avatar" src="${escapeHtml(getAvatarUrl(draft.command.botAvatarUrl))}" alt=""
         title="${escapeHtml(t('botChat.commandFrom', { bot: draft.command.botName }))}" data-fallback="avatar">
-      <span class="bot-command-token"><strong>/${escapeHtml(draft.command.name)}</strong><small>${escapeHtml(draft.command.botName)}</small></span>
+      <span class="bot-command-token"><strong>/${escapeHtml(presentation.displayName)}</strong><small>${escapeHtml(draft.command.botName)}</small></span>
       <div class="bot-command-arguments">
         ${fields.map((field) => renderInlineField(field, draft, `command-${channelId}`, disabled, members)).join('')}
         ${optionalCount ? `<button type="button" class="bot-add-parameters" data-bot-action="optional-parameters" aria-haspopup="listbox"
