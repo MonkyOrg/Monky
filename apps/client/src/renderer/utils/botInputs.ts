@@ -26,7 +26,10 @@ export type BotInputField = BotFormField | {
 
 export function commandInputFields(command: SlashCommand): BotInputField[] {
   return (command.options ?? []).map((option): BotInputField => {
-    const base = { name: option.name, label: option.description, required: option.required };
+    const base = {
+      name: option.name, label: option.label ?? option.description,
+      ...(option.label ? { description: option.description } : {}), required: option.required,
+    };
     if (option.type === 'boolean') return { ...base, type: 'boolean' };
     if (option.type === 'integer') {
       return { ...base, type: 'integer', min: option.min, max: option.max, placeholder: option.placeholder };

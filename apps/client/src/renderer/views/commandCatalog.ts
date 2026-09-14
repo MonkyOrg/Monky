@@ -1,5 +1,5 @@
-import type { SlashCommand } from '@monky/shared';
-import { t } from '../i18n';
+import { localizeCommand, type BotLocale, type SlashCommand } from '@monky/shared';
+import { getLanguage, t } from '../i18n';
 import { getAvatarUrl } from '../utils/avatar';
 import { escapeHtml } from '../utils/html';
 import type { CommandGroup } from '../utils/commandCatalog';
@@ -12,19 +12,21 @@ export function renderCommandParameters(command: SlashCommand): string {
   const required = (command.options ?? []).filter((option) => option.required);
   const optional = (command.options ?? []).length - required.length;
   return `<span class="command-row-arguments">
-    ${required.map((option) => `<span class="command-parameter-chip" title="${escapeHtml(option.description)}">${escapeHtml(option.name)}</span>`).join('')}
+    ${required.map((option) => `<span class="command-parameter-chip" title="${escapeHtml(option.description)}">${escapeHtml(option.label ?? option.name)}</span>`).join('')}
     ${optional ? `<span class="command-optional-count">${optionalParameterLabel(optional)}</span>` : ''}
   </span>`;
 }
 
 export function renderCommandCatalog(
   groups: CommandGroup[], activeIndex: number, deniedReason: (command: SlashCommand) => string | undefined = () => undefined,
+  localeFor: (command: SlashCommand) => BotLocale = () => getLanguage(),
 ): string {
   let index = 0;
   let activeGroup = '';
   const sections = groups.map((group, groupIndex) => {
     const start = index;
-    const rows = group.commands.map((command) => {
+    const rows = group.commands.map((original) => {
+      const command = localizeCommand(original, localeFor(original));
       const rowIndex = index++;
       const denied = deniedReason(command);
       return `<div id="command-option-${rowIndex}" class="command-row ${rowIndex === activeIndex ? 'active' : ''}"

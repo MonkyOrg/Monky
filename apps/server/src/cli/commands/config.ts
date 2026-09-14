@@ -11,7 +11,7 @@ import {
 } from '../constants';
 import { CliContext, readLocalConfig, writeLocalConfig } from '../context';
 import { estimateHostCapacity, printCapacityEstimate } from '../capacity';
-import { describeSfuPortProblem, formatBool, formatDate, parseBoolean, parseMemberLimit, parsePositiveInt, printSfuPreflight, printVoiceModeComparisonTable, sfuPreflightSummary } from '../formatters';
+import { configKeyLabel, describeSfuPortProblem, describeTurnPortProblem, describeTurnUnavailability, formatBool, formatDate, parseBoolean, parseMemberLimit, parsePositiveInt, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable, sfuPreflightSummary } from '../formatters';
 import { t } from '../i18n/index';
 import {
   getPm2ProcessName,
@@ -31,7 +31,7 @@ import { checkSfuPreflight } from '../../infrastructure/sfu/SfuPreflight';
  * relaying because coturn is missing (#425).
  */
 function turnStatusSuffix(): string {
-  const reason = CoturnManager.getUnavailabilityReason();
+  const reason = describeTurnUnavailability(CoturnManager.describeAvailability());
   return reason ? color(`  (${t('config.turnUnavailable', { reason })})`, ANSI.yellow) : '';
 }
 
@@ -55,32 +55,32 @@ export async function showConfig(ctx: CliContext): Promise<void> {
   const localConfig = readLocalConfig(ctx.dataDir);
   const owner = server.ownerUserId ? await ctx.userRepo.findById(server.ownerUserId) : null;
   console.log(color(t('config.title'), ANSI.bold));
-  console.log(`dataDir: ${ctx.dataDir}`);
-  console.log(`id: ${server.id}`);
-  console.log(`name: ${server.name}`);
-  console.log(`port: ${localConfig.port || LIMITS.DEFAULT_PORT}`);
-  console.log(`hasPassword: ${formatBool(Boolean(server.passwordHash))}`);
-  console.log(`maxUsers: ${server.maxUsers > LIMITS.MAX_USERS_UNLIMITED ? server.maxUsers : t('config.noLimit')}`);
-  console.log(`ownerUserId: ${server.ownerUserId ?? '-'}`);
-  console.log(`ownerNickname: ${owner?.nickname ?? '-'}`);
-  console.log(`allowSoundboard: ${formatBool(server.allowSoundboard !== false)}`);
-  console.log(`allowEveryoneMention: ${formatBool(server.allowEveryoneMention !== false)}`);
-  console.log(`showRoleBadgesToEveryone: ${formatBool(server.showRoleBadgesToEveryone !== false)}`);
-  console.log(`voiceMode: ${server.voiceMode || 'p2p'}${voiceModeStatusSuffix(server.voiceMode || 'p2p')}`);
-  console.log(`turn: ${formatBool(Boolean(server.turnEnabled))}${turnStatusSuffix()}`);
-  console.log(`iconPath: ${server.iconPath ?? '-'}`);
-  console.log(`maxAttachmentFileBytes: ${server.maxAttachmentFileBytes ?? '-'}`);
-  console.log(`maxAttachmentStorageBytes: ${server.maxAttachmentStorageBytes ?? '-'}`);
-  console.log(`autoUpdate: ${formatBool(isAutoUpdateEnabled(ctx.dataDir))}`);
-  console.log(`createdAt: ${formatDate(server.createdAt)}`);
+  console.log(`${t('label.dataDir')}: ${ctx.dataDir}`);
+  console.log(`${t('label.id')}: ${server.id}`);
+  console.log(`${configKeyLabel('name')}: ${server.name}`);
+  console.log(`${configKeyLabel('port')}: ${localConfig.port || LIMITS.DEFAULT_PORT}`);
+  console.log(`${t('label.hasPassword')}: ${formatBool(Boolean(server.passwordHash))}`);
+  console.log(`${configKeyLabel('maxUsers')}: ${server.maxUsers > LIMITS.MAX_USERS_UNLIMITED ? server.maxUsers : t('config.noLimit')}`);
+  console.log(`${t('label.ownerUserId')}: ${server.ownerUserId ?? '-'}`);
+  console.log(`${t('label.ownerNickname')}: ${owner?.nickname ?? '-'}`);
+  console.log(`${configKeyLabel('allowSoundboard')}: ${formatBool(server.allowSoundboard !== false)}`);
+  console.log(`${configKeyLabel('allowEveryoneMention')}: ${formatBool(server.allowEveryoneMention !== false)}`);
+  console.log(`${configKeyLabel('showRoleBadgesToEveryone')}: ${formatBool(server.showRoleBadgesToEveryone !== false)}`);
+  console.log(`${configKeyLabel('voiceMode')}: ${server.voiceMode || 'p2p'}${voiceModeStatusSuffix(server.voiceMode || 'p2p')}`);
+  console.log(`${configKeyLabel('turn')}: ${formatBool(Boolean(server.turnEnabled))}${turnStatusSuffix()}`);
+  console.log(`${t('label.iconPath')}: ${server.iconPath ?? '-'}`);
+  console.log(`${configKeyLabel('maxAttachmentFileBytes')}: ${server.maxAttachmentFileBytes ?? '-'}`);
+  console.log(`${configKeyLabel('maxAttachmentStorageBytes')}: ${server.maxAttachmentStorageBytes ?? '-'}`);
+  console.log(`${configKeyLabel('autoUpdate')}: ${formatBool(isAutoUpdateEnabled(ctx.dataDir))}`);
+  console.log(`${t('label.createdAt')}: ${formatDate(server.createdAt)}`);
 }
 
 export async function askConfigKey(): Promise<ConfigKey> {
-  const choice = await askChoice(
-    t('config.whichKey'),
-    CONFIG_KEYS.map((key) => `${key}`)
-  );
-  return choice as ConfigKey;
+  const labels = CONFIG_KEYS.map(configKeyLabel);
+  const choice = await askChoice(t('config.whichKey'), labels);
+  const key = CONFIG_KEYS[labels.indexOf(choice)];
+  if (!key) throw new Error(t('config.unsupportedKey', { key: choice }));
+  return key;
 }
 
 /**
@@ -97,7 +97,9 @@ export async function setConfig(
   value?: string,
   options: { skipSfuDiagnostics?: boolean } = {}
 ): Promise<void> {
-  const normalizedKey = (key.trim() || (await askConfigKey())) as ConfigKey;
+  const requestedKey = key.trim() || (await askConfigKey());
+  const normalizedKey = CONFIG_KEYS.find((candidate) => candidate === requestedKey);
+  if (!normalizedKey) throw new Error(t('config.unsupportedKey', { key: requestedKey }));
   const server = await ctx.serverRepo.getServer();
   if (!server) {
     throw new Error(t('create.serverNotFound'));
@@ -152,7 +154,7 @@ export async function setConfig(
         break;
       case 'maxAttachmentFileBytes':
       case 'maxAttachmentStorageBytes':
-        nextValue = await ask(t('config.askValue', { key: normalizedKey }), currentValues[normalizedKey]);
+        nextValue = await ask(t('config.askValue', { key: configKeyLabel(normalizedKey) }), currentValues[normalizedKey]);
         break;
       default:
         nextValue = await ask(t('config.askValue', { key: normalizedKey }));
@@ -245,7 +247,7 @@ export async function setConfig(
       await ctx.serverRepo.updateServer({ showRoleBadgesToEveryone: parseBoolean(nextValue) });
       break;
     case 'voiceMode': {
-      const mode = nextValue.toLowerCase().trim() === 'sfu' ? 'sfu' : 'p2p';
+      const mode = parseVoiceMode(nextValue);
 
       if (mode === 'sfu' && !options.skipSfuDiagnostics) {
         // Refuse before persisting: the desktop path already blocks the switch
@@ -306,7 +308,7 @@ export async function setConfig(
             case 'unknown-package-manager':
               throw new Error(t('config.coturnNoPackageManager'));
             default:
-              throw new Error(t('config.coturnInstallFailed', { detail: outcome.detail ?? 'unknown error' }));
+              throw new Error(t('config.coturnInstallFailed', { detail: outcome.detail ?? t('common.unknownError') }));
           }
         }
         if (!outcome.alreadyInstalled) {
@@ -328,7 +330,7 @@ export async function setConfig(
       }
       if (enabled) {
         // Run a real port check instead of a static reminder.
-        const portProblem = await CoturnManager.checkPortReachability();
+        const portProblem = await CoturnManager.checkPortReachability(describeTurnPortProblem);
         if (portProblem) {
           console.log(color('⚠ ' + portProblem, ANSI.yellow));
         } else {

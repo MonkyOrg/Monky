@@ -1,5 +1,5 @@
 import { escapeHtml } from '../utils/html';
-import { LIMITS, MessageType } from '@monky/shared';
+import { LIMITS, MessageType, parseBotCompatibility } from '@monky/shared';
 import { connectionStore, type CreatedServer, type SavedServer } from '../stores/connectionStore';
 import { favoritesStore, savedServerFavoriteKey } from '../stores/favoritesStore';
 import {
@@ -20,6 +20,9 @@ import { checkServerOnline } from '../utils/serverStatus';
 import { sortFavoritesFirst, type FavoriteOrderEntry } from '../utils/favoriteOrder';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
+import { bindServerAutoEntryControls, renderServerAutoEntryToggle } from './ServerAutoEntryControls';
+import { parseHomeVoicePreview } from '../utils/voicePreview';
+import '../styles/bot-compatibility.css';
 import { onboardingWizard } from './OnboardingWizard';
 import logoUrl from '../assets/Logo.png';
 import { getLanguage, t } from '../i18n';
@@ -51,6 +54,10 @@ export class ConnectionView {
   private savedFavoritesOnly = false;
   private connectionPending = false;
   private readonly savedFavoriteMotion = new FavoriteListMotion();
+  private readonly unbind: Array<() => void> = [];
+  private readonly previewControllers = new Set<AbortController>();
+  private previewGeneration = 0;
+  private startupNotices: string[] = [];
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -60,6 +67,7 @@ export class ConnectionView {
     this.selectedAvatarBase64 = connectionStore.savedAvatarBase64 || '';
     this.setupLanDiscoveryListeners();
     this.setupHostedServerListener();
+    this.unbind.push(bindServerAutoEntryControls(this.container, message => this.showError(message)));
     void this.syncHostedServerStatus();
   }
 
@@ -70,7 +78,7 @@ export class ConnectionView {
    * user came back (#333).
    */
   private setupHostedServerListener(): void {
-    window.api?.onHostServerStatusChanged?.((status) => {
+    const off = window.api?.onHostServerStatusChanged?.((status) => {
       this.applyHostedServerStatus(status);
       // Repainting while the main screen is up would drop the user back on the
       // connection screen mid-session.
@@ -78,6 +86,7 @@ export class ConnectionView {
         this.render();
       }
     });
+    if (off) this.unbind.push(off);
   }
 
   private applyHostedServerStatus(status: { isRunning: boolean; port: number | null; serverId: string | null }): void {
@@ -240,7 +249,14 @@ export class ConnectionView {
   }
 
   public render(): void {
-    this.savedFavoriteMotion.cancel();
+    this.suspend();
+    try {
+      settingsStore.retainAutoEntryServers(connectionStore.savedServers);
+    } catch (error: unknown) {
+      clientLog.warn('STORE', 'Could not clean stale automatic-entry preferences', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     const savedNick = connectionStore.savedNickname || '';
     const savedServers = sortFavoritesFirst(connectionStore.savedServers || [], server => this.savedServerOrder(server), getLanguage());
     const createdServers = connectionStore.createdServers || [];
@@ -277,6 +293,9 @@ export class ConnectionView {
           </div>
 
           <div id="error-banner" class="error-banner"></div>
+          <div id="auto-entry-notices" class="server-auto-entry-description" role="status">
+            ${this.startupNotices.map(message => `<p>${escapeHtml(message)}</p>`).join('')}
+          </div>
 
           <!-- Avatar Picker -->
           <div class="avatar-picker" style="margin-bottom: 14px; gap: 12px;">
@@ -340,7 +359,8 @@ export class ConnectionView {
                           <span style="font-size: 11px; color: var(--text-muted); margin-left: 22px;">${escapeHtml(s.host)}:${s.port}</span>
                           <div class="saved-server-preview" data-host="${escapeHtml(s.host)}" data-port="${s.port}" style="margin-left: 22px; margin-top: 4px;"></div>
                         </div>
-                        <div style="display: flex; gap: 6px; align-items: center;">
+                        <div class="saved-server-actions">
+                          <div class="saved-server-buttons">
                           ${renderFavoriteToggle(savedServerFavoriteKey(s), s.name || s.host, favoritesStore.isServerFavorite(s))}
                           <button type="button" class="btn btn-secondary btn-select-saved" data-host="${escapeHtml(s.host)}" data-port="${s.port}" data-password="${escapeHtml(s.password || '')}" style="padding: 2px 8px; font-size: 11px; height: 24px;">
                             ${isSelected ? `✓ ${t('connection.selected')}` : t('connection.use')}
@@ -351,6 +371,8 @@ export class ConnectionView {
                           <button type="button" class="btn-delete-saved-srv" data-host="${escapeHtml(s.host)}" data-port="${s.port}" title="${t('connection.removeFromSaved')}">
                             <span class="material-symbols-outlined md-16">close</span>
                           </button>
+                          </div>
+                          ${renderServerAutoEntryToggle(s)}
                         </div>
                       </div>
                     `;
@@ -510,6 +532,28 @@ export class ConnectionView {
     void this.refreshHostedServerStatus();
   }
 
+  public reportStartupNotice(message: string): void {
+    if (!this.startupNotices.includes(message)) this.startupNotices.push(message);
+    const notice = this.container.querySelector('#auto-entry-notices');
+    if (notice) notice.innerHTML = this.startupNotices.map(item => `<p>${escapeHtml(item)}</p>`).join('');
+  }
+
+  public suspend(): void {
+    this.previewGeneration++;
+    for (const controller of this.previewControllers) controller.abort();
+    this.previewControllers.clear();
+    this.contentResizeObserver?.disconnect();
+    this.savedFavoriteMotion.cancel();
+  }
+
+  public dispose(): void {
+    this.suspend();
+    for (const off of this.unbind.splice(0)) off();
+    for (const off of this.unbindLanListeners.splice(0)) off();
+    if (this.lanScanTimeout) clearTimeout(this.lanScanTimeout);
+    this.lanScanTimeout = null;
+  }
+
   /**
    * Grows the window to whatever the card currently measures so the home screen
    * never needs scrolling (#536). A ResizeObserver covers every cause at once:
@@ -563,6 +607,7 @@ export class ConnectionView {
         host: '127.0.0.1',
         port: server.port,
         name: result.server.name,
+        serverId: result.server.id,
         password: server.password,
         lastConnected: Date.now(),
       });
@@ -750,32 +795,39 @@ export class ConnectionView {
   }
 
   private async loadServerPreviews(): Promise<void> {
+    const generation = this.previewGeneration;
     const nodes = Array.from(
       this.container.querySelectorAll('.saved-server-preview')
     ) as HTMLElement[];
 
     for (const node of nodes) {
+      if (generation !== this.previewGeneration || !node.isConnected) return;
       const host = node.getAttribute('data-host');
       const port = node.getAttribute('data-port');
       if (!host || !port) continue;
 
+      const controller = new AbortController();
+      this.previewControllers.add(controller);
+      const timeout = setTimeout(() => controller.abort(), 2500);
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 2500);
         const res = await fetch(`http://${host}:${port}/preview`, {
           signal: controller.signal,
         });
-        clearTimeout(timeout);
+        if (generation !== this.previewGeneration || !node.isConnected) return;
         if (!res.ok) {
           this.setServerStatusDot(host, port, 'offline');
           continue;
         }
         this.setServerStatusDot(host, port, 'online');
-        const info = await res.json();
+        const info: unknown = await res.json();
+        if (generation !== this.previewGeneration || !node.isConnected) return;
         this.renderServerPreview(node, host, port, info);
       } catch {
         // Server offline/unreachable — mark the indicator and leave the preview empty.
-        this.setServerStatusDot(host, port, 'offline');
+        if (generation === this.previewGeneration && node.isConnected) this.setServerStatusDot(host, port, 'offline');
+      } finally {
+        clearTimeout(timeout);
+        this.previewControllers.delete(controller);
       }
     }
   }
@@ -793,39 +845,47 @@ export class ConnectionView {
     node: HTMLElement,
     host: string,
     port: string,
-    info: {
-      userCount?: number;
-      memberCount?: number;
-      maxUsers?: number;
-      users?: Array<{ nickname?: string; avatarUrl?: string }>;
-    }
+    info: unknown
   ): void {
-    const users = Array.isArray(info.users) ? info.users.slice(0, 5) : [];
-    const count = typeof info.userCount === 'number' ? info.userCount : users.length;
+    const preview = parseHomeVoicePreview(info);
+    const compatibility = parseBotCompatibility(
+      info && typeof info === 'object' && 'botCompatibility' in info ? info.botCompatibility : undefined
+    );
+    const botAdvisory = [
+      compatibility?.incompatibleBots ? t('connection.botCompatibilityMismatch', {
+        count: compatibility.incompatibleBots, protocol: compatibility.protocolVersion,
+      }) : '',
+      compatibility?.uncheckedBots ? t('connection.botCompatibilityUnchecked', {
+        count: compatibility.uncheckedBots, protocol: compatibility.protocolVersion,
+      }) : '',
+    ].filter(Boolean).join(' ');
     // The cap counts registered members, not who happens to be online, so the
     // two numbers are shown separately instead of as one misleading "3/20" (#403).
-    const max = typeof info.maxUsers === 'number' && info.maxUsers > 0 ? info.maxUsers : null;
-    const members = typeof info.memberCount === 'number' ? info.memberCount : null;
+    const max = preview.maxUsers !== null && preview.maxUsers > 0 ? preview.maxUsers : null;
+    const members = preview.memberCount;
     const membersLabel =
       max !== null && members !== null
         ? ` • ${t('connection.membersOfLimit', { count: members, max })}`
         : '';
 
-    const avatars = users
+    const avatars = preview.users
       .map((u) => {
         const raw = u.avatarUrl && u.avatarUrl.startsWith('/avatars/')
           ? `http://${host}:${port}${u.avatarUrl}`
           : u.avatarUrl || getAvatarUrl(null);
         const title = escapeHtml(u.nickname || t('connection.unknownUser'));
-        return `<img class="preview-avatar" src="${raw}" title="${title}" data-fallback="avatar">`;
+        return `<img class="preview-avatar" src="${escapeHtml(raw)}" title="${title}" alt="${title}" data-fallback="avatar">`;
       })
       .join('');
 
     node.innerHTML = `
       <div class="server-preview-row">
         <div class="preview-avatars">${avatars}</div>
-        <span class="preview-count">${count} ${t('connection.online')}${membersLabel}</span>
+        <span class="preview-count">${escapeHtml(preview.count === null
+          ? t('connection.voicePreviewUnavailable')
+          : t('connection.voiceUsersCount', { count: preview.count }))}${membersLabel}</span>
       </div>
+      ${botAdvisory ? `<div class="bot-compatibility-warning" role="note">${escapeHtml(botAdvisory)}</div>` : ''}
     `;
   }
 
@@ -995,6 +1055,7 @@ export class ConnectionView {
         host,
         port,
         name: res.server.name,
+        serverId: res.server.id,
         password: password || undefined,
         lastConnected: Date.now(),
       });
@@ -1209,7 +1270,7 @@ export class ConnectionView {
     savedServerItems.forEach((item) => {
       item.addEventListener('click', (e) => {
         if (e.target instanceof Element
-          && e.target.closest('.favorite-toggle, .btn-delete-saved-srv, .btn-edit-saved-srv')) return;
+          && e.target.closest('.favorite-toggle, .server-auto-entry-control, .btn-delete-saved-srv, .btn-edit-saved-srv')) return;
 
         const host = item.getAttribute('data-host');
         const port = parseInt(item.getAttribute('data-port') || '3000', 10);

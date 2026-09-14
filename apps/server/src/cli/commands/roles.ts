@@ -64,11 +64,11 @@ export async function listRoles(ctx: CliContext): Promise<void> {
 
   for (const role of roles) {
     console.log(color(`${role.name} (${role.id})`, ANSI.bold));
-    console.log(`  color: ${role.color ?? '-'}`);
-    console.log(`  position: ${role.position}`);
-    console.log(`  permissions: ${role.permissions}`);
-    console.log(`  isDefault: ${formatBool(role.isDefault)}`);
-    console.log(`  members: ${counts.get(role.id) ?? 0}`);
+    console.log(`  ${t('label.color')}: ${role.color ?? '-'}`);
+    console.log(`  ${t('label.position')}: ${role.position}`);
+    console.log(`  ${t('label.permissions')}: ${role.permissions}`);
+    console.log(`  ${t('label.isDefault')}: ${formatBool(role.isDefault)}`);
+    console.log(`  ${t('label.members')}: ${counts.get(role.id) ?? 0}`);
   }
 }
 

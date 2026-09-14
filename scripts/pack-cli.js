@@ -18,6 +18,7 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER_DIR = path.join(ROOT, 'apps', 'server');
@@ -91,6 +92,8 @@ function main() {
       throw new Error(`Missing build output: ${dir}. Run "npm run build" first.`);
     }
   }
+  const require = createRequire(import.meta.url);
+  const { PROTOCOL_VERSION } = require(path.join(sharedDist, 'constants.js'));
 
   const staging = path.join(ROOT, 'release', 'cli-pack');
   fs.rmSync(staging, { recursive: true, force: true });
@@ -147,9 +150,17 @@ function main() {
   fs.rmSync(finalPath, { force: true });
   fs.copyFileSync(path.join(staging, packed), finalPath);
   fs.rmSync(path.join(staging, packed), { force: true });
+  const compatibilityPath = path.join(args.out, `monky-compatibility-${version}.json`);
+  fs.writeFileSync(compatibilityPath, JSON.stringify({
+    schemaVersion: 1,
+    version,
+    protocolVersion: PROTOCOL_VERSION,
+    botSdkVersion: version,
+  }, null, 2) + '\n');
 
   console.log(`[pack-cli] ${migrations.length} migration(s) bundled`);
   console.log(`[pack-cli] ${finalPath}`);
+  console.log(`[pack-cli] ${compatibilityPath}`);
   return finalPath;
 }
 

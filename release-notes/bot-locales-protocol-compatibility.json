@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Esta versão altera o protocolo. Atualize o aplicativo, o servidor, o MonkyBot e o Myinstants juntos. Bots próprios precisam de um SDK compatível antes de voltar a conectar.",
+  "en": "This version changes the protocol. Update the app, server, MonkyBot and Myinstants together. Custom bots need a compatible SDK before they can reconnect."
+}

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { SettingsStore, settingsStore } from '../src/renderer/stores/settingsStore';
+import { appEvents } from '../src/renderer/core/EventBus';
 import * as Dialog from '../src/renderer/views/Dialog';
 import {
   confirmSoundDownload, soundDownloadConfirmationScope, type SoundDownloadConfirmationDetails,
@@ -10,6 +11,7 @@ function fixture(context: TestContext) {
   const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   const previousExceptions = settingsStore.botDownloadConfirmationExceptions;
   const previousPreferences = settingsStore.botUserPreferences;
+  const previousLocales = settingsStore.botLocalePreferences;
   const entries = new Map<string, string>();
   const storage: Storage = {
     get length() { return entries.size; },
@@ -22,9 +24,11 @@ function fixture(context: TestContext) {
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
   settingsStore.botDownloadConfirmationExceptions = [];
   settingsStore.botUserPreferences = {};
+  settingsStore.botLocalePreferences = {};
   context.after(() => {
     settingsStore.botDownloadConfirmationExceptions = previousExceptions;
     settingsStore.botUserPreferences = previousPreferences;
+    settingsStore.botLocalePreferences = previousLocales;
     if (previousStorage) Object.defineProperty(globalThis, 'localStorage', previousStorage);
     else Reflect.deleteProperty(globalThis, 'localStorage');
   });
@@ -36,6 +40,47 @@ function fixture(context: TestContext) {
   };
   return { storage, details };
 }
+
+test('bot language follows Monky by default and persists only for the selected identity/server/bot scope', (context) => {
+  const { details } = fixture(context);
+  const scope = soundDownloadConfirmationScope(details);
+  assert.ok(scope);
+  assert.equal(settingsStore.getBotLocalePreference(scope), 'auto');
+  const changed: Array<{ scope: string; customChanged: boolean }> = [];
+  context.after(appEvents.on('bot.preferences_updated', (event: { scope: string; customChanged: boolean }) => changed.push(event)));
+  settingsStore.saveBotPreferences(scope, { enabled: false }, false, 'en');
+  assert.equal(settingsStore.getBotLocalePreference(scope), 'en');
+  assert.equal(new SettingsStore().getBotLocalePreference(scope), 'en');
+  for (const different of [
+    { botId: 'other-bot' }, { invokerId: 'other-person' }, { serverId: 'other-server' }, { serverUrl: 'wss://other.example/' },
+  ]) {
+    const other = soundDownloadConfirmationScope({ ...details, ...different });
+    assert.ok(other);
+    assert.equal(settingsStore.getBotLocalePreference(other), 'auto');
+  }
+  settingsStore.saveBotPreferences(scope, { enabled: false });
+  assert.equal(settingsStore.getBotLocalePreference(scope), 'en');
+  settingsStore.saveBotPreferences(scope, { enabled: false }, undefined, 'pt-BR');
+  assert.equal(changed.at(-1)?.customChanged, true);
+  assert.equal(settingsStore.botDownloadConfirmationExceptions.includes(scope), true);
+  settingsStore.saveBotPreferences(scope, { enabled: false }, undefined, 'auto');
+  assert.equal(settingsStore.getBotLocalePreference(scope), 'auto');
+  assert.equal(Object.hasOwn(settingsStore.botLocalePreferences, scope), false);
+  assert.deepEqual(settingsStore.getBotUserSettings(scope), { enabled: false });
+  assert.equal(settingsStore.getBotLocalePreference('__proto__'), 'auto');
+});
+
+test('bot language persistence is atomic with custom values and file-name confirmation', (context) => {
+  const { details, storage } = fixture(context);
+  const scope = soundDownloadConfirmationScope(details);
+  assert.ok(scope);
+  settingsStore.saveBotPreferences(scope, { count: 1 }, false, 'en');
+  context.mock.method(storage, 'setItem', () => { throw new Error('fixture storage failure'); });
+  assert.throws(() => settingsStore.saveBotPreferences(scope, { count: 2 }, true, 'pt-BR'));
+  assert.equal(settingsStore.getBotLocalePreference(scope), 'en');
+  assert.deepEqual(settingsStore.getBotUserSettings(scope), { count: 1 });
+  assert.equal(settingsStore.botDownloadConfirmationExceptions.includes(scope), true);
+});
 
 test('download opt-outs are isolated by normalized endpoint, server, caller and bot', (context) => {
   const { details } = fixture(context);

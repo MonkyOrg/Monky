@@ -18,5 +18,5 @@ export const UPDATER_ECOSYSTEM_FILE = 'ecosystem.updater.config.cjs';
 export const GENERATED_WRAPPER_FILE = 'monky-cli.cjs';
 
 export function color(text: string, code: string): string {
-  return `${code}${text}${ANSI.reset}`;
+  return process.stdout.isTTY && !process.env.NO_COLOR ? `${code}${text}${ANSI.reset}` : text;
 }

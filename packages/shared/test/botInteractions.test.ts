@@ -28,6 +28,10 @@ import {
   LIMITS,
   validateBotFormValues,
   validateCommandOptions,
+  botLocaleSchema,
+  localizeCommand,
+  normalizeBotLocale,
+  resolveBotLocale,
 } from '../src/index.js';
 
 const fields = botFormSchema.parse({
@@ -70,6 +74,53 @@ assert.deepEqual(botSelectorPublicSchema.parse({
 }).choices[0].audio, preview);
 
 assert.equal(commandDefinitionSchema.safeParse({ name: '8ball', description: 'Question' }).success, true);
+assert.equal(normalizeBotLocale('en-US'), 'en');
+assert.equal(normalizeBotLocale('EN_us'), 'en');
+assert.equal(normalizeBotLocale('pt-BR'), 'pt-BR');
+for (const locale of ['en', 'EN_us.UTF-8', 'en-GB', 'en_US@euro']) assert.equal(normalizeBotLocale(locale), 'en');
+for (const locale of ['pt', 'pt_BR.UTF-8', 'PT-br', 'pt-PT']) assert.equal(normalizeBotLocale(locale), 'pt-BR');
+for (const locale of ['', 'english', 'fr-FR', 'en-', '1', 'pt-BR invalid']) assert.equal(normalizeBotLocale(locale), undefined);
+assert.equal(normalizeBotLocale('es'), undefined);
+assert.equal(normalizeBotLocale(null), undefined);
+assert.equal(resolveBotLocale('en', ['pt-BR'], 'pt-BR'), 'pt-BR');
+assert.equal(resolveBotLocale('es', ['en'], 'pt-BR'), 'en');
+assert.equal(botLocaleSchema.parse('en-US'), 'en');
+const localizedCommand = commandDefinitionSchema.parse({
+  name: 'play', description: 'Play a track',
+  options: [{
+    name: 'mode', label: 'Mode', description: 'Playback order', type: 'string',
+    choices: [{ label: 'Shuffle', value: 'shuffle', audio: preview }],
+  }],
+  localizations: {
+    'pt-BR': {
+      description: 'Reproduzir uma faixa',
+      options: { mode: {
+        label: 'Modo', description: 'Ordem de reprodução', placeholder: 'Escolha o modo',
+        choices: { shuffle: { label: 'Aleatório', description: 'Misturar as faixas' } },
+      } },
+    },
+  },
+});
+const portugueseCommand = localizeCommand(localizedCommand, 'pt-BR');
+assert.equal(portugueseCommand.name, 'play');
+assert.equal(portugueseCommand.description, 'Reproduzir uma faixa');
+assert.equal(portugueseCommand.options?.[0].name, 'mode');
+assert.equal(portugueseCommand.options?.[0].label, 'Modo');
+assert.equal(portugueseCommand.options?.[0].choices?.[0].label, 'Aleatório');
+assert.equal(portugueseCommand.options?.[0].choices?.[0].value, 'shuffle');
+assert.deepEqual(portugueseCommand.options?.[0].choices?.[0].audio, preview);
+assert.equal(localizedCommand.options?.[0].choices?.[0].label, 'Shuffle');
+assert.equal(localizeCommand(localizedCommand, 'en-US'), localizedCommand);
+for (const localizations of [
+  { en: { name: 'translated-name' } },
+  { 'en-US': { description: 'Noncanonical locale key' } },
+  { en: { options: { unknown: { label: 'Unknown' } } } },
+  { en: { options: { mode: { name: 'translated-option' } } } },
+  { en: { options: { mode: { choices: { invented: { label: 'Invented' } } } } } },
+]) {
+  assert.equal(commandDefinitionSchema.safeParse({ ...localizedCommand, localizations }).success, false);
+}
+assert.equal(commandInvokeSchema.parse({ commandName: 'play', botId: 'bot', channelId: 'chat', locale: 'en-US' }).locale, 'en');
 for (const voiceRequirement of ['joined', 'same-bot-channel'] as const) {
   const command = { name: 'voice', description: 'Voice command', voiceRequirement };
   assert.deepEqual(commandDefinitionSchema.parse(command), command);

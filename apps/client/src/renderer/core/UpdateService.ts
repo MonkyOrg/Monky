@@ -1,7 +1,10 @@
+import { PROTOCOL_VERSION, type ReleaseCompatibilityResult } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { settingsStore } from '../stores/settingsStore';
 import { changelogModal } from '../views/ChangelogModal';
+import { showConfirm } from '../views/Dialog';
+import { appEvents } from './EventBus';
 
 const DISMISSED_KEY = 'monky_dismissed_update';
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
@@ -33,6 +36,8 @@ class UpdateService {
   private bannerKind = '';
   private listenersBound = false;
   private unbindUpdateEvents: Array<() => void> = [];
+  private startingDownload = false;
+  private availableCompatibility: ReleaseCompatibilityResult | undefined;
 
   public async init(): Promise<void> {
     if (!window.api?.checkForUpdates) {
@@ -145,7 +150,9 @@ class UpdateService {
       ]);
     });
 
-    this.unbindUpdateEvents.push(u1, u2, u3);
+    this.unbindUpdateEvents.push(u1, u2, u3, appEvents.on('i18n.language_changed', () => {
+      if (this.bannerKind === 'available') this.showAvailable(this.latestVersion, this.availableCompatibility);
+    }));
   }
 
   private async check(): Promise<void> {
@@ -160,7 +167,7 @@ class UpdateService {
       }
 
       this.latestVersion = result.version;
-      this.showAvailable(result.version);
+      this.showAvailable(result.version, result.compatibility);
     } catch {
       // Non-fatal: try again on the next interval.
     }
@@ -181,7 +188,7 @@ class UpdateService {
       }
       if (result.available && result.version) {
         this.latestVersion = result.version;
-        this.showAvailable(result.version);
+        this.showAvailable(result.version, result.compatibility);
         return { status: 'available', version: result.version };
       }
       return { status: 'latest' };
@@ -190,21 +197,68 @@ class UpdateService {
     }
   }
 
-  private showAvailable(version: string): void {
+  private showAvailable(version: string, compatibility?: ReleaseCompatibilityResult): void {
     this.ensureBanner();
-    this.setText(t('update.available', { version: escapeHtml(version) }));
+    this.availableCompatibility = compatibility;
+    const warning = this.compatibilityWarning(compatibility);
+    this.setText(t('update.available', { version: escapeHtml(version) }) +
+      (warning ? `<span class="update-bot-compatibility">${escapeHtml(warning)}</span>` : ''));
+    this.bannerKind = 'available';
     this.setActions([
       {
         label: t('update.updateNow'),
         primary: true,
-        onClick: () => {
-          this.setText(t('update.startingDownload'));
-          this.setActions([]);
-          window.api.downloadUpdate();
-        },
+        onClick: () => { void this.downloadConfirmedVersion(version, compatibility); },
       },
       { label: '×', dismiss: true, onClick: () => this.dismiss() },
     ]);
+  }
+
+  private compatibilityWarning(compatibility?: ReleaseCompatibilityResult): string | null {
+    return compatibility?.status === 'available' && compatibility.manifest.protocolVersion !== PROTOCOL_VERSION
+      ? t('update.botCompatibilityChanged', {
+        protocol: compatibility.manifest.protocolVersion, sdk: compatibility.manifest.botSdkVersion,
+      })
+      : compatibility?.status === 'unavailable' ? t('update.botCompatibilityUnknown') : null;
+  }
+
+  private async downloadConfirmedVersion(version: string, compatibility?: ReleaseCompatibilityResult): Promise<void> {
+    if (this.startingDownload) return;
+    this.startingDownload = true;
+    try {
+      const warning = this.compatibilityWarning(compatibility);
+      if (warning) {
+        const banner = this.banner;
+        if (banner) banner.hidden = true;
+        let confirmed = false;
+        try {
+          confirmed = await showConfirm({
+            message: warning, variant: 'warning', confirmLabel: t('update.updateNow'),
+          });
+        } finally {
+          if (banner?.isConnected) {
+            banner.hidden = false;
+            banner.querySelector<HTMLButtonElement>('.update-banner__download')?.focus();
+          }
+        }
+        if (!confirmed) return;
+      }
+      this.setText(t('update.startingDownload'));
+      this.setActions([]);
+      const result = await window.api.downloadUpdate(version);
+      if (!result.ok) throw new Error(result.error || t('update.downloadFailed'));
+    } catch {
+      this.setText(t('update.downloadFailed'));
+      this.setActions([
+        {
+          label: t('update.checkAgain'), primary: true,
+          onClick: () => { void this.checkManually(); },
+        },
+        { label: '×', dismiss: true, onClick: () => this.dismiss() },
+      ]);
+    } finally {
+      this.startingDownload = false;
+    }
   }
 
   private dismiss(): void {
@@ -212,6 +266,7 @@ class UpdateService {
       localStorage.setItem(DISMISSED_KEY, this.latestVersion);
     }
     this.bannerKind = '';
+    this.availableCompatibility = undefined;
     this.banner?.remove();
     this.banner = null;
     this.textEl = null;

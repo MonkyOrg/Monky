@@ -42,6 +42,7 @@ import {
   soundDownloadRequestSchema,
   commandSubmitSchema,
   resolveBotSettingsValues,
+  resolveBotLocale,
   validateBotFormValues,
   validateCommandOptions,
 } from '@monky/shared';
@@ -54,6 +55,7 @@ import {
 } from '@monky/shared';
 import type {
   BotForm,
+  BotLocale,
   BotFormValues,
   BotScreen,
   BotScreenCreate,
@@ -71,6 +73,7 @@ import type {
   CommandAudioPreviewMimeType,
   CommandAudioPreviewResult,
   CommandOption,
+  CommandLocalizations,
   CommandResponsePayload,
   CommandValues,
   CommandVoiceRequirement,
@@ -99,6 +102,7 @@ export interface BotOptions {
 export interface CommandDefinition {
   name: string;
   description: string;
+  localizations?: CommandLocalizations;
   options?: CommandOption[];
   downloadsSound?: boolean;
   voiceRequirement?: CommandVoiceRequirement;
@@ -115,7 +119,7 @@ export interface CommandAutocompleteContext {
   query: string;
   optionName: string;
   args: CommandValues;
-  locale: 'pt-BR' | 'en';
+  locale: BotLocale;
   serverId: string;
   readonly settings: BotSettingsContext;
   signal: AbortSignal;
@@ -124,7 +128,7 @@ export interface CommandAutocompleteContext {
 export interface CommandAudioPreviewContext {
   resourceId: string;
   serverId: string;
-  locale: 'pt-BR' | 'en';
+  locale: BotLocale;
   optionName: string;
   /** Aborted on cancellation, timeout, disconnection or completion. */
   signal: AbortSignal;
@@ -148,7 +152,7 @@ export interface CommandContext {
   getVoiceChannel: () => Promise<string | null>;
   invokerNickname: string;
   serverId: string;
-  locale: 'pt-BR' | 'en';
+  locale: BotLocale;
   /** Immutable preferences captured for this invocation, including subsequent prompts. */
   readonly settings: BotSettingsContext;
   /** Named, typed values: integer and boolean options are not strings. */
@@ -418,6 +422,7 @@ export class BotClient extends EventEmitter {
       name: def.name.toLowerCase(),
       description: def.description,
       options: def.options,
+      localizations: def.localizations,
       downloadsSound: def.downloadsSound,
       voiceRequirement: def.voiceRequirement,
     });
@@ -1212,8 +1217,8 @@ export class BotClient extends EventEmitter {
     this.sendToConn(conn, {
       type: MessageType.COMMAND_REGISTER,
       payload: {
-        commands: [...this.commands.values()].map(({ name, description, options, downloadsSound, voiceRequirement }) => ({
-          name, description, options: options ?? [], downloadsSound, voiceRequirement,
+        commands: [...this.commands.values()].map(({ name, description, options, localizations, downloadsSound, voiceRequirement }) => ({
+          name, description, options: options ?? [], localizations, downloadsSound, voiceRequirement,
         })),
         settings: this.settingsDefinition,
       },
@@ -1313,7 +1318,7 @@ export class BotClient extends EventEmitter {
     try {
       const ctx: CommandAutocompleteContext = {
         query: payload.query, optionName: payload.optionName, args: values.values,
-        locale: payload.locale, serverId: conn.serverId, signal: controller.signal, settings,
+        locale: resolveBotLocale(payload.locale), serverId: conn.serverId, signal: controller.signal, settings,
       };
       Object.defineProperty(ctx, 'settings', { writable: false, configurable: false });
       const choices = await def.autocomplete(ctx);
@@ -1378,7 +1383,7 @@ export class BotClient extends EventEmitter {
     try {
       const ctx: CommandAudioPreviewContext = {
         resourceId: payload.resourceId, optionName: payload.optionName, serverId: conn.serverId,
-        locale: payload.locale, settings, signal: controller.signal,
+        locale: resolveBotLocale(payload.locale), settings, signal: controller.signal,
       };
       Object.defineProperty(ctx, 'settings', { writable: false, configurable: false });
       const data: unknown = await def.audioPreview(ctx);
@@ -1463,7 +1468,7 @@ export class BotClient extends EventEmitter {
       invokerVoiceChannelId: payload.invokerVoiceChannelId,
       getVoiceChannel: () => this.requestVoiceContext(conn, payload.invocationId, invocation),
       serverId: conn.serverId,
-      locale: payload.locale ?? 'pt-BR',
+      locale: resolveBotLocale(payload.locale),
       settings,
       args: validated.values,
       signal: invocation.controller.signal,
@@ -1741,6 +1746,7 @@ export { LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky
 export {
   botSettingsDefinitionSchema, botSettingsContextSchema, botServerSettingsSnapshotSchema,
   botSettingsSnapshotSchema, botSettingsValuesSchema, botSelectorRespondedSchema, resolveBotSettingsValues,
+  BOT_LOCALES, botLocaleSchema, normalizeBotLocale, resolveBotLocale, localizeCommand,
 } from '@monky/shared';
 export { runBotCli } from './cli';
 export {
@@ -1759,7 +1765,7 @@ export type {
   BotScreen, BotScreenCreate, BotScreenPatch, BotScreenActionEvent, BotScreenJson, BotScreenRemoved,
 } from '@monky/shared';
 export type {
-  BotForm, BotFormField, BotFormValues, BotManifest,
+  BotForm, BotFormField, BotFormValues, BotManifest, BotLocale, CommandLocalizations, BotFieldLocalization,
   BotSettingsDefinition, BotSettingsContext, BotServerSettingsSnapshot, BotSettingsSnapshot, BotSettingsSummary,
   BotInputResult,
   ChatMessage, ChatReactionEventPayload, MessageReaction,

@@ -1,5 +1,10 @@
 import { ANSI, color } from './constants';
-import { createCliContext } from './config';
+import { createCliContext, type CliContext } from './config';
+import { normalizeBotLocale, type BotLocale } from '@monky/shared';
+import {
+  chooseCliLocale, CliError, cliErrorMessage, cliText, isInteractiveCliAccess, parseCliLocaleArgs,
+  saveCliLocale, shouldPromptCliLocale,
+} from './locale';
 import { autoUpdateCommand, updateCommand } from './commands/update';
 import {
   configCommand,
@@ -11,10 +16,9 @@ import {
 } from './commands/lifecycle';
 import { setupCommand } from './commands/setup';
 
-function printUsage(packageRoot: string, args: string[] = []): void {
-  const context = createCliContext(packageRoot);
+function printUsage(context: CliContext): void {
   const modes = context.project.definition.modes.join(', ');
-  console.log(`
+  console.log(cliText(context.locale, `
 ${color(context.cliName, ANSI.bold)} — ${context.displayName} runtime CLI
 
 ${color('USO', ANSI.bold)}
@@ -33,10 +37,12 @@ ${color('COMANDOS', ANSI.bold)}
   autoupdate on [HH:MM] [--beta]
   autoupdate off
   autoupdate status
+  language [pt-BR|en]           Consulta ou salva o idioma do CLI
 
 ${color('OPÇÕES GLOBAIS', ANSI.bold)}
   --version, -v                 Exibe a versão do bot
   --help, -h                    Exibe esta ajuda
+  --locale pt-BR|en             Usa este idioma somente nesta execução
 
 ${color('SETUP NÃO INTERATIVO', ANSI.bold)}
   ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
@@ -45,18 +51,84 @@ ${color('SETUP NÃO INTERATIVO', ANSI.bold)}
 ${color('ORIGEM DAS ATUALIZAÇÕES', ANSI.bold)}
   Definida pelo autor no package.json: monkyBot.releases (GitHub recomendado)
   ou monkyBot.updateSource (URL HTTPS de .tgz ou caminho local de .tgz).
-`.trim());
+`, `
+${color(context.cliName, ANSI.bold)} — ${context.displayName} runtime CLI
+
+${color('USAGE', ANSI.bold)}
+  ${context.cliName} <command> [options]
+
+${color('COMMANDS', ANSI.bold)}
+  setup                         Configure the bot (${modes})
+  start [--foreground]          Start via pm2 in the background or in the foreground
+  stop                          Stop the managed process
+  restart [--fresh]             Restart using the saved configuration
+  status                        Show the process state and configuration
+  logs [--lines N] [--no-follow]
+  config                        Show the current configuration
+  config set <k> <v>             Set mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
+  update [--check] [--beta] [--yes]
+  autoupdate on [HH:MM] [--beta]
+  autoupdate off
+  autoupdate status
+  language [pt-BR|en]           Show or save the CLI language
+
+${color('GLOBAL OPTIONS', ANSI.bold)}
+  --version, -v                 Show the bot version
+  --help, -h                    Show this help
+  --locale pt-BR|en             Use this language for this invocation only
+
+${color('NON-INTERACTIVE SETUP', ANSI.bold)}
+  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "My Bot"] [--bot-dir <directory>] [--yes]
+  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-or-domain> [--serve-port 7780] [--name "My Bot"] [--bot-dir <directory>] [--yes]
+
+${color('UPDATE SOURCE', ANSI.bold)}
+  Configured by the author in package.json: monkyBot.releases (GitHub recommended)
+  or monkyBot.updateSource (an HTTPS .tgz URL or a local .tgz path).
+`).trim());
 }
 
 export async function runBotCli(packageRoot: string, args: string[] = process.argv.slice(2)): Promise<void> {
-  const context = createCliContext(packageRoot);
-  const [command, ...rest] = args;
-  if (!command || command === '--help' || command === '-h' || command === 'help') {
-    printUsage(packageRoot, rest);
-    return;
+  const parsed = parseCliLocaleArgs(args);
+  const versionOnly = ['--version', '-v', 'version'].includes(parsed.args[0]);
+  const selectedLanguage = parsed.args[0] === 'language' && parsed.args.length === 2
+    ? normalizeBotLocale(parsed.args[1]) : undefined;
+  const context = createCliContext(packageRoot, process.env, {
+    locale: parsed.locale ?? selectedLanguage ?? (versionOnly ? 'pt-BR' : undefined),
+    toleratePreferenceErrors: !isInteractiveCliAccess(parsed.args),
+  });
+  try {
+    await dispatchBotCli(context, parsed.args, parsed.locale);
+  } catch (error) {
+    if (error instanceof CliError) throw new Error(cliErrorMessage(error, context.locale));
+    throw error;
   }
+}
+
+async function dispatchBotCli(context: CliContext, args: string[], explicitLocale?: BotLocale): Promise<void> {
+  const [command, ...rest] = args;
   if (command === '--version' || command === '-v' || command === 'version') {
     console.log(`${context.cliName} ${context.version}`);
+    return;
+  }
+  if (shouldPromptCliLocale(context.homeDir, args, explicitLocale)) {
+    context.locale = await chooseCliLocale(context.locale);
+    saveCliLocale(context.homeDir, context.locale);
+  }
+  if (!command || command === '--help' || command === '-h' || command === 'help') {
+    printUsage(context);
+    return;
+  }
+  if (command === 'language') {
+    if (rest.length > 1 || (rest.length === 1 && !normalizeBotLocale(rest[0]))) {
+      throw new Error(cliText(context.locale, 'Use language pt-BR ou language en.', 'Use language pt-BR or language en.'));
+    }
+    const selected = normalizeBotLocale(rest[0]) ??
+      (!rest.length && isInteractiveCliAccess(args) ? await chooseCliLocale(context.locale) : undefined);
+    if (selected) {
+      saveCliLocale(context.homeDir, selected);
+      context.locale = selected;
+    }
+    console.log(cliText(context.locale, `Idioma: ${context.locale}`, `Language: ${context.locale}`));
     return;
   }
   if (command === 'setup') {
@@ -95,5 +167,7 @@ export async function runBotCli(packageRoot: string, args: string[] = process.ar
     await autoUpdateCommand(context, rest);
     return;
   }
-  throw new Error(`Unknown CLI command: ${command}. Use "${context.cliName} --help".`);
+  throw new Error(cliText(context.locale,
+    `Comando desconhecido. Use "${context.cliName} --help".`,
+    `Unknown CLI command. Use "${context.cliName} --help".`));
 }

@@ -244,7 +244,9 @@ jobs:
           name: dist-cli
           if-no-files-found: error
           retention-days: 7
-          path: release/monky-cli-*.tgz
+          path: |
+            release/monky-cli-*.tgz
+            release/monky-compatibility-*.json
 
       - name: Pack bot-sdk
         id: pack-sdk
@@ -332,7 +334,7 @@ jobs:
       - name: Generate checksums and sign artifacts
         run: |
           cd artifacts
-          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.tgz' \) \
+          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.tgz' -o -name 'monky-compatibility-*.json' \) \
             -exec sha256sum {} + | sort > checksums-sha256.txt
           echo "=== Checksums ==="
           cat checksums-sha256.txt
@@ -406,7 +408,7 @@ jobs:
         run: |
           cd artifacts
           shopt -s nullglob
-          FILES=( *.exe *.dmg *.zip *.tgz *.blockmap latest*.yml checksums-sha256.txt* )
+          FILES=( *.exe *.dmg *.zip *.tgz *.blockmap latest*.yml monky-compatibility-*.json checksums-sha256.txt* )
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "No artifacts to upload." >&2
             exit 1

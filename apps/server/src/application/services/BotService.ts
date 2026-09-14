@@ -4,11 +4,13 @@ import {
   LIMITS,
   ProtocolErrorCode,
   BotInfo,
+  PROTOCOL_VERSION,
   UserSummary,
   botIdentitySchema,
   botManifestSchema,
   botProfileUpdateSchema,
   type BotIdentity,
+  type BotCompatibilitySummary,
 } from '@monky/shared';
 import { BotRecord } from '../../domain/entities';
 import { IBotRepository, IServerRepository } from '../../domain/repositories';
@@ -115,6 +117,43 @@ export class BotService {
   async list(): Promise<BotInfo[]> {
     const records = await this.botRepo.listAll();
     return records.map((r) => this.toBotInfo(r));
+  }
+
+  async getCompatibility(): Promise<BotCompatibilitySummary> {
+    const bots = await this.botRepo.listAll();
+    return {
+      protocolVersion: PROTOCOL_VERSION,
+      incompatibleBots: bots.filter((bot) =>
+        bot.lastProtocolVersion != null && bot.lastProtocolVersion !== PROTOCOL_VERSION).length,
+      uncheckedBots: bots.filter((bot) =>
+        bot.boundPublicKey !== null && bot.lastProtocolVersion == null).length,
+    };
+  }
+
+  async recordCompatibleConnection(botId: string): Promise<boolean> {
+    return this.mutate(async () => {
+      const record = await this.botRepo.findById(botId);
+      if (!record) return false;
+      if (record.lastProtocolVersion !== PROTOCOL_VERSION) {
+        await this.botRepo.update(botId, { lastProtocolVersion: PROTOCOL_VERSION });
+      }
+      return true;
+    });
+  }
+
+  async recordRejectedProtocol(rawToken: string, publicKey: string, protocolVersion: unknown): Promise<boolean> {
+    if (typeof protocolVersion !== 'number' || !Number.isSafeInteger(protocolVersion) ||
+        protocolVersion <= 0 || protocolVersion === PROTOCOL_VERSION) return false;
+    return this.mutate(async () => {
+      const record = await this.botRepo.findByTokenHash(BotService.hashToken(rawToken));
+      // Never claim an unbound link or let an obsolete duplicate override a live, compatible bot.
+      if (!record || !record.boundPublicKey || record.boundPublicKey !== publicKey ||
+          this.getOnlineBotsMap().has(record.id)) return false;
+      if (record.lastProtocolVersion !== protocolVersion) {
+        await this.botRepo.update(record.id, { lastProtocolVersion: protocolVersion });
+      }
+      return true;
+    });
   }
 
   async getInfo(botId: string): Promise<BotInfo | null> {
@@ -317,6 +356,8 @@ export class BotService {
       bound: record.boundPublicKey !== null,
       online: onlineBots.has(record.id),
       profilePending: record.profilePending,
+      lastProtocolVersion: record.lastProtocolVersion ?? null,
+      requiredProtocolVersion: PROTOCOL_VERSION,
     };
   }
 

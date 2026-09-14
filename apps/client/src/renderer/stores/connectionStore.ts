@@ -2,7 +2,8 @@ import { ConnectionStatus } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
 import { VoiceMode } from '@monky/shared';
-import { favoritesStore } from './favoritesStore';
+import { favoritesStore, savedServerFavoriteKey } from './favoritesStore';
+import { settingsStore } from './settingsStore';
 
 export interface SavedServer {
   host: string;
@@ -11,6 +12,8 @@ export interface SavedServer {
   lastConnected: number;
   password?: string;
   iconUrl?: string;
+  /** Logical identity learned from an authenticated server, never its name. */
+  serverId?: string;
 }
 
 export interface RailServerNode {
@@ -111,6 +114,11 @@ export class ConnectionStore {
             (server.password === undefined || typeof server.password === 'string') &&
             (server.iconUrl === undefined || typeof server.iconUrl === 'string')
           ))
+            .map(server => ({
+              ...server,
+              serverId: typeof server.serverId === 'string' && server.serverId.length > 0 && server.serverId.length <= 256
+                ? server.serverId : undefined,
+            }))
           : [];
       }
     } catch (e) {
@@ -134,6 +142,10 @@ export class ConnectionStore {
       }
       if (!server.iconUrl && existing.iconUrl) {
         server.iconUrl = existing.iconUrl;
+      }
+      if (!server.serverId) server.serverId = existing.serverId;
+      if (existing.serverId && server.serverId !== existing.serverId) {
+        this.clearServerAutoEntry(existing);
       }
       this.savedServers[existingIdx] = server;
     } else {
@@ -178,6 +190,26 @@ export class ConnectionStore {
     this.updateSavedServerMeta(host, port, { iconUrl });
   }
 
+  public rememberSavedServerIdentity(host: string, port: number, serverId: string): void {
+    const key = savedServerFavoriteKey({ host, port });
+    const server = this.savedServers.find(item => savedServerFavoriteKey(item) === key);
+    if (!server || !serverId || server.serverId === serverId) return;
+    if (server.serverId) this.clearServerAutoEntry(server);
+    server.serverId = serverId;
+    this.saveSavedServers();
+    appEvents.emit('connection.saved_servers_changed');
+  }
+
+  public invalidateSavedServerIdentity(host: string, port: number): void {
+    const key = savedServerFavoriteKey({ host, port });
+    const server = this.savedServers.find(item => savedServerFavoriteKey(item) === key);
+    if (!server) return;
+    delete server.serverId;
+    this.clearServerAutoEntry(server);
+    this.saveSavedServers();
+    appEvents.emit('connection.saved_servers_changed');
+  }
+
   /**
    * Keeps "Meus Servidores" in step when the owner renames a server they host
    * from the app: that list has its own copy of the name (#85).
@@ -195,6 +227,11 @@ export class ConnectionStore {
   public updateSavedServer(oldHost: string, oldPort: number, updated: SavedServer): void {
     const idx = this.savedServers.findIndex((s) => s.host === oldHost && s.port === oldPort);
     if (idx >= 0) {
+      if (savedServerFavoriteKey(this.savedServers[idx]) === savedServerFavoriteKey(updated)) {
+        updated.serverId = this.savedServers[idx].serverId;
+      } else {
+        delete updated.serverId;
+      }
       this.savedServers[idx] = updated;
       try {
         favoritesStore.moveServer({ host: oldHost, port: oldPort }, updated);
@@ -445,6 +482,24 @@ export class ConnectionStore {
       favoritesStore.retainSavedServers(this.savedServers);
     } catch (error: unknown) {
       clientLog.warn('STORE', 'Could not reconcile saved server favorites', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    try {
+      // A changed endpoint requires a new opt-in; a name/icon edit does not.
+      settingsStore.retainAutoEntryServers(this.savedServers);
+    } catch (error: unknown) {
+      clientLog.warn('STORE', 'Could not reconcile automatic-entry servers', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private clearServerAutoEntry(server: SavedServer): void {
+    try {
+      settingsStore.setServerAutoEntry(server, false);
+    } catch (error: unknown) {
+      clientLog.warn('STORE', 'Could not disable automatic entry after the server identity changed', {
         error: error instanceof Error ? error.message : String(error),
       });
     }

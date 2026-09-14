@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 
 /**
  * Default size of the floating overlay window (#169). Shared so the renderer can

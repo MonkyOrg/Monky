@@ -2,6 +2,10 @@ import { z } from 'zod';
 import { LIMITS } from './constants.js';
 import type { CommandOption } from './models.js';
 import {
+  BOT_LOCALES, botFieldLocalizationSchema, botLocaleSchema, commandLocalizationsSchema,
+  localizeBotChoices, resolveBotLocale, type BotLocale,
+} from './botLocales.js';
+import {
   audioPreviewResourceIdSchema,
   createSelectionChoiceSchema,
   selectionChoicesSchema,
@@ -55,6 +59,7 @@ export const commandRequestIdSchema = identifier;
 
 export const commandOptionSchema = z.object({
   name: inputName,
+  label: label.optional(),
   description: label,
   type: z.enum(['string', 'integer', 'boolean', 'user']),
   required: z.boolean().optional(),
@@ -74,18 +79,35 @@ export const commandDefinitionSchema = z.object({
   name: commandName,
   description: label,
   options: z.array(commandOptionSchema).max(LIMITS.MAX_OPTIONS_PER_COMMAND).optional(),
+  localizations: commandLocalizationsSchema.optional(),
   downloadsSound: z.boolean().optional(),
   voiceRequirement: z.enum(['joined', 'same-bot-channel']).optional(),
 }).strict().refine((command) =>
   new Set(command.options?.map((option) => option.name)).size === (command.options?.length ?? 0)
-);
+).superRefine((command, ctx) => {
+  for (const locale of BOT_LOCALES) {
+    for (const [name, text] of Object.entries(command.localizations?.[locale]?.options ?? {})) {
+      const option = command.options?.find((entry) => entry.name === name);
+      const path = ['localizations', locale, 'options', name];
+      if (!option) {
+        ctx.addIssue({ code: 'custom', message: 'Unknown localized command option', path });
+        continue;
+      }
+      for (const value of Object.keys(text.choices ?? {})) {
+        if (!option.choices?.some((choice) => choice.value === value)) {
+          ctx.addIssue({ code: 'custom', message: 'Unknown localized command choice', path: [...path, 'choices', value] });
+        }
+      }
+    }
+  }
+});
 
 export const commandInvokeSchema = z.object({
   commandName,
   botId: identifier,
   channelId: identifier,
   options: commandValuesSchema.optional(),
-  locale: z.enum(['pt-BR', 'en']).optional(),
+  locale: botLocaleSchema.optional(),
   allowSoundDownload: z.boolean().optional(),
   userSettings: botSettingsValuesSchema.optional(),
 }).strict();
@@ -114,14 +136,14 @@ export const commandAutocompleteSchema = z.object({
   optionName: inputName,
   query: z.string().max(LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH),
   options: commandValuesSchema.optional(),
-  locale: z.enum(['pt-BR', 'en']).optional(),
+  locale: botLocaleSchema.optional(),
   userSettings: botSettingsValuesSchema.optional(),
 }).strict();
 export const commandAutocompleteExecutionSchema = commandAutocompleteSchema
   .omit({ botId: true, channelId: true, userSettings: true })
   .extend({
     options: commandValuesSchema,
-    locale: z.enum(['pt-BR', 'en']),
+    locale: botLocaleSchema,
     settings: botSettingsContextSchema.optional(),
   });
 export const commandAutocompleteResultSchema = z.discriminatedUnion('status', [
@@ -151,7 +173,7 @@ export const commandAudioPreviewExecutionSchema = z.object({
   commandName,
   optionName: inputName,
   resourceId: audioPreviewResourceIdSchema,
-  locale: z.enum(['pt-BR', 'en']),
+  locale: botLocaleSchema,
   settings: botSettingsContextSchema.optional(),
 }).strict();
 export type CommandAudioPreviewExecutionPayload = z.infer<typeof commandAudioPreviewExecutionSchema>;
@@ -263,10 +285,8 @@ export type BotForm = z.infer<typeof botFormSchema>;
 const botSettingsFormLocalizationSchema = z.object({
   title: label.optional(),
   description: description.optional(),
-  fields: z.record(inputName, z.object({
-    label: label.optional(),
-    description: description.optional(),
-  }).strict()).optional(),
+  submitLabel: label.optional(),
+  fields: z.record(inputName, botFieldLocalizationSchema).optional(),
 }).strict();
 const botSettingsLocalizationSchema = z.object({
   server: botSettingsFormLocalizationSchema.optional(),
@@ -302,9 +322,20 @@ export const botSettingsDefinitionSchema = z.object({
         ctx.addIssue({ code: 'custom', message: 'Localized settings scope is not declared', path: ['localizations', locale, scope] });
         continue;
       }
-      for (const name of Object.keys(localized.fields ?? {})) {
-        if (!form.fields.some((field) => field.name === name)) {
+      for (const [name, text] of Object.entries(localized.fields ?? {})) {
+        const field = form.fields.find((entry) => entry.name === name);
+        const path = ['localizations', locale, scope, 'fields', name];
+        if (!field) {
           ctx.addIssue({ code: 'custom', message: 'Unknown localized settings field', path: ['localizations', locale, scope, 'fields', name] });
+          continue;
+        }
+        if (text.placeholder !== undefined && field.type === 'boolean') {
+          ctx.addIssue({ code: 'custom', message: 'This settings field has no placeholder', path: [...path, 'placeholder'] });
+        }
+        for (const value of Object.keys(text.choices ?? {})) {
+          if (field.type !== 'select' || !field.choices.some((choice) => choice.value === value)) {
+            ctx.addIssue({ code: 'custom', message: 'Unknown localized settings choice', path: [...path, 'choices', value] });
+          }
         }
       }
     }
@@ -315,20 +346,26 @@ export type BotSettingsDefinition = z.infer<typeof botSettingsDefinitionSchema>;
 export function localizeBotSettingsForm(
   definition: BotSettingsDefinition,
   scope: 'server' | 'user',
-  locale: 'pt-BR' | 'en',
+  locale: BotLocale,
 ): BotForm | undefined {
   const form = definition[scope];
-  const localized = definition.localizations?.[locale]?.[scope];
+  const localized = definition.localizations?.[resolveBotLocale(locale)]?.[scope];
   if (!form || !localized) return form;
   return {
     ...form,
     title: localized.title ?? form.title,
     description: localized.description ?? form.description,
-    fields: form.fields.map((field) => ({
-      ...field,
-      label: localized.fields?.[field.name]?.label ?? field.label,
-      description: localized.fields?.[field.name]?.description ?? field.description,
-    })),
+    submitLabel: localized.submitLabel ?? form.submitLabel,
+    fields: form.fields.map((field) => {
+      const text = localized.fields?.[field.name];
+      return {
+        ...field,
+        label: text?.label ?? field.label,
+        description: text?.description ?? field.description,
+        ...(field.type !== 'boolean' ? { placeholder: text?.placeholder ?? field.placeholder } : {}),
+        ...(field.type === 'select' ? { choices: localizeBotChoices(field.choices, text?.choices) } : {}),
+      };
+    }),
   };
 }
 

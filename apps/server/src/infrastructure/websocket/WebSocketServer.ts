@@ -1139,9 +1139,11 @@ export class WebSocketServer {
       return;
     }
 
-    // Token validation performs TOFU binding, so incompatible peers must be
-    // rejected before looking up or binding their token.
+    // Incompatible peers must never perform TOFU binding. An already-bound bot
+    // can still identify its obsolete protocol for the owner's persistent warning.
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
+      await this.botService.recordRejectedProtocol(payload.botToken, payload.publicKey, payload.protocolVersion);
+      if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
       this.sendError(
         session.ws,
         ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
@@ -1187,6 +1189,12 @@ export class WebSocketServer {
       }
       if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
     }
+
+    if (!await this.botService.recordCompatibleConnection(botRecord.id)) {
+      this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'O vínculo do bot foi revogado.', requestId);
+      return;
+    }
+    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
 
     // Build a synthetic UserSummary for the bot.
     const sessionId = `bot:${botRecord.id}`;

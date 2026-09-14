@@ -324,7 +324,12 @@ export class MonkyServer {
         return;
       }
       if (req.url === '/preview') {
-        const people = listOnlineHumans(getOnlineUsers().values());
+        const onlineSessions = getOnlineUsers();
+        const people = listOnlineHumans(onlineSessions.values());
+        const voiceStates = signalingService.getAllVoiceStates();
+        const voicePeople = listOnlineHumans(
+          [...onlineSessions.entries()].filter(([sessionId]) => voiceStates[sessionId]).map(([, value]) => value)
+        );
         const users = people
           .filter((user) => !user.invisible)
           .slice(0, 10)
@@ -332,8 +337,12 @@ export class MonkyServer {
             nickname: user.nickname,
             avatarUrl: user.avatarUrl || null,
           }));
-        Promise.all([serverRepo.getServer(), userRepo.count()])
-          .then(([server, memberCount]) => {
+        const voiceUsers = voicePeople
+          .filter((user) => !user.invisible)
+          .slice(0, 10)
+          .map((user) => ({ nickname: user.nickname, avatarUrl: user.avatarUrl || null }));
+        Promise.all([serverRepo.getServer(), userRepo.count(), botService.getCompatibility()])
+          .then(([server, memberCount, botCompatibility]) => {
             res.writeHead(200, {
               'Content-Type': 'application/json',
               'Access-Control-Allow-Origin': '*',
@@ -345,6 +354,9 @@ export class MonkyServer {
                 iconUrl: avatarStorage.getPublicUrl(server?.iconPath),
                 // Distinct people, matching the per-person maxUsers semantics (#309).
                 userCount: people.length,
+                voiceUserCount: voicePeople.length,
+                voiceUsers,
+                botCompatibility,
                 // Registered members and the cap they count against, so a visitor
                 // can tell whether there is room before trying to join (#403).
                 // `??` rather than `||`: 0 is the "unlimited" sentinel and must
@@ -355,7 +367,8 @@ export class MonkyServer {
               })
             );
           })
-          .catch(() => {
+          .catch((error) => {
+            Logger.error('NETWORK', 'Failed to prepare the public server preview.', error);
             res.writeHead(500, { 'Access-Control-Allow-Origin': '*' });
             res.end();
           });

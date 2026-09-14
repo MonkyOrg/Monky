@@ -19,8 +19,24 @@ import { bindRendererDiagnostics } from './rendererDiagnostics';
 import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
 import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
+import { resolveDevelopmentProfile } from './developmentProfile';
 
 import fs from 'fs';
+
+const developmentProfile = resolveDevelopmentProfile({
+  isPackaged: app.isPackaged,
+  appPath: app.getAppPath(),
+  appDataPath: app.getPath('appData'),
+  explicitUserData: app.commandLine.getSwitchValue('user-data-dir'),
+});
+if (developmentProfile) {
+  // Select the profile before creating services, Chromium sessions or the lock.
+  fs.mkdirSync(developmentProfile.userData, { recursive: true });
+  fs.mkdirSync(developmentProfile.sessionData, { recursive: true });
+  app.setPath('userData', developmentProfile.userData);
+  app.setPath('sessionData', developmentProfile.sessionData);
+  process.env.MONKY_HOME = developmentProfile.cliHome;
+}
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
@@ -171,7 +187,7 @@ function createWindow(deferShow = false): void {
     frame: isMac,
     titleBarStyle: isMac ? 'hidden' : 'default',
     trafficLightPosition: isMac ? { x: 14, y: 12 } : undefined,
-    title: 'Monky',
+    title: developmentProfile ? 'Monky Dev' : 'Monky',
     icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
@@ -183,6 +199,14 @@ function createWindow(deferShow = false): void {
       backgroundThrottling: false, // Keep audio and WebRTC processing smoothly when minimized/hidden
     },
   });
+
+  if (developmentProfile) {
+    const window = mainWindow;
+    window.on('page-title-updated', (event) => {
+      event.preventDefault();
+      window.setTitle('Monky Dev');
+    });
+  }
 
   if (!trayManager) {
     trayManager = new TrayManager(mainWindow, quitApplication);
@@ -300,12 +324,10 @@ function createWindow(deferShow = false): void {
 // otherwise Windows sees the live window as a different app and the pinned icon
 // stops matching it after every update (#323).
 if (process.platform === 'win32') {
-  app.setAppUserModelId('com.monky.app');
+  app.setAppUserModelId(developmentProfile?.appUserModelId ?? 'com.monky.app');
 }
 
-// Only allow a single running instance. If a second instance is launched,
-// focus the window of the instance that is already running instead of
-// opening a new one (option 1 from #154).
+// Keep one instance per profile; development never shares the installed profile.
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();

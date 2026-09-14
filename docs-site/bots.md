@@ -65,11 +65,11 @@ Ao criar ou editar um canal de texto, o switch **Permitir comandos de bots** vem
 ### Pré-requisitos
 
 - **Node.js 18+**
-- Cliente, servidor e SDK compatíveis com o **protocolo 15**
+- Cliente, servidor e SDK compatíveis com o **protocolo 16**
 - O pacote `@monky/bot-sdk` da release correspondente
 
 ::: warning Atualização conjunta
-O protocolo 15 acrescenta voz, telas programáveis e prévias de áudio sob demanda. Atualize **cliente, servidor e bot** juntos; versões com protocolos diferentes não se conectam.
+O protocolo 16 acrescenta metadados de idioma e compatibilidade aos recursos de voz, telas programáveis e prévias de áudio. Atualize **cliente, servidor e bot** juntos; versões com protocolos diferentes não se conectam.
 
 As regras de vínculo do protocolo 14 são mantidas: `BOT_CREATE` recebe somente `{}` e a administração recebe `profilePending` para indicar uma identidade ainda não anunciada. O banco preserva as identidades existentes, e somente o próprio bot pode publicar alterações de perfil. `ctx.args` contém valores tipados e `ctx.reply()` é privado; use `ctx.publish()` somente para resultados que devem aparecer para o canal.
 :::
@@ -150,6 +150,22 @@ O CLI oferece `setup`, `start`, `stop`, `restart`, `status`, `logs` e `config`,
 com um processo PM2 e configuração isolados por nome do bot. `start --foreground`
 roda sem PM2 para desenvolvimento. `npm run cli -- setup` usa o mesmo CLI no
 checkout local, depois de compilar.
+
+No primeiro acesso em um terminal interativo, o CLI pede **Português (Brasil)**
+ou **English** e salva a escolha em `~/.<cliName>/preferences.json`.
+`language en` ou `language pt-BR` altera a preferência; `--locale en` vale somente
+para aquela execução. `en-US` é aceito e normalizado para `en`.
+`--version`, `--help`, entrada/saída redirecionadas, `--non-interactive`, `--yes`,
+`--check` e ambientes de CI não abrem essa pergunta nem criam uma preferência
+automaticamente. `MONKY_BOT_LOCALE` pode definir o idioma de uma automação;
+na ausência dela, o CLI aceita `MONKY_LANG`, como o CLI do servidor. A opção
+`--locale` prevalece sobre ambas, sem ler nem alterar a preferência salva.
+Tags regionais/POSIX como `en_GB.UTF-8` e `pt_PT` são normalizadas para `en` e
+`pt-BR`. A gravação é atômica; preferências inválidas geram um diagnóstico,
+sem impedir ajuda ou automação, e podem ser substituídas com `language en`
+ou `language pt-BR`. `--version` nem sequer lê esse arquivo.
+O CLI passa o idioma efetivo ao processo do bot nessa mesma variável, sem mudar
+identificadores como `setup`, `start`, `mode` ou nomes de variáveis.
 
 O setup segue o fluxo do MonkyBot: modo, diretório de trabalho, dados do modo
 e nome do bot. Em bots que suportam os dois modos, **instalação por URL é o padrão**
@@ -290,6 +306,17 @@ Se o diretório de configuração ou de dados estiver dentro do pacote instalado
 a atualização é bloqueada para não apagá-los; mova o perfil para fora do pacote
 antes de atualizar. O limite de transferência é 200 MiB e 60 segundos.
 
+O CLI mostra bytes realmente transferidos e porcentagem quando a origem informa
+um tamanho válido. Sem tamanho, informa os bytes recebidos sem inventar uma
+porcentagem. Consulta, verificação, instalação e reinício são etapas sem progresso
+numérico; logs redirecionados usam linhas legíveis. Se o bot estava em execução,
+o reinício passa pelo **CLI recém-instalado**, não pelo SDK antigo ainda carregado
+na memória do atualizador. Perfil, chaves e agendamento são preservados.
+No modo manual com `tokenEnv`, se a variável não existir no shell atual, somente
+essa credencial é recuperada do ambiente do processo PM2 gerenciado. Um valor
+explícito no shell tem prioridade; o token não é gravado na configuração nem
+colocado em argumentos ou logs.
+
 Para um repositório privado, disponibilize o token de leitura na variável de
 ambiente indicada, nunca dentro do pacote ou da URL. `autoupdate off` e `status`
 continuam disponíveis para administrar um agendamento antigo mesmo se a origem
@@ -353,7 +380,7 @@ bot.command({
     // ctx.getVoiceChannel() — consulta a sala atual da conexão original no servidor
     // ctx.serverId   — ID do servidor (útil em modo multi-servidor)
     // ctx.args       — argumentos { nome: string | number | boolean }
-    // ctx.locale     — idioma de quem chamou ('pt-BR' ou 'en')
+    // ctx.locale     — idioma preferido para este bot ('pt-BR' ou 'en')
     // ctx.reply()    — responde só para quem chamou, dentro do chat
     // ctx.publish()  — publica explicitamente um resultado no canal
     // ctx.prompt()   — aguarda um formulário privado; pode ser chamado em etapas
@@ -364,6 +391,53 @@ bot.command({
   },
 });
 ```
+
+### Idioma dos comandos e preferências
+
+Cada pessoa pode escolher **Configurações do bot > Minhas preferências > Idioma
+do bot**, inclusive para bots sem formulário de configuração próprio.
+**Seguir o Monky** usa o idioma do aplicativo; a escolha explícita vale somente
+para aquele bot, servidor/endereço e identidade no perfil local. Restaurar os
+padrões volta a seguir o Monky. O idioma efetivo chega em `ctx.locale` também no
+autocomplete e na prévia de áudio. Interações já iniciadas mantêm o idioma
+capturado; mensagens antigas não são traduzidas retroativamente.
+
+Declare `localizations` para os textos de descoberta e preenchimento:
+
+```ts
+bot.command({
+  name: 'play',
+  description: 'Choose playback order',
+  options: [{
+    name: 'mode', label: 'Mode', description: 'Playback order', type: 'string',
+    choices: [{ label: 'Shuffle', value: 'shuffle' }],
+  }],
+  localizations: {
+    'pt-BR': {
+      description: 'Escolha a ordem de reprodução',
+      options: {
+        mode: {
+          label: 'Modo', description: 'Ordem de reprodução', placeholder: 'Escolha',
+          choices: { shuffle: { label: 'Aleatório' } },
+        },
+      },
+    },
+  },
+  handler: (ctx) => { ctx.reply(ctx.locale === 'en' ? 'Ready.' : 'Pronto.'); },
+});
+```
+
+`name`, nomes de argumentos e `choices[].value` são identificadores estáveis:
+`/play` e `ctx.args.mode` não mudam de idioma. Traduza somente descrições,
+`label`, `placeholder` e os rótulos/descrições das escolhas. Campos ou escolhas
+não declarados são rejeitados. Texto ausente usa a declaração original.
+Formulários e respostas gerados pelo handler devem usar `ctx.locale`.
+
+O SDK exporta `BotLocale`, `normalizeBotLocale`, `resolveBotLocale` e
+`localizeCommand`. `normalizeBotLocale('en-US')` resulta em `en`; mantenha
+`pt-BR` e `en` como chaves de `localizations`. `resolveBotLocale` pode receber a
+lista de idiomas suportados pelo bot e um idioma padrão. `localizeCommand`
+produz metadados de exibição sem modificar a declaração ou os identificadores.
 
 ### Parâmetros guiados no chat
 
@@ -762,7 +836,7 @@ const current = bot.getServerSettings('meu-servidor'); // undefined antes de reg
 
 Campos obrigatórios de configurações precisam de defaults válidos; essa regra não muda os formulários de perguntas durante comandos. `false` e `0` são preservados. Textos, inteiros, switches, listas, escolhas e escolhas com prévia usam os mesmos controles, com **Salvar** explícito inclusive em escolhas apresentadas como botões. **Restaurar padrões** prepara a alteração, mas só persiste ao salvar.
 
-`localizations` é opcional e aceita `pt-BR` e `en`, seguindo o idioma escolhido no app. Cada escopo pode traduzir `title`, `description` e, em `fields`, o `label` e a `description` de campos já declarados. As traduções não alteram nomes, tipos, valores padrão ou validação; textos não traduzidos usam a declaração original. O formulário compartilhado e suas traduções só são enviados a quem pode configurá-lo.
+`localizations` é opcional e aceita `pt-BR` e `en`, seguindo a preferência individual de idioma para o bot (por padrão, o Monky). Cada escopo pode traduzir `title`, `description`, `submitLabel` e, em `fields`, `label`, `description`, `placeholder` e `choices: { valor: { label, description } }` de campos/escolhas já declarados. As traduções não alteram nomes, tipos, valores padrão ou validação; textos não traduzidos usam a declaração original. O formulário compartilhado e suas traduções só são enviados a quem pode configurá-lo.
 
 No MonkyBot, **Comportamento neste servidor → Música → Tempo de inatividade (segundos)** controla a saída por fila ociosa ou sala vazia: padrão de 60 segundos, de 1 a 600, salvo por servidor. Alterar durante uma espera considera o tempo já decorrido. A variável de ambiente `MONKY_MUSIC_GRACE_SECONDS` apenas define o padrão do host; não substitui a configuração compartilhada.
 

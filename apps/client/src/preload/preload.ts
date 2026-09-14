@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { AUDIO_PREVIEW_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS } from '@monky/shared';
+import { AUDIO_PREVIEW_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
   ActionShortcutBinding,
   AudioPreviewCancellation,
@@ -113,7 +113,7 @@ export interface ElectronApi {
   getAppVersion: () => Promise<string>;
   signalRendererReady: () => void;
   checkForUpdates: () => Promise<UpdateCheckResult>;
-  downloadUpdate: () => Promise<UpdateSimpleResult>;
+  downloadUpdate: (expectedVersion?: string) => Promise<UpdateSimpleResult>;
   installUpdate: () => Promise<UpdateSimpleResult>;
   setUpdateChannel: (allowBeta: boolean) => Promise<UpdateSimpleResult>;
   getUpdateOutcome: () => Promise<UpdateOutcome | null>;
@@ -282,12 +282,12 @@ const api: ElectronApi = {
   close: () => ipcRenderer.invoke('window:close'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   signalRendererReady: () => ipcRenderer.send('app:renderer-ready'),
-  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
-  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
-  installUpdate: () => ipcRenderer.invoke('updater:install'),
-  setUpdateChannel: (allowBeta) => ipcRenderer.invoke('updater:set-channel', allowBeta),
-  getUpdateOutcome: () => ipcRenderer.invoke('updater:outcome'),
-  getReleaseNotes: (tag) => ipcRenderer.invoke('updater:release-notes', tag),
+  checkForUpdates: () => ipcRenderer.invoke(UPDATER_IPC.check),
+  downloadUpdate: (expectedVersion) => ipcRenderer.invoke(UPDATER_IPC.download, expectedVersion),
+  installUpdate: () => ipcRenderer.invoke(UPDATER_IPC.install),
+  setUpdateChannel: (allowBeta) => ipcRenderer.invoke(UPDATER_IPC.setChannel, allowBeta),
+  getUpdateOutcome: () => ipcRenderer.invoke(UPDATER_IPC.outcome),
+  getReleaseNotes: (tag) => ipcRenderer.invoke(UPDATER_IPC.releaseNotes, tag),
   onUpdateProgress: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, percent: number) => cb(percent);
     ipcRenderer.on('updater:progress', listener);

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { list } from 'tar';
+import type { UpdateProgressHandler } from './updateProgress';
 import {
   httpsUpdateUrl, isBotVersion, isRecord, releaseAssetName,
   type BotPackageDefinition, type GitHubReleaseSource, type HttpsUpdateSource,
@@ -215,21 +216,39 @@ function assetResponse(url: URL, token: string | null, signal: AbortSignal): Pro
   });
 }
 
-function boundedTarball(): Transform {
+function boundedTarball(
+  stage: 'downloading' | 'copying', totalBytes: number | undefined, onProgress?: UpdateProgressHandler,
+): { stream: Transform; finish: () => void } {
   let written = 0;
-  return new Transform({
+  const report = (complete = false): void => onProgress?.({
+    stage, receivedBytes: written, ...(totalBytes === undefined ? {} : { totalBytes }), complete,
+  });
+  report();
+  const stream = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       written += chunk.length;
       if (written > MAX_TARBALL_BYTES) {
         callback(new UpdateArchiveError('Update archive exceeded the download size limit.'));
         return;
       }
+      if (totalBytes !== undefined && written > totalBytes) {
+        callback(new UpdateArchiveError('The update archive size does not match its declared length.'));
+        return;
+      }
+      report();
       callback(null, chunk);
     },
+    flush(callback) {
+      callback(totalBytes !== undefined && written !== totalBytes
+        ? new UpdateArchiveError('The update archive ended before its declared length.') : undefined);
+    },
   });
+  return { stream, finish: () => report(true) };
 }
 
-async function downloadToFile(url: URL, file: string, token: string | null, github: boolean): Promise<void> {
+async function downloadToFile(
+  url: URL, file: string, token: string | null, github: boolean, onProgress?: UpdateProgressHandler,
+): Promise<void> {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), DOWNLOAD_TIMEOUT_MS);
   let current = url;
@@ -272,7 +291,11 @@ async function downloadToFile(url: URL, file: string, token: string | null, gith
         response.destroy();
         throw new UpdateArchiveError('Update archive exceeds the download size limit.');
       }
-      await pipeline(response, boundedTarball(), fs.createWriteStream(file, { mode: 0o600, flags: 'wx' }));
+      const totalBytes = typeof headerLength === 'string' && /^\d+$/.test(headerLength) &&
+        Number.isSafeInteger(Number(headerLength)) && Number(headerLength) > 0 ? Number(headerLength) : undefined;
+      const transfer = boundedTarball('downloading', totalBytes, onProgress);
+      await pipeline(response, transfer.stream, fs.createWriteStream(file, { mode: 0o600, flags: 'wx' }));
+      transfer.finish();
       return;
     }
   } catch (error: unknown) {
@@ -286,15 +309,16 @@ async function downloadToFile(url: URL, file: string, token: string | null, gith
 export async function downloadHttpsUpdateArchive(
   source: HttpsUpdateSource,
   destinationFile: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  onProgress?: UpdateProgressHandler,
 ): Promise<void> {
   const url = new URL(httpsUpdateUrl(source.url));
   const token = source.tokenEnv ? environmentToken(source.tokenEnv, env) : null;
   if (source.tokenEnv && !token) throw new Error(`Set ${source.tokenEnv} before fetching this HTTPS update source.`);
-  await downloadToFile(url, destinationFile, token, false);
+  await downloadToFile(url, destinationFile, token, false, onProgress);
 }
 
-export async function copyLocalUpdateArchive(file: string, destinationFile: string): Promise<void> {
+export async function copyLocalUpdateArchive(file: string, destinationFile: string, onProgress?: UpdateProgressHandler): Promise<void> {
   let descriptor: number | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -310,12 +334,14 @@ export async function copyLocalUpdateArchive(file: string, destinationFile: stri
     if (original.size > MAX_TARBALL_BYTES) throw new UpdateArchiveError('The local update archive exceeds the size limit.');
     const input = fs.createReadStream(file, { fd: descriptor, autoClose: false });
     timer = setTimeout(() => input.destroy(new UpdateArchiveError('Timed out while copying the local update archive.')), DOWNLOAD_TIMEOUT_MS);
-    await pipeline(input, boundedTarball(), fs.createWriteStream(destinationFile, { mode: 0o600, flags: 'wx' }));
+    const transfer = boundedTarball('copying', original.size, onProgress);
+    await pipeline(input, transfer.stream, fs.createWriteStream(destinationFile, { mode: 0o600, flags: 'wx' }));
     const after = fs.fstatSync(descriptor);
     if (after.size !== original.size || after.mtimeMs !== original.mtimeMs || after.ctimeMs !== original.ctimeMs ||
         fs.statSync(destinationFile).size !== original.size) {
       throw new UpdateArchiveError('The local update archive changed while being copied; retry with a complete .tgz file.');
     }
+    transfer.finish();
   } catch (error: unknown) {
     if (isRecord(error) && error.code === 'ENOENT') throw new Error('The configured local update archive is missing.');
     throw archiveFailure(error, 'Could not read or copy the configured local update archive.');
@@ -400,11 +426,12 @@ export async function downloadReleaseAsset(
   source: GitHubReleaseSource,
   release: ReleaseInfo,
   destinationFile: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  onProgress?: UpdateProgressHandler,
 ): Promise<void> {
   const token = releaseToken(source.tokenEnv, env);
   const assetUrl = new URL(`${GITHUB_API}/repos/${source.repository}/releases/assets/${release.assetId}`);
-  await downloadToFile(assetUrl, destinationFile, token, true);
+  await downloadToFile(assetUrl, destinationFile, token, true, onProgress);
 }
 
 function inspectPackageManifest(file: string): VerifiedTarballManifest {

@@ -878,6 +878,7 @@ export interface CommandRegisterPayload {
     name: string;
     description: string;
     options?: CommandOption[];
+    localizations?: SlashCommand['localizations'];
     downloadsSound?: boolean;
     voiceRequirement?: SlashCommand['voiceRequirement'];
   }>;

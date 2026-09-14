@@ -43,6 +43,11 @@ export type TurnInstallOutcome =
 /** Notified after each step of an automatic installation (#438). */
 export type TurnInstallProgressListener = (progress: TurnInstallProgressPayload) => void;
 
+export type TurnPortProblem =
+  | { code: 'not-listening'; port: number }
+  | { code: 'external-unreachable'; port: number; publicIp: string; minPort: number; maxPort: number }
+  | { code: 'relay-bind-failed'; port: number; minPort: number; maxPort: number };
+
 /**
  * Runs a coturn TURN server next to the Monky server (#425).
  *
@@ -633,12 +638,14 @@ export class CoturnManager {
    * at least confirms it is listening locally.
    *
    * Returns a human-readable reason when the check fails, or null when
-   * everything looks good.
+   * everything looks good. The CLI can format structured failures in its own
+   * language; callers without a formatter keep the existing server messages.
    */
-  public static async checkPortReachability(): Promise<string | null> {
+  public static async checkPortReachability(describeProblem?: (problem: TurnPortProblem) => string): Promise<string | null> {
     // First: is anything listening on the TURN port locally?
     const localOk = await CoturnManager.probePort(TURN_LISTENING_PORT, 2000);
     if (!localOk) {
+      if (describeProblem) return describeProblem({ code: 'not-listening', port: TURN_LISTENING_PORT });
       return (
         `A porta ${TURN_LISTENING_PORT} não está escutando localmente. ` +
         'Verifique se nenhum outro processo está usando essa porta.'
@@ -650,6 +657,10 @@ export class CoturnManager {
     if (publicIp) {
       const externalOk = await CoturnManager.probePort3478External(publicIp);
       if (!externalOk) {
+        if (describeProblem) return describeProblem({
+          code: 'external-unreachable', port: TURN_LISTENING_PORT, publicIp,
+          minPort: TURN_RELAY_MIN_PORT, maxPort: TURN_RELAY_MAX_PORT,
+        });
         return (
           `A porta ${TURN_LISTENING_PORT} (UDP/TCP) não está acessível externamente no IP ${publicIp}. ` +
           `Abra a porta ${TURN_LISTENING_PORT} (UDP e TCP) e o range ${TURN_RELAY_MIN_PORT}-${TURN_RELAY_MAX_PORT} (UDP) ` +
@@ -661,7 +672,7 @@ export class CoturnManager {
     // Verify the UDP relay range is usable. coturn needs to bind ephemeral
     // ports in this range for actual media relay. We probe a few ports spread
     // across the range to catch firewall rules or exhaustion.
-    const relayProbe = await CoturnManager.probeRelayRange();
+    const relayProbe = await CoturnManager.probeRelayRange(describeProblem);
     if (relayProbe) {
       return relayProbe;
     }
@@ -674,7 +685,7 @@ export class CoturnManager {
    * UDP socket on several sample ports across the range. If any bind fails,
    * it likely means a firewall rule or another process is blocking the range.
    */
-  private static async probeRelayRange(): Promise<string | null> {
+  private static async probeRelayRange(describeProblem?: (problem: TurnPortProblem) => string): Promise<string | null> {
     // Test a few ports spread across the range
     const samplePorts = [
       TURN_RELAY_MIN_PORT,
@@ -686,6 +697,9 @@ export class CoturnManager {
     for (const port of samplePorts) {
       const bindOk = await CoturnManager.probeUdpBind(port, 2000);
       if (!bindOk) {
+        if (describeProblem) return describeProblem({
+          code: 'relay-bind-failed', port, minPort: TURN_RELAY_MIN_PORT, maxPort: TURN_RELAY_MAX_PORT,
+        });
         return (
           `O range de portas UDP ${TURN_RELAY_MIN_PORT}-${TURN_RELAY_MAX_PORT} não está acessível ` +
           `(falha ao testar porta ${port}/UDP). ` +

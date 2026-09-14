@@ -1,5 +1,6 @@
 import path from 'node:path';
 import type { BotProject, BotUpdateSource, GitHubReleaseSource } from '../tooling/config';
+import type { UpdateProgressHandler } from './updateProgress';
 import {
   copyLocalUpdateArchive,
   downloadHttpsUpdateArchive,
@@ -43,9 +44,11 @@ export async function withUpdateCandidate(
   project: BotProject,
   includePrerelease: boolean,
   action: (candidate: UpdateCandidate | null) => void | Promise<void>,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  onProgress?: UpdateProgressHandler,
 ): Promise<void> {
   const source = configuredUpdateSource(project);
+  onProgress?.({ stage: 'checking' });
   if (source.type === 'github') {
     const latest = await fetchLatestRelease(source.releases, project.definition, includePrerelease, env);
     return action(latest ? {
@@ -53,7 +56,8 @@ export async function withUpdateCandidate(
       htmlUrl: latest.htmlUrl,
       withVerifiedArchive: (install) => withTemporaryDownload(project.definition.cliName, async (directory) => {
         const file = path.join(directory, latest.assetName);
-        await downloadReleaseAsset(source.releases, latest, file, env);
+        await downloadReleaseAsset(source.releases, latest, file, env, onProgress);
+        onProgress?.({ stage: 'verifying' });
         verifyIdentity(project, readPackageManifestFromTarball(file), latest.version);
         await install(file);
       }),
@@ -62,11 +66,12 @@ export async function withUpdateCandidate(
   await withTemporaryDownload(project.definition.cliName, async (directory) => {
     const file = path.join(directory, 'update.tgz');
     if (source.type === 'https') {
-      await downloadHttpsUpdateArchive(source, file, env);
+      await downloadHttpsUpdateArchive(source, file, env, onProgress);
     } else {
       // Resolve from the installed package, independently of an operator's or PM2's working directory.
-      await copyLocalUpdateArchive(path.resolve(project.root, source.path), file);
+      await copyLocalUpdateArchive(path.resolve(project.root, source.path), file, onProgress);
     }
+    onProgress?.({ stage: 'verifying' });
     const manifest = readPackageManifestFromTarball(file);
     verifyIdentity(project, manifest);
     const parsed = parseVersion(manifest.version);

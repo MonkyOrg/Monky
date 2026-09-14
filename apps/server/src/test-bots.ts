@@ -1434,7 +1434,7 @@ test('bot identity migration preserves legacy profiles and persists new pending 
   database.close();
   database = await DatabaseConnection.create(filename);
   const repository = new SqliteBotRepository(database.getDb());
-  assert.deepEqual(await repository.findById(legacy.id), legacy);
+  assert.deepEqual(await repository.findById(legacy.id), { ...legacy, lastProtocolVersion: null });
   assert.equal(record(database.getDb().prepare('SELECT count(*) AS count FROM schema_migrations WHERE version = ?')
     .get('024_bot_profile_authority.sql')).count, 1);
   const service = new BotService(repository, new SqliteServerRepository(database.getDb()),
@@ -1450,7 +1450,7 @@ test('bot identity migration preserves legacy profiles and persists new pending 
   database.close();
   database = await DatabaseConnection.create(filename);
   const restored = new SqliteBotRepository(database.getDb());
-  assert.deepEqual(await restored.findById(legacy.id), legacy);
+  assert.deepEqual(await restored.findById(legacy.id), { ...legacy, lastProtocolVersion: null });
   assert.deepEqual(await restored.findById(pending.bot.id), before);
 });
 
@@ -2044,6 +2044,8 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.equal(botInfo.bound, false);
     assert.equal(botInfo.online, false);
     assert.equal(botInfo.avatarUrl, null);
+    assert.equal(botInfo.lastProtocolVersion, null);
+    assert.equal(botInfo.requiredProtocolVersion, PROTOCOL_VERSION);
     const catalog = botSettingsListResponseSchema.parse((await owner.peer.request(MessageType.BOT_SETTINGS_LIST)).payload);
     assert.deepEqual(catalog.bots, []);
     await owner.peer.error(MessageType.BOT_SETTINGS_GET, { botId }, ProtocolErrorCode.BAD_REQUEST);
@@ -2065,6 +2067,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       assert.equal(response.payload.code, ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED);
       assert.equal(response.payload.serverProtocolVersion, PROTOCOL_VERSION);
       assert.equal((await fixture.botRepo.findById(botId))?.boundPublicKey, null);
+      assert.equal((await fixture.botRepo.findById(botId))?.lastProtocolVersion, null);
       assert.equal((await fixture.botService.list()).find((item) => item.id === botId)?.online, false);
       assert.equal(await fixture.botRepo.count(), 1);
     }
@@ -2090,6 +2093,32 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await rejected.close();
   });
   let bot = await fixture.bot(token, undefined, 'Actual Bot');
+  await t.test('authenticates and persists the bot protocol; pending compatibility clears only after verification', async () => {
+    assert.equal((await fixture.botRepo.findById(botId))?.lastProtocolVersion, PROTOCOL_VERSION);
+    assert.deepEqual(await fixture.botService.getCompatibility(), {
+      protocolVersion: PROTOCOL_VERSION, incompatibleBots: 0, uncheckedBots: 0,
+    });
+    await fixture.botRepo.update(botId, { lastProtocolVersion: PROTOCOL_VERSION - 1 });
+    assert.equal((await fixture.botService.getCompatibility()).incompatibleBots, 1);
+    const listed = (await fixture.botService.list()).find((item) => item.id === botId);
+    assert.equal(listed?.lastProtocolVersion, PROTOCOL_VERSION - 1);
+    assert.equal(listed?.requiredProtocolVersion, PROTOCOL_VERSION);
+    await fixture.botRepo.update(botId, { lastProtocolVersion: null });
+    assert.equal((await fixture.botService.getCompatibility()).uncheckedBots, 1);
+    await fixture.botService.recordCompatibleConnection(botId);
+    assert.equal((await fixture.botRepo.findById(botId))?.lastProtocolVersion, PROTOCOL_VERSION);
+    assert.equal((await fixture.botService.getCompatibility()).uncheckedBots, 0);
+  });
+  await t.test('an obsolete duplicate cannot mark a currently connected compatible bot as incompatible', async () => {
+    const rejected = await fixture.connect();
+    await rejected.error(MessageType.AUTH_CONNECT, {
+      protocolVersion: PROTOCOL_VERSION - 1, nickname: 'Obsolete duplicate',
+      publicKey: bot.keys.publicKey, botToken: token,
+    }, ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED);
+    assert.equal((await fixture.botRepo.findById(botId))?.lastProtocolVersion, PROTOCOL_VERSION);
+    assert.equal((await fixture.botService.getCompatibility()).incompatibleBots, 0);
+    await rejected.close();
+  });
   const initialProfile = await bot.peer.request(MessageType.BOT_UPDATE_PROFILE, {
     avatarBase64: `data:image/png;base64,${PNG}`,
   });

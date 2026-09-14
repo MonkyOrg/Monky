@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { isIP } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { LIMITS } from '@monky/shared';
+import { LIMITS, type BotLocale } from '@monky/shared';
 import {
   BOT_ECOSYSTEM_FILE,
   DEFAULT_MANUAL_SERVER_URL,
@@ -12,6 +12,7 @@ import {
   UPDATER_ECOSYSTEM_FILE,
 } from './constants';
 import { ensurePrivateDirectory, readJsonFile, writePrivateJson } from './fs';
+import { CliError, defaultCliLocale } from './locale';
 import {
   botEntryPath,
   isRecord,
@@ -52,6 +53,7 @@ export interface CliContext {
   cliName: string;
   displayName: string;
   version: string;
+  locale: BotLocale;
   homeDir: string;
   configFile: string;
   pm2Home: string;
@@ -66,14 +68,15 @@ export interface CliContext {
 
 function stringValue(value: unknown, label: string, max = 512): string {
   if (typeof value !== 'string' || !value.trim() || value !== value.trim() || value.length > max) {
-    throw new Error(`${label} must be a non-empty string of at most ${max} characters.`);
+    throw new CliError(`${label}: informe um texto não vazio de até ${max} caracteres.`,
+      `${label} must be a non-empty string of at most ${max} characters.`);
   }
   return value;
 }
 
 function rejectUnknown(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   const key = Object.keys(value).find((entry) => !allowed.includes(entry));
-  if (key) throw new Error(`Unknown ${label} property: ${key}.`);
+  if (key) throw new CliError(`${label} contém uma propriedade desconhecida.`, `Unknown ${label} property.`);
 }
 
 export function configHomeDirectory(cliName: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -91,14 +94,16 @@ export function defaultBotDir(context: CliContext): string {
 
 export function normalizeBotDir(value: string): string {
   const resolved = path.resolve(value);
-  if (!path.isAbsolute(resolved)) throw new Error('The bot directory must resolve to an absolute path.');
+  if (!path.isAbsolute(resolved)) throw new CliError('O diretório do bot deve resultar em um caminho absoluto.',
+    'The bot directory must resolve to an absolute path.');
   return resolved;
 }
 
 export function validateBotName(value: unknown): string {
   const name = stringValue(value, 'bot name', LIMITS.MAX_NICKNAME_LENGTH);
   if (name.length < LIMITS.MIN_NICKNAME_LENGTH) {
-    throw new Error(`The bot name must contain at least ${LIMITS.MIN_NICKNAME_LENGTH} characters.`);
+    throw new CliError(`O nome do bot deve conter pelo menos ${LIMITS.MIN_NICKNAME_LENGTH} caracteres.`,
+      `The bot name must contain at least ${LIMITS.MIN_NICKNAME_LENGTH} characters.`);
   }
   return name;
 }
@@ -106,7 +111,8 @@ export function validateBotName(value: unknown): string {
 export function validateTokenEnv(value: unknown): string {
   const tokenEnv = stringValue(value, 'token environment variable', 100);
   if (!/^[A-Z_][A-Z0-9_]*$/.test(tokenEnv)) {
-    throw new Error('The token environment variable must use only A-Z, 0-9 and _.');
+    throw new CliError('A variável de ambiente do token deve usar somente A-Z, 0-9 e _.',
+      'The token environment variable must use only A-Z, 0-9 and _.');
   }
   return tokenEnv;
 }
@@ -117,7 +123,8 @@ export function validateBotToken(value: unknown): string {
 
 function validateManualCredentials(input: { botToken?: unknown; tokenEnv?: unknown }): ManualBotCredentials {
   if (input.botToken !== undefined) {
-    if (input.tokenEnv !== undefined) throw new Error('Configure either botToken or tokenEnv, not both.');
+    if (input.tokenEnv !== undefined) throw new CliError('Configure botToken ou tokenEnv, nunca os dois.',
+      'Configure either botToken or tokenEnv, not both.');
     return { botToken: validateBotToken(input.botToken) };
   }
   return { tokenEnv: validateTokenEnv(input.tokenEnv) };
@@ -132,10 +139,12 @@ export function validateServerUrl(value: unknown): string {
     }
     url = new URL(address.includes('://') ? address : `ws://${address}`);
   } catch {
-    throw new Error('The server URL must be a valid ws:// or wss:// URL.');
+    throw new CliError('A URL do servidor deve ser uma URL ws:// ou wss:// válida.',
+      'The server URL must be a valid ws:// or wss:// URL.');
   }
   if (!['ws:', 'wss:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.hash) {
-    throw new Error('The server URL must be a valid ws:// or wss:// URL without embedded credentials.');
+    throw new CliError('A URL do servidor deve ser uma URL ws:// ou wss:// válida e sem credenciais embutidas.',
+      'The server URL must be a valid ws:// or wss:// URL without embedded credentials.');
   }
   return url.toString();
 }
@@ -143,7 +152,8 @@ export function validateServerUrl(value: unknown): string {
 export function validateServePort(value: unknown): number {
   const parsed = typeof value === 'number' ? value : Number(stringValue(value, 'serve port', 16));
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-    throw new Error('The serve port must be an integer between 1 and 65535.');
+    throw new CliError('A porta do manifest deve ser um inteiro entre 1 e 65535.',
+      'The serve port must be an integer between 1 and 65535.');
   }
   return parsed;
 }
@@ -157,11 +167,13 @@ export function validatePublicHost(value: unknown): string {
   try {
     url = new URL(`http://${host}`);
   } catch {
-    throw new Error('The public host must be a hostname or IP without a scheme or port.');
+    throw new CliError('O host público deve ser um domínio ou IP sem protocolo ou porta.',
+      'The public host must be a hostname or IP without a scheme or port.');
   }
   if (url.hostname !== host.toLowerCase() || url.port || url.username || url.password ||
       url.pathname !== '/' || url.search || url.hash) {
-    throw new Error('The public host must be a hostname or IP without a scheme or port.');
+    throw new CliError('O host público deve ser um domínio ou IP sem protocolo ou porta.',
+      'The public host must be a hostname or IP without a scheme or port.');
   }
   return host;
 }
@@ -174,7 +186,7 @@ function parseCommonConfig(raw: Record<string, unknown>): { botName: string; bot
 }
 
 export function validateConfig(value: unknown, label = 'Bot config'): BotConfig {
-  if (!isRecord(value)) throw new Error(`${label} must contain an object.`);
+  if (!isRecord(value)) throw new CliError(`${label} deve conter um objeto.`, `${label} must contain an object.`);
   rejectUnknown(value, ['mode', 'botName', 'botDir', 'serverUrl', 'botToken', 'tokenEnv', 'servePort', 'publicHost'], label);
   const common = parseCommonConfig(value);
   if (value.mode === 'manual') {
@@ -195,10 +207,13 @@ export function validateConfig(value: unknown, label = 'Bot config'): BotConfig 
       publicHost: validatePublicHost(value.publicHost),
     };
   }
-  throw new Error(`${label}.mode must be "manual" or "marketplace".`);
+  throw new CliError(`${label}.mode deve ser "manual" ou "marketplace".`, `${label}.mode must be "manual" or "marketplace".`);
 }
 
-export function createCliContext(packageRoot: string, env: NodeJS.ProcessEnv = process.env): CliContext {
+export function createCliContext(
+  packageRoot: string, env: NodeJS.ProcessEnv = process.env,
+  options: { locale?: BotLocale; toleratePreferenceErrors?: boolean } = {},
+): CliContext {
   const project = loadBotProject(packageRoot);
   const cliName = project.definition.cliName;
   const homeDir = configHomeDirectory(cliName, env);
@@ -212,6 +227,7 @@ export function createCliContext(packageRoot: string, env: NodeJS.ProcessEnv = p
     cliName,
     displayName: project.definition.displayName,
     version: project.manifest.version,
+    locale: options.locale ?? defaultCliLocale(homeDir, env, options.toleratePreferenceErrors),
     homeDir,
     configFile: path.join(homeDir, 'config.json'),
     pm2Home: path.join(homeDir, '.pm2'),
@@ -240,7 +256,7 @@ export function writeConfig(context: CliContext, config: BotConfig): void {
 
 export function ensureModeSupported(context: CliContext, mode: BotMode): void {
   if (!context.project.definition.modes.includes(mode)) {
-    throw new Error(`${context.displayName} does not support the ${mode} mode.`);
+    throw new CliError(`${context.displayName} não suporta o modo ${mode}.`, `${context.displayName} does not support the ${mode} mode.`);
   }
 }
 

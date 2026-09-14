@@ -1,5 +1,5 @@
 import http from 'http';
-import { LIMITS } from '@monky/shared';
+import { LIMITS, parseBotCompatibility, type BotCompatibilitySummary } from '@monky/shared';
 import { ANSI, color } from './constants';
 import { readLocalConfig } from './context';
 import { t } from './i18n/index';
@@ -17,9 +17,26 @@ export function resolveServerPort(server: RegisteredServer): number {
  * Counts distinct people, so one person on two devices is still one (#309).
  */
 export function countOnlineUsers(port: number, timeoutMs = 1500): Promise<number | null> {
+  return readLocalServerPreview(port, timeoutMs).then((preview) => preview?.userCount ?? null);
+}
+
+export function countVoiceUsers(port: number, timeoutMs = 1500): Promise<number | null> {
+  return readLocalServerPreview(port, timeoutMs).then((preview) => preview?.voiceUserCount ?? null);
+}
+
+export interface LocalServerPreview {
+  userCount: number | null;
+  voiceUserCount: number | null;
+  botCompatibility: BotCompatibilitySummary | null;
+}
+
+const validCount = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+export function readLocalServerPreview(port: number, timeoutMs = 1500): Promise<LocalServerPreview | null> {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (value: number | null) => {
+    const finish = (value: LocalServerPreview | null) => {
       if (settled) return;
       settled = true;
       resolve(value);
@@ -42,10 +59,16 @@ export function countOnlineUsers(port: number, timeoutMs = 1500): Promise<number
           // are talking to something that is not a Monky server.
           if (body.length > 64_000) request.destroy();
         });
+        response.on('aborted', () => finish(null));
+        response.on('error', () => finish(null));
         response.on('end', () => {
           try {
-            const parsed = JSON.parse(body);
-            finish(typeof parsed?.userCount === 'number' ? parsed.userCount : null);
+            const parsed: unknown = JSON.parse(body);
+            finish(parsed && typeof parsed === 'object' ? {
+              userCount: validCount('userCount' in parsed ? parsed.userCount : undefined),
+              voiceUserCount: validCount('voiceUserCount' in parsed ? parsed.voiceUserCount : undefined),
+              botCompatibility: parseBotCompatibility('botCompatibility' in parsed ? parsed.botCompatibility : undefined),
+            } : null);
           } catch {
             finish(null);
           }
@@ -59,8 +82,8 @@ export function countOnlineUsers(port: number, timeoutMs = 1500): Promise<number
 }
 
 /**
- * Checks whether anyone is on the server before an action that disconnects
- * everybody, and asks the owner to confirm (#334). Non-interactive shells only
+ * Checks whether people are in voice before an action that interrupts their
+ * calls, and asks the owner to confirm (#334, #633). Non-interactive shells only
  * get the warning: blocking a scripted `monky stop` on a prompt nobody can
  * answer would be worse than the surprise.
  */
@@ -68,12 +91,12 @@ export async function confirmDisconnectingUsers(
   server: RegisteredServer,
   action: string
 ): Promise<boolean> {
-  const onlineUsers = await countOnlineUsers(resolveServerPort(server));
-  if (onlineUsers === null || onlineUsers <= 0) return true;
+  const voiceUsers = await countVoiceUsers(resolveServerPort(server));
+  if (voiceUsers === null || voiceUsers <= 0) return true;
 
-  const people = onlineUsers === 1 ? t('online.one') : t('online.many', { count: onlineUsers });
-  console.log(color(t('online.warning', { people, server: server.name || server.dataDir }), ANSI.yellow));
-  console.log(color(t('online.willDisconnect', { action }), ANSI.yellow));
+  const people = voiceUsers === 1 ? t('voiceUsers.one') : t('voiceUsers.many', { count: voiceUsers });
+  console.log(color(t('voiceUsers.warning', { people, server: server.name || server.dataDir }), ANSI.yellow));
+  console.log(color(t('voiceUsers.willDisconnect', { action }), ANSI.yellow));
 
   if (!process.stdin.isTTY) {
     console.log(color(t('online.nonInteractive'), ANSI.dim));

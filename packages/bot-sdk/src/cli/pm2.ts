@@ -5,6 +5,7 @@ import { runNpm } from '../tooling/process';
 import { pm2Command, runCommand, type CommandResult } from './process';
 import { type BotConfig, type CliContext } from './config';
 import { assertManifestPortAvailable, getManifestBindHost } from './ports';
+import { cliText } from './locale';
 
 export interface Pm2Process {
   name?: string;
@@ -54,7 +55,8 @@ export function isPm2Available(context: CliContext): boolean {
 
 export function ensurePm2ForStart(context: CliContext): void {
   if (isPm2Available(context)) return;
-  console.log('pm2 não encontrado. Instalando para o start em background...');
+  console.log(cliText(context.locale, 'pm2 não encontrado. Instalando para o start em background...',
+    'pm2 not found. Installing it for background start...'));
   runNpm(['install', '-g', 'pm2'], { stdio: 'inherit', env: pm2Env(context), timeout: 300_000 });
   if (!isPm2Available(context)) {
     throw new Error('pm2 was installed, but the executable is still unavailable in PATH.');
@@ -99,6 +101,7 @@ export function writeBotEcosystem(context: CliContext, entry: string): string {
     env: {
       MONKY_BOT_CLI_CONFIG_FILE: context.configFile,
       MONKY_BOT_CLI_ENTRY: entry,
+      MONKY_BOT_LOCALE: context.locale,
     },
   };
   writePrivateFile(file, ecosystemSource(app));
@@ -145,7 +148,7 @@ export async function restartBotProcess(
     if (current?.pm2_env?.status === 'online') {
       stopProcess(context, context.processName);
     }
-    await assertManifestPortAvailable(config.servePort, context.cliName, getManifestBindHost(current?.pm2_env));
+    await assertManifestPortAvailable(config.servePort, context.cliName, getManifestBindHost(current?.pm2_env), context.locale);
   }
   if (fresh) deleteProcess(context, context.processName);
   startOrRestart(context, writeBotEcosystem(context, entry));

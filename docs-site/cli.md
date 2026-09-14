@@ -81,12 +81,59 @@ informe `--data` explicitamente:
 monky --data /srv/monky-amigos restart
 ```
 
+## Idioma do CLI
+
+O primeiro comando executado em um terminal interativo pergunta **English** ou
+**Português (Brasil)** e salva a escolha em `~/.monky/cli-config.json`.
+`monky`, `--help` e `--version` não fazem essa pergunta nem salvam preferências.
+Comandos em scripts ou com entrada/saída redirecionada também não perguntam
+nem alteram o idioma salvo.
+
+Para trocar a preferência depois, use o comando explícito:
+
+```bash
+monky --lang pt-BR
+monky --lang en-US
+```
+
+`en-US` é normalizado para `en`; variantes de inglês e português, incluindo
+`pt_BR.UTF-8`, usam os catálogos `en` e `pt-BR`. Um código não suportado,
+`--lang` sem valor ou uma configuração inválida gera erro, sem substituir a
+preferência por um padrão silencioso.
+
+A prioridade é: **`--lang` → `MONKY_LANG` → preferência salva → locale do
+terminal → inglês**. Para detectar o locale, o CLI consulta `LC_ALL`,
+`LC_MESSAGES`, `LANG` e `LANGUAGE`, nessa ordem. `MONKY_LANG` permite que um
+app ou script passe o idioma escolhido sem ler nem alterar a preferência do
+CLI; o CLI não lê perfis do Electron.
+
+`--lang` junto de um comando interativo salva a escolha. Junto de ajuda,
+versão ou comandos não interativos, vale somente para aquela execução.
+O uso isolado `monky --lang <código>` é uma edição explícita e salva mesmo
+em scripts.
+
+**Isolamento para QA:** `MONKY_HOME` troca tanto o diretório do registro de
+servidores quanto o da preferência de idioma. No PowerShell, por exemplo:
+
+```powershell
+$env:MONKY_HOME = Join-Path $PWD '.monky-qa'
+monky --lang pt-BR
+monky --help
+```
+
+Nesse caso, a preferência fica em `.monky-qa\cli-config.json`; `--data`
+continua escolhendo os dados de um servidor, não o idioma. Nomes de comandos,
+chaves como `maxUsers` e `voiceMode`, permissões como `MANAGE_ROLES` e
+valores como `true`, `false`, `p2p` e `sfu` não são traduzidos.
+
 ## Opções globais
 
 | Opção | Descrição |
 |---|---|
 | `--data <pasta>` | Pasta de dados do servidor alvo. Obrigatório quando há vários servidores e o terminal não é interativo. |
 | `--help`, `-h` | Exibe a ajuda. |
+| `--version`, `-v` | Exibe a versão instalada. |
+| `--lang <código>` | Seleciona `en`/`en-US` ou `pt-BR`; usado sozinho, salva a preferência. |
 
 ## Estrutura da pasta de dados
 
@@ -118,19 +165,20 @@ Substitui o antigo `monky bootstrap`, que continua funcionando como apelido.
 monky create [opções]
 ```
 
-O comando é interativo e pergunta, nesta ordem:
+Após a escolha inicial de idioma, quando necessária, o comando pergunta:
 
 1. **Onde guardar os dados** — sugere `./data`, mas você pode informar qualquer
    caminho. Se já houver um servidor na pasta escolhida, ele pede outra.
 2. **Código de identidade do dono** (`MONKY-ID:...`) — exporte pelo app Monky em
    *Configurações → Identidade → Exportar*.
 3. **Senha da identidade** — a que você definiu ao exportar.
-4. **Nickname do dono**
-5. **Nome do servidor**
-6. **Porta do servidor** (padrão: `3000`)
-7. **Senha do servidor** — deixe vazio para um servidor aberto.
-8. **Limite de membros** — pergunta se você quer um teto de cadastros. O padrão
+4. **Nome do servidor**
+5. **Porta do servidor** (padrão: `3000`)
+6. **Senha do servidor** — deixe vazio para um servidor aberto.
+7. **Limite de membros** — pergunta se você quer um teto de cadastros. O padrão
    é não ter limite.
+8. **Modo de voz/vídeo** — `p2p` ou `sfu`. No modo SFU, verifica portas e
+   dependências e pergunta o upload disponível para estimar a capacidade.
 
 Ao final, exibe um resumo, pede confirmação e oferece iniciar o servidor.
 
@@ -177,7 +225,7 @@ monky list
 ```
 NOME       STATUS   PORTA  PASTA DE DADOS
 Amigos     online   3000   /srv/monky-amigos
-Trabalho   stopped  3100   /srv/monky-trabalho
+Trabalho   parado   3100   /srv/monky-trabalho
 ```
 
 ---
@@ -273,16 +321,16 @@ Com um único servidor (ou com `--data`), mostra o detalhe:
 
 ```
 Estado do servidor: Amigos
-status: online
-dataDir: /srv/monky-amigos
-porta: 3000
-processo PM2: monky-server-a1b2c3d4
-pid: 21877
-uptime: 2026-08-27T18:02:11.000Z
-restarts: 0
-memória: 88 MB
-cpu: 0%
-node: 24.20.0
+Estado: online
+Pasta de dados: /srv/monky-amigos
+porta 3000
+Processo PM2: monky-server-a1b2c3d4
+PID: 21877
+Iniciado em: 2026-08-27T18:02:11.000Z
+Reinícios: 0
+Memória: 88 MB
+CPU: 0%
+Node.js: 24.20.0
 ```
 
 O `status` não repete apenas o que o PM2 diz: a porta é sondada de verdade. O
@@ -300,6 +348,18 @@ Diagnóstico
 
 Com vários servidores e sem `--data`, imprime a mesma tabela do `monky list` —
 uma consulta não tem efeito colateral, então não faz sentido perguntar.
+
+O status detalhado de um servidor em execução também informa se há bots com
+protocolo incompatível ou ainda não verificado. Esses avisos aparecem após
+`monky start` e `monky restart` e orientam a atualizar ou conferir o SDK dos
+bots. Se o servidor ainda estiver iniciando ou `/preview` não responder, o CLI
+informa que não conseguiu consultar a compatibilidade; consulte novamente com
+`monky status --data <pasta>`.
+
+O `monky list` e a tabela de vários servidores mantêm esses avisos junto ao
+servidor correspondente. No `monky status --watch`, o aviso é atualizado a cada
+ciclo e desaparece quando os bots voltam a conectar com um SDK compatível.
+Servidores parados não são consultados nem aparecem como incompatíveis.
 
 ---
 

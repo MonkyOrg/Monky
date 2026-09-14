@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Escolha na tela inicial ou nas configurações da conta quais servidores conectar ao abrir o Monky. A opção vem desligada: nunca entra em voz nem inicia servidores parados. Servidores salvos anteriormente precisam de uma entrada manual antes de ativá-la.",
+  "en": "Choose on Home or in account settings which servers to connect to when Monky opens. The option is off by default: it never joins voice or starts stopped servers. Previously saved servers need one manual connection before enabling it."
+}
