@@ -1,3 +1,17 @@
+.connection-submit-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.connection-submit-row > .btn {
+  flex: 1;
+  min-width: 110px;
+}
+
 .server-auto-entry-control {
   display: flex;
   align-items: center;
@@ -42,47 +56,8 @@
   gap: 6px;
 }
 
-.server-auto-entry-settings {
-  border-top: 1px solid var(--border-color);
-  padding-top: 14px;
-  margin-top: 14px;
-}
-
-.server-auto-entry-settings h3 {
-  margin: 0 0 8px;
-  color: var(--text-primary);
-  font-size: 13px;
-}
-
 .server-auto-entry-description {
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.5;
-}
-
-.server-auto-entry-settings-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding: 10px 12px;
-  margin-top: 8px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-}
-
-.server-auto-entry-address {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  color: var(--text-primary);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.server-auto-entry-address span {
-  color: var(--text-muted);
-  font-size: 11px;
 }

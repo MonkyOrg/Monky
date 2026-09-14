@@ -176,6 +176,36 @@ test('only a selected opaque value is submitted; seeded/edited text and labels a
   assert.equal(commandValuesFromInputs(command, draft.values, [], draft.autocomplete).success, false);
 });
 
+test('localized command chips preserve selected autocomplete IDs and wire option names across locale changes', () => {
+  const command: SlashCommand = {
+    name: 'play', description: 'Search', botId: 'music', botName: 'Music',
+    options: [{ name: 'track', description: 'Track', type: 'string', required: true, autocomplete: true }],
+    localizations: {
+      'pt-BR': { name: 'tocar', aliases: ['musica'], options: { track: { label: 'Música' } } },
+      en: { name: 'listen', options: { track: { label: 'Track' } } },
+    },
+  };
+  const store = createChatStore();
+  store.bus = new EventBus();
+  store.setCommands([command]);
+  store.selectCommand('chat', command, 'Untranslated query');
+  store.selectCommandChoice('chat', 'track', { label: 'Selected song title', value: 'opaque:original-id' });
+  const draft = store.getCommandDraft('chat');
+  assert.ok(draft);
+  const original = structuredClone(draft);
+  for (const locale of ['pt-BR', 'en'] as const) {
+    const markup = renderCompactCommand(draft, 'chat', [], true, true, undefined, locale);
+    assert.ok(markup.includes(`<strong>/${locale === 'en' ? 'listen' : 'tocar'}</strong>`));
+    assert.match(markup, /data-command-name="play"/);
+    assert.match(markup, /data-bot-autocomplete="track"/);
+    assert.ok(markup.includes('value="Selected song title"'));
+    assert.deepEqual(commandValuesFromInputs(command, draft.values, [], draft.autocomplete), {
+      success: true, values: { track: 'opaque:original-id' },
+    });
+  }
+  assert.deepEqual(draft, original);
+});
+
 test('autocomplete uses the shared audio contract and does not recover rejected metadata', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   const invalid = [

@@ -46,11 +46,25 @@ O limite conta **membros cadastrados**, não quem está online: uma pessoa ocupa
 
 ## Monitor do Servidor
 
-Enquanto o servidor está rodando na sua máquina, o app mostra o que está acontecendo dentro dele. Abra pelo ícone de **monitoramento** ao lado do botão *Parar*, na aba *Meus Servidores*, ou pelo **nome do servidor › Monitor do Servidor** quando já estiver conectado.
+Abra **nome do servidor › Monitor do Servidor** para consultar o servidor
+conectado, inclusive quando ele roda em uma VPS. Administradores têm acesso;
+outros membros precisam da permissão **Visualizar monitor do servidor** em um
+cargo. **Gerenciar servidor**, sozinho, não concede esse acesso. O servidor
+confere a autorização em cada solicitação; não é necessário hospedar nada
+na máquina do cliente.
+
+Para o servidor hospedado no próprio dispositivo, o ícone de **monitoramento**
+ao lado de *Parar*, na aba *Meus Servidores*, continua abrindo o monitor
+explicitamente local, separado do servidor remoto em foco.
 
 O painel traz:
 
 - **Métricas ao vivo**, atualizadas a cada 3 segundos: tempo ativo, pessoas conectadas, membros registrados (e o limite, quando houver), canais e mensagens.
-- **Logs em tempo real**, com filtro por nível (`INFO`, `WARN`, `ERROR`), busca por texto, rolagem automática, botão para copiar o que está visível e botão para limpar.
+- **Logs recentes**, com filtro por nível (`INFO`, `WARN`, `ERROR`), busca por texto, rolagem automática e cópia dos registros visíveis. **Limpar visualização** limpa apenas esta janela, sem apagar o histórico do servidor.
 
-O app guarda os registros mais recentes em memória — ao reiniciar o servidor, a lista recomeça. Para servidores rodando numa VPS, use [`monky logs`](/hospedar-em-vps).
+O histórico em memória é limitado. Os logs remotos apresentam resumos
+operacionais protegidos, sem credenciais, dados privados ou detalhes do sistema;
+os detalhes completos ficam com quem hospeda o servidor, inclusive por
+[`monky logs`](/hospedar-em-vps). Trocar de servidor fecha o monitor remoto.
+Desconexão ou perda da permissão interrompe as consultas e remove os dados
+retidos na janela, sem desconectar você do Monky.

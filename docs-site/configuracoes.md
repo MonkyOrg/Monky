@@ -22,6 +22,19 @@ Abra pelo ícone de engrenagem na tela de conexão ou na barra inferior.
 - **Atualizações** — versão atual e verificação manual.
 - **Comunidade** — atalhos para ideias, votação e bugs.
 
+### Entrar no servidor ao abrir o Monky
+
+Na Home, selecione ou informe o servidor e ative **Entrar ao abrir o Monky**,
+ao lado de **Entrar no Servidor**. A escolha é salva somente depois de uma conexão
+bem-sucedida. Há um único destino: conectar em outro servidor com o switch
+ativado substitui o anterior. Uma tentativa que falha não altera o destino salvo.
+
+A preferência vale nas próximas aberturas até você desligar esse mesmo switch;
+desligá-lo desativa a entrada automática imediatamente, sem precisar conectar.
+Não inicia servidores parados nem entra em voz. Ao migrar de uma configuração
+antiga com vários destinos, somente a última escolha é mantida. A passagem da
+Home para o servidor tem uma animação curta, desativada com movimento reduzido.
+
 ### Navegação por seções
 
 Nas configurações do app e do servidor, selecionar uma categoria expande seus
@@ -53,6 +66,12 @@ novamente. Se a conexão ou a sessão mudar, reabra as configurações para obte
 o estado atual; uma solicitação sem confirmação não é apresentada como salva.
 Edições de cargos e perfis de bots também são imediatas, mas criação,
 instalação, exclusão e revogação continuam exigindo suas ações explícitas.
+
+Os avisos de bots incompatíveis ou ainda sem verificação ficam em
+**Configurações do servidor → Bots**, junto do bot que precisa de atenção,
+e não nos cards da Home. O dropdown do servidor não repete um item
+**Bots deste servidor**. As preferências pessoais continuam disponíveis pelo
+menu do próprio bot na lista de membros.
 
 ### Seletor de cores
 

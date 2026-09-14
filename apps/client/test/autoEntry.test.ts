@@ -56,21 +56,41 @@ test('automatic entry defaults off on fresh, migrated, malformed and subsequentl
   });
 });
 
-test('server opt-ins persist independently with canonical identities rather than names or list positions', () => {
+test('only one startup server persists, identified by canonical address rather than name or position', () => {
   withStorage(() => {
     const first = saved(' WSS://Example.TEST ');
     const otherPort = saved('example.test', 4000);
     const settings = new SettingsStore();
     settings.setServerAutoEntry(first, true);
+    const renamed = { ...saved(), name: 'Renamed' };
+    assert.equal(new SettingsStore().isServerAutoEntryEnabled(renamed), true);
     settings.setServerAutoEntry(otherPort, true);
     const restored = new SettingsStore();
-    const renamed = { ...saved(), name: 'Renamed' };
-    assert.equal(restored.isServerAutoEntryEnabled(renamed), true);
+    assert.equal(restored.isServerAutoEntryEnabled(renamed), false);
     assert.equal(restored.isServerAutoEntryEnabled(otherPort), true);
+    assert.deepEqual(restored.autoEntryServerKeys, [autoEntryServerKey(otherPort)]);
     restored.setServerAutoEntry(saved(), false);
     assert.equal(new SettingsStore().isServerAutoEntryEnabled(first), false);
     assert.equal(new SettingsStore().isServerAutoEntryEnabled(otherPort), true);
+    restored.clearServerAutoEntry();
+    assert.deepEqual(new SettingsStore().autoEntryServerKeys, []);
     assert.equal(autoEntryServerKey(saved('[::1]')), autoEntryServerKey(saved('::1')));
+  });
+});
+
+test('legacy multi-server settings retain only the most recently chosen valid address', () => {
+  withStorage(storage => {
+    const first = autoEntryServerKey(saved('first.test'));
+    const last = autoEntryServerKey(saved('last.test'));
+    assert.deepEqual(restoreAutoEntryServerKeys([first, last, null, '{bad']), [last]);
+    assert.deepEqual(restoreAutoEntryServerKeys([first, last, first]), [first]);
+    storage.setItem('monky_settings', JSON.stringify({ autoEntryServerKeys: [first, last] }));
+    const settings = new SettingsStore();
+    assert.deepEqual(settings.autoEntryServerKeys, [last]);
+    settings.save();
+    assert.deepEqual(new SettingsStore().autoEntryServerKeys, [last]);
+    settings.retainAutoEntryServers([saved('first.test')]);
+    assert.deepEqual(settings.autoEntryServerKeys, [], 'removing the chosen server never revives an older choice');
   });
 });
 
@@ -98,6 +118,10 @@ test('failed persistence rolls back the switch and never publishes an unsaved pr
       assert.equal(storage.getItem('monky_settings'), previous);
       assert.equal(notifications, 1);
       assert.throws(() => settings.retainAutoEntryServers([]), /Storage full/);
+      assert.equal(settings.isServerAutoEntryEnabled(saved()), true);
+      assert.throws(() => settings.setServerAutoEntry(saved('other.test'), true), /Storage full/);
+      assert.deepEqual(settings.autoEntryServerKeys, [autoEntryServerKey(saved())]);
+      assert.throws(() => settings.clearServerAutoEntry(), /Storage full/);
       assert.equal(settings.isServerAutoEntryEnabled(saved()), true);
     } finally { off(); }
   });

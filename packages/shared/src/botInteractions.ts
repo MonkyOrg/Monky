@@ -2,8 +2,8 @@ import { z } from 'zod';
 import { LIMITS } from './constants.js';
 import type { CommandOption } from './models.js';
 import {
-  BOT_LOCALES, botFieldLocalizationSchema, botLocaleSchema, commandLocalizationsSchema,
-  localizeBotChoices, resolveBotLocale, type BotLocale,
+  BOT_LOCALES, botFieldLocalizationSchema, botLocaleSchema, commandLocalizationsSchema, commandNameSchema,
+  getCommandPresentation, localizeBotChoices, resolveBotLocale, type BotLocale,
 } from './botLocales.js';
 import {
   audioPreviewResourceIdSchema,
@@ -16,7 +16,7 @@ import {
 const identifier = z.string().min(1).max(128);
 const inputName = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/)
   .refine((name) => !['__proto__', 'constructor', 'prototype'].includes(name));
-const commandName = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,31}$/);
+const commandName = commandNameSchema;
 const label = selectionLabelSchema;
 const description = selectionDescriptionSchema;
 const choicesSchema = selectionChoicesSchema.min(1).max(LIMITS.MAX_BOT_FORM_CHOICES)
@@ -369,12 +369,31 @@ export function localizeBotSettingsForm(
   };
 }
 
+export const commandDefinitionsSchema = z.array(commandDefinitionSchema).max(LIMITS.MAX_COMMANDS_PER_BOT)
+  .superRefine((commands, ctx) => {
+    for (const locale of BOT_LOCALES) {
+      const owners = new Map<string, number>();
+      commands.forEach((command, index) => {
+        for (const name of getCommandPresentation(command, locale).inputNames) {
+          const previous = owners.get(name);
+          if (previous !== undefined) {
+            ctx.addIssue({
+              code: 'custom',
+              message: `Command input "/${name}" is ambiguous in ${locale}: ${commands[previous].name}, ${command.name}`,
+              path: name === command.name ? [index, 'name'] : [index, 'localizations', locale],
+            });
+          } else {
+            owners.set(name, index);
+          }
+        }
+      });
+    }
+  });
+
 export const commandRegisterSchema = z.object({
-  commands: z.array(commandDefinitionSchema).max(LIMITS.MAX_COMMANDS_PER_BOT),
+  commands: commandDefinitionsSchema,
   settings: botSettingsDefinitionSchema.optional(),
-}).strict().refine((payload) =>
-  new Set(payload.commands.map((command) => command.name)).size === payload.commands.length
-);
+}).strict();
 
 export const commandRegisteredSchema = z.object({
   registered: z.number().int().min(0).max(LIMITS.MAX_COMMANDS_PER_BOT),

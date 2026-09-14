@@ -1,5 +1,5 @@
-import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, hasEveryoneMention } from '@monky/shared';
-import type { AttachmentMeta, ChatMessageUpdatedPayload, MessageReply, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
+import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, getCommandPresentation, hasEveryoneMention } from '@monky/shared';
+import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, CommandPresentation, MessageReply, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
 import { networkClient, getActiveNetworkClient } from '../core/NetworkClient';
@@ -24,9 +24,9 @@ import { bindChatComposerMotion } from './FooterControlsMotion';
 import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
 import { extractStickerIds, stickerToken, stripStickerTokens } from '../utils/stickers';
-import { parseTypedCommand } from '../utils/botInputs';
+import { formatCommandContext, parseTypedCommand } from '../utils/botInputs';
 import { BotChatView, renderBotInvocation } from './BotChatView';
-import { groupCommands, type CommandGroup } from '../utils/commandCatalog';
+import { filterCommands, findCommandsByInputName, groupCommands, type CommandGroup } from '../utils/commandCatalog';
 import { renderCommandCatalog } from './commandCatalog';
 import { renderBotCommandContext } from './botResponse';
 import { PublicSelectorView } from './PublicSelectorView';
@@ -84,6 +84,7 @@ export class ChatView {
   private commandSelection = 0;
   private publicSelectors: PublicSelectorView | null = null;
   private voiceNoticeCommand: SlashCommand | null = null;
+  private commandLocale = (command: SlashCommand): BotLocale => botLocaleFor(this.client, this.server, command.botId);
   // Files picked for the next message, keyed by a local id (#11).
   private pending: PendingAttachment[] = [];
   private uploadSeq = 0;
@@ -666,7 +667,8 @@ export class ChatView {
       ...messages.map((message) => ({ createdAt: message.createdAt, html: this.renderMessageRow(message) })),
       ...chatStore.getInvocations(this.currentChannelId ?? '').map((invocation) => ({
         createdAt: invocation.createdAt,
-        html: renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id, this.getVoiceCommandDeniedReason(invocation)),
+        html: renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id,
+          this.getVoiceCommandDeniedReason(invocation), this.commandPresentation(invocation.botId, invocation.commandName)),
       })),
     ].filter((item) => item.html !== '').sort((a, b) => a.createdAt - b.createdAt);
     for (const item of items) {
@@ -881,7 +883,8 @@ export class ChatView {
 
     const avatarSrc = escapeHtml(getAvatarUrl(m.userAvatarUrl));
     const isBot = m.isBot || serverStore.knownMembers.get(m.userId)?.isBot === true;
-    const botContext = isBot ? renderBotCommandContext(m) : '';
+    const botContext = isBot ? renderBotCommandContext(m,
+      m.botCommand ? this.commandPresentation(m.userId, m.botCommand.commandName) : undefined) : '';
     const botBadge = isBot ? `<span class="member-badge-bot">${t('botChat.badge')}</span>` : '';
     const privateCue = m.isEphemeral ? `<span class="bot-private-cue"><span class="material-symbols-outlined md-14" aria-hidden="true">lock</span>${t('botChat.private')}</span>` : '';
 
@@ -1557,7 +1560,7 @@ export class ChatView {
         this.botChat?.focusComposer();
         return;
       }
-      const command = parseTypedCommand(input.value, chatStore.getCommands());
+      const command = parseTypedCommand(input.value, chatStore.getCommands(), this.commandLocale);
       if (command.kind !== 'chat') {
         const denied = this.getBotCommandDeniedReason();
         if (denied) {
@@ -1569,7 +1572,7 @@ export class ChatView {
           typeof gesture === 'boolean' ? gesture : gesture.isTrusted);
         else if (command.kind === 'ambiguous') {
           this.showCommandNotice(t('botChat.commandAmbiguous'));
-          this.commandGroups = groupCommands(command.commands, [], getLanguage(), false);
+          this.commandGroups = groupCommands(command.commands, [], getLanguage(), false, this.commandLocale);
           this.commandMatches = this.commandGroups.flatMap((group) => group.commands);
           this.commandActiveIndex = 0;
           this.commandActive = true;
@@ -1900,10 +1903,14 @@ export class ChatView {
     });
 
     const u6 = appEvents.on('chat.commands_updated', () => {
+      if (!isCurrentInput()) return;
       if (input && !chatStore.getCommandDraft(this.currentChannelId ?? '')) this.updateCommandDropup(input);
+      this.refreshCommandAttribution();
     });
     const refreshCommandLocale = () => {
-      if (isCurrentInput() && input && this.commandActive && !this.messageEdit) this.updateCommandDropup(input);
+      if (!isCurrentInput()) return;
+      if (input && this.commandActive && !this.messageEdit) this.updateCommandDropup(input);
+      this.refreshCommandAttribution();
     };
     const updateVoiceCommands = () => {
       if (this.commandActive) this.renderCommandDropup();
@@ -1978,7 +1985,8 @@ export class ChatView {
       ? { start: focused.selectionStart, end: focused.selectionEnd }
       : undefined;
     const wrapper = document.createElement('div');
-    wrapper.innerHTML = renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id, this.getVoiceCommandDeniedReason(invocation));
+    wrapper.innerHTML = renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id,
+      this.getVoiceCommandDeniedReason(invocation), this.commandPresentation(invocation.botId, invocation.commandName));
     const card = wrapper.firstElementChild;
     if (!card) {
       previous?.remove();
@@ -2172,6 +2180,29 @@ export class ChatView {
 
   // ── Slash command dropup (#569) ──────────────────────────────────────
 
+  private commandPresentation(botId: string, commandName: string): CommandPresentation {
+    const command = this.store.getCommands().find((entry) => entry.botId === botId && entry.name === commandName);
+    return getCommandPresentation(command ?? { name: commandName }, botLocaleFor(this.client, this.server, botId));
+  }
+
+  private refreshCommandAttribution(): void {
+    if (!this.currentChannelId) return;
+    const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
+    if (!feed) return;
+    const messages = new Map(this.store.getMessages(this.currentChannelId).map((message) => [message.id, message]));
+    for (const label of feed.querySelectorAll<HTMLElement>('[data-command-context-label]')) {
+      const row = label.closest<HTMLElement>('[data-message-id]');
+      const message = messages.get(row?.dataset.messageId ?? '');
+      if (message?.botCommand) label.textContent = formatCommandContext(message.botCommand,
+        this.commandPresentation(message.userId, message.botCommand.commandName));
+    }
+    for (const card of feed.querySelectorAll<HTMLElement>('[data-invocation-id]')) {
+      const invocation = this.store.getInvocation(card.dataset.invocationId ?? '');
+      const label = card.querySelector<HTMLElement>('.bot-command-name');
+      if (invocation && label) label.textContent = `/${this.commandPresentation(invocation.botId, invocation.commandName).displayName}`;
+    }
+  }
+
   private getVoiceCommandDeniedReason(command: Pick<SlashCommand, 'botId' | 'voiceRequirement'>): string | undefined {
     const error = commandVoiceError(command, getActiveNetworkClient(), getActiveServerStore());
     return error ? translateProtocolError(error) : undefined;
@@ -2210,15 +2241,13 @@ export class ChatView {
     }
     const query = match[1].toLowerCase();
     const all = chatStore.getCommands();
-    const matches = query
-      ? all.filter((command) => command.name.includes(query) || command.botName.toLocaleLowerCase(getLanguage()).includes(query))
-      : all;
+    const matches = query ? filterCommands(all, query, this.commandLocale) : all;
     const previous = query === this.commandQuery ? this.commandMatches[this.commandActiveIndex] : undefined;
     const retained = previous && matches.find((command) => command.botId === previous.botId && command.name === previous.name);
-    const exact = matches.filter((command) => command.name === query);
+    const exact = findCommandsByInputName(matches, query, this.commandLocale);
     const preferred = retained ?? (exact.length === 1 ? exact[0] : undefined);
     this.commandQuery = query;
-    this.commandGroups = groupCommands(matches, chatStore.getCommandUsage(), getLanguage(), query.length === 0);
+    this.commandGroups = groupCommands(matches, chatStore.getCommandUsage(), getLanguage(), query.length === 0, this.commandLocale);
     this.commandMatches = this.commandGroups.flatMap((group) => group.commands);
     this.commandActive = true;
     this.commandActiveIndex = Math.max(0, this.commandMatches.findIndex((command) =>
@@ -2244,7 +2273,7 @@ export class ChatView {
     el.innerHTML = renderCommandCatalog(
       this.commandGroups, this.commandActiveIndex,
       (command) => this.getVoiceCommandDeniedReason(command),
-      (command) => botLocaleFor(this.client, this.server, command.botId),
+      this.commandLocale,
     );
     el.style.display = 'block';
     const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
@@ -2319,7 +2348,7 @@ export class ChatView {
       this.closeCommandDropup();
       return;
     }
-    const typed = parseTypedCommand(input.value, chatStore.getCommands());
+    const typed = parseTypedCommand(input.value, chatStore.getCommands(), this.commandLocale);
     this.selectCommand(cmd, typed.kind === 'command' || typed.kind === 'ambiguous' ? typed.text : '', userGesture, autoInvoke);
   }
 

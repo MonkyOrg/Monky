@@ -54,6 +54,10 @@ export class ChannelService {
     return roleIds.filter((id) => known.has(id));
   }
 
+  public getRoleAccessVersion(): number | null {
+    return this.permissionService.getRoleAccessVersion();
+  }
+
   public async getAccessContext(userId: string): Promise<ChannelAccessContext> {
     const [permissions, roles] = await Promise.all([
       this.permissionService.getUserPermissions(userId),

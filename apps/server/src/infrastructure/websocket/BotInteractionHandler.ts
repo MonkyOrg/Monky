@@ -833,6 +833,14 @@ export class BotInteractionHandler {
     return this.authorizeVoiceContext(session, invocationId, channelId, false);
   }
 
+  /** Retire pending prompts/work too, so a delayed continuation cannot recreate an ended miniapp. */
+  endScreenInvocation(session: BotInteractionSession, invocationId: string): void {
+    const invocation = this.invocations.get(invocationId);
+    if (invocation?.bot === session && session.isBot && invocation.botId === session.botId) {
+      this.finish(invocation, 'cancelled');
+    }
+  }
+
   private async authorizeVoiceContext(
     session: BotInteractionSession, invocationId: string, channelId: string, requireSpeak: boolean,
   ): Promise<VoiceInvocationAuthorization | undefined> {

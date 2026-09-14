@@ -398,6 +398,7 @@ export const ptBR = {
   'permission.MANAGE_BOTS': 'Gerenciar bots',
   'permission.USE_BOT_COMMANDS': 'Usar comandos de bots',
   'permission.CONFIGURE_BOTS': 'Configurar bots',
+  'permission.VIEW_SERVER_MONITOR': 'Visualizar monitor do servidor',
 
   // ── Voice mode comparison ──────────────────────────────────────────────
   'voice.data': 'Dado',

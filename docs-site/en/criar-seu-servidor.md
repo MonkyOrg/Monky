@@ -46,11 +46,24 @@ The limit counts **registered members**, not who is online: a person takes the s
 
 ## Server Monitor
 
-While the server is running on your machine, the app shows what is going on inside it. Open it from the **monitoring** icon next to the *Stop* button under *My Servers*, or from the **server name › Server Monitor** once you are connected.
+Open **server name › Server Monitor** to inspect the connected server, including
+one running on a VPS. Administrators have access; other members need the
+**View server monitor** permission in a role. **Manage server** alone does not
+grant access. The server checks authorization for every request; the client
+does not need to host a local server.
+
+For a server hosted on this device, the **monitoring** icon next to *Stop*
+under *My Servers* still opens the explicitly local monitor, separate from
+the remote server in focus.
 
 The panel shows:
 
 - **Live metrics**, refreshed every 3 seconds: uptime, people online, registered members (and the limit, when there is one), channels and messages.
-- **Live logs**, with a level filter (`INFO`, `WARN`, `ERROR`), text search, auto-scroll, a button to copy what is visible and a button to clear.
+- **Recent logs**, with a level filter (`INFO`, `WARN`, `ERROR`), text search, auto-scroll and copying of visible entries. **Clear view** clears only this window, without deleting server history.
 
-The app keeps the most recent entries in memory — restarting the server starts the list over. For servers running on a VPS, use [`monky logs`](/en/hospedar-em-vps).
+In-memory history is bounded. Remote logs show protected operational summaries
+without credentials, private data or system details. Full details remain
+available to the server host, including through
+[`monky logs`](/en/hospedar-em-vps). Switching servers closes the remote monitor.
+Disconnection or permission loss stops polling and removes retained data
+from the window, without disconnecting you from Monky.

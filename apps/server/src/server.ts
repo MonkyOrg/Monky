@@ -14,6 +14,7 @@ import { CommandRegistry } from './application/services/CommandRegistry';
 import { ChannelService } from './application/services/ChannelService';
 import { ChatService } from './application/services/ChatService';
 import { PermissionService } from './application/services/PermissionService';
+import { ServerMonitorService } from './application/services/ServerMonitorService';
 import { RoleService } from './application/services/RoleService';
 import { SignalingService } from './application/services/SignalingService';
 import { UserService } from './application/services/UserService';
@@ -31,6 +32,7 @@ import {
   SqliteUserRepository,
 } from './infrastructure/database/SqliteRepositories';
 import { Logger } from './infrastructure/logger/Logger';
+import { ServerLogScope } from './infrastructure/logger/ServerLogScope';
 import { LanBroadcaster } from './infrastructure/discovery/LanBroadcaster';
 import { scanServerNetworkInterfaces } from './infrastructure/discovery/ServerIpScanner';
 import { AttachmentStorageService } from './infrastructure/security/AttachmentStorageService';
@@ -205,6 +207,7 @@ export class MonkyServer {
     sfuManager: SfuManager,
     serverRepo: SqliteServerRepository,
     private readonly resources: ServerResourceScope,
+    private readonly logScope: ServerLogScope,
   ) {
     this.dbConn = dbConn;
     this.httpServer = httpServer;
@@ -220,20 +223,25 @@ export class MonkyServer {
 
   public static async create(config: ServerConfig): Promise<MonkyServer> {
     const resources = new ServerResourceScope();
-    let setupComplete = false;
-    try {
-      const dbConn = await DatabaseConnection.create(path.join(config.dataDir, 'server.db'));
-      resources.defer('database', () => dbConn.close({ discardChanges: !setupComplete }));
-      const server = await dbConn.getDb().transactionAsync(() => MonkyServer.createResources(config, dbConn, resources));
-      setupComplete = true;
-      return server;
-    } catch (error) {
-      return resources.fail(error);
-    }
+    const logScope = new ServerLogScope();
+    resources.defer('monitor log history', () => logScope.close());
+    return Logger.withScope(logScope, async () => {
+      let setupComplete = false;
+      try {
+        const dbConn = await DatabaseConnection.create(path.join(config.dataDir, 'server.db'));
+        resources.defer('database', () => dbConn.close({ discardChanges: !setupComplete }));
+        const server = await dbConn.getDb().transactionAsync(() => MonkyServer.createResources(config, dbConn, resources, logScope));
+        setupComplete = true;
+        return server;
+      } catch (error) {
+        return resources.fail(error);
+      }
+    });
   }
 
   private static async createResources(
     config: ServerConfig, dbConn: DatabaseConnection, resources: ServerResourceScope,
+    logScope: ServerLogScope,
   ): Promise<MonkyServer> {
     const avatarStorage = new AvatarStorageService(config.dataDir);
     const attachmentStorage = new AttachmentStorageService(config.dataDir);
@@ -441,6 +449,12 @@ export class MonkyServer {
     resources.defer('LAN broadcaster', () => lanBroadcaster.stop());
     let instance: MonkyServer | undefined;
     resources.defer('startup tasks', async () => { await instance?.waitForStartupTasks(); });
+    const serverRecord = await serverRepo.getServer();
+    if (!serverRecord) throw new Error('The initialized server record is missing.');
+    const monitorService = new ServerMonitorService(serverRecord.id, logScope, () => {
+      if (!instance) throw new Error('The server monitor is not ready.');
+      return instance.getStats();
+    }, rateLimiter);
 
     const wsServer = new WebSocketServer(
       httpServer,
@@ -458,7 +472,8 @@ export class MonkyServer {
       botService,
       commandRegistry,
       new BotSelectorService(new SqliteBotSelectorRepository(db)),
-      new BotSettingsService(new SqliteBotSettingsRepository(db))
+      new BotSettingsService(new SqliteBotSettingsRepository(db)),
+      monitorService,
     );
     resources.defer('WebSocket server', () => wsServer.close());
 
@@ -477,6 +492,7 @@ export class MonkyServer {
       sfuManager,
       serverRepo,
       resources,
+      logScope,
     );
     return instance;
   }
@@ -630,7 +646,7 @@ export class MonkyServer {
   public start(): Promise<void> {
     if (this.stopping || this.stopped) return Promise.reject(new Error('Server shutdown has already started'));
     if (this.startPromise) return this.startPromise;
-    const attempt = this.startListening();
+    const attempt = Logger.withScope(this.logScope, () => this.startListening());
     this.startPromise = attempt;
     void attempt.catch(() => { if (this.startPromise === attempt) this.startPromise = null; });
     return attempt;
@@ -693,18 +709,20 @@ export class MonkyServer {
   }
 
   public async stop(): Promise<void> {
-    if (this.stopped) return;
-    this.stopping = true;
-    Logger.info('INFO', 'Stopping Monky Server...');
-    await this.resources.close();
-    this.stopped = true;
-    this.startedAt = null;
-    this.startupTasks.length = 0;
-    Logger.info('INFO', 'Server stopped.');
+    await Logger.withScope(this.logScope, async () => {
+      if (this.stopped) return;
+      this.stopping = true;
+      Logger.info('INFO', 'Stopping Monky Server...');
+      await this.resources.close();
+      this.stopped = true;
+      this.startedAt = null;
+      this.startupTasks.length = 0;
+      Logger.info('INFO', 'Server stopped.');
+    });
   }
 
   /**
-   * Snapshot of the running server, for whoever is hosting it.
+   * Snapshot reused by local hosting and the authorized remote monitor.
    *
    * This exists as a public method on purpose: the Server GUI used to read the
    * same numbers by casting the instance to reach `dbConn` and `wsServer`
@@ -726,10 +744,11 @@ export class MonkyServer {
     // Counts people rather than sockets: one person may hold several sessions
     // since a single identity can be connected from more than one device.
     const onlineUsers = listOnlineHumans(this.wsServer.getOnlineUsersMap().values()).length;
+    const address = this.httpServer.address();
 
     return {
       serverName: serverRecord?.name ?? this.config.serverName ?? 'Monky Server',
-      port: this.config.port,
+      port: address && typeof address === 'object' ? address.port : this.config.port,
       dataDir: this.config.dataDir,
       startedAt: this.startedAt,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,

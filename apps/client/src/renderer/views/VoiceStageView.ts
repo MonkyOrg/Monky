@@ -30,6 +30,8 @@ import { isCameraOperationCancelled } from '../utils/cameraEffects';
 import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { BotScreenView } from './BotScreenView';
+import type { VoiceBotScreensUpdated } from '../stores/botScreenStore';
+import { showInfoToast } from './CopyToast';
 
 interface ScreenTelemetrySnapshot {
   kind: 'sender' | 'receiver';
@@ -129,6 +131,7 @@ export class VoiceStageView {
   private botScreens = new Map<string, BotScreenView>();
   private botVoiceContext: BotVoiceContext | null = null;
   private botScreenLayoutObserver: ResizeObserver | null = null;
+  private clearMiniappToast: (() => void) | null = null;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -184,6 +187,8 @@ export class VoiceStageView {
   }
 
   private closeBotScreens(): void {
+    this.clearMiniappToast?.();
+    this.clearMiniappToast = null;
     this.botScreenLayoutObserver?.disconnect();
     for (const view of this.botScreens.values()) view.destroy();
     const changed = this.botScreens.size > 0;
@@ -191,6 +196,19 @@ export class VoiceStageView {
     this.botVoiceContext = null;
     this.focusedTileKeys = this.focusedTileKeys.filter((key) => !key.startsWith('miniapp:'));
     if (changed) appEvents.emit('stage.bot_screens_changed');
+  }
+
+  private notifyMiniappEnded({ key, removed }: VoiceBotScreensUpdated): void {
+    if (removed?.reason !== 'ended') return;
+    const context = getBotVoiceContext();
+    const previous = this.botVoiceContext;
+    const view = this.botScreens.get(removed.id);
+    if (!context || !previous || context.session !== previous.session || context.session.key !== key ||
+        context.user.sessionId !== previous.user.sessionId || context.channelId !== removed.channelId ||
+        this.currentChannelId !== removed.channelId || context.session.serverStore !== getActiveServerStore() ||
+        !view?.isWatching || view.isEnding || view.snapshot.instanceId !== removed.instanceId) return;
+    this.clearMiniappToast?.();
+    this.clearMiniappToast = showInfoToast(t('botScreen.endedNotice', { title: view.snapshot.title }));
   }
 
   private refreshBotScreens(): void {
@@ -208,9 +226,10 @@ export class VoiceStageView {
     this.botVoiceContext = context;
     const screens = context.session.botScreenStore.list(context.channelId);
     for (const [id, view] of this.botScreens) {
-      if (!screens.some((screen) => screen.id === id)) {
+      if (!screens.some((screen) => screen.id === id && screen.instanceId === view.snapshot.instanceId)) {
         view.destroy();
         this.botScreens.delete(id);
+        this.focusedTileKeys = this.focusedTileKeys.filter((key) => key !== `miniapp:${id}`);
       }
     }
     for (const screen of screens) {
@@ -1892,7 +1911,10 @@ export class VoiceStageView {
     const u14 = appEvents.on('voice.connection_changed', () => this.startPingMonitor());
     const u15 = appEvents.on('server.voice_restrictions_updated', () => this.updateControlsUI());
     const u16 = appEvents.on('camera.state_changed', () => this.refreshLocalCameraVideo());
-    const u17 = appEvents.on('voice.bot_screens_updated', () => this.renderParticipants());
+    const u17 = appEvents.on<VoiceBotScreensUpdated | undefined>('voice.bot_screens_updated', (update) => {
+      if (update) this.notifyMiniappEnded(update);
+      this.renderParticipants();
+    });
     const u18 = appEvents.on('voice.channel_changed', () => {
       this.focusEpoch++;
       this.clearFocusError();

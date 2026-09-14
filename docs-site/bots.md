@@ -65,11 +65,11 @@ Ao criar ou editar um canal de texto, o switch **Permitir comandos de bots** vem
 ### Pré-requisitos
 
 - **Node.js 18+**
-- Cliente, servidor e SDK compatíveis com o **protocolo 16**
+- Cliente, servidor e SDK compatíveis com o **protocolo 17**
 - O pacote `@monky/bot-sdk` da release correspondente
 
 ::: warning Atualização conjunta
-O protocolo 16 acrescenta metadados de idioma e compatibilidade aos recursos de voz, telas programáveis e prévias de áudio. Atualize **cliente, servidor e bot** juntos; versões com protocolos diferentes não se conectam.
+O protocolo 17 acrescenta nomes locais de comandos e encerramento autorizado de miniapps, com referências que identificam cada instância. Atualize **cliente, servidor e bot** juntos; versões com protocolos diferentes não se conectam. Essa mudança exige uma release major, inclusive na linha beta.
 
 As regras de vínculo do protocolo 14 são mantidas: `BOT_CREATE` recebe somente `{}` e a administração recebe `profilePending` para indicar uma identidade ainda não anunciada. O banco preserva as identidades existentes, e somente o próprio bot pode publicar alterações de perfil. `ctx.args` contém valores tipados e `ctx.reply()` é privado; use `ctx.publish()` somente para resultados que devem aparecer para o canal.
 :::
@@ -400,9 +400,11 @@ do bot**, inclusive para bots sem formulário de configuração próprio.
 para aquele bot, servidor/endereço e identidade no perfil local. Restaurar os
 padrões volta a seguir o Monky. O idioma efetivo chega em `ctx.locale` também no
 autocomplete e na prévia de áudio. Interações já iniciadas mantêm o idioma
-capturado; mensagens antigas não são traduzidas retroativamente.
+capturado; o corpo de mensagens antigas não é traduzido retroativamente. O nome
+do comando no cabeçalho de uma resposta acompanha o idioma de quem a lê, usando
+os metadados disponíveis; sem eles, aparece o nome canônico.
 
-Declare `localizations` para os textos de descoberta e preenchimento:
+Declare `localizations` para nomes locais, aliases e textos de descoberta e preenchimento:
 
 ```ts
 bot.command({
@@ -414,6 +416,8 @@ bot.command({
   }],
   localizations: {
     'pt-BR': {
+      name: 'tocar',
+      aliases: ['musica'],
       description: 'Escolha a ordem de reprodução',
       options: {
         mode: {
@@ -427,17 +431,52 @@ bot.command({
 });
 ```
 
-`name`, nomes de argumentos e `choices[].value` são identificadores estáveis:
-`/play` e `ctx.args.mode` não mudam de idioma. Traduza somente descrições,
-`label`, `placeholder` e os rótulos/descrições das escolhas. Campos ou escolhas
-não declarados são rejeitados. Texto ausente usa a declaração original.
-Formulários e respostas gerados pelo handler devem usar `ctx.locale`.
+O `name` principal continua sendo o identificador canônico: o usuário em
+português vê `/tocar` e pode digitar `/tocar`, `/musica` ou `/play`, mas o servidor
+e `ctx.commandName` recebem `play`. A preferência é **apenas para aquela pessoa**,
+nunca uma renomeação global. Nomes de argumentos, `ctx.args.mode` e
+`choices[].value` não são traduzidos. Descrições, `label`, `placeholder` e
+rótulos/descrições de escolhas continuam traduzíveis; campos ou escolhas não
+declarados são rejeitados. Texto ausente usa a declaração original.
+
+Nomes locais e aliases usam slugs ASCII minúsculos de 1 a 32 caracteres:
+começam com letra ou número e aceitam letras, números, `_` e `-`. Cada idioma
+aceita até oito aliases únicos. A declaração do bot rejeita colisões entre
+comandos, inclusive um alias que esconda o nome canônico de outro comando.
+Colisões entre bots continuam oferecendo a escolha do bot; o cliente não
+executa o primeiro resultado por acidente. Só os aliases do idioma efetivo e
+os nomes canônicos são aceitos. Trocar o idioma durante o preenchimento atualiza
+nomes e rótulos, preservando o bot, comando canônico, valores e cursor.
 
 O SDK exporta `BotLocale`, `normalizeBotLocale`, `resolveBotLocale` e
-`localizeCommand`. `normalizeBotLocale('en-US')` resulta em `en`; mantenha
+`localizeCommand`, além de `getCommandPresentation` e do tipo
+`CommandPresentation`. `normalizeBotLocale('en-US')` resulta em `en`; mantenha
 `pt-BR` e `en` como chaves de `localizations`. `resolveBotLocale` pode receber a
 lista de idiomas suportados pelo bot e um idioma padrão. `localizeCommand`
 produz metadados de exibição sem modificar a declaração ou os identificadores.
+`getCommandPresentation(definicao, ctx.locale)` retorna
+`{ canonicalName, displayName, inputNames }`. Use `displayName` em ajuda privada;
+jamais o envie como `commandName` no protocolo. Por exemplo, usando o mesmo
+array `commandDefinitions` registrado com `bot.command()`:
+
+```ts
+import { getCommandPresentation, localizeCommand } from '@monky/bot-sdk';
+
+bot.command({
+  name: 'help',
+  description: 'Help',
+  localizations: { 'pt-BR': { name: 'ajuda' } },
+  handler: (ctx) => ctx.reply(commandDefinitions.map(command =>
+    `/${getCommandPresentation(command, ctx.locale).displayName} — ${
+      localizeCommand(command, ctx.locale).description
+    }`
+  ).join('\n')),
+});
+```
+
+Formulários e corpos das respostas ainda são responsabilidade do handler e
+devem usar `ctx.locale`, não `ctx.settings.user.locale`. `ctx.reply()` mantém a
+ajuda privada; publicar uma ajuda traduzida no canal não a torna individual.
 
 ### Parâmetros guiados no chat
 
@@ -774,10 +813,11 @@ O exemplo aceita somente a primeira reação válida de quem executou o comando 
 
 ### Configurações por bot e servidor
 
-Use **botão direito no bot → Configurações do bot**, inclusive no nome/foto de mensagens e cards privados. O menu do servidor também oferece **Bots deste servidor**, disponível a qualquer membro e incluindo bots offline. O servidor precisa estar conectado; desligar o bot não apaga suas declarações ou configurações.
+Use **botão direito no bot → Configurações do bot**, inclusive no nome/foto de mensagens e cards privados. Quem tem acesso à aba **Configurações do servidor → Bots** também pode abrir as preferências de cada bot por ela, inclusive de bots offline. As preferências pessoais continuam disponíveis pelos pontos de entrada do próprio bot, sem um item duplicado no menu do servidor. O servidor precisa estar conectado; desligar o bot não apaga suas declarações ou configurações.
 
 Reservas manuais ainda sem identidade aparecem apenas na administração de bots,
-aguardando conexão, e não nesse catálogo de bots já vinculados.
+aguardando conexão; suas configurações ficam indisponíveis até o bot anunciar
+a própria identidade.
 
 | Escopo | Quem altera | Onde fica |
 |---|---|---|
@@ -1059,6 +1099,19 @@ Uma tela é um miniapp HTML/CSS/JavaScript apresentado **no palco de voz**. Quem
 
 O cartão permanece no palco junto de câmeras e compartilhamentos, mesmo com a visualização fechada. **Abrir miniapp** inicia a visualização local; **Sair do miniapp** a encerra e devolve o cartão ao estado fechado, sem encerrar o miniapp para os demais. Focar ou voltar à grade só altera o layout: não recarrega a tela nem muda quem ocupa as vagas de jogador. Abrir uma tela para assistir não equivale a entrar na partida.
 
+**Encerrar miniapp** é outra ação: remove a instância, o cartão e os convites
+para todos e fecha as visualizações abertas. Só aparece para quem invocou o
+comando criador ou para um administrador (`ADMINISTRATOR`, incluindo o dono do
+servidor). O servidor verifica a mesma autorização e a presença desta conexão
+na sala; ocultar o botão não é a proteção. O criador é a identidade autenticada
+`creatorUserId`, preservada ao entrar por outro dispositivo ou reconectar, e não
+o ID do bot nem um campo fornecido pelo miniapp. Telas criadas sem invocação não
+têm criador humano; somente administradores podem encerrá-las pelo cliente.
+
+As outras visualizações abertas exibem um aviso temporário com o nome do
+miniapp, no idioma do cliente. Quem apenas recebeu o convite ou já saiu da
+visualização não recebe esse aviso.
+
 Dentro de um comando, `ctx.createScreen()` consulta a sala de voz atual de quem chamou e associa o miniapp àquela sala e à invocação, inclusive em sala privada autorizada. `screen.channelId` é sempre um **canal de voz**, não `ctx.channelId` (o canal de texto do comando). Sem voz, a criação é recusada. O bot não precisa estar conectado ao áudio para oferecer um miniapp. A API avulsa `bot.createScreen(serverId, input)` exige acesso do próprio bot; passar `invocationId` permite a autorização específica da invocação. Isso não concede acesso geral a mensagens privadas.
 
 ```ts
@@ -1090,13 +1143,43 @@ No documento isolado, o bridge `window.monkyScreen` fornece:
 
 Leia `window.monkyScreen.viewer.locale` dentro do callback de `onState()` para traduzir os controles de cada pessoa. Trocar o idioma no aplicativo também aciona esse callback, sem mudar o estado/revisão compartilhados nem recriar o iframe. Não escolha o idioma dos controles a partir do estado público ou do idioma de quem criou a tela.
 
-O evento `screenAction` do SDK entrega `{ serverId, screenId, channelId, userId, userNickname, action, payload, revision, actionId }`. Use a identidade autenticada desse envelope, nunca um jogador/usuário informado em `payload`. Valide a ação e suas regras no bot antes de chamar `await bot.updateScreen(serverId, id, { state, expectedRevision })`. Uma atualização aceita incrementa `revision` e chega aos participantes; uma revisão antiga é rejeitada em vez de sobrescrever uma alteração concorrente. O HTML permanece o mesmo durante as atualizações de estado.
+O evento `screenAction` do SDK entrega `{ serverId, screenId, instanceId, channelId, userId, userNickname, action, payload, revision, actionId }`. Use a identidade autenticada desse envelope, nunca um jogador/usuário informado em `payload`. Valide a ação e suas regras no bot antes de chamar `await bot.updateScreen(serverId, screen, { state, expectedRevision })`. Passe o snapshot recebido, ou um `BotScreenRef` com `{ id, instanceId }`, não apenas o ID textual. Uma atualização aceita incrementa `revision` e chega aos participantes; uma revisão antiga é rejeitada em vez de sobrescrever uma alteração concorrente. O HTML permanece o mesmo durante as atualizações de estado.
 
-Use `listScreens(serverId, channelId)` com o ID da sala de voz para obter snapshots atuais e `closeScreen(serverId, id)` para encerrar. O evento `screenRemoved` entrega `{ serverId, id, channelId }`: remova também o estado correspondente do jogo no bot. Registre listeners uma vez e remova-os ao encerrar. O cliente recupera os miniapps ativos ao entrar na sala; sair, mudar de sala ou desconectar fecha a visualização local e revoga ações. Fechar a visualização não termina a partida dos demais.
+Use `listScreens(serverId, channelId)` com o ID da sala de voz para obter
+snapshots atuais e `closeScreen(serverId, screen)` para o próprio bot encerrar.
+O `instanceId` é gerado pelo servidor: mesmo reutilizando `id`, uma nova tela
+ganha outra instância. Updates, ações, encerramentos e eventos antigos não
+podem atingir a substituta. O END humano não exige a última revisão do estado;
+uma atualização concorrente não impede o encerramento da instância correta.
+
+O evento `screenRemoved` entrega `{ serverId, id, instanceId, channelId, reason }`.
+Quando `reason === 'ended'`, também inclui `endedByUserId`, autenticado pelo
+servidor. Os demais motivos são `closed`, `access_revoked`, `bot_disconnected`
+e `view_revoked` (revogação de uma visualização local, não encerramento global).
+Remova o estado correspondente no bot comparando **servidor, ID e instância**:
+cancele timers/expiração, aborte trabalho pendente e libere as vagas do jogo.
+Se a instância controla música, encerre também a fonte/fila que ela possui e
+libere seus recursos; o SDK não pode adivinhar a regra de domínio do bot.
+Não use um erro de instância inexistente como sinal para recriá-la.
+
+Depois de um END, a invocação criadora ainda em execução é cancelada, incluindo
+seus prompts e trabalho pendente; ela não pode criar outra tela. Um novo comando
+é necessário. Invocações concluídas/expiradas continuam
+inválidas para criação. O SDK rejeita leituras/updates cuja resposta foi
+ultrapassada por uma remoção, em vez de devolver um snapshot aparentemente
+ativo. Depois de qualquer `await`, confira se a sessão do jogo ainda é a mesma
+antes de armazenar o resultado. `ctx.signal` é abortado se a invocação ainda
+estiver ativa, mas não acompanha a tela depois que o handler termina: use
+`screenRemoved` para o teardown do miniapp.
+
+Registre listeners uma vez e remova-os ao encerrar. O cliente recupera os
+miniapps ativos ao entrar na sala; sair, mudar de sala ou desconectar fecha a
+visualização local e revoga ações. **Sair do miniapp** não envia END, não apaga
+o estado compartilhado e não libera automaticamente uma vaga de jogador.
 
 **Estado compartilhado, sem segredos:** os participantes autorizados que estão naquela sala de voz recebem o HTML e o estado JSON. O servidor também verifica a presença na sala para listar e interagir; estar em outro canal ou em voz em outro dispositivo não autoriza esta conexão. Interações exigem `USE_BOT_COMMANDS`. Não inclua tokens, caminhos locais ou informações secretas de um jogador. A tela não recebe Node.js, preload, IPC, acesso ao DOM do cliente ou autorização para rede, navegação, popups e downloads. Inclua os recursos visuais no documento em vez de depender de CDNs ou requisições externas.
 
-Os limites são 128 KiB de HTML, 64 KiB de estado e 8 KiB por ação; JSON aceita até 12 níveis e 8.192 nós. Há até quatro miniapps por sala de voz, 16 por bot e 64 por servidor, com limites de frequência e deduplicação de ações. Eles vivem em memória e são removidos ao reiniciar/desconectar o bot ou perder a autorização de acesso à sala. Sair da sala, inclusive deixá-la vazia, não apaga automaticamente o estado. No jogo da velha, estado e vagas são preservados até o bot encerrar ou expirar a partida após 30 minutos. Para recuperar uma partida após reiniciar o próprio bot, persista o domínio do jogo fora da tela e crie uma nova tela autorizada.
+Os limites são 128 KiB de HTML, 64 KiB de estado e 8 KiB por ação; JSON aceita até 12 níveis e 8.192 nós. Há até quatro miniapps por sala de voz, 16 por bot e 64 por servidor, com limites de frequência e deduplicação de ações. Eles vivem em memória e são removidos ao reiniciar/desconectar o bot, perder a autorização de acesso à sala ou receber um encerramento autorizado. Sair da sala, inclusive deixá-la vazia, não apaga automaticamente o estado. A expiração do jogo é responsabilidade do bot. Se persistir partidas, persista também seu encerramento: reiniciar o bot não deve recuperar uma partida explicitamente encerrada.
 
 ## Referência rápida da API
 
@@ -1114,9 +1197,9 @@ Os limites são 128 KiB de HTML, 64 KiB de estado e 8 KiB por ação; JSON aceit
 | `bot.getVoiceConnection(serverId)` | Obtém a conexão de voz ativa daquele servidor |
 | `bot.leaveVoice(serverId)` | Encerra a conexão e libera os recursos de mídia |
 | `bot.createScreen(serverId, input)` | Cria um miniapp de HTML e estado JSON em uma sala de voz |
-| `bot.updateScreen(serverId, id, { state, expectedRevision })` | Atualiza o estado sem perder alterações concorrentes |
+| `bot.updateScreen(serverId, screenRef, { state, expectedRevision })` | Atualiza a instância `{ id, instanceId }` sem perder alterações concorrentes |
 | `bot.listScreens(serverId, channelId)` | Obtém os miniapps ativos autorizados daquela sala de voz |
-| `bot.closeScreen(serverId, id)` | Encerra a tela para todos os participantes |
+| `bot.closeScreen(serverId, screenRef)` | Encerra a instância `{ id, instanceId }` para todos os participantes |
 | `bot.serverCount` | Número de servidores conectados |
 | `bot.serverIds` | IDs dos servidores conectados |
 | `bot.registeredServerCount` | Quantidade de vínculos autenticados conhecidos, inclusive offline |

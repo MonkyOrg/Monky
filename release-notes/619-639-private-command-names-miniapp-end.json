@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Miniapps ganham Encerrar para o criador ou administradores, separado de Sair da visualiza\u00e7\u00e3o. Bots podem oferecer nomes e aliases de comandos no idioma de cada pessoa, sem mudar os identificadores de execu\u00e7\u00e3o. Protocolo 17: atualize cliente, servidor e bots juntos.",
+  "en": "Miniapp creators and administrators can End a miniapp for everyone, separately from leaving the view. Bots can offer command names and aliases in each person's language without changing execution identifiers. Protocol 17: update the client, server, and bots together."
+}

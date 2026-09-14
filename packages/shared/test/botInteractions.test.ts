@@ -30,6 +30,7 @@ import {
   validateCommandOptions,
   botLocaleSchema,
   localizeCommand,
+  getCommandPresentation,
   normalizeBotLocale,
   resolveBotLocale,
 } from '../src/index.js';
@@ -93,6 +94,7 @@ const localizedCommand = commandDefinitionSchema.parse({
   }],
   localizations: {
     'pt-BR': {
+      name: 'tocar', aliases: ['reproduzir', 'play'],
       description: 'Reproduzir uma faixa',
       options: { mode: {
         label: 'Modo', description: 'Ordem de reprodução', placeholder: 'Escolha o modo',
@@ -111,8 +113,22 @@ assert.equal(portugueseCommand.options?.[0].choices?.[0].value, 'shuffle');
 assert.deepEqual(portugueseCommand.options?.[0].choices?.[0].audio, preview);
 assert.equal(localizedCommand.options?.[0].choices?.[0].label, 'Shuffle');
 assert.equal(localizeCommand(localizedCommand, 'en-US'), localizedCommand);
+assert.deepEqual(getCommandPresentation(localizedCommand, 'pt-BR'), {
+  canonicalName: 'play', displayName: 'tocar', inputNames: ['play', 'tocar', 'reproduzir'],
+});
+assert.deepEqual(getCommandPresentation(portugueseCommand, 'pt-BR'), getCommandPresentation(localizedCommand, 'pt-BR'));
+assert.deepEqual(getCommandPresentation(localizedCommand, 'en-US'), {
+  canonicalName: 'play', displayName: 'play', inputNames: ['play'],
+});
+assert.deepEqual(getCommandPresentation({ name: '8ball' }, 'en'), {
+  canonicalName: '8ball', displayName: '8ball', inputNames: ['8ball'],
+});
+assert.deepEqual(getCommandPresentation({
+  name: 'help', localizations: { en: { aliases: ['commands'] } },
+}, 'en'), { canonicalName: 'help', displayName: 'help', inputNames: ['help', 'commands'] });
 for (const localizations of [
-  { en: { name: 'translated-name' } },
+  { en: { name: 'Translated-name' } },
+  { en: { aliases: ['bad alias'] } },
   { 'en-US': { description: 'Noncanonical locale key' } },
   { en: { options: { unknown: { label: 'Unknown' } } } },
   { en: { options: { mode: { name: 'translated-option' } } } },
@@ -120,6 +136,43 @@ for (const localizations of [
 ]) {
   assert.equal(commandDefinitionSchema.safeParse({ ...localizedCommand, localizations }).success, false);
 }
+for (const name of ['', 'x'.repeat(33), '-name', '_name', 'Uppercase', 'espaço', 'two words', '/name', '<script>']) {
+  for (const localized of [{ name }, { aliases: [name] }]) {
+    assert.equal(commandDefinitionSchema.safeParse({
+      name: 'valid', description: 'Valid', localizations: { en: localized },
+    }).success, false, `Invalid localized input must be rejected: ${name}`);
+  }
+}
+for (const aliases of [Array.from({ length: 9 }, (_, index) => `alias-${index}`), ['same', 'same']]) {
+  assert.equal(commandDefinitionSchema.safeParse({
+    name: 'valid', description: 'Valid', localizations: { en: { aliases } },
+  }).success, false);
+}
+assert.equal(commandDefinitionSchema.safeParse({
+  name: 'valid', description: 'Valid', localizations: {
+    en: { name: '8ball', aliases: Array.from({ length: 8 }, (_, index) => `${index}${'x'.repeat(31)}`) },
+  },
+}).success, true);
+for (const localizations of [
+  { 'pt-BR': { name: 'stop' } },
+  { 'pt-BR': { aliases: ['stop'] } },
+  { en: { name: 'stop' } },
+  { en: { aliases: ['stop'] } },
+  { 'pt-BR': { aliases: ['parar'] } },
+  { 'pt-BR': { name: 'parar' } },
+  { en: { aliases: ['halt'] } },
+]) {
+  const commands = [
+    { name: 'play', description: 'Play', localizations },
+    { name: 'stop', description: 'Stop', localizations: { 'pt-BR': { name: 'parar' }, en: { aliases: ['halt'] } } },
+  ];
+  assert.equal(commandRegisterSchema.safeParse({ commands }).success, false, 'Canonical names and localized aliases share one namespace per bot/locale');
+  assert.equal(commandRegisterSchema.safeParse({ commands: commands.slice().reverse() }).success, false, 'Collision validation must be registration-order independent');
+}
+assert.equal(commandRegisterSchema.safeParse({ commands: [
+  { name: 'first', description: 'First', localizations: { 'pt-BR': { aliases: ['shared'] } } },
+  { name: 'second', description: 'Second', localizations: { en: { aliases: ['shared'] } } },
+] }).success, true, 'Aliases from different active locales do not collide');
 assert.equal(commandInvokeSchema.parse({ commandName: 'play', botId: 'bot', channelId: 'chat', locale: 'en-US' }).locale, 'en');
 for (const voiceRequirement of ['joined', 'same-bot-channel'] as const) {
   const command = { name: 'voice', description: 'Voice command', voiceRequirement };

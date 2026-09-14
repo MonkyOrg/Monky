@@ -334,20 +334,23 @@ export class SettingsStore {
   public setServerAutoEntry(server: AutoEntryServerAddress, enabled: boolean): void {
     const key = autoEntryServerKey(server);
     if (!key) throw new TypeError('Invalid automatic-entry server address');
-    const next = this.autoEntryServerKeys.filter(item => item !== key);
-    if (enabled) next.push(key);
-    if (this.isServerAutoEntryEnabled(server) === enabled) return;
+    const next = enabled ? [key] : this.autoEntryServerKeys.filter(item => item !== key);
     this.saveAutoEntryServerKeys(next);
+  }
+
+  public clearServerAutoEntry(): void {
+    this.saveAutoEntryServerKeys([]);
   }
 
   public retainAutoEntryServers(servers: readonly AutoEntryServerAddress[]): void {
     const available = new Set(servers.map(autoEntryServerKey));
-    const retained = this.autoEntryServerKeys.filter(key => available.has(key));
-    if (retained.length !== this.autoEntryServerKeys.length) this.saveAutoEntryServerKeys(retained);
+    const retained = restoreAutoEntryServerKeys(this.autoEntryServerKeys).filter(key => available.has(key));
+    this.saveAutoEntryServerKeys(retained);
   }
 
   private saveAutoEntryServerKeys(keys: string[]): void {
     const previous = this.autoEntryServerKeys;
+    if (keys.length === previous.length && keys.every((key, index) => key === previous[index])) return;
     this.autoEntryServerKeys = keys;
     try {
       this.save();
