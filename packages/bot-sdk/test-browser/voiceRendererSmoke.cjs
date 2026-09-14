@@ -73,7 +73,7 @@ if (!process.versions.electron) {
   }
   function pace(peer, label) {
     let stopped = false, timer, index = 0, nextAt = performance.now();
-    let lateResets = 0, maxLagMs = 0, maxWriteMs = 0;
+    let lateTicks = 0, maxLagMs = 0, maxWriteMs = 0;
     const tick = () => {
       if (stopped) return;
       const now = performance.now();
@@ -83,10 +83,8 @@ if (!process.versions.electron) {
         return;
       }
       maxLagMs = Math.max(maxLagMs, now - nextAt);
-      if (now - nextAt > 100) {
-        lateResets++;
-        nextAt = now;
-      }
+      // Keep the media deadline: resynchronizing here silently discards RTP time.
+      if (now - nextAt > 100) lateTicks++;
       const writtenAt = performance.now();
       mediaWrite = peer.write(audioFrames[index++ % audioFrames.length])
         .catch(error => errors.push(`${label} frame ${index}: ${error.message}`))
@@ -100,7 +98,7 @@ if (!process.versions.electron) {
     const pacer = {
       get frames() { return index; },
       get timing() {
-        return { label, frames: index, lateResets, maxLagMs: Math.round(maxLagMs), maxWriteMs: Math.round(maxWriteMs) };
+        return { label, frames: index, lateTicks, maxLagMs: Math.round(maxLagMs), maxWriteMs: Math.round(maxWriteMs) };
       },
       stop() { stopped = true; clearTimeout(timer); timers.delete(pacer); },
     };
