@@ -18,7 +18,7 @@ import { commandParameterChoices, commandParameterError, renderCompactCommand, r
 import { renderBotCommandContext } from '../src/renderer/views/botResponse';
 import { renderBotFields } from '../src/renderer/views/botFields';
 import { renderBotInvocation } from '../src/renderer/views/BotChatView';
-import { setLanguage } from '../src/renderer/i18n';
+import { getLanguage, setLanguage } from '../src/renderer/i18n';
 import { commandPreviewVolumeScope, type SelectionChoice } from '../src/renderer/utils/selectionChoices';
 import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
 
@@ -47,7 +47,10 @@ const member: UserSummary = {
   avatarUrl: 'http://127.0.0.1:9900/avatars/alice.png',
 };
 
-test('per-bot command metadata is localized for display without translating submitted identifiers', () => {
+test('per-bot command metadata is localized for display without translating submitted identifiers', (context) => {
+  const previousLanguage = getLanguage();
+  context.after(() => setLanguage(previousLanguage));
+  setLanguage('en');
   const localized: SlashCommand = {
     ...command,
     localizations: { 'pt-BR': {
@@ -74,7 +77,7 @@ test('per-bot command metadata is localized for display without translating subm
   const draft = store.getCommandDraft('channel');
   assert.ok(draft);
   const translated = localizeCommand(draft.command, 'pt-BR');
-  const markup = renderCompactCommand({ ...draft, command: translated }, 'channel', [member], true, true);
+  const markup = renderCompactCommand(draft, 'channel', [member], true, true, undefined, 'pt-BR');
   assert.match(markup, /data-field-name="song"/);
   assert.match(markup, /name="song"/);
   assert.match(markup, /data-command-name="play"/);
@@ -193,7 +196,7 @@ test('legacy command options keep compact identifier labels when no display labe
   store.selectCommand('channel', legacy);
   const draft = store.getCommandDraft('channel');
   assert.ok(draft);
-  const markup = renderCompactCommand({ ...draft, command: localizeCommand(legacy, 'pt-BR') }, 'channel', [member], true, true);
+  const markup = renderCompactCommand(draft, 'channel', [member], true, true, undefined, 'pt-BR');
   assert.ok(markup.includes('>song</label>'));
   assert.match(markup, /aria-label="song: Pesquise uma música/);
   assert.ok(markup.includes('Pesquise uma música pelo título ou URL.'));
