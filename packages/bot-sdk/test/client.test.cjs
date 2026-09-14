@@ -147,6 +147,38 @@ test('command voice requirements survive SDK validation and wire registration wi
   ]);
 });
 
+test('localized metadata preserves canonical identifiers and contexts normalize English aliases', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const locales = [];
+  bot.command({
+    name: 'query', description: 'Search for a sound',
+    options: [{ name: 'audio', label: 'Sound', description: 'Search', type: 'string', autocomplete: true }],
+    localizations: { 'pt-BR': { description: 'Pesquise um áudio', options: { audio: { label: 'Áudio', placeholder: 'Pesquisar' } } } },
+    autocomplete: (ctx) => { locales.push(ctx.locale); return [{ label: 'Sound', value: 'opaque' }]; },
+    audioPreview: (ctx) => { locales.push(ctx.locale); return { bytes: new Uint8Array([1, 2, 3]), mimeType: 'audio/ogg' }; },
+    handler: (ctx) => { locales.push(ctx.locale); ctx.reply(ctx.locale === 'en' ? 'English response' : 'Resposta em português'); },
+  });
+  bot.connect();
+  const registration = await server.next(MessageType.COMMAND_REGISTER);
+  const command = registration.payload.commands[0];
+  assert.equal(command.name, 'query');
+  assert.equal(command.options[0].name, 'audio');
+  assert.equal(command.options[0].label, 'Sound');
+  assert.equal(command.localizations['pt-BR'].options.audio.label, 'Áudio');
+  server.invoke('locale-invocation', 'query', { locale: 'en-US' });
+  assert.equal((await server.next(MessageType.COMMAND_RESPONSE)).payload.content, 'English response');
+  await server.next(MessageType.COMMAND_FINISH);
+  server.send(MessageType.COMMAND_AUTOCOMPLETE,
+    { commandName: 'query', optionName: 'audio', query: 'sound', options: {}, locale: 'en-US' }, 'locale-search');
+  assert.equal((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload.status, 'ok');
+  server.send(MessageType.COMMAND_AUDIO_PREVIEW,
+    { commandName: 'query', optionName: 'audio', resourceId: 'opaque', locale: 'en-US' }, 'locale-preview');
+  assert.equal((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload.status, 'ok');
+  assert.deepEqual(locales, ['en', 'en', 'en']);
+  assert.deepEqual(errors, []);
+});
+
 test('miniapp context creation targets the live voice room, never the command text channel or stale snapshot', async (t) => {
   const f = await makeVoiceContextFixture(t);
   const created = f.ctx.createScreen({ id: 'game', title: 'Game', html: '<p>Game</p>', state: {} });
@@ -1617,7 +1649,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 15);
+  assert.equal(PROTOCOL_VERSION, 16);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

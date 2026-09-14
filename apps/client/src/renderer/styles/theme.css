@@ -1,3 +1,6 @@
+@import './bot-compatibility.css';
+@import './messageEditing.css';
+
 /* Qualquer regra de autor com `display` vence o `display: none` que o
    user-agent da a [hidden], e o app usa `display: flex` em classes genericas
    como .form-group. Sem esta regra, esconder um elemento pelo atributo `hidden`

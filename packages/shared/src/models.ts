@@ -1,4 +1,5 @@
 import type { SelectionChoice } from './selection.js';
+import type { CommandLocalizations } from './botLocales.js';
 
 export type ChannelType = 'VOICE' | 'TEXT';
 
@@ -226,6 +227,8 @@ export type CommandOptionType = 'string' | 'integer' | 'boolean' | 'user';
 /** One option (parameter) a slash command accepts. */
 export interface CommandOption {
   name: string;
+  /** Display label only; name remains the stable argument identifier. */
+  label?: string;
   description: string;
   type: CommandOptionType;
   required?: boolean;
@@ -244,6 +247,7 @@ export interface SlashCommand {
   /** Unique per bot; the command name without the leading `/`. */
   name: string;
   description: string;
+  localizations?: CommandLocalizations;
   /** The bot that owns this command (`UserSummary.id`). */
   botId: string;
   /** Display-friendly bot name for the command dropup. */
@@ -268,6 +272,14 @@ export interface BotInfo {
   online: boolean;
   /** A manual link awaiting the bot's first identity announcement. */
   profilePending: boolean;
+  lastProtocolVersion?: number | null;
+  requiredProtocolVersion?: number;
+}
+
+export interface BotCompatibilitySummary {
+  protocolVersion: number;
+  incompatibleBots: number;
+  uncheckedBots: number;
 }
 
 // ── End bot types ─────────────────────────────────────────────────────────

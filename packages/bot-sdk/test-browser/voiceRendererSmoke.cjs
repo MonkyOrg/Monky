@@ -14,7 +14,7 @@ if (!process.versions.electron) {
   child.once('error', (error) => { console.error(error); cleanup(); process.exitCode = 1; });
   child.once('exit', (code) => { cleanup(); process.exitCode = code ?? 1; });
 } else {
-  const { app, BrowserWindow } = require('electron');
+  const { app, BrowserWindow, powerSaveBlocker } = require('electron');
   const { OpusPeer } = require('../dist/voice/OpusPeer');
   const { BotVoiceConnection, validateOpus } = require('../dist/voice/BotVoiceConnection');
   const { MessageType, botVoiceSignalSchema } = require('@monky/shared');
@@ -24,6 +24,7 @@ if (!process.versions.electron) {
   app.on('window-all-closed', () => {});
   let vite, window, worker, router, p2p, sfu, botProducer, timeout, rosterVoice, rosterJoin, retiredPeer;
   let p2pTimer;
+  let powerBlocker;
   let mediaPaused = false;
   let mediaWrite = Promise.resolve();
   const outgoingSignals = [];
@@ -72,6 +73,7 @@ if (!process.versions.electron) {
   }
   function pace(peer, label) {
     let stopped = false, timer, index = 0, nextAt = performance.now();
+    let lateTicks = 0, maxLagMs = 0, maxWriteMs = 0;
     const tick = () => {
       if (stopped) return;
       const now = performance.now();
@@ -80,10 +82,14 @@ if (!process.versions.electron) {
         timer = setTimeout(tick, 20);
         return;
       }
-      if (now - nextAt > 100) nextAt = now;
+      maxLagMs = Math.max(maxLagMs, now - nextAt);
+      // Keep the media deadline: resynchronizing here silently discards RTP time.
+      if (now - nextAt > 100) lateTicks++;
+      const writtenAt = performance.now();
       mediaWrite = peer.write(audioFrames[index++ % audioFrames.length])
         .catch(error => errors.push(`${label} frame ${index}: ${error.message}`))
         .finally(() => {
+          maxWriteMs = Math.max(maxWriteMs, performance.now() - writtenAt);
           if (stopped) return;
           nextAt += 20;
           timer = setTimeout(tick, Math.max(0, nextAt - performance.now()));
@@ -91,6 +97,9 @@ if (!process.versions.electron) {
     };
     const pacer = {
       get frames() { return index; },
+      get timing() {
+        return { label, frames: index, lateTicks, maxLagMs: Math.round(maxLagMs), maxWriteMs: Math.round(maxWriteMs) };
+      },
       stop() { stopped = true; clearTimeout(timer); timers.delete(pacer); },
     };
     timers.add(pacer);
@@ -103,6 +112,7 @@ if (!process.versions.electron) {
   };
   const finish = async (code) => {
     clearTimeout(timeout);
+    if (powerBlocker !== undefined) powerSaveBlocker.stop(powerBlocker);
     await stopMedia();
     for (const stream of streams) await stream.close();
     if (window && !window.isDestroyed()) window.destroy();
@@ -111,6 +121,8 @@ if (!process.versions.electron) {
     app.exit(code);
   };
   app.whenReady().then(async () => {
+    // The hidden Electron fixture must stay awake like the real bot's Node process.
+    powerBlocker = powerSaveBlocker.start('prevent-app-suspension');
     audioFrames = generatedSine();
     const [{ createServer }, mediasoup] = await Promise.all([import('vite'), import('mediasoup')]);
     worker = await mediasoup.createWorker({ logLevel: 'error' });
@@ -136,6 +148,8 @@ if (!process.versions.electron) {
           return {};
         case 'fixture.voice-state':
           return { voiceState: roster[0].voiceState, updateCount: activityUpdates.length, frames: p2pTimer?.frames ?? 0 };
+        case 'fixture.timing':
+          return [...timers].map(timer => timer.timing);
         case 'fixture.restrict':
           roster[0].voiceState = { ...roster[0].voiceState,
             serverMuted: payload.serverMuted, serverDeafened: payload.serverDeafened,
@@ -504,6 +518,7 @@ async function runRenderer(MessageType, roster, humanId) {
     if (continuousMs) {
       await new Promise(resolve => setTimeout(resolve, 500));
       const before = await sampleStats();
+      const pacingBefore = await request('fixture.timing');
       const beforeActivity = checkActivity ? (await syncVoiceState()).updateCount : 0;
       const levels = [];
       let inactiveSpeakingProbes = 0;
@@ -521,6 +536,7 @@ async function runRenderer(MessageType, roster, humanId) {
         }
       }
       const after = await sampleStats();
+      const pacingAfter = await request('fixture.timing');
       check(before && after, `${category}: lost audio during continuous playback`);
       const samples = after.totalSamplesReceived - before.totalSamplesReceived;
       const concealed = after.concealedSamples - before.concealedSamples;
@@ -529,8 +545,9 @@ async function runRenderer(MessageType, roster, humanId) {
       continuous = { durationMs: wallMs, packetMs, decodedSamples: samples - concealed,
         concealedSamples: concealed, concealmentRatio: samples ? concealed / samples : 1,
         minOutputRms: Math.min(...levels), silentProbes: levels.filter(level => level <= 0.005).length,
+        pacing: { before: pacingBefore, after: pacingAfter },
         ...(checkActivity ? { inactiveSpeakingProbes } : {}) };
-      check(Math.abs(wallMs - packetMs) < 500, `${category}: RTP clock drift ${wallMs - packetMs} ms`);
+      check(Math.abs(wallMs - packetMs) < 500, `${category}: RTP clock drift ${wallMs - packetMs} ms: ${JSON.stringify(continuous)}`);
       check(continuous.concealmentRatio < 0.05, `${category}: excessive concealment ${JSON.stringify(continuous)}`);
       check(continuous.decodedSamples > continuousMs * 40 && continuous.silentProbes <= 1,
         `${category}: generated audio was not continuously decoded`);

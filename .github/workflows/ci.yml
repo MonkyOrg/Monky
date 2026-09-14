@@ -212,6 +212,9 @@ jobs:
         shell: bash
         run: |
           npm run test:bots:ui --workspace=apps/client
+          npm run test:development --workspace=apps/client
+          npm run test:updates --workspace=apps/client
+          npm run test:editing --workspace=apps/client
           npm run test:screens --workspace=apps/client
           node packages/bot-sdk/test-browser/voiceRendererSmoke.cjs
           node apps/client/test/userContextMenuSmoke.cjs

@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import os from 'os';
+import { execSync, spawnSync } from 'child_process';
+import { fetchReleaseCompatibility, isReleaseVersion, PROTOCOL_VERSION, type ReleaseCompatibilityResult } from '@monky/shared';
 import { ANSI, color } from '../constants';
 import { GlobalArgs } from '../context';
 import { resolveInterpreter } from '../health';
@@ -16,7 +18,7 @@ import {
 } from '../pm2';
 import { confirm } from '../prompts';
 import { runSync } from '../process';
-import { restartServerCommand } from './serverLifecycle';
+import { createCliDownloadProgress, downloadCliArtifact, validateCliArtifact, type CliReleaseArtifact } from '../releaseDownload';
 
 export const GITHUB_RELEASES_URL =
   'https://api.github.com/repos/MonkyOrg/Monky/releases?per_page=100';
@@ -104,7 +106,7 @@ export function getLocalVersion(): string {
 
 export async function fetchLatestVersion(
   includeBeta = false
-): Promise<{ version: string; url: string; tgzUrl?: string; isPrerelease: boolean } | null> {
+): Promise<{ version: string; url: string; tgzUrl?: string; artifact?: CliReleaseArtifact; isPrerelease: boolean } | null> {
   const endpoint = includeBeta ? GITHUB_RELEASES_URL : GITHUB_LATEST_RELEASE_URL;
 
   try {
@@ -117,25 +119,34 @@ export async function fetchLatestVersion(
         },
         (res) => {
           if (res.statusCode !== 200) {
+            res.resume();
             resolve(null);
             return;
           }
           let data = '';
           res.on('data', (chunk: string) => {
             data += chunk;
+            if (Buffer.byteLength(data, 'utf8') > 4 * 1024 * 1024) {
+              req.destroy(new Error('Release listing exceeds its size limit.'));
+            }
           });
+          res.on('aborted', () => resolve(null));
+          res.on('error', () => resolve(null));
           res.on('end', () => {
             try {
-              const parsed = JSON.parse(data);
-              const release = Array.isArray(parsed) ? pickNewestRelease(parsed) : parsed;
+              const parsed: unknown = JSON.parse(data);
+              const release = Array.isArray(parsed)
+                ? pickNewestRelease(parsed.flatMap((value) => {
+                  const item = parseGitHubRelease(value);
+                  return item ? [item] : [];
+                }))
+                : parseGitHubRelease(parsed);
               if (!release) {
                 resolve(null);
                 return;
               }
               const version = (release.tag_name || '').replace(/^v/, '');
-              const tgzAsset = (release.assets || []).find((a: any) =>
-                a.name?.endsWith('.tgz') && a.name?.includes('monky-cli')
-              );
+              const tgzAsset = release.assets?.find((asset) => asset.name === `monky-cli-${version}.tgz`);
               const tgzUrl =
                 tgzAsset?.browser_download_url ||
                 `https://github.com/MonkyOrg/Monky/releases/download/v${version}/monky-cli-${version}.tgz`;
@@ -144,6 +155,9 @@ export async function fetchLatestVersion(
                 version,
                 url: release.html_url || '',
                 tgzUrl,
+                artifact: tgzAsset && typeof tgzAsset.size === 'number' ? {
+                  version, name: tgzAsset.name ?? '', url: tgzUrl, size: tgzAsset.size, digest: tgzAsset.digest,
+                } : undefined,
                 isPrerelease: !!release.prerelease,
               });
             } catch {
@@ -204,7 +218,33 @@ export interface GitHubReleaseSummary {
   html_url?: string;
   prerelease?: boolean;
   draft?: boolean;
-  assets?: { name?: string; browser_download_url?: string }[];
+  assets?: { name?: string; browser_download_url?: string; size?: number; digest?: string | null }[];
+}
+
+function parseGitHubRelease(value: unknown): GitHubReleaseSummary | null {
+  if (!value || typeof value !== 'object' || !('tag_name' in value) ||
+      typeof value.tag_name !== 'string' || !isReleaseVersion(value.tag_name.replace(/^v/, ''))) return null;
+  const assets: NonNullable<GitHubReleaseSummary['assets']> = [];
+  if ('assets' in value && Array.isArray(value.assets)) {
+    for (const rawAsset of value.assets) {
+      const asset: unknown = rawAsset;
+      if (!asset || typeof asset !== 'object') continue;
+      assets.push({
+        name: 'name' in asset && typeof asset.name === 'string' ? asset.name : undefined,
+        browser_download_url: 'browser_download_url' in asset && typeof asset.browser_download_url === 'string'
+          ? asset.browser_download_url : undefined,
+        size: 'size' in asset && typeof asset.size === 'number' ? asset.size : undefined,
+        digest: 'digest' in asset && typeof asset.digest === 'string' ? asset.digest : undefined,
+      });
+    }
+  }
+  return {
+    tag_name: value.tag_name,
+    html_url: 'html_url' in value && typeof value.html_url === 'string' ? value.html_url : undefined,
+    prerelease: 'prerelease' in value && value.prerelease === true,
+    draft: 'draft' in value && value.draft === true,
+    assets,
+  };
 }
 
 /**
@@ -232,15 +272,17 @@ export function pickNewestRelease<T extends GitHubReleaseSummary>(releases: T[])
 
 export async function checkForUpdate(
   includeBeta = false
-): Promise<{ hasUpdate: boolean; local: string; remote: string; url: string; tgzUrl?: string; isPrerelease: boolean }> {
+): Promise<{
+  hasUpdate: boolean; local: string; remote: string; url: string; tgzUrl?: string;
+  artifact?: CliReleaseArtifact; isPrerelease: boolean; compatibility: ReleaseCompatibilityResult;
+}> {
   const local = getLocalVersion();
   console.log(color(t('update.localVersion', { version: local }), ANSI.dim));
   console.log(color(includeBeta ? t('update.checkingBeta') : t('update.checkingStable'), ANSI.dim));
 
   const latest = await fetchLatestVersion(includeBeta);
   if (!latest) {
-    console.log(color(t('update.checkFailed'), ANSI.yellow));
-    return { hasUpdate: false, local, remote: local, url: '', isPrerelease: false };
+    throw new Error(t('update.checkFailed'));
   }
 
   const hasUpdate = compareVersions(local, latest.version) > 0;
@@ -253,6 +295,14 @@ export async function checkForUpdate(
   } else {
     console.log(color(t('update.upToDate'), ANSI.green));
   }
+  const compatibility = await fetchReleaseCompatibility(latest.version);
+  if (compatibility.status === 'available' && compatibility.manifest.protocolVersion !== PROTOCOL_VERSION) {
+    console.log(color(t('update.compatibilityChanged', {
+      protocol: compatibility.manifest.protocolVersion, sdk: compatibility.manifest.botSdkVersion,
+    }), ANSI.yellow));
+  } else if (compatibility.status === 'unavailable') {
+    console.log(color(t('update.compatibilityUnknown'), ANSI.yellow));
+  }
 
   return {
     hasUpdate,
@@ -260,7 +310,9 @@ export async function checkForUpdate(
     remote: latest.version,
     url: latest.url,
     tgzUrl: latest.tgzUrl,
+    artifact: latest.artifact,
     isPrerelease: latest.isPrerelease,
+    compatibility,
   };
 }
 
@@ -313,34 +365,58 @@ export function buildInstallArgs(tgzUrl: string, npmVersion: string | null): str
   return args;
 }
 
+export function resolveInstalledCli(version: string, cwd?: string): string {
+  const root = runSync('npm', ['root', '-g'], { encoding: 'utf8', cwd });
+  if (root.error || root.status !== 0 || !root.stdout || !path.isAbsolute(root.stdout.trim())) {
+    throw new Error(t('update.invalidInstalledCli', { version }));
+  }
+  const packageDir = path.join(root.stdout.trim(), '@monky', 'server');
+  const pkg: unknown = JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8'));
+  if (!pkg || typeof pkg !== 'object' || !('name' in pkg) || pkg.name !== '@monky/server' ||
+      !('version' in pkg) || pkg.version !== version || !('bin' in pkg) || !pkg.bin ||
+      typeof pkg.bin !== 'object' || !('monky' in pkg.bin) || typeof pkg.bin.monky !== 'string') {
+    throw new Error(t('update.invalidInstalledCli', { version }));
+  }
+  const packageRoot = fs.realpathSync(packageDir);
+  const entry = fs.realpathSync(path.resolve(packageDir, pkg.bin.monky));
+  const relative = path.relative(packageRoot, entry);
+  if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`) ||
+      !fs.statSync(entry).isFile()) throw new Error(t('update.invalidInstalledCli', { version }));
+  return entry;
+}
+
 export async function performUpdate(
-  options: { beta?: boolean; targetVersion?: string; tgzUrl?: string } = {}
-): Promise<boolean> {
+  options: { targetVersion: string; artifact?: CliReleaseArtifact },
+): Promise<{ cliEntry: string }> {
   console.log(color(t('update.updating'), ANSI.bold));
   console.log();
 
-  const tgzUrl =
-    options.tgzUrl ||
-    (options.targetVersion
-      ? `https://github.com/MonkyOrg/Monky/releases/download/v${options.targetVersion}/monky-cli-${options.targetVersion}.tgz`
-      : null);
-
-  if (!tgzUrl) {
-    console.log(color(t('update.noTgzUrl'), ANSI.red));
-    return false;
+  const { artifact } = options;
+  if (!artifact || artifact.version !== options.targetVersion) throw new Error(t('update.invalidArtifact'));
+  validateCliArtifact(artifact);
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'monky-update-'));
+  const progress = createCliDownloadProgress();
+  try {
+    console.log(color(t('update.downloadStage'), ANSI.cyan));
+    await downloadCliArtifact(artifact, path.join(directory, 'package.tgz'), {
+      onProgress: progress.update,
+      onVerifying: () => {
+        progress.finish();
+        console.log(color(t('update.verifyingStage'), ANSI.dim));
+      },
+    });
+    console.log(color(t('update.installStage'), ANSI.cyan));
+    // A fixed relative filename never interpolates a home/temp path into cmd.exe.
+    const installArgs = buildInstallArgs('./package.tgz', detectNpmVersion());
+    const installResult = runSync('npm', installArgs, { stdio: 'inherit', cwd: directory });
+    if (installResult.error || installResult.status !== 0) throw new Error(t('update.installFailed'));
+    const cliEntry = resolveInstalledCli(options.targetVersion, directory);
+    console.log(color(t('update.success'), ANSI.green));
+    return { cliEntry };
+  } finally {
+    progress.finish();
+    await fs.promises.rm(directory, { recursive: true, force: true });
   }
-
-  console.log(color(t('update.installing', { url: tgzUrl }), ANSI.cyan));
-  const installArgs = buildInstallArgs(tgzUrl, detectNpmVersion());
-  const installResult = runSync('npm', installArgs, { stdio: 'inherit' });
-  if (installResult.status !== 0) {
-    console.log(color(t('update.installFailed'), ANSI.red));
-    return false;
-  }
-
-  console.log();
-  console.log(color(t('update.success'), ANSI.green));
-  return true;
 }
 
 export async function updateCommand(globalArgs: GlobalArgs, args: string[]): Promise<void> {
@@ -348,7 +424,7 @@ export async function updateCommand(globalArgs: GlobalArgs, args: string[]): Pro
   const includeBeta = args.includes('--beta') || args.includes('-b');
   const assumeYes = args.includes('--yes') || args.includes('-y');
 
-  const { hasUpdate, remote, tgzUrl, isPrerelease } = await checkForUpdate(includeBeta);
+  const { hasUpdate, remote, artifact, isPrerelease } = await checkForUpdate(includeBeta);
 
   if (checkOnly) {
     return;
@@ -371,25 +447,24 @@ export async function updateCommand(globalArgs: GlobalArgs, args: string[]): Pro
     }
   }
 
-  const success = await performUpdate({
-    beta: includeBeta || isPrerelease,
+  const installed = await performUpdate({
     targetVersion: remote,
-    tgzUrl,
+    artifact,
   });
-  if (!success) return;
 
   if (!isPm2Available()) return;
 
-  // Restarting goes through the lifecycle command so the ecosystem file is
-  // rewritten and the right server is picked when the machine hosts several.
-  if (assumeYes) {
-    await restartServerCommand(globalArgs);
-    return;
-  }
-
-  const shouldRestart = await confirm(t('update.confirmRestart'), true);
+  const shouldRestart = assumeYes || await confirm(t('update.confirmRestart'), true);
   if (shouldRestart) {
-    await restartServerCommand(globalArgs);
+    const args = [installed.cliEntry];
+    if (globalArgs.dataDirSpecified) args.push('--data', globalArgs.dataDir);
+    args.push('restart');
+    const restart = spawnSync(process.execPath, args, { stdio: 'inherit', shell: false });
+    if (restart.error || restart.status !== 0) {
+      throw new Error(t('update.restartFailed', {
+        reason: restart.error?.message ?? restart.signal ?? String(restart.status),
+      }));
+    }
   }
 }
 

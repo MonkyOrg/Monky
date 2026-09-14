@@ -144,6 +144,8 @@ export interface BotRecord {
   /** The user who created this bot. */
   createdByUserId: string;
   createdAt: number;
+  /** Last protocol presented by this bound bot; null for pre-migration links. */
+  lastProtocolVersion?: number | null;
 }
 
 export interface BotSettingsRecord {

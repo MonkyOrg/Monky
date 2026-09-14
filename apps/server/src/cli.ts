@@ -32,7 +32,9 @@ import { setConfig, showConfig } from './cli/commands/config';
 import { updateCommand, getLocalVersion } from './cli/commands/update';
 import { destroyCommand } from './cli/commands/destroy';
 import {
+  getCliLanguage,
   initCliI18n,
+  normalizeCliLanguage,
   SUPPORTED_CLI_LANGUAGES,
   setCliLanguage,
   persistLanguage,
@@ -41,8 +43,7 @@ import {
 } from './cli/i18n/index';
 
 function printUsage(): void {
-  const lang = require('./cli/i18n/index').getCliLanguage();
-  const isPtBR = lang === 'pt-BR';
+  const isPtBR = getCliLanguage() === 'pt-BR';
 
   if (isPtBR) {
     console.log(`
@@ -81,7 +82,7 @@ ${color('OPÇÕES GLOBAIS', ANSI.bold)}
   --version, -v            Exibe a versão instalada do Monky CLI
   --data <pasta>           Servidor a usar (obrigatório se houver vários)
   --help, -h               Exibe esta ajuda
-  --lang <código>          Define o idioma (en, pt-BR)
+  --lang <código>          Define o idioma (en/en-US, pt-BR)
 
 ${color('OPÇÕES POR COMANDO', ANSI.bold)}
   start   --port <n>  --fresh
@@ -95,6 +96,7 @@ ${color('EXEMPLOS', ANSI.bold)}
   monky start                         Inicia o único servidor da máquina
   monky logs --level ERROR --no-follow  Imprime os erros recentes e sai
   monky --data /srv/monky restart     Reinicia um servidor específico
+  monky --lang pt-BR                  Salva o idioma do CLI
 
 Documentação completa: https://monkyorg.github.io/Monky/cli
 `.trim());
@@ -135,7 +137,7 @@ ${color('GLOBAL OPTIONS', ANSI.bold)}
   --version, -v            Show installed Monky CLI version
   --data <dir>             Server to use (required if there are multiple)
   --help, -h               Show this help
-  --lang <code>            Set language (en, pt-BR)
+  --lang <code>            Set language (en/en-US, pt-BR)
 
 ${color('COMMAND OPTIONS', ANSI.bold)}
   start   --port <n>  --fresh
@@ -149,8 +151,9 @@ ${color('EXAMPLES', ANSI.bold)}
   monky start                         Start the only server on this machine
   monky logs --level ERROR --no-follow  Print recent errors and exit
   monky --data /srv/monky restart     Restart a specific server
+  monky --lang en                     Save the CLI language
 
-Full documentation: https://monkyorg.github.io/Monky/cli
+Full documentation: https://monkyorg.github.io/Monky/en/cli
 `.trim());
   }
 }
@@ -159,19 +162,44 @@ async function runDataCommand(
   globalArgs: GlobalArgs,
   fn: (dataDir: string) => Promise<void>
 ): Promise<void> {
-  const target = await resolveTargetServer(globalArgs, 'administrar');
+  const target = await resolveTargetServer(globalArgs, t('action.manage'));
   await fn(target.dataDir);
+}
+
+const COMMANDS = new Set([
+  'create', 'bootstrap', 'list', 'ls', 'start', 'stop', 'restart', 'logs',
+  'status', 'update', 'destroy', 'members', 'admin', 'roles', 'config',
+]);
+
+const SUBCOMMANDS = new Map<string, readonly string[]>([
+  ['members', ['list', 'info']],
+  ['admin', ['add', 'remove']],
+  ['roles', ['list', 'create', 'assign', 'unassign', 'delete']],
+  ['config', ['show', 'set']],
+]);
+
+function commandKind(args: string[]): 'help' | 'version' | 'command' {
+  const [section, action] = args;
+  if (!section || isHelpArg(section) || args.includes('--help') || args.includes('-h')) return 'help';
+  if (section === 'version' || args.includes('--version') || args.includes('-v')) return 'version';
+  if (!COMMANDS.has(section)) throw new Error(t('cli.unknownCommand', { command: section }));
+  const actions = SUBCOMMANDS.get(section);
+  if (actions && ((action && !actions.includes(action)) || (section === 'admin' && !action))) {
+    throw new Error(t('cli.invalidSubcommand', { command: section, actions: actions.join(', ') }));
+  }
+  return 'command';
 }
 
 export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
   const [section, action, ...rest] = globalArgs.args;
+  const kind = commandKind(globalArgs.args);
 
-  if (!section || isHelpArg(section)) {
+  if (kind === 'help') {
     printUsage();
     return;
   }
 
-  if (section === '--version' || section === '-v' || section === 'version') {
+  if (kind === 'version') {
     console.log(`monky ${getLocalVersion()}`);
     return;
   }
@@ -235,7 +263,6 @@ export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
           await showMemberInfo(ctx, rest.join(' '));
           return;
         }
-        throw new Error('Invalid members command.');
       });
     });
     return;
@@ -252,7 +279,6 @@ export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
           await changeAdminRole(ctx, rest.join(' '), false);
           return;
         }
-        throw new Error('Invalid admin command.');
       });
     });
     return;
@@ -282,7 +308,6 @@ export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
           await deleteRoleInteractive(ctx, rest);
           return;
         }
-        throw new Error('Invalid roles command.');
       });
     });
     return;
@@ -300,82 +325,114 @@ export async function runCommand(globalArgs: GlobalArgs): Promise<void> {
           await setConfig(ctx, rest[0] || '', rest.length > 1 ? rest.slice(1).join(' ') : undefined);
           return;
         }
-        throw new Error('Invalid config command.');
       });
     });
     return;
   }
 
-  throw new Error(`Unknown command: ${section}`);
+  throw new Error(t('cli.unknownCommand', { command: section }));
 }
 
-async function main(): Promise<void> {
-  // Handle --lang before parsing global args, so it's available everywhere.
-  const rawArgs = process.argv.slice(2);
-  const langIdx = rawArgs.indexOf('--lang');
-  if (langIdx >= 0 && rawArgs[langIdx + 1]) {
-    const code = rawArgs[langIdx + 1] as SupportedCliLanguage;
-    if (SUPPORTED_CLI_LANGUAGES.some((l) => l.code === code)) {
-      setCliLanguage(code);
-      persistLanguage(code);
-      // Remove --lang and its value from args before further parsing
-      rawArgs.splice(langIdx, 2);
+export function parseLanguageArgs(rawArgs: string[]): { args: string[]; language?: SupportedCliLanguage } {
+  const args: string[] = [];
+  let language: SupportedCliLanguage | undefined;
+  for (let index = 0; index < rawArgs.length; index++) {
+    const argument = rawArgs[index];
+    if (argument === '--lang' || argument.startsWith('--lang=')) {
+      if (language) throw new Error(t('language.duplicateOption'));
+      const value = argument === '--lang' ? rawArgs[++index] : argument.slice('--lang='.length);
+      if (!value || value.startsWith('-')) throw new Error(t('language.missingValue'));
+      const normalized = normalizeCliLanguage(value);
+      if (!normalized) throw new Error(t('language.unsupported', { value }));
+      language = normalized;
+    } else {
+      args.push(argument);
     }
   }
+  return { args, language };
+}
 
-  const hasLanguage = initCliI18n();
+export async function main(rawArgs: string[] = process.argv.slice(2)): Promise<void> {
+  // Pick the diagnostic language before validating flags. A valid override
+  // skips stored settings; an invalid flag is explained in the saved locale.
+  const languageIndex = rawArgs.findIndex((argument) => argument === '--lang' || argument.startsWith('--lang='));
+  const languageValue = languageIndex < 0 ? undefined : rawArgs[languageIndex] === '--lang'
+    ? rawArgs[languageIndex + 1]
+    : rawArgs[languageIndex].slice('--lang='.length);
+  const hasLanguage = initCliI18n(languageValue ? normalizeCliLanguage(languageValue) ?? undefined : undefined);
+  const { args, language } = parseLanguageArgs(rawArgs);
+  const globalArgs = parseGlobalArgs(args);
 
-  // If no language is persisted and stdin is interactive, ask on first run.
-  if (!hasLanguage && process.stdin.isTTY) {
-    await promptLanguageSelection();
+  // A standalone --lang is an explicit preference edit. Help, version and
+  // commands run by scripts only use the flag for that invocation.
+  if (language && args.length === 0) {
+    persistLanguage(language);
+    console.log(t('language.saved', { language }));
+    return;
   }
 
-  const globalArgs = parseGlobalArgs(rawArgs);
-  await runCommand(globalArgs);
+  const kind = commandKind(globalArgs.args);
+  if (kind !== 'command') {
+    await runCommand(globalArgs);
+    return;
+  }
+  if (process.stdin.isTTY && process.stdout.isTTY && !process.env.CI) {
+    if (language) {
+      persistLanguage(language);
+    } else if (!hasLanguage) {
+      await promptLanguageSelection();
+    }
+  }
+  // A one-off --lang must also reach child CLIs (for example, the fresh CLI
+  // that restarts a server after an update), without changing saved settings.
+  const previousEnvironmentLanguage = process.env.MONKY_LANG;
+  process.env.MONKY_LANG = getCliLanguage();
+  try {
+    await runCommand(globalArgs);
+  } finally {
+    if (previousEnvironmentLanguage === undefined) delete process.env.MONKY_LANG;
+    else process.env.MONKY_LANG = previousEnvironmentLanguage;
+  }
 }
 
 /**
- * First-run language prompt. Shown once in English (universal) and persisted.
+ * Keep one readline interface through retries; EOF cancels instead of leaving
+ * an unresolved question or silently persisting a different language.
  */
-async function promptLanguageSelection(): Promise<void> {
+export async function promptLanguageSelection(
+  input: NodeJS.ReadableStream = process.stdin,
+  output: NodeJS.WritableStream = process.stdout
+): Promise<void> {
   const readline = await import('readline');
   const labels = SUPPORTED_CLI_LANGUAGES.map((l, i) => `  ${i + 1}. ${l.label}`).join('\n');
-  console.log(t('language.selectPrompt'));
-  console.log(labels);
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise<string>((resolve) => {
-    rl.question('> ', (ans) => {
-      rl.close();
-      resolve(ans.trim());
-    });
-  });
-
-  const idx = parseInt(answer, 10) - 1;
-  if (idx >= 0 && idx < SUPPORTED_CLI_LANGUAGES.length) {
-    const chosen = SUPPORTED_CLI_LANGUAGES[idx].code;
-    setCliLanguage(chosen);
-    persistLanguage(chosen);
-  } else {
-    // Try matching by code
-    const match = SUPPORTED_CLI_LANGUAGES.find(
-      (l) => l.code.toLowerCase() === answer.toLowerCase()
-    );
-    if (match) {
-      setCliLanguage(match.code);
-      persistLanguage(match.code);
-    } else {
-      // Default to English
-      persistLanguage('en');
+  output.write(`${t('language.selectPrompt')}\n${labels}\n> `);
+  const rl = readline.createInterface({ input, output });
+  try {
+    for await (const answer of rl) {
+      const value = answer.trim();
+      const chosen = /^\d+$/.test(value)
+        ? SUPPORTED_CLI_LANGUAGES[Number(value) - 1]?.code
+        : normalizeCliLanguage(value);
+      if (!chosen) {
+        output.write(`${t('language.invalidSelection')}\n> `);
+        continue;
+      }
+      persistLanguage(chosen);
+      setCliLanguage(chosen);
+      output.write(`${t('language.saved', { language: chosen })}\n`);
+      return;
     }
+    throw new Error(t('prompt.cancelled'));
+  } finally {
+    rl.close();
   }
 }
 
 if (require.main === module) {
   main().catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(color(`Error: ${message}`, ANSI.red));
-    console.error(color('Use "monky --help"', ANSI.dim));
+    console.error(color(t('cli.error', { message }), ANSI.red));
+    console.error(color(t('cli.useHelp'), ANSI.dim));
     process.exit(1);
   });
 }

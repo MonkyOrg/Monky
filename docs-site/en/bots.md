@@ -64,11 +64,11 @@ When creating or editing a text channel, the **Allow bot commands** switch start
 ### Prerequisites
 
 - **Node.js 18+**
-- Client, server, and SDK compatible with **protocol 15**
+- Client, server, and SDK compatible with **protocol 16**
 - The `@monky/bot-sdk` package from the matching release
 
 ::: warning Update together
-Protocol 15 adds voice, programmable screens, and on-demand audio previews. Update the **client, server, and bot** together; different protocol versions cannot connect.
+Protocol 16 adds language and compatibility metadata to voice, programmable screens, and audio previews. Update the **client, server, and bot** together; different protocol versions cannot connect.
 
 Protocol 14's linking rules are preserved: `BOT_CREATE` accepts only `{}`, and management receives `profilePending` while a bot has not announced its identity. The database preserves existing identities, and only the authenticated bot may publish profile changes. `ctx.args` contains typed values and `ctx.reply()` is private; use `ctx.publish()` only for channel-visible results.
 :::
@@ -148,6 +148,23 @@ The CLI provides `setup`, `start`, `stop`, `restart`, `status`, `logs` and `conf
 with a PM2 process and configuration isolated by bot name. `start --foreground`
 runs without PM2 for development. `npm run cli -- setup` uses the same CLI in a
 local checkout after compilation.
+
+On the first access from an interactive terminal, the CLI asks for **Português
+(Brasil)** or **English** and saves the choice in `~/.<cliName>/preferences.json`.
+`language en` or `language pt-BR` changes that preference; `--locale en` applies
+only to that invocation. `en-US` is accepted and normalized to `en`.
+`--version`, `--help`, redirected input/output, `--non-interactive`, `--yes`,
+`--check`, and CI environments never open that prompt or create a preference
+automatically. `MONKY_BOT_LOCALE` can specify an automation's language; when it
+is absent, the CLI accepts `MONKY_LANG`, like the server CLI. `--locale` takes
+precedence over both without reading or changing the saved preference.
+Regional/POSIX tags such as `en_GB.UTF-8` and `pt_PT` normalize to `en` and
+`pt-BR`. Saving is atomic; invalid preferences produce a diagnostic without
+blocking help or automation and can be replaced with `language en` or
+`language pt-BR`. `--version` does not even read that file.
+The CLI passes the effective language to the bot process through that same
+variable, without translating identifiers such as `setup`, `start`, `mode`, or
+environment-variable names.
 
 Setup follows MonkyBot's flow: mode, working directory, mode-specific settings,
 and bot name. **URL installation is the default** for bots supporting both modes;
@@ -277,6 +294,17 @@ remain outside the installation. Installation is refused if configuration/runtim
 data is inside the installed package, to avoid deleting it during replacement.
 Transfers are bounded to 200 MiB and 60 seconds.
 
+The CLI shows actual transferred bytes and a percentage when the source provides
+a valid total. Without a total it reports received bytes without inventing a
+percentage. Checking, verification, installation, and restart are indeterminate
+stages; redirected logs use readable lines. If the bot was running, restart uses
+the **newly installed CLI**, rather than the old SDK still cached in the updater.
+The profile, keys, and update schedule are preserved.
+In manual mode with `tokenEnv`, if the variable is absent from the current shell,
+only that credential is recovered from the managed PM2 process environment.
+An explicit shell value takes precedence; the token is not written to config,
+arguments, or logs.
+
 For a private repository, supply the read token through the indicated environment
 variable, never through the package or URL. `autoupdate off` and `status` remain
 available to administer an old schedule even if a later version removes its
@@ -340,7 +368,7 @@ bot.command({
     // ctx.getVoiceChannel() — query the original connection's current room from the server
     // ctx.serverId   — server ID (useful in multi-server mode)
     // ctx.args       — arguments { name: string | number | boolean }
-    // ctx.locale     — caller's language ('pt-BR' or 'en')
+    // ctx.locale     — preferred language for this bot ('pt-BR' or 'en')
     // ctx.reply()    — reply only to the caller, within the chat
     // ctx.publish()  — explicitly publish a result in the channel
     // ctx.prompt()   — await a private form; may be called in multiple steps
@@ -351,6 +379,54 @@ bot.command({
   },
 });
 ```
+
+### Command language and individual preferences
+
+Each person can choose **Bot settings > My preferences > Bot language**, even
+for bots without their own settings form. **Follow Monky** uses the app's
+language; an explicit choice applies only to that bot, server/address, and
+identity in the local profile. Restoring defaults follows Monky again.
+The effective language arrives in `ctx.locale`, including autocomplete and
+audio previews. Existing interactions retain their captured language; old
+messages are not translated retroactively.
+
+Declare `localizations` for command discovery and input labels:
+
+```ts
+bot.command({
+  name: 'play',
+  description: 'Choose playback order',
+  options: [{
+    name: 'mode', label: 'Mode', description: 'Playback order', type: 'string',
+    choices: [{ label: 'Shuffle', value: 'shuffle' }],
+  }],
+  localizations: {
+    'pt-BR': {
+      description: 'Escolha a ordem de reprodução',
+      options: {
+        mode: {
+          label: 'Modo', description: 'Ordem de reprodução', placeholder: 'Escolha',
+          choices: { shuffle: { label: 'Aleatório' } },
+        },
+      },
+    },
+  },
+  handler: (ctx) => { ctx.reply(ctx.locale === 'en' ? 'Ready.' : 'Pronto.'); },
+});
+```
+
+`name`, argument names, and `choices[].value` remain stable identifiers:
+`/play` and `ctx.args.mode` do not change with language. Translate only
+descriptions, `label`, `placeholder`, and choice labels/descriptions.
+Undeclared fields or choices are rejected. Missing text falls back to the
+original declaration. Forms and responses produced by the handler should use
+`ctx.locale`.
+
+The SDK exports `BotLocale`, `normalizeBotLocale`, `resolveBotLocale`, and
+`localizeCommand`. `normalizeBotLocale('en-US')` returns `en`; use `pt-BR` and
+`en` as `localizations` keys. `resolveBotLocale` can receive the bot's supported
+languages and its default. `localizeCommand` produces display metadata without
+mutating the original declaration or identifiers.
 
 ### Guided parameters in chat
 
@@ -749,7 +825,7 @@ const current = bot.getServerSettings('my-server'); // undefined before registra
 
 Required settings fields need valid defaults; this does not change ordinary command prompt forms. `false` and `0` are preserved. Text, integers, switches, lists, choices, and audio choices reuse the same controls, with an explicit **Save** even for button-style choices. **Restore defaults** prepares a change but does not persist it until saving.
 
-Optional `localizations` supports `pt-BR` and `en`, following the language selected in the app. Each scope may translate `title`, `description` and, under `fields`, the `label` and `description` of declared fields. Translations never change names, types, defaults or validation; missing text falls back to the original declaration. Shared forms and their translations are only sent to people authorized to configure them.
+Optional `localizations` supports `pt-BR` and `en`, following the person's preferred bot language (Monky's language by default). Each scope may translate `title`, `description`, `submitLabel`, and, under `fields`, `label`, `description`, `placeholder`, and `choices: { value: { label, description } }` for already-declared fields/choices. Translations never change names, types, defaults, or validation; missing text falls back to the original declaration. Shared forms and their translations are only sent to people authorized to configure them.
 
 In MonkyBot, **Behavior on this server → Music → Idle timeout (seconds)** controls departure after an idle queue or an empty room: 60 seconds by default, from 1 to 600, saved per server. Changing it during a pending timeout preserves elapsed inactivity. The `MONKY_MUSIC_GRACE_SECONDS` environment variable only supplies the host default, not a replacement for shared configuration.
 

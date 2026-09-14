@@ -6,7 +6,6 @@ import {
   color,
   DEFAULT_BOOTSTRAP_PORT,
   DEFAULT_OWNER_NICKNAME,
-  DEFAULT_SERVER_NAME,
 } from '../constants';
 import { ask, askChoice, confirm, promptPassword } from '../prompts';
 import {
@@ -20,7 +19,7 @@ import {
 } from '../context';
 import { DecryptedIdentity, decryptIdentityExport } from '../identity';
 import { t } from '../i18n/index';
-import { describeSfuPortProblem, parseOption, parseMemberLimit, parsePositiveInt, printSfuPreflight, printVoiceModeComparisonTable } from '../formatters';
+import { describeSfuPortProblem, parseOption, parseMemberLimit, parsePositiveInt, parseVoiceMode, printSfuPreflight, printVoiceModeComparisonTable } from '../formatters';
 import { estimateHostCapacity, printCapacityEstimate } from '../capacity';
 import { hasServerDatabase, registerServer } from '../registry';
 import { setConfig } from './config';
@@ -104,9 +103,9 @@ export async function applyBootstrap(
   await ctx.serverRepo.updateServer({ ownerUserId: user.id });
 
   console.log(color(t('create.ownerConfigured'), ANSI.green));
-  console.log(`nickname: ${user.nickname}`);
-  console.log(`userId: ${user.id}`);
-  console.log(`clientId: ${user.clientId}`);
+  console.log(`${t('label.nickname')}: ${user.nickname}`);
+  console.log(`${t('label.userId')}: ${user.id}`);
+  console.log(`${t('label.clientId')}: ${user.clientId}`);
 }
 
 /**
@@ -166,13 +165,13 @@ export async function createCommand(globalArgs: GlobalArgs, args: string[]): Pro
 
   if (hasServerDatabase(dataDir)) {
     throw new Error(
-      `${t('create.alreadyExists', { path: dataDir })}\nUse "monky config" to adjust it or "monky destroy" to remove it.`
+      `${t('create.alreadyExists', { path: dataDir })}\n${t('create.adjustExisting')}`
     );
   }
 
   const identityCode = parseOption(args, '--identity') || (await ask(t('create.identityCode')));
   const identityPassword = await promptPassword(t('create.identityPassword'));
-  const serverName = parseOption(args, '--name') || (await ask(t('create.serverName'), DEFAULT_SERVER_NAME));
+  const serverName = parseOption(args, '--name') || (await ask(t('create.serverName'), t('create.defaultServerName')));
   const portValue = parseOption(args, '--port') || (await ask(t('create.serverPort'), String(DEFAULT_BOOTSTRAP_PORT)));
   const serverPassword = parseOption(args, '--password') ?? (await promptPassword(t('create.serverPassword')));
   const port = parsePositiveInt('port', portValue);
@@ -180,11 +179,11 @@ export async function createCommand(globalArgs: GlobalArgs, args: string[]): Pro
 
   const rawVoiceMode = parseOption(args, '--voice-mode');
   let voiceMode: 'p2p' | 'sfu';
-  if (rawVoiceMode === 'sfu' || rawVoiceMode === 'p2p') {
-    voiceMode = rawVoiceMode;
+  if (rawVoiceMode !== undefined) {
+    voiceMode = parseVoiceMode(rawVoiceMode);
   } else {
     printVoiceModeComparisonTable();
-    voiceMode = (await askChoice(t('create.voiceModeChoice'), ['p2p', 'sfu'])) as 'p2p' | 'sfu';
+    voiceMode = parseVoiceMode(await askChoice(t('create.voiceModeChoice'), ['p2p', 'sfu']));
   }
 
   if (voiceMode === 'sfu') {
@@ -206,13 +205,13 @@ export async function createCommand(globalArgs: GlobalArgs, args: string[]): Pro
 
   console.log();
   console.log(color(t('create.summary'), ANSI.bold));
-  console.log(`dataDir: ${dataDir}`);
-  console.log(`serverName: ${serverName}`);
-  console.log(`port: ${port}`);
-  console.log(`voiceMode: ${voiceMode}`);
-  console.log(`serverPassword: ${serverPassword ? t('create.passwordSet') : t('create.noPassword')}`);
+  console.log(`${t('label.dataDir')}: ${dataDir}`);
+  console.log(`${t('label.name')}: ${serverName}`);
+  console.log(`${t('label.port')}: ${port}`);
+  console.log(`${t('label.voiceMode')}: ${voiceMode}`);
+  console.log(`${t('label.password')}: ${serverPassword ? t('create.passwordSet') : t('create.noPassword')}`);
   console.log(`${t('create.memberLimit')}: ${maxUsers > LIMITS.MAX_USERS_UNLIMITED ? maxUsers : t('create.noLimit')}`);
-  console.log(`identity: ${identityCode.slice(0, Math.min(identityCode.length, 40))}${identityCode.length > 40 ? '...' : ''}`);
+  console.log(`${t('label.identity')}: ${identityCode.slice(0, Math.min(identityCode.length, 40))}${identityCode.length > 40 ? '...' : ''}`);
 
   const accepted = await confirm(t('create.confirm'), true);
   if (!accepted) {

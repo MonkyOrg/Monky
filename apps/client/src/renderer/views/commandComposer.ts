@@ -18,6 +18,10 @@ export interface ParameterChoice extends RenderableSelectionChoice {
   avatarUrl?: string | null;
 }
 
+export function commandParameterLabel(command: CommandDraft['command'], name: string): string {
+  return command.options?.find((option) => option.name === name)?.label ?? name;
+}
+
 export function commandParameterChoices(field: BotInputField, members: UserSummary[]): ParameterChoice[] {
   if (field.type === 'select') return field.choices;
   if (field.type === 'user') return members.map((member) => ({
@@ -27,7 +31,7 @@ export function commandParameterChoices(field: BotInputField, members: UserSumma
 }
 
 export function commandParameterHint(field: BotInputField): string {
-  const parts = [field.label];
+  const parts = [field.description ?? field.label];
   if (field.type === 'integer') {
     if (field.min !== undefined) parts.push(t('botChat.minimum', { value: field.min }));
     if (field.max !== undefined) parts.push(t('botChat.maximum', { value: field.max }));
@@ -53,9 +57,11 @@ function renderInlineField(field: BotInputField, draft: CommandDraft, prefix: st
   if (field.type === 'string-list') return '';
   const id = escapeHtml(`${prefix}-${field.name}`);
   const name = escapeHtml(field.name);
+  const label = commandParameterLabel(draft.command, field.name);
   const value = field.type === 'autocomplete' ? draft.autocomplete[field.name]?.query ?? '' : draft.values[field.name];
   const error = commandParameterError(draft, field, members);
-  const attributes = `id="${id}" name="${name}" data-bot-input aria-label="${escapeHtml(`${field.name}: ${field.label}`)}" aria-required="${!!field.required}" ${error ? 'aria-invalid="true"' : ''} ${disabled ? 'disabled' : ''}`;
+  const accessibleLabel = label === field.label ? label : `${label}: ${field.label}`;
+  const attributes = `id="${id}" name="${name}" data-bot-input aria-label="${escapeHtml(accessibleLabel)}" aria-required="${!!field.required}" ${error ? 'aria-invalid="true"' : ''} ${disabled ? 'disabled' : ''}`;
   const placeholder = field.type === 'text' || field.type === 'integer' || field.type === 'autocomplete'
     ? field.placeholder ?? t(field.type === 'autocomplete' ? 'botChat.autocompleteHint' :
       field.type === 'integer' ? 'botChat.integerPlaceholder' : 'botChat.textPlaceholder') : '';
@@ -98,10 +104,10 @@ ${escapeHtml(text)}</textarea>`;
     </span>`;
   }
   return `<div class="bot-inline-argument ${field.required ? 'required' : 'optional'} ${error ? 'invalid' : ''}" data-field-name="${name}" ${error ? `title="${escapeHtml(error)}"` : ''}>
-    <label class="bot-argument-name" for="${id}">${name}</label>
+    <label class="bot-argument-name" for="${id}">${escapeHtml(label)}</label>
     ${control}
     ${!field.required ? `<button type="button" class="bot-remove-argument" data-remove-parameter="${name}"
-      aria-label="${escapeHtml(t('botChat.removeParameter', { name: field.name }))}" title="${escapeHtml(t('botChat.removeParameter', { name: field.name }))}"
+      aria-label="${escapeHtml(t('botChat.removeParameter', { name: label }))}" title="${escapeHtml(t('botChat.removeParameter', { name: label }))}"
       ${disabled ? 'disabled' : ''}><span class="material-symbols-outlined md-14">close</span></button>` : ''}
   </div>`;
 }
@@ -123,7 +129,7 @@ export function renderCompactCommand(
   const hint = fields[0] ? commandParameterHint(fields[0]) : draft.command.description;
   return `<form class="bot-compact-command-form" data-command-form novalidate>
     <div class="bot-command-hint">
-      <strong data-parameter-hint-name>${escapeHtml(fields[0]?.name ?? `/${draft.command.name}`)}</strong>
+      <strong data-parameter-hint-name>${escapeHtml(fields[0] ? commandParameterLabel(draft.command, fields[0].name) : `/${draft.command.name}`)}</strong>
       <span data-parameter-hint-description>${escapeHtml(hint)}</span>
       <span class="bot-private-cue" title="${t('botChat.private')}"><span class="material-symbols-outlined md-14">lock</span><span>${t('botChat.private')}</span></span>
       <button type="button" class="bot-command-close" data-bot-action="cancel-command" title="${t('botChat.cancelCommand')}"

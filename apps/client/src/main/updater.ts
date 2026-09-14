@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import fs from 'fs';
 import https from 'https';
 import path from 'path';
-import { UpdateOutcome, ReleaseNotesResult } from '@monky/shared';
+import { UpdateOutcome, ReleaseNotesResult, UPDATER_IPC, fetchReleaseCompatibility, isReleaseVersion, type UpdateCheckResult } from '@monky/shared';
 import { mt } from './i18n';
 import { beginUpdateInstall, consumeUpdateOutcome } from './updateInstall';
 import { updateLog } from './updateLog';
@@ -17,12 +17,7 @@ import {
 
 const GITHUB_REPO = 'MonkyOrg/Monky';
 
-interface CheckResult {
-  ok: boolean;
-  available?: boolean;
-  version?: string;
-  error?: string;
-}
+type CheckResult = UpdateCheckResult;
 
 // electron-updater is loaded lazily (only on Windows/Linux) so that a missing
 // or broken package never prevents the app itself from starting.
@@ -201,7 +196,11 @@ async function checkViaGitHub(): Promise<CheckResult> {
       }
     }
 
-    return { ok: true, available: true, version };
+    const compatibility = await fetchReleaseCompatibility(version);
+    if (compatibility.status === 'unavailable') {
+      updateLog('Release compatibility metadata unavailable', { version, reason: compatibility.reason });
+    }
+    return { ok: true, available: true, version, compatibility };
   } catch (e) {
     return { ok: false, error: msg(e) };
   }
@@ -365,7 +364,7 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
     }
   }
 
-  ipcMain.handle('updater:set-channel', async (_e, allowBeta: unknown): Promise<CheckResult> => {
+  ipcMain.handle(UPDATER_IPC.setChannel, async (_e, allowBeta: unknown): Promise<CheckResult> => {
     betaChannel = !!allowBeta;
     // Which releases are eligible is decided by `fetchTargetRelease`, which
     // queries the GitHub API itself. electron-updater is handed the chosen
@@ -379,12 +378,16 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
     return { ok: true };
   });
 
-  ipcMain.handle('updater:check', async (): Promise<CheckResult> => {
+  ipcMain.handle(UPDATER_IPC.check, async (): Promise<CheckResult> => {
     // Detection is done via the GitHub API on every platform for reliability.
     return checkViaGitHub();
   });
 
-  ipcMain.handle('updater:download', async (): Promise<CheckResult> => {
+  ipcMain.handle(UPDATER_IPC.download, async (_event, expectedVersion: unknown): Promise<CheckResult> => {
+    if (expectedVersion !== undefined &&
+        (!isReleaseVersion(expectedVersion) || cleanVer(pendingTag ?? '') !== expectedVersion)) {
+      return { ok: false, error: mt('error.noPendingUpdate') };
+    }
     if (isMac) {
       return downloadMacDmg(mainWindow);
     }
@@ -436,7 +439,7 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
     }
   });
 
-  ipcMain.handle('updater:install', async (): Promise<CheckResult> => {
+  ipcMain.handle(UPDATER_IPC.install, async (): Promise<CheckResult> => {
     if (isMac) {
       if (downloadedMacPath) {
         const openError = await shell.openPath(downloadedMacPath);
@@ -473,13 +476,13 @@ export function setupUpdater(mainWindow: BrowserWindow): void {
 
   // Reported once per launch, right after an install: the renderer turns it
   // into the "updated to X" (or "update did not finish") banner (#498).
-  ipcMain.handle('updater:outcome', async (): Promise<UpdateOutcome | null> => {
+  ipcMain.handle(UPDATER_IPC.outcome, async (): Promise<UpdateOutcome | null> => {
     return consumeUpdateOutcome();
   });
 
   // Release notes for the in-app changelog: shown once after an update and on
   // demand from Settings (#547). Defaults to the running version's release.
-  ipcMain.handle('updater:release-notes', async (_e, tag?: unknown): Promise<ReleaseNotesResult> => {
+  ipcMain.handle(UPDATER_IPC.releaseNotes, async (_e, tag?: unknown): Promise<ReleaseNotesResult> => {
     return fetchReleaseNotes(typeof tag === 'string' ? tag : undefined);
   });
 }

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A tela inicial mostra quem está em canais de voz, em vez de todos os usuários conectados. O aviso do CLI ao parar ou reiniciar o servidor também considera só as pessoas em voz, sem contar bots ou dispositivos duplicados.",
+  "en": "The home screen shows people in voice channels instead of everyone connected. CLI warnings before stopping or restarting a server also count only people in voice, excluding bots and duplicate devices."
+}

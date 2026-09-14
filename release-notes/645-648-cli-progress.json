@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Os CLIs mostram o progresso real dos downloads e distinguem verificação, instalação e reinício. A preparação de música do MonkyBot também exibe o andamento. Após atualizar, o reinício usa o CLI recém-instalado.",
+  "en": "CLIs show actual download progress and distinguish verification, installation and restart. MonkyBot music preparation also displays progress. After an update, restarting uses the newly installed CLI."
+}

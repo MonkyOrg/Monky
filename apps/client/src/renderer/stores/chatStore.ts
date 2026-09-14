@@ -38,6 +38,27 @@ export interface CommandDraft {
   voiceContextRevision?: number;
 }
 
+export type MessageEditError = 'failed' | 'empty' | 'too-long' | 'in-progress';
+
+export interface MessageEditDraft {
+  message: ChatMessage;
+  content: string;
+  pending: boolean;
+  error?: MessageEditError;
+}
+
+interface ComposerRecovery {
+  drafts: Map<string, string>;
+  replies: Map<string, MessageReply>;
+  edits: Map<string, MessageEditDraft>;
+  commands: Map<string, CommandDraft>;
+}
+
+// A terminal disconnect destroys its session. Keep unfinished edits in memory
+// (never on disk), scoped to the same endpoint, server and authenticated user.
+const disconnectedComposers = new Map<string, ComposerRecovery>();
+const MAX_DISCONNECTED_COMPOSERS = 10;
+
 export interface BotFormState {
   interactionId: string;
   form: BotForm;
@@ -87,6 +108,8 @@ export class ChatStore {
   // center area switches between chat and the voice stage.
   private drafts: Map<string, string> = new Map();
   private replyDrafts = new Map<string, MessageReply>();
+  private messageEdits = new Map<string, MessageEditDraft>();
+  private composerScope: string | null = null;
   private commands: SlashCommand[] = [];
   private commandDrafts: Map<string, CommandDraft> = new Map();
   private invocations: Map<string, BotInvocation> = new Map();
@@ -128,7 +151,9 @@ export class ChatStore {
     const current = aroundMessageId ? [] : this.messages.get(channelId) ?? [];
     if (aroundMessageId) this.historicalChannels.add(channelId);
     else this.historicalChannels.delete(channelId);
-    const publicHistory = msgs.filter((message) => !message.isEphemeral);
+    const edit = this.messageEdits.get(channelId);
+    const publicHistory = msgs.filter((message) => !message.isEphemeral).map((message) =>
+      edit?.message.id === message.id && edit.message.deletedAt && !message.deletedAt ? edit.message : message);
     const publicIds = new Set(publicHistory.map((message) => message.id));
     const privateMessages = new Map((this.ephemeralMessages.get(channelId) ?? [])
       .filter((message) => !publicIds.has(message.id))
@@ -159,6 +184,9 @@ export class ChatStore {
       .sort((a, b) => a.createdAt - b.createdAt)
       .slice(-ChatStore.MAX_MESSAGES_PER_CHANNEL);
     this.messages.set(channelId, trimmed);
+    const editingId = this.messageEdits.get(channelId)?.message.id;
+    const editedMessage = editingId ? msgs.find((message) => message.id === editingId) : undefined;
+    if (editedMessage) this.refreshMessageEdit(editedMessage);
     for (const message of trimmed) this.recordBotResponse(message);
     this.bus.emit('chat.history_loaded', { channelId, messages: this.getMessages(channelId), aroundMessageId });
   }
@@ -201,6 +229,12 @@ export class ChatStore {
     const privateMessages = this.ephemeralMessages.get(message.channelId);
     const list = privateMessages?.some((entry) => entry.id === message.id)
       ? privateMessages : this.messages.get(message.channelId) ?? [];
+    const index = list.findIndex((entry) => entry.id === message.id);
+    const edit = this.messageEdits.get(message.channelId);
+    // A late edit ACK cannot resurrect a deleted original or discard its
+    // recoverable composer text. Deletion is irreversible in the protocol.
+    if (!message.deletedAt && (list[index]?.deletedAt || (edit?.message.id === message.id && edit.message.deletedAt))) return;
+    this.refreshMessageEdit(message);
     const reply = this.messageReply(message);
     const updatesDraft = this.replyDrafts.get(message.channelId)?.messageId === message.id;
     if (updatesDraft) {
@@ -212,7 +246,6 @@ export class ChatStore {
         this.bus.emit('chat.message_updated', entry);
       }
     }
-    const index = list.findIndex((m) => m.id === message.id);
     if (index === -1) {
       if (updatesDraft) this.bus.emit('chat.message_updated', message);
       return;
@@ -349,6 +382,87 @@ export class ChatStore {
     this.drafts.delete(channelId);
   }
 
+  public setComposerScope(scope: { sessionKey: string; serverId: string; userId: string }): void {
+    const key = JSON.stringify([scope.sessionKey, scope.serverId, scope.userId]);
+    if (key === this.composerScope) return;
+    if (this.composerScope !== null) {
+      this.retainDisconnectedComposer();
+      this.drafts.clear();
+      this.replyDrafts.clear();
+      this.messageEdits.clear();
+      this.commandDrafts.clear();
+    }
+    this.composerScope = key;
+    const recovered = disconnectedComposers.get(key);
+    if (!recovered) return;
+    disconnectedComposers.delete(key);
+    this.drafts = recovered.drafts;
+    this.replyDrafts = recovered.replies;
+    this.messageEdits = recovered.edits;
+    this.commandDrafts = recovered.commands;
+  }
+
+  public beginMessageEdit(message: ChatMessage): MessageEditDraft | undefined {
+    if (message.isSystem || message.isEphemeral || message.deletedAt) return;
+    const current = this.messageEdits.get(message.channelId);
+    if (current) return current;
+    const edit: MessageEditDraft = { message, content: message.content, pending: false };
+    this.messageEdits.set(message.channelId, edit);
+    this.bus.emit('chat.message_edit_updated', { channelId: message.channelId });
+    return edit;
+  }
+
+  public getMessageEdit(channelId: string): MessageEditDraft | undefined {
+    return this.messageEdits.get(channelId);
+  }
+
+  private refreshMessageEdit(message: ChatMessage): void {
+    const edit = this.messageEdits.get(message.channelId);
+    if (edit?.message.id !== message.id || (edit.message.deletedAt && !message.deletedAt)) return;
+    edit.message = message;
+    this.bus.emit('chat.message_edit_updated', { channelId: message.channelId });
+  }
+
+  public setMessageEditContent(channelId: string, content: string): void {
+    const edit = this.messageEdits.get(channelId);
+    if (!edit || edit.pending || edit.content === content) return;
+    edit.content = content;
+    edit.error = undefined;
+    this.bus.emit('chat.message_edit_updated', { channelId });
+  }
+
+  public setMessageEditPending(channelId: string, edit: MessageEditDraft, pending: boolean, error?: MessageEditError): void {
+    if (this.messageEdits.get(channelId) !== edit) return;
+    edit.pending = pending;
+    edit.error = error;
+    this.bus.emit('chat.message_edit_updated', { channelId });
+  }
+
+  public finishMessageEdit(channelId: string, edit: MessageEditDraft): void {
+    if (this.messageEdits.get(channelId) !== edit) return;
+    this.messageEdits.delete(channelId);
+    this.bus.emit('chat.message_edit_updated', { channelId });
+  }
+
+  private retainDisconnectedComposer(): void {
+    if (!this.composerScope || this.messageEdits.size === 0) return;
+    disconnectedComposers.delete(this.composerScope);
+    disconnectedComposers.set(this.composerScope, {
+      drafts: new Map(this.drafts),
+      replies: new Map(this.replyDrafts),
+      edits: new Map([...this.messageEdits].map(([channelId, edit]) => [
+        channelId, { ...edit, pending: false, error: edit.pending ? 'failed' : edit.error },
+      ])),
+      commands: new Map([...this.commandDrafts].map(([channelId, draft]) => [
+        channelId, { ...draft, pending: false },
+      ])),
+    });
+    while (disconnectedComposers.size > MAX_DISCONNECTED_COMPOSERS) {
+      const oldest = disconnectedComposers.keys().next().value;
+      if (oldest !== undefined) disconnectedComposers.delete(oldest);
+    }
+  }
+
   public setCommands(commands: SlashCommand[]): void {
     const previousCommands = this.commands;
     this.commands = commands;
@@ -385,7 +499,7 @@ export class ChatStore {
   }
 
   public selectCommand(channelId: string, command: SlashCommand, text = '', downloadConsent = false): void {
-    if (this.commandDrafts.get(channelId)?.pending) return;
+    if (this.messageEdits.has(channelId) || this.commandDrafts.get(channelId)?.pending) return;
     const values = seedCommandInputs(command, text);
     const first = command.options?.[0];
     const autocomplete: AutocompleteInputs = first?.autocomplete ? { [first.name]: { query: text } } : {};
@@ -398,6 +512,7 @@ export class ChatStore {
   }
 
   public getCommandDraft(channelId: string): CommandDraft | undefined {
+    if (this.messageEdits.has(channelId)) return;
     return this.commandDrafts.get(channelId);
   }
 
@@ -697,6 +812,7 @@ export class ChatStore {
   }
 
   public clear(): void {
+    this.retainDisconnectedComposer();
     this.finishAllInvocations('caller_disconnected');
     this.ephemeralMessages.clear();
     this.historicalChannels.clear();
@@ -705,6 +821,8 @@ export class ChatStore {
     this.mentionChannels.clear();
     this.unreadChannels.clear();
     this.drafts.clear();
+    this.messageEdits.clear();
+    this.composerScope = null;
     this.commands = [];
     this.commandDrafts.clear();
     this.invocations.clear();

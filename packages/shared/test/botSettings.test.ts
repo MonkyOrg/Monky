@@ -71,6 +71,35 @@ assert.deepEqual(resolveBotSettingsValues(localizedForm, {}), { success: true, v
 assert.equal(localizedDefinition.server?.fields[0].label, 'Count');
 assert.equal(localizeBotSettingsForm(localizedDefinition, 'server', 'en'), localizedDefinition.server);
 assert.equal(localizeBotSettingsForm({}, 'server', 'en'), undefined);
+const choiceDefinition = botSettingsDefinitionSchema.parse({
+  user: {
+    title: 'Preferences', submitLabel: 'Save',
+    fields: [{
+      name: 'mode', type: 'select', label: 'Mode', choices: [{ value: 'shuffle', label: 'Shuffle' }],
+      defaultValue: 'shuffle',
+    }],
+  },
+  localizations: {
+    'pt-BR': { user: { submitLabel: 'Salvar', fields: {
+      mode: { label: 'Modo', placeholder: 'Escolha', choices: { shuffle: { label: 'Aleatório', description: 'Misturar' } } },
+    } } },
+  },
+});
+const choiceForm = localizeBotSettingsForm(choiceDefinition, 'user', 'pt-BR');
+assert.equal(choiceForm?.submitLabel, 'Salvar');
+assert.equal(choiceForm?.fields[0].type, 'select');
+if (choiceForm?.fields[0].type === 'select') {
+  assert.equal(choiceForm.fields[0].name, 'mode');
+  assert.equal(choiceForm.fields[0].placeholder, 'Escolha');
+  assert.deepEqual(choiceForm.fields[0].choices, [{ value: 'shuffle', label: 'Aleatório', description: 'Misturar' }]);
+}
+assert.deepEqual(resolveBotSettingsValues(choiceForm, {}), { success: true, values: { mode: 'shuffle' } });
+assert.equal(botSettingsDefinitionSchema.safeParse({
+  ...choiceDefinition, localizations: { en: { user: { fields: { mode: { choices: { wrong: { label: 'No' } } } } } } },
+}).success, false);
+assert.equal(botSettingsDefinitionSchema.safeParse({
+  ...definition, localizations: { en: { user: { fields: { compact: { placeholder: 'No' } } } } },
+}).success, false);
 assert.equal(botSettingsDefinitionSchema.safeParse({
   ...definition, localizations: { en: { server: { fields: { unknown: { label: 'Unknown' } } } } },
 }).success, false);

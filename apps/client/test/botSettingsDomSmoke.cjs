@@ -15,6 +15,7 @@ async function runBotSettingsDomSmoke() {
   const previous = {
     client: networks.getActiveNetworkClient(), server: servers.getActiveServerStore(), chat: chats.getActiveChatStore(),
     exceptions: settingsStore.botDownloadConfirmationExceptions, preferences: settingsStore.botUserPreferences,
+    locales: settingsStore.botLocalePreferences,
     stored: localStorage.getItem('monky_settings'), language: language.getLanguage(),
   };
   let checks = 0;
@@ -71,6 +72,7 @@ async function runBotSettingsDomSmoke() {
   }, caller);
   settingsStore.botDownloadConfirmationExceptions = [];
   settingsStore.botUserPreferences = {};
+  settingsStore.botLocalePreferences = {};
   language.setLanguage('pt-BR');
   const definition = {
     user: {
@@ -196,6 +198,21 @@ async function runBotSettingsDomSmoke() {
     await submit();
     check(!settingsStore.botDownloadConfirmationExceptions.includes(audioKey) &&
       settingsStore.botDownloadConfirmationExceptions.includes(otherKey), 'Re-enabling a prompt leaves another bot untouched');
+    check(find('[data-settings-locale="auto"]').getAttribute('aria-pressed') === 'true',
+      'Bots follow the app language until the person chooses an override');
+    find('[data-settings-locale="en"]').click();
+    check(settingsStore.getBotLocalePreference(audioKey) === 'auto', 'Language cards do not save until confirmation');
+    check(find('[data-settings-locale="en"]').getAttribute('aria-pressed') === 'true', 'Language cards expose selected state');
+    find('[data-settings-locale="en"]').focus();
+    find('[data-settings-locale="en"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    check(document.activeElement === find('[data-settings-locale="auto"]'), 'Language cards support keyboard navigation');
+    await submit();
+    check(settingsStore.getBotLocalePreference(audioKey) === 'en' && settingsStore.getBotLocalePreference(otherKey) === 'auto',
+      'A language override is isolated from other bots and identities');
+    equal(settingsStore.getBotUserSettings(audioKey), {}, 'The bot language is not mixed into custom SDK settings');
+    find('[data-settings-defaults]').click();
+    await submit();
+    check(settingsStore.getBotLocalePreference(audioKey) === 'auto', 'Reset restores following Monky without pinning a locale');
 
     await modal.open();
     check(document.querySelectorAll('[data-settings-bot]').length === 2, 'Ordinary members can list installed offline bots');
@@ -210,6 +227,17 @@ async function runBotSettingsDomSmoke() {
       'Personal field labels and descriptions are localized rather than hardcoded');
     check(!Object.values(modal.snapshot.definition.localizations).some(forms => forms.server),
       'Unauthorized snapshots contain no localized server scope');
+    find('[data-settings-locale="en"]').click();
+    check(find('#bot-settings-form h3').textContent === 'Your preferences',
+      'An unsaved bot-language choice previews translated metadata without changing app language');
+    check(language.getLanguage() === 'pt-BR', 'A bot-language card does not change the application locale');
+    await submit();
+    await modal.open('generic-bot');
+    check(find('#bot-settings-form h3').textContent === 'Your preferences',
+      'Reopening settings restores the saved language override');
+    find('[data-settings-locale="auto"]').click();
+    await submit();
+    check(find('#bot-settings-form h3').textContent === 'Preferências pessoais', 'Automatic language follows the app again');
     check(find('#bot-settings-user-enabled').checked === false && find('#bot-settings-user-count').value === '0',
       'False and zero defaults are displayed without truthiness fallback');
     check(document.querySelectorAll('[data-audio-preview-volume]').length === 1 &&
@@ -474,6 +502,7 @@ async function runBotSettingsDomSmoke() {
     contextMenu.close();
     settingsStore.botDownloadConfirmationExceptions = previous.exceptions;
     settingsStore.botUserPreferences = previous.preferences;
+    settingsStore.botLocalePreferences = previous.locales;
     if (previous.stored === null) localStorage.removeItem('monky_settings');
     else localStorage.setItem('monky_settings', previous.stored);
     language.setLanguage(previous.language);

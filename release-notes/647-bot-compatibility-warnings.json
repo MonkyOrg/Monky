@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Atualizações avisam quando o protocolo exigido dos bots muda. Avisos de compatibilidade permanecem no cliente e no CLI enquanto os bots precisam de atenção, e somem após uma conexão compatível.",
+  "en": "Updates warn when the required bot protocol changes. Compatibility notices remain in the client and CLI while bots need attention, and clear after a compatible connection."
+}

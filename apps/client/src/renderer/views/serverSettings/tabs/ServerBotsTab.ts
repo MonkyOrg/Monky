@@ -342,6 +342,15 @@ export class ServerBotsTab {
         `${t('bots.createdAt')}: ${new Date(bot.createdAt).toLocaleDateString(getLanguage())}`,
       ].filter((value): value is string => !!value).map(escapeHtml).join(' • ');
       const configureTitle = pending ? t('bots.configurePending') : t('bots.configure');
+      const compatibilityWarning = bot.bound && bot.requiredProtocolVersion !== undefined
+        ? bot.lastProtocolVersion == null
+          ? t('bots.compatibilityUnchecked', { protocol: bot.requiredProtocolVersion })
+          : bot.lastProtocolVersion !== bot.requiredProtocolVersion
+            ? t('bots.compatibilityMismatch', {
+              previous: bot.lastProtocolVersion, protocol: bot.requiredProtocolVersion,
+            })
+            : null
+        : null;
       return `
         <div class="bot-list-item" data-bot-id="${escapeHtml(bot.id)}" style="display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: var(--radius-sm); background: var(--bg-elevated);">
           <img src="${avatarUrl}" alt="" data-fallback="avatar" style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover;">
@@ -352,6 +361,7 @@ export class ServerBotsTab {
               ${bot.online ? `<span style="width: 8px; height: 8px; border-radius: 50%; background: var(--success-color, #3ba55d);" title="${escapeHtml(t('botSettings.online'))}"></span>` : ''}
             </div>
             <div style="font-size: 11px; color: var(--text-muted);">${meta}</div>
+            ${compatibilityWarning ? `<div class="bot-compatibility-warning" role="status">${escapeHtml(compatibilityWarning)}</div>` : ''}
           </div>
           <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">
             <button type="button" class="btn btn-secondary" data-bot-configure="${escapeHtml(bot.id)}" title="${escapeHtml(configureTitle)}" ${pending ? 'disabled' : ''}>

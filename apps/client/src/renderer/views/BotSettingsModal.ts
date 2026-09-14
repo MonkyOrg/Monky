@@ -1,5 +1,6 @@
 import {
-  MessageType, Permission, botSettingsListResponseSchema, botSettingsSnapshotSchema, localizeBotSettingsForm, resolveBotSettingsValues,
+  MessageType, Permission, botSettingsListResponseSchema, botSettingsSnapshotSchema, localizeBotSettingsForm,
+  normalizeBotLocale, resolveBotLocale, resolveBotSettingsValues, type BotLocale,
   type BotForm, type BotFormValues, type BotSettingsDefinition, type BotSettingsPatch, type BotSettingsSnapshot, type BotSettingsSummary,
 } from '@monky/shared';
 import { v4 as uuidv4 } from 'uuid';
@@ -69,6 +70,7 @@ export class BotSettingsModal {
   private drafts: Partial<Record<Scope, SettingsDraft>> = {};
   private scope: Scope = 'user';
   private confirmFileName = true;
+  private localePreference: BotLocale | 'auto' = 'auto';
   private loading = false;
   private loadFailed = false;
   private saving = false;
@@ -230,6 +232,7 @@ export class BotSettingsModal {
     const values = resolved.success ? resolved.values : { ...initialBotInputValues(form?.fields ?? []), ...overrides };
     this.drafts.user = { values, initial: structuredClone(values), overrides, dirty: false, reset: false };
     this.confirmFileName = !settingsStore.botDownloadConfirmationExceptions.includes(key);
+    this.localePreference = settingsStore.getBotLocalePreference(key);
   }
 
   private canConfigure(): boolean {
@@ -239,8 +242,7 @@ export class BotSettingsModal {
   private hasScope(scope: Scope): boolean {
     if (!this.snapshot) return false;
     return scope === 'user'
-      ? !!this.snapshot.definition.user || this.snapshot.bot.capabilities.downloadsSound ||
-        Object.keys(this.drafts.user?.overrides ?? {}).length > 0
+      ? true
       : this.snapshot.bot.hasServerSettings && this.canConfigure() && !!this.snapshot.definition.server && !!this.snapshot.server;
   }
 
@@ -308,7 +310,8 @@ export class BotSettingsModal {
   }
 
   private form(): BotForm | undefined {
-    return this.snapshot ? localizeBotSettingsForm(this.snapshot.definition, this.scope, getLanguage()) : undefined;
+    const locale = resolveBotLocale(this.localePreference === 'auto' ? getLanguage() : this.localePreference);
+    return this.snapshot ? localizeBotSettingsForm(this.snapshot.definition, this.scope, locale) : undefined;
   }
   private blocked(): boolean {
     return this.loading || this.loadFailed || this.saving || this.schemaStale ||
@@ -363,6 +366,17 @@ export class BotSettingsModal {
             <p class="bot-settings-description">${t(this.scope === 'user' ? 'botSettings.userDescription' : 'botSettings.serverDescription')}</p>
             <form id="bot-settings-form" class="bot-settings-form" novalidate>
               <fieldset ${this.blocked() ? 'disabled' : ''}>
+                ${this.scope === 'user' ? `<div class="bot-settings-host-preference bot-field">
+                  <div class="bot-field-heading"><span id="bot-settings-language-label">${t('botSettings.language')}</span></div>
+                  <p class="bot-field-description">${t('botSettings.languageDescription')}</p>
+                  <div class="bot-choice-buttons" role="group" aria-labelledby="bot-settings-language-label">
+                    <button type="button" id="bot-settings-locale-auto" class="btn btn-secondary" data-settings-locale="auto"
+                      aria-pressed="${this.localePreference === 'auto'}" title="${t('botSettings.languageAutoDescription')}">${t('botSettings.languageAuto')}</button>
+                    ${SUPPORTED_LANGUAGES.map((language) => `<button type="button" id="bot-settings-locale-${language.code}"
+                      class="btn btn-secondary" data-settings-locale="${language.code}"
+                      aria-pressed="${this.localePreference === language.code}">${escapeHtml(language.label)}</button>`).join('')}
+                  </div>
+                </div>` : ''}
                 ${this.scope === 'user' && snapshot.bot.capabilities.downloadsSound ? `<div class="bot-settings-host-preference bot-field">
                   <div class="bot-field-heading"><label for="bot-settings-host-prompt">${t('botSettings.askFileName')}</label></div>
                   <label class="toggle-switch"><input type="checkbox" role="switch" id="bot-settings-host-prompt"
@@ -455,13 +469,26 @@ export class BotSettingsModal {
     const draft = this.drafts[this.scope];
     const form = this.form();
     if (!draft) return;
+    const language = target.closest<HTMLElement>('[data-settings-locale]')?.dataset.settingsLocale;
+    if (language && this.scope === 'user') {
+      const locale = language === 'auto' ? 'auto' : normalizeBotLocale(language);
+      if (!locale) return;
+      this.localePreference = locale;
+      draft.dirty = true;
+      this.setMessage('', false);
+      this.render();
+      return;
+    }
     if (target.closest('[data-settings-defaults]')) {
       const defaults = resolveBotSettingsValues(form, {});
       if (!defaults.success) { this.setMessage(t('botSettings.invalidResponse'), true); return; }
       draft.values = defaults.values;
       draft.reset = true;
       draft.dirty = true;
-      if (this.scope === 'user') this.confirmFileName = true;
+      if (this.scope === 'user') {
+        this.confirmFileName = true;
+        this.localePreference = 'auto';
+      }
       this.message = t('botSettings.resetHint');
       this.error = false;
       this.render();
@@ -538,7 +565,7 @@ export class BotSettingsModal {
     try {
       if (scope === 'user') {
         settingsStore.saveBotPreferences(botPreferenceScopeFor(session.client, session.server, snapshot.bot.botId), overrides,
-          snapshot.bot.capabilities.downloadsSound ? this.confirmFileName : undefined);
+          snapshot.bot.capabilities.downloadsSound ? this.confirmFileName : undefined, this.localePreference);
         this.initializeUserDraft();
         this.setMessage(t('botSettings.savedUser'), false);
       } else {
@@ -565,6 +592,16 @@ export class BotSettingsModal {
     if ([...document.querySelectorAll('.modal-backdrop')].filter((element) => element.getClientRects().length).at(-1) !== this.root) return;
     if (event.key === 'Escape') { event.preventDefault(); this.close(); return; }
     const target = event.target instanceof Element ? event.target : null;
+    const language = target?.closest<HTMLButtonElement>('button[data-settings-locale]');
+    if (language && !this.blocked() && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault();
+      const buttons = [...this.root.querySelectorAll<HTMLButtonElement>('[data-settings-locale]')];
+      const index = buttons.indexOf(language);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+        : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+      return;
+    }
     const tab = target?.closest<HTMLButtonElement>('button[data-settings-scope]');
     if (tab && !this.saving && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
       event.preventDefault();
@@ -609,6 +646,7 @@ export class BotSettingsModal {
     this.snapshot = null;
     this.selectedBotId = null;
     this.drafts = {};
+    this.localePreference = 'auto';
     this.bots = [];
     this.loading = this.loadFailed = this.saving = this.schemaStale = this.serverStale = this.userStale = false;
     this.message = '';

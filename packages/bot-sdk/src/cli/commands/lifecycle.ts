@@ -40,10 +40,13 @@ import { spawnCommand } from '../process';
 import { createRuntimeEnvironment } from '../runner';
 import { loadBotProject } from '../../tooling/config';
 import { runNpm } from '../../tooling/process';
+import { CliError, cliText } from '../locale';
 
 function loadConfigOrThrow(context: CliContext): BotConfig {
   const config = readConfig(context);
-  if (!config) throw new Error(`No config found. Run "${context.cliName} setup" first.`);
+  if (!config) throw new Error(cliText(context.locale,
+    `Nenhuma configuração encontrada. Execute "${context.cliName} setup" primeiro.`,
+    `No config found. Run "${context.cliName} setup" first.`));
   return config;
 }
 
@@ -116,13 +119,14 @@ function parseLogsOptions(args: string[]): { lines: number; follow: boolean } {
     }
     if (argument === '--lines') {
       const value = args[++index];
-      if (!value || value.startsWith('--')) throw new Error('--lines requires a numeric value.');
+      if (!value || value.startsWith('--')) throw new CliError('--lines requer um valor numérico.', '--lines requires a numeric value.');
       const parsed = Number(value);
-      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10_000) throw new Error('--lines must be between 1 and 10000.');
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10_000) throw new CliError('--lines deve estar entre 1 e 10000.',
+        '--lines must be between 1 and 10000.');
       lines = parsed;
       continue;
     }
-    throw new Error(`Unknown logs option: ${argument}`);
+    throw new CliError('Opção de logs desconhecida.', 'Unknown logs option.');
   }
   return { lines, follow };
 }
@@ -143,7 +147,7 @@ function applyConfigChange(context: CliContext, config: BotConfig, key: string, 
         publicHost: config.mode === 'marketplace' ? config.publicHost : 'localhost',
       });
     }
-    throw new Error('mode must be "manual" or "marketplace".');
+    throw new CliError('mode deve ser "manual" ou "marketplace".', 'mode must be "manual" or "marketplace".');
   }
   if (key === 'name') {
     return config.mode === 'manual'
@@ -193,7 +197,7 @@ function applyConfigChange(context: CliContext, config: BotConfig, key: string, 
       publicHost: validatePublicHost(value),
     });
   }
-  throw new Error(`Unknown config key: ${key}`);
+  throw new CliError('Chave de configuração desconhecida.', 'Unknown config key.');
 }
 
 function normalizedConfigKey(key: string): string {
@@ -212,16 +216,18 @@ function normalizedConfigKey(key: string): string {
 export async function startCommand(context: CliContext, args: string[]): Promise<void> {
   const foreground = args.includes('--foreground');
   const invalid = args.find((argument) => !['--foreground'].includes(argument));
-  if (invalid) throw new Error(`Unknown start option: ${invalid}`);
+  if (invalid) throw new CliError('Opção de start desconhecida.', 'Unknown start option.');
   const config = loadConfigOrThrow(context);
   const manualEntry = config.mode === 'manual' ? ensureRuntimeState(context, config) : null;
   const current = foreground ? null : findProcess(context);
   if (current?.pm2_env?.status === 'online') {
-    console.log(`${context.displayName} já está rodando (PID ${current.pid ?? 'desconhecido'}).`);
+    console.log(cliText(context.locale,
+      `${context.displayName} já está rodando (PID ${current.pid ?? 'desconhecido'}).`,
+      `${context.displayName} is already running (PID ${current.pid ?? 'unknown'}).`));
     return;
   }
   if (config.mode === 'marketplace') {
-    await assertManifestPortAvailable(config.servePort, context.cliName, getManifestBindHost(current?.pm2_env));
+    await assertManifestPortAvailable(config.servePort, context.cliName, getManifestBindHost(current?.pm2_env), context.locale);
   }
   const entry = manualEntry ?? ensureRuntimeState(context, config);
   if (foreground) {
@@ -231,6 +237,7 @@ export async function startCommand(context: CliContext, args: string[]): Promise
         ...process.env,
         MONKY_BOT_CLI_CONFIG_FILE: context.configFile,
         MONKY_BOT_CLI_ENTRY: entry,
+        MONKY_BOT_LOCALE: context.locale,
       },
       stdio: 'inherit',
     });
@@ -240,77 +247,81 @@ export async function startCommand(context: CliContext, args: string[]): Promise
   ensurePm2ForStart(context);
   startOrRestart(context, writeBotEcosystem(context, entry));
   saveProcessList(context);
-  console.log(`${context.displayName} iniciado em background.`);
-  console.log(`Modo: ${config.mode}`);
+  console.log(cliText(context.locale, `${context.displayName} iniciado em background.`, `${context.displayName} started in the background.`));
+  console.log(cliText(context.locale, `Modo: ${config.mode}`, `Mode: ${config.mode}`));
   if (config.mode === 'manual') {
-    console.log(`Servidor: ${config.serverUrl}`);
+    console.log(cliText(context.locale, `Servidor: ${config.serverUrl}`, `Server: ${config.serverUrl}`));
   } else {
     const host = config.publicHost.includes(':') && !config.publicHost.startsWith('[')
       ? `[${config.publicHost}]` : config.publicHost;
     console.log(`Manifest: http://${host}:${config.servePort}/manifest`);
   }
-  console.log(`Comandos úteis: ${context.cliName} status, logs, restart, stop.`);
+  console.log(cliText(context.locale, `Comandos úteis: ${context.cliName} status, logs, restart, stop.`,
+    `Useful commands: ${context.cliName} status, logs, restart, stop.`));
 }
 
 export function stopCommand(context: CliContext, args: string[]): void {
-  if (args.length) throw new Error(`Unknown stop option: ${args[0]}`);
+  if (args.length) throw new CliError('Opção de stop desconhecida.', 'Unknown stop option.');
   requirePm2(context, 'stop the bot');
   const processInfo = findProcess(context);
   if (!processInfo || processInfo.pm2_env?.status !== 'online') {
-    console.log(`${context.displayName} não está rodando.`);
+    console.log(cliText(context.locale, `${context.displayName} não está rodando.`, `${context.displayName} is not running.`));
     return;
   }
   stopProcess(context, context.processName);
   saveProcessList(context);
-  console.log(`${context.displayName} parado.`);
+  console.log(cliText(context.locale, `${context.displayName} parado.`, `${context.displayName} stopped.`));
 }
 
 export async function restartCommand(context: CliContext, args: string[]): Promise<void> {
   const fresh = args.includes('--fresh');
   const invalid = args.find((argument) => !['--fresh'].includes(argument));
-  if (invalid) throw new Error(`Unknown restart option: ${invalid}`);
+  if (invalid) throw new CliError('Opção de restart desconhecida.', 'Unknown restart option.');
   const config = loadConfigOrThrow(context);
   const entry = ensureRuntimeState(context, config);
   requirePm2(context, 'restart the bot');
   await restartBotProcess(context, config, entry, fresh);
-  console.log(`${context.displayName} reiniciado.`);
+  console.log(cliText(context.locale, `${context.displayName} reiniciado.`, `${context.displayName} restarted.`));
 }
 
 export function statusCommand(context: CliContext, args: string[]): void {
-  if (args.length) throw new Error(`Unknown status option: ${args[0]}`);
+  if (args.length) throw new CliError('Opção de status desconhecida.', 'Unknown status option.');
   const config = readConfig(context);
   const processes = listProcesses(context);
   const processInfo = processes?.find((entry) => entry.name === context.processName) ?? null;
   console.log(`${context.displayName} — status`);
   if (processes === null) {
-    console.log('pm2 não está instalado neste ambiente.');
+    console.log(cliText(context.locale, 'pm2 não está instalado neste ambiente.', 'pm2 is not installed in this environment.'));
   } else if (!processInfo) {
-    console.log('Processo em background: não registrado.');
+    console.log(cliText(context.locale, 'Processo em background: não registrado.', 'Background process: not registered.'));
   } else {
-    console.log(`Processo: ${processInfo.pm2_env?.status ?? 'unknown'}`);
+    console.log(cliText(context.locale, `Processo: ${processInfo.pm2_env?.status ?? 'desconhecido'}`,
+      `Process: ${processInfo.pm2_env?.status ?? 'unknown'}`));
     if (processInfo.pid) console.log(`PID: ${processInfo.pid}`);
     if (processInfo.pm2_env?.pm_uptime) {
       const uptimeMs = Date.now() - processInfo.pm2_env.pm_uptime;
       console.log(`Uptime: ${Math.floor(uptimeMs / 3_600_000)}h ${Math.floor((uptimeMs % 3_600_000) / 60_000)}m`);
     }
     if (processInfo.monit?.memory !== undefined) {
-      console.log(`Memória: ${(processInfo.monit.memory / 1024 / 1024).toFixed(1)} MB`);
+      console.log(cliText(context.locale, `Memória: ${(processInfo.monit.memory / 1024 / 1024).toFixed(1)} MB`,
+        `Memory: ${(processInfo.monit.memory / 1024 / 1024).toFixed(1)} MB`));
     }
     if (processInfo.monit?.cpu !== undefined) console.log(`CPU: ${processInfo.monit.cpu}%`);
     if (processInfo.pm2_env?.restart_time !== undefined) console.log(`Restarts: ${processInfo.pm2_env.restart_time}`);
   }
   if (!config) {
-    console.log(`Configuração: ausente (${context.configFile})`);
+    console.log(cliText(context.locale, `Configuração: ausente (${context.configFile})`, `Configuration: missing (${context.configFile})`));
     return;
   }
-  console.log('Configuração:');
+  console.log(cliText(context.locale, 'Configuração:', 'Configuration:'));
   console.log(JSON.stringify(sanitizeConfig(config), null, 2));
 }
 
 export function logsCommand(context: CliContext, args: string[]): void {
   requirePm2(context, 'read bot logs');
   const processInfo = findProcess(context);
-  if (!processInfo) throw new Error(`No background process is registered for ${context.cliName}.`);
+  if (!processInfo) throw new CliError(`Nenhum processo em background está registrado para ${context.cliName}.`,
+    `No background process is registered for ${context.cliName}.`);
   const { lines, follow } = parseLogsOptions(args);
   streamLogs(context, lines, follow);
 }
@@ -319,44 +330,51 @@ export async function configCommand(context: CliContext, args: string[]): Promis
   if (!args.length || args[0] === 'show') {
     const config = readConfig(context);
     if (!config) {
-      console.log(`Nenhuma configuração encontrada em ${context.configFile}.`);
+      console.log(cliText(context.locale, `Nenhuma configuração encontrada em ${context.configFile}.`,
+        `No configuration found at ${context.configFile}.`));
       return;
     }
     console.log(JSON.stringify(sanitizeConfig(config), null, 2));
     return;
   }
-  if (args[0] !== 'set') throw new Error(`Unknown config subcommand: ${args[0]}`);
+  if (args[0] !== 'set') throw new CliError('Subcomando de config desconhecido.', 'Unknown config subcommand.');
   const config = loadConfigOrThrow(context);
   const key = normalizedConfigKey(args[1] ?? '');
   const value = args.slice(2).join(' ').trim();
   if (!key || !value) {
-    throw new Error(`Usage: ${context.cliName} config set <mode|botName|botDir|serverUrl|botToken|tokenEnv|servePort|publicHost> <value>`);
+    throw new CliError(`Uso: ${context.cliName} config set <mode|botName|botDir|serverUrl|botToken|tokenEnv|servePort|publicHost> <valor>`,
+      `Usage: ${context.cliName} config set <mode|botName|botDir|serverUrl|botToken|tokenEnv|servePort|publicHost> <value>`);
   }
   const next = applyConfigChange(context, config, key, value);
   if (next.mode === 'marketplace' &&
       (config.mode !== 'marketplace' || next.servePort !== config.servePort)) {
-    await assertManifestPortAvailable(next.servePort, context.cliName);
+    await assertManifestPortAvailable(next.servePort, context.cliName, undefined, context.locale);
   }
   writeConfig(context, next);
-  console.log('Configuração atualizada.');
-  console.log(`Reinicie o bot para aplicar: ${context.cliName} restart`);
+  console.log(cliText(context.locale, 'Configuração atualizada.', 'Configuration updated.'));
+  console.log(cliText(context.locale, `Reinicie o bot para aplicar: ${context.cliName} restart`,
+    `Restart the bot to apply: ${context.cliName} restart`));
 }
 
 export function autoUpdateStatusCommand(context: CliContext): void {
   const processes = listProcesses(context);
   if (processes === null) {
-    console.log('Auto-update: pm2 indisponível.');
+    console.log(cliText(context.locale, 'Auto-update: pm2 indisponível.', 'Auto-update: pm2 unavailable.'));
     return;
   }
   const updater = processes.find((entry) => entry.name === context.updaterProcessName);
   if (!updater) {
-    console.log('Auto-update: desativado.');
+    console.log(cliText(context.locale, 'Auto-update: desativado.', 'Auto-update: disabled.'));
     return;
   }
   const env = updaterEnvironment(updater);
-  console.log('Auto-update: ativado.');
-  if (typeof env.MONKY_BOT_CLI_SCHEDULE === 'string') console.log(`Horário: ${env.MONKY_BOT_CLI_SCHEDULE}`);
+  console.log(cliText(context.locale, 'Auto-update: ativado.', 'Auto-update: enabled.'));
+  if (typeof env.MONKY_BOT_CLI_SCHEDULE === 'string') {
+    console.log(cliText(context.locale, `Horário: ${env.MONKY_BOT_CLI_SCHEDULE}`, `Schedule: ${env.MONKY_BOT_CLI_SCHEDULE}`));
+  }
   if (typeof env.MONKY_BOT_CLI_INCLUDE_BETA === 'string') {
-    console.log(`Canal: ${env.MONKY_BOT_CLI_INCLUDE_BETA === 'true' ? 'beta' : 'acompanha a versão instalada'}`);
+    console.log(cliText(context.locale,
+      `Canal: ${env.MONKY_BOT_CLI_INCLUDE_BETA === 'true' ? 'beta' : 'acompanha a versão instalada'}`,
+      `Channel: ${env.MONKY_BOT_CLI_INCLUDE_BETA === 'true' ? 'beta' : 'follows the installed version'}`));
   }
 }

@@ -1,7 +1,8 @@
-import { LIMITS, Permission } from '@monky/shared';
-import { ANSI, color, PERMISSION_OPTIONS } from './constants';
+import { LIMITS, Permission, TurnAvailability } from '@monky/shared';
+import { ANSI, color, ConfigKey, PERMISSION_OPTIONS } from './constants';
 import { t } from './i18n/index';
 import type { SfuPortProblem } from '../infrastructure/sfu/SfuManager';
+import type { TurnPortProblem } from '../infrastructure/turn/CoturnManager';
 import {
   SFU_MIN_NODE_MAJOR,
   SfuPreflightIssue,
@@ -43,10 +44,10 @@ export function parseOption(args: string[], name: string): string | undefined {
   if (index < 0) return undefined;
   const value = args[index + 1];
   if (value === undefined) {
-    throw new Error(`Informe um valor após ${name}.`);
+    throw new Error(t('validation.optionValue', { option: name }));
   }
   if (value.startsWith('--')) {
-    throw new Error(`Informe um valor após ${name} (recebido: ${value}).`);
+    throw new Error(t('validation.optionValueReceived', { option: name, value }));
   }
   return value;
 }
@@ -55,13 +56,13 @@ export function parseBoolean(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   if (['true', '1', 'yes', 'sim', 'on'].includes(normalized)) return true;
   if (['false', '0', 'no', 'nao', 'não', 'off'].includes(normalized)) return false;
-  throw new Error(`Valor booleano inválido: ${value}`);
+  throw new Error(t('validation.boolean', { value }));
 }
 
 export function parsePositiveInt(key: string, value: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`Valor inválido para ${key}: ${value}`);
+    throw new Error(t('validation.positiveInt', { key, value }));
   }
   return parsed;
 }
@@ -79,7 +80,7 @@ export function parseMemberLimit(key: string, value: string): number {
   }
   const parsed = Number.parseInt(normalized, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`Valor inválido para ${key}: ${value} (use 0 para sem limite).`);
+    throw new Error(t('validation.memberLimit', { key, value }));
   }
   return parsed;
 }
@@ -98,6 +99,11 @@ export function pad(value: string, size: number): string {
 }
 
 export function permissionLabel(name: keyof typeof Permission): string {
+  return t(`permission.${name}`);
+}
+
+/** Keep the old English labels valid in scripts, regardless of display locale. */
+function legacyPermissionLabel(name: keyof typeof Permission): string {
   return name
     .split('_')
     .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
@@ -107,10 +113,11 @@ export function permissionLabel(name: keyof typeof Permission): string {
 export function encodePermissions(names: string[]): number {
   let permissions = 0;
   for (const selected of names) {
-    const option = PERMISSION_OPTIONS.find((entry) => permissionLabel(entry.name) === selected || entry.name === selected);
-    if (option) {
-      permissions |= option.value;
-    }
+    const option = PERMISSION_OPTIONS.find((entry) =>
+      permissionLabel(entry.name) === selected || entry.name === selected || legacyPermissionLabel(entry.name) === selected
+    );
+    if (!option) throw new Error(t('validation.permission', { value: selected }));
+    permissions |= option.value;
   }
   return permissions;
 }
@@ -121,17 +128,20 @@ export function parsePermissionNames(input: string): string[] {
   for (const token of input.split(',').map((item) => item.trim()).filter(Boolean)) {
     const byEnum = PERMISSION_OPTIONS.find((entry) => entry.name.toLowerCase() === token.toLowerCase());
     if (byEnum) {
-      selected.add(permissionLabel(byEnum.name));
+      selected.add(byEnum.name);
       continue;
     }
 
-    const byLabel = PERMISSION_OPTIONS.find((entry) => permissionLabel(entry.name).toLowerCase() === token.toLowerCase());
+    const byLabel = PERMISSION_OPTIONS.find((entry) =>
+      permissionLabel(entry.name).toLowerCase() === token.toLowerCase() ||
+      legacyPermissionLabel(entry.name).toLowerCase() === token.toLowerCase()
+    );
     if (byLabel) {
-      selected.add(permissionLabel(byLabel.name));
+      selected.add(byLabel.name);
       continue;
     }
 
-    throw new Error(`Permissão inválida: ${token}`);
+    throw new Error(t('validation.permission', { value: token }));
   }
   return [...selected];
 }
@@ -140,27 +150,30 @@ export function normalizeRoleColor(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
   if (!/^#?[0-9a-fA-F]{6}$/.test(trimmed)) {
-    throw new Error('Cor inválida. Use formato #RRGGBB.');
+    throw new Error(t('validation.roleColor'));
   }
   return trimmed.startsWith('#') ? trimmed : `#${trimmed}`;
 }
 
 export function printVoiceModeComparisonTable(): void {
+  const direct = t('voice.direct');
+  const relayed = t('voice.viaServer');
+  const stored = t('voice.stored');
   const rows = [
-    { data: '🎤 Áudio (voz)', p2p: 'Direto entre peers', sfu: 'Passa pelo servidor' },
-    { data: '📹 Vídeo (câmera)', p2p: 'Direto entre peers', sfu: 'Passa pelo servidor' },
-    { data: '🖥️ Compartilhamento de tela', p2p: 'Direto entre peers', sfu: 'Passa pelo servidor' },
-    { data: '💬 Mensagens de chat', p2p: 'Passa pelo servidor', sfu: 'Passa pelo servidor' },
-    { data: '📎 Arquivos e anexos', p2p: 'Armazenados no servidor', sfu: 'Armazenados no servidor' },
-    { data: '🔗 Sinalização WebRTC', p2p: 'Passa pelo servidor', sfu: 'Passa pelo servidor' },
-    { data: '👤 Perfis e avatares', p2p: 'Armazenados no servidor', sfu: 'Armazenados no servidor' },
-    { data: '⚙️ Canais, cargos, configurações', p2p: 'Armazenados no servidor', sfu: 'Armazenados no servidor' },
-    { data: '🟢 Status e presença', p2p: 'Passa pelo servidor', sfu: 'Passa pelo servidor' },
+    { data: t('voice.audio'), p2p: direct, sfu: relayed },
+    { data: t('voice.video'), p2p: direct, sfu: relayed },
+    { data: t('voice.screen'), p2p: direct, sfu: relayed },
+    { data: t('voice.chat'), p2p: relayed, sfu: relayed },
+    { data: t('voice.files'), p2p: stored, sfu: stored },
+    { data: t('voice.signaling'), p2p: relayed, sfu: relayed },
+    { data: t('voice.profiles'), p2p: stored, sfu: stored },
+    { data: t('voice.settings'), p2p: stored, sfu: stored },
+    { data: t('voice.presence'), p2p: relayed, sfu: relayed },
   ];
 
   console.log();
   console.log(color('┌───────────────────────────────────────┬─────────────────────────┬─────────────────────────┐', ANSI.dim));
-  console.log(color('│ Dado                                  │ P2P Mesh                │ SFU                     │', ANSI.bold));
+  console.log(color(`│ ${pad(t('voice.data'), 37)} │ ${pad('P2P Mesh', 23)} │ ${pad('SFU', 23)} │`, ANSI.bold));
   console.log(color('├───────────────────────────────────────┼─────────────────────────┼─────────────────────────┤', ANSI.dim));
   for (const r of rows) {
     const d = pad(r.data, 37);
@@ -169,6 +182,51 @@ export function printVoiceModeComparisonTable(): void {
     console.log(`│ ${d} │ ${p} │ ${s} │`);
   }
   console.log(color('└───────────────────────────────────────┴─────────────────────────┴─────────────────────────┘', ANSI.dim));
+}
+
+export function parseVoiceMode(value: string): 'p2p' | 'sfu' {
+  const mode = value.trim().toLowerCase();
+  if (mode === 'p2p' || mode === 'sfu') return mode;
+  throw new Error(t('validation.voiceMode', { value }));
+}
+
+export function configKeyLabel(key: ConfigKey): string {
+  return `${t(`label.${key}`)} (${key})`;
+}
+
+export function formatProcessStatus(status: string): string {
+  switch (status) {
+    case 'online': return t('status.online');
+    case 'stopped': return t('status.stopped');
+    case 'stopping': return t('status.stopping');
+    case 'launching': return t('status.launching');
+    case 'errored': return t('status.errored');
+    case 'waiting restart': return t('status.waitingRestart');
+    case 'one-launch-status': return t('status.oneLaunch');
+    case 'not started': return t('status.notStarted');
+    default: return status;
+  }
+}
+
+export function describeTurnUnavailability(availability: TurnAvailability): string | null {
+  if (availability.supported) return null;
+  if (availability.reason === 'unsupported-platform') return t('config.turnLinuxOnly');
+  if (availability.reason === 'not-installed') {
+    return availability.autoInstallable ? t('config.coturnMissing') : t('config.coturnNoPrivileges');
+  }
+  return t('lifecycle.coturnUnavailable');
+}
+
+export function describeTurnPortProblem(problem: TurnPortProblem): string {
+  switch (problem.code) {
+    case 'not-listening': return t('turn.portNotListening', { port: problem.port });
+    case 'external-unreachable': return t('turn.portExternalUnreachable', {
+      port: problem.port, publicIp: problem.publicIp, minPort: problem.minPort, maxPort: problem.maxPort,
+    });
+    case 'relay-bind-failed': return t('turn.relayPortBindFailed', {
+      port: problem.port, minPort: problem.minPort, maxPort: problem.maxPort,
+    });
+  }
 }
 
 /** Problem and matching fix for a preflight issue, in the CLI language. */

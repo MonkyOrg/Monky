@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
+const realSpawnSync = childProcess.spawnSync;
 const fs = require('node:fs');
 const https = require('node:https');
 const os = require('node:os');
@@ -16,6 +17,7 @@ const updates = require('../dist/cli/commands/update');
 const releases = require('../dist/cli/updateReleases');
 const sources = require('../dist/cli/updateSources');
 const updater = require('../dist/cli/updater');
+const { formatUpdateProgress, createUpdateProgressReporter } = require('../dist/cli/updateProgress');
 
 function json(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -44,6 +46,7 @@ function fixture(t, { version = '1.2.3', releasesConfig = true, updateSource, ho
     },
   });
   fs.writeFileSync(path.join(bot, 'dist', 'index.js'), 'module.exports = {};');
+  fs.writeFileSync(path.join(bot, 'monky-cli.cjs'), 'process.exitCode = 0;');
   t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
   const result = { root, bot, globalRoot, state: homeInPackage ? bot : path.join(root, 'state') };
   fixtureHome(t, result);
@@ -158,10 +161,14 @@ function archiveFixture(t, type, version = '1.2.3', options = {}) {
 
 function fixtureHome(t, f) {
   const previousHome = process.env.MONKY_BOT_CLI_HOME;
+  const previousLocale = process.env.MONKY_BOT_LOCALE;
   process.env.MONKY_BOT_CLI_HOME = f.state;
+  process.env.MONKY_BOT_LOCALE = 'pt-BR';
   t.after(() => {
     if (previousHome === undefined) delete process.env.MONKY_BOT_CLI_HOME;
     else process.env.MONKY_BOT_CLI_HOME = previousHome;
+    if (previousLocale === undefined) delete process.env.MONKY_BOT_LOCALE;
+    else process.env.MONKY_BOT_LOCALE = previousLocale;
   });
 }
 
@@ -313,7 +320,8 @@ test('update installs a verified local tarball and restarts the same managed bot
     return '';
   });
   t.mock.method(pm2, 'findProcess', () => ({ pm2_env: { status: 'online' } }));
-  const restarted = t.mock.method(pm2, 'restartBotProcess', async () => {});
+  t.mock.method(pm2, 'restartBotProcess', () => assert.fail('must not restart from the cached SDK'));
+  const restarted = t.mock.method(childProcess, 'spawnSync', () => ({ status: 0 }));
 
   await updates.updateCommand(context, ['--yes']);
   assert.equal(npmCalls.length, 2);
@@ -321,7 +329,93 @@ test('update installs a verified local tarball and restarts the same managed bot
   assert.deepEqual(npmCalls[1].slice(0, 4), ['install', '-g', '--ignore-scripts', '--offline']);
   assert.ok(path.isAbsolute(npmCalls[1][npmCalls[1].length - 1]));
   assert.equal(restarted.mock.callCount(), 1);
-  assert.deepEqual(restarted.mock.calls[0].arguments[1], cliConfig.readConfig(context));
+  assert.deepEqual(restarted.mock.calls[0].arguments.slice(0, 2),
+    [process.execPath, [path.join(f.bot, 'monky-cli.cjs'), 'restart', '--fresh']]);
+  assert.equal(restarted.mock.calls[0].arguments[2].shell, false);
+  assert.equal(restarted.mock.calls[0].arguments[2].env.MONKY_BOT_LOCALE, 'pt-BR');
+  assert.equal(cliConfig.readConfig(context).botName, 'Updater Bot');
+});
+
+test('fresh installed restart preserves only the required managed token environment', async (t) => {
+  for (const scenario of ['managed-only', 'shell-override', 'explicit-empty', 'missing']) {
+    await t.test(scenario, async (t) => {
+      const f = archiveFixture(t, 'file');
+      const context = cliConfig.createCliContext(f.bot);
+      const tokenName = 'MONKY_SDK_FIXTURE_MANUAL_TOKEN';
+      const unrelatedName = 'MONKY_SDK_FIXTURE_OTHER_SECRET';
+      const managedToken = 'managed-fixture-token-never-print';
+      const shellToken = 'shell-fixture-token-never-print';
+      const previous = new Map([tokenName, unrelatedName].map((name) => [name, process.env[name]]));
+      delete process.env[tokenName];
+      delete process.env[unrelatedName];
+      if (scenario === 'shell-override') process.env[tokenName] = shellToken;
+      if (scenario === 'explicit-empty') process.env[tokenName] = '';
+      t.after(() => {
+        for (const [name, value] of previous) {
+          if (value === undefined) delete process.env[name];
+          else process.env[name] = value;
+        }
+      });
+      const config = cliConfig.manualConfig(context, {
+        botName: 'Managed token bot',
+        botDir: path.join(context.homeDir, 'runtime'),
+        serverUrl: 'wss://server.example.test',
+        tokenEnv: tokenName,
+      });
+      cliConfig.writeConfig(context, config);
+      const configBefore = fs.readFileSync(context.configFile);
+      const receipt = path.join(f.root, 'fresh-restart.json');
+      const expected = scenario === 'shell-override' ? shellToken : managedToken;
+      fs.writeFileSync(path.join(f.bot, 'monky-cli.cjs'), `
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const pm2 = require(${JSON.stringify(require.resolve('../dist/cli/pm2'))});
+const { createCliContext } = require(${JSON.stringify(require.resolve('../dist/cli/config'))});
+const { createRuntimeEnvironment } = require(${JSON.stringify(require.resolve('../dist/cli/runner'))});
+const { restartCommand } = require(${JSON.stringify(require.resolve('../dist/cli/commands/lifecycle'))});
+pm2.requirePm2 = () => {};
+pm2.restartBotProcess = async (_context, config, _entry, fresh) => {
+  const plan = createRuntimeEnvironment(config, 'fixture-public-key');
+  assert.ok(plan.values.MONKY_BOT_TOKEN === ${JSON.stringify(expected)}, 'Required runtime token was not preserved');
+  assert.equal(process.env[${JSON.stringify(unrelatedName)}], undefined, 'Unrelated PM2 secrets must not be copied');
+  fs.writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ fresh, tokenAvailable: true }));
+};
+restartCommand(createCliContext(${JSON.stringify(f.bot)}), ['--fresh']).catch(() => { process.exitCode = 1; });
+`);
+      createTarball(f.file, botManifest('1.2.4'));
+      t.mock.method(toolingProcess, 'runNpm', (args) => {
+        if (args[0] === 'root') return f.globalRoot;
+        const pkg = JSON.parse(fs.readFileSync(path.join(f.bot, 'package.json'), 'utf8'));
+        pkg.version = '1.2.4';
+        json(path.join(f.bot, 'package.json'), pkg);
+        return '';
+      });
+      t.mock.method(pm2, 'findProcess', () => ({ pm2_env: { status: 'online', env: {
+        ...(scenario === 'missing' ? {} : { [tokenName]: managedToken }),
+        [unrelatedName]: 'unrelated-managed-fixture-secret',
+      } } }));
+      const output = [];
+      t.mock.method(console, 'log', (...values) => output.push(values.join(' ')));
+      const spawn = t.mock.method(childProcess, 'spawnSync', (command, args, options) => {
+        assert.equal(command, process.execPath);
+        assert.ok(!args.join(' ').includes(expected), 'Credentials must not be passed in argv');
+        return realSpawnSync(command, args, options);
+      });
+      const shouldFail = scenario === 'missing' || scenario === 'explicit-empty';
+      if (shouldFail) {
+        await assert.rejects(updates.updateCommand(context, ['--yes']),
+          /pacote foi atualizado, mas o reinício falhou|package was updated, but restart failed/);
+        assert.equal(fs.existsSync(receipt), false);
+      } else {
+        await updates.updateCommand(context, ['--yes']);
+        assert.deepEqual(JSON.parse(fs.readFileSync(receipt, 'utf8')), { fresh: true, tokenAvailable: true });
+      }
+      assert.equal(spawn.mock.callCount(), 1);
+      assert.deepEqual(fs.readFileSync(context.configFile), configBefore, 'Do not persist the recovered token into config');
+      assert.equal(process.env[tokenName], scenario === 'shell-override' ? shellToken : scenario === 'explicit-empty' ? '' : undefined);
+      assert.ok(output.every((line) => !line.includes(managedToken) && !line.includes(shellToken)));
+    });
+  }
 });
 
 test('autoupdate on checks for explicit releases before consulting pm2', async (t) => {
@@ -665,7 +759,8 @@ for (const type of ['https', 'file']) {
       createTarball(f.file, botManifest('9.0.0'));
       return { pm2_env: { status: 'online' } };
     });
-    const restarted = t.mock.method(pm2, 'restartBotProcess', async () => {});
+    t.mock.method(pm2, 'restartBotProcess', () => assert.fail('must not restart from the cached SDK'));
+    const restarted = t.mock.method(childProcess, 'spawnSync', () => ({ status: 0 }));
     await updates.updateCommand(context, ['--yes']);
     assert.equal(npmCalls.length, 2);
     assert.deepEqual(npmCalls[1].args.slice(0, -1), [
@@ -673,7 +768,8 @@ for (const type of ['https', 'file']) {
     ]);
     assert.equal(npmCalls[1].options.stdio, 'pipe');
     assert.equal(restarted.mock.callCount(), 1);
-    assert.deepEqual(restarted.mock.calls[0].arguments[1], cliConfig.readConfig(context));
+    assert.deepEqual(restarted.mock.calls[0].arguments[1], [path.join(f.bot, 'monky-cli.cjs'), 'restart', '--fresh']);
+    assert.equal(restarted.mock.calls[0].arguments[2].shell, false);
     for (const [file, contents] of preserved) assert.deepEqual(fs.readFileSync(file), contents);
     assert.equal(fs.existsSync(snapshot), false);
     assert.equal(releases.readPackageManifestFromTarball(f.file).version, '9.0.0');
@@ -1001,3 +1097,139 @@ for (const kind of ['config home', 'runtime profile and keys', 'symlinked runtim
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.bot, 'package.json'))).version, '1.2.3');
   });
 }
+
+test('download progress measures streamed bytes and reports a percentage only with a valid total', async (t) => {
+  const f = fixture(t);
+  const body = Buffer.from('abcdef');
+  let known = true;
+  mockHttp(t, () => ({
+    response: Readable.from([body.subarray(0, 4), body.subarray(4)]),
+    headers: known ? { 'content-length': String(body.length) } : {},
+  }));
+  const source = { type: 'https', url: 'https://downloads.example.test/progress.tgz' };
+  const progress = [];
+  const file = path.join(f.root, 'known.tgz');
+  await releases.downloadHttpsUpdateArchive(source, file, {}, (event) => progress.push(event));
+  assert.deepEqual(progress.map((event) => event.receivedBytes), [0, 4, 6, 6]);
+  assert.ok(progress.every((event) => event.totalBytes === 6));
+  assert.equal(progress.at(-1).complete, true);
+  assert.deepEqual(fs.readFileSync(file), body);
+  assert.match(formatUpdateProgress(progress[1], 'en'), /4 B \/ 6 B \(66%\)/);
+  known = false;
+  progress.length = 0;
+  await releases.downloadHttpsUpdateArchive(source, path.join(f.root, 'unknown.tgz'), {}, (event) => progress.push(event));
+  assert.ok(progress.every((event) => event.totalBytes === undefined));
+  assert.equal(progress.at(-1).receivedBytes, body.length);
+  assert.doesNotMatch(formatUpdateProgress(progress.at(-1), 'en'), /%/);
+  assert.match(formatUpdateProgress(progress.at(-1), 'pt-BR'), /tamanho total desconhecido/);
+});
+
+test('truncated downloads never announce completion or an invented full byte count', async (t) => {
+  const f = fixture(t);
+  mockHttp(t, () => ({ body: Buffer.from('part'), headers: { 'content-length': '10' } }));
+  const progress = [];
+  await assert.rejects(releases.downloadHttpsUpdateArchive(
+    { type: 'https', url: 'https://downloads.example.test/partial.tgz' },
+    path.join(f.root, 'partial.tgz'), {}, (event) => progress.push(event),
+  ), /declared length/);
+  assert.equal(progress.at(-1).receivedBytes, 4);
+  assert.equal(progress.some((event) => event.complete), false);
+  assert.equal(progress.some((event) => formatUpdateProgress(event, 'en').includes('100%')), false);
+});
+
+test('local copy reports real size and separates verification from transfer progress', async (t) => {
+  const f = archiveFixture(t, 'file');
+  createTarball(f.file, botManifest());
+  const context = cliConfig.createCliContext(f.bot);
+  const progress = [];
+  await sources.withUpdateCandidate(context.project, false, () => {}, {}, (event) => progress.push(event));
+  assert.equal(progress[0].stage, 'checking');
+  const copy = progress.filter((event) => event.stage === 'copying');
+  assert.equal(copy[0].receivedBytes, 0);
+  assert.equal(copy.at(-1).receivedBytes, fs.statSync(f.file).size);
+  assert.equal(copy.at(-1).totalBytes, fs.statSync(f.file).size);
+  assert.equal(copy.at(-1).complete, true);
+  assert.equal(progress.at(-1).stage, 'verifying');
+  for (const stage of ['checking', 'verifying', 'installing', 'restarting']) {
+    assert.doesNotMatch(formatUpdateProgress({ stage }, 'en'), /%|\b\d+\s*B\b/);
+  }
+});
+
+test('non-TTY update output uses readable lines without terminal control sequences or fake progress', (t) => {
+  const descriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: false });
+  t.after(() => {
+    if (descriptor) Object.defineProperty(process.stdout, 'isTTY', descriptor);
+    else delete process.stdout.isTTY;
+  });
+  const lines = [];
+  t.mock.method(console, 'log', (line) => lines.push(line));
+  const reporter = createUpdateProgressReporter('en');
+  reporter.report({ stage: 'checking' });
+  reporter.report({ stage: 'downloading', receivedBytes: 0, totalBytes: 4 });
+  reporter.report({ stage: 'downloading', receivedBytes: 2, totalBytes: 4 });
+  reporter.report({ stage: 'downloading', receivedBytes: 4, totalBytes: 4, complete: true });
+  reporter.report({ stage: 'installing' });
+  reporter.close();
+  assert.match(lines.join('\n'), /2 B \/ 4 B \(50%\)/);
+  assert.doesNotMatch(lines.join('\n'), /[\r\u001b]/);
+  assert.doesNotMatch(lines.at(-1), /%/);
+});
+
+test('the updated bot is restarted by its fresh installed CLI instead of cached SDK lifecycle code', async (t) => {
+  const f = archiveFixture(t, 'file');
+  createTarball(f.file, botManifest());
+  const context = cliConfig.createCliContext(f.bot);
+  context.locale = 'en';
+  cliConfig.writeConfig(context, cliConfig.manualConfig(context, { botToken: 'fixture-profile-token' }));
+  const before = fs.readFileSync(context.configFile);
+  t.mock.method(pm2, 'findProcess', () => ({ pm2_env: { status: 'online' } }));
+  t.mock.method(pm2, 'restartBotProcess', () => assert.fail('cached lifecycle code must not be used'));
+  t.mock.method(toolingProcess, 'runNpm', (args) => {
+    if (args[0] === 'root') return f.globalRoot;
+    const pkg = JSON.parse(fs.readFileSync(path.join(f.bot, 'package.json'), 'utf8'));
+    pkg.version = '1.2.4';
+    pkg.monkyBot.newerSdkProperty = true;
+    json(path.join(f.bot, 'package.json'), pkg);
+    fs.writeFileSync(path.join(f.bot, 'monky-cli.cjs'), `
+const fs = require('node:fs');
+const path = require('node:path');
+fs.writeFileSync(path.join(__dirname, 'fresh-restart.json'), JSON.stringify({
+  version: require('./package.json').version,
+  args: process.argv.slice(2),
+  locale: process.env.MONKY_BOT_LOCALE
+}));
+`);
+    return '';
+  });
+  t.mock.method(childProcess, 'spawnSync', (command, args, options) => {
+    assert.equal(command, process.execPath);
+    assert.equal(options.shell, false);
+    return realSpawnSync(command, args, options);
+  });
+  await updates.updateCommand(context, ['--yes']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.bot, 'fresh-restart.json'), 'utf8')), {
+    version: '1.2.4', args: ['restart', '--fresh'], locale: 'en',
+  });
+  assert.deepEqual(fs.readFileSync(context.configFile), before);
+});
+
+test('failed fresh CLI restarts keep credentials out of update diagnostics', async (t) => {
+  const f = archiveFixture(t, 'file');
+  createTarball(f.file, botManifest());
+  const context = cliConfig.createCliContext(f.bot);
+  context.locale = 'en';
+  cliConfig.writeConfig(context, cliConfig.manualConfig(context, { botToken: 'fixture-profile-token' }));
+  t.mock.method(pm2, 'findProcess', () => ({ pm2_env: { status: 'online' } }));
+  t.mock.method(toolingProcess, 'runNpm', (args) => {
+    if (args[0] === 'root') return f.globalRoot;
+    const pkg = JSON.parse(fs.readFileSync(path.join(f.bot, 'package.json'), 'utf8'));
+    pkg.version = '1.2.4';
+    json(path.join(f.bot, 'package.json'), pkg);
+    return '';
+  });
+  t.mock.method(childProcess, 'spawnSync', () => ({ status: 1, stderr: 'fixture-profile-token', stdout: 'fixture-profile-token' }));
+  await assert.rejects(updates.updateCommand(context, ['--yes']), (error) =>
+    /restart failed/.test(error.message) && !error.message.includes('fixture-profile-token'));
+  assert.equal(cliConfig.readConfig(context).botToken, 'fixture-profile-token');
+});

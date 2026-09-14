@@ -792,16 +792,16 @@ export class SqliteBotRepository implements IBotRepository {
 
   async create(bot: BotRecord): Promise<void> {
     this.db.prepare(
-      `INSERT INTO bots (id, name, token_hash, avatar_path, bound_public_key, created_by_user_id, created_at, profile_pending)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(bot.id, bot.name, bot.tokenHash, bot.avatarPath, bot.boundPublicKey, bot.createdByUserId, bot.createdAt, bot.profilePending ? 1 : 0);
+      `INSERT INTO bots (id, name, token_hash, avatar_path, bound_public_key, created_by_user_id, created_at, profile_pending, last_protocol_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(bot.id, bot.name, bot.tokenHash, bot.avatarPath, bot.boundPublicKey, bot.createdByUserId, bot.createdAt, bot.profilePending ? 1 : 0, bot.lastProtocolVersion ?? null);
   }
 
   async findById(id: string): Promise<BotRecord | null> {
     const row = this.db.prepare(
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
-              created_at as createdAt, profile_pending as profilePending
+              created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion
        FROM bots WHERE id = ?`
     ).get(id) as BotRow | undefined;
     return row ? this.mapRow(row) : null;
@@ -811,7 +811,7 @@ export class SqliteBotRepository implements IBotRepository {
     const row = this.db.prepare(
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
-              created_at as createdAt, profile_pending as profilePending
+              created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion
        FROM bots WHERE token_hash = ?`
     ).get(tokenHash) as BotRow | undefined;
     return row ? this.mapRow(row) : null;
@@ -821,7 +821,7 @@ export class SqliteBotRepository implements IBotRepository {
     const rows = this.db.prepare(
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
-              created_at as createdAt, profile_pending as profilePending
+              created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion
        FROM bots ORDER BY created_at ASC`
     ).all() as BotRow[];
     return rows.map((r) => this.mapRow(r));
@@ -835,6 +835,7 @@ export class SqliteBotRepository implements IBotRepository {
     if (updates.tokenHash !== undefined) { cols.push('token_hash = ?'); vals.push(updates.tokenHash); }
     if (updates.avatarPath !== undefined) { cols.push('avatar_path = ?'); vals.push(updates.avatarPath); }
     if (updates.boundPublicKey !== undefined) { cols.push('bound_public_key = ?'); vals.push(updates.boundPublicKey); }
+    if (updates.lastProtocolVersion !== undefined) { cols.push('last_protocol_version = ?'); vals.push(updates.lastProtocolVersion); }
     if (cols.length === 0) return;
     vals.push(id);
     this.db.prepare(`UPDATE bots SET ${cols.join(', ')} WHERE id = ?`).run(...vals);
@@ -859,6 +860,7 @@ export class SqliteBotRepository implements IBotRepository {
       boundPublicKey: row.boundPublicKey ?? null,
       createdByUserId: row.createdByUserId,
       createdAt: row.createdAt,
+      lastProtocolVersion: row.lastProtocolVersion ?? null,
     };
   }
 }

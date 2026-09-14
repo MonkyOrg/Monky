@@ -1,7 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const net = require('node:net');
-const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
 const { EventEmitter } = require('node:events');
@@ -21,7 +20,7 @@ function json(file, value) {
 }
 
 function fixture(t, extraMonkyBot = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-sdk-cli-runtime-'));
+  const root = fs.mkdtempSync(path.join(__dirname, '.monky-sdk-cli-runtime-'));
   const bot = path.join(root, 'bot');
   fs.mkdirSync(path.join(bot, 'dist'), { recursive: true });
   json(path.join(bot, 'package.json'), {
@@ -43,7 +42,7 @@ function fixture(t, extraMonkyBot = {}) {
 
 function withEnv(t, updates) {
   const previous = {};
-  for (const [key, value] of Object.entries({ MONKY_SERVE_HOST: undefined, ...updates })) {
+  for (const [key, value] of Object.entries({ MONKY_SERVE_HOST: undefined, MONKY_BOT_LOCALE: 'pt-BR', ...updates })) {
     previous[key] = process.env[key];
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -144,6 +143,7 @@ function interactiveAnswers(t, answers) {
 
 test('runBotCli exposes the bot version instead of the SDK version', async (t) => {
   const f = fixture(t);
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
   const lines = captureLogs(t);
   await runBotCli(f.bot, ['--version']);
   assert.deepEqual(lines, ['sound-bot 1.2.3']);
@@ -151,7 +151,7 @@ test('runBotCli exposes the bot version instead of the SDK version', async (t) =
 
 test('non-interactive setup writes isolated config and refuses overwrite without --yes', async (t) => {
   const f = fixture(t);
-  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, MONKY_BOT_LOCALE: 'en' });
   await runBotCli(f.bot, [
     'setup',
     '--non-interactive',
@@ -547,7 +547,7 @@ test('port permission and unexpected bind errors are not reported as availabilit
 
 test('non-interactive setup rejects unsupported modes and missing or mixed mode-specific options', async (t) => {
   const f = fixture(t, { modes: ['manual'] });
-  withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
+  withEnv(t, { MONKY_BOT_CLI_HOME: f.state, MONKY_BOT_LOCALE: 'en' });
   for (const [args, error] of [
     [['--mode', 'marketplace', '--public-host', 'bot.example.test'], /does not support/],
     [['--mode', 'marketplace'], /requires --public-host/],
@@ -698,7 +698,7 @@ test('config mode and host changes also check the default port when enabling mar
     assert.deepEqual(cliConfig.readConfig(context), existing);
   }
   assert.equal(probe.mock.callCount(), 2);
-  assert.deepEqual(probe.mock.calls[0].arguments, [7780, context.cliName]);
+  assert.deepEqual(probe.mock.calls[0].arguments, [7780, context.cliName, undefined, context.locale]);
 });
 
 test('unrelated config changes do not mistake the running bot for a port collision', async (t) => {
@@ -825,6 +825,7 @@ test('bot ecosystem uses isolated runner metadata and never embeds token values'
   assert.deepEqual(apps[0].env, {
     MONKY_BOT_CLI_CONFIG_FILE: context.configFile,
     MONKY_BOT_CLI_ENTRY: entry,
+    MONKY_BOT_LOCALE: context.locale,
   });
   if (process.platform !== 'win32') {
     assert.equal(fs.statSync(ecosystemFile).mode & 0o777, 0o600);

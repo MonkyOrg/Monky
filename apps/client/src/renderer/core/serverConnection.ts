@@ -10,6 +10,7 @@ import { appEvents } from './EventBus';
 import { t } from '../i18n';
 import { videoService } from './VideoService';
 import { screenAudioService } from './ScreenAudioService';
+import { currentEventOrigin } from './sessionRouting';
 
 interface ClientIdentity {
   publicKey: string;
@@ -58,6 +59,32 @@ export function captureServerBrowseIntent(): () => boolean {
   return () => generation === serverNavigationGeneration && sessionManager.getActive() === previous;
 }
 
+async function connectServerSession(
+  session: ServerSession,
+  identity: ClientIdentity,
+  nickname: string,
+  password: string | undefined,
+  timeoutMs?: number,
+): Promise<AuthSuccessPayload> {
+  let offDisconnected: (() => void) | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    offDisconnected = appEvents.on('network.disconnected', () => {
+      if (currentEventOrigin() === session.key) reject(new DOMException('Server entry was cancelled', 'AbortError'));
+    });
+    if (timeoutMs !== undefined) timeout = setTimeout(() => reject(new Error(t('network.timeout'))), timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      session.client.connect(session.host, session.port, identity, nickname, password),
+      interrupted,
+    ]);
+  } finally {
+    offDisconnected?.();
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 /**
  * Connects to a server and puts it on screen, keeping every server already
  * connected alive in the background (#400).
@@ -72,16 +99,23 @@ export async function openServerSession(
   port: number,
   identity: ClientIdentity,
   nickname: string,
-  password?: string
+  password?: string,
+  options: { background?: boolean; timeoutMs?: number } = {},
 ): Promise<AuthSuccessPayload> {
   clientLog.info('CONNECTION', `Opening server session: ${host}:${port}`, { nickname });
+  const foreground = !options.background;
+  // Until a foreground bundle exists, routing a background event cannot
+  // restore the global stores. The first startup entry must use the normal path.
+  if (!foreground && !sessionManager.getActive()) throw new DOMException('No foreground session', 'AbortError');
   const existing = getServerSessionForAddress(host, port);
   const key = existing?.key ?? sessionKeyFor(host, port);
   if (existing?.client.getStatus() === 'CONNECTED') {
     const { serverDetails, currentUser, voiceRestrictions } = existing.serverStore;
     if (!serverDetails || !currentUser) throw new Error(t('navigation.sessionNotReady'));
-    serverNavigationGeneration++;
-    sessionManager.activate(key);
+    if (foreground) {
+      serverNavigationGeneration++;
+      sessionManager.activate(key);
+    }
     // Browsing an existing session is not another authentication handshake.
     return { server: serverDetails, currentUser, voiceRestrictions };
   }
@@ -91,7 +125,7 @@ export async function openServerSession(
     assertServerBrowseAvailable(host, port);
   }
 
-  const generation = ++serverNavigationGeneration;
+  const generation = foreground ? ++serverNavigationGeneration : serverNavigationGeneration;
   const pending = pendingServerOpens.get(key);
   const reusable = pending && pending.session === existing ? pending : undefined;
   const active = sessionManager.getActive();
@@ -101,11 +135,11 @@ export async function openServerSession(
     : active;
   const session = reusable?.session
     ?? sessionManager.create(existing?.host ?? host, existing?.port ?? port, nickname, password);
-  sessionManager.activate(session.key);
+  if (foreground) sessionManager.activate(session.key);
   const operation = reusable ?? {
     session,
     previous,
-    promise: session.client.connect(session.host, session.port, identity, nickname, password),
+    promise: connectServerSession(session, identity, nickname, password, options.timeoutMs),
   };
   pendingServerOpens.set(key, operation);
 
@@ -121,7 +155,7 @@ export async function openServerSession(
       sessionManager.remove(key);
     }
     // A late failure must not take the screen back from a newer navigation.
-    if (generation === serverNavigationGeneration) {
+    if (foreground && generation === serverNavigationGeneration) {
       const previousSurvives = previous && sessionManager.get(previous.key) === previous
         && (previous.client.getStatus() === 'CONNECTED' || previous.serverStore.serverDetails);
       const fallback = previousSurvives ? previous : sessionManager.getAll()

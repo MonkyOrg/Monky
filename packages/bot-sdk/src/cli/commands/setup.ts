@@ -1,6 +1,8 @@
 import os from 'node:os';
 import readline from 'node:readline';
 import { Writable } from 'node:stream';
+import type { BotLocale } from '@monky/shared';
+import { CliError, cliErrorMessage, cliText } from '../locale';
 import { assertManifestPortAvailable } from '../ports';
 import {
   ANSI,
@@ -37,9 +39,10 @@ type NonInteractiveSetupInput = {
 
 const SETUP_CANCELLED_MESSAGE = 'Setup cancelado; a configuração não foi alterada.';
 
-function prompt(rl: readline.Interface, question: string): Promise<string> {
+function prompt(rl: readline.Interface, question: string, locale: BotLocale): Promise<string> {
   return new Promise((resolve, reject) => {
-    const onClose = (): void => reject(new Error(SETUP_CANCELLED_MESSAGE));
+    const onClose = (): void => reject(new Error(cliText(locale, SETUP_CANCELLED_MESSAGE,
+      'Setup cancelled; the configuration was not changed.')));
     rl.once('close', onClose);
     rl.question(question, (answer) => {
       rl.off('close', onClose);
@@ -57,8 +60,9 @@ const MODE_LABELS: Record<SetupMode, string> = {
   manual: 'Conexão manual por token — avançado',
 };
 
-function promptModeLabel(mode: SetupMode): string {
-  return MODE_LABELS[mode];
+function promptModeLabel(mode: SetupMode, locale: BotLocale): string {
+  return cliText(locale, MODE_LABELS[mode], mode === 'marketplace'
+    ? 'Install by URL — recommended' : 'Manual token connection — advanced');
 }
 
 function promptModes(modes: readonly SetupMode[]): SetupMode[] {
@@ -66,14 +70,16 @@ function promptModes(modes: readonly SetupMode[]): SetupMode[] {
   return preferredOrder.filter((mode) => modes.includes(mode));
 }
 
-async function validatedPrompt<T>(ask: Ask, question: string, validate: (value: string) => T | Promise<T>, secret = false): Promise<T> {
+async function validatedPrompt<T>(
+  locale: BotLocale, ask: Ask, question: string, validate: (value: string) => T | Promise<T>, secret = false,
+): Promise<T> {
   while (true) {
     const answer = await ask(question, secret);
     try {
       return await validate(answer);
     } catch (error: unknown) {
       if (!(error instanceof Error)) throw error;
-      console.error(color(error.message, ANSI.red));
+      console.error(color(cliErrorMessage(error, locale), ANSI.red));
     }
   }
 }
@@ -104,9 +110,10 @@ function parseNonInteractiveSetup(args: string[]): NonInteractiveSetupInput | nu
     if (argument === '--yes' || argument === '-y') continue;
     if (['--mode', '--server-url', '--token-env', '--serve-port', '--public-host', '--name', '--bot-dir'].includes(argument)) {
       const value = args[++index];
-      if (!value || value.startsWith('--')) throw new Error(`${argument} requires a value.`);
+      if (!value || value.startsWith('--')) throw new CliError(`${argument} requer um valor.`, `${argument} requires a value.`);
       if (argument === '--mode') {
-        if (value !== 'manual' && value !== 'marketplace') throw new Error('--mode must be manual or marketplace.');
+        if (value !== 'manual' && value !== 'marketplace') throw new CliError('--mode deve ser manual ou marketplace.',
+          '--mode must be manual or marketplace.');
         mode = value;
       } else if (argument === '--server-url') serverUrl = validateServerUrl(value);
       else if (argument === '--token-env') tokenEnv = validateTokenEnv(value);
@@ -116,25 +123,31 @@ function parseNonInteractiveSetup(args: string[]): NonInteractiveSetupInput | nu
       else botDir = normalizeBotDir(value);
       continue;
     }
-    throw new Error(`Unknown setup option: ${argument}`);
+    throw new CliError('Opção de setup desconhecida.', 'Unknown setup option.');
   }
   const common = { ...(botName ? { botName } : {}), ...(botDir ? { botDir } : {}) };
   if (mode === 'manual') {
-    if (servePort !== undefined || publicHost !== undefined) throw new Error('Manifest options require --mode marketplace.');
-    if (!serverUrl) throw new Error('setup --non-interactive requires --server-url <ws://...>.');
+    if (servePort !== undefined || publicHost !== undefined) throw new CliError('Opções de manifest exigem --mode marketplace.',
+      'Manifest options require --mode marketplace.');
+    if (!serverUrl) throw new CliError('setup --non-interactive requer --server-url <ws://...>.',
+      'setup --non-interactive requires --server-url <ws://...>.');
     return { ...common, mode, serverUrl, tokenEnv: tokenEnv ?? DEFAULT_TOKEN_ENV };
   }
-  if (serverUrl !== undefined || tokenEnv !== undefined) throw new Error('Server and token options require --mode manual.');
-  if (!publicHost) throw new Error('setup --non-interactive --mode marketplace requires --public-host <hostname-or-IP>.');
+  if (serverUrl !== undefined || tokenEnv !== undefined) throw new CliError('Opções de servidor e token exigem --mode manual.',
+    'Server and token options require --mode manual.');
+  if (!publicHost) throw new CliError('setup --non-interactive --mode marketplace requer --public-host <domínio-ou-IP>.',
+    'setup --non-interactive --mode marketplace requires --public-host <hostname-or-IP>.');
   return { ...common, mode, servePort: servePort ?? DEFAULT_MARKETPLACE_PORT, publicHost };
 }
 
 function setupWillOverwrite(context: CliContext, existing: BotConfig | null, assumeYes: boolean): void {
   if (!existing || assumeYes) return;
-  throw new Error(`A config already exists at ${context.configFile}. Re-run with --yes to replace it.`);
+  throw new CliError(`Já existe uma configuração em ${context.configFile}. Execute novamente com --yes para substituir.`,
+    `A config already exists at ${context.configFile}. Re-run with --yes to replace it.`);
 }
 
 export async function setupCommand(context: CliContext, args: string[]): Promise<void> {
+  const text = (pt: string, en: string): string => cliText(context.locale, pt, en);
   const existing = readConfig(context);
   const assumeYes = args.includes('--yes') || args.includes('-y');
   const nonInteractive = parseNonInteractiveSetup(args);
@@ -149,21 +162,23 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
       ? manualConfig(context, input)
       : marketplaceConfig(context, input);
     if (config.mode === 'marketplace') {
-      await assertManifestPortAvailable(config.servePort, context.cliName);
+      await assertManifestPortAvailable(config.servePort, context.cliName, undefined, context.locale);
     }
     writeConfig(context, config);
-    console.log(`Configuração salva em ${context.configFile}.`);
+    console.log(text(`Configuração salva em ${context.configFile}.`, `Configuration saved to ${context.configFile}.`));
     if (config.mode === 'manual') {
-      console.log(`Defina ${config.tokenEnv} no ambiente antes de executar ${context.cliName} start.`);
+      console.log(text(`Defina ${config.tokenEnv} no ambiente antes de executar ${context.cliName} start.`,
+        `Set ${config.tokenEnv} in the environment before running ${context.cliName} start.`));
     }
     return;
   }
 
   for (const argument of args) {
-    if (!['--yes', '-y'].includes(argument)) throw new Error(`Unknown setup option: ${argument}`);
+    if (!['--yes', '-y'].includes(argument)) throw new CliError('Opção de setup desconhecida.', 'Unknown setup option.');
   }
   if (!process.stdin.isTTY) {
-    throw new Error('Use setup --non-interactive when no interactive terminal is available.');
+    throw new CliError('Use setup --non-interactive quando não houver um terminal interativo.',
+      'Use setup --non-interactive when no interactive terminal is available.');
   }
 
   let muted = false;
@@ -178,8 +193,8 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
   rl.once('close', () => { closed = true; });
   rl.on('SIGINT', () => rl.close());
   const ask: Ask = async (question, secret = false) => {
-    if (closed) throw new Error(SETUP_CANCELLED_MESSAGE);
-    const answer = prompt(rl, question);
+    if (closed) throw new Error(text(SETUP_CANCELLED_MESSAGE, 'Setup cancelled; the configuration was not changed.'));
+    const answer = prompt(rl, question, context.locale);
     muted = secret;
     try {
       return await answer;
@@ -192,11 +207,11 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     console.log(color(`${context.displayName} — Setup`, ANSI.bold));
     console.log();
     if (existing) {
-      console.log(`Configuração atual detectada em ${context.configFile}.`);
+      console.log(text(`Configuração atual detectada em ${context.configFile}.`, `Current configuration found at ${context.configFile}.`));
       if (!assumeYes) {
-        const answer = await ask('Substituir a configuração existente? [s/N] ');
+        const answer = await ask(text('Substituir a configuração existente? [s/N] ', 'Replace the existing configuration? [y/N] '));
         if (!['s', 'sim', 'y', 'yes'].includes(answer.toLowerCase())) {
-          console.log('Setup cancelado.');
+          console.log(text('Setup cancelado.', 'Setup cancelled.'));
           return;
         }
       }
@@ -205,92 +220,99 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     const modes = promptModes(context.project.definition.modes);
     let mode = modes[0] ?? 'manual';
     if (modes.length > 1) {
-      console.log(color('Escolha o modo de operação:', ANSI.bold));
+      console.log(color(text('Escolha o modo de operação:', 'Choose the operating mode:'), ANSI.bold));
       for (const [index, available] of modes.entries()) {
-        console.log(`  ${index + 1}. ${promptModeLabel(available)}`);
+        console.log(`  ${index + 1}. ${promptModeLabel(available, context.locale)}`);
       }
       const defaultMode = existing && modes.includes(existing.mode) ? modes.indexOf(existing.mode) + 1 : 1;
-      mode = await validatedPrompt(ask, `Modo [${defaultMode}]: `, (answer) => {
+      mode = await validatedPrompt(context.locale, ask, text(`Modo [${defaultMode}]: `, `Mode [${defaultMode}]: `), (answer) => {
         const selected = Number(answer || defaultMode) - 1;
         if (!Number.isInteger(selected) || selected < 0 || selected >= modes.length) {
-          throw new Error(`Escolha um modo entre 1 e ${modes.length}.`);
+          throw new Error(text(`Escolha um modo entre 1 e ${modes.length}.`, `Choose a mode between 1 and ${modes.length}.`));
         }
         return modes[selected];
       });
     } else {
       ensureModeSupported(context, mode);
-      console.log(`Modo suportado: ${promptModeLabel(mode)}`);
+      console.log(text(`Modo suportado: ${promptModeLabel(mode, context.locale)}`, `Supported mode: ${promptModeLabel(mode, context.locale)}`));
     }
 
     const current = existing ?? (mode === 'manual' ? manualConfig(context) : marketplaceConfig(context));
-    const botDir = await validatedPrompt(ask, `Diretório de trabalho [${current.botDir}]: `,
+    const botDir = await validatedPrompt(context.locale, ask, text(`Diretório de trabalho [${current.botDir}]: `, `Working directory [${current.botDir}]: `),
       (answer) => normalizeBotDir(answer || current.botDir));
     let config: BotConfig;
     console.log();
     if (mode === 'manual') {
-      console.log(color('Modo Manual', ANSI.cyan));
-      console.log('Para obter o token:');
-      console.log('  1. No app Monky → Configurações do Servidor → Bots');
-      console.log('  2. Na seção Avançado, gere um vínculo/token');
-      console.log('  3. Copie o token exibido (só aparece uma vez!)');
+      console.log(color(text('Modo Manual', 'Manual Mode'), ANSI.cyan));
+      console.log(text('Para obter o token:', 'To get a token:'));
+      console.log(text('  1. No app Monky → Configurações do Servidor → Bots', '  1. In Monky → Server Settings → Bots'));
+      console.log(text('  2. Na seção Avançado, gere um vínculo/token', '  2. In the Advanced section, generate a link/token'));
+      console.log(text('  3. Copie o token exibido (só aparece uma vez!)', '  3. Copy the displayed token (it is shown only once!)'));
       console.log();
       const defaultUrl = current.mode === 'manual' ? current.serverUrl : DEFAULT_MANUAL_SERVER_URL;
-      const serverUrl = await validatedPrompt(ask, `URL do servidor [${defaultUrl}]: `,
+      const serverUrl = await validatedPrompt(context.locale, ask, text(`URL do servidor [${defaultUrl}]: `, `Server URL [${defaultUrl}]: `),
         (answer) => validateServerUrl(answer || defaultUrl));
       const tokenHint = existing?.mode === 'manual'
-        ? existing.botToken === undefined ? ` [Enter mantém ${existing.tokenEnv}]` : ' [Enter mantém o atual]'
+        ? existing.botToken === undefined
+          ? text(` [Enter mantém ${existing.tokenEnv}]`, ` [Enter keeps ${existing.tokenEnv}]`)
+          : text(' [Enter mantém o atual]', ' [Enter keeps the current token]')
         : '';
-      const credentials = await validatedPrompt(ask, `Token do bot${tokenHint}: `, (answer): ManualBotCredentials => {
+      const credentials = await validatedPrompt(context.locale, ask, text(`Token do bot${tokenHint}: `, `Bot token${tokenHint}: `), (answer): ManualBotCredentials => {
         if (answer) return { botToken: validateBotToken(answer) };
         if (existing?.mode === 'manual') {
           return existing.botToken === undefined
             ? { tokenEnv: existing.tokenEnv }
             : { botToken: existing.botToken };
         }
-        throw new Error('Token é obrigatório no modo manual.');
+        throw new Error(text('Token é obrigatório no modo manual.', 'A token is required in manual mode.'));
       }, true);
       config = manualConfig(context, { botDir, botName: current.botName, serverUrl, ...credentials });
     } else {
-      console.log(color('Modo Marketplace', ANSI.cyan));
-      console.log('Qualquer servidor Monky poderá instalar o bot via URL.');
-      console.log('O host e a porta do manifest precisam ser acessíveis pelos servidores que vão instalar o bot.');
+      console.log(color(text('Modo Marketplace', 'Marketplace Mode'), ANSI.cyan));
+      console.log(text('Qualquer servidor Monky poderá instalar o bot via URL.', 'Any Monky server can install the bot by URL.'));
+      console.log(text('O host e a porta do manifest precisam ser acessíveis pelos servidores que vão instalar o bot.',
+        'The manifest host and port must be reachable by the servers that will install the bot.'));
       console.log();
       const defaultPort = current.mode === 'marketplace' ? current.servePort : DEFAULT_MARKETPLACE_PORT;
-      const servePort = await validatedPrompt(ask, `Porta do manifest [${defaultPort}]: `,
+      const servePort = await validatedPrompt(context.locale, ask, text(`Porta do manifest [${defaultPort}]: `, `Manifest port [${defaultPort}]: `),
         async (answer) => {
           const port = validateServePort(answer || String(defaultPort));
-          await assertManifestPortAvailable(port, context.cliName);
+          await assertManifestPortAvailable(port, context.cliName, undefined, context.locale);
           return port;
         });
       const detectedIp = localIpv4();
-      console.log(`Informe o IP ou domínio público desta máquina.${detectedIp ? ` (IP local detectado: ${detectedIp})` : ''}`);
+      console.log(text(`Informe o IP ou domínio público desta máquina.${detectedIp ? ` (IP local detectado: ${detectedIp})` : ''}`,
+        `Enter this machine's public IP or domain.${detectedIp ? ` (Detected local IP: ${detectedIp})` : ''}`));
       const defaultHost = existing?.mode === 'marketplace' ? existing.publicHost : '';
-      const publicHost = await validatedPrompt(ask, `Host público${defaultHost ? ` [${defaultHost}]` : ''}: `,
+      const publicHost = await validatedPrompt(context.locale, ask, text(`Host público${defaultHost ? ` [${defaultHost}]` : ''}: `,
+        `Public host${defaultHost ? ` [${defaultHost}]` : ''}: `),
         (answer) => validatePublicHost(answer || defaultHost));
       if (['localhost', '127.0.0.1', '::1', '[::1]'].includes(publicHost.toLowerCase())) {
-        console.log(color('Host local: somente servidores na mesma máquina conseguirão acessar.', ANSI.yellow));
+        console.log(color(text('Host local: somente servidores na mesma máquina conseguirão acessar.',
+          'Local host: only servers on this machine will be able to connect.'), ANSI.yellow));
       }
       config = marketplaceConfig(context, { botDir, botName: current.botName, servePort, publicHost });
     }
-    config = { ...config, botName: await validatedPrompt(ask, `Nome do bot [${current.botName}]: `,
+    config = { ...config, botName: await validatedPrompt(context.locale, ask, text(`Nome do bot [${current.botName}]: `, `Bot name [${current.botName}]: `),
       (answer) => validateBotName(answer || current.botName)) };
 
     if (config.mode === 'marketplace') {
-      await assertManifestPortAvailable(config.servePort, context.cliName);
+      await assertManifestPortAvailable(config.servePort, context.cliName, undefined, context.locale);
     }
-    if (closed) throw new Error(SETUP_CANCELLED_MESSAGE);
+    if (closed) throw new Error(text(SETUP_CANCELLED_MESSAGE, 'Setup cancelled; the configuration was not changed.'));
     writeConfig(context, config);
     console.log();
-    console.log(color('Configuração salva!', ANSI.green));
-    console.log(`Configuração salva em ${context.configFile}.`);
+    console.log(color(text('Configuração salva!', 'Configuration saved!'), ANSI.green));
+    console.log(text(`Configuração salva em ${context.configFile}.`, `Configuration saved to ${context.configFile}.`));
     if (config.mode === 'manual' && config.botToken === undefined) {
-      console.log(`Defina ${config.tokenEnv} no ambiente antes de executar ${context.cliName} start.`);
+      console.log(text(`Defina ${config.tokenEnv} no ambiente antes de executar ${context.cliName} start.`,
+        `Set ${config.tokenEnv} in the environment before running ${context.cliName} start.`));
     }
     console.log();
-    console.log(color('Próximos passos:', ANSI.bold));
-    console.log(`  ${context.cliName} start    — Inicia o bot em background`);
-    console.log(`  ${context.cliName} status   — Verifica o estado`);
-    console.log(`  ${context.cliName} logs     — Exibe os logs`);
+    console.log(color(text('Próximos passos:', 'Next steps:'), ANSI.bold));
+    console.log(text(`  ${context.cliName} start    — Inicia o bot em background`, `  ${context.cliName} start    — Start the bot in the background`));
+    console.log(text(`  ${context.cliName} status   — Verifica o estado`, `  ${context.cliName} status   — Check the status`));
+    console.log(text(`  ${context.cliName} logs     — Exibe os logs`, `  ${context.cliName} logs     — Show the logs`));
   } finally {
     rl.close();
     output.end();

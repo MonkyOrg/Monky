@@ -164,7 +164,7 @@ export async function askChoice(question: string, choices: string[]): Promise<st
 }
 
 export async function confirm(question: string, defaultYes: boolean = true): Promise<boolean> {
-  const suffix = defaultYes ? ' (S/n)' : ' (s/N)';
+  const suffix = ` ${t(defaultYes ? 'prompt.confirmDefaultYes' : 'prompt.confirmDefaultNo')}`;
   while (true) {
     const answer = (await ask(`${question}${suffix}`)).trim().toLowerCase();
     if (!answer) return defaultYes;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { BotCommandMessagePayload, SlashCommand, UserSummary } from '@monky/shared';
+import { localizeCommand, type BotCommandMessagePayload, type SlashCommand, type UserSummary } from '@monky/shared';
 import { createChatStore } from '../src/renderer/stores/chatStore';
 import { createServerStore, setActiveServerStore } from '../src/renderer/stores/serverStore';
 import { EventBus } from '../src/renderer/core/EventBus';
@@ -46,6 +46,62 @@ const member: UserSummary = {
   id: 'member-one', clientId: 'member-client', nickname: 'Alice', status: 'ONLINE', joinedAt: 1,
   avatarUrl: 'http://127.0.0.1:9900/avatars/alice.png',
 };
+
+test('per-bot command metadata is localized for display without translating submitted identifiers', () => {
+  const localized: SlashCommand = {
+    ...command,
+    localizations: { 'pt-BR': {
+      description: 'Escolha a música',
+      options: {
+        song: { label: 'Música', description: 'Título da música', placeholder: 'Digite o título' },
+        mode: { label: 'Modo', choices: { shuffle: { label: 'Aleatório' } } },
+      },
+    } },
+  };
+  const original = structuredClone(localized);
+  const catalog = renderCommandCatalog(groupCommands([localized, { ...localized, botId: 'english-bot' }], [], 'pt-BR', false), 0,
+    () => undefined, (entry) => entry.botId === localized.botId ? 'pt-BR' : 'en');
+  assert.ok(catalog.includes('Escolha a música'));
+  assert.ok(catalog.includes('Choose what to play'));
+  assert.ok(catalog.includes('/play'));
+  assert.ok(catalog.includes('Música'));
+  const store = createChatStore();
+  store.selectCommand('channel', localized);
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  const translated = localizeCommand(draft.command, 'pt-BR');
+  const markup = renderCompactCommand({ ...draft, command: translated }, 'channel', [member], true, true);
+  assert.match(markup, /data-field-name="song"/);
+  assert.match(markup, /name="song"/);
+  assert.ok(markup.includes('>Música</label>'));
+  assert.ok(markup.includes('placeholder="Digite o título"'));
+  const choices = commandInputFields(translated).find((field) => field.name === 'mode');
+  assert.ok(choices);
+  assert.deepEqual(commandParameterChoices(choices, [member]).map(({ value, label }) => ({ value, label })), [
+    { value: 'ordered', label: 'In order' }, { value: 'shuffle', label: 'Aleatório' },
+  ]);
+  assert.deepEqual(commandValuesFromInputs(translated, { song: 'Private song', count: 1, mode: 'shuffle' }, [member]),
+    { success: true, values: { song: 'Private song', count: 1, mode: 'shuffle' } });
+  assert.deepEqual(localized, original);
+  assert.deepEqual(draft.command, original);
+});
+
+test('legacy command options keep compact identifier labels when no display label is declared', () => {
+  const store = createChatStore();
+  const legacy: SlashCommand = {
+    ...command,
+    options: [{ name: 'song', description: 'Search for a song using its title or URL.', type: 'string', required: true }],
+    localizations: { 'pt-BR': { options: { song: { description: 'Pesquise uma música pelo título ou URL.' } } } },
+  };
+  store.selectCommand('channel', legacy);
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  const markup = renderCompactCommand({ ...draft, command: localizeCommand(legacy, 'pt-BR') }, 'channel', [member], true, true);
+  assert.ok(markup.includes('>song</label>'));
+  assert.match(markup, /aria-label="song: Pesquise uma música/);
+  assert.ok(markup.includes('Pesquise uma música pelo título ou URL.'));
+  assert.ok(!markup.includes('>Pesquise uma música pelo título ou URL.</label>'));
+});
 
 test('voice denial explains catalog and composer gating without disabling editing or unrelated commands', () => {
   const store = createChatStore();

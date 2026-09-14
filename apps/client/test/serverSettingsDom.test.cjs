@@ -445,6 +445,18 @@ async function runRegression(language) {
   check(field('.bot-list-item[data-bot-id="bot-a"]').textContent.includes('Helper') &&
     !field('.bot-list-item[data-bot-id="bot-a"]').textContent.includes(t('bots.pendingIdentity')),
   'Existing offline bots keep their published read-only identity');
+  bots = [botInfo({ requiredProtocolVersion: 16, lastProtocolVersion: 15 })];
+  appEvents.emit('server.members_updated');
+  await settle(() => document.querySelector('.bot-compatibility-warning')?.textContent ===
+    t('bots.compatibilityMismatch', { previous: 15, protocol: 16 }), 'Incompatible bot SDK warning did not appear');
+  check(field('.bot-compatibility-warning').getAttribute('role') === 'status', 'Persistent compatibility warning is accessible');
+  bots = [botInfo({ requiredProtocolVersion: 16, lastProtocolVersion: null })];
+  appEvents.emit('server.members_updated');
+  await settle(() => document.querySelector('.bot-compatibility-warning')?.textContent ===
+    t('bots.compatibilityUnchecked', { protocol: 16 }), 'Legacy bot compatibility must remain explicitly unchecked');
+  bots = [botInfo({ requiredProtocolVersion: 16, lastProtocolVersion: 16 })];
+  appEvents.emit('server.members_updated');
+  await settle(() => !document.querySelector('.bot-compatibility-warning'), 'Warning did not clear after verified compatible connection');
   check(field('#manual-bot-link-panel').hidden && field('#btn-toggle-manual-link').getAttribute('aria-expanded') === 'false',
     'Manual link starts collapsed behind an advanced disclosure');
   check(!document.querySelector('#bot-name-input, #bot-profile-editor, #bot-profile-name, [data-bot-edit], [data-photo-target], [data-photo-remove]'),

@@ -1,9 +1,9 @@
 import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, hasEveryoneMention } from '@monky/shared';
-import type { AttachmentMeta, MessageReply, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
+import type { AttachmentMeta, ChatMessageUpdatedPayload, MessageReply, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
 import { networkClient, getActiveNetworkClient } from '../core/NetworkClient';
-import { chatStore, getActiveChatStore, type BotInvocation } from '../stores/chatStore';
+import { chatStore, getActiveChatStore, type BotInvocation, type MessageEditDraft } from '../stores/chatStore';
 import { serverStore, getActiveServerStore } from '../stores/serverStore';
 import { participantManager } from '../core/ParticipantManager';
 import { userContextMenu } from './UserContextMenu';
@@ -32,6 +32,7 @@ import { renderBotCommandContext } from './botResponse';
 import { PublicSelectorView } from './PublicSelectorView';
 import { botSettingsMenuItem } from './BotSettingsModal';
 import { commandVoiceError } from '../utils/botVoice';
+import { botLocaleFor } from '../utils/botLocale';
 import { translateProtocolError } from '../i18n/protocolErrors';
 
 /** How close to the end the feed must be to keep following new messages (#270). */
@@ -58,7 +59,12 @@ type MentionCandidate =
 
 export class ChatView {
   private container: HTMLElement;
+  private readonly store = getActiveChatStore();
+  private readonly client = getActiveNetworkClient();
+  private readonly server = getActiveServerStore();
   private currentChannelId: string | null = null;
+  private composerInput: HTMLTextAreaElement | null = null;
+  private composerChannelId: string | null = null;
   private unbindEvents: Array<() => void> = [];
   /** Tracks whether the feed is following the end of the conversation (#270). */
   private pinnedToBottom = true;
@@ -80,8 +86,6 @@ export class ChatView {
   private voiceNoticeCommand: SlashCommand | null = null;
   // Files picked for the next message, keyed by a local id (#11).
   private pending: PendingAttachment[] = [];
-  /** Message currently open in the inline editor, if any (#504). */
-  private editingMessageId: string | null = null;
   private uploadSeq = 0;
   /** Emoji/sticker popover anchored to the composer (#356). */
   private emojiPicker: EmojiPicker | null = null;
@@ -95,7 +99,8 @@ export class ChatView {
   }
 
   public setChannel(channelId: string): void {
-    if (this.currentChannelId === channelId && this.container.querySelector('#chat-messages-feed')) {
+    if (!this.isCurrentSession()) return;
+    if (this.currentChannelId === channelId && this.composerInput && this.container.querySelector('#chat-messages-feed')) {
       // Channel is already active and rendered; keep existing DOM and media state
       this.focusChatInput({ defer: true });
       return;
@@ -119,7 +124,8 @@ export class ChatView {
   public render(): void {
     this.unbindListeners();
 
-    if (!this.currentChannelId || !serverStore.serverDetails) {
+    const serverDetails = this.server.serverDetails;
+    if (!this.isCurrentSession() || !this.currentChannelId || !serverDetails) {
       this.container.innerHTML = `
         <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted);">
           ${t('chat.selectChannel')}
@@ -128,7 +134,14 @@ export class ChatView {
       return;
     }
 
-    const channel = serverStore.serverDetails.channels.find((c) => c.id === this.currentChannelId);
+    if (this.server.currentUser) {
+      this.store.setComposerScope({
+        sessionKey: this.client.sessionKey || this.client.getCurrentServerUrl(),
+        serverId: serverDetails.id,
+        userId: this.server.currentUser.id,
+      });
+    }
+    const channel = serverDetails.channels.find((c) => c.id === this.currentChannelId);
     const channelName = channel ? channel.name : 'geral';
 
     const markup = `
@@ -152,6 +165,15 @@ export class ChatView {
         <button type="button" id="chat-return-latest" class="btn btn-secondary" hidden>${t('chat.returnLatest')}</button>
 
         <div class="chat-input-container">
+          <div id="chat-edit-composer" class="chat-edit-composer" hidden>
+            <div class="chat-edit-heading">
+              <span class="material-symbols-outlined md-18" aria-hidden="true">edit</span>
+              <strong id="chat-edit-label" role="status">${t('chat.editingMessage')}</strong>
+              <button type="button" id="btn-cancel-message-edit" class="btn btn-secondary">${t('common.cancel')}</button>
+            </div>
+            <p id="chat-edit-hint">${t('chat.editComposerHint')}</p>
+            <p id="chat-edit-error" class="chat-edit-error" role="alert" hidden></p>
+          </div>
           <div id="chat-reply-composer" class="chat-reply-composer" hidden></div>
           <div id="mention-dropup" class="mention-dropup" style="display: none;"></div>
           <div id="command-dropup" class="command-dropup" style="display: none;"></div>
@@ -173,9 +195,9 @@ export class ChatView {
             </button>
             <textarea id="chat-message-input" class="chat-input-field" rows="1" placeholder="${t('chat.inputPlaceholder', { channel: escapeHtml(channelName) })}" maxlength="${LIMITS.MAX_MESSAGE_LENGTH}"></textarea>
             <span id="chat-char-counter" class="chat-char-count">0/${LIMITS.MAX_MESSAGE_LENGTH}</span>
-            <button id="btn-send-message" class="btn btn-primary chat-send-btn">
-              <span class="material-symbols-outlined md-16">send</span>
-              ${t('chat.send')}
+            <button type="button" id="btn-send-message" class="btn btn-primary chat-send-btn">
+              <span class="material-symbols-outlined md-16" aria-hidden="true">send</span>
+              <span class="chat-send-label">${t('chat.send')}</span>
             </button>
           </div>
         </div>
@@ -205,9 +227,6 @@ export class ChatView {
     // Read before the feed is replaced: new messages only pull the view down when
     // the user is already reading the end of the conversation (#270).
     const shouldScroll = options.forceScroll === true || this.isFeedAtBottom(feed);
-
-    // The feed is rebuilt from scratch, so any open inline editor goes with it.
-    this.editingMessageId = null;
 
     const messages = chatStore.getMessages(this.currentChannelId);
     if (messages.length === 0 && chatStore.getInvocations(this.currentChannelId).length === 0) {
@@ -437,7 +456,8 @@ export class ChatView {
         onClick: () => this.container.querySelector<HTMLButtonElement>(
           `.chat-message-row[data-message-id="${CSS.escape(message.id)}"] .chat-reaction-add`
         )?.click(),
-      }, { label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(message.id) });
+      });
+      if (!this.messageEdit) items.push({ label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(message.id) });
     }
     items.push({ label: t('chat.copyMessage'), icon: 'content_copy', onClick: () => { void this.copyMessage(message.id); } });
     if (isAuthor && editingAllowed) {
@@ -458,102 +478,127 @@ export class ChatView {
     return items;
   }
 
-  /** Swaps a message's text for an inline editor (#504). */
+  /** Edit text and the new-message draft occupy separate, session-owned slots. */
   private startEditingMessage(messageId: string): void {
-    if (!this.currentChannelId) return;
-    const row = document.querySelector<HTMLElement>(
-      `#chat-messages-feed .chat-message-row[data-message-id="${CSS.escape(messageId)}"]`
-    );
-    const message = chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId);
-    if (!row || !message) return;
+    if (!this.isCurrentComposer() || !this.currentChannelId) return;
+    const message = this.store.getMessages(this.currentChannelId).find((entry) => entry.id === messageId);
+    if (!message || message.isSystem || message.isEphemeral || message.deletedAt ||
+        message.userId !== this.server.currentUser?.id || this.server.serverDetails?.allowMessageEdit === false) return;
+    this.rememberComposerText();
+    const previous = this.store.getMessageEdit(this.currentChannelId);
+    if (previous) {
+      if (previous.message.id !== messageId && !previous.pending) {
+        this.store.setMessageEditPending(this.currentChannelId, previous, false, 'in-progress');
+      }
+      this.focusChatInput();
+      return;
+    }
+    this.store.beginMessageEdit(message);
+    this.focusChatInput();
+  }
 
-    // Only one editor at a time, otherwise leaving one open and starting
-    // another would strand the first without a way back.
-    this.cancelMessageEdit();
+  private async submitMessageEdit(): Promise<void> {
+    if (!this.isCurrentComposer() || !this.currentChannelId || !this.composerInput) return;
+    const channelId = this.currentChannelId;
+    const edit = this.store.getMessageEdit(channelId);
+    if (!edit || edit.pending) return;
+    this.rememberComposerText();
+    if (this.messageEditDeniedReason(edit)) {
+      this.syncComposerPermissionState();
+      return;
+    }
+    const content = edit.content.trim();
+    if (!content && !edit.message.attachments?.length) {
+      this.store.setMessageEditPending(channelId, edit, false, 'empty');
+      return;
+    }
+    if (content.length > LIMITS.MAX_MESSAGE_LENGTH) {
+      this.store.setMessageEditPending(channelId, edit, false, 'too-long');
+      return;
+    }
+    if (edit.content === edit.message.content || content === edit.message.content) {
+      this.cancelMessageEdit();
+      return;
+    }
 
-    const body = row.querySelector('.chat-message-body');
-    const textEl = row.querySelector<HTMLElement>('.chat-message-text');
-    if (!body) return;
-
-    const editor = document.createElement('div');
-    editor.className = 'chat-message-editor';
-    editor.innerHTML = `
-      <textarea class="chat-message-edit-input" rows="1">${escapeHtml(message.content)}</textarea>
-      <div class="chat-message-edit-hint">${t('chat.editHint')}</div>
-    `;
-
-    if (textEl) textEl.style.display = 'none';
-    body.insertBefore(editor, textEl ? textEl.nextSibling : null);
-    this.editingMessageId = messageId;
-
-    const input = editor.querySelector('textarea') as HTMLTextAreaElement;
-    const autoGrow = () => {
-      input.style.height = 'auto';
-      input.style.height = `${input.scrollHeight}px`;
-    };
-    autoGrow();
-    input.focus();
-    input.setSelectionRange(input.value.length, input.value.length);
-
-    input.addEventListener('input', autoGrow);
-    input.addEventListener('keydown', (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        this.cancelMessageEdit();
+    const { store, client, server } = this;
+    const connectionId = client.getConnectionId();
+    const serverId = server.serverDetails?.id;
+    store.setMessageEditPending(channelId, edit, true);
+    try {
+      const result = await client.sendRequest<ChatMessageUpdatedPayload>(MessageType.CHAT_EDIT, {
+        channelId,
+        messageId: edit.message.id,
+        content,
+      });
+      if (store.getMessageEdit(channelId) !== edit) return;
+      if (client.getConnectionId() !== connectionId || client.getStatus() !== 'CONNECTED' ||
+          server.serverDetails?.id !== serverId || server.currentUser?.id !== edit.message.userId ||
+          result.message.id !== edit.message.id || result.message.channelId !== channelId ||
+          result.message.userId !== edit.message.userId || result.message.deletedAt || edit.message.deletedAt ||
+          result.message.content !== content) {
+        store.setMessageEditPending(channelId, edit, false, 'failed');
         return;
       }
-      // Shift+Enter keeps inserting line breaks, same as the composer.
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        this.submitMessageEdit(messageId, input.value);
-      }
-    });
+      const refocus = this.isCurrentComposer() && this.currentChannelId === channelId &&
+        (document.activeElement === this.composerInput ||
+          document.activeElement === this.container.querySelector('#btn-send-message'));
+      store.updateMessage(result.message);
+      store.finishMessageEdit(channelId, edit);
+      if (refocus && this.isCurrentComposer() && this.currentChannelId === channelId) this.focusChatInput();
+    } catch {
+      store.setMessageEditPending(channelId, edit, false, 'failed');
+    }
   }
 
-  private submitMessageEdit(messageId: string, content: string): void {
-    const trimmed = content.trim();
-    const original = this.currentChannelId
-      ? chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId)
-      : undefined;
-
-    // An empty edit is a deletion in disguise; asking for it explicitly keeps
-    // the two actions distinguishable in the UI (#504).
-    if (trimmed.length === 0) {
-      this.cancelMessageEdit();
-      void this.confirmDeleteMessage(messageId);
-      return;
-    }
-
-    if (!original || trimmed === original.content) {
-      this.cancelMessageEdit();
-      return;
-    }
-
-    networkClient.send(MessageType.CHAT_EDIT, {
-      channelId: original.channelId,
-      messageId,
-      content: trimmed,
-    });
-    this.cancelMessageEdit();
-  }
-
-  /** Closes the inline editor and puts the original text back on screen. */
   private cancelMessageEdit(): void {
-    if (!this.editingMessageId) return;
-    const row = document.querySelector<HTMLElement>(
-      `#chat-messages-feed .chat-message-row[data-message-id="${CSS.escape(this.editingMessageId)}"]`
-    );
-    this.editingMessageId = null;
-    if (!row) return;
-    row.querySelector('.chat-message-editor')?.remove();
-    const textEl = row.querySelector<HTMLElement>('.chat-message-text');
-    if (textEl) textEl.style.display = '';
+    if (!this.isCurrentComposer() || !this.currentChannelId) return;
+    const edit = this.store.getMessageEdit(this.currentChannelId);
+    if (!edit || edit.pending) return;
+    this.store.finishMessageEdit(this.currentChannelId, edit);
+    this.focusChatInput();
+  }
+
+  private isCurrentSession(): boolean {
+    return getActiveChatStore() === this.store && getActiveNetworkClient() === this.client &&
+      getActiveServerStore() === this.server;
+  }
+
+  private isCurrentComposer(): boolean {
+    return this.isCurrentSession() && !!this.composerInput?.isConnected &&
+      this.composerChannelId === this.currentChannelId;
+  }
+
+  private rememberComposerText(): void {
+    const channelId = this.composerChannelId;
+    if (!channelId || !this.composerInput) return;
+    if (this.store.getMessageEdit(channelId)) this.store.setMessageEditContent(channelId, this.composerInput.value);
+    else this.store.setDraft(channelId, this.composerInput.value);
+  }
+
+  private messageEditDeniedReason(edit: MessageEditDraft): string | undefined {
+    if (this.client.getStatus() !== 'CONNECTED') return t('chat.editDisconnected');
+    const message = edit.message;
+    if (message.deletedAt || message.isSystem || message.isEphemeral ||
+        !this.server.serverDetails?.channels.some((channel) => channel.id === message.channelId && channel.type === 'TEXT')) {
+      return t('chat.editUnavailable');
+    }
+    if (message.userId !== this.server.currentUser?.id || this.server.serverDetails.allowMessageEdit === false) {
+      return t('chat.editPermissionDenied');
+    }
+    return;
+  }
+
+  private get messageEdit(): MessageEditDraft | undefined {
+    return this.currentChannelId ? this.store.getMessageEdit(this.currentChannelId) : undefined;
   }
 
   private async confirmDeleteMessage(messageId: string): Promise<void> {
-    if (!this.currentChannelId) return;
-    const message = chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId);
+    if (!this.isCurrentComposer() || !this.currentChannelId) return;
+    const message = this.store.getMessages(this.currentChannelId).find((m) => m.id === messageId);
     if (!message) return;
+    const channelId = this.currentChannelId;
+    const connectionId = this.client.getConnectionId();
 
     const confirmed = await showConfirm({
       title: t('chat.deleteMessageTitle'),
@@ -561,9 +606,10 @@ export class ChatView {
       confirmLabel: t('chat.deleteMessage'),
       variant: 'danger',
     });
-    if (!confirmed) return;
+    if (!confirmed || !this.isCurrentComposer() || this.currentChannelId !== channelId ||
+        this.client.getConnectionId() !== connectionId || this.client.getStatus() !== 'CONNECTED') return;
 
-    networkClient.send(MessageType.CHAT_DELETE, {
+    this.client.send(MessageType.CHAT_DELETE, {
       channelId: message.channelId,
       messageId,
     });
@@ -577,8 +623,6 @@ export class ChatView {
       `.chat-message-row[data-message-id="${CSS.escape(msg.id)}"]`
     );
     if (!row) return;
-
-    if (this.editingMessageId === msg.id) this.cancelMessageEdit();
 
     const wrapper = document.createElement('div');
     wrapper.innerHTML = this.renderMessageRow(msg);
@@ -660,7 +704,8 @@ export class ChatView {
 
   private focusChatInput(options?: { defer?: boolean }): void {
     const applyFocus = () => {
-      if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+      if (!this.isCurrentComposer()) return;
+      if (!this.messageEdit && this.currentChannelId && this.store.getCommandDraft(this.currentChannelId)) {
         this.botChat?.focusComposer();
         return;
       }
@@ -684,6 +729,7 @@ export class ChatView {
   }
 
   private syncComposerPermissionState(): void {
+    if (!this.isCurrentComposer()) return;
     const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
     const inputWrapper = this.container.querySelector('.chat-input-wrapper') as HTMLElement | null;
     const permissionBanner = this.container.querySelector('#chat-send-permission-banner') as HTMLElement | null;
@@ -693,25 +739,51 @@ export class ChatView {
     const btnCode = this.container.querySelector('#btn-code') as HTMLButtonElement | null;
     if (!input || !inputWrapper) return;
 
+    const edit = this.messageEdit;
+    const editError = edit ? this.messageEditDeniedReason(edit) ??
+      (edit.error === 'failed' ? t('chat.editSaveFailed') :
+        edit.error === 'empty' ? t('chat.editEmpty') :
+          edit.error === 'too-long' ? t('chat.editTooLong', { max: LIMITS.MAX_MESSAGE_LENGTH }) :
+            edit.error === 'in-progress' ? t('chat.editInProgress') : '') : '';
+    const editBanner = this.container.querySelector<HTMLElement>('#chat-edit-composer');
+    if (editBanner) editBanner.hidden = !edit;
+    const editErrorEl = this.container.querySelector<HTMLElement>('#chat-edit-error');
+    if (editErrorEl) {
+      editErrorEl.hidden = !editError;
+      if (editErrorEl.textContent !== editError) editErrorEl.textContent = editError;
+    }
+    const cancelEdit = this.container.querySelector<HTMLButtonElement>('#btn-cancel-message-edit');
+    if (cancelEdit) cancelEdit.disabled = !!edit?.pending;
+    this.container.querySelector('.chat-input-container')?.classList.toggle('chat-input-container--editing', !!edit);
+
     const channelName = serverStore.serverDetails?.channels.find((c) => c.id === this.currentChannelId)?.name || 'geral';
     const permissionsResolved = this.arePermissionsResolved();
     const canSendMessages = !permissionsResolved || serverStore.hasPermission(Permission.SEND_MESSAGES);
     this.container.querySelectorAll<HTMLButtonElement>('.chat-reaction, .chat-reaction-add, [data-message-action="reply"]').forEach((button) => {
-      button.disabled = !canSendMessages;
+      button.disabled = !canSendMessages || (!!edit && button.dataset.messageAction === 'reply');
     });
     if (!canSendMessages) { this.reactionPicker?.destroy(); this.reactionPicker = null; }
     const canAttachFiles = canSendMessages && (!permissionsResolved || serverStore.hasPermission(Permission.ATTACH_FILES));
-    const locked = permissionsResolved && !canSendMessages;
+    const locked = !edit && permissionsResolved && !canSendMessages;
+    const readOnly = locked || !!edit?.pending;
     const commandSelected = !!this.currentChannelId && !!chatStore.getCommandDraft(this.currentChannelId);
-    inputWrapper.style.display = commandSelected ? 'none' : '';
+    inputWrapper.style.display = commandSelected && !edit ? 'none' : '';
+    const commandComposer = this.container.querySelector<HTMLElement>('#chat-command-composer');
+    if (commandComposer) {
+      commandComposer.hidden = !!edit || !commandSelected;
+      commandComposer.inert = !!edit;
+    }
 
-    input.readOnly = locked;
+    input.readOnly = readOnly;
     input.placeholder = locked
       ? t('chat.sendPermissionDenied')
-      : t('chat.inputPlaceholder', { channel: escapeHtml(channelName) });
-    input.setAttribute('aria-readonly', locked ? 'true' : 'false');
-    inputWrapper.classList.toggle('chat-input-wrapper--disabled', locked);
-    input.classList.toggle('chat-input-field--readonly', locked);
+      : edit ? t('chat.editingMessage') : t('chat.inputPlaceholder', { channel: channelName });
+    input.setAttribute('aria-label', input.placeholder);
+    input.setAttribute('aria-readonly', String(readOnly));
+    if (edit) input.setAttribute('aria-describedby', 'chat-edit-hint chat-edit-error');
+    else input.removeAttribute('aria-describedby');
+    inputWrapper.classList.toggle('chat-input-wrapper--disabled', readOnly);
+    input.classList.toggle('chat-input-field--readonly', readOnly);
 
     if (permissionBanner) {
       permissionBanner.textContent = locked ? t('chat.sendPermissionDenied') : '';
@@ -720,33 +792,45 @@ export class ChatView {
 
     if (btnSend) {
       btnSend.hidden = locked;
-      btnSend.disabled = locked || this.pending.some((p) => p.status === 'uploading');
+      btnSend.disabled = edit ? edit.pending || !!this.messageEditDeniedReason(edit) :
+        locked || this.pending.some((p) => p.status === 'uploading');
+      btnSend.setAttribute('aria-busy', String(!!edit?.pending));
+      const label = btnSend.querySelector('.chat-send-label');
+      const text = t(edit?.pending ? 'chat.editSaving' : edit ? 'common.save' : 'chat.send');
+      if (label && label.textContent !== text) label.textContent = text;
+      const icon = btnSend.querySelector('.material-symbols-outlined');
+      if (icon) icon.textContent = edit?.pending ? 'hourglass_empty' : edit ? 'check' : 'send';
+      btnSend.style.opacity = '';
+      btnSend.style.cursor = '';
     }
 
     if (btnAttach) {
-      btnAttach.disabled = !canAttachFiles;
+      btnAttach.style.display = edit ? 'none' : '';
+      btnAttach.disabled = !!edit || !canAttachFiles;
       btnAttach.setAttribute('aria-disabled', btnAttach.disabled ? 'true' : 'false');
     }
 
     if (btnEmoji) {
       // Emojis only need permission to talk; the sticker upload additionally
       // checks ATTACH_FILES when it is actually sent.
-      btnEmoji.disabled = locked;
+      btnEmoji.disabled = readOnly;
       btnEmoji.setAttribute('aria-disabled', btnEmoji.disabled ? 'true' : 'false');
     }
 
     if (btnCode) {
-      btnCode.disabled = locked;
+      btnCode.style.display = edit ? 'none' : '';
+      btnCode.disabled = !!edit || locked;
       btnCode.setAttribute('aria-disabled', btnCode.disabled ? 'true' : 'false');
     }
 
-    if (locked) {
+    if (readOnly) {
       this.closeMentionDropup();
       this.closeCommandDropup();
       this.emojiPicker?.close();
     } else if (this.commandActive) {
       this.updateCommandDropup(input);
     }
+    if (edit) this.closeCommandDropup();
   }
 
   private isEditableTarget(target: EventTarget | null): boolean {
@@ -924,7 +1008,7 @@ export class ChatView {
   }
 
   private startReply(messageId: string): void {
-    if (!this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+    if (!this.isCurrentComposer() || this.messageEdit || !this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
     const message = chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === messageId);
     if (!message || message.deletedAt || message.isSystem || message.isEphemeral) return;
     chatStore.setReplyDraft(this.currentChannelId, message);
@@ -936,7 +1020,7 @@ export class ChatView {
     const el = this.container.querySelector<HTMLElement>('#chat-reply-composer');
     if (!el) return;
     const reply = this.currentChannelId ? chatStore.getReplyDraft(this.currentChannelId) : undefined;
-    el.hidden = !reply;
+    el.hidden = !!this.messageEdit || !reply;
     el.innerHTML = reply ? `<span>${escapeHtml(reply.deleted ? t('chat.messageDeleted') : t('chat.replyingTo', { user: reply.userNickname }))}: ${escapeHtml(this.replyPreview(reply))}</span>
       <button type="button" aria-label="${t('chat.cancelReply')}" title="${t('chat.cancelReply')}"><span class="material-symbols-outlined md-18" aria-hidden="true">close</span></button>` : '';
     el.querySelector('button')?.addEventListener('click', () => {
@@ -946,6 +1030,7 @@ export class ChatView {
   }
 
   private clearReply(): void {
+    if (this.messageEdit) return;
     if (this.currentChannelId) chatStore.setReplyDraft(this.currentChannelId);
     this.renderReplyComposer();
   }
@@ -1278,6 +1363,13 @@ export class ChatView {
     const inputWrapper = this.container.querySelector('.chat-input-wrapper') as HTMLElement | null;
     const charCounter = document.getElementById('chat-char-counter');
     const btnSend = document.getElementById('btn-send-message');
+    this.composerInput = input;
+    this.composerChannelId = this.currentChannelId;
+    const isCurrentInput = () => input === this.composerInput && this.isCurrentComposer();
+    let displayedEdit = this.messageEdit;
+    let displayedEditPending = displayedEdit?.pending;
+    let displayedEditError = displayedEdit?.error;
+    let displayedEditMessage = displayedEdit?.message;
 
     const messagesFeed = this.container.querySelector('#chat-messages-feed') as HTMLElement | null;
     const commandDropup = this.container.querySelector<HTMLElement>('#command-dropup');
@@ -1324,7 +1416,7 @@ export class ChatView {
 
     const updateComposeLinkPreview = () => {
       if (!input || !composeLinkPreviewEl || !input.isConnected) return;
-      if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+      if (!this.messageEdit && this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
         composeLinkPreviewEl.style.display = 'none';
         return;
       }
@@ -1377,6 +1469,7 @@ export class ChatView {
     };
 
     input?.addEventListener('input', () => {
+      if (!isCurrentInput()) return;
       if (charCounter) {
         charCounter.innerText = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
       }
@@ -1404,7 +1497,7 @@ export class ChatView {
     // because the HTML parser silently eats a newline right after the opening
     // `<textarea>` tag, which would swallow the first line of a draft that
     // starts with a line break.
-    const draft = this.currentChannelId ? chatStore.getDraft(this.currentChannelId) : '';
+    const draft = this.messageEdit?.content ?? (this.currentChannelId ? this.store.getDraft(this.currentChannelId) : '');
     if (input && draft.length > 0) {
       input.value = draft;
       if (charCounter) {
@@ -1414,8 +1507,51 @@ export class ChatView {
       updateComposeLinkPreview();
     }
 
+    this.unbindEvents.push(appEvents.on('chat.message_edit_updated', ({ channelId }: { channelId: string }) => {
+      if (!isCurrentInput() || channelId !== this.currentChannelId || !input) return;
+      const edit = this.messageEdit;
+      const modeChanged = displayedEdit !== edit;
+      const statusChanged = modeChanged || displayedEditPending !== edit?.pending ||
+        displayedEditError !== edit?.error || displayedEditMessage !== edit?.message;
+      if (modeChanged) {
+        this.commandSelection++;
+        this.closeCommandDropup();
+        this.closeMentionDropup();
+        this.showCommandNotice('');
+        this.emojiPicker?.close();
+        codeBlockModal.close();
+      }
+      const text = edit?.content ?? this.store.getDraft(channelId);
+      if (input.value !== text) {
+        input.value = text;
+        if (charCounter) charCounter.textContent = `${text.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+        autoResize();
+      }
+      displayedEdit = edit;
+      displayedEditPending = edit?.pending;
+      displayedEditError = edit?.error;
+      displayedEditMessage = edit?.message;
+      if (statusChanged) this.syncComposerPermissionState();
+      if (modeChanged) {
+        this.renderReplyComposer();
+        this.renderTray();
+        this.botChat?.renderComposer();
+        lastComposeUrl = '';
+        if (composeLinkPreviewEl) {
+          composeLinkPreviewEl.style.display = 'none';
+          composeLinkPreviewEl.innerHTML = '';
+        }
+        updateComposeLinkPreview();
+      }
+    }));
+
     const handleSend = (gesture: Event | boolean = false) => {
-      if (!input || !this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+      if (!isCurrentInput() || !input || !this.currentChannelId) return;
+      if (this.messageEdit) {
+        void this.submitMessageEdit();
+        return;
+      }
+      if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
       const text = input.value.trim();
       if (chatStore.getCommandDraft(this.currentChannelId)) {
         this.botChat?.focusComposer();
@@ -1486,7 +1622,7 @@ export class ChatView {
     const fileInput = document.getElementById('chat-file-input') as HTMLInputElement | null;
 
     btnAttach?.addEventListener('click', () => {
-      if (!serverStore.hasPermission(Permission.ATTACH_FILES)) return;
+      if (!isCurrentInput() || this.messageEdit || !serverStore.hasPermission(Permission.ATTACH_FILES)) return;
       fileInput?.click();
     });
     fileInput?.addEventListener('change', () => {
@@ -1500,19 +1636,23 @@ export class ChatView {
     // --- Emoji & sticker picker (#356) ---
     const btnEmoji = document.getElementById('btn-emoji');
     if (btnEmoji && inputContainer) {
-      const picker = new EmojiPicker({
+      const pickerOptions = {
         container: inputContainer,
         anchor: btnEmoji,
-        onSelectEmoji: (emoji) => this.insertAtCaret(emoji),
-        onSelectSticker: (sticker) => {
+        emojiOnly: !!this.messageEdit,
+        onSelectEmoji: (emoji: string) => this.insertAtCaret(emoji),
+        onSelectSticker: (sticker: StickerEntry) => {
           picker.close();
           void this.sendSticker(sticker);
         },
-      });
+      };
+      const picker = new EmojiPicker(pickerOptions);
       this.emojiPicker = picker;
 
       const onEmojiClick = () => {
-        if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+        if (!isCurrentInput() || this.messageEdit?.pending) return;
+        if (!this.messageEdit && this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+        pickerOptions.emojiOnly = !!this.messageEdit;
         picker.toggle();
       };
       btnEmoji.addEventListener('click', onEmojiClick);
@@ -1529,6 +1669,7 @@ export class ChatView {
     const btnCode = document.getElementById('btn-code');
     if (btnCode) {
       const onCodeClick = () => {
+        if (!isCurrentInput() || this.messageEdit) return;
         if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
         codeBlockModal.open({
           onSubmit: (language, code) => this.sendCodeBlock(language, code),
@@ -1581,6 +1722,10 @@ export class ChatView {
       const de = e as DragEvent;
       if (!de.dataTransfer || !Array.from(de.dataTransfer.types).includes('Files')) return;
       e.preventDefault();
+      if (this.messageEdit) {
+        de.dataTransfer.dropEffect = 'none';
+        return;
+      }
       de.dataTransfer.dropEffect = 'copy';
       this.container.querySelector('.chat-container')?.classList.add('chat-drag-over');
     };
@@ -1615,8 +1760,18 @@ export class ChatView {
     this.syncComposerPermissionState();
 
     input?.addEventListener('keydown', (e) => {
+      if (!isCurrentInput()) return;
       if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === 'Escape' && !this.mentionActive && !this.commandActive) this.clearReply();
+      if (e.key === 'Escape' && this.messageEdit && !this.mentionActive) {
+        e.preventDefault();
+        this.cancelMessageEdit();
+        return;
+      }
+      if (e.key === 'Escape' && !this.messageEdit && !this.mentionActive && !this.commandActive) this.clearReply();
+      if (this.messageEdit && e.shiftKey && (e.key === 'Enter' || e.key === 'Tab')) {
+        this.closeMentionDropup();
+        return;
+      }
       // While the mention dropup is open, arrows/enter/tab/esc drive it (#14).
       if (this.mentionActive && this.mentionMatches.length > 0) {
         if (e.key === 'ArrowDown') {
@@ -1645,7 +1800,7 @@ export class ChatView {
       }
 
       // While the command dropup is open (#569).
-      if (this.commandActive) {
+      if (!this.messageEdit && this.commandActive) {
         if (e.key === 'Escape') {
           e.preventDefault();
           this.closeCommandDropup();
@@ -1702,6 +1857,7 @@ export class ChatView {
     btnSend?.addEventListener('click', () => {
       handleSend();
     });
+    this.container.querySelector('#btn-cancel-message-edit')?.addEventListener('click', () => this.cancelMessageEdit());
 
     // Listen for new messages
     const u1 = appEvents.on('server.updated', () => this.syncComposerPermissionState());
@@ -1746,6 +1902,9 @@ export class ChatView {
     const u6 = appEvents.on('chat.commands_updated', () => {
       if (input && !chatStore.getCommandDraft(this.currentChannelId ?? '')) this.updateCommandDropup(input);
     });
+    const refreshCommandLocale = () => {
+      if (isCurrentInput() && input && this.commandActive && !this.messageEdit) this.updateCommandDropup(input);
+    };
     const updateVoiceCommands = () => {
       if (this.commandActive) this.renderCommandDropup();
       const command = this.voiceNoticeCommand;
@@ -1758,11 +1917,21 @@ export class ChatView {
       appEvents.on('voice.channel_changed', updateVoiceCommands),
       appEvents.on('participants.updated', updateVoiceCommands),
       appEvents.on('session.voice_context_updated', updateVoiceCommands),
+      appEvents.on('i18n.language_changed', refreshCommandLocale),
+      appEvents.on('bot.preferences_updated', refreshCommandLocale),
     );
     this.unbindEvents.push(appEvents.on('chat.reactions_updated', (message: ChatMessage) => {
       if (message.channelId === this.currentChannelId) this.updateReactionRow(message);
     }), () => { this.reactionPicker?.destroy(); this.reactionPicker = null; });
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6,
+      appEvents.on('network.status', () => this.syncComposerPermissionState()),
+      appEvents.on('user.updated', () => this.syncComposerPermissionState()),
+      appEvents.on('chat.cleared', () => {
+        if (!this.isCurrentSession()) return;
+        this.composerInput = null;
+        this.composerChannelId = null;
+      }),
+    );
 
     const composer = this.container.querySelector<HTMLElement>('#chat-command-composer');
     if (composer && messagesFeed && this.currentChannelId) {
@@ -1775,16 +1944,17 @@ export class ChatView {
       this.botChat = new BotChatView(
         store, getActiveNetworkClient(), getActiveServerStore(), channelId, composer, messagesFeed,
         () => {
+          if (!isCurrentInput() || this.currentChannelId !== channelId) return;
           const selected = !!store.getCommandDraft(channelId);
           this.syncComposerPermissionState();
-          if (input && (selected || wasSelected)) {
+          if (!this.messageEdit && input && (selected || wasSelected)) {
             input.value = store.getDraft(channelId);
             if (charCounter) charCounter.textContent = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
             if (!selected) autoResize();
           }
-          if (selected && composeLinkPreviewEl) composeLinkPreviewEl.style.display = 'none';
-          if (selected && this.pending.length > 0) this.showCommandNotice(t('botChat.attachmentsKept'));
-          if (!selected && wasSelected) {
+          if (selected && !this.messageEdit && composeLinkPreviewEl) composeLinkPreviewEl.style.display = 'none';
+          if (selected && !this.messageEdit && this.pending.length > 0) this.showCommandNotice(t('botChat.attachmentsKept'));
+          if (!selected && wasSelected && !this.messageEdit) {
             this.showCommandNotice('');
             this.focusChatInput();
           }
@@ -1983,8 +2153,9 @@ export class ChatView {
    * textarea without going through a real `input` event.
    */
   private persistDraft(text: string): void {
-    if (!this.currentChannelId) return;
-    chatStore.setDraft(this.currentChannelId, text);
+    if (!this.isCurrentComposer() || !this.currentChannelId) return;
+    if (this.messageEdit) this.store.setMessageEditContent(this.currentChannelId, text);
+    else this.store.setDraft(this.currentChannelId, text);
   }
 
   private closeMentionDropup(): void {
@@ -2017,7 +2188,7 @@ export class ChatView {
   }
 
   private updateCommandDropup(input: HTMLTextAreaElement): void {
-    if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+    if (this.messageEdit || (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId))) {
       this.closeCommandDropup();
       return;
     }
@@ -2056,6 +2227,10 @@ export class ChatView {
   }
 
   private renderCommandDropup(): void {
+    if (!this.isCurrentComposer() || this.messageEdit) {
+      this.closeCommandDropup();
+      return;
+    }
     const el = document.getElementById('command-dropup');
     if (!el) return;
     const denied = this.getBotCommandDeniedReason();
@@ -2066,7 +2241,11 @@ export class ChatView {
       el.style.display = 'block';
       return;
     }
-    el.innerHTML = renderCommandCatalog(this.commandGroups, this.commandActiveIndex, (command) => this.getVoiceCommandDeniedReason(command));
+    el.innerHTML = renderCommandCatalog(
+      this.commandGroups, this.commandActiveIndex,
+      (command) => this.getVoiceCommandDeniedReason(command),
+      (command) => botLocaleFor(this.client, this.server, command.botId),
+    );
     el.style.display = 'block';
     const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
     input?.setAttribute('role', 'combobox');
@@ -2127,6 +2306,7 @@ export class ChatView {
   }
 
   private applyCommand(index: number, userGesture = false, autoInvoke = true): void {
+    if (!this.isCurrentComposer() || this.messageEdit) return;
     const denied = this.getBotCommandDeniedReason();
     if (denied) {
       this.showCommandNotice(denied);
@@ -2144,6 +2324,7 @@ export class ChatView {
   }
 
   private selectCommand(command: SlashCommand, text = '', userGesture = false, autoInvoke = true): void {
+    if (!this.isCurrentComposer() || this.messageEdit) return;
     this.commandSelection++;
     const denied = this.getBotCommandDeniedReason(command);
     if (denied) {
@@ -2168,7 +2349,7 @@ export class ChatView {
     const sourceText = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input')?.value;
     const current = () => view !== null && this.botChat === view && this.currentChannelId === channelId &&
       getActiveChatStore() === store && client.getConnectionId() === connectionId &&
-      selection === this.commandSelection && client.getStatus() === 'CONNECTED' &&
+      !this.messageEdit && selection === this.commandSelection && client.getStatus() === 'CONNECTED' &&
       this.container.querySelector<HTMLTextAreaElement>('#chat-message-input')?.value === sourceText;
     if (!window.api?.soundDownloadAvailability) {
       this.showCommandNotice(t('botChat.downloadDesktopOnly'));
@@ -2195,7 +2376,7 @@ export class ChatView {
   }
 
   private activateCommand(command: SlashCommand, text: string, userGesture: boolean, downloadConsent: boolean, autoInvoke: boolean): void {
-    if (!this.currentChannelId) return;
+    if (!this.isCurrentComposer() || this.messageEdit || !this.currentChannelId) return;
     if (this.getBotCommandDeniedReason(command) || !chatStore.isCommandAvailable(command)) {
       this.showCommandNotice(this.getBotCommandDeniedReason(command) ?? t('botChat.commandUnavailable'));
       return;
@@ -2236,6 +2417,7 @@ export class ChatView {
    * user had typed it (#356).
    */
   private insertAtCaret(text: string): void {
+    if (!this.isCurrentComposer()) return;
     const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
     if (!input || input.readOnly) return;
 
@@ -2258,7 +2440,7 @@ export class ChatView {
    */
   private sendCodeBlock(language: string, code: string): void {
     const channelId = this.currentChannelId;
-    if (!channelId) return;
+    if (!this.isCurrentComposer() || this.messageEdit || !channelId) return;
     if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) {
       void showAlert({ message: t('chat.sendPermissionDenied'), variant: 'danger' });
       return;
@@ -2280,9 +2462,12 @@ export class ChatView {
    */
   private async sendSticker(sticker: StickerEntry): Promise<void> {
     const channelId = this.currentChannelId;
-    if (!channelId) return;
+    if (!this.isCurrentComposer() || this.messageEdit || !channelId) return;
     const client = getActiveNetworkClient();
     const store = getActiveChatStore();
+    const connectionId = client.getConnectionId();
+    const current = () => this.isCurrentComposer() && this.currentChannelId === channelId &&
+      !store.getMessageEdit(channelId) && client.getConnectionId() === connectionId;
     const reply = store.getReplyDraft(channelId);
     if (reply?.deleted) { void showAlert({ message: t('chat.replyUnavailable'), variant: 'danger' }); return; }
     if (
@@ -2296,8 +2481,10 @@ export class ChatView {
     try {
       const file = await stickerService.toFile(sticker);
       if (!file) throw new Error(t('chat.stickerReadFailed'));
+      if (!current()) return;
 
       const meta = await uploadAttachment(channelId, file).promise;
+      if (!current()) return;
       client.send(MessageType.CHAT_SEND, {
         channelId,
         content: stickerToken(meta.id),
@@ -2315,7 +2502,7 @@ export class ChatView {
   }
 
   private addFiles(fileList: FileList): void {
-    if (!this.currentChannelId) return;
+    if (!this.isCurrentComposer() || this.messageEdit || !this.currentChannelId) return;
     if (this.arePermissionsResolved() && (!serverStore.hasPermission(Permission.SEND_MESSAGES) || !serverStore.hasPermission(Permission.ATTACH_FILES))) {
       return;
     }
@@ -2382,14 +2569,14 @@ export class ChatView {
   }
 
   private renderTray(): void {
-    const tray = document.getElementById('chat-attachment-tray');
+    const tray = this.container.querySelector<HTMLElement>('#chat-attachment-tray');
     if (!tray) return;
     if (this.pending.length === 0) {
       tray.style.display = 'none';
       tray.innerHTML = '';
       return;
     }
-    tray.style.display = 'flex';
+    tray.style.display = this.messageEdit ? 'none' : 'flex';
     tray.innerHTML = this.pending.map((p) => this.renderTrayItem(p)).join('');
     tray.querySelectorAll('[data-remove-id]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -2446,13 +2633,7 @@ export class ChatView {
   }
 
   private updateSendButtonState(): void {
-    const btnSend = document.getElementById('btn-send-message') as HTMLButtonElement | null;
-    if (!btnSend) return;
-    const uploading = this.pending.some((p) => p.status === 'uploading');
-    const permissionLocked = this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES);
-    btnSend.disabled = uploading || permissionLocked;
-    btnSend.style.opacity = uploading ? '0.6' : '';
-    btnSend.style.cursor = uploading ? 'not-allowed' : '';
+    this.syncComposerPermissionState();
   }
 
   private removePending(localId: string): void {
@@ -2490,6 +2671,8 @@ export class ChatView {
   }
 
   private unbindListeners(): void {
+    this.rememberComposerText();
+    this.commandSelection++;
     this.copyRequestId++;
     this.clearCopyFeedback?.();
     contextMenu.close();
@@ -2501,6 +2684,8 @@ export class ChatView {
     this.closeCommandDropup();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
+    this.composerInput = null;
+    this.composerChannelId = null;
   }
 
   public destroy(): void {

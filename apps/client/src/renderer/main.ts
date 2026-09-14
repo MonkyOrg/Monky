@@ -67,12 +67,14 @@ import { selectEnhancer } from './core/SelectEnhancer';
 import { initTooltips } from './core/TooltipService';
 import { bindCameraPublication } from './core/CameraPublication';
 import { cameraEffectErrorMessage } from './utils/cameraEffectErrors';
+import { AutoEntryService } from './core/AutoEntryService';
 
 class App {
   private appContainer: HTMLElement;
   private connectionView!: ConnectionView;
   private mainView!: MainView;
   private rendererReadySignalled = false;
+  private readonly autoEntryService = new AutoEntryService(message => this.connectionView?.reportStartupNotice(message));
   private readonly voiceModeReconnect = new VoiceModeReconnect({
     currentCall: () => {
       const sessionKey = voiceStore.voiceSessionKey;
@@ -157,6 +159,10 @@ class App {
     sessionManager.install();
     this.connectionView = new ConnectionView(this.appContainer);
     this.mainView = new MainView(this.appContainer);
+    window.addEventListener('pagehide', () => {
+      this.autoEntryService.dispose();
+      this.connectionView.dispose();
+    }, { once: true });
 
     // Must run before any await in init(): otherwise the Windows-style window
     // controls stay visible on macOS during onboarding/identity loading (#307)
@@ -220,6 +226,7 @@ class App {
 
     // Start checking for app updates (non-blocking)
     updateService.init();
+    void this.autoEntryService.start();
 
     // Debug helper to check voice engine status in console
     (window as any).debugVoice = () => {
@@ -460,6 +467,10 @@ class App {
     // Network Connect / Disconnect
     appEvents.on('network.connected', (payload: AuthSuccessPayload) => {
       const origin = currentEventOrigin();
+      const connectedSession = origin ? sessionManager.get(origin) : undefined;
+      if (connectedSession) {
+        connectionStore.rememberSavedServerIdentity(connectedSession.host, connectedSession.port, payload.server.id);
+      }
       // Voice is a single physical resource shared by every session (#400), so
       // only the connection actually hosting the call may touch it. Without
       // this, connecting to a second server would tear down an ongoing call.
@@ -509,6 +520,7 @@ class App {
       }
 
       if (isForegroundEvent()) {
+        this.connectionView.suspend();
         this.mainView.render();
       }
 

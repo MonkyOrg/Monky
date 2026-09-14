@@ -2,6 +2,7 @@ import {
   LIMITS,
   MessageType,
   Permission,
+  localizeCommand,
   botSettingsListResponseSchema,
   commandAutocompleteCancelSchema,
   type BotFormValues,
@@ -19,7 +20,7 @@ import { appEvents } from '../core/EventBus';
 import { type NetworkClient } from '../core/NetworkClient';
 import { getActiveChatStore, type BotInvocation, type ChatStore, type CommandDraft } from '../stores/chatStore';
 import { type ServerStore } from '../stores/serverStore';
-import { getLanguage, t, type TranslationKey } from '../i18n';
+import { t, type TranslationKey } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { getAvatarUrl } from '../utils/avatar';
 import {
@@ -35,7 +36,7 @@ import {
 } from '../utils/botInputs';
 import { applyBotFieldAction, readBotFieldChange, renderBotFields, type BotFieldContext } from './botFields';
 import {
-  commandParameterChoices, commandParameterHint, commandParameterError, renderCompactCommand, renderParameterChoices,
+  commandParameterChoices, commandParameterHint, commandParameterLabel, commandParameterError, renderCompactCommand, renderParameterChoices,
   type ParameterChoice,
 } from './commandComposer';
 import { CommandAutocomplete, type AutocompleteState } from '../utils/commandAutocomplete';
@@ -45,6 +46,7 @@ import { soundDownloadText } from '../utils/soundDownloadText';
 import { audioPreviewService } from '../core/AudioPreviewService';
 import { commandPreviewVolumeScope } from '../utils/selectionChoices';
 import { botPreferenceScopeFor, botUserSettingsPayload } from '../utils/botSettingsContext';
+import { botLocaleFor } from '../utils/botLocale';
 import { botSettingsMenuItem } from './BotSettingsModal';
 import { contextMenu } from './ContextMenu';
 import { currentEventOrigin } from '../core/sessionRouting';
@@ -229,9 +231,15 @@ export class BotChatView {
       appEvents.on('session.voice_context_updated', () => this.refreshVoiceEligibility()),
       appEvents.on('bot.preferences_updated', ({ scope, customChanged }: { scope: string; customChanged: boolean }) => {
         const draft = this.store.getCommandDraft(this.channelId);
-        if (!customChanged || !this.isCurrent() || !this.canSend() || !draft ||
+        if (!customChanged || !this.isCurrent() || !draft ||
             scope !== botPreferenceScopeFor(this.client, this.server, draft.command.botId)) return;
         this.invalidateAutocomplete();
+        this.renderComposer();
+      }),
+      appEvents.on('i18n.language_changed', () => {
+        if (!this.isCurrent()) return;
+        this.invalidateAutocomplete();
+        this.renderComposer();
       }),
       appEvents.on('message.BOT_SETTINGS_LIST_RESPONSE', (payload: unknown) => {
         const origin = currentEventOrigin();
@@ -252,6 +260,10 @@ export class BotChatView {
 
   private isCurrent(): boolean {
     return !this.destroyed && getActiveChatStore() === this.store;
+  }
+
+  private localizedCommand(command: SlashCommand): SlashCommand {
+    return localizeCommand(command, botLocaleFor(this.client, this.server, command.botId));
   }
 
   private invalidateAutocomplete(): void {
@@ -348,7 +360,8 @@ export class BotChatView {
     }
     const available = this.store.isCommandAvailable(draft.command);
     this.composer.innerHTML = renderCompactCommand(
-      draft, this.channelId, this.server.getHumanMembersInDisplayOrder(), this.canSend(), available, this.voiceError(draft.command)
+      { ...draft, command: this.localizedCommand(draft.command) }, this.channelId,
+      this.server.getHumanMembersInDisplayOrder(), this.canSend(), available, this.voiceError(draft.command)
     );
     this.onComposerChanged();
     if (menu?.kind === 'autocomplete') this.openAutocomplete(menu.fieldName);
@@ -398,7 +411,7 @@ export class BotChatView {
       const draft = this.store.getCommandDraft(this.channelId);
       if (!draft) return;
       return {
-        fields: visibleCommandFields(draft.command, draft.visibleOptionalNames),
+        fields: visibleCommandFields(this.localizedCommand(draft.command), draft.visibleOptionalNames),
         values: draft.values,
         context: { prefix: `command-${this.channelId}`, disabled: draft.pending || !this.canSend(), members: this.server.getHumanMembersInDisplayOrder() },
         save: (values) => this.store.setCommandValues(this.channelId, values),
@@ -454,14 +467,15 @@ export class BotChatView {
   private updateParameterHint(): void {
     const draft = this.store.getCommandDraft(this.channelId);
     if (!draft) return;
-    const fields = visibleCommandFields(draft.command, draft.visibleOptionalNames);
+    const command = this.localizedCommand(draft.command);
+    const fields = visibleCommandFields(command, draft.visibleOptionalNames);
     const field = fields.find((entry) => entry.name === this.focusedParameter) ?? fields[0];
     this.focusedParameter = field?.name ?? null;
     const label = this.composer.querySelector<HTMLElement>('[data-parameter-hint-name]');
     const description = this.composer.querySelector<HTMLElement>('[data-parameter-hint-description]');
-    if (label) label.textContent = field?.name ?? `/${draft.command.name}`;
+    if (label) label.textContent = field ? commandParameterLabel(command, field.name) : `/${command.name}`;
     if (description) {
-      description.textContent = field ? commandParameterHint(field) : draft.command.description;
+      description.textContent = field ? commandParameterHint(field) : command.description;
       description.title = description.textContent;
     }
     const active = document.activeElement;
@@ -478,7 +492,7 @@ export class BotChatView {
     const draft = this.store.getCommandDraft(this.channelId);
     if (!draft) return;
     const members = this.server.getHumanMembersInDisplayOrder();
-    for (const field of visibleCommandFields(draft.command, draft.visibleOptionalNames)) {
+    for (const field of visibleCommandFields(this.localizedCommand(draft.command), draft.visibleOptionalNames)) {
       const element = [...this.composer.querySelectorAll<HTMLElement>('[data-field-name]')]
         .find((entry) => entry.dataset.fieldName === field.name);
       if (!element) continue;
@@ -518,10 +532,11 @@ export class BotChatView {
     const draft = this.store.getCommandDraft(this.channelId);
     const menu = this.parameterMenu;
     if (!draft || !menu) return [];
-    if (menu.kind === 'optional') return (draft.command.options ?? [])
+    const command = this.localizedCommand(draft.command);
+    if (menu.kind === 'optional') return (command.options ?? [])
       .filter((option) => !option.required && !draft.visibleOptionalNames.includes(option.name))
-      .map((option) => ({ value: option.name, label: option.name, description: option.description }));
-    const field = commandInputFields(draft.command).find((entry) => entry.name === menu.fieldName);
+      .map((option) => ({ value: option.name, label: option.label ?? option.name, description: option.description }));
+    const field = commandInputFields(command).find((entry) => entry.name === menu.fieldName);
     return field ? commandParameterChoices(field, this.server.getHumanMembersInDisplayOrder()) : [];
   }
 
@@ -556,7 +571,9 @@ export class BotChatView {
     if (!element) return;
     element.hidden = false;
     element.innerHTML = renderParameterChoices(choices, menu.activeIndex,
-      menu.kind === 'optional' ? t('botChat.addParameters') : t('botChat.parameterChoices', { name: menu.fieldName }),
+      menu.kind === 'optional' ? t('botChat.addParameters') : t('botChat.parameterChoices', {
+        name: commandParameterLabel(this.localizedCommand(draft.command), menu.fieldName),
+      }),
       this.parameterChoiceScope(menu.kind === 'optional' ? 'optional' : menu.fieldName),
       commandPreviewVolumeScope(this.server.serverDetails?.id, draft.command.botId, draft.command.name));
     element.style.left = '';
@@ -750,7 +767,7 @@ export class BotChatView {
       options: autocompleteCommandOptions(draft.command, optionName,
         visibleCommandValues(draft.command, draft.values, draft.visibleOptionalNames),
         this.server.getHumanMembersInDisplayOrder(), draft.autocomplete),
-      locale: getLanguage(),
+      locale: botLocaleFor(this.client, this.server, draft.command.botId),
       ...botUserSettingsPayload(this.client, this.server, draft.command.botId),
     };
     const response = this.client.sendRequest<CommandAutocompleteResultPayload>(
@@ -1053,7 +1070,8 @@ export class BotChatView {
     );
     if (!result.success) {
       this.store.touchCommandField(this.channelId, result.field);
-      this.store.setCommandPending(this.channelId, draft, false, botInputError(commandInputFields(command), result.field, result.reason));
+      this.store.setCommandPending(this.channelId, draft, false,
+        botInputError(commandInputFields(this.localizedCommand(command)), result.field, result.reason));
       this.focusInvalidField(`command-${this.channelId}`, result.field);
       return;
     }
@@ -1062,7 +1080,7 @@ export class BotChatView {
       botId: command.botId,
       channelId: this.channelId,
       options: result.values,
-      locale: getLanguage(),
+      locale: botLocaleFor(this.client, this.server, command.botId),
     };
     const connectionId = this.client.getConnectionId();
     const voiceEpoch = this.voiceEpoch;

@@ -73,6 +73,23 @@ A comunicação do agente deve ser sempre **clara, didática, transparente e res
 
 ---
 
+## 🧪 Desenvolvimento ao lado da versão instalada
+
+- **Nunca feche a versão instalada para testar uma alteração.** O cliente não empacotado usa automaticamente um perfil próprio por checkout/worktree, em `appData/Monky-development/<identificador>`, separado da identidade, configurações, cache e servidores da instalação. O título da janela é `Monky Dev`.
+- **Mantenha o lock de instância única.** Ele continua valendo por perfil; não remova `requestSingleInstanceLock()` nem mate processos pelo nome. Encerre apenas os PIDs que o próprio teste iniciou.
+- **Duas instâncias de desenvolvimento precisam de perfis diferentes.** Para QA descartável, passe um `--user-data-dir` próprio para cada participante. Nunca aponte esse parâmetro para o perfil da instalação:
+
+```powershell
+npm run build
+npm run start --workspace=apps/client -- --user-data-dir="C:\Projetos\Monky-qa\participante-a"
+npm run start --workspace=apps/client -- --user-data-dir="C:\Projetos\Monky-qa\participante-b"
+```
+
+- O cliente de desenvolvimento mantém também o cache Chromium e o `MONKY_HOME` dos processos filhos dentro do perfil selecionado. Um **CLI de servidor iniciado separadamente** precisa do seu próprio `MONKY_HOME` e diretório de dados; não reutilize registros, bancos, portas ou credenciais de produção.
+- Cliente, servidor e bots de QA devem usar versões compatíveis do protocolo. Crie um servidor descartável da mesma branch e valide voz com dois participantes; não use um servidor real para contornar incompatibilidade de versões.
+
+---
+
 ## 🔄 Fluxo de Trabalho a partir do Board
 
 > ⚠️ **Esta seção só se aplica a quem tem acesso ao board da organização.**

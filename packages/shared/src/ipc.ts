@@ -6,6 +6,7 @@
 import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
 import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
+import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
 
 export interface DesktopSource {
   id: string;
@@ -212,7 +213,17 @@ export interface UpdateCheckResult {
   available?: boolean;
   version?: string;
   error?: string;
+  compatibility?: ReleaseCompatibilityResult;
 }
+
+export const UPDATER_IPC = {
+  setChannel: 'updater:set-channel',
+  check: 'updater:check',
+  download: 'updater:download',
+  install: 'updater:install',
+  outcome: 'updater:outcome',
+  releaseNotes: 'updater:release-notes',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export interface UpdateSimpleResult {
   ok: boolean;
@@ -493,7 +504,7 @@ export interface IpcInvokeChannels {
   // Atualizador
   'updater:set-channel': { args: [allowBeta: boolean]; returnType: UpdateSimpleResult };
   'updater:check': { args: []; returnType: UpdateCheckResult };
-  'updater:download': { args: [allowBeta: boolean]; returnType: UpdateSimpleResult };
+  'updater:download': { args: [expectedVersion?: string]; returnType: UpdateSimpleResult };
   'updater:install': { args: []; returnType: UpdateSimpleResult };
   'updater:outcome': { args: []; returnType: UpdateOutcome | null };
   'updater:release-notes': { args: [tag?: string]; returnType: ReleaseNotesResult };

@@ -10,9 +10,11 @@ import { showBackupExportDialog, showBackupImportDialog } from '../../BackupDial
 import { showAlert } from '../../Dialog';
 import { attachInputEmojiPicker } from '../../../utils/inputEmojiPicker';
 import { MessageType } from '@monky/shared';
+import { bindServerAutoEntryControls, renderAutoEntrySettings } from '../../ServerAutoEntryControls';
 
 export class AccountTab {
   private detachEmojiPicker: (() => void) | null = null;
+  private detachAutoEntryControls: (() => void) | null = null;
 
   public renderHtml(): string {
     return `
@@ -60,6 +62,8 @@ export class AccountTab {
           </label>
         </div>
       </div>
+
+      ${renderAutoEntrySettings()}
 
       <!-- Language (#16) -->
       <div data-settings-section="language" data-settings-label="${escapeHtml(t('settings.languageSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
@@ -143,6 +147,8 @@ export class AccountTab {
       onVisibilityChanged?: (appearOffline: boolean) => void;
     }
   ): void {
+    this.detachAutoEntryControls?.();
+    this.detachAutoEntryControls = bindServerAutoEntryControls(container, callbacks.showError);
     const inputNickname = container.querySelector<HTMLInputElement>('#settings-nickname-input');
     const btnSaveNickname = container.querySelector<HTMLButtonElement>('#btn-save-nickname');
     const selectLanguage = container.querySelector<HTMLSelectElement>('#select-language');
@@ -225,6 +231,8 @@ export class AccountTab {
   }
 
   public cleanup(): void {
+    this.detachAutoEntryControls?.();
+    this.detachAutoEntryControls = null;
     this.detachEmojiPicker?.();
     this.detachEmojiPicker = null;
   }

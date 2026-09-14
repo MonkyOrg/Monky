@@ -1,8 +1,9 @@
 import { LIMITS, LOG_LEVELS, LogLevel } from '@monky/shared';
 import { SqliteServerRepository } from '../../infrastructure/database/SqliteRepositories';
 import { ANSI, color, DEFAULT_SERVER_NAME } from '../constants';
+import { formatBotCompatibilityWarnings, printBotCompatibilityWarning } from '../botCompatibility';
 import { GlobalArgs, readLocalConfig, withContext } from '../context';
-import { formatBool, parseOption, parsePositiveInt, pad } from '../formatters';
+import { describeTurnPortProblem, describeTurnUnavailability, formatBool, formatProcessStatus, parseOption, parsePositiveInt, pad } from '../formatters';
 import {
   ensurePm2,
   deletePm2Process,
@@ -19,10 +20,10 @@ import {
 import { runAsync, runSync } from '../process';
 import { diagnoseServerHealth, HealthProblem, needsProcessRecreate } from '../health';
 import { hasServerDatabase, RegisteredServer, registerServer } from '../registry';
-import { confirmDisconnectingUsers } from '../onlineUsers';
+import { confirmDisconnectingUsers, readLocalServerPreview, resolveServerPort } from '../onlineUsers';
 import { knownServers, resolveTargetServer } from '../target';
 import { CoturnManager, TURN_LISTENING_PORT } from '../../infrastructure/turn/CoturnManager';
-import { t } from '../i18n/index';
+import { getCliLanguage, t } from '../i18n/index';
 
 /**
  * Flags that only ever applied while the database was being created.
@@ -120,7 +121,7 @@ export async function startServerCommand(globalArgs: GlobalArgs, args: string[])
   if (portOption) parsePositiveInt('port', portOption);
   const fresh = args.includes('--fresh');
 
-  const target = await resolveTargetServer(globalArgs, 'iniciar');
+  const target = await resolveTargetServer(globalArgs, t('action.start'));
   const plan = await buildStartPlan(target.dataDir, args);
   const processName = getPm2ProcessName(target.dataDir);
 
@@ -136,12 +137,13 @@ export async function startServerCommand(globalArgs: GlobalArgs, args: string[])
     if (!fresh) {
       console.log(color(t('lifecycle.alreadyRunning', { pid: existing.pid }), ANSI.yellow));
       console.log(color(t('lifecycle.useRestartOrStop'), ANSI.dim));
+      await printBotCompatibilityWarning(resolveServerPort(target));
       return;
     }
     // `--fresh` is the one path where start takes down a server that is
     // actually up, so it owes the same warning as stop and restart (#334).
     // A broken process has nobody connected, so this asks nothing there.
-    if (!(await confirmDisconnectingUsers(target, 'reiniciar'))) return;
+    if (!(await confirmDisconnectingUsers(target, t('action.restart')))) return;
   }
 
   retireLegacyProcess(target.dataDir);
@@ -161,9 +163,10 @@ export async function startServerCommand(globalArgs: GlobalArgs, args: string[])
   console.log();
   console.log(color(t('lifecycle.started'), ANSI.green));
   console.log(t('target.portSuffix', { port: plan.port }));
-  console.log(`dataDir: ${plan.dataDir}`);
-  console.log(`serverName: ${plan.serverName}`);
-  console.log(`PM2 process: ${processName}`);
+  console.log(`${t('label.dataDir')}: ${plan.dataDir}`);
+  console.log(`${t('label.name')}: ${plan.serverName}`);
+  console.log(`${t('label.pm2Process')}: ${processName}`);
+  await printBotCompatibilityWarning(plan.port);
   console.log();
   console.log(color(t('lifecycle.helpTitle'), ANSI.bold));
   console.log(t('lifecycle.helpStatus'));
@@ -173,13 +176,13 @@ export async function startServerCommand(globalArgs: GlobalArgs, args: string[])
 }
 
 export async function stopServerCommand(globalArgs: GlobalArgs): Promise<void> {
-  if (!requirePm2('parar')) return;
+  if (!requirePm2(t('action.stop'))) return;
 
-  const target = await resolveTargetServer(globalArgs, 'parar');
+  const target = await resolveTargetServer(globalArgs, t('action.stop'));
   const processName = getPm2ProcessName(target.dataDir);
 
   // Everyone on the server loses their session when it goes down (#334).
-  if (!(await confirmDisconnectingUsers(target, 'parar'))) return;
+  if (!(await confirmDisconnectingUsers(target, t('action.stop')))) return;
 
   if (!isMonkyServerRegistered(processName) && findLegacyProcessFor(target.dataDir)) {
     runSync('pm2', ['stop', LEGACY_PM2_PROCESS_NAME], { stdio: 'inherit' });
@@ -204,10 +207,10 @@ export async function stopServerCommand(globalArgs: GlobalArgs): Promise<void> {
 }
 
 export async function restartServerCommand(globalArgs: GlobalArgs, args: string[] = []): Promise<void> {
-  if (!requirePm2('reiniciar')) return;
+  if (!requirePm2(t('action.restart'))) return;
 
   const fresh = args.includes('--fresh');
-  const target = await resolveTargetServer(globalArgs, 'reiniciar');
+  const target = await resolveTargetServer(globalArgs, t('action.restart'));
   const processName = getPm2ProcessName(target.dataDir);
 
   if (!isMonkyServerRegistered(processName) && !findLegacyProcessFor(target.dataDir)) {
@@ -216,7 +219,7 @@ export async function restartServerCommand(globalArgs: GlobalArgs, args: string[
   }
 
   // A restart drops every open session, same as a stop (#334).
-  if (!(await confirmDisconnectingUsers(target, 'reiniciar'))) return;
+  if (!(await confirmDisconnectingUsers(target, t('action.restart')))) return;
 
   retireLegacyProcess(target.dataDir);
 
@@ -236,6 +239,7 @@ export async function restartServerCommand(globalArgs: GlobalArgs, args: string[
 
   console.log(color(t('lifecycle.restarted'), ANSI.green));
   console.log(t('target.portSuffix', { port: plan.port }));
+  await printBotCompatibilityWarning(plan.port);
 }
 
 /**
@@ -276,7 +280,7 @@ export async function logsServerCommand(globalArgs: GlobalArgs, args: string[] =
     return;
   }
 
-  const target = await resolveTargetServer(globalArgs, 'inspecionar');
+  const target = await resolveTargetServer(globalArgs, t('action.inspect'));
   let processName = getPm2ProcessName(target.dataDir);
 
   if (!isMonkyServerRegistered(processName)) {
@@ -341,7 +345,7 @@ export async function logsServerCommand(globalArgs: GlobalArgs, args: string[] =
 
 function statusLabel(status: string): string {
   const statusColor = status === 'online' ? ANSI.green : status === 'stopped' ? ANSI.yellow : ANSI.red;
-  return color(status, statusColor);
+  return color(formatProcessStatus(status), statusColor);
 }
 
 function readServerStatus(dataDir: string): { status: string; process: ReturnType<typeof findPm2Process> } {
@@ -354,26 +358,29 @@ async function printServerDetails(server: RegisteredServer): Promise<void> {
   const port = server.port ?? readLocalConfig(server.dataDir).port ?? LIMITS.DEFAULT_PORT;
 
   console.log(color(t('lifecycle.serverState', { name: server.name || 'Monky Server' }), ANSI.bold));
-  console.log(`status: ${statusLabel(status)}`);
-  console.log(`dataDir: ${server.dataDir}`);
+  console.log(`${t('label.status')}: ${statusLabel(status)}`);
+  console.log(`${t('label.dataDir')}: ${server.dataDir}`);
   console.log(`${t('target.portSuffix', { port })}`);
-  console.log(`PM2 process: ${getPm2ProcessName(server.dataDir)}`);
+  console.log(`${t('label.pm2Process')}: ${getPm2ProcessName(server.dataDir)}`);
 
   if (!entry) {
     console.log(color(t('lifecycle.useStart'), ANSI.dim));
     return;
   }
 
-  console.log(`pid: ${entry.pid || '-'}`);
-  console.log(`uptime: ${entry.pm2_env?.pm_uptime ? new Date(entry.pm2_env.pm_uptime).toISOString() : '-'}`);
-  console.log(`restarts: ${entry.pm2_env?.restart_time ?? 0}`);
-  console.log(`memory: ${entry.monit?.memory ? `${Math.round(entry.monit.memory / 1024 / 1024)} MB` : '-'}`);
-  console.log(`cpu: ${entry.monit?.cpu !== undefined ? `${entry.monit.cpu}%` : '-'}`);
-  if (entry.pm2_env?.node_version) console.log(`node: ${entry.pm2_env.node_version}`);
+  console.log(`${t('label.pid')}: ${entry.pid || '-'}`);
+  console.log(`${t('label.startedAt')}: ${entry.pm2_env?.pm_uptime ? new Date(entry.pm2_env.pm_uptime).toISOString() : '-'}`);
+  console.log(`${t('label.restarts')}: ${entry.pm2_env?.restart_time ?? 0}`);
+  console.log(`${t('label.memory')}: ${entry.monit?.memory ? `${Math.round(entry.monit.memory / 1024 / 1024)} MB` : '-'}`);
+  console.log(`${t('label.cpu')}: ${entry.monit?.cpu !== undefined ? `${entry.monit.cpu}%` : '-'}`);
+  if (entry.pm2_env?.node_version) console.log(`${t('label.node')}: ${entry.pm2_env.node_version}`);
 
   // PM2's own status is a claim, not a measurement, so it is checked against
   // the port before being taken at face value (#522).
   printHealthProblems(await diagnoseServerHealth(entry, port));
+  if (status === 'online' && entry.pid) {
+    await printBotCompatibilityWarning(port);
+  }
 
   // TURN relay info (#441)
   printTurnStatus(server.dataDir);
@@ -390,17 +397,22 @@ function printHealthProblems(problems: HealthProblem[]): void {
   }
 }
 
-export function printServerTable(servers: RegisteredServer[]): void {
-  const rows = servers.map((server) => ({
-    name: server.name || 'Monky Server',
-    status: readServerStatus(server.dataDir).status,
-    port: String(server.port ?? readLocalConfig(server.dataDir).port ?? LIMITS.DEFAULT_PORT),
-    dataDir: server.dataDir,
+export async function printServerTable(servers: RegisteredServer[]): Promise<void> {
+  const rows = await Promise.all(servers.map(async (server) => {
+    const snapshot = readServerStatus(server.dataDir);
+    const port = resolveServerPort(server);
+    return {
+      name: server.name || 'Monky Server',
+      status: snapshot.status,
+      port: String(port),
+      dataDir: server.dataDir,
+      warnings: await readBotWarnings(port, snapshot),
+    };
   }));
 
-  const nameWidth = Math.max(4, ...rows.map((row) => row.name.length));
-  const statusWidth = Math.max(6, ...rows.map((row) => row.status.length));
-  const portWidth = Math.max(5, ...rows.map((row) => row.port.length));
+  const nameWidth = Math.max(t('lifecycle.tableNome').length, ...rows.map((row) => row.name.length));
+  const statusWidth = Math.max(t('lifecycle.tableStatus').length, ...rows.map((row) => formatProcessStatus(row.status).length));
+  const portWidth = Math.max(t('lifecycle.tablePorta').length, ...rows.map((row) => row.port.length));
 
   console.log(
     `${color(pad(t('lifecycle.tableNome'), nameWidth), ANSI.cyan)}  ${color(pad(t('lifecycle.tableStatus'), statusWidth), ANSI.cyan)}  ` +
@@ -408,8 +420,9 @@ export function printServerTable(servers: RegisteredServer[]): void {
   );
 
   for (const row of rows) {
-    const paddedStatus = statusLabel(row.status) + ' '.repeat(Math.max(0, statusWidth - row.status.length));
+    const paddedStatus = statusLabel(row.status) + ' '.repeat(Math.max(0, statusWidth - formatProcessStatus(row.status).length));
     console.log(`${pad(row.name, nameWidth)}  ${paddedStatus}  ${pad(row.port, portWidth)}  ${row.dataDir}`);
+    for (const warning of row.warnings) console.log(`  ${warning}`);
   }
 }
 
@@ -420,7 +433,7 @@ export async function listServersCommand(): Promise<void> {
     console.log(color(t('lifecycle.createHint'), ANSI.dim));
     return;
   }
-  printServerTable(servers);
+  await printServerTable(servers);
 }
 
 /**
@@ -447,28 +460,30 @@ async function printTurnStatusAsync(dataDir: string): Promise<void> {
       const turnEnabled = Boolean(server.turnEnabled);
       console.log();
       console.log(color(t('lifecycle.turnTitle'), ANSI.bold));
-      console.log(`turn: ${formatBool(turnEnabled)}`);
+      console.log(`${t('label.turn')}: ${formatBool(turnEnabled)}`);
       if (turnEnabled) {
-        const reason = CoturnManager.getUnavailabilityReason();
+        const reason = describeTurnUnavailability(CoturnManager.describeAvailability());
         if (reason) {
           console.log(`coturn: ${color(t('lifecycle.coturnUnavailable'), ANSI.yellow)}`);
           console.log(`  ${color(reason, ANSI.dim)}`);
         } else {
           console.log(`coturn: ${color(t('lifecycle.coturnInstalled'), ANSI.green)}`);
-          console.log(`port: ${TURN_LISTENING_PORT}`);
+          console.log(`${t('label.port')}: ${TURN_LISTENING_PORT}`);
           // Check port reachability
-          const portProblem = await CoturnManager.checkPortReachability();
+          const portProblem = await CoturnManager.checkPortReachability(describeTurnPortProblem);
           if (portProblem) {
-            console.log(`status: ${color(t('lifecycle.turnPortBlocked'), ANSI.yellow)}`);
+            console.log(`${t('label.status')}: ${color(t('lifecycle.turnPortBlocked'), ANSI.yellow)}`);
             console.log(`  ${color(portProblem, ANSI.dim)}`);
           } else {
-            console.log(`status: ${color(t('lifecycle.turnAccessible'), ANSI.green)}`);
+            console.log(`${t('label.status')}: ${color(t('lifecycle.turnAccessible'), ANSI.green)}`);
           }
         }
       }
     }, false);
-  } catch {
-    // Database may be locked by the running server; skip silently.
+  } catch (error) {
+    console.log(color(t('lifecycle.turnDiagnosticsFailed', {
+      reason: error instanceof Error ? error.message : String(error),
+    }), ANSI.yellow));
   }
 }
 
@@ -517,6 +532,12 @@ let healthCache: HealthProblem[] = [];
  */
 type StatusSnapshot = ReturnType<typeof readServerStatus>;
 
+async function readBotWarnings(port: number, snapshot: StatusSnapshot): Promise<string[]> {
+  if (snapshot.status !== 'online' || !snapshot.process?.pid) return [];
+  const summary = (await readLocalServerPreview(port))?.botCompatibility ?? null;
+  return formatBotCompatibilityWarnings(summary);
+}
+
 async function refreshHealthCache(server: RegisteredServer, snapshot: StatusSnapshot): Promise<void> {
   const port = server.port ?? readLocalConfig(server.dataDir).port ?? LIMITS.DEFAULT_PORT;
   try {
@@ -533,7 +554,7 @@ async function refreshTurnCache(dataDir: string): Promise<void> {
       if (!server) { turnCache.enabled = null; return; }
       turnCache.enabled = Boolean(server.turnEnabled);
       if (!turnCache.enabled) return;
-      const reason = CoturnManager.getUnavailabilityReason();
+      const reason = describeTurnUnavailability(CoturnManager.describeAvailability());
       if (reason) {
         turnCache.coturnOk = false;
         turnCache.coturnProblem = reason;
@@ -541,7 +562,7 @@ async function refreshTurnCache(dataDir: string): Promise<void> {
       } else {
         turnCache.coturnOk = true;
         turnCache.coturnProblem = null;
-        turnCache.portProblem = await CoturnManager.checkPortReachability();
+        turnCache.portProblem = await CoturnManager.checkPortReachability(describeTurnPortProblem);
       }
     }, false);
   } catch {
@@ -556,7 +577,7 @@ async function refreshTurnCache(dataDir: string): Promise<void> {
  * the cursor to the top-left, write the full frame, then erase everything
  * below. This produces a smooth in-place update.
  */
-function renderDashboard(server: RegisteredServer, snapshot: StatusSnapshot): void {
+function renderDashboard(server: RegisteredServer, snapshot: StatusSnapshot, botWarnings: readonly string[]): void {
   const { status, process: entry } = snapshot;
   const port = server.port ?? readLocalConfig(server.dataDir).port ?? LIMITS.DEFAULT_PORT;
 
@@ -564,28 +585,29 @@ function renderDashboard(server: RegisteredServer, snapshot: StatusSnapshot): vo
   const push = (s: string = '') => lines.push(s);
 
   push(color('╔══════════════════════════════════════════════════╗', ANSI.cyan));
-  push(color('║', ANSI.cyan) + color(`  ${t('lifecycle.dashboard')}`, ANSI.bold) + ' '.repeat(25) + color('║', ANSI.cyan));
+  push(color('║', ANSI.cyan) + color(pad(`  ${t('lifecycle.dashboard')}`, 50), ANSI.bold) + color('║', ANSI.cyan));
   push(color('╚══════════════════════════════════════════════════╝', ANSI.cyan));
   push();
 
   // ── Server ──
   push(color(`  ${t('lifecycle.dashboardServer')}`, ANSI.bold));
   push(`    ${t('config.askName')}: ${server.name || 'Monky Server'}`);
-  push(`    status:   ${statusLabel(status)}`);
+  push(`    ${t('label.status')}: ${statusLabel(status)}`);
   push(`    ${t('config.askPort')}: ${port}`);
-  push(`    dataDir:  ${server.dataDir}`);
-  push(`    process:  ${getPm2ProcessName(server.dataDir)}`);
+  push(`    ${t('label.dataDir')}: ${server.dataDir}`);
+  push(`    ${t('label.pm2Process')}: ${getPm2ProcessName(server.dataDir)}`);
+  for (const warning of botWarnings) push(`    ${warning}`);
 
   // ── Process ──
   if (entry) {
     push();
     push(color(`  ${t('lifecycle.dashboardProcess')}`, ANSI.bold));
-    push(`    pid:      ${entry.pid || '-'}`);
-    push(`    uptime:   ${entry.pm2_env?.pm_uptime ? formatUptime(entry.pm2_env.pm_uptime) : '-'}`);
-    push(`    restarts: ${entry.pm2_env?.restart_time ?? 0}`);
-    push(`    memory:   ${entry.monit?.memory ? `${Math.round(entry.monit.memory / 1024 / 1024)} MB` : '-'}`);
-    push(`    cpu:      ${entry.monit?.cpu !== undefined ? `${entry.monit.cpu}%` : '-'}`);
-    if (entry.pm2_env?.node_version) push(`    node:     ${entry.pm2_env.node_version}`);
+    push(`    ${t('label.pid')}: ${entry.pid || '-'}`);
+    push(`    ${t('label.uptime')}: ${entry.pm2_env?.pm_uptime ? formatUptime(entry.pm2_env.pm_uptime) : '-'}`);
+    push(`    ${t('label.restarts')}: ${entry.pm2_env?.restart_time ?? 0}`);
+    push(`    ${t('label.memory')}: ${entry.monit?.memory ? `${Math.round(entry.monit.memory / 1024 / 1024)} MB` : '-'}`);
+    push(`    ${t('label.cpu')}: ${entry.monit?.cpu !== undefined ? `${entry.monit.cpu}%` : '-'}`);
+    if (entry.pm2_env?.node_version) push(`    ${t('label.node')}: ${entry.pm2_env.node_version}`);
   }
 
   // ── Diagnóstico ──
@@ -602,26 +624,26 @@ function renderDashboard(server: RegisteredServer, snapshot: StatusSnapshot): vo
   if (turnCache.enabled !== null) {
     push();
     push(color(`  ${t('lifecycle.turnTitle')}`, ANSI.bold));
-    push(`    turn:     ${formatBool(turnCache.enabled)}`);
+    push(`    ${t('label.turn')}: ${formatBool(turnCache.enabled)}`);
     if (turnCache.enabled) {
       if (!turnCache.coturnOk) {
         push(`    coturn:   ${color(t('lifecycle.coturnUnavailable'), ANSI.yellow)}`);
         if (turnCache.coturnProblem) push(`              ${color(turnCache.coturnProblem, ANSI.dim)}`);
       } else {
         push(`    coturn:   ${color(t('lifecycle.coturnInstalled'), ANSI.green)}`);
-        push(`    port:     ${TURN_LISTENING_PORT}`);
+        push(`    ${t('label.port')}: ${TURN_LISTENING_PORT}`);
         if (turnCache.portProblem) {
-          push(`    status:   ${color(t('lifecycle.turnPortBlocked'), ANSI.yellow)}`);
+          push(`    ${t('label.status')}: ${color(t('lifecycle.turnPortBlocked'), ANSI.yellow)}`);
           push(`              ${color(turnCache.portProblem, ANSI.dim)}`);
         } else {
-          push(`    status:   ${color(t('lifecycle.turnAccessible'), ANSI.green)}`);
+          push(`    ${t('label.status')}: ${color(t('lifecycle.turnAccessible'), ANSI.green)}`);
         }
       }
     }
   }
 
   push();
-  push(color(`  ${t('lifecycle.dashboardUpdated', { time: new Date().toLocaleTimeString() })}`, ANSI.dim));
+  push(color(`  ${t('lifecycle.dashboardUpdated', { time: new Date().toLocaleTimeString(getCliLanguage()) })}`, ANSI.dim));
   push(color(`  ${t('lifecycle.dashboardExit')}`, ANSI.dim));
 
   // Move cursor to top-left, write frame, then erase anything below
@@ -636,26 +658,40 @@ function renderDashboard(server: RegisteredServer, snapshot: StatusSnapshot): vo
  * effects.
  */
 export async function statusServerCommand(globalArgs: GlobalArgs, args: string[] = []): Promise<void> {
-  if (!requirePm2('consultar')) return;
+  if (!requirePm2(t('action.check'))) return;
 
   const watch = args.includes('--watch') || args.includes('-w');
 
   if (watch) {
-    const target = await resolveTargetServer(globalArgs, 'monitorar');
+    const target = await resolveTargetServer(globalArgs, t('action.monitor'));
 
     // --watch mode: real-time dashboard that refreshes every 2s (#441)
-    // Hide cursor for cleaner output, clear screen once
-    process.stdout.write('\x1b[?25l\x1b[2J');
     // Seed TURN cache before first render, then render
     const seed = readServerStatus(target.dataDir);
-    await refreshTurnCache(target.dataDir);
-    await refreshHealthCache(target, seed);
-    renderDashboard(target, seed);
-    const interval = setInterval(() => {
-      const snapshot = readServerStatus(target.dataDir);
-      Promise.all([refreshTurnCache(target.dataDir), refreshHealthCache(target, snapshot)]).then(() =>
-        renderDashboard(target, snapshot)
-      );
+    const port = resolveServerPort(target);
+    const [, , seedWarnings] = await Promise.all([
+      refreshTurnCache(target.dataDir), refreshHealthCache(target, seed), readBotWarnings(port, seed),
+    ]);
+    // Hide the cursor only after the initial probes succeed.
+    process.stdout.write('\x1b[?25l\x1b[2J');
+    renderDashboard(target, seed, seedWarnings);
+    let refreshing = false;
+    const interval = setInterval(async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const snapshot = readServerStatus(target.dataDir);
+        const [, , warnings] = await Promise.all([
+          refreshTurnCache(target.dataDir), refreshHealthCache(target, snapshot), readBotWarnings(resolveServerPort(target), snapshot),
+        ]);
+        renderDashboard(target, snapshot, warnings);
+      } catch (error) {
+        console.error(color(t('lifecycle.dashboardRefreshFailed', {
+          reason: error instanceof Error ? error.message : String(error),
+        }), ANSI.red));
+      } finally {
+        refreshing = false;
+      }
     }, 2000);
 
     const cleanup = () => {
@@ -672,7 +708,7 @@ export async function statusServerCommand(globalArgs: GlobalArgs, args: string[]
   }
 
   if (globalArgs.dataDirSpecified) {
-    const target = await resolveTargetServer(globalArgs, 'consultar');
+    const target = await resolveTargetServer(globalArgs, t('action.check'));
     await printServerDetails(target);
     await printTurnStatusAsync(target.dataDir);
     return;
@@ -691,7 +727,7 @@ export async function statusServerCommand(globalArgs: GlobalArgs, args: string[]
     return;
   }
 
-  printServerTable(servers);
+  await printServerTable(servers);
   console.log();
   console.log(color(t('lifecycle.useStatusData'), ANSI.dim));
 }

@@ -67,10 +67,10 @@ When there is **one** server, commands act on it directly. When there is **more
 than one**, the CLI asks which one you mean:
 
 ```
-Há 2 servidores Monky nesta máquina.
-Qual servidor deseja reiniciar?
-❯ Friends — porta 3000 — /srv/monky-friends
-  Work — porta 3100 — /srv/monky-work
+There are 2 Monky servers on this machine.
+Which server would you like to restart?
+❯ Friends — port 3000 — /srv/monky-friends
+  Work — port 3100 — /srv/monky-work
 ```
 
 Scripts and cron jobs have no interactive terminal, so pass `--data` explicitly:
@@ -79,12 +79,59 @@ Scripts and cron jobs have no interactive terminal, so pass `--data` explicitly:
 monky --data /srv/monky-friends restart
 ```
 
+## CLI language
+
+The first command run in an interactive terminal asks for **English** or
+**Português (Brasil)** and saves the choice in `~/.monky/cli-config.json`.
+`monky`, `--help` and `--version` neither ask this question nor save a
+preference. Commands in scripts or with redirected input/output do not ask
+or change the saved language either.
+
+To change the preference later, use the explicit command:
+
+```bash
+monky --lang en-US
+monky --lang pt-BR
+```
+
+`en-US` is normalized to `en`; English and Portuguese variants, including
+`pt_BR.UTF-8`, use the `en` and `pt-BR` catalogs. An unsupported code, a
+missing `--lang` value or an invalid configuration produces an error instead
+of silently overwriting the preference with a default.
+
+Precedence is **`--lang` → `MONKY_LANG` → saved preference → terminal locale
+→ English**. For terminal detection, the CLI checks `LC_ALL`, `LC_MESSAGES`,
+`LANG` and `LANGUAGE`, in that order. `MONKY_LANG` lets an app or script pass
+its selected language without reading or changing the CLI preference; the
+CLI does not read Electron profiles.
+
+`--lang` alongside an interactive command saves the choice. With help,
+version or non-interactive commands, it applies only to that invocation.
+Standalone `monky --lang <code>` explicitly edits the preference and saves
+it even in scripts.
+
+**QA isolation:** `MONKY_HOME` changes the directory of both the server
+registry and the language preference. For example, in PowerShell:
+
+```powershell
+$env:MONKY_HOME = Join-Path $PWD '.monky-qa'
+monky --lang en-US
+monky --help
+```
+
+The preference then lives in `.monky-qa\cli-config.json`; `--data` still
+selects a server's data, not its language. Command names, keys such as
+`maxUsers` and `voiceMode`, permissions such as `MANAGE_ROLES`, and values
+such as `true`, `false`, `p2p` and `sfu` are not translated.
+
 ## Global options
 
 | Option | Description |
 |---|---|
 | `--data <folder>` | Data directory of the target server. Required when there are several servers and the terminal is not interactive. |
 | `--help`, `-h` | Show the help. |
+| `--version`, `-v` | Show the installed version. |
+| `--lang <code>` | Select `en`/`en-US` or `pt-BR`; used alone, save the preference. |
 
 ## Data directory layout
 
@@ -116,19 +163,20 @@ It replaces the former `monky bootstrap`, which still works as an alias.
 monky create [options]
 ```
 
-The command is interactive and asks, in order:
+After the initial language choice, when needed, the command asks:
 
 1. **Where to store the data** — suggests `./data`, but any path works. If the
    chosen folder already holds a server, it asks for another one.
 2. **Owner identity code** (`MONKY-ID:...`) — export it from the Monky app under
    *Settings → Identity → Export*.
 3. **Identity password** — the one you set when exporting.
-4. **Owner nickname**
-5. **Server name**
-6. **Server port** (default: `3000`)
-7. **Server password** — leave empty for an open server.
-8. **Member limit** — asks whether you want a cap on registrations. The default
+4. **Server name**
+5. **Server port** (default: `3000`)
+6. **Server password** — leave empty for an open server.
+7. **Member limit** — asks whether you want a cap on registrations. The default
    is no limit.
+8. **Voice/video mode** — `p2p` or `sfu`. In SFU mode, it checks ports and
+   dependencies and asks for available upload bandwidth to estimate capacity.
 
 It then prints a summary, asks for confirmation and offers to start the server.
 
@@ -137,7 +185,7 @@ It then prints a summary, asks for confirmation and offers to start the server.
 | Option | Description | Default |
 |---|---|---|
 | `--identity <code>` | Owner identity code | asked |
-| `--name <name>` | Server name | `Servidor dos Amigos` |
+| `--name <name>` | Server name | `Friends Server` |
 | `--port <n>` | Server port | `3000` |
 | `--password <password>` | Server password (empty = no password) | asked |
 | `--max-users <n>` | Registered member limit (`0` = no limit) | asked |
@@ -173,7 +221,7 @@ monky list
 ```
 
 ```
-NOME       STATUS   PORTA  PASTA DE DADOS
+NAME       STATUS   PORT   DATA DIRECTORY
 Friends    online   3000   /srv/monky-friends
 Work       stopped  3100   /srv/monky-work
 ```
@@ -270,17 +318,17 @@ monky status [--data <folder>]
 With a single server (or with `--data`), it shows the details:
 
 ```
-Estado do servidor: Friends
-status: online
-dataDir: /srv/monky-friends
-porta: 3000
-processo PM2: monky-server-a1b2c3d4
-pid: 21877
-uptime: 2026-08-27T18:02:11.000Z
-restarts: 0
-memória: 88 MB
-cpu: 0%
-node: 24.20.0
+Server state: Friends
+State: online
+Data directory: /srv/monky-friends
+port 3000
+PM2 process: monky-server-a1b2c3d4
+PID: 21877
+Started at: 2026-08-27T18:02:11.000Z
+Restarts: 0
+Memory: 88 MB
+CPU: 0%
+Node.js: 24.20.0
 ```
 
 `status` does not just echo what PM2 says: the port is actually probed. PM2
@@ -298,6 +346,18 @@ Diagnostics
 
 With several servers and no `--data`, it prints the same table as `monky list` —
 a read-only query has no side effects, so asking would be busywork.
+
+Detailed status for a running server also reports bots with an incompatible
+or unchecked protocol. These warnings appear after `monky start` and
+`monky restart` and explain when to update or check the bots' SDK. If the
+server is still starting or `/preview` does not respond, the CLI reports that
+compatibility could not be retrieved; check again with
+`monky status --data <folder>`.
+
+`monky list` and multi-server tables keep these warnings next to the relevant
+server. In `monky status --watch`, the warning refreshes each cycle and clears
+when bots reconnect with a compatible SDK. Stopped servers are not queried or
+reported as incompatible.
 
 ---
 
