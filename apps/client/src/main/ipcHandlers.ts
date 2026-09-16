@@ -1320,6 +1320,10 @@ export function setupIpcHandlers(
     for (const channel of Object.values(SOUND_DOWNLOAD_IPC)) ipcMain.removeHandler(channel);
     for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);
     clearAudioBufferAccumulator();
+    // Recovery keeps Main alive after the renderer is retired (#454).
+    try { screenAudio?.stop(); } catch (error: unknown) {
+      console.error('[ScreenAudio:Main] Could not stop capture after window destruction', error);
+    }
     void lanDiscovery.stop();
     globalInputHook.destroy();
   });

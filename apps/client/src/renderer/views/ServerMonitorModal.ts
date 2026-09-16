@@ -1,5 +1,6 @@
 import { LOG_LEVELS, SERVER_MONITOR_LIMITS, type LogEntry, type LogLevel, type ServerMonitorStats } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
+import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { t, type TranslationKey } from '../i18n';
 import { appEvents } from '../core/EventBus';
 import { RequestTimeoutError } from '../core/NetworkClient';
@@ -39,6 +40,7 @@ export class ServerMonitorModal {
   private previousFocus: HTMLElement | null = null;
   private dropped = 0;
   private failureMessage: string | null = null;
+  private loading = true;
 
   public async openRemote(session: ServerSession): Promise<void> {
     const source = new RemoteServerMonitorSource(
@@ -62,6 +64,7 @@ export class ServerMonitorModal {
     this.autoScroll = true;
     this.dropped = 0;
     this.failureMessage = null;
+    this.loading = true;
     this.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     this.events = new AbortController();
 
@@ -86,7 +89,7 @@ export class ServerMonitorModal {
         <div style="font-size: 11px; color: var(--text-muted);">${t(session ? 'serverMonitor.remotePrivacy' : 'serverMonitor.clearHint')}</div>
         <p id="monitor-error" role="alert" hidden style="color: var(--danger); margin: 0;"></p>
 
-        <div id="monitor-stats" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px;">
+        <div id="monitor-stats" aria-busy="true" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px;">
           ${this.renderStatsSkeleton()}
         </div>
 
@@ -115,7 +118,7 @@ export class ServerMonitorModal {
         </div>
 
         <div id="monitor-logs" style="background: var(--bg-tertiary, #1e1f22); border: 1px solid var(--border-color); border-radius: var(--radius-md); height: 320px; overflow-y: auto; padding: 8px 10px; font-family: var(--font-mono); font-size: 11px; line-height: 1.6;">
-          <div style="color: var(--text-muted); text-align: center; padding: 16px;">${t('serverMonitor.loading')}</div>
+          ${renderLoadingSkeleton('lines', 6)}
         </div>
 
         <div id="monitor-dropped" role="status" hidden style="font-size: 11px; color: var(--warning);"></div>
@@ -152,10 +155,14 @@ export class ServerMonitorModal {
           });
       this.entries = [];
       this.dropped = 0;
+      this.loading = false;
       const errorEl = modal.querySelector<HTMLElement>('#monitor-error');
       if (errorEl) { errorEl.textContent = this.failureMessage; errorEl.hidden = false; }
       const statsEl = modal.querySelector<HTMLElement>('#monitor-stats');
-      if (statsEl) statsEl.innerHTML = this.renderStatsSkeleton();
+      if (statsEl) {
+        statsEl.setAttribute('aria-busy', 'false');
+        statsEl.innerHTML = this.renderStatsSkeleton();
+      }
       this.renderLogs();
     });
     this.feed = feed;
@@ -177,6 +184,8 @@ export class ServerMonitorModal {
   }
 
   private applyUpdate(update: MonitorUpdate): void {
+    const firstUpdate = this.loading;
+    this.loading = false;
     this.renderStats(update.stats);
     if (update.replaceLogs) this.entries = [];
     this.entries.push(...update.entries);
@@ -184,7 +193,7 @@ export class ServerMonitorModal {
       this.entries.splice(0, this.entries.length - SERVER_MONITOR_LIMITS.HISTORY_ENTRIES);
     }
     this.dropped += update.dropped;
-    if (update.replaceLogs || update.entries.length || update.dropped) this.renderLogs();
+    if (firstUpdate || update.replaceLogs || update.entries.length || update.dropped) this.renderLogs();
   }
 
   private renderStatsSkeleton(): string {
@@ -205,7 +214,7 @@ export class ServerMonitorModal {
               <span class="material-symbols-outlined md-14">${card.icon}</span>
               ${card.label}
             </div>
-            <div id="stat-${card.id}" style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin-top: 2px;">—</div>
+            <div id="stat-${card.id}" style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin-top: 2px;">${this.loading ? '<span class="skeleton loading-skeleton-value" aria-hidden="true"></span>' : '—'}</div>
           </div>
         `
       )
@@ -213,6 +222,7 @@ export class ServerMonitorModal {
   }
 
   private renderStats(stats: ServerMonitorStats): void {
+    this.modalEl?.querySelector('#monitor-stats')?.setAttribute('aria-busy', 'false');
     const set = (id: string, value: string) => {
       const el = this.modalEl?.querySelector<HTMLElement>(`#stat-${id}`);
       if (el) el.textContent = value;
@@ -258,6 +268,12 @@ export class ServerMonitorModal {
     const container = this.modalEl.querySelector<HTMLElement>('#monitor-logs');
     const countEl = this.modalEl.querySelector<HTMLElement>('#monitor-count');
     if (!container) return;
+    container.setAttribute('aria-busy', String(this.loading));
+    if (this.loading) {
+      container.innerHTML = renderLoadingSkeleton('lines', 6);
+      if (countEl) countEl.textContent = t('common.loading');
+      return;
+    }
 
     const visible = this.getVisibleEntries();
     const copyButton = this.modalEl.querySelector<HTMLButtonElement>('#btn-copy-logs');

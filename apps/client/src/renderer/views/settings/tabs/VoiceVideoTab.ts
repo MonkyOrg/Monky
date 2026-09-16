@@ -11,6 +11,7 @@ import { AudioOutputControls } from '../AudioOutputControls';
 import { CameraEffectsControl } from '../CameraEffectsControl';
 import { populateCameraDeviceSelect } from '../CameraDeviceSelection';
 import { appEvents } from '../../../core/EventBus';
+import { renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
 
 export class VoiceVideoTab {
   private unbindVadMeter: (() => void) | null = null;
@@ -23,6 +24,7 @@ export class VoiceVideoTab {
   private noiseSuppressionControl = new NoiseSuppressionControl();
   private audioOutputControls = new AudioOutputControls();
   private cameraEffectsControl = new CameraEffectsControl();
+  private devicesRequest = 0;
 
   public renderHtml(): string {
     return `
@@ -43,9 +45,10 @@ export class VoiceVideoTab {
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">mic</span>
           ${t('settings.microphone')}
         </label>
-        <select id="select-mic">
+        <div data-device-loading>${renderLoadingSkeleton('lines', 1)}</div>
+        <div data-device-control hidden><select id="select-mic">
           <option value="">${t('settings.loadingMics')}</option>
-        </select>
+        </select></div>
         <div id="mic-device-status" class="audio-device-status" role="status"></div>
       </div>
 
@@ -167,9 +170,10 @@ export class VoiceVideoTab {
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">headphones</span>
           ${t('audioOutputs.general')}
         </label>
-        <select id="select-speaker">
+        <div data-device-loading>${renderLoadingSkeleton('lines', 1)}</div>
+        <div data-device-control hidden><select id="select-speaker">
           <option value="">${t('settings.loadingOutputs')}</option>
-        </select>
+        </select></div>
         <div id="speaker-device-status" class="audio-device-status" role="status"></div>
       </div>
       ${this.audioOutputControls.renderHtml()}
@@ -180,9 +184,10 @@ export class VoiceVideoTab {
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">videocam</span>
           ${t('settings.camera')}
         </label>
-        <select id="select-cam">
+        <div data-device-loading>${renderLoadingSkeleton('lines', 1)}</div>
+        <div data-device-control hidden><select id="select-cam">
           <option value="">${t('settings.loadingCameras')}</option>
-        </select>
+        </select></div>
         <div id="camera-device-status" class="audio-device-status" role="status"></div>
         ${this.cameraEffectsControl.renderHtml()}
       </div>
@@ -504,8 +509,15 @@ export class VoiceVideoTab {
   }
 
   public async refreshDevices(container: HTMLElement): Promise<void> {
+    const request = ++this.devicesRequest;
+    const isCurrent = (): boolean => request === this.devicesRequest && container.isConnected;
+    const initial = !container.dataset.devicesLoaded;
+    container.querySelectorAll<HTMLElement>('[data-device-control]').forEach(element => {
+      element.setAttribute('aria-busy', 'true');
+    });
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
+      if (!isCurrent()) return;
       const selectMic = container.querySelector<HTMLSelectElement>('#select-mic');
       const selectSpeaker = container.querySelector<HTMLSelectElement>('#select-speaker');
       const selectCam = container.querySelector<HTMLSelectElement>('#select-cam');
@@ -529,11 +541,31 @@ export class VoiceVideoTab {
         const status = container.querySelector<HTMLElement>('#camera-device-status');
         if (status) status.textContent = message;
       }
+      container.dataset.devicesLoaded = 'true';
+      if (initial) {
+        container.querySelectorAll<HTMLSelectElement>('[data-device-control] select')
+          .forEach(select => { select.disabled = false; });
+      }
     } catch (e) {
+      if (!isCurrent()) return;
       console.warn('[VoiceVideoTab] Error enumerating devices:', e);
+      if (initial) {
+        container.querySelectorAll<HTMLSelectElement>('[data-device-control] select').forEach(select => {
+          select.replaceChildren(new Option(t('settings.devicesUnavailable'), ''));
+          select.disabled = true;
+        });
+      }
       for (const id of ['#mic-device-status', '#speaker-device-status', '#camera-device-status']) {
         const status = container.querySelector<HTMLElement>(id);
         if (status) status.textContent = audioDeviceError(e);
+      }
+    } finally {
+      if (isCurrent()) {
+        container.querySelectorAll<HTMLElement>('[data-device-loading]').forEach(element => { element.hidden = true; });
+        container.querySelectorAll<HTMLElement>('[data-device-control]').forEach(element => {
+          element.hidden = false;
+          element.setAttribute('aria-busy', 'false');
+        });
       }
     }
   }
@@ -579,6 +611,7 @@ export class VoiceVideoTab {
   }
 
   public cleanup(): void {
+    this.devicesRequest++;
     this.deactivate();
     this.noiseSuppressionControl.cleanup();
     this.audioOutputControls.cleanup();

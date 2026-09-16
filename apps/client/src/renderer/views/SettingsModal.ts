@@ -154,10 +154,12 @@ export class SettingsModal {
       this.voiceVideoTab.activateCameraPreview();
     }
     const modal = this.modalEl;
-    await this.voiceVideoTab.refreshDevices(modal);
-    if (this.modalEl !== modal) return;
-    await this.aboutTab.loadAppVersion(modal);
-    if (this.modalEl === modal && this.activeTab === 'voice_video') this.voiceVideoTab.startVadMeter(modal);
+    await Promise.all([
+      this.voiceVideoTab.refreshDevices(modal).then(() => {
+        if (this.modalEl === modal && this.activeTab === 'voice_video') this.voiceVideoTab.startVadMeter(modal);
+      }),
+      this.aboutTab.loadAppVersion(modal),
+    ]);
   }
 
   private getTabHeaderTitle(tab: string): string {

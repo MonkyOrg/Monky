@@ -12,10 +12,12 @@ import { clientLog } from '../../../core/ClientLogService';
 import { renderFavoriteToggle, renderFavoritesFilter } from '../../FavoritesControls';
 import { showAlert } from '../../Dialog';
 import type { SoundboardDownloadAvailability } from '@monky/shared';
+import { renderLoadingError, renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
 
 export class SoundboardTab {
   private searchQuery: string = '';
   private unbindSounds: (() => void) | null = null;
+  private unbindLoading: (() => void) | null = null;
   private unbindSettings: (() => void) | null = null;
   private unbindFolderControls: (() => void) | null = null;
   private folderContainer: HTMLElement | null = null;
@@ -27,6 +29,8 @@ export class SoundboardTab {
   public cleanup(): void {
     this.unbindSounds?.();
     this.unbindSounds = null;
+    this.unbindLoading?.();
+    this.unbindLoading = null;
     this.unbindSettings?.();
     this.unbindSettings = null;
     this.unbindFolderControls?.();
@@ -56,7 +60,7 @@ export class SoundboardTab {
           </button>
         </div>
         <div id="soundboard-folder-info" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
-          ${settingsStore.soundboardFolderPath ? tCount('settings.soundsFound', soundboardService.getSounds().length) : t('soundboard.formatsBadge')}
+          ${this.folderSummary()}
         </div>
         <p id="soundboard-download-folder-status" role="status" aria-live="polite" style="font-size: 12px; color: var(--text-muted); margin-top: 8px;" hidden></p>
         <button type="button" id="btn-confirm-soundboard-folder" class="btn btn-secondary" style="font-size: 12px;" hidden>
@@ -112,6 +116,9 @@ export class SoundboardTab {
   }
 
   public renderShortcutsTable(): string {
+    const status = soundboardService.getLoadStatus();
+    if (status === 'loading') return renderLoadingSkeleton('lines', 4);
+    if (status === 'error') return renderLoadingError(t('soundboard.loadFailed'));
     const sounds = soundboardService.getSounds();
     if (sounds.length === 0) {
       return `
@@ -200,15 +207,29 @@ export class SoundboardTab {
     `;
   }
 
+  private folderSummary(): string {
+    if (!settingsStore.soundboardFolderPath) return t('soundboard.formatsBadge');
+    const status = soundboardService.getLoadStatus();
+    if (status === 'loading') return t('common.loading');
+    if (status === 'error') return t('soundboard.loadFailed');
+    return tCount('settings.soundsFound', soundboardService.getSounds().length);
+  }
+
   public attachEvents(container: HTMLElement): void {
     this.cleanup();
     this.folderContainer = container;
     this.unbindSounds = appEvents.on('soundboard.sounds_loaded', () => {
       if (!container.isConnected) return;
       const info = container.querySelector('#soundboard-folder-info');
-      if (info) info.textContent = tCount('settings.soundsFound', soundboardService.getSounds().length);
+      if (info) info.textContent = this.folderSummary();
       this.refreshTable(container);
       void this.refreshFolderDownloadState(container);
+    });
+    this.unbindLoading = appEvents.on('soundboard.sounds_loading', () => {
+      if (this.folderContainer !== container || !container.isConnected) return;
+      const info = container.querySelector('#soundboard-folder-info');
+      if (info) info.textContent = t('common.loading');
+      this.refreshTable(container);
     });
     const inputPath = container.querySelector<HTMLInputElement>('#input-soundboard-path');
     const btnSelectFolder = container.querySelector<HTMLButtonElement>('#btn-select-soundboard-folder');
@@ -232,7 +253,7 @@ export class SoundboardTab {
         if (inputPath) inputPath.value = folder;
         const info = container.querySelector<HTMLElement>('#soundboard-folder-info');
         if (info) {
-          info.textContent = tCount('settings.soundsFound', soundboardService.getSounds().length);
+          info.textContent = this.folderSummary();
         }
         this.refreshTable(container);
       } catch (error: unknown) {
@@ -330,6 +351,10 @@ export class SoundboardTab {
 
   public attachShortcutButtons(container: HTMLElement): void {
     const table = container.querySelector('#soundboard-shortcuts-table-container');
+    table?.setAttribute('aria-busy', String(soundboardService.getLoadStatus() === 'loading'));
+    table?.querySelector('[data-loading-retry]')?.addEventListener('click', () => {
+      if (this.folderContainer === container) void soundboardService.loadSounds();
+    });
     table?.querySelectorAll<HTMLButtonElement>('[data-favorites-filter]').forEach(button => {
       button.addEventListener('click', () => {
         this.favoritesOnly = button.dataset.favoritesFilter === 'favorites';

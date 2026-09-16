@@ -181,6 +181,42 @@ export function callClient(): NetworkClient {
   return session ? session.client : networkClient;
 }
 
+/** An explicit leave is local intent, not something that waits for a server echo. */
+export function leaveCurrentCall(notifyServer = true): void {
+  const sessionKey = voiceStore.voiceSessionKey;
+  const channelId = voiceStore.currentVoiceChannelId;
+  const session = sessionKey ? sessionManager.get(sessionKey) : undefined;
+  voiceAdmissionGeneration++;
+  activeVoiceAdmission = null;
+  if (channelId && notifyServer && session?.client.getStatus() === 'CONNECTED') {
+    session.client.send(MessageType.VOICE_LEAVE, { channelId });
+  }
+  const sessionId = session?.serverStore.currentUser?.sessionId;
+  if (sessionId) session.participants.removeVoiceState(sessionId);
+  audioProcessor.stopMicrophone();
+  videoService.stopCamera();
+  videoService.stopScreenShare();
+  void screenAudioService.stop().catch((error: unknown) => {
+    clientLog.error('SCREEN_SHARE', 'Failed to stop screen audio after leaving voice', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+  webRtcManager.clearLocalScreenTracks();
+  webRtcManager.closeAllPeers();
+  voiceStore.reset();
+}
+
+/** Signalling recovery owns admission; media must not race it with SFU rejoins. */
+export function suspendCallForNetworkLoss(sessionKey: string): void {
+  if (voiceStore.voiceSessionKey !== sessionKey || !voiceStore.currentVoiceChannelId) return;
+  voiceAdmissionGeneration++;
+  activeVoiceAdmission = null;
+  webRtcManager.suspendForVoiceReconnect(true);
+  audioProcessor.stopMicrophone();
+  voiceStore.setSpeaking(false);
+  voiceStore.setReconnecting(true);
+}
+
 /**
  * Rejoins a captured server session, even when another server is on screen.
  * Admission and moderation must be confirmed before acquiring/publishing the
@@ -355,6 +391,7 @@ export async function joinCallOnSession(
     if (!isCurrent()) throw cancelled();
     if (reconnect) throw error;
     session.client.send(MessageType.VOICE_LEAVE, { channelId });
+    session.participants.removeVoiceState(mySessionId);
     audioProcessor.stopMicrophone();
     const stopAudio = screenAudioService.stop();
     videoService.stopCamera();

@@ -5,6 +5,7 @@ import { CLIENT_NOTE_GROUPS, parseClientReleaseNotes, type ClientNoteGroup, type
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
 import { bindVersionCopyButton, renderVersionCopyButton } from './VersionCopyButton';
+import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
 
 const RELEASES_URL = 'https://github.com/MonkyOrg/Monky/releases';
 const GROUP_LABELS: Record<ClientNoteGroup, TranslationKey> = {
@@ -205,10 +206,13 @@ export class ChangelogModal {
       linkError.textContent = this.linkFailed ? t('changelog.openFailed') : '';
     }
     this.bodyEl.setAttribute('aria-busy', String(!this.result));
-    if (!this.result || !this.result.ok || this.notes.kind === 'invalid' || this.notes.kind === 'empty') {
+    if (!this.result) {
+      this.bodyEl.innerHTML = renderLoadingSkeleton('lines', 5);
+      return;
+    }
+    if (!this.result.ok || this.notes.kind === 'invalid' || this.notes.kind === 'empty') {
       const failed = this.result?.ok === false || this.notes.kind === 'invalid';
-      const key = !this.result ? 'changelog.loading'
-        : !this.result.ok ? 'changelog.loadFailed'
+      const key = !this.result.ok ? 'changelog.loadFailed'
           : this.notes.kind === 'invalid' ? 'changelog.invalid' : 'changelog.noHighlights';
       this.bodyEl.innerHTML = `<p class="${failed ? 'changelog-error' : 'changelog-empty'}" role="${failed ? 'alert' : 'status'}">${escapeHtml(t(key))}</p>`;
       return;

@@ -10,6 +10,7 @@ import { settingsStore } from '../src/renderer/stores/settingsStore';
 import { VoiceStore, voiceStore } from '../src/renderer/stores/voiceStore';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { sessionManager } from '../src/renderer/core/SessionManager';
+import { currentEventOrigin, setEventOrigin } from '../src/renderer/core/sessionRouting';
 import { createServerStore, getActiveServerStore, setActiveServerStore } from '../src/renderer/stores/serverStore';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../src/renderer/utils/voiceConnection';
 
@@ -470,6 +471,117 @@ test('rebuilding SFU producers does not stop caller-owned capture tracks', async
   assert.equal(stops, 0, 'capture ownership remains with AudioProcessor/VideoService across reconnect');
 });
 
+test('failed microphone publication cannot be hidden by a healthy receive transport', async (t) => {
+  const { engine, client, failures, connected, health } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  t.mock.method(engine, 'canProduceKind', () => true);
+  engine['channelId'] = 'room';
+  engine['recvTransportState'] = 'connected';
+  Object.defineProperty(engine, 'sendTransport', { writable: true, value: {
+    close() {},
+    async produce() { throw new Error('Fixture microphone negotiation failed'); },
+  } });
+  const track = { id: 'mic', kind: 'audio', readyState: 'live' } as MediaStreamTrack;
+  assert.equal(await engine.produceMic(track), null);
+  assert.equal(health.at(-1), 'failed');
+  assert.equal(failures(), 1);
+  engine['sendTransportState'] = 'connected';
+  engine['notifyIfHealthy']();
+  assert.equal(connected(), 0);
+  assert.equal(engine.isChannelConnected(), false);
+  engine.closeProducer('mic');
+  assert.equal(engine.isChannelConnected(), true, 'explicit receive-only mode no longer requires microphone publication');
+});
+
+test('pending microphone publication stays connecting and a cancelled producer cannot replace its successor', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { engine, client, health, failures } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  t.mock.method(engine, 'canProduceKind', () => true);
+  t.mock.method(client, 'send', () => {});
+  engine['channelId'] = 'room';
+  engine['sendTransportState'] = 'connected';
+  engine['recvTransportState'] = 'connected';
+  const makeProducer = (id: string, track: MediaStreamTrack) => ({
+    id, track, closed: false, on() {}, close() { this.closed = true; },
+  });
+  let finishFirst!: (producer: ReturnType<typeof makeProducer>) => void;
+  let calls = 0;
+  Object.defineProperty(engine, 'sendTransport', { writable: true, value: {
+    close() {},
+    produce({ track }: { track: MediaStreamTrack }) {
+      if (++calls === 1) return new Promise<ReturnType<typeof makeProducer>>(resolve => { finishFirst = resolve; });
+      return Promise.resolve(makeProducer('new-producer', track));
+    },
+  } });
+  const oldTrack = { id: 'old-mic', kind: 'audio', readyState: 'live' } as MediaStreamTrack;
+  const newTrack = { id: 'new-mic', kind: 'audio', readyState: 'live' } as MediaStreamTrack;
+  const pending = engine.produceMic(oldTrack);
+  assert.equal(health.at(-1), 'connecting');
+  assert.equal(engine.isChannelConnected(), false);
+  t.mock.timers.tick(15_000);
+  assert.equal(failures(), 1, 'a healthy DTLS connection cannot hide stalled microphone negotiation');
+  const current = await engine.produceMic(newTrack);
+  assert.ok(current);
+  const abandoned = makeProducer('old-producer', oldTrack);
+  finishFirst(abandoned);
+  assert.equal(await pending, null);
+  assert.equal(abandoned.closed, true);
+  assert.equal(engine['producers'].get('mic'), current);
+  assert.equal(engine.isChannelConnected(), true);
+});
+
+test('a pending receive operation is monitored even when the sending transport is healthy', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { engine, client, health, failures } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  let finish!: (payload: SfuConsumedPayload) => void;
+  Object.defineProperty(client, 'sendRequest', { value: () => new Promise<SfuConsumedPayload>(resolve => { finish = resolve; }) });
+  Object.defineProperties(engine, {
+    recvTransport: { writable: true, value: { id: 'recv', close() {} } },
+    device: { writable: true, value: { rtpCapabilities: {} } },
+    channelId: { writable: true, value: 'room' },
+  });
+  engine['sendTransportState'] = 'connected';
+  const pending = engine['consumeRemoteProducer']({
+    channelId: 'room', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', appData: { mediaType: 'mic' },
+  });
+  assert.equal(health.at(-1), 'connecting');
+  assert.equal(engine.isChannelConnected(), false);
+  t.mock.timers.tick(15_000);
+  assert.equal(failures(), 1);
+  engine.leave();
+  finish({ channelId: 'room', id: 'consumer', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', rtpParameters: {}, appData: {} });
+  await pending;
+  assert.equal(engine['pendingConsumers'].size, 0);
+});
+
+test('SFU announcements from a background server cannot alter the call even with matching channel IDs', async (t) => {
+  const { engine, client } = engineFixture();
+  const origin = currentEventOrigin();
+  t.after(() => { setEventOrigin(origin); engine.leave(); client.dispose(); });
+  client.sessionKey = 'call-server';
+  engine['channelId'] = 'room';
+  let consumes = 0;
+  let closes = 0;
+  Object.defineProperties(engine, {
+    consumeRemoteProducer: { value: async () => { consumes++; } },
+    handleRemoteProducerClosed: { value: () => { closes++; } },
+  });
+  engine['subscribeNetworkEvents']();
+  const producer = { channelId: 'room', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', appData: { mediaType: 'mic' } };
+  setEventOrigin('other-server');
+  appEvents.emit(`message.${MessageType.SFU_NEW_PRODUCER}`, producer);
+  appEvents.emit(`message.${MessageType.SFU_PRODUCER_CLOSED}`, producer);
+  assert.equal(consumes, 0);
+  assert.equal(closes, 0);
+  setEventOrigin('call-server');
+  appEvents.emit(`message.${MessageType.SFU_NEW_PRODUCER}`, producer);
+  appEvents.emit(`message.${MessageType.SFU_PRODUCER_CLOSED}`, producer);
+  assert.equal(consumes, 1);
+  assert.equal(closes, 1);
+});
+
 test('duplicate producer announcements and a leave during consume cannot resurrect stale media', async (t) => {
   const { engine, client } = engineFixture();
   t.after(() => { engine.leave(); client.dispose(); });
@@ -522,6 +634,8 @@ test('a failed consumer setup cannot be masked by the sending transport connecti
 test('missing-producer request completion before the close broadcast never poisons a healthy SFU session', async (t) => {
   const { engine, client, failures, health } = engineFixture();
   t.after(() => { engine.leave(); client.dispose(); });
+  client['status'] = 'CONNECTED';
+  Object.defineProperty(client, 'ws', { writable: true, value: { readyState: 1, send() {}, close() {} } });
   let requestId: string | undefined;
   let consumes = 0;
   t.mock.method(client, 'send', (_type: MessageType, _payload: unknown, id?: string) => { requestId = id; });

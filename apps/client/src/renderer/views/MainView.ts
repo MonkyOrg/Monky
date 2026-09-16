@@ -6,7 +6,7 @@ import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
 import { sessionManager } from '../core/SessionManager';
 import { isForegroundEvent } from '../core/sessionRouting';
-import { callClient, isVoiceAdmissionPending, joinCallOnSession, rejoinCallOnSession } from '../core/serverConnection';
+import { callClient, isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession } from '../core/serverConnection';
 import { participantManager } from '../core/ParticipantManager';
 import { serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
@@ -1280,10 +1280,7 @@ export class MainView {
       voiceStore.currentVoiceChannelId === channelId &&
       voiceStore.voiceSessionKey === sessionManager.getActiveKey()
     ) {
-      networkClient.send(MessageType.VOICE_LEAVE, { channelId });
-      webRtcManager.closeAllPeers();
-      audioProcessor.stopMicrophone();
-      voiceStore.reset();
+      leaveCurrentCall();
       this.voiceStageView?.setChannel(null);
       this.setActiveContentView('chat');
     }
@@ -1536,25 +1533,23 @@ export class MainView {
     });
 
     btnDisconnect?.addEventListener('click', async () => {
+      const session = sessionManager.getActive();
+      if (!session) return;
       const confirmed = await showConfirm({
         title: t('main.disconnect'),
         message: t('main.disconnectMessage'),
         confirmLabel: t('main.disconnect'),
         variant: 'danger',
       });
-      if (confirmed) {
+      if (confirmed && sessionManager.get(session.key) === session) {
         // Captured before the socket closes: afterwards there is no way to tell
         // whether this user was hosting the server they just left (#334).
-        const leaveState = await captureHostedServerLeaveState();
+        const leaveState = await captureHostedServerLeaveState(session.client.getCurrentServerUrl());
         soundEffects.play('leave_voice');
         // Microphone and peer mesh are shared by every session (#400): tearing
         // them down while the call lives on another server would kill the audio
         // and still leave the user listed in that server's voice channel.
-        if (this.callIsHere()) {
-          audioProcessor.stopMicrophone();
-          webRtcManager.closeAllPeers();
-        }
-        networkClient.disconnect();
+        session.client.disconnect();
         if (leaveState) await promptShutdownAfterLeave(leaveState);
       }
     });

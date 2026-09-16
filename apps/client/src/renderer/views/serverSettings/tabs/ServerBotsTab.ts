@@ -14,6 +14,7 @@ import { showAlert, showConfirm } from '../../Dialog';
 import { botSettingsModal } from '../../BotSettingsModal';
 import { botRequestError } from '../../../utils/botInputs';
 import type { ServerSettingsContext } from '../ServerSettingsContext';
+import { renderLoadingError, renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
 
 /**
  * Bots tab inside Server Settings (#569).
@@ -34,6 +35,7 @@ export class ServerBotsTab {
   private hadPermission = false;
   private statusTimer: ReturnType<typeof setTimeout> | null = null;
   private manualLinkExpanded = false;
+  private hasLoadedList = false;
 
   public renderHtml(): string {
     return `
@@ -97,8 +99,8 @@ export class ServerBotsTab {
 
         <div data-settings-section="bots" data-settings-label="${escapeHtml(t('bots.listTitle'))}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px;">
           <div style="font-size: 13px; font-weight: 700; margin-bottom: 10px;">${t('bots.listTitle')}</div>
-          <div id="bot-list-container" style="display: flex; flex-direction: column; gap: 6px;">
-            <div style="font-size: 12px; color: var(--text-muted);">${t('bots.loading')}</div>
+          <div id="bot-list-container" aria-busy="true" style="display: flex; flex-direction: column; gap: 6px;">
+            ${renderLoadingSkeleton('lines', 4)}
           </div>
         </div>
       </div>
@@ -117,6 +119,7 @@ export class ServerBotsTab {
       const button = event.target.closest<HTMLButtonElement>('button');
       if (!button || button.matches(':disabled')) return;
       if (button.id === 'btn-create-bot') void this.handleCreate();
+      else if (button.hasAttribute('data-loading-retry')) void this.refreshList();
       else if (button.id === 'btn-install-bot') void this.handleInstall();
       else if (button.id === 'btn-toggle-manual-link') this.setManualLinkExpanded(!this.manualLinkExpanded);
       else if (button.id === 'btn-copy-token' && this.pendingToken) {
@@ -160,6 +163,7 @@ export class ServerBotsTab {
     this.client = null;
     this.context = null;
     this.bots = [];
+    this.hasLoadedList = false;
   }
 
   private isAttached(generation = this.generation, client = this.client): boolean {
@@ -304,15 +308,26 @@ export class ServerBotsTab {
     const generation = this.generation;
     const request = ++this.listRequest;
     if (!client || !this.isAttached()) return;
+    const container = this.root?.querySelector<HTMLElement>('#bot-list-container');
+    if (!this.hasLoadedList && container) {
+      container.setAttribute('aria-busy', 'true');
+      container.innerHTML = renderLoadingSkeleton('lines', 4);
+    }
     try {
       const response = await client.sendRequest<BotListResponsePayload>(MessageType.BOT_LIST, {});
       if (!this.isAttached(generation, client) || request !== this.listRequest) return;
       this.bots = response.bots;
+      this.hasLoadedList = true;
       this.renderBotList();
     } catch (error) {
       if (!this.isAttached(generation, client) || request !== this.listRequest) return;
       const container = this.root?.querySelector<HTMLElement>('#bot-list-container');
       if (container) {
+        container.setAttribute('aria-busy', 'false');
+        if (!this.hasLoadedList) {
+          container.innerHTML = renderLoadingError(botRequestError(error));
+          return;
+        }
         const message = document.createElement('p');
         message.className = 'bot-error';
         message.setAttribute('role', 'alert');
@@ -326,6 +341,7 @@ export class ServerBotsTab {
   private renderBotList(): void {
     const container = this.root?.querySelector<HTMLElement>('#bot-list-container');
     if (!container) return;
+    container.setAttribute('aria-busy', 'false');
 
     if (this.bots.length === 0) {
       container.innerHTML = `<div style="font-size: 12px; color: var(--text-muted);">${t('bots.noBots')}</div>`;

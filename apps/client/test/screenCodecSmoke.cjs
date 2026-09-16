@@ -1023,6 +1023,8 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
         && !voice.currentVoiceChannelId, 'Intentional leave cancels pending admission without reopening any capture');
 
       const queuedRequest = a.client.sendRequest;
+      const previousSocket = a.client.ws;
+      a.client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
       a.client.sendRequest = NetworkClient.prototype.sendRequest;
       try {
         const firstMessage = messages.length;
@@ -1043,6 +1045,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
         'Only the final correlated own response admits media and clears the request timer');
       } finally {
         a.client.sendRequest = queuedRequest;
+        a.client.ws = previousSocket;
       }
 
       deferCapture = true;

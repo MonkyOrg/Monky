@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Seletores e pain\u00e9is aparecem sem esperar todos os dados. Telas, sons, imagens, dispositivos e informa\u00e7\u00f5es do servidor mostram uma pr\u00e9via do layout enquanto carregam, com erros claros e sem reabrir janelas que voc\u00ea j\u00e1 fechou.",
+  "en": "Pickers and panels appear without waiting for all their data. Screens, sounds, images, devices, and server information show layout placeholders while loading, with clear errors and no reopening of windows you already closed."
+}
