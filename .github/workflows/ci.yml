@@ -10,6 +10,69 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  light-native:
+    name: Light native (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: windows-x64
+            arch: x64
+          - os: macos-15-intel
+            target: macos-x64
+            arch: x64
+          - os: macos-15
+            target: macos-arm64
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: ${{ matrix.arch }}
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Read native toolchain pins
+        id: native-tools
+        shell: pwsh
+        run: |
+          $manifest = Join-Path 'apps' (Join-Path 'light' 'dependencies.json')
+          $tools = (Get-Content -Raw -LiteralPath $manifest | ConvertFrom-Json).buildTools
+          if ($tools.ciCmake -notmatch '^\d+\.\d+\.\d+$' -or $tools.ciXcode -notmatch '^\d+\.\d+(\.\d+)?$') {
+            throw 'Invalid native toolchain version in dependencies.json'
+          }
+          "cmake=$($tools.ciCmake)" >> $env:GITHUB_OUTPUT
+          "xcode=$($tools.ciXcode)" >> $env:GITHUB_OUTPUT
+      - name: Select the qualified Xcode toolchain
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_${{ steps.native-tools.outputs.xcode }}.app/Contents/Developer"
+          xcodebuild -version
+          xcrun --show-sdk-version
+      - name: Install the compatible CMake series
+        run: python -m pip install --disable-pip-version-check cmake==${{ steps.native-tools.outputs.cmake }}
+      - name: Cache verified SDK archives
+        uses: actions/cache@v4
+        with:
+          path: apps/light/build/downloads
+          key: light-sdk-${{ matrix.target }}-${{ hashFiles('apps/light/dependencies.json') }}
+      - name: Install build-time JavaScript dependencies
+        run: npm ci --ignore-scripts
+      - name: Build native components
+        run: npm run build:light -- --arch ${{ matrix.arch }}
+      - name: Exercise native components without media devices
+        run: node --test scripts/test-light-contracts.js scripts/test-light-build.js apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs
+      - name: Prepare disposable voice interoperability fixtures
+        run: |
+          npm rebuild mediasoup electron esbuild
+          npm run build --workspace=apps/server
+      - name: Exercise native and Chromium voice through a real isolated server
+        run: node --test apps/light/test/server_fixture.test.cjs apps/light/test/headless_interop.test.cjs apps/light/test/browser_interop.test.cjs
+
   bot-tests:
     name: Bot interactions and SDK package
     runs-on: ubuntu-latest
@@ -28,6 +91,7 @@ jobs:
       - name: Test bot contracts and SDK
         run: |
           node scripts/test-changelog.js
+          node --test scripts/test-light-contracts.js scripts/test-light-build.js
           npm run test --workspace=packages/shared
           npm run test --workspace=packages/bot-sdk
       - name: Test server, client state and real bot conversations
@@ -115,6 +179,7 @@ jobs:
 
           check_pair "README.md" "README.en.md"
           check_pair "CONTRIBUTING.md" "CONTRIBUTING.en.md"
+          check_pair "apps/light/README.md" "apps/light/README.en.md"
 
           # O site de docs (VitePress) tem PT na raiz de docs-site/ e EN em
           # docs-site/en/. Cada pagina precisa manter o par no mesmo PR.

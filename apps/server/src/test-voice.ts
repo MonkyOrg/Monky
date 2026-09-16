@@ -539,11 +539,49 @@ test('producer disappearance during worker consume is obsolete work, but transpo
       producer: { id: 'producer', closed: false, close() {} } as MediasoupTypes.Producer,
       sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'screen_video' },
     });
+
     const router: Partial<MediasoupTypes.Router> = { canConsume: () => true };
     t.mock.method(sfu, 'getOrCreateRouter', async () => router as MediasoupTypes.Router);
     await assert.rejects(sfu.consume('self', 'room', 'recv', 'producer', {}), (actual: unknown) => {
       return disappearance ? actual instanceof SfuProducerClosedError : actual === error;
     });
     sfu.close();
+  }
+});
+
+test('SFU pause and resume tolerate retired consumers but propagate failures of live media', async () => {
+  for (const paused of [false, true]) {
+    for (const disappearance of ['before', 'producer', 'consumer', 'none']) {
+      const sfu = new SfuManager();
+      const error = new Error('Worker consumer state failed');
+      let calls = 0;
+      const changeState = async () => {
+        calls++;
+        if (disappearance === 'producer') sfu.closeProducer('producer');
+        if (disappearance === 'consumer') sfu['consumers'].delete('consumer');
+        throw error;
+      };
+      const consumer: Partial<MediasoupTypes.Consumer> = {
+        id: 'consumer', closed: false, close() {}, pause: changeState, resume: changeState,
+      };
+      sfu['consumers'].set('consumer', {
+        consumer: consumer as MediasoupTypes.Consumer, sessionId: 'self', channelId: 'room', producerId: 'producer',
+      });
+      sfu['producers'].set('producer', {
+        producer: { id: 'producer', closed: false, close() {} } as MediasoupTypes.Producer,
+        sessionId: 'peer', channelId: 'room', kind: 'audio', appData: { mediaType: 'mic' },
+      });
+      if (disappearance === 'before') sfu.closeProducer('producer');
+      try {
+        if (disappearance === 'none') {
+          await assert.rejects(sfu.setConsumerPaused('consumer', paused), actual => actual === error);
+        } else {
+          await sfu.setConsumerPaused('consumer', paused);
+        }
+        assert.equal(calls, disappearance === 'before' ? 0 : 1);
+      } finally {
+        sfu.close();
+      }
+    }
   }
 });
