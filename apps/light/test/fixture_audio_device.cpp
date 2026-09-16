@@ -11,6 +11,7 @@
 #include <mutex>
 #include <numbers>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 
 #ifdef _WIN32
@@ -22,6 +23,9 @@
 #endif
 #include <windows.h>
 #include <mmsystem.h>
+#elif defined(__APPLE__)
+#include <pthread.h>
+#include <pthread/qos.h>
 #endif
 
 namespace monky::light::test {
@@ -105,7 +109,7 @@ struct FixtureAudioDevice::State {
   int32_t Start(Direction direction) {
     if (InCallback()) return -1;
     std::lock_guard control(lifecycle);
-    std::lock_guard lock(mutex);
+    std::unique_lock lock(mutex);
     bool& active = direction == Direction::recording ? recording : playing;
     const bool ready = direction == Direction::recording ? recording_initialized
                                                          : playout_initialized;
@@ -119,10 +123,19 @@ struct FixtureAudioDevice::State {
         // Windows' coarse default timer otherwise turns 10 ms audio into ~64 Hz.
         auto timer = std::make_unique<FixtureTimerResolution>();
         worker = std::thread([this, timer = std::move(timer)] { Run(); });
+#ifdef __APPLE__
+        // Default QoS coalesces this synthetic device's short audio deadlines.
+        const int result = pthread_set_qos_class_np(worker.native_handle(), QOS_CLASS_USER_INTERACTIVE, 0);
+        if (result != 0) throw std::system_error(result, std::generic_category(), "Synthetic audio thread QoS");
+#endif
       } catch (const std::exception& error) {
         std::cerr << "Unable to start synthetic audio: " << error.what() << '\n';
-        counters.worker_running = false;
         active = false;
+        shutdown = true;
+        lock.unlock();
+        if (worker.joinable()) worker.join();
+        lock.lock();
+        counters.worker_running = false;
         return -1;
       }
     }

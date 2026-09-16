@@ -41,6 +41,8 @@ struct WebSocketCallbacks {
 // close/destruction cancel I/O and retire callbacks, silently: local cancellation
 // is not a transport failure. On return no callback can access the owner, except
 // the currently executing callback when close/destruction is called from it.
+// External callers wait for bounded native teardown; callback-thread closure
+// retires asynchronously to avoid waiting on its own I/O queue.
 class WebSocket final {
  public:
   explicit WebSocket(WebSocketCallbacks callbacks,

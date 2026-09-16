@@ -94,44 +94,27 @@ CFStringRef profileAccount(int directory) {
 }
 
 // The file-based Keychain is available to a headless CLI without app entitlements.
-// Preflight every searched keychain: a locked database must not look like absence.
+// Check only the selected store: unrelated search-list entries may be locked.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-void requireUnlockedKeychains(CFArrayRef list) {
-  if (CFArrayGetCount(list) == 0) {
-    throw std::runtime_error("No local Keychain is available for identity storage");
+void requireUsableKeychain(SecKeychainRef keychain, bool writing = false) {
+  SecKeychainStatus keychainStatus = 0;
+  const OSStatus result = SecKeychainGetStatus(keychain, &keychainStatus);
+  if (result != errSecSuccess) failKeychain("Inspect selected identity Keychain", result);
+  if ((keychainStatus & kSecUnlockStateStatus) == 0 ||
+      (keychainStatus & kSecReadPermStatus) == 0) {
+    throw std::runtime_error("Selected identity Keychain is locked or unreadable");
   }
-  for (CFIndex i = 0; i < CFArrayGetCount(list); ++i) {
-    const auto keychain = static_cast<SecKeychainRef>(
-        const_cast<void*>(CFArrayGetValueAtIndex(list, i)));
-    SecKeychainStatus keychainStatus = 0;
-    const OSStatus result = SecKeychainGetStatus(keychain, &keychainStatus);
-    if (result != errSecSuccess) failKeychain("Inspect identity Keychain", result);
-    if ((keychainStatus & kSecUnlockStateStatus) == 0 ||
-        (keychainStatus & kSecReadPermStatus) == 0) {
-      throw std::runtime_error("An identity search Keychain is locked or unreadable");
-    }
+  if (writing && (keychainStatus & kSecWritePermStatus) == 0) {
+    throw std::runtime_error("Selected identity Keychain is not writable");
   }
 }
 
-CFArrayRef unlockedSearchList() {
-  CFArrayRef raw = nullptr;
-  const OSStatus status = SecKeychainCopySearchList(&raw);
-  if (status != errSecSuccess) failKeychain("Read Keychain search list", status);
-  CfOwner<CFArrayRef> list(raw);
-  requireUnlockedKeychains(list.get());
-  return list.release();
-}
-
-SecKeychainRef defaultKeychain(CFArrayRef searchList) {
+SecKeychainRef defaultKeychain() {
   SecKeychainRef raw = nullptr;
   const OSStatus status = SecKeychainCopyDefault(&raw);
   if (status != errSecSuccess) failKeychain("Open default identity Keychain", status);
   CfOwner<SecKeychainRef> keychain(raw);
-  if (!CFArrayContainsValue(searchList, CFRangeMake(0, CFArrayGetCount(searchList)),
-                            keychain.get())) {
-    throw std::runtime_error("Default identity Keychain is not in the search list");
-  }
   return keychain.release();
 }
 #pragma clang diagnostic pop
@@ -153,16 +136,20 @@ CFMutableDictionaryRef identityQuery(CFStringRef account) {
 }
 #pragma clang diagnostic pop
 
-CFArrayRef findIdentity(CFStringRef account, CFArrayRef searchList) {
+CFArrayRef findIdentity(CFStringRef account, SecKeychainRef keychain) {
+  requireUsableKeychain(keychain);
+  const void* selected = keychain;
+  CfOwner<CFArrayRef> searchList(CFArrayCreate(
+      kCFAllocatorDefault, &selected, 1, &kCFTypeArrayCallBacks));
   CfOwner<CFMutableDictionaryRef> query(identityQuery(account));
-  CFDictionarySetValue(query.get(), kSecMatchSearchList, searchList);
+  CFDictionarySetValue(query.get(), kSecMatchSearchList, searchList.get());
   CFDictionarySetValue(query.get(), kSecMatchLimit, kSecMatchLimitAll);
   // Count references before decrypting, so an inaccessible duplicate cannot be skipped.
   CFDictionarySetValue(query.get(), kSecReturnRef, kCFBooleanTrue);
   CFTypeRef raw = nullptr;
   const OSStatus status = SecItemCopyMatching(query.get(), &raw);
   if (status == errSecItemNotFound) {
-    requireUnlockedKeychains(searchList);
+    requireUsableKeychain(keychain);
     return nullptr;
   }
   if (status != errSecSuccess) failKeychain("Find identity without prompting", status);
@@ -177,9 +164,8 @@ CFArrayRef findIdentity(CFStringRef account, CFArrayRef searchList) {
   return static_cast<CFArrayRef>(result.release());
 }
 
-std::optional<IdentitySeed> readSeed(CFStringRef account) {
-  CfOwner<CFArrayRef> searchList(unlockedSearchList());
-  CFArrayRef found = findIdentity(account, searchList.get());
+std::optional<IdentitySeed> readSeed(CFStringRef account, SecKeychainRef keychain) {
+  CFArrayRef found = findIdentity(account, keychain);
   if (!found) return std::nullopt;
   CfOwner<CFArrayRef> item(found);
   CfOwner<CFMutableDictionaryRef> query(identityQuery(account));
@@ -209,13 +195,15 @@ struct IdentityStore::Impl final {
   FileDescriptor directory;
   FileDescriptor lock;
   CfOwner<CFStringRef> account;
+  CfOwner<SecKeychainRef> keychain;
 
   explicit Impl(const std::filesystem::path& profile)
       : directory(open(canonicalProfile(profile).c_str(),
                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)),
         lock(openat(directory.get(), kLockFile,
                     O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600)),
-        account(profileAccount(directory.get())) {
+        account(profileAccount(directory.get())),
+        keychain(defaultKeychain()) {
     requireLockFile();
     if (flock(lock.get(), LOCK_EX | LOCK_NB) == -1) {
       failPosix("Acquire exclusive identity profile lock (profile may be in use)");
@@ -245,14 +233,13 @@ IdentityStore::~IdentityStore() = default;
 
 std::optional<IdentitySeed> IdentityStore::load() const {
   impl_->requireLockFile();
-  return readSeed(impl_->account.get());
+  return readSeed(impl_->account.get(), impl_->keychain.get());
 }
 
 void IdentityStore::save(const IdentitySeed& newSeed) {
   impl_->requireLockFile();
-  CfOwner<CFArrayRef> searchList(unlockedSearchList());
-  CfOwner<SecKeychainRef> keychain(defaultKeychain(searchList.get()));
-  CFArrayRef existing = findIdentity(impl_->account.get(), searchList.get());
+  requireUsableKeychain(impl_->keychain.get(), true);
+  CFArrayRef existing = findIdentity(impl_->account.get(), impl_->keychain.get());
   if (existing) {
     CFRelease(existing);
     throw std::runtime_error("Identity already exists; refusing to replace it");
@@ -264,7 +251,8 @@ void IdentityStore::save(const IdentitySeed& newSeed) {
       kCFAllocatorDefault, plaintext.value.data(),
       static_cast<CFIndex>(plaintext.value.size()), kCFAllocatorNull));
   CFDictionarySetValue(query.get(), kSecValueData, data.get());
-  CFDictionarySetValue(query.get(), kSecUseKeychain, keychain.get());
+  CFDictionarySetValue(query.get(), kSecUseKeychain, impl_->keychain.get());
+  requireUsableKeychain(impl_->keychain.get(), true);
   const OSStatus status = SecItemAdd(query.get(), nullptr);
   if (status != errSecSuccess) failKeychain("Create identity without replacement or UI", status);
 }

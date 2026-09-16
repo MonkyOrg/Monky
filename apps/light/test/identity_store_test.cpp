@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
@@ -57,9 +58,99 @@ void requireFailure(Action action, const char* message) {
 #ifdef __APPLE__
 constexpr char kTestService[] = "org.monky.light.identity.ed25519-seed.v1";
 
+void requireKeychain(OSStatus status, const char* operation) {
+  if (status != errSecSuccess) {
+    throw std::runtime_error(std::string(operation) + " (Keychain OSStatus " +
+                             std::to_string(status) + ")");
+  }
+}
+
+void checkKeychainCleanup(OSStatus status, const char* operation) {
+  if (status != errSecSuccess) {
+    ++cleanupFailures;
+    std::cerr << operation << ": " << status << '\n';
+  }
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+class KeychainSettingsGuard final {
+ public:
+  KeychainSettingsGuard() {
+    requireKeychain(SecKeychainCopyDefault(&default_), "Save test's default Keychain");
+    const OSStatus status = SecKeychainCopySearchList(&searchList_);
+    if (status != errSecSuccess) {
+      CFRelease(default_);
+      requireKeychain(status, "Save test's Keychain search list");
+    }
+  }
+  ~KeychainSettingsGuard() {
+    checkKeychainCleanup(SecKeychainSetSearchList(searchList_), "Restore Keychain search list");
+    checkKeychainCleanup(SecKeychainSetDefault(default_), "Restore default Keychain");
+    CFRelease(searchList_);
+    CFRelease(default_);
+  }
+  KeychainSettingsGuard(const KeychainSettingsGuard&) = delete;
+  KeychainSettingsGuard& operator=(const KeychainSettingsGuard&) = delete;
+
+  void select(SecKeychainRef keychain) {
+    requireKeychain(SecKeychainSetDefault(keychain), "Select disposable default Keychain");
+  }
+
+  void search(std::initializer_list<SecKeychainRef> keychains) {
+    CFMutableArrayRef list = CFArrayCreateMutable(
+        kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+    require(list != nullptr, "Allocate disposable Keychain search list");
+    for (const auto keychain : keychains) CFArrayAppendValue(list, keychain);
+    const OSStatus status = SecKeychainSetSearchList(list);
+    CFRelease(list);
+    requireKeychain(status, "Set disposable Keychain search list");
+  }
+
+ private:
+  SecKeychainRef default_ = nullptr;
+  CFArrayRef searchList_ = nullptr;
+};
+
+class DisposableKeychain final {
+ public:
+  explicit DisposableKeychain(const fs::path& root) {
+    static unsigned sequence = 0;
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path = root / ("identity-keychain-test-" + std::to_string(getpid()) + "-" +
+                              std::to_string(stamp) + "-" +
+                              std::to_string(sequence++) + ".keychain-db");
+    requireKeychain(SecKeychainCreate(path.c_str(), sizeof(kPassword) - 1, kPassword,
+                                      false, nullptr, &keychain_),
+                    "Create exclusive disposable Keychain");
+  }
+  ~DisposableKeychain() {
+    checkKeychainCleanup(SecKeychainDelete(keychain_), "Delete disposable Keychain");
+    CFRelease(keychain_);
+  }
+  DisposableKeychain(const DisposableKeychain&) = delete;
+  DisposableKeychain& operator=(const DisposableKeychain&) = delete;
+  SecKeychainRef get() const { return keychain_; }
+
+  void unlock() {
+    requireKeychain(SecKeychainUnlock(keychain_, sizeof(kPassword) - 1, kPassword, true),
+                    "Unlock disposable Keychain");
+  }
+  void lock() {
+    requireKeychain(SecKeychainLock(keychain_), "Lock disposable Keychain");
+    SecKeychainStatus status = 0;
+    requireKeychain(SecKeychainGetStatus(keychain_, &status), "Inspect disposable Keychain");
+    require((status & kSecUnlockStateStatus) == 0, "Disposable Keychain did not lock");
+  }
+
+ private:
+  static constexpr char kPassword[] = "monky-light-disposable-keychain-test";
+  SecKeychainRef keychain_ = nullptr;
+};
+
 class TestKeychainQuery final {
  public:
-  explicit TestKeychainQuery(const fs::path& profile) {
+  explicit TestKeychainQuery(const fs::path& profile, SecKeychainRef keychain = nullptr) {
     const int directory = open(profile.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     require(directory != -1, "Open test profile for Keychain cleanup");
     char path[PATH_MAX]{};
@@ -77,29 +168,66 @@ class TestKeychainQuery final {
       release();
       throw std::runtime_error("Allocate exact test Keychain query");
     }
+    if (keychain) {
+      keychain_ = keychain;
+      CFRetain(keychain_);
+    } else {
+      const OSStatus status = SecKeychainCopyDefault(&keychain_);
+      if (status != errSecSuccess) {
+        release();
+        requireKeychain(status, "Open default test Keychain");
+      }
+    }
+    const void* selected = keychain_;
+    CFArrayRef searchList = CFArrayCreate(
+        kCFAllocatorDefault, &selected, 1, &kCFTypeArrayCallBacks);
+    if (!searchList) {
+      release();
+      throw std::runtime_error("Allocate scoped test Keychain query");
+    }
     CFDictionarySetValue(query_, kSecClass, kSecClassGenericPassword);
     CFDictionarySetValue(query_, kSecAttrService, service_);
     CFDictionarySetValue(query_, kSecAttrAccount, account_);
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CFDictionarySetValue(query_, kSecMatchSearchList, searchList);
+    CFRelease(searchList);
     CFDictionarySetValue(query_, kSecUseAuthenticationUI, kSecUseAuthenticationUIFail);
-#pragma clang diagnostic pop
   }
   ~TestKeychainQuery() { release(); }
   TestKeychainQuery(const TestKeychainQuery&) = delete;
   TestKeychainQuery& operator=(const TestKeychainQuery&) = delete;
   CFMutableDictionaryRef get() const { return query_; }
 
+  OSStatus add(const UInt8* bytes, CFIndex length) const {
+    CFDataRef data = CFDataCreate(kCFAllocatorDefault, bytes, length);
+    CFMutableDictionaryRef creation = CFDictionaryCreateMutableCopy(
+        kCFAllocatorDefault, 0, query_);
+    if (!data || !creation) {
+      if (data) CFRelease(data);
+      if (creation) CFRelease(creation);
+      throw std::runtime_error("Allocate exact test Keychain entry");
+    }
+    CFDictionaryRemoveValue(creation, kSecMatchSearchList);
+    CFDictionarySetValue(creation, kSecUseKeychain, keychain_);
+    CFDictionarySetValue(creation, kSecValueData, data);
+    const OSStatus status = SecItemAdd(creation, nullptr);
+    CFRelease(creation);
+    CFRelease(data);
+    return status;
+  }
+
  private:
   void release() {
     if (query_) CFRelease(query_);
     if (service_) CFRelease(service_);
     if (account_) CFRelease(account_);
+    if (keychain_) CFRelease(keychain_);
   }
   CFStringRef account_ = nullptr;
   CFStringRef service_ = nullptr;
   CFMutableDictionaryRef query_ = nullptr;
+  SecKeychainRef keychain_ = nullptr;
 };
+#pragma clang diagnostic pop
 #endif
 
 class DisposableProfile final {
@@ -298,20 +426,80 @@ void windowsFailures(const fs::path& root) {
   requireFailure([&] { store.save(seed); }, "Identity directory was overwritten");
 }
 #else
+void macosKeychainIsolation(const fs::path& root) {
+  // Only disposable stores are locked; restore the user's settings on every exit.
+  KeychainSettingsGuard settings;
+  DisposableKeychain selected(root);
+  DisposableKeychain unrelated(root);
+  selected.unlock();
+  unrelated.unlock();
+  settings.select(selected.get());
+  settings.search({unrelated.get(), selected.get()});
+  DisposableProfile profile(root);
+  DisposableProfile emptyProfile(root);
+  const auto seed = testSeed();
+  auto otherSeed = seed;
+  otherSeed[0] ^= 0xff;
+  TestKeychainQuery otherEntry(profile.path, unrelated.get());
+  requireKeychain(otherEntry.add(otherSeed.data(), static_cast<CFIndex>(otherSeed.size())),
+                  "Create same-account entry in unrelated Keychain");
+  unrelated.lock();
+
+  {
+    IdentityStore store(profile.path);
+    IdentityStore empty(emptyProfile.path);
+    require(!store.load(), "Identity lookup escaped the selected Keychain");
+    require(!empty.load(), "Unrelated locked Keychain hid a missing identity");
+    store.save(seed);
+    require(store.load() == seed, "Unrelated locked Keychain prevented identity persistence");
+    requireFailure([&] { store.save(otherSeed); }, "Scoped duplicate save was accepted");
+
+    selected.lock();
+    requireFailure([&] { (void)store.load(); }, "Locked identity was treated as readable/absent");
+    requireFailure([&] { (void)empty.load(); }, "Locked empty Keychain was treated as absence");
+    requireFailure([&] { store.save(otherSeed); }, "Locked identity was replaced");
+    requireFailure([&] { empty.save(otherSeed); }, "Locked Keychain accepted a new identity");
+    selected.unlock();
+    require(store.load() == seed, "A locked-store failure changed the identity");
+    require(!empty.load(), "A locked-store failure created an identity");
+
+    {
+      KeychainSettingsGuard changedDefault;
+      changedDefault.select(unrelated.get());
+      changedDefault.search({unrelated.get()});
+      require(store.load() == seed, "An open identity store followed a changed default");
+      require(!empty.load(), "An open empty store followed a changed default");
+      empty.save(otherSeed);
+      require(empty.load() == otherSeed, "save did not use the store's selected Keychain");
+    }
+  }
+  {
+    IdentityStore reopened(profile.path);
+    IdentityStore reopenedEmpty(emptyProfile.path);
+    require(reopened.load() == seed && reopenedEmpty.load() == otherSeed,
+            "Scoped identities did not persist in the selected default Keychain");
+  }
+  unrelated.unlock();
+  {
+    KeychainSettingsGuard otherDefault;
+    otherDefault.select(unrelated.get());
+    IdentityStore untouched(profile.path);
+    IdentityStore unwritten(emptyProfile.path);
+    require(untouched.load() == otherSeed, "Operations changed an unrelated Keychain entry");
+    require(!unwritten.load(), "save also wrote to the changed default Keychain");
+  }
+}
+
 void macosFailures(const fs::path& root) {
   for (const CFIndex length : {0, 31, 33}) {
     DisposableProfile profile(root);
     IdentityStore store(profile.path);
     TestKeychainQuery query(profile.path);
     const std::vector<UInt8> invalid(static_cast<std::size_t>(length), 0x5a);
-    CFDataRef data = CFDataCreate(kCFAllocatorDefault, invalid.data(), length);
-    require(data != nullptr, "Allocate malformed test seed");
-    CFDictionarySetValue(query.get(), kSecValueData, data);
-    CFRelease(data);
-    const OSStatus status = SecItemAdd(query.get(), nullptr);
-    require(status == errSecSuccess, "Create exact malformed test Keychain entry");
+    requireKeychain(query.add(invalid.data(), length), "Create exact malformed test Keychain entry");
     requireFailure([&] { (void)store.load(); }, "Malformed Keychain seed was accepted");
     requireFailure([&] { store.save(testSeed()); }, "Malformed Keychain seed was replaced");
+    requireFailure([&] { (void)store.load(); }, "Failed save changed the malformed seed");
   }
 }
 #endif
@@ -328,6 +516,7 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     windowsFailures(root);
 #else
+    macosKeychainIsolation(root);
     macosFailures(root);
 #endif
     require(cleanupFailures == 0, "Disposable test cleanup failed");

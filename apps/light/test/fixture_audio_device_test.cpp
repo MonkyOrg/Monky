@@ -304,11 +304,17 @@ void CheckRealtimeCadence() {
   const auto started = std::chrono::steady_clock::now();
   Require(device->StartRecording() == 0 && device->StartPlayout() == 0,
           "Start realtime synthetic PCM");
-  Require(transport.WaitFor(200, 200), "Two seconds of PCM must be produced in realtime");
+  const bool reached = transport.WaitFor(200, 200);
   const auto elapsed = std::chrono::steady_clock::now() - started;
+  const auto observed = transport.Snapshot();
   Require(device->Terminate() == 0, "Release synthetic timing and device worker");
-  Require(elapsed >= 1750ms && elapsed <= 2600ms,
-          "Synthetic PCM must not drift to Windows' coarse default timer cadence");
+  if (!reached || elapsed < 1750ms || elapsed > 2600ms) {
+    std::cerr << "Synthetic cadence: " << observed.recording << " capture / "
+              << observed.playout << " playout callbacks in "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << " ms\n";
+  }
+  Require(reached && elapsed >= 1750ms && elapsed <= 2600ms,
+          "Synthetic PCM must maintain its realtime 10 ms device clock");
 }
 
 void CheckCallbackRemovalAndReplacement() {

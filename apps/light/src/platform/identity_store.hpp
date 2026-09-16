@@ -12,6 +12,8 @@ using IdentitySeed = std::array<std::uint8_t, 32>;
 
 // Requires an existing absolute profile directory; does not change its permissions.
 // Holds an exclusive OS profile lock until destruction. Calls must be serialized.
+// macOS pins the default file-based Keychain at construction; operations never
+// search other Keychains or change the user's default/search list.
 // Invalid path arguments throw std::invalid_argument. Other failures throw
 // std::runtime_error (including std::system_error/filesystem_error).
 class IdentityStore final {

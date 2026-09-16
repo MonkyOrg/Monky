@@ -128,9 +128,14 @@ estas últimas situações geram erro, nunca uma substituição automática.
 importação e migração não fazem parte dessa API.
 
 No Windows, `identity.dpapi.pending` indica uma gravação interrompida e exige
-recuperação explícita. No macOS, as consultas são não interativas; Keychains
-bloqueados/inacessíveis interrompem a operação. A conta é vinculada ao caminho
-canônico do perfil, portanto mover o diretório exige tratamento de migração.
+recuperação explícita. No macOS, cada `IdentityStore` mantém o Keychain padrão
+selecionado na construção e restringe consultas e criação a ele, sem alterar a
+lista de busca ou o padrão do usuário. As operações são não interativas: esse
+Keychain precisa estar desbloqueado e legível, e `save()` também exige permissão
+de escrita. Keychains não relacionados, mesmo bloqueados, não interferem.
+O serviço é `org.monky.light.identity.ed25519-seed.v1`, e a conta é o caminho
+canônico do perfil. Mover o diretório ou reabrir com outro Keychain padrão exige
+tratamento explícito de migração/recuperação; chaves não são movidas nem substituídas.
 
 O executável de cenários da plataforma cria subdiretórios descartáveis e remove
 apenas os arquivos e registros de Keychain que pertencem a eles. No Windows:
@@ -143,6 +148,11 @@ npm run build:light -- --target monky-light-platform-test
 No macOS, o executável fica em `bin` no diretório da arquitetura selecionada.
 Passe esse diretório de construção existente como argumento; não use perfis
 do Monky instalado nem servidores/dados de produção.
+Os cenários de isolamento criam Keychains descartáveis, bloqueiam somente esses
+Keychains e restauram o padrão e a lista de busca ao sair. Execute-os sem outros
+testes de Keychain em paralelo. Em CI sem interface, prepare antes um Keychain
+descartável como padrão, desbloqueado e gravável; restaure a configuração anterior
+e exclua somente esse Keychain ao terminar.
 
 Para os cenários nativos disponíveis, incluindo compatibilidade da assinatura
 com o verificador usado pelo servidor:
@@ -191,6 +201,9 @@ O dispositivo de áudio sintético existe somente em `test`: fornece PCM mono a
 hardware, mesmo quando o SDK solicita o dispositivo padrão. No Windows, somente
 esse dispositivo de teste solicita temporariamente resolução de timer de 1 ms,
 liberada ao parar seu worker; isso não altera o timer do cliente de produção.
+No macOS, o worker sintético usa QoS `user-interactive` para evitar agrupamento
+dos prazos de áudio. A prioridade dura somente enquanto esse worker existe e
+não muda o dispositivo de áudio de produção.
 
 O ambiente de servidor descartável usa o servidor real, limitado ao loopback,
 sem divulgação na LAN ou servidores STUN externos:

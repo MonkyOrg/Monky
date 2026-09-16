@@ -4,6 +4,8 @@
 #import <dispatch/dispatch.h>
 
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <deque>
 #include <mutex>
@@ -18,6 +20,7 @@
   std::function<void()> opened;
   std::function<void(NSInteger)> closed;
   std::function<void(NSError*)> failed;
+  std::function<void()> completed;
 }
 @end
 
@@ -36,6 +39,7 @@
 - (void)URLSession:(NSURLSession*)session task:(NSURLSessionTask*)task
     didCompleteWithError:(NSError*)error {
   if (error && failed) failed(error);
+  if (completed) completed();
 }
 - (void)URLSession:(NSURLSession*)session task:(NSURLSessionTask*)task
     willPerformHTTPRedirection:(NSHTTPURLResponse*)response
@@ -83,17 +87,26 @@ struct WebSocket::Impl : std::enable_shared_from_this<WebSocket::Impl> {
   std::recursive_mutex callbackMutex;
   WebSocketCallbacks callbacks;
   std::mutex mutex;
+  std::condition_variable completion;
   const std::size_t maxIncoming;
   bool started = false;
   bool stopping = false;
   bool opened = false;
   bool sendPending = false;
+  bool nativeFinished = false;
   std::deque<std::string> outgoing;
   std::size_t outgoingBytes = 0;
   std::size_t outgoingCount = 0;
   NSOperationQueue* queue = nil;
   NSURLSession* session = nil;
   NSURLSessionWebSocketTask* task = nil;
+
+  void didFinish() {
+    std::lock_guard lock(mutex);
+    nativeFinished = true;
+    queue = nil;
+    completion.notify_all();
+  }
 
   bool active() {
     std::lock_guard lock(mutex);
@@ -257,6 +270,9 @@ struct WebSocket::Impl : std::enable_shared_from_this<WebSocket::Impl> {
     delegate->failed = [weak](NSError* error) {
       if (auto self = weak.lock()) self->fail(error);
     };
+    delegate->completed = [weak] {
+      if (auto self = weak.lock()) self->didFinish();
+    };
     NSURLSessionConfiguration* config =
         [NSURLSessionConfiguration ephemeralSessionConfiguration];
     config.URLCredentialStorage = nil;
@@ -291,34 +307,45 @@ struct WebSocket::Impl : std::enable_shared_from_this<WebSocket::Impl> {
   }
 
   void stop(std::uint16_t code = 1000) noexcept {
-    std::lock_guard gate(callbackMutex);
-    callbacks = {};
-    NSURLSessionWebSocketTask* current;
-    NSURLSession* currentSession;
+    NSURLSessionWebSocketTask* current = nil;
+    NSURLSession* currentSession = nil;
+    NSOperationQueue* closingQueue;
     {
+      std::lock_guard gate(callbackMutex);
+      callbacks = {};
       std::lock_guard lock(mutex);
-      if (stopping) return;
-      stopping = true;
-      opened = false;
-      outgoing.clear();
-      current = task;
-      currentSession = session;
-      task = nil;
-      session = nil;
-      queue = nil;
+      closingQueue = queue;
+      if (!stopping) {
+        stopping = true;
+        opened = false;
+        outgoing.clear();
+        current = task;
+        currentSession = session;
+        nativeFinished = !task;
+        task = nil;
+        session = nil;
+      }
     }
     // Foundation sends the close frame and cancels outstanding work. Delegate
     // and completion blocks retain only weak C++ state, so late work is harmless.
     const auto closeCode = code == 1005 || code == 1006
         ? NSURLSessionWebSocketCloseCodeNormalClosure
         : static_cast<NSURLSessionWebSocketCloseCode>(code);
-    [current cancelWithCloseCode:closeCode reason:nil];
-    [currentSession finishTasksAndInvalidate];
-    // A peer that ignores close cannot retain the session forever.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-      [currentSession invalidateAndCancel];
-    });
+    if (currentSession) {
+      [current cancelWithCloseCode:closeCode reason:nil];
+      [currentSession finishTasksAndInvalidate];
+      // A peer that ignores close cannot retain the session forever.
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
+                     dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        [currentSession invalidateAndCancel];
+      });
+    }
+    // The delegate must finish the handshake before an external owner exits.
+    // Waiting on the delegate queue itself would deadlock close-from-callback.
+    if (closingQueue && [NSOperationQueue currentQueue] != closingQueue) {
+      std::unique_lock lock(mutex);
+      completion.wait_for(lock, std::chrono::milliseconds(500), [&] { return nativeFinished; });
+    }
   }
 };
 

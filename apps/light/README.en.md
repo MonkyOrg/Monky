@@ -128,9 +128,14 @@ the latter conditions fail explicitly, never silently replacing the identity.
 Recovery, import, and migration are outside this API.
 
 On Windows, `identity.dpapi.pending` indicates an interrupted write requiring
-explicit recovery. On macOS, queries are noninteractive; locked or inaccessible
-Keychains stop the operation. The account is scoped to the canonical profile
-path, so moving the directory requires migration handling.
+explicit recovery. On macOS, each `IdentityStore` retains the default Keychain
+selected at construction and restricts queries and creation to it, without
+changing the user's search list or default. Operations are noninteractive: that
+Keychain must be unlocked and readable, and `save()` also requires write
+permission. Unrelated Keychains, even locked ones, do not interfere.
+The service is `org.monky.light.identity.ed25519-seed.v1`, and the account is the
+canonical profile path. Moving the directory or reopening with another default
+Keychain requires explicit migration/recovery; keys are never moved or replaced.
 
 The platform scenario executable creates disposable subdirectories and removes
 only their owned files and Keychain records. On Windows:
@@ -143,6 +148,11 @@ npm run build:light -- --target monky-light-platform-test
 On macOS, the executable is under `bin` in the selected architecture's build
 directory. Pass that existing build directory as its argument; do not use an
 installed Monky profile or production servers/data.
+The isolation scenarios create disposable Keychains, lock only those stores,
+and restore the default and search list on exit. Run them without other
+Keychain tests in parallel. For headless CI, first prepare an unlocked, writable
+disposable default Keychain; restore the previous configuration and delete only
+that Keychain when finished.
 
 For the available native scenarios, including signature compatibility with the
 verifier used by the server:
@@ -190,6 +200,9 @@ PCM in 10 ms frames and measures received audio energy. It never selects
 hardware, even when the SDK requests a default device. On Windows, only this
 test device temporarily requests 1 ms timer resolution, released when its
 worker stops; it does not change the production client's timer.
+On macOS, the synthetic worker uses `user-interactive` QoS to avoid coalescing
+audio deadlines. That priority lasts only for the worker's lifetime and does
+not change the production audio device.
 
 The disposable server fixture uses the real server, restricted to loopback,
 without LAN advertising or external STUN servers:
