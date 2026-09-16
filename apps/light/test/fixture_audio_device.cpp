@@ -7,6 +7,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <numbers>
@@ -122,12 +123,22 @@ struct FixtureAudioDevice::State {
       try {
         // Windows' coarse default timer otherwise turns 10 ms audio into ~64 Hz.
         auto timer = std::make_unique<FixtureTimerResolution>();
-        worker = std::thread([this, timer = std::move(timer)] { Run(); });
+        std::promise<int> scheduling;
+        auto configured = scheduling.get_future();
+        worker = std::thread([this, timer = std::move(timer),
+                              scheduling = std::move(scheduling)]() mutable {
 #ifdef __APPLE__
-        // Default QoS coalesces this synthetic device's short audio deadlines.
-        const int result = pthread_set_qos_class_np(worker.native_handle(), QOS_CLASS_USER_INTERACTIVE, 0);
-        if (result != 0) throw std::system_error(result, std::generic_category(), "Synthetic audio thread QoS");
+          // Apple applies requested QoS from the thread being configured.
+          const int result = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+          scheduling.set_value(result);
+          if (result != 0) return;
+#else
+          scheduling.set_value(0);
 #endif
+          Run();
+        });
+        const int result = configured.get();
+        if (result != 0) throw std::system_error(result, std::generic_category(), "Synthetic audio thread QoS");
       } catch (const std::exception& error) {
         std::cerr << "Unable to start synthetic audio: " << error.what() << '\n';
         active = false;
