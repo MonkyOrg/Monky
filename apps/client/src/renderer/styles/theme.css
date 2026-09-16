@@ -3517,6 +3517,27 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-secondary);
   font-size: 12px;
 }
+.bot-autocomplete-pagination {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 8px 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.bot-autocomplete-pagination > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.bot-autocomplete-pagination > button {
+  flex-shrink: 0;
+}
+.bot-autocomplete-pagination > button[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: wait;
+}
 .bot-local-download-cue {
   display: flex;
   gap: 5px;

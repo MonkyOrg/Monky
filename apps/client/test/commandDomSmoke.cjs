@@ -92,10 +92,12 @@ if (!process.versions.electron) {
       await runLocalDownloadGestureSmoke(window);
       const preferenceChecks = await window.webContents.executeJavaScript('window.autocompletePreferencesSmoke()', true);
       const lazyChecks = await window.webContents.executeJavaScript('window.autocompleteLazyPreviewSmoke()', true);
+      const paginationChecks = await window.webContents.executeJavaScript('window.autocompletePaginationSmoke()', true);
       await window.webContents.executeJavaScript('window.autocompleteDomCleanup()', true);
       console.log(`Autocomplete DOM smoke: ${checks} checks passed`);
       console.log(`Bot preference transport: ${preferenceChecks} checks passed`);
       console.log(`Lazy autocomplete previews: ${lazyChecks} checks passed`);
+      console.log(`Paginated autocomplete: ${paginationChecks} checks passed`);
       await finish(0);
       return;
     }
@@ -121,6 +123,7 @@ if (!process.versions.electron) {
     await runLocalDownloadGestureSmoke(window);
     const preferenceChecks = await window.webContents.executeJavaScript('window.autocompletePreferencesSmoke()', true);
     const lazyChecks = await window.webContents.executeJavaScript('window.autocompleteLazyPreviewSmoke()', true);
+    const paginationChecks = await window.webContents.executeJavaScript('window.autocompletePaginationSmoke()', true);
     await window.webContents.executeJavaScript('window.autocompleteDomCleanup()', true);
     const sidebarChecks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
     const restrictionChecks = await window.webContents.executeJavaScript(`(${runServerRestrictionSmoke.toString()})()`, true);
@@ -142,6 +145,7 @@ if (!process.versions.electron) {
     console.log(`Bot settings DOM smoke: ${botSettingsChecks} checks passed`);
     console.log(`Bot preference transport: ${preferenceChecks} checks passed`);
     console.log(`Lazy autocomplete previews: ${lazyChecks} checks passed`);
+    console.log(`Paginated autocomplete: ${paginationChecks} checks passed`);
     console.log('Screenshots: dist-test\\command-dom-catalog.png and dist-test\\command-dom-composer.png');
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
@@ -1327,8 +1331,8 @@ async function runAutocompleteDomSmoke() {
   view.setChannel('one');
   const input = () => find('[data-bot-autocomplete="sound"]');
   const select = () => { type(find('#chat-message-input'), '/query'); key(find('#chat-message-input'), 'Enter'); };
-  const response = (request, choices) => client.handleIncomingMessage({
-    type: 'COMMAND_AUTOCOMPLETE_RESULT', requestId: request.requestId, payload: { status: 'ok', choices },
+  const response = (request, choices, paging = {}) => client.handleIncomingMessage({
+    type: 'COMMAND_AUTOCOMPLETE_RESULT', requestId: request.requestId, payload: { status: 'ok', choices, ...paging },
   });
   const choices = Array.from({ length: 20 }, (_, index) => ({
     label: `Visible ${index}`,
@@ -1359,7 +1363,7 @@ async function runAutocompleteDomSmoke() {
   check(JSON.stringify(queries[0].payload.userSettings) === JSON.stringify({ language: 'pt-BR' }),
     'Autocomplete carries only this bot/server/caller custom preferences');
   response(queries[0], choices);
-  await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 10);
+  await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 20);
   const menuRect = find('#bot-parameter-options').getBoundingClientRect();
   const composerRect = find('.bot-compact-command-form').getBoundingClientRect();
   check(menuRect.bottom <= composerRect.top + 1 && menuRect.width >= composerRect.width * 0.95,
@@ -1775,6 +1779,213 @@ async function runAutocompleteDomSmoke() {
     await new Promise(resolve => setTimeout(resolve, 30));
     check(invoked.length === beforeInvoked, 'No lazy lifecycle transition invokes a command');
     language.setLanguage('pt-BR');
+    return checks - beforeChecks;
+  };
+  window.autocompletePaginationSmoke = async () => {
+    const beforeChecks = checks;
+    const { audioPreviewService } = await import('/core/AudioPreviewService.ts');
+    command = { ...command, downloadsSound: false, options: requiredOnlyOptions };
+    store.setCommands([command]);
+    server.setSlashCommands([command]);
+    select();
+    const firstQueryIndex = queries.length;
+    type(input(), 'paginated');
+    await waitFor(() => queries.length === firstQueryIndex + 1);
+    const firstRequest = queries.at(-1);
+    check(!('page' in firstRequest.payload) && !('cursor' in firstRequest.payload),
+      'The first request preserves the legacy wire shape');
+    const makeChoices = (start, count) => Array.from({ length: count }, (_, index) => ({
+      label: `Paged ${start + index}`, value: `paged-${start + index}`,
+    }));
+    const firstPage = makeChoices(0, 20);
+    firstPage[0].audio = { resourceId: 'paged-first-preview', fileName: 'first.wav' };
+    firstPage[1].audio = { url: 'https://audio.example.test/paged.wav', fileName: 'paged.wav' };
+    response(firstRequest, firstPage, { hasMore: true, nextCursor: 'source:1:20' });
+    await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 20);
+    const list = find('#bot-parameter-options .bot-choice-list');
+    const originalOption = find('[data-parameter-option="0"]');
+    originalOption.focus();
+    find('[data-parameter-option="1"] [data-audio-preview-action="toggle"]').click();
+    await waitFor(() => previewLoads.some(entry => entry.url === 'https://audio.example.test/paged.wav'));
+    const originalPreview = audioPreviewService.active;
+    list.scrollTop = list.scrollHeight;
+    const scrollTop = list.scrollTop;
+    list.dispatchEvent(new Event('scroll'));
+    list.dispatchEvent(new Event('scroll'));
+    check(find('#bot-parameter-options').getAttribute('aria-busy') === 'true' &&
+      audioPreviewService.active === originalPreview && originalOption.isConnected,
+    'Loading another page keeps current choices, focus targets and playback alive');
+    await waitFor(() => queries.length === firstQueryIndex + 2);
+    const secondRequest = queries.at(-1);
+    check(secondRequest.payload.page === 1 && secondRequest.payload.cursor === 'source:1:20' &&
+      !queryCancels.some(cancel => cancel.requestId === firstRequest.requestId),
+    'Scroll forwards the next page/cursor without revoking earlier lazy previews');
+    const secondPage = makeChoices(19, 20);
+    secondPage[1].audio = { resourceId: 'paged-second-preview', fileName: 'second.wav' };
+    response(secondRequest, secondPage, { hasMore: true, nextCursor: 'source:2:0' });
+    await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 39);
+    check(find('[data-parameter-option="0"]') === originalOption && document.activeElement === originalOption &&
+      Math.abs(list.scrollTop - scrollTop) < 1,
+    'Pages append without rebuilding old rows, resetting focus or jumping the scrollbar');
+    check(root.querySelectorAll('[data-audio-preview-volume]').length === 1 &&
+      root.querySelectorAll('[data-parameter-option="20"]').length === 1,
+    'Appending reuses the shared preview control and keeps globally unique choice indices');
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(queries.length === firstQueryIndex + 2, 'Loading a page does not eagerly fetch the rest of the catalog');
+    originalOption.querySelector('[data-audio-preview-action="toggle"]').click();
+    await waitFor(() => lazyRequests.at(-1)?.payload.resourceId === 'paged-first-preview');
+    const firstPreview = lazyRequests.at(-1);
+    check(firstPreview.payload.autocompleteRequestId === firstRequest.requestId,
+      'A first-page preview keeps its original request authority after later pages load');
+    client.handleIncomingMessage({ type: 'COMMAND_AUTOCOMPLETE_CANCEL', payload: { requestId: firstRequest.requestId } });
+    check(!find('#bot-parameter-options').hidden && lazyCancels.some(cancel => cancel.requestId === firstPreview.requestId),
+      'Expiring an older page stops only its preview without closing the accumulated search');
+    find('[data-parameter-option="20"] [data-audio-preview-action="toggle"]').click();
+    await waitFor(() => lazyRequests.at(-1)?.payload.resourceId === 'paged-second-preview');
+    check(lazyRequests.at(-1).payload.autocompleteRequestId === secondRequest.requestId,
+      'A later-page preview remains bound to its own still-valid authority');
+    audioPreviewService.release(root);
+    list.scrollTop = list.scrollHeight;
+    list.dispatchEvent(new Event('scroll'));
+    await waitFor(() => queries.length === firstQueryIndex + 3);
+    const failedPage = queries.at(-1);
+    client.handleIncomingMessage({
+      type: 'COMMAND_AUTOCOMPLETE_RESULT', requestId: failedPage.requestId,
+      payload: { status: 'failed', reason: 'handler_failed' },
+    });
+    await waitFor(() => find('[data-autocomplete-pagination]').textContent.includes(language.t('botChat.autocompleteMoreError')));
+    check(root.querySelectorAll('[data-parameter-option]').length === 39 && originalOption.isConnected,
+      'A later-page error leaves all existing results selectable');
+    list.dispatchEvent(new Event('scroll'));
+    await new Promise(resolve => setTimeout(resolve, 550));
+    check(queries.length === firstQueryIndex + 3, 'Scroll does not silently retry a failed provider');
+    const retry = find('[data-bot-action="autocomplete-load-more"]');
+    check(retry.textContent === language.t('botChat.autocompleteRetry'), 'Pagination retry copy follows the active locale');
+    retry.click();
+    await waitFor(() => queries.length === firstQueryIndex + 4);
+    const retryPage = queries.at(-1);
+    check(retryPage.payload.page === 2 && retryPage.payload.cursor === 'source:2:0',
+      'Retry requests the same page/cursor rather than skipping results');
+    response(retryPage, makeChoices(39, 20), { hasMore: false });
+    await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 59);
+    check(find('[data-autocomplete-pagination]').textContent.includes(language.t('botChat.autocompleteEnd')),
+      'The final page visibly ends infinite scrolling without a total result cap');
+    list.scrollTop = list.scrollHeight;
+    list.dispatchEvent(new Event('scroll'));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(queries.length === firstQueryIndex + 4, 'Scrolling the final page sends no more requests');
+    const invocationCount = invoked.length;
+    find('[data-parameter-option="58"]').click();
+    await waitFor(() => invoked.length === invocationCount + 1 && !store.getCommandDraft('one'));
+    check(invoked.at(-1).options.sound === 'paged-58' &&
+      queryCancels.some(cancel => cancel.requestId === secondRequest.requestId),
+    'A late-page choice executes with its opaque value and closing releases retained page authorities');
+
+    select();
+    type(input(), 'old paginated');
+    await waitFor(() => queries.length === firstQueryIndex + 5);
+    response(queries.at(-1), firstPage, { hasMore: true, nextCursor: 'old:cursor' });
+    await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 20);
+    const oldList = find('#bot-parameter-options .bot-choice-list');
+    oldList.scrollTop = oldList.scrollHeight;
+    oldList.dispatchEvent(new Event('scroll'));
+    await waitFor(() => queries.length === firstQueryIndex + 6);
+    const oldPage = queries.at(-1);
+    type(input(), 'new query');
+    check(queryCancels.some(cancel => cancel.requestId === oldPage.requestId) &&
+      root.querySelectorAll('[data-parameter-option]').length === 0,
+    'Editing immediately clears the list and cancels the in-flight continuation');
+    response(oldPage, secondPage, { hasMore: true, nextCursor: 'stale:cursor' });
+    await waitFor(() => queries.length === firstQueryIndex + 7);
+    check(queries.at(-1).payload.query === 'new query' && !('page' in queries.at(-1).payload),
+      'A replacement search resets paging to the original wire request');
+    response(queries.at(-1), [], { hasMore: false });
+    await waitFor(() => find('#bot-parameter-options').textContent.includes(language.t('botChat.autocompleteEmpty')));
+    check(root.querySelectorAll('[data-parameter-option]').length === 0, 'A late continuation cannot contaminate the new query');
+    check(!root.querySelector('[data-autocomplete-pagination]'),
+      'A replacement non-paginated search does not inherit the previous search footer or expiry behavior');
+    type(input(), 'keyboard pages');
+    await waitFor(() => queries.length === firstQueryIndex + 8);
+    response(queries.at(-1), makeChoices(0, 1), { hasMore: true, nextCursor: 'keyboard:next' });
+    await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 1);
+    const beforeKeyboardInvoke = invoked.length;
+    key(input(), 'ArrowDown');
+    key(input(), 'ArrowDown');
+    await waitFor(() => queries.length === firstQueryIndex + 9);
+    check(queries.at(-1).payload.page === 1 && queries.at(-1).payload.cursor === 'keyboard:next' &&
+      invoked.length === beforeKeyboardInvoke,
+    'Keyboard navigation at the end requests one continuation even when the first page cannot scroll');
+    response(queries.at(-1), makeChoices(1, 1), { hasMore: false });
+    await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 2);
+    const keyboardBefore = input().getAttribute('aria-activedescendant');
+    check(keyboardBefore === 'bot-parameter-option-0',
+      'Appending results under a stationary pointer must preserve the keyboard selection');
+    key(input(), 'ArrowDown');
+    const keyboardAfter = input().getAttribute('aria-activedescendant');
+    key(input(), 'Enter');
+    await waitFor(() => invoked.length === beforeKeyboardInvoke + 1 && !store.getCommandDraft('one'));
+    check(invoked.at(-1).options.sound === 'paged-1',
+      `Keyboard users can select and execute a later-page choice (${keyboardBefore} -> ${keyboardAfter}: ${invoked.at(-1).options.sound})`);
+    select();
+    const focusQueryIndex = queries.length;
+    type(input(), 'focused pagination');
+    await waitFor(() => queries.length === focusQueryIndex + 1);
+    response(queries.at(-1), makeChoices(0, 1), { hasMore: true, nextCursor: 'focused:next' });
+    await waitFor(() => !!root.querySelector('[data-bot-action="autocomplete-load-more"]'));
+    const focusedMore = find('[data-bot-action="autocomplete-load-more"]');
+    focusedMore.focus();
+    focusedMore.click();
+    check(document.activeElement === focusedMore,
+      'Activating Load more must not blur the focused keyboard control');
+    await waitFor(() => queries.length === focusQueryIndex + 2);
+    client.handleIncomingMessage({
+      type: 'COMMAND_AUTOCOMPLETE_RESULT', requestId: queries.at(-1).requestId,
+      payload: { status: 'failed', reason: 'handler_failed' },
+    });
+    await waitFor(() => focusedMore.textContent === language.t('botChat.autocompleteRetry'));
+    check(document.activeElement === focusedMore, 'A failed page keeps the retry button focused');
+    focusedMore.click();
+    await waitFor(() => queries.length === focusQueryIndex + 3);
+    response(queries.at(-1), makeChoices(1, 1), { hasMore: false });
+    await waitFor(() => focusedMore.hidden);
+    check(document.activeElement === input(),
+      'Completing the last page transfers focus from the disappearing button to the query');
+    find('[data-bot-action="cancel-command"]').click();
+
+    select();
+    const emptyQueryIndex = queries.length;
+    type(input(), 'empty continuation');
+    await waitFor(() => queries.length === emptyQueryIndex + 1);
+    response(queries.at(-1), [], { hasMore: true, nextCursor: 'empty:first' });
+    await waitFor(() => !!root.querySelector('[data-bot-action="autocomplete-load-more"]'));
+    const emptyMore = find('[data-bot-action="autocomplete-load-more"]');
+    emptyMore.focus();
+    emptyMore.click();
+    check(emptyMore.isConnected && document.activeElement === emptyMore,
+      'Loading after an empty nonterminal page preserves the focused continuation control');
+    await waitFor(() => queries.length === emptyQueryIndex + 2);
+    response(queries.at(-1), [], { hasMore: true, nextCursor: 'empty:second' });
+    await waitFor(() => find('#bot-parameter-options').getAttribute('aria-busy') === 'false');
+    check(emptyMore.isConnected && document.activeElement === emptyMore &&
+      queries.length === emptyQueryIndex + 2 && root.querySelectorAll('[data-parameter-option]').length === 0,
+    'Another empty nonterminal page keeps its controls without automatically fetching more');
+    emptyMore.click();
+    await waitFor(() => queries.length === emptyQueryIndex + 3);
+    const afterEmpty = makeChoices(0, 1);
+    afterEmpty[0].audio = { url: 'https://audio.example.test/after-empty.wav', fileName: 'after-empty.wav' };
+    response(queries.at(-1), afterEmpty, { hasMore: true, nextCursor: 'empty:third' });
+    await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 1);
+    check(emptyMore.isConnected && document.activeElement === emptyMore &&
+      input().getAttribute('aria-activedescendant') === 'bot-parameter-option-0' &&
+      root.querySelectorAll('[data-audio-preview-volume]').length === 1,
+    'The first choices after empty pages initialize selection and audio controls without losing focus');
+    emptyMore.click();
+    await waitFor(() => queries.length === emptyQueryIndex + 4);
+    response(queries.at(-1), [], { hasMore: false });
+    await waitFor(() => emptyMore.hidden);
+    check(document.activeElement === input() && root.querySelectorAll('[data-parameter-option]').length === 1,
+      'An empty terminal page retains the accumulated choices and restores query focus');
+    find('[data-bot-action="cancel-command"]').click();
     return checks - beforeChecks;
   };
   return checks;

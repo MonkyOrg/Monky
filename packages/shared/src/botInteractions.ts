@@ -129,12 +129,27 @@ export const commandAutocompleteChoicesSchema = z.array(commandAutocompleteChoic
   .refine((choices) => new Set(choices.map((choice) => choice.value)).size === choices.length);
 export type CommandAutocompleteChoice = z.infer<typeof commandAutocompleteChoiceSchema>;
 
+const autocompleteCursorSchema = z.string().min(1).max(LIMITS.MAX_BOT_AUTOCOMPLETE_CURSOR_LENGTH);
+const autocompletePageFields = {
+  choices: commandAutocompleteChoicesSchema,
+  hasMore: z.boolean().optional(),
+  nextCursor: autocompleteCursorSchema.optional(),
+};
+function validAutocompleteContinuation(page: { hasMore?: boolean; nextCursor?: string }): boolean {
+  return page.nextCursor === undefined || page.hasMore === true;
+}
+export const commandAutocompletePageSchema = z.object(autocompletePageFields).strict()
+  .refine(validAutocompleteContinuation, 'A continuation cursor requires hasMore');
+export type CommandAutocompletePage = z.infer<typeof commandAutocompletePageSchema>;
+
 export const commandAutocompleteSchema = z.object({
   botId: identifier,
   commandName,
   channelId: identifier,
   optionName: inputName,
   query: z.string().max(LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH),
+  page: z.number().int().safe().nonnegative().optional(),
+  cursor: autocompleteCursorSchema.optional(),
   options: commandValuesSchema.optional(),
   locale: botLocaleSchema.optional(),
   userSettings: botSettingsValuesSchema.optional(),
@@ -149,13 +164,14 @@ export const commandAutocompleteExecutionSchema = commandAutocompleteSchema
 export const commandAutocompleteResultSchema = z.discriminatedUnion('status', [
   z.object({
     status: z.literal('ok'),
-    choices: commandAutocompleteChoicesSchema,
+    ...autocompletePageFields,
   }).strict(),
   z.object({
     status: z.literal('failed'),
     reason: z.enum(['handler_failed', 'invalid_response', 'timeout']),
   }).strict(),
-]);
+]).refine((result) => result.status !== 'ok' || validAutocompleteContinuation(result),
+  'A continuation cursor requires hasMore');
 export type CommandAutocompleteResult = z.infer<typeof commandAutocompleteResultSchema>;
 export const commandAutocompleteCancelSchema = z.object({ requestId: identifier }).strict();
 

@@ -29,7 +29,7 @@ import {
   commandDefinitionSchema,
   commandDefinitionsSchema,
   commandAutocompleteCancelSchema,
-  commandAutocompleteChoicesSchema,
+  commandAutocompletePageSchema,
   commandAutocompleteExecutionSchema,
   commandAudioPreviewCancelSchema,
   commandAudioPreviewExecutionSchema,
@@ -69,6 +69,7 @@ import type {
   BotSettingsDefinition,
   CommandExecutionPayload,
   CommandAutocompleteChoice,
+  CommandAutocompletePage,
   CommandAutocompleteExecutionPayload,
   CommandAutocompleteResultPayload,
   CommandAudioPreviewExecutionPayload,
@@ -110,7 +111,7 @@ export interface CommandDefinition {
   voiceRequirement?: CommandVoiceRequirement;
   autocomplete?: (
     ctx: CommandAutocompleteContext
-  ) => CommandAutocompleteChoice[] | Promise<CommandAutocompleteChoice[]>;
+  ) => CommandAutocompleteChoice[] | CommandAutocompletePage | Promise<CommandAutocompleteChoice[] | CommandAutocompletePage>;
   audioPreview?: (
     ctx: CommandAudioPreviewContext
   ) => CommandAudioPreviewData | Promise<CommandAudioPreviewData>;
@@ -119,6 +120,9 @@ export interface CommandDefinition {
 
 export interface CommandAutocompleteContext {
   query: string;
+  /** Zero-based page. Legacy searches start at zero. */
+  page: number;
+  cursor?: string;
   optionName: string;
   args: CommandValues;
   locale: BotLocale;
@@ -1327,16 +1331,17 @@ export class BotClient extends EventEmitter {
     try {
       const ctx: CommandAutocompleteContext = {
         query: payload.query, optionName: payload.optionName, args: values.values,
+        page: payload.page ?? 0, ...(payload.cursor !== undefined ? { cursor: payload.cursor } : {}),
         locale: resolveBotLocale(payload.locale), serverId: conn.serverId, signal: controller.signal, settings,
       };
       Object.defineProperty(ctx, 'settings', { writable: false, configurable: false });
-      const choices = await def.autocomplete(ctx);
+      const response = await def.autocomplete(ctx);
       if (!isCurrent()) return;
-      const parsed = commandAutocompleteChoicesSchema.safeParse(choices);
+      const parsed = commandAutocompletePageSchema.safeParse(Array.isArray(response) ? { choices: response } : response);
       const supported = parsed.success && (def.audioPreview ||
-        !parsed.data.some((choice) => choice.audio && 'resourceId' in choice.audio));
+        !parsed.data.choices.some((choice) => choice.audio && 'resourceId' in choice.audio));
       sendResult(parsed.success && supported
-        ? { status: 'ok', choices: parsed.data }
+        ? { status: 'ok', ...parsed.data }
         : { status: 'failed', reason: 'invalid_response' });
     } catch (error) {
       if (!isCurrent()) return;
@@ -1780,6 +1785,6 @@ export type {
   BotInputResult,
   ChatMessage, ChatReactionEventPayload, MessageReaction,
   SlashCommand, CommandOption, CommandValue, CommandValues, CommandVoiceRequirement, CommandResponsePayload,
-  CommandAutocompleteChoice, CommandAudioPreviewMimeType, SoundDownloadRequest, SoundDownloadResult, SoundDownloadFailureReason,
+  CommandAutocompleteChoice, CommandAutocompletePage, CommandAudioPreviewMimeType, SoundDownloadRequest, SoundDownloadResult, SoundDownloadFailureReason,
   AudioPreviewSource, SelectionChoice,
 } from '@monky/shared';

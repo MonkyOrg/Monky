@@ -375,6 +375,16 @@ try {
       assert.equal(ctx.optionName, 'audio');
       assert.equal(ctx.locale, 'en');
       assert.deepEqual(ctx.args, {});
+      if (ctx.query === 'paged fixture') {
+        assert.equal(ctx.cursor, ctx.page === 0 ? undefined : `batch:${ctx.page}`);
+        return {
+          choices: Array.from({ length: 20 }, (_, index) => ({
+            label: `Paged sound ${ctx.page * 20 + index}`, value: `paged:${ctx.page * 20 + index}`,
+            audio: { resourceId: `authored-page-${ctx.page}`, fileName: 'authored.wav', durationMs: 1 },
+          })),
+          hasMore: ctx.page < 2, ...(ctx.page < 2 ? { nextCursor: `batch:${ctx.page + 1}` } : {}),
+        };
+      }
       return [{ label: `Sound ${ctx.query}`, value: soundChoiceId,
         audio: { resourceId: 'authored-clip', fileName: 'authored.wav', durationMs: 1 } }];
     },
@@ -725,6 +735,45 @@ try {
   await owner.request(MessageType.COMMAND_AUDIO_PREVIEW, previewInput, true);
   assert.equal(previewContexts.length, 2);
   console.log('Lazy audio preview E2E: explicit generation, opaque authorization, caller/device privacy, native byte validation and AbortSignal cancellation passed.');
+  waitForPreviewCancellation = false;
+  const pagedRequests = [];
+  const pagedChoices = [];
+  for (let page = 0; page < 3; page++) {
+    await new Promise(resolve => setTimeout(resolve, LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS));
+    const requestId = randomUUID();
+    owner.send(MessageType.COMMAND_AUTOCOMPLETE, {
+      botId, channelId, commandName: 'sound', optionName: 'audio', query: 'paged fixture', locale: 'en',
+      ...(page > 0 ? { page, cursor: `batch:${page}` } : {}),
+    }, requestId);
+    const result = (await owner.wait(message => message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT &&
+      message.requestId === requestId, `autocomplete page ${page}`)).payload;
+    assert.equal(result.status, 'ok');
+    assert.equal(result.choices.length, 20);
+    assert.equal(result.hasMore, page < 2);
+    assert.equal(result.nextCursor, page < 2 ? `batch:${page + 1}` : undefined);
+    pagedRequests.push(requestId);
+    pagedChoices.push(...result.choices);
+  }
+  assert.equal(new Set(pagedChoices.map(choice => choice.value)).size, 60);
+  for (const page of [0, 1, 2]) {
+    const input = {
+      botId, channelId, commandName: 'sound', optionName: 'audio',
+      autocompleteRequestId: pagedRequests[page], resourceId: pagedChoices[page * 20].audio.resourceId,
+    };
+    await otherDevice.request(MessageType.COMMAND_AUDIO_PREVIEW, input, true);
+    await owner.request(MessageType.COMMAND_AUDIO_PREVIEW, {
+      ...input, autocompleteRequestId: pagedRequests[(page + 1) % pagedRequests.length],
+    }, true);
+    const result = await owner.request(MessageType.COMMAND_AUDIO_PREVIEW, input);
+    assert.equal(result.status, 'ok');
+    assert.equal(result.audioBase64, previewBytes.toString('base64'));
+    assert.equal(previewContexts.at(-1).resourceId, `authored-page-${page}`);
+  }
+  for (const requestId of pagedRequests) owner.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId });
+  await owner.request(MessageType.PING, {});
+  assert.equal(soundContexts.size, 0);
+  assert.deepEqual(sdkErrors, []);
+  console.log('Paginated autocomplete E2E: 60 results, source cursors, old-page previews, per-page authorization and legacy array compatibility passed.');
   assert.equal(owner.messages.some((message) => message.type === MessageType.COMMAND_SOUND_DOWNLOAD), false);
   const soundInput = {
     botId, channelId, commandName: 'sound', options: { audio: soundChoiceId }, locale: 'en',
@@ -880,10 +929,22 @@ process.on('message', (message) => {
         botId: account.bot.id, channelId, commandName: 'query', optionName: 'audio', query: 'brasil', locale: 'pt-BR',
       }, false, 20000);
       assert.equal(found.status, 'ok', runtime.output);
-      assert.ok(found.choices.length > 0 && found.choices.length <= 10);
+      assert.ok(found.choices.length > 0 && found.choices.length <= LIMITS.MAX_BOT_AUTOCOMPLETE_CHOICES);
+      let selection = found.choices[0];
+      if (found.hasMore) {
+        await new Promise(resolve => setTimeout(resolve, LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS));
+        const next = await owner.request(MessageType.COMMAND_AUTOCOMPLETE, {
+          botId: account.bot.id, channelId, commandName: 'query', optionName: 'audio', query: 'brasil', locale: 'pt-BR',
+          page: 1, ...(found.nextCursor !== undefined ? { cursor: found.nextCursor } : {}),
+        }, false, 20000);
+        assert.equal(next.status, 'ok', runtime.output);
+        assert.ok(next.choices.length > 0 && next.choices.length <= LIMITS.MAX_BOT_AUTOCOMPLETE_CHOICES);
+        assert.ok(new Set([...found.choices, ...next.choices].map(choice => choice.value)).size > found.choices.length);
+        selection = next.choices.at(-1);
+      }
       const invocation = await owner.request(MessageType.COMMAND_INVOKE, {
         botId: account.bot.id, channelId, commandName: 'query',
-        options: { audio: found.choices[0].value }, locale: 'pt-BR', allowSoundDownload: true,
+        options: { audio: selection.value }, locale: 'pt-BR', allowSoundDownload: true,
       });
       const request = await owner.wait((message) => message.type === MessageType.COMMAND_SOUND_DOWNLOAD &&
         message.payload.invocationId === invocation.invocationId, 'sound bot resolved metadata', 20000);

@@ -12,6 +12,7 @@ import {
   commandSubmitSchema,
   commandAutocompleteSchema,
   commandAutocompleteExecutionSchema,
+  commandAutocompletePageSchema,
   commandAutocompleteResultSchema,
   commandAutocompleteCancelSchema,
   commandAudioPreviewSchema,
@@ -375,6 +376,21 @@ const autocomplete = {
   query: 'hello', options: { enabled: false, sides: 0 }, locale: 'en',
 };
 assert.equal(commandAutocompleteSchema.safeParse(autocomplete).success, true);
+assert.deepEqual(commandAutocompleteSchema.parse(autocomplete), autocomplete, 'Legacy payloads must not gain paging fields');
+for (const page of [0, 1, 1000, Number.MAX_SAFE_INTEGER]) {
+  assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, page }).success, true);
+}
+for (const page of [-1, 0.5, '1', null, Number.MAX_SAFE_INTEGER + 1]) {
+  assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, page }).success, false);
+}
+for (const cursor of ['', 'x'.repeat(LIMITS.MAX_BOT_AUTOCOMPLETE_CURSOR_LENGTH + 1), 1, null]) {
+  assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, page: 1, cursor }).success, false);
+}
+const pagedExecution = {
+  commandName: 'search', optionName: 'sound', query: 'hello', options: {}, locale: 'en',
+  page: 4, cursor: 'source-page:2:offset:20',
+};
+assert.deepEqual(commandAutocompleteExecutionSchema.parse(pagedExecution), pagedExecution);
 assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, query: 'x'.repeat(201) }).success, false);
 assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, invocationId: 'forged' }).success, false);
 assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, options: JSON.parse('{"__proto__": true}') }).success, false);
@@ -385,6 +401,25 @@ assert.equal(commandRequestIdSchema.safeParse('').success, false);
 assert.equal(commandRequestIdSchema.safeParse('x'.repeat(129)).success, false);
 assert.equal(commandAutocompleteCancelSchema.safeParse({ requestId: 'query', userId: 'forged' }).success, false);
 const longChoice = { label: 'Long identifier', value: `/instant/${'a'.repeat(503)}`, description: 'Description' };
+const autocompletePage = { choices: [longChoice], hasMore: true, nextCursor: 'next-batch' };
+assert.deepEqual(commandAutocompletePageSchema.parse(autocompletePage), autocompletePage);
+assert.deepEqual(commandAutocompleteResultSchema.parse({ status: 'ok', ...autocompletePage }), {
+  status: 'ok', ...autocompletePage,
+});
+assert.deepEqual(commandAutocompletePageSchema.parse({ choices: [longChoice] }), { choices: [longChoice] });
+for (const invalid of [
+  { ...autocompletePage, hasMore: false }, { ...autocompletePage, hasMore: undefined },
+  { ...autocompletePage, hasMore: 'true' }, { ...autocompletePage, nextCursor: '' },
+  { ...autocompletePage, nextCursor: 'x'.repeat(LIMITS.MAX_BOT_AUTOCOMPLETE_CURSOR_LENGTH + 1) },
+  { ...autocompletePage, ignored: true },
+  { ...autocompletePage, choices: Array.from({ length: 21 }, (_, index) => ({ label: 'Sound', value: String(index) })) },
+]) {
+  assert.equal(commandAutocompletePageSchema.safeParse(invalid).success, false);
+  assert.equal(commandAutocompleteResultSchema.safeParse({ status: 'ok', ...invalid }).success, false);
+}
+assert.deepEqual(commandAutocompleteResultSchema.parse({ status: 'ok', choices: [], hasMore: false }), {
+  status: 'ok', choices: [], hasMore: false,
+});
 assert.equal(commandAutocompleteResultSchema.safeParse({ status: 'ok', choices: [longChoice] }).success, true);
 const previewAutocompleteResult = commandAutocompleteResultSchema.parse({
   status: 'ok',

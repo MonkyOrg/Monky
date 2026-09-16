@@ -7,10 +7,11 @@ import {
 import { PROTOCOL_VERSION } from '../src/constants.js';
 import { authConnectSchema } from '../src/validators.js';
 
-test('protocol 17 requires clients and bots to update with the server', () => {
+test('protocol 18 requires clients and bots to update with the server', () => {
   const input = { nickname: 'Member', publicKey: 'ab'.repeat(32), protocolVersion: PROTOCOL_VERSION };
-  assert.equal(PROTOCOL_VERSION, 17);
+  assert.equal(PROTOCOL_VERSION, 18);
   assert.equal(authConnectSchema.safeParse(input).success, true);
+  assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: 17 }).success, false);
   assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: 16 }).success, false);
 });
 

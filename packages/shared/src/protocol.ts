@@ -915,6 +915,10 @@ export interface CommandAutocompletePayload {
   channelId: string;
   optionName: string;
   query: string;
+  /** Zero-based page; omission preserves the original, non-paginated request. */
+  page?: number;
+  /** Opaque continuation returned by the bot, when its source uses cursors. */
+  cursor?: string;
   options?: CommandValues;
   locale?: 'pt-BR' | 'en';
   userSettings?: BotFormValues;
@@ -924,6 +928,8 @@ export interface CommandAutocompleteExecutionPayload {
   commandName: string;
   optionName: string;
   query: string;
+  page?: number;
+  cursor?: string;
   options: CommandValues;
   locale: 'pt-BR' | 'en';
   settings?: BotSettingsContext;
