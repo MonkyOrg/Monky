@@ -239,7 +239,10 @@ struct FixtureAudioDevice::State {
       changed.wait(lock, [&] { return shutdown || HasWork(); });
       auto deadline = std::chrono::steady_clock::now();
       while (!shutdown && HasWork()) {
+        const auto waiting = std::chrono::steady_clock::now();
         changed.wait_until(lock, deadline, [&] { return shutdown || !HasWork(); });
+        const auto processing = std::chrono::steady_clock::now();
+        counters.waiting_ms += std::chrono::duration<double, std::milli>(processing - waiting).count();
         if (shutdown || !HasWork()) break;
         lock.unlock();
         Process(Direction::playout);
@@ -247,6 +250,7 @@ struct FixtureAudioDevice::State {
         lock.lock();
         deadline += kPeriod;
         const auto now = std::chrono::steady_clock::now();
+        counters.processing_ms += std::chrono::duration<double, std::milli>(now - processing).count();
         // Slow callbacks skip deadlines rather than generating a catch-up burst.
         if (deadline < now) deadline = now + kPeriod;
       }

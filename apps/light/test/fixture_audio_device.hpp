@@ -36,6 +36,8 @@ class FixtureAudioDevice : public webrtc::AudioDeviceModule {
     double input_energy = 0;
     double output_energy = 0;
     double output_rms = 0;  // Cumulative normalized RMS of successful sink PCM.
+    double waiting_ms = 0;
+    double processing_ms = 0;
     bool worker_running = false;
   };
 

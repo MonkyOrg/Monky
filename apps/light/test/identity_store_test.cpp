@@ -74,6 +74,21 @@ void checkKeychainCleanup(OSStatus status, const char* operation) {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+class KeychainInteractionGuard final {
+ public:
+  KeychainInteractionGuard() {
+    requireKeychain(SecKeychainGetUserInteractionAllowed(&previous_), "Read Keychain interaction policy");
+    requireKeychain(SecKeychainSetUserInteractionAllowed(false), "Disable UI in Keychain scenarios");
+  }
+  ~KeychainInteractionGuard() {
+    checkKeychainCleanup(SecKeychainSetUserInteractionAllowed(previous_), "Restore Keychain interaction policy");
+  }
+  KeychainInteractionGuard(const KeychainInteractionGuard&) = delete;
+  KeychainInteractionGuard& operator=(const KeychainInteractionGuard&) = delete;
+ private:
+  Boolean previous_ = true;
+};
+
 class KeychainSettingsGuard final {
  public:
   KeychainSettingsGuard() {
@@ -429,6 +444,7 @@ void windowsFailures(const fs::path& root) {
 void macosKeychainIsolation(const fs::path& root) {
   // Only disposable stores are locked; restore the user's settings on every exit.
   KeychainSettingsGuard settings;
+  std::cerr << "Keychain fixture: creating isolated stores\n";
   DisposableKeychain selected(root);
   DisposableKeychain unrelated(root);
   selected.unlock();
@@ -444,6 +460,7 @@ void macosKeychainIsolation(const fs::path& root) {
   requireKeychain(otherEntry.add(otherSeed.data(), static_cast<CFIndex>(otherSeed.size())),
                   "Create same-account entry in unrelated Keychain");
   unrelated.lock();
+  std::cerr << "Keychain fixture: unrelated locked store\n";
 
   {
     IdentityStore store(profile.path);
@@ -455,6 +472,7 @@ void macosKeychainIsolation(const fs::path& root) {
     requireFailure([&] { store.save(otherSeed); }, "Scoped duplicate save was accepted");
 
     selected.lock();
+    std::cerr << "Keychain fixture: selected locked store\n";
     requireFailure([&] { (void)store.load(); }, "Locked identity was treated as readable/absent");
     requireFailure([&] { (void)empty.load(); }, "Locked empty Keychain was treated as absence");
     requireFailure([&] { store.save(otherSeed); }, "Locked identity was replaced");
@@ -464,6 +482,7 @@ void macosKeychainIsolation(const fs::path& root) {
     require(!empty.load(), "A locked-store failure created an identity");
 
     {
+      std::cerr << "Keychain fixture: switching default while stores remain open\n";
       KeychainSettingsGuard changedDefault;
       changedDefault.select(unrelated.get());
       changedDefault.search({unrelated.get()});
@@ -480,6 +499,7 @@ void macosKeychainIsolation(const fs::path& root) {
             "Scoped identities did not persist in the selected default Keychain");
   }
   unrelated.unlock();
+  std::cerr << "Keychain fixture: checking the untouched second store\n";
   {
     KeychainSettingsGuard otherDefault;
     otherDefault.select(unrelated.get());
@@ -511,12 +531,18 @@ int main(int argc, char** argv) {
     require(argc <= 2, "Usage: identity_store_test [existing-disposable-parent-directory]");
     const auto root = fs::canonical(argc == 2 ? fs::path{argv[1]} : fs::current_path());
     require(fs::is_directory(root), "Test artifact parent must be a directory");
+#ifdef __APPLE__
+    KeychainInteractionGuard interaction;
+#endif
+    std::cerr << "Identity fixture: round-trip and profile lock\n";
     roundTripAndLock(root);
+    std::cerr << "Identity fixture: invalid profiles\n";
     invalidProfiles(root);
 #ifdef _WIN32
     windowsFailures(root);
 #else
     macosKeychainIsolation(root);
+    std::cerr << "Identity fixture: malformed key data\n";
     macosFailures(root);
 #endif
     require(cleanupFailures == 0, "Disposable test cleanup failed");

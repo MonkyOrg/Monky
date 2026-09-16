@@ -309,9 +309,12 @@ void CheckRealtimeCadence() {
   const auto observed = transport.Snapshot();
   Require(device->Terminate() == 0, "Release synthetic timing and device worker");
   if (!reached || elapsed < 1750ms || elapsed > 2600ms) {
+    const auto timing = device->Snapshot();
     std::cerr << "Synthetic cadence: " << observed.recording << " capture / "
               << observed.playout << " playout callbacks in "
-              << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << " ms\n";
+              << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+              << " ms; waiting=" << timing.waiting_ms << " ms; processing="
+              << timing.processing_ms << " ms\n";
   }
   Require(reached && elapsed >= 1750ms && elapsed <= 2600ms,
           "Synthetic PCM must maintain its realtime 10 ms device clock");

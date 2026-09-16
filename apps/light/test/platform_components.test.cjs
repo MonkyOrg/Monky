@@ -10,7 +10,9 @@ function run(component, args) {
     timeout: 30_000,
     maxBuffer: 128 * 1024,
   });
-  assert.ifError(result.error);
+  if (result.error) {
+    throw new Error(`${component}: ${result.stderr || result.stdout}`, { cause: result.error });
+  }
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
 
