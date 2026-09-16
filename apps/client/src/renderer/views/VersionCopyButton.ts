@@ -5,11 +5,13 @@ import { showAlert } from './Dialog';
 
 export function renderVersionCopyButton(id: string, version = ''): string {
   const label = version ? t('versionCopy.copy', { version }) : t('versionCopy.loading');
-  return `<button type="button" id="${escapeHtml(id)}" class="version-copy" ${version ? '' : 'disabled'}
+  return `<button type="button" id="${escapeHtml(id)}" class="version-copy${version ? '' : ' skeleton loading-skeleton-value'}" ${version ? '' : 'disabled'} aria-busy="${!version}"
     title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${escapeHtml(version || '…')}</button>`;
 }
 
 export function setVersionCopyButton(button: HTMLButtonElement, version: string): void {
+  button.classList.remove('skeleton', 'loading-skeleton-value');
+  button.setAttribute('aria-busy', 'false');
   button.textContent = version;
   button.disabled = !version;
   button.title = t('versionCopy.copy', { version });

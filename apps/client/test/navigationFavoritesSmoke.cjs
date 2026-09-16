@@ -124,6 +124,8 @@ if (!process.versions.electron) {
     await motionPreference('no-preference');
     phase = 'voice-preserving navigation';
     await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.navigation()', true);
+    phase = 'connection recovery and explicit departures';
+    await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.connectionRecovery()', true);
     phase = 'noise quick toggle';
     await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.noiseToggle()', true);
     phase = 'cleanup';
@@ -394,6 +396,8 @@ async function setupNavigationFavoritesSmoke() {
   const prepareCall = (host = 'remote.test', mode = 'p2p') => {
     voice.voiceSessionKey = null;
     voice.currentVoiceChannelId = null;
+    voice.isReconnecting = false;
+    voice.isConnecting = false;
     for (const session of sessions.getAll()) session.client.status = 'DISCONNECTED';
     sessions.removeAll();
     hosted = { isRunning: false, port: null, serverId: null };
@@ -1345,6 +1349,104 @@ async function setupNavigationFavoritesSmoke() {
         check(sends.some(item => item.key === destination.key && item.type === MessageType.VOICE_JOIN),
           'Explicit voice join still requests admission');
         check(mediaCalls.includes('audio.startMicrophone'), 'Explicit voice join still acquires microphone media');
+      }
+    },
+    async connectionRecovery() {
+      const addLocalParticipant = session => {
+        const user = session.serverStore.currentUser;
+        const voiceState = {
+          sessionId: user.sessionId, userId: user.id, channelId: 'voice-room',
+          isMuted: true, isDeafened: false, serverMuted: false, serverDeafened: false,
+          isSpeaking: false, isCameraOn: false, isScreenSharing: false, isSharingScreenAudio: false,
+        };
+        session.participants.addUser(user);
+        session.participants.updateVoiceState(voiceState);
+        return voiceState;
+      };
+      for (const mode of ['p2p', 'sfu']) {
+        {
+          const { call, visible } = prepareCall('remote.test', mode);
+          const previousState = addLocalParticipant(call);
+          call.client.setStatus('RECONNECTING');
+          check(voice.isReconnecting && voice.voiceSessionKey === call.key
+            && voice.currentVoiceChannelId === 'voice-room', `${mode}: signal loss preserves the call intention`);
+          check(mediaCalls.includes('rtc.suspendForVoiceReconnect') && mediaCalls.includes('audio.stopMicrophone'),
+            `${mode}: media recovery is suspended while signaling owns the retry`);
+          equal(sessions.getActiveKey(), visible.key, `${mode}: background recovery never steals navigation`);
+          click('#sidebar-btn-leave-voice');
+          equal(voice.currentVoiceChannelId, null, `${mode}: the actual leave button ends the call offline`);
+          equal(call.participants.get(previousState.sessionId).voiceState, undefined,
+            `${mode}: leaving removes the local roster entry without waiting for a server echo`);
+          check(voice.isMuted && !voice.isDeafened, `${mode}: leaving retains privacy preferences`);
+          check(mediaCalls.includes('screenAudio.stop'), `${mode}: leaving also stops native screen audio`);
+          clearMetrics();
+          const payload = payloadFor(call.port);
+          payload.server.voiceStates[previousState.sessionId] = previousState;
+          call.client.status = 'CONNECTED';
+          call.client.emitScoped('network.connected', payload);
+          await tick();
+          equal(voice.currentVoiceChannelId, null, `${mode}: a recovered socket cannot undo an explicit leave`);
+          check(!mediaCalls.includes('audio.startMicrophone') && !mediaCalls.includes('view.rejoinVoiceChannel'),
+            `${mode}: no automatic capture after an explicit leave`);
+          equal(call.participants.get(previousState.sessionId).voiceState, undefined,
+            `${mode}: an auth snapshot cannot revive a membership already abandoned locally`);
+          check(sends.some(message => message.key === call.key && message.type === MessageType.VOICE_LEAVE),
+            `${mode}: lingering membership on a replaced server socket is explicitly retired`);
+          equal(sessions.getActiveKey(), visible.key, `${mode}: background auth stays in its own bundle`);
+        }
+        {
+          const { call, visible } = prepareCall('remote.test', mode);
+          addLocalParticipant(call);
+          call.client.setStatus('RECONNECTING');
+          clearMetrics();
+          call.client.status = 'CONNECTED';
+          call.client.emitScoped('network.connected', payloadFor(call.port));
+          await until(() => mediaCalls.includes('rtc.setLocalAudioTrack'), `${mode}: background call is readmitted after reconnection`);
+          equal(voice.voiceSessionKey, call.key, `${mode}: automatic admission targets the captured call server`);
+          equal(sessions.getActiveKey(), visible.key, `${mode}: automatic admission leaves the foreground alone`);
+          const request = sends.find(message => message.key === call.key && message.type === MessageType.VOICE_JOIN);
+          check(request?.payload.isMuted === true && request.payload.isDeafened === false,
+            `${mode}: reconnection reapplies the current privacy preferences at admission`);
+          navigation.leaveCurrentCall();
+          await tick();
+        }
+        for (const status of ['RECONNECTING', 'DISCONNECTED']) {
+          const { call, visible } = prepareCall('remote.test', mode);
+          sessions.activate(call.key);
+          addLocalParticipant(call);
+          call.client.status = status;
+          call.client.hasEverConnected = true;
+          call.client.lastConnectPayload = { ...identity, nickname: 'Fixture', password: '' };
+          click('#bar-btn-disconnect');
+          await settleDialog();
+          await until(() => !sessions.has(call.key), `${mode}/${status}: disconnect removes a retained offline session`);
+          equal(sessions.getActiveKey(), visible.key, `${mode}/${status}: disconnect returns to a surviving server`);
+          equal(voice.currentVoiceChannelId, null, `${mode}/${status}: disconnect cancels the call intention`);
+          check(mediaCalls.includes('video.stopCamera') && mediaCalls.includes('screenAudio.stop'),
+            `${mode}/${status}: disconnect tears down every capture path`);
+        }
+        {
+          const { call, visible } = prepareCall('remote.test', mode);
+          call.client.setStatus('RECONNECTING');
+          visible.client.setStatus('RECONNECTING');
+          click('#server-rail-home');
+          await settleDialog();
+          await until(() => sessions.getAll().length === 0 && document.querySelector('.connection-layout'),
+            `${mode}: Home remains functional while every server is reconnecting`);
+          equal(voice.currentVoiceChannelId, null, `${mode}: Home cancels recovery instead of resurrecting a call later`);
+        }
+        {
+          const { call } = prepareCall('remote.test', mode);
+          call.client.setStatus('RECONNECTING');
+          clearMetrics();
+          const payload = payloadFor(call.port);
+          payload.server.channels = [];
+          call.client.status = 'CONNECTED';
+          call.client.emitScoped('network.connected', payload);
+          await settleDialog();
+          equal(voice.currentVoiceChannelId, null, `${mode}: a deleted/inaccessible room cannot leave an endless recovery badge`);
+          check(!mediaCalls.includes('audio.startMicrophone'), `${mode}: no media is acquired for a missing room`);
+        }
       }
     },
     async noiseToggle() {

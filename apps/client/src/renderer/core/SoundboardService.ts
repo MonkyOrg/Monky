@@ -30,6 +30,7 @@ interface PendingSoundPlayback {
 export class SoundboardService {
   private sounds: SoundItem[] = [];
   private loadGeneration = 0;
+  private loadStatus: 'loading' | 'ready' | 'error' = 'ready';
   private sinkId: string = settingsStore.selectedSpeakerId;
   private activePlaybacks: Map<string, ActiveSoundPlayback> = new Map();
   private pendingPlaybacks = new Map<string, PendingSoundPlayback>();
@@ -114,16 +115,21 @@ export class SoundboardService {
     const generation = ++this.loadGeneration;
     const folder = settingsStore.soundboardFolderPath;
     const isCurrent = () => generation === this.loadGeneration && folder === settingsStore.soundboardFolderPath;
-    if (!folder || !window.api?.listSoundboardSounds) {
+    if (!folder) {
       this.sounds = [];
+      this.loadStatus = 'ready';
       appEvents.emit('soundboard.sounds_loaded', this.sounds);
       return [];
     }
 
+    this.loadStatus = 'loading';
+    appEvents.emit('soundboard.sounds_loading');
     try {
+      if (!window.api?.listSoundboardSounds) throw new Error('Soundboard folder access is unavailable');
       const sounds = await window.api.listSoundboardSounds(folder);
       if (!isCurrent()) return this.sounds;
       this.sounds = sounds;
+      this.loadStatus = 'ready';
       appEvents.emit('soundboard.sounds_loaded', this.sounds);
       this.syncShortcuts();
       return this.sounds;
@@ -131,6 +137,7 @@ export class SoundboardService {
       if (!isCurrent()) return this.sounds;
       console.warn('[SoundboardService] Error loading sounds from folder:', err);
       this.sounds = [];
+      this.loadStatus = 'error';
       appEvents.emit('soundboard.sounds_loaded', this.sounds);
       return [];
     }
@@ -138,6 +145,10 @@ export class SoundboardService {
 
   public getSounds(): SoundItem[] {
     return this.sounds;
+  }
+
+  public getLoadStatus(): 'loading' | 'ready' | 'error' {
+    return this.loadStatus;
   }
 
   public getPlayingSoundNames(): Set<string> {

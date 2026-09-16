@@ -781,6 +781,13 @@ export class SfuManager {
     }
   }
 
+  public discardPendingConsumer(consumerId: string): void {
+    const record = this.consumers.get(consumerId);
+    if (!record) return;
+    this.consumers.delete(consumerId);
+    record.consumer.close();
+  }
+
   public async setConsumerPaused(consumerId: string, paused: boolean): Promise<void> {
     const record = this.consumers.get(consumerId);
     if (!record) return;

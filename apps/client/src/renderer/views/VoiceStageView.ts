@@ -2,7 +2,7 @@ import { MessageType, type BotScreen } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
-import { callClient } from '../core/serverConnection';
+import { callClient, leaveCurrentCall } from '../core/serverConnection';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
 import { screenAudioService } from '../core/ScreenAudioService';
 import { getActiveServerStore, serverStore } from '../stores/serverStore';
@@ -1712,13 +1712,7 @@ export class VoiceStageView {
     this.stopPingMonitor();
     this.stopTelemetryMonitor();
     soundEffects.play('leave_voice');
-    callClient().send(MessageType.VOICE_LEAVE, { channelId });
-    audioProcessor.stopMicrophone();
-    videoService.stopCamera();
-    videoService.stopScreenShare();
-    webRtcManager.clearLocalScreenTracks();
-    webRtcManager.closeAllPeers();
-    voiceStore.reset();
+    leaveCurrentCall();
     this.setChannel(null);
   }
 

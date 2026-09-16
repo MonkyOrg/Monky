@@ -444,7 +444,7 @@ export class WebRtcManager {
   }
 
   public async initSfuForCurrentChannel(): Promise<void> {
-    if (this.voiceReconnectSuspended) return;
+    if (this.voiceReconnectSuspended || this.signalClient.getStatus() !== 'CONNECTED' || this.sfuEngine.isReady()) return;
     // A rejoin ladder already owns the connection: joining again from here
     // would race it and strand a second set of transports on the server. This
     // path is reached from every `connectToPeer` call, so an SFU that is down
@@ -467,7 +467,8 @@ export class WebRtcManager {
    */
   private async performSfuJoin(): Promise<void> {
     const channelId = voiceStore.currentVoiceChannelId;
-    if (!channelId || !this.isSfuMode()) return;
+    if (!channelId || !this.isSfuMode() || this.voiceReconnectSuspended
+      || this.signalClient.getStatus() !== 'CONNECTED') return;
     // Two joins in flight interleave their assignments inside the engine and
     // can leave it holding a send transport from one and a recv transport from
     // the other, whose server-side peer is already gone. The request is not
@@ -496,7 +497,12 @@ export class WebRtcManager {
       }
 
       if (this.localAudioTrack) {
-        await this.sfuEngine.produceMic(this.localAudioTrack);
+        const producer = await this.sfuEngine.produceMic(this.localAudioTrack);
+        if (this.isSfuJoinStale(epoch, channelId)) return;
+        if (!producer) {
+          this.handleSfuConnectionFailure('Could not publish the microphone to the SFU');
+          return;
+        }
       }
       if (this.localCameraTrack) {
         const track = this.localCameraTrack;
@@ -562,6 +568,8 @@ export class WebRtcManager {
     return (
       this.sfuJoinEpoch !== epoch ||
       voiceStore.currentVoiceChannelId !== channelId ||
+      this.voiceReconnectSuspended ||
+      this.signalClient.getStatus() !== 'CONNECTED' ||
       !this.isSfuMode()
     );
   }
@@ -647,7 +655,8 @@ export class WebRtcManager {
    * and honest about what is happening.
    */
   private handleSfuConnectionFailure(reason: string): void {
-    if (!this.isSfuMode() || !voiceStore.currentVoiceChannelId) return;
+    if (!this.isSfuMode() || !voiceStore.currentVoiceChannelId || this.voiceReconnectSuspended
+      || this.signalClient.getStatus() !== 'CONNECTED') return;
     // Send and recv transports usually fail together; one ladder covers both.
     if (this.sfuReconnectTimer) return;
 
@@ -674,7 +683,8 @@ export class WebRtcManager {
 
   /** Tears the SFU session down and builds it again from scratch. */
   private async rejoinSfu(): Promise<void> {
-    if (!voiceStore.currentVoiceChannelId || !this.isSfuMode()) return;
+    if (!voiceStore.currentVoiceChannelId || !this.isSfuMode() || this.voiceReconnectSuspended
+      || this.signalClient.getStatus() !== 'CONNECTED') return;
     // A join from an earlier rung is still running. Cutting it off here would
     // leave nobody to schedule the next one, so let it finish and take the
     // following rung instead.
@@ -691,6 +701,8 @@ export class WebRtcManager {
 
   /** Closes the ladder once media is flowing again. */
   private handleSfuConnected(): void {
+    if (!voiceStore.currentVoiceChannelId || this.voiceReconnectSuspended
+      || this.signalClient.getStatus() !== 'CONNECTED') return;
     if (this.sfuReconnectTimer) {
       clearTimeout(this.sfuReconnectTimer);
       this.sfuReconnectTimer = null;

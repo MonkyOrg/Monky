@@ -1,8 +1,7 @@
-import { MessageType } from '@monky/shared';
+import { MessageType, type DesktopSource } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
 import { enableBackdropClose } from '../utils/modal';
-import { networkClient } from '../core/NetworkClient';
 import { callClient } from '../core/serverConnection';
 import { screenAudioService } from '../core/ScreenAudioService';
 import { videoService } from '../core/VideoService';
@@ -10,22 +9,22 @@ import { voiceStore, VoiceStore } from '../stores/voiceStore';
 import { webRtcManager } from '../core/WebRtcManager';
 import { settingsStore } from '../stores/settingsStore';
 import { setButtonLoading } from '../utils/buttonLoading';
+import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { showAlert, showConfirm } from './Dialog';
 import { t } from '../i18n';
 
-type DesktopSource = {
-  id: string;
-  name: string;
-  type: 'screen' | 'window';
-  thumbnailDataUrl: string;
-  appIconDataUrl: string | null;
-};
+type SourceLoadState =
+  | { status: 'loading' }
+  | { status: 'ready'; sources: DesktopSource[] }
+  | { status: 'error' };
 
 export class ScreenSharePickerModal {
   private modalEl: HTMLElement | null = null;
   private selectedSourceId: string | null = null;
   private activeTab: 'screen' | 'window' = 'screen';
   private isStarting = false;
+  private sourceState: SourceLoadState = { status: 'loading' };
+  private sourceRequest = 0;
 
   /** ScreenCaptureKit can only capture the whole system audio (#298). */
   private get isMac(): boolean {
@@ -50,23 +49,6 @@ export class ScreenSharePickerModal {
 
   public async open(): Promise<void> {
     this.close();
-
-    // macOS can silently deny capture after an update (#327); the picker would
-    // only show black thumbnails, so ask the main process to sort it out first.
-    if (window.api?.ensureScreenPermission && !(await window.api.ensureScreenPermission())) {
-      return;
-    }
-
-    let sources: DesktopSource[] = [];
-    if (window.api?.getDesktopSources) {
-      sources = (await window.api.getDesktopSources()) as DesktopSource[];
-    }
-
-    // When there is nothing on a given tab, fall back to the one that has sources.
-    const hasScreens = sources.some((s) => s.type === 'screen');
-    if (!hasScreens && sources.some((s) => s.type === 'window')) {
-      this.activeTab = 'window';
-    }
 
     const alreadySharing = voiceStore.isScreenSharing;
     const audioAlreadyCaptured = screenAudioService.getIsCapturing();
@@ -101,7 +83,7 @@ export class ScreenSharePickerModal {
           </button>
         </div>
 
-        <div id="share-sources-panel"></div>
+        <div id="share-sources-panel" aria-busy="true"></div>
 
         <div class="modal-footer">
           <label id="share-audio-label" style="display: flex; align-items: center; gap: 8px; margin-right: auto; cursor: ${audioAlreadyCaptured ? 'not-allowed' : 'pointer'}; font-size: 0.85rem; color: var(--text-secondary); ${audioAlreadyCaptured ? 'opacity: 0.5;' : ''}">
@@ -127,19 +109,63 @@ export class ScreenSharePickerModal {
       </div>
     `;
 
-    document.body.appendChild(this.modalEl);
-    this.renderSources(sources);
-    this.attachEvents(sources);
+    const modal = this.modalEl;
+    document.body.appendChild(modal);
+    this.renderSources();
+    this.attachEvents();
     // Signal that the picker is now visible so the triggering button can clear
     // its loading state (loading should last only until the modal opens) (#48).
     appEvents.emit('modal.screenshare_picker_opened');
+    if (this.modalEl === modal) await this.loadSources(modal);
   }
 
-  private renderSources(sources: DesktopSource[]): void {
+  private async loadSources(modal: HTMLElement): Promise<void> {
+    const request = ++this.sourceRequest;
+    const isCurrent = (): boolean => this.modalEl === modal && this.sourceRequest === request;
+    this.sourceState = { status: 'loading' };
+    this.renderSources();
+    try {
+      // Permission still precedes enumeration, but no longer hides the picker.
+      if (window.api?.ensureScreenPermission && !(await window.api.ensureScreenPermission())) {
+        if (isCurrent()) this.close();
+        return;
+      }
+      if (!isCurrent()) return;
+      if (!window.api?.getDesktopSources) throw new Error('Desktop source enumeration is unavailable');
+      const sources = await window.api.getDesktopSources();
+      if (!isCurrent()) return;
+      this.sourceState = { status: 'ready', sources };
+      if (!sources.some(source => source.type === 'screen') && sources.some(source => source.type === 'window')) {
+        this.selectTab('window');
+      } else {
+        this.renderSources();
+      }
+    } catch (error: unknown) {
+      if (!isCurrent()) return;
+      console.error('[ScreenShare] Could not load capture sources', error);
+      this.sourceState = { status: 'error' };
+      this.renderSources();
+    }
+  }
+
+  private renderSources(): void {
     const panel = this.modalEl?.querySelector('#share-sources-panel');
     if (!panel) return;
+    panel.setAttribute('aria-busy', String(this.sourceState.status === 'loading'));
+    if (this.sourceState.status === 'loading') {
+      panel.innerHTML = renderLoadingSkeleton('cards', 2);
+      return;
+    }
+    if (this.sourceState.status === 'error') {
+      panel.innerHTML = renderLoadingError(t('screenShare.loadFailed'));
+      const modal = this.modalEl;
+      panel.querySelector('[data-loading-retry]')?.addEventListener('click', () => {
+        if (modal && this.modalEl === modal) void this.loadSources(modal);
+      });
+      return;
+    }
 
-    const filtered = sources.filter((s) => s.type === this.activeTab);
+    const filtered = this.sourceState.sources.filter((s) => s.type === this.activeTab);
     const activeSourceIds = videoService.getActiveSourceIds();
     const available = filtered.filter((s) => !activeSourceIds.has(s.id));
 
@@ -224,7 +250,19 @@ export class ScreenSharePickerModal {
     });
   }
 
-  private attachEvents(sources: DesktopSource[]): void {
+  private selectTab(tab: 'screen' | 'window'): void {
+    this.activeTab = tab;
+    this.selectedSourceId = null;
+    this.modalEl?.querySelectorAll<HTMLButtonElement>('#btn-share, #btn-share-add')
+      .forEach(button => { button.disabled = true; });
+    this.modalEl?.querySelector('#share-tab-screen')?.classList.toggle('active', tab === 'screen');
+    this.modalEl?.querySelector('#share-tab-window')?.classList.toggle('active', tab === 'window');
+    const audioText = this.modalEl?.querySelector('#share-audio-text');
+    if (audioText) audioText.textContent = this.audioToggleLabel(tab);
+    this.renderSources();
+  }
+
+  private attachEvents(): void {
     if (!this.modalEl) return;
 
     const btnClose = this.modalEl.querySelector('#modal-close');
@@ -240,23 +278,8 @@ export class ScreenSharePickerModal {
     btnShare?.addEventListener('click', () => this.startSharing('replace'));
     btnShareAdd?.addEventListener('click', () => this.startSharing('add'));
 
-    const switchTab = (tab: 'screen' | 'window') => {
-      this.activeTab = tab;
-      this.selectedSourceId = null;
-      if (btnShare) btnShare.disabled = true;
-      if (btnShareAdd) btnShareAdd.disabled = true;
-      tabScreen?.classList.toggle('active', tab === 'screen');
-      tabWindow?.classList.toggle('active', tab === 'window');
-      const audioText = this.modalEl?.querySelector('#share-audio-text');
-      if (audioText) {
-        // Keep the "audio already being shared" warning across tab switches (#315)
-        audioText.textContent = this.audioToggleLabel(tab);
-      }
-      this.renderSources(sources);
-    };
-
-    tabScreen?.addEventListener('click', () => switchTab('screen'));
-    tabWindow?.addEventListener('click', () => switchTab('window'));
+    tabScreen?.addEventListener('click', () => this.selectTab('screen'));
+    tabWindow?.addEventListener('click', () => this.selectTab('window'));
   }
 
   /**
@@ -368,6 +391,8 @@ export class ScreenSharePickerModal {
 
 
   public close(): void {
+    this.sourceRequest++;
+    this.sourceState = { status: 'loading' };
     const wasOpen = this.modalEl !== null;
     if (this.modalEl) {
       this.modalEl.remove();

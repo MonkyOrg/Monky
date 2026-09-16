@@ -30,7 +30,7 @@ import {
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
 import { networkClient, type ConnectionStatus } from './core/NetworkClient';
-import { callClient, rejoinCallOnSession } from './core/serverConnection';
+import { callClient, leaveCurrentCall, rejoinCallOnSession, suspendCallForNetworkLoss } from './core/serverConnection';
 import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeReconnect';
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
@@ -68,6 +68,7 @@ import { initTooltips } from './core/TooltipService';
 import { bindCameraPublication } from './core/CameraPublication';
 import { cameraEffectErrorMessage } from './utils/cameraEffectErrors';
 import { AutoEntryService } from './core/AutoEntryService';
+import { runFatalBootstrap } from './utils/fatalBootstrap';
 
 class App {
   private appContainer: HTMLElement;
@@ -122,18 +123,10 @@ class App {
     if (voiceStore.voiceSessionKey !== call.sessionKey || voiceStore.currentVoiceChannelId !== call.channelId) return;
     const session = sessionManager.get(call.sessionKey);
     if (session?.serverStore.currentUser?.sessionId !== call.sessionId) return;
-    session.client.send(MessageType.VOICE_LEAVE, { channelId: call.channelId });
-    webRtcManager.suspendForVoiceReconnect();
-    audioProcessor.stopMicrophone();
-    videoService.stopCamera();
-    videoService.stopScreenShare();
-    void screenAudioService.stop().catch((error: unknown) => {
-      clientLog.error('SCREEN_SHARE', 'Failed to finish screen audio teardown', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-    webRtcManager.closeAllPeers();
-    voiceStore.reset();
+    // Socket recovery now owns readmission, including a mode change that was
+    // interrupted by network loss. It must keep the user's call intention.
+    if (session.client.getStatus() === 'RECONNECTING') return;
+    leaveCurrentCall();
   }
 
   constructor() {
@@ -171,7 +164,7 @@ class App {
     // the user out of whatever server is connected (#458).
     this.setupGracefulQuit();
 
-    this.init();
+    void runFatalBootstrap(() => this.init(), 'initialization');
   }
 
   private async init(): Promise<void> {
@@ -502,10 +495,16 @@ class App {
         participantManager.updateVoiceState(state);
       }
 
+      const myVoiceState = payload.currentUser.sessionId
+        ? payload.server.voiceStates[payload.currentUser.sessionId]
+        : undefined;
+      if (myVoiceState && (!ownsCall || !previousVoiceChannelId)) {
+        // A half-open server socket may still remember the room the user left
+        // while offline. Authentication must not restore that abandoned call.
+        networkClient.send(MessageType.VOICE_LEAVE, { channelId: myVoiceState.channelId });
+        participantManager.removeVoiceState(myVoiceState.sessionId);
+      }
       if (ownsCall) {
-        const myVoiceState = payload.currentUser.sessionId
-          ? payload.server.voiceStates[payload.currentUser.sessionId]
-          : undefined;
         const resumingChannel = myVoiceState?.channelId === previousVoiceChannelId;
         voiceStore.setServerMuted(resumingChannel && !!myVoiceState?.serverMuted);
         voiceStore.setServerDeafened(resumingChannel && !!myVoiceState?.serverDeafened);
@@ -554,10 +553,20 @@ class App {
         } else if (origin) {
           void rejoinCallOnSession(origin, previousVoiceChannelId!);
         }
+      } else if (previousVoiceChannelId) {
+        leaveCurrentCall(false);
+        clientLog.warn('CONNECTION', 'Voice channel is no longer available after reconnection', {
+          channelId: previousVoiceChannelId,
+        });
+        emitOutsideRouting(() => appEvents.emit('voice.rejoin_failed', { error: t('voiceReconnect.unavailable') }));
       }
     });
 
     appEvents.on('network.status', (status: ConnectionStatus) => {
+      if (status === 'RECONNECTING') {
+        const origin = currentEventOrigin();
+        if (origin) suspendCallForNetworkLoss(origin);
+      }
       if (status !== 'CONNECTED') {
         chatStore.finishAllInvocations('caller_disconnected');
         chatStore.setCommands([]);
@@ -567,21 +576,13 @@ class App {
     appEvents.on('network.disconnected', () => {
       const origin = currentEventOrigin();
       const ownsCall = !voiceStore.voiceSessionKey || voiceStore.voiceSessionKey === origin;
+      if (ownsCall) leaveCurrentCall(false);
 
       // The stores resolve to the session that dropped, so this clears the
       // right bundle even when a background server is the one going away.
       serverStore.clear();
       chatStore.clear();
       participantManager.clear();
-
-      if (ownsCall) {
-        voiceStore.reset();
-        audioProcessor.stopMicrophone();
-        videoService.stopCamera();
-        videoService.stopScreenShare();
-        webRtcManager.clearLocalScreenTracks();
-        webRtcManager.closeAllPeers();
-      }
 
       // This event only fires once a socket is gone for good — a client that
       // still intends to retry emits `network.reconnecting` instead. Leaving the
@@ -828,12 +829,7 @@ class App {
       }
       if (this.eventOwnsCall()) {
         if (isMySession && voiceStore.currentVoiceChannelId === payload.channelId) {
-          audioProcessor.stopMicrophone();
-          videoService.stopCamera();
-          videoService.stopScreenShare();
-          webRtcManager.clearLocalScreenTracks();
-          webRtcManager.closeAllPeers();
-          voiceStore.reset();
+          leaveCurrentCall(false);
           if (!voiceStore.getEffectiveDeafened()) {
             soundEffects.play('leave_voice');
           }
@@ -1015,8 +1011,8 @@ class App {
 
 // Bootstrap when DOM ready
 document.addEventListener('DOMContentLoaded', () => {
-  new App();
-});
+  void runFatalBootstrap(() => { new App(); }, 'constructor');
+}, { once: true });
 
 // Global error handlers for uncaught exceptions (#444)
 window.addEventListener('error', (event) => {

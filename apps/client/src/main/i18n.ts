@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+
 /**
  * Tiny catalog for the strings the main process owns (#16).
  *
@@ -10,6 +13,32 @@ export type MainLanguage = 'pt-BR' | 'en';
 
 const CATALOGS = {
   'pt-BR': {
+    'crash.title': 'Ops! O Monky encontrou uma falha',
+    'crash.description': 'A interface parou de funcionar. Você pode nos ajudar a entender o que aconteceu ou reabrir o aplicativo quando quiser.',
+    'crash.privacy': 'Nada é reportado automaticamente. “Reportar bug” copia o diagnóstico abaixo e abre o formulário habitual no GitHub. Cole em “Contexto adicional” e revise antes de publicar.',
+    'crash.report': 'Reportar bug',
+    'crash.reopen': 'Reabrir Monky',
+    'crash.close': 'Fechar Monky',
+    'crash.copy': 'Copiar diagnóstico',
+    'crash.details': 'Ver diagnóstico técnico',
+    'crash.wait': 'Só um instante…',
+    'crash.reportOpened': 'Formulário aberto. O diagnóstico foi copiado: cole em “Contexto adicional”. O Monky não publicou nenhum relatório.',
+    'crash.reportOpenedNoCopy': 'Formulário aberto, mas não foi possível copiar. Selecione e copie o diagnóstico abaixo para “Contexto adicional”.',
+    'crash.reportFailed': 'Não foi possível abrir o navegador. O diagnóstico foi copiado; tente novamente ou abra o formulário em Configurações › Sobre e Updates após reabrir o Monky.',
+    'crash.actionFailed': 'Não foi possível concluir a ação. Tente novamente ou selecione e copie o diagnóstico abaixo.',
+    'crash.copied': 'Diagnóstico copiado.',
+    'crash.restartFailed': 'Não foi possível reabrir o Monky. Feche esta janela e abra o aplicativo pelo atalho.',
+    'crash.nativeTitle': 'O Monky precisa de atenção',
+    'crash.nativeDescription': 'A tela de recuperação também não pôde abrir. Você ainda pode reportar a falha ou reabrir o Monky.',
+    'crash.nativePrivacy': 'Reportar copia este diagnóstico e abre o formulário habitual no GitHub. Cole em “Contexto adicional”, revise e publique somente se quiser.',
+    'crash.fieldIncident': 'Incidente',
+    'crash.fieldTime': 'Data (UTC)',
+    'crash.fieldFailure': 'Falha',
+    'crash.fieldCode': 'Código',
+    'crash.fieldOs': 'Sistema',
+    'crash.fieldUptime': 'Tempo aberto',
+    'crash.fieldError': 'Erro',
+    'crash.fieldSource': 'Origem',
     'dialog.selectProfilePhoto': 'Selecionar Foto de Perfil',
     'dialog.selectSoundFile': 'Selecionar Arquivo de Som',
     'dialog.saveBackup': 'Salvar backup do Monky',
@@ -69,6 +98,32 @@ const CATALOGS = {
     'tray.quit': 'Fechar Monky',
   },
   en: {
+    'crash.title': 'Oops! Monky ran into a problem',
+    'crash.description': 'The interface stopped working. You can help us understand what happened, or reopen the app whenever you are ready.',
+    'crash.privacy': 'Nothing is reported automatically. “Report a bug” copies the diagnostic below and opens the usual GitHub form. Paste into “Contexto adicional” (additional context) and review before publishing.',
+    'crash.report': 'Report a bug',
+    'crash.reopen': 'Reopen Monky',
+    'crash.close': 'Close Monky',
+    'crash.copy': 'Copy diagnostic',
+    'crash.details': 'View technical diagnostic',
+    'crash.wait': 'Just a moment…',
+    'crash.reportOpened': 'Form opened. The diagnostic was copied: paste into “Contexto adicional” (additional context). Monky has not published a report.',
+    'crash.reportOpenedNoCopy': 'Form opened, but the diagnostic could not be copied. Select and copy it below into “Contexto adicional” (additional context).',
+    'crash.reportFailed': 'Could not open the browser. The diagnostic was copied; try again or open the form in Settings › About & Updates after reopening Monky.',
+    'crash.actionFailed': 'Could not complete this action. Try again, or select and copy the diagnostic below.',
+    'crash.copied': 'Diagnostic copied.',
+    'crash.restartFailed': 'Could not reopen Monky. Close this window and open the app using its shortcut.',
+    'crash.nativeTitle': 'Monky needs attention',
+    'crash.nativeDescription': 'The recovery screen could not open either. You can still report the failure or reopen Monky.',
+    'crash.nativePrivacy': 'Report copies this diagnostic and opens the usual GitHub form. Paste into “Contexto adicional” (additional context), review, and publish only if you want to.',
+    'crash.fieldIncident': 'Incident',
+    'crash.fieldTime': 'Time (UTC)',
+    'crash.fieldFailure': 'Failure',
+    'crash.fieldCode': 'Code',
+    'crash.fieldOs': 'OS',
+    'crash.fieldUptime': 'Uptime',
+    'crash.fieldError': 'Error',
+    'crash.fieldSource': 'Source',
     'dialog.selectProfilePhoto': 'Select Profile Picture',
     'dialog.selectSoundFile': 'Select Sound File',
     'dialog.saveBackup': 'Save Monky backup',
@@ -132,10 +187,42 @@ const CATALOGS = {
 export type MainTranslationKey = keyof (typeof CATALOGS)['pt-BR'];
 
 let currentLanguage: MainLanguage = 'pt-BR';
+let languageFile: string | null = null;
+
+/** A tiny cache survives a renderer failing before its localStorage is readable. */
+export function initializeMainLanguage(userData: string, systemLanguages: readonly string[]): void {
+  languageFile = path.join(userData, 'main-language.json');
+  currentLanguage = 'pt-BR';
+  for (const candidate of systemLanguages) {
+    const prefix = candidate.toLowerCase().split('-')[0];
+    if (prefix !== 'pt' && prefix !== 'en') continue;
+    currentLanguage = prefix === 'en' ? 'en' : 'pt-BR';
+    break;
+  }
+  try {
+    if (fs.statSync(languageFile).size > 100) {
+      console.warn('[Main i18n] Saved language is oversized; using the system language');
+      return;
+    }
+    const language: unknown = JSON.parse(fs.readFileSync(languageFile, 'utf8'));
+    if (language === 'en' || language === 'pt-BR') currentLanguage = language;
+    else console.warn('[Main i18n] Invalid saved language; using the system language');
+  } catch (error: unknown) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return;
+    console.warn('[Main i18n] Could not read the saved language; using the system language', error);
+  }
+}
 
 export function setMainLanguage(language: string | undefined): void {
   if (language === 'en' || language === 'pt-BR') {
     currentLanguage = language;
+    if (languageFile) {
+      try {
+        fs.writeFileSync(languageFile, JSON.stringify(language), 'utf8');
+      } catch (error: unknown) {
+        console.warn('[Main i18n] Could not persist the selected language', error);
+      }
+    }
   }
 }
 

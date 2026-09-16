@@ -5,6 +5,7 @@ import { t, type TranslationKey } from '../../i18n';
 import {
   AUDIO_OUTPUT_CATEGORIES, copyAudioOutputPreferences, type AudioOutputCategory, type AudioOutputPreferences,
 } from '../../utils/audioPreferences';
+import { renderLoadingSkeleton } from '../../utils/loadingSkeleton';
 
 const labels: Record<AudioOutputCategory, TranslationKey> = {
   voice: 'audioOutputs.voice',
@@ -33,9 +34,10 @@ export class AudioOutputControls {
           ${AUDIO_OUTPUT_CATEGORIES.map((category) => `
             <div class="form-group" style="margin-top:10px;">
               <label for="select-audio-output-${category}">${t(labels[category])}</label>
-              <select id="select-audio-output-${category}" data-output-category="${category}" aria-describedby="audio-output-${category}-status">
+              <div data-device-loading>${renderLoadingSkeleton('lines', 1)}</div>
+              <div data-device-control hidden><select id="select-audio-output-${category}" data-output-category="${category}" aria-describedby="audio-output-${category}-status">
                 <option value="inherit">${t('audioOutputs.inherit')}</option>
-              </select>
+              </select></div>
               <div id="audio-output-${category}-status" class="audio-device-status" role="status"></div>
             </div>
           `).join('')}
@@ -140,6 +142,12 @@ export class AudioOutputControls {
       select.prepend(new Option(t('audioOutputs.inherit'), 'inherit'));
       select.value = selected ?? 'inherit';
       select.disabled = this.busy;
+      const control = select.closest<HTMLElement>('[data-device-control]');
+      if (control) {
+        control.hidden = false;
+        const loading = control.previousElementSibling;
+        if (loading instanceof HTMLElement && loading.hasAttribute('data-device-loading')) loading.hidden = true;
+      }
       const status = this.container?.querySelector<HTMLElement>(`#audio-output-${category}-status`);
       if (status) status.textContent = message;
     }

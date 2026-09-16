@@ -20,6 +20,8 @@ if (!process.versions.electron) {
   app.setPath('userData', process.env.MONKY_COMMAND_DOM_PROFILE);
   app.commandLine.appendSwitch('use-fake-device-for-media-stream');
   app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+  // finish() owns the exit status, including failures during async cleanup.
+  app.on('window-all-closed', () => {});
   let vite;
   let window;
   let timeout;
@@ -580,6 +582,7 @@ async function runLocalizedCommandDomSmoke() {
       members: [user], knownMembers: [user], roles: [], userRoles: [], myPermissions: 2147483647, ownerId: id,
     }, user);
     client.getStatus = () => 'CONNECTED';
+    client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
     client.getConnectionId = () => `localized-${id}`;
     client.getCurrentServerUrl = () => 'wss://localized-command.example/';
     client.send = (messageType, payload, requestId) => {
@@ -863,6 +866,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
   }, user);
   participants.setUsers([user, bot]);
   client.getStatus = () => 'CONNECTED';
+  client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
   client.getConnectionId = () => 'voice-dom-connection';
   client.getCurrentServerUrl = () => session.key;
   const music = {
@@ -1212,6 +1216,7 @@ async function runAutocompleteDomSmoke() {
   const server = servers.createServerStore();
   const client = networks.createNetworkClient();
   client.getStatus = () => 'CONNECTED';
+  client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
   client.getCurrentServerUrl = () => 'ws://local-fixture.example:46332';
   chats.setActiveChatStore(store);
   servers.setActiveServerStore(server);
@@ -2384,12 +2389,13 @@ async function runSettingsNavigationSmoke() {
     const priorStarts = starts;
     const priorVersions = versions;
     const opening = modal.open('voice_video');
+    check(versions === priorVersions + 1, 'Version lookup starts alongside the pending device enumeration');
     const pendingCameraActivations = cameraActivations;
     modal.close();
     resolveRefresh();
     await opening;
     check(starts === priorStarts && cameraActivations === pendingCameraActivations
-      && versions === priorVersions && !document.querySelector('.modal-backdrop--settings'),
+      && versions === priorVersions + 1 && !document.querySelector('.modal-backdrop--settings'),
       'Closing during async settings setup cannot start a late media preview');
     return checks;
   } finally {
@@ -3128,6 +3134,7 @@ async function runDomSmoke() {
   const client = networks.createNetworkClient();
   const sent = [];
   client.getStatus = () => 'CONNECTED';
+  client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
   client.getCurrentServerUrl = () => 'wss://command-fixture.example/';
   client.send = (messageType, payload) => sent.push({ type: messageType, payload });
   chats.setActiveChatStore(store);

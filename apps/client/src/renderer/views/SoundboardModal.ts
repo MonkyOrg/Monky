@@ -15,6 +15,7 @@ import { matchesSearch as matchesSoundSearch } from '../utils/search';
 import { sortFavoritesFirst } from '../utils/favoriteOrder';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
+import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
 
 export class SoundboardModal {
   private modalEl: HTMLElement | null = null;
@@ -32,10 +33,6 @@ export class SoundboardModal {
     const lifecycle = this.lifecycle;
     this.searchQuery = '';
 
-    // Ensure sounds are loaded
-    await soundboardService.loadSounds();
-    if (lifecycle !== this.lifecycle) return;
-    const sounds = soundboardService.getSounds();
     const serverAllows = serverStore.serverDetails?.allowSoundboard !== false;
     const hasSoundboardPermission = serverStore.hasPermission(Permission.USE_SOUNDBOARD);
 
@@ -50,7 +47,7 @@ export class SoundboardModal {
             <span class="material-symbols-outlined" style="color: var(--accent-primary);">music_note</span>
             <span>Soundboard</span>
             <span id="sb-sound-count" style="font-size: 11px; background: var(--bg-tertiary); padding: 2px 8px; border-radius: 12px; color: var(--text-muted); font-weight: 500;">
-              ${tCount('soundboard.soundCount', sounds.length)}
+              ${t('common.loading')}
             </span>
             <div class="sb-help-badge" title="${t('soundboard.formatsBadge')}" style="margin-left: 2px;">
               <span class="material-symbols-outlined md-16">help</span>
@@ -153,7 +150,7 @@ export class SoundboardModal {
 
         <!-- Sounds Grid Area -->
         <div id="sb-sounds-container" style="flex: 1; overflow-y: auto; padding: 10px 20px 16px; min-height: 220px;">
-          ${this.renderSoundsGrid(sounds)}
+          ${renderLoadingSkeleton('lines', 5)}
         </div>
 
         <!-- Footer -->
@@ -169,6 +166,8 @@ export class SoundboardModal {
     document.body.appendChild(this.modalEl);
     this.attachEvents();
     this.setupPlaybackListeners();
+    await soundboardService.loadSounds();
+    if (lifecycle !== this.lifecycle) return;
     this.refreshGrid();
   }
 
@@ -356,6 +355,20 @@ export class SoundboardModal {
     if (!modal) return;
     const container = modal.querySelector<HTMLElement>('#sb-sounds-container');
     const countBadge = modal.querySelector('#sb-sound-count');
+    const status = soundboardService.getLoadStatus();
+    container?.setAttribute('aria-busy', String(status === 'loading'));
+    if (status !== 'ready') {
+      this.favoriteMotion.cancel();
+      if (countBadge) countBadge.textContent = t(status === 'loading' ? 'common.loading' : 'common.error');
+      if (container) {
+        container.innerHTML = status === 'loading' ? renderLoadingSkeleton('lines', 5)
+          : renderLoadingError(t('soundboard.loadFailed'));
+        container.querySelector('[data-loading-retry]')?.addEventListener('click', () => {
+          if (this.modalEl === modal) void soundboardService.loadSounds();
+        });
+      }
+      return;
+    }
     if (container) this.favoriteMotion.update(container, '.sb-sound-card, .sb-sound-row', () => {
       const scrollTop = container.scrollTop;
       const focused = document.activeElement;
@@ -738,6 +751,10 @@ export class SoundboardModal {
       if (kind === 'sounds') this.refreshGrid('reorder');
     }));
     this.unbindEvents.push(appEvents.on('soundboard.sounds_loaded', () => {
+      this.refreshFolderLabel();
+      this.refreshGrid();
+    }));
+    this.unbindEvents.push(appEvents.on('soundboard.sounds_loading', () => {
       this.refreshFolderLabel();
       this.refreshGrid();
     }));

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Chamadas SFU recuperam falhas de envio ou recep\u00e7\u00e3o de \u00e1udio sem exigir sair e entrar de novo. Conex\u00f5es antigas n\u00e3o deixam mais m\u00eddia fantasma, e uma chamada j\u00e1 conectada n\u00e3o \u00e9 reconstru\u00edda desnecessariamente.",
+  "en": "SFU calls recover audio sending or receiving failures without requiring you to leave and rejoin. Old connections no longer leave ghost media, and an already connected call is not rebuilt unnecessarily."
+}

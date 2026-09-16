@@ -19,6 +19,7 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_EDITING_PROFILE);
+  app.on('window-all-closed', () => {});
   let vite;
   let window;
   let timeout;
@@ -434,6 +435,7 @@ async function installFixture() {
     const state = { name, session, status: 'CONNECTED', epoch: 1, edits: [], sent: [], commands: [] };
     session.serverStore.setServerDetails(details(name), user);
     session.client.getStatus = () => state.status;
+    session.client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
     session.client.getConnectionId = () => `${name}-${state.epoch}`;
     session.client.getCurrentServerUrl = () => session.key;
     session.client.send = (type, payload, requestId) => {

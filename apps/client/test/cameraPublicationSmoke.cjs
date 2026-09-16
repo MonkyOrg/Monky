@@ -362,6 +362,7 @@ async function runCameraPublicationSmoke(filter) {
     return entry.stream;
   };
   const transport = {
+    getStatus: () => 'CONNECTED',
     send(type, payload) {
       sent.push({ type, payload });
       const route = type === MessageType.RTC_SIGNAL && routes.get(payload.targetSessionId);
