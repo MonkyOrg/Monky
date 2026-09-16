@@ -378,6 +378,8 @@ async function runRenderer(MessageType, roster, humanId) {
   const errors = [];
   const audioProbes = new Set();
   const client = {
+    getStatus: () => 'CONNECTED',
+    getConnectionId: () => 'voice-renderer-connection',
     send(type, payload) {
       void request(type, payload).then(async (response) => {
         for (const signal of response.signals ?? []) await rtc.handleIncomingSignal(signal);

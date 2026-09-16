@@ -585,3 +585,106 @@ test('SFU pause and resume tolerate retired consumers but propagate failures of 
     }
   }
 });
+
+test('SFU allocations completing after a human reconnect are reaped without touching the replacement session', async (t) => {
+  for (const allocation of ['initialization', 'transport', 'producer', 'consumer'] as const) {
+    await t.test(allocation, async () => {
+      const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
+      const sfu = new SfuManager();
+      const service = signaling();
+      server['sfuManager'] = sfu;
+      server['signalingService'] = service;
+      server['closing'] = false;
+      const makeSocket = () => {
+        const ws = Object.create(WebSocket.prototype) as WebSocket;
+        Object.defineProperty(ws, 'readyState', { value: WebSocket.OPEN });
+        return ws;
+      };
+      const session: Parameters<WebSocketServer['handleSfuCreateWebRtcTransport']>[0] = {
+        ws: makeSocket(), sessionId: 'self', isAlive: true, ip: '127.0.0.1', messageQueue: Promise.resolve(),
+        user: { id: 'self', sessionId: 'self', clientId: 'self', nickname: 'Self', status: 'ONLINE', joinedAt: 1 },
+      };
+      server['sessions'] = new Map([[session.ws, session]]);
+      server['sessionSockets'] = new Map([['self', session.ws]]);
+      const messages: Parameters<WebSocketServer['send']>[1][] = [];
+      server['send'] = (_ws, message) => { messages.push(message); };
+      server['broadcast'] = message => { messages.push(message); };
+      await service.joinVoiceChannel('self', 'self', 'room');
+
+      const resource = (id: string) => ({ id, closed: false, close() { this.closed = true; } });
+      const abandoned = resource('abandoned');
+      const replacement = resource('replacement');
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const register = (entry: ReturnType<typeof resource>) => {
+        if (allocation === 'transport' || allocation === 'initialization') {
+          sfu['transports'].set(entry.id, {
+            transport: entry as MediasoupTypes.WebRtcTransport,
+            sessionId: 'self', channelId: 'room', direction: 'send',
+          });
+        } else if (allocation === 'producer') {
+          sfu['producers'].set(entry.id, {
+            producer: entry as MediasoupTypes.Producer,
+            sessionId: 'self', channelId: 'room', kind: 'audio', appData: { mediaType: 'mic' },
+          });
+        } else {
+          sfu['consumers'].set(entry.id, {
+            consumer: entry as MediasoupTypes.Consumer,
+            sessionId: 'self', channelId: 'room', producerId: 'peer-producer',
+          });
+        }
+      };
+      let pending: Promise<void>;
+      if (allocation === 'transport' || allocation === 'initialization') {
+        sfu.isReady = () => allocation !== 'initialization';
+        sfu.init = async () => { await gate; return true; };
+        sfu.createWebRtcTransport = async () => {
+          await gate;
+          register(abandoned);
+          return {
+            id: abandoned.id, iceParameters: { usernameFragment: 'fixture', password: 'fixture' },
+            iceCandidates: [], dtlsParameters: { fingerprints: [] },
+          };
+        };
+        pending = server['handleSfuCreateWebRtcTransport'](session, { channelId: 'room', direction: 'send' }, 'old-request');
+      } else if (allocation === 'producer') {
+        sfu.produce = async () => {
+          await gate;
+          register(abandoned);
+          return { id: abandoned.id };
+        };
+        pending = server['handleSfuProduce'](session, {
+          channelId: 'room', transportId: 'old-transport', kind: 'audio', rtpParameters: {}, appData: { mediaType: 'mic' },
+        }, 'old-request');
+      } else {
+        sfu.consume = async () => {
+          await gate;
+          register(abandoned);
+          return {
+            id: abandoned.id, producerId: 'peer-producer', producerSessionId: 'peer',
+            kind: 'audio', rtpParameters: { codecs: [] }, appData: { mediaType: 'mic' },
+          };
+        };
+        pending = server['handleSfuConsume'](session, {
+          channelId: 'room', transportId: 'old-transport', producerId: 'peer-producer', rtpCapabilities: {},
+        }, 'old-request');
+      }
+      const replacementSession = { ...session, ws: makeSocket() };
+      session.replaced = true;
+      server['sessions'].delete(session.ws);
+      server['sessions'].set(replacementSession.ws, replacementSession);
+      server['sessionSockets'].set('self', replacementSession.ws);
+      register(replacement);
+      release();
+      await pending;
+      assert.equal(abandoned.closed, allocation !== 'initialization',
+        'late initialization must not allocate, and late allocations must be closed');
+      assert.equal(replacement.closed, false, 'the logical session ID cannot authorize closing the replacement allocation');
+      assert.equal(messages.length, 0, 'obsolete producers must never be announced to the room');
+      const records = allocation === 'transport' || allocation === 'initialization' ? sfu['transports']
+        : allocation === 'producer' ? sfu['producers'] : sfu['consumers'];
+      assert.deepEqual([...records.keys()], ['replacement']);
+      sfu.close();
+    });
+  }
+});

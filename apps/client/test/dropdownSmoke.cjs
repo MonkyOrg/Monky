@@ -209,6 +209,7 @@ async function runDropdownSmoke() {
     fixture.replaceChildren(container);
     for (const tab of [new AccountTab(), new LogsTab(), new VoiceVideoTab()]) {
       container.innerHTML = tab.renderHtml();
+      if (tab instanceof VoiceVideoTab) await tab.refreshDevices(container);
       const conditionalGroups = [...container.querySelectorAll('[hidden]')]
         .filter(group => group.querySelector('select'));
       for (const group of conditionalGroups) {

@@ -2850,6 +2850,7 @@ export class WebSocketServer {
       if (!this.sfuManager.isReady()) {
         await this.sfuManager.init();
       }
+      if (!this.isCurrentSession(session)) return;
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) creating ${payload.direction} transport for channel ${payload.channelId}`);
       // A client asking for a transport it already has is rejoining after a
       // failure. Its previous one is never coming back, and nothing else would
@@ -2888,14 +2889,14 @@ export class WebSocketServer {
         payload.direction,
         session.requestHost
       );
+      if (!this.isCurrentSession(session) ||
+          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId) {
+        // A reconnected device keeps its logical session ID. Reap only this
+        // late allocation, never the replacement connection's media.
+        this.sfuManager.discardPendingTransport(transportOptions.id);
+        return;
+      }
       if (session.isBot) {
-        if (!this.isCurrentSession(session) ||
-            this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId) {
-          // A replacement bot uses the same logical session ID. Reap only the
-          // allocation that just completed, never the replacement's transport.
-          this.sfuManager.discardPendingTransport(transportOptions.id);
-          return;
-        }
         session.botVoiceTransports ??= new Map();
         session.botVoiceTransports.clear();
         session.botVoiceTransports.set(transportOptions.id, { channelId: payload.channelId, direction: payload.direction });
@@ -2962,8 +2963,8 @@ export class WebSocketServer {
         payload.rtpParameters,
         payload.appData || {}
       );
-      if (session.isBot && (!this.isCurrentSession(session) ||
-          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId)) {
+      if (!this.isCurrentSession(session) ||
+          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId) {
         this.sfuManager.closeProducer(id);
         return;
       }
@@ -3023,6 +3024,11 @@ export class WebSocketServer {
         payload.producerId,
         payload.rtpCapabilities
       );
+      if (!this.isCurrentSession(session) ||
+          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId) {
+        this.sfuManager.discardPendingConsumer(consumed.id);
+        return;
+      }
 
       this.send(session.ws, {
         type: MessageType.SFU_CONSUMED,

@@ -21,6 +21,7 @@ export * from './validators.js';
 export * from './identity.js';
 export * from './permissions.js';
 export * from './ipc.js';
+export * from './bugReport.js';
 export * from './shortcuts.js';
 export * from './lruCache.js';
 export * from './logging.js';

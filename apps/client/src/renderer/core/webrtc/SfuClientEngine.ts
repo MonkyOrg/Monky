@@ -24,6 +24,7 @@ import {
 import { NetworkClient } from '../NetworkClient';
 import { clientLog } from '../ClientLogService';
 import { appEvents } from '../EventBus';
+import { currentEventOrigin } from '../sessionRouting';
 import { settingsStore } from '../../stores/settingsStore';
 import {
   explicitScreenCodecMime, ScreenCodecError, selectScreenVideoCodecs,
@@ -66,6 +67,7 @@ export class SfuClientEngine {
   private producers: Map<string, mediasoupTypes.Producer> = new Map();
   private pendingScreenProducers = new Map<string, object>();
   private pendingCameraProducer: object | null = null;
+  private pendingMicProducer: object | null = null;
   // Last quality profile pushed from WebRtcManager. Applied to every producer's
   // RTP sender so SFU media honors the same bitrate/degradation caps as the P2P
   // path (#568). Null until the first apply.
@@ -92,6 +94,7 @@ export class SfuClientEngine {
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private joinEpoch = 0;
   private consumerSetupFailed = false;
+  private microphoneSetupFailed = false;
 
   constructor(
     getClient: () => NetworkClient,
@@ -109,6 +112,10 @@ export class SfuClientEngine {
   public async join(channelId: string): Promise<boolean> {
     this.leave();
     const epoch = this.joinEpoch;
+    const client = this.client;
+    const connectionId = client.getConnectionId();
+    const isCurrent = () => epoch === this.joinEpoch && client.getConnectionId() === connectionId;
+    const abandoned = () => new DOMException('SFU connection was abandoned', 'AbortError');
     this.channelId = channelId;
     this.isConnecting = true;
     this.callbacks.onHealthChanged('connecting');
@@ -118,13 +125,13 @@ export class SfuClientEngine {
       clientLog.info('SFU', `Joining SFU room for channel ${channelId}`);
 
       // 1. Get router RTP capabilities
-      const routerCapsResp = await this.client.sendRequest<SfuRouterRtpCapabilitiesPayload>(
+      const routerCapsResp = await client.sendRequest<SfuRouterRtpCapabilitiesPayload>(
         MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES,
         { channelId } satisfies SfuGetRouterRtpCapabilitiesPayload,
         undefined,
         10000
       );
-      if (epoch !== this.joinEpoch) return false;
+      if (!isCurrent()) return false;
 
       if (!routerCapsResp || !routerCapsResp.rtpCapabilities) {
         throw new Error('Falha ao obter capacidades RTP do servidor SFU');
@@ -135,38 +142,40 @@ export class SfuClientEngine {
       // 2. Load device
       this.device = new mediasoupClient.Device();
       await this.device.load({ routerRtpCapabilities: routerCapsResp.rtpCapabilities as any });
-      if (epoch !== this.joinEpoch) return false;
+      if (!isCurrent()) return false;
       console.log(`[SFU Client] Mediasoup Device loaded! Can produce audio: ${this.canProduceKind('audio')}, video: ${this.canProduceKind('video')}`);
 
       // 3. Create send transport
       console.log(`[SFU Client] Requesting createSendTransport from server...`);
-      const sendCreated = await this.client.sendRequest<SfuWebRtcTransportCreatedPayload>(
+      const sendCreated = await client.sendRequest<SfuWebRtcTransportCreatedPayload>(
         MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
         { channelId, direction: 'send' } satisfies SfuCreateWebRtcTransportPayload,
         undefined,
         10000
       );
-      if (epoch !== this.joinEpoch) return false;
+      if (!isCurrent()) return false;
 
       console.log(`[SFU Client] Send transport created on server (${sendCreated.transportOptions?.id}). ICE candidates:`, sendCreated.transportOptions?.iceCandidates?.map((c: any) => `${c.protocol?.toUpperCase()} ${c.ip || c.address}:${c.port}`));
 
       this.sendTransport = this.device.createSendTransport(sendCreated.transportOptions as any);
+      const sendTransport = this.sendTransport;
 
-      this.sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        if (epoch !== this.joinEpoch) { errback(new Error('SFU connection was abandoned')); return; }
+      sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
+        if (!isCurrent()) { errback(abandoned()); return; }
         console.log(`[SFU Client] Send transport on('connect') DTLS triggered (role: ${dtlsParameters.role})`);
-        this.client
+        client
           .sendRequest(
             MessageType.SFU_CONNECT_WEBRTC_TRANSPORT,
             {
               channelId,
-              transportId: this.sendTransport!.id,
+              transportId: sendTransport.id,
               dtlsParameters,
             } satisfies SfuConnectWebRtcTransportPayload,
             undefined,
             8000
           )
           .then(() => {
+            if (!isCurrent()) { errback(abandoned()); return; }
             console.log(`[SFU Client] Send transport DTLS connect acknowledged by server`);
             callback();
           })
@@ -177,15 +186,15 @@ export class SfuClientEngine {
           });
       });
 
-      this.sendTransport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
-        if (epoch !== this.joinEpoch) { errback(new Error('SFU connection was abandoned')); return; }
+      sendTransport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
+        if (!isCurrent()) { errback(abandoned()); return; }
         console.log(`[SFU Client] Send transport on('produce') triggered: kind=${kind}, type=${appData?.mediaType}`);
-        this.client
+        client
           .sendRequest<SfuProducedPayload>(
             MessageType.SFU_PRODUCE,
             {
               channelId,
-              transportId: this.sendTransport!.id,
+              transportId: sendTransport.id,
               kind,
               rtpParameters,
               appData,
@@ -194,6 +203,7 @@ export class SfuClientEngine {
             8000
           )
           .then((resp) => {
+            if (!isCurrent()) { errback(abandoned()); return; }
             console.log(`[SFU Client] Producer acknowledged by server with producerId: ${resp.id}`);
             callback({ id: resp.id });
           })
@@ -204,8 +214,8 @@ export class SfuClientEngine {
           });
       });
 
-      this.sendTransport.on('connectionstatechange', (state) => {
-        if (epoch !== this.joinEpoch) return;
+      sendTransport.on('connectionstatechange', (state) => {
+        if (!isCurrent()) return;
         console.log(`[SFU Client] Send transport connectionState changed: ${state}`);
         clientLog.info('SFU', `Send transport state: ${state}`);
         this.sendTransportState = state;
@@ -214,33 +224,35 @@ export class SfuClientEngine {
 
       // 4. Create recv transport
       console.log(`[SFU Client] Requesting createRecvTransport from server...`);
-      const recvCreated = await this.client.sendRequest<SfuWebRtcTransportCreatedPayload>(
+      const recvCreated = await client.sendRequest<SfuWebRtcTransportCreatedPayload>(
         MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
         { channelId, direction: 'recv' } satisfies SfuCreateWebRtcTransportPayload,
         undefined,
         10000
       );
-      if (epoch !== this.joinEpoch) return false;
+      if (!isCurrent()) return false;
 
       console.log(`[SFU Client] Recv transport created on server (${recvCreated.transportOptions?.id}). ICE candidates:`, recvCreated.transportOptions?.iceCandidates?.map((c: any) => `${c.protocol?.toUpperCase()} ${c.ip || c.address}:${c.port}`));
 
       this.recvTransport = this.device.createRecvTransport(recvCreated.transportOptions as any);
+      const recvTransport = this.recvTransport;
 
-      this.recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        if (epoch !== this.joinEpoch) { errback(new Error('SFU connection was abandoned')); return; }
+      recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
+        if (!isCurrent()) { errback(abandoned()); return; }
         console.log(`[SFU Client] Recv transport on('connect') DTLS triggered (role: ${dtlsParameters.role})`);
-        this.client
+        client
           .sendRequest(
             MessageType.SFU_CONNECT_WEBRTC_TRANSPORT,
             {
               channelId,
-              transportId: this.recvTransport!.id,
+              transportId: recvTransport.id,
               dtlsParameters,
             } satisfies SfuConnectWebRtcTransportPayload,
             undefined,
             8000
           )
           .then(() => {
+            if (!isCurrent()) { errback(abandoned()); return; }
             console.log(`[SFU Client] Recv transport DTLS connect acknowledged by server`);
             callback();
           })
@@ -251,8 +263,8 @@ export class SfuClientEngine {
           });
       });
 
-      this.recvTransport.on('connectionstatechange', (state) => {
-        if (epoch !== this.joinEpoch) return;
+      recvTransport.on('connectionstatechange', (state) => {
+        if (!isCurrent()) return;
         console.log(`[SFU Client] Recv transport connectionState changed: ${state}`);
         clientLog.info('SFU', `Recv transport state: ${state}`);
         this.recvTransportState = state;
@@ -260,18 +272,18 @@ export class SfuClientEngine {
       });
 
       // 5. Register network listeners for new producers and producer closed
-      this.subscribeNetworkEvents();
+      this.subscribeNetworkEvents(client);
 
       // 6. Fetch existing producers in the channel and consume them
       try {
         console.log(`[SFU Client] Fetching existing producers in channel ${channelId}...`);
-        const producersResp = await this.client.sendRequest<SfuProducersListPayload>(
+        const producersResp = await client.sendRequest<SfuProducersListPayload>(
           MessageType.SFU_GET_PRODUCERS,
           { channelId } satisfies SfuGetProducersPayload,
           undefined,
           8000
         );
-        if (epoch !== this.joinEpoch) return false;
+        if (!isCurrent()) return false;
         this.callbacks.onRoster(channelId, producersResp.participants);
 
         if (producersResp && Array.isArray(producersResp.producers)) {
@@ -285,7 +297,7 @@ export class SfuClientEngine {
         clientLog.warn('SFU', 'Failed to fetch existing producers in channel', { error: err?.message });
         throw err;
       }
-      if (epoch !== this.joinEpoch) return false;
+      if (!isCurrent()) return false;
 
       this.isInitialized = true;
       this.isConnecting = false;
@@ -293,7 +305,7 @@ export class SfuClientEngine {
       clientLog.info('SFU', `Successfully connected to SFU channel ${channelId}`);
       return true;
     } catch (err: any) {
-      if (epoch !== this.joinEpoch) return false;
+      if (!isCurrent()) return false;
       console.error('[SFU Client] Error joining SFU channel:', err);
       clientLog.error('SFU', 'Error joining SFU channel', { error: err?.message });
       this.leave();
@@ -301,14 +313,15 @@ export class SfuClientEngine {
     }
   }
 
-  private subscribeNetworkEvents(): void {
+  private subscribeNetworkEvents(client = this.client): void {
+    const isOrigin = () => !currentEventOrigin() || currentEventOrigin() === client.sessionKey;
     const handleNewProducer = (payload: SfuNewProducerPayload) => {
-      if (payload.channelId !== this.channelId) return;
+      if (!isOrigin() || payload.channelId !== this.channelId) return;
       void this.consumeRemoteProducer(payload);
     };
 
     const handleProducerClosed = (payload: SfuProducerClosedPayload) => {
-      if (payload.channelId !== this.channelId) return;
+      if (!isOrigin() || payload.channelId !== this.channelId) return;
       this.handleRemoteProducerClosed(payload.producerId);
     };
 
@@ -372,31 +385,63 @@ export class SfuClientEngine {
   public async produceMic(track: MediaStreamTrack): Promise<mediasoupTypes.Producer | null> {
     if (!this.sendTransport || !this.canProduceKind('audio')) {
       console.warn(`[SFU Client] Cannot produce mic: sendTransport=${!!this.sendTransport}, canProduceAudio=${this.canProduceKind('audio')}`);
+      if (this.channelId) {
+        this.microphoneSetupFailed = true;
+        this.notifyIfHealthy();
+      }
       return null;
     }
+    this.closeProducer('mic', false);
+    const operation = {};
+    const client = this.client;
+    const channelId = this.channelId;
+    this.pendingMicProducer = operation;
+    this.microphoneSetupFailed = false;
+    this.notifyIfHealthy();
+    let producer: mediasoupTypes.Producer | null = null;
     try {
-      this.closeProducer('mic');
       console.log(`[SFU Client] Producing microphone track ${track.id} (enabled=${track.enabled}, readyState=${track.readyState})...`);
-      const producer = await this.produceTrack({
+      producer = await this.produceTrack({
         track,
         appData: { mediaType: 'mic' },
         codecOptions: {
           opusDtx: true,
         },
       });
+      if (this.pendingMicProducer !== operation || track.readyState !== 'live') {
+        throw new DOMException('Microphone producer was stopped or replaced', 'AbortError');
+      }
       this.producers.set('mic', producer);
       await this.applyProducerQuality('mic', producer);
+      if (this.pendingMicProducer !== operation || this.producers.get('mic') !== producer || producer.closed) {
+        throw new DOMException('Microphone producer was stopped or replaced', 'AbortError');
+      }
+      const current = producer;
       producer.on('transportclose', () => {
         console.log(`[SFU Client] Mic producer transport closed`);
-        this.producers.delete('mic');
+        if (this.producers.get('mic') === current) this.producers.delete('mic');
       });
       console.log(`[SFU Client] Produced mic audio track ${track.id} with producerId ${producer.id}`);
       clientLog.info('SFU', `Produced mic audio track ${track.id} with producerId ${producer.id}`);
       return producer;
-    } catch (err: any) {
-      console.error('[SFU Client] Failed to produce mic track:', err);
-      clientLog.error('SFU', 'Failed to produce mic track', { error: err?.message });
+    } catch (error) {
+      if (producer) {
+        if (this.producers.get('mic') === producer) this.producers.delete('mic');
+        if (!producer.closed) {
+          producer.close();
+          if (channelId) client.send(MessageType.SFU_PRODUCER_CLOSED, { channelId, producerId: producer.id } satisfies SfuProducerClosedPayload);
+        }
+      }
+      if (this.pendingMicProducer === operation) {
+        clientLog.error('SFU', 'Failed to produce mic track', { error: error instanceof Error ? error.message : String(error) });
+        this.microphoneSetupFailed = true;
+      }
       return null;
+    } finally {
+      if (this.pendingMicProducer === operation) {
+        this.pendingMicProducer = null;
+        this.notifyIfHealthy();
+      }
     }
   }
 
@@ -593,7 +638,11 @@ export class SfuClientEngine {
     }
   }
 
-  public closeProducer(key: string): void {
+  public closeProducer(key: string, notifyHealth = true): void {
+    if (key === 'mic') {
+      this.pendingMicProducer = null;
+      this.microphoneSetupFailed = false;
+    }
     if (key === 'camera') this.pendingCameraProducer = null;
     this.pendingScreenProducers.delete(key);
     const producer = this.producers.get(key);
@@ -609,6 +658,7 @@ export class SfuClientEngine {
         } satisfies SfuProducerClosedPayload);
       }
     }
+    if (key === 'mic' && notifyHealth && this.channelId) this.notifyIfHealthy();
   }
 
   private async consumeRemoteProducer(producerData: SfuNewProducerPayload): Promise<void> {
@@ -634,6 +684,7 @@ export class SfuClientEngine {
     const transport = this.recvTransport;
     const pending = {};
     this.pendingConsumers.set(producerId, pending);
+    this.notifyIfHealthy();
     const isCurrent = () => epoch === this.joinEpoch && this.pendingConsumers.get(producerId) === pending;
     try {
       console.log(`[SFU Client] Consuming remote producer ${producerId} (${kind}, mediaType: ${appData?.mediaType}) from session ${producerSessionId}...`);
@@ -681,6 +732,7 @@ export class SfuClientEngine {
       consumer.on('trackended', () => {
         if (epoch !== this.joinEpoch) return;
         console.log(`[SFU Client] Consumer track ended for producer ${producerId}`);
+        this.consumerSetupFailed = true;
         this.handleRemoteProducerClosed(producerId);
       });
 
@@ -707,10 +759,12 @@ export class SfuClientEngine {
       clientLog.error('SFU', `Error consuming remote producer ${producerId}`, { error: err?.message });
       if (isCurrent()) {
         this.consumerSetupFailed = true;
-        this.notifyIfHealthy();
       }
     } finally {
-      if (this.pendingConsumers.get(producerId) === pending) this.pendingConsumers.delete(producerId);
+      if (this.pendingConsumers.get(producerId) === pending) {
+        this.pendingConsumers.delete(producerId);
+        this.notifyIfHealthy();
+      }
     }
   }
 
@@ -728,6 +782,7 @@ export class SfuClientEngine {
       this.consumerMeta.delete(producerId);
       this.callbacks.onConsumerClosed(meta.producerSessionId, meta.mediaType, meta.shareId);
     }
+    if (this.channelId) this.notifyIfHealthy();
   }
 
   public async setConsumerPaused(producerId: string, paused: boolean): Promise<void> {
@@ -761,7 +816,7 @@ export class SfuClientEngine {
   }
 
   public isChannelConnected(): boolean {
-    return !this.consumerSetupFailed && aggregateTransportHealth([this.sendTransportState, this.recvTransportState]) === 'connected';
+    return this.getHealth() === 'connected';
   }
 
   public getCameraSender(): RTCRtpSender | null {
@@ -811,6 +866,8 @@ export class SfuClientEngine {
 
   public leave(): void {
     this.joinEpoch++;
+    this.channelId = null;
+    this.pendingMicProducer = null;
     this.pendingCameraProducer = null;
     this.pendingScreenProducers.clear();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
@@ -855,6 +912,7 @@ export class SfuClientEngine {
     this.sendTransportState = 'new';
     this.recvTransportState = 'new';
     this.consumerSetupFailed = false;
+    this.microphoneSetupFailed = false;
   }
 
   /**
@@ -871,8 +929,16 @@ export class SfuClientEngine {
    * participants would keep their "connecting" badge, and the backoff would
    * stay pinned at its longest delay for the rest of the session.
    */
+  private getHealth(): VoiceConnectionHealth {
+    if (this.consumerSetupFailed || this.microphoneSetupFailed) return 'failed';
+    return aggregateTransportHealth([
+      this.sendTransportState, this.recvTransportState,
+      ...(this.pendingMicProducer || this.pendingConsumers.size > 0 ? ['connecting'] : []),
+    ]);
+  }
+
   private notifyIfHealthy(): void {
-    const health = this.consumerSetupFailed ? 'failed' : aggregateTransportHealth([this.sendTransportState, this.recvTransportState]);
+    const health = this.getHealth();
     this.callbacks.onHealthChanged(health);
     if (health === 'connected' || health === 'failed') {
       if (this.recoveryTimer) clearTimeout(this.recoveryTimer);

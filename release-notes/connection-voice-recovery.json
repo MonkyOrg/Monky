@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A reconex\u00e3o continua tentando ap\u00f3s falhas de internet e recupera a chamada sem alterar mute ou deafen. Sair da chamada, desconectar e voltar ao in\u00edcio funcionam durante a queda, sem deixar voc\u00ea preso na sala.",
+  "en": "Reconnection keeps retrying after network failures and restores your call without changing mute or deafen. Leaving a call, disconnecting and going Home work during outages, without leaving you stuck in a room."
+}

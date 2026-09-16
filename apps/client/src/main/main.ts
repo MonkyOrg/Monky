@@ -20,6 +20,8 @@ import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
 import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
 import { resolveDevelopmentProfile } from './developmentProfile';
+import { CrashRecovery } from './crashRecovery';
+import { initializeMainLanguage } from './i18n';
 
 import fs from 'fs';
 
@@ -68,6 +70,7 @@ let overlayManager: OverlayManager | null = null;
 let trayManager: TrayManager | null = null;
 const serverManager = new ServerManager();
 let clientLogger: ClientLogger | null = null;
+let crashRecovery: CrashRecovery | null = null;
 let isShuttingDown = false;
 let isQuitting = false;
 /** Whether the renderer has already been asked to leave the call (#458). */
@@ -155,6 +158,29 @@ function quitApplication(): void {
   app.quit();
 }
 
+function getCrashRecovery(): CrashRecovery {
+  if (!crashRecovery) {
+    crashRecovery = new CrashRecovery({
+      logger: () => clientLogger,
+      isQuitting: () => isQuitting,
+      quit: quitApplication,
+      onRecovery: () => {
+        leaveAnnounced = true;
+        for (const cleanup of [
+          () => overlayManager?.close(),
+          () => { trayManager?.destroy(); trayManager = null; },
+          () => dismissInstallSplash(),
+        ]) {
+          try { cleanup(); } catch (error: unknown) {
+            console.error('[CrashRecovery] Auxiliary-window cleanup failed', error);
+          }
+        }
+      },
+    });
+  }
+  return crashRecovery;
+}
+
 function createWindow(deferShow = false): void {
   const iconCandidates = [
     path.join(__dirname, '../../build/icon.ico'),
@@ -199,6 +225,8 @@ function createWindow(deferShow = false): void {
       backgroundThrottling: false, // Keep audio and WebRTC processing smoothly when minimized/hidden
     },
   });
+
+  getCrashRecovery().watch(mainWindow);
 
   if (developmentProfile) {
     const window = mainWindow;
@@ -245,42 +273,56 @@ function createWindow(deferShow = false): void {
   // fallback timer guarantees a slow or missing signal never strands the window
   // behind it.
   if (deferShow) {
+    const window = mainWindow;
     let revealed = false;
     let onRendererReady: ((event: IpcMainEvent) => void) | null = null;
+    let revealTimer: ReturnType<typeof setTimeout> | null = null;
+    let dismissTimer: ReturnType<typeof setTimeout> | null = null;
+    const cleanupReveal = (): void => {
+      if (revealTimer) clearTimeout(revealTimer);
+      if (dismissTimer) clearTimeout(dismissTimer);
+      if (onRendererReady) ipcMain.removeListener('app:renderer-ready', onRendererReady);
+      revealTimer = null;
+      dismissTimer = null;
+      onRendererReady = null;
+    };
+    window.once('closed', cleanupReveal);
     const reveal = (reason: string): void => {
       if (revealed) return;
       revealed = true;
+      cleanupReveal();
       updateLog('reveal main window after update', { reason });
-      if (onRendererReady) {
-        ipcMain.removeListener('app:renderer-ready', onRendererReady);
-        onRendererReady = null;
+      if (!window.isDestroyed() && !window.isVisible()) {
+        window.show();
+        window.focus();
       }
-      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
-        mainWindow.show();
-        mainWindow.focus();
-      }
-      setTimeout(() => dismissInstallSplash(), 80);
+      dismissTimer = setTimeout(() => dismissInstallSplash(), 80);
     };
     // Primary trigger: the renderer signals once its real UI has painted. The
     // old `ready-to-show` trigger fired at the blank first paint (a dark
     // rectangle still loading the bundle), which is exactly why the splash
     // vanished seconds before Monky appeared (#498).
     onRendererReady = (event: IpcMainEvent): void => {
-      if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) {
+      if (!window.isDestroyed() && event.sender === window.webContents) {
         reveal('renderer-ready');
       }
     };
     ipcMain.on('app:renderer-ready', onRendererReady);
     // Fallback: never leave the window stranded behind the splash if the signal
     // never arrives (renderer crash, load failure, …).
-    setTimeout(() => reveal('timeout'), 20000);
+    revealTimer = setTimeout(() => reveal('timeout'), 20000);
   }
 
   // In dev, load Vite dev server if running, otherwise load dist/index.html
+  const onPageLoadFailed = (error: unknown): void => {
+    if (error && typeof error === 'object'
+      && (('code' in error && error.code === 'ERR_ABORTED') || ('errno' in error && error.errno === -3))) return;
+    getCrashRecovery().show({ kind: 'document-load' });
+  };
   if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+    void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL).catch(onPageLoadFailed);
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
+    void mainWindow.loadFile(path.join(__dirname, '../../dist/index.html')).catch(onPageLoadFailed);
   }
 
   // Atalho de desenvolvimento: F12 ou Ctrl+Shift+I para alternar DevTools
@@ -333,6 +375,7 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
+    if (crashRecovery?.focus()) return;
     if (mainWindow) {
       if (!mainWindow.isVisible()) mainWindow.show();
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -341,6 +384,8 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
+    initializeMainLanguage(app.getPath('userData'), app.getPreferredSystemLanguages());
+    getCrashRecovery();
     // TEST-ONLY (Bancada A): simulate the update install UX without a real
     // download or NSIS run. Gated entirely on MONKY_SIM_UPDATE, so a normal
     // launch never reaches it. `full` shows the installing splash then
@@ -404,6 +449,7 @@ if (!gotTheLock) {
     bindMainWindowNavigationGuards();
 
     app.on('activate', () => {
+      if (crashRecovery?.focus()) return;
       if (BrowserWindow.getAllWindows().length === 0) {
         createWindow();
         bindMainWindowNavigationGuards();
@@ -413,10 +459,16 @@ if (!gotTheLock) {
         mainWindow.focus();
       }
     });
+  }).catch((error: unknown) => {
+    getCrashRecovery().show({
+      kind: 'main-bootstrap',
+      ...(error instanceof Error ? { error: { name: error.name, stack: error.stack } } : {}),
+    });
   });
 }
 
 app.on('window-all-closed', () => {
+  if (crashRecovery?.isActive() && !isQuitting) return;
   shutdownServer();
   if (process.platform !== 'darwin') {
     app.quit();
@@ -434,6 +486,7 @@ app.on('before-quit', (event) => {
     return;
   }
 
+  crashRecovery?.dispose();
   clientLogger?.shutdown();
   shutdownServer();
   trayManager?.destroy();

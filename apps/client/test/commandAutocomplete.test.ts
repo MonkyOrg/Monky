@@ -400,6 +400,8 @@ test('an empty optional autocomplete does not disable an otherwise complete comm
 
 test('cancelled autocomplete requests release timers and late server errors are not global UI events', async () => {
   const client = createNetworkClient();
+  client['status'] = 'CONNECTED';
+  Object.defineProperty(client, 'ws', { writable: true, value: { readyState: 1, send() {}, close() {} } });
   client.send = () => {};
   let errors = 0;
   const unbind = appEvents.on(`message.${MessageType.SERVER_ERROR}`, () => { errors++; });
@@ -420,6 +422,8 @@ test('cancelled autocomplete requests release timers and late server errors are 
 test('timed out lazy preview requests retire late replies and errors', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const client = createNetworkClient();
+  client['status'] = 'CONNECTED';
+  Object.defineProperty(client, 'ws', { writable: true, value: { readyState: 1, send() {}, close() {} } });
   client.send = () => {};
   let events = 0;
   const unbind = [

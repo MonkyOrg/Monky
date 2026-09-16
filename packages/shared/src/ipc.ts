@@ -8,6 +8,26 @@ import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadRes
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
 
+export interface RendererBootstrapFailure {
+  phase: 'constructor' | 'initialization';
+  errorName: string;
+  /** Only sanitized app source locations survive validation in Main. */
+  stack?: string;
+}
+
+export type CrashRecoveryActionResult =
+  | { ok: true; copied?: boolean }
+  | { ok: false; reason: 'unavailable' | 'open-failed' | 'copy-failed' | 'restart-failed'; copied?: boolean };
+
+export const CRASH_RECOVERY_IPC = {
+  bootstrapFailed: 'crash-recovery:bootstrap-failed',
+  ready: 'crash-recovery:ready',
+  report: 'crash-recovery:report',
+  copy: 'crash-recovery:copy',
+  reopen: 'crash-recovery:reopen',
+  close: 'crash-recovery:close',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
 export interface DesktopSource {
   id: string;
   name: string;
@@ -389,6 +409,13 @@ export interface OverlaySignalPayload {
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
  */
 export interface IpcInvokeChannels {
+  // Local fatal-failure recovery, not a client/server protocol change (#454).
+  'crash-recovery:bootstrap-failed': { args: [failure: RendererBootstrapFailure]; returnType: boolean };
+  'crash-recovery:ready': { args: []; returnType: boolean };
+  'crash-recovery:report': { args: []; returnType: CrashRecoveryActionResult };
+  'crash-recovery:copy': { args: []; returnType: CrashRecoveryActionResult };
+  'crash-recovery:reopen': { args: []; returnType: CrashRecoveryActionResult };
+  'crash-recovery:close': { args: []; returnType: boolean };
   // Janela
   'window:minimize': { args: []; returnType: void };
   'window:maximize': { args: []; returnType: void };

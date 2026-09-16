@@ -180,7 +180,8 @@ async function runRegression(config) {
   check(requests[1].payload.serverId === 'server-b', 'reopening captures server B');
   requests[0].resolve(result('server-a', 99));
   await oldOpening;
-  check(document.querySelector('#stat-online').textContent === '\u2014', 'late A response cannot fill B metrics');
+  check(document.querySelector('#stat-online .skeleton') &&
+    document.querySelector('#monitor-stats').getAttribute('aria-busy') === 'true', 'late A response cannot replace B loading metrics');
   requests[1].resolve(result('server-b'));
   await newOpening;
   check(document.querySelector('#stat-online').textContent === '2', 'current remote metrics render');

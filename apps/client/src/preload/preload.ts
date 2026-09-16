@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { AUDIO_PREVIEW_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
+import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
   ActionShortcutBinding,
   AudioPreviewCancellation,
@@ -42,6 +42,7 @@ import type {
   UpdateCheckResult,
   UpdateOutcome,
   ReleaseNotesResult,
+  RendererBootstrapFailure,
   UpdateSimpleResult,
 } from '@monky/shared';
 
@@ -112,6 +113,7 @@ export interface ElectronApi {
   close: () => Promise<void>;
   getAppVersion: () => Promise<string>;
   signalRendererReady: () => void;
+  reportFatalBootstrap: (failure: RendererBootstrapFailure) => Promise<boolean>;
   checkForUpdates: () => Promise<UpdateCheckResult>;
   downloadUpdate: (expectedVersion?: string) => Promise<UpdateSimpleResult>;
   installUpdate: () => Promise<UpdateSimpleResult>;
@@ -281,7 +283,13 @@ const api: ElectronApi = {
   fitHomeWindowToContent: (contentHeight) => ipcRenderer.invoke('window:fit-home-content', contentHeight),
   close: () => ipcRenderer.invoke('window:close'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
-  signalRendererReady: () => ipcRenderer.send('app:renderer-ready'),
+  signalRendererReady: () => {
+    ipcRenderer.send('app:renderer-ready');
+    void ipcRenderer.invoke(CRASH_RECOVERY_IPC.ready).catch((error: unknown) => {
+      console.error('[Bootstrap] Could not acknowledge renderer readiness', error);
+    });
+  },
+  reportFatalBootstrap: (failure) => ipcRenderer.invoke(CRASH_RECOVERY_IPC.bootstrapFailed, failure),
   checkForUpdates: () => ipcRenderer.invoke(UPDATER_IPC.check),
   downloadUpdate: (expectedVersion) => ipcRenderer.invoke(UPDATER_IPC.download, expectedVersion),
   installUpdate: () => ipcRenderer.invoke(UPDATER_IPC.install),

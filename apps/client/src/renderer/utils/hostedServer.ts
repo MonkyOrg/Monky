@@ -52,12 +52,14 @@ export interface HostedServerLeaveState {
   serverName: string;
 }
 
-export async function captureHostedServerLeaveState(): Promise<HostedServerLeaveState | null> {
+export async function captureHostedServerLeaveState(
+  serverUrl: string = networkClient.getCurrentServerUrl()
+): Promise<HostedServerLeaveState | null> {
   if (!settingsStore.askShutdownOnLastLeave) return null;
   if (!window.api?.hostServerStatus || !window.api?.hostServerStats) return null;
 
   try {
-    const current = hostOf(networkClient.getCurrentServerUrl());
+    const current = hostOf(serverUrl);
     if (!current || !LOCAL_HOSTS.has(current.host)) return null;
 
     const status = await window.api.hostServerStatus();

@@ -1,3 +1,4 @@
+import { BUG_REPORT_URL } from '@monky/shared';
 import { settingsStore } from '../../../stores/settingsStore';
 import { updateService } from '../../../core/UpdateService';
 import { changelogModal } from '../../ChangelogModal';
@@ -7,7 +8,6 @@ import { bindVersionCopyButton, renderVersionCopyButton, setVersionCopyButton } 
 
 const IDEAS_URL = 'https://github.com/MonkyOrg/Monky/discussions/categories/ideas';
 const NEW_IDEA_URL = 'https://github.com/MonkyOrg/Monky/discussions/new?category=ideas';
-const NEW_BUG_URL = 'https://github.com/MonkyOrg/Monky/discussions/new?category=bug-reports';
 const DONATE_URL = 'https://buymeacoffee.com/monkyorg';
 
 export class AboutTab {
@@ -64,11 +64,13 @@ export class AboutTab {
               ${t('settings.autoStartDesc')}
             </div>
           </div>
-          <label class="toggle-switch" aria-label="${t('settings.autoStart')}">
-            <input id="checkbox-auto-start" type="checkbox">
+          <span id="auto-start-loading" class="skeleton loading-skeleton-switch" role="status" aria-label="${escapeHtml(t('common.loading'))}"></span>
+          <label id="auto-start-control" class="toggle-switch" aria-label="${t('settings.autoStart')}" hidden>
+            <input id="checkbox-auto-start" type="checkbox" disabled>
             <span class="toggle-slider"></span>
           </label>
         </div>
+        <p id="auto-start-load-error" class="audio-device-status" role="status" hidden></p>
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
           <div>
             <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-minimize-to-tray">
@@ -143,6 +145,8 @@ export class AboutTab {
     } catch (error) {
       console.warn('[AboutTab] Could not load app version', error);
       if (!container.isConnected) return;
+      verEl.classList.remove('skeleton', 'loading-skeleton-value');
+      verEl.setAttribute('aria-busy', 'false');
       verEl.disabled = true;
       verEl.textContent = t('versionCopy.unavailable');
       verEl.title = t('versionCopy.loadFailed');
@@ -193,10 +197,29 @@ export class AboutTab {
       }
     });
 
-    if (window.api?.getAutoStart && checkboxAutoStart) {
-      window.api.getAutoStart().then((enabled) => {
-        checkboxAutoStart.checked = enabled;
-      }).catch(() => {});
+    if (checkboxAutoStart) {
+      const loading = container.querySelector<HTMLElement>('#auto-start-loading');
+      const control = container.querySelector<HTMLElement>('#auto-start-control');
+      const failure = container.querySelector<HTMLElement>('#auto-start-load-error');
+      const loadAutoStart = async (): Promise<void> => {
+        try {
+          if (!window.api?.getAutoStart) throw new Error('Auto-start preference bridge unavailable');
+          const enabled = await window.api.getAutoStart();
+          if (!container.isConnected) return;
+          checkboxAutoStart.checked = enabled;
+          checkboxAutoStart.disabled = false;
+        } catch (error: unknown) {
+          if (!container.isConnected) return;
+          console.warn('[AboutTab] Could not load the auto-start preference', error);
+          if (failure) { failure.textContent = t('settings.autoStartLoadFailed'); failure.hidden = false; }
+        } finally {
+          if (container.isConnected) {
+            if (loading) loading.hidden = true;
+            if (control) control.hidden = false;
+          }
+        }
+      };
+      void loadAutoStart();
 
       checkboxAutoStart.addEventListener('change', () => {
         window.api?.setAutoStart?.(checkboxAutoStart.checked);
@@ -237,7 +260,7 @@ export class AboutTab {
     btnSupport?.addEventListener('click', () => openLink(DONATE_URL));
     btnSuggest?.addEventListener('click', () => openLink(NEW_IDEA_URL));
     btnVote?.addEventListener('click', () => openLink(IDEAS_URL));
-    btnReport?.addEventListener('click', () => openLink(NEW_BUG_URL));
+    btnReport?.addEventListener('click', () => openLink(BUG_REPORT_URL));
   }
 
   public cleanup(): void {

@@ -20,6 +20,7 @@ import { botInputError, botRequestError, convertBotInputValues, initialBotInputV
 import { applyBotFieldAction, readBotFieldChange, renderBotFields, type BotFieldContext } from './botFields';
 import { showAlert } from './Dialog';
 import type { ContextMenuItem } from './ContextMenu';
+import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
 
 type Scope = 'user' | 'server';
 interface SettingsSession {
@@ -350,8 +351,8 @@ export class BotSettingsModal {
           <div class="bot-settings-server">${escapeHtml(this.session.server.serverDetails?.name ?? '')}</div></div>
         <button type="button" class="modal-close-btn" data-settings-close aria-label="${t('common.close')}"><span class="material-symbols-outlined">close</span></button>
       </div>
-      <div class="bot-settings-body">
-        ${this.loading ? `<p class="bot-status" role="status">${t('botSettings.loading')}</p>` : snapshot ? `
+      <div class="bot-settings-body" aria-busy="${this.loading}">
+        ${this.loading ? renderLoadingSkeleton('lines', 5) : snapshot ? `
           <div class="bot-settings-identity">
             <img src="${escapeHtml(getAvatarUrl(snapshot.bot.avatarUrl))}" alt="" data-fallback="avatar">
             <div><div class="bot-settings-name">${escapeHtml(snapshot.bot.name)}</div>
