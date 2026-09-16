@@ -273,6 +273,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
       });
     };
     const transport = {
+      getStatus: () => 'CONNECTED',
       send(type, payload) {
         if (type !== MessageType.RTC_SIGNAL || payload.targetSessionId !== 'peer') return;
         if (payload.signalType === 'offer' || payload.signalType === 'answer') {
