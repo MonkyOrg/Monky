@@ -1381,6 +1381,8 @@ test('autocomplete registration and callbacks preserve typed partial options wit
   assert.equal(result.requestId, 'query');
   assert.deepEqual(result.payload, { status: 'ok', choices: [{ label: 'Sound', value, description: 'Audio' }] });
   assert.equal(context.query, 'hello');
+  assert.equal(context.page, 0);
+  assert.equal(context.cursor, undefined);
   assert.equal(context.optionName, 'sound');
   assert.equal(context.locale, 'en');
   assert.equal(context.serverId, 'autocomplete-server');
@@ -1390,6 +1392,58 @@ test('autocomplete registration and callbacks preserve typed partial options wit
   assert.equal('downloadSound' in context, false);
   assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_FINISH), false);
   assert.deepEqual(errors, []);
+});
+
+test('autocomplete forwards page and cursor and validates paged responses without changing legacy arrays', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const contexts = [];
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions, handler: () => {},
+    autocomplete: (ctx) => {
+      contexts.push(ctx);
+      if (ctx.query === 'invalid') return { choices: [], hasMore: false, nextCursor: 'inconsistent' };
+      if (ctx.query === 'oversized') return {
+        choices: Array.from({ length: 21 }, (_, index) => ({ label: 'Sound', value: `${index}` })), hasMore: true,
+      };
+      if (ctx.page === 0) return {
+        choices: [{ label: 'First', value: 'first' }], hasMore: true, nextCursor: 'source:1:20',
+      };
+      return { choices: [{ label: 'Later', value: 'later' }], hasMore: false };
+    },
+  });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest('sounds'), 'page-zero');
+  assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload, {
+    status: 'ok', choices: [{ label: 'First', value: 'first' }], hasMore: true, nextCursor: 'source:1:20',
+  });
+  server.send(MessageType.COMMAND_AUTOCOMPLETE, {
+    ...autocompleteRequest('sounds'), page: 1, cursor: 'source:1:20',
+  }, 'page-one');
+  assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload, {
+    status: 'ok', choices: [{ label: 'Later', value: 'later' }], hasMore: false,
+  });
+  assert.equal(contexts[0].page, 0);
+  assert.equal(contexts[0].cursor, undefined);
+  assert.equal(contexts[1].page, 1);
+  assert.equal(contexts[1].cursor, 'source:1:20');
+  for (const query of ['invalid', 'oversized']) {
+    server.send(MessageType.COMMAND_AUTOCOMPLETE, autocompleteRequest(query), query);
+    assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload, {
+      status: 'failed', reason: 'invalid_response',
+    });
+  }
+  const before = contexts.length;
+  for (const paging of [{ page: -1 }, { page: 1.5 }, { page: '1' }, { cursor: '' }]) {
+    server.send(MessageType.COMMAND_AUTOCOMPLETE, { ...autocompleteRequest('invalid input'), ...paging }, `bad-${JSON.stringify(paging)}`);
+    assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload, {
+      status: 'failed', reason: 'invalid_response',
+    });
+  }
+  assert.equal(contexts.length, before, 'Invalid paging must never reach the provider');
+  assert.equal(errors.length, 4);
+  for (const error of errors) assert.match(error.message, /invalid autocomplete request/);
 });
 
 test('autocomplete cancellation and disconnect isolate identical request IDs across servers and suppress late results', async (t) => {
@@ -1728,7 +1782,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 17);
+  assert.equal(PROTOCOL_VERSION, 18);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

@@ -12,7 +12,9 @@ import {
 } from '../utils/botInputs';
 import { optionalParameterLabel } from './commandCatalog';
 import { AUTOCOMPLETE_MAX_QUERY } from '../utils/commandAutocomplete';
-import { renderSelectionChoiceList, type RenderableSelectionChoice } from '../utils/selectionChoices';
+import {
+  renderSelectionChoiceList, renderSelectionChoiceItems, type RenderableSelectionChoice, type SelectionChoiceListOptions,
+} from '../utils/selectionChoices';
 
 export interface ParameterChoice extends RenderableSelectionChoice {
   avatarUrl?: string | null;
@@ -163,7 +165,19 @@ export function renderCompactCommand(
 export function renderParameterChoices(
   choices: ParameterChoice[], activeIndex: number, label: string, keyPrefix = `command:${label}`, volumeScope = keyPrefix
 ): string {
-  return renderSelectionChoiceList({
+  return renderSelectionChoiceList(parameterChoiceOptions(choices, activeIndex, label, keyPrefix, volumeScope));
+}
+
+export function renderParameterChoiceItems(
+  choices: ParameterChoice[], activeIndex: number, label: string, keyPrefix: string, volumeScope: string, startIndex: number
+): string {
+  return renderSelectionChoiceItems(parameterChoiceOptions(choices, activeIndex, label, keyPrefix, volumeScope), startIndex);
+}
+
+function parameterChoiceOptions(
+  choices: ParameterChoice[], activeIndex: number, label: string, keyPrefix: string, volumeScope: string
+): SelectionChoiceListOptions {
+  return {
     choices,
     activeIndex,
     label,
@@ -172,5 +186,5 @@ export function renderParameterChoices(
     keyPrefix,
     volumeScope,
     optionAttributes: (_choice, index) => `data-parameter-option="${index}"`,
-  });
+  };
 }

@@ -6,13 +6,13 @@ import {
   localizeCommand,
   botSettingsListResponseSchema,
   commandAutocompleteCancelSchema,
+  commandAutocompleteResultSchema,
   type BotFormValues,
   type CommandFinishedPayload,
   type CommandInvokedPayload,
   type CommandInvokePayload,
   type CommandSubmitPayload,
   type CommandAutocompletePayload,
-  type CommandAutocompleteResultPayload,
   type CommandAudioPreviewPayload,
   type CommandPresentation,
   type SlashCommand,
@@ -38,7 +38,8 @@ import {
 } from '../utils/botInputs';
 import { applyBotFieldAction, readBotFieldChange, renderBotFields, type BotFieldContext } from './botFields';
 import {
-  commandParameterChoices, commandParameterHint, commandParameterLabel, commandParameterError, renderCompactCommand, renderParameterChoices,
+  commandParameterChoices, commandParameterHint, commandParameterLabel, commandParameterError, renderCompactCommand,
+  renderParameterChoices, renderParameterChoiceItems,
   type ParameterChoice,
 } from './commandComposer';
 import { CommandAutocomplete, type AutocompleteState } from '../utils/commandAutocomplete';
@@ -46,7 +47,7 @@ import { settingsStore } from '../stores/settingsStore';
 import { localSoundDownloads } from '../core/LocalSoundDownloadService';
 import { soundDownloadText } from '../utils/soundDownloadText';
 import { audioPreviewService } from '../core/AudioPreviewService';
-import { commandPreviewVolumeScope } from '../utils/selectionChoices';
+import { choicesHaveAudio, commandPreviewVolumeScope, renderAudioPreviewVolume } from '../utils/selectionChoices';
 import { botPreferenceScopeFor, botUserSettingsPayload } from '../utils/botSettingsContext';
 import { botLocaleFor } from '../utils/botLocale';
 import { botSettingsMenuItem } from './BotSettingsModal';
@@ -133,6 +134,14 @@ type ParameterMenu =
   | { kind: 'optional'; activeIndex: number }
   | { kind: 'choices' | 'autocomplete'; fieldName: string; activeIndex: number };
 
+interface AutocompleteRequest {
+  requestId: string;
+  connectionId: string;
+  payload: CommandAutocompletePayload;
+  resources: Set<string>;
+  cancel: () => void;
+}
+
 /**
  * DOM listeners belong to this channel view; drafts and forms belong to its
  * captured session. A late acknowledgement never writes through active proxies.
@@ -147,7 +156,9 @@ export class BotChatView {
   private suppressChoiceFocus = false;
   private autocomplete: CommandAutocomplete;
   private autocompleteField: string | null = null;
-  private autocompleteRequest: { requestId: string; connectionId: string; payload: CommandAutocompletePayload } | null = null;
+  private autocompleteRequests = new Map<string, AutocompleteRequest>();
+  private autocompleteState: AutocompleteState | null = null;
+  private autocompletePaged = false;
   private composing = false;
   private deferredRender = false;
   private submitGesture = false;
@@ -167,8 +178,10 @@ export class BotChatView {
     private onComposerChanged: () => void,
     private onInvocationChanged: (invocation: BotInvocation) => void
   ) {
-    this.autocomplete = new CommandAutocomplete(client, (query, signal) => this.queryAutocomplete(query, signal),
+    this.autocomplete = new CommandAutocomplete(client, (query, signal, page, cursor) => this.queryAutocomplete(query, signal, page, cursor),
       (state) => this.renderAutocomplete(state));
+    composer.addEventListener('scroll', this.onAutocompleteScroll, { capture: true, passive: true });
+    this.unbind.push(() => composer.removeEventListener('scroll', this.onAutocompleteScroll, true));
     if (server.serverDetails && server.currentUser) {
       store.setCommandUsageScope({ serverId: server.serverDetails.id, callerId: server.currentUser.id });
     }
@@ -226,7 +239,11 @@ export class BotChatView {
         const origin = currentEventOrigin();
         if (!this.isCurrent() || (origin !== null && origin !== this.client.sessionKey)) return;
         const parsed = commandAutocompleteCancelSchema.safeParse(payload);
-        if (parsed.success && parsed.data.requestId === this.autocompleteRequest?.requestId) this.closeParameterMenu();
+        const request = parsed.success ? this.autocompleteRequests.get(parsed.data.requestId) : undefined;
+        if (request) {
+          if (this.autocompletePaged) this.expireAutocompleteRequest(request);
+          else this.closeParameterMenu();
+        }
       }),
       appEvents.on('server.updated', () => this.refreshPermissions()),
       appEvents.on('server.members_updated', () => this.refreshMembers()),
@@ -614,6 +631,8 @@ export class BotChatView {
     const trigger = this.parameterMenuTrigger();
     this.autocomplete.close();
     this.autocompleteField = null;
+    this.autocompleteState = null;
+    this.autocompletePaged = false;
     this.parameterMenu = null;
     this.menuChoices = [];
     audioPreviewService.release(this.composer);
@@ -706,11 +725,17 @@ export class BotChatView {
   private handleParameterMenuKey(event: KeyboardEvent): boolean {
     if (!(event.target instanceof HTMLElement)) return false;
     if (audioPreviewService.ownsEventTarget(event.target)) return false;
+    if (event.target.closest('[data-bot-action="autocomplete-load-more"]') && event.key !== 'Escape') return false;
     const menu = this.parameterMenu;
     if (menu) {
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault();
         const choices = this.menuChoices;
+        if (event.key === 'ArrowDown' && menu.kind === 'autocomplete' && this.autocompleteState?.hasMore &&
+            menu.activeIndex >= choices.length - 1) {
+          this.autocomplete.loadMore();
+          return true;
+        }
         if (choices.length) this.setParameterMenuActive((menu.activeIndex + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length);
         return true;
       }
@@ -761,7 +786,7 @@ export class BotChatView {
     if (!draft.autocomplete[name]?.query) this.renderAutocomplete({ status: 'idle', query: '', choices: [] });
   }
 
-  private async queryAutocomplete(query: string, signal: AbortSignal): Promise<CommandAutocompleteResultPayload> {
+  private async queryAutocomplete(query: string, signal: AbortSignal, page: number, cursor?: string): Promise<unknown> {
     const draft = this.store.getCommandDraft(this.channelId);
     const optionName = this.autocompleteField;
     if (signal.aborted || !draft || !optionName || draft.pending || !this.isCurrent() || !this.canSend() || this.voiceError(draft.command)) {
@@ -771,30 +796,40 @@ export class BotChatView {
     const connectionId = this.client.getConnectionId();
     const payload: CommandAutocompletePayload = {
       botId: draft.command.botId, commandName: draft.command.name, channelId: this.channelId, optionName, query,
+      ...(page > 0 ? { page } : {}),
+      ...(cursor !== undefined ? { cursor } : {}),
       options: autocompleteCommandOptions(draft.command, optionName,
         visibleCommandValues(draft.command, draft.values, draft.visibleOptionalNames),
         this.server.getHumanMembersInDisplayOrder(), draft.autocomplete),
       locale: botLocaleFor(this.client, this.server, draft.command.botId),
       ...botUserSettingsPayload(this.client, this.server, draft.command.botId),
     };
-    const response = this.client.sendRequest<CommandAutocompleteResultPayload>(
+    const response = this.client.sendRequest<unknown>(
       MessageType.COMMAND_AUTOCOMPLETE, payload, requestId, LIMITS.BOT_AUTOCOMPLETE_TIMEOUT_MS
     );
-    const active = { requestId, connectionId, payload };
-    this.autocompleteRequest = active;
     const cancel = () => {
-      if (this.autocompleteRequest === active) this.autocompleteRequest = null;
+      signal.removeEventListener('abort', cancel);
+      if (!this.autocompleteRequests.delete(requestId)) return;
       this.client.cancelRequest(requestId);
       if (this.client.getStatus() === 'CONNECTED' && this.client.getConnectionId() === connectionId) {
         this.client.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId });
       }
     };
+    const active: AutocompleteRequest = { requestId, connectionId, payload, resources: new Set(), cancel };
+    this.autocompleteRequests.set(requestId, active);
     signal.addEventListener('abort', cancel, { once: true });
     if (signal.aborted) cancel();
     try {
       // The signal also owns the returned choices, until a new query or close.
       const result = await response;
       if (signal.aborted || this.voiceError(draft.command)) throw new DOMException('Voice context changed', 'AbortError');
+      const parsed = commandAutocompleteResultSchema.safeParse(result);
+      if (parsed.success && parsed.data.status === 'ok') {
+        for (const choice of parsed.data.choices) {
+          if (choice.audio && 'resourceId' in choice.audio) active.resources.add(choice.audio.resourceId);
+        }
+      }
+      if (!active.resources.size) cancel();
       return result;
     } catch (error) {
       signal.removeEventListener('abort', cancel);
@@ -803,8 +838,15 @@ export class BotChatView {
     }
   }
 
+  private expireAutocompleteRequest(request: AutocompleteRequest): void {
+    this.composer.querySelectorAll<HTMLElement>('[data-audio-resource-id]').forEach((controls) => {
+      if (request.resources.has(controls.dataset.audioResourceId ?? '')) audioPreviewService.release(controls);
+    });
+    request.cancel();
+  }
+
   private async previewAutocomplete(resourceId: string, requestId: string, signal: AbortSignal): Promise<unknown> {
-    const active = this.autocompleteRequest;
+    const active = [...this.autocompleteRequests.values()].find((request) => request.resources.has(resourceId));
     const draft = this.store.getCommandDraft(this.channelId);
     if (signal.aborted || !active || !draft || !this.isCurrent() || !this.canSend() || this.voiceError(draft.command) || draft.pending ||
         !this.store.isCommandAvailable(draft.command) || this.client.getConnectionId() !== active.connectionId ||
@@ -842,32 +884,100 @@ export class BotChatView {
     const draft = this.store.getCommandDraft(this.channelId);
     if (!fieldName || !draft || !this.isCurrent() || this.composing || draft.pending || this.voiceError(draft.command) ||
         (draft.autocomplete[fieldName]?.query ?? '') !== state.query) return;
-    this.parameterMenu = { kind: 'autocomplete', fieldName, activeIndex: state.choices.length ? 0 : -1 };
+    const previousCount = this.menuChoices.length;
+    const continuing = this.autocompleteState?.query === state.query &&
+      state.choices.length >= previousCount && this.menuChoices.every((choice, index) => choice === state.choices[index]) &&
+      !!this.composer.querySelector('#bot-parameter-options .bot-choice-list');
+    const activeIndex = continuing && previousCount > 0 && this.parameterMenu
+      ? this.parameterMenu.activeIndex : state.choices.length ? 0 : -1;
+    if (this.autocompleteState?.query !== state.query) this.autocompletePaged = false;
+    this.autocompleteState = state;
+    this.autocompletePaged ||= state.hasMore === true;
+    this.parameterMenu = { kind: 'autocomplete', fieldName, activeIndex };
     this.menuChoices = state.choices;
     const trigger = this.parameterMenuTrigger();
     const menu = this.composer.querySelector<HTMLElement>('#bot-parameter-options');
     if (!trigger || !menu) return;
-    audioPreviewService.release(this.composer);
+    if (!continuing) audioPreviewService.release(this.composer);
     const keys = {
       idle: 'botChat.autocompleteHint', loading: 'botChat.autocompleteLoading',
       empty: 'botChat.autocompleteEmpty', failed: 'botChat.autocompleteError', ready: 'botChat.parameterChoices',
     } as const;
     menu.hidden = false;
-    menu.innerHTML = state.choices.length
-      ? renderParameterChoices(state.choices, 0, t('botChat.parameterChoices', { name: fieldName }), this.parameterChoiceScope(fieldName),
-        commandPreviewVolumeScope(this.server.serverDetails?.id, draft.command.botId, draft.command.name))
-      : `<p class="bot-autocomplete-status" role="status" aria-live="polite">${escapeHtml(
-        state.status === 'failed' && state.error ? state.error : t(keys[state.status]))}</p>`;
-    menu.setAttribute('aria-busy', String(state.status === 'loading'));
+    const label = t('botChat.parameterChoices', { name: commandParameterLabel(this.localizedCommand(draft.command), fieldName) });
+    const volumeScope = commandPreviewVolumeScope(this.server.serverDetails?.id, draft.command.botId, draft.command.name);
+    if (continuing) {
+      const list = menu.querySelector<HTMLElement>('.bot-choice-list');
+      if (list && state.choices.length > previousCount) {
+        const scrollTop = list.scrollTop;
+        list.insertAdjacentHTML('beforeend', renderParameterChoiceItems(
+          state.choices.slice(previousCount), activeIndex, label, this.parameterChoiceScope(fieldName), volumeScope, previousCount));
+        list.scrollTop = scrollTop;
+      }
+      if (choicesHaveAudio(state.choices) && !menu.querySelector('[data-audio-preview-volume-control]')) {
+        menu.querySelector('.bot-choice-panel-header')?.insertAdjacentHTML('beforeend', renderAudioPreviewVolume(volumeScope));
+      }
+    } else {
+      // Empty nonterminal pages still need a stable list and continuation control.
+      menu.innerHTML = state.choices.length || this.autocompletePaged
+        ? renderParameterChoices(state.choices, activeIndex, label, this.parameterChoiceScope(fieldName), volumeScope)
+        : `<p class="bot-autocomplete-status" role="status" aria-live="polite">${escapeHtml(
+          state.status === 'failed' && state.error ? state.error : t(keys[state.status]))}</p>`;
+    }
+    this.renderAutocompletePagination(menu, state);
+    menu.setAttribute('aria-busy', String(state.status === 'loading' || !!state.loadingMore));
     menu.style.left = '';
     trigger.setAttribute('aria-expanded', 'true');
     trigger.setAttribute('aria-controls', 'bot-parameter-options');
-    trigger.removeAttribute('aria-activedescendant');
-    menu.querySelectorAll<HTMLElement>('[data-parameter-option]').forEach((option) => {
-      option.addEventListener('mouseenter', () => this.setParameterMenuActive(Number(option.dataset.parameterOption), false));
+    if (!continuing) trigger.removeAttribute('aria-activedescendant');
+    [...menu.querySelectorAll<HTMLElement>('[data-parameter-option]')].slice(continuing ? previousCount : 0).forEach((option) => {
+      // Appending rows can fire mouseenter beneath a stationary pointer.
+      option.addEventListener('mousemove', (event) => {
+        if (event.movementX || event.movementY) this.setParameterMenuActive(Number(option.dataset.parameterOption), false);
+      });
     });
-    if (state.choices.length) this.setParameterMenuActive(0);
+    if (state.choices.length && (!continuing || previousCount === 0)) this.setParameterMenuActive(activeIndex);
   }
+
+  private renderAutocompletePagination(menu: HTMLElement, state: AutocompleteState): void {
+    let footer = menu.querySelector<HTMLElement>('[data-autocomplete-pagination]');
+    if (!this.autocompletePaged) { footer?.remove(); return; }
+    if (!footer) {
+      footer = document.createElement('div');
+      footer.className = 'bot-autocomplete-pagination';
+      footer.dataset.autocompletePagination = '';
+      const status = document.createElement('span');
+      status.setAttribute('role', 'status');
+      status.setAttribute('aria-live', 'polite');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn btn-secondary btn-sm';
+      button.dataset.botAction = 'autocomplete-load-more';
+      footer.append(status, button);
+      menu.append(footer);
+    }
+    const status = footer.querySelector('span');
+    const button = footer.querySelector('button');
+    if (status) status.textContent = state.loadMoreFailed
+      ? state.error ?? t('botChat.autocompleteMoreError')
+      : t(state.loadingMore ? 'botChat.autocompleteLoadingMore'
+        : state.hasMore ? 'botChat.autocompleteMoreHint' : 'botChat.autocompleteEnd');
+    if (button) {
+      if (!state.hasMore && document.activeElement === button) this.parameterMenuTrigger()?.focus();
+      button.hidden = !state.hasMore;
+      button.setAttribute('aria-disabled', String(!!state.loadingMore));
+      button.textContent = t(state.loadMoreFailed ? 'botChat.autocompleteRetry' : 'botChat.autocompleteLoadMore');
+    }
+  }
+
+  private onAutocompleteScroll = (event: Event): void => {
+    const state = this.autocompleteState;
+    const list = event.target;
+    if (!this.isCurrent() || this.parameterMenu?.kind !== 'autocomplete' || !state?.hasMore ||
+        state.loadingMore || state.loadMoreFailed || !(list instanceof HTMLElement) ||
+        !list.matches('#bot-parameter-options .bot-choice-list') || list.scrollTop <= 0) return;
+    if (list.scrollHeight - list.scrollTop - list.clientHeight <= 64) this.autocomplete.loadMore();
+  };
 
   private onCompositionStart = (event: CompositionEvent): void => {
     if (!(event.target instanceof HTMLElement) || !this.composer.contains(event.target)) return;
@@ -950,6 +1060,8 @@ export class BotChatView {
     } else if (button.dataset.botAction === 'optional-parameters') {
       if (this.parameterMenu?.kind === 'optional') this.closeParameterMenu();
       else this.openParameterMenu({ kind: 'optional', activeIndex: 0 });
+    } else if (button.dataset.botAction === 'autocomplete-load-more') {
+      this.autocomplete.loadMore();
     } else if (button.dataset.botSelectValue !== undefined) {
       this.chooseBotSelectValue(button);
     } else if (button.dataset.fieldAction) {

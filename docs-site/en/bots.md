@@ -64,11 +64,11 @@ When creating or editing a text channel, the **Allow bot commands** switch start
 ### Prerequisites
 
 - **Node.js 18+**
-- Client, server, and SDK compatible with **protocol 17**
+- Client, server, and SDK compatible with **protocol 18**
 - The `@monky/bot-sdk` package from the matching release
 
 ::: warning Update together
-Protocol 17 adds private command names and authorized miniapp termination with instance-bound references. Update the **client, server, and bot** together; different protocol versions cannot connect. This requires a major release, including on the beta track.
+Protocol 18 adds paginated autocomplete with pages, cursors, and on-demand continuation. Older clients and servers reject the new response fields. Update the **client, server, and bot** together; different protocol versions cannot connect. This requires a major release, including on the beta track. Private command names and authorized miniapp termination remain available.
 
 Protocol 14's linking rules are preserved: `BOT_CREATE` accepts only `{}`, and management receives `profilePending` while a bot has not announced its identity. The database preserves existing identities, and only the authenticated bot may publish profile changes. `ctx.args` contains typed values and `ctx.reply()` is private; use `ctx.publish()` only for channel-visible results.
 :::
@@ -509,11 +509,23 @@ bot.command({
 });
 ```
 
-The callback receives `{ query, optionName, args, locale, serverId, signal, settings }` and may return a list or a `Promise` of `SelectionChoice` (`{ label, value, description?, audio? }`). `args` contains only the other filled, valid options; missing required options are allowed at this stage. `query` contains the text of the option being edited. `settings` is an immutable snapshot of server settings and this person's preferences.
+The callback receives `{ query, page, cursor, optionName, args, locale, serverId, signal, settings }` and may return a list of `SelectionChoice` (`{ label, value, description?, audio? }`) or a page `{ choices, hasMore?, nextCursor? }`, directly or through a `Promise`. `page` starts at zero; `cursor` is optional. `args` contains only the other filled, valid options; missing required options are allowed at this stage. `query` contains the text of the option being edited. `settings` is an immutable snapshot of server settings and this person's preferences.
 
 This example keeps the catalog in the bot. For an external source, replace filtering with a **metadata** search, pass `signal` to `fetch`, and validate the response. The callback receives neither an invocation nor reply/download methods. Queries are sent to the selected bot while the person types; they are not published in the channel or persisted in history.
 
-The client debounces for 250 ms; the server allows one search per user every 500 ms, combining their devices. Only the originating connection's latest search remains valid, with a 15-second deadline. Closing the composer, cancellation, losing access, or disconnection aborts the search; stale responses are discarded. Return at most 20 choices with unique values: `label` up to 100 characters, `value` up to 2,000, and `description` up to 500. `query` accepts up to 200 characters; a bot may impose a smaller limit. An empty list means no results.
+The client debounces for 250 ms; the server allows one request per user every 500 ms, combining their devices, with a 15-second deadline per page. Return at most **20 choices per response**, with unique values: `label` up to 100 characters, `value` up to 2,000, and `description` up to 500. **The accumulated menu has no total result cap.** `query` accepts up to 200 characters; a bot may impose a smaller limit.
+
+To enable on-demand scrolling, return `hasMore: true` while another page exists. The client increments `page` near the end of the list, keeps earlier choices, and deduplicates by `value`. If the source uses cursors or a source page needs to be split into batches, also return `nextCursor` (an opaque string of up to 512 characters); the client passes it back as `cursor`. Validate cursors in the provider: they are not authorization and must not be treated as trusted URLs. Do not fetch every page in advance.
+
+```ts
+autocomplete: ({ query, page }) => {
+  const matches = catalog.filter((choice) => choice.label.toLowerCase().includes(query.toLowerCase()));
+  const offset = page * 20;
+  return { choices: matches.slice(offset, offset + 20), hasMore: offset + 20 < matches.length };
+},
+```
+
+Omitting `hasMore` (including legacy array returns) keeps the response a single list. Return `hasMore: false` on the final page and omit `nextCursor`; an empty list ends a search without continuation. Loading failures keep existing results and allow retrying the same page. Closing the composer, changing the search, cancellation, access loss, or disconnection invalidates the context; late responses are discarded. On-demand previews retain each page's own authorization and expiry rather than becoming invalid just because the next page loads. The SDK, server, and client must use protocol 18; existing array callbacks do not need changes after updating the SDK.
 
 Arrow keys only navigate. Enter or a click confirms a suggestion. **Without optional parameters, if every required parameter is valid, the same gesture executes the command exactly once.** If optional parameters exist, selection only fills the field: the composer stays open to use `+N`, and a later Enter or the execute button submits. Missing required parameters must be filled before execution. Typing text without a valid choice does not execute the command. Editing the text invalidates the previous selection. `value` is an opaque identifier, not authorization: the handler must validate it again before resolving the result's metadata.
 

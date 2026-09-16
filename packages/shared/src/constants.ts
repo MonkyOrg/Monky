@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 17;
+export const PROTOCOL_VERSION = 18;
 
 /**
  * Default size of the floating overlay window (#169). Shared so the renderer can
@@ -78,8 +78,10 @@ export const LIMITS = {
   MAX_BOT_INVOCATIONS_PER_SESSION: 5,
   MAX_BOT_INVOCATIONS: 1000,
   BOT_INTERACTION_TIMEOUT_MS: 5 * 60 * 1000,
+  /** Per response, not a limit on the accumulated search results. */
   MAX_BOT_AUTOCOMPLETE_CHOICES: 20,
   MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH: 200,
+  MAX_BOT_AUTOCOMPLETE_CURSOR_LENGTH: 512,
   MAX_BOT_AUTOCOMPLETE_REQUESTS: 1000,
   BOT_AUTOCOMPLETE_DEBOUNCE_MS: 250,
   BOT_AUTOCOMPLETE_THROTTLE_MS: 500,

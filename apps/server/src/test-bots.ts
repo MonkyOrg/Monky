@@ -969,11 +969,11 @@ test('voice-bound bot interactions protect commands, searches, previews and exac
     assert.equal((await bot.peer.request(MessageType.COMMAND_FINISH, { invocationId })).type, MessageType.COMMAND_FINISHED);
   };
   const searchInput = () => ({ ...commandInput('play'), optionName: 'busca', query: 'Authorized original' });
-  const search = async () => {
+  const search = async (page?: number) => {
     now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
     const requestId = randomUUID();
     const since = bot.peer.messages.length;
-    caller.peer.send(MessageType.COMMAND_AUTOCOMPLETE, searchInput(), requestId);
+    caller.peer.send(MessageType.COMMAND_AUTOCOMPLETE, { ...searchInput(), ...(page !== undefined ? { page } : {}) }, requestId);
     const execution = await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE, since);
     return { requestId, providerId: text(execution.requestId) };
   };
@@ -1043,6 +1043,12 @@ test('voice-bound bot interactions protect commands, searches, previews and exac
   if (choices.status !== 'ok') throw new Error('Expected authorized music choices.');
   const audio = choices.choices[0].audio;
   assert.ok(audio && 'resourceId' in audio);
+  const nextQuery = await search(1);
+  bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, { status: 'ok', choices: [{
+    label: 'Next', value: 'next', audio: { resourceId: 'next-private-preview' },
+  }] }, nextQuery.providerId);
+  await caller.peer.wait((message) =>
+    message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === nextQuery.requestId);
   const previewInput = {
     botId, channelId: textId, commandName: 'play', optionName: 'busca',
     autocompleteRequestId: query.requestId, resourceId: audio.resourceId,
@@ -1054,6 +1060,9 @@ test('voice-bound bot interactions protect commands, searches, previews and exac
   await caller.peer.request(MessageType.VOICE_LEAVE, { channelId: firstRoom });
   await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === preview.requestId);
   await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === query.providerId);
+  await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === nextQuery.providerId);
+  await caller.peer.wait((message) =>
+    message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === nextQuery.requestId);
   assert.equal((await caller.peer.wait((message) =>
     message.type === MessageType.COMMAND_FINISHED && message.payload.invocationId === pending.id)).payload.reason, 'cancelled');
   assert.deepEqual(commandAudioPreviewResultSchema.parse((await caller.peer.wait((message) =>
@@ -1387,6 +1396,8 @@ test('bot settings reject stale sessions and recheck permissions changed during 
 
   await t.test('lazy audio preview settings reuse only the authorized search snapshot and invalidate on shared changes', async (t) => {
     const f = await createSettingsFixture(t);
+    let now = Date.now();
+    t.mock.method(Date, 'now', () => now);
     const queryId = randomUUID();
     f.alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE, {
       botId: f.botId, channelId: f.channelId, commandName: 'run', optionName: 'query', query: 'clip',
@@ -1399,6 +1410,20 @@ test('bot settings reject stale sessions and recheck permissions changed during 
     const choices = commandAutocompleteResultSchema.parse((await f.alice.peer.wait((message) =>
       message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === queryId)).payload);
     assert.ok(choices.status === 'ok' && choices.choices[0].audio && 'resourceId' in choices.choices[0].audio);
+    now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+    const nextQueryId = randomUUID();
+    const beforeNext = f.bot.peer.messages.length;
+    f.alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE, {
+      botId: f.botId, channelId: f.channelId, commandName: 'run', optionName: 'query', query: 'clip', page: 1,
+      userSettings: { tags: ['PRIVATE-PREVIEW'], compact: false },
+    }, nextQueryId);
+    const nextQuery = await f.bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE, beforeNext);
+    assert.deepEqual(nextQuery.payload.settings, query.payload.settings);
+    f.bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, {
+      status: 'ok', choices: [{ label: 'Next clip', value: 'canonical-next', audio: { resourceId: 'provider-next' } }],
+    }, nextQuery.requestId);
+    await f.alice.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === nextQueryId);
     const requestId = randomUUID();
     f.alice.peer.send(MessageType.COMMAND_AUDIO_PREVIEW, {
       botId: f.botId, channelId: f.channelId, commandName: 'run', optionName: 'query',
@@ -1411,6 +1436,10 @@ test('bot settings reject stale sessions and recheck permissions changed during 
     await f.update({ count: 3 });
     await f.bot.peer.wait((message) =>
       message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === preview.requestId);
+    for (const pageId of [queryId, nextQueryId]) {
+      await f.alice.peer.wait((message) =>
+        message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === pageId);
+    }
     assert.deepEqual((await f.alice.peer.wait((message) =>
       message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT && message.requestId === requestId)).payload,
     { status: 'failed', reason: 'expired' });
@@ -3009,7 +3038,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
     peer.send(MessageType.COMMAND_AUTOCOMPLETE, input, requestId);
     const execution = await bot.peer.wait((message) =>
       message.type === MessageType.COMMAND_AUTOCOMPLETE && message.payload.query === input.query, since);
-    return { peer, requestId, execution, botRequestId: text(execution.requestId) };
+    return { peer, requestId, execution, searchInput: input, botRequestId: text(execution.requestId) };
   };
   const invoke = async (peer = alice.peer, commandName = 'search', targetChannelId = channelId) => {
     const acknowledged = await peer.request(MessageType.COMMAND_INVOKE, {
@@ -3038,10 +3067,13 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
     choices: [{ label: 'Sound', value: `/instant/${'x'.repeat(503)}`, description: 'Audio', audio: AUDIO_PREVIEW }],
   };
   const previewResult = { status: 'ok', mimeType: 'audio/ogg', audioBase64: Buffer.from([0xf8, 0xff, 0xfe]).toString('base64') };
-  const lazySearch = async (peer = alice.peer, overrides: Partial<CommandAutocompletePayload> = {}, requestId = randomUUID()) => {
+  const lazySearch = async (
+    peer = alice.peer, overrides: Partial<CommandAutocompletePayload> = {}, requestId = randomUUID(),
+    pagination: { hasMore?: boolean; nextCursor?: string } = {},
+  ) => {
     const query = await search(peer, overrides, requestId);
     bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, {
-      status: 'ok', choices: [
+      status: 'ok', ...pagination, choices: [
         { label: 'First clip', value: 'canonical-first', audio: { resourceId: 'source-first', fileName: 'first.ogg', durationMs: 10_000 } },
         { label: 'Second clip', value: 'canonical-second', audio: { resourceId: 'source-second', fileName: 'second.ogg' } },
         result.choices[0],
@@ -3061,7 +3093,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
       botId, commandName: 'search', channelId: overrides.channelId ?? channelId, optionName: 'sound',
       autocompleteRequestId: query.requestId, resourceId: audio.resourceId,
     };
-    return { ...query, input, secondResourceId: second.resourceId };
+    return { ...query, input, received, secondResourceId: second.resourceId };
   };
   const startPreview = async (query: Awaited<ReturnType<typeof lazySearch>>, requestId = randomUUID(), resourceId = query.input.resourceId) => {
     const since = bot.peer.messages.length;
@@ -3098,10 +3130,168 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
     assert.equal(alice.peer.messages.some((message) => message.type === MessageType.COMMAND_INVOKED), false);
   });
 
+  await t.test('paginated autocomplete forwards opaque cursors and preserves metadata and page-scoped preview authorities', async () => {
+    const first = await lazySearch(alice.peer, { locale: undefined }, randomUUID(), { hasMore: true, nextCursor: 'opaque:page/1' });
+    assert.equal('page' in first.execution.payload, false, 'The first page keeps the legacy execution envelope');
+    assert.equal('cursor' in first.execution.payload, false);
+    assert.equal(first.received.hasMore, true);
+    assert.equal(first.received.nextCursor, 'opaque:page/1');
+    const firstPreview = await startPreview(first);
+    const second = await lazySearch(alice.peer, {
+      ...first.searchInput, options: { enabled: false, count: 0 }, locale: 'pt-BR', userSettings: {},
+      page: 1, cursor: first.received.nextCursor,
+    }, randomUUID(), { hasMore: false });
+    assert.equal(second.execution.payload.page, 1);
+    assert.equal(second.execution.payload.cursor, 'opaque:page/1');
+    assert.equal(second.received.hasMore, false);
+    assert.equal('nextCursor' in second.received, false);
+    assert.notEqual(first.input.resourceId, second.input.resourceId);
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === first.botRequestId), false);
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === firstPreview.botRequestId), false,
+    'Loading a page must not cancel a preview from an earlier page');
+    for (const input of [
+      { ...first.input, resourceId: second.input.resourceId },
+      { ...second.input, resourceId: first.input.resourceId },
+    ]) await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, input, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    await otherDevice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, first.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    otherDevice.peer.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: first.requestId });
+    await otherDevice.peer.barrier();
+    const secondPreview = await startPreview(second);
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === firstPreview.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+      message.requestId === firstPreview.requestId)).payload, { status: 'failed', reason: 'expired' });
+    bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, firstPreview.botRequestId);
+    assert.equal((await bot.peer.wait((message) => message.type === MessageType.SERVER_ERROR &&
+      message.requestId === firstPreview.botRequestId)).payload.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, secondPreview.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+      message.requestId === secondPreview.requestId)).payload, previewResult);
+    const replay = await startPreview(first);
+    assert.equal(replay.execution.payload.resourceId, 'source-first');
+    alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: second.requestId });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === second.botRequestId);
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === replay.botRequestId), false,
+    'Cancelling one page cannot cancel another page’s preview');
+    alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: first.requestId });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === replay.botRequestId);
+    for (const page of [first, second]) {
+      await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    }
+  });
+
+  await t.test('page throttles, provider failures, legacy responses and cancelled continuations preserve valid earlier pages', async () => {
+    const first = await lazySearch(alice.peer, {}, randomUUID(), { hasMore: true });
+    const continuation = { ...first.searchInput, page: 1 };
+    await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, continuation, ProtocolErrorCode.RATE_LIMITED);
+    for (const [response, expected] of [
+      [{ status: 'failed', reason: 'handler_failed' }, { status: 'failed', reason: 'handler_failed' }],
+      [{ ...result, choices: Array.from({ length: 21 }, (_, index) => ({ label: `Choice ${index}`, value: `${index}` })) },
+        { status: 'failed', reason: 'invalid_response' }],
+      [{ ...result, nextCursor: 'without-has-more' }, { status: 'failed', reason: 'invalid_response' }],
+      [result, result],
+      [{ status: 'ok', choices: [] }, { status: 'ok', choices: [] }],
+    ]) {
+      const page = await search(alice.peer, continuation);
+      bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, response, page.botRequestId);
+      assert.deepEqual((await alice.peer.wait((message) =>
+        message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === page.requestId)).payload, expected);
+    }
+    const timeout = await search(alice.peer, continuation);
+    now += LIMITS.BOT_AUTOCOMPLETE_TIMEOUT_MS;
+    bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, timeout.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT &&
+      message.requestId === timeout.requestId)).payload, { status: 'failed', reason: 'timeout' });
+    const superseded = await search(alice.peer, continuation);
+    await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, { ...continuation, page: 2 }, ProtocolErrorCode.RATE_LIMITED);
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === superseded.botRequestId), false,
+    'A throttle must not cancel the existing in-flight page');
+    const cancelled = await search(alice.peer, { ...continuation, page: 2 });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === superseded.botRequestId);
+    alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: cancelled.requestId });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === cancelled.botRequestId);
+    for (const page of [superseded, cancelled]) {
+      bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, page.botRequestId);
+      assert.equal((await bot.peer.wait((message) => message.type === MessageType.SERVER_ERROR &&
+        message.requestId === page.botRequestId)).payload.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+      assert.equal(alice.peer.messages.some((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT &&
+        message.requestId === page.requestId), false);
+    }
+    now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+    alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE, continuation, first.requestId);
+    assert.equal((await alice.peer.wait((message) => message.type === MessageType.SERVER_ERROR &&
+      message.requestId === first.requestId)).payload.code, ProtocolErrorCode.BOT_INTERACTION_INVALID,
+    'A new page cannot overwrite a retained page’s request ID');
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === first.botRequestId), false);
+    const preview = await startPreview(first);
+    bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, preview.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+      message.requestId === preview.requestId)).payload, previewResult);
+  });
+
+  await t.test('autocomplete limits choices per response without capping a search at twenty results', async () => {
+    const input = searchInput();
+    let delivered = 0;
+    const providerIds: string[] = [];
+    for (let page = 0; page < 3; page++) {
+      const pending = await search(alice.peer, { ...input, page });
+      assert.equal(pending.execution.payload.page, page);
+      providerIds.push(pending.botRequestId);
+      bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, {
+        status: 'ok', hasMore: page < 2, choices: Array.from({ length: 20 }, (_, index) => ({
+          label: `Choice ${page}-${index}`, value: `${page}-${index}`,
+          audio: { resourceId: `resource-${page}-${index}` },
+        })),
+      }, pending.botRequestId);
+      const received = commandAutocompleteResultSchema.parse((await alice.peer.wait((message) =>
+        message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === pending.requestId)).payload);
+      assert.ok(received.status === 'ok');
+      assert.equal(received.choices.length, 20);
+      assert.equal(received.hasMore, page < 2);
+      delivered += received.choices.length;
+    }
+    assert.equal(delivered, 60);
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && providerIds.includes(text(message.payload.requestId))), false);
+  });
+
+  await t.test('changed search identities and page zero immediately revoke every page even when throttled', async () => {
+    const changes: Partial<CommandAutocompletePayload>[] = [
+      { page: 0 }, { page: undefined }, { query: 'replacement' }, { optionName: 'count' },
+      { commandName: 'plain' }, { botId: text(record(otherCreated.payload.bot).id) },
+      { channelId: privateChannelId }, { locale: 'pt-BR' }, { options: { count: 1, enabled: false } },
+      { userSettings: { changed: true } },
+    ];
+    for (const change of changes) {
+      const first = await lazySearch();
+      const second = await lazySearch(alice.peer, { ...first.searchInput, page: 1 });
+      await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, {
+        ...first.searchInput, page: 2, ...change,
+      }, ProtocolErrorCode.RATE_LIMITED);
+      for (const page of [first, second]) {
+        await bot.peer.wait((message) =>
+          message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === page.botRequestId);
+        await alice.peer.wait((message) =>
+          message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === page.requestId);
+        await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+      }
+    }
+  });
+
   await t.test('validates partial inputs and throttles across devices while cancelling superseded work', async () => {
     for (const invalid of [
       { optionName: 'count' }, { query: 'x'.repeat(201) }, { options: { sound: 'edited' } },
       { options: { count: 'wrong' } }, { options: { count: 11 } }, { options: { target: 'non-member' } },
+      { page: -1 }, { page: 1.5 }, { page: Number.MAX_SAFE_INTEGER + 1 }, { cursor: 'x'.repeat(513) },
     ]) {
       now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
       await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, { ...searchInput(), ...invalid }, ProtocolErrorCode.BOT_INVALID_OPTIONS);
@@ -3262,6 +3452,7 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
     for (const stage of ['request', 'result']) {
       for (const permission of [Permission.USE_BOT_COMMANDS, Permission.SEND_MESSAGES]) {
         const query = await lazySearch();
+        const nextPage = await lazySearch(alice.peer, { ...query.searchInput, page: 1 });
         const pending = stage === 'result' ? await startPreview(query) : null;
         const before = bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length;
         await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS & ~permission });
@@ -3278,6 +3469,11 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
           }
         } finally {
           await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS });
+        }
+        for (const page of [query, nextPage]) {
+          await alice.peer.wait((message) =>
+            message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === page.requestId);
+          await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
         }
       }
     }
@@ -3297,11 +3493,14 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
     await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, privateQuery.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
     await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: alice.id, roleId: role.id });
     const changed = await lazySearch();
+    const changedPage = await lazySearch(alice.peer, { ...changed.searchInput, page: 1 });
     const active = await startPreview(changed);
     await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: definitions.filter((command) => command.name !== 'search') });
     await bot.peer.wait((message) =>
       message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === active.botRequestId);
-    await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, changed.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    for (const page of [changed, changedPage]) {
+      await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    }
     await register();
   });
 
@@ -3313,12 +3512,16 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
     assert.deepEqual(rejected.payload, { status: 'failed', reason: 'expired' });
     assert.equal(bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length, before);
     const old = await lazySearch();
+    const oldPage = await lazySearch(alice.peer, { ...old.searchInput, page: 1 });
     const active = await startPreview(old);
     alice = await fixture.human('Download Alice', alice.keys, alice.deviceId);
     await bot.peer.wait((message) =>
       message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === active.botRequestId);
-    await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, old.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    for (const page of [old, oldPage]) {
+      await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    }
     const disconnected = await lazySearch();
+    const disconnectedPage = await lazySearch(alice.peer, { ...disconnected.searchInput, page: 1 });
     const generating = await startPreview(disconnected);
     const keys = bot.keys;
     await bot.peer.close();
@@ -3326,15 +3529,20 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
       message.requestId === generating.requestId)).payload.status, 'failed');
     bot = await fixture.bot(token, keys);
     await register();
-    await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, disconnected.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    for (const page of [disconnected, disconnectedPage]) {
+      await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    }
     const channel = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'preview-lifetime', type: 'TEXT' });
     const target = text(record(channel.payload.channel).id);
     const removed = await lazySearch(alice.peer, { channelId: target });
+    const removedPage = await lazySearch(alice.peer, { ...removed.searchInput, page: 1 });
     const removing = await startPreview(removed);
     await owner.peer.request(MessageType.CHANNEL_DELETE, { channelId: target });
     await bot.peer.wait((message) =>
       message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === removing.botRequestId);
-    await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, removed.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    for (const page of [removed, removedPage]) {
+      await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    }
   });
 
   await t.test('requires explicit declared consent and never upgrades an existing invocation through re-registration', async () => {
@@ -3694,8 +3902,10 @@ test('autocomplete and sound download timers bound state and discard responses c
     errors.length = 0;
     current.add(bot);
 
-    const lazyChoice = async (session: BotInteractionSession, requestId: string): Promise<CommandAudioPreviewPayload> => {
-      await handler.autocomplete(session, input, requestId);
+    const lazyChoice = async (
+      session: BotInteractionSession, requestId: string, overrides: Partial<CommandAutocompletePayload> = {},
+    ): Promise<CommandAudioPreviewPayload> => {
+      await handler.autocomplete(session, { ...input, ...overrides }, requestId);
       const queryId = text(lastMessage(MessageType.COMMAND_AUTOCOMPLETE).requestId);
       await handler.autocompleteResult(bot, {
         status: 'ok', choices: [{ label: 'Clip', value: 'canonical', audio: { resourceId: 'provider-clip' } }],
@@ -3707,6 +3917,83 @@ test('autocomplete and sound download timers bound state and discard responses c
         autocompleteRequestId: requestId, resourceId: result.choices[0].audio.resourceId,
       };
     };
+    const leaseOwner = origin(1900);
+    const firstLease = await lazyChoice(leaseOwner, 'first-page-lease');
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS / 2);
+    const secondLease = await lazyChoice(leaseOwner, 'second-page-lease', { page: 1 });
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS / 2);
+    await flush();
+    const beforeExpiredPreview = messages.filter(({ message }) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length;
+    await handler.audioPreview(leaseOwner, firstLease, 'expired-first-page');
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    assert.equal(messages.filter(({ message }) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length, beforeExpiredPreview);
+    await handler.audioPreview(leaseOwner, secondLease, 'unexpired-second-page');
+    assert.equal(record(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW).payload).resourceId, 'provider-clip');
+    handler.cancelAudioPreview(leaseOwner, { requestId: 'unexpired-second-page' });
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS / 2);
+    await flush();
+    await handler.audioPreview(leaseOwner, secondLease, 'expired-second-page');
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    for (const page of [firstLease, secondLease]) {
+      assert.equal(messages.filter(({ ws, message }) => ws === leaseOwner.ws &&
+        message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL &&
+        record(message.payload).requestId === page.autocompleteRequestId).length, 1,
+      'Each page expires on its own original lease');
+    }
+
+    const pageRaceOwner = origin(1901);
+    const retained = await lazyChoice(pageRaceOwner, 'retained-before-race');
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await handler.autocomplete(pageRaceOwner, { ...input, page: 1 }, 'cancelled-page-race');
+    const cancelledPageId = text(lastMessage(MessageType.COMMAND_AUTOCOMPLETE).requestId);
+    accessGate = new Promise((resolve) => { releaseAccess = resolve; });
+    const latePage = handler.autocompleteResult(bot, {
+      status: 'ok', hasMore: true, choices: [{ label: 'Late', value: 'late', audio: { resourceId: 'late-resource' } }],
+    }, cancelledPageId);
+    accessGate = null;
+    handler.cancelAutocomplete(pageRaceOwner, { requestId: 'cancelled-page-race' });
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await handler.autocomplete(pageRaceOwner, { ...input, page: 1 }, 'retry-page-race');
+    assert.ok(releaseAccess);
+    releaseAccess(granted);
+    await latePage;
+    assert.equal(messages.some(({ message }) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === 'cancelled-page-race'), false);
+    handler.cancelAutocomplete(pageRaceOwner, { requestId: 'retry-page-race' });
+    await handler.audioPreview(pageRaceOwner, retained, 'retained-after-race');
+    assert.equal(record(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW).payload).resourceId, 'provider-clip');
+    handler.cancelAutocomplete(pageRaceOwner, { requestId: 'retained-before-race' });
+
+    const retainedOrigins = origins.slice(0, LIMITS.MAX_BOT_AUTOCOMPLETE_REQUESTS / 2);
+    const firstPages: CommandAudioPreviewPayload[] = [];
+    const secondPages: CommandAudioPreviewPayload[] = [];
+    for (const [index, session] of retainedOrigins.entries()) {
+      firstPages.push(await lazyChoice(session, `retained-first-${index}`));
+    }
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    for (const [index, session] of retainedOrigins.entries()) {
+      secondPages.push(await lazyChoice(session, `retained-second-${index}`, { page: 1 }));
+    }
+    assert.equal(errors.length, 0);
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await handler.autocomplete(retainedOrigins[0], { ...input, page: 2 }, 'retained-capacity-full');
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_COMMAND_BUSY,
+      'Settled preview pages share the existing global outstanding request limit');
+    await handler.audioPreview(retainedOrigins[0], firstPages[0], 'retained-despite-capacity');
+    assert.equal(record(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW).payload).resourceId, 'provider-clip');
+    handler.cancelAutocomplete(retainedOrigins[0], { requestId: firstPages[0].autocompleteRequestId });
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await lazyChoice(retainedOrigins[0], 'retained-capacity-released', { page: 2 });
+    assert.equal(errors.length, 0, 'Cancelling one retained page immediately releases its global slot');
+    await handler.audioPreview(retainedOrigins[0], secondPages[0], 'retained-after-capacity');
+    assert.equal(record(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW).payload).resourceId, 'provider-clip');
+    handler.settingsChanged('timer');
+    assert.equal(errors.length, 0);
+    const afterRetainedCleanup = messages.length;
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS * 2);
+    await flush();
+    assert.equal(messages.length, afterRetainedCleanup, 'Invalidating page groups releases every page and preview timer');
+
     const previewOwner = origin(2001);
     const choice = await lazyChoice(previewOwner, 'lazy-timeout-query');
     await handler.audioPreview(previewOwner, choice, 'lazy-timeout');
@@ -3794,9 +4081,27 @@ test('autocomplete and sound download timers bound state and discard responses c
     t.mock.timers.tick(LIMITS.BOT_INTERACTION_TIMEOUT_MS * 2);
     await flush();
     assert.equal(messages.length, afterCancellation, 'Cancelled work must leave no live timers.');
+    const closeFirst = await lazyChoice(downloader, 'close-first');
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    const closeSecond = await lazyChoice(downloader, 'close-second', { page: 1 });
+    await handler.audioPreview(downloader, closeFirst, 'close-preview');
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await handler.autocomplete(downloader, { ...input, page: 2 }, 'close-pending');
+    const closePendingId = text(lastMessage(MessageType.COMMAND_AUTOCOMPLETE).requestId);
     handler.close();
+    for (const page of [closeFirst, closeSecond]) {
+      assert.equal(messages.some(({ ws, message }) => ws === downloader.ws &&
+        message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL &&
+        record(message.payload).requestId === page.autocompleteRequestId), true);
+    }
+    assert.equal(messages.some(({ ws, message }) => ws === bot.ws &&
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && record(message.payload).requestId === closePendingId), true);
+    assert.equal(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW_RESULT).requestId, 'close-preview');
+    const afterClose = messages.length;
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS * 2);
+    await flush();
     await handler.autocomplete(downloader, input, 'closed');
-    assert.equal(messages.length, afterCancellation);
+    assert.equal(messages.length, afterClose);
   } finally {
     handler.close();
     t.mock.timers.reset();

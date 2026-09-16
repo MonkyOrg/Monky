@@ -82,27 +82,33 @@ function renderAudioControls(choice: RenderableSelectionChoice, key: string, vol
 }
 
 export function renderSelectionChoiceList(options: SelectionChoiceListOptions): string {
-  const activeIndex = options.activeIndex ?? -1;
   const volumeScope = options.volumeScope ?? options.keyPrefix;
   return `<div class="bot-choice-panel" data-selection-choice-panel>
     <div class="bot-choice-panel-header"><span>${escapeHtml(options.header)}</span>
       ${options.showVolume !== false && choicesHaveAudio(options.choices) ? renderAudioPreviewVolume(volumeScope) : ''}
     </div>
     <div class="bot-choice-list" role="listbox" aria-label="${escapeHtml(options.label)}">
-      ${options.choices.map((choice, index) => {
-        const selected = options.selectedValue !== undefined ? choice.value === options.selectedValue : index === activeIndex;
-        const audio = choiceAudio(choice);
-        const key = JSON.stringify([options.keyPrefix, choice.value,
-          audio && ('url' in audio ? audio.url : audio.resourceId), audio?.fileName]);
-        return `<div class="bot-parameter-option bot-selection-choice ${selected ? 'active' : ''} ${audio ? 'has-audio' : ''}"
-          id="${escapeHtml(options.idPrefix)}-${index}" role="option" tabindex="${selected ? '0' : '-1'}" aria-selected="${selected}"
-          data-selection-choice ${options.optionAttributes(choice, index)}>
-          ${choice.avatarUrl ? `<img src="${escapeHtml(getAvatarUrl(choice.avatarUrl))}" alt="" data-fallback="avatar">` : ''}
-          <span class="bot-choice-copy"><strong>${escapeHtml(choice.label)}</strong>${choice.description ? `<small>${escapeHtml(choice.description)}</small>` : ''}</span>
-          ${choice.count !== undefined ? `<span class="bot-choice-count">${escapeHtml(String(choice.count))}</span>` : ''}
-          ${renderAudioControls(choice, key, volumeScope)}
-        </div>`;
-      }).join('')}
+      ${renderSelectionChoiceItems(options)}
     </div>
   </div>`;
+}
+
+export function renderSelectionChoiceItems(options: SelectionChoiceListOptions, startIndex = 0): string {
+  const activeIndex = options.activeIndex ?? -1;
+  const volumeScope = options.volumeScope ?? options.keyPrefix;
+  return options.choices.map((choice, offset) => {
+    const index = startIndex + offset;
+    const selected = options.selectedValue !== undefined ? choice.value === options.selectedValue : index === activeIndex;
+    const audio = choiceAudio(choice);
+    const key = JSON.stringify([options.keyPrefix, choice.value,
+      audio && ('url' in audio ? audio.url : audio.resourceId), audio?.fileName]);
+    return `<div class="bot-parameter-option bot-selection-choice ${selected ? 'active' : ''} ${audio ? 'has-audio' : ''}"
+      id="${escapeHtml(options.idPrefix)}-${index}" role="option" tabindex="${selected ? '0' : '-1'}" aria-selected="${selected}"
+      data-selection-choice ${options.optionAttributes(choice, index)}>
+      ${choice.avatarUrl ? `<img src="${escapeHtml(getAvatarUrl(choice.avatarUrl))}" alt="" data-fallback="avatar">` : ''}
+      <span class="bot-choice-copy"><strong>${escapeHtml(choice.label)}</strong>${choice.description ? `<small>${escapeHtml(choice.description)}</small>` : ''}</span>
+      ${choice.count !== undefined ? `<span class="bot-choice-count">${escapeHtml(String(choice.count))}</span>` : ''}
+      ${renderAudioControls(choice, key, volumeScope)}
+    </div>`;
+  }).join('');
 }

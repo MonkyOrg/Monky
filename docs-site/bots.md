@@ -65,11 +65,11 @@ Ao criar ou editar um canal de texto, o switch **Permitir comandos de bots** vem
 ### Pré-requisitos
 
 - **Node.js 18+**
-- Cliente, servidor e SDK compatíveis com o **protocolo 17**
+- Cliente, servidor e SDK compatíveis com o **protocolo 18**
 - O pacote `@monky/bot-sdk` da release correspondente
 
 ::: warning Atualização conjunta
-O protocolo 17 acrescenta nomes locais de comandos e encerramento autorizado de miniapps, com referências que identificam cada instância. Atualize **cliente, servidor e bot** juntos; versões com protocolos diferentes não se conectam. Essa mudança exige uma release major, inclusive na linha beta.
+O protocolo 18 acrescenta paginação de autocomplete, com páginas, cursores e continuação sob demanda. Clientes e servidores antigos rejeitam os novos campos das respostas. Atualize **cliente, servidor e bot** juntos; versões com protocolos diferentes não se conectam. Essa mudança exige uma release major, inclusive na linha beta. Nomes locais de comandos e encerramento autorizado de miniapps continuam disponíveis.
 
 As regras de vínculo do protocolo 14 são mantidas: `BOT_CREATE` recebe somente `{}` e a administração recebe `profilePending` para indicar uma identidade ainda não anunciada. O banco preserva as identidades existentes, e somente o próprio bot pode publicar alterações de perfil. `ctx.args` contém valores tipados e `ctx.reply()` é privado; use `ctx.publish()` somente para resultados que devem aparecer para o canal.
 :::
@@ -521,11 +521,23 @@ bot.command({
 });
 ```
 
-O callback recebe `{ query, optionName, args, locale, serverId, signal, settings }` e pode retornar uma lista ou uma `Promise` de `SelectionChoice` (`{ label, value, description?, audio? }`). `args` contém somente as outras opções já preenchidas e válidas; obrigatórios ainda ausentes são permitidos nessa etapa. `query` contém o texto da opção editada. `settings` é um snapshot imutável das configurações do servidor e preferências dessa pessoa.
+O callback recebe `{ query, page, cursor, optionName, args, locale, serverId, signal, settings }` e pode retornar uma lista de `SelectionChoice` (`{ label, value, description?, audio? }`) ou uma página `{ choices, hasMore?, nextCursor? }`, diretamente ou por `Promise`. `page` começa em zero; `cursor` é opcional. `args` contém somente as outras opções já preenchidas e válidas; obrigatórios ainda ausentes são permitidos nessa etapa. `query` contém o texto da opção editada. `settings` é um snapshot imutável das configurações do servidor e preferências dessa pessoa.
 
 No exemplo, o catálogo é local ao bot. Para uma fonte externa, substitua a filtragem por uma busca de **metadados**, passe `signal` ao `fetch` e valide o retorno. O callback não recebe uma invocação nem métodos de resposta/download. As consultas são enviadas ao bot selecionado enquanto a pessoa digita; não são publicadas no canal nem persistidas no histórico.
 
-O cliente usa debounce de 250 ms; o servidor limita a uma busca por usuário a cada 500 ms, somando os dispositivos. Apenas a busca mais recente da conexão permanece válida, com prazo de 15 segundos. Fechar o compositor, cancelar, perder acesso ou desconectar aborta a busca; respostas antigas são descartadas. Retorne no máximo 20 choices, com valores únicos: `label` até 100 caracteres, `value` até 2.000 e `description` até 500. `query` aceita até 200 caracteres; o bot pode impor um limite menor. Uma lista vazia significa nenhum resultado.
+O cliente usa debounce de 250 ms; o servidor limita a uma consulta por usuário a cada 500 ms, somando os dispositivos, com prazo de 15 segundos por página. Retorne no máximo **20 choices por resposta**, com valores únicos: `label` até 100 caracteres, `value` até 2.000 e `description` até 500. **Não há corte no total acumulado no menu.** `query` aceita até 200 caracteres; o bot pode impor um limite menor.
+
+Para habilitar rolagem com carregamento sob demanda, retorne `hasMore: true` enquanto houver outra página. O cliente incrementa `page` ao se aproximar do fim da lista, mantém as escolhas anteriores e remove duplicatas por `value`. Se a fonte usa cursores ou uma página precisa ser dividida em vários lotes, retorne também `nextCursor` (string opaca de até 512 caracteres); o cliente o devolve em `cursor`. Valide esse cursor no provider: ele não é uma autorização nem deve ser tratado como URL confiável. Não busque todas as páginas antecipadamente.
+
+```ts
+autocomplete: ({ query, page }) => {
+  const matches = catalog.filter((choice) => choice.label.toLowerCase().includes(query.toLowerCase()));
+  const offset = page * 20;
+  return { choices: matches.slice(offset, offset + 20), hasMore: offset + 20 < matches.length };
+},
+```
+
+Sem `hasMore` (inclusive no retorno antigo em array), a resposta continua sendo uma lista única. Use `hasMore: false` na última página e omita `nextCursor`; uma lista vazia encerra uma busca sem continuação. Falhas ao carregar mais mantêm os resultados e permitem tentar a mesma página novamente. Fechar o compositor, alterar a busca, cancelar, perder acesso ou desconectar invalida o contexto; respostas atrasadas são descartadas. As prévias sob demanda de cada página mantêm sua própria autorização e expiração, sem serem invalidadas apenas por carregar a página seguinte. SDK, servidor e cliente no protocolo 18 são necessários; callbacks antigos em array não precisam mudar após atualizar o SDK.
 
 Setas apenas navegam. Enter ou clique confirmam uma sugestão. **Sem parâmetros opcionais, se todos os obrigatórios estiverem válidos, esse mesmo gesto executa o comando uma única vez.** Se houver opcionais, a escolha apenas preenche o campo: o compositor fica aberto para usar `+N` e o envio acontece com um Enter posterior ou pelo botão de executar. Se faltar algum obrigatório, ele precisa ser preenchido antes de executar. Texto digitado sem uma escolha válida não executa o comando. Alterar o texto invalida a escolha anterior. `value` é um identificador opaco, não uma autorização: o handler deve validá-lo novamente antes de resolver os metadados do resultado.
 

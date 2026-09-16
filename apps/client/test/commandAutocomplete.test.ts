@@ -97,7 +97,7 @@ test('autocomplete clears stale choices immediately, ignores late successes/erro
   assert.equal(requests.has('cancel timer'), false);
 });
 
-test('autocomplete respects the shared query limit and displays at most ten validated choices', async (context) => {
+test('autocomplete respects the shared query limit and displays every validated choice', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   let calls = 0;
   let state: AutocompleteState = { status: 'idle', choices: [], query: '' };
@@ -118,7 +118,150 @@ test('autocomplete respects the shared query limit and displays at most ten vali
   context.mock.timers.tick(250);
   await flush();
   assert.equal(calls, 1);
-  assert.equal(state.choices.length, 10);
+  assert.equal(state.choices.length, 20);
+});
+
+test('autocomplete appends unlimited pages on demand, deduplicates values and preserves page authorities', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const sent: Array<{ page: number; cursor?: string; signal: AbortSignal }> = [];
+  const states: AutocompleteState[] = [];
+  const choices = (start: number, count: number) => Array.from({ length: count }, (_, index) => ({
+    label: `Sound ${start + index}`, value: `sound-${start + index}`,
+  }));
+  const controller = new CommandAutocomplete({}, async (_query, signal, page, cursor) => {
+    sent.push({ page, cursor, signal });
+    return {
+      status: 'ok',
+      choices: page === 0 ? choices(0, 20) : page === 1 ? choices(19, 20) : page === 2 ? choices(39, 20) : choices(59, 6),
+      hasMore: page < 3, ...(page < 3 ? { nextCursor: `cursor-${page + 1}` } : {}),
+    };
+  }, (state) => states.push(state));
+  context.after(() => controller.close());
+  controller.setQuery('sound');
+  context.mock.timers.tick(250);
+  await flush();
+  assert.equal(states.at(-1)?.choices.length, 20);
+  const first = states.at(-1)?.choices[0];
+  assert.equal(sent.length, 1, 'A continuation must not prefetch without scrolling or explicit loadMore');
+  controller.loadMore();
+  controller.loadMore();
+  controller.loadMore();
+  assert.equal(states.at(-1)?.loadingMore, true);
+  assert.equal(states.at(-1)?.choices.length, 20);
+  context.mock.timers.tick(499);
+  assert.equal(sent.length, 1, 'Pagination shares the connection throttle');
+  context.mock.timers.tick(1);
+  await flush();
+  assert.equal(sent.length, 2, 'Repeated scroll events must share one pending page');
+  assert.equal(sent[1].page, 1);
+  assert.equal(sent[1].cursor, 'cursor-1');
+  assert.equal(sent[0].signal, sent[1].signal);
+  assert.equal(sent[0].signal.aborted, false, 'Earlier lazy previews stay authorized while more results load');
+  assert.equal(states.at(-1)?.choices.length, 39);
+  assert.equal(states.at(-1)?.choices[0], first, 'Appending must retain the existing choice objects');
+  for (let page = 2; page <= 3; page++) {
+    controller.loadMore();
+    context.mock.timers.tick(500);
+    await flush();
+    assert.equal(sent.at(-1)?.page, page);
+    assert.equal(sent.at(-1)?.cursor, `cursor-${page}`);
+  }
+  assert.equal(states.at(-1)?.choices.length, 65, 'No accumulated 10/20/25-item cap is allowed');
+  assert.deepEqual(states.at(-1)?.choices, choices(0, 65));
+  assert.equal(states.at(-1)?.hasMore, false);
+  controller.loadMore();
+  context.mock.timers.tick(1000);
+  await flush();
+  assert.equal(sent.length, 4, 'The final page must stop loading');
+  controller.close();
+  assert.ok(sent.every((request) => request.signal.aborted), 'Closing invalidates the entire search, not just its last page');
+});
+
+test('pagination failures preserve choices and retry the same page and cursor', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const requests: Array<{ page: number; cursor?: string }> = [];
+  const states: AutocompleteState[] = [];
+  let fail = true;
+  const controller = new CommandAutocomplete({}, async (_query, _signal, page, cursor) => {
+    requests.push({ page, cursor });
+    if (page === 0) return { status: 'ok', choices: [{ label: 'First', value: 'first' }], hasMore: true, nextCursor: 'next' };
+    if (fail) throw new Error('Localized provider error');
+    return { status: 'ok', choices: [{ label: 'Later', value: 'later' }], hasMore: false };
+  }, (state) => states.push(state));
+  context.after(() => controller.close());
+  controller.setQuery('sound');
+  context.mock.timers.tick(250);
+  await flush();
+  controller.loadMore();
+  context.mock.timers.tick(500);
+  await flush();
+  assert.equal(states.at(-1)?.status, 'ready');
+  assert.equal(states.at(-1)?.loadMoreFailed, true);
+  assert.equal(states.at(-1)?.error, 'Localized provider error');
+  assert.equal(states.at(-1)?.choices[0].value, 'first');
+  assert.equal(states.at(-1)?.hasMore, true);
+  context.mock.timers.tick(10_000);
+  assert.equal(requests.length, 2, 'Failures must not trigger an automatic retry loop');
+  fail = false;
+  controller.loadMore();
+  context.mock.timers.tick(0);
+  await flush();
+  assert.deepEqual(requests.slice(1), [{ page: 1, cursor: 'next' }, { page: 1, cursor: 'next' }]);
+  assert.deepEqual(states.at(-1)?.choices.map((choice) => choice.value), ['first', 'later']);
+  assert.equal(states.at(-1)?.loadMoreFailed, undefined);
+});
+
+test('changing a query cancels a pending page and ignores its late continuation', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const requests: Array<{ query: string; page: number; signal: AbortSignal; resolve: (value: unknown) => void }> = [];
+  const states: AutocompleteState[] = [];
+  const controller = new CommandAutocomplete({}, (query, signal, page) => new Promise((resolve) => {
+    requests.push({ query, signal, page, resolve });
+  }), (state) => states.push(state));
+  context.after(() => controller.close());
+  controller.setQuery('original');
+  context.mock.timers.tick(250);
+  requests[0].resolve({ status: 'ok', choices: [{ label: 'Original', value: 'original' }], hasMore: true });
+  await flush();
+  controller.loadMore();
+  context.mock.timers.tick(500);
+  controller.setQuery('replacement');
+  assert.equal(requests[1].signal.aborted, true);
+  assert.deepEqual(states.at(-1)?.choices, []);
+  requests[1].resolve({ status: 'ok', choices: [{ label: 'Late', value: 'late' }], hasMore: true });
+  await flush();
+  assert.equal(states.at(-1)?.query, 'replacement');
+  assert.deepEqual(states.at(-1)?.choices, []);
+  context.mock.timers.tick(500);
+  assert.equal(requests[2].page, 0);
+  requests[2].resolve({ status: 'ok', choices: [{ label: 'Replacement', value: 'replacement' }] });
+  await flush();
+  controller.loadMore();
+  context.mock.timers.tick(1000);
+  assert.equal(requests.length, 3, 'Legacy array-style responses have no continuation');
+});
+
+test('empty terminal pages preserve loaded results while repeated cursors fail visibly', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  let result: unknown = { status: 'ok', choices: [{ label: 'First', value: 'first' }], hasMore: true, nextCursor: 'next' };
+  const states: AutocompleteState[] = [];
+  const controller = new CommandAutocomplete({}, async () => result, (state) => states.push(state));
+  context.after(() => controller.close());
+  controller.setQuery('query');
+  context.mock.timers.tick(250);
+  await flush();
+  controller.loadMore();
+  context.mock.timers.tick(500);
+  await flush();
+  assert.equal(states.at(-1)?.loadMoreFailed, true, 'A source returning the same continuation must not loop forever');
+  assert.equal(states.at(-1)?.choices.length, 1);
+  result = { status: 'ok', choices: [], hasMore: false };
+  controller.loadMore();
+  context.mock.timers.tick(500);
+  await flush();
+  assert.equal(states.at(-1)?.status, 'ready');
+  assert.equal(states.at(-1)?.choices.length, 1);
+  assert.equal(states.at(-1)?.hasMore, false);
 });
 
 test('autocomplete preserves full YouTube URLs longer than the old 100-character input limit', async (context) => {

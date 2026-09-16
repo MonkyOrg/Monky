@@ -2,7 +2,6 @@ import { LIMITS, commandAutocompleteResultSchema, type CommandAutocompleteChoice
 
 export const AUTOCOMPLETE_MIN_QUERY = 2;
 export const AUTOCOMPLETE_MAX_QUERY = LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH;
-export const AUTOCOMPLETE_VISIBLE_CHOICES = 10;
 
 export interface AutocompleteInput {
   query: string;
@@ -13,16 +12,14 @@ export interface AutocompleteState {
   status: 'idle' | 'loading' | 'ready' | 'empty' | 'failed';
   query: string;
   choices: CommandAutocompleteChoice[];
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  loadMoreFailed?: boolean;
   error?: string;
 }
 
 interface QueryBudget { lastStartedAt: number }
 const budgets = new WeakMap<object, QueryBudget>();
-
-function normalizeAutocompleteChoices(response: unknown): CommandAutocompleteChoice[] | null {
-  const parsed = commandAutocompleteResultSchema.safeParse(response);
-  return parsed.success && parsed.data.status === 'ok' ? parsed.data.choices : null;
-}
 
 /** The budget belongs to the connection, not a menu that can be rebuilt. */
 export class CommandAutocomplete {
@@ -31,10 +28,17 @@ export class CommandAutocomplete {
   private generation = 0;
   private query = '';
   private budget: QueryBudget;
+  private choices: CommandAutocompleteChoice[] = [];
+  private values = new Set<string>();
+  private cursors = new Set<string>();
+  private page = 0;
+  private cursor: string | undefined;
+  private hasMore = false;
+  private pending = false;
 
   constructor(
     connection: object,
-    private search: (query: string, signal: AbortSignal) => Promise<unknown>,
+    private search: (query: string, signal: AbortSignal, page: number, cursor?: string) => Promise<unknown>,
     private update: (state: AutocompleteState) => void
   ) {
     this.budget = budgets.get(connection) ?? { lastStartedAt: -Infinity };
@@ -45,7 +49,6 @@ export class CommandAutocomplete {
     if (query === this.query) return;
     this.close();
     this.query = query;
-    const generation = this.generation;
     if (query.trim().length < AUTOCOMPLETE_MIN_QUERY) {
       this.update({ status: 'idle', query, choices: [] });
       return;
@@ -54,32 +57,79 @@ export class CommandAutocomplete {
       this.update({ status: 'failed', query, choices: [] });
       return;
     }
+    this.request = new AbortController();
     this.update({ status: 'loading', query, choices: [] });
-    const due = Date.now() + LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS;
+    this.schedulePage(Date.now() + LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
+  }
+
+  public loadMore(): void {
+    if (!this.request || !this.hasMore || this.pending) return;
+    this.pending = true;
+    this.update({
+      status: this.choices.length ? 'ready' : 'empty', query: this.query,
+      choices: this.choices, hasMore: true, loadingMore: true,
+    });
+    this.schedulePage(Date.now());
+  }
+
+  private schedulePage(due: number): void {
+    const { generation, query, page, cursor, request } = this;
+    if (!request) return;
+    this.pending = true;
+    const current = () => generation === this.generation && !request.signal.aborted;
+    const failed = (error?: unknown) => {
+      if (!current()) return;
+      this.pending = false;
+      this.update({
+        status: page === 0 ? 'failed' : this.choices.length ? 'ready' : 'empty',
+        query, choices: this.choices, hasMore: this.hasMore, loadMoreFailed: page > 0,
+        error: error instanceof Error ? error.message : undefined,
+      });
+    };
     const schedule = () => {
-      if (generation !== this.generation) return;
+      if (!current()) return;
       const delay = Math.max(due, this.budget.lastStartedAt + LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS) - Date.now();
       this.timer = setTimeout(() => {
         this.timer = null;
-        if (generation !== this.generation) return;
+        if (!current()) return;
         if (Date.now() < this.budget.lastStartedAt + LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS) { schedule(); return; }
         this.budget.lastStartedAt = Date.now();
-        const request = new AbortController();
-        this.request = request;
-        void this.search(query, request.signal).then((response) => {
-          if (generation !== this.generation || request.signal.aborted) return;
-          const choices = normalizeAutocompleteChoices(response);
-          if (!choices) {
-            this.update({ status: 'failed', query, choices: [] });
+        let response: Promise<unknown>;
+        try {
+          response = this.search(query, request.signal, page, cursor);
+        } catch (error) {
+          failed(error);
+          return;
+        }
+        void response.then((response) => {
+          if (!current()) return;
+          const parsed = commandAutocompleteResultSchema.safeParse(response);
+          if (!parsed.success || parsed.data.status !== 'ok') {
+            failed();
             return;
           }
-          const visibleChoices = choices.slice(0, AUTOCOMPLETE_VISIBLE_CHOICES);
-          this.update({ status: visibleChoices.length ? 'ready' : 'empty', query, choices: visibleChoices });
-        }, (error: unknown) => {
-          if (generation === this.generation && !request.signal.aborted) {
-            this.update({ status: 'failed', query, choices: [], error: error instanceof Error ? error.message : undefined });
+          const result = parsed.data;
+          if ((result.hasMore && !Number.isSafeInteger(page + 1)) ||
+              (result.nextCursor !== undefined && (result.nextCursor === cursor || this.cursors.has(result.nextCursor)))) {
+            failed();
+            return;
           }
-        });
+          const added = result.choices.filter((choice) => {
+            if (this.values.has(choice.value)) return false;
+            this.values.add(choice.value);
+            return true;
+          });
+          this.choices = this.choices.concat(added);
+          if (cursor !== undefined) this.cursors.add(cursor);
+          this.cursor = result.nextCursor;
+          this.page = page + 1;
+          this.hasMore = result.hasMore ?? false;
+          this.pending = false;
+          this.update({
+            status: this.choices.length ? 'ready' : 'empty', query, choices: this.choices,
+            hasMore: this.hasMore,
+          });
+        }, failed);
       }, Math.max(0, delay));
     };
     schedule();
@@ -92,5 +142,12 @@ export class CommandAutocomplete {
     this.timer = null;
     this.request?.abort();
     this.request = null;
+    this.choices = [];
+    this.values.clear();
+    this.cursors.clear();
+    this.page = 0;
+    this.cursor = undefined;
+    this.hasMore = false;
+    this.pending = false;
   }
 }
