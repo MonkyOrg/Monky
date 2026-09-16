@@ -41,7 +41,7 @@ void wakingAndDeadline() {
   std::promise<void> first;
   bool ticked = false;
   auto deadline = ApplicationLoop::Deadline{};
-  std::jthread producer([&] {
+  auto producer = std::async(std::launch::async, [&] {
     first.get_future().wait();
     require(loop.post([&] { deadline = ApplicationLoop::Clock::now() + 10ms; }),
             "Cross-thread event was rejected");
@@ -52,6 +52,7 @@ void wakingAndDeadline() {
     ticked = true;
     loop.stop();
   });
+  producer.get();
   require(ticked, "Timed work was never dispatched");
 }
 

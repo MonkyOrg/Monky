@@ -48,11 +48,12 @@ CancelMicrophoneAccess requestMicrophoneAccess(MicrophoneAccessCallback callback
       case AVAuthorizationStatusRestricted:
         request->complete(MicrophoneAccess::restricted);
         break;
-      case AVAuthorizationStatusNotDetermined:
+      case AVAuthorizationStatusNotDetermined: {
         [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
           request->complete(granted ? MicrophoneAccess::granted : MicrophoneAccess::denied);
         }];
         break;
+      }
       default:
         throw std::runtime_error("macOS returned an unknown microphone authorization state");
     }
