@@ -1,7 +1,7 @@
 {
   "qualification": "development-only",
   "buildTools": {
-    "ciCmake": "3.31.8",
+    "ciCmake": "3.31.10",
     "ciXcode": "16.4"
   },
   "webrtc": {
