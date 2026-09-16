@@ -10,6 +10,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -111,6 +112,13 @@ void requireUsableKeychain(SecKeychainRef keychain, bool writing = false) {
 }
 
 SecKeychainRef defaultKeychain() {
+  // File-based Keychains do not honor the data-protection Keychain's per-query
+  // UI flags. Set the headless process policy once, never toggle it around calls.
+  static std::once_flag noninteractive;
+  std::call_once(noninteractive, [] {
+    const OSStatus status = SecKeychainSetUserInteractionAllowed(false);
+    if (status != errSecSuccess) failKeychain("Disable interactive Keychain access", status);
+  });
   SecKeychainRef raw = nullptr;
   const OSStatus status = SecKeychainCopyDefault(&raw);
   if (status != errSecSuccess) failKeychain("Open default identity Keychain", status);
@@ -119,10 +127,7 @@ SecKeychainRef defaultKeychain() {
 }
 #pragma clang diagnostic pop
 
-// Keep UI suppression local to these queries, not a process-wide Keychain setting.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-CFMutableDictionaryRef identityQuery(CFStringRef account) {
+CFMutableDictionaryRef identityQuery(CFStringRef account, SecKeychainRef keychain) {
   CfOwner<CFMutableDictionaryRef> query(CFDictionaryCreateMutable(
       kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks));
@@ -131,18 +136,16 @@ CFMutableDictionaryRef identityQuery(CFStringRef account) {
   CFDictionarySetValue(query.get(), kSecClass, kSecClassGenericPassword);
   CFDictionarySetValue(query.get(), kSecAttrService, service.get());
   CFDictionarySetValue(query.get(), kSecAttrAccount, account);
-  CFDictionarySetValue(query.get(), kSecUseAuthenticationUI, kSecUseAuthenticationUIFail);
-  return query.release();
-}
-#pragma clang diagnostic pop
-
-CFArrayRef findIdentity(CFStringRef account, SecKeychainRef keychain) {
-  requireUsableKeychain(keychain);
   const void* selected = keychain;
   CfOwner<CFArrayRef> searchList(CFArrayCreate(
       kCFAllocatorDefault, &selected, 1, &kCFTypeArrayCallBacks));
-  CfOwner<CFMutableDictionaryRef> query(identityQuery(account));
   CFDictionarySetValue(query.get(), kSecMatchSearchList, searchList.get());
+  return query.release();
+}
+
+CFArrayRef findIdentity(CFStringRef account, SecKeychainRef keychain) {
+  requireUsableKeychain(keychain);
+  CfOwner<CFMutableDictionaryRef> query(identityQuery(account, keychain));
   CFDictionarySetValue(query.get(), kSecMatchLimit, kSecMatchLimitAll);
   // Count references before decrypting, so an inaccessible duplicate cannot be skipped.
   CFDictionarySetValue(query.get(), kSecReturnRef, kCFBooleanTrue);
@@ -168,7 +171,8 @@ std::optional<IdentitySeed> readSeed(CFStringRef account, SecKeychainRef keychai
   CFArrayRef found = findIdentity(account, keychain);
   if (!found) return std::nullopt;
   CfOwner<CFArrayRef> item(found);
-  CfOwner<CFMutableDictionaryRef> query(identityQuery(account));
+  // kSecMatchItemList filters a search; it does not replace its Keychain scope.
+  CfOwner<CFMutableDictionaryRef> query(identityQuery(account, keychain));
   CFDictionarySetValue(query.get(), kSecMatchItemList, item.get());
   CFDictionarySetValue(query.get(), kSecMatchLimit, kSecMatchLimitOne);
   CFDictionarySetValue(query.get(), kSecReturnData, kCFBooleanTrue);
@@ -246,11 +250,12 @@ void IdentityStore::save(const IdentitySeed& newSeed) {
   }
   // Do not copy plaintext into a CFData allocation; it borrows the wiped temporary.
   TemporarySeed plaintext{newSeed};
-  CfOwner<CFMutableDictionaryRef> query(identityQuery(impl_->account.get()));
+  CfOwner<CFMutableDictionaryRef> query(identityQuery(impl_->account.get(), impl_->keychain.get()));
   CfOwner<CFDataRef> data(CFDataCreateWithBytesNoCopy(
       kCFAllocatorDefault, plaintext.value.data(),
       static_cast<CFIndex>(plaintext.value.size()), kCFAllocatorNull));
   CFDictionarySetValue(query.get(), kSecValueData, data.get());
+  CFDictionaryRemoveValue(query.get(), kSecMatchSearchList);
   CFDictionarySetValue(query.get(), kSecUseKeychain, impl_->keychain.get());
   requireUsableKeychain(impl_->keychain.get(), true);
   const OSStatus status = SecItemAdd(query.get(), nullptr);

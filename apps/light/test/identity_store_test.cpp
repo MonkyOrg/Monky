@@ -78,7 +78,6 @@ class KeychainInteractionGuard final {
  public:
   KeychainInteractionGuard() {
     requireKeychain(SecKeychainGetUserInteractionAllowed(&previous_), "Read Keychain interaction policy");
-    requireKeychain(SecKeychainSetUserInteractionAllowed(false), "Disable UI in Keychain scenarios");
   }
   ~KeychainInteractionGuard() {
     checkKeychainCleanup(SecKeychainSetUserInteractionAllowed(previous_), "Restore Keychain interaction policy");
@@ -88,6 +87,12 @@ class KeychainInteractionGuard final {
  private:
   Boolean previous_ = true;
 };
+
+void requireNoninteractiveKeychain() {
+  Boolean enabled = true;
+  requireKeychain(SecKeychainGetUserInteractionAllowed(&enabled), "Read identity runtime UI policy");
+  require(!enabled, "Identity runtime left interactive Keychain authorization enabled");
+}
 
 class KeychainSettingsGuard final {
  public:
@@ -310,6 +315,9 @@ void roundTripAndLock(const fs::path& root) {
   otherSeed[0] ^= 0xff;
   {
     IdentityStore store(profile.path);
+#ifdef __APPLE__
+    requireNoninteractiveKeychain();
+#endif
     require(!store.load(), "A newly created profile must have no identity");
     requireFailure([&] { IdentityStore second(profile.path); },
                    "Two owners acquired the same profile");

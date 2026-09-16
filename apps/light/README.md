@@ -130,9 +130,12 @@ importação e migração não fazem parte dessa API.
 No Windows, `identity.dpapi.pending` indica uma gravação interrompida e exige
 recuperação explícita. No macOS, cada `IdentityStore` mantém o Keychain padrão
 selecionado na construção e restringe consultas e criação a ele, sem alterar a
-lista de busca ou o padrão do usuário. As operações são não interativas: esse
-Keychain precisa estar desbloqueado e legível, e `save()` também exige permissão
-de escrita. Keychains não relacionados, mesmo bloqueados, não interferem.
+lista de busca ou o padrão do usuário. A primeira abertura desabilita a UI do
+Keychain legado para todo o processo headless, uma única vez: esse backend não
+respeita os flags de UI por consulta do Keychain de proteção de dados. O cofre
+precisa estar desbloqueado e legível, e `save()` também exige permissão de escrita.
+Desbloqueio ou autorização devem ser feitos fora do processo antes de tentar
+novamente. Keychains não relacionados, mesmo bloqueados, não interferem.
 O serviço é `org.monky.light.identity.ed25519-seed.v1`, e a conta é o caminho
 canônico do perfil. Mover o diretório ou reabrir com outro Keychain padrão exige
 tratamento explícito de migração/recuperação; chaves não são movidas nem substituídas.
@@ -201,9 +204,11 @@ O dispositivo de áudio sintético existe somente em `test`: fornece PCM mono a
 hardware, mesmo quando o SDK solicita o dispositivo padrão. No Windows, somente
 esse dispositivo de teste solicita temporariamente resolução de timer de 1 ms,
 liberada ao parar seu worker; isso não altera o timer do cliente de produção.
-No macOS, o worker sintético usa QoS `user-interactive` para evitar agrupamento
-dos prazos de áudio. A prioridade dura somente enquanto esse worker existe e
-não muda o dispositivo de áudio de produção.
+No macOS, o worker sintético usa prazos monotônicos Mach e QoS `user-interactive`.
+Cada espera solicita no máximo um bloco de áudio; o estado de encerramento é
+reavaliado antes de emitir PCM. A prioridade dura somente enquanto esse worker
+existe e não muda o dispositivo de áudio de produção. Os diagnósticos de cadência
+separam o tempo de espera do tempo de processamento.
 
 O ambiente de servidor descartável usa o servidor real, limitado ao loopback,
 sem divulgação na LAN ou servidores STUN externos:

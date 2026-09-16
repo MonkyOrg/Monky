@@ -130,9 +130,12 @@ Recovery, import, and migration are outside this API.
 On Windows, `identity.dpapi.pending` indicates an interrupted write requiring
 explicit recovery. On macOS, each `IdentityStore` retains the default Keychain
 selected at construction and restricts queries and creation to it, without
-changing the user's search list or default. Operations are noninteractive: that
-Keychain must be unlocked and readable, and `save()` also requires write
-permission. Unrelated Keychains, even locked ones, do not interfere.
+changing the user's search list or default. The first construction disables
+legacy Keychain UI once for the entire headless process: this backend does not
+honor the data-protection Keychain's per-query UI flags. The store must be unlocked
+and readable, and `save()` also requires write permission. Unlocking or authorizing
+access must happen outside the process before retrying. Unrelated Keychains,
+even locked ones, do not interfere.
 The service is `org.monky.light.identity.ed25519-seed.v1`, and the account is the
 canonical profile path. Moving the directory or reopening with another default
 Keychain requires explicit migration/recovery; keys are never moved or replaced.
@@ -200,9 +203,11 @@ PCM in 10 ms frames and measures received audio energy. It never selects
 hardware, even when the SDK requests a default device. On Windows, only this
 test device temporarily requests 1 ms timer resolution, released when its
 worker stops; it does not change the production client's timer.
-On macOS, the synthetic worker uses `user-interactive` QoS to avoid coalescing
-audio deadlines. That priority lasts only for the worker's lifetime and does
-not change the production audio device.
+On macOS, the synthetic worker uses monotonic Mach deadlines and
+`user-interactive` QoS. Each wait requests at most one audio frame; shutdown state
+is rechecked before emitting PCM. That priority lasts only for the worker's
+lifetime and does not change the production audio device. Cadence diagnostics
+separate waiting time from processing time.
 
 The disposable server fixture uses the real server, restricted to loopback,
 without LAN advertising or external STUN servers:
