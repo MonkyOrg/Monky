@@ -204,11 +204,12 @@ O dispositivo de áudio sintético existe somente em `test`: fornece PCM mono a
 hardware, mesmo quando o SDK solicita o dispositivo padrão. No Windows, somente
 esse dispositivo de teste solicita temporariamente resolução de timer de 1 ms,
 liberada ao parar seu worker; isso não altera o timer do cliente de produção.
-No macOS, o worker sintético usa prazos monotônicos Mach e QoS `user-interactive`.
-Cada espera solicita no máximo um bloco de áudio; o estado de encerramento é
-reavaliado antes de emitir PCM. A prioridade dura somente enquanto esse worker
-existe e não muda o dispositivo de áudio de produção. Os diagnósticos de cadência
-separam o tempo de espera do tempo de processamento.
+No macOS, o worker sintético usa QoS `user-interactive` e uma atividade
+`NSActivityLatencyCritical` para solicitar precisão de timer sem depender de
+hardware de áudio ativo. A atividade e a prioridade terminam junto do worker;
+não impedem o repouso do sistema nem mudam o dispositivo de produção. Isso não
+garante tempo real sob carga arbitrária. Os diagnósticos de cadência separam
+espera de processamento, e as esperas continuam canceláveis durante o teardown.
 
 O ambiente de servidor descartável usa o servidor real, limitado ao loopback,
 sem divulgação na LAN ou servidores STUN externos:

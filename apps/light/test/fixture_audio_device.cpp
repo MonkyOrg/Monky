@@ -25,8 +25,7 @@
 #include <windows.h>
 #include <mmsystem.h>
 #elif defined(__APPLE__)
-#include <mach/mach.h>
-#include <mach/mach_time.h>
+#include "fixture_audio_activity.hpp"
 #include <pthread.h>
 #include <pthread/qos.h>
 #endif
@@ -45,10 +44,7 @@ class FixtureTimerResolution final {
       throw std::runtime_error("Unable to obtain the synthetic audio timer resolution");
     }
 #elif defined(__APPLE__)
-    if (mach_timebase_info(&timebase_) != KERN_SUCCESS ||
-        timebase_.numer == 0 || timebase_.denom == 0) {
-      throw std::runtime_error("Unable to obtain the synthetic audio Mach timebase");
-    }
+    end_activity_ = BeginFixtureAudioActivity();
 #endif
   }
   ~FixtureTimerResolution() {
@@ -56,25 +52,15 @@ class FixtureTimerResolution final {
     if (timeEndPeriod(1) != TIMERR_NOERROR) {
       std::cerr << "Unable to release the synthetic audio timer resolution\n";
     }
+#elif defined(__APPLE__)
+    if (end_activity_) end_activity_();
 #endif
   }
   FixtureTimerResolution(const FixtureTimerResolution&) = delete;
   FixtureTimerResolution& operator=(const FixtureTimerResolution&) = delete;
 #ifdef __APPLE__
-  kern_return_t WaitUntil(std::chrono::steady_clock::time_point deadline) const {
-    auto remaining = deadline - std::chrono::steady_clock::now();
-    while (remaining > std::chrono::steady_clock::duration::zero()) {
-      const auto ns = static_cast<std::uint64_t>(
-          std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count());
-      const auto ticks = (ns * timebase_.denom + timebase_.numer - 1) / timebase_.numer;
-      const auto status = mach_wait_until(mach_absolute_time() + ticks);
-      if (status != KERN_SUCCESS && status != KERN_ABORTED) return status;
-      remaining = deadline - std::chrono::steady_clock::now();
-    }
-    return KERN_SUCCESS;
-  }
  private:
-  mach_timebase_info_data_t timebase_{};
+  std::function<void()> end_activity_;
 #endif
 };
 
@@ -158,7 +144,7 @@ struct FixtureAudioDevice::State {
 #else
           scheduling.set_value(0);
 #endif
-          Run(*timer);
+          Run();
         });
         const int result = configured.get();
         if (result != 0) throw std::system_error(result, std::generic_category(), "Synthetic audio thread QoS");
@@ -256,28 +242,14 @@ struct FixtureAudioDevice::State {
     changed.notify_all();
   }
 
-  void Run([[maybe_unused]] const FixtureTimerResolution& timer) {
+  void Run() {
     std::unique_lock lock(mutex);
     while (!shutdown) {
       changed.wait(lock, [&] { return shutdown || HasWork(); });
       auto deadline = std::chrono::steady_clock::now();
       while (!shutdown && HasWork()) {
         const auto waiting = std::chrono::steady_clock::now();
-#ifdef __APPLE__
-        // Request at most one frame on the monotonic device clock, then recheck
-        // lifecycle state before borrowing the transport or generating PCM.
-        lock.unlock();
-        const auto status = timer.WaitUntil(deadline);
-        lock.lock();
-        if (status != KERN_SUCCESS) {
-          std::cerr << "Synthetic audio clock failed: Mach status " << status << '\n';
-          if (recording) ++counters.recording_errors;
-          if (playing) ++counters.playout_errors;
-          shutdown = true;
-        }
-#else
         changed.wait_until(lock, deadline, [&] { return shutdown || !HasWork(); });
-#endif
         const auto processing = std::chrono::steady_clock::now();
         counters.waiting_ms += std::chrono::duration<double, std::milli>(processing - waiting).count();
         if (shutdown || !HasWork()) break;
