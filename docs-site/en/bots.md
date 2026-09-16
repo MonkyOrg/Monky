@@ -12,7 +12,7 @@ A bot is an **external process** that connects to the Monky server via WebSocket
 - Use their own name and photo in chat messages and forms
 - Don't count toward the user limit (they have their own limit: `maxBots`)
 
-The bot runs on **its own machine** (VPS, cloud, your PC), not on the Monky server. The server only routes messages — all processing happens on the bot side.
+The bot runs on **its own machine** (VPS, cloud, your PC), not on the Monky server. By default, it processes commands and the server routes messages. Local execution capabilities allow specific operations on the caller's client with that person's authorization; they do not allow arbitrary programs or scripts.
 
 ```
 User types /ping
@@ -64,11 +64,11 @@ When creating or editing a text channel, the **Allow bot commands** switch start
 ### Prerequisites
 
 - **Node.js 18+**
-- Client, server, and SDK compatible with **protocol 18**
+- Client, server, and SDK compatible with **protocol 19**
 - The `@monky/bot-sdk` package from the matching release
 
 ::: warning Update together
-Protocol 18 adds paginated autocomplete with pages, cursors, and on-demand continuation. Older clients and servers reject the new response fields. Update the **client, server, and bot** together; different protocol versions cannot connect. This requires a major release, including on the beta track. Private command names and authorized miniapp termination remain available.
+Protocol 19 adds local execution contracts, authenticated interaction identities, private task signaling, and local preview references. It preserves protocol 18's paginated autocomplete with pages, cursors, and on-demand continuation, along with localized command names and authorized miniapp termination. Update the **client, server, and bot** together; different protocol versions cannot connect. This requires a major release, including on the beta track.
 
 Protocol 14's linking rules are preserved: `BOT_CREATE` accepts only `{}`, and management receives `profilePending` while a bot has not announced its identity. The database preserves existing identities, and only the authenticated bot may publish profile changes. `ctx.args` contains typed values and `ctx.reply()` is private; use `ctx.publish()` only for channel-visible results.
 :::
@@ -513,7 +513,7 @@ The callback receives `{ query, page, cursor, optionName, args, locale, serverId
 
 This example keeps the catalog in the bot. For an external source, replace filtering with a **metadata** search, pass `signal` to `fetch`, and validate the response. The callback receives neither an invocation nor reply/download methods. Queries are sent to the selected bot while the person types; they are not published in the channel or persisted in history.
 
-The client debounces for 250 ms; the server allows one request per user every 500 ms, combining their devices, with a 15-second deadline per page. Return at most **20 choices per response**, with unique values: `label` up to 100 characters, `value` up to 2,000, and `description` up to 500. **The accumulated menu has no total result cap.** `query` accepts up to 200 characters; a bot may impose a smaller limit.
+The client waits for **700 ms without typing** and spaces actual sends by at least **1 second** per connection, including between pages and after reopening the menu. Local preparation happens before reserving that interval and before starting the response deadline. The server still allows one request per user every 500 ms, combining their devices, with a 15-second deadline per page. Return at most **20 choices per response**, with unique values: `label` up to 100 characters, `value` up to 2,000, and `description` up to 500. **The accumulated menu has no total result cap.** `query` accepts up to 200 characters; a bot may impose a smaller limit.
 
 To enable on-demand scrolling, return `hasMore: true` while another page exists. The client increments `page` near the end of the list, keeps earlier choices, and deduplicates by `value`. If the source uses cursors or a source page needs to be split into batches, also return `nextCursor` (an opaque string of up to 512 characters); the client passes it back as `cursor`. Validate cursors in the provider: they are not authorization and must not be treated as trusted URLs. Do not fetch every page in advance.
 
@@ -525,7 +525,7 @@ autocomplete: ({ query, page }) => {
 },
 ```
 
-Omitting `hasMore` (including legacy array returns) keeps the response a single list. Return `hasMore: false` on the final page and omit `nextCursor`; an empty list ends a search without continuation. Loading failures keep existing results and allow retrying the same page. Closing the composer, changing the search, cancellation, access loss, or disconnection invalidates the context; late responses are discarded. On-demand previews retain each page's own authorization and expiry rather than becoming invalid just because the next page loads. The SDK, server, and client must use protocol 18; existing array callbacks do not need changes after updating the SDK.
+Omitting `hasMore` (including legacy array returns) keeps the response a single list. Return `hasMore: false` on the final page and omit `nextCursor`; an empty list ends a search without continuation. Loading failures keep existing results and allow retrying the same page. Closing the composer, changing the search, cancellation, access loss, or disconnection invalidates the context; late responses are discarded. On-demand previews retain each page's own authorization and expiry rather than becoming invalid just because the next page loads. The SDK, server, and client must use protocol 19; existing array callbacks do not need changes after updating the SDK.
 
 Arrow keys only navigate. Enter or a click confirms a suggestion. **Without optional parameters, if every required parameter is valid, the same gesture executes the command exactly once.** If optional parameters exist, selection only fills the field: the composer stays open to use `+N`, and a later Enter or the execute button submits. Missing required parameters must be filled before execution. Typing text without a valid choice does not execute the command. Editing the text invalidates the previous selection. `value` is an opaque identifier, not authorization: the handler must validate it again before resolving the result's metadata.
 
@@ -1046,21 +1046,101 @@ In marketplace mode, TOFU binding happens automatically during installation.
 
 Each server has an independent queue and one active voice channel for that queue. All music commands, searches and private previews require voice membership, including `/queue` and `/nowplaying`. The first `/play` brings the bot to the caller's room; if it is already in another room, the request is rejected with instructions to join it. No DJ role is required, but Monky's general command permissions still apply. Playback does not belong to the `/play` handler: finishing or expiring that invocation does not end tracks that are already queued.
 
-Music uses only `/play`, not a separate `/query`. Search reuses the 250/500 ms autocomplete; listening generates up to 10 seconds for that person only, without adding to the queue. Selecting a result and executing `/play` is what adds the track.
+Music uses only `/play`, not a separate `/query`. Search waits for 700 ms without typing and reuses autocomplete request pacing; local preparation and authorization happen before starting the search deadline. Listening generates up to 10 seconds for that person only, without adding to the queue. Selecting a result and executing `/play` is what adds the track.
 
-Search, source resolution, and audio conversion run **in the external MonkyBot process**, not on the Monky server or the requesting user's computer. This differs from `ctx.downloadSound()`, which requests an authorized local soundboard download.
+In `youtube-local` mode, search, source resolution, and audio conversion belong to **the requesting person's client**, in an isolated Node process with Monky-managed tools. MonkyBot retains the queue, controls, and room publication, so it can remain hosted on a VPS. There is no alternative VPS execution or automatic transfer to another participant or device. `ctx.downloadSound()` remains a different operation: an authorized soundboard download, not a continuous music source.
+
+If the current track's requester leaves the room or disconnects their client, the bot stops that track, announces it in chat, and skips it. That session's upcoming tracks remain queued while it is unavailable; eligible requests from other people may continue. Another session on the same account does not replace the original one. A queue with no eligible tracks still follows the configured idle departure policy, and closing the queue releases its references.
 
 This first version does not support Spotify, playlists, albums, or live streams. Extracting YouTube media is not an official audio API for bots and may stop working because of platform restrictions or changes. Only play content you are authorized to use and respect [YouTube's terms and policies](https://developers.google.com/youtube/terms/developer-policies). The bot repository documents media prerequisites and unavailability messages.
 
 See the [Monky Bot repository](https://github.com/MonkyOrg/MonkyBot) for installation and usage instructions.
 
+## Local capability execution
+
+This infrastructure belongs to the SDK and client, not exclusively to MonkyBot. A command declares `localCapabilities: ['youtube-audio']` only when it needs local processing. Control commands and queue queries must not require installation just to execute.
+
+When the person **selects the command**, by click or keyboard, Monky starts its prerequisites before argument entry, search, or execution. When needed, authorization is requested **per bot, server, installation, and public key**, on this device. The person can deny access, allow it until the server connection ends, or keep authorization until revocation. Equal names do not share permission. Merely browsing the list does not request authorization. Closing the command or changing channels cancels its preparation; a late completion cannot execute the command.
+
+The request uses a Monky-styled, Main-owned modal. Before approval, it describes Node.js, yt-dlp, and FFmpeg, each tool's purpose, and a conservative additional-storage ceiling, distinguishing installed files from new downloads. After approval, the **same modal** tracks installation: downloads show actual bytes and a progress bar; lookup, verification, and extraction use an animation without invented percentages. Choices and progress remain visible even when the description needs scrolling. The command is released only after preparation and authorization finish.
+
+Completed preparation is reused on the same connection, including when selecting the command again. Editing the query shows search loading, not a new installation notice. If installation fails, **Try again** repeats preparation in the same modal, preserving the chosen duration and reusing completed tools. If previous cleanup failed, this action retries cleaning retained files before installing again, only after confirming that native processes have stopped. An invalid tool or persistent lock still blocks installation; the error and attempt number remain visible. Cancelling installation waits for shutdown and cleanup; failed preparation does not save a new permission.
+
+Tasks still verify executable integrity before use. The client reuses only the native version-check result of a generation already verified in this process; replacing files, removing a tool, or restarting the client requires a new check. For music, local streaming already resolves a fresh source and reauthorizes the requester, so the queue does not create another lookup task immediately before it. Enqueue and skip requests receive processing acknowledgements, and each track has a preparation notice before **Now playing**; the playback notice appears only after the first frame is sent to voice.
+
+Search, preview, command startup, bot replies, form/selector submissions, downloads, and cancellation use animated waiting indicators while preserving localized text and available cancellation controls. Indicators stop on completion or failure and respect the system's reduced-motion preference.
+
+In **Settings → Bot tools**, the person can inspect installed tools, versions, storage, cache, permissions, and tasks. **Manage local permissions and tools** in bot settings opens this personal section, not an administrative server permission.
+
+**Remove tool** and **Clear cache** also use a Monky-styled confirmation instead of a native system dialog. The same modal shows progress, allows retrying a failed operation, and closes only after completion. The person can cancel before confirming; once confirmed, cleanup must finish stopping affected tasks. The settings tab releases other actions as soon as the operation finishes, without waiting for inventory refresh; unanswered reads show an error that allows another refresh.
+
+- **Tools:** portable Node.js, yt-dlp, and FFmpeg come from Monky-known recipes with integrity verification. They are not global installations or changes to the person's `PATH`.
+- **Sharing:** bots may reuse the same installed files; their authorizations remain separate.
+- **Revocation and removal:** stop affected work. Removing a tool revokes dependent capabilities; the bot cannot silently reinstall it.
+- **Clear cache:** stops local tasks but keeps tools and permissions. Displayed space is retained storage, not the total audio already transmitted.
+
+::: warning Trust and connectivity limits
+A separate process improves lifecycle isolation but **is not an operating-system sandbox**. The SDK requests fixed operations; it does not receive a shell API, executable paths, or bot-supplied scripts. Electron Main validates consent, rather than a renderer preference granting it.
+
+Transmission requires a private WebRTC channel between client and bot, even when the room uses SFU. A working SFU call does not prove this private path is reachable. The existing server-authorized ICE configuration is reused; there is no automatic TURN activation, WebSocket audio, or replacement executor if the connection fails.
+:::
+
+### SDK contracts
+
+`BotClient` implements `LocalExecutionProvider`: obtain the execution client with `const client = bot.localExecution(serverId)`. The public `LocalExecutionClient`, `LocalExecutor`, and `LocalOpusStream` contracts separate the authorized source, each task, and the playback clock:
+
+| Operation | Responsibility |
+|-----------|----------------|
+| `bot.localExecution(serverId)` | Select the server connection without selecting another user |
+| `client.executor(context)` | Use an authorized invocation, autocomplete, preview, or source reference |
+| `executor.execute(spec, { signal })` | Execute `youtube.search`, `youtube.resolve`, or `youtube.preview` |
+| `client.retainSource(invocationId, url, { signal })` | Retain an item's origin and canonical URL from a real invocation |
+| `client.checkSourceAvailability(sourceContextId, voiceChannelId, { signal })` | Confirm the original connection's presence and access without starting a client task |
+| `executor.stream(spec, { voiceChannelId, signal })` | Open a new `youtube.stream` task for the current room |
+| `client.releaseSource(sourceContextId)` | Release a removed or completed item's reference |
+
+In autocomplete and preview contexts, `requestId` is the server-remapped identifier delivered to the SDK callback. The returned preview may contain a different `requestId` from the original client request: return `LocalWirePreviewResult` without rewriting its fields. It contains references only; Ogg bytes remain on the originating client. `LocalMediaTrack` metadata has no `audioUrl`, and Main authorization tokens never belong in command messages.
+
+A retained reference is not an active task. Do not make the invocation's `AbortSignal` the playback lifetime, or substitute another session on the same account after disconnection. Each playback opens a new task subject to current authorization and presence.
+
+To resume entries waiting for their requester, use `checkSourceAvailability()`: the server checks the retained source, original physical connection, room, and current access. Success does not install tools, open a transport, or replace consent and the next stream's admission. Leaving and rejoining voice on the same connection can make the source available; reconnecting the client cannot revive references from the closed connection, even when reusing the same `invokerSessionId`. `voiceParticipantsChanged` events may trigger sequential, coalesced checks, but participant counts, a recent command, or another session are never authorization.
+
+The stream provides Opus packets through `frames`. The bot maintains a 20 ms cadence and calls `markFrameAdvanced()` **once per frame consumed by its clock**, after `writeOpus()`. Prefetch, receive credit, and arriving bytes are not playback progress. Await `setPaused()` and observe `stream.signal` even while the queue is paused. `LocalExecutionError.event` distinguishes failure, voice departure, disconnection, and revocation; notifications and queue changes remain bot policy.
+
+A rejection before task admission, or during a source-reference/control operation, uses `LocalExecutionRpcError`. Inspect `code` and, when present, `reason` or `cancellationCause`; this error does not invent a task event. Do not classify a consent refusal or transport failure as provider authentication failure.
+
+Decoder EOF does not mean the last frame has been consumed. Preserve the tail through final acknowledgments: `stream.closed` resolves only after playback drain and server-confirmed completion, and rejects on failure or cancellation. Await `stream.close()` to cancel active work or await completion of an already-drained stream; rejection of `closed` alone does not replace teardown. Closing a stream does not automatically release its source reference. On the client, the native process may finish before playback acknowledgments without losing cancellation or revocation of the remaining task.
+
+Using the requester's computer does not guarantee provider acceptance. The initial capability accepts eligible individual public YouTube videos only, without accounts, cookies, or bypassing restrictions. Provider refusals remain explicit errors.
+
+### Integrated checkout validation
+
+The modal and search feedback have dedicated regressions in `npm run test:local-execution --workspace=@monky/client`. To exercise only modal presentation, decisions, progress, and cancellation, use `npm run test:local-preparation --workspace=@monky/client`. Its preload is an isolated bundle, also generated by the normal build, preserving `sandbox: true` without exposing a generic API to the document.
+
+After building Monky, the test below starts an isolated server, SDK, and two Electron clients in real P2P and SFU rooms. It measures decoded listener audio and checks consent, mute/PTT, pause, voice departure, final drain, and resource teardown. It does not reuse personal profiles or servers.
+
+```powershell
+$env:MONKY_WORKER_TEST_FFMPEG = 'C:\path\ffmpeg.exe'
+npm run test:local-execution:e2e --workspace=@monky/client
+```
+
+To also exercise **MonkyBot's production command registration**, build the bot with the compatible SDK installed and, from the Monky root, select its checkout:
+
+```powershell
+$env:MONKY_LOCAL_E2E_MUSIC_BOT_ROOT = 'C:\path\MonkyBot'
+npm run test:local-execution:e2e --workspace=@monky/client
+Remove-Item Env:\MONKY_LOCAL_E2E_MUSIC_BOT_ROOT
+```
+
+This mode loads the SDK actually installed in the bot and exercises search, preview, `/play`, a mixed queue, `/pause`, requester rejoin, and `/skip` through the UI. Both modes use controlled authored audio: they do not access YouTube or prove that the provider will accept a real request.
+
 ## Bot voice
 
-The SDK separates the voice connection from the audio source. `bot.joinVoice(serverId, channelId, options?)` creates the server's appropriate P2P or SFU connection; decoding tracks, maintaining the queue, and pacing playback belong to the bot process. Text-only bots do not need to start media connections.
+The SDK separates the voice connection from the audio source. `bot.joinVoice(serverId, channelId, options?)` creates the server's appropriate P2P or SFU connection; the bot maintains the queue and publication clock. Decoding may belong to its own local source or an authorized capability on a participant's client. Text-only bots do not need to start media connections.
 
 The bot joins with its personal mute and deafen states off; existing administrative restrictions still apply. The current SDK transmits audio but does not yet offer an API to receive participants' voices ([#642](https://github.com/MonkyOrg/Monky/issues/642)). That limitation is not represented as the bot choosing to deafen itself.
 
-Declare `voiceRequirement: 'joined'` for commands that require voice, or `'same-bot-channel'` when callers must also share the bot's room if it has already joined voice. Omitting this field preserves ordinary command behavior. Client and server apply the rule to execution, autocomplete and previews; the server checks that exact person's connection, not another device on the same account. Leaving or moving cancels pending work and invalidates choices/previews, without retargeting the request to another room or interrupting already accepted playback.
+Declare `voiceRequirement: 'joined'` for commands that require voice, or `'same-bot-channel'` when callers must also share the bot's room if it has already joined voice. Omitting this field preserves ordinary command behavior. Client and server apply the rule to execution, autocomplete and previews; the server checks that exact person's connection, not another device on the same account. Leaving or moving cancels pending work and invalidates choices/previews without retargeting the request to another room. An independent bot-hosted source does not belong to the invocation lifetime; a client-delegated stream, however, depends on its executor's voice presence.
 
 Command contexts contain server-authenticated `invokerSessionId` and `invokerVoiceChannelId`. They describe the initial execution; the latter is `null` when the connection invoking the command is not in voice. **The field is not a live getter.** After a search, form, or other wait, use `await ctx.getVoiceChannel()` to query the original connection's current room from the server. Do not look up the room by `invokerId` alone: the same person may be connected on two devices in different rooms.
 
@@ -1193,6 +1273,7 @@ Limits are 128 KiB of HTML, 64 KiB of state, and 8 KiB per action; JSON allows u
 | `bot.disconnect(serverId?)` | Disconnect from one or all servers |
 | `bot.close()` | Close the bot's connections and HTTP servers |
 | `bot.serve(options)` | Start HTTP server for marketplace |
+| `bot.localExecution(serverId)` | Obtain local executors and manage authorized source references |
 | `bot.joinVoice(serverId, channelId, { invocationId }?)` | Join voice, using invocation authorization when supplied |
 | `bot.getVoiceConnection(serverId)` | Obtain that server's active voice connection |
 | `bot.leaveVoice(serverId)` | Close the connection and release media resources |

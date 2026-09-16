@@ -12,6 +12,7 @@ import { getActiveServerStore, type ServerStore } from '../stores/serverStore';
 import { settingsStore } from '../stores/settingsStore';
 import { getLanguage, SUPPORTED_LANGUAGES, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { renderLoadingIndicator } from '../utils/loadingIndicator';
 import { getAvatarUrl } from '../utils/avatar';
 import { enableBackdropClose } from '../utils/modal';
 import { botPreferenceScope } from '../utils/botPreferenceScope';
@@ -352,7 +353,7 @@ export class BotSettingsModal {
         <button type="button" class="modal-close-btn" data-settings-close aria-label="${t('common.close')}"><span class="material-symbols-outlined">close</span></button>
       </div>
       <div class="bot-settings-body" aria-busy="${this.loading}">
-        ${this.loading ? renderLoadingSkeleton('lines', 5) : snapshot ? `
+        ${this.loading ? `<p class="bot-status" role="status">${renderLoadingIndicator(t('botSettings.loading'))}</p>${renderLoadingSkeleton('lines', 5)}` : snapshot ? `
           <div class="bot-settings-identity">
             <img src="${escapeHtml(getAvatarUrl(snapshot.bot.avatarUrl))}" alt="" data-fallback="avatar">
             <div><div class="bot-settings-name">${escapeHtml(snapshot.bot.name)}</div>
@@ -365,6 +366,10 @@ export class BotSettingsModal {
           ).join('')}</div>` : `<p class="bot-status">${t('botSettings.noPreferences')}</p>`}
           ${active && draft ? `<div role="tabpanel" id="bot-settings-panel" aria-labelledby="bot-settings-tab-${this.scope}">
             <p class="bot-settings-description">${t(this.scope === 'user' ? 'botSettings.userDescription' : 'botSettings.serverDescription')}</p>
+            ${this.scope === 'user' ? `<button type="button" class="btn btn-secondary" data-settings-local-tools>
+              <span class="material-symbols-outlined md-16" aria-hidden="true">build</span>
+              ${escapeHtml(t('localExecution.managePermissions'))}
+            </button>` : ''}
             <form id="bot-settings-form" class="bot-settings-form" novalidate>
               <fieldset ${this.blocked() ? 'disabled' : ''}>
                 ${this.scope === 'user' ? `<div class="bot-settings-host-preference bot-field">
@@ -400,9 +405,9 @@ export class BotSettingsModal {
       </div>
       <div class="modal-footer">
         ${this.selectedBotId ? `<button type="button" class="btn btn-secondary" data-settings-back ${this.saving ? 'disabled' : ''}>${t('common.back')}</button>` : ''}
-        <button type="button" class="btn btn-secondary" data-settings-reload ${this.loading || this.saving ? 'disabled' : ''}>${t('botSettings.reload')}</button>
+        <button type="button" class="btn btn-secondary" data-settings-reload ${this.loading || this.saving ? 'disabled' : ''} ${this.loading ? 'data-loading="1" aria-busy="true"' : ''}>${t('botSettings.reload')}</button>
         ${active && !this.loading ? `<button type="button" class="btn btn-secondary" data-settings-defaults ${this.blocked() ? 'disabled' : ''}>${t('botSettings.defaults')}</button>
-          <button type="submit" form="bot-settings-form" class="btn btn-primary" data-settings-save ${this.blocked() ? 'disabled' : ''}>
+          <button type="submit" form="bot-settings-form" class="btn btn-primary" data-settings-save ${this.blocked() ? 'disabled' : ''} ${this.saving ? 'data-loading="1" aria-busy="true"' : ''}>
             ${t(this.saving ? 'botSettings.saving' : 'common.save')}</button>` : ''}
       </div>
     </div>`;
@@ -452,6 +457,12 @@ export class BotSettingsModal {
     if (target.closest('[data-settings-close]')) { this.close(); return; }
     if (!this.session || !this.isCurrent(this.session)) { this.close(); return; }
     if (this.loading || this.saving) return;
+    if (this.scope === 'user' && target.closest('[data-settings-local-tools]')) {
+      this.close();
+      void import('./SettingsModal').then(({ settingsModal }) => settingsModal.open('local_tools', 'local-tools-permissions'))
+        .catch(() => showAlert({ title: t('settings.tabLocalTools'), message: t('localExecution.failure.executor_unavailable'), variant: 'warning' }));
+      return;
+    }
     const bot = target.closest<HTMLElement>('[data-settings-bot]')?.dataset.settingsBot;
     if (bot) { void this.loadBot(bot); return; }
     if (target.closest('[data-settings-back]')) { void this.loadList(); return; }

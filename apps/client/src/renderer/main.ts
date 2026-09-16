@@ -34,6 +34,7 @@ import { callClient, leaveCurrentCall, rejoinCallOnSession, suspendCallForNetwor
 import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeReconnect';
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
+import type { LocalExecutionTaskNotice } from './core/LocalExecutionController';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
 import { soundEffects } from './core/SoundEffects';
 import { soundboardService } from './core/SoundboardService';
@@ -155,6 +156,7 @@ class App {
     window.addEventListener('pagehide', () => {
       this.autoEntryService.dispose();
       this.connectionView.dispose();
+      sessionManager.dispose();
     }, { once: true });
 
     // Must run before any await in init(): otherwise the Windows-style window
@@ -382,6 +384,17 @@ class App {
   private setupGlobalEventListeners(): void {    // Global Keybind Actions (#252)
     const unbindCameraPublication = bindCameraPublication();
     window.addEventListener('pagehide', unbindCameraPublication, { once: true });
+    const unbindLocalExecution = appEvents.on('localExecution.task_failed', (notice: LocalExecutionTaskNotice) => {
+      if (!sessionManager.get(notice.sessionKey)) return;
+      void showAlert({
+        title: t('settings.tabLocalTools'),
+        message: t('localExecution.taskFailed', {
+          bot: notice.botName, server: notice.serverName, error: t(`localExecution.failure.${notice.reason}`),
+        }),
+        variant: 'danger',
+      });
+    });
+    window.addEventListener('pagehide', unbindLocalExecution, { once: true });
     appEvents.on<unknown>('camera.error_notice', (error) => {
       void showAlert({
         title: t('stage.cameraErrorTitle'),

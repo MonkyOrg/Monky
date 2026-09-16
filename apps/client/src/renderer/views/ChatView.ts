@@ -2418,11 +2418,8 @@ export class ChatView {
     const draft = chatStore.getCommandDraft(this.currentChannelId);
     if (draft && !command.options?.length && text.trim()) {
       chatStore.setCommandPending(this.currentChannelId, draft, false, t('botChat.unexpectedText'));
-    } else if (draft && !command.options?.length && autoInvoke) {
-      void this.botChat?.invoke(userGesture);
-      return;
     }
-    this.botChat?.focusComposer();
+    void this.botChat?.activateCommand(userGesture, autoInvoke);
   }
 
   private closeCommandDropup(): void {

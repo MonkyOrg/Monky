@@ -7,6 +7,7 @@ import { currentEventOrigin } from '../core/sessionRouting';
 import type { ServerStore } from '../stores/serverStore';
 import { getLanguage, t } from '../i18n';
 import { escapeHtml } from '../utils/html';
+import { renderLoadingIndicator } from '../utils/loadingIndicator';
 import { audioPreviewService } from '../core/AudioPreviewService';
 import { botUserSettingsPayload } from '../utils/botSettingsContext';
 import {
@@ -136,9 +137,11 @@ export class PublicSelectorView {
       const permitted = this.client.getStatus() === 'CONNECTED' && channel?.botCommandsEnabled !== false &&
         this.server.hasPermission(Permission.READ_MESSAGES) &&
         this.server.hasPermission(Permission.SEND_MESSAGES) && this.server.hasPermission(Permission.USE_BOT_COMMANDS);
-      const disabled = closed || !permitted || !selector.canRespond || this.pending.has(selector.id);
+      const pending = this.pending.has(selector.id);
+      const disabled = closed || !permitted || !selector.canRespond || pending;
+      controls.setAttribute('aria-busy', String(pending));
       const selected = this.drafts.get(selector.id) ?? selector.ownResponse ?? selector.choices[0]?.value ?? '';
-      const renderKey = JSON.stringify([selector, selected, disabled, closed, this.errors.get(selector.id), getLanguage()]);
+      const renderKey = JSON.stringify([selector, selected, disabled, closed, pending, this.errors.get(selector.id), getLanguage()]);
       if (this.rendered.get(selector.id) === renderKey) continue;
       const selectorChoices: RenderableSelectionChoice[] = selector.choices.map((choice) => ({
         ...choice, count: selector.counts[choice.value] ?? 0,
@@ -182,7 +185,7 @@ export class PublicSelectorView {
       ].filter(Boolean).join(' · ');
       const html = `${choices}<p class="bot-status" role="status">${closed
         ? t('botSelector.closed')
-        : this.pending.has(selector.id) ? t('botChat.submitting')
+        : pending ? renderLoadingIndicator(t('botChat.submitting'))
           : t('botSelector.responses', { count: selector.responseCount })}</p>
         <p class="bot-field-description">${escapeHtml(conditions)}</p>
         <p class="bot-error" role="alert" ${this.errors.has(selector.id) ? '' : 'hidden'}>${escapeHtml(this.errors.get(selector.id) ?? '')}</p>`;

@@ -13,6 +13,8 @@ import {
 } from '@monky/shared';
 import { SoundboardDownloads } from './soundboardDownload';
 import { AudioPreviews } from './audioPreviews';
+import { createLocalExecutionService } from './localExecution/createService';
+import { setupLocalExecutionIpc, type LocalExecutionIpc } from './localExecution/ipc';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
@@ -349,12 +351,14 @@ export function setupIpcHandlers(
   serverManager: ServerManager,
   trayManager?: TrayManager,
   options?: SetupIpcOptions
-): void {
+): LocalExecutionIpc {
   const lanDiscovery = new LanDiscovery(mainWindow);
   globalInputHook.init(mainWindow);
   const overlayManager = options?.overlayManager || new OverlayManager(mainWindow);
   const soundDownloads = new SoundboardDownloads(path.join(app.getPath('userData'), 'soundboard-folder.json'));
   const audioPreviews = new AudioPreviews();
+  const localExecution = setupLocalExecutionIpc(mainWindow, (notifications) =>
+    createLocalExecutionService(mainWindow, app.getPath('userData'), notifications));
   const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
     event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
   ipcMain.handle(SOUND_DOWNLOAD_IPC.availability, async (event, folder: unknown): Promise<SoundboardDownloadAvailability> =>
@@ -1327,4 +1331,5 @@ export function setupIpcHandlers(
     void lanDiscovery.stop();
     globalInputHook.destroy();
   });
+  return localExecution;
 }

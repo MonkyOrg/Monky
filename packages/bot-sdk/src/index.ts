@@ -5,10 +5,21 @@ import { isDeepStrictEqual } from 'util';
 import WebSocket from 'ws';
 import { BotVoiceConnection } from './voice/BotVoiceConnection';
 import { BotScreenClient } from './BotScreenClient';
+import {
+  BotLocalExecutionClient, type LocalExecutionCaller, type LocalExecutionConnection,
+  type LocalExecutionContextLifetime,
+} from './localExecution/LocalExecutionClient';
+import type { LocalExecutionClient } from './localExecution/contracts';
 import { botVoiceAuthSchema, botVoiceContextResultSchema, botVoiceJoinOptionsSchema, type BotVoiceAuth, type BotVoiceJoinOptions } from '@monky/shared';
-export type { BotVoiceJoinOptions } from '@monky/shared';
+export type {
+  BotVoiceJoinOptions, LocalCapabilityId, LocalMediaTrack, LocalPreviewReference, LocalRequestContext,
+  LocalSourceContext, LocalSourceFailure, LocalTaskCancellationCause, LocalTaskEvent, LocalTaskFailureReason,
+  LocalTaskSpec, LocalWirePreviewResult, LocalWireTaskResult,
+} from '@monky/shared';
 export { BotVoiceConnection } from './voice/BotVoiceConnection';
 export { BotScreenClient } from './BotScreenClient';
+export * from './managedTools';
+export * from './localExecution/contracts';
 import {
   LIMITS,
   MessageType,
@@ -40,6 +51,8 @@ import {
   commandResponseSchema,
   commandRequestIdSchema,
   commandSoundDownloadResultSchema,
+  localWireTaskResultSchema,
+  localBotIdentitySchema,
   soundDownloadRequestSchema,
   commandSubmitSchema,
   resolveBotSettingsValues,
@@ -70,6 +83,7 @@ import type {
   CommandExecutionPayload,
   CommandAutocompleteChoice,
   CommandAutocompletePage,
+  CommandCallerContext,
   CommandAutocompleteExecutionPayload,
   CommandAutocompleteResultPayload,
   CommandAudioPreviewExecutionPayload,
@@ -80,6 +94,9 @@ import type {
   CommandResponsePayload,
   CommandValues,
   CommandVoiceRequirement,
+  LocalCapabilityId,
+  LocalRequestContext,
+  LocalWirePreviewResult,
   SoundDownloadRequest,
   SoundDownloadResult,
   ChatMessage,
@@ -109,16 +126,20 @@ export interface CommandDefinition {
   options?: CommandOption[];
   downloadsSound?: boolean;
   voiceRequirement?: CommandVoiceRequirement;
+  localCapabilities?: LocalCapabilityId[];
   autocomplete?: (
     ctx: CommandAutocompleteContext
   ) => CommandAutocompleteChoice[] | CommandAutocompletePage | Promise<CommandAutocompleteChoice[] | CommandAutocompletePage>;
   audioPreview?: (
     ctx: CommandAudioPreviewContext
-  ) => CommandAudioPreviewData | Promise<CommandAudioPreviewData>;
+  ) => CommandAudioPreviewResponse | Promise<CommandAudioPreviewResponse>;
   handler: (ctx: CommandContext) => void | Promise<void>;
 }
 
-export interface CommandAutocompleteContext {
+export interface CommandAutocompleteContext extends CommandCallerContext {
+  /** Server-remapped correlation for this live interaction, not the UI request ID. */
+  requestId: string;
+  commandName: string;
   query: string;
   /** Zero-based page. Legacy searches start at zero. */
   page: number;
@@ -131,7 +152,10 @@ export interface CommandAutocompleteContext {
   signal: AbortSignal;
 }
 
-export interface CommandAudioPreviewContext {
+export interface CommandAudioPreviewContext extends CommandCallerContext {
+  /** Server-remapped correlation for this live interaction, not the UI request ID. */
+  requestId: string;
+  commandName: string;
   resourceId: string;
   serverId: string;
   locale: BotLocale;
@@ -146,8 +170,11 @@ export interface CommandAudioPreviewData {
   mimeType: CommandAudioPreviewMimeType;
 }
 
+export type CommandAudioPreviewResponse = CommandAudioPreviewData | LocalWirePreviewResult;
+
 export interface CommandContext {
   invocationId: string;
+  botId: string;
   commandName: string;
   channelId: string;
   invokerId: string;
@@ -206,6 +233,7 @@ interface PendingPrompt {
 
 interface Invocation {
   controller: AbortController;
+  caller: LocalExecutionCaller;
   prompt: PendingPrompt | null;
   download: PendingSoundDownload | null;
   downloadUsed: boolean;
@@ -228,6 +256,7 @@ interface PendingSoundDownload {
 
 interface AutocompleteExecution {
   controller: AbortController;
+  caller: LocalExecutionCaller;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -299,6 +328,13 @@ function immutableCopy<T>(value: T): T {
   return freezeData(structuredClone(value));
 }
 
+function localExecutionCaller(caller: CommandCallerContext): LocalExecutionCaller {
+  return Object.freeze({
+    botId: caller.botId, channelId: caller.channelId,
+    invokerId: caller.invokerId, invokerSessionId: caller.invokerSessionId,
+  });
+}
+
 function checkedSettingsValues(
   form: BotForm | undefined, values: BotFormValues, scope: 'server' | 'user'
 ): BotFormValues {
@@ -318,6 +354,7 @@ function checkedSettingsValues(
 export class BotClient extends EventEmitter {
   private audioPreviewWork = 0;
   private voiceCleanup = new Set<Promise<void>>();
+  private localExecutionClients = new Map<string, BotLocalExecutionClient>();
   private resourceRequests = new Map<string, {
     conn: ServerConnection;
     resolve: (value: unknown) => void;
@@ -356,6 +393,70 @@ export class BotClient extends EventEmitter {
 
   listScreens(serverId: string, channelId: string): Promise<BotScreen[]> {
     return this.screens.listScreens(serverId, channelId);
+  }
+
+  localExecution(serverId: string): LocalExecutionClient {
+    if (this.closing) throw new Error('This bot client has been closed.');
+    this.requireConnection(serverId);
+    const existing = this.localExecutionClients.get(serverId);
+    if (existing) return existing;
+    const botPublicKey = localBotIdentitySchema.shape.botPublicKey.parse(this.options.publicKey);
+    const isCurrent = (connection: LocalExecutionConnection): boolean => {
+      const conn = this.connections.get(serverId);
+      return !this.closing && !!conn && conn.connected && !conn.disposed && conn.ws === connection.ws &&
+        connection.ws.readyState === WebSocket.OPEN && conn.botId === connection.botId &&
+        conn.voiceAuth?.currentUser.id === connection.botId &&
+        conn.voiceAuth.currentUser.sessionId === connection.botSessionId;
+    };
+    const client = new BotLocalExecutionClient({
+      connection: () => {
+        if (this.closing) throw new Error('This bot client has been closed.');
+        const conn = this.requireConnection(serverId);
+        if (!conn.ws || !conn.voiceAuth || conn.botId !== conn.voiceAuth.currentUser.id) {
+          throw new Error('Server did not supply valid authenticated local execution metadata.');
+        }
+        return {
+          ws: conn.ws, botId: conn.botId, botSessionId: conn.voiceAuth.currentUser.sessionId, botPublicKey,
+        };
+      },
+      isCurrent,
+      captureContext: (connection, context) => this.captureLocalExecutionContext(serverId, connection, context),
+      send: (connection, message) => {
+        if (!isCurrent(connection)) throw new Error('Local execution signaling disconnected.');
+        this.sendToConn(this.requireConnection(serverId), message);
+      },
+      reportError: (error) => this.reportError(error, this.connections.get(serverId)),
+    });
+    this.localExecutionClients.set(serverId, client);
+    return client;
+  }
+
+  private captureLocalExecutionContext(
+    serverId: string, connection: LocalExecutionConnection,
+    context: Exclude<LocalRequestContext, { kind: 'source' }>,
+  ): LocalExecutionContextLifetime {
+    const conn = this.requireConnection(serverId);
+    const current = () => {
+      switch (context.kind) {
+        case 'invocation': return conn.invocations.get(context.invocationId);
+        case 'autocomplete': return conn.autocompletes.get(context.requestId);
+        case 'audio-preview': return conn.audioPreviews.get(context.requestId);
+      }
+    };
+    const pending = current();
+    if (conn.ws !== connection.ws || !pending || pending.controller.signal.aborted ||
+        pending.caller.botId !== connection.botId) {
+      throw new Error('The local execution context is not a live interaction on this connection.');
+    }
+    return {
+      caller: pending.caller, signal: pending.controller.signal,
+      isCurrent: () => this.connections.get(serverId) === conn && conn.ws === connection.ws &&
+        current() === pending && !pending.controller.signal.aborted,
+    };
+  }
+
+  private disposeLocalExecution(conn: ServerConnection): void {
+    if (conn.ws) this.localExecutionClients.get(conn.serverId)?.disconnect(conn.ws);
   }
 
   joinVoice(serverId: string, channelId: string, options: BotVoiceJoinOptions = {}): Promise<BotVoiceConnection> {
@@ -431,6 +532,7 @@ export class BotClient extends EventEmitter {
       localizations: def.localizations,
       downloadsSound: def.downloadsSound,
       voiceRequirement: def.voiceRequirement,
+      localCapabilities: def.localCapabilities,
     });
     if (typeof def.handler !== 'function') throw new TypeError('A command handler is required.');
     if ((def.autocomplete !== undefined && typeof def.autocomplete !== 'function') ||
@@ -445,8 +547,8 @@ export class BotClient extends EventEmitter {
     }
     commandDefinitionsSchema.parse([
       ...[...this.commands.values()].filter((command) => command.name !== definition.name)
-        .map(({ name, description, options, localizations, downloadsSound, voiceRequirement }) => ({
-          name, description, options, localizations, downloadsSound, voiceRequirement,
+        .map(({ name, description, options, localizations, downloadsSound, voiceRequirement, localCapabilities }) => ({
+          name, description, options, localizations, downloadsSound, voiceRequirement, localCapabilities,
         })),
       definition,
     ]);
@@ -644,7 +746,10 @@ export class BotClient extends EventEmitter {
     this.closing = true;
     this.closePromise = Promise.resolve().then(async () => {
       this.disconnect();
-      await Promise.all([...this.voiceCleanup]);
+      const mediaCleanup = await Promise.allSettled([
+        ...this.voiceCleanup, ...[...this.localExecutionClients.values()].map((client) => client.dispose()),
+      ]);
+      this.localExecutionClients.clear();
       await Promise.allSettled([...this.startingServers]);
       await Promise.all([...this.httpServers].map((server) => new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => server.closeAllConnections(), LIMITS.SHUTDOWN_GRACE_MS);
@@ -656,6 +761,8 @@ export class BotClient extends EventEmitter {
         server.closeIdleConnections();
       })));
       await this.registrationStore.flush();
+      const failure = mediaCleanup.find((result) => result.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
     }).finally(() => {
       this.disconnect();
       this.emit('closed');
@@ -738,6 +845,7 @@ export class BotClient extends EventEmitter {
     });
     ws.on('close', () => {
       if (!isCurrent()) return;
+      this.disposeLocalExecution(conn);
       this.disposeVoice(conn, 'disconnected');
       conn.ws = null;
       conn.connected = false;
@@ -761,6 +869,7 @@ export class BotClient extends EventEmitter {
   }
 
   private teardownConnection(conn: ServerConnection): void {
+    this.disposeLocalExecution(conn);
     this.disposeVoice(conn, 'disconnected');
     conn.disposed = true;
     if (conn.reconnectTimer) clearTimeout(conn.reconnectTimer);
@@ -881,6 +990,7 @@ export class BotClient extends EventEmitter {
   }
 
   private handleMessage(conn: ServerConnection, msg: IncomingMessage): void {
+    if (conn.ws && this.localExecutionClients.get(conn.serverId)?.handle(conn.ws, msg)) return;
     if (this.handleVoiceContext(conn, msg)) return;
     if (conn.voice?.handle(msg)) return;
     if (msg.type === MessageType.SERVER_SETTINGS_UPDATED && conn.voiceAuth && isRecord(msg.payload) &&
@@ -960,6 +1070,7 @@ export class BotClient extends EventEmitter {
         return;
       }
       case MessageType.AUTH_SUCCESS: {
+        if (conn.connected) this.disposeLocalExecution(conn);
         const voiceAuth = botVoiceAuthSchema.safeParse(msg.payload);
         conn.voiceAuth = voiceAuth.success ? voiceAuth.data : undefined;
         const currentUser = isRecord(msg.payload) ? msg.payload.currentUser : undefined;
@@ -1230,8 +1341,8 @@ export class BotClient extends EventEmitter {
     this.sendToConn(conn, {
       type: MessageType.COMMAND_REGISTER,
       payload: {
-        commands: [...this.commands.values()].map(({ name, description, options, localizations, downloadsSound, voiceRequirement }) => ({
-          name, description, options: options ?? [], localizations, downloadsSound, voiceRequirement,
+        commands: [...this.commands.values()].map(({ name, description, options, localizations, downloadsSound, voiceRequirement, localCapabilities }) => ({
+          name, description, options: options ?? [], localizations, downloadsSound, voiceRequirement, localCapabilities,
         })),
         settings: this.settingsDefinition,
       },
@@ -1324,12 +1435,15 @@ export class BotClient extends EventEmitter {
       }
     }, LIMITS.BOT_AUTOCOMPLETE_TIMEOUT_MS);
     timer.unref();
-    const pending: AutocompleteExecution = { controller, timer };
+    const pending: AutocompleteExecution = { controller, timer, caller: localExecutionCaller(payload) };
     conn.autocompletes.set(requestId, pending);
     const isCurrent = () => conn.autocompletes.get(requestId) === pending &&
       conn.connected && !conn.disposed && conn.ws?.readyState === WebSocket.OPEN;
     try {
       const ctx: CommandAutocompleteContext = {
+        requestId, commandName: payload.commandName, botId: payload.botId, channelId: payload.channelId,
+        invokerId: payload.invokerId, invokerSessionId: payload.invokerSessionId,
+        invokerNickname: payload.invokerNickname, invokerVoiceChannelId: payload.invokerVoiceChannelId,
         query: payload.query, optionName: payload.optionName, args: values.values,
         page: payload.page ?? 0, ...(payload.cursor !== undefined ? { cursor: payload.cursor } : {}),
         locale: resolveBotLocale(payload.locale), serverId: conn.serverId, signal: controller.signal, settings,
@@ -1389,20 +1503,27 @@ export class BotClient extends EventEmitter {
       }
     }, LIMITS.BOT_AUDIO_PREVIEW_TIMEOUT_MS);
     timer.unref();
-    const pending: AutocompleteExecution = { controller, timer };
+    const pending: AutocompleteExecution = { controller, timer, caller: localExecutionCaller(payload) };
     conn.audioPreviews.set(requestId, pending);
     this.audioPreviewWork++;
     const isCurrent = () => conn.audioPreviews.get(requestId) === pending &&
       conn.connected && !conn.disposed && conn.ws?.readyState === WebSocket.OPEN;
     try {
       const ctx: CommandAudioPreviewContext = {
+        requestId, commandName: payload.commandName, botId: payload.botId, channelId: payload.channelId,
+        invokerId: payload.invokerId, invokerSessionId: payload.invokerSessionId,
+        invokerNickname: payload.invokerNickname, invokerVoiceChannelId: payload.invokerVoiceChannelId,
         resourceId: payload.resourceId, optionName: payload.optionName, serverId: conn.serverId,
         locale: resolveBotLocale(payload.locale), settings, signal: controller.signal,
       };
       Object.defineProperty(ctx, 'settings', { writable: false, configurable: false });
       const data: unknown = await def.audioPreview(ctx);
       if (!isCurrent()) return;
-      if (!isRecord(data) || !(data.bytes instanceof Uint8Array) || data.bytes.byteLength === 0 ||
+      const local = localWireTaskResultSchema.safeParse(data);
+      if (local.success && local.data.operation === 'youtube.preview') {
+        const { operation: _operation, ...reference } = local.data;
+        sendResult({ status: 'local', ...reference });
+      } else if (!isRecord(data) || !(data.bytes instanceof Uint8Array) || data.bytes.byteLength === 0 ||
           Object.keys(data).some((key) => key !== 'bytes' && key !== 'mimeType')) {
         sendResult({ status: 'failed', reason: 'invalid_response' });
       } else if (data.bytes.byteLength > LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES) {
@@ -1458,6 +1579,7 @@ export class BotClient extends EventEmitter {
     }
     const invocation: Invocation = {
       controller: new AbortController(), prompt: null, download: null, downloadUsed: false, voiceContext: null,
+      caller: localExecutionCaller(payload),
     };
     conn.invocations.set(payload.invocationId, invocation);
     const requireActive = () => {
@@ -1474,6 +1596,7 @@ export class BotClient extends EventEmitter {
     };
     const ctx: CommandContext = {
       invocationId: payload.invocationId,
+      botId: payload.botId,
       commandName: payload.commandName,
       channelId: payload.channelId,
       invokerId: payload.invokerId,

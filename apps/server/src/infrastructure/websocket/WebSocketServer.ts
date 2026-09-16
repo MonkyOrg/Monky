@@ -113,6 +113,7 @@ import {
   adminMuteUserSchema,
   adminDeafenUserSchema,
   hasPermission,
+  localBotIdentitySchema,
 } from '@monky/shared';
 import { AuthService } from '../../application/services/AuthService';
 import { AttachmentService } from '../../application/services/AttachmentService';
@@ -129,6 +130,7 @@ import { BotScreenService } from '../../application/services/BotScreenService';
 import type { ServerMonitorService } from '../../application/services/ServerMonitorService';
 import { ServerMonitorHandler } from './ServerMonitorHandler';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
+import { BotLocalExecutionService } from '../../application/services/BotLocalExecutionService';
 import { SignalingService } from '../../application/services/SignalingService';
 import { UserService } from '../../application/services/UserService';
 import { IServerRepository } from '../../domain/repositories';
@@ -140,6 +142,14 @@ import { Logger } from '../logger/Logger';
 import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
 import { botVoiceJoinSchema, botVoiceChannelSchema, botVoiceSignalSchema } from '@monky/shared';
+
+const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
+  MessageType.BOT_LOCAL_SOURCE_REQUEST,
+  MessageType.BOT_LOCAL_TASK_REQUEST,
+  MessageType.BOT_LOCAL_TASK_CONTROL,
+  MessageType.BOT_LOCAL_TASK_EVENT,
+  MessageType.BOT_LOCAL_MEDIA_SIGNAL,
+]);
 
 interface ClientSession {
   ws: WebSocket;
@@ -168,6 +178,7 @@ interface ClientSession {
   };
   /** The bot record id — set only for bot sessions (#569). */
   botId?: string;
+  botPublicKey?: string;
   botSettingsReady?: boolean;
   /**
    * Channels this connection currently knows about (#384). The server filters
@@ -206,11 +217,14 @@ export class WebSocketServer {
     inFlight: boolean;
   }>();
   private botInteractions: BotInteractionHandler;
+  private botLocalExecution: BotLocalExecutionService<BotInteractionSession>;
   private botSelectors?: BotSelectorHandler;
   private botScreens?: BotScreenHandler;
   private readonly serverMonitor?: ServerMonitorHandler;
   private botSettingsPermissionVersion = 0;
   private botScreenAccessVersion = 0;
+  private localAccessVersion = 0;
+  private pendingLocalAccessMutations = 0;
 
   constructor(
     private server: http.Server,
@@ -273,7 +287,55 @@ export class WebSocketServer {
       sendError: (ws, code, message, requestId) => this.sendError(ws, code, message, requestId),
       broadcastToChannel: (channelId, message, canSend) => this.broadcastToChannel(channelId, message, undefined, canSend),
       publishResponse: (session, response, canSend, requestId) => this.publishBotResponse(session, response, canSend, requestId),
+      localContextEnded: (context, cause) => this.botLocalExecution.contextEnded(context, cause),
+      consumeLocalPreview: (bot, origin, contextId, requestId, result) =>
+        this.botLocalExecution.consumePreview(bot, origin, contextId, requestId, result),
     }, this.channelService, this.userService, this.commandRegistry, this.botSettings);
+    this.botLocalExecution = new BotLocalExecutionService({
+      isCurrent: (session) => this.isCurrentSession(session),
+      accessVersion: () => {
+        const roles = this.channelService.getRoleAccessVersion();
+        return roles === null || this.pendingLocalAccessMutations > 0
+          ? null : `${this.localAccessVersion}:${this.botSettingsPermissionVersion}:${roles}`;
+      },
+      authorizeContext: (session, context, capability) => this.botInteractions.authorizeLocalContext(session, context, capability),
+      authorizeCaller: (userId, channelId) => this.botInteractions.authorizeLocalCaller(userId, channelId),
+      authorizeVoice: (origin, bot, channelId) => this.authorizeLocalVoice(origin, bot, channelId),
+      botIdentity: async (session) => {
+        if (!session.botId) return undefined;
+        const [server, bot] = await Promise.all([this.serverRepo.getServer(), this.botService?.findById(session.botId)]);
+        const key = localBotIdentitySchema.shape.botPublicKey.safeParse(bot?.boundPublicKey);
+        if (!server || !bot || !key.success || !this.isCurrentSession(session)) return undefined;
+        return { serverId: server.id, serverName: server.name, botId: bot.id, botName: bot.name, botPublicKey: key.data };
+      },
+      botBinding: async (botId) => {
+        const bot = await this.botService?.findById(botId);
+        const key = localBotIdentitySchema.shape.botPublicKey.safeParse(bot?.boundPublicKey);
+        return key.success ? key.data : undefined;
+      },
+      commandHasCapability: (botId, name, capability) =>
+        this.commandRegistry.find(botId, name)?.localCapabilities?.includes(capability) === true,
+      voiceChannelId: (session) => session.sessionId
+        ? this.signalingService.getVoiceState(session.sessionId)?.channelId ?? null : null,
+      iceServers: (session) => this.buildLocalIceServersFor(session),
+      send: (session, message) => {
+        if (session.ws.readyState !== WebSocket.OPEN) return false;
+        try {
+          session.ws.send(JSON.stringify(message), (error) => {
+            if (error) {
+              this.botLocalExecution.disconnect(session);
+              Logger.error('BOT', 'Failed to deliver a local execution message.', error);
+            }
+          });
+          return true;
+        } catch (error) {
+          Logger.error('BOT', 'Failed to send a local execution message.', error);
+          return false;
+        }
+      },
+      error: (session, code, reason, requestId) => this.sendError(session.ws, code, reason, requestId),
+      reportError: (error) => Logger.error('BOT', 'Local execution authorization or transport failed.', error),
+    });
     if (this.botService) {
       this.botScreens = new BotScreenHandler(new BotScreenService(), this.channelService, this.userService, {
         sessions: () => this.sessions.values(),
@@ -365,6 +427,7 @@ export class WebSocketServer {
 
     const targets = this.getSessionsOfUser(userId);
     for (const target of targets) {
+      this.botLocalExecution.disconnect(target);
       this.botInteractions.disconnect(target);
       this.disconnectBotScreens(target);
       if (target.sessionId) this.sessionSockets.delete(target.sessionId);
@@ -761,6 +824,7 @@ export class WebSocketServer {
         // as an intentional leave (immediate USER_LEFT, no reconnecting grace).
         session.intentionalLogout = true;
         this.voiceReconnectGrants?.delete(session);
+        this.botLocalExecution.disconnect(session);
         this.botInteractions.disconnect(session);
         this.disconnectBotScreens(session);
         break;
@@ -807,6 +871,19 @@ export class WebSocketServer {
       // ── Slash commands (#569) ────────────────────────────────────────
       case MessageType.COMMAND_REGISTER:
         await this.handleCommandRegister(session, payload, requestId);
+        break;
+
+      case MessageType.BOT_LOCAL_SOURCE_REQUEST:
+      case MessageType.BOT_LOCAL_TASK_REQUEST:
+      case MessageType.BOT_LOCAL_TASK_ACCEPT:
+      case MessageType.BOT_LOCAL_TASK_CONTROL:
+      case MessageType.BOT_LOCAL_TASK_EVENT:
+      case MessageType.BOT_LOCAL_MEDIA_SIGNAL:
+        if (session.isBot && !BOT_LOCAL_ALLOWED_MESSAGES.has(type)) {
+          this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'permission_denied', requestId);
+          break;
+        }
+        await this.botLocalExecution.handle(session, type, payload, requestId);
         break;
 
       case MessageType.BOT_SCREEN_CREATE:
@@ -973,6 +1050,7 @@ export class WebSocketServer {
     if (existingWs && existingWs !== session.ws) {
       const staleSession = this.sessions.get(existingWs);
       if (staleSession) {
+        this.botLocalExecution.disconnect(staleSession);
         this.botInteractions.disconnect(staleSession);
         this.disconnectBotScreens(staleSession);
         this.authService.clearChallenge(existingWs);
@@ -1236,6 +1314,7 @@ export class WebSocketServer {
     session.sessionId = sessionId;
     session.isBot = true;
     session.botId = botRecord.id;
+    session.botPublicKey = localBotIdentitySchema.shape.botPublicKey.parse(botRecord.boundPublicKey);
     session.botSettingsReady = false;
 
     // Replace existing bot session if any.
@@ -1243,6 +1322,7 @@ export class WebSocketServer {
     if (existingWs && existingWs !== session.ws) {
       const stale = this.sessions.get(existingWs);
       if (stale) {
+        this.botLocalExecution.disconnect(stale);
         if (stale.user && stale.sessionId) this.announceVoiceLeave(stale.user, stale.sessionId);
         this.botInteractions.disconnect(stale);
         this.disconnectBotScreens(stale);
@@ -1417,13 +1497,14 @@ export class WebSocketServer {
     payload: BotRevokePayload,
     requestId?: string
   ): Promise<void> {
-    if (!session.user || !this.botService) return;
+    const botService = this.botService;
+    if (!session.user || !botService) return;
 
     if (typeof payload?.botId !== 'string' || !payload.botId || payload.botId.length > 128) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Bot inválido.', requestId);
       return;
     }
-    const result = await this.botService.revoke(payload.botId);
+    const result = await this.mutateLocalAccess(() => botService.revoke(payload.botId));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
       return;
@@ -1437,6 +1518,7 @@ export class WebSocketServer {
   }
 
   private disconnectBot(botId: string): void {
+    this.botLocalExecution.invalidateBot(botId);
     const botSessionId = `bot:${botId}`;
     const botWs = this.sessionSockets.get(botSessionId);
     if (botWs) {
@@ -1530,6 +1612,14 @@ export class WebSocketServer {
         settingsError ? parsed.error.message : 'Definições de comandos inválidas.', requestId);
       return;
     }
+    const bot = await this.botService?.findById(session.botId);
+    const botKey = localBotIdentitySchema.shape.botPublicKey.safeParse(bot?.boundPublicKey);
+    if (!this.isCurrentSession(session)) return;
+    if (!bot || !botKey.success || botKey.data !== session.botPublicKey) {
+      this.botLocalExecution.invalidateBot(session.botId);
+      this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'Bot binding is no longer valid.', requestId);
+      return;
+    }
     try {
       if (!this.botSettings && parsed.data.settings) {
         throw new BotSettingsError(ProtocolErrorCode.BOT_SETTINGS_INVALID, 'Bot settings are unavailable.');
@@ -1540,8 +1630,9 @@ export class WebSocketServer {
       // No await between persistence and registry replacement: validation of both
       // declarations has completed before either set becomes visible.
       const registered = this.commandRegistry.register(
-        session.botId, session.user.nickname, parsed.data.commands, session.user.avatarUrl
+        session.botId, session.user.nickname, parsed.data.commands, session.user.avatarUrl, botKey.data
       );
+      this.botLocalExecution.commandsChanged(session.botId);
       this.botInteractions.commandsChanged(session.botId);
       this.send(session.ws, {
         type: MessageType.COMMAND_REGISTERED, requestId,
@@ -1586,7 +1677,10 @@ export class WebSocketServer {
           if (!canConfigure) throw new BotSettingsError(ProtocolErrorCode.PERMISSION_DENIED, 'You cannot configure bots.');
           const update = botSettingsUpdateSchema.parse(parsed.data);
           const changed = settingsService.update(update);
-          if (changed.revision !== update.expectedRevision) this.botInteractions.settingsChanged(botId);
+          if (changed.revision !== update.expectedRevision) {
+            this.botLocalExecution.settingsChanged(botId);
+            this.botInteractions.settingsChanged(botId);
+          }
           // Cache updates precede new-revision executions on the owning socket.
           const owner = this.findSessionById(`bot:${botId}`);
           if (owner?.botSettingsReady && this.isCurrentSession(owner)) {
@@ -1686,6 +1780,44 @@ export class WebSocketServer {
     } catch (error) {
       Logger.warn('NETWORK', 'Failed to build the ICE server list; sending STUN only.', error);
       return this.coturnManager.buildIceServers(userId, null, null);
+    }
+  }
+
+  private async buildLocalIceServersFor(session: BotInteractionSession) {
+    const current = this.sessions.get(session.ws);
+    if (current !== session || !session.user || !this.isCurrentSession(session)) throw new Error('Local endpoint disconnected.');
+    const server = await this.serverRepo.getServer();
+    if (!server || !this.isCurrentSession(session)) throw new Error('Local ICE authorization unavailable.');
+    // Use the same authorized ICE builder, but never convert an authorization/I/O failure into a successful fallback.
+    const secret = server.voiceMode === 'sfu' || !server.turnEnabled ? null : server.turnSecret ?? null;
+    return this.coturnManager.buildIceServers(session.user.id, current.requestHost ?? null, secret);
+  }
+
+  private async authorizeLocalVoice(
+    origin: BotInteractionSession, bot: BotInteractionSession, channelId: string,
+  ): Promise<boolean> {
+    const currentBot = this.sessions.get(bot.ws);
+    if (!origin.user || !bot.user || origin.isBot || !bot.isBot || currentBot !== bot) return false;
+    const [channel, callerAccess, botAccess] = await Promise.all([
+      this.channelService.getChannelSummary(channelId),
+      this.channelService.getAccessContext(origin.user.id),
+      this.channelService.getAccessContext(bot.user.id),
+    ]);
+    return this.isCurrentSession(origin) && this.isCurrentSession(bot) &&
+      channel?.type === 'VOICE' && hasPermission(callerAccess.permissions, Permission.SPEAK) &&
+      hasPermission(botAccess.permissions, Permission.SPEAK) &&
+      canAccessChannel(channel, callerAccess.permissions, callerAccess.roleIds) &&
+      (canAccessChannel(channel, botAccess.permissions, botAccess.roleIds) || this.hasBotVoiceGrant(currentBot, channelId));
+  }
+
+  private async mutateLocalAccess<T>(mutation: () => Promise<T>): Promise<T> {
+    this.localAccessVersion++;
+    this.pendingLocalAccessMutations++;
+    try {
+      return await mutation();
+    } finally {
+      this.pendingLocalAccessMutations--;
+      this.localAccessVersion++;
     }
   }
 
@@ -1932,7 +2064,7 @@ export class WebSocketServer {
     payload: ChannelUpdatePayload,
     requestId?: string
   ): Promise<void> {
-    const result = await this.channelService.updateChannel(payload);
+    const result = await this.mutateLocalAccess(() => this.channelService.updateChannel(payload));
     if (!result.success || !result.channel) {
       this.sendError(
         session.ws,
@@ -2018,7 +2150,7 @@ export class WebSocketServer {
     payload: ChannelDeletePayload,
     requestId?: string
   ): Promise<void> {
-    const result = await this.channelService.deleteChannel(payload.channelId);
+    const result = await this.mutateLocalAccess(() => this.channelService.deleteChannel(payload.channelId));
     if (!result.success) {
       this.sendError(
         session.ws,
@@ -2029,6 +2161,7 @@ export class WebSocketServer {
       return;
     }
 
+    this.botLocalExecution.deleteChannel(payload.channelId);
     this.botInteractions.deleteChannel(payload.channelId);
 
     // If it was a voice channel, disconnect any participants still in it so they
@@ -2247,7 +2380,7 @@ export class WebSocketServer {
       if (payload.voiceMode === 'sfu' && previousVoiceMode !== 'sfu') this.sfuManager.close();
       return;
     }
-    let result = await this.authService.updateServerSettings(payload);
+    let result = await this.mutateLocalAccess(() => this.authService.updateServerSettings(payload));
     if (!result.success) {
       if (payload.voiceMode === 'sfu' && previousVoiceMode !== 'sfu') this.sfuManager.close();
       this.sendError(
@@ -2262,6 +2395,7 @@ export class WebSocketServer {
     const changedMode = result.voiceMode !== undefined && result.voiceMode !== previousVoiceMode;
     let voiceTransition: VoiceModeTransition | undefined;
     if (changedMode) {
+      this.botLocalExecution.voiceModeChanged();
       this.voiceReconnectGrants.clear();
       for (const session of this.sessions.values()) {
         if (!session.isBot) continue;
@@ -2311,7 +2445,7 @@ export class WebSocketServer {
         // process. Publish actual persisted truth before rejecting the request.
         const running = this.coturnManager.isRunning();
         if (running !== Boolean(result.turnEnabled)) {
-          const reconciled = await this.authService.updateServerSettings({ turnEnabled: running });
+          const reconciled = await this.mutateLocalAccess(() => this.authService.updateServerSettings({ turnEnabled: running }));
           if (!reconciled.success) {
             this.sendError(session.ws, ProtocolErrorCode.TURN_UNAVAILABLE,
               `${relayError} ${reconciled.errorMessage ?? 'Não foi possível atualizar o estado persistido.'}`, requestId);
@@ -3423,7 +3557,7 @@ export class WebSocketServer {
       return;
     }
 
-    const result = await this.userService.deleteMember(targetUserId);
+    const result = await this.mutateLocalAccess(() => this.userService.deleteMember(targetUserId));
     if (!result.success) {
       this.sendError(session.ws, result.errorCode ?? ProtocolErrorCode.BAD_REQUEST, result.errorMessage ?? 'Não foi possível expulsar o membro.', requestId);
       return;
@@ -3504,6 +3638,7 @@ export class WebSocketServer {
     this.voiceReconnectGrants?.delete(session);
     const wasConnected = this.sessions.delete(session.ws);
     this.authService.clearChallenge(session.ws);
+    this.botLocalExecution.disconnect(session);
     this.botInteractions.disconnect(session);
     this.disconnectBotScreens(session);
 
@@ -3873,6 +4008,7 @@ export class WebSocketServer {
       }
     }
 
+    await this.botLocalExecution.reconcileAccess();
     for (const [ws, session] of this.sessions.entries()) {
       if (!session.user || ws.readyState !== WebSocket.OPEN) continue;
 
@@ -3913,6 +4049,7 @@ export class WebSocketServer {
     // Voice admission grants track ACL changes only. A participant moving must
     // revoke viewer/command context without invalidating the bot's media grant.
     this.botScreenAccessVersion++;
+    this.botLocalExecution.voiceChanged();
     this.botInteractions.voiceChanged();
     void this.botScreens?.revokeInvalid()
       .catch((error: unknown) => Logger.error('BOT', 'Failed to reconcile voice miniapp access.', error));
@@ -3996,6 +4133,7 @@ export class WebSocketServer {
   public close(): Promise<void> {
     if (!this.closing) {
       this.closing = true;
+      this.botLocalExecution.close();
       this.serverMonitor?.close();
       this.signalingService.setVoiceMembershipListener(undefined);
       for (const session of this.sessions.values()) {

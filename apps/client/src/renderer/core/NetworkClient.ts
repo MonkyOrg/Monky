@@ -48,6 +48,10 @@ interface PendingAuthRequest {
 type ConnectState = AuthConnectPayload & ClientIdentity;
 
 const DEVICE_ID_STORAGE_KEY = 'monky_device_id';
+const LOCAL_EXECUTION_EVENTS = new Set<MessageType>([
+  MessageType.BOT_LOCAL_TASK_OFFER, MessageType.BOT_LOCAL_TASK_CONTROL,
+  MessageType.BOT_LOCAL_TASK_EVENT, MessageType.BOT_LOCAL_MEDIA_SIGNAL,
+]);
 
 /**
  * Stable id for this installation. It deliberately lives outside the identity
@@ -79,6 +83,8 @@ export class NetworkClient {
   private ws: WebSocket | null = null;
   private connectionTimeout: ReturnType<typeof setTimeout> | null = null;
   private status: ConnectionStatus = 'DISCONNECTED';
+  private eventListeners = new Set<(event: string, data: unknown, requestId?: string) => void>();
+  private iceServers: RTCIceServer[] = [];
   private reconnectAttempt: number = 0;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private pendingRequests: Map<string, PendingRequest> = new Map();
@@ -112,6 +118,8 @@ export class NetworkClient {
   /** Releases everything the client holds outside itself, for good. */
   public dispose(): void {
     this.disconnect();
+    this.emitScoped('network.disposed');
+    this.eventListeners.clear();
     if (typeof window !== 'undefined') {
       window.removeEventListener('online', this.onBrowserOnline);
     }
@@ -155,6 +163,15 @@ export class NetworkClient {
 
   public getConnectionId(): string { return this.connectionId; }
 
+  public getIceServers(): RTCIceServer[] {
+    return this.iceServers.map((server) => ({ ...server, urls: Array.isArray(server.urls) ? [...server.urls] : server.urls }));
+  }
+
+  public onEvent(listener: (event: string, data: unknown, requestId?: string) => void): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
+
   public cancelRequest(requestId: string): boolean {
     this.retireRequest(requestId);
     const pending = this.pendingRequests.get(requestId);
@@ -178,8 +195,16 @@ export class NetworkClient {
    * session manager can point the stores at the right bundle before handlers
    * run (#400).
    */
-  private emitScoped(event: string, data?: unknown): void {
+  private emitScoped(event: string, data?: unknown, requestId?: string): void {
+    if (event === 'network.status') this.notifyEventListeners(event, data, requestId);
     routeSessionEvent(this.sessionKey, event, () => appEvents.emit(event, data));
+    if (event !== 'network.status') this.notifyEventListeners(event, data, requestId);
+  }
+
+  private notifyEventListeners(event: string, data: unknown, requestId?: string): void {
+    for (const listener of [...this.eventListeners]) {
+      if (this.eventListeners.has(listener)) listener(event, data, requestId);
+    }
   }
 
   public getHttpBaseUrl(): string {
@@ -274,6 +299,7 @@ export class NetworkClient {
           resolve: (res) => {
             if (isStale() || this.pendingAuth !== auth) return;
             this.clearPendingAuth();
+            this.iceServers = (res.iceServers ?? []).map((server) => ({ ...server }));
             this.reconnectAttempt = 0;
             this.hasEverConnected = true;
             this.setStatus('CONNECTED');
@@ -432,7 +458,8 @@ export class NetworkClient {
 
   private handleIncomingMessage(message: ProtocolMessage): void {
     const { type, requestId, payload } = message;
-    if (requestId && this.retiredRequests.has(requestId)) return;
+    const localEvent = LOCAL_EXECUTION_EVENTS.has(type);
+    if (requestId && this.retiredRequests.has(requestId) && !localEvent) return;
 
     if (type === MessageType.PONG) {
       this.lastPongAt = Date.now();
@@ -476,7 +503,7 @@ export class NetworkClient {
       }
     }
 
-    if (requestId && this.pendingRequests.has(requestId)) {
+    if (requestId && this.pendingRequests.has(requestId) && !localEvent) {
       const pending = this.pendingRequests.get(requestId)!;
       clearTimeout(pending.timer);
       this.pendingRequests.delete(requestId);
@@ -490,7 +517,7 @@ export class NetworkClient {
       pending.resolve(payload);
     }
 
-    this.emitScoped(`message.${type}`, payload);
+    this.emitScoped(`message.${type}`, payload, requestId);
   }
 
   private async respondToAuthChallenge(payload: AuthChallengePayload, requestId?: string): Promise<void> {

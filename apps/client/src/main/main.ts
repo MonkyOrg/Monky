@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
 import path from 'path';
 import { setupIpcHandlers } from './ipcHandlers';
 import { setupUpdater } from './updater';
@@ -21,7 +21,8 @@ import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
 import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
 import { resolveDevelopmentProfile } from './developmentProfile';
 import { CrashRecovery } from './crashRecovery';
-import { initializeMainLanguage } from './i18n';
+import type { LocalExecutionIpc } from './localExecution/ipc';
+import { initializeMainLanguage, mt } from './i18n';
 
 import fs from 'fs';
 
@@ -75,6 +76,9 @@ let isShuttingDown = false;
 let isQuitting = false;
 /** Whether the renderer has already been asked to leave the call (#458). */
 let leaveAnnounced = false;
+let localExecution: LocalExecutionIpc | null = null;
+let localExecutionStopping = false;
+let localExecutionStopped = false;
 
 /**
  * How long the quit waits for the renderer to say goodbye to the servers.
@@ -181,6 +185,35 @@ function getCrashRecovery(): CrashRecovery {
   return crashRecovery;
 }
 
+function stopLocalExecutionThenQuit(): void {
+  if (!localExecution || localExecutionStopping) return;
+  localExecutionStopping = true;
+  void localExecution.dispose().then(() => {
+    localExecutionStopping = false;
+    localExecutionStopped = true;
+    app.quit();
+  }, (error: unknown) => {
+    console.error('[LocalExecution] Could not finish local task shutdown:', error);
+    localExecutionStopping = false;
+    isQuitting = false;
+    leaveAnnounced = false;
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+    void dialog.showMessageBox({
+      type: 'error',
+      title: mt('localExecution.shutdownFailedTitle'),
+      message: mt('localExecution.shutdownFailedMessage'),
+      buttons: [mt('localExecution.retryShutdown'), mt('localExecution.keepOpen')],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    }).then(({ response }) => {
+      if (response === 0) quitApplication();
+    }).catch((dialogError: unknown) => {
+      console.error('[LocalExecution] Could not display the shutdown error:', dialogError);
+    });
+  });
+}
+
 function createWindow(deferShow = false): void {
   const iconCandidates = [
     path.join(__dirname, '../../build/icon.ico'),
@@ -257,13 +290,14 @@ function createWindow(deferShow = false): void {
   });
   bindRendererDiagnostics(mainWindow.webContents, clientLogger);
 
-  setupIpcHandlers(mainWindow, serverManager, trayManager, {
+  localExecution = setupIpcHandlers(mainWindow, serverManager, trayManager, {
     setMinimizeToTray: (enabled: boolean) => {
       minimizeToTray = enabled;
     },
     clientLogger,
     overlayManager,
   });
+  localExecutionStopped = false;
   setupUpdater(mainWindow);
 
   // A launch straight after an update install keeps the "finishing" splash up
@@ -483,6 +517,12 @@ app.on('before-quit', (event) => {
   if (!leaveAnnounced && mainWindow && !mainWindow.isDestroyed()) {
     event.preventDefault();
     announceLeaveThenQuit();
+    return;
+  }
+
+  if (localExecution && !localExecutionStopped) {
+    event.preventDefault();
+    stopLocalExecutionThenQuit();
     return;
   }
 

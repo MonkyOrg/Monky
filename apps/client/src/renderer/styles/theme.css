@@ -6730,6 +6730,30 @@ button[data-loading="1"]::after {
   to { transform: rotate(360deg); }
 }
 
+.bot-loading-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bot-loading-spinner {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bot-loading-spinner,
+  [data-audio-preview-icon].spin,
+  .bot-command-run[data-loading="1"]::after,
+  .bot-interaction-card button[data-loading="1"]::after,
+  .bot-settings-card button[data-loading="1"]::after {
+    animation: none;
+  }
+}
+
 .settings-cam-preview {
   width: 100%;
   max-width: 320px;

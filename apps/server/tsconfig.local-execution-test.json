@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./test",
+    "outDir": "./dist-test"
+  },
+  "include": ["test/local-execution-sdk.test.ts"]
+}

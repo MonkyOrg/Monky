@@ -4,6 +4,7 @@ import type {
   BotSettingsPatch, BotSettingsSnapshot, BotServerSettingsSnapshot, CommandAutocompleteResult, CommandValues,
 } from './botInteractions.js';
 import type { SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
+import type { CommandCallerContext, LocalCommandPreparation } from './localExecutionProtocol.js';
 
 export enum ProtocolErrorCode {
   AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
@@ -74,6 +75,14 @@ export enum MessageType {
   BOT_SCREEN_REMOVED = 'BOT_SCREEN_REMOVED',
   BOT_VOICE_CONTEXT = 'BOT_VOICE_CONTEXT',
   BOT_VOICE_CONTEXT_RESULT = 'BOT_VOICE_CONTEXT_RESULT',
+  BOT_LOCAL_SOURCE_REQUEST = 'BOT_LOCAL_SOURCE_REQUEST',
+  BOT_LOCAL_SOURCE_RESULT = 'BOT_LOCAL_SOURCE_RESULT',
+  BOT_LOCAL_TASK_REQUEST = 'BOT_LOCAL_TASK_REQUEST',
+  BOT_LOCAL_TASK_OFFER = 'BOT_LOCAL_TASK_OFFER',
+  BOT_LOCAL_TASK_ACCEPT = 'BOT_LOCAL_TASK_ACCEPT',
+  BOT_LOCAL_TASK_CONTROL = 'BOT_LOCAL_TASK_CONTROL',
+  BOT_LOCAL_TASK_EVENT = 'BOT_LOCAL_TASK_EVENT',
+  BOT_LOCAL_MEDIA_SIGNAL = 'BOT_LOCAL_MEDIA_SIGNAL',
   // Client -> Server
   AUTH_CONNECT = 'AUTH_CONNECT',
   AUTH_CHALLENGE_RESPONSE = 'AUTH_CHALLENGE_RESPONSE',
@@ -884,6 +893,7 @@ export interface CommandRegisterPayload {
     localizations?: SlashCommand['localizations'];
     downloadsSound?: boolean;
     voiceRequirement?: SlashCommand['voiceRequirement'];
+    localCapabilities?: SlashCommand['localCapabilities'];
   }>;
   settings?: BotSettingsDefinition;
 }
@@ -922,9 +932,10 @@ export interface CommandAutocompletePayload {
   options?: CommandValues;
   locale?: 'pt-BR' | 'en';
   userSettings?: BotFormValues;
+  localPreparation?: LocalCommandPreparation;
 }
 
-export interface CommandAutocompleteExecutionPayload {
+export interface CommandAutocompleteExecutionPayload extends CommandCallerContext {
   commandName: string;
   optionName: string;
   query: string;
@@ -953,15 +964,12 @@ export interface CommandInvokePayload {
   /** Consent for one local soundboard download by this invocation only. */
   allowSoundDownload?: boolean;
   userSettings?: BotFormValues;
+  localPreparation?: LocalCommandPreparation;
 }
 
 /** Server -> bot: caller identity and invocation ID are assigned by the server. */
-export interface CommandExecutionPayload extends Omit<CommandInvokePayload, 'userSettings'> {
+export interface CommandExecutionPayload extends Omit<CommandInvokePayload, 'userSettings' | 'localPreparation'>, CommandCallerContext {
   invocationId: string;
-  invokerId: string;
-  invokerNickname: string;
-  invokerSessionId: string;
-  invokerVoiceChannelId: string | null;
   settings?: BotSettingsContext;
 }
 

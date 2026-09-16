@@ -199,7 +199,11 @@ for (const invalid of [
   { ...lazyRequest, invokerId: 'forged' }, { ...lazyRequest, url: preview.url },
   { ...lazyRequest, autocompleteRequestId: undefined }, { ...lazyRequest, optionName: 'constructor' },
 ]) assert.equal(commandAudioPreviewSchema.safeParse(invalid).success, false);
-const lazyExecution = { commandName: 'play', optionName: 'track', resourceId: 'provider-clip', locale: 'en' };
+const executionCaller = {
+  botId: 'bot', channelId: 'chat', invokerId: 'caller', invokerSessionId: 'caller-device',
+  invokerNickname: 'Caller', invokerVoiceChannelId: null,
+};
+const lazyExecution = { ...executionCaller, commandName: 'play', optionName: 'track', resourceId: 'provider-clip', locale: 'en' };
 assert.deepEqual(commandAudioPreviewExecutionSchema.parse(lazyExecution), lazyExecution);
 assert.equal(commandAudioPreviewExecutionSchema.safeParse({ ...lazyExecution, serverId: 'forged' }).success, false);
 assert.deepEqual(commandAudioPreviewCancelSchema.parse({ requestId: 'preview-request' }), { requestId: 'preview-request' });
@@ -387,7 +391,7 @@ for (const cursor of ['', 'x'.repeat(LIMITS.MAX_BOT_AUTOCOMPLETE_CURSOR_LENGTH +
   assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, page: 1, cursor }).success, false);
 }
 const pagedExecution = {
-  commandName: 'search', optionName: 'sound', query: 'hello', options: {}, locale: 'en',
+  ...executionCaller, commandName: 'search', optionName: 'sound', query: 'hello', options: {}, locale: 'en',
   page: 4, cursor: 'source-page:2:offset:20',
 };
 assert.deepEqual(commandAutocompleteExecutionSchema.parse(pagedExecution), pagedExecution);
@@ -395,7 +399,7 @@ assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, query: 'x'.r
 assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, invocationId: 'forged' }).success, false);
 assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, options: JSON.parse('{"__proto__": true}') }).success, false);
 assert.equal(commandAutocompleteExecutionSchema.safeParse({
-  commandName: 'search', optionName: 'sound', query: '', options: {}, locale: 'pt-BR',
+  ...executionCaller, commandName: 'search', optionName: 'sound', query: '', options: {}, locale: 'pt-BR',
 }).success, true);
 assert.equal(commandRequestIdSchema.safeParse('').success, false);
 assert.equal(commandRequestIdSchema.safeParse('x'.repeat(129)).success, false);

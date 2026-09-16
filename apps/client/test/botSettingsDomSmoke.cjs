@@ -439,6 +439,9 @@ async function runBotSettingsDomSmoke() {
     completeRequest = null;
     find('#bot-settings-form').requestSubmit();
     await settle(() => !!completeRequest);
+    check(find('[data-settings-save]').dataset.loading === '1' &&
+      getComputedStyle(find('[data-settings-save]'), '::after').animationName === 'reconnect-spin',
+    'Saving bot settings uses the existing animated button feedback');
     const finishSave = completeRequest;
     appEvents.emit('session.changed');
     deferType = null;
@@ -454,6 +457,9 @@ async function runBotSettingsDomSmoke() {
     completeRequest = null;
     const opening = modal.open('audio-bot');
     await settle(() => !!completeRequest);
+    check(!!document.querySelector('.bot-settings-body .bot-loading-spinner') &&
+      getComputedStyle(find('.bot-settings-body .bot-loading-spinner')).animationName === 'reconnect-spin',
+    'Bot settings reads retain an animated localized waiting indicator');
     appEvents.emit('session.changed');
     completeRequest(snapshot('audio-bot'));
     await opening;

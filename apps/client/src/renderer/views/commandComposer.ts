@@ -117,13 +117,14 @@ ${escapeHtml(text)}</textarea>`;
 export function renderCompactCommand(
   draft: CommandDraft, channelId: string, members: UserSummary[], canSend: boolean, available: boolean, voiceError?: string,
   locale: BotLocale = getLanguage(),
+  preparing = false,
 ): string {
   draft = { ...draft, command: localizeCommand(draft.command, locale) };
   const presentation = getCommandPresentation(draft.command, locale);
   const fields = visibleCommandFields(draft.command, draft.visibleOptionalNames);
   const optionalCount = (draft.command.options ?? []).filter((option) =>
     !option.required && !draft.visibleOptionalNames.includes(option.name)).length;
-  const disabled = draft.pending || !canSend;
+  const disabled = draft.pending || preparing || !canSend;
   const canExecute = commandValuesFromInputs(
     draft.command,
     visibleCommandValues(draft.command, draft.values, draft.visibleOptionalNames),
@@ -132,6 +133,7 @@ export function renderCompactCommand(
     draft.visibleOptionalNames
   ).success;
   const hint = fields[0] ? commandParameterHint(fields[0]) : draft.command.description;
+  const actionLabel = t(draft.pending ? 'botChat.invoking' : preparing ? 'localExecution.preparing' : 'botChat.execute');
   return `<form class="bot-compact-command-form" data-command-form
     data-bot-id="${escapeHtml(draft.command.botId)}" data-command-name="${escapeHtml(draft.command.name)}" novalidate>
     <div class="bot-command-hint">
@@ -151,8 +153,9 @@ export function renderCompactCommand(
           aria-expanded="false" title="${t('botChat.addParameters')}" ${disabled ? 'disabled' : ''}>${optionalParameterLabel(optionalCount)}</button>` : ''}
       </div>
       <button type="submit" class="btn btn-primary bot-command-run" ${disabled || !available || !canExecute || voiceError ? 'disabled' : ''}
-        title="${t(draft.pending ? 'botChat.invoking' : 'botChat.execute')}" aria-label="${t(draft.pending ? 'botChat.invoking' : 'botChat.execute')}">
-        <span class="material-symbols-outlined md-18">${draft.pending ? 'hourglass_empty' : 'send'}</span>
+        ${draft.pending || preparing ? 'data-loading="1" aria-busy="true"' : ''}
+        title="${escapeHtml(actionLabel)}" aria-label="${escapeHtml(actionLabel)}">
+        <span class="material-symbols-outlined md-18">send</span>
       </button>
     </div>
     ${draft.command.downloadsSound ? `<p class="bot-local-download-cue"><span class="material-symbols-outlined md-16" aria-hidden="true">download</span>${t('botChat.localDownload')}</p>` : ''}

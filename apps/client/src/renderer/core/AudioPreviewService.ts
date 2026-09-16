@@ -1,10 +1,14 @@
 import { v4 as uuidv4 } from 'uuid';
-import { LIMITS, commandAudioPreviewResultSchema, type AudioPreviewFailureReason, type AudioPreviewResult } from '@monky/shared';
+import {
+  LIMITS, commandAudioPreviewResultSchema, localTaskResultSchema,
+  type AudioPreviewFailureReason, type AudioPreviewResult, type LocalPreviewReference, type LocalTaskResult,
+} from '@monky/shared';
 import { appEvents } from './EventBus';
 import { settingsStore } from '../stores/settingsStore';
 import { t, type TranslationKey } from '../i18n';
 import { formatMediaTime } from '../utils/videoPlayer';
 import { setAudioOutputSink } from './AudioOutputSink';
+import { LocalExecutionError } from './localExecutionSupport';
 
 const DEFAULT_PREVIEW_VOLUME = 60;
 const MAX_PREVIEW_VOLUMES = 256;
@@ -30,6 +34,9 @@ interface ActivePreview {
 }
 
 export type AudioPreviewLoader = (resourceId: string, requestId: string, signal: AbortSignal) => Promise<unknown>;
+export type LocalAudioPreviewResolver = (
+  reference: LocalPreviewReference, requestId: string, signal: AbortSignal,
+) => Extract<LocalTaskResult, { operation: 'youtube.preview' }>;
 
 const FAILURE_KEYS: Record<AudioPreviewFailureReason, TranslationKey> = {
   no_folder: 'botChat.downloadNoFolder',
@@ -68,8 +75,11 @@ function stopEvent(event: Event): void {
 export class AudioPreviewService {
   private active: ActivePreview | null = null;
 
-  public bind(root: HTMLElement, loadResource?: AudioPreviewLoader, deniedReason?: (controls: HTMLElement) => string | undefined): () => void {
-    const click = (event: MouseEvent) => this.onClick(event, loadResource, deniedReason);
+  public bind(
+    root: HTMLElement, loadResource?: AudioPreviewLoader, deniedReason?: (controls: HTMLElement) => string | undefined,
+    resolveLocal?: LocalAudioPreviewResolver,
+  ): () => void {
+    const click = (event: MouseEvent) => this.onClick(event, loadResource, deniedReason, resolveLocal);
     const input = (event: Event) => this.onVolumeInput(event);
     const keydown = (event: KeyboardEvent) => this.onKeyDown(event);
     root.addEventListener('click', click, true);
@@ -105,14 +115,17 @@ export class AudioPreviewService {
     if (!stillVisible) this.release(scope);
   }
 
-  private onClick(event: MouseEvent, loadResource?: AudioPreviewLoader, deniedReason?: (controls: HTMLElement) => string | undefined): void {
+  private onClick(
+    event: MouseEvent, loadResource?: AudioPreviewLoader, deniedReason?: (controls: HTMLElement) => string | undefined,
+    resolveLocal?: LocalAudioPreviewResolver,
+  ): void {
     if (!(event.target instanceof Element)) return;
     const toggle = event.target.closest<HTMLButtonElement>('[data-audio-preview-action="toggle"]');
     const range = event.target.closest<HTMLInputElement>('[data-audio-preview-volume]');
     if (toggle) {
       stopEvent(event);
       const controls = toggle.closest<HTMLElement>('[data-audio-choice-controls]');
-      if (controls) void this.toggle(controls, loadResource, deniedReason);
+      if (controls) void this.toggle(controls, loadResource, deniedReason, resolveLocal);
     } else if (range) {
       event.stopPropagation();
       event.stopImmediatePropagation();
@@ -154,7 +167,10 @@ export class AudioPreviewService {
     }
   }
 
-  private async toggle(controls: HTMLElement, loadResource?: AudioPreviewLoader, deniedReason?: (controls: HTMLElement) => string | undefined): Promise<void> {
+  private async toggle(
+    controls: HTMLElement, loadResource?: AudioPreviewLoader, deniedReason?: (controls: HTMLElement) => string | undefined,
+    resolveLocal?: LocalAudioPreviewResolver,
+  ): Promise<void> {
     const key = controls.dataset.audioKey;
     const url = controls.dataset.audioUrl;
     const resourceId = controls.dataset.audioResourceId;
@@ -203,6 +219,19 @@ export class AudioPreviewService {
         const parsed = commandAudioPreviewResultSchema.safeParse(response);
         if (!parsed.success) result = { status: 'failed', reason: 'invalid_response' };
         else if (parsed.data.status === 'failed') result = parsed.data;
+        else if (parsed.data.status === 'local') {
+          if (!resolveLocal || parsed.data.requestId !== requestId) throw new LocalExecutionError('permission_denied');
+          const reference: LocalPreviewReference = {
+            localPreviewId: parsed.data.localPreviewId, taskId: parsed.data.taskId,
+            requestId: parsed.data.requestId, executorSessionId: parsed.data.executorSessionId,
+          };
+          const preview = localTaskResultSchema.safeParse(resolveLocal(reference, requestId, active.controller.signal));
+          if (!preview.success || preview.data.operation !== 'youtube.preview') throw new LocalExecutionError('invalid_request');
+          result = await window.api?.loadAudioPreview?.({
+            requestId, audioBase64: preview.data.audioBase64, mimeType: preview.data.mimeType,
+            fileName: controls.dataset.audioFileName,
+          });
+        }
         else result = await window.api?.loadAudioPreview?.({
           requestId, audioBase64: parsed.data.audioBase64, mimeType: parsed.data.mimeType,
           fileName: controls.dataset.audioFileName,
@@ -268,7 +297,8 @@ export class AudioPreviewService {
       active.objectUrl = objectUrl;
       await this.playActive(active);
     } catch (error) {
-      this.failActive(active, resourceId ? 'botChat.audioPreviewProviderFailed' : 'botChat.audioPreviewPlaybackFailed', error);
+      this.failActive(active, error instanceof LocalExecutionError ? `localExecution.failure.${error.reason}`
+        : resourceId ? 'botChat.audioPreviewProviderFailed' : 'botChat.audioPreviewPlaybackFailed', error);
     }
   }
 
@@ -376,11 +406,13 @@ export class AudioPreviewService {
 
   private setControlsState(controls: HTMLElement, state: 'idle' | 'loading' | 'ready' | 'playing' | 'failed', message = ''): void {
     controls.dataset.audioPreviewState = state;
+    controls.setAttribute('aria-busy', String(state === 'loading'));
     const icon = controls.querySelector<HTMLElement>('[data-audio-preview-icon]');
     const button = controls.querySelector<HTMLButtonElement>('[data-audio-preview-action="toggle"]');
     const status = controls.querySelector<HTMLElement>('[data-audio-preview-status]');
     if (icon) {
-      icon.textContent = state === 'loading' ? 'hourglass_empty' :
+      icon.classList.toggle('spin', state === 'loading');
+      icon.textContent = state === 'loading' ? 'progress_activity' :
         state === 'playing' ? 'pause' :
           state === 'failed' ? 'error' : 'play_arrow';
     }

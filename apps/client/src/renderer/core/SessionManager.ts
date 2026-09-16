@@ -2,6 +2,8 @@ import { MessageType } from '@monky/shared';
 import { BotScreenStore, setActiveBotScreenStore } from '../stores/botScreenStore';
 import { appEvents } from './EventBus';
 import { clientLog } from './ClientLogService';
+import { LocalExecutionController } from './LocalExecutionController';
+import { voiceStore } from '../stores/voiceStore';
 import {
   createNetworkClient,
   setActiveNetworkClient,
@@ -47,6 +49,7 @@ export interface ServerSession {
   chatStore: ChatStore;
   botScreenStore: BotScreenStore;
   participants: ParticipantManager;
+  localExecution: LocalExecutionController;
   /** Credentials kept so the rail can show the session and reconnect it. */
   host: string;
   port: number;
@@ -74,9 +77,14 @@ export class SessionManager {
   /** Session the global proxies currently resolve to — not always the visible
    * one, since `route()` borrows them while a background event is handled. */
   private installedBundle: ServerSession | null = null;
+  private unbindLocalVoice: (() => void) | null = null;
 
   public install(): void {
     setSessionEventRouter((sessionKey, event, emit) => this.route(sessionKey, event, emit));
+    this.unbindLocalVoice?.();
+    this.unbindLocalVoice = appEvents.on('voice.channel_changed', () => {
+      for (const session of this.sessions.values()) session.localExecution.syncVoiceContext();
+    });
   }
 
   public getActive(): ServerSession | null {
@@ -127,13 +135,26 @@ export class SessionManager {
     clientLog.info('CONNECTION', `Creating new session for ${host}:${port}`);
     const client = createNetworkClient();
     client.sessionKey = key;
+    const server = createServerStore();
+    const participants = createParticipantManager();
+    const localExecution = new LocalExecutionController(client, server, () => {
+      const user = server.currentUser;
+      const channel = voiceStore.voiceSessionKey === key ? voiceStore.currentVoiceChannelId : null;
+      return user?.sessionId && channel && participants.get(user.sessionId)?.voiceState?.channelId === channel ? channel : null;
+    }, undefined, {
+      botIsInVoice: (botId, botSessionId, channelId) => {
+        const bot = participants.get(botSessionId);
+        return bot?.user.id === botId && bot.user.isBot === true && bot.voiceState?.channelId === channelId;
+      },
+    });
     const session: ServerSession = {
       key,
       client,
-      serverStore: createServerStore(),
+      serverStore: server,
       chatStore: createChatStore(),
       botScreenStore: new BotScreenStore(key),
-      participants: createParticipantManager(),
+      participants,
+      localExecution,
       host,
       port,
       nickname,
@@ -173,6 +194,7 @@ export class SessionManager {
     if (!session) return;
     clientLog.info('CONNECTION', `Removing session: ${key}`);
     const wasActive = this.activeKey === key;
+    session.localExecution.dispose();
     session.client.dispose();
     this.sessions.delete(key);
     // The disconnect above may have already handed the screen to another
@@ -189,6 +211,12 @@ export class SessionManager {
     // the connection screen, so it has to be the last thing to happen.
     for (const session of this.getBackground()) this.remove(session.key);
     if (this.activeKey) this.remove(this.activeKey);
+  }
+
+  public dispose(): void {
+    this.unbindLocalVoice?.();
+    this.unbindLocalVoice = null;
+    this.removeAll();
   }
 
   /** Points the global proxies at a session's bundle of state. */
@@ -258,6 +286,7 @@ export class SessionManager {
 
   private notifyVoiceContext(key: string, event: string): void {
     if (VOICE_CONTEXT_EVENTS.has(event)) {
+      this.sessions.get(key)?.localExecution.syncVoiceContext();
       emitOutsideRouting(() => appEvents.emit('session.voice_context_updated', { key }));
     }
   }

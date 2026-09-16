@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A autorização e a preparação de ferramentas começam ao selecionar um comando, antes de preencher seus campos. Se a instalação falhar, é possível tentar novamente no mesmo modal. A janela não destaca mais Não permitir ao abrir.",
+  "en": "Tool authorization and preparation start when you select a command, before filling in its fields. If installation fails, you can retry in the same modal. The window no longer highlights Deny when it opens."
+}

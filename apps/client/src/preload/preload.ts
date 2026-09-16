@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
+import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
   ActionShortcutBinding,
   AudioPreviewCancellation,
@@ -15,6 +15,21 @@ import type {
   HostServerOptions,
   ImageSelectionResult,
   LinkPreviewData,
+  LocalExecutionMutationResult,
+  LocalExecutionSnapshot,
+  LocalPermissionChange,
+  LocalToolId,
+  LocalPreparationInput,
+  LocalPreparationResult,
+  LocalTaskStartInput,
+  LocalTaskStartResult,
+  LocalFrameReadInput,
+  LocalFrameReadResult,
+  LocalFrameProgress,
+  LocalRequestCancellation,
+  LocalTaskPause,
+  LocalConnectionState,
+  LocalTaskFailureEvent,
   LogEntry,
   OverlayBounds,
   OverlayConfig,
@@ -91,6 +106,20 @@ export interface ElectronApi {
   onSoundDownloadProgress: (cb: (progress: SoundboardDownloadProgress) => void) => () => void;
   loadAudioPreview: (input: AudioPreviewInput) => Promise<AudioPreviewResult>;
   cancelAudioPreview: (input: AudioPreviewCancellation) => Promise<boolean>;
+  getLocalExecutionState: () => Promise<LocalExecutionSnapshot>;
+  setLocalExecutionPermission: (input: LocalPermissionChange) => Promise<LocalExecutionMutationResult>;
+  removeLocalTool: (tool: LocalToolId) => Promise<LocalExecutionMutationResult>;
+  clearLocalExecutionCache: () => Promise<LocalExecutionMutationResult>;
+  cancelLocalExecutionTask: (taskId: string) => Promise<LocalExecutionMutationResult>;
+  onLocalExecutionChanged: (cb: (snapshot: LocalExecutionSnapshot) => void) => () => void;
+  prepareLocalExecution: (input: LocalPreparationInput) => Promise<LocalPreparationResult>;
+  startLocalExecutionTask: (input: LocalTaskStartInput) => Promise<LocalTaskStartResult>;
+  readLocalExecutionFrames: (input: LocalFrameReadInput) => Promise<LocalFrameReadResult>;
+  acknowledgeLocalExecutionFrames: (input: LocalFrameProgress) => Promise<LocalExecutionMutationResult>;
+  cancelLocalExecutionRequest: (input: LocalRequestCancellation) => Promise<LocalExecutionMutationResult>;
+  setLocalExecutionPaused: (input: LocalTaskPause) => Promise<LocalExecutionMutationResult>;
+  setLocalExecutionConnection: (input: LocalConnectionState) => Promise<LocalExecutionMutationResult>;
+  onLocalExecutionTaskFailed: (cb: (failure: LocalTaskFailureEvent) => void) => () => void;
   selectStickersFolder: () => Promise<string | null>;
   listStickers: (folderPath: string) => Promise<StickerEntry[]>;
   readSticker: (filePath: string) => Promise<StickerData | null>;
@@ -233,6 +262,28 @@ const api: ElectronApi = {
   cancelSoundDownload: (key) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.cancel, key),
   loadAudioPreview: (input) => ipcRenderer.invoke(AUDIO_PREVIEW_IPC.load, input),
   cancelAudioPreview: (input) => ipcRenderer.invoke(AUDIO_PREVIEW_IPC.cancel, input),
+  getLocalExecutionState: () => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.getState),
+  setLocalExecutionPermission: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.setPermission, input),
+  removeLocalTool: (tool) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.removeTool, tool),
+  clearLocalExecutionCache: () => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.clearCache),
+  cancelLocalExecutionTask: (taskId) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.cancelTask, taskId),
+  onLocalExecutionChanged: (cb) => {
+    const listener = (_event: Electron.IpcRendererEvent, snapshot: LocalExecutionSnapshot) => cb(snapshot);
+    ipcRenderer.on(LOCAL_EXECUTION_CHANGED, listener);
+    return () => ipcRenderer.removeListener(LOCAL_EXECUTION_CHANGED, listener);
+  },
+  prepareLocalExecution: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.prepare, input),
+  startLocalExecutionTask: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.startTask, input),
+  readLocalExecutionFrames: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.readFrames, input),
+  acknowledgeLocalExecutionFrames: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.acknowledgeFrames, input),
+  cancelLocalExecutionRequest: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.cancelRequest, input),
+  setLocalExecutionPaused: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.setPaused, input),
+  setLocalExecutionConnection: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.setConnection, input),
+  onLocalExecutionTaskFailed: (cb) => {
+    const listener = (_event: Electron.IpcRendererEvent, failure: LocalTaskFailureEvent) => cb(failure);
+    ipcRenderer.on(LOCAL_EXECUTION_TASK_FAILED, listener);
+    return () => ipcRenderer.removeListener(LOCAL_EXECUTION_TASK_FAILED, listener);
+  },
   onSoundDownloadProgress: (cb) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: SoundboardDownloadProgress) => cb(progress);
     ipcRenderer.on(SOUND_DOWNLOAD_PROGRESS, listener);

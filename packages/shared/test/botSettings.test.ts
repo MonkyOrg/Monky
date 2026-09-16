@@ -147,6 +147,8 @@ assert.equal(commandExecutionSchema.safeParse({ ...execution, invokerSessionId: 
 assert.equal(commandExecutionSchema.safeParse({ ...execution, invokerVoiceChannelId: undefined }).success, false);
 assert.equal(commandAutocompleteSchema.safeParse({ ...invoke, optionName: 'query', query: '' }).success, true);
 assert.equal(commandAutocompleteExecutionSchema.safeParse({
+  botId: 'bot', channelId: 'channel', invokerId: 'user', invokerNickname: 'User',
+  invokerSessionId: 'user:device', invokerVoiceChannelId: null,
   commandName: 'run', optionName: 'query', query: '', options: {}, locale: 'en', settings,
 }).success, true);
 assert.equal(commandSubmitSchema.safeParse({ invocationId: 'inv', interactionId: 'form', values: {}, userSettings: {} }).success, false);

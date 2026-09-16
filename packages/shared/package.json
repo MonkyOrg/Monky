@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "tsc -p tsconfig.test.json && node dist-test/test/validators.test.js && node --test dist-test/test/botScreens.test.js dist-test/test/botInteractions.test.js dist-test/test/botSettings.test.js dist-test/test/releaseCompatibility.test.js dist-test/test/serverMonitor.test.js",
+    "test": "tsc -p tsconfig.test.json && node dist-test/test/validators.test.js && node --test dist-test/test/botScreens.test.js dist-test/test/botInteractions.test.js dist-test/test/botSettings.test.js dist-test/test/releaseCompatibility.test.js dist-test/test/serverMonitor.test.js dist-test/test/localExecution.test.js dist-test/test/localExecutionProtocol.test.js",
     "clean": "rimraf dist"
   },
   "dependencies": {
