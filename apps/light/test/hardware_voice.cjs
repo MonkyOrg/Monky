@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const { NativeClient } = require('./native_client.cjs');
 const { createServerFixture } = require('./server_fixture.cjs');
 
-test('opt-in native microphone capture uses only a disposable loopback call and respects mute', { timeout: 45_000 }, async t => {
+test('opt-in native microphone capture uses only a disposable loopback call and respects mute', { timeout: 60_000 }, async t => {
   const fixture = await createServerFixture(t);
   const sink = new NativeClient(fixture, { nickname: 'Silent sink', muted: true });
   const source = new NativeClient(fixture, { nickname: 'Hardware microphone', synthetic: false, muted: true });
@@ -26,6 +26,30 @@ test('opt-in native microphone capture uses only a disposable loopback call and 
   } while (Date.now() < deadline);
   assert.ok(capture?.totalSamplesDuration > 0.1, 'The physical microphone did not deliver PCM to WebRTC');
   assert.equal((await source.nativeAudioState()).recording, true);
+
+  const listed = await source.command('devices');
+  assert.equal(listed.event, 'audio-devices', JSON.stringify(listed));
+  assert.ok(listed.inputs.length > 0 && listed.outputs.length > 0, 'No physical audio endpoints were listed');
+  for (const device of [...listed.inputs, ...listed.outputs]) {
+    assert.ok(device.id && device.name, 'Physical endpoints need a stable ID and a name');
+  }
+  const input = listed.inputs[0];
+  const selectSince = source.events.length;
+  assert.equal((await source.command('set-input', { deviceId: input.id })).event, 'command-accepted');
+  const selected = await source.wait(event => event.event === 'audio-device-selected' &&
+    event.stats.input.requestedId === input.id, selectSince);
+  assert.deepEqual(selected.stats.input, { requestedId: input.id, id: input.id, name: input.name, fallback: false });
+  assert.equal((await source.nativeAudioState()).inputDeviceId, input.id);
+  const before = capture.totalSamplesDuration;
+  do {
+    const since = source.events.length;
+    await source.state();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const report = source.events.slice(since).findLast(event => event.event === 'media-stats' && Array.isArray(event.stats));
+    capture = report?.stats.find(value => value.type === 'media-source' && value.kind === 'audio') ?? capture;
+    if (capture.totalSamplesDuration > before + 0.1) break;
+  } while (Date.now() < deadline + 10_000);
+  assert.ok(capture.totalSamplesDuration > before + 0.1, 'Capture did not continue on the selected physical input');
   await source.command('mute', { enabled: true });
   let device;
   do {
@@ -40,5 +64,5 @@ test('opt-in native microphone capture uses only a disposable loopback call and 
   assert.equal(device.playing, false);
   await source.close();
   await sink.close();
-  t.diagnostic('Physical capture delivered PCM locally and stopped on mute. No audio was saved; the remote participant transmitted no sound.');
+  t.diagnostic('Physical capture delivered PCM locally, switched to a listed input and stopped on mute. No audio was saved; the remote participant transmitted no sound.');
 });

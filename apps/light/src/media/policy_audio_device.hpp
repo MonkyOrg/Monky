@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio_devices.hpp"
+
 #include <api/audio/audio_device.h>
 #include <api/scoped_refptr.h>
 #include <stdexcept>
@@ -41,6 +43,17 @@ public:
     }
     return 0;
   }
+
+  // Applies the preference after WebRTC's own default-device initialization.
+  // An unavailable or failing requested device falls back to the system
+  // default. Running directions restart only when the device really changes.
+  int SelectDevices(const AudioDevicePreference &preference) {
+    if (SelectDevice(AudioDirection::input, preference.input) != 0)
+      return -1;
+    return SelectDevice(AudioDirection::output, preference.output);
+  }
+  const AudioDeviceSelection &input_selection() const { return input_; }
+  const AudioDeviceSelection &output_selection() const { return output_; }
 
   int32_t InitRecording() override {
     return capture_allowed_ ? native_->InitRecording() : 0;
@@ -146,7 +159,82 @@ protected:
   ~PolicyAudioDevice() override = default;
 
 private:
+  int SelectDevice(AudioDirection direction,
+                   const std::optional<std::string> &requested) {
+    const bool input = direction == AudioDirection::input;
+    auto &current = input ? input_ : output_;
+    AudioDeviceSelection target{requested};
+    std::optional<uint16_t> index;
+    if (requested) {
+      index = FindDevice(*native_, direction, *requested, &target.name);
+      if (index)
+        target.id = *requested;
+      else
+        target.fallback = true;
+    }
+    if (selected_ && target.id == current.id) {
+      current.requested = target.requested;
+      current.fallback = target.fallback;
+      return 0;
+    }
+    if (Apply(direction, index) != 0) {
+      if (!index || Apply(direction, std::nullopt) != 0)
+        return -1;
+      target.id.clear();
+      target.name.clear();
+      target.fallback = true;
+    }
+    current = std::move(target);
+    if (!input)
+      selected_ = true;
+    return 0;
+  }
+
+  int Apply(AudioDirection direction, std::optional<uint16_t> index) {
+    if (direction == AudioDirection::input) {
+      if ((native_->Recording() || native_->RecordingIsInitialized()) &&
+          native_->StopRecording() != 0)
+        return -1;
+      const auto result = index ? native_->SetRecordingDevice(*index) :
+#ifdef _WIN32
+                                // The console default, as the Chromium client
+                                // uses, not the communications role.
+                                native_->SetRecordingDevice(kDefaultDevice);
+#else
+                                native_->SetRecordingDevice(uint16_t{0});
+#endif
+      if (result != 0 || native_->InitMicrophone() != 0)
+        return -1;
+      if (capture_allowed_ && capture_requested_ &&
+          ((!native_->RecordingIsInitialized() &&
+            native_->InitRecording() != 0) ||
+           native_->StartRecording() != 0))
+        return -1;
+      return 0;
+    }
+    if ((native_->Playing() || native_->PlayoutIsInitialized()) &&
+        native_->StopPlayout() != 0)
+      return -1;
+    const auto result = index ? native_->SetPlayoutDevice(*index) :
+#ifdef _WIN32
+                              native_->SetPlayoutDevice(kDefaultDevice);
+#else
+                              native_->SetPlayoutDevice(uint16_t{0});
+#endif
+    if (result != 0 || native_->InitSpeaker() != 0)
+      return -1;
+    if (playout_allowed_ && playout_requested_ &&
+        ((!native_->PlayoutIsInitialized() && native_->InitPlayout() != 0) ||
+         native_->StartPlayout() != 0))
+      return -1;
+    return 0;
+  }
+
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> native_;
+  AudioDeviceSelection input_;
+  AudioDeviceSelection output_;
+  // The first selection always applies, even for the default device.
+  bool selected_ = false;
   bool capture_allowed_ = false;
   bool playout_allowed_ = false;
   bool capture_requested_ = false;

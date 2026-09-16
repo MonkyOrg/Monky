@@ -70,6 +70,9 @@ Digite um objeto JSON por linha no terminal, usando o ID recebido:
 {"command":"join","channelId":"ID-DO-CANAL"}
 {"command":"mute","enabled":true}
 {"command":"deafen","enabled":false}
+{"command":"devices"}
+{"command":"set-input","deviceId":"ID-DO-DISPOSITIVO"}
+{"command":"set-output","deviceId":null}
 {"command":"stats","id":"minha-consulta"}
 {"command":"leave"}
 {"command":"reconnect"}
@@ -79,6 +82,30 @@ Digite um objeto JSON por linha no terminal, usando o ID recebido:
 `enabled:false` desfaz mute/deafen. Restrições impostas pelo servidor continuam
 valendo. `stats` consulta dispositivos e RTP sob demanda; não há coleta periódica
 de telemetria no núcleo. EOF, Ctrl+C e `quit` encerram conexão e mídia.
+
+### Dispositivos de áudio
+
+`devices` responde com `audio-devices`: entradas e saídas físicas (`id` e
+`name`) e a preferência salva. A lista é criada sob demanda, em uma thread
+temporária, e libera o módulo de áudio logo em seguida; fora de uma chamada
+nenhum dispositivo permanece aberto. No Windows, o `id` é o endpoint ID do Core
+Audio. O ADM do macOS não expõe identificador, então o nome é usado nesse caso.
+
+`set-input`/`set-output` recebem o `id` de um dispositivo listado, ou `null` para
+seguir o dispositivo padrão do sistema. A escolha é salva em
+`monky-light-settings.json` no perfil e vale imediatamente se houver chamada,
+reiniciando apenas a direção alterada. Mute e deafen continuam valendo: a troca
+nunca reabre um microfone interrompido. Cada mudança efetiva gera
+`audio-device-selected` com o dispositivo pedido, o dispositivo em uso e `fallback`.
+
+Se o dispositivo escolhido não estiver presente (removido, desativado ou nunca
+conectado), a chamada usa o padrão do sistema com `fallback:true`, sem falhar.
+As notificações de dispositivos do Windows e do macOS são por evento, sem
+polling; após uma rajada de mudanças o núcleo emite `audio-devices-changed`,
+reaplica a preferência e volta ao dispositivo escolhido quando ele é
+reconectado. O Windows usa o ADM Core Audio (`kWindowsCoreAudio2`) com reinício
+automático do fluxo. Remoção e reconexão de dispositivos no macOS ainda precisam
+de qualificação em um Mac.
 
 No macOS, a autorização do microfone é solicitada apenas quando uma chamada
 precisa transmitir. Enquanto a permissão está pendente, é possível receber
@@ -116,6 +143,12 @@ um `deviceId` aleatório independente da chave. Não contém seed, chave privada
 senha. Metadados inconsistentes, arquivos pendentes ou a ausência de um dos
 componentes da identidade exigem recuperação explícita, nunca recriação silenciosa.
 Diretórios com arquivos de outros aplicativos são recusados.
+
+`monky-light-settings.json` guarda apenas preferências do usuário (hoje, os
+dispositivos de áudio) e nunca participa da validação da identidade. É
+substituído de forma atômica sob o lock do perfil. Configurações inválidas ou
+ilegíveis geram `warning`, usam os padrões e são substituídas no próximo
+salvamento; uma gravação interrompida das configurações não exige recuperação.
 
 `IdentityStore` requer um diretório de perfil absoluto e já existente. Mantém um
 lock exclusivo durante sua vida e armazena uma seed Ed25519 de 32 bytes com
@@ -237,8 +270,8 @@ npm run test:light:hardware
 ```
 
 O cenário usa o executável de produção e um receptor sintético em loopback.
-O outro participante não transmite som. Confere entrega de PCM e interrupção
-da captura; não salva áudio nem envia dados para um servidor externo. Exige
+O outro participante não transmite som. Confere entrega de PCM, troca para uma
+entrada listada e interrupção da captura; não salva áudio nem envia dados para um servidor externo. Exige
 dispositivo disponível e permissão do sistema; não substitui avaliação auditiva
 por duas pessoas, dispositivos diferentes ou redes reais.
 

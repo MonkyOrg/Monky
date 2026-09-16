@@ -1,6 +1,8 @@
 #include "fixture_audio_device.hpp"
 #include "fixture_audio_clock.hpp"
+#include "media/policy_audio_device.hpp"
 
+#include <api/make_ref_counted.h>
 #include <media/engine/adm_helpers.h>
 
 #include <array>
@@ -401,6 +403,56 @@ void CheckInflightStopAndTerminate(bool terminate) {
           "No counter updates after draining stop/terminate");
 }
 
+void CheckDeviceSelection() {
+  const auto catalog = std::make_shared<FixtureDeviceCatalog>();
+  catalog->Set({{"mic-a", "Mic A"}, {"mic-b", "Mic B"}}, {{"out-a", "Out A"}, {"out-b", "Out B"}});
+  Transport transport;
+  auto device = FixtureAudioDevice::Create(catalog);
+  const auto listed = media::EnumerateDevices(*device);
+  Require(listed.inputs.size() == 2 && listed.inputs[1].id == "mic-b" && listed.inputs[1].name == "Mic B" &&
+              listed.outputs.size() == 2 && listed.outputs[0].id == "out-a",
+          "Enumeration must report catalog IDs and names");
+  webrtc::adm_helpers::Init(device.get());
+  auto policy = webrtc::make_ref_counted<media::PolicyAudioDevice>(device);
+  transport.device = device.get();
+  Require(policy->RegisterAudioCallback(&transport) == 0, "Register policy transport");
+
+  Require(policy->SelectDevices({std::string("mic-b"), std::nullopt}) == 0 &&
+              device->Snapshot().selected_input == "mic-b" && device->Snapshot().selected_output == "out-a" &&
+              policy->input_selection().id == "mic-b" && policy->input_selection().name == "Mic B" &&
+              !policy->input_selection().fallback && policy->output_selection().id.empty(),
+          "A present device is selected; nullopt uses the default");
+  Require(policy->SetPolicy(true, true) == 0 && policy->StartRecording() == 0 &&
+              policy->StartPlayout() == 0 && transport.WaitFor(3, 3),
+          "Selected devices start");
+
+  Require(policy->SelectDevices({std::string("mic-a"), std::string("out-b")}) == 0 &&
+              device->Recording() && device->Playing() &&
+              device->Snapshot().selected_input == "mic-a" && device->Snapshot().selected_output == "out-b",
+          "Switching running directions restarts them on the new devices");
+  const auto switched = transport.Snapshot();
+  Require(transport.WaitFor(switched.recording + 3, switched.playout + 3), "Audio continues after a switch");
+
+  catalog->Set({{"mic-b", "Mic B"}}, {{"out-a", "Out A"}, {"out-b", "Out B"}});
+  Require(policy->SelectDevices({std::string("mic-a"), std::string("out-b")}) == 0 &&
+              device->Recording() && device->Snapshot().selected_input == "mic-b" &&
+              policy->input_selection().fallback && policy->input_selection().id.empty() &&
+              policy->input_selection().requested == std::optional<std::string>("mic-a"),
+          "A removed device falls back to the default and keeps capturing");
+  catalog->Set({{"mic-b", "Mic B"}, {"mic-a", "Mic A"}}, {{"out-a", "Out A"}, {"out-b", "Out B"}});
+  Require(policy->SelectDevices({std::string("mic-a"), std::string("out-b")}) == 0 &&
+              device->Snapshot().selected_input == "mic-a" && !policy->input_selection().fallback,
+          "A reconnected preferred device is selected again");
+
+  Require(policy->SetPolicy(false, true) == 0 && !device->Recording(), "Mute stops capture");
+  Require(policy->SelectDevices({std::string("mic-b"), std::string("out-b")}) == 0 &&
+              !device->Recording() && device->Snapshot().selected_input == "mic-b",
+          "Switching the input while muted must not reopen capture");
+  Require(policy->SetPolicy(true, true) == 0 && device->Recording(), "Unmute resumes on the new device");
+  Require(policy->SetPolicy(false, false) == 0 && policy->Terminate() == 0, "Release the selection device");
+  Require(policy->RegisterAudioCallback(nullptr) == 0, "Detach the policy transport");
+}
+
 void CheckFailures() {
   Transport transport;
   auto device = FixtureAudioDevice::Create();
@@ -474,6 +526,7 @@ int main() {
     CheckCallbackRemovalAndReplacement();
     CheckInflightStopAndTerminate(false);
     CheckInflightStopAndTerminate(true);
+    CheckDeviceSelection();
     CheckFailures();
     CheckDestruction();
     CheckTransportDestructionAfterRemoval();

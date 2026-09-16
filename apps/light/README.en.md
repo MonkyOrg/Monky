@@ -70,6 +70,9 @@ Enter one JSON object per line in the terminal, using the received channel ID:
 {"command":"join","channelId":"CHANNEL-ID"}
 {"command":"mute","enabled":true}
 {"command":"deafen","enabled":false}
+{"command":"devices"}
+{"command":"set-input","deviceId":"DEVICE-ID"}
+{"command":"set-output","deviceId":null}
 {"command":"stats","id":"my-query"}
 {"command":"leave"}
 {"command":"reconnect"}
@@ -79,6 +82,29 @@ Enter one JSON object per line in the terminal, using the received channel ID:
 `enabled:false` undoes mute/deafen. Server restrictions still apply. `stats`
 queries devices and RTP on demand; the core does not periodically collect
 telemetry. EOF, Ctrl+C, and `quit` close the connection and media.
+
+### Audio devices
+
+`devices` answers with `audio-devices`: physical inputs and outputs (`id` and
+`name`) and the saved preference. The list is created on demand, on a
+temporary thread, and releases the audio device module right after; outside a
+call no device remains open. On Windows, the `id` is the Core Audio endpoint ID.
+The macOS ADM exposes no identifier, so the name is used there instead.
+
+`set-input`/`set-output` take the `id` of a listed device, or `null` to follow
+the system default device. The choice is saved in `monky-light-settings.json`
+in the profile and applies immediately if a call is active, restarting only the
+changed direction. Mute and deafen continue to apply: a switch never reopens a
+stopped microphone. Each effective change emits `audio-device-selected` with the
+requested device, the device in use, and `fallback`.
+
+If the chosen device is not present (removed, disabled, or never connected),
+the call uses the system default with `fallback:true`, without failing.
+Windows and macOS device notifications are event-driven, without polling; after
+a burst of changes the core emits `audio-devices-changed`, reapplies the
+preference, and returns to the chosen device when it is reconnected. Windows
+uses the Core Audio ADM (`kWindowsCoreAudio2`) with automatic stream restart.
+Device removal and reconnection on macOS still require qualification on a Mac.
 
 On macOS, microphone authorization is requested only when a call needs to send
 audio. While permission is pending, receiving audio, leaving the call, and
@@ -116,6 +142,12 @@ random `deviceId` independent of the key. It contains no seed, private key, or
 password. Inconsistent metadata, pending files, or a missing identity component
 require explicit recovery, never silent replacement. Directories containing
 another application's files are rejected.
+
+`monky-light-settings.json` stores only user preferences (currently audio
+devices) and never participates in identity validation. It is replaced
+atomically under the profile lock. Invalid or unreadable settings emit a
+`warning`, fall back to defaults, and are replaced by the next save; an
+interrupted settings write does not require recovery.
 
 `IdentityStore` requires an existing absolute profile directory. It holds an
 exclusive lock for its lifetime and stores a 32-byte Ed25519 seed with
@@ -236,8 +268,8 @@ npm run test:light:hardware
 ```
 
 The scenario uses the production executable and a synthetic receiver on
-loopback. The other participant transmits no sound. It checks PCM delivery
-and capture stopping; it neither saves audio nor sends data to an external
+loopback. The other participant transmits no sound. It checks PCM delivery,
+switching to a listed input, and capture stopping; it neither saves audio nor sends data to an external
 server. An available device and system permission are required; this does not
 replace listening with two people, different devices, or real networks.
 
