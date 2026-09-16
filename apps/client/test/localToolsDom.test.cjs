@@ -382,7 +382,7 @@ async function runRegression(language) {
   modal.voiceVideoTab.activateCameraPreview = () => { previewActivations++; };
   modal.aboutTab.loadAppVersion = async () => {};
   for (const section of ['camera', 'noise-suppression']) {
-    await modal.open('voice_video', section);
+    const opening = modal.open('voice_video', section);
     container = document.querySelector('.modal-backdrop--settings');
     const link = field(`[data-section-target="${section}"]`);
     check(field('.settings-tab-btn.active').dataset.tab === 'voice_video'
@@ -390,6 +390,7 @@ async function runRegression(language) {
       && document.getElementById(link.getAttribute('aria-controls')) === field(`[data-settings-section="${section}"]`),
     'existing voice/video deep links retain their actual sections');
     await answerRead();
+    await opening;
     modal.close();
   }
   check(previewActivations === 2, 'voice/video callers still activate their preview lifecycle');
@@ -449,13 +450,14 @@ async function runRegression(language) {
   const oldModalChange = listenerHistory.at(-1);
   modal.close();
   check(listeners.size === 0 && !document.querySelector('.settings-section-nav'), 'modal close cleans IPC and section navigation');
-  await modal.open('local_tools');
+  const reopening = modal.open('local_tools');
   container = document.querySelector('.modal-backdrop--settings');
   oldModalRead.resolve({ ...state, toolsBytes: 1 });
   oldModalChange({ ...state, toolsBytes: 2 });
   await flush();
   check(field('[data-local-tools-size]').textContent === t('localExecution.notLoaded'), 'actual modal reopen ignores old state and change responses');
   await answerRead();
+  await reopening;
   const keyboardStart = mutations.length;
   const keyboardEvents = [];
   const recordKey = event => keyboardEvents.push({
