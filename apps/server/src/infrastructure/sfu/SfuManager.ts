@@ -791,10 +791,19 @@ export class SfuManager {
   public async setConsumerPaused(consumerId: string, paused: boolean): Promise<void> {
     const record = this.consumers.get(consumerId);
     if (!record) return;
-    if (paused) {
-      await record.consumer.pause();
-    } else {
-      await record.consumer.resume();
+    const producer = this.producers.get(record.producerId);
+    const retired = () => record.consumer.closed || this.consumers.get(consumerId) !== record ||
+      !producer || producer.producer.closed || this.producers.get(record.producerId) !== producer;
+    // The worker may remove a consumer before its producerclose notification reaches Node.
+    if (retired()) return;
+    try {
+      if (paused) {
+        await record.consumer.pause();
+      } else {
+        await record.consumer.resume();
+      }
+    } catch (error) {
+      if (!retired()) throw error;
     }
   }
 

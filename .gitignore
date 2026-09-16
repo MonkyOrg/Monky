@@ -23,6 +23,7 @@ artifacts/
 *.exp
 *.o
 apps/client/native/screen-audio/build/
+apps/light/build/
 
 # Variáveis de Ambiente e Segredos
 .env
