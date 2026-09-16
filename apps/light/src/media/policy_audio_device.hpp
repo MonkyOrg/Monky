@@ -163,7 +163,8 @@ private:
                    const std::optional<std::string> &requested) {
     const bool input = direction == AudioDirection::input;
     auto &current = input ? input_ : output_;
-    AudioDeviceSelection target{requested};
+    AudioDeviceSelection target;
+    target.requested = requested;
     std::optional<uint16_t> index;
     if (requested) {
       index = FindDevice(*native_, direction, *requested, &target.name);
