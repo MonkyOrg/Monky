@@ -7,6 +7,23 @@ import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
 import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
+import type {
+  LocalExecutionMutationResult,
+  LocalExecutionSnapshot,
+  LocalPermissionChange,
+  LocalToolId,
+  LocalPreparationInput,
+  LocalPreparationResult,
+  LocalTaskStartInput,
+  LocalTaskStartResult,
+  LocalFrameReadInput,
+  LocalFrameReadResult,
+  LocalFrameProgress,
+  LocalRequestCancellation,
+  LocalTaskPause,
+  LocalConnectionState,
+  LocalTaskFailureEvent,
+} from './localExecution.js';
 
 export interface RendererBootstrapFailure {
   phase: 'constructor' | 'initialization';
@@ -123,6 +140,48 @@ export const AUDIO_PREVIEW_IPC = {
   load: 'audio-preview:load',
   cancel: 'audio-preview:cancel',
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const LOCAL_EXECUTION_IPC = {
+  getState: 'local-execution:get-state',
+  setPermission: 'local-execution:set-permission',
+  removeTool: 'local-execution:remove-tool',
+  clearCache: 'local-execution:clear-cache',
+  cancelTask: 'local-execution:cancel-task',
+  prepare: 'local-execution:prepare',
+  startTask: 'local-execution:start-task',
+  readFrames: 'local-execution:read-frames',
+  acknowledgeFrames: 'local-execution:acknowledge-frames',
+  cancelRequest: 'local-execution:cancel-request',
+  setPaused: 'local-execution:set-paused',
+  setConnection: 'local-execution:set-connection',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const LOCAL_EXECUTION_CHANGED = 'local-execution:changed' satisfies keyof IpcEvents;
+export const LOCAL_EXECUTION_TASK_FAILED = 'local-execution:task-failed' satisfies keyof IpcEvents;
+
+export type LocalPreparationDialogAction = 'deny' | 'connection' | 'always' | 'confirm' | 'retry' | 'cancel' | 'close';
+
+export interface LocalPreparationDialogState {
+  phase: 'consent' | 'installing' | 'cancelling' | 'failed' | 'complete';
+  title: string;
+  status: string;
+  detail: string;
+  storage: string;
+  progress: number | null;
+  tools: Array<{
+    id: LocalToolId;
+    status: string;
+    size: string;
+    ready: boolean;
+    active: boolean;
+  }>;
+}
+
+export const LOCAL_PREPARATION_DIALOG_IPC = {
+  state: 'local-preparation-dialog:state',
+  action: 'local-preparation-dialog:action',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const LOCAL_PREPARATION_DIALOG_CHANGED = 'local-preparation-dialog:changed' satisfies keyof IpcEvents;
 
 /** One custom sticker image found in the user's stickers folder (#356). */
 export interface StickerEntry {
@@ -496,6 +555,21 @@ export interface IpcInvokeChannels {
   'audio-preview:cancel': { args: [input: AudioPreviewCancellation]; returnType: boolean };
   'soundboard:register-shortcuts': { args: [shortcuts: SoundboardShortcutBinding[]]; returnType: boolean };
 
+  'local-execution:get-state': { args: []; returnType: LocalExecutionSnapshot };
+  'local-execution:set-permission': { args: [input: LocalPermissionChange]; returnType: LocalExecutionMutationResult };
+  'local-execution:remove-tool': { args: [tool: LocalToolId]; returnType: LocalExecutionMutationResult };
+  'local-execution:clear-cache': { args: []; returnType: LocalExecutionMutationResult };
+  'local-execution:cancel-task': { args: [taskId: string]; returnType: LocalExecutionMutationResult };
+  'local-execution:prepare': { args: [input: LocalPreparationInput]; returnType: LocalPreparationResult };
+  'local-execution:start-task': { args: [input: LocalTaskStartInput]; returnType: LocalTaskStartResult };
+  'local-execution:read-frames': { args: [input: LocalFrameReadInput]; returnType: LocalFrameReadResult };
+  'local-execution:acknowledge-frames': { args: [input: LocalFrameProgress]; returnType: LocalExecutionMutationResult };
+  'local-execution:cancel-request': { args: [input: LocalRequestCancellation]; returnType: LocalExecutionMutationResult };
+  'local-execution:set-paused': { args: [input: LocalTaskPause]; returnType: LocalExecutionMutationResult };
+  'local-execution:set-connection': { args: [input: LocalConnectionState]; returnType: LocalExecutionMutationResult };
+  'local-preparation-dialog:state': { args: []; returnType: LocalPreparationDialogState };
+  'local-preparation-dialog:action': { args: [action: LocalPreparationDialogAction]; returnType: void };
+
   // Figurinhas do chat (#356)
   'stickers:list': { args: [folderPath: string]; returnType: StickerEntry[] };
   'stickers:read': { args: [filePath: string]; returnType: StickerData | null };
@@ -556,6 +630,9 @@ export interface IpcEvents {
   'lan:lost': [server: DiscoveredLanServer];
   'soundboard:shortcut-triggered': [soundName: string];
   'soundboard:download-progress': [progress: SoundboardDownloadProgress];
+  'local-execution:changed': [snapshot: LocalExecutionSnapshot];
+  'local-execution:task-failed': [failure: LocalTaskFailureEvent];
+  'local-preparation-dialog:changed': [state: LocalPreparationDialogState];
   'shortcut:action-triggered': [action: string];
   'ptt:state-changed': [active: boolean];
   'ptt:captured': [binding: PttKeyBinding];

@@ -358,6 +358,7 @@ test('successful forms disappear and discard inputs, while failed submissions re
   assert.ok(invocation);
   store.setFormValues('invoke-one', 'step-one', { title: 'Private input' });
   store.beginFormSubmit('invoke-one', 'step-one');
+  assert.match(renderBotInvocation(invocation), /data-loading="1" aria-busy="true"/);
   store.failFormSubmit('invoke-one', 'step-one', 'Try again');
   assert.match(renderBotInvocation(invocation), /Private input/);
   assert.match(renderBotInvocation(invocation), /Try again/);
@@ -370,6 +371,7 @@ test('successful forms disappear and discard inputs, while failed submissions re
   store.receivePrompt(prompt('invoke-one', 'step-two'));
   assert.match(renderBotInvocation(invocation), /data-interaction-id="step-two"/);
   assert.doesNotMatch(renderBotInvocation(invocation), /data-interaction-id="step-one"/);
+  assert.doesNotMatch(renderBotInvocation(invocation), /data-loading="1"/);
 });
 
 test('private selectors render escaped immediate buttons or a dropdown with confirmation', () => {

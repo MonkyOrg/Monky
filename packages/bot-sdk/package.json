@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "npm run build && node --test"
+    "test": "npm run build && npm run test:types && node --test",
+    "test:types": "tsc -p tsconfig.type-tests.json"
   },
   "dependencies": {
     "@monky/shared": "*",

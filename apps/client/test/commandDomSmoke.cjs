@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { runBotSettingsDomSmoke } = require(path.join(__dirname, 'botSettingsDomSmoke.cjs'));
+const { authoredOggPreview } = require(path.join(__dirname, 'fixtures', 'authoredAudio.cjs'));
 
 const clientRoot = path.resolve(__dirname, '..');
 const output = path.join(clientRoot, 'dist-test');
@@ -18,6 +19,9 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_COMMAND_DOM_PROFILE);
+  // finish() must report the scenario result after Vite cleanup, not quit early
+  // with Electron's default zero exit code when the final window is destroyed.
+  app.on('window-all-closed', () => {});
   app.commandLine.appendSwitch('use-fake-device-for-media-stream');
   app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
   // finish() owns the exit status, including failures during async cleanup.
@@ -64,11 +68,23 @@ if (!process.versions.electron) {
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    timeout = setTimeout(() => { console.error('DOM smoke timed out'); void finish(1); }, 60_000);
+    timeout = setTimeout(() => { console.error('DOM smoke timed out'); void finish(1); }, 120_000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__command_dom_smoke__`);
     window.webContents.debugger.attach('1.3');
     await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
     window.webContents.focus();
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+    });
+    const waitingChecks = await window.webContents.executeJavaScript(`(${runCommandWaitFeedbackSmoke.toString()})(true)`, true);
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+    });
+    await window.webContents.executeJavaScript(`(${runCommandWaitFeedbackSmoke.toString()})(false)`, true);
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+    });
+    console.log(`Command waiting indicators: ${waitingChecks} checks plus reduced-motion coverage passed`);
     if (process.argv.includes('--bot-settings-only')) {
       const checks = await window.webContents.executeJavaScript(`(${runBotSettingsDomSmoke.toString()})()`, true);
       await window.webContents.executeJavaScript('document.body.innerHTML = window.botSettingsPreviewMarkup', true);
@@ -153,28 +169,84 @@ if (!process.versions.electron) {
   }).catch(async (error) => { console.error(error); await finish(1); });
 }
 
-function authoredOggPreview() {
-  const page = (packets, sequence, flags, granule) => {
-    const header = Buffer.alloc(27 + packets.length);
-    header.write('OggS'); header[5] = flags; header.writeBigUInt64LE(BigInt(granule), 6);
-    header.writeUInt32LE(1, 14); header.writeUInt32LE(sequence, 18); header[26] = packets.length;
-    packets.forEach((packet, index) => { header[27 + index] = packet.length; });
-    const bytes = Buffer.concat([header, ...packets]);
-    let crc = 0;
-    for (const byte of bytes) {
-      crc ^= byte << 24;
-      for (let bit = 0; bit < 8; bit++) crc = ((crc << 1) ^ ((crc & 0x80000000) ? 0x04c11db7 : 0)) >>> 0;
-    }
-    bytes.writeUInt32LE(crc, 22);
-    return bytes;
-  };
-  const header = Buffer.alloc(19);
-  header.write('OpusHead'); header[8] = 1; header[9] = 2; header.writeUInt32LE(48000, 12);
-  const tags = Buffer.alloc(16); tags.write('OpusTags');
-  return Buffer.concat([
-    page([header], 0, 2, 0), page([tags], 1, 0, 0),
-    page(Array.from({ length: 25 }, () => Buffer.from([0xf8, 0xff, 0xfe])), 2, 4, 25 * 960),
+async function runCommandWaitFeedbackSmoke(motion) {
+  const [{ renderBotInvocation }, { renderCompactCommand }, { createChatStore }, language] = await Promise.all([
+    import('/views/BotChatView.ts'), import('/views/commandComposer.ts'), import('/stores/chatStore.ts'), import('/i18n/index.ts'),
   ]);
+  const previous = language.getLanguage();
+  const root = document.createElement('div');
+  document.body.append(root);
+  let checks = 0;
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const animation = (selector, pseudo) => {
+    const element = root.querySelector(selector);
+    check(!!element, `Missing waiting indicator ${selector}`);
+    check(getComputedStyle(element, pseudo).animationName === (motion ? 'reconnect-spin' : 'none'),
+      `${selector} must respect the motion preference`);
+  };
+  try {
+    for (const locale of ['pt-BR', 'en']) {
+      language.setLanguage(locale);
+      const invocation = {
+        invocationId: 'waiting-ui', channelId: 'channel', botId: 'bot', botName: 'Bot', commandName: 'play',
+        createdAt: 1, expiresAt: Date.now() + 60000, status: 'active',
+        cancelPending: false, forms: [], acknowledged: true, hasResponse: false,
+      };
+      root.innerHTML = renderBotInvocation(invocation);
+      animation('.bot-loading-spinner');
+      check(root.textContent.includes(language.t('botChat.waiting')), 'Waiting retains readable localized text');
+      invocation.hasResponse = true;
+      root.innerHTML = renderBotInvocation(invocation);
+      animation('.bot-loading-spinner');
+      check(root.querySelector('.bot-status').getAttribute('aria-busy') === 'true',
+        'An early acknowledgement does not end the loading state of a still-running command');
+      invocation.hasResponse = false;
+      const form = { title: 'Form', fields: [{ name: 'answer', label: 'Answer', type: 'text' }] };
+      invocation.forms = [{ interactionId: 'form', form, values: {}, status: 'submitting' }];
+      root.innerHTML = renderBotInvocation(invocation);
+      animation('.bot-inline-form button[type=submit]', '::after');
+      check(root.querySelector('.bot-inline-form').getAttribute('aria-busy') === 'true', 'Submission is accessible as busy');
+      form.fields = [{ name: 'answer', label: 'Answer', type: 'select', presentation: 'buttons', choices: [{ label: 'Yes', value: 'yes' }] }];
+      root.innerHTML = renderBotInvocation(invocation);
+      animation('.bot-loading-spinner');
+      invocation.forms = [];
+      invocation.cancelPending = true;
+      root.innerHTML = renderBotInvocation(invocation);
+      animation('.bot-cancel-interaction', '::after');
+      invocation.cancelPending = false;
+      invocation.soundDownload = { downloadId: 'download', title: 'Sound', fileName: 'sound.ogg', receivedBytes: 0, phase: 'confirming' };
+      root.innerHTML = renderBotInvocation(invocation);
+      animation('.bot-sound-download .bot-loading-spinner');
+      invocation.soundDownload.phase = 'downloading';
+      root.innerHTML = renderBotInvocation(invocation);
+      animation('.bot-sound-download .bot-loading-spinner');
+      check(!!root.querySelector('progress'), 'Download keeps its real progress control');
+      delete invocation.soundDownload;
+      invocation.status = 'completed';
+      root.innerHTML = renderBotInvocation(invocation);
+      check(!root.querySelector('.bot-loading-spinner, [data-loading="1"]'), 'Completed commands do not retain a loading animation');
+      invocation.hasResponse = true;
+      root.innerHTML = renderBotInvocation(invocation);
+      check(root.childElementCount === 0, 'Finishing an acknowledged text command removes its loading card');
+
+      const store = createChatStore();
+      const command = { name: 'play', description: 'Play', botId: 'bot', botName: 'Bot' };
+      store.setCommands([command]);
+      store.selectCommand('channel', command);
+      const draft = store.getCommandDraft('channel');
+      store.setCommandPending('channel', draft, true);
+      root.innerHTML = renderCompactCommand(draft, 'channel', [], true, true);
+      animation('.bot-command-run', '::after');
+      check(root.querySelector('.bot-command-run').getAttribute('aria-busy') === 'true', 'Command startup is busy until acknowledged');
+      store.setCommandPending('channel', draft, false);
+      root.innerHTML = renderCompactCommand(draft, 'channel', [], false, true);
+      check(!root.querySelector('[data-loading="1"]'), 'A disabled command is not necessarily loading');
+    }
+  } finally {
+    root.remove();
+    language.setLanguage(previous);
+  }
+  return checks;
 }
 
 async function runNativeAudioPreviewSmoke(url) {
@@ -328,8 +400,14 @@ async function runAudioPreviewLifecycleSmoke() {
     let submissions = 0;
     root.addEventListener('click', event => { if (event.target.closest('[data-lifecycle-select]')) submissions++; });
     play(0);
+    check(controls(0).getAttribute('aria-busy') === 'true' &&
+      controls(0).querySelector('[data-audio-preview-icon]').classList.contains('spin') &&
+      getComputedStyle(controls(0).querySelector('[data-audio-preview-icon]')).animationName === 'reconnect-spin',
+    'A loading preview must animate without disabling its existing cancel/play control');
     await settle();
     check(audios[0]?.plays === 1 && audios[0].src.startsWith('blob:'), 'A preview must play only a local Blob after IPC');
+    check(controls(0).getAttribute('aria-busy') === 'false' &&
+      !controls(0).querySelector('[data-audio-preview-icon]').classList.contains('spin'), 'Preview animation stops when playback is ready');
     const sliders = [...root.querySelectorAll('[data-audio-preview-volume]')];
     const progress = index => controls(index).querySelector('[data-audio-preview-progress]');
     check(!controls(0).querySelector('input'), 'Individual results must not have their own volume sliders');
@@ -940,6 +1018,11 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     await waitFor(() => !!root.querySelector('[data-parameter-option]'), 'Voice autocomplete did not render');
   };
   const listen = () => root.querySelector('[data-audio-preview-action=toggle]').click();
+  const listenLazy = async () => {
+    const before = previews.length;
+    listen();
+    await waitFor(() => previews.length > before, 'Lazy preview request did not start');
+  };
   const binary = [];
   for (let offset = 0; offset < wave.length; offset += 16384) binary.push(String.fromCharCode(...wave.subarray(offset, offset + 16384)));
   const ready = { status: 'ok', audioBase64: btoa(binary.join('')), mimeType: 'audio/wav' };
@@ -1058,7 +1141,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     store.selectCommand('chat', music, 'offline');
     type(input(), 'still offline');
     root.querySelector('[data-command-form]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await new Promise(resolve => setTimeout(resolve, 550));
+    await new Promise(resolve => setTimeout(resolve, 1100));
     check(queries.length === 0 && previews.length === 0 && invoked.length === 0, 'Outside voice blocks query, preview and execute');
     check(!input().disabled && !root.querySelector('[data-bot-action=cancel-command]').disabled &&
       root.querySelector('.bot-command-run').disabled, 'Voice denial keeps command editing and clearing available');
@@ -1073,7 +1156,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     join('voice');
     await prepare('joined');
     check(previews.length === 0 && loads.length === 0, 'Query results never start private audio without listen');
-    listen();
+    await listenLazy();
     const old = previews.at(-1);
     const oldQuery = queries.at(-1);
     leave();
@@ -1085,7 +1168,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     check(loads.length === 0, 'Late private preview never reaches native playback');
     join('voice');
     await prepare('playing');
-    listen(); reply(previews.at(-1), ready, 'COMMAND_AUDIO_PREVIEW_RESULT');
+    await listenLazy(); reply(previews.at(-1), ready, 'COMMAND_AUDIO_PREVIEW_RESULT');
     await waitFor(() => played.length > 0 && !played.at(-1).paused, 'Generated voice preview did not play');
     const activeAudio = played.at(-1);
     moveBot('other');
@@ -1097,7 +1180,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     const beforeQueries = queries.length;
     type(input(), 'wrong room');
     root.querySelector('[data-command-form]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await new Promise(resolve => setTimeout(resolve, 550));
+    await new Promise(resolve => setTimeout(resolve, 1100));
     check(queries.length === beforeQueries && invoked.length === 0, 'Mismatch blocks every music command path');
     store.clearCommand('chat'); store.selectCommand('chat', mini);
     root.querySelector('[data-command-form]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
@@ -1124,7 +1207,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
       'Moving while eligible neither displays stale choices nor silently retargets the search');
     await prepare('eligible pending preview');
     const loadsBeforeMove = loads.length;
-    listen();
+    await listenLazy();
     const eligiblePreview = previews.at(-1);
     join('other');
     reply(eligiblePreview, ready, 'COMMAND_AUDIO_PREVIEW_RESULT');
@@ -1134,7 +1217,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     'An eligible room move cancels pending preview work and rejects its late audio');
     await prepare('eligible playing preview');
     const playedBeforeMove = played.length;
-    listen(); reply(previews.at(-1), ready, 'COMMAND_AUDIO_PREVIEW_RESULT');
+    await listenLazy(); reply(previews.at(-1), ready, 'COMMAND_AUDIO_PREVIEW_RESULT');
     await waitFor(() => played.length > playedBeforeMove && !played.at(-1).paused, 'Eligible preview did not start');
     const eligibleAudio = played.at(-1);
     join('voice');
@@ -1362,6 +1445,9 @@ async function runAutocompleteDomSmoke() {
   await new Promise(resolve => setTimeout(resolve, 270));
   check(queries.length === 0, 'One character must not trigger a query');
   type(input(), 'alpha');
+  check(!!root.querySelector('#bot-parameter-options .bot-loading-spinner') &&
+    getComputedStyle(find('#bot-parameter-options .bot-loading-spinner')).animationName === 'reconnect-spin',
+  'Search waiting has an actual animated indicator and keeps its localized text');
   key(input(), 'Enter');
   check(invoked.length === 0, 'Typed text without a selected choice must not invoke');
   await waitFor(() => queries.length === 1);
@@ -1369,6 +1455,7 @@ async function runAutocompleteDomSmoke() {
     'Autocomplete carries only this bot/server/caller custom preferences');
   response(queries[0], choices);
   await waitFor(() => root.querySelectorAll('[data-parameter-option]').length === 20);
+  check(!root.querySelector('#bot-parameter-options .bot-loading-spinner'), 'Search animation disappears when choices arrive');
   const menuRect = find('#bot-parameter-options').getBoundingClientRect();
   const composerRect = find('.bot-compact-command-form').getBoundingClientRect();
   check(menuRect.bottom <= composerRect.top + 1 && menuRect.width >= composerRect.width * 0.95,
@@ -1396,7 +1483,7 @@ async function runAutocompleteDomSmoke() {
   key(input(), 'Enter');
   check(invoked.length === 0, 'Enter while loading must not submit the query as an ID');
   await waitFor(() => queries.length === 2);
-  check(queries[1].time - queries[0].time >= 495, 'Queries must be throttled independently of debounce');
+  check(queries[1].time - queries[0].time >= 1000, 'Actual query sends must be spaced independently of debounce');
   response(queries[1], choices);
   await waitFor(() => !!root.querySelector('[data-parameter-option]'));
   check(find('[data-audio-preview-volume]').value === '41', 'Replacing search results keeps the same command volume');
@@ -1728,12 +1815,16 @@ async function runAutocompleteDomSmoke() {
     };
     const reply = (request, payload) => client.handleIncomingMessage({ type: 'COMMAND_AUDIO_PREVIEW_RESULT', requestId: request.requestId, payload });
     const ready = { status: 'ok', audioBase64: btoa(String.fromCharCode(...syntheticWave())), mimeType: 'audio/wav' };
-    const play = index => root.querySelectorAll('[data-audio-preview-action]')[index].click();
+    const play = async index => {
+      const before = lazyRequests.length;
+      root.querySelectorAll('[data-audio-preview-action]')[index].click();
+      await waitFor(() => lazyRequests.length > before);
+    };
     await prepare('lazy first');
     check(lazyRequests.length === 0, 'Autocomplete metadata never invokes the lazy provider');
     let beforeLoads = previewLoads.length;
-    play(0);
-    await waitFor(() => lazyRequests.length === 1);
+    await play(0);
+    check(lazyRequests.length === 1, 'The first listen starts exactly one lazy request');
     const old = lazyRequests.at(-1);
     check(old.payload.autocompleteRequestId === queries.at(-1).requestId && old.payload.resourceId === 'opaque-first' &&
       old.payload.channelId === 'one' && old.payload.botId === command.botId && previewLoads.length === beforeLoads,
@@ -1746,9 +1837,9 @@ async function runAutocompleteDomSmoke() {
     await new Promise(resolve => setTimeout(resolve, 30));
     check(previewLoads.length === beforeLoads, 'Late audio from older typing must not reach native playback');
     await prepare('lazy current');
-    play(0);
+    await play(0);
     const first = lazyRequests.at(-1);
-    play(1);
+    await play(1);
     const second = lazyRequests.at(-1);
     check(first !== second && lazyCancels.some(cancel => cancel.requestId === first.requestId),
       'Switching preview results cancels the previous provider');
@@ -1762,20 +1853,20 @@ async function runAutocompleteDomSmoke() {
     for (const locale of ['pt-BR', 'en']) {
       language.setLanguage(locale);
       await prepare(`lazy error ${locale}`);
-      play(0);
+      await play(0);
       reply(lazyRequests.at(-1), { status: 'failed', reason: 'handler_failed' });
       await waitFor(() => root.querySelector('[data-audio-preview-state="failed"]'));
       check(root.querySelector('[data-audio-preview-state="failed"]').textContent.includes(language.t('botChat.audioPreviewProviderFailed')),
         `Provider errors use the ${locale} translation`);
     }
     audioPreviewService.release(root);
-    play(0);
+    await play(0);
     const invalidated = lazyRequests.at(-1);
     client.handleIncomingMessage({ type: 'COMMAND_AUTOCOMPLETE_CANCEL', payload: { requestId: queries.at(-1).requestId } });
     check(find('#bot-parameter-options').hidden && lazyCancels.some(cancel => cancel.requestId === invalidated.requestId),
       'Server expiry, disconnect, or access invalidation closes the choice and aborts its provider');
     await prepare('lazy close');
-    play(0);
+    await play(0);
     const closing = lazyRequests.at(-1);
     find('[data-bot-action="cancel-command"]').click();
     check(lazyCancels.some(cancel => cancel.requestId === closing.requestId) && audioPreviewService.active === null,
@@ -3356,10 +3447,10 @@ async function runDomSmoke() {
   };
   checkPickerSearch();
   find('[data-goto-group="smileys"]').click();
-  await frame();
+  await waitFor(() => find('.emoji-picker-body').scrollTop > 0);
   check(find('.emoji-picker-body').scrollTop > 0, 'Existing category buttons must still navigate the catalog');
   find('[data-goto-group="recent"]').click();
-  for (let attempt = 0; attempt < 60 && find('.emoji-picker-body').scrollTop > 0; attempt++) await frame();
+  await waitFor(() => find('.emoji-picker-body').scrollTop === 0);
   check(find('.emoji-picker-body').scrollTop === 0, 'Recent clock must navigate back to the first category');
   check(!!document.querySelector('[data-emoji-group="recent"] .emoji-picker-recent-empty'), 'Empty recent category must explain how it is populated');
   check(recentEmojis.get().length === 0, 'Opening recent category must not record an emoji');
@@ -4056,7 +4147,12 @@ async function runDomSmoke() {
   check(existingPreviewControl.isConnected && !selectorFeed.textContent.includes('Rejected'),
     'An invalid audio snapshot must not bypass the shared contract by stripping and restoring metadata');
   selectorFeed.querySelector('[data-selector-value="b"]').click();
+  check(!!selectorFeed.querySelector('.public-bot-selector .bot-loading-spinner') &&
+    selectorFeed.querySelector('.public-bot-selector').getAttribute('aria-busy') === 'true',
+  'A pending public selector response has the same animated feedback');
   await frame();
+  check(!selectorFeed.querySelector('.public-bot-selector .bot-loading-spinner'),
+    'Public selector feedback ends after its response');
   check(publicRequests.filter((request) => request.type === 'SELECTOR_RESPOND').length === 1, 'Public option buttons must submit immediately');
   check(JSON.stringify(publicRequests.find((request) => request.type === 'SELECTOR_RESPOND').payload.userSettings) === JSON.stringify({ compact: true }),
     'Independent public selectors send only their owning bot/caller custom preferences, not host approval');

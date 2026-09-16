@@ -2,6 +2,12 @@ import { z } from 'zod';
 import { LIMITS } from './constants.js';
 import type { CommandOption } from './models.js';
 import {
+  commandCallerContextSchema,
+  localCapabilitiesSchema,
+  localCommandPreparationSchema,
+  localPreviewReferenceSchema,
+} from './localExecutionProtocol.js';
+import {
   BOT_LOCALES, botFieldLocalizationSchema, botLocaleSchema, commandLocalizationsSchema, commandNameSchema,
   getCommandPresentation, localizeBotChoices, resolveBotLocale, type BotLocale,
 } from './botLocales.js';
@@ -82,6 +88,7 @@ export const commandDefinitionSchema = z.object({
   localizations: commandLocalizationsSchema.optional(),
   downloadsSound: z.boolean().optional(),
   voiceRequirement: z.enum(['joined', 'same-bot-channel']).optional(),
+  localCapabilities: localCapabilitiesSchema.optional(),
 }).strict().refine((command) =>
   new Set(command.options?.map((option) => option.name)).size === (command.options?.length ?? 0)
 ).superRefine((command, ctx) => {
@@ -110,14 +117,12 @@ export const commandInvokeSchema = z.object({
   locale: botLocaleSchema.optional(),
   allowSoundDownload: z.boolean().optional(),
   userSettings: botSettingsValuesSchema.optional(),
+  localPreparation: localCommandPreparationSchema.optional(),
 }).strict();
 
-export const commandExecutionSchema = commandInvokeSchema.omit({ userSettings: true }).extend({
+export const commandExecutionSchema = commandInvokeSchema.omit({ userSettings: true, localPreparation: true }).extend({
+  ...commandCallerContextSchema.shape,
   invocationId: identifier,
-  invokerId: identifier,
-  invokerSessionId: identifier,
-  invokerVoiceChannelId: identifier.nullable(),
-  invokerNickname: z.string().min(1).max(LIMITS.MAX_NICKNAME_LENGTH),
   settings: botSettingsContextSchema.optional(),
 });
 
@@ -153,10 +158,12 @@ export const commandAutocompleteSchema = z.object({
   options: commandValuesSchema.optional(),
   locale: botLocaleSchema.optional(),
   userSettings: botSettingsValuesSchema.optional(),
+  localPreparation: localCommandPreparationSchema.optional(),
 }).strict();
 export const commandAutocompleteExecutionSchema = commandAutocompleteSchema
-  .omit({ botId: true, channelId: true, userSettings: true })
+  .omit({ userSettings: true, localPreparation: true })
   .extend({
+    ...commandCallerContextSchema.shape,
     options: commandValuesSchema,
     locale: botLocaleSchema,
     settings: botSettingsContextSchema.optional(),
@@ -182,10 +189,12 @@ export const commandAudioPreviewSchema = z.object({
   optionName: inputName,
   autocompleteRequestId: identifier,
   resourceId: audioPreviewResourceIdSchema,
+  localPreparation: localCommandPreparationSchema.optional(),
 }).strict();
 export type CommandAudioPreviewPayload = z.infer<typeof commandAudioPreviewSchema>;
 
 export const commandAudioPreviewExecutionSchema = z.object({
+  ...commandCallerContextSchema.shape,
   commandName,
   optionName: inputName,
   resourceId: audioPreviewResourceIdSchema,
@@ -213,6 +222,7 @@ export const commandAudioPreviewResultSchema = z.discriminatedUnion('status', [
     audioBase64: commandAudioPreviewBase64Schema,
     mimeType: commandAudioPreviewMimeSchema,
   }).strict(),
+  localPreviewReferenceSchema.extend({ status: z.literal('local') }).strict(),
   z.object({
     status: z.literal('failed'),
     reason: z.enum(['handler_failed', 'invalid_response', 'timeout', 'too_large', 'unsupported_audio', 'busy', 'expired']),

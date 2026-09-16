@@ -12,7 +12,7 @@ Um bot é um **processo externo** que se conecta ao servidor Monky via WebSocket
 - Usam seu próprio nome e foto nas mensagens e nos formulários do chat
 - Não contam no limite de usuários (têm limite próprio: `maxBots`)
 
-O bot roda na **máquina dele** (VPS, nuvem, seu PC), não no servidor Monky. O servidor apenas roteia mensagens — todo o processamento fica no bot.
+O bot roda na **máquina dele** (VPS, nuvem, seu PC), não no servidor Monky. Por padrão, ele processa os comandos e o servidor roteia as mensagens. Capacidades de execução local permitem solicitar operações específicas no cliente de quem chamou o comando, com autorização daquela pessoa; isso não permite enviar programas ou scripts arbitrários.
 
 ```
 Usuário digita /ping
@@ -65,11 +65,11 @@ Ao criar ou editar um canal de texto, o switch **Permitir comandos de bots** vem
 ### Pré-requisitos
 
 - **Node.js 18+**
-- Cliente, servidor e SDK compatíveis com o **protocolo 18**
+- Cliente, servidor e SDK compatíveis com o **protocolo 19**
 - O pacote `@monky/bot-sdk` da release correspondente
 
 ::: warning Atualização conjunta
-O protocolo 18 acrescenta paginação de autocomplete, com páginas, cursores e continuação sob demanda. Clientes e servidores antigos rejeitam os novos campos das respostas. Atualize **cliente, servidor e bot** juntos; versões com protocolos diferentes não se conectam. Essa mudança exige uma release major, inclusive na linha beta. Nomes locais de comandos e encerramento autorizado de miniapps continuam disponíveis.
+O protocolo 19 acrescenta contratos de execução local, identidade autenticada nas interações, sinalização privada de tarefas e referências de prévias locais. Preserva a paginação de autocomplete do protocolo 18, com páginas, cursores e continuação sob demanda, além dos nomes locais de comandos e do encerramento autorizado de miniapps. Atualize **cliente, servidor e bot** juntos; versões com protocolos diferentes não se conectam. Essa mudança exige uma release major, inclusive na linha beta.
 
 As regras de vínculo do protocolo 14 são mantidas: `BOT_CREATE` recebe somente `{}` e a administração recebe `profilePending` para indicar uma identidade ainda não anunciada. O banco preserva as identidades existentes, e somente o próprio bot pode publicar alterações de perfil. `ctx.args` contém valores tipados e `ctx.reply()` é privado; use `ctx.publish()` somente para resultados que devem aparecer para o canal.
 :::
@@ -525,7 +525,7 @@ O callback recebe `{ query, page, cursor, optionName, args, locale, serverId, si
 
 No exemplo, o catálogo é local ao bot. Para uma fonte externa, substitua a filtragem por uma busca de **metadados**, passe `signal` ao `fetch` e valide o retorno. O callback não recebe uma invocação nem métodos de resposta/download. As consultas são enviadas ao bot selecionado enquanto a pessoa digita; não são publicadas no canal nem persistidas no histórico.
 
-O cliente usa debounce de 250 ms; o servidor limita a uma consulta por usuário a cada 500 ms, somando os dispositivos, com prazo de 15 segundos por página. Retorne no máximo **20 choices por resposta**, com valores únicos: `label` até 100 caracteres, `value` até 2.000 e `description` até 500. **Não há corte no total acumulado no menu.** `query` aceita até 200 caracteres; o bot pode impor um limite menor.
+O cliente espera **700 ms sem digitação** e espaça os envios reais em pelo menos **1 segundo** por conexão, inclusive entre páginas e ao reabrir o menu. A preparação local acontece antes de reservar esse intervalo e antes de iniciar o prazo da resposta. O servidor continua limitando a uma consulta por usuário a cada 500 ms, somando os dispositivos, com prazo de 15 segundos por página. Retorne no máximo **20 choices por resposta**, com valores únicos: `label` até 100 caracteres, `value` até 2.000 e `description` até 500. **Não há corte no total acumulado no menu.** `query` aceita até 200 caracteres; o bot pode impor um limite menor.
 
 Para habilitar rolagem com carregamento sob demanda, retorne `hasMore: true` enquanto houver outra página. O cliente incrementa `page` ao se aproximar do fim da lista, mantém as escolhas anteriores e remove duplicatas por `value`. Se a fonte usa cursores ou uma página precisa ser dividida em vários lotes, retorne também `nextCursor` (string opaca de até 512 caracteres); o cliente o devolve em `cursor`. Valide esse cursor no provider: ele não é uma autorização nem deve ser tratado como URL confiável. Não busque todas as páginas antecipadamente.
 
@@ -537,7 +537,7 @@ autocomplete: ({ query, page }) => {
 },
 ```
 
-Sem `hasMore` (inclusive no retorno antigo em array), a resposta continua sendo uma lista única. Use `hasMore: false` na última página e omita `nextCursor`; uma lista vazia encerra uma busca sem continuação. Falhas ao carregar mais mantêm os resultados e permitem tentar a mesma página novamente. Fechar o compositor, alterar a busca, cancelar, perder acesso ou desconectar invalida o contexto; respostas atrasadas são descartadas. As prévias sob demanda de cada página mantêm sua própria autorização e expiração, sem serem invalidadas apenas por carregar a página seguinte. SDK, servidor e cliente no protocolo 18 são necessários; callbacks antigos em array não precisam mudar após atualizar o SDK.
+Sem `hasMore` (inclusive no retorno antigo em array), a resposta continua sendo uma lista única. Use `hasMore: false` na última página e omita `nextCursor`; uma lista vazia encerra uma busca sem continuação. Falhas ao carregar mais mantêm os resultados e permitem tentar a mesma página novamente. Fechar o compositor, alterar a busca, cancelar, perder acesso ou desconectar invalida o contexto; respostas atrasadas são descartadas. As prévias sob demanda de cada página mantêm sua própria autorização e expiração, sem serem invalidadas apenas por carregar a página seguinte. SDK, servidor e cliente no protocolo 19 são necessários; callbacks antigos em array não precisam mudar após atualizar o SDK.
 
 Setas apenas navegam. Enter ou clique confirmam uma sugestão. **Sem parâmetros opcionais, se todos os obrigatórios estiverem válidos, esse mesmo gesto executa o comando uma única vez.** Se houver opcionais, a escolha apenas preenche o campo: o compositor fica aberto para usar `+N` e o envio acontece com um Enter posterior ou pelo botão de executar. Se faltar algum obrigatório, ele precisa ser preenchido antes de executar. Texto digitado sem uma escolha válida não executa o comando. Alterar o texto invalida a escolha anterior. `value` é um identificador opaco, não uma autorização: o handler deve validá-lo novamente antes de resolver os metadados do resultado.
 
@@ -1058,21 +1058,101 @@ O [**Monky Bot**](https://github.com/MonkyOrg/MonkyBot) é o bot de referência 
 
 Há uma fila independente por servidor e um canal de voz ativo para cada fila. Todos os comandos de música, a busca e a prévia privada exigem estar em voz, inclusive `/queue` e `/nowplaying`. O primeiro `/play` leva o bot à sala de quem pediu; se ele já estiver em outra sala, o pedido é recusado com uma orientação para entrar nela. Não há cargo de DJ, mas as permissões gerais de comandos do Monky continuam valendo. A reprodução não pertence ao handler de `/play`: concluir ou expirar aquele comando não encerra as músicas já adicionadas.
 
-A música usa somente `/play`, não um `/query` separado. A busca reutiliza o autocomplete de 250/500 ms; o botão de ouvir gera até 10 segundos apenas para essa pessoa, sem adicionar à fila. Selecionar o resultado e executar `/play` é a ação que adiciona a música.
+A música usa somente `/play`, não um `/query` separado. A busca espera 700 ms sem digitação e reutiliza o espaçamento de envios do autocomplete; a preparação e a autorização locais acontecem antes de iniciar o prazo da busca. O botão de ouvir gera até 10 segundos apenas para essa pessoa, sem adicionar à fila. Selecionar o resultado e executar `/play` é a ação que adiciona a música.
 
-A busca, a resolução das fontes e a conversão do áudio acontecem **no processo externo do MonkyBot**, não no servidor Monky nem no computador de quem pediu a música. Isso é diferente de `ctx.downloadSound()`, que solicita um download local autorizado para a soundboard.
+No modo `youtube-local`, a busca, a resolução das fontes e a conversão do áudio pertencem ao **cliente de quem fez o pedido**, em um processo Node isolado e com ferramentas gerenciadas pelo Monky. O MonkyBot mantém a fila, os controles e a publicação na sala, podendo continuar hospedado em uma VPS. Não há execução alternativa na VPS nem transferência automática para outro participante ou dispositivo. `ctx.downloadSound()` continua sendo uma operação diferente: um download autorizado para a soundboard, não uma fonte contínua de música.
+
+Se o solicitante da faixa atual sair da sala ou desconectar o cliente, o bot interrompe essa faixa, avisa no chat e a pula. As próximas faixas daquela sessão ficam preservadas enquanto ela estiver indisponível; pedidos elegíveis de outras pessoas podem continuar. Outra sessão da mesma conta não substitui a original. Uma fila sem faixas elegíveis continua sujeita à configuração de saída por inatividade, e encerrar a fila libera suas referências.
 
 Nesta primeira versão, Spotify, playlists, álbuns e transmissões ao vivo não são suportados. A integração de YouTube por extração não é uma API oficial de áudio para bots e pode deixar de funcionar por restrições ou mudanças da plataforma. Use somente conteúdo cuja reprodução você esteja autorizado a realizar e respeite os [termos e políticas do YouTube](https://developers.google.com/youtube/terms/developer-policies). Os pré-requisitos de mídia e as mensagens de indisponibilidade estão documentados no repositório do bot.
 
 Consulte o [repositório do Monky Bot](https://github.com/MonkyOrg/MonkyBot) para instruções de instalação e uso.
 
+## Execução local de capacidades
+
+Essa infraestrutura pertence ao SDK e ao cliente, não exclusivamente ao MonkyBot. Um comando declara `localCapabilities: ['youtube-audio']` somente quando precisa de processamento local. Comandos de controle ou consulta de fila não devem pedir instalação apenas para poder executar.
+
+Ao **selecionar o comando**, por clique ou teclado, o Monky inicia seus pré-requisitos antes de preencher parâmetros, pesquisar ou executar. Quando necessária, a autorização é solicitada **por bot, servidor, instalação e chave pública**, neste dispositivo. É possível negar, permitir até encerrar a conexão com o servidor ou manter a autorização até revogá-la. Nomes iguais não compartilham permissão. Apenas navegar pela lista não pede autorização. Fechar o comando ou trocar de canal cancela sua preparação; uma conclusão atrasada não executa o comando.
+
+O pedido usa um modal com o visual do Monky, controlado pelo Main. Antes de permitir, ele descreve Node.js, yt-dlp e FFmpeg, a finalidade de cada ferramenta e o limite conservador de espaço adicional, separando arquivos já instalados de novos downloads. Após a aprovação, o **mesmo modal** acompanha a instalação: o download mostra bytes reais e uma barra; consulta, verificação e extração usam uma animação sem percentual inventado. Opções e progresso permanecem visíveis mesmo quando a descrição precisa rolar. O comando só é liberado após a preparação e a autorização serem concluídas.
+
+Uma preparação concluída é reutilizada na mesma conexão, inclusive ao selecionar novamente o comando. Ao editar a busca, o compositor mostra o carregamento da pesquisa, não um novo aviso de instalação. Se a instalação falhar, **Tentar novamente** repete a preparação no mesmo modal, preservando a duração escolhida e reutilizando as ferramentas concluídas. Se uma limpeza anterior falhou, essa ação tenta limpar os arquivos retidos antes de instalar novamente, somente após confirmar que os processos nativos foram encerrados. Uma ferramenta inválida ou um bloqueio persistente continua impedindo a instalação; o erro e o número da tentativa ficam visíveis. Cancelar durante a instalação aguarda o encerramento e a limpeza; uma preparação que falha não grava uma nova permissão.
+
+As tarefas continuam verificando a integridade dos executáveis antes do uso. O cliente reutiliza apenas o resultado do teste nativo de versão de uma geração já verificada neste processo; substituir arquivos, remover a ferramenta ou reiniciar o cliente exige um novo teste. Na música, o streaming local já consulta uma fonte atualizada e revalida o solicitante, então a fila não cria outra tarefa de consulta imediatamente antes dele. Pedidos de adicionar e pular recebem confirmação de processamento, e cada início de faixa tem um aviso de preparação antes de **Tocando**; o aviso de reprodução só aparece após o primeiro quadro enviado à voz.
+
+Esperas de pesquisa, prévia, início do comando, resposta do bot, envio de formulários/seletores, download e cancelamento têm indicadores animados, preservando o texto localizado e os controles de cancelamento disponíveis. Os indicadores param ao concluir ou falhar e respeitam a preferência de movimento reduzido do sistema.
+
+Em **Configurações → Ferramentas de bots**, a pessoa pode consultar ferramentas instaladas, versões, armazenamento, cache, permissões e tarefas. O atalho **Gerenciar permissões e ferramentas locais** nas configurações do bot abre essa seção pessoal, não uma permissão administrativa do servidor.
+
+**Remover ferramenta** e **Limpar cache** também usam uma confirmação com o visual do Monky, sem diálogo nativo do sistema. O mesmo modal mostra o andamento, permite tentar novamente em caso de falha e só fecha após a operação terminar. É possível desistir antes de confirmar; após confirmar, a limpeza precisa concluir o encerramento das tarefas. A aba libera as demais ações assim que a operação termina, sem ficar presa à atualização do inventário; leituras sem resposta exibem um erro que permite atualizar novamente.
+
+- **Ferramentas:** Node.js, yt-dlp e FFmpeg portáteis são obtidos de receitas conhecidas pelo Monky, com verificação de integridade. Não é uma instalação global nem uma alteração do `PATH` da pessoa.
+- **Compartilhamento:** bots podem reutilizar os mesmos arquivos instalados; suas autorizações continuam separadas.
+- **Revogação e remoção:** interrompem o trabalho afetado. Remover uma ferramenta revoga as capacidades que dependem dela; o bot não pode reinstalá-la silenciosamente.
+- **Limpar cache:** interrompe as tarefas locais, mas mantém ferramentas e permissões. O espaço exibido é o armazenamento efetivamente retido, não o total de áudio já transmitido.
+
+::: warning Limites de confiança e conectividade
+O processo separado melhora o isolamento de ciclo de vida, mas **não é uma sandbox do sistema operacional**. O SDK solicita operações fixas; não recebe uma API de shell, caminhos executáveis ou scripts enviados pelo bot. O consentimento é validado no Main do Electron, não concedido por uma preferência do renderer.
+
+A transmissão precisa de um canal WebRTC privado entre cliente e bot, mesmo quando a sala usa SFU. Uma chamada SFU funcionando não comprova que esse caminho privado está acessível. A configuração ICE autorizada pelo servidor é reutilizada; não há ativação automática de TURN, áudio por WebSocket ou substituição do executor se a conexão falhar.
+:::
+
+### Contratos do SDK
+
+`BotClient` implementa `LocalExecutionProvider`: obtenha o cliente de execução com `const client = bot.localExecution(serverId)`. Os contratos públicos `LocalExecutionClient`, `LocalExecutor` e `LocalOpusStream` separam a origem autorizada, cada tarefa e o relógio de reprodução:
+
+| Operação | Responsabilidade |
+|----------|------------------|
+| `bot.localExecution(serverId)` | Seleciona a conexão do servidor, sem selecionar outro usuário |
+| `client.executor(context)` | Usa uma invocação, autocomplete, prévia ou referência de fonte autorizada |
+| `executor.execute(spec, { signal })` | Executa `youtube.search`, `youtube.resolve` ou `youtube.preview` |
+| `client.retainSource(invocationId, url, { signal })` | Retém a origem e a URL canônica de um item a partir de uma invocação real |
+| `client.checkSourceAvailability(sourceContextId, voiceChannelId, { signal })` | Confirma a presença e o acesso da conexão original, sem iniciar uma tarefa no cliente |
+| `executor.stream(spec, { voiceChannelId, signal })` | Abre uma nova tarefa `youtube.stream` para a sala atual |
+| `client.releaseSource(sourceContextId)` | Libera a referência de um item removido ou concluído |
+
+Nos contextos de autocomplete e prévia, `requestId` é o identificador remapeado pelo servidor entregue ao callback do SDK. A prévia retornada pode conter outro `requestId`, da solicitação original do cliente: devolva o `LocalWirePreviewResult` sem reescrever seus campos. Ele contém somente referências; o Ogg permanece no cliente de origem. Metadados `LocalMediaTrack` não têm `audioUrl`, e o token de autorização do Main nunca faz parte das mensagens de comando.
+
+Uma referência retida não é uma tarefa ativa. Não mantenha o `AbortSignal` da invocação como duração da reprodução, nem use outra sessão da mesma conta após uma desconexão. Cada reprodução abre uma tarefa nova, sujeita à autorização e à presença atuais.
+
+Para retomar entradas aguardando o solicitante, use `checkSourceAvailability()`: o servidor verifica a fonte retida, a conexão física original, a sala e o acesso atual. O sucesso não instala ferramentas, não abre transporte e não substitui o consentimento ou a admissão do próximo stream. Uma saída e volta à voz na mesma conexão pode tornar a fonte disponível; reconectar o cliente não reativa referências da conexão encerrada, mesmo reutilizando o mesmo `invokerSessionId`. Eventos `voiceParticipantsChanged` podem disparar consultas sequenciais e agrupadas, mas a contagem de pessoas, um comando recente ou outra sessão nunca são autorização.
+
+O stream fornece pacotes Opus em `frames`. O bot mantém a cadência de 20 ms e chama `markFrameAdvanced()` **uma vez por quadro consumido pelo seu relógio**, depois de `writeOpus()`. Prefetch, crédito de recepção e chegada de bytes não são avanço de reprodução. Aguarde `setPaused()` e observe `stream.signal` também enquanto a fila estiver pausada. `LocalExecutionError.event` distingue falha, saída da voz, desconexão e revogação; decidir avisos e mudanças na fila continua sendo responsabilidade do bot.
+
+Uma recusa antes da admissão da tarefa, ou em uma operação de referência/controle, usa `LocalExecutionRpcError`. Consulte `code` e, quando presentes, `reason` ou `cancellationCause`; esse erro não inventa um evento de tarefa. Não trate uma recusa de consentimento ou uma falha de transporte como erro de autenticação do provedor.
+
+O fim do decoder não significa que o último quadro já foi consumido. Preserve a cauda até as confirmações finais: `stream.closed` resolve somente após a drenagem de reprodução e a conclusão confirmada pelo servidor, e rejeita em falha ou cancelamento. Aguarde `stream.close()` para cancelar trabalho ativo ou aguardar a conclusão de um stream já drenado; a rejeição de `closed` por si só não substitui o encerramento. Encerrar um stream não libera automaticamente a referência de sua fonte. No cliente, o processo nativo pode terminar antes das confirmações de reprodução, sem perder a possibilidade de cancelar ou revogar a tarefa restante.
+
+Usar o computador do solicitante não garante que o provedor aceite uma requisição. A capacidade inicial aceita somente vídeos públicos individuais elegíveis do YouTube, sem contas, cookies ou contorno de restrições. Recusas do provedor permanecem erros explícitos.
+
+### Validação integrada no checkout
+
+O modal e a indicação de busca têm regressões próprias em `npm run test:local-execution --workspace=@monky/client`. Para exercitar só apresentação, decisões, progresso e cancelamento do modal, use `npm run test:local-preparation --workspace=@monky/client`. Seu preload é um bundle isolado, gerado também pelo build normal, para manter `sandbox: true` sem expor uma API genérica ao documento.
+
+Depois do build do Monky, o teste abaixo inicia servidor, SDK e dois clientes Electron isolados, em salas P2P e SFU reais. Ele mede áudio decodificado no ouvinte e verifica consentimento, mute/PTT, pausa, saída da voz, drenagem final e encerramento dos recursos. Não reutiliza perfis ou servidores pessoais.
+
+```powershell
+$env:MONKY_WORKER_TEST_FFMPEG = 'C:\caminho\ffmpeg.exe'
+npm run test:local-execution:e2e --workspace=@monky/client
+```
+
+Para exercitar também o **registro de comandos de produção do MonkyBot**, faça o build do bot com o SDK compatível instalado e, na raiz do Monky, defina o checkout dele:
+
+```powershell
+$env:MONKY_LOCAL_E2E_MUSIC_BOT_ROOT = 'C:\caminho\MonkyBot'
+npm run test:local-execution:e2e --workspace=@monky/client
+Remove-Item Env:\MONKY_LOCAL_E2E_MUSIC_BOT_ROOT
+```
+
+Esse modo carrega o SDK realmente instalado no bot e percorre busca, prévia, `/play`, fila mista, `/pause`, retorno do solicitante e `/skip` pela interface. Ambos os modos usam áudio autoral controlado: não acessam o YouTube nem comprovam que o provedor aceitará uma requisição real.
+
 ## Voz para bots
 
-O SDK separa a conexão de voz da fonte de áudio. `bot.joinVoice(serverId, channelId, options?)` cria a conexão P2P ou SFU apropriada ao servidor; decodificar uma música, manter a fila e controlar o ritmo de reprodução são responsabilidades do processo do bot. Bots de texto não precisam iniciar conexões de mídia.
+O SDK separa a conexão de voz da fonte de áudio. `bot.joinVoice(serverId, channelId, options?)` cria a conexão P2P ou SFU apropriada ao servidor; o bot mantém a fila e o ritmo de publicação. A decodificação pode pertencer à sua fonte local ou a uma capacidade autorizada no cliente de um participante. Bots de texto não precisam iniciar conexões de mídia.
 
 O bot entra com os estados pessoais de mute e deafen desligados; restrições administrativas existentes continuam valendo. O SDK atual transmite áudio, mas ainda não oferece uma API para receber a voz dos participantes ([#642](https://github.com/MonkyOrg/Monky/issues/642)). Essa limitação não é representada como um deafen escolhido pelo bot.
 
-Declare `voiceRequirement: 'joined'` em comandos que exigem voz ou `'same-bot-channel'` quando também é necessário estar na sala do bot, caso ele já esteja conectado à voz. Sem esse campo, os comandos mantêm o comportamento normal. Cliente e servidor aplicam a regra à execução, ao autocomplete e à prévia; o servidor usa a conexão exata da pessoa, não outro dispositivo da mesma conta. Sair ou mudar de sala cancela o trabalho pendente e invalida escolhas/prévias, sem transferir o pedido para outra sala nem interromper músicas já aceitas.
+Declare `voiceRequirement: 'joined'` em comandos que exigem voz ou `'same-bot-channel'` quando também é necessário estar na sala do bot, caso ele já esteja conectado à voz. Sem esse campo, os comandos mantêm o comportamento normal. Cliente e servidor aplicam a regra à execução, ao autocomplete e à prévia; o servidor usa a conexão exata da pessoa, não outro dispositivo da mesma conta. Sair ou mudar de sala cancela o trabalho pendente e invalida escolhas/prévias, sem transferir o pedido para outra sala. Uma fonte independente hospedada no bot não pertence à duração da invocação; um stream delegado ao cliente, porém, depende da presença de seu executor na voz.
 
 O contexto de comando contém `invokerSessionId` e `invokerVoiceChannelId` autenticados pelo servidor. Eles descrevem a execução inicial; o segundo é `null` quando a conexão que chamou o comando não está em voz. **O campo não é um getter vivo.** Depois de uma busca, formulário ou outra espera, use `await ctx.getVoiceChannel()` para consultar novamente a sala da conexão original no servidor. Não procure a sala somente por `invokerId`: a mesma pessoa pode estar conectada em dois dispositivos, em salas diferentes.
 
@@ -1205,6 +1285,7 @@ Os limites são 128 KiB de HTML, 64 KiB de estado e 8 KiB por ação; JSON aceit
 | `bot.disconnect(serverId?)` | Desconecta de um ou todos os servidores |
 | `bot.close()` | Encerra conexões e servidores HTTP do bot |
 | `bot.serve(options)` | Inicia servidor HTTP para marketplace |
+| `bot.localExecution(serverId)` | Obtém os executores locais e gerencia referências de fontes autorizadas |
 | `bot.joinVoice(serverId, channelId, { invocationId }?)` | Conecta à voz, com autorização da invocação quando fornecida |
 | `bot.getVoiceConnection(serverId)` | Obtém a conexão de voz ativa daquele servidor |
 | `bot.leaveVoice(serverId)` | Encerra a conexão e libera os recursos de mídia |

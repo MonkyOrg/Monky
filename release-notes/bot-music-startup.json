@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A música inicia com menos verificações repetidas, mantendo a integridade das ferramentas. Adicionar e pular faixas agora recebem resposta imediata, e o bot avisa quando está preparando a primeira ou a próxima música.",
+  "en": "Music starts with fewer repeated checks while preserving tool integrity. Enqueue and skip requests now receive an immediate response, and the bot announces when it is preparing the first or next track."
+}

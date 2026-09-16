@@ -5,12 +5,14 @@ import { MessageType, Permission, ProtocolErrorCode, type ProtocolMessage, type 
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
 import { SignalingService } from './application/services/SignalingService';
 import { AuthService } from './application/services/AuthService';
+import { BotLocalExecutionService } from './application/services/BotLocalExecutionService';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import type { ChannelRecord, ServerRecord, VoiceRestrictions } from './domain/entities';
 
 function fixture(restricted = true) {
   let mode: 'sfu' | 'p2p' = 'sfu';
   let allowed = true, exists = true, closes = 0;
+  let localModeChanges = 0;
   const channel: ChannelRecord = {
     id: 'room', serverId: 'server', name: 'Voice', type: 'VOICE', position: 0,
     createdAt: 1, maxParticipants: 10, isPrivate: false, allowedRoleIds: [], botCommandsEnabled: false,
@@ -39,6 +41,10 @@ function fixture(restricted = true) {
   server['sessionSockets'] = new Map(sessions.map((entry) => [entry.sessionId!, entry.ws]));
   server['voiceReconnectGrants'] = new Map();
   server['settingsUpdateQueue'] = Promise.resolve();
+  server['localAccessVersion'] = 0;
+  server['pendingLocalAccessMutations'] = 0;
+  server['botLocalExecution'] = Object.create(BotLocalExecutionService.prototype) as typeof server['botLocalExecution'];
+  server['botLocalExecution'].voiceModeChanged = () => { localModeChanges++; };
   server['signalingService'] = signaling;
   const record = (): ServerRecord => ({ id: 'server', name: 'Test', createdAt: 1, passwordHash: '', maxUsers: 10, voiceMode: mode });
   server['serverRepo'] = { getServer: async () => record(), createServer: async () => {}, updateServer: async () => {} };
@@ -71,7 +77,7 @@ function fixture(restricted = true) {
   };
   return {
     server, signaling, admin, alice, bob, broadcasts, sent,
-    closes: () => closes, setMode: (next: 'p2p' | 'sfu') => { mode = next; },
+    closes: () => closes, localModeChanges: () => localModeChanges, setMode: (next: 'p2p' | 'sfu') => { mode = next; },
     revoke: () => { allowed = false; }, removeChannel: () => { exists = false; },
   };
 }
@@ -89,6 +95,7 @@ test('only a real SFU to P2P change fully closes media and grants one reconnect 
   const f = fixture();
   const id = await switchMode(f);
   assert.equal(f.closes(), 1);
+  assert.equal(f.localModeChanges(), 1);
   assert.equal(Object.keys(f.signaling.getAllVoiceStates()).length, 0);
   const left = f.broadcasts.filter((message) => message.type === MessageType.VOICE_USER_LEFT).map((message) => message.payload as VoiceUserLeftPayload);
   assert.deepEqual(left.map((entry) => [entry.sessionId, entry.channelId, entry.reconnect?.id]),
@@ -104,6 +111,7 @@ test('only a real SFU to P2P change fully closes media and grants one reconnect 
   }
   await f.server['handleServerUpdateSettings'](f.admin, { voiceMode: 'p2p', name: 'Rename' });
   assert.equal(f.closes(), 1, 'unchanged full-form save never evicts the reconnected users');
+  assert.equal(f.localModeChanges(), 1, 'unchanged saves must not terminate delegated streams');
   assert.equal(Object.keys(f.signaling.getAllVoiceStates()).length, 2);
   await f.server['handleVoiceReconnect'](f.alice, { channelId: 'room', transitionId: id }, 'repeat');
   assert.equal(f.sent.at(-1)?.message.type, MessageType.SERVER_ERROR);

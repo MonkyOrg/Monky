@@ -1,5 +1,6 @@
 import type { SelectionChoice } from './selection.js';
 import type { CommandLocalizations } from './botLocales.js';
+import type { LocalCapabilityId } from './localExecution.js';
 
 export type ChannelType = 'VOICE' | 'TEXT';
 
@@ -253,7 +254,11 @@ export interface SlashCommand {
   /** Display-friendly bot name for the command dropup. */
   botName: string;
   botAvatarUrl?: string | null;
+  /** Server-authenticated key; required when localCapabilities is nonempty. */
+  botPublicKey?: string;
   options?: CommandOption[];
+  /** Prepare these capabilities before starting an invocation or suggestion deadline. */
+  localCapabilities?: LocalCapabilityId[];
   /** Requires explicit caller consent for one local soundboard download. */
   downloadsSound?: boolean;
   /** Enforced for invocation, autocomplete and private previews on the caller's device. */

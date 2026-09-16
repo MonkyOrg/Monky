@@ -726,6 +726,21 @@ test('download confirmation phase shows pending copy without transfer progress',
   });
   assert.ok(html.includes('Aguardando sua confirmação para baixar.'));
   assert.equal(html.includes('<progress'), false);
+  assert.match(html, /bot-loading-spinner/);
+});
+
+test('an early bot acknowledgement keeps its invocation animated until the operation finishes', () => {
+  const invocation: Parameters<typeof renderBotInvocation>[0] = {
+    invocationId: 'music-preparing', channelId: 'channel', botId: 'music-bot', commandName: 'play',
+    botName: 'Music Bot', createdAt: 1, expiresAt: Date.now() + 60_000, status: 'active',
+    cancelPending: false, forms: [], acknowledged: true, hasResponse: true,
+  };
+  const html = renderBotInvocation(invocation);
+  assert.match(html, /bot-loading-spinner/);
+  assert.match(html, /aria-busy="true"/);
+  assert.equal(html.includes('<progress'), false, 'Unknown source startup time is not a download percentage');
+  invocation.status = 'completed';
+  assert.equal(renderBotInvocation(invocation), '');
 });
 
 test('flat attribution maps to distinct nested caller snapshots for private and public bot messages', () => {

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A busca dos comandos de bots espera você parar de digitar e espaça as requisições para evitar tentativas excessivas. Pesquisa, prévia e outras esperas agora têm animação de carregamento. O modal de ferramentas usa a scrollbar padrão do Monky.",
+  "en": "Bot command search waits until you stop typing and spaces requests to avoid excessive attempts. Search, previews and other waits now have animated loading feedback. The tools modal uses Monky's standard scrollbar."
+}

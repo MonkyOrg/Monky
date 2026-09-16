@@ -48,6 +48,10 @@ import {
   resolveBotSettingsValues,
   botVoiceContextRequestSchema,
   type BotVoiceContextResult,
+  type LocalCapabilityId,
+  type LocalPreviewReference,
+  type LocalRequestContext,
+  type LocalTaskCancellationCause,
 } from '@monky/shared';
 import { ChannelAccessContext, ChannelService } from '../../application/services/ChannelService';
 import { CommandRegistry } from '../../application/services/CommandRegistry';
@@ -55,6 +59,7 @@ import { UserService } from '../../application/services/UserService';
 import { RateLimiter } from '../security/RateLimiter';
 import { Logger } from '../logger/Logger';
 import { BotSettingsError, BotSettingsService } from '../../application/services/BotSettingsService';
+import type { BotLocalContext } from '../../application/services/BotLocalExecutionService';
 
 export interface BotInteractionSession {
   ws: WebSocket;
@@ -62,6 +67,7 @@ export interface BotInteractionSession {
   sessionId?: string;
   isBot?: boolean;
   botId?: string;
+  botPublicKey?: string;
   botSettingsReady?: boolean;
 }
 
@@ -82,10 +88,16 @@ interface InteractionTransport {
   sendError(ws: WebSocket, code: ProtocolErrorCode, message: string, requestId?: string): void;
   broadcastToChannel(channelId: string, message: ProtocolMessage, canSend: () => boolean): Promise<void>;
   publishResponse(session: BotInteractionSession, response: BotCommandMessagePayload, canSend: () => boolean, requestId?: string): Promise<void>;
+  localContextEnded?(context: Exclude<LocalRequestContext, { kind: 'source' }>, cause: LocalTaskCancellationCause): void;
+  consumeLocalPreview?(
+    bot: BotInteractionSession, origin: BotInteractionSession, contextId: string, requestId: string, result: LocalPreviewReference,
+  ): Promise<boolean>;
 }
 
 interface Invocation {
   id: string;
+  /** Original client correlation, distinct from the server-issued invocation ID. */
+  requestId?: string;
   origin: BotInteractionSession;
   bot: BotInteractionSession;
   invokerId: string;
@@ -94,6 +106,7 @@ interface Invocation {
   botId: string;
   channelId: string;
   commandName: string;
+  localCapabilities?: SlashCommand['localCapabilities'];
   voiceRequirement?: SlashCommand['voiceRequirement'];
   voiceChannelId?: string | null;
   locale?: 'pt-BR' | 'en';
@@ -122,6 +135,7 @@ interface Autocomplete {
   invokerId: string;
   channelId: string;
   command: SlashCommand;
+  localCapabilities?: SlashCommand['localCapabilities'];
   voiceChannelId?: string | null;
   optionName: string;
   locale: 'pt-BR' | 'en';
@@ -174,7 +188,8 @@ export class BotInteractionHandler {
 
   async autocomplete(session: BotInteractionSession, payload: unknown, requestId?: string): Promise<void> {
     const user = session.user;
-    if (!user || session.isBot) {
+    const invokerSessionId = session.sessionId;
+    if (!user || !invokerSessionId || session.isBot) {
       this.error(session, ProtocolErrorCode.PERMISSION_DENIED, requestId);
       return;
     }
@@ -250,6 +265,7 @@ export class BotInteractionHandler {
     const pending: Autocomplete = {
       id, requestId: correlation.data, search, origin: session, bot, invokerId: user.id, completed: false,
       channelId: input.channelId, command, voiceChannelId, optionName: input.optionName, locale: input.locale ?? 'pt-BR', timer,
+      localCapabilities: command.localCapabilities?.slice(),
       expiresAt: Date.now() + LIMITS.BOT_AUTOCOMPLETE_TIMEOUT_MS,
     };
     this.autocompletes.set(id, pending);
@@ -270,6 +286,9 @@ export class BotInteractionHandler {
         return;
       }
       const execution: CommandAutocompleteExecutionPayload = {
+        botId: pending.command.botId, channelId: pending.channelId,
+        invokerId: pending.invokerId, invokerSessionId, invokerNickname: user.nickname,
+        invokerVoiceChannelId: this.transport.getVoiceChannelId?.(invokerSessionId) ?? null,
         commandName: input.commandName, optionName: input.optionName, query: input.query,
         options: options.values, locale: input.locale ?? 'pt-BR',
         ...(input.page !== undefined ? { page: input.page } : {}),
@@ -323,7 +342,9 @@ export class BotInteractionHandler {
   }
 
   async audioPreview(session: BotInteractionSession, payload: unknown, requestId?: string): Promise<void> {
-    if (!session.user || !session.sessionId || session.isBot) {
+    const user = session.user;
+    const invokerSessionId = session.sessionId;
+    if (!user || !invokerSessionId || session.isBot) {
       this.error(session, ProtocolErrorCode.PERMISSION_DENIED, requestId);
       return;
     }
@@ -348,7 +369,7 @@ export class BotInteractionHandler {
     const resourceId = pending.choices.get(input.resourceId);
     if (pending.requestId !== input.autocompleteRequestId || pending.command.botId !== input.botId ||
         pending.command.name !== input.commandName || pending.channelId !== input.channelId ||
-        pending.optionName !== input.optionName || pending.invokerId !== session.user.id || resourceId === undefined ||
+        pending.optionName !== input.optionName || pending.invokerId !== user.id || resourceId === undefined ||
         search.preview?.requestId === correlation.data) {
       this.error(session, ProtocolErrorCode.BOT_INTERACTION_INVALID, requestId);
       return;
@@ -370,6 +391,9 @@ export class BotInteractionHandler {
     try {
       if (!(await this.authorizeAudioPreview(preview))) return;
       const execution: CommandAudioPreviewExecutionPayload = {
+        botId: pending.command.botId, channelId: pending.channelId,
+        invokerId: pending.invokerId, invokerSessionId, invokerNickname: user.nickname,
+        invokerVoiceChannelId: this.transport.getVoiceChannelId?.(invokerSessionId) ?? null,
         commandName: pending.command.name, optionName: pending.optionName, resourceId,
         locale: pending.locale, ...(pending.settings ? { settings: pending.settings } : {}),
       };
@@ -396,8 +420,13 @@ export class BotInteractionHandler {
     const parsed = commandAudioPreviewResultSchema.safeParse(payload);
     try {
       if (!(await this.authorizeAudioPreview(preview))) return;
-      this.completeAudioPreview(preview, parsed.success
-        ? parsed.data : { status: 'failed', reason: 'invalid_response' });
+      let result: CommandAudioPreviewResult = parsed.success ? parsed.data : { status: 'failed', reason: 'invalid_response' };
+      if (result.status === 'local' && !(await this.transport.consumeLocalPreview?.(
+        session, preview.autocomplete.origin, preview.id, preview.requestId, result,
+      ))) {
+        result = { status: 'failed', reason: 'invalid_response' };
+      }
+      this.completeAudioPreview(preview, result);
     } catch (error) {
       Logger.error('BOT', 'Could not deliver an audio preview', error);
       this.completeAudioPreview(preview, { status: 'failed', reason: 'handler_failed' }, true);
@@ -548,6 +577,7 @@ export class BotInteractionHandler {
     timer.unref();
     const invocation: Invocation = {
       id,
+      requestId,
       origin: session,
       bot,
       invokerId: user.id,
@@ -556,6 +586,7 @@ export class BotInteractionHandler {
       botId: input.botId,
       channelId: input.channelId,
       commandName: input.commandName,
+      localCapabilities: command.localCapabilities?.slice(),
       voiceRequirement: command.voiceRequirement,
       voiceChannelId,
       locale: input.locale,
@@ -849,6 +880,50 @@ export class BotInteractionHandler {
     for (const invocation of this.invocations.values()) this.finish(invocation, 'failed');
   }
 
+  /** Shares the existing caller/channel authorizer without exposing invocation registries or native grants. */
+  async authorizeLocalCaller(userId: string, channelId: string): Promise<boolean> {
+    return !this.closed && !(await this.getAccessError(userId, channelId));
+  }
+
+  async authorizeLocalContext(
+    session: BotInteractionSession, context: Exclude<LocalRequestContext, { kind: 'source' }>, capability: LocalCapabilityId,
+  ): Promise<BotLocalContext<BotInteractionSession> | undefined> {
+    if (!session.isBot || !session.botId || !session.botPublicKey || !this.transport.isCurrent(session)) return undefined;
+    if (context.kind === 'invocation') {
+      const invocation = this.invocations.get(context.invocationId);
+      if (!invocation || invocation.bot !== session || invocation.botId !== session.botId ||
+          !invocation.localCapabilities?.includes(capability) || !commandRequestIdSchema.safeParse(invocation.requestId).success ||
+          !this.isActive(invocation)) return undefined;
+      if (!(await this.authorizeSelector(session, invocation.id, invocation.channelId))) return undefined;
+      const requestId = invocation.requestId;
+      if (!requestId) return undefined;
+      return {
+        origin: invocation.origin, bot: session, requestId, invokerId: invocation.invokerId,
+        originChannelId: invocation.channelId, commandName: invocation.commandName, capability,
+        expiresAt: invocation.expiresAt,
+        isCurrent: () => this.isActive(invocation) && invocation.origin.user?.id === invocation.invokerId &&
+          invocation.bot === session && invocation.botId === session.botId,
+      };
+    }
+    const preview = context.kind === 'audio-preview' ? this.audioPreviews.get(context.requestId) : undefined;
+    const pending = context.kind === 'audio-preview' ? preview?.autocomplete : this.autocompletes.get(context.requestId);
+    if (!pending || pending.bot !== session || pending.command.botId !== session.botId ||
+        !pending.localCapabilities?.includes(capability) || (context.kind === 'autocomplete' && pending.choices)) return undefined;
+    if (!(preview ? await this.authorizeAudioPreview(preview) : await this.authorizeAutocomplete(pending))) return undefined;
+    const isCurrent = () => !this.closed && this.autocompletes.get(pending.id) === pending &&
+      this.transport.isCurrent(pending.origin) && this.transport.isCurrent(session) &&
+      pending.origin.user?.id === pending.invokerId && pending.bot === session && pending.command.botId === session.botId &&
+      this.registry.find(pending.command.botId, pending.command.name) === pending.command &&
+      (preview ? this.audioPreviews.get(preview.id) === preview && pending.search.preview === preview : !pending.choices) &&
+      Date.now() < (preview?.expiresAt ?? pending.expiresAt);
+    if (!isCurrent()) return undefined;
+    return {
+      origin: pending.origin, bot: session, requestId: preview?.requestId ?? pending.requestId,
+      invokerId: pending.invokerId, originChannelId: pending.channelId, commandName: pending.command.name, capability,
+      expiresAt: preview?.expiresAt ?? pending.expiresAt, isCurrent,
+    };
+  }
+
   async authorizeSelector(
     session: BotInteractionSession, invocationId: string, channelId: string
   ): Promise<SelectorInvocationAuthorization | undefined> {
@@ -962,9 +1037,10 @@ export class BotInteractionHandler {
     }
   }
 
-  private dropAutocomplete(pending: Autocomplete, cancelBot: boolean): boolean {
+  private dropAutocomplete(pending: Autocomplete, cancelBot: boolean, cause: LocalTaskCancellationCause = 'requested'): boolean {
     if (this.autocompletes.get(pending.id) !== pending) return false;
     this.autocompletes.delete(pending.id);
+    this.transport.localContextEnded?.({ kind: 'autocomplete', requestId: pending.id }, cause);
     const search = pending.search;
     search.pages.delete(pending.requestId);
     if (search.pending === pending) search.pending = undefined;
@@ -1003,6 +1079,7 @@ export class BotInteractionHandler {
     pending.completed = true;
     if (pending.search.pending === pending) pending.search.pending = undefined;
     if (result.status === 'ok' && result.choices.some((choice) => choice.audio && 'resourceId' in choice.audio)) {
+      this.transport.localContextEnded?.({ kind: 'autocomplete', requestId: pending.id }, 'requested');
       const resources = new Map<string, string>();
       result = { ...result, choices: result.choices.map((choice) => {
         if (!choice.audio || !('resourceId' in choice.audio)) return choice;
@@ -1015,9 +1092,10 @@ export class BotInteractionHandler {
       pending.choices = resources;
       clearTimeout(pending.timer);
       pending.expiresAt = Date.now() + LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS;
-      pending.timer = setTimeout(() => this.dropAutocomplete(pending, true), LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS);
+      pending.timer = setTimeout(() => this.dropAutocomplete(pending, true, 'expired'), LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS);
       pending.timer.unref();
-    } else if (!this.dropAutocomplete(pending, cancelBot)) return;
+    } else if (!this.dropAutocomplete(pending, cancelBot,
+      result.status === 'failed' && result.reason === 'timeout' ? 'expired' : 'requested')) return;
     this.transport.send(pending.origin.ws, {
       type: MessageType.COMMAND_AUTOCOMPLETE_RESULT, requestId: pending.requestId, payload: result,
     });
@@ -1033,9 +1111,10 @@ export class BotInteractionHandler {
     return true;
   }
 
-  private dropAudioPreview(preview: AudioPreview, cancelBot: boolean): boolean {
+  private dropAudioPreview(preview: AudioPreview, cancelBot: boolean, cause: LocalTaskCancellationCause = 'requested'): boolean {
     if (this.audioPreviews.get(preview.id) !== preview) return false;
     this.audioPreviews.delete(preview.id);
+    this.transport.localContextEnded?.({ kind: 'audio-preview', requestId: preview.id }, cause);
     clearTimeout(preview.timer);
     if (preview.autocomplete.search.preview === preview) preview.autocomplete.search.preview = undefined;
     if (cancelBot && this.transport.isCurrent(preview.autocomplete.bot)) {
@@ -1047,7 +1126,8 @@ export class BotInteractionHandler {
   }
 
   private completeAudioPreview(preview: AudioPreview, result: CommandAudioPreviewResult, cancelBot = false): void {
-    if (!this.dropAudioPreview(preview, cancelBot) || !this.transport.isCurrent(preview.autocomplete.origin)) return;
+    const cause = result.status === 'failed' && (result.reason === 'timeout' || result.reason === 'expired') ? 'expired' : 'requested';
+    if (!this.dropAudioPreview(preview, cancelBot, cause) || !this.transport.isCurrent(preview.autocomplete.origin)) return;
     this.transport.send(preview.autocomplete.origin.ws, {
       type: MessageType.COMMAND_AUDIO_PREVIEW_RESULT, requestId: preview.requestId, payload: result,
     });
@@ -1175,6 +1255,9 @@ export class BotInteractionHandler {
     requestId?: string
   ): void {
     if (!this.invocations.delete(invocation.id)) return;
+    this.transport.localContextEnded?.({ kind: 'invocation', invocationId: invocation.id },
+      reason === 'expired' ? 'expired' : reason === 'bot_disconnected' ? 'bot_disconnected' :
+        reason === 'caller_disconnected' ? 'requester_disconnected' : 'requested');
     clearTimeout(invocation.timer);
     if (invocation.soundDownload) {
       clearTimeout(invocation.soundDownload.timer);

@@ -15,6 +15,10 @@ const form = {
   title: 'Your choice',
   fields: [{ name: 'answer', label: 'Answer', type: 'text', required: true }],
 };
+const executionCaller = {
+  botId: 'bot-one', channelId: 'channel-one', invokerId: 'caller', invokerSessionId: 'caller-device',
+  invokerNickname: 'Caller', invokerVoiceChannelId: 'voice-one',
+};
 
 async function makeServer(t, handlers = {}) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -181,10 +185,10 @@ test('localized metadata preserves canonical identifiers and contexts normalize 
   assert.equal((await server.next(MessageType.COMMAND_RESPONSE)).payload.content, 'English response');
   await server.next(MessageType.COMMAND_FINISH);
   server.send(MessageType.COMMAND_AUTOCOMPLETE,
-    { commandName: 'query', optionName: 'audio', query: 'sound', options: {}, locale: 'en-US' }, 'locale-search');
+    { ...executionCaller, commandName: 'query', optionName: 'audio', query: 'sound', options: {}, locale: 'en-US' }, 'locale-search');
   assert.equal((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload.status, 'ok');
   server.send(MessageType.COMMAND_AUDIO_PREVIEW,
-    { commandName: 'query', optionName: 'audio', resourceId: 'opaque', locale: 'en-US' }, 'locale-preview');
+    { ...executionCaller, commandName: 'query', optionName: 'audio', resourceId: 'opaque', locale: 'en-US' }, 'locale-preview');
   assert.equal((await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT)).payload.status, 'ok');
   assert.deepEqual(locales, ['en', 'en', 'en']);
   assert.deepEqual(errors, []);
@@ -450,7 +454,7 @@ test('selection metadata is preserved in command choices, autocomplete, forms an
   assert.deepEqual(registered.payload.commands[0].options[0].choices[0], choice);
 
   server.send(MessageType.COMMAND_AUTOCOMPLETE, {
-    commandName: 'sound', optionName: 'query', query: 'eff', options: { static: 'effect' }, locale: 'en',
+    ...executionCaller, commandName: 'sound', optionName: 'query', query: 'eff', options: { static: 'effect' }, locale: 'en',
   }, 'autocomplete-one');
   assert.deepEqual((await server.next(MessageType.COMMAND_AUTOCOMPLETE_RESULT)).payload, {
     status: 'ok', choices: [{ ...choice, value: `/instant/${'a'.repeat(503)}` }],
@@ -1167,7 +1171,7 @@ const autocompleteOptions = [
 const soundDownloadRequest = { url: 'https://example.com/sound.mp3', fileName: 'sound.mp3', title: 'Sound' };
 
 function autocompleteRequest(query, options = {}) {
-  return { commandName: 'search', optionName: 'sound', query, options, locale: 'en' };
+  return { ...executionCaller, commandName: 'search', optionName: 'sound', query, options, locale: 'en' };
 }
 
 async function sdkBarrier(server) {
@@ -1184,7 +1188,7 @@ const previewBytes = () => {
   return bytes;
 };
 const previewRequest = (resourceId = 'clip') => ({
-  commandName: 'search', optionName: 'sound', resourceId, locale: 'en',
+  ...executionCaller, commandName: 'search', optionName: 'sound', resourceId, locale: 'en',
 });
 
 test('lazy audio previews run only on explicit requests, with immutable settings and no command or HTTP server', async (t) => {
@@ -1217,6 +1221,9 @@ test('lazy audio previews run only on explicit requests, with immutable settings
   assert.equal(context.optionName, 'sound');
   assert.equal(context.locale, 'en');
   assert.equal(context.serverId, 'preview-server');
+  assert.equal(context.requestId, 'listen');
+  assert.equal(context.commandName, 'search');
+  for (const [key, value] of Object.entries(executionCaller)) assert.equal(context[key], value);
   assert.equal(context.signal.aborted, true);
   assertDeepFrozen(context.settings);
   assert.equal(Reflect.set(context, 'settings', {}), false);
@@ -1386,9 +1393,12 @@ test('autocomplete registration and callbacks preserve typed partial options wit
   assert.equal(context.optionName, 'sound');
   assert.equal(context.locale, 'en');
   assert.equal(context.serverId, 'autocomplete-server');
+  assert.equal(context.requestId, 'query');
+  assert.equal(context.commandName, 'search');
+  for (const [key, value] of Object.entries(executionCaller)) assert.equal(context[key], value);
   assert.deepEqual(context.args, { count: 0, enabled: false });
   assert.equal(context.signal.aborted, true);
-  assert.equal('invokerId' in context, false);
+  assert.equal('localPreparation' in context, false);
   assert.equal('downloadSound' in context, false);
   assert.equal(server.frames.some((frame) => frame.type === MessageType.COMMAND_FINISH), false);
   assert.deepEqual(errors, []);
@@ -1444,6 +1454,52 @@ test('autocomplete forwards page and cursor and validates paged responses withou
   assert.equal(contexts.length, before, 'Invalid paging must never reach the provider');
   assert.equal(errors.length, 4);
   for (const error of errors) assert.match(error.message, /invalid autocomplete request/);
+});
+
+test('local command capabilities survive cloning and registration without becoming provider callbacks or credentials', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const capabilities = ['youtube-audio'];
+  bot.command({ name: 'local', description: 'Local', localCapabilities: capabilities, handler() {} });
+  capabilities.length = 0;
+  bot.command({ name: 'ordinary', description: 'Ordinary', handler() {} });
+  for (const localCapabilities of [['shell'], ['youtube-audio', 'youtube-audio']]) {
+    assert.throws(() => bot.command({ name: 'invalid', description: 'Invalid', localCapabilities, handler() {} }));
+  }
+  bot.connect();
+  const registration = await server.next(MessageType.COMMAND_REGISTER);
+  assert.deepEqual(registration.payload.commands[0].localCapabilities, ['youtube-audio']);
+  assert.equal(registration.payload.commands[1].localCapabilities, undefined);
+  assert.equal('botPublicKey' in registration.payload.commands[0], false);
+  assert.equal('token' in registration.payload.commands[0], false);
+  assert.deepEqual(errors, []);
+});
+
+test('local preview handlers return scoped handles without sending preview bytes through the bot', async (t) => {
+  const server = await makeServer(t);
+  const { bot, errors } = makeBot(t, server);
+  const reference = {
+    localPreviewId: 'local-handle', taskId: 'local-task',
+    requestId: 'original-ui-request', executorSessionId: executionCaller.invokerSessionId,
+  };
+  let context;
+  bot.command({
+    name: 'search', description: 'Search', options: autocompleteOptions, localCapabilities: ['youtube-audio'],
+    autocomplete: () => [],
+    audioPreview(ctx) { context = ctx; return { operation: 'youtube.preview', ...reference }; },
+    handler() {},
+  });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  server.send(MessageType.COMMAND_AUDIO_PREVIEW, previewRequest(), 'server-remapped-preview');
+  const result = await server.next(MessageType.COMMAND_AUDIO_PREVIEW_RESULT);
+  assert.equal(context.requestId, 'server-remapped-preview');
+  assert.equal(result.requestId, 'server-remapped-preview');
+  assert.deepEqual(result.payload, { status: 'local', ...reference });
+  assert.equal('audioBase64' in result.payload, false);
+  assert.equal('bytes' in result.payload, false);
+  assert.equal(context.signal.aborted, true);
+  assert.deepEqual(errors, []);
 });
 
 test('autocomplete cancellation and disconnect isolate identical request IDs across servers and suppress late results', async (t) => {
@@ -1782,7 +1838,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 18);
+  assert.equal(PROTOCOL_VERSION, 19);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

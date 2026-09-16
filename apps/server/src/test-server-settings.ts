@@ -4,6 +4,7 @@ import { WebSocket } from 'ws';
 import { MessageType, ProtocolErrorCode, type ProtocolMessage, type ServerSettingsUpdatedPayload } from '@monky/shared';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
 import { AuthService } from './application/services/AuthService';
+import { BotLocalExecutionService } from './application/services/BotLocalExecutionService';
 import { CoturnManager } from './infrastructure/turn/CoturnManager';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import type { ServerRecord } from './domain/entities';
@@ -30,11 +31,16 @@ function fixture() {
   let allowed = true;
   let running = false;
   let writes = 0;
+  let localModeChanges = 0;
   const messages: ProtocolMessage[] = [];
   server['sessions'] = new Map([[ws, session]]);
   server['sessionSockets'] = new Map([['admin-session', ws]]);
   server['settingsUpdateQueue'] = Promise.resolve();
   server['voiceReconnectGrants'] = new Map();
+  server['localAccessVersion'] = 0;
+  server['pendingLocalAccessMutations'] = 0;
+  server['botLocalExecution'] = Object.create(BotLocalExecutionService.prototype) as typeof server['botLocalExecution'];
+  server['botLocalExecution'].voiceModeChanged = () => { localModeChanges++; };
   server['serverRepo'] = {
     getServer: async () => ({ ...record }), createServer: async () => {},
     updateServer: async (patch) => { Object.assign(record, patch); },
@@ -66,7 +72,7 @@ function fixture() {
   server['broadcast'] = (message) => { messages.push(message); };
   server['send'] = (_socket, message) => { messages.push(message); };
   return {
-    server, session, record, messages, turn, sfu, writes: () => writes,
+    server, session, record, messages, turn, sfu, writes: () => writes, localModeChanges: () => localModeChanges,
     revoke: () => { allowed = false; },
   };
 }
@@ -129,11 +135,13 @@ test('SFU initialization failures reject the request before mode persistence and
   assert.equal(f.writes(), 0);
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_ERROR);
   assert.equal(f.messages.at(-1)?.requestId, 'sfu-failed');
+  assert.equal(f.localModeChanges(), 0);
   f.sfu.init = async () => true;
   await f.server['handleServerUpdateSettings'](f.session, { voiceMode: 'sfu' }, 'sfu-retry');
   assert.equal(f.record.voiceMode, 'sfu');
   assert.equal(f.messages.at(-1)?.type, MessageType.SERVER_SETTINGS_UPDATED);
   assert.equal(f.messages.at(-1)?.requestId, 'sfu-retry');
+  assert.equal(f.localModeChanges(), 1);
 });
 
 test('permission loss and replaced sessions during installation cannot commit a stale queued edit', async () => {

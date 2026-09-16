@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Tentar novamente agora recupera a limpeza de arquivos após uma falha de instalação. Remover ferramentas e limpar cache usam o modal do Monky, com andamento e nova tentativa, sem deixar os outros controles presos à atualização da lista.",
+  "en": "Retry now recovers file cleanup after an installation failure. Removing tools and clearing cache use Monky's modal, with progress and retry, without keeping other controls locked while the list refreshes."
+}

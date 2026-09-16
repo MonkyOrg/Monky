@@ -93,7 +93,8 @@ jobs:
           security("list-keychains", "-d", "user", "-s", keychain)
           security("default-keychain", "-d", "user", "-s", keychain)
       - name: Exercise native components without media devices
-        run: node --test scripts/test-light-contracts.js scripts/test-light-build.js apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs
+        # Keep the realtime audio clock check isolated from the other native processes.
+        run: node --test --test-concurrency=1 scripts/test-light-contracts.js scripts/test-light-build.js apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs
       - name: Prepare disposable voice interoperability fixtures
         run: |
           npm rebuild mediasoup electron esbuild

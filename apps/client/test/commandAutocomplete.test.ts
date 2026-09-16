@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { LIMITS, MessageType, ProtocolErrorCode, type SlashCommand } from '@monky/shared';
-import { CommandAutocomplete, type AutocompleteState } from '../src/renderer/utils/commandAutocomplete';
+import {
+  AUTOCOMPLETE_REQUEST_INTERVAL_MS, CommandAutocomplete, type AutocompleteState, type PreparedAutocompleteRequest,
+} from '../src/renderer/utils/commandAutocomplete';
 import { commandValuesFromInputs } from '../src/renderer/utils/botInputs';
 import { createChatStore } from '../src/renderer/stores/chatStore';
 import { EventBus, appEvents } from '../src/renderer/core/EventBus';
@@ -18,63 +20,143 @@ test('autocomplete preserves actionable localized settings errors', async (conte
   const controller = new CommandAutocomplete({}, async () => { throw new Error(message); }, (state) => states.push(state));
   context.after(() => controller.close());
   controller.setQuery('query');
-  context.mock.timers.tick(250);
+  context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
   await flush();
   assert.equal(states.at(-1)?.status, 'failed');
   assert.equal(states.at(-1)?.error, message);
   assert.deepEqual(states.at(-1)?.choices, []);
 });
 
-test('autocomplete combines 250ms debounce and 500ms throttle, including menu reconstruction', async (context) => {
+test('autocomplete waits 700ms for input and spaces actual requests by 1s across menu reconstruction', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   const connection = {};
   const sent: Array<{ query: string; time: number }> = [];
-  const search = async (query: string) => {
+  const search = async (query: string) => async () => {
     sent.push({ query, time: Date.now() });
     return { status: 'ok', choices: [] };
   };
   let controller = new CommandAutocomplete(connection, search, () => {});
   context.after(() => controller.close());
   controller.setQuery('first');
-  context.mock.timers.tick(249);
+  assert.equal(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS, 700);
+  assert.equal(AUTOCOMPLETE_REQUEST_INTERVAL_MS, 1000);
+  context.mock.timers.tick(699);
   assert.equal(sent.length, 0);
   context.mock.timers.tick(1);
   await flush();
-  assert.deepEqual(sent, [{ query: 'first', time: 250 }]);
-  controller.setQuery('second');
-  context.mock.timers.tick(250);
-  await flush();
-  assert.equal(sent.length, 1, 'debounce alone must not send a second request after 250ms');
-  controller.setQuery('latest');
-  context.mock.timers.tick(249);
-  assert.equal(sent.length, 1);
-  context.mock.timers.tick(1);
-  await flush();
-  assert.deepEqual(sent[1], { query: 'latest', time: 750 });
+  assert.deepEqual(sent, [{ query: 'first', time: 700 }]);
   controller.close();
   controller = new CommandAutocomplete(connection, search, () => {});
   controller.setQuery('reopened');
-  context.mock.timers.tick(250);
-  assert.equal(sent.length, 2, 'rebuilding a view must not reset the connection budget');
-  context.mock.timers.tick(250);
+  context.mock.timers.tick(700);
   await flush();
-  assert.deepEqual(sent[2], { query: 'reopened', time: 1250 });
+  assert.equal(sent.length, 1, 'Rebuilding a view must not reset the connection budget');
+  context.mock.timers.tick(299);
+  await flush();
+  assert.equal(sent.length, 1);
+  context.mock.timers.tick(1);
+  await flush();
+  assert.deepEqual(sent[1], { query: 'reopened', time: 1700 });
+});
+
+test('typing with pauses longer than 250ms still sends only after the final 700ms quiet period', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const sent: string[] = [];
+  const controller = new CommandAutocomplete({}, async (query) => async () => {
+    sent.push(query);
+    return { status: 'ok', choices: [] };
+  }, () => {});
+  context.after(() => controller.close());
+  for (const query of ['ha', 'han', 'hang', 'hanga', 'hangar']) {
+    controller.setQuery(query);
+    context.mock.timers.tick(400);
+    await flush();
+    assert.deepEqual(sent, []);
+  }
+  context.mock.timers.tick(299);
+  await flush();
+  assert.deepEqual(sent, []);
+  context.mock.timers.tick(1);
+  await flush();
+  assert.deepEqual(sent, ['hangar']);
+});
+
+test('delayed local preparation cannot bunch actual requests that reserved earlier callback slots', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const connection = {};
+  const prepared: Array<(request: PreparedAutocompleteRequest) => void> = [];
+  const sent: number[] = [];
+  const prepare = async (): Promise<PreparedAutocompleteRequest> => new Promise((resolve) => prepared.push(resolve));
+  const a = new CommandAutocomplete(connection, prepare, () => {});
+  const b = new CommandAutocomplete(connection, prepare, () => {});
+  context.after(() => { a.close(); b.close(); });
+  a.setQuery('first');
+  context.mock.timers.tick(700);
+  await flush();
+  b.setQuery('second');
+  context.mock.timers.tick(700);
+  await flush();
+  assert.equal(prepared.length, 2);
+  context.mock.timers.tick(3600);
+  const send = async () => { sent.push(Date.now()); return { status: 'ok', choices: [] }; };
+  prepared[0](send);
+  prepared[1](send);
+  await flush();
+  assert.deepEqual(sent, [5000]);
+  context.mock.timers.tick(999);
+  await flush();
+  assert.deepEqual(sent, [5000]);
+  context.mock.timers.tick(1);
+  await flush();
+  assert.deepEqual(sent, [5000, 6000]);
+  assert.ok(sent[1] - sent[0] - 300 >= LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS,
+    'Actual requests retain server-window headroom even when the earlier delivery is delayed');
+});
+
+test('editing or closing during the connection cooldown discards stale prepared dispatches', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const sent: string[] = [];
+  const controller = new CommandAutocomplete({}, async (query) => async () => {
+    sent.push(query);
+    return { status: 'ok', choices: [] };
+  }, () => {});
+  context.after(() => controller.close());
+  controller.setQuery('first');
+  context.mock.timers.tick(700);
+  await flush();
+  controller.setQuery('waiting');
+  context.mock.timers.tick(700);
+  await flush();
+  assert.deepEqual(sent, ['first']);
+  controller.setQuery('latest');
+  context.mock.timers.tick(700);
+  await flush();
+  assert.deepEqual(sent, ['first', 'latest']);
+  controller.setQuery('closing');
+  context.mock.timers.tick(700);
+  await flush();
+  controller.close();
+  context.mock.timers.tick(10000);
+  await flush();
+  assert.deepEqual(sent, ['first', 'latest']);
 });
 
 test('autocomplete clears stale choices immediately, ignores late successes/errors and aborts on close', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   const requests = new Map<string, { signal: AbortSignal; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   const states: AutocompleteState[] = [];
-  const controller = new CommandAutocomplete({}, (query, signal) => new Promise((resolve, reject) => {
+  const controller = new CommandAutocomplete({}, async (query, signal) => () => new Promise((resolve, reject) => {
     requests.set(query, { signal, resolve, reject });
   }), (state) => states.push(state));
   context.after(() => controller.close());
   controller.setQuery('old');
-  context.mock.timers.tick(250);
+  context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
+  await flush();
   controller.setQuery('new');
   assert.equal(requests.get('old')?.signal.aborted, true);
   assert.deepEqual(states.at(-1)?.choices, []);
-  context.mock.timers.tick(500);
+  context.mock.timers.tick(AUTOCOMPLETE_REQUEST_INTERVAL_MS);
+  await flush();
   requests.get('new')?.resolve({ status: 'ok', choices: [{ label: 'New label', value: 'opaque-id' }] });
   await flush();
   assert.equal(states.at(-1)?.choices[0]?.value, 'opaque-id');
@@ -84,7 +166,8 @@ test('autocomplete clears stale choices immediately, ignores late successes/erro
   assert.equal(states.at(-1)?.status, 'ready');
   controller.setQuery('closing');
   assert.equal(requests.get('new')?.signal.aborted, true, 'Changing a finished query invalidates its lazy preview authority');
-  context.mock.timers.tick(500);
+  context.mock.timers.tick(AUTOCOMPLETE_REQUEST_INTERVAL_MS);
+  await flush();
   controller.close();
   const count = states.length;
   requests.get('closing')?.resolve({ status: 'ok', choices: [{ label: 'Stale', value: 'stale' }] });
@@ -101,7 +184,7 @@ test('autocomplete respects the shared query limit and displays every validated 
   context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   let calls = 0;
   let state: AutocompleteState = { status: 'idle', choices: [], query: '' };
-  const controller = new CommandAutocomplete({}, async () => {
+  const controller = new CommandAutocomplete({}, async () => async () => {
     calls++;
     return { status: 'ok', choices: Array.from({ length: 20 }, (_, index) => ({ label: `Result ${index}`, value: `opaque-${index}` })) };
   }, (next) => { state = next; });
@@ -115,7 +198,7 @@ test('autocomplete respects the shared query limit and displays every validated 
   assert.equal(calls, 0);
   assert.equal(state.status, 'failed');
   controller.setQuery('x'.repeat(LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH));
-  context.mock.timers.tick(250);
+  context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
   await flush();
   assert.equal(calls, 1);
   assert.equal(state.choices.length, 20);
@@ -128,7 +211,7 @@ test('autocomplete appends unlimited pages on demand, deduplicates values and pr
   const choices = (start: number, count: number) => Array.from({ length: count }, (_, index) => ({
     label: `Sound ${start + index}`, value: `sound-${start + index}`,
   }));
-  const controller = new CommandAutocomplete({}, async (_query, signal, page, cursor) => {
+  const controller = new CommandAutocomplete({}, async (_query, signal, page, cursor) => async () => {
     sent.push({ page, cursor, signal });
     return {
       status: 'ok',
@@ -138,7 +221,7 @@ test('autocomplete appends unlimited pages on demand, deduplicates values and pr
   }, (state) => states.push(state));
   context.after(() => controller.close());
   controller.setQuery('sound');
-  context.mock.timers.tick(250);
+  context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
   await flush();
   assert.equal(states.at(-1)?.choices.length, 20);
   const first = states.at(-1)?.choices[0];
@@ -148,7 +231,8 @@ test('autocomplete appends unlimited pages on demand, deduplicates values and pr
   controller.loadMore();
   assert.equal(states.at(-1)?.loadingMore, true);
   assert.equal(states.at(-1)?.choices.length, 20);
-  context.mock.timers.tick(499);
+  context.mock.timers.tick(AUTOCOMPLETE_REQUEST_INTERVAL_MS - 1);
+  await flush();
   assert.equal(sent.length, 1, 'Pagination shares the connection throttle');
   context.mock.timers.tick(1);
   await flush();
@@ -161,7 +245,7 @@ test('autocomplete appends unlimited pages on demand, deduplicates values and pr
   assert.equal(states.at(-1)?.choices[0], first, 'Appending must retain the existing choice objects');
   for (let page = 2; page <= 3; page++) {
     controller.loadMore();
-    context.mock.timers.tick(500);
+    context.mock.timers.tick(AUTOCOMPLETE_REQUEST_INTERVAL_MS);
     await flush();
     assert.equal(sent.at(-1)?.page, page);
     assert.equal(sent.at(-1)?.cursor, `cursor-${page}`);
@@ -182,7 +266,7 @@ test('pagination failures preserve choices and retry the same page and cursor', 
   const requests: Array<{ page: number; cursor?: string }> = [];
   const states: AutocompleteState[] = [];
   let fail = true;
-  const controller = new CommandAutocomplete({}, async (_query, _signal, page, cursor) => {
+  const controller = new CommandAutocomplete({}, async (_query, _signal, page, cursor) => async () => {
     requests.push({ page, cursor });
     if (page === 0) return { status: 'ok', choices: [{ label: 'First', value: 'first' }], hasMore: true, nextCursor: 'next' };
     if (fail) throw new Error('Localized provider error');
@@ -190,10 +274,10 @@ test('pagination failures preserve choices and retry the same page and cursor', 
   }, (state) => states.push(state));
   context.after(() => controller.close());
   controller.setQuery('sound');
-  context.mock.timers.tick(250);
+  context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
   await flush();
   controller.loadMore();
-  context.mock.timers.tick(500);
+  context.mock.timers.tick(AUTOCOMPLETE_REQUEST_INTERVAL_MS);
   await flush();
   assert.equal(states.at(-1)?.status, 'ready');
   assert.equal(states.at(-1)?.loadMoreFailed, true);
@@ -215,16 +299,18 @@ test('changing a query cancels a pending page and ignores its late continuation'
   context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   const requests: Array<{ query: string; page: number; signal: AbortSignal; resolve: (value: unknown) => void }> = [];
   const states: AutocompleteState[] = [];
-  const controller = new CommandAutocomplete({}, (query, signal, page) => new Promise((resolve) => {
+  const controller = new CommandAutocomplete({}, async (query, signal, page) => () => new Promise((resolve) => {
     requests.push({ query, signal, page, resolve });
   }), (state) => states.push(state));
   context.after(() => controller.close());
   controller.setQuery('original');
-  context.mock.timers.tick(250);
+  context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
+  await flush();
   requests[0].resolve({ status: 'ok', choices: [{ label: 'Original', value: 'original' }], hasMore: true });
   await flush();
   controller.loadMore();
-  context.mock.timers.tick(500);
+  context.mock.timers.tick(AUTOCOMPLETE_REQUEST_INTERVAL_MS);
+  await flush();
   controller.setQuery('replacement');
   assert.equal(requests[1].signal.aborted, true);
   assert.deepEqual(states.at(-1)?.choices, []);
@@ -232,7 +318,8 @@ test('changing a query cancels a pending page and ignores its late continuation'
   await flush();
   assert.equal(states.at(-1)?.query, 'replacement');
   assert.deepEqual(states.at(-1)?.choices, []);
-  context.mock.timers.tick(500);
+  context.mock.timers.tick(AUTOCOMPLETE_REQUEST_INTERVAL_MS);
+  await flush();
   assert.equal(requests[2].page, 0);
   requests[2].resolve({ status: 'ok', choices: [{ label: 'Replacement', value: 'replacement' }] });
   await flush();
@@ -245,19 +332,19 @@ test('empty terminal pages preserve loaded results while repeated cursors fail v
   context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   let result: unknown = { status: 'ok', choices: [{ label: 'First', value: 'first' }], hasMore: true, nextCursor: 'next' };
   const states: AutocompleteState[] = [];
-  const controller = new CommandAutocomplete({}, async () => result, (state) => states.push(state));
+  const controller = new CommandAutocomplete({}, async () => async () => result, (state) => states.push(state));
   context.after(() => controller.close());
   controller.setQuery('query');
-  context.mock.timers.tick(250);
+  context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
   await flush();
   controller.loadMore();
-  context.mock.timers.tick(500);
+  context.mock.timers.tick(AUTOCOMPLETE_REQUEST_INTERVAL_MS);
   await flush();
   assert.equal(states.at(-1)?.loadMoreFailed, true, 'A source returning the same continuation must not loop forever');
   assert.equal(states.at(-1)?.choices.length, 1);
   result = { status: 'ok', choices: [], hasMore: false };
   controller.loadMore();
-  context.mock.timers.tick(500);
+  context.mock.timers.tick(AUTOCOMPLETE_REQUEST_INTERVAL_MS);
   await flush();
   assert.equal(states.at(-1)?.status, 'ready');
   assert.equal(states.at(-1)?.choices.length, 1);
@@ -269,7 +356,7 @@ test('autocomplete preserves full YouTube URLs longer than the old 100-character
   const query = `https://www.youtube.com/watch?feature=${'x'.repeat(110)}&v=abcdefghijk`;
   assert.ok(query.length > 100 && query.length <= LIMITS.MAX_BOT_AUTOCOMPLETE_QUERY_LENGTH);
   const sent: string[] = [];
-  const controller = new CommandAutocomplete({}, async (value) => {
+  const controller = new CommandAutocomplete({}, async (value) => async () => {
     sent.push(value);
     return { status: 'ok', choices: [] };
   }, () => {});
@@ -359,11 +446,11 @@ test('autocomplete uses the shared audio contract and does not recover rejected 
   ];
   for (const metadata of invalid) {
     const states: AutocompleteState[] = [];
-    const controller = new CommandAutocomplete({}, async () => ({
+    const controller = new CommandAutocomplete({}, async () => async () => ({
       status: 'ok', choices: [{ label: 'Sound', value: 'sound', ...metadata }],
     }), (state) => states.push(state));
     controller.setQuery('sound');
-    context.mock.timers.tick(250);
+    context.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_DEBOUNCE_MS);
     await flush();
     assert.equal(states.at(-1)?.status, 'failed');
     assert.deepEqual(states.at(-1)?.choices, []);
