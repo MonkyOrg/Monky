@@ -3447,10 +3447,10 @@ async function runDomSmoke() {
   };
   checkPickerSearch();
   find('[data-goto-group="smileys"]').click();
-  await frame();
+  await waitFor(() => find('.emoji-picker-body').scrollTop > 0);
   check(find('.emoji-picker-body').scrollTop > 0, 'Existing category buttons must still navigate the catalog');
   find('[data-goto-group="recent"]').click();
-  for (let attempt = 0; attempt < 60 && find('.emoji-picker-body').scrollTop > 0; attempt++) await frame();
+  await waitFor(() => find('.emoji-picker-body').scrollTop === 0);
   check(find('.emoji-picker-body').scrollTop === 0, 'Recent clock must navigate back to the first category');
   check(!!document.querySelector('[data-emoji-group="recent"] .emoji-picker-recent-empty'), 'Empty recent category must explain how it is populated');
   check(recentEmojis.get().length === 0, 'Opening recent category must not record an emoji');

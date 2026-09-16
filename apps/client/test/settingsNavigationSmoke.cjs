@@ -678,7 +678,7 @@ async function runSettingsNavigationSmoke() {
   language.setLanguage('pt-BR');
   const appModal = new SettingsModal();
   for (const tab of Object.values(appModal)) {
-    if (tab && typeof tab === 'object' && typeof tab.renderHtml === 'function') tab.attachEvents = () => {};
+    if (tab && typeof tab === 'object' && typeof tab.renderHtml === 'function') tab.attachEvents = async () => {};
   }
   appModal.voiceVideoTab.refreshDevices = async () => {};
   appModal.voiceVideoTab.startVadMeter = () => {};

@@ -31,7 +31,7 @@
     "test": "node scripts/test-versioning.js && node scripts/test-changelog.js && npm run test:light:scripts && npm run test --workspaces && npm run test:local-execution:integration --workspace=apps/server",
     "test:light:scripts": "npm run build --workspace=packages/shared && node --test scripts/test-light-contracts.js scripts/test-light-build.js",
     "test:light:identity": "npm run build:light -- --target monky-light-identity-test && node --test apps/light/test/identity_key_interop.test.cjs",
-    "test:light:native": "npm run build:light && node --test apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs",
+    "test:light:native": "npm run build:light && node --test --test-concurrency=1 apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs",
     "test:light:server": "npm run build:server && node --test apps/light/test/server_fixture.test.cjs",
     "test:light:voice": "npm run build:light && npm run build --workspace=apps/server && node --test apps/light/test/headless_interop.test.cjs apps/light/test/browser_interop.test.cjs",
     "test:light:hardware": "npm run build:light && npm run build --workspace=apps/server && node --test apps/light/test/hardware_voice.cjs",
