@@ -36,6 +36,7 @@
     "test:light:voice": "npm run build:light && npm run build --workspace=apps/server && node --test apps/light/test/headless_interop.test.cjs apps/light/test/browser_interop.test.cjs",
     "test:light:hardware": "npm run build:light && npm run build --workspace=apps/server && node --test apps/light/test/hardware_voice.cjs",
     "measure:light": "npm run build:light && npm run build --workspace=apps/server && node --test apps/light/test/resource_usage.cjs",
+    "measure:client": "node apps/light/test/measure_client.cjs",
     "docs:dev": "vitepress dev docs-site",
     "docs:build": "vitepress build docs-site",
     "docs:preview": "vitepress preview docs-site"

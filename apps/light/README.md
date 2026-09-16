@@ -250,12 +250,47 @@ npm run measure:light
 
 São intervalos de aproximadamente 10 segundos em idle conectado, chamada P2P,
 chamada SFU, deafen e após sair. A fonte é sintética, mas AEC, ganho automático
-e supressão de ruído usam a política padrão. A medição cobre somente o PID do
-cliente nativo, excluindo o servidor e o executor. `oneCoreCpuPercent` usa
-**100% = um processador lógico**; `workingSetMiB` e `privateMiB` são medidas distintas
-do Windows, não uma soma. Não há limiar de aprovação nem comparação automática
-com Electron. Drivers, outros computadores e uso prolongado ainda precisam de
-medição; memória residente pode reter páginas do alocador mesmo após o teardown.
+e supressão de ruído usam a política padrão. A medição cobre a árvore de processos
+do cliente nativo, excluindo o servidor e o executor. `oneCoreCpuPercent` usa
+**100% = um processador lógico**; `systemCpuPercent` divide pelo total de
+processadores lógicos, como o Gerenciador de Tarefas. `workingSetMiB` e
+`privateMiB` são medidas distintas do Windows, não uma soma; os valores `peak*`
+são os maiores entre as amostras. Não há limiar de aprovação. Memória residente
+pode reter páginas do alocador mesmo após o teardown.
+
+Para uso prolongado e ciclos repetidos de chamada, que revelam memória ou threads
+que sobrevivem ao teardown:
+
+```powershell
+$env:MONKY_LIGHT_MEASURE_SECONDS = 60   # duração de cada fase, mínimo 10
+$env:MONKY_LIGHT_MEASURE_CYCLES = 20    # entradas/saídas antes da última fase
+npm run measure:light
+```
+
+Referência local (Windows x64, áudio sintético): 20 ciclos de chamada não deixaram
+crescimento relevante após sair. No SFU, a memória privada **enquanto o Light
+transmite** sobe cerca de 16 MiB nos primeiros 2 a 6 minutos e então estabiliza
+(aprox. 25 MiB privados e 39 MiB residentes em uma chamada de 12 minutos); apenas
+recebendo, ou em P2P, a chamada estabiliza em cerca de 1 minuto. A origem desse
+buffer de envio ainda não foi identificada.
+
+### Comparar com o Monky completo
+
+`measure:client` apenas lê a contabilidade de um cliente já aberto (Light ou Monky
+completo) e soma todos os processos da árvore: no Electron, renderer, GPU, rede e
+áudio ficam em processos separados. Não inicia, encerra nem controla o aplicativo.
+
+```powershell
+npm run measure:client -- --name Monky --label completo-sfu --seconds 300 --output medições.jsonl
+npm run measure:client -- --name monky-light --label light-sfu --seconds 300 --output medições.jsonl
+```
+
+`--name` escolhe o único processo de topo com esse nome; use `--pid` quando houver
+mais de um. Para uma comparação válida, meça as duas edições no mesmo computador,
+servidor descartável, canal, topologia, participantes, dispositivos e política de
+áudio, uma de cada vez, com a outra fechada. Registre cada fase (conectado sem
+chamada, chamada P2P, chamada SFU, deafen, após sair) por pelo menos 5 minutos.
+O roteiro completo está em [QA.md](QA.md).
 
 Chat, soundboard, miniapps, assistir transmissões, bandeja e hospedagem pela CLI
 ficam para marcos posteriores, com recursos opcionais carregados sob demanda.
