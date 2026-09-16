@@ -1,4 +1,5 @@
 #include "fixture_audio_device.hpp"
+#include "fixture_audio_clock.hpp"
 
 #include <media/engine/adm_helpers.h>
 
@@ -298,6 +299,26 @@ void CheckDuplexAndStop() {
 }
 
 void CheckRealtimeCadence() {
+  const std::chrono::steady_clock::time_point epoch{};
+  auto clock = AdvanceFixtureAudioDeadline(epoch, epoch + 1ms);
+  Require(clock.next == epoch + 10ms && clock.discarded_frames == 0,
+          "Normal processing must preserve the device clock");
+  clock = {epoch, 0};
+  for (int frame = 1; frame <= 4; ++frame) {
+    clock = AdvanceFixtureAudioDeadline(clock.next, epoch + 36ms);
+    Require(clock.next == epoch + frame * 10ms && clock.discarded_frames == 0,
+            "Short scheduler delays must drain buffered PCM, not slow the sample rate");
+  }
+  clock = AdvanceFixtureAudioDeadline(epoch, epoch + 59ms);
+  Require(clock.next == epoch + 10ms && clock.discarded_frames == 0,
+          "The synthetic buffer must retain up to five delayed frames");
+  clock = AdvanceFixtureAudioDeadline(epoch, epoch + 60ms);
+  Require(clock.next == epoch + 70ms && clock.discarded_frames == 6,
+          "Buffer overflow must discard old frames and resume on the original clock");
+  clock = AdvanceFixtureAudioDeadline(epoch, epoch + 5003ms);
+  Require(clock.next == epoch + 5010ms && clock.discarded_frames == 500,
+          "A long stall must never produce an unbounded catch-up burst");
+
   Transport transport;
   auto device = FixtureAudioDevice::Create();
   Prepare(*device, transport);
@@ -314,7 +335,8 @@ void CheckRealtimeCadence() {
               << observed.playout << " playout callbacks in "
               << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
               << " ms; waiting=" << timing.waiting_ms << " ms; processing="
-              << timing.processing_ms << " ms\n";
+              << timing.processing_ms << " ms; discarded="
+              << timing.discarded_clock_frames << " frames\n";
   }
   Require(reached && elapsed >= 1750ms && elapsed <= 2600ms,
           "Synthetic PCM must maintain its realtime 10 ms device clock");

@@ -32,6 +32,7 @@ class FixtureAudioDevice : public webrtc::AudioDeviceModule {
     std::uint64_t nonzero_playout_callbacks = 0;
     std::uint64_t recording_errors = 0;
     std::uint64_t playout_errors = 0;
+    std::uint64_t discarded_clock_frames = 0;
     // Cumulative sum of squared samples normalized to [-1, 1].
     double input_energy = 0;
     double output_energy = 0;

@@ -139,12 +139,6 @@ else()
   target_link_libraries(monky_light_platform PUBLIC
     "${MONKY_SECURITY_FRAMEWORK}" "${MONKY_CORE_FOUNDATION_FRAMEWORK}" "${MONKY_FOUNDATION_FRAMEWORK}"
     "${MONKY_AVFOUNDATION_FRAMEWORK}")
-  if(MONKY_LIGHT_WITH_RTC)
-    target_sources(monky_light_fixture_audio PRIVATE test/fixture_audio_activity_macos.mm)
-    set_source_files_properties(test/fixture_audio_activity_macos.mm
-      PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(monky_light_fixture_audio PUBLIC "${MONKY_FOUNDATION_FRAMEWORK}")
-  endif()
 endif()
 target_include_directories(monky_light_platform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 

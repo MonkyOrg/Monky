@@ -203,12 +203,12 @@ PCM in 10 ms frames and measures received audio energy. It never selects
 hardware, even when the SDK requests a default device. On Windows, only this
 test device temporarily requests 1 ms timer resolution, released when its
 worker stops; it does not change the production client's timer.
-On macOS, the synthetic worker uses `user-interactive` QoS and an
-`NSActivityLatencyCritical` activity to request timer precision without relying
-on active audio hardware. The activity and priority end with the worker; they
-neither prevent system sleep nor change the production device. This does not
-guarantee realtime scheduling under arbitrary load. Cadence diagnostics separate
-waiting from processing, and waits remain cancellable during teardown.
+The sample clock is independent of how often the system wakes the worker:
+short delays accumulate up to five frames, like a device buffer. Longer stalls
+discard old content and resume the original clock, without accumulating
+unbounded work. Cadence diagnostics separate waiting, processing, and discarded
+frames. Waits remain cancellable during teardown; the simulator neither requests
+special priority nor prevents macOS system sleep.
 
 The disposable server fixture uses the real server, restricted to loopback,
 without LAN advertising or external STUN servers:

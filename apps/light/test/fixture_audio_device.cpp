@@ -1,4 +1,5 @@
 #include "fixture_audio_device.hpp"
+#include "fixture_audio_clock.hpp"
 
 #include <api/make_ref_counted.h>
 
@@ -7,12 +8,10 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
-#include <future>
 #include <iostream>
 #include <mutex>
 #include <numbers>
 #include <stdexcept>
-#include <system_error>
 #include <thread>
 
 #ifdef _WIN32
@@ -24,17 +23,12 @@
 #endif
 #include <windows.h>
 #include <mmsystem.h>
-#elif defined(__APPLE__)
-#include "fixture_audio_activity.hpp"
-#include <pthread.h>
-#include <pthread/qos.h>
 #endif
 
 namespace monky::light::test {
 namespace {
 
 thread_local const void* callback_device = nullptr;
-constexpr auto kPeriod = std::chrono::milliseconds(10);
 
 class FixtureTimerResolution final {
  public:
@@ -43,8 +37,6 @@ class FixtureTimerResolution final {
     if (timeBeginPeriod(1) != TIMERR_NOERROR) {
       throw std::runtime_error("Unable to obtain the synthetic audio timer resolution");
     }
-#elif defined(__APPLE__)
-    end_activity_ = BeginFixtureAudioActivity();
 #endif
   }
   ~FixtureTimerResolution() {
@@ -52,16 +44,10 @@ class FixtureTimerResolution final {
     if (timeEndPeriod(1) != TIMERR_NOERROR) {
       std::cerr << "Unable to release the synthetic audio timer resolution\n";
     }
-#elif defined(__APPLE__)
-    if (end_activity_) end_activity_();
 #endif
   }
   FixtureTimerResolution(const FixtureTimerResolution&) = delete;
   FixtureTimerResolution& operator=(const FixtureTimerResolution&) = delete;
-#ifdef __APPLE__
- private:
-  std::function<void()> end_activity_;
-#endif
 };
 
 template <typename T>
@@ -132,22 +118,9 @@ struct FixtureAudioDevice::State {
       try {
         // Windows' coarse default timer otherwise turns 10 ms audio into ~64 Hz.
         auto timer = std::make_unique<FixtureTimerResolution>();
-        std::promise<int> scheduling;
-        auto configured = scheduling.get_future();
-        worker = std::thread([this, timer = std::move(timer),
-                              scheduling = std::move(scheduling)]() mutable {
-#ifdef __APPLE__
-          // Apple applies requested QoS from the thread being configured.
-          const int result = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-          scheduling.set_value(result);
-          if (result != 0) return;
-#else
-          scheduling.set_value(0);
-#endif
+        worker = std::thread([this, timer = std::move(timer)] {
           Run();
         });
-        const int result = configured.get();
-        if (result != 0) throw std::system_error(result, std::generic_category(), "Synthetic audio thread QoS");
       } catch (const std::exception& error) {
         std::cerr << "Unable to start synthetic audio: " << error.what() << '\n';
         active = false;
@@ -257,11 +230,13 @@ struct FixtureAudioDevice::State {
         Process(Direction::playout);
         Process(Direction::recording);
         lock.lock();
-        deadline += kPeriod;
         const auto now = std::chrono::steady_clock::now();
         counters.processing_ms += std::chrono::duration<double, std::milli>(now - processing).count();
-        // Slow callbacks skip deadlines rather than generating a catch-up burst.
-        if (deadline < now) deadline = now + kPeriod;
+        // Emulate a bounded device buffer: the sample clock does not slow down
+        // with scheduler wakeups, but long stalls must not create unbounded work.
+        const auto advanced = AdvanceFixtureAudioDeadline(deadline, now);
+        deadline = advanced.next;
+        counters.discarded_clock_frames += advanced.discarded_frames;
       }
     }
     counters.worker_running = false;
