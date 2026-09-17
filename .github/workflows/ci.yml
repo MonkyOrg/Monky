@@ -298,6 +298,7 @@ jobs:
           npm run test:updates --workspace=apps/client
           npm run test:editing --workspace=apps/client
           npm run test:clipboard --workspace=apps/client
+          node apps/client/test/messageClipboardDomSmoke.cjs --system-clipboard
           npm run test:screens --workspace=apps/client
           node packages/bot-sdk/test-browser/voiceRendererSmoke.cjs
           node apps/client/test/userContextMenuSmoke.cjs

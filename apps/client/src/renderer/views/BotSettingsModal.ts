@@ -72,6 +72,7 @@ export class BotSettingsModal {
   private bots: BotSettingsSummary[] = [];
   private snapshot: BotSettingsSnapshot | null = null;
   private selectedBotId: string | null = null;
+  private openedFromCatalog = false;
   private drafts: Partial<Record<Scope, SettingsDraft>> = {};
   private scope: Scope = 'user';
   private confirmFileName = true;
@@ -106,6 +107,7 @@ export class BotSettingsModal {
     }
     this.close();
     this.session = session;
+    this.openedFromCatalog = !botId;
     this.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     this.root = document.createElement('div');
     this.root.className = 'modal-backdrop bot-settings-modal';
@@ -380,8 +382,7 @@ export class BotSettingsModal {
     const error = stale || this.error || !!(invalid && !invalid.success);
     this.root.innerHTML = `<div class="modal-card settings-modal-card bot-settings-card" role="dialog" aria-modal="true" aria-labelledby="bot-settings-title" tabindex="-1">
       <div class="settings-sidebar">
-        <button type="button" class="settings-tab-btn ${!snapshot ? 'active' : ''}" data-tab="catalog" data-settings-back ${this.saving ? 'disabled' : ''}>
-          <span class="material-symbols-outlined md-18" aria-hidden="true">smart_toy</span>${t('botSettings.listTitle')}</button>
+        <div class="bot-settings-sidebar-title">${t('botSettings.title')}</div>
         <div role="tablist" aria-orientation="vertical" aria-label="${t('botSettings.title')}">
           ${scopes.map((scope) => `<button type="button" class="settings-tab-btn ${scope === this.scope ? 'active' : ''}" role="tab"
             id="bot-settings-tab-${scope}" data-tab="${scope}" data-settings-scope="${scope}"
@@ -419,16 +420,15 @@ export class BotSettingsModal {
             </button>` : ''}
             <form id="bot-settings-form" class="bot-settings-form" novalidate>
               <fieldset ${this.blocked() ? 'disabled' : ''}>
-                ${this.scope === 'user' ? `<div class="bot-settings-host-preference bot-field" data-settings-section="language" data-settings-label="${escapeHtml(t('botSettings.language'))}">
-                  <div class="bot-field-heading"><span id="bot-settings-language-label">${t('botSettings.language')}</span></div>
-                  <p class="bot-field-description">${t('botSettings.languageDescription')}</p>
-                  <div class="bot-choice-buttons" role="group" aria-labelledby="bot-settings-language-label">
-                    <button type="button" id="bot-settings-locale-auto" class="btn btn-secondary" data-settings-locale="auto"
-                      aria-pressed="${this.localePreference === 'auto'}" title="${t('botSettings.languageAutoDescription')}">${t('botSettings.languageAuto')}</button>
-                    ${SUPPORTED_LANGUAGES.map((language) => `<button type="button" id="bot-settings-locale-${language.code}"
-                      class="btn btn-secondary" data-settings-locale="${language.code}"
-                      aria-pressed="${this.localePreference === language.code}">${escapeHtml(language.label)}</button>`).join('')}
-                  </div>
+                ${this.scope === 'user' ? `<div class="bot-settings-host-preference form-group" data-settings-section="language" data-settings-label="${escapeHtml(t('botSettings.language'))}">
+                  <label for="bot-settings-locale">${t('botSettings.language')}</label>
+                  <p class="bot-field-description" id="bot-settings-language-description">${t('botSettings.languageDescription')}</p>
+                  <select id="bot-settings-locale" data-settings-locale aria-describedby="bot-settings-language-description bot-settings-language-auto-hint">
+                    <option value="auto" ${this.localePreference === 'auto' ? 'selected' : ''}>${t('botSettings.languageAuto')}</option>
+                    ${SUPPORTED_LANGUAGES.map((language) => `<option value="${language.code}"
+                      ${this.localePreference === language.code ? 'selected' : ''}>${escapeHtml(language.label)}</option>`).join('')}
+                  </select>
+                  <p class="bot-field-description" id="bot-settings-language-auto-hint">${t('botSettings.languageAutoDescription')}</p>
                 </div>` : ''}
                 ${this.scope === 'user' && snapshot.bot.capabilities.downloadsSound ? `<div class="bot-settings-host-preference bot-field" data-settings-section="downloads" data-settings-label="${escapeHtml(t('botSettings.askFileName'))}">
                   <div class="bot-field-heading"><label for="bot-settings-host-prompt">${t('botSettings.askFileName')}</label></div>
@@ -437,11 +437,11 @@ export class BotSettingsModal {
                     <span class="toggle-slider"></span></label>
                   <p class="bot-field-description" id="bot-settings-host-hint">${t('botSettings.askFileNameHint')}</p>
                 </div>` : ''}
-                <section data-settings-section="bot-defined" data-settings-label="${escapeHtml(form?.title ?? t('botSettings.userTab'))}">
-                ${form ? `<h3 class="bot-settings-name">${escapeHtml(form.title)}</h3>` : ''}
-                ${form?.description ? `<p class="bot-field-description">${escapeHtml(form.description)}</p>` : ''}
-                ${renderBotFields(form?.fields ?? [], draft.values, this.fieldContext())}
-                </section>
+                ${form ? `<section data-settings-section="bot-defined" data-settings-label="${escapeHtml(form.title)}">
+                  <h3 class="bot-settings-name">${escapeHtml(form.title)}</h3>
+                  ${form.description ? `<p class="bot-field-description">${escapeHtml(form.description)}</p>` : ''}
+                  ${renderBotFields(form.fields, draft.values, this.fieldContext())}
+                </section>` : ''}
               </fieldset>
             </form>
           </div>` : ''}` : this.selectedBotId ? '' : `<div class="bot-settings-list">${this.bots.map((bot) => `
@@ -454,7 +454,7 @@ export class BotSettingsModal {
       </div>
       </div>
       <div class="modal-footer">
-        ${this.selectedBotId ? `<button type="button" class="btn btn-secondary" data-settings-back ${this.saving ? 'disabled' : ''}>${t('common.back')}</button>` : ''}
+        ${this.selectedBotId && this.openedFromCatalog ? `<button type="button" class="btn btn-secondary" data-settings-back ${this.saving ? 'disabled' : ''}>${t('common.back')}</button>` : ''}
         <button type="button" class="btn btn-secondary" data-settings-reload ${this.loading || this.saving ? 'disabled' : ''} ${this.loading ? 'data-loading="1" aria-busy="true"' : ''}>${t('botSettings.reload')}</button>
         ${active && !this.loading ? `<button type="button" class="btn btn-secondary" data-settings-defaults ${this.blocked() ? 'disabled' : ''}>${t('botSettings.defaults')}</button>
           <button type="submit" form="bot-settings-form" class="btn btn-primary" data-settings-save ${this.blocked() ? 'disabled' : ''} ${this.saving ? 'data-loading="1" aria-busy="true"' : ''}>
@@ -501,7 +501,16 @@ export class BotSettingsModal {
     }
     const draft = this.drafts[this.scope];
     if (!draft) return;
-    if (event.target instanceof HTMLInputElement && event.target.hasAttribute('data-settings-host-prompt')) {
+    if (this.scope === 'user' && event.target instanceof HTMLSelectElement && event.target.hasAttribute('data-settings-locale')) {
+      if (event.type !== 'change') return;
+      const locale = event.target.value === 'auto' ? 'auto' : normalizeBotLocale(event.target.value);
+      if (!locale) { this.setMessage(t('botSettings.invalidResponse'), true); return; }
+      this.localePreference = locale;
+      draft.dirty = true;
+      this.setMessage('', false);
+      this.render();
+      return;
+    } else if (event.target instanceof HTMLInputElement && event.target.hasAttribute('data-settings-host-prompt')) {
       this.confirmFileName = event.target.checked;
       draft.dirty = true;
     } else {
@@ -551,16 +560,6 @@ export class BotSettingsModal {
     const draft = this.drafts[this.scope];
     const form = this.form();
     if (!draft) return;
-    const language = target.closest<HTMLElement>('[data-settings-locale]')?.dataset.settingsLocale;
-    if (language && this.scope === 'user') {
-      const locale = language === 'auto' ? 'auto' : normalizeBotLocale(language);
-      if (!locale) return;
-      this.localePreference = locale;
-      draft.dirty = true;
-      this.setMessage('', false);
-      this.render();
-      return;
-    }
     if (target.closest('[data-settings-defaults]')) {
       const defaults = resolveBotSettingsValues(form, {});
       if (!defaults.success) { this.setMessage(t('botSettings.invalidResponse'), true); return; }
@@ -705,16 +704,6 @@ export class BotSettingsModal {
     if ([...document.querySelectorAll('.modal-backdrop')].filter((element) => element.getClientRects().length).at(-1) !== this.root) return;
     if (event.key === 'Escape') { event.preventDefault(); this.close(); return; }
     const target = event.target instanceof Element ? event.target : null;
-    const language = target?.closest<HTMLButtonElement>('button[data-settings-locale]');
-    if (language && !this.blocked() && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-      event.preventDefault();
-      const buttons = [...this.root.querySelectorAll<HTMLButtonElement>('[data-settings-locale]')];
-      const index = buttons.indexOf(language);
-      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
-        : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
-      buttons[next]?.focus();
-      return;
-    }
     const tab = target?.closest<HTMLButtonElement>('button[data-settings-scope]');
     if (tab && !this.saving && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
       event.preventDefault();
@@ -760,6 +749,7 @@ export class BotSettingsModal {
     this.session = null;
     this.snapshot = null;
     this.selectedBotId = null;
+    this.openedFromCatalog = false;
     this.drafts = {};
     this.permissionDraft = [];
     this.permissionsStale = false;

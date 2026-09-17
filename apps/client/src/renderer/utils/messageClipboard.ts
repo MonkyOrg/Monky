@@ -6,6 +6,7 @@ export type MessageCopyMode = 'formatted' | 'plain';
 export interface MessageClipboardContent {
   text: string;
   html?: string;
+  markdown?: string;
 }
 
 const clipboardMarker = 'markdown-v1';
@@ -106,7 +107,7 @@ function clipboardContent(clean: HTMLElement, markdown?: string): MessageClipboa
     clean.dataset.monkyClipboard = clipboardMarker;
     clean.dataset.monkyMarkdown = original;
   }
-  return { text, html: clean.outerHTML };
+  return { text, html: clean.outerHTML, markdown: original };
 }
 
 export function renderedMessageClipboard(source: Node, markdown?: string): MessageClipboardContent {
@@ -167,15 +168,15 @@ export function selectedMessageClipboard(feed: HTMLElement, selection: Selection
 export function writeMessageClipboard(content: MessageClipboardContent, mode: MessageCopyMode): Promise<void> {
   if (mode === 'plain' || !content.html) return navigator.clipboard.writeText(content.text);
   return navigator.clipboard.write([new ClipboardItem({
-    'text/plain': new Blob([content.text], { type: 'text/plain' }),
+    'text/plain': new Blob([content.markdown ?? content.text], { type: 'text/plain' }),
     'text/html': new Blob([content.html], { type: 'text/html' }),
   })]);
 }
 
-export function setMessageClipboardData(data: DataTransfer, content: MessageClipboardContent): void {
+export function setMessageClipboardData(data: DataTransfer, content: MessageClipboardContent, mode: MessageCopyMode = 'formatted'): void {
   data.clearData();
-  data.setData('text/plain', content.text);
-  if (content.html) data.setData('text/html', content.html);
+  data.setData('text/plain', mode === 'formatted' ? content.markdown ?? content.text : content.text);
+  if (mode === 'formatted' && content.html) data.setData('text/html', content.html);
 }
 
 /** Metadata is only text for the composer, never HTML to mount in the document. */
@@ -192,7 +193,7 @@ export function readMonkyClipboardMarkdown(data: DataTransfer): string | null {
   // A rich editor may retain the outer metadata while copying only a fragment.
   // Never let stale metadata expand that selection back to the whole message.
   const plain = data.getData('text/plain').replace(/\r\n?/g, '\n');
-  return markdownMessageClipboard(markdown).text === plain ? markdown : null;
+  return markdown === plain || markdownMessageClipboard(markdown).text === plain ? markdown : null;
 }
 
 export function pasteMonkyClipboard(input: HTMLTextAreaElement, data: DataTransfer): boolean {

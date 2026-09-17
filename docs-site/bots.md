@@ -425,8 +425,9 @@ bot.command({
 
 ### Idioma dos comandos e preferências
 
-Cada pessoa pode escolher **Configurações do bot > Minhas preferências > Idioma
-do bot**, inclusive para bots sem formulário de configuração próprio.
+Cada pessoa pode escolher o idioma no dropdown **Configurações do bot > Minhas
+preferências > Idioma do bot** e confirmar em **Salvar**, inclusive para bots
+sem formulário de configuração próprio.
 **Seguir o Monky** usa o idioma do aplicativo; a escolha explícita vale somente
 para aquele bot, servidor/endereço e identidade no perfil local. Restaurar os
 padrões volta a seguir o Monky. O idioma efetivo chega em `ctx.locale` também no

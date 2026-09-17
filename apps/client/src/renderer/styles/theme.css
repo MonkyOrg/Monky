@@ -4016,6 +4016,19 @@ input:focus, textarea:focus, select:focus {
 }
 .bot-settings-card .modal-footer {
   flex-shrink: 0;
+  flex-wrap: wrap;
+  padding: 12px 24px;
+  border-top: 1px solid var(--border-color);
+  margin: 0;
+  background: var(--bg-secondary);
+}
+.bot-settings-sidebar-title {
+  padding: 4px 10px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
 }
 .bot-settings-card .settings-sidebar [role="tablist"] {
   display: flex;
@@ -4137,9 +4150,6 @@ input:focus, textarea:focus, select:focus {
 }
 .bot-settings-host-preference {
   margin: 16px 0;
-}
-.bot-settings-card .modal-footer {
-  flex-wrap: wrap;
 }
 .bot-settings-card [data-settings-save] {
   margin-left: auto;

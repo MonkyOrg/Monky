@@ -48,6 +48,13 @@ async function runBotSettingsDomSmoke() {
     input.checked = value;
     input.dispatchEvent(new Event('change', { bubbles: true }));
   };
+  const selectLanguage = value => {
+    const select = find('#bot-settings-locale');
+    check(select instanceof HTMLSelectElement, 'Bot language uses the standard native dropdown');
+    select.focus();
+    select.value = value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  };
   const submit = async () => {
     find('#bot-settings-form').requestSubmit();
     await tick();
@@ -203,6 +210,21 @@ async function runBotSettingsDomSmoke() {
       'Bot identity is escaped');
     check(find('[data-settings-scope="user"]') && !document.querySelector('[data-settings-scope="server"]'),
       'A bot with only download capability shows only individual preferences');
+    check(!document.querySelector('.bot-settings-sidebar-title button, [data-tab="catalog"], [data-settings-back]'),
+      'Opening one bot directly does not add a server bot catalog menu or an unrelated Back action');
+    check(!document.querySelector('[data-settings-section="bot-defined"]'),
+      'A bot without its own personal form does not add an empty duplicate preferences subsection');
+    const footer = find('.bot-settings-card .modal-footer');
+    const footerStyle = getComputedStyle(footer);
+    check(footerStyle.paddingLeft === '24px' && footerStyle.paddingRight === '24px' &&
+      footerStyle.paddingTop === '12px' && footerStyle.paddingBottom === '12px' &&
+      footerStyle.borderTopWidth === '1px', 'Bot actions share the padded, separated settings footer');
+    const footerRect = footer.getBoundingClientRect();
+    check([...footer.querySelectorAll('button')].every(button => {
+      const rect = button.getBoundingClientRect();
+      return rect.left >= footerRect.left + 23 && rect.right <= footerRect.right - 23 &&
+        rect.top >= footerRect.top + 12 && rect.bottom <= footerRect.bottom - 11;
+    }), 'Reload, defaults and save are inset from the modal edges');
     check(find('#bot-settings-host-prompt').getAttribute('role') === 'switch', 'Host confirmation uses a switch');
     check(find('.bot-settings-presence').textContent.includes('Offline'), 'An offline bot remains configurable');
     settingsStore.suppressBotDownloadConfirmation(otherKey);
@@ -215,14 +237,15 @@ async function runBotSettingsDomSmoke() {
     await submit();
     check(!settingsStore.botDownloadConfirmationExceptions.includes(audioKey) &&
       settingsStore.botDownloadConfirmationExceptions.includes(otherKey), 'Re-enabling a prompt leaves another bot untouched');
-    check(find('[data-settings-locale="auto"]').getAttribute('aria-pressed') === 'true',
+    check(find('#bot-settings-locale').value === 'auto',
       'Bots follow the app language until the person chooses an override');
-    find('[data-settings-locale="en"]').click();
-    check(settingsStore.getBotLocalePreference(audioKey) === 'auto', 'Language cards do not save until confirmation');
-    check(find('[data-settings-locale="en"]').getAttribute('aria-pressed') === 'true', 'Language cards expose selected state');
-    find('[data-settings-locale="en"]').focus();
-    find('[data-settings-locale="en"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
-    check(document.activeElement === find('[data-settings-locale="auto"]'), 'Language cards support keyboard navigation');
+    selectLanguage('en');
+    check(settingsStore.getBotLocalePreference(audioKey) === 'auto', 'The language dropdown does not save until confirmation');
+    check(find('#bot-settings-locale').value === 'en' && find('#bot-settings-locale').selectedOptions[0].textContent === 'English',
+      'The language dropdown exposes the selected option');
+    check(document.activeElement === find('#bot-settings-locale') &&
+      find('label[for="bot-settings-locale"]').textContent === language.t('botSettings.language'),
+    'Changing the language preserves dropdown focus and its accessible label');
     await submit();
     check(settingsStore.getBotLocalePreference(audioKey) === 'en' && settingsStore.getBotLocalePreference(otherKey) === 'auto',
       'A language override is isolated from other bots and identities');
@@ -235,6 +258,12 @@ async function runBotSettingsDomSmoke() {
     check(document.querySelectorAll('[data-settings-bot]').length === 2, 'Ordinary members can list installed offline bots');
     find('[data-settings-bot="generic-bot"]').click();
     await settle(() => !!document.querySelector('#bot-settings-user-count'));
+    check(!!document.querySelector('.modal-footer [data-settings-back]') && !document.querySelector('[data-tab="catalog"]'),
+      'Only entering through the catalog provides a Back action, without a duplicate sidebar menu');
+    find('[data-settings-back]').click();
+    await settle(() => document.querySelectorAll('[data-settings-bot]').length === 2);
+    find('[data-settings-bot="generic-bot"]').click();
+    await settle(() => !!document.querySelector('#bot-settings-user-count'));
     check(!document.querySelector('[data-settings-scope="server"]'), 'Shared behavior is omitted without configure permission');
     check(find('#bot-settings-form h3').textContent === 'Preferências pessoais' &&
       find('#bot-settings-form [data-settings-section="bot-defined"] > .bot-field-description').textContent === 'Opções pessoais salvas neste dispositivo.',
@@ -244,15 +273,15 @@ async function runBotSettingsDomSmoke() {
       'Personal field labels and descriptions are localized rather than hardcoded');
     check(!Object.values(modal.snapshot.definition.localizations).some(forms => forms.server),
       'Unauthorized snapshots contain no localized server scope');
-    find('[data-settings-locale="en"]').click();
+    selectLanguage('en');
     check(find('#bot-settings-form h3').textContent === 'Your preferences',
       'An unsaved bot-language choice previews translated metadata without changing app language');
-    check(language.getLanguage() === 'pt-BR', 'A bot-language card does not change the application locale');
+    check(language.getLanguage() === 'pt-BR', 'The bot-language dropdown does not change the application locale');
     await submit();
     await modal.open('generic-bot');
     check(find('#bot-settings-form h3').textContent === 'Your preferences',
       'Reopening settings restores the saved language override');
-    find('[data-settings-locale="auto"]').click();
+    selectLanguage('auto');
     await submit();
     check(find('#bot-settings-form h3').textContent === 'Preferências pessoais', 'Automatic language follows the app again');
     check(find('#bot-settings-user-enabled').checked === false && find('#bot-settings-user-count').value === '0',

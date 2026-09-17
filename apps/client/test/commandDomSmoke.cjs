@@ -88,6 +88,12 @@ if (!process.versions.electron) {
     if (process.argv.includes('--bot-settings-only')) {
       const checks = await window.webContents.executeJavaScript(`(${runBotSettingsDomSmoke.toString()})()`, true);
       await window.webContents.executeJavaScript('document.body.innerHTML = window.botSettingsPreviewMarkup', true);
+      await window.webContents.executeJavaScript(`(async () => {
+        await document.fonts.ready;
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        await Promise.all(document.getAnimations().filter(animation =>
+          animation.effect?.getComputedTiming().iterations !== Infinity).map(animation => animation.finished));
+      })()`, true);
       fs.writeFileSync(path.join(output, 'bot-settings.png'), (await window.webContents.capturePage()).toPNG());
       console.log(`Bot settings DOM smoke: ${checks} checks passed`);
       await finish(0);

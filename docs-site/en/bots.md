@@ -413,8 +413,9 @@ bot.command({
 
 ### Command language and individual preferences
 
-Each person can choose **Bot settings > My preferences > Bot language**, even
-for bots without their own settings form. **Follow Monky** uses the app's
+Each person can use the **Bot settings > My preferences > Bot language**
+dropdown and confirm with **Save**, even for bots without their own settings form.
+**Follow Monky** uses the app's
 language; an explicit choice applies only to that bot, server/address, and
 identity in the local profile. Restoring defaults follows Monky again.
 The effective language arrives in `ctx.locale`, including autocomplete and

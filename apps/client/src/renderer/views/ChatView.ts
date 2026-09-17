@@ -1113,7 +1113,7 @@ export class ChatView {
     this.clearCopyFeedback?.();
     try {
       if (event?.clipboardData) {
-        setMessageClipboardData(event.clipboardData, content);
+        setMessageClipboardData(event.clipboardData, content, mode);
         event.preventDefault();
       } else {
         await writeMessageClipboard(content, mode);
