@@ -87,12 +87,15 @@ async function runSmoke(window) {
     checks++;
   };
   const key = async (key, code, virtualKey, modifiers = 0, text) => {
+    // CDP bypasses Cocoa's key-binding resolver; native editing needs its command.
+    const commands = process.platform === 'darwin' && code === 'KeyZ' && [4, 12].includes(modifiers)
+      ? [modifiers === 12 ? 'redo' : 'undo'] : [];
     await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
-      type: 'keyDown', key, code, modifiers, windowsVirtualKeyCode: virtualKey, nativeVirtualKeyCode: virtualKey,
+      type: text ? 'keyDown' : 'rawKeyDown', key, code, modifiers, windowsVirtualKeyCode: virtualKey, commands,
       ...(text ? { text, unmodifiedText: text } : {}),
     });
     await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
-      type: 'keyUp', key, code, modifiers, windowsVirtualKeyCode: virtualKey, nativeVirtualKeyCode: virtualKey,
+      type: 'keyUp', key, code, modifiers, windowsVirtualKeyCode: virtualKey,
     });
     await fixture('settle()');
   };
@@ -152,7 +155,16 @@ async function runSmoke(window) {
     check(pasted && state.input === `draft ${state.source}`, 'Pasting a full formatted message into Monky restores the exact Markdown source as editable text');
     check(state.draft === state.input, 'Formatted paste updates the existing draft, counter and input lifecycle');
     await key('z', 'KeyZ', 90, process.platform === 'darwin' ? 4 : 2);
-    check((await fixture('state()')).input === 'draft ', 'Native Undo reverts the formatted paste without erasing the prior draft');
+    state = await fixture('state()');
+    check(state.input === 'draft ', `Native Undo reverts the formatted paste without erasing the prior draft: ${JSON.stringify({
+      input: state.input, historyInputType: state.historyInputType,
+    })}`);
+    check(state.historyInputType === 'historyUndo', 'Undo uses the real trusted native editing history event');
+    if (process.platform === 'darwin') await key('Z', 'KeyZ', 90, 12);
+    else await key('y', 'KeyY', 89, 2);
+    state = await fixture('state()');
+    check(state.historyInputType === 'historyRedo' && state.input === `draft ${state.source}`,
+      'Native Redo restores the formatted paste through the same editing history');
 
     for (const locale of ['pt-BR', 'en']) {
       await fixture(`prepare(${JSON.stringify(locale)})`);
@@ -284,12 +296,19 @@ async function installFixture() {
   let trustedKeys = 0;
   let trustedClicks = 0;
   let trustedCopyEvents = 0;
+  let historyInputType = '';
   const onKey = event => { if (event.isTrusted) trustedKeys++; };
   const onClick = event => { if (event.isTrusted) trustedClicks++; };
   const onCopy = event => { if (event.isTrusted) trustedCopyEvents++; };
+  const onInput = event => {
+    if (event.isTrusted && event instanceof InputEvent && event.target?.id === 'chat-message-input') {
+      historyInputType = event.inputType;
+    }
+  };
   document.addEventListener('keydown', onKey);
   document.addEventListener('click', onClick);
   document.addEventListener('copy', onCopy);
+  document.addEventListener('input', onInput);
   const write = entry => {
     writes.push(entry);
     if (writeMode === 'reject') return Promise.reject(new Error('Clipboard denied by fixture'));
@@ -432,6 +451,7 @@ async function installFixture() {
     writes.length = 0;
     writeMode = 'resolve';
     filePastes = 0;
+    historyInputType = '';
     view = new ChatView(root);
     view.addFiles = () => { filePastes++; };
     view.setChannel('chat');
@@ -459,7 +479,7 @@ async function installFixture() {
       const submenu = document.querySelector('.floating-context-submenu');
       return {
         source, code, expectedPlain, last: await last(), writes: writes.length,
-        input: input?.value, draft: session.chatStore.getDraft(view.currentChannelId),
+        input: input?.value, draft: session.chatStore.getDraft(view.currentChannelId), historyInputType,
         toast: document.querySelector('.chat-copy-toast-label')?.textContent ?? '',
         menuCount: document.querySelectorAll('.floating-context-menu').length,
         submenuLabels: [...(submenu?.querySelectorAll('button') ?? [])].map(button => button.textContent),
@@ -819,6 +839,7 @@ async function installFixture() {
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('click', onClick);
       document.removeEventListener('copy', onCopy);
+      document.removeEventListener('input', onInput);
       EventTarget.prototype.addEventListener = originalAdd;
       EventTarget.prototype.removeEventListener = originalRemove;
       if (previousClipboard) Object.defineProperty(navigator, 'clipboard', previousClipboard);
