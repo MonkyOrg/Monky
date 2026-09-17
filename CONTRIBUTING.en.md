@@ -190,6 +190,9 @@ real scenarios; `node scripts\qa.js connected --smoke` reuses that build.
 On macOS CI, real application tests use a temporary unlocked Keychain and restore
 the original configuration afterwards. Identity still goes through the app's
 `safeStorage`; preparation does not disable encryption to avoid prompts.
+The Electron process preserves `HOME` on macOS to access that system service.
+Its profile, identity, cache and `MONKY_HOME` still use explicit QA paths;
+server/bot workers keep their `HOME` isolated too.
 
 Prepared mode disables automatic updates, LAN discovery and global shortcuts,
 and uses synthetic capture. **Do not use it to test those steps, identities,

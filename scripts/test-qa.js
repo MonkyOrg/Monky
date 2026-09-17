@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { EventEmitter } from 'node:events';
@@ -70,6 +71,21 @@ test('QA environment does not inherit installed profiles, credentials or Node fl
     assert.equal(env.NODE_OPTIONS, undefined);
   } finally {
     for (const [name, value] of original) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+  }
+});
+
+test('macOS app retains system HOME for Keychain while all Monky data remains isolated', () => {
+  const root = path.join(repoRoot, '.qa', 'keychain-environment');
+  const env = isolatedEnvironment(root, {}, { useSystemKeychain: true, platform: 'darwin' });
+  assert.equal(env.HOME, process.env.HOME || os.homedir());
+  for (const name of ['USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
+    'XDG_DATA_HOME', 'TMP', 'TEMP', 'TMPDIR', 'MONKY_HOME']) {
+    assert.ok(env[name] === root || env[name].startsWith(root + path.sep), name);
+  }
+  assert.equal(isolatedEnvironment(root, {}, { platform: 'darwin' }).HOME, root,
+    'Node server/bot workers do not need the system Keychain.');
+  for (const platform of ['win32', 'linux']) {
+    assert.equal(isolatedEnvironment(root, {}, { useSystemKeychain: true, platform }).HOME, root);
   }
 });
 

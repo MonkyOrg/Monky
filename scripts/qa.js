@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -36,14 +37,17 @@ export function parseQaArguments(args) {
   return result;
 }
 
-export function isolatedEnvironment(root, extra = {}) {
+export function isolatedEnvironment(root, extra = {}, { useSystemKeychain = false, platform = process.platform } = {}) {
   const env = {};
   for (const name of ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'ComSpec', 'COMSPEC',
     'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'LANG', 'LC_ALL', 'TZ']) {
     if (process.env[name]) env[name] = process.env[name];
   }
+  // macOS resolves its Keychain through HOME; remapping it blocks safeStorage
+  // on a "create login Keychain" prompt even with a valid unlocked CI fixture.
+  const home = useSystemKeychain && platform === 'darwin' ? (process.env.HOME || os.homedir()) : root;
   return {
-    ...env, HOME: root, USERPROFILE: root, APPDATA: path.join(root, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(root, 'AppData', 'Local'),
+    ...env, HOME: home, USERPROFILE: root, APPDATA: path.join(root, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(root, 'AppData', 'Local'),
     XDG_CONFIG_HOME: path.join(root, 'config'), XDG_CACHE_HOME: path.join(root, 'cache'), XDG_DATA_HOME: path.join(root, 'data'),
     TMP: path.join(root, 'scratch'), TEMP: path.join(root, 'scratch'), TMPDIR: path.join(root, 'scratch'),
     MONKY_HOME: path.join(root, 'cli'), ...extra,
@@ -142,7 +146,9 @@ export async function runQa(options, hooks = {}) {
     const reports = [];
     const client = spawn('QA client', require('electron'), [
       path.join(repoRoot, 'apps', 'client'), `--user-data-dir=${path.join(root, 'client')}`,
-    ], path.join(repoRoot, 'apps', 'client'), isolatedEnvironment(path.join(root, 'client'), { MONKY_QA_CONFIG: configFile }), message => {
+    ], path.join(repoRoot, 'apps', 'client'), isolatedEnvironment(
+      path.join(root, 'client'), { MONKY_QA_CONFIG: configFile }, { useSystemKeychain: true },
+    ), message => {
       if (message.type !== 'qa-report') return;
       const report = developmentQaReportSchema.parse(message.report);
       if (report.runId !== runId || report.scenario !== options.scenario) { failureReject(new Error('Mismatched QA readiness report.')); return; }

@@ -189,6 +189,9 @@ esse build sem recompilar.
 No CI do macOS, os testes reais usam um Keychain temporário desbloqueado, com
 restauração ao final. A identidade continua passando pelo `safeStorage` do
 aplicativo; a preparação não desliga a criptografia para evitar prompts.
+O processo Electron preserva `HOME` no macOS para acessar esse serviço do sistema.
+Perfil, identidade, cache e `MONKY_HOME` continuam nos caminhos explícitos de QA;
+os workers de servidor/bot mantêm também `HOME` isolado.
 
 Esse modo desliga atualizações automáticas, descoberta LAN e atalhos globais e
 usa captura sintética. **Não o use para testar essas etapas, identidade,
