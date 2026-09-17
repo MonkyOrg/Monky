@@ -305,6 +305,17 @@ before restarting.
 `--fresh` works the same as in `monky start`: it drops the PM2 process
 registration before bringing the server back up.
 
+If PM2 still executes a file from another CLI installation, `start` and
+`restart` automatically recreate only that server's registration. Rewriting
+`ecosystem.config.cjs` is not enough in this case: PM2 may retain the previous
+executable path. The data directory and logs are preserved; a change only to
+the Node interpreter still uses the normal restart.
+
+Database reads performed by `start`, `restart` and `status` (including
+`--watch`) do not write data or apply migrations. The server owns migrations
+at startup, after the previous instance exits, so its in-memory snapshot
+cannot overwrite a schema upgraded by the CLI.
+
 ---
 
 ## `monky status`
@@ -412,6 +423,14 @@ monky restart --fresh
 That drops the PM2 process and registers it again. Files under `~/.pm2/logs` are
 preserved.
 :::
+
+If the updated CLI shows the new version but connections still report an old
+protocol, check `monky status --data <folder>`. Diagnostics compare the file
+actually executed by PM2 with the current CLI installation's file, showing
+both when they differ. On versions without this automatic recovery,
+`monky restart --fresh --data <folder>` recreates only the selected registration
+without deleting the database. Run it as the user managing that instance;
+if the mismatch persists, check which process is listening on the server port.
 
 Native modules are a **separate** concern: `better-sqlite3` and the mediasoup
 worker are compiled against the Node ABI (20 = 115, 22 = 127, 24 = 137). Any

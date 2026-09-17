@@ -7,13 +7,16 @@ interface AudioLevelReceiver {
 }
 
 /**
- * RemoteVadMonitor monitors incoming RTP audio levels for remote peers via WebRTC getStats()
- * without fetching full stats reports, preventing garbage collection pressure (#411).
+ * Samples each decoded microphone without allocating per tick. Receiver stats
+ * remain a fallback when its playback graph is not available yet.
  */
 export class RemoteVadMonitor {
   private remoteAudioVads: Map<string, ReturnType<typeof setInterval>> = new Map();
 
-  constructor(private getVoiceParticipants: () => ParticipantManager) {}
+  constructor(
+    private getVoiceParticipants: () => ParticipantManager,
+    private getDecodedAudioLevel?: (peerSessionId: string) => number | null,
+  ) {}
 
   public setupRemoteVad(peerSessionId: string, getSession: () => PeerSession | undefined): void {
     this.setupRemoteReceiverVad(peerSessionId, () => {
@@ -45,14 +48,16 @@ export class RemoteVadMonitor {
         const receiverIsCurrent = () => isCurrent() && audioReceiver === getReceiver()
           && audioReceiver.track.readyState !== 'ended';
         if (!receiverIsCurrent()) return;
-        const stats = await audioReceiver.getStats();
-        if (!receiverIsCurrent()) return;
-        let audioLevel: number | undefined;
-        for (const report of stats.values()) {
-          if (report.type === 'inbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')) {
-            if (typeof report.audioLevel === 'number') {
-              audioLevel = report.audioLevel;
-              break;
+        let audioLevel = this.getDecodedAudioLevel?.(peerSessionId) ?? undefined;
+        if (audioLevel === undefined) {
+          const stats = await audioReceiver.getStats();
+          if (!receiverIsCurrent()) return;
+          for (const report of stats.values()) {
+            if (report.type === 'inbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')) {
+              if (typeof report.audioLevel === 'number') {
+                audioLevel = report.audioLevel;
+                break;
+              }
             }
           }
         }
@@ -68,8 +73,7 @@ export class RemoteVadMonitor {
             participants.setSpeaking(peerSessionId, true);
           } else {
             silenceCounter++;
-            // At 150ms interval, 3 consecutive silent reads ≈ 450ms — still
-            // responsive enough for a natural speaking-indicator transition.
+            // Brief gaps between words should not make the indicator flicker.
             if (silenceCounter > 3) participants.setSpeaking(peerSessionId, false);
           }
         }

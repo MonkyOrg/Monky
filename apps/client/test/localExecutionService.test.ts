@@ -149,6 +149,35 @@ test('an initial storage error does not permanently reject later service invento
   assert.equal(initializations, 2, 'a successful initialization remains shared');
 });
 
+test('permanent consent is reused after reconnect while tools are revalidated and other servers still require consent', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.service.prepare({ requestId: 'initial-grant', subject, capability: 'youtube-audio' })).status, 'prepared');
+  assert.deepEqual(f.counts(), { preparations: 1, prompts: 1, removed: null, cacheCleared: 0 });
+  await f.service.setConnection({ connectionId: subject.connectionId, connected: false, voiceChannelId: null });
+  const reconnected = { ...subject, connectionId: 'new-connection' };
+  await f.service.setConnection({ connectionId: reconnected.connectionId, connected: true, voiceChannelId: 'voice' });
+  assert.equal((await f.service.prepare({ requestId: 'silent-reconnect', subject: reconnected, capability: 'youtube-audio' })).status, 'prepared');
+  assert.equal(f.counts().prompts, 1, 'Persistent consent does not reopen a dialog');
+  assert.equal(f.counts().preparations, 2, 'The existing tools are still checked before use');
+  const other = { ...subject, connectionId: 'other-connection', serverId: 'other-server', serverOrigin: 'wss://other.example.test' };
+  await f.service.setConnection({ connectionId: other.connectionId, connected: true, voiceChannelId: 'voice' });
+  assert.equal((await f.service.prepare({ requestId: 'another-server', subject: other, capability: 'youtube-audio' })).status, 'prepared');
+  assert.equal(f.counts().prompts, 2, 'Tool availability does not authorize another server');
+  assert.equal(f.counts().preparations, 3);
+});
+
+test('until-disconnect consent is not silently promoted to a permanent grant', async t => {
+  const f = await fixture(t);
+  f.setDecision('connection');
+  assert.equal((await f.service.prepare({ requestId: 'temporary-grant', subject, capability: 'youtube-audio' })).status, 'prepared');
+  await f.service.setConnection({ connectionId: subject.connectionId, connected: false, voiceChannelId: null });
+  const next = { ...subject, connectionId: 'next-temporary-connection' };
+  await f.service.setConnection({ connectionId: next.connectionId, connected: true, voiceChannelId: 'voice' });
+  assert.equal((await f.service.prepare({ requestId: 'renew-temporary', subject: next, capability: 'youtube-audio' })).status, 'prepared');
+  assert.equal(f.counts().prompts, 2);
+  assert.equal((await f.permissions.list())[0].decision, 'connection');
+});
+
 test('unsupported targets and denied consent cannot install or start tools', async (t) => {
   const f = await fixture(t);
   f.setSupported(false);

@@ -3625,6 +3625,46 @@ async function runDomSmoke() {
   server.myPermissions = 2147483647;
   events.appEvents.emit('server.roles_updated');
   check(document.querySelectorAll('[data-cmd-index]').length > 0, 'Granting bot permission must restore commands');
+  const savedCommands = store.getCommands();
+  const savedBots = store.getCommandBots();
+  const { botSettingsModal } = await import('/views/BotSettingsModal.ts');
+  const openBotSettings = botSettingsModal.open;
+  let configuredBot = null;
+  botSettingsModal.open = async botId => { configuredBot = botId; };
+  try {
+    const pendingBot = {
+      botId: 'pending-online-bot', name: 'Pending online bot', online: true,
+      capabilities: { downloadsSound: false }, schemaRevision: 1, revision: 0,
+      hasServerSettings: false, hasUserSettings: false, canConfigure: false, canManage: true,
+      permissions: { requested: ['commands'], granted: [], revision: 1, reviewRequired: true, reviewedBy: null, reviewedAt: null },
+    };
+    store.setCommands([]);
+    store.setCommandBots([pendingBot]);
+    type(find('#chat-message-input'), '/');
+    check(find('#command-dropup').textContent.includes(language.t('botChat.commandsReviewRequired')),
+      'An online bot awaiting approval is not misrepresented as offline');
+    check(!document.querySelector('#command-list-options[role="listbox"]') && !find('#chat-message-input').hasAttribute('role'),
+      'Empty discovery is a status panel, not a combobox with interactive fake options');
+    const configure = find('[data-command-bot-configure="pending-online-bot"]');
+    configure.focus();
+    check(document.activeElement === configure && configure.tagName === 'BUTTON', 'Configuration action is keyboard focusable');
+    configure.click();
+    check(configuredBot === pendingBot.botId && document.activeElement === find('#chat-message-input'),
+      'Configuration opens the correct bot and preserves composer return focus');
+    store.setCommandBots([{ ...pendingBot, canManage: false }]);
+    type(find('#chat-message-input'), '/');
+    check(!document.querySelector('[data-command-bot-configure]'), 'Members without management authority get no review action');
+    store.setCommandBots([{ ...pendingBot, online: false }]);
+    check(find('#command-dropup').textContent.includes(language.t('botChat.noOnlineBots')), 'Offline status updates an already open catalog');
+    store.setCommands(savedCommands);
+    type(find('#chat-message-input'), '/not-a-registered-command');
+    check(find('#command-dropup').textContent.includes(language.t('botChat.noMatchingCommands')), 'Search mismatch is distinct from bot availability');
+  } finally {
+    botSettingsModal.open = openBotSettings;
+    store.setCommands(savedCommands);
+    store.setCommandBots(savedBots);
+    type(find('#chat-message-input'), '');
+  }
   language.setLanguage('pt-BR');
   type(find('#chat-message-input'), '');
   const [{ CreateChannelModal }, { EditChannelModal }, { ServerRolesTab }] = await Promise.all([

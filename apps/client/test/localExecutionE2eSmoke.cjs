@@ -272,7 +272,16 @@ async function startRendererServer(root) {
   }
 }
 
-function assertTaskTrace(rows, taskId, frames, startIndex) {
+async function assertTaskTrace(rows, taskId, frames, startIndex) {
+  // WebSocket completion may arrive before the independent SCTP/IPC acknowledgements.
+  await until(() => {
+    const pending = rows.slice(startIndex);
+    const created = pending.find(row => row.role === 'executor' && row.event === 'private.created');
+    return created && pending.some(row => row.role === 'executor' && row.event === 'private.record' &&
+      row.peer === created.peer && row.kind === 'drainAck') &&
+      pending.some(row => row.role === 'executor' && row.event === 'ipc.played.end' &&
+        row.playedFrames === frames && row.status === 'completed');
+  }, 'ordered private drain ACK and final Main playback acknowledgement', 5_000);
   const taskRows = rows.slice(startIndex);
   const wire = rows.filter(row => row.event === 'wire' && row.taskId === taskId);
   const offers = wire.filter(row => row.direction === 'out' && row.type === MessageType.BOT_LOCAL_TASK_OFFER);
@@ -646,7 +655,7 @@ async function runMediaSmoke(t, mode) {
     await until(() => ['completed', 'failed', 'cancelled'].includes(job.state), 'final played/drain completion', 30_000);
     if (job.state !== 'completed') throw job.error;
     assert.ok(job.played >= 400 && job.played <= 405, 'The entire authored eight-second Opus source must drain.');
-    assertTaskTrace(rows, job.taskId, job.played, startIndex);
+    await assertTaskTrace(rows, job.taskId, job.played, startIndex);
     const completed = await nativeCleanup('completed natural EOF native/cache/RTC cleanup');
     assert.equal(completed.spawnedWorkers, 2);
     evidence.playedFrames = job.played;
@@ -776,7 +785,7 @@ async function runRegisteredMusicScenario({ executor, listener, requester, audie
     return terminal(resumed, 'completed');
   }, 'registered queue natural EOF and server-confirmed drain', 30_000);
   assert.ok(completed.playedFrames >= 400 && completed.playedFrames <= 405);
-  assertTaskTrace(rows, resumed.taskId, completed.playedFrames, resumedIndex);
+  await assertTaskTrace(rows, resumed.taskId, completed.playedFrames, resumedIndex);
   await chatMatches(/queue finished|fim da fila/i);
   const messages = await listener.call('chat');
   evidence.sourceMetadataTasks = 0;

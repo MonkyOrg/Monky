@@ -13,6 +13,7 @@ import { sessionManager } from '../src/renderer/core/SessionManager';
 import { currentEventOrigin, setEventOrigin } from '../src/renderer/core/sessionRouting';
 import { createServerStore, getActiveServerStore, setActiveServerStore } from '../src/renderer/stores/serverStore';
 import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../src/renderer/utils/voiceConnection';
+import { clientLog } from '../src/renderer/core/ClientLogService';
 
 function participant(sessionId: string, channelId = 'room'): VoiceRosterParticipant {
   return {
@@ -279,6 +280,37 @@ test('retired asynchronous VAD samples cannot revive a rejoined participant or o
   assert.equal(manager.get('peer')?.isSpeaking, false);
 });
 
+test('decoded microphone VAD stays per-peer, takes precedence over RTP and retains a startup fallback', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const manager = new ParticipantManager();
+  manager.reconcileVoiceChannel('room', [participant('talking'), participant('quiet')]);
+  let decoded: number | null = 0.2;
+  let statReads = 0;
+  const receiver = {
+    track: { readyState: 'live' } satisfies Pick<MediaStreamTrack, 'readyState'>,
+    getStats: async () => { statReads++; return audioStats(0.4); },
+  };
+  const monitor = new RemoteVadMonitor(() => manager, id => id === 'talking' ? decoded : 0);
+  t.after(() => monitor.cleanupAll());
+  for (const id of ['talking', 'quiet']) monitor.setupRemoteReceiverVad(id, () => receiver);
+  const tick = async () => { t.mock.timers.tick(150); await Promise.resolve(); };
+  await tick();
+  assert.equal(manager.get('talking')?.isSpeaking, true);
+  assert.equal(manager.get('quiet')?.isSpeaking, false);
+  assert.equal(statReads, 0, 'A ready PCM meter needs no native stats allocation');
+  decoded = 0;
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(manager.get('talking')?.isSpeaking, false, 'Real silence is not replaced by a stale RTP level');
+  decoded = null;
+  await tick();
+  assert.equal(manager.get('talking')?.isSpeaking, true, 'RTP remains available before the playback graph is ready');
+  assert.equal(statReads, 1);
+  manager.updateVoiceState({ ...participant('talking').voiceState, serverMuted: true });
+  decoded = 0.3;
+  await tick();
+  assert.equal(manager.get('talking')?.isSpeaking, false);
+});
+
 test('SFU health badges are visible to local users, remote users and observers, independently of signaling', () => {
   const manager = new ParticipantManager();
   for (const health of ['connecting', 'connected', 'reconnecting', 'failed'] satisfies VoiceConnectionHealth[]) {
@@ -293,6 +325,35 @@ test('SFU health badges are visible to local users, remote users and observers, 
       assert.equal(indicator.isPeerFailed, health === 'failed');
     }
   }
+});
+
+test('SFU candidate diagnostics expose addresses and ports without ICE credentials or DTLS material', t => {
+  const log = t.mock.method(clientLog, 'info', () => {});
+  const engine = new SfuClientEngine(() => { throw new Error('Unexpected network access'); }, () => 'self', {
+    onHealthChanged() {}, onRoster() {}, onConsumerTrack() {}, onConsumerClosed() {},
+    onConnectionFailed() {}, onConnected() {},
+  });
+  const transport = {
+    id: 'transport',
+    iceParameters: { usernameFragment: 'private-username', password: 'private-password' },
+    dtlsParameters: { fingerprints: [{ value: 'private-fingerprint' }] },
+    iceCandidates: [
+      { ip: '127.0.0.1', protocol: 'udp', port: 42000, password: 'never-log-this' },
+      { address: '192.0.2.1', protocol: 'tcp', port: 42001 },
+      null,
+    ],
+  };
+  engine['logTransportCandidates']('send', transport);
+  assert.equal(log.mock.callCount(), 1);
+  assert.deepEqual(log.mock.calls[0].arguments[2], {
+    transportId: 'transport',
+    candidates: [
+      { address: '127.0.0.1', protocol: 'udp', port: 42000 },
+      { address: '192.0.2.1', protocol: 'tcp', port: 42001 },
+      { invalid: true },
+    ],
+  });
+  assert.doesNotMatch(JSON.stringify(log.mock.calls[0].arguments), /private-|never-log-this/);
 });
 
 test('logical offline presence and subsequent SFU reconciliation preserve the physical voice session and streams', () => {
@@ -699,6 +760,8 @@ test('remote WebRTC output changes keep default voice separate from screen speak
     destination = {};
     gains: Array<{ gain: { value: number }; connect: () => void; disconnect: () => void }> = [];
     streams: MediaStream[] = [];
+    meterReads = 0;
+    closedMeters = 0;
     constructor(options: { sinkId: string | { type: string } }) {
       this.sinkId = options.sinkId;
       contexts.push(this);
@@ -711,6 +774,13 @@ test('remote WebRTC output changes keep default voice separate from screen speak
       const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
       this.gains.push(gain);
       return gain;
+    }
+    createAnalyser() {
+      const owner = this;
+      return {
+        context: this, fftSize: 1024, connect() {}, disconnect() { owner.closedMeters++; },
+        getFloatTimeDomainData(values: Float32Array) { owner.meterReads++; values.fill(0.125); },
+      };
     }
     async close() { this.state = 'closed'; }
     async setSinkId(id: string) { this.sinkId = id; }
@@ -757,6 +827,9 @@ test('remote WebRTC output changes keep default voice separate from screen speak
   assert.deepEqual(contexts.map(context => context.sinkId), ['', 'screen-speakers']);
   assert.deepEqual(contexts[0].streams.map(stream => stream.getAudioTracks()[0].id), ['microphone', 'other-microphone']);
   assert.deepEqual(contexts[1].streams.map(stream => stream.getAudioTracks()[0].id), ['screen-sound']);
+  assert.equal(router.getVoiceAudioLevel('peer'), 0.125);
+  assert.equal(router.getVoiceAudioLevel('missing'), null);
+  assert.equal(router['screenAudioPipelines'].get('peer')?.activity, undefined, 'Screen audio is not a microphone meter');
   for (const volume of [0, 50, 100, 150, 200]) {
     router.setPeerVolume('peer', volume);
     router.setScreenAudioVolume('peer', volume);
@@ -765,6 +838,7 @@ test('remote WebRTC output changes keep default voice separate from screen speak
     assert.equal(voice.volume, 0, 'the microphone decoder element never becomes an audible second path');
     assert.equal(otherVoice.volume, 0);
     assert.equal(router.getScreenAudioElement('peer')?.volume, 0);
+    assert.equal(router.getVoiceAudioLevel('peer'), 0.125, 'Activity is measured before per-listener volume');
   }
   for (const isBot of [false, true]) {
     const peer = participant('peer');
@@ -823,6 +897,8 @@ test('remote WebRTC output changes keep default voice separate from screen speak
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(closingRouter['audioContexts'].size, 0, 'pending decoder routing cannot recreate contexts after leaving');
   assert.equal(contexts.slice(contextCount).every(context => context.state === 'closed'), true);
+  assert.equal(contexts.slice(contextCount).every(context => context.closedMeters === 1), true);
+  assert.equal(closingRouter.getVoiceAudioLevel('closing'), null, 'A retired graph has no activity sample');
 });
 
 test('screen audio opt-in and 0–200% volume stay independent of voice deafen in the shared P2P/SFU router', (t) => {
@@ -833,6 +909,9 @@ test('screen audio opt-in and 0–200% volume stay independent of voice deafen i
     destination = {};
     createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
     createMediaStreamDestination() { return {}; }
+    createAnalyser() {
+      return { context: this, fftSize: 1024, connect() {}, disconnect() {}, getFloatTimeDomainData(values: Float32Array) { values.fill(0); } };
+    }
     createGain() {
       const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
       gains.push(gain);

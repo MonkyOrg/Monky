@@ -1630,20 +1630,23 @@ export class WebSocketServer {
       return;
     }
 
-    this.disconnectBot(payload.botId);
+    this.disconnectBot(payload.botId, 'revoked');
     const revokedPayload: BotRevokedPayload = { botId: payload.botId };
     this.send(session.ws, { type: MessageType.BOT_REVOKED, requestId, payload: revokedPayload });
     this.broadcast({ type: MessageType.BOT_REVOKED, payload: revokedPayload }, session.ws);
     await this.broadcastBotSettings();
   }
 
-  private disconnectBot(botId: string): void {
+  private disconnectBot(botId: string, reason?: 'revoked'): void {
     this.botLocalExecution.invalidateBot(botId);
     const botSessionId = `bot:${botId}`;
     const botWs = this.sessionSockets.get(botSessionId);
     if (botWs) {
       const botSession = this.sessions.get(botWs);
       if (botSession) {
+        if (reason === 'revoked') {
+          this.send(botWs, { type: MessageType.BOT_REVOKED, payload: { botId } satisfies BotRevokedPayload });
+        }
         this.botInteractions.disconnect(botSession);
         this.disconnectBotScreens(botSession);
         if (botSession.user && botSession.sessionId) this.finalizeSessionLeave(botSession.user, botSession.sessionId);
@@ -1697,7 +1700,7 @@ export class WebSocketServer {
 
     if (!result.success) {
       if (result.revokedBotId) {
-        this.disconnectBot(result.revokedBotId);
+        this.disconnectBot(result.revokedBotId, 'revoked');
         this.broadcast({ type: MessageType.BOT_REVOKED, payload: { botId: result.revokedBotId } satisfies BotRevokedPayload });
         await this.broadcastBotSettings();
       }
@@ -3467,7 +3470,9 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<boolean> {
     if (!session.user) return false;
-    const allowed = await this.permissionService.checkPermission(session.user.id, permission);
+    const allowed = session.isBot
+      ? hasPermission((await this.channelService.getAccessContext(session.user.id)).permissions, permission)
+      : await this.permissionService.checkPermission(session.user.id, permission);
     if (allowed) return true;
     this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Você não tem permissão para executar esta ação.', requestId);
     return false;

@@ -314,6 +314,7 @@ jobs:
           npm run test:camera --workspace=apps/client
           node apps/client/test/footerControlsSmoke.cjs
           npm run test:transport --workspace=apps/client
+          npm run test:bot-marketplace --workspace=apps/client
 
       # Mirror the release pipeline: tsc does not copy the .sql migration files
       # into the compiled server output, so we copy them next to the compiled

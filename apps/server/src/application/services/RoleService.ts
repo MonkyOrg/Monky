@@ -202,9 +202,10 @@ export class RoleService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: parsed.error.errors[0]?.message || 'Dados inválidos.' };
     }
 
+    const user = await this.userRepo.findById(parsed.data.userId);
     const role = await this.roleRepo.findById(parsed.data.roleId);
-    if (!role) {
-      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Cargo não encontrado.' };
+    if (!user || !role) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Usuário ou cargo não encontrado.' };
     }
     if (role.isDefault) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O cargo padrão não pode ser removido.' };

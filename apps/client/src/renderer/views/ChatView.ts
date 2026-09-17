@@ -29,10 +29,10 @@ import { extractStickerIds, stickerToken, stripStickerTokens } from '../utils/st
 import { formatCommandContext, parseTypedCommand } from '../utils/botInputs';
 import { BotChatView, renderBotInvocation } from './BotChatView';
 import { filterCommands, findCommandsByInputName, groupCommands, type CommandGroup } from '../utils/commandCatalog';
-import { renderCommandCatalog } from './commandCatalog';
+import { renderCommandCatalog, renderEmptyCommandCatalog } from './commandCatalog';
 import { renderBotCommandContext } from './botResponse';
 import { PublicSelectorView } from './PublicSelectorView';
-import { botSettingsMenuItem } from './BotSettingsModal';
+import { botSettingsModal, botSettingsMenuItem } from './BotSettingsModal';
 import { commandVoiceError } from '../utils/botVoice';
 import { botLocaleFor } from '../utils/botLocale';
 import { translateProtocolError } from '../i18n/protocolErrors';
@@ -2368,9 +2368,27 @@ export class ChatView {
       this.commandGroups, this.commandActiveIndex,
       (command) => this.getVoiceCommandDeniedReason(command),
       this.commandLocale,
+      this.commandGroups.length === 0
+        ? renderEmptyCommandCatalog(this.store.getCommandBots(), this.commandQuery.length > 0 && this.store.getCommands().length > 0)
+        : undefined,
     );
     el.style.display = 'block';
+    el.querySelectorAll<HTMLButtonElement>('[data-command-bot-configure]').forEach(button => {
+      button.addEventListener('click', () => {
+        const botId = button.dataset.commandBotConfigure;
+        if (!botId || !this.isCurrentComposer()) return;
+        this.closeCommandDropup();
+        input?.focus();
+        void botSettingsModal.open(botId);
+      });
+    });
     const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
+    if (this.commandGroups.length === 0) {
+      for (const attribute of ['role', 'aria-expanded', 'aria-controls', 'aria-autocomplete', 'aria-activedescendant']) {
+        input?.removeAttribute(attribute);
+      }
+      return;
+    }
     input?.setAttribute('role', 'combobox');
     input?.setAttribute('aria-expanded', 'true');
     input?.setAttribute('aria-controls', 'command-list-options');

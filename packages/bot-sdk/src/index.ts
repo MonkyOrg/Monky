@@ -1052,6 +1052,22 @@ export class BotClient extends EventEmitter {
         this.updatePermissions(conn, parsed.data.permissions);
         return;
       }
+      case MessageType.BOT_REVOKED: {
+        const botId = commandRequestIdSchema.safeParse(isRecord(msg.payload) ? msg.payload.botId : undefined);
+        if (!botId.success) {
+          this.reportError(new Error('Invalid bot revocation notification.'), conn);
+          return;
+        }
+        if (botId.data === conn.botId && this.connections.get(conn.serverId) === conn) {
+          const removed = this.registrationStore.remove({
+            serverId: conn.serverId, serverUrl: conn.serverUrl, token: conn.token,
+          });
+          this.disconnect(conn.serverId);
+          void removed.catch(error => this.reportError(error, conn));
+        }
+        this.emit('message', msg, { serverId: conn.serverId });
+        return;
+      }
       case MessageType.BOT_SETTINGS_SNAPSHOT: {
         const parsed = botSettingsSnapshotSchema.safeParse(msg.payload);
         if (!parsed.success) {
@@ -1320,6 +1336,13 @@ export class BotClient extends EventEmitter {
     this.emit('auth_failed', payload, { serverId: conn.serverId });
     this.rejectRegistration(conn, error);
     if (pending) return;
+    if (this.connections.get(conn.serverId) === conn && isRecord(payload) &&
+        payload.code === ProtocolErrorCode.UNAUTHORIZED) {
+      const removed = this.registrationStore.remove({
+        serverId: conn.serverId, serverUrl: conn.serverUrl, token: conn.token,
+      });
+      void removed.catch(error => this.reportError(error, conn));
+    }
     if (this.options.autoReconnect && isRecord(payload) &&
         payload.code === ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED) {
       conn.ws?.close();
@@ -1339,6 +1362,7 @@ export class BotClient extends EventEmitter {
   }
 
   private async registerServer(registration: BotRegistration): Promise<void> {
+    await this.registrationStore.flush();
     const known = this.registrationStore.get(registration.serverId) ?? this.connections.get(registration.serverId);
     if (known && (known.serverUrl !== registration.serverUrl || known.token !== registration.token)) {
       throw new Error('This serverId is already registered with different credentials or a different URL.');

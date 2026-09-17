@@ -6,6 +6,7 @@ import {
   ProtocolErrorCode,
   type BotForm,
   type CommandPromptReceivedPayload,
+  type BotSettingsSummary,
   type SlashCommand,
 } from '@monky/shared';
 import {
@@ -540,6 +541,47 @@ test('initial registry snapshots populate new and reconnecting sessions without 
     unbindUi();
     manager.removeAll();
     setSessionEventRouter((_key, _event, emit) => emit());
+    setActiveChatStore(createChatStore());
+    setActiveServerStore(createServerStore());
+  }
+});
+
+test('bot availability snapshots stay scoped, refresh discovery and clear on revocation or disconnect', () => {
+  const manager = new SessionManager();
+  manager.install();
+  const foreground = manager.create('127.0.0.1', 9911, 'Caller');
+  const background = manager.create('127.0.0.1', 9912, 'Caller');
+  manager.activate(foreground.key);
+  const unbind = bindBotChatEvents();
+  let changes = 0;
+  const unbindUi = appEvents.on('chat.commands_updated', () => { changes++; });
+  const bot: BotSettingsSummary = {
+    botId: 'pending-bot', name: 'Pending bot', online: true, capabilities: { downloadsSound: false },
+    schemaRevision: 1, revision: 0, hasServerSettings: false, hasUserSettings: false, canConfigure: false,
+    permissions: { requested: ['commands'], granted: [], revision: 1, reviewRequired: true, reviewedBy: null, reviewedAt: null },
+  };
+  const emit = (key: string, event: string, value: unknown) => routeSessionEvent(key, event, () => appEvents.emit(event, value));
+  try {
+    emit(background.key, `message.${MessageType.BOT_SETTINGS_LIST_RESPONSE}`, { bots: [bot] });
+    assert.deepEqual(background.chatStore.getCommandBots(), [bot]);
+    assert.equal(foreground.chatStore.getCommandBots(), null);
+    assert.equal(changes, 0);
+    emit(foreground.key, `message.${MessageType.BOT_SETTINGS_LIST_RESPONSE}`, { bots: [bot] });
+    assert.deepEqual(chatStore.getCommandBots(), [bot]);
+    assert.equal(changes, 1);
+    assert.deepEqual(chatStore.getCommands(), [], 'A pending bot never gets synthetic executable commands');
+    emit(foreground.key, `message.${MessageType.BOT_REVOKED}`, { botId: bot.botId });
+    assert.deepEqual(chatStore.getCommandBots(), []);
+    assert.deepEqual(background.chatStore.getCommandBots(), [bot]);
+    emit(foreground.key, 'network.status', 'RECONNECTING');
+    assert.equal(chatStore.getCommandBots(), null);
+    background.chatStore.clear();
+    assert.equal(background.chatStore.getCommandBots(), null);
+  } finally {
+    unbindUi();
+    unbind();
+    manager.removeAll();
+    setSessionEventRouter((_key, _event, action) => action());
     setActiveChatStore(createChatStore());
     setActiveServerStore(createServerStore());
   }

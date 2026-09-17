@@ -99,6 +99,10 @@ test('the trusted dialog discloses each fixed tool and escapes request identitie
     assert.match(html, /role="radiogroup"/);
     assert.match(html, /prefers-reduced-motion/);
     assert.match(html, /id="allow" disabled/);
+    assert.match(html, /id="always-choice" role="radio" aria-checked="true"/);
+    assert.match(html, /id="connection-choice" role="radio" aria-checked="false"/);
+    assert.ok(html.includes(mt('localExecution.allowAlwaysAndPrepare')));
+    assert.ok(html.includes(mt('localExecution.allowConnectionAndPrepare')));
     assert.match(html, /id="title" tabindex="-1"/);
     assert.ok(html.includes(`id="retry" hidden>${mt('localExecution.retry')}</button>`));
     assert.ok(!preparationDialogState('failed', inventory()).detail.includes(

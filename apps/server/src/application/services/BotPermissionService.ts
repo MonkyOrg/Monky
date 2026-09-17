@@ -1,5 +1,5 @@
 import {
-  ProtocolErrorCode, botCapabilitiesSchema, botPermissionsUpdateSchema,
+  Permission, ProtocolErrorCode, botCapabilitiesSchema, botPermissionsUpdateSchema,
   type BotCapability, type BotPermissions, type BotPermissionsUpdate,
 } from '@monky/shared';
 import type { IBotPermissionRepository } from '../../domain/repositories';
@@ -17,6 +17,18 @@ export class BotPermissionService {
     const state = this.get(botId);
     return !!state && capabilities.every((capability) =>
       state.requested?.includes(capability) && state.granted.includes(capability));
+  }
+
+  getChannelPermissions(botId: string): number | undefined {
+    const state = this.get(botId);
+    if (!state) return undefined;
+    const channelCapabilities = [
+      ['read_messages', Permission.READ_MESSAGES],
+      ['send_messages', Permission.SEND_MESSAGES],
+      ['publish_voice', Permission.SPEAK],
+    ] as const;
+    return channelCapabilities.reduce((permissions, [capability, flag]) =>
+      state.requested?.includes(capability) && state.granted.includes(capability) ? permissions | flag : permissions, 0);
   }
 
   declare(botId: string, input: BotCapability[]): { permissions: BotPermissions; changed: boolean } {

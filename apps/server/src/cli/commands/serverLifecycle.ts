@@ -10,6 +10,7 @@ import {
   findLegacyProcessFor,
   findPm2Process,
   getPm2ProcessName,
+  getServerEntryPath,
   isMonkyServerRegistered,
   isPm2Available,
   LEGACY_PM2_PROCESS_NAME,
@@ -54,25 +55,22 @@ function rejectRemovedStartOptions(args: string[]): void {
  * Drops a broken PM2 registration before starting, so the next start builds the
  * process from the ecosystem instead of reusing one that cannot run.
  *
- * Reserved for a process PM2 calls `online` without ever having a pid for it:
- * the spawn failed, and restarting only asks the same configuration to fail
- * again — deleting first is what actually recovered it (#522). A plain
- * `startOrRestart` re-reads the ecosystem file and re-applies the interpreter,
- * so a stale interpreter alone is not worth dropping the process for.
+ * A failed spawn or changed executable needs a fresh registration. PM2
+ * reapplies the interpreter on restart but retains its cached pm_exec_path.
  */
 function recreateIfStale(processName: string, entry: Pm2Process | null, forced: boolean): void {
-  if (!forced && !needsProcessRecreate(entry)) return;
+  if (!forced && !needsProcessRecreate(entry, getServerEntryPath())) return;
   console.log(color(t('lifecycle.recreatingProcess'), ANSI.yellow));
   deletePm2Process(processName);
 }
 
 export async function loadStoredServer(
   dataDir: string
-): Promise<Awaited<ReturnType<SqliteServerRepository['getServer']>>> {
+): Promise<Awaited<ReturnType<SqliteServerRepository['getLifecycleSettings']>>> {
   if (!hasServerDatabase(dataDir)) {
     return null;
   }
-  return withContext(dataDir, async (ctx) => ctx.serverRepo.getServer(), false);
+  return withContext(dataDir, async (ctx) => ctx.serverRepo.getLifecycleSettings(), false, { readOnly: true });
 }
 
 export interface StartPlan {
@@ -396,7 +394,7 @@ async function printServerDetails(server: RegisteredServer): Promise<void> {
 
   // PM2's own status is a claim, not a measurement, so it is checked against
   // the port before being taken at face value (#522).
-  printHealthProblems(await diagnoseServerHealth(entry, port));
+  printHealthProblems(await diagnoseServerHealth(entry, port, getServerEntryPath()));
   if (status === 'online' && entry.pid) {
     await printBotCompatibilityWarning(port);
   }
@@ -474,7 +472,7 @@ async function printTurnStatusAsync(dataDir: string): Promise<void> {
   if (!hasServerDatabase(dataDir)) return;
   try {
     await withContext(dataDir, async (ctx) => {
-      const server = await ctx.serverRepo.getServer();
+      const server = await ctx.serverRepo.getLifecycleSettings();
       if (!server) return;
       const turnEnabled = Boolean(server.turnEnabled);
       console.log();
@@ -498,7 +496,7 @@ async function printTurnStatusAsync(dataDir: string): Promise<void> {
           }
         }
       }
-    }, false);
+    }, false, { readOnly: true });
   } catch (error) {
     console.log(color(t('lifecycle.turnDiagnosticsFailed', {
       reason: error instanceof Error ? error.message : String(error),
@@ -560,7 +558,7 @@ async function readBotWarnings(port: number, snapshot: StatusSnapshot): Promise<
 async function refreshHealthCache(server: RegisteredServer, snapshot: StatusSnapshot): Promise<void> {
   const port = server.port ?? readLocalConfig(server.dataDir).port ?? LIMITS.DEFAULT_PORT;
   try {
-    healthCache = await diagnoseServerHealth(snapshot.process, port);
+    healthCache = await diagnoseServerHealth(snapshot.process, port, getServerEntryPath());
   } catch {
     healthCache = [];
   }
@@ -569,7 +567,7 @@ async function refreshHealthCache(server: RegisteredServer, snapshot: StatusSnap
 async function refreshTurnCache(dataDir: string): Promise<void> {
   try {
     await withContext(dataDir, async (ctx) => {
-      const server = await ctx.serverRepo.getServer();
+      const server = await ctx.serverRepo.getLifecycleSettings();
       if (!server) { turnCache.enabled = null; return; }
       turnCache.enabled = Boolean(server.turnEnabled);
       if (!turnCache.enabled) return;
@@ -583,7 +581,7 @@ async function refreshTurnCache(dataDir: string): Promise<void> {
         turnCache.coturnProblem = null;
         turnCache.portProblem = await CoturnManager.checkPortReachability(describeTurnPortProblem);
       }
-    }, false);
+    }, false, { readOnly: true });
   } catch {
     // DB locked — keep stale cache
   }

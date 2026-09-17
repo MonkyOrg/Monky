@@ -81,10 +81,10 @@ test('watch refreshes and clears warnings, skips overlapping probes and surfaces
   const timer = {};
   t.mock.method(target, 'resolveTargetServer', async () => server);
   t.mock.method(pm2, 'findPm2Process', () => status);
-  t.mock.method(context, 'withContext', async (_dir, action) => action({
-    serverRepo: { getServer: async () => ({ turnEnabled: false }) },
+  const contexts = t.mock.method(context, 'withContext', async (_dir, action) => action({
+    serverRepo: { getLifecycleSettings: async () => ({ name: 'Fixture', turnEnabled: false }) },
   }));
-  t.mock.method(health, 'diagnoseServerHealth', async () => []);
+  const diagnoses = t.mock.method(health, 'diagnoseServerHealth', async () => []);
   const probe = t.mock.method(preview, 'readLocalServerPreview', async () => {
     if (fail) throw new Error('fixture preview failure');
     if (delayed) await new Promise((resolve) => { releaseProbe = resolve; });
@@ -133,4 +133,13 @@ test('watch refreshes and clears warnings, skips overlapping probes and surfaces
   signalHandlers.get('SIGINT')();
   assert.equal(clear.mock.callCount(), 1);
   assert.ok(frames.includes('\x1b[?25h'));
+  assert.ok(contexts.mock.callCount() > 0);
+  for (const call of contexts.mock.calls) {
+    assert.equal(call.arguments[2], false);
+    assert.deepEqual(call.arguments[3], { readOnly: true });
+  }
+  assert.ok(diagnoses.mock.callCount() > 0);
+  for (const call of diagnoses.mock.calls) {
+    assert.equal(call.arguments[2], pm2.getServerEntryPath());
+  }
 });

@@ -135,7 +135,7 @@ export function preparationDialogHtml(options: {
     </dl></details>`;
   return localToolDialogHtml({
     ...options, content, windowTitle: mt('localExecution.permissionTitle'),
-    confirmLabel: mt(mode === 'enable' ? 'localExecution.allowAlways' : 'localExecution.allowAndPrepare'),
+    confirmLabel: mt(mode === 'enable' ? 'localExecution.allowAlways' : 'localExecution.allowAlwaysAndPrepare'),
   });
 }
 
@@ -240,10 +240,10 @@ body[data-phase="complete"] #status { color: #62d994; }
     <section class="choices" id="choices"${mode !== 'consent' ? ' hidden' : ''}>
       <strong class="section-title" id="duration-label">${escapeHtml(mt('localExecution.permissionDuration'))}</strong>
       <div class="choice-grid" role="radiogroup" aria-labelledby="duration-label">
-        <button type="button" class="choice" id="connection-choice" role="radio" aria-checked="true" tabindex="0">
-          <strong>${escapeHtml(mt('localExecution.allowConnection'))}</strong><small>${escapeHtml(mt('localExecution.connectionHint'))}</small></button>
-        <button type="button" class="choice" id="always-choice" role="radio" aria-checked="false" tabindex="-1">
+        <button type="button" class="choice" id="always-choice" role="radio" aria-checked="true" tabindex="0">
           <strong>${escapeHtml(mt('localExecution.allowAlways'))}</strong><small>${escapeHtml(mt('localExecution.alwaysHint'))}</small></button>
+        <button type="button" class="choice" id="connection-choice" role="radio" aria-checked="false" tabindex="-1">
+          <strong>${escapeHtml(mt('localExecution.allowConnection'))}</strong><small>${escapeHtml(mt('localExecution.connectionHint'))}</small></button>
       </div>
     </section>
     <section id="progress-section" class="progress-section" hidden>
@@ -252,7 +252,9 @@ body[data-phase="complete"] #status { color: #62d994; }
     </section>
     <div class="footer-actions">
     <button type="button" class="button" id="deny" disabled>${escapeHtml(mt(mode === 'consent' ? 'localExecution.deny' : 'localExecution.cancel'))}</button>
-    <button type="button" class="button primary" id="allow" disabled>${escapeHtml(options.confirmLabel)}</button>
+    <button type="button" class="button primary" id="allow" disabled
+      data-allow-always="${escapeHtml(mt('localExecution.allowAlwaysAndPrepare'))}"
+      data-allow-connection="${escapeHtml(mt('localExecution.allowConnectionAndPrepare'))}">${escapeHtml(options.confirmLabel)}</button>
     <button type="button" class="button" id="cancel" hidden>${escapeHtml(mt('localExecution.cancel'))}</button>
     <button type="button" class="button" id="dismiss" hidden>${escapeHtml(mt('localExecution.close'))}</button>
     <button type="button" class="button primary" id="retry" hidden>${escapeHtml(mt('localExecution.retry'))}</button>

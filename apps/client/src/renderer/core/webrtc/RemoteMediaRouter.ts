@@ -9,6 +9,7 @@ interface AudioPlaybackPipeline {
   source: MediaStreamAudioSourceNode;
   gain: GainNode;
   trackId: string;
+  activity?: { analyser: AnalyserNode; samples: Float32Array<ArrayBuffer> };
 }
 
 /**
@@ -90,6 +91,15 @@ export class RemoteMediaRouter {
 
   public getScreenAudioElement(peerSessionId: string): HTMLAudioElement | undefined {
     return this.screenAudioElements.get(peerSessionId);
+  }
+
+  public getVoiceAudioLevel(peerSessionId: string): number | null {
+    const activity = this.voicePipelines.get(peerSessionId)?.activity;
+    if (!activity || activity.analyser.context.state !== 'running') return null;
+    activity.analyser.getFloatTimeDomainData(activity.samples);
+    let energy = 0;
+    for (const sample of activity.samples) energy += sample * sample;
+    return Math.sqrt(energy / activity.samples.length);
   }
 
   // ── Deafen ──
@@ -304,13 +314,25 @@ export class RemoteMediaRouter {
     const source = ctx.createMediaStreamSource(new MediaStream([audioTrack]));
     const gain = ctx.createGain();
     gain.gain.value = 0;
-    source.connect(gain);
+    // Muting the native decoder makes Chromium's RTP audioLevel report zero.
+    // Meter this microphone before the listener's volume gain, not the mixed output.
+    const activity = category === 'voice'
+      ? { analyser: ctx.createAnalyser(), samples: new Float32Array(1024) }
+      : undefined;
+    if (activity) {
+      activity.analyser.fftSize = activity.samples.length;
+      source.connect(activity.analyser);
+      activity.analyser.connect(gain);
+    } else {
+      source.connect(gain);
+    }
     gain.connect(ctx.destination);
 
     pipelineMap.set(sessionId, {
       source,
       gain,
       trackId: audioTrack.id,
+      activity,
     });
   }
 
@@ -347,10 +369,10 @@ export class RemoteMediaRouter {
   private cleanupAudioPipeline(sessionId: string, pipelineMap: Map<string, AudioPlaybackPipeline>): void {
     const pipeline = pipelineMap.get(sessionId);
     if (pipeline) {
-      try {
-        pipeline.source.disconnect();
-        pipeline.gain.disconnect();
-      } catch {}
+      for (const node of [pipeline.source, pipeline.activity?.analyser, pipeline.gain]) {
+        try { node?.disconnect(); }
+        catch (error: unknown) { console.warn('[WebRTC:MediaRouter] Could not disconnect playback node:', error); }
+      }
       pipelineMap.delete(sessionId);
     }
   }
@@ -447,21 +469,8 @@ export class RemoteMediaRouter {
     }
     this.sfuRemoteScreenStreams.clear();
 
-    for (const pipeline of this.voicePipelines.values()) {
-      try {
-        pipeline.source.disconnect();
-        pipeline.gain.disconnect();
-      } catch {}
-    }
-    this.voicePipelines.clear();
-
-    for (const pipeline of this.screenAudioPipelines.values()) {
-      try {
-        pipeline.source.disconnect();
-        pipeline.gain.disconnect();
-      } catch {}
-    }
-    this.screenAudioPipelines.clear();
+    for (const id of this.voicePipelines.keys()) this.cleanupAudioPipeline(id, this.voicePipelines);
+    for (const id of this.screenAudioPipelines.keys()) this.cleanupAudioPipeline(id, this.screenAudioPipelines);
 
     for (const context of this.audioContexts.values()) {
       if (context.state !== 'closed') {

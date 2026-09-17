@@ -210,11 +210,14 @@ if (!process.versions.electron) {
       await audit(window);
       await screenshot(window, `local-consent-${language}`);
       assert.equal(f.calls(), 0);
+      assert.equal(await evaluate(window, 'document.getElementById("always-choice").getAttribute("aria-checked")'), 'true');
+      assert.equal(await evaluate(window, 'document.getElementById("allow").textContent'), mt('localExecution.allowAlwaysAndPrepare'));
       if (language === 'en') {
-        await evaluate(window, 'document.getElementById("connection-choice").focus()');
+        await evaluate(window, 'document.getElementById("always-choice").focus()');
         window.webContents.focus();
         for (const type of ['keyDown', 'keyUp']) window.webContents.sendInputEvent({ type, keyCode: 'Right' });
-        await until(() => evaluate(window, 'document.getElementById("always-choice").getAttribute("aria-checked") === "true"'), 'keyboard choice');
+        await until(() => evaluate(window, 'document.getElementById("connection-choice").getAttribute("aria-checked") === "true"'), 'temporary keyboard choice');
+        assert.equal(await evaluate(window, 'document.getElementById("allow").textContent'), mt('localExecution.allowConnectionAndPrepare'));
       }
       await click(window, 'allow');
       await phase(window, 'installing');
@@ -252,7 +255,7 @@ if (!process.versions.electron) {
       assert.equal(prepared.status, 'prepared');
       assert.match(prepared.permit, /^[a-f0-9]{64}$/);
       const permission = (await f.permissions.list())[0];
-      assert.equal(permission.decision, language === 'en' ? 'always' : 'connection');
+      assert.equal(permission.decision, language === 'en' ? 'connection' : 'always');
       assert.equal(window.isDestroyed(), true);
       assert.equal(handlers.size, 0);
       assert.equal((await f.prepare('same-binding-again')).permit, prepared.permit);
@@ -298,7 +301,7 @@ if (!process.versions.electron) {
       });
       const retrying = settled(retried.prepare());
       const retryWindow = await dialog();
-      if (language === 'en') await click(retryWindow, 'always-choice');
+      if (language === 'en') await click(retryWindow, 'connection-choice');
       await click(retryWindow, 'allow');
       await phase(retryWindow, 'installing');
       await until(() => evaluate(retryWindow, 'document.getElementById("progress").getAttribute("aria-valuenow") === "25"'), 'interrupted download');
@@ -341,7 +344,7 @@ if (!process.versions.electron) {
       await screenshot(retryWindow, `local-installation-retry-${language}`);
       resumed.resolve();
       assert.equal((await retrying.promise).status, 'prepared');
-      assert.equal((await retried.permissions.list())[0].decision, language === 'en' ? 'always' : 'connection');
+      assert.equal((await retried.permissions.list())[0].decision, language === 'en' ? 'connection' : 'always');
       assert.equal(retried.calls(), 3, 'Only successful preparation grants access; no extra install is needed');
       assert.equal(retryWindow.isDestroyed(), true);
       assert.equal(handlers.size, 0);
