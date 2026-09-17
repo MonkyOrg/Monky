@@ -284,12 +284,17 @@ jobs:
         if: runner.os == 'macOS'
         run: python scripts/macos-test-keychain.py setup
 
+      - name: Exercise prepared application startup and scenarios
+        shell: bash
+        run: |
+          node scripts/qa.js home --smoke
+          npm run test:qa
+
       - name: Exercise client DOM and microphone state in Electron
         shell: bash
         run: |
           npm run test:bots:ui --workspace=apps/client
           npm run test:development --workspace=apps/client
-          npm run test:qa
           npm run test:updates --workspace=apps/client
           npm run test:editing --workspace=apps/client
           npm run test:clipboard --workspace=apps/client

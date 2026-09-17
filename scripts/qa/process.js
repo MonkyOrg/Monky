@@ -1,6 +1,8 @@
 import { spawn, execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 const exec = promisify(execFile);
 
@@ -26,7 +28,7 @@ export async function terminateOwnedTree(pid) {
 
 export function startOwnedProcess(command, args, { cwd, env, runId, label, onMessage = () => {}, onFailure = () => {}, timeoutMs = 60_000, windowsHide = true }) {
   const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide });
-  let output = '', exited = false, stopping = false;
+  let output = '', exited = false, stopping = false, startupTimeout;
   let resolveReady, rejectReady, resolveClosed;
   const requests = new Map();
   const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
@@ -36,7 +38,10 @@ export function startOwnedProcess(command, args, { cwd, env, runId, label, onMes
     rejectReady(error);
     if (!stopping) onFailure(error);
   };
-  const timeout = setTimeout(() => fail(new Error(`${label}: readiness timed out.\n${output}`)), timeoutMs);
+  const timeout = setTimeout(() => {
+    startupTimeout = new Error(`${label}: readiness timed out.\n${output}`);
+    fail(startupTimeout);
+  }, timeoutMs);
   const log = data => { output = (output + data.toString()).slice(-12_000); };
   child.stdout.on('data', log);
   child.stderr.on('data', log);
@@ -91,6 +96,18 @@ export function startOwnedProcess(command, args, { cwd, env, runId, label, onMes
     async stop() {
       stopping = true;
       clearTimeout(timeout);
+      if (startupTimeout && process.platform === 'darwin' && !exited) {
+        const sample = path.join(env.TMPDIR, `qa-startup-${randomUUID()}.txt`);
+        try {
+          await exec('sample', [String(child.pid), '1', '1', '-file', sample], { timeout: 5000 });
+          startupTimeout.message += `\nOwned process startup sample:\n${(await fs.readFile(sample, 'utf8')).slice(0, 24_000)}`;
+        } catch (error) {
+          startupTimeout.message += `\nStartup sample failed: ${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+          try { await fs.rm(sample, { force: true }); }
+          catch (error) { startupTimeout.message += `\nStartup sample cleanup failed: ${String(error)}`; }
+        }
+      }
       if (!exited && child.connected) child.send({ type: 'qa-stop', runId }, () => {});
       let deadline;
       const stopped = await Promise.race([
