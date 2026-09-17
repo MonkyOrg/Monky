@@ -35,6 +35,8 @@ interface CodecSendParameters extends RTCRtpSendParameters {
 }
 
 export interface PeerSession {
+  /** Bot peers publish audio only; never attach local capture to their link. */
+  receiveOnly?: boolean;
   peerSessionId: string;
   pc: RTCPeerConnection;
   remoteStream: MediaStream;
@@ -1212,6 +1214,7 @@ export class WebRtcManager {
 
     const session: PeerSession = {
       peerSessionId,
+      receiveOnly: peerSessionId.startsWith('bot:') || this.voiceParticipants.get(peerSessionId)?.user.isBot === true,
       pc,
       remoteStream,
       remoteScreenStreams: new Map(),
@@ -1226,7 +1229,9 @@ export class WebRtcManager {
     this.peers.set(peerSessionId, session);
 
     // Setup Audio Transceiver
-    if (this.localAudioTrack) {
+    if (session.receiveOnly) {
+      pc.addTransceiver('audio', { direction: 'recvonly' });
+    } else if (this.localAudioTrack) {
       session.audioSender = pc.addTrack(this.localAudioTrack, new MediaStream([this.localAudioTrack]));
     } else {
       pc.addTransceiver('audio', { direction: 'sendrecv' });
@@ -1235,10 +1240,12 @@ export class WebRtcManager {
     // Setup Video Transceiver (Camera on the primary video m-line). Screen
     // share now rides its own second sender (see below) so camera + screen can
     // be sent simultaneously as two independent tiles (#26).
-    if (this.localCameraTrack) {
-      session.videoSender = pc.addTrack(this.localCameraTrack, new MediaStream([this.localCameraTrack]));
-    } else {
-      pc.addTransceiver('video', { direction: 'sendrecv' });
+    if (!session.receiveOnly) {
+      if (this.localCameraTrack) {
+        session.videoSender = pc.addTrack(this.localCameraTrack, new MediaStream([this.localCameraTrack]));
+      } else {
+        pc.addTransceiver('video', { direction: 'sendrecv' });
+      }
     }
 
     // Setup Screen Video Tracks as dedicated extra senders (if currently
@@ -1246,6 +1253,7 @@ export class WebRtcManager {
     // apart from the camera track and from each other (mirrors the
     // screen-audio-meta mechanism) — #26, #253.
     for (const [shareId, screenTrack] of this.localScreenTracks) {
+      if (session.receiveOnly) break;
       const stream = this.localScreenStreams.get(shareId);
       if (!stream) continue;
       this.signalClient.send(MessageType.RTC_SIGNAL, {
@@ -1260,7 +1268,7 @@ export class WebRtcManager {
     }
 
     // Setup Screen Audio Track (if currently sharing)
-    if (this.localScreenAudioTrack && this.screenAudioStream) {
+    if (!session.receiveOnly && this.localScreenAudioTrack && this.screenAudioStream) {
       // Announce stream ID before adding track
       this.signalClient.send(MessageType.RTC_SIGNAL, {
         targetSessionId: peerSessionId,
@@ -1513,7 +1521,7 @@ export class WebRtcManager {
       applyVideoCodecPreferences(session.pc, preferred, session.screenVideoSenders.values());
       const offer = await session.pc.createOffer({
         offerToReceiveAudio: true,
-        offerToReceiveVideo: true,
+        offerToReceiveVideo: !session.receiveOnly,
         iceRestart,
       });
       if (!isCurrent()) return;
@@ -1711,7 +1719,7 @@ export class WebRtcManager {
         }
 
         // 1. Ensure local audio track is attached to audio transceiver
-        if (this.localAudioTrack) {
+        if (!session.receiveOnly && this.localAudioTrack) {
           const transceivers = session.pc.getTransceivers();
           const audioTransceiver = transceivers.find(
             (t) => t.receiver.track.kind === 'audio' || t.sender.track?.kind === 'audio'
@@ -1734,7 +1742,7 @@ export class WebRtcManager {
         //    video transceiver that isn't the screen sender is the camera one.
         //    Screen shares ride their own extra senders and are negotiated
         //    separately (via screen-video-meta + renegotiateIfNeeded).
-        const cameraTrack = this.localCameraTrack;
+        const cameraTrack = session.receiveOnly ? null : this.localCameraTrack;
         const transceivers = session.pc.getTransceivers();
         const videoTransceiver = transceivers.find(
           (t) =>
@@ -1742,7 +1750,7 @@ export class WebRtcManager {
             !this.isScreenVideoSender(session, t.sender)
         );
         if (videoTransceiver) {
-          videoTransceiver.direction = cameraTrack ? 'sendrecv' : 'recvonly';
+          videoTransceiver.direction = session.receiveOnly ? 'inactive' : cameraTrack ? 'sendrecv' : 'recvonly';
           await videoTransceiver.sender.replaceTrack(cameraTrack);
           session.videoSender = videoTransceiver.sender;
         } else if (cameraTrack) {
@@ -1865,7 +1873,7 @@ export class WebRtcManager {
       try {
         for (const session of this.peers.values()) {
           ensureCurrent();
-          if (session.pc.connectionState === 'closed') continue;
+          if (session.receiveOnly || session.pc.connectionState === 'closed') continue;
           const sender = session.audioSender ?? session.pc.getTransceivers().find(
             (transceiver) => transceiver.receiver.track.kind === 'audio' && transceiver.sender !== session.screenAudioSender,
           )?.sender;
@@ -1903,6 +1911,7 @@ export class WebRtcManager {
       return;
     }
     for (const session of this.peers.values()) {
+      if (session.receiveOnly) continue;
       try {
         const transceivers = session.pc.getTransceivers();
         const audioTransceiver = transceivers.find(
@@ -2023,6 +2032,7 @@ export class WebRtcManager {
         return;
       }
       for (const session of [...this.peers.values()]) {
+        if (session.receiveOnly) continue;
         try {
           const stable = await this.waitForStable(session.pc);
           if (!this.isCurrentPeer(session)) continue;
@@ -2281,6 +2291,7 @@ export class WebRtcManager {
 
       // Announce stream ID to all peers BEFORE adding the track
       for (const session of this.peers.values()) {
+        if (session.receiveOnly) continue;
         this.signalClient.send(MessageType.RTC_SIGNAL, {
           targetSessionId: session.peerSessionId,
           fromSessionId: this.currentSessionId,
@@ -2292,6 +2303,7 @@ export class WebRtcManager {
       // Add track to all peers — wait for stable signaling state before
       // renegotiating, since screen video may have just triggered an offer.
       for (const session of this.peers.values()) {
+        if (session.receiveOnly) continue;
         try {
           await this.waitForStable(session.pc);
           session.screenAudioSender = session.pc.addTrack(track, stream);
@@ -2332,7 +2344,7 @@ export class WebRtcManager {
   private async updateVideoTrackAcrossPeers(track: MediaStreamTrack | null, ensureCurrent: () => void): Promise<void> {
     for (const session of this.peers.values()) {
       ensureCurrent();
-      if (session.pc.connectionState === 'closed') continue;
+      if (session.receiveOnly || session.pc.connectionState === 'closed') continue;
       try {
         const videoTransceiver = this.cameraTransceiver(session);
         let negotiate = false;

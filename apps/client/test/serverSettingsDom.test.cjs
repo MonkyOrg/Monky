@@ -85,6 +85,10 @@ async function runRegression(language) {
   ]);
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const copiedVersions = [];
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true, value: { writeText: async value => { copiedVersions.push(value); } },
+  });
   const listenerCount = () => [...appEvents.listeners.values()].reduce((total, listeners) => total + listeners.size, 0);
   const initialListeners = listenerCount();
   const flush = async () => { for (let index = 0; index < 20; index++) await Promise.resolve(); };
@@ -129,7 +133,7 @@ async function runRegression(language) {
     };
   };
   store.setServerDetails({
-    id: 'server-a', name: 'Server A', createdAt: 1, maxUsers: 0, hasPassword: false,
+    id: 'server-a', name: 'Server A', serverVersion: '44.7.9-beta', createdAt: 1, maxUsers: 0, hasPassword: false,
     iconUrl: 'data:image/png;base64,AA==', voiceMode: 'p2p', turnEnabled: false,
     turnAvailability: { supported: false, reason: 'not-installed', autoInstallable: true },
     allowSoundboard: true, allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
@@ -188,6 +192,12 @@ async function runRegression(language) {
       const bot = botInfo({ id: 'created-bot', name: 'Bot', online: false, bound: false, profilePending: true });
       bots.push(bot);
       result = { bot, token: 'non-secret-test-token' };
+    } else if (type === 'BOT_INSTALL_PREVIEW') {
+      result = {
+        previewId: 'bot-review-preview', expiresAt: Date.now() + 60000,
+        manifest: { name: 'Manifest helper', requestedCapabilities: ['commands', 'publish_voice', 'local_execution'],
+          registrationUrl: 'https://example.invalid/register' },
+      };
     }
     request.resolve(result);
     return payload;
@@ -214,6 +224,12 @@ async function runRegression(language) {
   const mainBackdrop = () => document.querySelector('.server-settings-modal-card')?.closest('.modal-backdrop');
   modal.open();
   await flush();
+  check(field('#server-settings-version').textContent === '44.7.9-beta',
+    'Server settings display the remote runtime version rather than the desktop version');
+  field('#server-settings-version').click();
+  await flush();
+  check(copiedVersions.length === 1 && copiedVersions[0] === '44.7.9-beta',
+    'The server version reuses the accessible copy interaction');
   check(!field('#btn-save') && field('#btn-done'), 'Save is replaced with one Done button');
   check(field('[data-settings-section="server-profile"]').contains(field('#input-server-name')) &&
     field('#server-voice-mode-cards').children.length === 2, 'Profile and selectable-card markup retain their expected layout boundaries');
@@ -473,8 +489,12 @@ async function runRegression(language) {
     'Advanced manual link can be revealed on demand');
   field('#btn-create-bot').click();
   await flush();
+  check(field('.dialog-card').textContent.includes(t('botPermissions.manualPending')),
+    'Manual linking explains that the token grants no unreviewed capability');
+  field('.dialog-card [data-action="confirm"]').click();
+  await flush();
   check(locked() && JSON.stringify(pendingRequest('BOT_CREATE').payload) === '{}',
-    'Advanced manual linking sends only the empty approved BOT_CREATE payload');
+    'Advanced manual linking sends only an empty token-reservation payload after confirmation');
   acknowledge('BOT_CREATE');
   await flush();
   const createdBot = field('.bot-list-item[data-bot-id="created-bot"]');
@@ -502,11 +522,40 @@ async function runRegression(language) {
   change('#bot-manifest-url', 'https://example.invalid/bot.json');
   field('#btn-install-bot').click();
   await flush();
-  check(locked() && pendingRequest('BOT_INSTALL').payload.manifestUrl.endsWith('bot.json'), 'Manifest installation waits for its final request response');
+  check(locked() && pendingRequest('BOT_INSTALL_PREVIEW').payload.manifestUrl.endsWith('bot.json'),
+    'Manifest installation first requests a bound preview without creating a bot');
+  acknowledge('BOT_INSTALL_PREVIEW');
+  await flush();
+  check(locked() && field('.bot-permission-review') &&
+    ![...document.querySelectorAll('[data-bot-capability]')].some(input => input.checked),
+  'Manifest review owns the operation lock and all requested capabilities start off');
+  field('[data-bot-permissions-all]').click();
+  field('[data-bot-capability="local_execution"]').click();
+  field('[data-review-confirm]').click();
+  await flush();
+  check(JSON.stringify(pendingRequest('BOT_INSTALL').payload) === JSON.stringify({
+    previewId: 'bot-review-preview', grantedCapabilities: ['commands', 'publish_voice'],
+  }), 'Manifest installation sends exactly the reviewed subset and the server preview, never a fresh unreviewed URL');
   acknowledge('BOT_INSTALL');
   await flush();
   check(!locked() && field('#bot-manifest-url').value === '', 'Successful installation releases the guard after acknowledgement');
+  change('#bot-manifest-url', 'https://example.invalid/bot.json');
+  field('#btn-install-bot').click();
+  await flush();
+  acknowledge('BOT_INSTALL_PREVIEW');
+  await flush();
+  store.myPermissions = 0;
+  appEvents.emit('server.updated');
+  await flush();
+  check(!document.querySelector('.bot-permission-review') && !locked() &&
+    !requests.some(request => request.type === 'BOT_INSTALL' && !request.done),
+  'Losing bot-management permission aborts review instead of allowing a late installation');
+  store.myPermissions = 0xFFFFFFFF;
+  appEvents.emit('server.updated');
+  await flush();
   field('#btn-create-bot').click();
+  await flush();
+  field('.dialog-card [data-action="confirm"]').click();
   await flush();
   const revokedCreate = pendingRequest('BOT_CREATE');
   store.myPermissions = 0;
@@ -523,6 +572,8 @@ async function runRegression(language) {
   appEvents.emit('server.updated');
   await flush();
   field('#btn-create-bot').click();
+  await flush();
+  field('.dialog-card [data-action="confirm"]').click();
   await flush();
   const pendingBotCreate = pendingRequest('BOT_CREATE');
   const previousToken = field('#bot-token-value').textContent;
@@ -692,6 +743,12 @@ async function runRegression(language) {
   check(!field('#input-server-name').matches(':disabled') && field('#input-server-name').value === store.serverDetails.name, 'Reopening after reconnect uses newly persisted truth');
   modal.close();
   check(listenerCount() === initialListeners, 'Closing removes every modal-owned EventBus subscription after retries and reconnects');
+  store.serverDetails.serverVersion = null;
+  modal.open();
+  check(!field('#server-settings-version') &&
+    field('#server-settings-version-unavailable').textContent === t('serverSettings.serverVersionUnavailable'),
+  'Missing server metadata is explicit and never replaced with the local app version');
+  modal.close();
   client.dispose();
   otherClient.dispose();
   return checks;

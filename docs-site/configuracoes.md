@@ -73,6 +73,16 @@ e não nos cards da Home. O dropdown do servidor não repete um item
 **Bots deste servidor**. As preferências pessoais continuam disponíveis pelo
 menu do próprio bot na lista de membros.
 
+Em **Configurações do servidor → Geral → Informações do Servidor**, a versão
+é a do processo que hospeda o servidor, não a do cliente no seu computador.
+Clique na versão para copiá-la. Se essa informação não estiver disponível,
+o aplicativo informa isso em vez de substituir pela versão local.
+
+Quando um servidor reinicia para instalar uma atualização, os clientes conectados
+recebem um aviso próprio do Monky, no idioma selecionado, orientando a tentar
+reconectar em alguns segundos. O aviso também aparece se esse servidor estiver
+em segundo plano; um encerramento comum continua usando o aviso de servidor encerrado.
+
 ### Seletor de cores
 
 A cor da tela física do chroma key, a cor do fundo virtual e as cores dos

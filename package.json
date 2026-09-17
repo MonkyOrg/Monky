@@ -19,6 +19,8 @@
   ],
   "scripts": {
     "start": "npm run start --workspace=apps/client",
+    "qa": "npm run build && node scripts/qa.js",
+    "test:qa": "node --test scripts/test-qa.js",
     "app": "npm run start --workspace=apps/client",
     "package": "npm run build && node scripts/package.js",
     "dist": "npm run build && node scripts/package.js",

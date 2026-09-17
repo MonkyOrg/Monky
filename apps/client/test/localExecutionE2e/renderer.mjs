@@ -172,6 +172,8 @@ export async function startRenderer({ port, nickname }) {
       }
       return response;
     },
+    approveBot: (botId, expectedRevision, granted) =>
+      session.client.sendRequest(MessageType.BOT_PERMISSIONS_UPDATE, { botId, expectedRevision, granted }),
     async join() {
       const control = document.querySelector(
         `[data-channel-id="${voiceChannel.id}"][data-channel-type="VOICE"]`,

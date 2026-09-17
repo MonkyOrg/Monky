@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
-const { createHash } = require('node:crypto');
-const { EventEmitter } = require('node:events');
+const { createHash, randomUUID, sign } = require('node:crypto');
+const { EventEmitter, once } = require('node:events');
+const { fork } = require('node:child_process');
 const fs = require('node:fs');
 const https = require('node:https');
 const http = require('node:http');
@@ -8,7 +9,9 @@ const os = require('node:os');
 const path = require('node:path');
 const { Readable } = require('node:stream');
 const test = require('node:test');
-const { PROTOCOL_VERSION } = require('@monky/shared');
+const { MessageType, PROTOCOL_VERSION } = require('@monky/shared');
+const { identity, Peer, record, text } = require('../dist/testFixtures/bots');
+const { prepareUpdateRestart } = require('../dist/infrastructure/lifecycle/updateRestart');
 const processHelpers = require('../dist/cli/process');
 const pm2 = require('../dist/cli/pm2');
 const prompts = require('../dist/cli/prompts');
@@ -25,6 +28,82 @@ const artifact = {
   url: `https://github.com/MonkyOrg/Monky/releases/download/v${version}/monky-cli-${version}.tgz`,
   size: bytes.length, digest: `sha256:${digest}`,
 };
+
+for (const reason of ['stopped', 'update']) {
+  test(`the real CLI consumes ${reason} intent and notifies clients before PM2 IPC shutdown`, { timeout: 20000 }, async t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-cli-shutdown-'));
+    const preload = path.join(root, 'loopback.cjs');
+    fs.writeFileSync(preload, `
+      const http = require('node:http');
+      const listen = http.Server.prototype.listen;
+      http.Server.prototype.listen = function () {
+        this.once('listening', () => process.send({ qaPort: this.address().port }));
+        return listen.call(this, 0, '127.0.0.1');
+      };
+      require(${JSON.stringify(path.resolve(__dirname, '../dist/infrastructure/discovery/LanBroadcaster.js'))})
+        .LanBroadcaster.prototype.start = async () => {};
+    `);
+    const child = fork(path.resolve(__dirname, '../dist/index.js'), ['--data', root], {
+      execArgv: ['--require', preload],
+      env: { ...process.env, MONKY_HOME: path.join(root, 'isolated-cli') },
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    });
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-8000); });
+    let peer;
+    t.after(async () => {
+      await peer?.close();
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, 'exit');
+        child.kill('SIGKILL');
+        await exited;
+      }
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    });
+    const port = await new Promise((resolve, reject) => {
+      const finish = (error, value) => {
+        clearTimeout(timer);
+        child.off('message', message);
+        child.off('error', failed);
+        child.off('exit', exited);
+        if (error) reject(error);
+        else resolve(value);
+      };
+      const failed = error => finish(error);
+      const exited = code => finish(new Error(`CLI exited before readiness (${code}): ${stderr}`));
+      const message = value => {
+        if (value && typeof value === 'object' && Number.isInteger(value.qaPort) && value.qaPort > 0) {
+          finish(undefined, value.qaPort);
+        }
+      };
+      const timer = setTimeout(() => finish(new Error(`CLI readiness timed out: ${stderr}`)), 10000);
+      child.on('message', message);
+      child.once('error', failed);
+      child.once('exit', exited);
+    });
+    peer = new Peer(new (require('ws').WebSocket)(`ws://127.0.0.1:${port}`));
+    await once(peer.ws, 'open');
+    const keys = identity();
+    const challenge = await peer.request(MessageType.AUTH_CONNECT, {
+      protocolVersion: PROTOCOL_VERSION, nickname: 'CLI notice viewer',
+      publicKey: keys.publicKey, deviceId: randomUUID(),
+    });
+    assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
+    const signature = sign(null, Buffer.from(text(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex');
+    const auth = await peer.request(MessageType.AUTH_CHALLENGE_RESPONSE, { signature });
+    assert.equal(auth.type, MessageType.AUTH_SUCCESS);
+    assert.match(text(record(auth.payload.server).serverVersion), /^\d+\.\d+\.\d+/);
+    const clearIntent = reason === 'update' ? prepareUpdateRestart(root, child.pid) : undefined;
+    const notice = peer.wait(message => message.type === MessageType.SERVER_SHUTDOWN);
+    const exited = once(child, 'exit');
+    child.send('shutdown');
+    assert.deepEqual((await notice).payload, { reasonCode: reason });
+    const [code, signal] = await exited;
+    assert.equal(code, 0, stderr);
+    assert.equal(signal, null);
+    clearIntent?.();
+  });
+}
 
 function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-cli-update-'));
@@ -110,7 +189,7 @@ test('two-version update launches the newly installed CLI with the original isol
   const f = fixture(t);
   await update.updateCommand({ args: [], dataDir: f.dataDir, dataDirSpecified: true }, ['--beta', '--yes']);
   assert.deepEqual(JSON.parse(fs.readFileSync(f.receipt, 'utf8')), {
-    version, argv: ['--data', f.dataDir, 'restart'], home: f.profile,
+    version, argv: ['--data', f.dataDir, 'restart', '--after-update'], home: f.profile,
   });
   const install = f.commands.find((call) => call.args[0] === 'install');
   assert.ok(install.args.includes('--allow-scripts=mediasoup'));

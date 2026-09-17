@@ -132,6 +132,66 @@ To try the CLI out without touching your real servers, point the `MONKY_HOME`
 variable at a throwaway folder — that is where the machine's server registry
 lives.
 
+### Prepared QA without skipping the test target
+
+Use `npm run qa -- <scenario>` to build this branch and open **the real app**
+with its own disposable server, profile, identity and data. Normal `npm start`
+and the installed application are unchanged. No installed profile is copied.
+
+| Scenario | Preconfigured | Deliberately left to test |
+|---|---|---|
+| `connected` (default) | Fresh identity, real first-owner authentication, channels and sample message | The chat feature under test |
+| `server-settings` | Connected owner and the real General settings panel | Editing/applying settings |
+| `voice` | Muted user, synthetic devices and a second SDK participant over real P2P | Voice behavior; the labeled fixture is not production music |
+| `home` | Fresh identity and completed introduction; Home with no saved servers | Home navigation/addition and server entry |
+| `login` | Home with loopback address, nickname and test password filled | Submitting the form and authenticating |
+| `bot-install` | Connected server and bot URL filled in settings | Installing/linking the bot |
+| `tool-consent` | Installed bot, registered catalog and local command filled | Selecting the command, consenting and preparing tools |
+| `music` | Production MonkyBot, voice and real local preparation | Mandatory human consent; ready is reported only after authorization and verified tools. Playback is not invoked automatically |
+
+```powershell
+npm run qa -- server-settings
+npm run qa -- voice
+npm run qa -- bot-install --bot=fixture
+npm run qa -- tool-consent --bot=fixture
+npm run qa -- music --bot-root="C:\Projects\MonkyBot"
+npm run qa -- connected --smoke
+```
+
+`--bot=fixture` is an explicitly labeled SDK fixture, never a MonkyBot substitute.
+`--bot-root` loads the real compiled commands from an explicit `@monky/bot`
+checkout with a matching protocol. Build that checkout first; its keys,
+registrations and consent are never copied. The launcher neither installs
+dependencies nor hides unavailable bots, manifests or tools.
+
+MonkyBot's compiled `dist\commands\index.js` must export `registerAllCommands`
+and the same `requestedCapabilities` used by its own `BotClient`; QA never invents
+a production declaration. Prepared scenarios use the owner's real manifest
+preview and authorized installation to approve the declared capabilities. The
+fixture requests only commands and local execution, plus voice publishing in
+`voice`. `bot-install` leaves installation and review pending; server permission
+never substitutes for local consent in `tool-consent`/`music`.
+
+To test the bot's voice admission, use `connected --bot-root=...`, not
+`voice`/`music`: those scenarios already join the bot to the call.
+
+Wait for **QA_READY**, not merely a visible window. Server health, authentication,
+persisted chat, command registration and the voice peer are checked as applicable.
+Services use loopback without LAN announcements; all state stays under
+`.qa\runs\<scenario>-<id>` and is deleted on shutdown. Closing the window or
+pressing `Ctrl+C` stops owned processes. Startup failures perform the same cleanup.
+
+`--smoke` verifies readiness in a hidden window, then shuts everything down.
+Production music cannot approve consent unattended: smoke fails clearly when
+authorization is needed. After a build, `npm run test:qa` covers the launcher and
+real scenarios; `node scripts\qa.js connected --smoke` reuses that build.
+
+Prepared mode disables automatic updates, LAN discovery and global shortcuts,
+and uses synthetic capture. **Do not use it to test those steps, identities,
+onboarding or real hardware**: use ordinary `npm start` with another isolated
+`--user-data-dir` and perform the step under test explicitly. The `voice` scenario
+does not replace two-machine QA for network, device or SFU problems.
+
 ### Before you start coding
 
 **Work from an issue.** If what you want to do is not an issue yet, open the

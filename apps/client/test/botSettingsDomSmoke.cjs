@@ -1,15 +1,17 @@
 async function runBotSettingsDomSmoke() {
   const [modalModule, servers, networks, chats, { settingsStore }, { appEvents }, { botPreferenceScopeFor },
-    { userContextMenu }, { contextMenu }, { SoundboardTab }, language, { BotChatView, renderBotInvocation }] = await Promise.all([
+    { userContextMenu }, { contextMenu }, { SoundboardTab }, language, { BotChatView, renderBotInvocation },
+    { showBotPermissionReview }] = await Promise.all([
     import('/views/BotSettingsModal.ts'), import('/stores/serverStore.ts'),
     import('/core/NetworkClient.ts'), import('/stores/chatStore.ts'), import('/stores/settingsStore.ts'),
     import('/core/EventBus.ts'), import('/utils/botSettingsContext.ts'), import('/views/UserContextMenu.ts'),
     import('/views/ContextMenu.ts'), import('/views/settings/tabs/SoundboardTab.ts'), import('/i18n/index.ts'),
-    import('/views/BotChatView.ts'),
+    import('/views/BotChatView.ts'), import('/views/BotPermissionReview.ts'),
   ]);
   const Permission = { CONFIGURE_BOTS: 1 << 15, MANAGE_BOTS: 1 << 13 };
   const MessageType = {
     BOT_SETTINGS_LIST: 'BOT_SETTINGS_LIST', BOT_SETTINGS_GET: 'BOT_SETTINGS_GET', BOT_SETTINGS_UPDATE: 'BOT_SETTINGS_UPDATE',
+    BOT_PERMISSIONS_UPDATE: 'BOT_PERMISSIONS_UPDATE',
   };
   const { botSettingsModal: modal, botSettingsMenuItem } = modalModule;
   const previous = {
@@ -128,6 +130,11 @@ async function runBotSettingsDomSmoke() {
   let completeRequest = null;
   let failNext = false;
   const canConfigure = () => server.hasPermission(Permission.CONFIGURE_BOTS);
+  const canManage = () => server.hasPermission(Permission.MANAGE_BOTS);
+  let permissions = {
+    requested: ['commands', 'send_messages', 'local_execution'], granted: [], revision: 1,
+    reviewRequired: true, reviewedBy: null, reviewedAt: null,
+  };
   const visibleDefinition = () => {
     const visible = {
       ...(userDefinition ? { user: userDefinition } : {}),
@@ -146,7 +153,7 @@ async function runBotSettingsDomSmoke() {
     botId: id, name: id === 'audio-bot' ? 'Audio <bot>' : 'Generic bot', avatarUrl: null, online: false,
     capabilities: { downloadsSound: id === 'audio-bot' }, schemaRevision, revision,
     hasServerSettings: id === 'generic-bot', hasUserSettings: id === 'generic-bot' && !!userDefinition,
-    canConfigure: canConfigure(),
+    canConfigure: canConfigure(), canManage: canManage(), permissions: structuredClone(permissions),
   });
   const snapshot = id => ({
     bot: summary(id),
@@ -164,6 +171,16 @@ async function runBotSettingsDomSmoke() {
     if (deferType === type) return new Promise(resolve => { completeRequest = resolve; });
     if (type === MessageType.BOT_SETTINGS_LIST) return { bots: [summary('audio-bot'), summary('generic-bot')] };
     if (type === MessageType.BOT_SETTINGS_GET) return snapshot(payload.botId);
+    if (type === MessageType.BOT_PERMISSIONS_UPDATE) {
+      if (!canManage()) throw new Error('Fixture bot management denied');
+      if (payload.expectedRevision !== permissions.revision) throw new Error('Fixture permission conflict');
+      if (!payload.granted.every(capability => permissions.requested?.includes(capability))) throw new Error('Fixture unrequested grant');
+      permissions = {
+        ...permissions, granted: payload.granted.slice(), revision: permissions.revision + 1,
+        reviewRequired: false, reviewedBy: caller.id, reviewedAt: Date.now(),
+      };
+      return { botId: payload.botId, permissions: structuredClone(permissions) };
+    }
     if (type === MessageType.BOT_SETTINGS_UPDATE) {
       if (!canConfigure()) throw new Error('Fixture permission denied');
       if (payload.expectedRevision !== revision || payload.schemaRevision !== schemaRevision) throw new Error('Fixture settings conflict');
@@ -220,7 +237,7 @@ async function runBotSettingsDomSmoke() {
     await settle(() => !!document.querySelector('#bot-settings-user-count'));
     check(!document.querySelector('[data-settings-scope="server"]'), 'Shared behavior is omitted without configure permission');
     check(find('#bot-settings-form h3').textContent === 'Preferências pessoais' &&
-      find('#bot-settings-form fieldset > .bot-field-description').textContent === 'Opções pessoais salvas neste dispositivo.',
+      find('#bot-settings-form [data-settings-section="bot-defined"] > .bot-field-description').textContent === 'Opções pessoais salvas neste dispositivo.',
       'Personal form title and description follow declared app-language metadata');
     check(find('label[for="bot-settings-user-count"]').textContent.includes('Quantidade') &&
       find('[data-field-name="count"] .bot-field-description').textContent === 'Quantidade de itens de 0 a 5.',
@@ -495,6 +512,106 @@ async function runBotSettingsDomSmoke() {
     find('[data-settings-reload]').click();
     await settle(() => !!document.querySelector('#bot-settings-user-count') && !find('[data-settings-save]').disabled);
     check(find('#bot-settings-user-count').value === '1', 'Reload recovers after a visible request error');
+    check(!!document.querySelector('.bot-settings-modal .settings-sidebar .settings-section-nav') &&
+      find('#tab-panel-user').getAttribute('role') === 'tabpanel',
+    'Bot settings reuse the app sidebar, subsection navigation and labelled settings panel');
+    server.myPermissions = Permission.CONFIGURE_BOTS;
+    await modal.open('generic-bot');
+    check(!document.querySelector('[data-settings-scope="permissions"]'),
+      'Configuring bot-defined settings never grants authority to review bot permissions');
+    const localBeforeReview = JSON.stringify({
+      preferences: settingsStore.botUserPreferences, locales: settingsStore.botLocalePreferences,
+      exceptions: settingsStore.botDownloadConfirmationExceptions,
+    });
+    server.myPermissions = Permission.MANAGE_BOTS;
+    await modal.open('generic-bot');
+    check(find('[data-settings-scope="permissions"]').getAttribute('aria-selected') === 'true' &&
+      !document.querySelector('[data-settings-scope="server"]'),
+    'An unreviewed declaration opens its review for managers without exposing shared settings');
+    check(document.querySelectorAll('[data-bot-capability]').length === 3 &&
+      !document.querySelector('[data-bot-capability="publish_voice"]') &&
+      ![...document.querySelectorAll('[data-bot-capability]')].some(input => input.checked),
+    'Only requested capabilities are offered and new grants default off');
+    const allowAll = find('[data-bot-permissions-all]');
+    allowAll.focus();
+    allowAll.click();
+    check(document.activeElement === allowAll && [...document.querySelectorAll('[data-bot-capability]')].every(input => input.checked) &&
+      allowAll.getAttribute('role') === 'switch', 'Allow all updates native accessible switches without replacing keyboard focus');
+    find('[data-bot-capability="local_execution"]').click();
+    check(!find('[data-bot-permissions-all]').checked, 'Turning off one capability clears Allow all');
+    await submit();
+    const grantRequest = requests.filter(request => request.type === MessageType.BOT_PERMISSIONS_UPDATE).at(-1);
+    equal(grantRequest.payload, { botId: 'generic-bot', expectedRevision: 1, granted: ['commands', 'send_messages'] },
+      'Saving sends the reviewed subset with its original optimistic revision');
+    check(permissions.reviewedBy === caller.id && !permissions.reviewRequired, 'The server-approved revision is reflected after save');
+    check(JSON.stringify({
+      preferences: settingsStore.botUserPreferences, locales: settingsStore.botLocalePreferences,
+      exceptions: settingsStore.botDownloadConfirmationExceptions,
+    }) === localBeforeReview, 'Server capability review never changes local consent, language or personal preferences');
+    find('[data-bot-capability="commands"]').click();
+    permissions = { ...permissions, requested: [...permissions.requested, 'publish_voice'], revision: permissions.revision + 1,
+      reviewRequired: true, reviewedBy: null, reviewedAt: null };
+    appEvents.emit('message.BOT_PERMISSIONS_SNAPSHOT', { botId: 'generic-bot', permissions });
+    check(find('[data-settings-save]').disabled && !find('[data-bot-capability="commands"]').checked &&
+      !find('[data-bot-capability="publish_voice"]').checked, 'A concurrent declaration preserves the draft but blocks stale approval');
+    find('[data-settings-reload]').click();
+    await settle(() => !modal.loading);
+    check(!find('[data-settings-save]').disabled && find('[data-bot-capability="commands"]').checked &&
+      !find('[data-bot-capability="publish_voice"]').checked, 'Explicit reload restores only persisted grants, never a newly requested capability');
+    find('[data-settings-defaults]').click();
+    check(![...document.querySelectorAll('[data-bot-capability]')].some(input => input.checked),
+      'Restoring permission defaults grants nothing');
+    deferType = MessageType.BOT_PERMISSIONS_UPDATE;
+    completeRequest = null;
+    find('#bot-settings-form').requestSubmit();
+    await settle(() => !!completeRequest);
+    server.myPermissions = Permission.CONFIGURE_BOTS;
+    appEvents.emit('server.updated');
+    check(!document.querySelector('[data-settings-scope="permissions"]') && modal.permissionDraft.length === 0,
+      'Losing MANAGE_BOTS removes permission editing and its unsaved draft');
+    permissions = { ...permissions, granted: [], revision: permissions.revision + 1,
+      reviewRequired: false, reviewedBy: caller.id, reviewedAt: Date.now() };
+    completeRequest({ botId: 'generic-bot', permissions: structuredClone(permissions) });
+    await tick();
+    deferType = null;
+    check(!document.querySelector('[data-settings-scope="permissions"]') && modal.permissionDraft.length === 0,
+      'A late approval response cannot restore permission editing after role loss');
+    permissions = { requested: null, granted: [], revision: 0, reviewRequired: true, reviewedBy: null, reviewedAt: null };
+    server.myPermissions = Permission.MANAGE_BOTS;
+    await modal.open('generic-bot');
+    check(find('[data-settings-save]').disabled && !document.querySelector('[data-bot-capability]') &&
+      find('.bot-settings-body').textContent.includes(language.t('botPermissions.undeclared')),
+    'Manual and migrated bots with no declaration cannot receive fabricated approval');
+    modal.close();
+    const reviewPreview = {
+      previewId: 'review-preview', expiresAt: Date.now() + 60000,
+      manifest: { name: 'Review <bot>', description: 'Declared access', registrationUrl: 'https://bot.example/register',
+        requestedCapabilities: ['commands', 'local_execution'] },
+    };
+    const reviewAbort = new AbortController();
+    const review = showBotPermissionReview(reviewPreview, reviewAbort.signal);
+    check(!find('[data-bot-permissions-all]').checked &&
+      ![...document.querySelectorAll('[data-bot-capability]')].some(input => input.checked) &&
+      !document.querySelector('#bot-permission-review-title bot'), 'Installation review escapes identity and starts with all switches off');
+    check(find('.bot-permission-review-body').textContent.includes(language.t('botPermissions.localConsent')) &&
+      find('.bot-permission-review-body').textContent.includes(language.t('botPermissions.listeningUnavailable')),
+    'Review distinguishes device consent and explicitly states that voice reception is unavailable');
+    find('[data-bot-permissions-all]').click();
+    find('[data-bot-capability="local_execution"]').click();
+    find('[data-review-confirm]').focus();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+    check(document.activeElement === find('[data-bot-permissions-all]'), 'Installation review wraps keyboard focus inside the dialog');
+    find('[data-review-confirm]').click();
+    equal(await review, ['commands'], 'Installation returns exactly the reviewed capability subset');
+    const aborted = showBotPermissionReview(reviewPreview, reviewAbort.signal);
+    reviewAbort.abort();
+    check(await aborted === null && !document.querySelector('.bot-permission-review'),
+      'Permission/session loss aborts the installation dialog and removes its listeners and DOM');
+    const cancelled = showBotPermissionReview(reviewPreview, new AbortController().signal);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    check(await cancelled === null && !document.querySelector('.bot-permission-review'), 'Escape cancels a repeated review without stale dialogs');
+    server.myPermissions = 0;
+    await modal.open('generic-bot');
     language.setLanguage('en');
     check(find('#bot-settings-title').textContent === 'Bot settings', 'Settings chrome follows the active app language');
     await modal.open('audio-bot');

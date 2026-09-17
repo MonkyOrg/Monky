@@ -5,12 +5,14 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocket } from 'ws';
-import { MessageType, PROTOCOL_VERSION, ProtocolErrorCode, type UserSummary } from '@monky/shared';
+import { BOT_CAPABILITIES, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, type BotCapability, type UserSummary } from '@monky/shared';
 import { AttachmentService } from '../application/services/AttachmentService';
 import { AuthService } from '../application/services/AuthService';
 import { BotService } from '../application/services/BotService';
 import { BotSelectorService } from '../application/services/BotSelectorService';
 import { BotSettingsService } from '../application/services/BotSettingsService';
+import { BotPermissionService } from '../application/services/BotPermissionService';
+import { SqliteBotPermissionRepository } from '../infrastructure/database/SqliteBotPermissionRepository';
 import { ChannelService } from '../application/services/ChannelService';
 import { ChatService } from '../application/services/ChatService';
 import { CommandRegistry } from '../application/services/CommandRegistry';
@@ -88,7 +90,7 @@ export class Peer {
   readonly messages: Received[] = [];
   private listeners = new Set<(message: Received) => void>();
 
-  constructor(readonly ws: WebSocket) {
+  constructor(readonly ws: WebSocket, private readonly requestedCapabilities?: BotCapability[]) {
     ws.on('message', (data) => {
       const message = readMessage(data.toString());
       this.messages.push(message);
@@ -115,6 +117,10 @@ export class Peer {
   }
 
   send(type: MessageType, payload: unknown, requestId?: string): void {
+    if (type === MessageType.COMMAND_REGISTER && this.requestedCapabilities && isRecord(payload) &&
+        !Object.hasOwn(payload, 'requestedCapabilities')) {
+      payload = { ...payload, requestedCapabilities: this.requestedCapabilities };
+    }
     this.ws.send(JSON.stringify({ type, payload, requestId }));
   }
 
@@ -144,7 +150,12 @@ export class Peer {
   }
 }
 
-export async function createFixture() {
+/** Existing API regressions run with explicitly pre-approved bot fixtures. Consent tests use createFixture(). */
+export function createApprovedBotFixture() {
+  return createFixture({ approvedBotCapabilities: [...BOT_CAPABILITIES] });
+}
+
+export async function createFixture(options: { approvedBotCapabilities?: BotCapability[] } = {}) {
   const dataDir = path.join(__dirname, '..', '..', `.bot-test-data-${process.pid}-${randomUUID()}`);
   const database = await DatabaseConnection.create(path.join(dataDir, 'server.db'));
   const db = database.getDb();
@@ -155,6 +166,7 @@ export async function createFixture() {
   const mentionRepo = new SqliteMentionRepository(db);
   const roleRepo = new SqliteRoleRepository(db);
   const botRepo = new SqliteBotRepository(db);
+  const botPermissions = new BotPermissionService(new SqliteBotPermissionRepository(db));
   const avatars = new AvatarStorageService(dataDir);
   const rateLimiter = new RateLimiter();
   const attachmentRepo = new SqliteAttachmentRepository(db);
@@ -171,7 +183,7 @@ export async function createFixture() {
     const bots = new Map<string, UserSummary>();
     for (const { user } of online().values()) if (user.isBot) bots.set(user.id, user);
     return bots;
-  });
+  }, botPermissions);
   await ensureServerSeedData({ serverName: 'Bot tests', maxUsers: 10 }, serverRepo, channelRepo, roleRepo);
   const httpServer = http.createServer();
   const chatService = new ChatService(
@@ -196,7 +208,7 @@ export async function createFixture() {
     botService,
     registry,
     new BotSelectorService(new SqliteBotSelectorRepository(database.getDb())),
-    new BotSettingsService(new SqliteBotSettingsRepository(database.getDb()))
+    new BotSettingsService(new SqliteBotSettingsRepository(database.getDb()), botPermissions)
   );
   online = () => wsServer.getOnlineUsersMap();
   httpServer.listen(0, '127.0.0.1');
@@ -206,7 +218,7 @@ export async function createFixture() {
   const url = `ws://127.0.0.1:${address.port}`;
   const peers: Peer[] = [];
   const connect = async () => {
-    const peer = new Peer(new WebSocket(url));
+    const peer = new Peer(new WebSocket(url), options.approvedBotCapabilities);
     peers.push(peer);
     await once(peer.ws, 'open');
     return peer;
@@ -223,6 +235,15 @@ export async function createFixture() {
     return { peer, keys, deviceId, id: text(record(auth.payload.currentUser).id), auth };
   };
   const bot = async (token: string, keys = identity(), name = 'SDK bot') => {
+    if (options.approvedBotCapabilities) {
+      const linked = await botRepo.findByTokenHash(BotService.hashToken(token));
+      if (linked && botPermissions.get(linked.id)?.requested === null) {
+        const { permissions: state } = botPermissions.declare(linked.id, options.approvedBotCapabilities);
+        botPermissions.approve(linked.createdByUserId, {
+          botId: linked.id, expectedRevision: state.revision, granted: options.approvedBotCapabilities,
+        });
+      }
+    }
     const peer = await connect();
     const auth = await peer.request(MessageType.AUTH_CONNECT, {
       protocolVersion: PROTOCOL_VERSION, nickname: name, publicKey: keys.publicKey, botToken: token,
@@ -242,6 +263,6 @@ export async function createFixture() {
     url,
     connect, human, bot, dispose, peers, wsServer, botService, botRepo, roleRepo, avatars,
     channelService, userService, registry, dataDir, messageRepo, channelRepo, userRepo, serverRepo, chatService, attachmentRepo,
-    database, permissions, signalingService, coturnManager,
+    database, permissions, botPermissions, signalingService, coturnManager,
   };
 }

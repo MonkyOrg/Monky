@@ -9,10 +9,11 @@ import {
   PROTOCOL_VERSION,
   RECONNECT_DELAYS_MS,
   ServerErrorPayload,
+  serverShutdownSchema,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { createActiveProxy } from './activeProxy';
-import { routeSessionEvent } from './sessionRouting';
+import { emitOutsideRouting, routeSessionEvent } from './sessionRouting';
 import { clientLog } from './ClientLogService';
 import { t } from '../i18n';
 import { translateProtocolError } from '../i18n/protocolErrors';
@@ -92,6 +93,7 @@ export class NetworkClient {
   private pendingAuth: PendingAuthRequest | null = null;
   private pendingConnect: { reject: (reason: Error) => void } | null = null;
   private currentServerUrl: string = '';
+  private serverName: string = '';
   private lastConnectPayload: ConnectState | null = null;
   private manualDisconnect: boolean = false;
   private hasEverConnected: boolean = false;
@@ -197,7 +199,11 @@ export class NetworkClient {
    */
   private emitScoped(event: string, data?: unknown, requestId?: string): void {
     if (event === 'network.status') this.notifyEventListeners(event, data, requestId);
-    routeSessionEvent(this.sessionKey, event, () => appEvents.emit(event, data));
+    if (event === 'network.server_shutdown') {
+      emitOutsideRouting(() => appEvents.emit(event, data));
+    } else {
+      routeSessionEvent(this.sessionKey, event, () => appEvents.emit(event, data));
+    }
     if (event !== 'network.status') this.notifyEventListeners(event, data, requestId);
   }
 
@@ -239,6 +245,7 @@ export class NetworkClient {
 
     const cleanHost = host.trim().replace(/^ws:\/\//, '').replace(/^wss:\/\//, '');
     this.currentServerUrl = `ws://${cleanHost}:${port}`;
+    this.serverName = '';
     if (!this.sessionKey) this.sessionKey = this.currentServerUrl;
     this.lastConnectPayload = {
       protocolVersion: PROTOCOL_VERSION,
@@ -467,11 +474,20 @@ export class NetworkClient {
     }
 
     if (type === MessageType.SERVER_SHUTDOWN) {
-      const reason = (payload as { reason?: string })?.reason;
-      this.emitScoped('network.server_shutdown', { reason });
+      const parsed = serverShutdownSchema.safeParse(payload);
+      if (!parsed.success) {
+        clientLog.warn('NETWORK', 'Invalid server shutdown notice');
+        this.disconnect();
+        return;
+      }
+      this.emitScoped('network.server_shutdown', {
+        ...parsed.data, serverName: this.serverName || this.currentServerUrl,
+      });
       this.disconnect();
       return;
     }
+
+    if (type === MessageType.SERVER_SETTINGS_UPDATED) this.captureServerName(payload);
 
     if (this.pendingAuth && requestId === this.pendingAuth.requestId) {
       if (type === MessageType.AUTH_CHALLENGE) {
@@ -481,6 +497,7 @@ export class NetworkClient {
 
       if (type === MessageType.AUTH_SUCCESS) {
         clientLog.info('NETWORK', 'Authentication successful');
+        if (payload && typeof payload === 'object' && 'server' in payload) this.captureServerName(payload.server);
         this.pendingAuth.resolve(payload as AuthSuccessPayload);
         return;
       }
@@ -518,6 +535,13 @@ export class NetworkClient {
     }
 
     this.emitScoped(`message.${type}`, payload, requestId);
+  }
+
+  private captureServerName(value: unknown): void {
+    if (value && typeof value === 'object' && 'name' in value &&
+        typeof value.name === 'string' && value.name.trim()) {
+      this.serverName = value.name.trim().slice(0, 200);
+    }
   }
 
   private async respondToAuthChallenge(payload: AuthChallengePayload, requestId?: string): Promise<void> {

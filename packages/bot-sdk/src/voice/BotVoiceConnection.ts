@@ -122,7 +122,7 @@ export class BotVoiceConnection {
 
   private ensurePeer(sessionId: string, initiate = false): OpusPeer | undefined {
     if (this.closed || !this.admitted || !this.participants.has(sessionId) ||
-        sessionId === this.auth.currentUser.sessionId) return undefined;
+        this.participants.get(sessionId)?.isBot || sessionId === this.auth.currentUser.sessionId) return undefined;
     const existing = this.peers.get(sessionId);
     if (existing) return existing;
     if (this.peers.size >= 1000) throw new Error('Voice peer limit exceeded.');

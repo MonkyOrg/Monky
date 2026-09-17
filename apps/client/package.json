@@ -12,6 +12,7 @@
     "test:development": "node test/developmentProfileSmoke.cjs",
     "test:updates": "node test/updateCompatibilitySmoke.cjs",
     "test:editing": "tsc -p tsconfig.test.json && node --test dist-test/test/messageEditing.test.js && node test/messageEditingDomSmoke.cjs",
+    "test:clipboard": "node test/messageClipboardDomSmoke.cjs",
     "test:settings:ui": "node --test --test-concurrency=1 test/serverSettingsDom.test.cjs test/navigationFavoritesSmoke.cjs test/serverManagerLifecycle.test.cjs test/homeAutoEntrySmoke.cjs test/serverMonitorDom.test.cjs test/localToolsDom.test.cjs",
     "test:camera": "node test/cameraEffectsSmoke.cjs && node test/cameraEffectsSmoke.cjs --packaged && node test/cameraPublicationSmoke.cjs",
     "test:colors": "tsc -p tsconfig.test.json && node --test dist-test/test/cameraEffects.test.js dist-test/test/screenColorPicker.test.js && node test/audioDeviceSmoke.cjs --color-native && node --test test/serverSettingsDom.test.cjs && node test/screenColorPickerSmoke.cjs",

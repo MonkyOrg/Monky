@@ -5,6 +5,8 @@ import type {
 } from './botInteractions.js';
 import type { SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
 import type { CommandCallerContext, LocalCommandPreparation } from './localExecutionProtocol.js';
+import type { ServerShutdownReason } from './serverLifecycle.js';
+import type { BotCapability, BotPermissions } from './botPermissions.js';
 
 export enum ProtocolErrorCode {
   AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
@@ -38,6 +40,10 @@ export enum ProtocolErrorCode {
   BOT_INVALID_PROFILE = 'BOT_INVALID_PROFILE',
   BOT_SETTINGS_INVALID = 'BOT_SETTINGS_INVALID',
   BOT_SETTINGS_CONFLICT = 'BOT_SETTINGS_CONFLICT',
+  BOT_PERMISSIONS_REQUIRED = 'BOT_PERMISSIONS_REQUIRED',
+  BOT_CAPABILITIES_INVALID = 'BOT_CAPABILITIES_INVALID',
+  BOT_PERMISSIONS_CONFLICT = 'BOT_PERMISSIONS_CONFLICT',
+  BOT_MANIFEST_CHANGED = 'BOT_MANIFEST_CHANGED',
   /**
    * The relay cannot run on the host. Kept apart from BAD_REQUEST so the
    * client can explain what to do instead of showing a generic message (#429).
@@ -174,6 +180,11 @@ export enum MessageType {
   BOT_SETTINGS_GET = 'BOT_SETTINGS_GET',
   BOT_SETTINGS_UPDATE = 'BOT_SETTINGS_UPDATE',
   BOT_SETTINGS_SNAPSHOT = 'BOT_SETTINGS_SNAPSHOT',
+  BOT_PERMISSIONS_GET = 'BOT_PERMISSIONS_GET',
+  BOT_PERMISSIONS_UPDATE = 'BOT_PERMISSIONS_UPDATE',
+  BOT_PERMISSIONS_SNAPSHOT = 'BOT_PERMISSIONS_SNAPSHOT',
+  BOT_INSTALL_PREVIEW = 'BOT_INSTALL_PREVIEW',
+  BOT_INSTALL_PREVIEW_RESULT = 'BOT_INSTALL_PREVIEW_RESULT',
   /** Bot -> server: register slash commands. */
   COMMAND_REGISTER = 'COMMAND_REGISTER',
   /** Server -> bot: commands were registered. */
@@ -656,6 +667,7 @@ export interface SoundboardStoppedPayload {
 
 export interface ServerShutdownPayload {
   reason?: string;
+  reasonCode?: ServerShutdownReason;
 }
 
 export interface UserJoinedPayload {
@@ -886,6 +898,7 @@ export interface BotProfileUpdatedPayload {
 
 /** Bot -> server: register slash commands (replaces the bot's previous set). */
 export interface CommandRegisterPayload {
+  requestedCapabilities: BotCapability[];
   commands: Array<{
     name: string;
     description: string;
@@ -902,6 +915,7 @@ export interface CommandRegisterPayload {
 export interface CommandRegisteredPayload {
   registered: number;
   settings: BotServerSettingsSnapshot;
+  permissions?: BotPermissions;
 }
 
 export type BotSettingsListResponsePayload = BotSettingsListResponse;
@@ -1078,6 +1092,7 @@ export interface CommandFinishedPayload {
  * the token back automatically.
  */
 export interface BotManifest {
+  requestedCapabilities: BotCapability[];
   /** Display name of the bot. */
   name: string;
   /** Short description shown in the install preview. */
@@ -1096,8 +1111,9 @@ export interface BotManifest {
 
 /** Client -> server: install a bot from a manifest URL (#578). */
 export interface BotInstallPayload {
-  /** URL of the bot's manifest endpoint (e.g. http://bot-host:4000/manifest). */
-  manifestUrl: string;
+  /** One-time, short-lived preview bound to the requesting administrator. */
+  previewId: string;
+  grantedCapabilities: BotCapability[];
 }
 
 /** Server -> client: bot installed successfully (#578). */

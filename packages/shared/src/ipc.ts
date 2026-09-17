@@ -4,6 +4,7 @@
  */
 
 import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
+import type { DevelopmentQaConfig, DevelopmentQaReport } from './developmentQa.js';
 import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
@@ -31,6 +32,11 @@ export interface RendererBootstrapFailure {
   /** Only sanitized app source locations survive validation in Main. */
   stack?: string;
 }
+
+export const DEVELOPMENT_QA_IPC = {
+  config: 'development-qa:config',
+  report: 'development-qa:report',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export type CrashRecoveryActionResult =
   | { ok: true; copied?: boolean }
@@ -468,6 +474,8 @@ export interface OverlaySignalPayload {
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
  */
 export interface IpcInvokeChannels {
+  'development-qa:config': { args: []; returnType: DevelopmentQaConfig | null };
+  'development-qa:report': { args: [report: DevelopmentQaReport]; returnType: boolean };
   // Local fatal-failure recovery, not a client/server protocol change (#454).
   'crash-recovery:bootstrap-failed': { args: [failure: RendererBootstrapFailure]; returnType: boolean };
   'crash-recovery:ready': { args: []; returnType: boolean };

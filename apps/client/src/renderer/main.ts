@@ -17,6 +17,7 @@ import {
   RolesListPayload,
   ServerErrorPayload,
   ServerSettingsUpdatedPayload,
+  ServerShutdownPayload,
   UserJoinedPayload,
   UserLeftPayload,
   UserConnectionStatePayload,
@@ -70,6 +71,7 @@ import { bindCameraPublication } from './core/CameraPublication';
 import { cameraEffectErrorMessage } from './utils/cameraEffectErrors';
 import { AutoEntryService } from './core/AutoEntryService';
 import { runFatalBootstrap } from './utils/fatalBootstrap';
+import { prepareDevelopmentQaProfile, startDevelopmentQa } from './core/DevelopmentQa';
 
 class App {
   private appContainer: HTMLElement;
@@ -176,6 +178,9 @@ class App {
 
     initI18n();
 
+    const developmentQa = await window.api?.getDevelopmentQaConfig?.() ?? null;
+    if (developmentQa) await prepareDevelopmentQaProfile(developmentQa);
+
     // Check if identity exists BEFORE rendering anything
     if (window.api?.hasIdentity) {
       connectionStore.hasIdentity = await window.api.hasIdentity();
@@ -217,11 +222,14 @@ class App {
     }
 
     // Initialize keybind service (#252)
-    keybindService.init();
+    if (!developmentQa) keybindService.init();
 
     // Start checking for app updates (non-blocking)
-    updateService.init();
-    void this.autoEntryService.start();
+    if (developmentQa) void startDevelopmentQa(developmentQa);
+    else {
+      updateService.init();
+      void this.autoEntryService.start();
+    }
 
     // Debug helper to check voice engine status in console
     (window as any).debugVoice = () => {
@@ -976,10 +984,13 @@ class App {
 
     // Host closed the server: show a friendly notice (the network layer already
     // returned us to the home screen).
-    appEvents.on('network.server_shutdown', (data: { reason?: string }) => {
+    appEvents.on('network.server_shutdown', (data: ServerShutdownPayload & { serverName?: string }) => {
+      const updating = data?.reasonCode === 'update';
       showAlert({
-        title: t('app.serverShutdownTitle'),
-        message: data?.reason || t('app.serverShutdownMessage'),
+        title: t(updating ? 'app.serverUpdatingTitle' : 'app.serverShutdownTitle'),
+        message: updating
+          ? t('app.serverUpdatingMessage', { server: data.serverName || '' })
+          : data?.reason || t('app.serverShutdownMessage'),
         variant: 'warning',
       });
     });

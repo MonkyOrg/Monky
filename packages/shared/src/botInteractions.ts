@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { LIMITS } from './constants.js';
+import { botCapabilitiesSchema, botPermissionsSchema } from './botPermissions.js';
 import type { CommandOption } from './models.js';
 import {
   commandCallerContextSchema,
@@ -417,13 +418,26 @@ export const commandDefinitionsSchema = z.array(commandDefinitionSchema).max(LIM
   });
 
 export const commandRegisterSchema = z.object({
+  requestedCapabilities: botCapabilitiesSchema,
   commands: commandDefinitionsSchema,
   settings: botSettingsDefinitionSchema.optional(),
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  const required = [
+    ...(value.commands.length ? ['commands'] as const : []),
+    ...(value.commands.some((command) => command.downloadsSound) ? ['sound_download'] as const : []),
+    ...(value.commands.some((command) => command.localCapabilities?.length) ? ['local_execution'] as const : []),
+  ];
+  for (const capability of required) {
+    if (!value.requestedCapabilities.includes(capability)) {
+      ctx.addIssue({ code: 'custom', message: `Commands require the declared capability: ${capability}`, path: ['requestedCapabilities'] });
+    }
+  }
+});
 
 export const commandRegisteredSchema = z.object({
   registered: z.number().int().min(0).max(LIMITS.MAX_COMMANDS_PER_BOT),
   settings: botServerSettingsSnapshotSchema,
+  permissions: botPermissionsSchema.optional(),
 }).strict();
 
 export const commandPromptSchema = z.object({
@@ -471,12 +485,27 @@ const httpUrl = z.string().url().max(2048).refine((value) => {
   }
 });
 export const botManifestSchema = z.object({
+  requestedCapabilities: botCapabilitiesSchema,
   name: botIdentitySchema.shape.name,
   description: description.optional(),
   icon: avatarSchema.optional(),
-  commands: z.array(z.object({ name: commandName, description: label })).max(LIMITS.MAX_COMMANDS_PER_BOT).optional(),
+  commands: z.array(z.object({ name: commandName, description: label }).strict()).max(LIMITS.MAX_COMMANDS_PER_BOT).optional(),
   registrationUrl: httpUrl,
+}).strict().refine((manifest) => !manifest.commands?.length || manifest.requestedCapabilities.includes('commands'), {
+  message: 'Manifest commands require the declared capability: commands', path: ['requestedCapabilities'],
 });
+
+export const botInstallPreviewRequestSchema = z.object({ manifestUrl: httpUrl }).strict();
+export const botInstallPreviewSchema = z.object({
+  previewId: identifier,
+  expiresAt: z.number().int().safe().nonnegative(),
+  manifest: botManifestSchema,
+}).strict();
+export type BotInstallPreview = z.infer<typeof botInstallPreviewSchema>;
+export const botInstallSchema = z.object({
+  previewId: identifier,
+  grantedCapabilities: botCapabilitiesSchema,
+}).strict();
 
 export const botRegistrationSchema = z.object({
   token: z.string().min(1).max(128),
@@ -496,6 +525,8 @@ export const botSettingsSummarySchema = z.object({
   hasServerSettings: z.boolean(),
   hasUserSettings: z.boolean(),
   canConfigure: z.boolean(),
+  permissions: botPermissionsSchema.optional(),
+  canManage: z.boolean().optional(),
 }).strict();
 export type BotSettingsSummary = z.infer<typeof botSettingsSummarySchema>;
 

@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "As configurações mostram a versão real do servidor, com botão para copiar. Quando ele reinicia para atualizar, os participantes recebem um aviso próprio do Monky, inclusive se o servidor estiver em segundo plano.",
+  "en": "Settings show the actual server version with a copy button. When it restarts to update, participants receive a dedicated Monky notice, including when that server is in the background."
+}

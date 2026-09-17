@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
+import { randomUUID, sign } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -7,7 +8,7 @@ import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import * as mediasoup from 'mediasoup';
 import { WebSocket } from 'ws';
-import { LIMITS, MessageType } from '@monky/shared';
+import { LIMITS, MessageType, PROTOCOL_VERSION } from '@monky/shared';
 import { MonkyServer, type ServerConfig } from './server';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import { SqlJsDriver, type DatabaseCloseOptions } from './infrastructure/database/SqliteWrapper';
@@ -17,6 +18,9 @@ import { closeHttpServer, listenHttpServer } from './infrastructure/lifecycle/ht
 import { Logger } from './infrastructure/logger/Logger';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import type { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import { consumeUpdateRestart, prepareUpdateRestart } from './infrastructure/lifecycle/updateRestart';
+import { resolveServerVersion } from './runtimeVersion';
+import { identity, Peer, record, text, type Received } from './testFixtures/bots';
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -247,32 +251,78 @@ test('server-level listener errors never disconnect or evict existing voice sess
   assertReleased(f.server);
 });
 
-test('acknowledged shutdown delivers the existing notice and drains actual loopback WebSocket peers', async (t) => {
-  const f = await fixture(t);
-  await f.server.start();
-  const address = f.listener.address();
-  assert.ok(address && typeof address !== 'string');
-  const peer = new WebSocket(`ws://127.0.0.1:${address.port}`);
-  f.cleanup.push(() => peer.terminate());
-  await once(peer, 'open');
-  const server = f.server['wsServer'];
-  const session = [...server['sessions'].values()][0];
-  assert.ok(session);
-  session.sessionId = 'loopback-session';
-  session.user = { id: 'loopback-user', clientId: 'fixture-key', sessionId: session.sessionId, nickname: 'Loopback', status: 'ONLINE', joinedAt: 1 };
-  const notices: string[] = [];
-  peer.on('message', data => {
-    const message: unknown = JSON.parse(data.toString());
-    if (message && typeof message === 'object' && 'type' in message && typeof message.type === 'string') notices.push(message.type);
-  });
-  const closed = once(peer, 'close');
-  await f.server.stop();
-  await closed;
-  assert.ok(notices.includes(MessageType.SERVER_SHUTDOWN));
-  assert.equal(server['sessions'].size, 0);
-  assert.equal(server['wss'].clients.size, 0);
-  assertReleased(f.server);
+test('runtime version uses server package metadata and validates explicit embedded versions', () => {
+  assert.equal(resolveServerVersion('44.7.9-beta'), '44.7.9-beta');
+  assert.match(resolveServerVersion(), /^\d+\.\d+\.\d+/);
+  for (const invalid of ['', 'not-a-version', '<script>1.0.0</script>']) {
+    assert.throws(() => resolveServerVersion(invalid), /runtime version/);
+  }
 });
+
+test('update restart intent is process-bound, single-use and cleaned after a failed restart', (t) => {
+  const f = temporaryData(t);
+  t.mock.method(Logger, 'warn', () => {});
+  assert.equal(consumeUpdateRestart(f.directory, 1234), 'stopped');
+  const cleanup = prepareUpdateRestart(f.directory, 1234);
+  assert.equal(consumeUpdateRestart(f.directory, 5678), 'stopped');
+  assert.throws(() => prepareUpdateRestart(f.directory, 1234), /already pending/);
+  assert.equal(consumeUpdateRestart(f.directory, 1234), 'update');
+  assert.equal(consumeUpdateRestart(f.directory, 1234), 'stopped');
+  cleanup();
+  const cancelled = prepareUpdateRestart(f.directory, 1234);
+  cancelled();
+  assert.equal(consumeUpdateRestart(f.directory, 1234), 'stopped');
+  assert.throws(() => prepareUpdateRestart(f.directory, 0), /PID/);
+});
+
+test('expired or malformed update intent cannot label an unrelated shutdown as an update', (t) => {
+  const f = temporaryData(t);
+  t.mock.method(Logger, 'warn', () => {});
+  t.mock.timers.enable({ apis: ['Date'], now: 100_000 });
+  const cleanup = prepareUpdateRestart(f.directory, 1234);
+  t.mock.timers.tick(60_001);
+  assert.equal(consumeUpdateRestart(f.directory, 1234), 'stopped');
+  const replacement = prepareUpdateRestart(f.directory, 5678);
+  cleanup();
+  assert.equal(consumeUpdateRestart(f.directory, 5678), 'update');
+  replacement();
+  const file = path.join(f.directory, 'update-restart-intent.json');
+  fs.writeFileSync(file, JSON.stringify({ pid: 1234, expiresAt: Date.now() + 1000, id: 'invalid' }));
+  assert.throws(() => consumeUpdateRestart(f.directory, 1234), /Invalid update restart/);
+});
+
+for (const reason of ['stopped', 'update'] as const) {
+  test(`server version and ${reason} notice reach every authenticated client before socket closure`, async (t) => {
+    const f = await fixture(t, { version: '44.7.9-beta' });
+    await f.server.start();
+    const address = f.listener.address();
+    assert.ok(address && typeof address !== 'string');
+    const peers: Peer[] = [];
+    for (const nickname of ['First viewer', 'Second viewer']) {
+      const peer: Peer = new Peer(new WebSocket(`ws://127.0.0.1:${address.port}`));
+      f.cleanup.push(() => peer.close());
+      await once(peer.ws, 'open');
+      const keys = identity();
+      const challenge: Received = await peer.request(MessageType.AUTH_CONNECT, {
+        protocolVersion: PROTOCOL_VERSION, nickname, publicKey: keys.publicKey, deviceId: randomUUID(),
+      });
+      assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
+      const signature = sign(null, Buffer.from(text(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex');
+      const auth: Received = await peer.request(MessageType.AUTH_CHALLENGE_RESPONSE, { signature });
+      assert.equal(auth.type, MessageType.AUTH_SUCCESS);
+      assert.equal(record(auth.payload.server).serverVersion, '44.7.9-beta');
+      peers.push(peer);
+    }
+    const notices = peers.map(peer => peer.wait(message => message.type === MessageType.SERVER_SHUTDOWN));
+    const closed = peers.map(peer => once(peer.ws, 'close'));
+    await f.server.stop(reason);
+    for (const notice of await Promise.all(notices)) assert.deepEqual(notice.payload, { reasonCode: reason });
+    await Promise.all(closed);
+    assert.equal(f.server['wsServer']['sessions'].size, 0);
+    assert.equal(f.server['wsServer']['wss'].clients.size, 0);
+    assertReleased(f.server);
+  });
+}
 
 test('shutdown during pending bind waits for settlement and prevents late startup work', async (t) => {
   const f = await fixture(t);

@@ -28,7 +28,7 @@ if (!process.versions.electron) {
   const { app, BrowserWindow } = require('electron');
   const { WebSocketServer } = require('ws');
   const { BotVoiceConnection } = require('@monky/bot-sdk');
-  const { MessageType, Permission } = require('@monky/shared');
+  const { MessageType, Permission, isBotPublishSignalAllowed } = require('@monky/shared');
   const { bindRendererDiagnostics } = require('../dist-electron/main/rendererDiagnostics.js');
   app.setPath('userData', process.env.MONKY_VOICE_REJOIN_PROFILE);
   app.commandLine.appendSwitch('use-fake-device-for-media-stream');
@@ -119,6 +119,10 @@ if (!process.versions.electron) {
         payload: { channelId: payload.channelId, userId: user.id, sessionId: user.sessionId },
       });
     } else if (type === MessageType.RTC_SIGNAL) {
+      if (user.isBot || payload.targetSessionId === botUser.sessionId) {
+        assert.ok(isBotPublishSignalAllowed(payload, user.isBot === true),
+          'Actual bot/human SDP must satisfy the production one-way voice gate');
+      }
       if (payload.sdp?.sdp) {
         negotiations.push({
           phase, from: user.sessionId, type: payload.signalType,
@@ -322,6 +326,8 @@ if (!process.versions.electron) {
       'Lack of bot audio reception never appears as voluntary mute/deafen');
     for (const listener of [window, guest]) {
       await until(() => run(listener, 'window.voiceFixture.speaking()'), 'bot uses human sidebar/stage speaking classes');
+      check(await run(listener, 'window.voiceFixture.noPublicationToBot()'),
+        'Human microphone tracks are never attached to the live bot audio connection');
     }
     const speakingPackets = await Promise.all([window, guest].map(listener =>
       run(listener, 'window.voiceFixture.receivedPackets()')));
@@ -358,6 +364,9 @@ if (!process.versions.electron) {
     console.log(`Full renderer bot controls: ${checks} checks passed (authored Opus, two listeners, local/admin mute, shared speaking UI)`);
     await run(guest, 'window.voiceFixture.leave()');
     await until(() => run(guest, 'window.voiceFixture.mediaReleased()'), 'guest media release');
+    phase = 'one-way media authorization';
+    check(await run(window, 'window.voiceFixture.verifyOneWayPublication()'),
+      'Changing microphone, camera, screen video and screen audio cannot publish a track to the bot');
     for (let round = 0; round < 5; round++) {
       phase = `leave ${round + 1}`;
       await run(window, 'window.voiceFixture.leave()');
@@ -369,6 +378,7 @@ if (!process.versions.electron) {
       await run(window, 'window.voiceFixture.join()');
       await until(() => run(window, 'window.voiceFixture.receiving()'), 'decoded SDK audio after rejoin');
       check(await run(window, 'window.voiceFixture.graphActive()'), 'Fresh real graphs and stage survive rejoin');
+      check(await run(window, 'window.voiceFixture.noPublicationToBot()'), 'Rejoining does not reintroduce human media senders toward the bot');
       check(errors.length === 0, 'No renderer, signaling, or SDK errors');
     }
     phase = 'steady full-renderer audio after rejoin';
@@ -572,6 +582,36 @@ async function setupFullVoiceRenderer(port, traceNative = false) {
       return [...reports.values()].some(report => report.type === 'inbound-rtp'
         && report.kind === 'audio' && report.packetsReceived > 8 && report.totalSamplesReceived > 0)
         && this.voiceRms() > 0.005;
+    },
+    noPublicationToBot() {
+      const peer = webRtcManager.peers.get('bot:fixture');
+      return peer?.receiveOnly === true && peer.pc.getSenders().every(sender => sender.track === null)
+        && peer.pc.getTransceivers().every(transceiver =>
+          transceiver.direction === 'recvonly' || transceiver.direction === 'inactive');
+    },
+    async verifyOneWayPublication() {
+      const original = webRtcManager.localAudioTrack;
+      if (!original) throw new Error('The real microphone capture must be active for this check');
+      const microphone = original.clone();
+      const desktopAudio = original.clone();
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 32;
+      canvas.getContext('2d').fillRect(0, 0, 32, 32);
+      const camera = canvas.captureStream(5);
+      const screen = canvas.captureStream(5);
+      try {
+        await webRtcManager.setLocalAudioTrack(microphone);
+        await webRtcManager.setLocalCameraTrack(camera.getVideoTracks()[0]);
+        await webRtcManager.addLocalScreenTrack(screen);
+        await webRtcManager.setLocalScreenAudioTrack(desktopAudio);
+        return this.noPublicationToBot();
+      } finally {
+        await webRtcManager.setLocalScreenAudioTrack(null);
+        await webRtcManager.removeLocalScreenTrack(screen.id);
+        await webRtcManager.setLocalCameraTrack(null);
+        await webRtcManager.setLocalAudioTrack(original);
+        for (const track of [microphone, desktopAudio, ...camera.getTracks(), ...screen.getTracks()]) track.stop();
+      }
     },
     async receivedPackets() {
       const peer = webRtcManager.peers.get('bot:fixture');

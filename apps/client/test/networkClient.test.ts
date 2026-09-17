@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
-import { MessageType, type ProtocolMessage } from '@monky/shared';
+import { MessageType, type ProtocolMessage, type ServerShutdownPayload } from '@monky/shared';
 import { NetworkClient, type ConnectionStatus } from '../src/renderer/core/NetworkClient';
 import { appEvents } from '../src/renderer/core/EventBus';
+import { setForegroundContext, setSessionEventRouter } from '../src/renderer/core/sessionRouting';
 
 const identity = { clientId: 'fixture-client', publicKey: 'fixture-public-key' };
 
@@ -299,4 +300,29 @@ test('leaving from a reconnect notification cannot schedule a timer after teardo
   assert.equal(f.client.getStatus(), 'DISCONNECTED');
   assert.equal(f.sockets.length, 1);
   assert.equal(f.client['reconnectTimeout'], null);
+});
+
+test('a background server update notice reaches global UI without reconnecting or losing its identity', async context => {
+  const f = fixture(context);
+  f.client.sessionKey = 'background-server';
+  await f.connected();
+  f.lastSocket().receive({ type: MessageType.SERVER_SETTINGS_UPDATED, payload: { name: 'Remote fixture server' } });
+  const notices: Array<ServerShutdownPayload & { serverName?: string }> = [];
+  const off = appEvents.on<ServerShutdownPayload & { serverName?: string }>('network.server_shutdown', notice => notices.push(notice));
+  setSessionEventRouter(() => {});
+  context.after(() => {
+    off();
+    setForegroundContext(true);
+    setSessionEventRouter((_key, _event, emit) => emit());
+  });
+  setForegroundContext(false);
+  f.lastSocket().receive({ type: MessageType.SERVER_SHUTDOWN, payload: { reasonCode: 'update' } });
+  assert.equal(notices.length, 0, 'UI waits for the borrowed background routing scope to finish');
+  setForegroundContext(true);
+  await setImmediate();
+  assert.deepEqual(notices, [{ reasonCode: 'update', serverName: 'Remote fixture server' }]);
+  assert.equal(f.client.getStatus(), 'DISCONNECTED');
+  context.mock.timers.tick(60_000);
+  await setImmediate();
+  assert.equal(f.sockets.length, 1, 'Intentional shutdown keeps the existing manual-reconnection behavior');
 });

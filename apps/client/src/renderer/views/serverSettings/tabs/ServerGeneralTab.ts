@@ -3,6 +3,7 @@ import { getAvatarUrl } from '../../../utils/avatar';
 import { serverStore } from '../../../stores/serverStore';
 import { t } from '../../../i18n';
 import { LIMITS } from '@monky/shared';
+import { bindVersionCopyButton, renderVersionCopyButton } from '../../VersionCopyButton';
 import logoUrl from '../../../assets/Logo.png';
 import {
   renderWhatPassesWhereTableHtml,
@@ -114,6 +115,12 @@ export class ServerGeneralTab {
           <span>${t('serverSettings.generalInfo')}</span>
         </div>
         <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; font-size: 12px; color: var(--text-secondary);">
+          <div style="grid-column: span 2;">
+            <span>${t('serverSettings.serverVersion')}: </span>
+            ${s.serverVersion
+              ? renderVersionCopyButton('server-settings-version', s.serverVersion)
+              : `<span id="server-settings-version-unavailable">${t('serverSettings.serverVersionUnavailable')}</span>`}
+          </div>
           <div id="server-settings-channel-count">${t('serverSettings.channelsCount', { count: s.channels.length })}</div>
           <div id="server-settings-member-count">${t('serverSettings.membersCount', { count: memberCount })}</div>
           <div style="grid-column: span 2; font-size: 11px; color: var(--text-muted); word-break: break-all;"><strong>ID:</strong> ${s.id}</div>
@@ -146,10 +153,13 @@ export class ServerGeneralTab {
       'general',
       serverStore.serverDetails?.hostSpecs ?? null
     );
+    const version = root.querySelector<HTMLButtonElement>('#server-settings-version');
+    const cleanupVersion = version ? bindVersionCopyButton(version) : undefined;
 
     return () => {
       if (toggle && group) toggle.removeEventListener('change', sync);
       cleanupCapacity();
+      cleanupVersion?.();
     };
   }
 }

@@ -12,7 +12,7 @@ import {
 import type { LocalExecutionClient } from './localExecution/contracts';
 import { botVoiceAuthSchema, botVoiceContextResultSchema, botVoiceJoinOptionsSchema, type BotVoiceAuth, type BotVoiceJoinOptions } from '@monky/shared';
 export type {
-  BotVoiceJoinOptions, LocalCapabilityId, LocalMediaTrack, LocalPreviewReference, LocalRequestContext,
+  BotCapability, BotPermissions, BotVoiceJoinOptions, LocalCapabilityId, LocalMediaTrack, LocalPreviewReference, LocalRequestContext,
   LocalSourceContext, LocalSourceFailure, LocalTaskCancellationCause, LocalTaskEvent, LocalTaskFailureReason,
   LocalTaskSpec, LocalWirePreviewResult, LocalWireTaskResult,
 } from '@monky/shared';
@@ -27,6 +27,10 @@ import {
   ProtocolErrorCode,
   botFormSchema,
   botManifestSchema,
+  botCapabilitiesSchema,
+  botPermissionsSnapshotSchema,
+  type BotCapability,
+  type BotPermissions,
   botProfileUpdateSchema,
   botRegistrationSchema,
   botSettingsContextSchema,
@@ -106,6 +110,8 @@ import type {
 } from '@monky/shared';
 
 export interface BotOptions {
+  /** Explicit request, not a grant. Each server administrator approves a subset. */
+  requestedCapabilities: BotCapability[];
   serverUrl?: string;
   token?: string;
   /** Ed25519 public key in hex (DER/SPKI), used for TOFU binding. */
@@ -279,6 +285,7 @@ interface ServerConnection {
   connected: boolean;
   botId: string | null;
   serverSettings: BotServerSettingsSnapshot | undefined;
+  permissions?: BotPermissions;
   disposed: boolean;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   profileRequestId: string | null;
@@ -514,7 +521,7 @@ export class BotClient extends EventEmitter {
 
   constructor(options: BotOptions) {
     super();
-    this.options = { autoReconnect: true, ...options };
+    this.options = { autoReconnect: true, ...options, requestedCapabilities: botCapabilitiesSchema.parse(options.requestedCapabilities) };
     this.registrationStore = new RegistrationStore(options.registrationFile, options.publicKey);
     if (options.name !== undefined || options.avatarBase64 !== undefined) {
       this.profile = botProfileUpdateSchema.parse({
@@ -524,7 +531,17 @@ export class BotClient extends EventEmitter {
     }
   }
 
+  getPermissions(serverId: string): BotPermissions | undefined {
+    const connection = this.connections.get(serverId);
+    return connection?.connected && connection.permissions ? immutableCopy(connection.permissions) : undefined;
+  }
+
   command(def: CommandDefinition): this {
+    if (!this.options.requestedCapabilities.includes('commands') ||
+        (def.downloadsSound && !this.options.requestedCapabilities.includes('sound_download')) ||
+        (def.localCapabilities?.length && !this.options.requestedCapabilities.includes('local_execution'))) {
+      throw new Error('Declare the capabilities required by this command in BotOptions.requestedCapabilities.');
+    }
     const definition = commandDefinitionSchema.parse({
       name: def.name.toLowerCase(),
       description: def.description,
@@ -815,6 +832,7 @@ export class BotClient extends EventEmitter {
     if (conn.disposed || this.connections.get(conn.serverId) !== conn) return;
     conn.botId = null;
     conn.serverSettings = undefined;
+    conn.permissions = undefined;
     const ws = new WebSocket(conn.serverUrl);
     conn.ws = ws;
     const isCurrent = () => conn.ws === ws && !conn.disposed;
@@ -851,6 +869,7 @@ export class BotClient extends EventEmitter {
       conn.connected = false;
       conn.botId = null;
       conn.serverSettings = undefined;
+      conn.permissions = undefined;
       conn.profileRequestId = null;
       this.rejectRegistration(conn, new Error('The connection closed before the bot registration completed.'));
       this.clearInvocations(conn);
@@ -879,6 +898,7 @@ export class BotClient extends EventEmitter {
     conn.connected = false;
     conn.botId = null;
     conn.serverSettings = undefined;
+    conn.permissions = undefined;
     conn.profileRequestId = null;
     this.rejectRegistration(conn, new Error('The bot registration was interrupted.'));
     this.clearInvocations(conn);
@@ -1017,9 +1037,19 @@ export class BotClient extends EventEmitter {
         }
         try {
           this.updateServerSettings(conn, parsed.data.settings);
+          if (parsed.data.permissions) this.updatePermissions(conn, parsed.data.permissions);
         } catch (error) {
           this.reportError(error, conn);
         }
+        return;
+      }
+      case MessageType.BOT_PERMISSIONS_SNAPSHOT: {
+        const parsed = botPermissionsSnapshotSchema.safeParse(msg.payload);
+        if (!parsed.success || parsed.data.botId !== conn.botId) {
+          this.reportError(new Error('Invalid bot permission snapshot.'), conn);
+          return;
+        }
+        this.updatePermissions(conn, parsed.data.permissions);
         return;
       }
       case MessageType.BOT_SETTINGS_SNAPSHOT: {
@@ -1042,6 +1072,7 @@ export class BotClient extends EventEmitter {
           this.updateServerSettings(conn, snapshot.server ?? {
             schemaRevision: snapshot.bot.schemaRevision, revision: snapshot.bot.revision, values: {},
           });
+          if (snapshot.bot.permissions) this.updatePermissions(conn, snapshot.bot.permissions);
         } catch (error) {
           this.reportError(error, conn);
         }
@@ -1341,12 +1372,29 @@ export class BotClient extends EventEmitter {
     this.sendToConn(conn, {
       type: MessageType.COMMAND_REGISTER,
       payload: {
+        requestedCapabilities: this.options.requestedCapabilities,
         commands: [...this.commands.values()].map(({ name, description, options, localizations, downloadsSound, voiceRequirement, localCapabilities }) => ({
           name, description, options: options ?? [], localizations, downloadsSound, voiceRequirement, localCapabilities,
         })),
         settings: this.settingsDefinition,
       },
     });
+  }
+
+  private updatePermissions(conn: ServerConnection, permissions: BotPermissions): void {
+    if (!conn.connected || conn.disposed) {
+      this.reportError(new Error('Bot permissions arrived before authentication.'), conn);
+      return;
+    }
+    const current = conn.permissions;
+    if (current && (permissions.revision < current.revision ||
+        (permissions.revision === current.revision && !isDeepStrictEqual(current, permissions)))) {
+      this.reportError(new Error('The server sent a stale or conflicting bot permission snapshot.'), conn);
+      return;
+    }
+    if (current && isDeepStrictEqual(current, permissions)) return;
+    conn.permissions = freezeData(structuredClone(permissions));
+    this.emit('permissionsChanged', immutableCopy(permissions), immutableCopy({ serverId: conn.serverId }));
   }
 
   private updateServerSettings(conn: ServerConnection, snapshot: BotServerSettingsSnapshot): void {
@@ -1735,6 +1783,7 @@ export class BotClient extends EventEmitter {
     });
     let listeningPort = port;
     const getManifest = (): BotManifest => botManifestSchema.parse({
+      requestedCapabilities: this.options.requestedCapabilities,
       name: opts.name,
       description: opts.description,
       icon: opts.icon ?? this.profile.avatarBase64 ?? undefined,
@@ -1879,7 +1928,7 @@ export interface ServeOptions {
   publicHost?: string;
 }
 
-export { LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
+export { BOT_CAPABILITIES, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode } from '@monky/shared';
 export {
   botSettingsDefinitionSchema, botSettingsContextSchema, botServerSettingsSnapshotSchema,
   botSettingsSnapshotSchema, botSettingsValuesSchema, botSelectorRespondedSchema, resolveBotSettingsValues,

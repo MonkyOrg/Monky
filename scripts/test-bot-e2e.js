@@ -10,7 +10,7 @@ import { spawn, spawnSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const { WebSocket } = require('ws');
 const { MonkyServer } = require('../apps/server/dist/server.js');
-const { BotClient, LIMITS, MessageType, PROTOCOL_VERSION } = require('../packages/bot-sdk/dist/index.js');
+const { BotClient, BOT_CAPABILITIES, LIMITS, MessageType, PROTOCOL_VERSION } = require('../packages/bot-sdk/dist/index.js');
 
 function identity() {
   const pair = generateKeyPairSync('ed25519');
@@ -70,7 +70,8 @@ class Peer {
     pc.addTransceiver('audio', { direction: 'recvonly' });
     pc.onIceCandidate.subscribe((candidate) => {
       if (candidate && this.voiceEnabled && this.voicePeers.get(sessionId) === pc && this.ws.readyState === WebSocket.OPEN) {
-        this.send(MessageType.RTC_SIGNAL, { targetSessionId: sessionId, signalType: 'candidate', candidate: candidate.toJSON() });
+        this.send(MessageType.RTC_SIGNAL, { fromSessionId: this.sessionId, targetSessionId: sessionId,
+          signalType: 'candidate', candidate: candidate.toJSON() });
       }
     });
     pc.onTrack.subscribe((track) => track.onReceiveRtp.subscribe((packet) => {
@@ -80,7 +81,7 @@ class Peer {
       await pc.setLocalDescription(await pc.createOffer());
       if (this.voiceEnabled) {
         this.send(MessageType.RTC_SIGNAL, {
-          targetSessionId: sessionId, signalType: 'offer', sdp: { type: 'offer', sdp: pc.localDescription.sdp },
+          fromSessionId: this.sessionId, targetSessionId: sessionId, signalType: 'offer', sdp: { type: 'offer', sdp: pc.localDescription.sdp },
         });
       }
     }
@@ -127,7 +128,7 @@ class Peer {
       await pc.setLocalDescription(await pc.createAnswer());
       if (this.voiceEnabled) {
         this.send(MessageType.RTC_SIGNAL, {
-          targetSessionId: signal.fromSessionId, signalType: 'answer', sdp: { type: 'answer', sdp: pc.localDescription.sdp },
+          fromSessionId: this.sessionId, targetSessionId: signal.fromSessionId, signalType: 'answer', sdp: { type: 'answer', sdp: pc.localDescription.sdp },
         });
       }
     }
@@ -244,6 +245,13 @@ let bot;
 let officialProcess;
 let officialExited;
 
+async function installReviewedBot(owner, manifestUrl) {
+  const preview = await owner.request(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl });
+  return owner.request(MessageType.BOT_INSTALL, {
+    previewId: preview.previewId, grantedCapabilities: preview.manifest.requestedCapabilities,
+  });
+}
+
 try {
   const port = await freePort();
   monky = await MonkyServer.create({ port, dataDir, serverName: 'Bot interaction test', maxUsers: 6 });
@@ -268,6 +276,7 @@ try {
   const botKeys = identity();
   const avatar = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJfcAAAAASUVORK5CYII=';
   bot = new BotClient({
+    requestedCapabilities: [...BOT_CAPABILITIES],
     serverUrl: url, token: created.token, publicKey: botKeys.publicKey, autoReconnect: false,
     name: 'Identity Bot', avatarBase64: avatar,
   });
@@ -406,6 +415,15 @@ try {
       if (result !== null) ctx.reply(`download:${result.status}`);
     },
   });
+  const declared = once(bot, 'permissionsChanged');
+  bot.connect({ serverId: 'e2e' });
+  const [permissions] = await declared;
+  assert.deepEqual(permissions.granted, [], 'A manual token cannot approve its own declaration.');
+  const reviewedDisconnect = once(bot, 'disconnected');
+  await owner.request(MessageType.BOT_PERMISSIONS_UPDATE, {
+    botId, expectedRevision: permissions.revision, granted: permissions.requested,
+  });
+  await reviewedDisconnect;
   bot.connect({ serverId: 'e2e' });
   await owner.wait((message) => message.type === MessageType.COMMANDS_LIST_RESPONSE &&
     message.payload.commands?.some((command) => command.botId === botId && command.name === 'guided'), 'command discovery');
@@ -985,7 +1003,7 @@ process.on('message', (message) => {
         runtime = startSoundBot();
         await waitForSoundManifest(runtime, manifestUrl);
         const beforeInstall = new Set(owner.messages);
-        const installed = await owner.request(MessageType.BOT_INSTALL, { manifestUrl });
+        const installed = await installReviewedBot(owner, manifestUrl);
         await waitForSoundBot(runtime, beforeInstall, installed.bot.id);
         const registrationsFile = path.join(workingDir, '.keys', 'registrations.json');
         const registrations = JSON.parse(fs.readFileSync(registrationsFile, 'utf8'));
@@ -1068,7 +1086,7 @@ process.on('message', (message) => {
     };
     await startOfficial();
     if (marketplaceRestart) {
-      const installed = await owner.request(MessageType.BOT_INSTALL, { manifestUrl });
+      const installed = await installReviewedBot(owner, manifestUrl);
       officialId = installed.bot.id;
     }
     assert.ok(officialId);
@@ -1469,6 +1487,7 @@ process.on('message', (message) => {
         refreshRegistry: async () => {
           const unrelated = await owner.request(MessageType.BOT_CREATE, {});
           const publisher = new BotClient({
+            requestedCapabilities: [],
             serverUrl: url, token: unrelated.token, publicKey: identity().publicKey,
             name: 'Refreshed offline bot', autoReconnect: false,
           });

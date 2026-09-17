@@ -59,7 +59,7 @@ export class SettingsSectionNavigation {
       menu.setAttribute('aria-labelledby', trigger.id);
       const expanded = trigger.getAttribute('aria-expanded');
       const controls = trigger.getAttribute('aria-controls');
-      trigger.setAttribute('aria-controls', menu.id);
+      trigger.setAttribute('aria-controls', controls ? `${controls} ${menu.id}` : menu.id);
       trigger.setAttribute('aria-expanded', 'false');
       trigger.after(menu);
       this.menus.set(tab, { trigger, menu, content, expanded: false, animation: null });

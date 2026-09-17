@@ -2,6 +2,12 @@ import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecor
 import type { BotSelector } from '@monky/shared';
 import type { BotSettingsRecord } from './entities';
 
+export interface IBotPermissionRepository {
+  findById(botId: string): import('@monky/shared').BotPermissions | undefined;
+  save(botId: string, permissions: import('@monky/shared').BotPermissions): void;
+  transaction<T>(operation: () => T): T;
+}
+
 export interface IBotSettingsRepository {
   /** Existing bots without a declaration return an empty revision-zero record. */
   findById(botId: string): BotSettingsRecord | undefined;

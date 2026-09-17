@@ -130,6 +130,67 @@ Para experimentar o CLI sem mexer nos seus servidores reais, aponte a variável
 `MONKY_HOME` para uma pasta descartável — é lá que fica o registro de servidores
 da máquina.
 
+### QA preparado, sem pular o alvo do teste
+
+Use `npm run qa -- <cenário>` para compilar esta branch e abrir **o aplicativo real**
+com servidor, perfil, identidade e dados descartáveis próprios. `npm start` e a
+instalação continuam inalterados. Nada é copiado do perfil instalado.
+
+| Cenário | O que já fica preparado | O que não é pulado |
+|---|---|---|
+| `connected` (padrão) | Identidade nova, autenticação como primeiro administrador, canais e mensagem de exemplo | A funcionalidade que será exercitada no chat |
+| `server-settings` | O mesmo, com Geral nas configurações reais aberto | Alterar/aplicar configurações |
+| `voice` | Usuário mutado, dispositivos sintéticos e segundo participante SDK por P2P real | Teste de voz; a fixture é identificada e não simula música de produção |
+| `home` | Identidade nova e introdução concluída; Home sem servidores salvos | Navegação/adição na Home e entrada no servidor |
+| `login` | Home com endereço local, apelido e senha de teste preenchidos | Enviar o formulário e autenticar |
+| `bot-install` | Servidor conectado e URL do bot preenchida nas configurações | Instalar/vincular o bot |
+| `tool-consent` | Bot instalado, catálogo registrado e comando local preenchido | Escolher o comando, consentir e preparar ferramentas |
+| `music` | MonkyBot de produção, voz e preparação local real | Consentimento humano obrigatório; só fica pronto após autorização e ferramentas verificadas. A música não é executada automaticamente |
+
+```powershell
+npm run qa -- server-settings
+npm run qa -- voice
+npm run qa -- bot-install --bot=fixture
+npm run qa -- tool-consent --bot=fixture
+npm run qa -- music --bot-root="C:\Projetos\MonkyBot"
+npm run qa -- connected --smoke
+```
+
+`--bot=fixture` é uma fixture SDK claramente identificada, nunca substituição do
+MonkyBot. `--bot-root` usa os comandos compilados reais de um checkout explícito
+de `@monky/bot`, com protocolo compatível; compile esse checkout antes, sem copiar
+suas chaves, registros ou consentimentos. O launcher não instala dependências nem
+mascara bot, manifest ou ferramenta ausentes.
+
+O módulo compilado `dist\commands\index.js` do MonkyBot precisa exportar
+`registerAllCommands` e a mesma `requestedCapabilities` usada por seu próprio
+`BotClient`: QA não inventa a declaração de produção. Nos cenários preparados,
+o owner realiza o preview real e aprova as capacidades declaradas via instalação
+autorizada. A fixture solicita apenas comandos e execução local, mais publicação
+de voz em `voice`. `bot-install` deixa instalação e revisão pendentes; permissão
+do servidor nunca substitui o consentimento local de `tool-consent`/`music`.
+
+Para testar a admissão do bot na chamada, use `connected --bot-root=...`, não
+`voice`/`music`: esses dois cenários já colocam o bot na voz.
+
+Aguarde **QA_READY**, não apenas a abertura da janela. Servidor, autenticação,
+mensagem persistida, catálogo e peer de voz são conferidos conforme o cenário.
+Os serviços usam loopback, não anunciam na LAN, e os dados ficam exclusivamente
+em `.qa\runs\<cenário>-<id>`, apagados ao encerrar. Fechar a janela ou usar `Ctrl+C`
+encerra os processos próprios; falhas de inicialização também fazem essa limpeza.
+
+`--smoke` verifica a prontidão com janela oculta e encerra tudo. Música de produção
+não pode aprovar consentimento sem pessoa: nesse modo ela falha claramente se a
+preparação depender de autorização. Após um build, `npm run test:qa` cobre o
+launcher e os cenários reais; `node scripts\qa.js connected --smoke` reutiliza
+esse build sem recompilar.
+
+Esse modo desliga atualizações automáticas, descoberta LAN e atalhos globais e
+usa captura sintética. **Não o use para testar essas etapas, identidade,
+onboarding ou hardware real**: use `npm start` com outro `--user-data-dir` isolado
+e realize explicitamente a etapa sob teste. O cenário `voice` não substitui QA
+com duas máquinas para problemas de rede, dispositivos ou SFU.
+
 ### Antes de começar a codar
 
 **Trabalhe a partir de uma issue.** Se o que você quer fazer ainda não é uma

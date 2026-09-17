@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { WebSocketServer } = require('ws');
 const {
-  BotClient, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, resolveBotSettingsValues,
+  BotClient, BOT_CAPABILITIES, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, resolveBotSettingsValues,
   getCommandPresentation, localizeCommand,
 } = require('../dist/index.js');
 
@@ -86,6 +86,7 @@ async function makeServer(t, handlers = {}) {
 
 function makeBot(t, server, options = {}) {
   const bot = new BotClient({
+    requestedCapabilities: [...BOT_CAPABILITIES],
     publicKey: 'a'.repeat(64), token: 'test-token', serverUrl: server.url, autoReconnect: false, ...options,
   });
   const errors = [];
@@ -93,6 +94,83 @@ function makeBot(t, server, options = {}) {
   t.after(() => bot.close());
   return { bot, errors };
 }
+
+test('bot capabilities require an explicit supported declaration without inferred access', async (t) => {
+  for (const requestedCapabilities of [undefined, ['receive_voice'], ['commands', 'commands']]) {
+    assert.throws(() => new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities }));
+  }
+  const server = await makeServer(t);
+  const requestedCapabilities = ['commands'];
+  const { bot, errors } = makeBot(t, server, { requestedCapabilities });
+  requestedCapabilities.push('local_execution');
+  bot.command({ name: 'ping', description: 'Private ping', handler() {} });
+  assert.throws(() => bot.command({ name: 'download', description: 'Missing download grant declaration', downloadsSound: true, handler() {} }),
+    /requestedCapabilities/);
+  assert.throws(() => bot.command({ name: 'local', description: 'Missing local grant declaration',
+    localCapabilities: ['media.search'], handler() {} }), /requestedCapabilities/);
+  const passive = makeBot(t, server, { requestedCapabilities: [] }).bot;
+  assert.throws(() => passive.command({ name: 'ping', description: 'Undeclared commands', handler() {} }), /requestedCapabilities/);
+  const listener = await bot.serve({ name: 'Declared bot', host: '127.0.0.1', port: 0 });
+  const manifest = await (await fetch(`http://127.0.0.1:${listener.address().port}/manifest`)).json();
+  assert.deepEqual(manifest.requestedCapabilities, ['commands']);
+  bot.connect({ serverId: 'permissions-server' });
+  const registration = await server.next(MessageType.COMMAND_REGISTER);
+  assert.deepEqual(registration.payload.requestedCapabilities, ['commands']);
+  assert.equal('granted' in registration.payload, false);
+  assert.deepEqual(errors, []);
+});
+
+test('permissions use immutable per-server snapshots, reject stale approvals and clear on disconnect', async (t) => {
+  const server = await makeSettingsServer(t);
+  const { bot, errors } = makeBot(t, server, { requestedCapabilities: ['commands', 'send_messages'] });
+  const changes = [];
+  bot.on('permissionsChanged', (permissions, context) => {
+    assertDeepFrozen(permissions);
+    assertDeepFrozen(context);
+    changes.push({ permissions, context });
+  });
+  bot.connect({ serverId: 'permissions-server' });
+  await server.next(MessageType.COMMAND_REGISTER);
+  assert.equal(bot.getPermissions('permissions-server'), undefined);
+  assert.equal(bot.getPermissions('another-server'), undefined);
+  const permissions = {
+    requested: ['commands', 'send_messages'], granted: ['commands'], revision: 2,
+    reviewRequired: false, reviewedBy: 'human-admin', reviewedAt: 1,
+  };
+  server.send(MessageType.COMMAND_REGISTERED, {
+    registered: 0, settings: { schemaRevision: 0, revision: 0, values: {} }, permissions,
+  });
+  await sdkBarrier(server);
+  const original = bot.getPermissions('permissions-server');
+  assert.deepEqual(original, permissions);
+  assertDeepFrozen(original);
+  assert.notEqual(original, changes[0].permissions);
+  assert.deepEqual(changes[0].context, { serverId: 'permissions-server' });
+  server.send(MessageType.BOT_PERMISSIONS_SNAPSHOT, { botId: 'bot-one', permissions });
+  await sdkBarrier(server);
+  assert.equal(changes.length, 1);
+  for (const invalid of [
+    { botId: 'wrong-bot', permissions },
+    { botId: 'bot-one', permissions: { ...permissions, granted: ['publish_voice'] } },
+    { botId: 'bot-one', permissions: { ...permissions, revision: 1 } },
+    { botId: 'bot-one', permissions: { ...permissions, granted: [] } },
+  ]) {
+    server.send(MessageType.BOT_PERMISSIONS_SNAPSHOT, invalid);
+    await sdkBarrier(server);
+    assert.deepEqual(bot.getPermissions('permissions-server'), original);
+  }
+  assert.equal(errors.length, 4);
+  const revoked = { ...permissions, revision: 3, granted: [] };
+  server.send(MessageType.BOT_PERMISSIONS_SNAPSHOT, { botId: 'bot-one', permissions: revoked });
+  await sdkBarrier(server);
+  assert.deepEqual(bot.getPermissions('permissions-server'), revoked);
+  assert.deepEqual(original, permissions);
+  assert.equal(changes.length, 2);
+  const disconnected = once(bot, 'disconnected');
+  server.disconnect();
+  await disconnected;
+  assert.equal(bot.getPermissions('permissions-server'), undefined);
+});
 
 test('manual authentication announces the bot-owned name before profile and command publication', { timeout: 10000 }, async (t) => {
   const server = await makeServer(t);
@@ -1838,7 +1916,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 19);
+  assert.equal(PROTOCOL_VERSION, 20);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

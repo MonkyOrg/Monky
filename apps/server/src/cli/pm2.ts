@@ -5,6 +5,7 @@ import { t } from './i18n/index';
 import { commandSucceeds, runSync } from './process';
 import { canonicalDataDir, LEGACY_PM2_PROCESS_NAME, serverIdFor } from './registry';
 import { resolveInterpreter } from './health';
+import { LIMITS } from '@monky/shared';
 
 export const PM2_PROCESS_PREFIX = 'monky-server';
 export const UPDATER_PROCESS_PREFIX = 'monky-updater';
@@ -202,6 +203,8 @@ export function generateEcosystem(options: EcosystemOptions): string {
     args: '--data "${resolvedDataDir}" --port ${options.port} --name "${serverName}"',
     cwd: '${resolvedDataDir}',
     autorestart: true,
+    shutdown_with_message: true,
+    kill_timeout: ${LIMITS.SHUTDOWN_GRACE_MS + 3500},
     watch: false,
     max_memory_restart: '512M',
     env: {

@@ -216,6 +216,8 @@ export const en: CliTranslationMap = {
   'lifecycle.logsAvailable': 'Logs are still available via "monky logs".',
   'lifecycle.notRegisteredStart': 'This server is not registered in PM2. Use "monky start" first.',
   'lifecycle.restartFailed': 'Failed to restart the server.',
+  'lifecycle.updateNoticeFailed': 'Could not prepare the update notice. The server was not restarted.',
+  'lifecycle.updateNoticeCleanupFailed': 'Restart finished, but the temporary update notice could not be cleared. Check the logs.',
   'lifecycle.restarted': 'Monky Server restarted successfully.',
   'lifecycle.pm2NoLogs': 'PM2 is not installed, so there are no persisted logs to read.',
   'lifecycle.logsExplain': '"monky logs" reads logs from the server started with "monky start" (which runs via PM2).',
