@@ -186,6 +186,10 @@ preparação depender de autorização. Após um build, `npm run test:qa` cobre 
 launcher e os cenários reais; `node scripts\qa.js connected --smoke` reutiliza
 esse build sem recompilar.
 
+No CI do macOS, os testes reais usam um Keychain temporário desbloqueado, com
+restauração ao final. A identidade continua passando pelo `safeStorage` do
+aplicativo; a preparação não desliga a criptografia para evitar prompts.
+
 Esse modo desliga atualizações automáticas, descoberta LAN e atalhos globais e
 usa captura sintética. **Não o use para testar essas etapas, identidade,
 onboarding ou hardware real**: use `npm start` com outro `--user-data-dir` isolado

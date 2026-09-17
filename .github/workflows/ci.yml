@@ -66,32 +66,7 @@ jobs:
         run: npm run build:light -- --arch ${{ matrix.arch }}
       - name: Prepare an isolated macOS test Keychain
         if: runner.os == 'macOS'
-        shell: python
-        run: |
-          import json, os, pathlib, secrets, shlex, subprocess
-
-          root = pathlib.Path(os.environ["RUNNER_TEMP"])
-          state_file = root / "monky-light-keychain-state.json"
-          if state_file.exists():
-              raise RuntimeError("A previous Light Keychain fixture was not restored")
-
-          def security(*args):
-              return subprocess.check_output(["security", *args], text=True).strip()
-
-          keychain = str(root / ("monky-light-" + secrets.token_hex(8) + ".keychain-db"))
-          previous = {
-              "default": shlex.split(security("default-keychain", "-d", "user"))[0],
-              "search": shlex.split(security("list-keychains", "-d", "user")),
-              "fixture": keychain,
-          }
-          state_file.write_text(json.dumps(previous), encoding="utf-8")
-          password = secrets.token_hex(24)
-          print("::add-mask::" + password, flush=True)
-          security("create-keychain", "-p", password, keychain)
-          security("set-keychain-settings", "-lut", "21600", keychain)
-          security("unlock-keychain", "-p", password, keychain)
-          security("list-keychains", "-d", "user", "-s", keychain)
-          security("default-keychain", "-d", "user", "-s", keychain)
+        run: python scripts/macos-test-keychain.py setup
       - name: Exercise native components without media devices
         # Keep the realtime audio clock check isolated from the other native processes.
         run: node --test --test-concurrency=1 scripts/test-light-contracts.js scripts/test-light-build.js apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs
@@ -103,27 +78,7 @@ jobs:
         run: node --test apps/light/test/server_fixture.test.cjs apps/light/test/headless_interop.test.cjs apps/light/test/browser_interop.test.cjs
       - name: Restore macOS Keychain configuration
         if: always() && runner.os == 'macOS'
-        shell: python
-        run: |
-          import json, os, pathlib, subprocess
-
-          state_file = pathlib.Path(os.environ["RUNNER_TEMP"]) / "monky-light-keychain-state.json"
-          if state_file.exists():
-              previous = json.loads(state_file.read_text(encoding="utf-8"))
-              operations = [
-                  ["list-keychains", "-d", "user", "-s", *previous["search"]],
-                  ["default-keychain", "-d", "user", "-s", previous["default"]],
-              ]
-              if pathlib.Path(previous["fixture"]).exists():
-                  operations.append(["delete-keychain", previous["fixture"]])
-              errors = []
-              for args in operations:
-                  result = subprocess.run(["security", *args], text=True, capture_output=True)
-                  if result.returncode:
-                      errors.append(args[0] + ": " + result.stderr.strip())
-              if errors:
-                  raise RuntimeError("Light Keychain cleanup failed: " + "; ".join(errors))
-              state_file.unlink()
+        run: python scripts/macos-test-keychain.py restore
 
   bot-tests:
     name: Bot interactions and SDK package
@@ -325,6 +280,10 @@ jobs:
           fi
           ffmpeg -hide_banner -version
 
+      - name: Prepare an isolated macOS test Keychain
+        if: runner.os == 'macOS'
+        run: python scripts/macos-test-keychain.py setup
+
       - name: Exercise client DOM and microphone state in Electron
         shell: bash
         run: |
@@ -377,3 +336,7 @@ jobs:
           npm exec -- tsc -p apps/client/tsconfig.test.json
           node apps/client/test/shortcutsDomSmoke.cjs
           node apps/client/test/shortcutWorkerSmoke.cjs
+
+      - name: Restore macOS Keychain configuration
+        if: always() && runner.os == 'macOS'
+        run: python scripts/macos-test-keychain.py restore

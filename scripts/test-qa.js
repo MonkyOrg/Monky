@@ -224,6 +224,7 @@ test('production without its own capability declaration fails before command reg
     await assert.rejects(runQa(parseQaArguments(['connected', '--bot-root', root, '--smoke']), {
       onReady() { ready = true; },
     }), error => error instanceof AggregateError &&
+      error.message.includes('must export its actual requestedCapabilities') &&
       error.errors.some(cause => cause.message.includes('must export its actual requestedCapabilities')));
     assert.equal(ready, false);
     await assert.rejects(fs.access(path.join(commands, 'registered')), /ENOENT/);
@@ -237,6 +238,7 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
     ['home'], ['login'], ['connected'], ['server-settings'], ['connected', '--bot=fixture'],
     ['bot-install', '--bot=fixture'], ['tool-consent', '--bot=fixture'], ['voice'],
   ]) {
+    if (t.signal.aborted) break;
     await t.test(args.join(' '), async () => {
       let observed;
       const result = await runQa(parseQaArguments([...args, '--smoke']), {
@@ -245,6 +247,10 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
           assert.equal(state.windowVisible, false);
           assert.ok(state.pids.every(alive));
           assert.equal((await fs.stat(path.join(state.root, 'client', 'identity.json'))).isFile(), true);
+          if (process.platform === 'darwin') {
+            const identity = JSON.parse(await fs.readFile(path.join(state.root, 'client', 'identity.json'), 'utf8'));
+            assert.equal(identity.storage, 'safeStorage', 'Prepared macOS identity must use the real unlocked test Keychain.');
+          }
           assert.ok(state.root.startsWith(path.join(repoRoot, '.qa', 'runs') + path.sep));
           assert.equal(paths.has(state.root), false);
           paths.add(state.root);

@@ -187,6 +187,10 @@ Production music cannot approve consent unattended: smoke fails clearly when
 authorization is needed. After a build, `npm run test:qa` covers the launcher and
 real scenarios; `node scripts\qa.js connected --smoke` reuses that build.
 
+On macOS CI, real application tests use a temporary unlocked Keychain and restore
+the original configuration afterwards. Identity still goes through the app's
+`safeStorage`; preparation does not disable encryption to avoid prompts.
+
 Prepared mode disables automatic updates, LAN discovery and global shortcuts,
 and uses synthetic capture. **Do not use it to test those steps, identities,
 onboarding or real hardware**: use ordinary `npm start` with another isolated

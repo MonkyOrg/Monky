@@ -199,7 +199,12 @@ export async function runQa(options, hooks = {}) {
     process.removeListener('SIGTERM', interrupt);
     if (children.every(child => child.isClosed())) await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 150 });
     else failures.push(new Error(`Could not confirm owned child termination; preserving QA data at ${root}.`));
-    if (failures.length) error = new AggregateError([...(error ? [error] : []), ...failures], 'Prepared QA startup/shutdown failed.');
+    if (failures.length) {
+      const causes = [...(error ? [error] : []), ...failures];
+      const primary = causes[0];
+      error = new AggregateError(causes,
+        `Prepared QA startup/shutdown failed: ${primary instanceof Error ? primary.message : String(primary)}`);
+    }
   }
   if (error) throw error;
   return result;
