@@ -458,7 +458,7 @@ export async function updateCommand(globalArgs: GlobalArgs, args: string[]): Pro
   if (shouldRestart) {
     const args = [installed.cliEntry];
     if (globalArgs.dataDirSpecified) args.push('--data', globalArgs.dataDir);
-    args.push('restart');
+    args.push('restart', '--after-update');
     const restart = spawnSync(process.execPath, args, { stdio: 'inherit', shell: false });
     if (restart.error || restart.status !== 0) {
       throw new Error(t('update.restartFailed', {

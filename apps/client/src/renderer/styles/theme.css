@@ -1580,6 +1580,8 @@ input:focus, textarea:focus, select:focus {
 .floating-context-menu {
   position: fixed;
   min-width: 190px;
+  max-width: calc(100vw - 24px);
+  box-sizing: border-box;
   background-color: var(--bg-panel);
   border: 1px solid var(--border-color);
   border-radius: 8px;
@@ -1589,6 +1591,23 @@ input:focus, textarea:focus, select:focus {
   flex-direction: column;
   padding: 6px;
   gap: 2px;
+}
+
+.floating-context-menu .server-dropdown-item {
+  white-space: normal;
+  text-align: left;
+}
+
+.floating-context-menu .context-menu-trailing {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.floating-context-menu kbd.context-menu-trailing {
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .floating-context-menu .server-dropdown-item.danger {
@@ -3995,14 +4014,71 @@ input:focus, textarea:focus, select:focus {
   outline: 2px solid var(--accent-primary);
   outline-offset: 3px;
 }
-.modal-card.bot-settings-card {
+.bot-settings-card .modal-footer {
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  padding: 12px 24px;
+  border-top: 1px solid var(--border-color);
+  margin: 0;
+  background: var(--bg-secondary);
+}
+.bot-settings-sidebar-title {
+  padding: 4px 10px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+.bot-settings-card .settings-sidebar [role="tablist"] {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bot-settings-card .settings-tab-btn {
+  text-align: left;
+}
+.bot-permission-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+.bot-permission-row > div {
+  min-width: 0;
+}
+.bot-permission-row .toggle-switch {
+  flex-shrink: 0;
+}
+.bot-permission-row .toggle-switch:has(input:focus-visible) {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 3px;
+}
+.bot-permission-row p {
+  margin: 6px 0 0;
+}
+.bot-permission-consent {
+  padding: 12px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.modal-card.bot-permission-review-card {
   width: min(740px, calc(100vw - 32px));
   max-width: 740px;
   max-height: calc(100vh - 32px);
   overflow: hidden;
 }
-.bot-settings-card .modal-header,
-.bot-settings-card .modal-footer {
+.bot-permission-review-body {
+  overflow-y: auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+}
+.bot-permission-review-card .modal-header,
+.bot-permission-review-card .modal-footer {
   flex-shrink: 0;
 }
 .bot-settings-body {
@@ -4061,17 +4137,6 @@ input:focus, textarea:focus, select:focus {
   margin-left: auto;
   flex-shrink: 0;
 }
-.bot-settings-tabs {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin: 16px 0;
-}
-.bot-settings-tabs [aria-selected="true"] {
-  border-color: var(--accent-primary);
-  color: var(--accent-primary);
-  background: var(--bg-hover);
-}
 .bot-settings-card .bot-choice-buttons [aria-pressed="true"] {
   border-color: var(--accent-primary);
   color: var(--accent-primary);
@@ -4085,9 +4150,6 @@ input:focus, textarea:focus, select:focus {
 }
 .bot-settings-host-preference {
   margin: 16px 0;
-}
-.bot-settings-card .modal-footer {
-  flex-wrap: wrap;
 }
 .bot-settings-card [data-settings-save] {
   margin-left: auto;

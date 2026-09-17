@@ -15,6 +15,7 @@ import { Logger } from '../logger/Logger';
 import { BotSettingsError, BotSettingsService } from '../../application/services/BotSettingsService';
 
 interface SelectorTransport {
+  allowsBot?(botId: string): boolean;
   sessions(): Iterable<BotInteractionSession>;
   isCurrent(session: BotInteractionSession): boolean;
   accessVersion(): number;
@@ -125,6 +126,9 @@ export class BotSelectorHandler {
           const input = parsed.data;
           const existing = this.selectors.get(input.id);
           if (!existing) throw new Error('Selector not found.');
+          if (this.transport.allowsBot?.(existing.botId) === false) {
+            throw new SelectorAccessError('Bot selector permission was revoked.', ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
+          }
           let owner: BotInteractionSession | undefined;
           while (true) {
             const accessVersion = this.transport.accessVersion();
@@ -144,6 +148,9 @@ export class BotSelectorHandler {
             if (!this.transport.isCurrent(session)) return;
             if (accessVersion !== this.transport.accessVersion() || (owner && !this.transport.isCurrent(owner))) continue;
             break;
+          }
+          if (this.transport.allowsBot?.(existing.botId) === false) {
+            throw new SelectorAccessError('Bot selector permission was revoked.', ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
           }
           if (!this.settings && !resolveBotSettingsValues(undefined, input.userSettings).success) {
             throw new BotSettingsError(ProtocolErrorCode.BOT_SETTINGS_INVALID, 'This bot declares no individual preferences.');
@@ -205,6 +212,14 @@ export class BotSelectorHandler {
   close(): void {
     this.closed = true;
     clearInterval(this.timer);
+  }
+
+  revokeBot(botId: string): Promise<void> {
+    return this.enqueue(async () => {
+      for (const selector of this.selectors.list(botId)) {
+        if (selector.closedAt === null) await this.notify(this.selectors.close(selector.id, botId));
+      }
+    });
   }
 
   private enqueue(work: () => Promise<void>): Promise<void> {
@@ -283,7 +298,7 @@ export class BotSelectorHandler {
     }
     return {
       ...publicFields, counts, responseCount: Object.keys(responses).length, ownResponse,
-      canRespond: permitted && selector.closedAt === null &&
+      canRespond: permitted && this.transport.allowsBot?.(selector.botId) !== false && selector.closedAt === null &&
         (selector.expiresAt === undefined || selector.expiresAt > Date.now()) &&
         (selector.responder === 'any' || invokerId === session.user!.id) &&
         (selector.allowChange || ownResponse === undefined),

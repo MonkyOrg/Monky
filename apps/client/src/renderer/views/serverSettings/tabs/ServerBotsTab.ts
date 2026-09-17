@@ -1,6 +1,7 @@
 import {
   MessageType,
   Permission,
+  botInstallPreviewSchema,
   type BotInfo,
   type BotCreatedPayload,
   type BotListResponsePayload,
@@ -12,6 +13,7 @@ import { getAvatarUrl } from '../../../utils/avatar';
 import { getLanguage, t } from '../../../i18n';
 import { showAlert, showConfirm } from '../../Dialog';
 import { botSettingsModal } from '../../BotSettingsModal';
+import { showBotPermissionReview } from '../../BotPermissionReview';
 import { botRequestError } from '../../../utils/botInputs';
 import type { ServerSettingsContext } from '../ServerSettingsContext';
 import { renderLoadingError, renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
@@ -36,6 +38,7 @@ export class ServerBotsTab {
   private statusTimer: ReturnType<typeof setTimeout> | null = null;
   private manualLinkExpanded = false;
   private hasLoadedList = false;
+  private reviewAbort = new AbortController();
 
   public renderHtml(): string {
     return `
@@ -109,6 +112,7 @@ export class ServerBotsTab {
 
   public attachEvents(container: HTMLElement, context: ServerSettingsContext): void {
     this.detachEvents();
+    this.reviewAbort = new AbortController();
     const root = container.querySelector<HTMLElement>('#server-bots-tab');
     if (!root) return;
     this.root = root;
@@ -143,7 +147,10 @@ export class ServerBotsTab {
       }),
       appEvents.on('user.updated', () => {
         if (this.isAttached()) void this.refreshList();
-      })
+      }),
+      appEvents.on('message.BOT_SETTINGS_LIST_RESPONSE', () => {
+        if (this.isAttached()) void this.refreshList();
+      }),
     );
     this.setManualLinkExpanded(this.manualLinkExpanded);
     this.refreshPermissions();
@@ -151,6 +158,7 @@ export class ServerBotsTab {
 
   public detachEvents(): void {
     this.generation++;
+    this.reviewAbort.abort();
     for (const fn of this.unbind) fn();
     this.unbind = [];
     if (this.statusTimer) clearTimeout(this.statusTimer);
@@ -180,6 +188,8 @@ export class ServerBotsTab {
       this.hadPermission = true;
       void this.refreshList();
     } else if (!allowed && this.hadPermission) {
+      this.reviewAbort.abort();
+      this.reviewAbort = new AbortController();
       this.hadPermission = false;
       this.pendingToken = null;
       this.bots = [];
@@ -224,14 +234,28 @@ export class ServerBotsTab {
       return;
     }
 
-    this.showInstallStatus('loading', t('bots.installing'));
+    this.showInstallStatus('loading', t('botPermissions.loadingPreview'));
     if (button) button.disabled = true;
 
     try {
-      const result = await context.operations.run('bot-install', t('bots.installTitle'), Permission.MANAGE_BOTS,
-        () => context.request<unknown>(MessageType.BOT_INSTALL, { manifestUrl: url }, Permission.MANAGE_BOTS, 30000));
+      const result = await context.operations.run('bot-install', t('bots.installTitle'), Permission.MANAGE_BOTS, async () => {
+        const response = await context.request<unknown>(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl: url }, Permission.MANAGE_BOTS, 15000);
+        if (!this.isAttached(generation, client)) return false;
+        const preview = botInstallPreviewSchema.parse(response);
+        this.showInstallStatus('loading', t('botPermissions.reviewHint'));
+        const grantedCapabilities = await showBotPermissionReview(preview, this.reviewAbort.signal);
+        if (!grantedCapabilities || !this.isAttached(generation, client)) return false;
+        this.showInstallStatus('loading', t('bots.installing'));
+        await context.request<unknown>(MessageType.BOT_INSTALL, { previewId: preview.previewId, grantedCapabilities }, Permission.MANAGE_BOTS, 30000);
+        return true;
+      });
       if (!result.ok) throw new Error(result.message);
       if (!this.isAttached(generation, client)) return;
+      if (!result.value) {
+        const status = this.root?.querySelector<HTMLElement>('#bot-install-status');
+        if (status) status.style.display = 'none';
+        return;
+      }
       if (urlInput) urlInput.value = '';
       this.showInstallStatus('success', t('bots.installSuccess'));
       void this.refreshList();
@@ -278,6 +302,11 @@ export class ServerBotsTab {
     this.creating = true;
     if (button) button.disabled = true;
     try {
+      const confirmed = await showConfirm({
+        title: t('bots.createTitle'), message: t('botPermissions.manualPending'),
+        confirmLabel: t('bots.createBtn'), signal: this.reviewAbort.signal,
+      });
+      if (!confirmed || !this.isAttached(generation, client)) return;
       const result = await context.operations.run('bot-create', t('bots.createTitle'), Permission.MANAGE_BOTS,
         () => context.request<BotCreatedPayload>(MessageType.BOT_CREATE, {}, Permission.MANAGE_BOTS));
       if (!result.ok) throw new Error(result.message);
@@ -355,6 +384,7 @@ export class ServerBotsTab {
       const meta = [
         pending ? t('bots.pendingIdentity') : t(bot.online ? 'botSettings.online' : 'botSettings.offline'),
         bot.bound ? t('bots.tofuBound') : null,
+        bot.permissions?.reviewRequired !== false ? t('botPermissions.reviewPending') : null,
         `${t('bots.createdAt')}: ${new Date(bot.createdAt).toLocaleDateString(getLanguage())}`,
       ].filter((value): value is string => !!value).map(escapeHtml).join(' • ');
       const configureTitle = pending ? t('bots.configurePending') : t('bots.configure');

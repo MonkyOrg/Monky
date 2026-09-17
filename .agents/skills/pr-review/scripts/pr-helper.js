@@ -6,12 +6,15 @@
  * Comandos:
  *   node pr-helper.js list                 - Lista os PRs abertos
  *   node pr-helper.js checkout <pr_number> - Faz checkout da branch do PR e analisa as mudanças
- *   node pr-helper.js start <target>       - Constrói e inicia a aplicação necessária (client, server, docs)
+ *   node pr-helper.js start <target> [scenario] [QA options] - Compila e inicia QA preparado
  */
 
 import { execSync } from 'child_process';
-import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import { parseQaArguments, runQa, scenarios } from '../../../../scripts/qa.js';
+
+const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -36,6 +39,7 @@ function run(cmd, inheritStdio = true) {
     return execSync(cmd, {
       encoding: 'utf-8',
       env: getEnv(),
+      cwd: repository,
       stdio: inheritStdio ? 'inherit' : 'pipe',
     });
   } catch (error) {
@@ -52,7 +56,7 @@ switch (command) {
     try {
       const output = execSync(
         'gh pr list --state open --json number,title,headRefName,author,updatedAt --template "{{range .}}#{{.number}} | {{.title}} | Branch: {{.headRefName}} | Autor: {{.author.login}}{{\\"\\n\\"}}{{end}}"',
-        { encoding: 'utf-8', env: getEnv() }
+        { encoding: 'utf-8', env: getEnv(), cwd: repository }
       );
       if (!output.trim()) {
         console.log('Nenhum Pull Request aberto encontrado.');
@@ -77,7 +81,7 @@ switch (command) {
 
     console.log('\n📂 Analisando arquivos alterados...');
     try {
-      const diffFiles = execSync('git diff main...HEAD --name-only', { encoding: 'utf-8', env: getEnv() })
+      const diffFiles = execSync('git --no-pager diff main...HEAD --name-only', { encoding: 'utf-8', env: getEnv(), cwd: repository })
         .split('\n')
         .map((f) => f.trim())
         .filter(Boolean);
@@ -100,13 +104,17 @@ switch (command) {
 
       console.log('\n💡 Comandos sugeridos para teste rápido:');
       if (hasShared || hasClient) {
-        console.log('  npm run build && npm start');
+        console.log('  npm run qa -- connected');
       } else if (hasServer) {
-        console.log('  npm run dev:server');
+        console.log('  npm run qa -- server-settings');
       } else if (hasDocs) {
         console.log('  npm run docs:dev');
       } else {
         console.log('  npm test');
+      }
+      if (hasShared || hasClient || hasServer) {
+        console.log('  Escolha home/login/bot-install/tool-consent quando essa etapa for o alvo; nunca pule o teste.');
+        console.log('  Música exige --bot-root explícito; voice usa uma fixture SDK identificada, não MonkyBot.');
       }
     } catch (e) {
       console.error('Não foi possível obter o diff detalhado:', e.message);
@@ -118,16 +126,18 @@ switch (command) {
     const target = args[1] || 'client';
     console.log(`\n🚀 Preparando e iniciando: ${target}...\n`);
 
-    if (target === 'client') {
-      console.log('🔨 Compilando shared e client...');
-      run('npm run build');
-      console.log('✨ Iniciando Electron client...');
-      run('npm start');
-    } else if (target === 'server') {
-      console.log('🔨 Compilando shared e server...');
-      run('npm run build:server');
-      console.log('✨ Iniciando servidor...');
-      run('npm run dev:server');
+    if (target === 'client' || target === 'server') {
+      try {
+        const qaArgs = args.slice(2);
+        if (target === 'server' && !qaArgs.some(argument => scenarios.includes(argument))) qaArgs.unshift('server-settings');
+        const options = parseQaArguments(qaArgs);
+        console.log(`🔨 Compilando esta branch para QA ${options.scenario}...`);
+        run('npm run build');
+        await runQa(options, { log: console.log });
+      } catch (error) {
+        console.error('QA não ficou pronto:', error);
+        process.exitCode = 1;
+      }
     } else if (target === 'docs') {
       console.log('✨ Iniciando servidor de docs...');
       run('npm run docs:dev');
@@ -142,7 +152,12 @@ switch (command) {
 Uso do PR Helper:
   node pr-helper.js list                 - Lista os PRs abertos
   node pr-helper.js checkout <pr_number> - Checkout do PR e análise de escopo
-  node pr-helper.js start <target>       - Inicia a aplicação (client | server | docs)
+  node pr-helper.js start client [scenario] [--bot=fixture | --bot-root <checkout>] [--smoke]
+  node pr-helper.js start server [scenario] - QA real; padrão server-settings
+  node pr-helper.js start docs              - Inicia VitePress
+
+Cenários: ${scenarios.join(', ')}
+Só entregue o ambiente após QA_READY. Não use preparação para pular a etapa sob teste.
 `);
     break;
 }

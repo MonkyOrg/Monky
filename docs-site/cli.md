@@ -642,6 +642,13 @@ artefatos da release no GitHub.
 
 Ao final, o servidor é reiniciado (com confirmação, exceto com `--yes`).
 
+Antes de desconectar os participantes para esse reinício, o servidor informa
+que está em atualização. Os clientes mostram um aviso próprio no idioma
+selecionado e orientam a reconectar em alguns segundos. Isso exige um processo
+do servidor que já ofereça esse aviso; um processo antigo, ainda em execução
+durante a primeira atualização, pode enviar apenas o aviso genérico de encerramento.
+Recusar o reinício não desconecta participantes nem envia um aviso de atualização.
+
 ### Exemplos
 
 ```bash

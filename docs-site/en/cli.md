@@ -639,6 +639,13 @@ the GitHub release artifacts.
 
 At the end the server is restarted (with confirmation, except with `--yes`).
 
+Before disconnecting participants for that restart, the server reports that
+it is updating. Clients show a dedicated notice in their selected language
+and ask them to reconnect in a few seconds. This requires a running server
+process that already supports the notice; an older process still running
+during its first upgrade may send only the generic shutdown notice.
+Declining the restart neither disconnects participants nor sends an update notice.
+
 ### Examples
 
 ```bash

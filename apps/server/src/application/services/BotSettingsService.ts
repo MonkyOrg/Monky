@@ -7,13 +7,14 @@ import {
 } from '@monky/shared';
 import type { BotSettingsRecord } from '../../domain/entities';
 import type { IBotSettingsRepository } from '../../domain/repositories';
+import type { BotPermissionService } from './BotPermissionService';
 
 export class BotSettingsError extends Error {
   constructor(readonly code: ProtocolErrorCode, message: string) { super(message); }
 }
 
 export class BotSettingsService {
-  constructor(private repository: IBotSettingsRepository) {}
+  constructor(private repository: IBotSettingsRepository, private permissions?: BotPermissionService) {}
 
   register(botId: string, input: BotSettingsDefinition | undefined, downloadsSound: boolean): BotServerSettingsSnapshot {
     const parsed = botSettingsDefinitionSchema.safeParse(input ?? {});
@@ -80,18 +81,18 @@ export class BotSettingsService {
     });
   }
 
-  list(bots: BotInfo[], canConfigure: boolean): BotSettingsListResponse {
+  list(bots: BotInfo[], canConfigure: boolean, canManage = false): BotSettingsListResponse {
     const summaries: BotSettingsSummary[] = [];
     for (const bot of bots) {
       if (bot.profilePending) continue;
       const record = this.repository.findById(bot.id);
       // A bot may be revoked while the asynchronous identity list is being read.
-      if (record) summaries.push(this.summary(bot, record, canConfigure));
+      if (record) summaries.push(this.summary(bot, record, canConfigure, canManage));
     }
     return botSettingsListResponseSchema.parse({ bots: summaries });
   }
 
-  snapshot(bot: BotInfo, canConfigure: boolean, owningBot = false): BotSettingsSnapshot {
+  snapshot(bot: BotInfo, canConfigure: boolean, owningBot = false, canManage = false): BotSettingsSnapshot {
     if (bot.profilePending) {
       throw new BotSettingsError(ProtocolErrorCode.BAD_REQUEST, 'This bot link is awaiting the bot identity.');
     }
@@ -115,7 +116,7 @@ export class BotSettingsService {
       if (Object.keys(localizations).length) definition.localizations = localizations;
     }
     return botSettingsSnapshotSchema.parse({
-      bot: this.summary(bot, record, canConfigure),
+      bot: this.summary(bot, record, canConfigure, canManage),
       definition,
       ...(readServer && record.definition.server ? { server: this.serverSnapshot(record) } : {}),
     });
@@ -135,12 +136,13 @@ export class BotSettingsService {
     };
   }
 
-  private summary(bot: BotInfo, record: BotSettingsRecord, canConfigure: boolean): BotSettingsSummary {
+  private summary(bot: BotInfo, record: BotSettingsRecord, canConfigure: boolean, canManage: boolean): BotSettingsSummary {
     return {
       botId: bot.id, name: bot.name, avatarUrl: bot.avatarUrl, online: bot.online,
       capabilities: { downloadsSound: record.downloadsSound },
       schemaRevision: record.schemaRevision, revision: record.revision,
       hasServerSettings: !!record.definition.server, hasUserSettings: !!record.definition.user, canConfigure,
+      permissions: this.permissions?.get(bot.id) ?? bot.permissions, canManage,
     };
   }
 

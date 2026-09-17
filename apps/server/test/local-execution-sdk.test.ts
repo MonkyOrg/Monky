@@ -14,6 +14,7 @@ import {
 } from '@monky/bot-sdk';
 import {
   LOCAL_MEDIA_CHANNEL_LABEL,
+  BOT_CAPABILITIES,
   LOCAL_MEDIA_CHANNEL_OPTIONS,
   LOCAL_MEDIA_FORMAT,
   MessageType,
@@ -100,8 +101,13 @@ test('local execution SDK and real server pair private Opus with retained source
     const created = await owner.peer.request(MessageType.BOT_CREATE, {});
     assert.equal(created.type, MessageType.BOT_CREATED);
     const botId = text(record(created.payload.bot).id);
+    const declaration = f.botPermissions.declare(botId, [...BOT_CAPABILITIES]);
+    f.botPermissions.approve(owner.id, {
+      botId, expectedRevision: declaration.permissions.revision, granted: [...BOT_CAPABILITIES],
+    });
     const botKeys = identity();
     const bot = new BotClient({
+      requestedCapabilities: [...BOT_CAPABILITIES],
       serverUrl: f.url, token: text(created.payload.token), publicKey: botKeys.publicKey,
       name: 'Combined SDK fixture', autoReconnect: false,
     });

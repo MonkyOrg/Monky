@@ -24,6 +24,8 @@ import { confirmDisconnectingUsers, readLocalServerPreview, resolveServerPort } 
 import { knownServers, resolveTargetServer } from '../target';
 import { CoturnManager, TURN_LISTENING_PORT } from '../../infrastructure/turn/CoturnManager';
 import { getCliLanguage, t } from '../i18n/index';
+import { prepareUpdateRestart } from '../../infrastructure/lifecycle/updateRestart';
+import { Logger } from '../../infrastructure/logger/Logger';
 
 /**
  * Flags that only ever applied while the database was being created.
@@ -221,17 +223,34 @@ export async function restartServerCommand(globalArgs: GlobalArgs, args: string[
   // A restart drops every open session, same as a stop (#334).
   if (!(await confirmDisconnectingUsers(target, t('action.restart')))) return;
 
-  retireLegacyProcess(target.dataDir);
-
   // Rewriting the ecosystem before restarting is what makes a port or name
   // changed in the meantime actually take effect.
   const plan = await buildStartPlan(target.dataDir, args);
   const ecosystemPath = writeEcosystem(plan);
-  recreateIfStale(processName, findPm2Process(processName), fresh);
-
-  const result = runSync('pm2', ['startOrRestart', ecosystemPath], { stdio: 'inherit' });
-  if (result.status !== 0) {
-    throw new Error(t('lifecycle.restartFailed'));
+  const current = findPm2Process(processName) ?? findLegacyProcessFor(target.dataDir);
+  let clearIntent: (() => void) | undefined;
+  if (args.includes('--after-update') && current?.pm2_env?.status === 'online' && current.pid) {
+    try { clearIntent = prepareUpdateRestart(target.dataDir, current.pid); }
+    catch (error) {
+      Logger.error('ERROR', 'Could not prepare the update restart notice.', error);
+      throw new Error(t('lifecycle.updateNoticeFailed'));
+    }
+  }
+  let restartFailed = false;
+  try {
+    retireLegacyProcess(target.dataDir);
+    recreateIfStale(processName, current, fresh);
+    const result = runSync('pm2', ['startOrRestart', ecosystemPath], { stdio: 'inherit' });
+    if (result.status !== 0) throw new Error(t('lifecycle.restartFailed'));
+  } catch (error) {
+    restartFailed = true;
+    throw error;
+  } finally {
+    try { clearIntent?.(); }
+    catch (error) {
+      Logger.error('ERROR', 'Could not clear the update restart notice.', error);
+      if (!restartFailed) throw new Error(t('lifecycle.updateNoticeCleanupFailed'));
+    }
   }
 
   runSync('pm2', ['save'], { stdio: 'ignore' });

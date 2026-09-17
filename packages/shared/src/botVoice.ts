@@ -52,6 +52,42 @@ export const botVoiceSignalSchema = z.object({
 });
 export type BotVoiceSignal = z.infer<typeof botVoiceSignalSchema>;
 
+/** P2P bot links have one audio publisher, never a channel-media receiver. */
+export function isBotPublishSignalAllowed(input: unknown, fromBot: boolean): boolean {
+  const parsed = botVoiceSignalSchema.safeParse(input);
+  if (!parsed.success) return false;
+  const signal = parsed.data;
+  if (signal.signalType === 'candidate') return signal.candidate !== undefined;
+  if (signal.signalType === 'user-left') return true;
+  if ((signal.signalType !== 'offer' && signal.signalType !== 'answer') ||
+      !signal.sdp || signal.sdp.type !== signal.signalType) return false;
+  const sections: Array<{ kind: string; port: string; bundleOnly: boolean; directions: string[] }> = [];
+  const sessionDirections: string[] = [];
+  for (const rawLine of signal.sdp.sdp.split(/\r\n|\n|\r/)) {
+    const line = rawLine.trim();
+    if (line.startsWith('m=')) {
+      const [kind, port] = line.slice(2).trim().split(/\s+/);
+      if (!kind || !port || !/^\d+$/.test(port)) return false;
+      sections.push({ kind, port, bundleOnly: false, directions: [] });
+    } else if (line === 'a=bundle-only') {
+      const section = sections.at(-1);
+      if (!section) return false;
+      section.bundleOnly = true;
+    } else if (/^a=(sendrecv|sendonly|recvonly|inactive)$/.test(line)) {
+      (sections.at(-1)?.directions ?? sessionDirections).push(line.slice(2));
+    }
+  }
+  if (!sections.length || sessionDirections.length > 1) return false;
+  let audio = 0;
+  return sections.every((section) => {
+    if (section.directions.length > 1) return false;
+    if (section.port === '0' && !section.bundleOnly) return true;
+    const direction = section.directions[0] ?? sessionDirections[0] ?? 'sendrecv';
+    if (direction === 'inactive') return true;
+    return section.kind === 'audio' && ++audio === 1 && direction === (fromBot ? 'sendonly' : 'recvonly');
+  });
+}
+
 export const botVoiceTransportSchema = z.object({
   transportOptions: z.object({
     id,

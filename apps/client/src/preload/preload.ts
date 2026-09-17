@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
+import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
   ActionShortcutBinding,
   AudioPreviewCancellation,
@@ -11,6 +11,8 @@ import type {
   ClientLogConfig,
   ClientLogEntry,
   DesktopSource,
+  DevelopmentQaConfig,
+  DevelopmentQaReport,
   DiscoveredLanServer,
   HostServerOptions,
   ImageSelectionResult,
@@ -64,6 +66,8 @@ import type {
 export type { LinkPreviewData, OverlayBounds, OverlayConfig, OverlayMode, OverlayLayout, OverlayPosition, OverlayParticipantState, OverlaySyncState } from '@monky/shared';
 
 export interface ElectronApi {
+  getDevelopmentQaConfig: () => Promise<DevelopmentQaConfig | null>;
+  reportDevelopmentQaState: (report: DevelopmentQaReport) => Promise<boolean>;
   startLanDiscovery: () => Promise<void>;
   stopLanDiscovery: () => Promise<void>;
   onLanDiscoveryFound: (cb: (server: DiscoveredLanServer) => void) => () => void;
@@ -199,8 +203,11 @@ export interface ElectronApi {
   platform: string;
 }
 
+const preparedQa = process.argv.includes('--monky-prepared-qa');
 const api: ElectronApi = {
-  startLanDiscovery: () => ipcRenderer.invoke('lan:start'),
+  getDevelopmentQaConfig: () => preparedQa ? ipcRenderer.invoke(DEVELOPMENT_QA_IPC.config) : Promise.resolve(null),
+  reportDevelopmentQaState: (report) => ipcRenderer.invoke(DEVELOPMENT_QA_IPC.report, report),
+  startLanDiscovery: () => preparedQa ? Promise.resolve() : ipcRenderer.invoke('lan:start'),
   stopLanDiscovery: () => ipcRenderer.invoke('lan:stop'),
   onLanDiscoveryFound: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, server: DiscoveredLanServer) => cb(server);

@@ -13,7 +13,7 @@ const { test } = require('node:test');
 const { WebSocket, WebSocketServer } = require('ws');
 const { BotClient } = require('@monky/bot-sdk');
 const {
-  MessageType, PROTOCOL_VERSION, localTaskOfferSchema, localMediaSignalSchema,
+  botCapabilitiesSchema, MessageType, PROTOCOL_VERSION, localTaskOfferSchema, localMediaSignalSchema,
 } = require('@monky/shared');
 const clientRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(clientRoot, '..', '..');
@@ -362,7 +362,7 @@ function assertTaskTrace(rows, taskId, frames, startIndex) {
 }
 
 for (const mode of ['p2p', 'sfu']) {
-  test(`${musicBotRoot ? 'production MonkyBot commands and mixed requester queue' : 'real protocol19 local executor -> private RTC -> SDK bot voice'} -> decoded renderer PCM (${mode.toUpperCase()})`, {
+  test(`${musicBotRoot ? 'production MonkyBot commands and mixed requester queue' : 'real protocol20 local executor -> private RTC -> SDK bot voice'} -> decoded renderer PCM (${mode.toUpperCase()})`, {
     timeout: 180_000, concurrency: false,
   }, t => runMediaSmoke(t, mode));
 }
@@ -371,7 +371,7 @@ async function runMediaSmoke(t, mode) {
   assert.ok(ffmpeg && path.isAbsolute(ffmpeg),
     'Set MONKY_WORKER_TEST_FFMPEG to an existing explicit fixture FFmpeg; this smoke never installs tools.');
   assert.ok((await fs.stat(ffmpeg)).isFile());
-  assert.equal(PROTOCOL_VERSION, 19);
+  assert.equal(PROTOCOL_VERSION, 20);
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `monky-local-execution-e2e-${mode}-`));
   const oldHome = process.env.MONKY_HOME;
   process.env.MONKY_HOME = path.join(root, 'monky-home');
@@ -461,14 +461,17 @@ async function runMediaSmoke(t, mode) {
   const registration = await executor.call('createBot');
   const botKeys = generateKeyPairSync('ed25519');
   let Bot = BotClient;
+  let requestedCapabilities = ['commands', 'send_messages', 'publish_voice', 'local_execution'];
   if (musicBotRoot) {
     assert.ok(path.isAbsolute(musicBotRoot), 'MONKY_LOCAL_E2E_MUSIC_BOT_ROOT must be an explicit absolute checkout path.');
     const fromBot = createRequire(path.join(musicBotRoot, 'package.json'));
     const sdk = fromBot('@monky/bot-sdk');
     assert.equal(sdk.PROTOCOL_VERSION, PROTOCOL_VERSION);
+    requestedCapabilities = botCapabilitiesSchema.parse(fromBot('./dist/commands').requestedCapabilities);
     Bot = sdk.BotClient;
   }
   bot = new Bot({
+    requestedCapabilities,
     serverUrl: `ws://127.0.0.1:${port}`, token: registration.token,
     publicKey: botKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('hex'),
     name: 'Authored local smoke', avatarBase64: null, autoReconnect: false,
@@ -535,8 +538,20 @@ async function runMediaSmoke(t, mode) {
     },
   });
   const connected = once(bot, 'connected');
+  const declaration = once(bot, 'permissionsChanged');
   bot.connect({ serverId: requester.serverId });
   await connected;
+  const [unreviewed] = await declaration;
+  assert.deepEqual(unreviewed.requested, requestedCapabilities);
+  assert.deepEqual(unreviewed.granted, []);
+  const disconnectedForReview = once(bot, 'disconnected');
+  await executor.call('approveBot', registration.bot.id, unreviewed.revision, unreviewed.requested);
+  await disconnectedForReview;
+  const approvedRegistration = once(bot, 'permissionsChanged');
+  bot.connect({ serverId: requester.serverId });
+  const [approved] = await approvedRegistration;
+  assert.equal(approved.reviewedBy, requester.userId);
+  assert.deepEqual(approved.granted, unreviewed.requested);
   await until(() => rows.some(row => row.type === MessageType.COMMAND_REGISTERED && row.direction === 'out'),
     'real bot command registration');
   await executor.call('join');

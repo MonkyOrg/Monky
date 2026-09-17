@@ -88,6 +88,12 @@ if (!process.versions.electron) {
     if (process.argv.includes('--bot-settings-only')) {
       const checks = await window.webContents.executeJavaScript(`(${runBotSettingsDomSmoke.toString()})()`, true);
       await window.webContents.executeJavaScript('document.body.innerHTML = window.botSettingsPreviewMarkup', true);
+      await window.webContents.executeJavaScript(`(async () => {
+        await document.fonts.ready;
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        await Promise.all(document.getAnimations().filter(animation =>
+          animation.effect?.getComputedTiming().iterations !== Infinity).map(animation => animation.finished));
+      })()`, true);
       fs.writeFileSync(path.join(output, 'bot-settings.png'), (await window.webContents.capturePage()).toPNG());
       console.log(`Bot settings DOM smoke: ${checks} checks passed`);
       await finish(0);
@@ -2289,6 +2295,7 @@ async function runMessageToolbarPointerSmoke(window) {
     await evaluate(`Array.from(document.querySelectorAll('.floating-context-menu button'))
       .find(button => button.textContent.includes('content_copy')).id = 'toolbar-menu-copy'`);
     await click('#toolbar-menu-copy');
+    await click('.floating-context-submenu button:first-child');
     await check(`!(${visible}) && !document.querySelector('.floating-context-menu')`,
       'Selecting a submenu action also dismisses the toolbar');
     await evaluate('window.finishToolbarPointerCopy()');
@@ -3346,9 +3353,12 @@ async function runDomSmoke() {
   check(!document.querySelector('.floating-context-menu'), 'Escape must close message menu');
   check(document.activeElement.dataset.messageAction === 'more', 'Escape must return focus to toolbar');
   const originalWriteText = navigator.clipboard.writeText;
+  const originalWrite = navigator.clipboard.write;
   let copiedMessage = '';
+  let copiedItem;
   let finishCopy;
   navigator.clipboard.writeText = (value) => new Promise((resolve) => { copiedMessage = value; finishCopy = resolve; });
+  navigator.clipboard.write = (items) => { copiedItem = items[0]; return navigator.clipboard.writeText(''); };
   try {
     const copyToolbar = find('.chat-message-toolbar');
     const toolbarWidth = copyToolbar.getBoundingClientRect().width;
@@ -3357,7 +3367,9 @@ async function runDomSmoke() {
     check(!document.querySelector('.chat-copy-toast'), 'Copy must not report success before the clipboard write finishes');
     finishCopy();
     await Promise.resolve();
-    check(copiedMessage === original.content, 'Copy message must preserve plain source text without markup');
+    copiedMessage = await (await copiedItem.getType('text/plain')).text();
+    check(copiedMessage === original.content, 'Copy message must preserve visible text in the plain MIME flavor');
+    check(copiedItem.types.includes('text/html'), 'Normal message copying also provides formatted HTML');
     check(find('.chat-copy-toast-label').textContent === 'Copiado!', 'Copy success must display a localized toast');
     check(find('.chat-copy-toast').parentElement === document.body && getComputedStyle(find('.chat-copy-toast')).position === 'fixed', 'Copy toast must be outside the hover toolbar and anchored to the viewport');
     check(find('.chat-copy-toast').getAttribute('role') === 'status', 'Copy toast must expose accessible status feedback');
@@ -3375,6 +3387,8 @@ async function runDomSmoke() {
       .find((button) => button.textContent.includes('Copy message'));
     check(!!menuCopy, 'Message menu must expose its localized copy action');
     menuCopy.click();
+    check(!!document.querySelector('.floating-context-submenu'), 'Copy exposes both formatting modes');
+    find('.floating-context-submenu button').click();
     await Promise.resolve();
     check(!document.querySelector('.floating-context-menu'), 'Copy from menu must close the menu');
     check(find('.chat-copy-toast-label').textContent === 'Copied!', 'Menu copy must show the same toast in English');
@@ -3406,6 +3420,7 @@ async function runDomSmoke() {
     view.render();
   } finally {
     navigator.clipboard.writeText = originalWriteText;
+    navigator.clipboard.write = originalWrite;
     language.setLanguage('pt-BR');
   }
   find('[data-message-action="reply"]').click();
@@ -4223,7 +4238,9 @@ async function runDomSmoke() {
     const { initTooltips } = await import('/core/TooltipService.ts');
     const offTooltips = initTooltips();
     const writeText = navigator.clipboard.writeText;
+    const write = navigator.clipboard.write;
     navigator.clipboard.writeText = () => new Promise(resolve => { window.finishToolbarPointerCopy = resolve; });
+    navigator.clipboard.write = () => navigator.clipboard.writeText('');
     store.addMessage({ ...original, id: 'toolbar-pointer', channelId: 'two', content: 'Toolbar pointer fixture', createdAt: Date.now() });
     view.setChannel('two');
     const pointerRow = find('[data-message-id="toolbar-pointer"]');
@@ -4234,6 +4251,7 @@ async function runDomSmoke() {
       contextMenu.close();
       view.reactionPicker?.close();
       navigator.clipboard.writeText = writeText;
+      navigator.clipboard.write = write;
       offTooltips();
     };
     await frame();

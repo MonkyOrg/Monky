@@ -73,6 +73,16 @@ rather than on Home cards. The server dropdown no longer repeats a
 **Bots on this server** entry. Personal preferences remain available through the
 bot's own menu in the member list.
 
+In **Server Settings → General → Server Information**, the version belongs to
+the process hosting that server, not the desktop client on your computer.
+Click the version to copy it. If the server does not provide this information,
+the app states that explicitly rather than substituting the local version.
+
+When a server restarts to install an update, connected clients receive a
+dedicated Monky notice in their selected language, asking them to try reconnecting
+in a few seconds. This also appears for a background server; an ordinary shutdown
+continues to use the server-closed notice.
+
 ### Color picker
 
 The physical chroma-key screen color, virtual background color and role

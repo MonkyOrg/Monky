@@ -2,13 +2,15 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator } from '@monky/shared';
+import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator, type ServerShutdownReason } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
 import { AttachmentService } from './application/services/AttachmentService';
 import { BotService } from './application/services/BotService';
 import { BotSelectorService } from './application/services/BotSelectorService';
 import { BotSettingsService } from './application/services/BotSettingsService';
 import { SqliteBotSettingsRepository } from './infrastructure/database/SqliteBotSettingsRepository';
+import { SqliteBotPermissionRepository } from './infrastructure/database/SqliteBotPermissionRepository';
+import { BotPermissionService } from './application/services/BotPermissionService';
 import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
 import { CommandRegistry } from './application/services/CommandRegistry';
 import { ChannelService } from './application/services/ChannelService';
@@ -44,10 +46,12 @@ import { SfuManager } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
 import { closeHttpServer, listenHttpServer } from './infrastructure/lifecycle/httpLifecycle';
 import { ServerResourceScope } from './infrastructure/lifecycle/ServerResourceScope';
+import { resolveServerVersion } from './runtimeVersion';
 
 export interface ServerConfig {
   port: number;
   dataDir: string;
+  version?: string;
   serverName?: string;
   discoveryPort?: number;
   password?: string;
@@ -193,6 +197,7 @@ export class MonkyServer {
   private readonly startupTasks: Promise<void>[] = [];
   private stopping = false;
   private stopped = false;
+  private shutdownReason: ServerShutdownReason = 'stopped';
 
   private constructor(
     private config: ServerConfig,
@@ -297,6 +302,7 @@ export class MonkyServer {
 
     // Bot infrastructure (#569).
     const botRepo = new SqliteBotRepository(db);
+    const botPermissions = new BotPermissionService(new SqliteBotPermissionRepository(db));
     const botService = new BotService(
       botRepo,
       serverRepo,
@@ -308,7 +314,8 @@ export class MonkyServer {
           if (user.isBot) bots.set(user.id, user);
         }
         return bots;
-      }
+      },
+      botPermissions,
     );
     const commandRegistry = new CommandRegistry();
 
@@ -472,10 +479,11 @@ export class MonkyServer {
       botService,
       commandRegistry,
       new BotSelectorService(new SqliteBotSelectorRepository(db)),
-      new BotSettingsService(new SqliteBotSettingsRepository(db)),
+      new BotSettingsService(new SqliteBotSettingsRepository(db), botPermissions),
       monitorService,
+      resolveServerVersion(config.version),
     );
-    resources.defer('WebSocket server', () => wsServer.close());
+    resources.defer('WebSocket server', () => wsServer.close(instance?.shutdownReason ?? 'stopped'));
 
     getOnlineUsers = () => wsServer.getOnlineUsersMap();
 
@@ -708,9 +716,10 @@ export class MonkyServer {
     }
   }
 
-  public async stop(): Promise<void> {
+  public async stop(reason: ServerShutdownReason = 'stopped'): Promise<void> {
     await Logger.withScope(this.logScope, async () => {
       if (this.stopped) return;
+      if (!this.stopping) this.shutdownReason = reason;
       this.stopping = true;
       Logger.info('INFO', 'Stopping Monky Server...');
       await this.resources.close();

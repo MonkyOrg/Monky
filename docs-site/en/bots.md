@@ -33,21 +33,22 @@ User sees the response
 This is the default flow, including for private bots. The endpoint must be
 reachable by the Monky server; it does not need a public catalogue listing.
 
-1. The bot serves an **HTTP manifest** containing its identity, description, and registration URL
+1. The bot serves an **HTTP manifest** containing its identity, description, requested capabilities, and registration URL
 2. In the client, go to **Server Settings → Bots**
-3. Paste the manifest URL in the URL-linking section and confirm
-4. The server validates the bot-provided identity and sends the link token automatically
-5. The bot auto-connects and registers its commands
+3. Paste the manifest URL under **Link bot by URL** and open the review
+4. Review every switch; all start off. **Allow all requested capabilities** selects only what the bot requested
+5. Confirm installation. The server refetches the manifest and registers the link; the approved subset is enabled only after registration is verified
 
 ### 2. Manual token connection (advanced)
 
 Use this when the bot can only make outbound connections and has no HTTP
 endpoint reachable by the Monky server.
 
-1. In the client, open **Server Settings → Bots → Advanced**
-2. Generate a manual link without entering a name or avatar
+1. In the client, open **Server Settings → Bots → Show advanced option**
+2. Generate a manual link without entering a name or avatar, confirming that the token does not authorize actions
 3. Copy the token (shown **only once**) into the bot's setup/code
-4. The link waits for the bot to connect; the bot announces its name during authentication and publishes its avatar through the SDK
+4. The link waits for the bot to connect; it publishes its identity and declares capabilities through the SDK, still without authority to perform actions
+5. Open **Bot settings → Server permissions**, select the switches and save. The bot may reconnect after the review
 
 **Only the bot controls its name and avatar.** The client links bots, configures
 their behavior, and unlinks them; it does not edit their identity. Existing
@@ -57,18 +58,47 @@ profiles, links, tokens, and keys are preserved when upgrading.
 
 ### Permissions and channels
 
-In **Server Settings → Roles**, **Add and manage bots** controls linking and unlinking; **Configure bots** controls shared behavior settings. Neither permission allows changing a bot's name or avatar. **Use bot commands** controls who can use commands and interactions, and is initially enabled for existing members and roles.
+In **Server Settings → Roles**, **Add and manage bots** (`MANAGE_BOTS`) controls linking, unlinking, and capability reviews; **Configure bots** (`CONFIGURE_BOTS`) controls shared behavior settings only. Neither permission allows changing a bot's name or avatar. **Use bot commands** controls who can use commands and interactions, and is initially enabled for existing members and roles.
 
 When creating or editing a text channel, the **Allow bot commands** switch starts enabled. Turning it off blocks commands and responses to forms and selectors in that channel, **including for administrators**. Typing `/` displays the reason. Permission changes also affect interactions that are already open; ordinary messages and reactions continue to follow their own permissions.
+
+### Requested capabilities and consent
+
+`BotOptions.requestedCapabilities` is required. Declare only categories the bot actually uses; the SDK publishes the same list in its manifest and `COMMAND_REGISTER`. A declaration is a request, never an authorization:
+
+| Capability | Server-enforced access |
+|------------|------------------------|
+| `commands` | Explicit command inputs, autocomplete, previews, private replies, and forms |
+| `read_messages` | Messages, history, and reactions in accessible channels; also required to quote another message |
+| `send_messages` | Messages, replies, reactions, and public command results |
+| `publish_voice` | Publishing audio in permitted rooms, without receiving participant media |
+| `local_execution` | Requesting tasks and tool preparation on the client; may receive media produced by an authorized task |
+| `sound_download` | Requesting a Soundboard audio save on the caller's device, without general filesystem access |
+| `selectors` | Persistent public choice controls and their responses; publication also requires `send_messages` |
+| `miniapps` | Shared voice-room miniapps, including authorized participant actions |
+
+Registering commands requires `commands`; commands with `downloadsSound` also declare `sound_download`, and those with `localCapabilities` declare `local_execution`. Public replies require `send_messages`; default private replies require only `commands`. Role, channel, and initiating-user permissions still apply.
+
+**Voice reception is unavailable.** Requests such as `receive_voice` are rejected. The server refuses bot SFU consumption and P2P negotiations that would receive microphone, camera, or screen sharing; clients do not publish those tracks to bots. Media from consented local tasks is a separate route, not channel listening.
+
+**Device consent is separate.** Granting `local_execution` or `sound_download` on the server neither installs tools nor authorizes a computer. The person still controls local requests and can deny or revoke them in local tool settings. Personal preferences, bot language, and file-name confirmation do not become administrator-controlled permissions.
+
+**Editing and safe migration.** Bot settings use the same sidebar and section navigation as app/server settings. Under **Server permissions**, users with `MANAGE_BOTS` may review switches at any time. Saving invalidates the previous connection, ends voice, local tasks, source references, previews, interactions, and miniapps, and closes persistent selectors; the SDK may reconnect. Old asynchronous work cannot regain authority after a quick revoke/regrant.
+
+Migration `026_bot_capability_consent.sql` preserves bots, tokens, identities, and settings, but **does not invent approval for existing bots**: they start with no grants and must declare capabilities with the updated SDK and undergo review. A changed declaration retains only previously granted capabilities that remain requested; new capabilities stay off. Optimistic revisions require reloading after concurrent edits.
+
+For URL installation, a preview lasts five minutes, belongs to the administrator's session/device, and can be consumed once. `BOT_INSTALL_PREVIEW { manifestUrl }` returns `{ previewId, expiresAt, manifest }`; `BOT_INSTALL { previewId, grantedCapabilities }` refetches the content. Changes to the manifest, a runtime declaration during registration, or the installer's authority cancel installation without leaving an approved account. Provisional registrations may publish identity and declarations, not perform actions.
+
+The SDK exposes `bot.getPermissions(serverId)` and `permissionsChanged(permissions, { serverId })`, containing `requested`, `granted`, `revision`, `reviewRequired`, `reviewedBy`, and `reviewedAt`. These are informational per-server snapshots, not a way to grant permissions; the server remains authoritative.
 
 ### Prerequisites
 
 - **Node.js 18+**
-- Client, server, and SDK compatible with **protocol 19**
+- Client, server, and SDK compatible with **protocol 20**
 - The `@monky/bot-sdk` package from the matching release
 
 ::: warning Update together
-Protocol 19 adds local execution contracts, authenticated interaction identities, private task signaling, and local preview references. It preserves protocol 18's paginated autocomplete with pages, cursors, and on-demand continuation, along with localized command names and authorized miniapp termination. Update the **client, server, and bot** together; different protocol versions cannot connect. This requires a major release, including on the beta track.
+Protocol 20 requires explicit declarations and per-bot administrator consent, including installation previews. It preserves local execution, private signaling, previews, pagination, and localized command names. Update the **client, server, and bot** together; different protocol versions cannot connect. This requires a major release, including on the beta track. Updating the SDK does not automatically approve existing bots.
 
 Protocol 14's linking rules are preserved: `BOT_CREATE` accepts only `{}`, and management receives `profilePending` while a bot has not announced its identity. The database preserves existing identities, and only the authenticated bot may publish profile changes. `ctx.args` contains typed values and `ctx.reply()` is private; use `ctx.publish()` only for channel-visible results.
 :::
@@ -316,6 +346,7 @@ update source.
 import { BotClient } from '@monky/bot-sdk';
 
 const bot = new BotClient({
+  requestedCapabilities: ['commands'],
   serverUrl: 'ws://your-server:3000',
   token: 'YOUR_BOT_TOKEN',
   publicKey: 'YOUR_ED25519_PUBLIC_KEY_HEX',
@@ -382,8 +413,9 @@ bot.command({
 
 ### Command language and individual preferences
 
-Each person can choose **Bot settings > My preferences > Bot language**, even
-for bots without their own settings form. **Follow Monky** uses the app's
+Each person can use the **Bot settings > My preferences > Bot language**
+dropdown and confirm with **Save**, even for bots without their own settings form.
+**Follow Monky** uses the app's
 language; an explicit choice applies only to that bot, server/address, and
 identity in the local profile. Restoring defaults follows Monky again.
 The effective language arrives in `ctx.locale`, including autocomplete and
@@ -525,7 +557,7 @@ autocomplete: ({ query, page }) => {
 },
 ```
 
-Omitting `hasMore` (including legacy array returns) keeps the response a single list. Return `hasMore: false` on the final page and omit `nextCursor`; an empty list ends a search without continuation. Loading failures keep existing results and allow retrying the same page. Closing the composer, changing the search, cancellation, access loss, or disconnection invalidates the context; late responses are discarded. On-demand previews retain each page's own authorization and expiry rather than becoming invalid just because the next page loads. The SDK, server, and client must use protocol 19; existing array callbacks do not need changes after updating the SDK.
+Omitting `hasMore` (including legacy array returns) keeps the response a single list. Return `hasMore: false` on the final page and omit `nextCursor`; an empty list ends a search without continuation. Loading failures keep existing results and allow retrying the same page. Closing the composer, changing the search, cancellation, access loss, or disconnection invalidates the context; late responses are discarded. On-demand previews retain each page's own authorization and expiry rather than becoming invalid just because the next page loads. The SDK, server, and client must use protocol 20; existing array callbacks do not need changes after updating the SDK and declaring the capabilities in use.
 
 Arrow keys only navigate. Enter or a click confirms a suggestion. **Without optional parameters, if every required parameter is valid, the same gesture executes the command exactly once.** If optional parameters exist, selection only fills the field: the composer stays open to use `+N`, and a later Enter or the execute button submits. Missing required parameters must be filled before execution. Typing text without a valid choice does not execute the command. Editing the text invalidates the previous selection. `value` is an opaque identifier, not authorization: the handler must validate it again before resolving the result's metadata.
 
@@ -896,6 +928,7 @@ import { readFileSync } from 'node:fs';
 import { BotClient } from '@monky/bot-sdk';
 
 const bot = new BotClient({
+  requestedCapabilities: [],
   publicKey: 'YOUR_ED25519_PUBLIC_KEY_HEX',
   name: 'My Bot',
   avatarBase64: `data:image/png;base64,${readFileSync('bot.png').toString('base64')}`,
@@ -920,6 +953,7 @@ import path from 'node:path';
 import { BotClient } from '@monky/bot-sdk';
 
 const bot = new BotClient({
+  requestedCapabilities: ['commands'],
   publicKey: 'YOUR_ED25519_PUBLIC_KEY_HEX',
   registrationFile: path.join(process.cwd(), '.keys', 'registrations.json'),
 });
@@ -940,7 +974,7 @@ bot.serve({
 ```
 
 This exposes:
-- `GET /manifest` — returns the bot manifest (name, description, registration URL)
+- `GET /manifest` — returns the bot manifest (name, description, requested capabilities, registration URL)
 - `POST /register` — receives the token from each server that adds the bot
 
 Each server that adds the bot creates an **independent WebSocket connection**. The bot manages all of them automatically, with reconnection.
@@ -1273,6 +1307,7 @@ Limits are 128 KiB of HTML, 64 KiB of state, and 8 KiB per action; JSON allows u
 | `bot.disconnect(serverId?)` | Disconnect from one or all servers |
 | `bot.close()` | Close the bot's connections and HTTP servers |
 | `bot.serve(options)` | Start HTTP server for marketplace |
+| `bot.getPermissions(serverId)` | Read requested/granted capabilities and review status; unavailable before acknowledgement or after disconnection |
 | `bot.localExecution(serverId)` | Obtain local executors and manage authorized source references |
 | `bot.joinVoice(serverId, channelId, { invocationId }?)` | Join voice, using invocation authorization when supplied |
 | `bot.getVoiceConnection(serverId)` | Obtain that server's active voice connection |
@@ -1290,6 +1325,7 @@ Limits are 128 KiB of HTML, 64 KiB of state, and 8 KiB per action; JSON allows u
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `publicKey` | `string` | ✅ | Ed25519 public key in hex |
+| `requestedCapabilities` | `BotCapability[]` | ✅ | Explicit requested categories, never automatic grants; `[]` permits identity/metadata only |
 | `serverUrl` | `string` | Manual mode | Server WebSocket URL |
 | `token` | `string` | Manual mode | Bot token |
 | `autoReconnect` | `boolean` | — | Auto-reconnect (default: `true`) |

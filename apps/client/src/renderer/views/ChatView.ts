@@ -7,9 +7,11 @@ import { chatStore, getActiveChatStore, type BotInvocation, type MessageEditDraf
 import { serverStore, getActiveServerStore } from '../stores/serverStore';
 import { participantManager } from '../core/ParticipantManager';
 import { userContextMenu } from './UserContextMenu';
-import { contextMenu, ContextMenuItem } from './ContextMenu';
+import { contextMenu, type ContextMenuEntry, type ContextMenuItem } from './ContextMenu';
 import { getAvatarUrl } from '../utils/avatar';
 import { renderMarkdown } from '../utils/markdown';
+import { markdownMessageClipboard, pasteMonkyClipboard, renderedMessageClipboard, selectedMessageClipboard,
+  setMessageClipboardData, writeMessageClipboard, type MessageClipboardContent, type MessageCopyMode } from '../utils/messageClipboard';
 import { getLanguage, t } from '../i18n';
 import { uploadAttachment, UploadHandle } from '../core/AttachmentUploader';
 import { getAttachmentUrl, formatBytes, fileIconName } from '../utils/attachment';
@@ -344,19 +346,26 @@ export class ChatView {
       const toolbar = row.querySelector<HTMLElement>('.chat-message-toolbar');
       const dismissToolbar = () => this.dismissMessageToolbar(row);
       const resetToolbar = () => row.classList.remove('chat-message-actions-dismissed');
-      row.addEventListener('mouseenter', resetToolbar);
+      // Closing a submenu over the row can synthesize an enter without moving
+      // the pointer. Only real movement should undo an action's dismissal.
+      row.addEventListener('pointermove', (event) => {
+        if (event.movementX || event.movementY) resetToolbar();
+      });
       row.addEventListener('mouseleave', resetToolbar);
       toolbar?.addEventListener('focusin', resetToolbar);
       toolbar?.addEventListener('click', (event) => {
         const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-message-action]') : null;
-        if (button && !button.disabled && !['more', 'emoji'].includes(button.dataset.messageAction ?? '')) dismissToolbar();
+        if (button && !button.disabled && !['more', 'emoji', 'copy'].includes(button.dataset.messageAction ?? '')) dismissToolbar();
       }, true);
       this.bindReactionButtons(row);
       row.querySelector<HTMLButtonElement>('[data-message-action="reply"]')?.addEventListener('click', () => {
         this.startReply(row.dataset.messageId ?? '');
       });
       row.querySelector<HTMLButtonElement>('[data-message-action="copy"]')?.addEventListener('click', () => {
-        void this.copyMessage(row.dataset.messageId ?? '');
+        const messageId = row.dataset.messageId ?? '';
+        const selection = this.selectedClipboard(messageId);
+        dismissToolbar();
+        void this.copyMessage(messageId, 'formatted', selection);
       });
       const more = row.querySelector<HTMLButtonElement>('[data-message-action="more"]');
       more?.addEventListener('click', (event) => {
@@ -368,10 +377,12 @@ export class ChatView {
         this.reactionPicker?.close();
         resetToolbar();
         const rect = more.getBoundingClientRect();
-        const items = this.buildMessageMenuItems(row.dataset.messageId ?? null).map((item) => ({
+        const dismissItem = (item: ContextMenuItem): ContextMenuItem => ({
           ...item,
           onClick: () => { dismissToolbar(); item.onClick(); },
-        }));
+        });
+        const items = this.buildMessageMenuItems(row.dataset.messageId ?? null).map((item) =>
+          'submenu' in item ? { ...item, submenu: item.submenu.map(dismissItem) } : dismissItem(item));
         contextMenu.open(rect.right, rect.bottom, items, more);
       });
       row.querySelector<HTMLButtonElement>('[data-reply-target]')?.addEventListener('click', (event) => {
@@ -441,7 +452,7 @@ export class ChatView {
    * be able to clean up after other people. Deleted and system messages offer
    * nothing.
    */
-  private buildMessageMenuItems(messageId: string | null): ContextMenuItem[] {
+  private buildMessageMenuItems(messageId: string | null): ContextMenuEntry[] {
     if (!messageId || !this.currentChannelId) return [];
     const message = chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId);
     if (!message || message.isSystem || message.isEphemeral || message.deletedAt) return [];
@@ -450,7 +461,7 @@ export class ChatView {
     const canModerate = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const editingAllowed = serverStore.serverDetails?.allowMessageEdit !== false;
 
-    const items: ContextMenuItem[] = [];
+    const items: ContextMenuEntry[] = [];
     if (serverStore.hasPermission(Permission.SEND_MESSAGES)) {
       items.push({
         label: t('chat.emojiAction'), icon: 'add_reaction',
@@ -460,7 +471,17 @@ export class ChatView {
       });
       if (!this.messageEdit) items.push({ label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(message.id) });
     }
-    items.push({ label: t('chat.copyMessage'), icon: 'content_copy', onClick: () => { void this.copyMessage(message.id); } });
+    const selection = this.selectedClipboard(message.id);
+    const modifier = navigator.platform.startsWith('Mac') ? 'Cmd' : 'Ctrl';
+    items.push({
+      label: t('chat.copyMessage'), icon: 'content_copy',
+      submenu: [
+        { label: t('chat.copyFormatted'), shortcut: `${modifier}+C`,
+          onClick: () => { void this.copyMessage(message.id, 'formatted', selection); } },
+        { label: t('chat.copyPlain'),
+          onClick: () => { void this.copyMessage(message.id, 'plain', selection); } },
+      ],
+    });
     if (isAuthor && editingAllowed) {
       items.push({
         label: t('chat.editMessage'),
@@ -1038,13 +1059,62 @@ export class ChatView {
     this.renderReplyComposer();
   }
 
-  private async copyMessage(messageId: string): Promise<void> {
+  private messageClipboard(messageId: string): MessageClipboardContent | null {
     const message = this.currentChannelId ? chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === messageId) : undefined;
-    if (!message || message.deletedAt) return;
+    if (!message || message.deletedAt || message.isSystem) return null;
+    const stickerIds = extractStickerIds(message.content).filter((id) =>
+      message.attachments?.some((attachment) => attachment.id === id && attachment.kind === 'image'));
+    const content = stripStickerTokens(message.content, stickerIds);
+    if (!content.trim()) {
+      return { text: message.attachments?.map((entry) => entry.originalName).join('\n') || content };
+    }
+    const rendered = this.container.querySelector(
+      `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] .chat-message-text`);
+    return rendered ? renderedMessageClipboard(rendered, content) : markdownMessageClipboard(content);
+  }
+
+  private selectedClipboard(messageId?: string): MessageClipboardContent | null {
+    const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
+    const selection = window.getSelection();
+    if (!feed || !selection || selection.isCollapsed) return null;
+    if (messageId) {
+      const row = feed.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+      if (!row || !selection.rangeCount || !selection.getRangeAt(0).intersectsNode(row)) return null;
+    }
+    return selectedMessageClipboard(feed, selection);
+  }
+
+  private keyboardClipboard(target: EventTarget | null): MessageClipboardContent | null {
+    if (!this.isCurrentSession() || !this.container.isConnected ||
+        this.isEditableTarget(target) || this.isEditableTarget(document.activeElement)) return null;
+    const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
+    const element = target instanceof Element ? target : document.activeElement;
+    if (!feed || (element !== document.body && element !== document.documentElement && !feed.contains(element))) return null;
+    // An unsupported or out-of-chat selection must never fall back to copying a whole row.
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) {
+      return this.selectedClipboard();
+    }
+    const row = document.activeElement?.closest<HTMLElement>('.chat-message-row');
+    return row && feed.contains(row) ? this.messageClipboard(row.dataset.messageId ?? '') : null;
+  }
+
+  private copyMessage(messageId: string, mode: MessageCopyMode = 'formatted', selection: MessageClipboardContent | null = null): Promise<void> {
+    if (!this.isCurrentSession()) return Promise.resolve();
+    const content = this.messageClipboard(messageId);
+    return content ? this.copyContent(selection ?? content, mode) : Promise.resolve();
+  }
+
+  private async copyContent(content: MessageClipboardContent, mode: MessageCopyMode, event?: ClipboardEvent): Promise<void> {
     const requestId = ++this.copyRequestId;
     this.clearCopyFeedback?.();
     try {
-      await navigator.clipboard.writeText(message.content || message.attachments?.map((entry) => entry.originalName).join('\n') || '');
+      if (event?.clipboardData) {
+        setMessageClipboardData(event.clipboardData, content, mode);
+        event.preventDefault();
+      } else {
+        await writeMessageClipboard(content, mode);
+      }
     } catch (error) {
       console.warn('[ChatView] Could not copy message', error);
       if (requestId === this.copyRequestId) void showAlert({ message: t('chat.copyFailed'), variant: 'danger' });
@@ -1375,6 +1445,25 @@ export class ChatView {
     let displayedEditMessage = displayedEdit?.message;
 
     const messagesFeed = this.container.querySelector('#chat-messages-feed') as HTMLElement | null;
+    const onCopyKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.altKey || event.shiftKey ||
+          !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'c') return;
+      const content = this.keyboardClipboard(event.target);
+      if (!content) return;
+      event.preventDefault();
+      void this.copyContent(content, 'formatted');
+    };
+    const onCopy = (event: ClipboardEvent) => {
+      if (event.defaultPrevented || !event.clipboardData) return;
+      const content = this.keyboardClipboard(event.target);
+      if (content) void this.copyContent(content, 'formatted', event);
+    };
+    document.addEventListener('keydown', onCopyKey);
+    document.addEventListener('copy', onCopy);
+    this.unbindEvents.push(() => {
+      document.removeEventListener('keydown', onCopyKey);
+      document.removeEventListener('copy', onCopy);
+    });
     const commandDropup = this.container.querySelector<HTMLElement>('#command-dropup');
     const onCommandFocusOut = (event: FocusEvent) => {
       if (event.relatedTarget === input || (event.relatedTarget instanceof Node && commandDropup?.contains(event.relatedTarget))) return;
@@ -1686,14 +1775,19 @@ export class ChatView {
     }
 
     // Paste files/images directly into the message box.
-    input?.addEventListener('paste', (e: ClipboardEvent) => {
+    const onInputPaste = (e: ClipboardEvent) => {
+      if (!input || !isCurrentInput() || e.defaultPrevented) return;
       const files = e.clipboardData?.files;
       if (files && files.length > 0) {
         if (!serverStore.hasPermission(Permission.ATTACH_FILES)) return;
         e.preventDefault();
         this.addFiles(files);
+        return;
       }
-    });
+      if (e.clipboardData && pasteMonkyClipboard(input, e.clipboardData)) e.preventDefault();
+    };
+    input?.addEventListener('paste', onInputPaste);
+    this.unbindEvents.push(() => input?.removeEventListener('paste', onInputPaste));
 
     // Global paste handler: Ctrl+V anywhere on the page uploads files when a
     // text channel is open (#181).

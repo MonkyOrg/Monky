@@ -27,6 +27,10 @@ A message you started but haven't sent stays with the channel you were typing in
 
 Hover over a message (or reach its buttons with `Tab`) to reveal a floating toolbar with **Emoji**, **Reply**, **Copy message** and **More options**. The three-dot menu displays full action names; **Edit message** is only available to the author when the server permits editing, and **Delete message** to the author or moderators. Navigate menus with arrow keys and close them with `Escape`.
 
+`Ctrl+C` copies selected text with its displayed formatting, including Markdown rendering. On macOS, use `Cmd` instead of `Ctrl`. Without a selection, the shortcut acts only on the focused message, never the entire conversation. **Copy message** in the toolbar uses formatting; under **More options → Copy message**, choose **With formatting** or **Without formatting**. Plain copying is available only in this submenu, without a dedicated shortcut. Those buttons also respect a selection within the message. Use `→` or `Enter` to open the submenu, `←` or `Escape` to go back, and `Tab` to leave.
+
+Formatted copying provides HTML for rich-text applications and Markdown for text destinations: for example, bold text may paste as `**text**` when the destination does not accept HTML. **Without formatting** provides only visible text, without Markdown markers or HTML. Pasting a formatted copy into Monky keeps the markup editable; external HTML is never inserted into the interface. Editing fields keep their native shortcuts. Attachment-only messages copy file names, without transferring attachments.
+
 **Reply** keeps a reference to the original message with its author and preview. Replies support text, attachments, code and stickers; public bot messages can also receive replies. Cancel with the `×` in the composer or `Escape`. The reference stays with the channel draft. Clicking the preview jumps to the original, loading a history window if needed; **Back to latest messages** returns to recent conversation. Previews reflect edits and show **Message deleted** when the original is deleted, without retaining its content. Private bot messages cannot be referenced.
 
 ## Mentions

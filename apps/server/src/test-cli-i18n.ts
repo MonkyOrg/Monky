@@ -8,7 +8,7 @@ import readline from 'node:readline';
 import { PassThrough, Readable } from 'node:stream';
 import test, { TestContext } from 'node:test';
 import { stripVTControlCharacters } from 'node:util';
-import { Permission, PROTOCOL_VERSION } from '@monky/shared';
+import { LIMITS, Permission, PROTOCOL_VERSION } from '@monky/shared';
 import { main, parseLanguageArgs, promptLanguageSelection, runCommand } from './cli';
 import { CONFIG_KEYS, PERMISSION_OPTIONS } from './cli/constants';
 import { GlobalArgs, withContext } from './cli/context';
@@ -758,6 +758,42 @@ test('failed start or restart never claims that a running server was checked for
   await assert.rejects(restartServerCommand(commandArgs(['restart'], f.dataDir)), /Failed to restart/);
   assert.deepEqual(f.previewPorts, []);
   assert.ok(f.commands.every((args) => args[0] === 'startOrRestart'));
+});
+
+for (const exitCode of [0, 1]) {
+  test(`update restart publishes a PID-bound intent before PM2 and cleans it (exit=${exitCode})`, async (context) => {
+    const f = lifecycleFixture(context);
+    f.state.entry = { pid: 24680, pm2_env: { status: 'online' } };
+    f.state.exitCode = exitCode;
+    const filename = path.join(f.dataDir, 'update-restart-intent.json');
+    const run = processes.runSync;
+    let observed = false;
+    context.mock.method(processes, 'runSync', (...parameters: Parameters<typeof processes.runSync>) => {
+      if (parameters[1]?.[0] === 'startOrRestart') {
+        const intent: unknown = JSON.parse(fs.readFileSync(filename, 'utf8'));
+        assert.ok(intent && typeof intent === 'object' && 'pid' in intent && 'expiresAt' in intent);
+        assert.equal(intent.pid, 24680);
+        assert.ok(typeof intent.expiresAt === 'number' && intent.expiresAt > Date.now());
+        observed = true;
+      }
+      return run(...parameters);
+    });
+    const restart = restartServerCommand(commandArgs(['restart'], f.dataDir), ['--after-update']);
+    if (exitCode === 0) await restart;
+    else await assert.rejects(restart, /Failed to restart/);
+    assert.equal(observed, true);
+    assert.equal(fs.existsSync(filename), false);
+  });
+}
+
+test('PM2 shutdown uses a portable IPC message and allows the WebSocket grace period', (context) => {
+  const f = fixture(context);
+  context.mock.method(health, 'resolveInterpreter', () => process.execPath);
+  const ecosystem = pm2.generateEcosystem({ dataDir: f.root, port: 3200, serverName: 'Notice fixture' });
+  assert.match(ecosystem, /shutdown_with_message:\s*true/);
+  const timeout = ecosystem.match(/kill_timeout:\s*(\d+)/);
+  assert.ok(timeout);
+  assert.ok(Number(timeout[1]) > LIMITS.SHUTDOWN_GRACE_MS);
 });
 
 test('already-running start reports bot compatibility at the running port, not an unapplied override', async (context) => {

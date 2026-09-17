@@ -78,48 +78,57 @@ Após a definição do número do PR (`<PR_NUMBER>`):
 
 Para que o testador valide o PR imediatamente sem atrito, prepare o ambiente e inicie os componentes necessários:
 
-1. **Build das Dependências Compartilhadas:**
-   ```bash
-   npm run build
-   ```
-   *(Ou build específico caso apenas o servidor ou cliente tenha sido modificado, ex.: `npm run build:server`)*
+1. **Escolher o cenário pelo alvo do teste, antes de abrir o app.**
+   Use o fluxo explícito [QA preparado no CONTRIBUTING](../../../CONTRIBUTING.md),
+   não um `npm start` genérico com servidores, identidades ou consentimentos do
+   desenvolvedor. O launcher compila esta branch e usa servidor, cliente e SDK
+   reais, com dados novos em `.qa\runs\<cenário>-<id>`.
 
-2. **Inicializar a Aplicação de Acordo com o Escopo:**
+   | Alvo | Comando / cenário |
+   |---|---|
+   | Chat ou funcionalidade que pressupõe login | `npm run qa -- connected` |
+   | Configurações do servidor | `npm run qa -- server-settings` |
+   | Voz P2P local | `npm run qa -- voice` (peer SDK sintético, não música de produção) |
+   | Home, adicionar/criar servidor | `npm run qa -- home` (não salva nem autentica servidor) |
+   | Login | `npm run qa -- login` (preenche o formulário, não envia) |
+   | Instalar bot | `npm run qa -- bot-install --bot=fixture` (preenche URL, não instala) |
+   | Consentimento/preparo de ferramenta | `npm run qa -- tool-consent --bot=fixture` (não concede consentimento nem instala ferramentas) |
+   | Música de produção | `npm run qa -- music --bot-root="C:\Projetos\MonkyBot"` |
 
-   - **Se alterou o Cliente Desktop (`apps/client` ou `packages/shared`):**
-     Inicie o cliente Electron:
-     ```bash
-     npm start
-     ```
-     *(Ou se o testador preferir dev server com Vite: `npm run dev:client` em background e `npm start`)*
+   Para testar o bot real em qualquer cenário com bot, informe um checkout
+   `@monky/bot` compilado e compatível via `--bot-root`. Nunca substitua música
+   de produção pela fixture sem avisar. `music` pede o consentimento real e
+   espera ferramentas verificadas; cancelamento, bot ou ferramenta ausente
+   impedem declarar prontidão. Reprodução e busca continuam sendo o teste.
+   O checkout de produção deve exportar sua declaração `requestedCapabilities`
+   junto de `registerAllCommands`, conforme CONTRIBUTING. QA aprova somente
+   o manifest realmente revisado pelo owner, usando as APIs autorizadas; não
+   escreva grants diretamente no banco. `bot-install` mantém a revisão pendente.
 
-   - **Se alterou o Servidor (`apps/server`):**
-     Inicie o servidor local em background/daemon:
-     ```bash
-     npm run dev:server
-     ```
-     E se necessário abrir o cliente para conectar ao servidor: `npm start`.
+2. **Executar e comprovar prontidão.**
+   Aguarde `QA_READY`: a janela aberta, um PID ou uma porta não comprovam
+   autenticação, mensagem persistida, catálogo ou peer. Para validação
+   automatizada sem janela visível, acrescente `--smoke`; para música que exige
+   consentimento humano, esse modo deve falhar claramente, nunca aprovar o
+   diálogo pelo usuário. Após build, `npm run test:qa` valida o fluxo.
 
-   - **Se alterou a Documentação (`docs-site`):**
-     Inicie o servidor do VitePress:
-     ```bash
-     npm run docs:dev
-     ```
+   O helper também aceita `start client <cenário> [opções]` e `start server
+   <cenário> [opções]`, sempre no checkout que contém o helper. Documentação
+   continua usando `npm run docs:dev`.
 
-3. **Exibir o Guia de Validação Prática:**
-   Forneça ao testador os passos diretos para exercitar a funcionalidade alterada com a aplicação aberta.
+3. **Entregar um roteiro que não pule o alvo.**
+   Liste o que foi preparado e o que o desenvolvedor ainda precisa executar.
+   Se o teste é admissão do bot na voz, use `connected --bot-root=...`, não
+   `voice`/`music`, que já o colocam na chamada. Se é identidade, onboarding,
+   atualização automática, atalhos globais, LAN ou captura física, não use o
+   modo preparado: abra o app comum com perfil próprio e execute essa etapa.
 
-4. **Armadilhas do Monky que invalidam o teste:**
-
-   Confira estes quatro pontos **antes** de entregar o roteiro — cada um já fez teste passar ou falhar pelo motivo errado.
-
-   - **Cliente e servidor têm de vir da mesma branch.** `packages/shared/src/validators.ts` compara `protocolVersion` por igualdade exata contra `PROTOCOL_VERSION` (`packages/shared/src/constants.ts`). Se o PR mexeu no protocolo, o app da branch **não conecta** num servidor que já estava no ar. O roteiro deve mandar criar o servidor pelo próprio app da branch, e não reaproveitar um existente.
-   - **Só abre uma instância por máquina.** `apps/client/src/main/main.ts` usa `app.requestSingleInstanceLock()`; o segundo `npm start` apenas foca a janela aberta. Para testar dois participantes, são duas máquinas — ou uma segunda instância com `--user-data-dir` próprio.
-   - **Voz, vídeo e tela são P2P e não se validam sozinho.** PR que toca `apps/client/src/renderer/core/WebRtcManager.ts`, `VideoService.ts`, `core/webrtc/` ou a sinalização do servidor precisa de **duas pessoas conectadas**; abrir o app e olhar a própria tela não exercita o caminho.
-   - **Use `MONKY_HOME` para não sujar os servidores reais.** O registro de servidores do CLI fica em `~/.monky` (`apps/server/src/cli/registry.ts`). Apontando `MONKY_HOME` para uma pasta descartável, o servidor de teste não entra na lista de quem está testando:
-     ```bash
-     MONKY_HOME=$(mktemp -d) npm run dev:server
-     ```
+4. **Isolamento e encerramento são parte do teste.**
+   - Cliente e servidor vêm da mesma branch/protocolo; nunca reaproveite um servidor já aberto.
+   - A trava de instância é **por perfil**, não por máquina. O perfil de QA é único e não reutiliza a instalação nem outro worktree.
+   - O launcher não captura microfone/câmera reais automaticamente, não anuncia na LAN e isola dados, sessão, HOME e `MONKY_HOME`.
+   - Use o processo anexado à sessão, sem daemon/detach. Feche a janela ou envie `Ctrl+C` ao launcher: ele encerra seus filhos por PID e remove seus dados. Falhas fazem a mesma limpeza; nunca mate por nome.
+   - O peer SDK valida P2P local, não rede entre máquinas, hardware ou SFU. Esses casos ainda exigem participantes/dispositivos reais e roteiro específico.
 
 ---
 

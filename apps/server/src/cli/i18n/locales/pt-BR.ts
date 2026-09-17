@@ -216,6 +216,8 @@ export const ptBR = {
   'lifecycle.logsAvailable': 'Os logs continuam disponíveis em "monky logs".',
   'lifecycle.notRegisteredStart': 'Esse servidor não está registrado no PM2. Use "monky start" primeiro.',
   'lifecycle.restartFailed': 'Falha ao reiniciar o servidor.',
+  'lifecycle.updateNoticeFailed': 'Não foi possível preparar o aviso de atualização. O servidor não foi reiniciado.',
+  'lifecycle.updateNoticeCleanupFailed': 'O reinício terminou, mas não foi possível limpar o aviso temporário de atualização. Confira os logs.',
   'lifecycle.restarted': 'Servidor Monky reiniciado com sucesso.',
   'lifecycle.pm2NoLogs': 'PM2 não está instalado, então não há logs persistidos para ler.',
   'lifecycle.logsExplain': 'O "monky logs" lê os logs do servidor iniciado com "monky start" (que roda via PM2).',

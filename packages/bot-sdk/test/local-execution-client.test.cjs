@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const { WebSocketServer } = require('ws');
 const { RTCPeerConnection } = require('werift');
 const {
-  BotClient, LocalExecutionError, LocalExecutionRpcError, MessageType, ProtocolErrorCode,
+  BotClient, BOT_CAPABILITIES, LocalExecutionError, LocalExecutionRpcError, MessageType, ProtocolErrorCode,
 } = require('../dist/index.js');
 const {
   LOCAL_EXECUTION_PROTOCOL_LIMITS, LOCAL_MEDIA_CHANNEL_LABEL, LOCAL_MEDIA_CHANNEL_OPTIONS, LOCAL_MEDIA_PROTOCOL,
@@ -99,6 +99,7 @@ async function fixture(t, options = {}) {
     socket.send(JSON.stringify({ type, payload, requestId }));
   }
   bot = new BotClient({
+    requestedCapabilities: [...BOT_CAPABILITIES],
     publicKey: 'a'.repeat(64), serverUrl: `ws://127.0.0.1:${server.address().port}`,
     token: 'local-test-token', autoReconnect: false, ...options,
   });

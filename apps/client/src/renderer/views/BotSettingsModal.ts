@@ -1,6 +1,7 @@
 import {
   MessageType, Permission, botSettingsListResponseSchema, botSettingsSnapshotSchema, localizeBotSettingsForm,
   normalizeBotLocale, resolveBotLocale, resolveBotSettingsValues, type BotLocale,
+  botPermissionsSnapshotSchema, unreviewedBotPermissions, type BotCapability,
   type BotForm, type BotFormValues, type BotSettingsDefinition, type BotSettingsPatch, type BotSettingsSnapshot, type BotSettingsSummary,
 } from '@monky/shared';
 import { v4 as uuidv4 } from 'uuid';
@@ -22,8 +23,10 @@ import { applyBotFieldAction, readBotFieldChange, renderBotFields, type BotField
 import { showAlert } from './Dialog';
 import type { ContextMenuItem } from './ContextMenu';
 import { renderLoadingSkeleton } from '../utils/loadingSkeleton';
+import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
+import { readBotPermissionChange, renderBotPermissionControls, syncBotPermissionControls } from './botPermissionControls';
 
-type Scope = 'user' | 'server';
+type Scope = 'user' | 'server' | 'permissions';
 interface SettingsSession {
   client: NetworkClient;
   server: ServerStore;
@@ -69,6 +72,7 @@ export class BotSettingsModal {
   private bots: BotSettingsSummary[] = [];
   private snapshot: BotSettingsSnapshot | null = null;
   private selectedBotId: string | null = null;
+  private openedFromCatalog = false;
   private drafts: Partial<Record<Scope, SettingsDraft>> = {};
   private scope: Scope = 'user';
   private confirmFileName = true;
@@ -81,6 +85,9 @@ export class BotSettingsModal {
   private userStale = false;
   private message = '';
   private error = false;
+  private permissionDraft: BotCapability[] = [];
+  private permissionsStale = false;
+  private sectionNavigation: SettingsSectionNavigation | null = null;
 
   public createOpenAction(
     botId?: string, client = getActiveNetworkClient(), server = getActiveServerStore()
@@ -100,6 +107,7 @@ export class BotSettingsModal {
     }
     this.close();
     this.session = session;
+    this.openedFromCatalog = !botId;
     this.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     this.root = document.createElement('div');
     this.root.className = 'modal-backdrop bot-settings-modal';
@@ -122,6 +130,14 @@ export class BotSettingsModal {
     this.unbind.push(
       appEvents.on('message.BOT_SETTINGS_LIST_RESPONSE', (payload: unknown) => this.receiveList(session, payload)),
       appEvents.on('message.BOT_SETTINGS_SNAPSHOT', (payload: unknown) => this.receiveSnapshot(session, payload)),
+      appEvents.on('message.BOT_PERMISSIONS_SNAPSHOT', (payload: unknown) => {
+        if (!this.isOrigin(session) || !this.isCurrent(session) || this.saving || !this.snapshot) return;
+        const parsed = botPermissionsSnapshotSchema.safeParse(payload);
+        if (!parsed.success || parsed.data.botId !== this.snapshot.bot.botId) return;
+        this.permissionsStale ||= parsed.data.permissions.revision !== this.snapshot.bot.permissions?.revision;
+        this.snapshot.bot = { ...this.snapshot.bot, permissions: parsed.data.permissions };
+        this.render();
+      }),
       appEvents.on('bot.preferences_updated', ({ scope }: { scope: string }) => {
         if (!this.isCurrent(session) || !this.snapshot || (this.saving && this.scope === 'user') ||
             scope !== botPreferenceScopeFor(session.client, session.server, this.snapshot.bot.botId)) return;
@@ -213,6 +229,8 @@ export class BotSettingsModal {
     const keepUserDraft = preserveUser && sameDeclaration && this.drafts.user?.dirty;
     const userStale = !!keepUserDraft && this.userStale;
     this.snapshot = snapshot;
+    this.permissionDraft = snapshot.bot.permissions?.granted.slice() ?? [];
+    this.permissionsStale = false;
     if (!keepUserDraft) this.initializeUserDraft();
     const values = structuredClone(snapshot.server?.values ?? {});
     this.drafts.server = { values, initial: structuredClone(values), overrides: {}, dirty: false, reset: false };
@@ -222,6 +240,7 @@ export class BotSettingsModal {
     this.message = '';
     this.error = false;
     if (!this.hasScope(this.scope)) this.scope = this.hasScope('user') ? 'user' : 'server';
+    if (!sameDeclaration && snapshot.bot.permissions?.reviewRequired && this.canManage()) this.scope = 'permissions';
     this.refreshAuthorization(false);
   }
 
@@ -241,8 +260,13 @@ export class BotSettingsModal {
     return !!this.snapshot?.bot.canConfigure && !!this.session?.server.hasPermission(Permission.CONFIGURE_BOTS);
   }
 
+  private canManage(): boolean {
+    return this.snapshot?.bot.canManage === true && this.session?.server.hasPermission(Permission.MANAGE_BOTS) === true;
+  }
+
   private hasScope(scope: Scope): boolean {
     if (!this.snapshot) return false;
+    if (scope === 'permissions') return this.canManage();
     return scope === 'user'
       ? true
       : this.snapshot.bot.hasServerSettings && this.canConfigure() && !!this.snapshot.definition.server && !!this.snapshot.server;
@@ -250,6 +274,11 @@ export class BotSettingsModal {
 
   private refreshAuthorization(render = true): void {
     if (!this.snapshot) return;
+    if (!this.canManage() && this.scope === 'permissions') {
+      this.scope = 'user';
+      this.permissionDraft = [];
+      if (render) this.render();
+    }
     if (!this.canConfigure() && (this.snapshot.server || this.snapshot.definition.server)) {
       const definition: BotSettingsDefinition = { user: this.snapshot.definition.user };
       for (const { code } of SUPPORTED_LANGUAGES) {
@@ -290,6 +319,7 @@ export class BotSettingsModal {
         if (JSON.stringify(previous) === JSON.stringify(bot)) return;
         this.schemaStale ||= bot.schemaRevision !== previous.schemaRevision;
         this.serverStale ||= bot.revision !== previous.revision;
+        this.permissionsStale ||= bot.permissions?.revision !== previous.permissions?.revision;
         this.snapshot = { ...this.snapshot, bot };
         this.refreshAuthorization(false);
       }
@@ -306,6 +336,7 @@ export class BotSettingsModal {
     if (parsed.data.bot.botId !== this.snapshot.bot.botId) return;
     this.schemaStale ||= parsed.data.bot.schemaRevision !== this.snapshot.bot.schemaRevision;
     this.serverStale ||= parsed.data.server?.revision !== this.snapshot.server?.revision;
+    this.permissionsStale ||= parsed.data.bot.permissions?.revision !== this.snapshot.bot.permissions?.revision;
     this.snapshot = { ...this.snapshot, bot: parsed.data.bot };
     this.refreshAuthorization(false);
     this.render();
@@ -313,11 +344,12 @@ export class BotSettingsModal {
 
   private form(): BotForm | undefined {
     const locale = resolveBotLocale(this.localePreference === 'auto' ? getLanguage() : this.localePreference);
-    return this.snapshot ? localizeBotSettingsForm(this.snapshot.definition, this.scope, locale) : undefined;
+    return this.snapshot && this.scope !== 'permissions' ? localizeBotSettingsForm(this.snapshot.definition, this.scope, locale) : undefined;
   }
   private blocked(): boolean {
     return this.loading || this.loadFailed || this.saving || this.schemaStale ||
-      (this.scope === 'server' ? this.serverStale : this.userStale);
+      (this.scope === 'permissions' ? this.permissionsStale || !this.canManage() || !this.snapshot?.bot.permissions?.requested
+        : this.scope === 'server' ? this.serverStale : this.userStale);
   }
   private fieldContext(): BotFieldContext {
     return {
@@ -335,24 +367,40 @@ export class BotSettingsModal {
     const selection = focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement
       ? { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection } : null;
     const scrollTop = this.root.querySelector('.bot-settings-body')?.scrollTop ?? 0;
+    this.sectionNavigation?.destroy();
+    this.sectionNavigation = null;
     audioPreviewService.release(this.root);
     const snapshot = this.snapshot;
-    const scopes = (['user', 'server'] as const).filter((scope) => this.hasScope(scope));
+    const scopes = (['user', 'server', 'permissions'] as const).filter((scope) => this.hasScope(scope));
     const active = scopes.includes(this.scope);
     const form = this.form();
     const draft = this.drafts[this.scope];
     const invalid = !this.loading && draft ? resolveBotSettingsValues(form, convertBotInputValues(form?.fields ?? [], draft.values)) : undefined;
-    const stale = this.schemaStale || (this.scope === 'server' ? this.serverStale : this.userStale);
-    const message = stale ? t('botSettings.conflict') : this.message ||
+    const stale = this.schemaStale || (this.scope === 'permissions' ? this.permissionsStale : this.scope === 'server' ? this.serverStale : this.userStale);
+    const message = stale ? t(this.scope === 'permissions' ? 'botPermissions.conflict' : 'botSettings.conflict') : this.message ||
       (invalid && !invalid.success ? t('botSettings.stalePreferences') : '');
     const error = stale || this.error || !!(invalid && !invalid.success);
-    this.root.innerHTML = `<div class="modal-card bot-settings-card" role="dialog" aria-modal="true" aria-labelledby="bot-settings-title" tabindex="-1">
-      <div class="modal-header">
+    this.root.innerHTML = `<div class="modal-card settings-modal-card bot-settings-card" role="dialog" aria-modal="true" aria-labelledby="bot-settings-title" tabindex="-1">
+      <div class="settings-sidebar">
+        <div class="bot-settings-sidebar-title">${t('botSettings.title')}</div>
+        <div role="tablist" aria-orientation="vertical" aria-label="${t('botSettings.title')}">
+          ${scopes.map((scope) => `<button type="button" class="settings-tab-btn ${scope === this.scope ? 'active' : ''}" role="tab"
+            id="bot-settings-tab-${scope}" data-tab="${scope}" data-settings-scope="${scope}"
+            aria-selected="${scope === this.scope}" tabindex="${scope === this.scope ? '0' : '-1'}"
+            aria-controls="tab-panel-${scope}" ${this.saving ? 'disabled' : ''}>
+            <span class="material-symbols-outlined md-18" aria-hidden="true">${scope === 'permissions' ? 'shield' : scope === 'server' ? 'dns' : 'person'}</span>
+            ${t(scope === 'permissions' ? 'botPermissions.title' : scope === 'user' ? 'botSettings.userTab' : 'botSettings.serverTab')}</button>`).join('')}
+        </div>
+      </div>
+      <div class="settings-main-container">
+      <div class="settings-content-header">
         <div><h2 class="modal-title" id="bot-settings-title">${t(this.selectedBotId ? 'botSettings.title' : 'botSettings.listTitle')}</h2>
           <div class="bot-settings-server">${escapeHtml(this.session.server.serverDetails?.name ?? '')}</div></div>
-        <button type="button" class="modal-close-btn" data-settings-close aria-label="${t('common.close')}"><span class="material-symbols-outlined">close</span></button>
+        <button type="button" class="settings-back-btn" data-settings-close aria-label="${t('common.close')}"><span class="material-symbols-outlined">close</span><span class="esc-hint">ESC</span></button>
       </div>
-      <div class="bot-settings-body" aria-busy="${this.loading}">
+      <div class="settings-content-body bot-settings-body" aria-busy="${this.loading}">
+      <div class="settings-tab-panel" id="tab-panel-${snapshot ? this.scope : 'catalog'}"
+        ${snapshot ? `role="tabpanel" aria-labelledby="bot-settings-tab-${this.scope}"` : ''}>
         ${this.loading ? `<p class="bot-status" role="status">${renderLoadingIndicator(t('botSettings.loading'))}</p>${renderLoadingSkeleton('lines', 5)}` : snapshot ? `
           <div class="bot-settings-identity">
             <img src="${escapeHtml(getAvatarUrl(snapshot.bot.avatarUrl))}" alt="" data-fallback="avatar">
@@ -360,11 +408,11 @@ export class BotSettingsModal {
               <div class="bot-settings-presence">${t(snapshot.bot.online ? 'botSettings.online' : 'botSettings.offline')}</div></div>
           </div>
           ${!snapshot.bot.online ? `<p class="bot-settings-description">${t('botSettings.offlineHint')}</p>` : ''}
-          ${scopes.length ? `<div class="bot-settings-tabs" role="tablist" aria-label="${t('botSettings.title')}">${scopes.map((scope) =>
-            `<button type="button" class="btn btn-secondary" role="tab" id="bot-settings-tab-${scope}" data-settings-scope="${scope}"
-              aria-selected="${scope === this.scope}" tabindex="${scope === this.scope ? '0' : '-1'}" aria-controls="bot-settings-panel" ${this.saving ? 'disabled' : ''}>${t(scope === 'user' ? 'botSettings.userTab' : 'botSettings.serverTab')}</button>`
-          ).join('')}</div>` : `<p class="bot-status">${t('botSettings.noPreferences')}</p>`}
-          ${active && draft ? `<div role="tabpanel" id="bot-settings-panel" aria-labelledby="bot-settings-tab-${this.scope}">
+          ${this.scope === 'permissions' && active ? `<form id="bot-settings-form" class="bot-settings-form" novalidate>
+            <h3>${t('botPermissions.title')}</h3>
+            ${snapshot.bot.permissions?.reviewRequired !== false ? `<p role="status">${t('botPermissions.reviewPending')}</p>` : ''}
+            ${renderBotPermissionControls(snapshot.bot.permissions?.requested ?? null, this.permissionDraft, 'bot-settings-permissions', this.blocked())}
+          </form>` : active && draft ? `<div id="bot-settings-panel">
             <p class="bot-settings-description">${t(this.scope === 'user' ? 'botSettings.userDescription' : 'botSettings.serverDescription')}</p>
             ${this.scope === 'user' ? `<button type="button" class="btn btn-secondary" data-settings-local-tools>
               <span class="material-symbols-outlined md-16" aria-hidden="true">build</span>
@@ -372,27 +420,28 @@ export class BotSettingsModal {
             </button>` : ''}
             <form id="bot-settings-form" class="bot-settings-form" novalidate>
               <fieldset ${this.blocked() ? 'disabled' : ''}>
-                ${this.scope === 'user' ? `<div class="bot-settings-host-preference bot-field">
-                  <div class="bot-field-heading"><span id="bot-settings-language-label">${t('botSettings.language')}</span></div>
-                  <p class="bot-field-description">${t('botSettings.languageDescription')}</p>
-                  <div class="bot-choice-buttons" role="group" aria-labelledby="bot-settings-language-label">
-                    <button type="button" id="bot-settings-locale-auto" class="btn btn-secondary" data-settings-locale="auto"
-                      aria-pressed="${this.localePreference === 'auto'}" title="${t('botSettings.languageAutoDescription')}">${t('botSettings.languageAuto')}</button>
-                    ${SUPPORTED_LANGUAGES.map((language) => `<button type="button" id="bot-settings-locale-${language.code}"
-                      class="btn btn-secondary" data-settings-locale="${language.code}"
-                      aria-pressed="${this.localePreference === language.code}">${escapeHtml(language.label)}</button>`).join('')}
-                  </div>
+                ${this.scope === 'user' ? `<div class="bot-settings-host-preference form-group" data-settings-section="language" data-settings-label="${escapeHtml(t('botSettings.language'))}">
+                  <label for="bot-settings-locale">${t('botSettings.language')}</label>
+                  <p class="bot-field-description" id="bot-settings-language-description">${t('botSettings.languageDescription')}</p>
+                  <select id="bot-settings-locale" data-settings-locale aria-describedby="bot-settings-language-description bot-settings-language-auto-hint">
+                    <option value="auto" ${this.localePreference === 'auto' ? 'selected' : ''}>${t('botSettings.languageAuto')}</option>
+                    ${SUPPORTED_LANGUAGES.map((language) => `<option value="${language.code}"
+                      ${this.localePreference === language.code ? 'selected' : ''}>${escapeHtml(language.label)}</option>`).join('')}
+                  </select>
+                  <p class="bot-field-description" id="bot-settings-language-auto-hint">${t('botSettings.languageAutoDescription')}</p>
                 </div>` : ''}
-                ${this.scope === 'user' && snapshot.bot.capabilities.downloadsSound ? `<div class="bot-settings-host-preference bot-field">
+                ${this.scope === 'user' && snapshot.bot.capabilities.downloadsSound ? `<div class="bot-settings-host-preference bot-field" data-settings-section="downloads" data-settings-label="${escapeHtml(t('botSettings.askFileName'))}">
                   <div class="bot-field-heading"><label for="bot-settings-host-prompt">${t('botSettings.askFileName')}</label></div>
                   <label class="toggle-switch"><input type="checkbox" role="switch" id="bot-settings-host-prompt"
                     data-settings-host-prompt aria-describedby="bot-settings-host-hint" ${this.confirmFileName ? 'checked' : ''}>
                     <span class="toggle-slider"></span></label>
                   <p class="bot-field-description" id="bot-settings-host-hint">${t('botSettings.askFileNameHint')}</p>
                 </div>` : ''}
-                ${form ? `<h3 class="bot-settings-name">${escapeHtml(form.title)}</h3>` : ''}
-                ${form?.description ? `<p class="bot-field-description">${escapeHtml(form.description)}</p>` : ''}
-                ${renderBotFields(form?.fields ?? [], draft.values, this.fieldContext())}
+                ${form ? `<section data-settings-section="bot-defined" data-settings-label="${escapeHtml(form.title)}">
+                  <h3 class="bot-settings-name">${escapeHtml(form.title)}</h3>
+                  ${form.description ? `<p class="bot-field-description">${escapeHtml(form.description)}</p>` : ''}
+                  ${renderBotFields(form.fields, draft.values, this.fieldContext())}
+                </section>` : ''}
               </fieldset>
             </form>
           </div>` : ''}` : this.selectedBotId ? '' : `<div class="bot-settings-list">${this.bots.map((bot) => `
@@ -403,14 +452,18 @@ export class BotSettingsModal {
             </button>`).join('') || `<p class="bot-status">${t('botSettings.empty')}</p>`}</div>`}
         <p class="bot-settings-message ${error ? 'bot-error' : 'bot-status'}" role="${error ? 'alert' : 'status'}">${escapeHtml(message)}</p>
       </div>
+      </div>
       <div class="modal-footer">
-        ${this.selectedBotId ? `<button type="button" class="btn btn-secondary" data-settings-back ${this.saving ? 'disabled' : ''}>${t('common.back')}</button>` : ''}
+        ${this.selectedBotId && this.openedFromCatalog ? `<button type="button" class="btn btn-secondary" data-settings-back ${this.saving ? 'disabled' : ''}>${t('common.back')}</button>` : ''}
         <button type="button" class="btn btn-secondary" data-settings-reload ${this.loading || this.saving ? 'disabled' : ''} ${this.loading ? 'data-loading="1" aria-busy="true"' : ''}>${t('botSettings.reload')}</button>
         ${active && !this.loading ? `<button type="button" class="btn btn-secondary" data-settings-defaults ${this.blocked() ? 'disabled' : ''}>${t('botSettings.defaults')}</button>
           <button type="submit" form="bot-settings-form" class="btn btn-primary" data-settings-save ${this.blocked() ? 'disabled' : ''} ${this.saving ? 'data-loading="1" aria-busy="true"' : ''}>
             ${t(this.saving ? 'botSettings.saving' : 'common.save')}</button>` : ''}
       </div>
+      </div>
     </div>`;
+    this.sectionNavigation = new SettingsSectionNavigation(this.root);
+    this.sectionNavigation.setTab(snapshot ? this.scope : 'catalog');
     const restored = focused?.id ? document.getElementById(focused.id) : null;
     if (restored && this.root.contains(restored)) {
       restored.focus({ preventScroll: true });
@@ -436,9 +489,28 @@ export class BotSettingsModal {
 
   private onInput = (event: Event): void => {
     if (this.blocked() || !this.session || !this.isCurrent(this.session)) return;
+    if (this.scope === 'permissions') {
+      const requested = this.snapshot?.bot.permissions?.requested ?? null;
+      const next = readBotPermissionChange(event.target, requested, this.permissionDraft);
+      if (next && this.root && requested) {
+        this.permissionDraft = next;
+        syncBotPermissionControls(this.root, requested, next);
+        this.setMessage('', false);
+      }
+      return;
+    }
     const draft = this.drafts[this.scope];
     if (!draft) return;
-    if (event.target instanceof HTMLInputElement && event.target.hasAttribute('data-settings-host-prompt')) {
+    if (this.scope === 'user' && event.target instanceof HTMLSelectElement && event.target.hasAttribute('data-settings-locale')) {
+      if (event.type !== 'change') return;
+      const locale = event.target.value === 'auto' ? 'auto' : normalizeBotLocale(event.target.value);
+      if (!locale) { this.setMessage(t('botSettings.invalidResponse'), true); return; }
+      this.localePreference = locale;
+      draft.dirty = true;
+      this.setMessage('', false);
+      this.render();
+      return;
+    } else if (event.target instanceof HTMLInputElement && event.target.hasAttribute('data-settings-host-prompt')) {
       this.confirmFileName = event.target.checked;
       draft.dirty = true;
     } else {
@@ -472,25 +544,22 @@ export class BotSettingsModal {
       return;
     }
     const scope = target.closest<HTMLElement>('[data-settings-scope]')?.dataset.settingsScope;
-    if ((scope === 'user' || scope === 'server') && this.hasScope(scope)) {
+    if ((scope === 'user' || scope === 'server' || scope === 'permissions') && this.hasScope(scope)) {
       this.scope = scope; this.message = ''; this.error = false; this.render();
       this.root?.querySelector<HTMLElement>(`[data-settings-scope="${scope}"]`)?.focus();
       return;
     }
     if (this.blocked()) return;
+    if (this.scope === 'permissions') {
+      if (target.closest('[data-settings-defaults]') && this.root) {
+        this.permissionDraft = [];
+        syncBotPermissionControls(this.root, this.snapshot?.bot.permissions?.requested ?? [], []);
+      }
+      return;
+    }
     const draft = this.drafts[this.scope];
     const form = this.form();
     if (!draft) return;
-    const language = target.closest<HTMLElement>('[data-settings-locale]')?.dataset.settingsLocale;
-    if (language && this.scope === 'user') {
-      const locale = language === 'auto' ? 'auto' : normalizeBotLocale(language);
-      if (!locale) return;
-      this.localePreference = locale;
-      draft.dirty = true;
-      this.setMessage('', false);
-      this.render();
-      return;
-    }
     if (target.closest('[data-settings-defaults]')) {
       const defaults = resolveBotSettingsValues(form, {});
       if (!defaults.success) { this.setMessage(t('botSettings.invalidResponse'), true); return; }
@@ -541,6 +610,7 @@ export class BotSettingsModal {
   };
 
   private async save(): Promise<void> {
+    if (this.scope === 'permissions') { await this.savePermissions(); return; }
     const session = this.session;
     const snapshot = this.snapshot;
     const scope = this.scope;
@@ -599,28 +669,48 @@ export class BotSettingsModal {
     }
   }
 
+  private async savePermissions(): Promise<void> {
+    const session = this.session;
+    const snapshot = this.snapshot;
+    if (!session || !snapshot || !this.isCurrent(session) || this.blocked() || !this.canManage()) return;
+    const permissions = snapshot.bot.permissions ?? unreviewedBotPermissions();
+    if (permissions.requested === null) return;
+    this.saving = true;
+    this.message = '';
+    this.render();
+    try {
+      const response = botPermissionsSnapshotSchema.parse(await this.request(session, MessageType.BOT_PERMISSIONS_UPDATE, {
+        botId: snapshot.bot.botId, expectedRevision: permissions.revision, granted: this.permissionDraft,
+      }));
+      if (!this.isCurrent(session)) return;
+      if (response.botId !== snapshot.bot.botId || this.snapshot?.bot.botId !== snapshot.bot.botId) {
+        throw new Error(t('botSettings.invalidResponse'));
+      }
+      this.snapshot = { ...this.snapshot, bot: { ...this.snapshot.bot, permissions: response.permissions } };
+      this.permissionDraft = this.canManage() ? response.permissions.granted.slice() : [];
+      this.permissionsStale = false;
+      this.refreshAuthorization(false);
+      this.message = t('botPermissions.saved');
+      this.error = false;
+    } catch (error) {
+      if (this.isCurrent(session)) this.setMessage(botRequestError(error), true);
+    } finally {
+      if (this.isCurrent(session)) { this.saving = false; this.render(); }
+    }
+  }
+
   private onKeyDown = (event: KeyboardEvent): void => {
     if (!this.root || event.defaultPrevented) return;
     if ([...document.querySelectorAll('.modal-backdrop')].filter((element) => element.getClientRects().length).at(-1) !== this.root) return;
     if (event.key === 'Escape') { event.preventDefault(); this.close(); return; }
     const target = event.target instanceof Element ? event.target : null;
-    const language = target?.closest<HTMLButtonElement>('button[data-settings-locale]');
-    if (language && !this.blocked() && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-      event.preventDefault();
-      const buttons = [...this.root.querySelectorAll<HTMLButtonElement>('[data-settings-locale]')];
-      const index = buttons.indexOf(language);
-      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
-        : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
-      buttons[next]?.focus();
-      return;
-    }
     const tab = target?.closest<HTMLButtonElement>('button[data-settings-scope]');
-    if (tab && !this.saving && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+    if (tab && !this.saving && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
       event.preventDefault();
       const tabs = [...this.root.querySelectorAll<HTMLButtonElement>('[data-settings-scope]')];
       const index = tabs.indexOf(tab);
       const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
-        : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+        : (index + (event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1) + tabs.length) % tabs.length;
       tabs[next]?.click();
       return;
     }
@@ -648,6 +738,8 @@ export class BotSettingsModal {
 
   public close(): void {
     this.generation++;
+    this.sectionNavigation?.destroy();
+    this.sectionNavigation = null;
     for (const id of this.pending) this.session?.client.cancelRequest(id);
     this.pending.clear();
     this.unbind.forEach((unbind) => unbind());
@@ -657,7 +749,10 @@ export class BotSettingsModal {
     this.session = null;
     this.snapshot = null;
     this.selectedBotId = null;
+    this.openedFromCatalog = false;
     this.drafts = {};
+    this.permissionDraft = [];
+    this.permissionsStale = false;
     this.localePreference = 'auto';
     this.bots = [];
     this.loading = this.loadFailed = this.saving = this.schemaStale = this.serverStale = this.userStale = false;

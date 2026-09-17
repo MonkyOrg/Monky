@@ -79,7 +79,7 @@ const register = (channel, handler) => ipcMain.handle(channel, (event, ...args) 
   return handler(...args);
 });
 const run = (action, args = []) => {
-  assert.ok(['identity', 'createBot', 'join', 'invoke', 'sample', 'chat', 'mute', 'enablePermission',
+  assert.ok(['identity', 'createBot', 'approveBot', 'join', 'invoke', 'sample', 'chat', 'mute', 'enablePermission',
     'leave', 'privateReady', 'privateClosed', 'failures', 'cleanup'].includes(action));
   assert.ok(window && !window.isDestroyed() && !window.webContents.isCrashed());
   return window.webContents.executeJavaScript(

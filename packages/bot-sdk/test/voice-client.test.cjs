@@ -21,7 +21,7 @@ const human = { user: { id: 'human', sessionId: 'aaa:human' }, voiceState: { ses
 test('text-only BotClient does not load the WebRTC transport dependency', () => {
   const result = spawnSync(process.execPath, ['-e', `
     const { BotClient } = require('./dist');
-    const bot = new BotClient({ publicKey: 'a'.repeat(64) });
+    const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities: ['publish_voice'] });
     if (require.cache[require.resolve('werift')]) throw new Error('WebRTC was loaded eagerly');
     bot.close().catch((error) => { console.error(error); process.exitCode = 1; });
   `], { cwd: path.join(__dirname, '..'), encoding: 'utf8', timeout: 10000 });
@@ -75,7 +75,7 @@ async function fixture(t, withHuman = false) {
     });
   });
   function send(type, payload, requestId) { socket.send(JSON.stringify({ type, payload, requestId })); }
-  const bot = new BotClient({ publicKey: 'a'.repeat(64), token: 'token', serverUrl: `ws://127.0.0.1:${server.address().port}`, autoReconnect: false });
+  const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities: ['commands', 'publish_voice'], token: 'token', serverUrl: `ws://127.0.0.1:${server.address().port}`, autoReconnect: false });
   bot.on('error', (error) => errors.push(error));
   const connected = once(bot, 'connected');
   bot.connect({ serverId: 'server' });

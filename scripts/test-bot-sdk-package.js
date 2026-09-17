@@ -19,9 +19,9 @@ try {
     const { BotClient, PROTOCOL_VERSION } = require('@monky/bot-sdk');
     (async () => {
       assert.equal(PROTOCOL_VERSION, ${PROTOCOL_VERSION});
-      const bot = new BotClient({ publicKey: 'a'.repeat(64), autoReconnect: false });
+      const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities: ['commands'], autoReconnect: false });
       for (const method of [
-        'joinVoice', 'leaveVoice', 'getVoiceConnection',
+        'joinVoice', 'leaveVoice', 'getVoiceConnection', 'getPermissions',
         'createScreen', 'updateScreen', 'closeScreen', 'listScreens',
       ]) {
         assert.equal(typeof bot[method], 'function', method + ' must be available in the packaged SDK.');
@@ -39,6 +39,7 @@ try {
         assert.equal(response.status, 200);
         const manifest = await response.json();
         assert.equal(manifest.name, 'Packaged Bot');
+        assert.deepEqual(manifest.requestedCapabilities, ['commands']);
         assert.equal(manifest.commands[0].name, '8ball');
       } finally {
         await bot.close();

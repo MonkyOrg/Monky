@@ -20,11 +20,27 @@ import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
 import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
 import { resolveDevelopmentProfile } from './developmentProfile';
+import { bindDevelopmentQa, loadDevelopmentQa } from './developmentQa';
 import { CrashRecovery } from './crashRecovery';
 import type { LocalExecutionIpc } from './localExecution/ipc';
 import { initializeMainLanguage, mt } from './i18n';
 
 import fs from 'fs';
+
+const developmentQa = loadDevelopmentQa({
+  packaged: app.isPackaged,
+  appPath: app.getAppPath(),
+  profile: app.commandLine.getSwitchValue('user-data-dir'),
+  configFile: process.env.MONKY_QA_CONFIG,
+  parentPid: process.ppid,
+  supervised: typeof process.send === 'function',
+});
+if (developmentQa) {
+  // Prepared QA never opens physical capture devices, including after unmute.
+  app.commandLine.appendSwitch('use-fake-device-for-media-stream');
+  app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+  if (developmentQa.smoke) app.commandLine.appendSwitch('mute-audio');
+}
 
 const developmentProfile = resolveDevelopmentProfile({
   isPackaged: app.isPackaged,
@@ -240,7 +256,7 @@ function createWindow(deferShow = false): void {
     // Right after an update install the window is held back (show: false) and
     // only revealed once it has painted, so the "finishing" splash hands off to
     // a fully-drawn UI with no dark gap in between (#498).
-    show: !deferShow,
+    show: !deferShow && !developmentQa?.smoke,
     // Windows/Linux: fully frameless (custom title bar in the renderer).
     // macOS: keep the native traffic-light buttons but hide the title bar.
     frame: isMac,
@@ -256,10 +272,14 @@ function createWindow(deferShow = false): void {
       sandbox: false, // needed for custom desktopCapturer / preload access
       webSecurity: true,
       backgroundThrottling: false, // Keep audio and WebRTC processing smoothly when minimized/hidden
+      offscreen: developmentQa?.smoke === true,
+      additionalArguments: developmentQa ? ['--monky-prepared-qa'] : [],
     },
   });
 
   getCrashRecovery().watch(mainWindow);
+  const disposeQa = bindDevelopmentQa(mainWindow, developmentQa, quitApplication);
+  mainWindow.once('closed', disposeQa);
 
   if (developmentProfile) {
     const window = mainWindow;
@@ -279,7 +299,7 @@ function createWindow(deferShow = false): void {
     overlayManager.setMainWindow(mainWindow);
   }
 
-  let minimizeToTray = true;
+  let minimizeToTray = !developmentQa;
 
   clientLogger = new ClientLogger();
   clientLogger.write({
@@ -369,6 +389,11 @@ function createWindow(deferShow = false): void {
 
   // Minimize to tray on close instead of quitting the application (#149, #256)
   mainWindow.on('close', (event) => {
+    if (developmentQa && !isQuitting) {
+      event.preventDefault();
+      quitApplication();
+      return;
+    }
     if (!isQuitting) {
       if (minimizeToTray) {
         event.preventDefault();

@@ -279,6 +279,8 @@ export interface BotInfo {
   profilePending: boolean;
   lastProtocolVersion?: number | null;
   requiredProtocolVersion?: number;
+  /** Absent declarations are unreviewed, never implicitly approved. */
+  permissions?: import('./botPermissions.js').BotPermissions;
 }
 
 export interface BotCompatibilitySummary {
@@ -292,6 +294,8 @@ export interface BotCompatibilitySummary {
 export interface ServerDetails {
   id: string;
   name: string;
+  /** Version of the running server, not the connected desktop application. */
+  serverVersion?: string | null;
   createdAt: number;
   maxUsers: number;
   hasPassword?: boolean;

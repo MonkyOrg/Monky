@@ -59,6 +59,7 @@ export class ServerManager {
     const config: ServerConfig = {
       port: options.port,
       dataDir,
+      version: app.getVersion(),
       serverName: options.serverName || 'Monky Server',
       password: options.password || '',
       initialVoiceChannel: options.initialVoiceChannel || 'Geral',

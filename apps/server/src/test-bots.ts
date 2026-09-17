@@ -63,7 +63,7 @@ import {
 import { AvatarStorageService } from './infrastructure/security/AvatarStorageService';
 import { BotInteractionHandler, BotInteractionSession } from './infrastructure/websocket/BotInteractionHandler';
 import { ensureServerSeedData } from './server';
-import { createFixture, identity, record, records, text, type Received } from './testFixtures/bots';
+import { createApprovedBotFixture as createFixture, identity, record, records, text, type Received } from './testFixtures/bots';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
 const AUDIO_PREVIEW = { url: 'https://cdn.example.test/effect.mp3', fileName: 'effect.mp3', durationMs: 1200 };
@@ -956,7 +956,14 @@ test('bot settings catalog separates configuration permissions, broadcasts safe 
   const safe = botSettingsListResponseSchema.parse(broadcast.payload).bots.find((entry) => entry.botId === f.botId);
   assert.ok(safe && !safe.canConfigure);
   await f.bob.peer.barrier();
-  assert.equal(f.alice.peer.messages.slice(since).some((message) => message.type === MessageType.BOT_SETTINGS_SNAPSHOT), false);
+  const managerSnapshots = f.alice.peer.messages.slice(since).filter((message) => message.type === MessageType.BOT_SETTINGS_SNAPSHOT);
+  assert.ok(managerSnapshots.length > 0);
+  for (const message of managerSnapshots) {
+    const managerSnapshot = botSettingsSnapshotSchema.parse(message.payload);
+    assert.equal(managerSnapshot.bot.canManage, true);
+    assert.equal(managerSnapshot.server, undefined);
+    assert.equal(managerSnapshot.definition.server, undefined);
+  }
   await f.bot.peer.error(MessageType.BOT_SETTINGS_UPDATE, {
     botId: f.botId, schemaRevision: saved.bot.schemaRevision, expectedRevision: saved.bot.revision, patch: { count: 1 },
   }, ProtocolErrorCode.PERMISSION_DENIED);
@@ -2385,10 +2392,12 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await bot.peer.error(MessageType.COMMAND_PROMPT, { invocationId: id, interactionId: 'parallel', form }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     await otherBot.peer.error(MessageType.COMMAND_PROMPT, { invocationId: id, interactionId: 'forged', form }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     const submission = { invocationId: id, interactionId: 'round-one', values: formValues };
-    for (const peer of [bob.peer, otherDevice.peer, otherBot.peer]) {
+    for (const peer of [bob.peer, otherDevice.peer]) {
       await peer.error(MessageType.COMMAND_SUBMIT, submission, ProtocolErrorCode.BOT_INTERACTION_INVALID);
       await peer.error(MessageType.COMMAND_CANCEL, { invocationId: id }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     }
+    await otherBot.peer.error(MessageType.COMMAND_SUBMIT, submission, ProtocolErrorCode.PERMISSION_DENIED);
+    await otherBot.peer.error(MessageType.COMMAND_CANCEL, { invocationId: id }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     await otherBot.peer.error(MessageType.COMMAND_FINISH, { invocationId: id }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     for (const values of [
       {}, { ...formValues, size: '2' }, { ...formValues, mode: 'unknown' },
@@ -2700,7 +2709,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
         const address = manifestServer.address();
         assert.ok(address && typeof address === 'object');
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ name: 'Installed Bot', icon, registrationUrl: `http://127.0.0.1:${address.port}/register` }));
+        res.end(JSON.stringify({ name: 'Installed Bot', icon, requestedCapabilities: [], registrationUrl: `http://127.0.0.1:${address.port}/register` }));
       } else {
         const chunks: Buffer[] = [];
         req.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -2718,8 +2727,13 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     const address = manifestServer.address();
     assert.ok(address && typeof address === 'object');
     const manifestUrl = `http://127.0.0.1:${address.port}/manifest`;
+    const previewInstall = async () => {
+      const preview = await owner.peer.request(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl });
+      assert.equal(preview.type, MessageType.BOT_INSTALL_PREVIEW_RESULT);
+      return { previewId: text(preview.payload.previewId), grantedCapabilities: [] };
+    };
     try {
-      const installed = await owner.peer.request(MessageType.BOT_INSTALL, { manifestUrl });
+      const installed = await owner.peer.request(MessageType.BOT_INSTALL, await previewInstall());
       assert.equal(installed.type, MessageType.BOT_INSTALLED);
       const installedBot = record(installed.payload.bot);
       assert.equal(installedBot.name, 'Installed Bot');
@@ -2730,18 +2744,18 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       assert.equal(registration.serverName, 'Bot tests');
       const count = await fixture.botRepo.count();
       icon = 'not an image';
-      await owner.peer.error(MessageType.BOT_INSTALL, { manifestUrl }, ProtocolErrorCode.AVATAR_INVALID_TYPE);
+      await owner.peer.error(MessageType.BOT_INSTALL, await previewInstall(), ProtocolErrorCode.AVATAR_INVALID_TYPE);
       assert.equal(await fixture.botRepo.count(), count);
       icon = PNG;
       registrationStatus = 502;
-      const rejected = await owner.peer.request(MessageType.BOT_INSTALL, { manifestUrl });
+      const rejected = await owner.peer.request(MessageType.BOT_INSTALL, await previewInstall());
       assert.equal(rejected.type, MessageType.SERVER_ERROR);
       assert.equal(rejected.payload.code, ProtocolErrorCode.BAD_REQUEST);
       assert.match(text(rejected.payload.message), /registro.*502/);
       assert.equal(await fixture.botRepo.count(), count, 'a rejected registration must not leave an offline account behind');
       registrationStatus = 200;
       registrationKey = 'invalid-key';
-      await owner.peer.error(MessageType.BOT_INSTALL, { manifestUrl }, ProtocolErrorCode.BAD_REQUEST);
+      await owner.peer.error(MessageType.BOT_INSTALL, await previewInstall(), ProtocolErrorCode.BAD_REQUEST);
       assert.equal(await fixture.botRepo.count(), count, 'an invalid confirmation must not leave an account behind');
     } finally {
       await new Promise<void>((resolve, reject) => manifestServer.close((error) => error ? reject(error) : resolve()));
@@ -3392,8 +3406,11 @@ test('autocomplete and sound downloads over authenticated WebSockets', async (t)
     assert.notEqual(pending.received.downloadId, pending.requestId);
     await bot.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD, { ...sound, invocationId }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     const submitted = { invocationId, downloadId: pending.received.downloadId, result: { status: 'downloaded' } };
-    for (const peer of [otherDevice.peer, bob.peer, bot.peer, otherBot.peer]) {
+    for (const peer of [otherDevice.peer, bob.peer]) {
       await peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, submitted, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    }
+    for (const peer of [bot.peer, otherBot.peer]) {
+      await peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, submitted, ProtocolErrorCode.PERMISSION_DENIED);
     }
     for (const invalid of [
       { ...submitted, downloadId: 'forged' },
@@ -3993,6 +4010,39 @@ async function createLocalExecutionFixture(t: TestContext) {
   };
   return { ...f, connectBot: f.bot, owner, caller, bot, botId, token, textId, voiceId, invoke, retain, task, event, join, negotiate };
 }
+
+test('administrator capability revocation cancels local work, sources, voice and pending interactions', async (t) => {
+  const f = await createLocalExecutionFixture(t);
+  const invocation = await f.invoke();
+  const source = await f.retain(invocation.id);
+  await f.join(invocation.id);
+  const task = await f.task({ kind: 'source', sourceContextId: source.sourceContextId },
+    { operation: 'youtube.stream', url: LOCAL_TEST_URL });
+  await f.negotiate(task.offer);
+  f.bot.peer.send(MessageType.COMMAND_PROMPT, {
+    invocationId: invocation.id, interactionId: 'permission-prompt',
+    form: { title: 'Pending consent', fields: [{ name: 'answer', label: 'Answer', type: 'text' }] },
+  });
+  await f.caller.peer.wait((message) => message.type === MessageType.COMMAND_PROMPT &&
+    message.payload.invocationId === invocation.id);
+  const state = f.botPermissions.get(f.botId);
+  assert.ok(state);
+  const response = await f.owner.peer.request(MessageType.BOT_PERMISSIONS_UPDATE, {
+    botId: f.botId, expectedRevision: state.revision, granted: state.granted.filter((capability) => capability !== 'local_execution'),
+  });
+  assert.equal(response.type, MessageType.BOT_PERMISSIONS_SNAPSHOT);
+  assert.deepEqual(await f.event(task.offer, 'cancelled', f.caller.peer),
+    { state: 'cancelled', taskId: task.offer.taskId, cause: 'permission_revoked' });
+  await f.caller.peer.wait((message) => message.type === MessageType.COMMAND_FINISHED &&
+    message.payload.invocationId === invocation.id && message.payload.reason === 'bot_disconnected');
+  assert.equal(f.signalingService.getVoiceState(`bot:${f.botId}`), undefined);
+  await f.caller.peer.error(MessageType.COMMAND_SUBMIT, {
+    invocationId: invocation.id, interactionId: 'permission-prompt', values: { answer: 'late' },
+  }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  const reconnected = await f.connectBot(f.token, f.bot.keys);
+  await reconnected.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'release', sourceContextId: source.sourceContextId }, ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
+});
 
 test('local execution real sockets expose only authenticated public keys and derive retained sources from original invocation capability', async (t) => {
   const f = await createLocalExecutionFixture(t);

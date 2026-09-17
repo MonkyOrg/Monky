@@ -59,7 +59,7 @@ function fixture(create) {
   const dependencies = new Map([
     ['path', path], ['fs', fakeFs],
     ['electron', {
-      app: { getPath: () => path.join('C:\\', 'synthetic-monky-profile') },
+      app: { getPath: () => path.join('C:\\', 'synthetic-monky-profile'), getVersion: () => '44.7.9-beta' },
       BrowserWindow: {
         getAllWindows: () => [
           fakeWindow,
@@ -134,6 +134,7 @@ test('real ServerManager wiring serializes concurrent IPC starts and never repla
   assert.equal(f.configCalls.length, 1);
   assert.equal(f.configCalls[0].voiceMode, 'sfu');
   assert.equal(f.configCalls[0].maxUsers, 8);
+  assert.equal(f.configCalls[0].version, '44.7.9-beta');
   assert.equal(f.configCalls[0].dataDir, path.join('C:\\', 'synthetic-monky-profile', 'server-data', 'a'));
   assert.equal(server.starts, 1);
   assert.equal(server.stops, 0);

@@ -167,10 +167,10 @@ for (const localizations of [
     { name: 'play', description: 'Play', localizations },
     { name: 'stop', description: 'Stop', localizations: { 'pt-BR': { name: 'parar' }, en: { aliases: ['halt'] } } },
   ];
-  assert.equal(commandRegisterSchema.safeParse({ commands }).success, false, 'Canonical names and localized aliases share one namespace per bot/locale');
-  assert.equal(commandRegisterSchema.safeParse({ commands: commands.slice().reverse() }).success, false, 'Collision validation must be registration-order independent');
+  assert.equal(commandRegisterSchema.safeParse({ requestedCapabilities: ['commands'], commands }).success, false, 'Canonical names and localized aliases share one namespace per bot/locale');
+  assert.equal(commandRegisterSchema.safeParse({ requestedCapabilities: ['commands'], commands: commands.slice().reverse() }).success, false, 'Collision validation must be registration-order independent');
 }
-assert.equal(commandRegisterSchema.safeParse({ commands: [
+assert.equal(commandRegisterSchema.safeParse({ requestedCapabilities: ['commands'], commands: [
   { name: 'first', description: 'First', localizations: { 'pt-BR': { aliases: ['shared'] } } },
   { name: 'second', description: 'Second', localizations: { en: { aliases: ['shared'] } } },
 ] }).success, true, 'Aliases from different active locales do not collide');
@@ -178,7 +178,7 @@ assert.equal(commandInvokeSchema.parse({ commandName: 'play', botId: 'bot', chan
 for (const voiceRequirement of ['joined', 'same-bot-channel'] as const) {
   const command = { name: 'voice', description: 'Voice command', voiceRequirement };
   assert.deepEqual(commandDefinitionSchema.parse(command), command);
-  assert.deepEqual(commandRegisterSchema.parse({ commands: [command] }).commands[0], command);
+  assert.deepEqual(commandRegisterSchema.parse({ requestedCapabilities: ['commands'], commands: [command] }).commands[0], command);
 }
 for (const voiceRequirement of ['any', '', true, null]) {
   assert.equal(commandDefinitionSchema.safeParse({ name: 'voice', description: 'Voice', voiceRequirement }).success, false);
@@ -235,6 +235,7 @@ for (const badAudio of [
   assert.equal(audioPreviewSourceSchema.safeParse(badAudio).success, false);
 }
 assert.equal(commandRegisterSchema.safeParse({
+  requestedCapabilities: ['commands'],
   commands: [{ name: 'ping', description: 'Ping' }, { name: 'ping', description: 'Other' }],
 }).success, false);
 assert.deepEqual(commandDefinitionSchema.parse({
@@ -315,10 +316,10 @@ assert.equal(botFormSchema.safeParse({
 assert.equal(commandSubmitSchema.safeParse({
   invocationId: 'inv', interactionId: 'form', values: JSON.parse('{"constructor": "evil"}'),
 }).success, false);
-assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'not a URL' }).success, false);
-assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'file:///tmp/bot' }).success, false);
+assert.equal(botManifestSchema.safeParse({ requestedCapabilities: [], name: 'Bot', registrationUrl: 'not a URL' }).success, false);
+assert.equal(botManifestSchema.safeParse({ requestedCapabilities: [], name: 'Bot', registrationUrl: 'file:///invalid/bot' }).success, false);
 assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'http://user:pass@host/register' }).success, false);
-assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'http://localhost:7780/register' }).success, true);
+assert.equal(botManifestSchema.safeParse({ requestedCapabilities: [], name: 'Bot', registrationUrl: 'http://localhost:7780/register' }).success, true);
 assert.equal(botProfileUpdateSchema.safeParse({ avatarBase64: null }).success, true);
 assert.deepEqual(botCreateSchema.parse({}), {});
 for (const input of [null, { name: 'Client name' }, { avatarBase64: 'AAAA' }, { profilePending: false }]) {

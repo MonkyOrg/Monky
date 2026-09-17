@@ -53,7 +53,7 @@ assert.equal(botSettingsDefinitionSchema.safeParse({ user: {
   title: 'Missing default', fields: [{ name: 'name', label: 'Name', type: 'text', required: true }],
 } }).success, false);
 assert.equal(botSettingsDefinitionSchema.safeParse({ host: { confirmFileName: false } }).success, false);
-assert.equal(commandRegisterSchema.safeParse({ commands: [], settings: definition }).success, true);
+assert.equal(commandRegisterSchema.safeParse({ requestedCapabilities: [], commands: [], settings: definition }).success, true);
 
 const localizedDefinition = botSettingsDefinitionSchema.parse({
   ...definition,
