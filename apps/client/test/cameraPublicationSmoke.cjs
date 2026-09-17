@@ -757,22 +757,43 @@ async function runCameraPublicationSmoke(filter) {
       }, [238, 32, 32], 'Native camera decodes over genuine same-host ICE without DNS and with late track registration');
       check(lookups > 1 && sender.track === entry.track,
         'Decoder lookup waits for eventual ontrack registration without replacing or fabricating the sender');
-      const report = await receiving.getStats();
-      const pair = [...report.values()].find(stat => stat.type === 'candidate-pair' && stat.state === 'succeeded' && stat.nominated);
-      const remoteCandidate = pair && report.get(pair.remoteCandidateId);
       const signaled = receiving.remoteDescription.sdp.split(/\r?\n/).filter(line => line.startsWith('a=candidate:'))
         .map(line => new RTCIceCandidate({ candidate: line.slice(2), sdpMid: '0' }));
-      const inbound = [...report.values()].find(stat => stat.type === 'inbound-rtp' && stat.kind === 'video');
-      const sentReport = await sender.getStats();
-      const outbound = [...sentReport.values()].find(stat => stat.type === 'outbound-rtp' && stat.kind === 'video');
-      check(pair && signaled.length > 0 && signaled.every(numericHost)
-        && outbound?.framesEncoded > 0 && inbound?.framesDecoded > 0,
-      'A genuine numeric host ICE pair encodes and decodes RTP without mDNS resolution');
+      check(signaled.length > 0 && signaled.every(numericHost), 'Only genuine numeric host candidates are signaled',
+        signaled.map(candidate => ({ type: candidate.type, addressKind: addressKind(candidate.address) })));
+      let statsSamples = 0;
+      let firstStats;
+      let lastStats;
+      let transport;
+      try {
+        // Decoded pixels can precede libwebrtc's asynchronously collected/cached stats.
+        transport = await until(async () => {
+          const [report, sentReport] = await Promise.all([receiving.getStats(), sender.getStats()]);
+          const pairs = [...report.values()].filter(stat => stat.type === 'candidate-pair');
+          const pair = pairs.find(stat => stat.state === 'succeeded' && stat.nominated);
+          const inbound = [...report.values()].find(stat => stat.type === 'inbound-rtp' && stat.kind === 'video');
+          const outbound = [...sentReport.values()].find(stat => stat.type === 'outbound-rtp' && stat.kind === 'video');
+          lastStats = {
+            pairs: pairs.map(stat => ({ state: stat.state, nominated: stat.nominated })),
+            framesEncoded: outbound?.framesEncoded ?? null, framesDecoded: inbound?.framesDecoded ?? null,
+          };
+          if (++statsSamples === 1) firstStats = lastStats;
+          return pair && outbound?.framesEncoded > 0 && inbound?.framesDecoded > 0
+            && { pair, remoteCandidate: report.get(pair.remoteCandidateId), inbound, outbound };
+        }, 'A genuine numeric host ICE pair encodes and decodes RTP without mDNS resolution');
+      } catch (error) {
+        throw new Error(`${error.message}; native RTP stats=${JSON.stringify({
+          statsSamples, firstStats, lastStats, peers: await transportDiagnostics(),
+        })}`, { cause: error });
+      }
+      const { pair, remoteCandidate, inbound, outbound } = transport;
+      check(pair.state === 'succeeded' && pair.nominated && outbound.framesEncoded > 0 && inbound.framesDecoded > 0,
+        'A genuine numeric host ICE pair encodes and decodes RTP without mDNS resolution', lastStats);
       console.log('CAMERA TEST DNS-independent transport ' + JSON.stringify({
         senderIce: sending.iceConnectionState, receiverIce: receiving.iceConnectionState,
         pairState: pair.state, candidate: addressKind(remoteCandidate?.address || remoteCandidate?.ip),
         signaledCandidates: signaled.map(candidate => addressKind(candidate.address)),
-        framesEncoded: outbound.framesEncoded, framesDecoded: inbound.framesDecoded, rgba,
+        framesEncoded: outbound.framesEncoded, framesDecoded: inbound.framesDecoded, rgba, statsSamples, firstStats,
       }));
     });
 
