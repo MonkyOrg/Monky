@@ -119,7 +119,7 @@ export class ServerRolesTab {
 
   private renderRoleRows(): string {
     const roles = serverStore.getVisibleRoles().sort((a, b) => b.position - a.position);
-    const members = serverStore.getAllMembersInDisplayOrder();
+    const members = serverStore.getAllMembersInDisplayOrder().filter(member => !member.isBot);
     return roles.map((role) => `
       <tr class="role-table-row" data-role-id="${role.id}" draggable="true">
         <td><div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
@@ -196,7 +196,7 @@ export class ServerRolesTab {
     // A role belongs to the person, not to the connection, so offline members
     // have to be listed too. This helper forces the right presence state on
     // people who dropped mid-session (#477).
-    const members = serverStore.getAllMembersInDisplayOrder();
+    const members = serverStore.getAllMembersInDisplayOrder().filter(member => !member.isBot);
 
     return `
       <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">${t('roles.membersEditorHint')}</div>

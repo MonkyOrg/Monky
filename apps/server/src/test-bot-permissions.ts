@@ -78,6 +78,24 @@ test('manual and legacy bots receive no grant until a human manager reviews an e
   assert.equal(bot.peer.messages.slice(before).some((message) => message.type === MessageType.CHAT_MESSAGE), false);
 });
 
+test('unlink notifies the affected bot before closing its connection, unlike a capability review', async t => {
+  const f = await fixture(t);
+  let bot = await f.connectBot();
+  await bot.peer.request(MessageType.COMMAND_REGISTER, { requestedCapabilities: ['commands'], commands: [] });
+  const reviewedMessages = bot.peer.messages.length;
+  const closedForReview = once(bot.peer.ws, 'close');
+  await f.approve(['commands']);
+  await closedForReview;
+  assert.equal(bot.peer.messages.slice(reviewedMessages).some(message => message.type === MessageType.BOT_REVOKED), false);
+  bot = await f.connectBot();
+  const notice = bot.peer.wait(message => message.type === MessageType.BOT_REVOKED);
+  const closed = once(bot.peer.ws, 'close');
+  const result = await f.owner.peer.request(MessageType.BOT_REVOKE, { botId: f.botId });
+  assert.equal(result.type, MessageType.BOT_REVOKED);
+  assert.equal((await notice).payload.botId, f.botId);
+  await closed;
+});
+
 test('only MANAGE_BOTS may approve a requested subset, with persistent optimistic revisions', async (t) => {
   const f = await fixture(t);
   const bot = await f.connectBot();
@@ -292,6 +310,7 @@ test('revoking interactive capabilities closes durable selectors and voice minia
     presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 2,
   });
   assert.equal(selector.type, MessageType.SELECTOR_SNAPSHOT, JSON.stringify(selector.payload));
+  await bot.peer.error(MessageType.CHAT_LOAD_HISTORY, { channelId: f.textId }, ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
   const selectorId = text(selector.payload.id);
   const before = f.caller.peer.messages.length;
   await f.approve(['commands', 'send_messages']);

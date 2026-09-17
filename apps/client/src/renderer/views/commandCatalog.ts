@@ -1,4 +1,4 @@
-import { getCommandPresentation, localizeCommand, type BotLocale, type SlashCommand } from '@monky/shared';
+import { getCommandPresentation, localizeCommand, type BotLocale, type BotSettingsSummary, type SlashCommand } from '@monky/shared';
 import { getLanguage, t } from '../i18n';
 import { getAvatarUrl } from '../utils/avatar';
 import { escapeHtml } from '../utils/html';
@@ -17,10 +17,38 @@ export function renderCommandParameters(command: SlashCommand): string {
   </span>`;
 }
 
+export function renderEmptyCommandCatalog(bots: readonly BotSettingsSummary[] | null, searching = false): string {
+  if (searching) return `<p class="command-empty-frequency">${t('botChat.noMatchingCommands')}</p>`;
+  if (bots === null) return `<p class="command-empty-frequency">${t('botChat.loadingCommands')}</p>`;
+  const online = bots.filter(bot => bot.online);
+  if (online.length === 0) return `<p class="command-empty-frequency">${t('botChat.noOnlineBots')}</p>`;
+  return online.map(bot => {
+    const permissions = bot.permissions;
+    const reason = permissions?.requested === null ? 'botChat.commandsUndeclared'
+      : permissions?.reviewRequired ? 'botChat.commandsReviewRequired'
+        : permissions && !permissions.granted.includes('commands') ? 'botChat.commandsNotGranted'
+          : 'botChat.commandsUnavailable';
+    return `<section class="command-group">
+      <h3>${escapeHtml(bot.name)}</h3>
+      <p class="command-empty-frequency">${t(reason)}</p>
+      ${bot.canManage ? `<button type="button" class="btn btn-secondary"
+        data-command-bot-configure="${escapeHtml(bot.botId)}">${t('bots.configure')}</button>` : ''}
+    </section>`;
+  }).join('');
+}
+
 export function renderCommandCatalog(
   groups: CommandGroup[], activeIndex: number, deniedReason: (command: SlashCommand) => string | undefined = () => undefined,
   localeFor: (command: SlashCommand) => BotLocale = () => getLanguage(),
+  emptyState?: string,
 ): string {
+  if (groups.length === 0) {
+    return `<div class="command-picker command-picker-empty">
+      <div id="command-list-status" class="command-picker-scroll" role="status">
+        ${emptyState || `<p class="command-empty-frequency">${t('botChat.noCommands')}</p>`}
+      </div>
+    </div>`;
+  }
   let index = 0;
   let activeGroup = '';
   const sections = groups.map((group, groupIndex) => {
@@ -62,7 +90,7 @@ export function renderCommandCatalog(
       </button>`).join('')}
     </nav>
     <div id="command-list-options" class="command-picker-scroll" role="listbox" aria-label="${t('botChat.commands')}">
-      ${sections || `<p class="command-empty-frequency">${t('botChat.noCommands')}</p>`}
+      ${sections}
     </div>
   </div>`;
 }

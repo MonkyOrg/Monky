@@ -109,6 +109,24 @@ export class SfuClientEngine {
     return this.getClient();
   }
 
+  private logTransportCandidates(
+    direction: 'send' | 'recv',
+    transport: { id: string; iceCandidates: readonly unknown[] },
+  ): void {
+    const candidates = transport.iceCandidates.map(candidate => {
+      if (!candidate || typeof candidate !== 'object') return { invalid: true };
+      const address = 'ip' in candidate && typeof candidate.ip === 'string' ? candidate.ip
+        : 'address' in candidate && typeof candidate.address === 'string' ? candidate.address : undefined;
+      const protocol = 'protocol' in candidate && typeof candidate.protocol === 'string' ? candidate.protocol : undefined;
+      const port = 'port' in candidate && typeof candidate.port === 'number' ? candidate.port : undefined;
+      if (!address || !protocol || port === undefined) return { invalid: true };
+      return { address, protocol, port };
+    });
+    clientLog.info('SFU', `${direction} transport created; ICE connectivity is not confirmed`, {
+      transportId: transport.id, candidates,
+    });
+  }
+
   public async join(channelId: string): Promise<boolean> {
     this.leave();
     const epoch = this.joinEpoch;
@@ -155,7 +173,7 @@ export class SfuClientEngine {
       );
       if (!isCurrent()) return false;
 
-      console.log(`[SFU Client] Send transport created on server (${sendCreated.transportOptions?.id}). ICE candidates:`, sendCreated.transportOptions?.iceCandidates?.map((c: any) => `${c.protocol?.toUpperCase()} ${c.ip || c.address}:${c.port}`));
+      this.logTransportCandidates('send', sendCreated.transportOptions);
 
       this.sendTransport = this.device.createSendTransport(sendCreated.transportOptions as any);
       const sendTransport = this.sendTransport;
@@ -232,7 +250,7 @@ export class SfuClientEngine {
       );
       if (!isCurrent()) return false;
 
-      console.log(`[SFU Client] Recv transport created on server (${recvCreated.transportOptions?.id}). ICE candidates:`, recvCreated.transportOptions?.iceCandidates?.map((c: any) => `${c.protocol?.toUpperCase()} ${c.ip || c.address}:${c.port}`));
+      this.logTransportCandidates('recv', recvCreated.transportOptions);
 
       this.recvTransport = this.device.createRecvTransport(recvCreated.transportOptions as any);
       const recvTransport = this.recvTransport;
@@ -302,7 +320,7 @@ export class SfuClientEngine {
       this.isInitialized = true;
       this.isConnecting = false;
       console.log(`[SFU Client] Successfully joined and initialized SFU for channel ${channelId}`);
-      clientLog.info('SFU', `Successfully connected to SFU channel ${channelId}`);
+      clientLog.info('SFU', `Signaling ready for SFU channel ${channelId}; waiting for media transport`);
       return true;
     } catch (err: any) {
       if (!isCurrent()) return false;
@@ -948,6 +966,9 @@ export class SfuClientEngine {
     } else if (!this.recoveryTimer) {
       this.recoveryTimer = setTimeout(() => {
         this.recoveryTimer = null;
+        clientLog.warn('SFU', 'SFU media transport connection timed out', {
+          sendState: this.sendTransportState, recvState: this.recvTransportState,
+        });
         this.callbacks.onConnectionFailed('SFU transport connection timed out');
       }, health === 'reconnecting' ? 3000 : 15000);
     }

@@ -331,6 +331,14 @@ async function runUserContextMenuSmoke() {
       { id: 'custom-role', name: 'Custom', color: '#fff', permissions: 0, position: 1, isDefault: false },
       { id: 'admin-role', name: 'Admin', color: '#fff', permissions: 1 << 11, position: 2, isDefault: false },
     ];
+    server.addMember(musicBot);
+    await open(musicBot);
+    check(!button('toggle-role') && !button('toggle-admin') && !!button('bot-settings'),
+      'Bots use their capability settings and never offer human role or administrator assignment');
+    const { ServerRolesTab } = await import('/views/serverSettings/tabs/ServerRolesTab.ts');
+    const roleMembers = new ServerRolesTab().renderRoleMembersEditorPanel('custom-role');
+    check(roleMembers.includes(`data-user-id="${user.id}"`) && !roleMembers.includes(`data-user-id="${musicBot.id}"`),
+      'Role membership and bulk assignment include humans, not bots');
     await open(user);
     click('toggle-role');
     await delay();

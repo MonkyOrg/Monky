@@ -51,6 +51,7 @@ export const en: CliTranslationMap = {
   // ── PM2 ────────────────────────────────────────────────────────────────
   'pm2.notFound': 'PM2 not found. Installing globally...',
   'pm2.installFailed': 'Failed to install PM2. Install manually: npm install -g pm2',
+  'pm2.deleteFailed': 'Could not remove the PM2 registration "{name}": {reason}',
   'pm2.notInstalled': 'PM2 is not installed, so there is nothing to {action}.',
   'pm2.installHint': 'Install with: npm install -g pm2',
 
@@ -248,6 +249,8 @@ export const en: CliTranslationMap = {
 
   // ── Process health diagnostics (health.ts) ───────────────────────────────
   'health.title': 'Diagnostics',
+  'health.scriptMismatch': 'PM2 runs "{script}", but this CLI uses "{expected}".',
+  'health.scriptMismatchHint': 'Run "monky restart" with this CLI to replace the old registration while preserving the server data.',
   'health.noPid': 'PM2 reports the process as "online", but it has no PID — it never actually started.',
   'health.noPidHint': 'This usually means PM2 is trying to use a Node that no longer exists. Run "monky restart --fresh" to re-register the process.',
   'health.portClosed': 'Nothing is listening on the port — the process is registered, but the server did not come up.',

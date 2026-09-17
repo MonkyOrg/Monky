@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { getCommandPresentation, localizeCommand, type BotCommandMessagePayload, type SlashCommand, type UserSummary } from '@monky/shared';
+import { getCommandPresentation, localizeCommand, type BotCommandMessagePayload, type BotPermissions, type BotSettingsSummary, type SlashCommand, type UserSummary } from '@monky/shared';
 import { createChatStore } from '../src/renderer/stores/chatStore';
 import { createServerStore, setActiveServerStore } from '../src/renderer/stores/serverStore';
 import { EventBus } from '../src/renderer/core/EventBus';
@@ -13,12 +13,12 @@ import {
   botCommandMessage, commandInputFields, commandValuesFromInputs, formatCommandContext,
   parseTypedCommand, visibleCommandFields, visibleCommandValues,
 } from '../src/renderer/utils/botInputs';
-import { renderCommandCatalog, renderCommandParameters } from '../src/renderer/views/commandCatalog';
+import { renderCommandCatalog, renderCommandParameters, renderEmptyCommandCatalog } from '../src/renderer/views/commandCatalog';
 import { commandParameterChoices, commandParameterError, renderCompactCommand, renderParameterChoices } from '../src/renderer/views/commandComposer';
 import { renderBotCommandContext } from '../src/renderer/views/botResponse';
 import { renderBotFields } from '../src/renderer/views/botFields';
 import { renderBotInvocation } from '../src/renderer/views/BotChatView';
-import { getLanguage, setLanguage } from '../src/renderer/i18n';
+import { getLanguage, setLanguage, t } from '../src/renderer/i18n';
 import { commandPreviewVolumeScope, type SelectionChoice } from '../src/renderer/utils/selectionChoices';
 import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
 
@@ -474,6 +474,46 @@ test('command discovery renders avatars, grouped rows, required chips and an hon
   const escaped = renderCommandCatalog(groupCommands([{ ...command, botName: '<img src=x>', description: '<script>bad</script>' }], []), 0);
   assert.equal(escaped.includes('<script>'), false);
   assert.ok(escaped.includes('&lt;img src=x&gt;'));
+});
+
+test('empty discovery distinguishes loading, offline bots, consent, denied commands and missing registration', (context) => {
+  const previous = getLanguage();
+  context.after(() => setLanguage(previous));
+  const permissions: BotPermissions = {
+    requested: ['commands'], granted: [], revision: 1,
+    reviewRequired: true, reviewedBy: null, reviewedAt: null,
+  };
+  const bot: BotSettingsSummary = {
+    botId: 'music-bot', name: '<Music Bot>', online: true, capabilities: { downloadsSound: false },
+    schemaRevision: 1, revision: 0, hasServerSettings: false, hasUserSettings: false,
+    canConfigure: false, canManage: true,
+    permissions,
+  };
+  for (const language of ['pt-BR', 'en'] as const) {
+    setLanguage(language);
+    assert.ok(renderEmptyCommandCatalog(null).includes(t('botChat.loadingCommands')));
+    assert.ok(renderEmptyCommandCatalog([]).includes(t('botChat.noOnlineBots')));
+    assert.ok(renderEmptyCommandCatalog([{ ...bot, online: false }]).includes(t('botChat.noOnlineBots')));
+    const pending = renderEmptyCommandCatalog([bot]);
+    assert.ok(pending.includes(t('botChat.commandsReviewRequired')));
+    assert.ok(pending.includes('&lt;Music Bot&gt;'));
+    assert.ok(pending.includes('data-command-bot-configure="music-bot"'));
+    assert.ok(!pending.includes(t('botChat.noOnlineBots')));
+    assert.ok(!renderEmptyCommandCatalog([{ ...bot, canManage: false }]).includes('data-command-bot-configure'));
+    const denied = { ...bot, permissions: { ...permissions, reviewRequired: false } };
+    assert.ok(renderEmptyCommandCatalog([denied]).includes(t('botChat.commandsNotGranted')));
+    const undeclared = { ...bot, permissions: { ...permissions, requested: null } };
+    assert.ok(renderEmptyCommandCatalog([undeclared]).includes(t('botChat.commandsUndeclared')));
+    const ready: BotSettingsSummary = {
+      ...bot, permissions: { ...permissions, granted: ['commands'], reviewRequired: false },
+    };
+    assert.ok(renderEmptyCommandCatalog([ready]).includes(t('botChat.commandsUnavailable')));
+    assert.ok(renderEmptyCommandCatalog([bot], true).includes(t('botChat.noMatchingCommands')));
+    assert.ok(!renderEmptyCommandCatalog([bot], true).includes('data-command-bot-configure'));
+    const empty = renderCommandCatalog([], 0, undefined, undefined, pending);
+    assert.ok(empty.includes(t('botChat.commandsReviewRequired')));
+    assert.ok(!empty.includes('role="listbox"'), 'Configuration actions are not exposed as command options');
+  }
 });
 
 test('required arguments stay visible; removing optional arguments omits them without losing typed values', () => {

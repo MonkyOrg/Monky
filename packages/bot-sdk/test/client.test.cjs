@@ -1113,6 +1113,92 @@ test('invalid credentials cannot overwrite a saved registration', { timeout: 100
   assert.ok(errors.every((error) => /already registered/.test(error.message)));
 });
 
+test('revocation removes only the affected saved link and permits a new installation without rotating the bot identity', { timeout: 10000 }, async t => {
+  const file = registrationFile(t);
+  let validToken = 'initial-link-token';
+  const server = await makeServer(t, {
+    authenticate: (ws, message) => ws.send(JSON.stringify(message.payload.botToken === validToken
+      ? { type: MessageType.AUTH_SUCCESS, payload: { currentUser: { id: 'bot-one' } } }
+      : { type: MessageType.AUTH_FAILED, payload: { code: ProtocolErrorCode.UNAUTHORIZED, message: 'Rejected link.' } })),
+  });
+  const other = await makeServer(t);
+  const { bot, errors } = makeBot(t, server, { registrationFile: file });
+  bot.command({ name: 'ping', description: 'Ping', handler: () => {} });
+  const listener = await bot.serve({ name: 'Reinstallable bot', port: 0, host: '127.0.0.1' });
+  const registration = { serverId: 'relinked-server', serverName: 'Server', serverUrl: server.url, token: validToken };
+  const unrelated = { serverId: 'other-server', serverName: 'Other', serverUrl: other.url, token: 'other-link-token' };
+  assert.equal((await registerAt(listener, registration)).status, 200);
+  assert.equal((await registerAt(listener, unrelated)).status, 200);
+  await Promise.all([server.next(MessageType.COMMAND_REGISTER), other.next(MessageType.COMMAND_REGISTER)]);
+  const originalKey = JSON.parse(fs.readFileSync(file, 'utf8')).publicKey;
+  const foreignNotice = once(bot, 'message');
+  server.send(MessageType.BOT_REVOKED, { botId: 'another-bot' });
+  await foreignNotice;
+  assert.equal(bot.registeredServerCount, 2, 'Another bot being removed does not revoke this installation');
+  const notice = once(bot, 'message');
+  server.send(MessageType.BOT_REVOKED, { botId: 'bot-one' });
+  await notice;
+  assert.deepEqual(bot.serverIds, ['other-server']);
+  validToken = 'replacement-link-token';
+  const replacement = { ...registration, token: validToken };
+  assert.equal((await registerAt(listener, replacement)).status, 200, 'Reinstallation waits for the atomic revocation write');
+  await server.next(MessageType.COMMAND_REGISTER);
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(saved.publicKey, originalKey);
+  assert.deepEqual(saved.registrations.sort((a, b) => a.serverId.localeCompare(b.serverId)),
+    [unrelated, replacement].sort((a, b) => a.serverId.localeCompare(b.serverId)));
+  assert.deepEqual(errors, []);
+});
+
+test('a restored token explicitly rejected by its server does not permanently block relinking', { timeout: 10000 }, async t => {
+  const file = registrationFile(t);
+  const server = await makeServer(t, {
+    authenticate: (ws, message) => ws.send(JSON.stringify(message.payload.botToken === 'new-approved-link'
+      ? { type: MessageType.AUTH_SUCCESS, payload: {} }
+      : { type: MessageType.AUTH_FAILED, payload: { code: ProtocolErrorCode.UNAUTHORIZED, message: 'Old link was revoked.' } })),
+  });
+  const old = { serverId: 'stale-server', serverName: 'Stale', serverUrl: server.url, token: 'previously-revoked-link' };
+  fs.writeFileSync(file, JSON.stringify({ version: 1, publicKey: 'a'.repeat(64), registrations: [old] }));
+  const { bot, errors } = makeBot(t, server, { registrationFile: file });
+  const rejected = once(bot, 'auth_failed');
+  const listener = await bot.serve({ name: 'Restored identity', port: 0, host: '127.0.0.1' });
+  await rejected;
+  const fresh = { ...old, token: 'new-approved-link' };
+  assert.equal((await registerAt(listener, fresh)).status, 200);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).registrations, [fresh]);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /Old link was revoked/);
+});
+
+test('protocol incompatibility does not erase an otherwise restorable registration', async t => {
+  const file = registrationFile(t);
+  const server = await makeServer(t, {
+    authenticate: ws => ws.send(JSON.stringify({
+      type: MessageType.AUTH_FAILED,
+      payload: { code: ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED, message: 'Update the bot first.' },
+    })),
+  });
+  const registration = { serverId: 'update-server', serverName: 'Update', serverUrl: server.url, token: 'still-valid-link' };
+  fs.writeFileSync(file, JSON.stringify({ version: 1, publicKey: 'a'.repeat(64), registrations: [registration] }));
+  const { bot } = makeBot(t, server, { registrationFile: file });
+  const rejected = once(bot, 'auth_failed');
+  await bot.serve({ name: 'Updating bot', port: 0, host: '127.0.0.1' });
+  await rejected;
+  await bot.close();
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).registrations, [registration]);
+});
+
+test('a delayed revocation cannot erase replacement credentials', async t => {
+  const { RegistrationStore } = require('../dist/RegistrationStore.js');
+  const store = new RegistrationStore(registrationFile(t), 'a'.repeat(64));
+  const old = { serverId: 'server', serverName: 'Server', serverUrl: 'ws://127.0.0.1:9999', token: 'old-link' };
+  const fresh = { ...old, token: 'new-link' };
+  await store.save(old);
+  await store.save(fresh);
+  await store.remove(old);
+  assert.deepEqual(store.get(old.serverId), fresh);
+});
+
 test('a rejected first registration never saves the supplied token', async (t) => {
   const file = registrationFile(t);
   const server = await makeServer(t, {

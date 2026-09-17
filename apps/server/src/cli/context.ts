@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { LIMITS } from '@monky/shared';
 import { DatabaseConnection } from '../infrastructure/database/DatabaseConnection';
+import type { DatabaseOpenOptions } from '../infrastructure/database/SqliteWrapper';
 import {
   SqliteChannelRepository,
   SqliteRoleRepository,
@@ -95,9 +96,11 @@ export function isHelpArg(value?: string): boolean {
 export async function withContext<T>(
   dataDir: string,
   fn: (ctx: CliContext) => Promise<T>,
-  seed: boolean = true
+  seed: boolean = true,
+  options: DatabaseOpenOptions = {}
 ): Promise<T> {
-  const dbConn = await DatabaseConnection.create(dataDbPath(dataDir));
+  if (options.readOnly && seed) throw new Error('A read-only CLI context cannot seed server data.');
+  const dbConn = await DatabaseConnection.create(dataDbPath(dataDir), options);
   const db = dbConn.getDb();
   const serverRepo = new SqliteServerRepository(db);
   const userRepo = new SqliteUserRepository(db);

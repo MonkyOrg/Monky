@@ -252,14 +252,21 @@ test('private invocation voice grants allow only room media, retain rosters and 
     await f.bot.peer.error(MessageType.VOICE_JOIN, { ...payload, invocationId: 'unowned' }, ProtocolErrorCode.PERMISSION_DENIED);
     await f.bot.peer.error(MessageType.VOICE_JOIN, { ...payload, channelId: f.publicVoiceId }, ProtocolErrorCode.PERMISSION_DENIED);
     const original = f.permissions.getUserPermissions.bind(f.permissions);
-    for (const deniedId of [f.botId, f.caller.id]) {
-      f.permissions.getUserPermissions = async (userId) => userId === deniedId ? DEFAULT_PERMISSIONS & ~Permission.SPEAK : original(userId);
-      await f.bot.peer.error(MessageType.VOICE_JOIN, payload, ProtocolErrorCode.PERMISSION_DENIED);
-    }
-    f.permissions.getUserPermissions = original;
+    f.permissions.getUserPermissions = async (userId) => userId === f.caller.id ? DEFAULT_PERMISSIONS & ~Permission.SPEAK : original(userId);
+    await f.bot.peer.error(MessageType.VOICE_JOIN, payload, ProtocolErrorCode.PERMISSION_DENIED);
+    f.permissions.getUserPermissions = async (userId) => userId === f.botId ? 0 : original(userId);
+    assert.deepEqual((await f.channelService.getAccessContext(f.botId)).roleIds, []);
+    await f.owner.peer.error(MessageType.ROLE_ASSIGN, { userId: f.botId, roleId: f.role.id }, ProtocolErrorCode.BAD_REQUEST);
+    await f.owner.peer.error(MessageType.ROLE_UNASSIGN, { userId: f.botId, roleId: f.role.id }, ProtocolErrorCode.BAD_REQUEST);
     const joined = await f.bot.peer.request(MessageType.VOICE_JOIN, payload);
     assert.equal(joined.type, MessageType.VOICE_USER_JOINED);
     assert.ok(records(joined.payload.participants).some((entry) => record(entry.user).id === f.caller.id));
+    const currentSessions = [...f.wsServer['sessions'].values()];
+    const callerSession = currentSessions.find(session => session.user?.id === f.caller.id);
+    const activeBot = currentSessions.find(session => session.botId === f.botId);
+    assert.ok(callerSession && activeBot);
+    assert.equal(await f.wsServer['authorizeLocalVoice'](callerSession, activeBot, f.voiceId), true,
+      'Local audio uses approved bot capabilities and caller channel access, not a bot role');
     await f.bot.peer.request(MessageType.COMMAND_FINISH, { invocationId: f.invocationId });
     let transportId: string | undefined;
     if (mode === 'sfu') {
@@ -479,7 +486,7 @@ test('bot voice uses real authentication metadata, room admission and originatin
   assert.equal(f.wsServer['signalingService'].getVoiceState(botSessionId), undefined);
 });
 
-test('bot voice rejects inaccessible and full rooms and applies ordinary server SPEAK permissions', async (t) => {
+test('bot voice rejects inaccessible/full rooms but approved publishing does not require a human role', async (t) => {
   const f = await createFixture();
   t.after(() => f.dispose());
   const owner = await f.human('Voice permissions');
@@ -494,7 +501,9 @@ test('bot voice rejects inaccessible and full rooms and applies ordinary server 
   await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.CHANNEL_FULL);
   const original = f.permissions.getUserPermissions.bind(f.permissions);
   f.permissions.getUserPermissions = async (id) => id === botId ? DEFAULT_PERMISSIONS & ~Permission.SPEAK : original(id);
-  await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.CHANNEL_FULL);
+  await owner.peer.request(MessageType.VOICE_LEAVE, { channelId: voiceId });
+  assert.equal((await bot.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId })).type, MessageType.VOICE_USER_JOINED);
   const left = await bot.peer.request(MessageType.VOICE_LEAVE, { channelId: voiceId });
   assert.equal(left.type, MessageType.VOICE_USER_LEFT);
 });

@@ -34,7 +34,7 @@ window.addEventListener('DOMContentLoaded', () => {
   const storage = document.getElementById('storage');
   const mode = document.body.dataset.mode;
   const maintenance = mode === 'remove' || mode === 'cache';
-  let selected: 'connection' | 'always' = mode === 'enable' ? 'always' : 'connection';
+  let selected: 'connection' | 'always' = 'always';
   let phase: LocalPreparationDialogState['phase'] = 'consent';
   let broken = false;
 
@@ -59,6 +59,11 @@ window.addEventListener('DOMContentLoaded', () => {
     always.setAttribute('aria-checked', String(value === 'always'));
     connection.tabIndex = value === 'connection' ? 0 : -1;
     always.tabIndex = value === 'always' ? 0 : -1;
+    if (mode === 'consent') {
+      const label = value === 'always' ? allow.dataset.allowAlways : allow.dataset.allowConnection;
+      if (!label) throw new Error('Missing consent duration label');
+      text(allow, label);
+    }
     if (focus) (value === 'connection' ? connection : always).focus();
   };
   connection.addEventListener('click', () => select('connection'));
@@ -66,7 +71,7 @@ window.addEventListener('DOMContentLoaded', () => {
   choices.addEventListener('keydown', (event) => {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    select(event.key === 'Home' ? 'connection' : event.key === 'End' ? 'always'
+    select(event.key === 'Home' ? 'always' : event.key === 'End' ? 'connection'
       : selected === 'connection' ? 'always' : 'connection', true);
   });
   allow.addEventListener('click', () => {

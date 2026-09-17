@@ -8,6 +8,10 @@ export interface DatabaseCloseOptions {
   discardChanges?: boolean;
 }
 
+export interface DatabaseOpenOptions {
+  readOnly?: boolean;
+}
+
 export interface IDatabaseDriver {
   prepare(sql: string): {
     get(...params: any[]): any;
@@ -30,36 +34,46 @@ export class SqlJsDriver implements IDatabaseDriver {
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly SAVE_DEBOUNCE_MS = 3000;
 
-  private constructor(dbPath: string, db: SqlJsDatabase) {
+  private constructor(dbPath: string, db: SqlJsDatabase, private readonly readOnly = false) {
     this.dbPath = dbPath;
     this.db = db;
   }
 
-  public static async create(dbPath: string): Promise<SqlJsDriver> {
+  public static async create(dbPath: string, options: DatabaseOpenOptions = {}): Promise<SqlJsDriver> {
     const SQL = await initSqlJs();
+    const readOnly = options.readOnly === true;
     const dir = path.dirname(dbPath);
-    if (!fs.existsSync(dir)) {
+    if (!readOnly && !fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
 
     let db: SqlJsDatabase;
-    if (fs.existsSync(dbPath)) {
+    if (readOnly || fs.existsSync(dbPath)) {
       const fileBuffer = fs.readFileSync(dbPath);
       db = new SQL.Database(fileBuffer);
     } else {
       db = new SQL.Database();
     }
 
-    const driver = new SqlJsDriver(dbPath, db);
+    const driver = new SqlJsDriver(dbPath, db, readOnly);
     const resources = new ServerResourceScope();
     resources.defer('SQLite allocation', () => driver.close({ discardChanges: true }));
     try {
-      // A failed initial write must not publish an unpersisted database.
-      driver.flushToDisk(true);
+      if (readOnly) {
+        // get/all can also execute SQL with side effects, so SQLite enforces the snapshot.
+        db.exec('PRAGMA query_only = ON;');
+      } else {
+        // A failed initial write must not publish an unpersisted database.
+        driver.flushToDisk(true);
+      }
       return driver;
     } catch (error) {
       return resources.fail(error);
     }
+  }
+
+  private assertWritable(): void {
+    if (this.readOnly) throw new Error('Cannot modify a read-only database snapshot.');
   }
 
   /**
@@ -82,7 +96,7 @@ export class SqlJsDriver implements IDatabaseDriver {
 
   /** Synchronously exports the in-memory database to disk if dirty. */
   private flushToDisk(throwOnError = false): void {
-    if (this.isClosed) {
+    if (this.isClosed || this.readOnly) {
       return;
     }
     if (this.saveTimer !== null) {
@@ -181,6 +195,7 @@ export class SqlJsDriver implements IDatabaseDriver {
       },
 
       run(...params: any[]) {
+        self.assertWritable();
         const stmt: Statement = db.prepare(sql);
         try {
           if (params.length > 0) {
@@ -200,6 +215,7 @@ export class SqlJsDriver implements IDatabaseDriver {
   }
 
   public exec(sql: string): void {
+    this.assertWritable();
     this.db.exec(sql);
     this.saveToDisk();
   }
@@ -207,6 +223,7 @@ export class SqlJsDriver implements IDatabaseDriver {
   public transaction<T>(fn: () => T): () => T {
     const self = this;
     return () => {
+      self.assertWritable();
       self.inTransaction++;
       if (self.inTransaction === 1) {
         self.db.exec('BEGIN TRANSACTION;');
@@ -234,6 +251,7 @@ export class SqlJsDriver implements IDatabaseDriver {
   }
 
   public async transactionAsync<T>(fn: () => Promise<T>): Promise<T> {
+    this.assertWritable();
     if (this.inTransaction !== 0) {
       throw new Error('An asynchronous database transaction must own the outer transaction');
     }
@@ -269,6 +287,7 @@ export class SqlJsDriver implements IDatabaseDriver {
   }
 
   public pragma(pragmaStr: string): void {
+    this.assertWritable();
     try {
       this.db.exec(`PRAGMA ${pragmaStr};`);
     } catch (e) {

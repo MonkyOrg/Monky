@@ -42,6 +42,7 @@ export interface Pm2Process {
     pm_uptime?: number;
     restart_time?: number;
     pm_cwd?: string;
+    pm_exec_path?: string;
     args?: string[] | string;
     /** Node version PM2 actually spawned the process with (#522). */
     node_version?: string;
@@ -76,7 +77,13 @@ export function isMonkyServerRunning(processName: string): boolean {
  * Log files under `~/.pm2/logs` survive this: only the process entry goes.
  */
 export function deletePm2Process(processName: string): void {
-  runSync('pm2', ['delete', processName], { stdio: 'ignore' });
+  const result = runSync('pm2', ['delete', processName], { encoding: 'utf8' });
+  if (result.error || result.status !== 0) {
+    throw new Error(t('pm2.deleteFailed', {
+      name: processName,
+      reason: result.error?.message || result.stderr?.trim() || result.stdout?.trim() || String(result.signal ?? result.status),
+    }));
+  }
 }
 
 /**

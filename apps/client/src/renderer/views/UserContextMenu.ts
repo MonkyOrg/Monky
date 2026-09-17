@@ -43,11 +43,12 @@ export class UserContextMenu {
     const canDeafenMembers = serverStore.hasPermission(Permission.DEAFEN_MEMBERS);
     const canKickMembers = !!targetState && serverStore.hasPermission(Permission.KICK_MEMBERS);
     const canMoveMembers = !!targetState && serverStore.hasPermission(Permission.MOVE_MEMBERS) && voiceChannels.length > 0;
-    const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES) && manageableRoles.length > 0;
+    const canManageRoles = !user.isBot && serverStore.hasPermission(Permission.MANAGE_ROLES) && manageableRoles.length > 0;
     // Promoting/demoting admins is also available straight from the member list (#273).
     const adminRole = serverStore.getAdminRole();
     const isTargetAdmin = !!adminRole && roleIds.has(adminRole.id);
     const canManageAdmin =
+      !user.isBot &&
       !!adminRole &&
       user.id !== serverStore.ownerId &&
       serverStore.hasPermission(Permission.MANAGE_ROLES);

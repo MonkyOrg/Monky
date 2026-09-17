@@ -15,6 +15,22 @@ import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepo
 export class SqliteServerRepository implements IServerRepository {
   constructor(private db: IDatabaseDriver) {}
 
+  async getLifecycleSettings(): Promise<Pick<ServerRecord, 'name' | 'turnEnabled'> | null> {
+    const columns: unknown[] = this.db.prepare('PRAGMA table_info(server_meta)').all();
+    if (columns.length === 0) return null;
+    const hasTurn = columns.some((column) =>
+      column !== null && typeof column === 'object' && 'name' in column && column.name === 'turn_enabled');
+    // Lifecycle reads must also work before the running server applies newer migrations.
+    const row: unknown = this.db.prepare(
+      `SELECT name, ${hasTurn ? 'turn_enabled' : '0'} AS turnEnabled FROM server_meta LIMIT 1`
+    ).get();
+    if (row === undefined) return null;
+    if (!row || typeof row !== 'object' || !('name' in row) || typeof row.name !== 'string' || !('turnEnabled' in row)) {
+      throw new Error('Invalid stored server lifecycle settings.');
+    }
+    return { name: row.name, turnEnabled: Boolean(row.turnEnabled) };
+  }
+
   async getServer(): Promise<ServerRecord | null> {
     const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as any;
     if (!row) return null;

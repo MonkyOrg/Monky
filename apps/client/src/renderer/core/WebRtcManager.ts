@@ -257,7 +257,10 @@ export class WebRtcManager {
 
   constructor() {
     this.mediaRouter = new RemoteMediaRouter(() => this.voiceParticipants);
-    this.vadMonitor = new RemoteVadMonitor(() => this.voiceParticipants);
+    this.vadMonitor = new RemoteVadMonitor(
+      () => this.voiceParticipants,
+      peerSessionId => this.mediaRouter.getVoiceAudioLevel(peerSessionId),
+    );
     this.diagnosticsCollector = new RtcDiagnosticsCollector();
     this.sfuEngine = new SfuClientEngine(
       () => this.signalClient,

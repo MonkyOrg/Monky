@@ -15,6 +15,7 @@ import {
   type CommandAutocompleteChoice,
   type CommandVoiceRequirement,
   type SoundDownloadResult,
+  type BotSettingsSummary,
 } from '@monky/shared';
 import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
@@ -111,6 +112,7 @@ export class ChatStore {
   private messageEdits = new Map<string, MessageEditDraft>();
   private composerScope: string | null = null;
   private commands: SlashCommand[] = [];
+  private commandBots: readonly BotSettingsSummary[] | null = null;
   private commandDrafts: Map<string, CommandDraft> = new Map();
   private invocations: Map<string, BotInvocation> = new Map();
   private invocationFinished = new Set<(invocation: BotInvocation) => void>();
@@ -494,6 +496,19 @@ export class ChatStore {
     return this.commands;
   }
 
+  public setCommandBots(bots: readonly BotSettingsSummary[] | null): void {
+    this.commandBots = bots;
+    this.bus.emit('chat.commands_updated');
+  }
+
+  public getCommandBots(): readonly BotSettingsSummary[] | null {
+    return this.commandBots;
+  }
+
+  public removeCommandBot(botId: string): void {
+    if (this.commandBots) this.setCommandBots(this.commandBots.filter(bot => bot.botId !== botId));
+  }
+
   public isCommandAvailable(command: SlashCommand): boolean {
     return this.commands.some((entry) => entry.botId === command.botId && entry.name === command.name);
   }
@@ -824,6 +839,7 @@ export class ChatStore {
     this.messageEdits.clear();
     this.composerScope = null;
     this.commands = [];
+    this.commandBots = null;
     this.commandDrafts.clear();
     this.invocations.clear();
     this.commandUsageScope = null;

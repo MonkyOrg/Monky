@@ -51,6 +51,7 @@ export const ptBR = {
   // ── PM2 ────────────────────────────────────────────────────────────────
   'pm2.notFound': 'PM2 não encontrado. Instalando globalmente...',
   'pm2.installFailed': 'Falha ao instalar PM2. Instale manualmente: npm install -g pm2',
+  'pm2.deleteFailed': 'Não foi possível remover o registro "{name}" do PM2: {reason}',
   'pm2.notInstalled': 'PM2 não está instalado, então não há o que {action}.',
   'pm2.installHint': 'Instale com: npm install -g pm2',
 
@@ -248,6 +249,8 @@ export const ptBR = {
 
   // ── Diagnóstico de saúde do processo (health.ts) ─────────────────────────
   'health.title': 'Diagnóstico',
+  'health.scriptMismatch': 'O PM2 executa "{script}", mas este CLI usa "{expected}".',
+  'health.scriptMismatchHint': 'Rode "monky restart" com este CLI para substituir o registro antigo, preservando os dados do servidor.',
   'health.noPid': 'O PM2 marca o processo como "online", mas ele não tem PID — ou seja, nunca chegou a iniciar.',
   'health.noPidHint': 'Normalmente o PM2 está tentando usar um Node que não existe mais. Rode "monky restart --fresh" para registrar o processo de novo.',
   'health.portClosed': 'Nada está escutando na porta — o processo está registrado, mas o servidor não subiu.',

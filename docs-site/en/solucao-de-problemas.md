@@ -6,13 +6,14 @@
 | I can't connect to my friend's server | Double-check IP and port; ask them to confirm the server is started; check firewall and port forwarding; on CGNAT, use a VPN or [TURN](/en/turn) |
 | Nickname already in use | Nicknames are unique per server — pick another |
 | I joined, but nobody hears me | Check microphone under Settings › Devices, watch the VAD meter, lower sensitivity and confirm the mic is not muted |
+| I hear someone, but their avatar does not indicate speech | Update the client. The indicator follows each microphone's decoded audio in P2P and SFU, even when RTP statistics report zero audio level. It is hidden while you are deafened; screen audio must not trigger it |
 | Everyone sounds choppy | Use the Economy profile, ask broadcasters to do the same and prefer cable over Wi-Fi |
 | Shared screen has no sound | Share a whole screen and check the source app volume |
 | Nothing under Servers on the Network | Discovery only works on the same LAN; click Scan again and check UDP `41234` in the firewall |
 | One participant is silent only for me | Right-click them and set individual volume back to 100% |
 | I can only fail to talk to **one** specific person (everyone else works) | A red `link_off` icon shows next to them. You are both likely behind CGNAT with no direct route. The host can enable the [TURN relay](/en/turn); otherwise both of you need a VPN. This only happens in P2P Mesh mode |
 | In **SFU mode**, nobody hears anybody and the call never connects | The `40000-49151` range must be open in **both UDP and TCP** on the firewall and the router. Signalling uses a different port, so the server looks fine while no media gets through. See [Opening the SFU mode ports](/en/hospedar-em-vps#opening-the-sfu-mode-ports) |
-| In **SFU mode**, the call drops and the app keeps saying it is reconnecting | The SFU process crashed or never started on the server. The app rebuilds the session on its own once it is back; whoever hosts should check `monky status` and `monky logs` |
+| In **SFU mode**, the call drops and the app keeps saying it is reconnecting | Either the process or the media path may have failed. Creating transports and producers through signaling does not prove ICE/DTLS connectivity. Check the advertised addresses and ports in the logs, the VM firewall and the provider's rules; successfully binding a local port does not prove external reachability |
 | Avast (or another antivirus) flags the installer/updater | False positive — see [Antivirus: Avast and similar](#antivirus-avast-and-similar) |
 | The **TURN relay** switch is greyed out and will not budge | The host cannot run the relay. The notice under the switch says why: the server is not on Linux, the server predates the feature (update the server), or the server lacks the privileges to install coturn (run `sudo bash scripts/install-turn.sh` once) |
 | TURN is enabled but nobody connects via relay | Ports may be closed. See the [full port guide](/en/turn#required-ports). Run `monky status` — it should show `✔ accessible` |

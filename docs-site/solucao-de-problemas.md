@@ -6,13 +6,14 @@
 | Não consigo conectar no servidor do meu amigo | Confirme IP e porta; peça para ele confirmar que o servidor está iniciado; verifique firewall e port forwarding; em CGNAT, usem VPN ou [TURN](/turn) |
 | Nickname já em uso | Nicknames são únicos por servidor — escolha outro |
 | Entrei, mas ninguém me ouve | Confira microfone em Configurações › Dispositivos, veja o medidor VAD, baixe a sensibilidade e confirme que o mic não está mutado |
+| Ouço uma pessoa, mas o avatar não indica sua fala | Atualize o cliente. O indicador acompanha o áudio decodificado de cada microfone em P2P e SFU, mesmo quando as estatísticas RTP informam nível zero. Ele fica oculto enquanto você está ensurdecido; áudio de tela não deve acioná-lo |
 | Ouço todo mundo cortando | Use perfil Econômico, peça o mesmo a quem transmite e prefira cabo a Wi-Fi |
 | Tela compartilhada sem som | Compartilhe uma tela inteira e confira o volume do app de origem |
 | Nada em Servidores na Rede | A descoberta só funciona na mesma LAN; clique em Buscar de novo e verifique UDP `41234` no firewall |
 | Um participante ficou mudo só para mim | Clique com o botão direito nele e volte o volume individual para 100% |
 | Só não consigo falar com **uma** pessoa específica (com o resto funciona) | Aparece um ícone vermelho `link_off` ao lado dela. Os dois provavelmente estão atrás de CGNAT e não há rota direta. Quem hospeda pode ligar o [relay TURN](/turn); a alternativa é os dois entrarem numa VPN. Só acontece no modo P2P Mesh |
 | No **modo SFU**, ninguém ouve ninguém e a chamada nunca conecta | O range `40000-49151` precisa estar aberto em **UDP e TCP** no firewall e no roteador. A sinalização usa outra porta, então o servidor parece funcionar enquanto a mídia não passa. Veja [Abrindo as portas do Modo SFU](/hospedar-em-vps#abrindo-as-portas-do-modo-sfu) |
-| No **modo SFU**, a chamada cai e o app fica avisando que está reconectando | O processo do SFU caiu ou não subiu no servidor. O app refaz a sessão sozinho assim que ele voltar; quem hospeda deve conferir `monky status` e `monky logs` |
+| No **modo SFU**, a chamada cai e o app fica avisando que está reconectando | Pode ser falha do processo ou do trajeto de mídia. Criar transportes e produtores pela sinalização não comprova conectividade ICE/DTLS. Confira nos logs os endereços e portas anunciados, o firewall da VM e as regras do provedor; conseguir reservar uma porta localmente não comprova acesso externo |
 | O Avast (ou outro antivírus) apita ao instalar/atualizar | Falso positivo — veja [Antivírus: Avast e similares](#antivirus-avast-e-similares) |
 | O botão do **relay TURN** está esmaecido e não deixa clicar | O host não pode rodar o relay. O próprio aviso embaixo do botão diz o motivo: servidor fora do Linux, servidor numa versão anterior ao recurso (atualize o servidor), ou servidor sem privilégio para instalar o coturn (rode `sudo bash scripts/install-turn.sh` uma vez) |
 | O TURN está ligado mas ninguém conecta via relay | As portas podem estar fechadas. Veja o [guia completo de portas](/turn#portas-necessarias). Rode `monky status` — deve aparecer `✔ acessível` |

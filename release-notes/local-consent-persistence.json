@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "A autorização de ferramentas agora deixa explícita a opção permanente por bot e servidor. Ao reconectar, ferramentas já autorizadas são verificadas em segundo plano. A opção de permitir apenas até desconectar continua disponível.",
+  "en": "Tool authorization now makes permanent access for each bot and server explicit. Authorized tools are checked in the background after reconnecting. The option to allow access only until disconnecting remains available."
+}

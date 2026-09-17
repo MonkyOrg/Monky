@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Corrigido um caso em que o servidor continuava executando uma instalação antiga após atualizar e reiniciar. Consultas de status e reinício também deixam de aplicar migrações enquanto a instância anterior ainda está ativa.",
+  "en": "Fixed a case where the server kept running an older installation after updating and restarting. Status and restart queries no longer apply database migrations while the previous instance is still running."
+}

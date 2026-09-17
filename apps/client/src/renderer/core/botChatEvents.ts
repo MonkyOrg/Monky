@@ -9,6 +9,7 @@ import {
   type CommandFinishedPayload,
   type CommandSoundDownloadReceivedPayload,
   type CommandSoundDownloadCancelPayload,
+  type BotSettingsListResponse,
 } from '@monky/shared';
 import { appEvents, type EventBus } from './EventBus';
 import { chatStore } from '../stores/chatStore';
@@ -27,11 +28,17 @@ export function bindBotChatEvents(events: EventBus = appEvents): () => void {
       localSoundDownloads.cancelRequest(getActiveNetworkClient(), payload);
     }),
     events.on('network.status', (status: ConnectionStatus) => {
-      if (status !== 'CONNECTED') localSoundDownloads.disconnect(getActiveNetworkClient());
+      if (status !== 'CONNECTED') {
+        localSoundDownloads.disconnect(getActiveNetworkClient());
+        chatStore.setCommandBots(null);
+      }
     }),
     events.on(`message.${MessageType.COMMANDS_LIST_RESPONSE}`, (payload: CommandsListResponsePayload) => {
       serverStore.setSlashCommands(payload.commands ?? []);
       chatStore.setCommands(payload.commands ?? []);
+    }),
+    events.on(`message.${MessageType.BOT_SETTINGS_LIST_RESPONSE}`, (payload: BotSettingsListResponse) => {
+      chatStore.setCommandBots(payload.bots);
     }),
     events.on(`message.${MessageType.COMMAND_RESPONSE}`, (payload: BotCommandMessagePayload) => {
       chatStore.addMessage(botCommandMessage(payload));
@@ -50,6 +57,7 @@ export function bindBotChatEvents(events: EventBus = appEvents): () => void {
     }),
     events.on(`message.${MessageType.BOT_REVOKED}`, (payload: BotRevokedPayload) => {
       chatStore.finishBotInvocations(payload.botId);
+      chatStore.removeCommandBot(payload.botId);
       serverStore.removeMember(payload.botId);
     }),
   ];

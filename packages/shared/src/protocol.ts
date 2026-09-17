@@ -171,7 +171,7 @@ export enum MessageType {
   BOT_LIST_RESPONSE = 'BOT_LIST_RESPONSE',
   /** Admin -> server: revoke a bot's token and disconnect it. */
   BOT_REVOKE = 'BOT_REVOKE',
-  /** Server -> admin: bot was revoked. */
+  /** Server -> members and the affected bot: its installation was revoked. */
   BOT_REVOKED = 'BOT_REVOKED',
   BOT_UPDATE_PROFILE = 'BOT_UPDATE_PROFILE',
   BOT_PROFILE_UPDATED = 'BOT_PROFILE_UPDATED',

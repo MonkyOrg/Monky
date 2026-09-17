@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { Logger } from '../logger/Logger';
-import { type DatabaseCloseOptions, IDatabaseDriver, SqlJsDriver } from './SqliteWrapper';
+import { type DatabaseCloseOptions, type DatabaseOpenOptions, IDatabaseDriver, SqlJsDriver } from './SqliteWrapper';
 import { ServerResourceScope } from '../lifecycle/ServerResourceScope';
 
 export class DatabaseConnection {
@@ -11,8 +11,8 @@ export class DatabaseConnection {
     this.db = db;
   }
 
-  public static async create(dbPath: string): Promise<DatabaseConnection> {
-    const driver = await SqlJsDriver.create(dbPath);
+  public static async create(dbPath: string, options: DatabaseOpenOptions = {}): Promise<DatabaseConnection> {
+    const driver = await SqlJsDriver.create(dbPath, options);
     const resources = new ServerResourceScope();
     resources.defer('SQLite migrations', () => driver.close({ discardChanges: true }));
     // Note: sql.js runs entirely in-memory (WASM) and is persisted to disk via
@@ -20,9 +20,11 @@ export class DatabaseConnection {
     // and would be silently ignored, so we do not set it. foreign_keys is still
     // requested to enforce referential integrity when supported by the build.
     try {
-      driver.pragma('foreign_keys = ON');
       const conn = new DatabaseConnection(driver);
-      conn.runMigrations();
+      if (!options.readOnly) {
+        driver.pragma('foreign_keys = ON');
+        conn.runMigrations();
+      }
       return conn;
     } catch (error) {
       return resources.fail(error);

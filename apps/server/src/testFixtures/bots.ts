@@ -175,7 +175,7 @@ export async function createFixture(options: { approvedBotCapabilities?: BotCapa
   );
   const permissions = new PermissionService(serverRepo, roleRepo);
   const roleService = new RoleService(roleRepo, userRepo, permissions);
-  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions);
+  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions, botPermissions);
   const registry = new CommandRegistry();
   let online: () => Map<string, { user: UserSummary }> = () => new Map();
   const userService = new UserService(userRepo, avatars, () => online());

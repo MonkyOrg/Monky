@@ -267,7 +267,8 @@ export class MonkyServer {
     const roleService = new RoleService(roleRepo, userRepo, permissionService);
 
     const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
-    const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService);
+    const botPermissions = new BotPermissionService(new SqliteBotPermissionRepository(db));
+    const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService, botPermissions);
     const chatService = new ChatService(
       messageRepo,
       channelRepo,
@@ -302,7 +303,6 @@ export class MonkyServer {
 
     // Bot infrastructure (#569).
     const botRepo = new SqliteBotRepository(db);
-    const botPermissions = new BotPermissionService(new SqliteBotPermissionRepository(db));
     const botService = new BotService(
       botRepo,
       serverRepo,
