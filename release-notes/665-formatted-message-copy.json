@@ -1,5 +1,5 @@
 {
   "group": "novidades",
-  "pt-BR": "Copie mensagens e trechos com formatação usando Ctrl+C, ou só o texto com Ctrl+Shift+C. O menu de três pontos oferece as duas opções. Ao colar de volta no Monky, a formatação é preservada.",
-  "en": "Copy messages and selections with formatting using Ctrl+C, or just text with Ctrl+Shift+C. The three-dot menu offers both options. Pasting back into Monky preserves the formatting."
+  "pt-BR": "Copie mensagens e trechos com formatação usando Ctrl+C. Para copiar só o texto, use Sem formatação no menu de três pontos. Ao colar de volta no Monky, a formatação é preservada.",
+  "en": "Copy messages and selections with formatting using Ctrl+C. For plain text, choose Without formatting in the three-dot menu. Pasting back into Monky preserves the formatting."
 }

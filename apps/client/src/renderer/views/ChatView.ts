@@ -478,7 +478,7 @@ export class ChatView {
       submenu: [
         { label: t('chat.copyFormatted'), shortcut: `${modifier}+C`,
           onClick: () => { void this.copyMessage(message.id, 'formatted', selection); } },
-        { label: t('chat.copyPlain'), shortcut: `${modifier}+Shift+C`,
+        { label: t('chat.copyPlain'),
           onClick: () => { void this.copyMessage(message.id, 'plain', selection); } },
       ],
     });
@@ -1084,7 +1084,7 @@ export class ChatView {
     return selectedMessageClipboard(feed, selection);
   }
 
-  private keyboardClipboard(target: EventTarget | null, mode: MessageCopyMode = 'formatted'): MessageClipboardContent | null {
+  private keyboardClipboard(target: EventTarget | null): MessageClipboardContent | null {
     if (!this.isCurrentSession() || !this.container.isConnected ||
         this.isEditableTarget(target) || this.isEditableTarget(document.activeElement)) return null;
     const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
@@ -1093,10 +1093,7 @@ export class ChatView {
     // An unsupported or out-of-chat selection must never fall back to copying a whole row.
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed) {
-      const content = this.selectedClipboard();
-      if (content) return content;
-      return mode === 'plain' && feed.contains(selection.anchorNode) && feed.contains(selection.focusNode)
-        ? { text: selection.toString() } : null;
+      return this.selectedClipboard();
     }
     const row = document.activeElement?.closest<HTMLElement>('.chat-message-row');
     return row && feed.contains(row) ? this.messageClipboard(row.dataset.messageId ?? '') : null;
@@ -1449,13 +1446,12 @@ export class ChatView {
 
     const messagesFeed = this.container.querySelector('#chat-messages-feed') as HTMLElement | null;
     const onCopyKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.altKey ||
+      if (event.defaultPrevented || event.isComposing || event.altKey || event.shiftKey ||
           !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'c') return;
-      const mode = event.shiftKey ? 'plain' : 'formatted';
-      const content = this.keyboardClipboard(event.target, mode);
+      const content = this.keyboardClipboard(event.target);
       if (!content) return;
       event.preventDefault();
-      void this.copyContent(content, mode);
+      void this.copyContent(content, 'formatted');
     };
     const onCopy = (event: ClipboardEvent) => {
       if (event.defaultPrevented || !event.clipboardData) return;

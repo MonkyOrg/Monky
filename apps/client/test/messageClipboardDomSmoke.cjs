@@ -93,7 +93,7 @@ if (!process.versions.electron) {
 async function dispatchKey(window, key, code, virtualKey, modifiers = 0, text) {
   // CDP bypasses Cocoa's key-binding resolver; native editing needs its command.
   const editingCommand = code === 'KeyZ' ? (modifiers === 12 ? 'redo' : 'undo')
-    : code === 'KeyV' ? 'paste' : code === 'KeyC' ? 'copy' : null;
+    : code === 'KeyV' ? 'paste' : code === 'KeyC' && !(modifiers & 8) ? 'copy' : null;
   const commands = process.platform === 'darwin' && [4, 12].includes(modifiers) && editingCommand
     ? [editingCommand] : [];
   await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
@@ -102,6 +102,17 @@ async function dispatchKey(window, key, code, virtualKey, modifiers = 0, text) {
   });
   await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
     type: 'keyUp', key, code, modifiers, windowsVirtualKeyCode: virtualKey,
+  });
+}
+
+async function dispatchClick(window, point, clickCount = 1) {
+  await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1, y: 1 });
+  await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+  await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+    type: 'mousePressed', button: 'left', clickCount, ...point,
+  });
+  await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+    type: 'mouseReleased', button: 'left', clickCount, ...point,
   });
 }
 
@@ -133,10 +144,20 @@ async function runSystemClipboardSmoke(sourceWindow) {
   external.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   external.webContents.on('will-navigate', event => event.preventDefault());
   const destination = code => external.webContents.executeJavaScript(code, true);
-  const copy = async plain => {
-    sourceWindow.webContents.focus();
-    await dispatchKey(sourceWindow, plain ? 'C' : 'c', 'KeyC', 67, modifier | (plain ? 8 : 0));
+  const click = async (selector, clickCount = 1) => {
+    await dispatchClick(sourceWindow, await fixture(`point(${JSON.stringify(selector)})`), clickCount);
     await fixture('settle()');
+  };
+  const copy = async () => {
+    sourceWindow.webContents.focus();
+    await dispatchKey(sourceWindow, 'c', 'KeyC', 67, modifier);
+    await fixture('settle()');
+  };
+  const copyPlain = async () => {
+    sourceWindow.webContents.focus();
+    await click('[data-message-id="rich"] [data-message-action="more"]');
+    await click('.floating-context-menu:not(.floating-context-submenu) [aria-haspopup="menu"]');
+    await click('.floating-context-submenu [role="menuitem"]:last-child');
   };
   const paste = async target => {
     external.webContents.focus();
@@ -170,7 +191,7 @@ async function runSystemClipboardSmoke(sourceWindow) {
     await fixture('prepare("en")');
     const expected = await fixture('state()');
     await fixture('focusRow("rich")');
-    await copy(false);
+    await copy();
     await until(() => [expected.source, expected.expectedPlain].includes(normalize(clipboard.readText())),
       'owned formatted clipboard write');
     const rich = await paste('rich');
@@ -182,31 +203,29 @@ async function runSystemClipboardSmoke(sourceWindow) {
     check(normalize(clipboard.readText()) === expected.source && clipboard.availableFormats().includes('text/html'),
       'The real OS clipboard carries both Markdown text and semantic HTML');
 
-    await copy(true);
-    await until(() => normalize(clipboard.readText()) === expected.expectedPlain, 'Ctrl+Shift+C plain write');
+    sourceWindow.webContents.focus();
+    await dispatchKey(sourceWindow, 'C', 'KeyC', 67, modifier | 8);
+    await fixture('settle()');
+    check(normalize(clipboard.readText()) === expected.source && clipboard.availableFormats().includes('text/html'),
+      'The removed plain-copy shortcut leaves the current formatted system clipboard unchanged');
+    await copyPlain();
+    await until(() => normalize(clipboard.readText()) === expected.expectedPlain, 'plain-copy menu button write');
     // macOS ReadHTML can return plain text; the advertised MIME types identify actual rich content.
     check(!clipboard.availableFormats().some(type => ['text/html', 'text/rtf'].includes(type)),
       `Plain copy replaces the previous rich formats: ${JSON.stringify(clipboard.availableFormats())}`);
     const plain = await paste('plain');
     check(normalize(plain.text) === expected.expectedPlain && !plain.types.includes('text/html'),
-      'Ctrl+Shift+C followed by external Ctrl+V pastes exactly visible text without Markdown markers or HTML');
+      'The plain-copy menu button followed by external Ctrl+V pastes visible text without Markdown markers or HTML');
     const plainRich = await paste('rich');
     check(!plainRich.bold && !plainRich.italic && !plainRich.link && !plainRich.types.includes('text/html'),
       'A rich editor also pastes plain copying without retaining the previous emphasis or links');
 
     await fixture('preparePaste("Untouched draft")');
-    const point = await fixture('point("[data-message-id=rich] strong")');
     sourceWindow.webContents.focus();
-    await sourceWindow.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
-    await sourceWindow.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
-      type: 'mousePressed', button: 'left', clickCount: 2, ...point,
-    });
-    await sourceWindow.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
-      type: 'mouseReleased', button: 'left', clickCount: 2, ...point,
-    });
+    await click('[data-message-id="rich"] strong', 2);
     const selected = (await fixture('state()')).selection;
     check(selected === 'bold' || selected === 'bold ', 'Native mouse selection remains local to the chosen word');
-    await copy(false);
+    await copy();
     await until(() => clipboard.readText() === `**bold**${selected.slice(4)}`, 'formatted selection write');
     const fragment = await paste('plain');
     check(fragment.text === `**bold**${selected.slice(4)}`,
@@ -214,7 +233,7 @@ async function runSystemClipboardSmoke(sourceWindow) {
     const richFragment = await paste('rich');
     check(richFragment.bold && richFragment.text.trim() === 'bold',
       'The same partial selection stays formatted in the independent rich editor');
-    await copy(true);
+    await copyPlain();
     await until(() => clipboard.readText() === selected, 'plain selection write');
     const plainFragment = await paste('plain');
     check(plainFragment.text === selected && !clipboard.availableFormats().includes('text/html'),
@@ -242,22 +261,19 @@ async function runSmoke(window) {
   };
   const enter = () => key('Enter', 'Enter', 13, 0, '\r');
   const escape = () => key('Escape', 'Escape', 27);
-  const copy = (plain = false, meta = false) => key(plain ? 'C' : 'c', 'KeyC', 67, (meta ? 4 : 2) | (plain ? 8 : 0));
+  const copy = (meta = false) => key('c', 'KeyC', 67, meta ? 4 : 2);
   const click = async (selector, clickCount = 1) => {
-    const point = await fixture(`point(${JSON.stringify(selector)})`);
-    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1, y: 1 });
-    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
-    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
-      type: 'mousePressed', button: 'left', clickCount, ...point,
-    });
-    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
-      type: 'mouseReleased', button: 'left', clickCount, ...point,
-    });
+    await dispatchClick(window, await fixture(`point(${JSON.stringify(selector)})`), clickCount);
     await fixture('settle()');
   };
   const more = '[data-message-id="rich"] [data-message-action="more"]';
   const parentCopy = '.floating-context-menu:not(.floating-context-submenu) [aria-haspopup="menu"]';
   const children = '.floating-context-submenu [role="menuitem"]';
+  const copyPlain = async (messageId = 'rich') => {
+    await click(`[data-message-id="${messageId}"] [data-message-action="more"]`);
+    await click(parentCopy);
+    await click(`${children}:last-child`);
+  };
 
   await evaluate(`(${installFixture.toString()})()`);
   try {
@@ -269,10 +285,10 @@ async function runSmoke(window) {
     const mouseSelection = state.selection;
     check(mouseSelection === 'bold' || mouseSelection === 'bold ',
       `Native mouse selection chooses the rendered word, including the platform's trailing space: ${JSON.stringify(mouseSelection)}`);
-    await copy(true);
+    await copyPlain();
     state = await fixture('state()');
     check(state.last?.kind === 'plain' && state.last.text === mouseSelection,
-      `Ctrl+Shift+C copies the native mouse selection after typing a draft: ${JSON.stringify({
+      `The plain-copy button preserves native mouse selection after typing a draft: ${JSON.stringify({
         last: state.last, selection: state.selection, activeElement: state.activeElement,
       })}`);
     await fixture('select("[data-message-id=rich] strong", 1, 3)');
@@ -282,13 +298,16 @@ async function runSmoke(window) {
     check(state.last.html.includes('<strong>ol</strong>'), 'Partial selection retains the strong ancestor dropped by Range.cloneContents');
     check(state.last.types.join(',') === 'text/plain,text/html', 'Formatted copying supplies standard text/plain and text/html MIME flavors');
     check(state.toast === 'Copied!', 'A successful native copy retains localized accessible feedback');
-    await copy(true);
+    await copyPlain();
     state = await fixture('state()');
-    check(state.last.kind === 'plain' && state.last.text === 'ol' && !state.last.html, 'Native Ctrl+Shift+C contains only visible plain text');
-    await copy(false, true);
+    check(state.last.kind === 'plain' && state.last.text === 'ol' && !state.last.html, 'The plain-copy button contains only visible plain text');
+    await copy(true);
     check((await fixture('state()')).last.kind === 'formatted', 'Cmd+C follows the same formatted behavior');
-    await copy(true, true);
-    check((await fixture('state()')).last.kind === 'plain', 'Cmd+Shift+C follows the same plain behavior');
+    const beforeRemovedShortcuts = (await fixture('state()')).writes;
+    await key('C', 'KeyC', 67, 10);
+    await key('C', 'KeyC', 67, 12);
+    check((await fixture('state()')).writes === beforeRemovedShortcuts,
+      'Neither Ctrl+Shift+C nor Cmd+Shift+C invokes message copying');
     await fixture('select("[data-message-id=rich] .chat-message-text")');
     await copy();
     state = await fixture('state()');
@@ -298,7 +317,7 @@ async function runSmoke(window) {
     check(state.last.text.includes('~~strike~~') && state.last.text.includes('[Monky]'),
       'Formatted text/plain retains markup for destinations that do not accept HTML');
     checks += await fixture('testRichDestination()');
-    await copy(true);
+    await copyPlain();
     check((await fixture('state()')).last.text === state.expectedPlain, 'Plain mode uses the same visible text for an entire rendered selection');
 
     await fixture('clearSelection(); window.messageClipboardFixture.focusRow("rich")');
@@ -331,8 +350,9 @@ async function runSmoke(window) {
       check(state.writes === before && state.menuCount === 2, 'The Copy parent opens a submenu rather than copying immediately');
       check(state.submenuLabels[0].includes(locale === 'en' ? 'With formatting' : 'Com formatação') &&
         state.submenuLabels[1].includes(locale === 'en' ? 'Without formatting' : 'Sem formatação'), 'Both submenu choices are localized');
-      check(state.submenuExpanded && state.submenuControlled && state.submenuLabels[1].includes('Shift+C'),
-        'The submenu exposes aria-haspopup, aria-expanded, aria-controls and shortcut hints');
+      check(state.submenuExpanded && state.submenuControlled && state.submenuLabels[0].includes('+C') &&
+        !state.submenuLabels[1].includes('+C'),
+        'The submenu exposes accessible navigation and a shortcut hint only for formatted copying');
       await click(`${children}:first-child`);
       state = await fixture('state()');
       check(state.last.text === '**ol**' && state.last.kind === 'formatted', 'Pointer navigation preserves the selected fragment captured before the submenu takes focus');
@@ -393,10 +413,10 @@ async function runSmoke(window) {
     await copy();
     state = await fixture('state()');
     check(state.last.text === 'report **literal**.txt\nimage.png' && !state.last.html, 'Attachment-only copying keeps literal file names, never Markdown-parsed names or media data');
-    await copy(true);
+    await copyPlain('files');
     check((await fixture('state()')).last.text === state.last.text, 'Both modes retain attachment-only filename copying');
     await fixture('focusRow("caption")');
-    await copy(true);
+    await copyPlain('caption');
     check((await fixture('state()')).last.text === 'Caption', 'A message with attachments still copies its caption instead of appending filenames');
 
     checks += await fixture('testScopesAndPaste()');
@@ -585,9 +605,9 @@ async function installFixture(systemClipboard = false) {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   };
   const dismissAlert = () => document.querySelector('.dialog-card [data-action="confirm"]')?.click();
-  const openMenu = () => {
+  const openMenu = (id = 'rich') => {
     clearSelection();
-    find('[data-message-id="rich"] [data-message-action="more"]').click();
+    find(`[data-message-id="${id}"] [data-message-action="more"]`).click();
     find('.floating-context-menu [aria-haspopup="menu"]').click();
   };
   const prepare = async locale => {
@@ -769,8 +789,11 @@ async function installFixture(systemClipboard = false) {
 
       select('[data-message-id=rich] strong', 1, 3);
       const before = writes.length;
-      for (const options of [{ ctrlKey: false }, { altKey: true }, { isComposing: true }, { key: 'v' }, { key: 'x' }]) {
-        expect(!keyboard(document.activeElement, options), 'Unrelated modifiers, IME, paste and cut remain native');
+      for (const options of [
+        { ctrlKey: false }, { altKey: true }, { shiftKey: true }, { ctrlKey: false, metaKey: true, shiftKey: true },
+        { isComposing: true }, { key: 'v' }, { key: 'x' },
+      ]) {
+        expect(!keyboard(document.activeElement, options), 'Unrelated modifiers, removed shortcuts, IME, paste and cut remain native');
       }
       const external = document.createElement('button');
       external.textContent = 'Another dialog';
@@ -803,9 +826,9 @@ async function installFixture(systemClipboard = false) {
       expect(writes.length === before, 'Already-handled events are not copied a second time');
       select('[data-message-id=rich] .chat-author-name', 1, 4);
       expect(!keyboard(document.activeElement), 'Ordinary author-name copying keeps browser behavior');
-      expect(keyboard(document.activeElement, { shiftKey: true }), 'Plain-copy shortcuts also work for other selected visible text inside the feed');
+      expect(!keyboard(document.activeElement, { shiftKey: true }), 'The removed plain-copy shortcut does not intercept author-name selections');
       await settle();
-      expect((await last()).text === 'uth' && (await last()).kind === 'plain', 'Author-name selections never expand into the message body');
+      expect(writes.length === before, 'Author-name selections do not trigger a custom clipboard write or copy the message body');
       const other = sessionManager.create('message-clipboard-other', 49217, user.nickname);
       sessionManager.activate(other.key);
       select('[data-message-id=rich] strong', 1, 3);
@@ -856,7 +879,8 @@ async function installFixture(systemClipboard = false) {
       await settle();
       expect(!paste(detachedInput, files) && filePastes === 2, 'Detached composer paste listeners cannot upload or mutate the new view');
       focusRow('sticker');
-      keyboard(document.activeElement, { shiftKey: true });
+      openMenu('sticker');
+      find('.floating-context-submenu button:last-child').click();
       await settle();
       expect((await last()).text === 'sticker.png', 'Plain copying of rendered stickers uses their visible file identity, never hidden marker syntax');
       focusRow('deleted');
