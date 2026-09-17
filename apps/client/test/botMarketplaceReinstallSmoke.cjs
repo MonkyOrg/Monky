@@ -86,3 +86,66 @@ test('real marketplace install, private command, unlink and relink preserve the 
   assert.equal(restored.registrations.length, 1);
   assert.equal(errors.length, 1, 'Only the explicitly rejected old token is expected');
 });
+
+test('one real bot links to two server endpoints without mixing tokens or changing its identity', { timeout: 60_000 }, async t => {
+  const vps = await createFixture();
+  let pc, bot;
+  t.after(async () => {
+    await bot?.close();
+    await pc?.dispose();
+    await vps.dispose();
+  });
+  pc = await createFixture({ webSocketPath: '/monky/callback?route=pc' });
+  const vpsOwner = await vps.human('VPS owner');
+  const pcOwner = await pc.human('PC owner');
+  const publicKey = identity().publicKey;
+  const registrationFile = path.join(vps.dataDir, 'multi-server-registrations.json');
+  const errors = [];
+  bot = new BotClient({
+    publicKey, requestedCapabilities: ['commands'], registrationFile,
+    name: 'Multi-server fixture', avatarBase64: null, autoReconnect: false,
+  });
+  bot.on('error', error => errors.push(error));
+  bot.command({ name: 'ping', description: 'Check this server', handler: ctx => ctx.reply('Pong from this registration') });
+  const listener = await bot.serve({
+    name: 'Multi-server fixture', port: 0, host: '127.0.0.1', publicHost: '127.0.0.1',
+  });
+  const install = async owner => {
+    const preview = await owner.peer.request(MessageType.BOT_INSTALL_PREVIEW, {
+      manifestUrl: `http://127.0.0.1:${listener.address().port}/manifest`,
+    });
+    assert.equal(preview.type, MessageType.BOT_INSTALL_PREVIEW_RESULT);
+    const installed = await owner.peer.request(MessageType.BOT_INSTALL, {
+      previewId: preview.payload.previewId, grantedCapabilities: ['commands'],
+    });
+    assert.equal(installed.type, MessageType.BOT_INSTALLED);
+    return installed.payload.bot.id;
+  };
+  const vpsId = await install(vpsOwner);
+  const vpsRegistration = JSON.parse(fs.readFileSync(registrationFile, 'utf8')).registrations[0];
+  const pcId = await install(pcOwner);
+  assert.notEqual(vpsId, pcId);
+  assert.equal(bot.serverCount, 2);
+  const saved = JSON.parse(fs.readFileSync(registrationFile, 'utf8'));
+  assert.equal(saved.publicKey, publicKey);
+  assert.equal(saved.registrations.length, 2);
+  assert.deepEqual(saved.registrations.find(entry => entry.serverId === vpsId), vpsRegistration);
+  assert.equal(saved.registrations.find(entry => entry.serverId === pcId).serverUrl,
+    `${pc.url}/monky/callback?route=pc`);
+  assert.notEqual(saved.registrations[0].token, saved.registrations[1].token);
+  for (const [owner, botId, otherId] of [[vpsOwner, vpsId, pcId], [pcOwner, pcId, vpsId]]) {
+    const catalog = await owner.peer.request(MessageType.COMMANDS_LIST);
+    assert.ok(catalog.payload.commands.some(command => command.botId === botId && command.name === 'ping'));
+    assert.ok(catalog.payload.commands.every(command => command.botId !== otherId));
+  }
+  const revoked = once(bot, 'message');
+  assert.equal((await pcOwner.peer.request(MessageType.BOT_REVOKE, { botId: pcId })).type, MessageType.BOT_REVOKED);
+  assert.equal((await revoked)[0].type, MessageType.BOT_REVOKED);
+  // A new installation waits for the serialized removal before saving its own credentials.
+  await install(pcOwner);
+  const relinked = JSON.parse(fs.readFileSync(registrationFile, 'utf8'));
+  assert.equal(relinked.publicKey, publicKey);
+  assert.equal(relinked.registrations.length, 2);
+  assert.deepEqual(relinked.registrations.find(entry => entry.serverId === vpsId), vpsRegistration);
+  assert.deepEqual(errors, []);
+});

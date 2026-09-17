@@ -1024,7 +1024,7 @@ For Monky servers to reach the manifest and register the bot, the configured por
 curl --fail --max-time 10 http://YOUR-IP:7780/manifest
 
 # If using iptables (Linux):
-sudo iptables -A INPUT -p tcp --dport 7780 -j ACCEPT
+sudo iptables -I INPUT 1 -p tcp --dport 7780 -j ACCEPT
 
 # If using ufw (Ubuntu):
 sudo ufw allow 7780/tcp
@@ -1034,6 +1034,23 @@ sudo ufw allow 7780/tcp
 ```
 
 Also, `publicHost` must be the machine's **public IP or domain** — `localhost` only works if bot and server run on the same machine.
+
+Connectivity must also work **from the bot to the Monky server**. Registration
+sends the WebSocket URL the client used to reach the server, preserving its
+host, port and path; it does not turn a `0.0.0.0` listener into `localhost`.
+If the bot runs on a VPS and the server on your computer, connect to Monky using
+an IP or domain reachable from that VPS. Firewall rules, port forwarding or a
+proxy must allow the return connection; reaching the bot manifest does not
+prove that this second path works.
+
+A server advertised through loopback only accepts installation when both the
+manifest and registration URLs also use loopback. Otherwise, the preview is
+rejected before creating an account or sending a token, with guidance about
+the required address. For a bot and server on the same machine, use local URLs
+on both sides, or connect to the server through its external address. Proxies
+must preserve the original `Host` and set `X-Forwarded-Proto: https` when
+terminating TLS; the callback then uses `wss`. This adjustment does not require
+deleting identities or valid registrations.
 
 The request must return the manifest JSON. If `monkybot status` reports `errored`, fix the error in `monkybot logs` first: opening ports cannot start a failing process. `iptables` rules must precede blocking rules and be persisted according to your distribution; behind NAT, also configure port forwarding.
 

@@ -1767,6 +1767,8 @@ export const ptBR = {
   'bots.installBtn': 'Vincular',
   'bots.manifestUrlRequired': 'Informe a URL do manifest do bot.',
   'bots.manifestUrlInvalid': 'URL inválida.',
+  'bots.serverAddressUnavailable': 'Não foi possível determinar o endereço do servidor para o bot. Reconecte usando a URL completa do servidor.',
+  'bots.serverAddressLoopback': 'Um bot remoto não pode usar localhost para acessar este servidor. Reconecte pelo IP ou domínio acessível ao bot e tente novamente. Se o servidor estiver no seu computador, esse endereço e a porta também precisam ser acessíveis a partir da máquina do bot.',
   'bots.installing': 'Vinculando bot...',
   'bots.installSuccess': 'Bot vinculado com sucesso!',
   'bots.installError': 'Erro ao vincular bot.',

@@ -1,5 +1,6 @@
 import http from 'http';
 import { randomUUID } from 'node:crypto';
+import { TLSSocket } from 'node:tls';
 import { WebSocket, WebSocketServer as WSServer } from 'ws';
 import {
   AdminDeafenUserPayload,
@@ -206,6 +207,8 @@ interface ClientSession {
    * or on a LAN. Whatever brought the client here is reachable by definition.
    */
   requestHost?: string;
+  /** Full endpoint used by this connection, including a proxy's port and path. */
+  requestServerUrl?: string;
 }
 
 export class WebSocketServer {
@@ -475,6 +478,25 @@ export class WebSocketServer {
     return host.length > 0 ? host : undefined;
   }
 
+  private static parseRequestServerUrl(req: http.IncomingMessage): string | undefined {
+    if (!req.headers.host) return undefined;
+    try {
+      const forwarded = req.headers['x-forwarded-proto'];
+      if (forwarded !== undefined && typeof forwarded !== 'string') return undefined;
+      const protocol = typeof forwarded === 'string' ? forwarded.split(',')[0].trim().toLowerCase() : undefined;
+      if (protocol !== undefined && protocol !== 'http' && protocol !== 'https') return undefined;
+      const secure = (req.socket instanceof TLSSocket && req.socket.encrypted) || protocol === 'https';
+      const url = new URL(`${secure ? 'wss' : 'ws'}://${req.headers.host}`);
+      const target = req.url || '/';
+      if (url.username || url.password || url.pathname !== '/' || url.search || url.hash ||
+          !target.startsWith('/') || target.startsWith('//') || target.includes('#')) return undefined;
+      const endpoint = new URL(target, url);
+      return endpoint.origin === url.origin && !endpoint.hash ? endpoint.href : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private setupWss(): void {
     // ws forwards HTTP listener errors here before the startup promise sees
     // them. Log them without throwing or tearing down unrelated live sessions.
@@ -491,6 +513,7 @@ export class WebSocketServer {
         isAlive: true,
         ip,
         requestHost: WebSocketServer.parseRequestHostname(req.headers.host),
+        requestServerUrl: WebSocketServer.parseRequestServerUrl(req),
       };
       this.sessions.set(ws, session);
 
@@ -1564,7 +1587,9 @@ export class WebSocketServer {
     }
     const authorized = await this.botManagementAuthorization(session, requestId);
     if (!authorized || !session.sessionId) return;
-    const result = await this.botService.previewInstallation(parsed.data.manifestUrl, session.sessionId);
+    const result = await this.botService.previewInstallation(
+      parsed.data.manifestUrl, session.sessionId, session.requestServerUrl,
+    );
     if (!authorized()) return;
     if (!result.success) this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
     else this.send(session.ws, { type: MessageType.BOT_INSTALL_PREVIEW_RESULT, requestId, payload: result.preview });
@@ -1680,21 +1705,13 @@ export class WebSocketServer {
     const server = await this.serverRepo.getServer();
     const serverName = server?.name || 'Monky Server';
 
-    // Derive the server's WebSocket URL so the bot can auto-connect.
-    const addr = this.server.address();
-    let serverWsUrl: string | undefined;
-    if (addr && typeof addr === 'object') {
-      const host = addr.address === '::' || addr.address === '0.0.0.0' ? 'localhost' : addr.address;
-      serverWsUrl = `ws://${host}:${addr.port}`;
-    }
-
     const result = await this.botService.installFromPreview(
       parsed.data.previewId,
       parsed.data.grantedCapabilities,
       session.sessionId,
       session.user.id,
       serverName,
-      serverWsUrl,
+      session.requestServerUrl,
       authorized,
     );
 

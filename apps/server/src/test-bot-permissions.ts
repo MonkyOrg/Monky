@@ -386,6 +386,84 @@ test('install previews bind identity, requests and administrator session before 
   assert.equal(registrations, 1);
 });
 
+test('bot installation preserves the connection endpoint and rejects remote loopback before issuing credentials', async t => {
+  const cases: {
+    name: string;
+    headers?: Record<string, string>;
+    path?: string;
+    registrationUrl?: string;
+    expectedUrl?: string;
+    error?: 'loopback' | 'invalid';
+  }[] = [
+    { name: 'public hostname and external port', headers: { host: 'pc.example.test:4100' }, expectedUrl: 'ws://pc.example.test:4100/' },
+    { name: 'bracketed IPv6', headers: { host: '[2001:db8::1]:4100' }, expectedUrl: 'ws://[2001:db8::1]:4100/' },
+    {
+      name: 'TLS proxy preserves path without trusting forwarded host',
+      headers: { host: 'pc.example.test', 'x-forwarded-proto': 'https', 'x-forwarded-host': 'not-the-server.invalid' },
+      path: '/monky/ws?route=qa', expectedUrl: 'wss://pc.example.test/monky/ws?route=qa',
+    },
+    { name: 'TLS on an explicit nonstandard port', headers: { host: 'pc.example.test:80', 'x-forwarded-proto': 'https' }, expectedUrl: 'wss://pc.example.test:80/' },
+    { name: 'co-located loopback remains supported' },
+    { name: 'remote bot with a loopback server', registrationUrl: 'http://bot.example.test/register', error: 'loopback' },
+    { name: 'trailing-dot localhost', headers: { host: 'localhost.:4100' }, registrationUrl: 'http://bot.example.test/register', error: 'loopback' },
+    { name: 'IPv4-mapped loopback', headers: { host: '[::ffff:127.0.0.1]:4100' }, registrationUrl: 'http://bot.example.test/register', error: 'loopback' },
+    { name: 'unspecified address', headers: { host: '0.0.0.0:4100' }, error: 'invalid' },
+    { name: 'credentials in authority', headers: { host: 'user@pc.example.test' }, error: 'invalid' },
+    { name: 'request target cannot replace authority', path: '//not-the-server.invalid', error: 'invalid' },
+    { name: 'invalid forwarded protocol', headers: { host: 'pc.example.test', 'x-forwarded-proto': 'file' }, error: 'invalid' },
+  ];
+  for (const entry of cases) {
+    await t.test(entry.name, async t => {
+      const f = await createFixture({ webSocketHeaders: entry.headers, webSocketPath: entry.path });
+      t.after(() => f.dispose());
+      const owner = await f.human('Address owner');
+      const keys = identity();
+      let registration: Record<string, unknown> | undefined;
+      const manifest = http.createServer((request, response) => {
+        response.setHeader('Content-Type', 'application/json');
+        const address = manifest.address();
+        assert.ok(address && typeof address === 'object');
+        if (request.url === '/manifest') {
+          response.end(JSON.stringify({
+            name: 'Address bot', requestedCapabilities: ['commands'],
+            registrationUrl: entry.registrationUrl ?? `http://127.0.0.1:${address.port}/register`,
+          }));
+          return;
+        }
+        let body = '';
+        request.on('data', chunk => { body += chunk.toString(); });
+        request.on('end', () => {
+          registration = record(JSON.parse(body));
+          response.end(JSON.stringify({ publicKey: keys.publicKey }));
+        });
+      });
+      manifest.listen(0, '127.0.0.1');
+      await once(manifest, 'listening');
+      t.after(() => new Promise<void>((resolve, reject) => manifest.close(error => error ? reject(error) : resolve())));
+      const address = manifest.address();
+      assert.ok(address && typeof address === 'object');
+      const preview = await owner.peer.request(MessageType.BOT_INSTALL_PREVIEW, {
+        manifestUrl: `http://127.0.0.1:${address.port}/manifest`,
+      });
+      if (entry.error) {
+        assert.equal(preview.type, MessageType.SERVER_ERROR);
+        assert.equal(preview.payload.code, ProtocolErrorCode.BAD_REQUEST);
+        assert.match(text(preview.payload.message), entry.error === 'loopback' ? /localhost/ : /endereço do servidor/);
+        assert.equal(registration, undefined, 'A rejected address must not receive a token.');
+        assert.equal(await f.botRepo.count(), 0, 'A rejected address must not leave a bot account.');
+        return;
+      }
+      assert.equal(preview.type, MessageType.BOT_INSTALL_PREVIEW_RESULT);
+      const result = await owner.peer.request(MessageType.BOT_INSTALL, {
+        previewId: preview.payload.previewId, grantedCapabilities: ['commands'],
+      });
+      assert.equal(result.type, MessageType.BOT_INSTALLED);
+      assert.ok(registration);
+      assert.equal(registration.serverUrl, entry.expectedUrl ?? `${f.url}/`);
+    });
+  }
+});
+
 test('the bot dispatcher is closed by default and separates publication, privacy and local requests', () => {
   assert.deepEqual(botMessageCapabilities(MessageType.COMMAND_RESPONSE, { ephemeral: true }), ['commands']);
   assert.deepEqual(botMessageCapabilities(MessageType.COMMAND_RESPONSE, {}), ['commands']);

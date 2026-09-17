@@ -1800,6 +1800,8 @@ export const en: TranslationMap = {
   'bots.installBtn': 'Link',
   'bots.manifestUrlRequired': 'Please enter the bot manifest URL.',
   'bots.manifestUrlInvalid': 'Invalid URL.',
+  'bots.serverAddressUnavailable': 'Could not determine the server address for the bot. Reconnect using the full server URL.',
+  'bots.serverAddressLoopback': 'A remote bot cannot use localhost to reach this server. Reconnect using an IP or domain reachable by the bot and try again. If the server runs on your computer, that address and port must also be reachable from the bot host.',
   'bots.installing': 'Linking bot...',
   'bots.installSuccess': 'Bot linked successfully!',
   'bots.installError': 'Error linking bot.',

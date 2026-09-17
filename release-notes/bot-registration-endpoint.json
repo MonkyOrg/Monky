@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Corrigido o endereço enviado ao vincular bots hospedados em outra máquina. O vínculo preserva a URL do servidor e avisa quando um endereço local não pode ser usado pelo bot, sem criar cadastros inválidos.",
+  "en": "Fixed the address sent when linking bots hosted on another machine. Registration preserves the server URL and explains when a local address cannot be used by the bot, without creating invalid accounts."
+}

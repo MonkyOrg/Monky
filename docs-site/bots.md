@@ -1036,7 +1036,7 @@ Para que servidores Monky consigam acessar o manifest e registrar o bot, a porta
 curl --fail --max-time 10 http://SEU-IP:7780/manifest
 
 # Se usar iptables (Linux):
-sudo iptables -A INPUT -p tcp --dport 7780 -j ACCEPT
+sudo iptables -I INPUT 1 -p tcp --dport 7780 -j ACCEPT
 
 # Se usar ufw (Ubuntu):
 sudo ufw allow 7780/tcp
@@ -1046,6 +1046,23 @@ sudo ufw allow 7780/tcp
 ```
 
 Além disso, o `publicHost` deve ser o **IP ou domínio público** da máquina — `localhost` só funciona se bot e servidor estiverem na mesma máquina.
+
+O acesso também precisa funcionar **do bot para o servidor Monky**. O vínculo
+envia a URL WebSocket usada pelo cliente para entrar no servidor, preservando
+host, porta e caminho; ele não transforma um listener `0.0.0.0` em `localhost`.
+Se o bot estiver em uma VPS e o servidor no seu computador, entre no Monky pelo
+IP ou domínio alcançável a partir dessa VPS. Firewall, encaminhamento de portas
+ou um proxy precisam permitir a conexão de retorno; conseguir abrir o manifest
+do bot não comprova esse segundo caminho.
+
+Um servidor anunciado por loopback só aceita instalação quando as URLs do
+manifest e do registro também são de loopback. Caso contrário, a prévia é
+recusada antes de criar uma conta ou enviar um token, com uma orientação sobre
+o endereço necessário. Para bot e servidor na mesma máquina, use URLs locais
+nos dois lados, ou entre no servidor pelo endereço externo. Proxies devem
+preservar o `Host` original e informar `X-Forwarded-Proto: https` quando terminam
+TLS; o callback usa `wss` nesse caso. Esse ajuste não exige apagar identidades
+nem vínculos válidos.
 
 O teste precisa retornar o JSON do manifest. Se `monkybot status` indicar `errored`, corrija primeiro o erro em `monkybot logs`: abrir portas não inicia um processo que está falhando. Regras de `iptables` devem preceder regras de bloqueio e ser persistidas conforme a distribuição; em redes com NAT, configure também o encaminhamento da porta.
 

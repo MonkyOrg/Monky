@@ -826,6 +826,23 @@ test('bot errors and input validation have Portuguese and English actionable mes
   }
 });
 
+test('bot registration address errors explain the network requirement in the selected language', () => {
+  const unavailable = 'Não foi possível determinar o endereço do servidor para o bot. Reconecte usando a URL completa do servidor.';
+  const loopback = 'Um bot remoto não pode usar localhost para acessar este servidor. Reconecte pelo IP ou domínio acessível ao bot e tente novamente.';
+  try {
+    setLanguage('en');
+    assert.match(translateProtocolError(ProtocolErrorCode.BAD_REQUEST, unavailable), /full server URL/);
+    assert.match(translateProtocolError(ProtocolErrorCode.BAD_REQUEST, loopback), /reachable from the bot host/);
+    assert.equal(translateProtocolError(ProtocolErrorCode.BAD_REQUEST, '__proto__'), '__proto__');
+    assert.equal(translateProtocolError(ProtocolErrorCode.BAD_REQUEST, 'Other server error'), 'Other server error');
+    setLanguage('pt-BR');
+    assert.match(translateProtocolError(ProtocolErrorCode.BAD_REQUEST, unavailable), /URL completa/);
+    assert.match(translateProtocolError(ProtocolErrorCode.BAD_REQUEST, loopback), /máquina do bot/);
+  } finally {
+    setLanguage('pt-BR');
+  }
+});
+
 test('bot photos accept supported image signatures and reject oversized, malformed or SVG input', () => {
   const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGZkAAAAASUVORK5CYII=';
   assert.equal(validateBotAvatar(png), null);

@@ -57,6 +57,11 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
 const LEGACY_MISMATCH_MESSAGE = /vers[ãa]o de protocolo/i;
 const LEGACY_EXPECTED_VERSION = /esperado:\s*(\d+)/i;
 
+const BOT_ADDRESS_ERRORS = new Map<string, TranslationKey>([
+  ['Não foi possível determinar o endereço do servidor para o bot. Reconecte usando a URL completa do servidor.', 'bots.serverAddressUnavailable'],
+  ['Um bot remoto não pode usar localhost para acessar este servidor. Reconecte pelo IP ou domínio acessível ao bot e tente novamente.', 'bots.serverAddressLoopback'],
+]);
+
 /**
  * The protocol version the server speaks, or `null` when the rejection was not
  * a version mismatch at all. A mismatch with an unknown remote version is
@@ -93,6 +98,9 @@ export function translateProtocolError(
 ): string {
   const mismatch = detectVersionMismatch(code, serverMessage, serverProtocolVersion);
   if (mismatch) return describeVersionMismatch(mismatch.serverVersion);
+  const botAddressKey = code === ProtocolErrorCode.BAD_REQUEST && serverMessage
+    ? BOT_ADDRESS_ERRORS.get(serverMessage) : undefined;
+  if (botAddressKey) return t(botAddressKey);
 
   const key = code ? ERROR_KEYS[code as ProtocolErrorCode] : undefined;
   // For BAD_REQUEST, prefer the server's specific message (e.g. bot install
