@@ -179,15 +179,20 @@ async function runSystemClipboardSmoke(sourceWindow) {
     const text = await paste('plain');
     check(normalize(text.text) === expected.source,
       `Formatted native copy preserves Markdown for external text destinations: ${JSON.stringify(text.text)}`);
-    check(normalize(clipboard.readText()) === expected.source && !!clipboard.readHTML(),
+    check(normalize(clipboard.readText()) === expected.source && clipboard.availableFormats().includes('text/html'),
       'The real OS clipboard carries both Markdown text and semantic HTML');
 
     await copy(true);
     await until(() => normalize(clipboard.readText()) === expected.expectedPlain, 'Ctrl+Shift+C plain write');
-    check(!clipboard.readHTML(), 'Plain copy replaces, rather than retains, the previous rich HTML flavor');
+    // macOS ReadHTML can return plain text; the advertised MIME types identify actual rich content.
+    check(!clipboard.availableFormats().some(type => ['text/html', 'text/rtf'].includes(type)),
+      `Plain copy replaces the previous rich formats: ${JSON.stringify(clipboard.availableFormats())}`);
     const plain = await paste('plain');
     check(normalize(plain.text) === expected.expectedPlain && !plain.types.includes('text/html'),
       'Ctrl+Shift+C followed by external Ctrl+V pastes exactly visible text without Markdown markers or HTML');
+    const plainRich = await paste('rich');
+    check(!plainRich.bold && !plainRich.italic && !plainRich.link && !plainRich.types.includes('text/html'),
+      'A rich editor also pastes plain copying without retaining the previous emphasis or links');
 
     await fixture('preparePaste("Untouched draft")');
     const point = await fixture('point("[data-message-id=rich] strong")');
@@ -212,7 +217,7 @@ async function runSystemClipboardSmoke(sourceWindow) {
     await copy(true);
     await until(() => clipboard.readText() === selected, 'plain selection write');
     const plainFragment = await paste('plain');
-    check(plainFragment.text === selected && !clipboard.readHTML(),
+    check(plainFragment.text === selected && !clipboard.availableFormats().includes('text/html'),
       'Plain external copying preserves the exact native selection without copying the whole message');
     check((await fixture('state()')).input === 'Untouched draft', 'External copying never mutates the existing composer draft');
   } finally {
