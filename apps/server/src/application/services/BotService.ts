@@ -283,7 +283,36 @@ export class BotService {
     return { success: true, manifest: parsed.data };
   }
 
-  async previewInstallation(manifestUrl: string, owner: string): Promise<{ success: true; preview: BotInstallPreview } | BotFailure> {
+  private validateRegistrationAddress(serverWsUrl: string | undefined, botUrls: string[]): BotFailure | null {
+    const invalid: BotFailure = {
+      success: false, errorCode: ProtocolErrorCode.BAD_REQUEST,
+      errorMessage: 'Não foi possível determinar o endereço do servidor para o bot. Reconecte usando a URL completa do servidor.',
+    };
+    if (!serverWsUrl) return invalid;
+    try {
+      const server = new URL(serverWsUrl);
+      if (!['ws:', 'wss:'].includes(server.protocol) || server.username || server.password || server.hash ||
+          ['0.0.0.0', '[::]'].includes(server.hostname) || server.port === '0') return invalid;
+      const isLoopback = (url: URL): boolean => {
+        const host = url.hostname.toLowerCase().replace(/\.$/, '');
+        return host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' ||
+          /^127\.\d+\.\d+\.\d+$/.test(host) || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(host);
+      };
+      if (isLoopback(server) && botUrls.some(url => !isLoopback(new URL(url)))) {
+        return {
+          success: false, errorCode: ProtocolErrorCode.BAD_REQUEST,
+          errorMessage: 'Um bot remoto não pode usar localhost para acessar este servidor. Reconecte pelo IP ou domínio acessível ao bot e tente novamente.',
+        };
+      }
+      return null;
+    } catch {
+      return invalid;
+    }
+  }
+
+  async previewInstallation(
+    manifestUrl: string, owner: string, serverWsUrl?: string,
+  ): Promise<{ success: true; preview: BotInstallPreview } | BotFailure> {
     const now = Date.now();
     for (const [id, preview] of this.previews) if (preview.expiresAt <= now) this.previews.delete(id);
     if (this.previews.size >= 256 || [...this.previews.values()].filter((preview) => preview.owner === owner).length >= 8) {
@@ -291,6 +320,8 @@ export class BotService {
     }
     const result = await this.fetchManifest(manifestUrl);
     if (!result.success) return result;
+    const invalidAddress = this.validateRegistrationAddress(serverWsUrl, [manifestUrl, result.manifest.registrationUrl]);
+    if (invalidAddress) return invalidAddress;
     const preview: BotInstallPreview = { previewId: uuidv4(), manifest: result.manifest, expiresAt: Date.now() + 5 * 60_000 };
     this.previews.set(preview.previewId, {
       ...preview, owner, url: manifestUrl, digest: this.manifestDigest(result.manifest),
@@ -320,6 +351,8 @@ export class BotService {
     }
     if (!isAuthorized()) return this.permissionChanged();
     const manifest = preview.manifest;
+    const invalidAddress = this.validateRegistrationAddress(serverWsUrl, [preview.url, manifest.registrationUrl]);
+    if (invalidAddress) return invalidAddress;
 
     // Only metadata supplied by the bot can initialize a linked identity.
     const createResult = await this.mutate(async () => {

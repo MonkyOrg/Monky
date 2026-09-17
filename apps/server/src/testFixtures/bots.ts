@@ -155,7 +155,11 @@ export function createApprovedBotFixture() {
   return createFixture({ approvedBotCapabilities: [...BOT_CAPABILITIES] });
 }
 
-export async function createFixture(options: { approvedBotCapabilities?: BotCapability[] } = {}) {
+export async function createFixture(options: {
+  approvedBotCapabilities?: BotCapability[];
+  webSocketHeaders?: Record<string, string>;
+  webSocketPath?: string;
+} = {}) {
   const dataDir = path.join(__dirname, '..', '..', `.bot-test-data-${process.pid}-${randomUUID()}`);
   const database = await DatabaseConnection.create(path.join(dataDir, 'server.db'));
   const db = database.getDb();
@@ -218,7 +222,9 @@ export async function createFixture(options: { approvedBotCapabilities?: BotCapa
   const url = `ws://127.0.0.1:${address.port}`;
   const peers: Peer[] = [];
   const connect = async () => {
-    const peer = new Peer(new WebSocket(url), options.approvedBotCapabilities);
+    const peer = new Peer(new WebSocket(`${url}${options.webSocketPath ?? ''}`, {
+      headers: options.webSocketHeaders,
+    }), options.approvedBotCapabilities);
     peers.push(peer);
     await once(peer.ws, 'open');
     return peer;
