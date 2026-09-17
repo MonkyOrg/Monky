@@ -113,6 +113,7 @@ test('QA IPC rejects other frames/runs and unregisters every listener across win
   const window = {
     get webContents() { if (destroyed) throw new Error('Object has been destroyed'); return contents; },
     isDestroyed: () => destroyed,
+    isVisible: () => true,
   };
   contents.isCrashed = () => false;
   const event = { sender: contents, senderFrame: contents.mainFrame };
@@ -241,6 +242,7 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
       const result = await runQa(parseQaArguments([...args, '--smoke']), {
         async onReady(state) {
           observed = state;
+          assert.equal(state.windowVisible, false);
           assert.ok(state.pids.every(alive));
           assert.equal((await fs.stat(path.join(state.root, 'client', 'identity.json'))).isFile(), true);
           assert.ok(state.root.startsWith(path.join(repoRoot, '.qa', 'runs') + path.sep));
@@ -289,6 +291,18 @@ test('failure after actual readiness cleans every real child and its private run
 
 test('an attached hidden QA startup handles interruption without orphaning the real app or server', { timeout: 60_000 }, async () => {
   const result = await runQa(parseQaArguments(['connected', '--smoke']), { onReady() { process.emit('SIGINT'); } });
+  assert.ok(result.pids.every(pid => !alive(pid)));
+  await assert.rejects(fs.access(result.root), /ENOENT/);
+});
+
+test('interactive QA is visible before readiness and still cleans up on interruption', { timeout: 60_000 }, async () => {
+  const result = await runQa(parseQaArguments(['connected']), {
+    onReady(state) {
+      assert.equal(state.windowVisible, true);
+      assert.equal(state.ready.connected, true);
+      process.emit('SIGINT');
+    },
+  });
   assert.ok(result.pids.every(pid => !alive(pid)));
   await assert.rejects(fs.access(result.root), /ENOENT/);
 });

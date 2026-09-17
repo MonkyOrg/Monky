@@ -48,7 +48,10 @@ export function bindDevelopmentQa(window: BrowserWindow, config: DevelopmentQaCo
     if (!config || !input || typeof input !== 'object' || !('runId' in input) || input.runId !== config.runId || !('type' in input)) return;
     if (input.type === 'qa-stop') quit();
     if (input.type === 'qa-ping' && 'id' in input) {
-      process.send?.({ type: 'qa-response', id: input.id, value: { alive: !window.isDestroyed() && !contents.isCrashed() } });
+      process.send?.({ type: 'qa-response', id: input.id, value: {
+        alive: !window.isDestroyed() && !contents.isCrashed(),
+        visible: !window.isDestroyed() && window.isVisible(),
+      } });
     }
   };
   const rendererGone = (): void => {

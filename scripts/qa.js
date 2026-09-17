@@ -93,9 +93,9 @@ export async function runQa(options, hooks = {}) {
   process.once('SIGTERM', interrupt);
   const password = randomBytes(24).toString('hex');
   const startup = promise => Promise.race([promise, failure]);
-  const spawn = (label, command, args, cwd, env, onMessage) => {
+  const spawn = (label, command, args, cwd, env, onMessage, windowsHide = true) => {
     const child = startOwnedProcess(command, args, {
-      cwd, env, runId, label, onMessage, onFailure: failureReject, timeoutMs: options.smoke ? 60_000 : 180_000,
+      cwd, env, runId, label, onMessage, windowsHide, onFailure: failureReject, timeoutMs: options.smoke ? 60_000 : 180_000,
     });
     children.push(child);
     return child;
@@ -153,10 +153,18 @@ export async function runQa(options, hooks = {}) {
         joining.catch(failureReject);
       }
       if (report.phase === 'waiting-consent') hooks.log?.('QA_PREPARING: real local consent and verified tools are required; not ready yet.');
-    });
+    }, options.smoke === true);
     const ready = await startup(client.ready);
     await startup(joining);
-    for (const child of children) if (!(await startup(child.call('qa-ping'))).alive) throw new Error('A QA child failed its readiness ping.');
+    let windowVisible;
+    for (const child of children) {
+      const state = await startup(child.call('qa-ping'));
+      if (!state.alive) throw new Error('A QA child failed its readiness ping.');
+      if (child === client) {
+        windowVisible = state.visible;
+        if (windowVisible !== !options.smoke) throw new Error('The QA client window visibility does not match the interactive/smoke scenario.');
+      }
+    }
     const stats = await startup(server.call('qa-snapshot'));
     const expectsLogin = !['home', 'login'].includes(options.scenario);
     if (ready.connected !== expectsLogin || (expectsLogin && (stats.onlineUsers !== 1 || stats.messages < 1)) ||
@@ -177,7 +185,7 @@ export async function runQa(options, hooks = {}) {
     }
     result = { scenario: options.scenario, root, runId, serverUrl: `ws://127.0.0.1:${serverReady.port}`,
       botManifestUrl: botReady?.manifestUrl, botKind: botReady?.kind, pids: children.map(child => child.child.pid),
-      prepared: scenarioPreparation[options.scenario], ready, stats, reports };
+      prepared: scenarioPreparation[options.scenario], windowVisible, ready, stats, reports };
     await hooks.onReady?.(result);
     hooks.log?.(`QA_READY ${JSON.stringify(result)}`);
     if (!options.smoke) await Promise.race([client.closed, failure]);

@@ -24,8 +24,8 @@ export async function terminateOwnedTree(pid) {
   }
 }
 
-export function startOwnedProcess(command, args, { cwd, env, runId, label, onMessage = () => {}, onFailure = () => {}, timeoutMs = 60_000 }) {
-  const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true });
+export function startOwnedProcess(command, args, { cwd, env, runId, label, onMessage = () => {}, onFailure = () => {}, timeoutMs = 60_000, windowsHide = true }) {
+  const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide });
   let output = '', exited = false, stopping = false;
   let resolveReady, rejectReady, resolveClosed;
   const requests = new Map();

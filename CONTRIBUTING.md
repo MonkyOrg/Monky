@@ -173,7 +173,8 @@ do servidor nunca substitui o consentimento local de `tool-consent`/`music`.
 Para testar a admissão do bot na chamada, use `connected --bot-root=...`, não
 `voice`/`music`: esses dois cenários já colocam o bot na voz.
 
-Aguarde **QA_READY**, não apenas a abertura da janela. Servidor, autenticação,
+Aguarde **QA_READY**, não apenas a abertura da janela. O launcher confere que a
+janela está visível no modo interativo e oculta em `--smoke`. Servidor, autenticação,
 mensagem persistida, catálogo e peer de voz são conferidos conforme o cenário.
 Os serviços usam loopback, não anunciam na LAN, e os dados ficam exclusivamente
 em `.qa\runs\<cenário>-<id>`, apagados ao encerrar. Fechar a janela ou usar `Ctrl+C`

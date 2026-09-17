@@ -175,7 +175,8 @@ never substitutes for local consent in `tool-consent`/`music`.
 To test the bot's voice admission, use `connected --bot-root=...`, not
 `voice`/`music`: those scenarios already join the bot to the call.
 
-Wait for **QA_READY**, not merely a visible window. Server health, authentication,
+Wait for **QA_READY**, not merely a visible window. The launcher checks that the
+window is visible in interactive mode and hidden with `--smoke`. Server health, authentication,
 persisted chat, command registration and the voice peer are checked as applicable.
 Services use loopback without LAN announcements; all state stays under
 `.qa\runs\<scenario>-<id>` and is deleted on shutdown. Closing the window or
