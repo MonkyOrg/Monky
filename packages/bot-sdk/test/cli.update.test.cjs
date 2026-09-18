@@ -16,6 +16,8 @@ const toolingProcess = require('../dist/tooling/process');
 const updates = require('../dist/cli/commands/update');
 const releases = require('../dist/cli/updateReleases');
 const sources = require('../dist/cli/updateSources');
+const updateConfiguration = require('../dist/cli/updateConfiguration');
+const lifecycle = require('../dist/cli/commands/lifecycle');
 const updater = require('../dist/cli/updater');
 const { formatUpdateProgress, createUpdateProgressReporter } = require('../dist/cli/updateProgress');
 
@@ -428,7 +430,7 @@ test('autoupdate on checks for explicit releases before consulting pm2', async (
   assert.equal(requirePm2.mock.callCount(), 0);
 });
 
-test('auto-update follows the installed channel unless beta is explicitly pinned', (t) => {
+test('auto-update uses stable even on a beta installation unless beta is explicitly requested', (t) => {
   const f = fixture(t, { version: '1.2.3-beta.1' });
   const calls = [];
   t.mock.method(childProcess, 'spawnSync', (_command, args) => {
@@ -443,7 +445,7 @@ test('auto-update follows the installed channel unless beta is explicitly pinned
     schedule: '04:00',
     includeBeta: false,
   });
-  assert.ok(calls[0].includes('--beta'));
+  assert.equal(calls[0].includes('--beta'), false);
 
   json(path.join(f.bot, 'package.json'), {
     name: '@example/sound-bot',
@@ -1009,16 +1011,16 @@ test('scheduled updates reload the author source and invoke the same source-reso
     commands.push({ command, args, options, source: sources.configuredUpdateSource(cliConfig.createCliContext(f.bot).project) });
     return { status: 0 };
   });
-  updater.runAutoUpdateOnce(settings, { BOT_UPDATE_TOKEN: 'fixture-env-token' });
+  updater.runAutoUpdateOnce(settings, { ...process.env, BOT_UPDATE_TOKEN: 'fixture-env-token' });
   const pkg = JSON.parse(fs.readFileSync(path.join(f.bot, 'package.json'), 'utf8'));
   pkg.monkyBot.updateSource = { type: 'https', url: 'https://downloads.example.test/current.tgz', tokenEnv: 'BOT_UPDATE_TOKEN' };
   pkg.version = '1.2.4-beta.1';
   json(path.join(f.bot, 'package.json'), pkg);
-  updater.runAutoUpdateOnce(settings, { BOT_UPDATE_TOKEN: 'fixture-env-token' });
+  updater.runAutoUpdateOnce(settings, { ...process.env, BOT_UPDATE_TOKEN: 'fixture-env-token' });
   assert.equal(commands[0].source.type, 'file');
   assert.equal(commands[1].source.type, 'https');
   assert.deepEqual(commands[0].args, settings.updateArgs);
-  assert.deepEqual(commands[1].args, [...settings.updateArgs, '--beta']);
+  assert.deepEqual(commands[1].args, settings.updateArgs);
   assert.ok(commands.every((call) => call.command === process.execPath && call.options.shell === false));
   assert.ok(commands.every((call) => call.options.env.BOT_UPDATE_TOKEN === 'fixture-env-token'));
   assert.ok(commands.every((call) => !call.args.join(' ').includes('fixture-env-token')));
@@ -1048,7 +1050,7 @@ test('an invalid scheduler source or failed updater process cannot fall back or 
   assert.equal(spawn.mock.callCount(), 0);
 });
 
-test('operator update-source overrides are unsupported and never echo embedded credentials', async (t) => {
+test('update options cannot bypass the saved source or echo embedded credentials', async (t) => {
   const f = fixture(t);
   const context = cliConfig.createCliContext(f.bot);
   const secret = 'fixture-unsupported-argument-secret';
@@ -1057,6 +1059,171 @@ test('operator update-source overrides are unsupported and never echo embedded c
   await assert.rejects(updates.updateCommand(context, [option]), safeError);
   await assert.rejects(updates.autoUpdateCommand(context, ['on', option]), safeError);
   await assert.rejects(updates.autoUpdateCommand(context, [option]), safeError);
+});
+
+test('operator source persists outside the package, survives upgrades and resets to current package defaults', async t => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot);
+  const manifestFile = path.join(f.bot, 'package.json');
+  const originalManifest = fs.readFileSync(manifestFile);
+  cliConfig.writeConfig(context, cliConfig.manualConfig(context));
+  const originalConfig = fs.readFileSync(context.configFile);
+  const keys = path.join(context.homeDir, '.keys', 'registrations.json');
+  json(keys, { registrations: [{ serverId: 'fixture', token: 'fixture-private-token' }] });
+  const originalKeys = fs.readFileSync(keys);
+  const output = [];
+  t.mock.method(console, 'log', value => output.push(String(value)));
+  await lifecycle.configCommand(context, ['update-source', 'github', 'https://github.com/example/other/releases',
+    '--asset-name', 'download-{version}.tgz', '--token-env', 'BOT_UPDATES_TOKEN']);
+  const preferenceFile = path.join(context.homeDir, 'update-source.json');
+  const saved = fs.readFileSync(preferenceFile);
+  const resolved = sources.configuredUpdateSource(updateConfiguration.projectForUpdates(cliConfig.createCliContext(f.bot)));
+  assert.equal(resolved.type, 'github');
+  assert.equal(resolved.releases.repository, 'example/other');
+  assert.equal(resolved.releases.assetName, 'download-{version}.tgz');
+  assert.equal(resolved.releases.tokenEnv, 'BOT_UPDATES_TOKEN');
+  assert.deepEqual(fs.readFileSync(manifestFile), originalManifest);
+  assert.deepEqual(fs.readFileSync(context.configFile), originalConfig);
+  assert.deepEqual(fs.readFileSync(keys), originalKeys);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(preferenceFile).mode & 0o777, 0o600);
+  const pkg = JSON.parse(originalManifest);
+  pkg.version = '1.2.4';
+  pkg.monkyBot.releases.url = 'https://github.com/example/new-default/releases';
+  json(manifestFile, pkg);
+  const upgraded = cliConfig.createCliContext(f.bot);
+  assert.equal(sources.configuredUpdateSource(updateConfiguration.projectForUpdates(upgraded)).releases.repository, 'example/other');
+  assert.deepEqual(fs.readFileSync(preferenceFile), saved);
+  const otherProfile = cliConfig.createCliContext(f.bot, { ...process.env, MONKY_BOT_CLI_HOME: path.join(f.root, 'other-profile') });
+  assert.equal(sources.configuredUpdateSource(updateConfiguration.projectForUpdates(otherProfile)).releases.repository, 'example/new-default');
+  await lifecycle.configCommand(upgraded, ['update-source']);
+  assert.ok(output.some(line => line.includes('example/other')));
+  assert.ok(output.every(line => !line.includes('fixture-private-token')));
+  await lifecycle.configCommand(upgraded, ['update-source', 'reset']);
+  assert.equal(fs.existsSync(preferenceFile), false);
+  assert.equal(sources.configuredUpdateSource(updateConfiguration.projectForUpdates(upgraded)).releases.repository, 'example/new-default');
+  assert.deepEqual(fs.readFileSync(context.configFile), originalConfig);
+  assert.deepEqual(fs.readFileSync(keys), originalKeys);
+});
+
+test('saved local sources use the operator path and retain identity checks and stable defaults', async t => {
+  const f = fixture(t, { releasesConfig: false, version: '1.2.3-beta.1' });
+  const context = cliConfig.createCliContext(f.bot);
+  const file = path.join(f.root, 'operator package.tgz');
+  const output = [];
+  t.mock.method(console, 'log', value => output.push(String(value)));
+  createTarball(file, botManifest('1.2.4-beta.1'));
+  await lifecycle.configCommand(context, ['update-source', 'file', path.relative(process.cwd(), file)]);
+  const preferenceFile = path.join(context.homeDir, 'update-source.json');
+  assert.equal(JSON.parse(fs.readFileSync(preferenceFile)).updateSource.path, file);
+  await updates.updateCommand(context, ['--check']);
+  assert.ok(output.some(line => line.includes('Nenhuma release')));
+  output.length = 0;
+  await updates.updateCommand(context, ['--check', '--beta']);
+  assert.ok(output.some(line => line.includes('Nova versão disponível: 1.2.4-beta.1')));
+  createTarball(file, botManifest('1.2.4', { name: '@example/wrong-bot' }));
+  await assert.rejects(updates.updateCommand(context, ['--check']), /does not match/);
+  createTarball(file, botManifest('1.2.4'));
+  const install = t.mock.method(toolingProcess, 'runNpm', args => {
+    if (args[0] === 'root') return f.globalRoot;
+    assert.ok(args.includes('--offline') && args.includes('--ignore-scripts'));
+    const pkg = JSON.parse(fs.readFileSync(path.join(f.bot, 'package.json')));
+    pkg.version = '1.2.4';
+    json(path.join(f.bot, 'package.json'), pkg);
+    return '';
+  });
+  t.mock.method(pm2, 'findProcess', () => null);
+  await updates.updateCommand(context, ['--yes']);
+  assert.equal(install.mock.callCount(), 2);
+  assert.equal(JSON.parse(fs.readFileSync(preferenceFile)).updateSource.path, file);
+});
+
+test('HTTPS overrides retain credential-variable validation and use the selected source for checks', async t => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot);
+  const file = path.join(f.root, 'https.tgz');
+  createTarball(file, botManifest());
+  t.mock.method(console, 'log', () => {});
+  await lifecycle.configCommand(context, ['update-source', 'https', 'https://downloads.example.test/alternate.tgz']);
+  const calls = mockHttp(t, () => ({ body: fs.readFileSync(file) }));
+  await updates.updateCommand(context, ['--check']);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://downloads.example.test/alternate.tgz');
+});
+
+test('invalid or unreadable saved sources never fall back and invalid edits preserve the previous choice', async t => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot);
+  t.mock.method(console, 'log', () => {});
+  await lifecycle.configCommand(context, ['update-source', 'file', path.join(f.root, 'valid.tgz')]);
+  const file = path.join(context.homeDir, 'update-source.json');
+  const before = fs.readFileSync(file);
+  const secret = 'fixture-secret';
+  for (const args of [
+    ['github', `https://user:${secret}@github.com/example/bot`],
+    ['https', `https://downloads.example.test/bot.tgz?token=${secret}`],
+    ['https', 'http://downloads.example.test/bot.tgz'],
+    ['file', path.join(f.root, 'invalid.zip')],
+    ['file', path.join(f.root, 'valid.tgz'), '--beta'],
+    ['github', 'https://github.com/example/bot', '--token-env', secret],
+    ['github', 'https://github.com/example/bot', '--asset-name', '../other.tgz'],
+    ['github', 'https://github.com/example/bot', '--asset-name', 'first.tgz', '--asset-name', 'second.tgz'],
+    ['reset', '--extra'], ['show', '--extra'],
+  ]) {
+    await assert.rejects(lifecycle.configCommand(context, ['update-source', ...args]), error =>
+      !error.message.includes(secret) && /Invalid update source/.test(error.message));
+    assert.deepEqual(fs.readFileSync(file), before);
+  }
+  fs.writeFileSync(file, '{"broken":');
+  await assert.rejects(updates.updateCommand(context, ['--check']), /No fallback source/);
+  await assert.rejects(updates.autoUpdateCommand(context, ['on']), /No fallback source/);
+  await assert.rejects(lifecycle.configCommand(context, ['update-source']), /No fallback source/);
+  await lifecycle.configCommand(context, ['update-source', 'reset']);
+  assert.equal(sources.configuredUpdateSource(updateConfiguration.projectForUpdates(context)).type, 'github');
+});
+
+test('source write failure is atomic and leaves no pending files', async t => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot);
+  t.mock.method(console, 'log', () => {});
+  await lifecycle.configCommand(context, ['update-source', 'https', 'https://downloads.example.test/first.tgz']);
+  const file = path.join(context.homeDir, 'update-source.json');
+  const before = fs.readFileSync(file);
+  t.mock.method(fs, 'renameSync', () => { throw new Error('fixture rename failure'); });
+  await assert.rejects(lifecycle.configCommand(context,
+    ['update-source', 'https', 'https://downloads.example.test/second.tgz']), /previous configuration was preserved/);
+  assert.deepEqual(fs.readFileSync(file), before);
+  assert.ok(fs.readdirSync(context.homeDir).every(name => !name.endsWith('.pending')));
+});
+
+test('autoupdate reloads saved sources on every tick without a package default or channel inheritance', async t => {
+  const f = fixture(t, { releasesConfig: false, version: '1.2.3-beta.1' });
+  const context = cliConfig.createCliContext(f.bot);
+  t.mock.method(console, 'log', () => {});
+  await lifecycle.configCommand(context, ['update-source', 'https', 'https://downloads.example.test/first.tgz']);
+  t.mock.method(pm2, 'requirePm2', () => {});
+  t.mock.method(pm2, 'startOrRestart', () => {});
+  t.mock.method(pm2, 'saveProcessList', () => {});
+  await updates.autoUpdateCommand(context, ['on', '03:45']);
+  const ecosystem = fs.readFileSync(context.updaterEcosystemFile, 'utf8');
+  assert.ok(ecosystem.includes(JSON.stringify(f.state)));
+  const settings = {
+    packageRoot: f.bot, updateCwd: f.root, updateArgs: [...context.cliInvocation.args, 'update', '--yes'],
+    schedule: '03:45', includeBeta: false,
+  };
+  const seen = [];
+  t.mock.method(childProcess, 'spawnSync', (_command, args) => {
+    seen.push({ args, source: sources.configuredUpdateSource(updateConfiguration.projectForUpdates(cliConfig.createCliContext(f.bot))) });
+    return { status: 0 };
+  });
+  updater.runAutoUpdateOnce(settings);
+  await lifecycle.configCommand(context, ['update-source', 'file', path.join(f.root, 'second.tgz')]);
+  updater.runAutoUpdateOnce(settings);
+  assert.equal(seen[0].source.url, 'https://downloads.example.test/first.tgz');
+  assert.equal(seen[1].source.path, path.join(f.root, 'second.tgz'));
+  assert.ok(seen.every(call => !call.args.includes('--beta')));
+  fs.writeFileSync(path.join(context.homeDir, 'update-source.json'), '{}');
+  assert.throws(() => updater.runAutoUpdateOnce(settings), /No fallback source/);
+  assert.equal(seen.length, 2);
 });
 
 for (const kind of ['config home', 'runtime profile and keys', 'symlinked runtime data']) {

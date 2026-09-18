@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Bots com o CLI do SDK permitem trocar a origem das atualizações após instalar, sem editar o pacote nem perder vínculos. A escolha fica salva no perfil. Atualizações manuais e automáticas usam stable por padrão; betas exigem uma opção explícita.",
+  "en": "Bots using the SDK CLI can change their update source after installation without editing the package or losing registrations. The choice is saved in the profile. Manual and automatic updates use stable by default; betas require explicit opt-in."
+}

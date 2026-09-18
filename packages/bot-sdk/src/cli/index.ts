@@ -33,6 +33,11 @@ ${color('COMANDOS', ANSI.bold)}
   logs [--lines N] [--no-follow]
   config                        Exibe a configuração atual
   config set <k> <v>             Ajusta mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
+  config update-source          Consulta a origem de atualização deste perfil
+  config update-source github <URL> [--asset-name <nome.tgz>] [--token-env <VAR>]
+  config update-source https <URL.tgz> [--token-env <VAR>]
+  config update-source file <caminho.tgz>
+  config update-source reset    Restaura a origem padrão do pacote
   update [--check] [--beta] [--yes]
   autoupdate on [HH:MM] [--beta]
   autoupdate off
@@ -49,8 +54,9 @@ ${color('SETUP NÃO INTERATIVO', ANSI.bold)}
   ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-ou-domínio> [--serve-port 7780] [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
 
 ${color('ORIGEM DAS ATUALIZAÇÕES', ANSI.bold)}
-  Definida pelo autor no package.json: monkyBot.releases (GitHub recomendado)
-  ou monkyBot.updateSource (URL HTTPS de .tgz ou caminho local de .tgz).
+  O padrão vem de monkyBot.releases ou monkyBot.updateSource no package.json.
+  config update-source salva uma escolha por perfil, fora do pacote instalado.
+  update e autoupdate usam stable; betas exigem --beta.
 `, `
 ${color(context.cliName, ANSI.bold)} — ${context.displayName} runtime CLI
 
@@ -66,6 +72,11 @@ ${color('COMMANDS', ANSI.bold)}
   logs [--lines N] [--no-follow]
   config                        Show the current configuration
   config set <k> <v>             Set mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
+  config update-source          Show the update source for this profile
+  config update-source github <URL> [--asset-name <name.tgz>] [--token-env <VAR>]
+  config update-source https <URL.tgz> [--token-env <VAR>]
+  config update-source file <path.tgz>
+  config update-source reset    Restore the package default source
   update [--check] [--beta] [--yes]
   autoupdate on [HH:MM] [--beta]
   autoupdate off
@@ -82,8 +93,9 @@ ${color('NON-INTERACTIVE SETUP', ANSI.bold)}
   ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-or-domain> [--serve-port 7780] [--name "My Bot"] [--bot-dir <directory>] [--yes]
 
 ${color('UPDATE SOURCE', ANSI.bold)}
-  Configured by the author in package.json: monkyBot.releases (GitHub recommended)
-  or monkyBot.updateSource (an HTTPS .tgz URL or a local .tgz path).
+  Defaults come from monkyBot.releases or monkyBot.updateSource in package.json.
+  config update-source saves a per-profile choice outside the installed package.
+  update and autoupdate use stable; beta releases require --beta.
 `).trim());
 }
 

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { BOT_ECOSYSTEM_FILE, UPDATER_ECOSYSTEM_FILE } from './constants';
 import { ensurePrivateDirectory, writePrivateFile } from './fs';
 import { runNpm } from '../tooling/process';
@@ -121,6 +122,7 @@ export function writeUpdaterEcosystem(context: CliContext, schedule: string, inc
     watch: false,
     env: {
       MONKY_BOT_CLI_PACKAGE_ROOT: context.packageRoot,
+      MONKY_BOT_CLI_HOME: path.dirname(context.homeDir),
       MONKY_BOT_CLI_UPDATE_CWD: context.cliInvocation.cwd,
       MONKY_BOT_CLI_UPDATE_ARGS: JSON.stringify(updateArgs),
       MONKY_BOT_CLI_SCHEDULE: schedule,

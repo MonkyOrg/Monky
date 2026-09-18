@@ -941,6 +941,18 @@ process.on('message', (message) => {
     };
     let runtime = startSoundBot();
     try {
+      const declaration = await owner.wait((message) => message.type === MessageType.BOT_SETTINGS_LIST_RESPONSE &&
+        message.payload.bots?.some((summary) => summary.botId === account.bot.id &&
+          Array.isArray(summary.permissions?.requested)), 'sound bot capability declaration', 15000);
+      const permissions = declaration.payload.bots.find((summary) => summary.botId === account.bot.id).permissions;
+      assert.deepEqual(permissions.requested, ['commands', 'sound_download']);
+      assert.deepEqual(permissions.granted, [], 'The manual link must wait for administrator approval.');
+      const beforeApproval = await owner.request(MessageType.COMMANDS_LIST, {});
+      assert.equal(beforeApproval.commands.some((command) => command.botId === account.bot.id), false);
+      const approval = await owner.request(MessageType.BOT_PERMISSIONS_UPDATE, {
+        botId: account.bot.id, expectedRevision: permissions.revision, granted: permissions.requested,
+      });
+      assert.deepEqual(approval.permissions.granted, ['commands', 'sound_download']);
       await waitForSoundBot(runtime);
       await new Promise((resolve) => setTimeout(resolve, LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS));
       const found = await owner.request(MessageType.COMMAND_AUTOCOMPLETE, {

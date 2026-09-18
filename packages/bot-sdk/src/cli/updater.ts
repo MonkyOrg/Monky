@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { loadBotProject } from '../tooling/config';
+import { createCliContext } from './config';
 import { DEFAULT_AUTOUPDATE_SCHEDULE } from './constants';
 import { parseVersion } from './updateReleases';
 import { configuredUpdateSource } from './updateSources';
+import { projectForUpdates } from './updateConfiguration';
 
 export interface AutoUpdateSettings {
   packageRoot: string;
@@ -53,11 +54,11 @@ export function msUntilNextRun(schedule: string, now = new Date()): number {
 export function shouldIncludeBeta(installedVersion: string, explicit: boolean): boolean {
   const parsed = parseVersion(installedVersion);
   if (!parsed) throw new Error('Installed bot version is invalid.');
-  return explicit || parsed.prerelease.length > 0;
+  return explicit;
 }
 
 export function runAutoUpdateOnce(settings: AutoUpdateSettings, env: NodeJS.ProcessEnv = process.env): void {
-  const project = loadBotProject(settings.packageRoot);
+  const project = projectForUpdates(createCliContext(settings.packageRoot, env));
   configuredUpdateSource(project);
   const includeBeta = shouldIncludeBeta(project.manifest.version, settings.includeBeta);
   const args = [...settings.updateArgs];
