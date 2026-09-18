@@ -50,6 +50,20 @@ export interface UserActivity {
   appId: number;
   /** Title as Steam itself names it, read from the local app manifest. */
   name: string;
+  /**
+   * Epoch ms of when the game was first *seen* running, not when it launched:
+   * Steam publishes which app is up, never since when. Someone who opens Monky
+   * mid-match therefore starts counting from zero, which is the honest reading
+   * of what we know.
+   */
+  startedAt: number;
+  /**
+   * The app icon Steam already cached on the player's disk, base64 JPEG and
+   * without the data-URI prefix. Optional because the cache layout is Valve's
+   * private business: a missing or unreadable icon falls back to a generic one
+   * rather than hiding the game.
+   */
+  iconBase64?: string;
 }
 
 /**

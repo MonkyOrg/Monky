@@ -163,8 +163,39 @@ console.log('✔ Schemas de criação e edição de canal verificados (#384)');
 
 // Presença de jogo e convites de partida (#675)
 console.assert(
-  userActivitySchema.safeParse({ source: 'steam', appId: 548430, name: 'Deep Rock Galactic' }).success === true,
-  'Atividade da Steam com appid e nome é válida'
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 548430, name: 'Deep Rock Galactic', startedAt: 1_700_000_000_000,
+  }).success === true,
+  'Atividade da Steam com appid, nome e início é válida'
+);
+console.assert(
+  userActivitySchema.safeParse({ source: 'steam', appId: 548430, name: 'Deep Rock Galactic' }).success === false,
+  'Sem o início não há contador: o campo é obrigatório'
+);
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 1, name: 'x', startedAt: -1,
+  }).success === false,
+  'Início negativo é rejeitado'
+);
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 1, name: 'x', startedAt: 1, iconBase64: '/9j/4AAQSkZJRg==',
+  }).success === true,
+  'Base64 de JPEG é aceito como ícone'
+);
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 1, name: 'x', startedAt: 1, iconBase64: 'iVBORw0KGgo=',
+  }).success === false,
+  'Só JPEG: o prefixo /9j/ é o que autoriza virar data URI'
+);
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 1, name: 'x', startedAt: 1,
+    iconBase64: `/9j/${'A'.repeat(LIMITS.MAX_ACTIVITY_ICON_LENGTH)}`,
+  }).success === false,
+  'O ícone tem teto: o campo não é um canal para dados em massa'
 );
 console.assert(
   userUpdateActivitySchema.safeParse({ activity: null }).success === true,
