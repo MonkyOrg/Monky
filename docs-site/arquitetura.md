@@ -47,10 +47,16 @@ O repositório é um monorepo com workspaces npm:
 |---|---|
 | `apps/client` | O app Electron — a interface, e também o anfitrião quando você hospeda pelo próprio app |
 | `apps/server` | O servidor: WebSocket, SQLite e o [Monky CLI](/cli) |
+| `apps/light` | Núcleo nativo headless em desenvolvimento; não é o cliente desktop publicado descrito nos guias de uso |
 | `packages/shared` | O contrato entre os dois: tipos do protocolo, validadores, limites e perfis de qualidade |
+| `packages/bot-sdk` | SDK, contratos de bot, conexão de voz, execução local e empacotamento do CLI de bots |
 
 `packages/shared` é o que impede cliente e servidor de divergirem: os dois
 importam os **mesmos** tipos e os **mesmos** validadores.
+
+A implementação e as limitações atuais do Light estão no
+[README próprio](https://github.com/MonkyOrg/Monky/tree/main/apps/light).
+As seções de interface abaixo descrevem o cliente Electron.
 
 ## O cliente
 
@@ -76,8 +82,14 @@ Talvez a decisão mais incomum do projeto: **o renderer é TypeScript e DOM puro
 Não há React, Vue ou Svelte. As telas montam o próprio HTML com template strings
 e se re-renderizam.
 
-O estado fica em *stores* singleton que emitem eventos num barramento
-(`appEvents`), e as telas se inscrevem no que lhes interessa:
+`SessionManager` mantém conexão, chat, membros e miniapps separados por
+sessão de servidor. As stores da sessão ativa emitem no barramento de interface
+(`appEvents`); as de fundo atualizam seus dados por um barramento silencioso.
+Preferências e a chamada ativa têm escopo global. Trocar a sessão visualizada
+não equivale a encerrar as conexões.
+
+As telas se inscrevem nos eventos relevantes; o diagrama mostra esse fluxo
+lógico, não uma única store compartilhando dados de todos os servidores:
 
 <div class="diagrama">
 
@@ -222,23 +234,24 @@ release **major** — existe até uma verificação no CI que barra o PR se isso
 for respeitado.
 :::
 
-### Autenticação: o servidor nunca vê uma senha sua
+### Autenticação por identidade {#autenticacao-o-servidor-nunca-ve-uma-senha-sua}
 
 O login é por desafio-resposta com criptografia de chave pública. Você não tem
 conta nem cadastro: sua identidade **é** o seu par de chaves.
 
 <div class="diagrama">
 
-![Autenticação: o servidor nunca vê uma senha sua](./diagramas/pt/07-autenticacao-o-servidor-nunca-ve-uma-sen.claro.svg){.tema-claro}
-![Autenticação: o servidor nunca vê uma senha sua](./diagramas/pt/07-autenticacao-o-servidor-nunca-ve-uma-sen.escuro.svg){.tema-escuro}
+![Autenticação por desafio e assinatura: a chave privada permanece no cliente; a senha opcional de entrada é enviada ao servidor.](./diagramas/pt/07-autenticacao-o-servidor-nunca-ve-uma-sen.claro.svg){.tema-claro}
+![Autenticação por desafio e assinatura: a chave privada permanece no cliente; a senha opcional de entrada é enviada ao servidor.](./diagramas/pt/07-autenticacao-o-servidor-nunca-ve-uma-sen.escuro.svg){.tema-escuro}
 
 </div>
 
 O `clientId` é derivado da própria chave pública, então ele não pode ser
 falsificado: quem não tem a chave privada não consegue assinar o desafio.
 
-A senha do servidor, quando existe, protege a *entrada* — é conferida antes de o
-desafio ser emitido.
+A senha do servidor, quando existe, protege a *entrada* e é conferida pelo
+servidor antes do desafio. Ela é diferente da senha local do backup da sua
+identidade. A chave privada e a senha desse backup não são enviadas no login.
 
 ### Sessões: a mesma pessoa em vários aparelhos
 

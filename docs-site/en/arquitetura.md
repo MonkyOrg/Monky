@@ -47,10 +47,16 @@ The repository is a monorepo with npm workspaces:
 |---|---|
 | `apps/client` | The Electron app — the interface, and also the host when you host from the app itself |
 | `apps/server` | The server: WebSocket, SQLite and the [Monky CLI](/en/cli) |
+| `apps/light` | Native headless core under development; not the published desktop client covered by the user guides |
 | `packages/shared` | The contract between the two: protocol types, validators, limits and quality profiles |
+| `packages/bot-sdk` | SDK, bot contracts, voice connection, local execution and bot CLI packaging |
 
 `packages/shared` is what stops client and server from drifting apart: both
 import the **same** types and the **same** validators.
+
+Light's implementation and current limitations live in its
+[own README](https://github.com/MonkyOrg/Monky/blob/main/apps/light/README.en.md).
+The interface sections below describe the Electron client.
 
 ## The client
 
@@ -76,8 +82,14 @@ Possibly the project's most unusual decision: **the renderer is plain TypeScript
 and DOM**. There is no React, Vue or Svelte. Views build their own HTML with
 template strings and re-render themselves.
 
-State lives in singleton stores that emit events on a bus (`appEvents`), and
-views subscribe to whatever concerns them:
+`SessionManager` keeps connections, chat, members and miniapps isolated per
+server session. The active session's stores emit on the UI bus (`appEvents`);
+background stores update their data through a silent bus. Preferences and
+the active call have global scope. Switching the viewed session does not
+close the connections.
+
+Views subscribe to relevant events; the diagram shows this logical flow,
+not one store mixing every server's data:
 
 <div class="diagrama">
 
@@ -222,23 +234,24 @@ That is why bumping the protocol is always a breaking change and forces a
 respected.
 :::
 
-### Authentication: the server never sees a password of yours
+### Identity authentication {#authentication-the-server-never-sees-a-password-of-yours}
 
 Login is challenge–response with public-key cryptography. You have no account and
 no sign-up: your identity **is** your key pair.
 
 <div class="diagrama">
 
-![Authentication: the server never sees a password of yours](../diagramas/en/07-autenticacao-o-servidor-nunca-ve-uma-sen.claro.svg){.tema-claro}
-![Authentication: the server never sees a password of yours](../diagramas/en/07-autenticacao-o-servidor-nunca-ve-uma-sen.escuro.svg){.tema-escuro}
+![Challenge-and-signature authentication: the private key stays on the client; the optional entry password is sent to the server.](../diagramas/en/07-autenticacao-o-servidor-nunca-ve-uma-sen.claro.svg){.tema-claro}
+![Challenge-and-signature authentication: the private key stays on the client; the optional entry password is sent to the server.](../diagramas/en/07-autenticacao-o-servidor-nunca-ve-uma-sen.escuro.svg){.tema-escuro}
 
 </div>
 
 The `clientId` is derived from the public key itself, so it cannot be forged:
 without the private key you cannot sign the challenge.
 
-The server password, when there is one, protects *entry* — it is checked before
-the challenge is issued.
+The server password, when present, protects *entry* and is checked by the
+server before the challenge. It differs from your local identity-backup
+password. The private key and that backup password are not sent during login.
 
 ### Sessions: the same person on several devices
 

@@ -1,5 +1,8 @@
 # Monky CLI
 
+This is the **server CLI**, not the CLI generated for a bot. To package
+and operate your own bot, see [Bot distribution](/en/bots-distribuicao).
+
 Command line tool to create and administer Monky servers.
 
 ```
@@ -152,7 +155,7 @@ such as `true`, `false`, `p2p` and `sfu` are not translated.
 
 ---
 
-# Command reference
+## Command reference
 
 ## `monky create`
 
@@ -168,7 +171,8 @@ After the initial language choice, when needed, the command asks:
 1. **Where to store the data** — suggests `./data`, but any path works. If the
    chosen folder already holds a server, it asks for another one.
 2. **Owner identity code** (`MONKY-ID:...`) — export it from the Monky app under
-   *Settings → Identity → Export*.
+   *Settings → My Profile → Identity*. Treat the backup and password as
+   credentials: use them only on a trusted administration machine.
 3. **Identity password** — the one you set when exporting.
 4. **Server name**
 5. **Server port** (default: `3000`)

@@ -1,5 +1,11 @@
 # Usando o App
 
+Depois de conectar, a lateral esquerda organiza servidores e canais; o centro
+mostra a conversa ou o palco de voz; a lista à direita reúne os membros.
+Conectar ao servidor e entrar em uma chamada são ações separadas.
+
+<AppScreenshot src="/screenshots/conversa-pt.png" alt="Conversa demonstrativa com servidores e canais à esquerda, mensagens ao centro e membros à direita." caption="Captura do cliente para Windows com dados demonstrativos. Nomes, conversas e bot foram criados para este guia." />
+
 ## Voz
 
 Clique em um **canal de voz** para entrar na chamada. Quem fala ganha um anel verde no avatar. A barra inferior tem microfone, fone/ensurdecer e desconectar. O painel mostra ping médio e permite sair só da chamada.
@@ -10,7 +16,9 @@ A chamada acompanha você: se trocar de servidor na coluna da esquerda, ela cont
 
 ## Câmera e tela
 
-Na barra de mídia: **Câmera**, **Compartilhar Tela** e **Soundboard**. O compartilhamento permite escolher uma tela inteira ou uma janela específica, com áudio de tela para os participantes.
+Na barra de mídia: **Câmera**, **Compartilhar Tela** e **Soundboard**. Escolha
+uma tela ou janela específica; a disponibilidade de áudio de compartilhamento
+depende da plataforma e da fonte. Confira o que será capturado antes de iniciar.
 
 Em **Configurações → Voz e Vídeo → Câmera**, compare desfoque, fundo virtual
 de cor ou imagem e chroma key de tela física na prévia. Os efeitos são locais
@@ -39,7 +47,16 @@ Digitar `@` no campo de mensagem abre a lista de membros: escolha alguém para i
 
 O primeiro item da lista é o `@todos` (ou `@everyone` — os dois tokens funcionam em qualquer idioma), que notifica todo mundo que enxerga aquele canal. Canais privados continuam privados: quem não tem acesso não é notificado.
 
-Quem administra o servidor pode desligar isso em **Configurações do servidor → Geral → Permitir menção a todos**, ou pela CLI com a chave `allowEveryoneMention`. O padrão é ligado.
+Quem administra o servidor pode desligar isso em **Configurações do servidor →
+Notificações → Permitir menção a todos**, ou pelo CLI com a chave
+`allowEveryoneMention`. O padrão é ligado.
+
+## Bots e miniapps
+
+Digite `/` em um canal de texto para descobrir os comandos disponíveis.
+Bots podem responder em privado, publicar votações ou abrir miniapps no
+palco de voz. O [guia de uso de bots](/bots) explica permissões, preferências
+e consentimento sem exigir programação.
 
 ## Blocos de código
 

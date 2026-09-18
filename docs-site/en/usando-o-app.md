@@ -1,5 +1,11 @@
 # Using the App
 
+After connecting, the left sidebar organizes servers and channels, the center
+shows chat or the voice stage, and the right side lists members. Connecting
+to a server and joining a call are separate actions.
+
+<AppScreenshot src="/screenshots/conversa-en.png" alt="A demo conversation with servers and channels on the left, messages in the center and members on the right." caption="Windows client capture using demo data. The names, conversation and bot were created for this guide." />
+
 ## Voice
 
 Click a **voice channel** to join the call. Whoever speaks gets a green ring around the avatar. The bottom bar has microphone, headphones/deafen and disconnect. The panel shows average ping and lets you leave only the call.
@@ -10,7 +16,9 @@ The call follows you: switching servers in the left column keeps it running, and
 
 ## Camera and screen
 
-On the media bar: **Camera**, **Share Screen** and **Soundboard**. Screen sharing lets you choose a whole screen or a specific window, with screen audio sent to participants.
+On the media bar: **Camera**, **Share Screen** and **Soundboard**. Choose a screen
+or a specific window; screen-audio availability depends on the platform and
+source. Check what will be captured before starting.
 
 Under **Settings → Voice and Video → Camera**, preview blur, color or image
 virtual backgrounds and physical-screen chroma key. Effects run locally and
@@ -39,7 +47,16 @@ Typing `@` in the message box opens the member list: pick someone to insert `@ni
 
 The first entry on the list is `@everyone` (or `@todos` — both tokens work in any language), which notifies everybody who can see that channel. Private channels stay private: people without access are not notified.
 
-Server admins can turn this off under **Server settings → General → Allow everyone mention**, or through the CLI with the `allowEveryoneMention` key. It is on by default.
+Server admins can turn this off under **Server settings → Notifications →
+Allow everyone mention**, or through the CLI with `allowEveryoneMention`.
+It is on by default.
+
+## Bots and miniapps
+
+Type `/` in a text channel to discover available commands. Bots can reply
+privately, publish polls or open miniapps in the voice stage.
+[Use bots](/en/bots) explains permissions, preferences and consent without
+requiring programming.
 
 ## Code blocks
 

@@ -1,106 +1,35 @@
 # Configurações
 
-Abra pelo ícone de engrenagem na tela de conexão ou na barra inferior.
+Abra a **engrenagem** na tela inicial ou na barra inferior. Estas são as
+preferências do seu aplicativo. Para mudar algo compartilhado com os
+participantes, use [Configurações do Servidor](/administrar-servidor).
 
-- **Perfil** — nickname e foto.
-- **Servidores e configurações** — exporte seus servidores salvos e as
-  configurações do app para um arquivo `.monkybackup` e restaure em outro
-  computador. Você escolhe o que entra e o que sai a cada vez, e os dados também
-  podem viajar junto do backup da identidade. O arquivo é protegido pela senha
-  que você define na exportação: a lista de servidores salvos pode conter senhas
-  de servidor, então ela nunca vai para o disco em texto aberto. Sem essa senha
-  não há como recuperar o backup.
-- **Dispositivos** — microfone, alto-falante/fone e câmera, com pré-visualização e atualização da lista.
-- **Efeitos de câmera** — desfoque, fundo virtual com cor ou imagem e chroma key de fundo físico, processados localmente.
-- **Sensibilidade de Voz (VAD)** — ajuste olhando o medidor; deixe o marcador acima do nível em silêncio.
-- **Supressão de ruído** — escolha RNNoise, Speex, GTCRN, WebRTC (nativo) ou desative o processamento de ruído.
-- **Saída geral e saídas avançadas** — use o mesmo dispositivo para tudo ou defina saídas para voz, compartilhamentos e mídias do chat.
-- **Perfil de Qualidade e Desempenho** — afeta só o que você transmite.
-- **Comportamento** — manter o Monky na bandeja ao fechar a janela e perguntar
-  antes de desligar um servidor hospedado nesta máquina quando você for a última
-  pessoa a sair dele.
-- **Atualizações** — versão atual e verificação manual.
-- **Comunidade** — atalhos para ideias, votação e bugs.
+| Aba | O que você encontra |
+| --- | --- |
+| Meu Perfil | Nickname, foto, visibilidade, idioma, identidade e backups |
+| Voz e Vídeo | Dispositivos, microfone, PTT, saídas, supressão de ruído e câmera |
+| Soundboard / Figurinhas | Pastas locais e controles dessas bibliotecas |
+| Atalhos | Combinações para ações rápidas |
+| Notificações e Sons | Sons e avisos pessoais |
+| Qualidade | Perfis de transmissão, resolução, FPS, bitrate e codec |
+| Ferramentas de bots | Instalações locais, permissões, cache e tarefas |
+| Logs | Eventos locais e diagnóstico do cliente |
+| Sobre e Updates | Versão, atualização, comportamento da janela e comunidade |
 
-### Entrar no servidor ao abrir o Monky
+## Meu Perfil
 
-Na Home, selecione ou informe o servidor e ative **Entrar ao abrir o Monky**,
-ao lado de **Entrar no Servidor**. A escolha é salva somente depois de uma conexão
-bem-sucedida. Há um único destino: conectar em outro servidor com o switch
-ativado substitui o anterior. Uma tentativa que falha não altera o destino salvo.
+Altere seu nickname e foto nesta aba. **Idioma** aplica Português (Brasil)
+ou English imediatamente e salva a preferência neste computador.
 
-A preferência vale nas próximas aberturas até você desligar esse mesmo switch;
-desligá-lo desativa a entrada automática imediatamente, sem precisar conectar.
-Não inicia servidores parados nem entra em voz. Ao migrar de uma configuração
-antiga com vários destinos, somente a última escolha é mantida. A passagem da
-Home para o servidor tem uma animação curta, desativada com movimento reduzido.
+Em **Identidade**, exporte ou importe sua identidade criptográfica para continuar
+sendo reconhecido nos servidores. Veja os cuidados em
+[Primeiros passos](/primeiros-passos#guarde-um-backup-da-identidade).
 
-### Navegação por seções
-
-Nas configurações do app e do servidor, selecionar uma categoria expande seus
-atalhos de seção na barra lateral. Os submenus abrem e recolhem suavemente,
-inclusive ao alternar rapidamente entre categorias. Clique em um deles para
-rolar suavemente até aquela parte da página. A seção atual fica destacada também ao rolar
-manualmente, sem recriar o formulário nem perder alterações ainda não salvas.
-Seções ocultas ou indisponíveis não aparecem na navegação.
-
-A abertura e o fechamento dos submenus, assim como a rolagem das seções e
-das categorias do seletor de emojis, respeitam a
-preferência de movimento reduzido do sistema: quando ativada, o deslocamento
-é imediato, sem animação.
-
-### Configurações do servidor: aplicação imediata
-
-As configurações do servidor não têm uma etapa final de salvar. Switches e
-seleções aplicam imediatamente; nomes, senhas e limites aplicam ao terminar
-a edição, ao sair do campo ou pressionar `Enter`. **Pronto** apenas fecha a
-janela, sem desfazer alterações já aplicadas.
-
-Enquanto houver uma operação pendente, **Pronto**, `X`, `Esc`, o clique fora
-da janela e outras tentativas de fechamento ficam bloqueados. A instalação
-do TURN chegar a 100% não significa que terminou: o aplicativo espera a
-confirmação final do servidor e mostra falhas reais de inicialização.
-
-Erros indicam qual alteração não foi confirmada e permitem corrigir e tentar
-novamente. Se a conexão ou a sessão mudar, reabra as configurações para obter
-o estado atual; uma solicitação sem confirmação não é apresentada como salva.
-Edições de cargos e perfis de bots também são imediatas, mas criação,
-instalação, exclusão e revogação continuam exigindo suas ações explícitas.
-
-Os avisos de bots incompatíveis ou ainda sem verificação ficam em
-**Configurações do servidor → Bots**, junto do bot que precisa de atenção,
-e não nos cards da Home. O dropdown do servidor não repete um item
-**Bots deste servidor**. As preferências pessoais continuam disponíveis pelo
-menu do próprio bot na lista de membros.
-
-Em **Configurações do servidor → Geral → Informações do Servidor**, a versão
-é a do processo que hospeda o servidor, não a do cliente no seu computador.
-Clique na versão para copiá-la. Se essa informação não estiver disponível,
-o aplicativo informa isso em vez de substituir pela versão local.
-
-Quando um servidor reinicia para instalar uma atualização, os clientes conectados
-recebem um aviso próprio do Monky, no idioma selecionado, orientando a tentar
-reconectar em alguns segundos. O aviso também aparece se esse servidor estiver
-em segundo plano; um encerramento comum continua usando o aviso de servidor encerrado.
-
-### Seletor de cores
-
-A cor da tela física do chroma key, a cor do fundo virtual e as cores dos
-cargos usam o mesmo seletor do Monky. Clique na amostra de cor para abrir
-os controles de matiz, saturação e brilho, as cores predefinidas e o campo
-**HEX**, que aceita três ou seis dígitos.
-
-Soltar o controle após arrastar ou escolher uma cor aplica a seleção.
-Ao digitar um HEX válido, `Enter`, o botão de fechar ou um clique fora
-confirmam a entrada; fechar o seletor não desfaz a cor escolhida. Uma entrada
-inválida é indicada no próprio painel. `Escape` cancela somente a entrada
-ainda em edição e fecha o seletor, sem fechar suas configurações.
-
-O **Conta-gotas** permite escolher uma cor da tela. Durante a seleção,
-`Escape` cancela apenas o conta-gotas, mantendo a cor anterior e o painel
-aberto. Falta de permissão ou falha de captura é informada, sem substituir
-a cor por um valor padrão. Isso não desliga os efeitos nem transmite a
-câmera sem filtro para a chamada.
+**Servidores e configurações** exporta um `.monkybackup` protegido pela senha
+que você escolher. Selecione o que deseja incluir/restaurar; esses dados
+também podem acompanhar a exportação da identidade. A lista de servidores
+pode conter senhas e não é gravada em texto aberto nesse backup.
+Sem a senha escolhida, não há recuperação do arquivo.
 
 ### Aparecer offline
 
@@ -113,6 +42,14 @@ não torna você online novamente.
 
 Isso não desconecta o cliente nem interrompe uma chamada em andamento. Sua
 participação em um canal de voz continua visível nesse canal.
+
+## Voz e Vídeo
+
+Escolha o microfone e acompanhe o medidor antes de entrar em uma chamada.
+Ajuste o limite de detecção de voz acima do nível do ambiente em silêncio.
+Confira a saída de áudio e use o teste local com fones.
+
+<AppScreenshot src="/screenshots/configuracoes-voz-pt.png" alt="Aba Voz e Vídeo mostrando o microfone, o teste local e opções de entrada." caption="As prévias são locais. Abrir estas configurações não desmuta nem autoriza uma transmissão por si só." />
 
 ### Controles rápidos de áudio
 
@@ -165,28 +102,26 @@ mostrando os participantes da chamada ativa.
 Cliente e servidor precisam estar atualizados para trocar essa informação
 antes de entrar na voz.
 
-### Dicas e menus
+### Modo de entrada e Push to Talk
 
-Os tooltips do cliente usam um visual escuro e compacto, aparecem após cerca
-de **150 ms** com o mouse e imediatamente ao navegar pelo teclado. `Esc`
-dispensa a dica. Os menus e listas de seleção compartilham o mesmo tema;
-nos seletores, use as setas, digite para buscar uma opção e confirme com
-`Enter`. `Esc` fecha a lista sem alterar a escolha.
+Em **Voz e Vídeo → Modo de Entrada**, escolha um dos dois cards: **Atividade
+de Voz (VAD)** ou **Push to Talk**. Os cards também podem ser acionados pelo
+teclado, sem radio buttons.
 
-Os controles da barra inferior e os botões de **anexo, emoji e código** do
-compositor têm movimentos próprios ao passar o mouse: a engrenagem gira,
-a seta de compartilhamento se move, o soundboard solta notas e o emoji ri.
-O efeito da câmera é uma moldura animada, não um indicador de gravação.
-Cliques e mudanças de estado também têm um feedback visual curto. Os botões
-da barra flutuante de ações das mensagens não recebem essas animações.
-A preferência de movimento reduzido desativa esses efeitos.
+Com PTT habilitado, o **botão de microfone no canto inferior esquerdo** ganha
+a marca **PTT** sob o ícone, sem borda: amarelo com ícone de entrada de voz
+enquanto aguarda a tecla e verde com microfone aberto ao transmitir. Quando
+há mute manual ou áudio desativado, aparece apenas o microfone cortado em
+vermelho, sem a marca PTT. Um bloqueio feito por administrador acrescenta o
+símbolo vermelho de proibido, sem substituir o ícone pessoal nem esconder
+a marca PTT. O bloqueio impede a transmissão, mesmo que seu mute pessoal esteja
+desativado. Fora de chamada, o estado de espera fica cinza.
 
-No modal **Bloco de código**, arraste o canto inferior direito para ajustar
-largura e altura; o editor acompanha o tamanho do modal. Os limites mantêm
-uma margem de pelo menos **24 px** até as bordas da janela do aplicativo.
-
-Essa padronização vale para a interface do cliente. Diálogos de arquivos e
-menus da bandeja continuam sendo desenhados pelo sistema operacional.
+Clicar no botão continua alternando o **mute manual**. Segurar a tecla do PTT
+não desfaz esse mute: apenas abre o microfone quando permitido. O estado
+acompanha a abertura real, incluindo o atraso de liberação ao soltar a tecla.
+A tecla configurada e a descrição do estado aparecem no tooltip e nas
+configurações; não há mais um indicador separado no palco da chamada.
 
 ### Teste do microfone
 
@@ -298,6 +233,32 @@ P2P ou SFU. Em caso de falha, a câmera é desligada e o erro é mostrado, sem
 voltar silenciosamente ao vídeo sem efeito. Desativar o efeito exige uma
 escolha explícita.
 
+### Seletor de cores
+
+A cor da tela física do chroma key, a cor do fundo virtual e as cores dos
+cargos usam o mesmo seletor do Monky. Clique na amostra de cor para abrir
+os controles de matiz, saturação e brilho, as cores predefinidas e o campo
+**HEX**, que aceita três ou seis dígitos.
+
+Soltar o controle após arrastar ou escolher uma cor aplica a seleção.
+Ao digitar um HEX válido, `Enter`, o botão de fechar ou um clique fora
+confirmam a entrada; fechar o seletor não desfaz a cor escolhida. Uma entrada
+inválida é indicada no próprio painel. `Escape` cancela somente a entrada
+ainda em edição e fecha o seletor, sem fechar suas configurações.
+
+O **Conta-gotas** permite escolher uma cor da tela. Durante a seleção,
+`Escape` cancela apenas o conta-gotas, mantendo a cor anterior e o painel
+aberto. Falta de permissão ou falha de captura é informada, sem substituir
+a cor por um valor padrão. Isso não desliga os efeitos nem transmite a
+câmera sem filtro para a chamada.
+
+## Soundboard e figurinhas
+
+Escolha uma pasta em cada aba. As bibliotecas são locais, não pastas do
+servidor. Configurar uma pasta não envia todos os seus arquivos.
+Consulte [Soundboard e figurinhas no uso diário](/usando-o-app#soundboard)
+para formatos, envio e permissões.
+
 ### Favoritos de sons e servidores
 
 Use a estrela para marcar sons no soundboard, tanto na grade/lista quanto
@@ -321,16 +282,7 @@ preserva estrelas dos endereços mantidos e remove as dos endereços retirados.
 A ordenação preserva os atalhos associados aos sons e não altera a barra
 lateral de servidores.
 
-### Iniciar outro servidor durante uma chamada
-
-Iniciar e visualizar um servidor próprio offline, pela Home ou pela barra
-lateral, não entra automaticamente em voz e não interrompe a chamada atual,
-o microfone, a câmera ou os compartilhamentos. Entrar em outro canal de voz
-continua sendo uma ação separada.
-
-Se outro servidor já estiver hospedado por esta instância do app, ele não será
-desligado implicitamente. Use os controles de hospedagem para pará-lo
-explicitamente quando for seguro, antes de iniciar um servidor diferente.
+## Atalhos
 
 ### Atalhos de teclado
 
@@ -369,26 +321,10 @@ for reconhecida, grave-a novamente. Permissões de entrada/acessibilidade podem
 ser necessárias para a captura global. O Push-to-Talk mantém sua tecla ou botão
 do mouse configurado separadamente.
 
-### Modo de entrada e Push to Talk
+## Qualidade
 
-Em **Voz e Vídeo → Modo de Entrada**, escolha um dos dois cards: **Atividade
-de Voz (VAD)** ou **Push to Talk**. Os cards também podem ser acionados pelo
-teclado, sem radio buttons.
-
-Com PTT habilitado, o **botão de microfone no canto inferior esquerdo** ganha
-a marca **PTT** sob o ícone, sem borda: amarelo com ícone de entrada de voz
-enquanto aguarda a tecla e verde com microfone aberto ao transmitir. Quando
-há mute manual ou áudio desativado, aparece apenas o microfone cortado em
-vermelho, sem a marca PTT. Um bloqueio feito por administrador acrescenta o
-símbolo vermelho de proibido, sem substituir o ícone pessoal nem esconder
-a marca PTT. O bloqueio impede a transmissão, mesmo que seu mute pessoal esteja
-desativado. Fora de chamada, o estado de espera fica cinza.
-
-Clicar no botão continua alternando o **mute manual**. Segurar a tecla do PTT
-não desfaz esse mute: apenas abre o microfone quando permitido. O estado
-acompanha a abertura real, incluindo o atraso de liberação ao soltar a tecla.
-A tecla configurada e a descrição do estado aparecem no tooltip e nas
-configurações; não há mais um indicador separado no palco da chamada.
+O perfil controla o que **você transmite**; não aumenta a resolução da câmera
+ou da tela de outra pessoa.
 
 ### Perfis de qualidade
 
@@ -398,6 +334,10 @@ configurações; não há mais um indicador separado no palco da chamada.
 | Normal | 32 kbps | 480p | 720p | Uso geral |
 | Alta Qualidade | 48 kbps | 720p | 1080p | Internet rápida e PC sobrando |
 | Gaming | 28 kbps | reduzida | fluida (60 FPS) | Jogando: prioriza voz e tela fluida |
+| Ultra | 64 kbps | 1080p / 60 FPS | 1080p / 60 FPS | Banda e hardware suficientes para taxas mais altas |
+
+São alvos de configuração, não uma garantia de FPS ou bitrate observado.
+Dispositivo, codec, rede, número de participantes e conteúdo afetam o resultado.
 
 O perfil **Personalizado** abre listas com os valores mais usados — proporção
 (16:9, 16:10, 4:3 e 21:9), resolução (da mais baixa até 4K), FPS e bitrate. Cada
@@ -407,20 +347,19 @@ próxima da que você já usava.
 
 ### Compartilhando a tela enquanto joga
 
-Codificar vídeo custa caro, e o codec escolhido decide se esse custo cai na CPU
-ou na GPU. AV1 e VP9 comprimem melhor, mas quase nenhum PC tem encoder de
-hardware para eles — a 1080p60 o trabalho vai todo para a CPU e o jogo perde
-FPS. H.264 tem aceleração por hardware em praticamente toda placa de vídeo
-(NVENC, QuickSync, AMF).
+Codificar vídeo consome recursos. A aceleração depende do codec, da placa,
+do driver e do suporte disponível no aplicativo. H.264 tem suporte de hardware
+amplo; AV1 e VP9 podem usar a CPU quando não existe um encoder compatível.
+Não presuma que escolher um codec garante uso de GPU.
 
 Por isso, no perfil **Gaming** o codec **Automático** coloca o H.264 na frente.
 Se você usa outro perfil e sente o jogo travando ao compartilhar, escolha
 **H.264 / AVC** em *Codec de Vídeo Preferido*.
 
-**Automático** pode negociar outro codec compatível. Uma escolha explícita é
-obrigatória para sua tela em P2P e SFU, inclusive ao trocar de tela ou de modo de
-voz. Se ela não puder ser usada, o cliente informa o motivo e não transmite
-usando um codec diferente.
+**Automático** negocia um codec compatível. Ao escolher explicitamente um
+codec, ele passa a ser obrigatório para sua tela em P2P e SFU, inclusive ao
+trocar de tela ou de modo de voz. Se não puder ser usado, o cliente informa
+o motivo e não transmite usando outro codec.
 
 No Windows, o Monky também captura a tela pela API **Windows Graphics Capture**,
 que compõe na GPU e não entrega quadros quando nada muda na tela. Ela precisa do
@@ -432,3 +371,110 @@ Uma última dica que vale para qualquer programa de captura: compartilhar **a
 janela do jogo** costuma custar menos que compartilhar o monitor inteiro, e
 jogar em *fullscreen sem bordas* evita as trocas de modo que fazem o jogo
 engasgar.
+
+## Notificações e Sons
+
+Ajuste os sons e avisos pessoais nesta aba. Isso não altera as permissões
+de menção ou os eventos publicados pelo servidor; esses controles pertencem
+à [administração](/administrar-servidor).
+
+## Ferramentas de bots
+
+Veja ferramentas instaladas, armazenamento, cache, autorizações e tarefas
+locais. Uma concessão no servidor não permite que um bot execute tarefas no
+seu computador sem consentimento.
+
+<AppScreenshot src="/screenshots/ferramentas-pt.png" alt="Aba Ferramentas de bots com seções de armazenamento, ferramentas, permissões e tarefas." caption="A gestão é centralizada no cliente e o consentimento é por bot e dispositivo." />
+
+Revogar uma autorização ou remover uma ferramenta encerra o trabalho afetado.
+Confira [Ferramentas no seu computador](/bots#ferramentas-no-seu-computador)
+antes de aprovar um pedido.
+
+## Logs
+
+Consulte os eventos do cliente para identificar em qual etapa uma operação
+falhou. Antes de compartilhar logs, revise seu conteúdo e remova dados
+sensíveis. O [Monitor do Servidor](/criar-seu-servidor#monitor-do-servidor)
+é uma consulta separada, sujeita às permissões daquele servidor.
+
+## Sobre e Updates
+
+Consulte a versão, procure atualizações e reveja as notas da versão instalada.
+Betas são pré-lançamentos e exigem optar por recebê-las; para uso cotidiano,
+prefira uma versão estável. Veja [Atualizações](/download#atualizacoes).
+
+Aqui também ficam opções de comportamento da janela e links da comunidade.
+Se hospeda um servidor neste computador, diferencie **fechar a janela**,
+**manter na bandeja** e **encerrar o servidor**: parar o processo afeta
+quem está conectado.
+
+## Conexão e interface
+
+### Entrar no servidor ao abrir o Monky
+
+Na Home, selecione ou informe o servidor e ative **Entrar ao abrir o Monky**,
+ao lado de **Entrar no Servidor**. A escolha é salva somente depois de uma conexão
+bem-sucedida. Há um único destino: conectar em outro servidor com o switch
+ativado substitui o anterior. Uma tentativa que falha não altera o destino salvo.
+
+A preferência vale nas próximas aberturas até você desligar esse mesmo switch;
+desligá-lo desativa a entrada automática imediatamente, sem precisar conectar.
+Não inicia servidores parados nem entra em voz. Ao migrar de uma configuração
+antiga com vários destinos, somente a última escolha é mantida. A passagem da
+Home para o servidor tem uma animação curta, desativada com movimento reduzido.
+
+### Navegação por seções
+
+Nas configurações do app e do servidor, selecionar uma categoria expande seus
+atalhos de seção na barra lateral. Os submenus abrem e recolhem suavemente,
+inclusive ao alternar rapidamente entre categorias. Clique em um deles para
+rolar suavemente até aquela parte da página. A seção atual fica destacada também ao rolar
+manualmente, sem recriar o formulário nem perder alterações ainda não salvas.
+Seções ocultas ou indisponíveis não aparecem na navegação.
+
+A abertura e o fechamento dos submenus, assim como a rolagem das seções e
+das categorias do seletor de emojis, respeitam a
+preferência de movimento reduzido do sistema: quando ativada, o deslocamento
+é imediato, sem animação.
+
+### Dicas e menus
+
+Os tooltips do cliente usam um visual escuro e compacto, aparecem após cerca
+de **150 ms** com o mouse e imediatamente ao navegar pelo teclado. `Esc`
+dispensa a dica. Os menus e listas de seleção compartilham o mesmo tema;
+nos seletores, use as setas, digite para buscar uma opção e confirme com
+`Enter`. `Esc` fecha a lista sem alterar a escolha.
+
+Os controles da barra inferior e os botões de **anexo, emoji e código** do
+compositor têm movimentos próprios ao passar o mouse: a engrenagem gira,
+a seta de compartilhamento se move, o soundboard solta notas e o emoji ri.
+O efeito da câmera é uma moldura animada, não um indicador de gravação.
+Cliques e mudanças de estado também têm um feedback visual curto. Os botões
+da barra flutuante de ações das mensagens não recebem essas animações.
+A preferência de movimento reduzido desativa esses efeitos.
+
+No modal **Bloco de código**, arraste o canto inferior direito para ajustar
+largura e altura; o editor acompanha o tamanho do modal. Os limites mantêm
+uma margem de pelo menos **24 px** até as bordas da janela do aplicativo.
+
+Essa padronização vale para a interface do cliente. Diálogos de arquivos e
+menus da bandeja continuam sendo desenhados pelo sistema operacional.
+
+### Iniciar outro servidor durante uma chamada
+
+Iniciar e visualizar um servidor próprio offline, pela Home ou pela barra
+lateral, não entra automaticamente em voz e não interrompe a chamada atual,
+o microfone, a câmera ou os compartilhamentos. Entrar em outro canal de voz
+continua sendo uma ação separada.
+
+Se outro servidor já estiver hospedado por esta instância do app, ele não será
+desligado implicitamente. Use os controles de hospedagem para pará-lo
+explicitamente quando for seguro, antes de iniciar um servidor diferente.
+
+## Configurações do servidor: aplicação imediata
+
+Essas configurações são compartilhadas e ficam no menu do **nome do servidor**,
+não na engrenagem pessoal. O guia [Administrar um servidor](/administrar-servidor)
+explica aplicação imediata, cargos, canais, limites, modo de voz e versão
+do processo. Para permissões e avisos de compatibilidade de bots,
+veja [Usar bots](/bots).
