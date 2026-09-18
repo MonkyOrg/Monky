@@ -17,6 +17,9 @@ try {
   execFileSync(process.execPath, ['-e', `
     const assert = require('node:assert/strict');
     const { BotClient, PROTOCOL_VERSION } = require('@monky/bot-sdk');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const { runBotCli } = require('@monky/bot-sdk/dist/cli/index.js');
     (async () => {
       assert.equal(PROTOCOL_VERSION, ${PROTOCOL_VERSION});
       const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities: ['commands'], autoReconnect: false });
@@ -44,9 +47,35 @@ try {
       } finally {
         await bot.close();
       }
+
+      const project = path.join(process.cwd(), 'operator-bot');
+      const home = path.join(process.cwd(), 'operator-profile');
+      fs.mkdirSync(project);
+      const packageFile = path.join(project, 'package.json');
+      const pkg = {
+        name: '@example/operator-bot', version: '1.0.0',
+        monkyBot: { cliName: 'operator-bot', releases: { url: 'https://github.com/example/operator-bot/releases' } },
+      };
+      fs.writeFileSync(packageFile, JSON.stringify(pkg));
+      process.env.MONKY_BOT_CLI_HOME = home;
+      const cli = (...args) => runBotCli(project, ['--locale', 'en', ...args]);
+      const original = fs.readFileSync(packageFile);
+      await cli('config', 'update-source', 'file', ${JSON.stringify(tarball)});
+      const preference = path.join(home, '.operator-bot', 'update-source.json');
+      const saved = fs.readFileSync(preference);
+      assert.equal(JSON.parse(saved).updateSource.path, ${JSON.stringify(tarball)});
+      assert.deepEqual(fs.readFileSync(packageFile), original);
+      await assert.rejects(cli('update', '--check'), /does not match the expected bot package/);
+      pkg.version = '1.0.1';
+      fs.writeFileSync(packageFile, JSON.stringify(pkg));
+      await cli('config', 'update-source');
+      assert.deepEqual(fs.readFileSync(preference), saved);
+      await cli('config', 'update-source', 'reset');
+      assert.equal(fs.existsSync(preference), false);
+      assert.equal(fs.existsSync(path.join(home, '.operator-bot', '.keys')), false);
     })().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: workspace, env, stdio: 'inherit', timeout: 15000 });
-  console.log('SDK tarball installed and served its manifest outside the monorepo.');
+  console.log('SDK tarball installed, served its manifest and preserved operator update sources outside the monorepo.');
 } finally {
   fs.rmSync(workspace, { recursive: true, force: true });
 }

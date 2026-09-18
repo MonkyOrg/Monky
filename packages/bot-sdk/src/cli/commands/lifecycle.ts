@@ -41,6 +41,7 @@ import { createRuntimeEnvironment } from '../runner';
 import { loadBotProject } from '../../tooling/config';
 import { runNpm } from '../../tooling/process';
 import { CliError, cliText } from '../locale';
+import { updateSourceConfigCommand } from '../updateConfiguration';
 
 function loadConfigOrThrow(context: CliContext): BotConfig {
   const config = readConfig(context);
@@ -327,6 +328,10 @@ export function logsCommand(context: CliContext, args: string[]): void {
 }
 
 export async function configCommand(context: CliContext, args: string[]): Promise<void> {
+  if (args[0] === 'update-source') {
+    updateSourceConfigCommand(context, args.slice(1));
+    return;
+  }
   if (!args.length || args[0] === 'show') {
     const config = readConfig(context);
     if (!config) {
@@ -374,7 +379,7 @@ export function autoUpdateStatusCommand(context: CliContext): void {
   }
   if (typeof env.MONKY_BOT_CLI_INCLUDE_BETA === 'string') {
     console.log(cliText(context.locale,
-      `Canal: ${env.MONKY_BOT_CLI_INCLUDE_BETA === 'true' ? 'beta' : 'acompanha a versão instalada'}`,
-      `Channel: ${env.MONKY_BOT_CLI_INCLUDE_BETA === 'true' ? 'beta' : 'follows the installed version'}`));
+      `Canal: ${env.MONKY_BOT_CLI_INCLUDE_BETA === 'true' ? 'beta' : 'stable'}`,
+      `Channel: ${env.MONKY_BOT_CLI_INCLUDE_BETA === 'true' ? 'beta' : 'stable'}`));
   }
 }

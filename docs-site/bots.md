@@ -262,10 +262,36 @@ pelo SDK, permitem à entrada reutilizar as validações do CLI.
 
 ### Atualizações opcionais do CLI
 
-`update` e a ativação de `autoupdate` **só funcionam quando o autor do bot configura
-explicitamente uma origem** no `package.json` usado no build. O operador não
-escolhe essa origem no setup. **GitHub Releases é a opção recomendada**: permite
-manter histórico de versões e selecionar stable/beta no formato de pacote atual.
+`update` e a ativação de `autoupdate` exigem uma origem explícita. O autor pode
+definir o padrão no `package.json` usado no build; o operador pode substituí-lo
+depois da instalação, sem editar o pacote ou refazer o setup.
+**GitHub Releases é a opção recomendada**: permite manter histórico de versões
+e selecionar stable/beta no formato de pacote atual.
+
+```text
+meu-bot config update-source
+meu-bot config update-source github https://github.com/minha-org/meu-bot/releases
+meu-bot config update-source github https://github.com/minha-org/meu-bot/releases --asset-name meu-bot-{version}.tgz --token-env GH_TOKEN
+meu-bot config update-source https https://downloads.example.com/meu-bot.tgz
+meu-bot config update-source file "C:\atualizacoes\meu-bot.tgz"
+meu-bot config update-source reset
+meu-bot update --check
+```
+
+A escolha fica em `~/.<cliName>/update-source.json`, fora da instalação, e vale
+para `update` e para as próximas verificações de `autoupdate`. Sobrevive à
+substituição do pacote; não altera o canal, a conexão, as chaves nem os vínculos.
+Sem argumentos, o comando mostra a origem efetiva; `reset` remove a escolha e
+volta ao padrão atual do pacote. Uma configuração salva inválida interrompe a
+atualização, sem recorrer silenciosamente a outra origem.
+
+No comando `file`, um caminho relativo é convertido em absoluto a partir do
+terminal ao salvar. Use o caminho nativo da máquina do bot. HTTPS aceita
+`--token-env`; GitHub também aceita `--asset-name`. Salve somente o nome da
+variável, nunca o token. A mudança valida a configuração; `update --check`
+verifica a disponibilidade na origem escolhida.
+
+Para definir o padrão distribuído pelo autor:
 
 ```json
 {
@@ -314,22 +340,25 @@ distribuição do autor:
 }
 ```
 
-O caminho relativo é resolvido a partir do `package.json` **instalado**, nunca
+Nesse padrão do pacote, o caminho relativo é resolvido a partir do `package.json` **instalado**, nunca
 do diretório atual do terminal ou do PM2. Use caminhos relativos portáveis ao
 empacotar para plataformas diferentes; caminhos absolutos precisam ser nativos
 do ambiente. Não há expansão de `~` nem de variáveis de ambiente. O arquivo
 precisa ser regular, legível e não pode ser um link simbólico. O CLI copia um
 snapshot antes de inspecionar e instalar, sem reabrir um arquivo que possa mudar.
 
-Configure **somente uma origem**: `releases` ou `updateSource`. Sem ambas, o SDK não
-deduz uma origem de `repository`, de `git origin`, do repositório do SDK ou do
-registro npm. Um link inválido gera erro, não habilita uma origem alternativa.
+O padrão do pacote aceita **somente uma origem**: `releases` ou `updateSource`.
+Sem padrão nem escolha do operador, o SDK não deduz uma origem de `repository`,
+de `git origin`, do repositório do SDK ou do registro npm.
+Um link inválido gera erro, não habilita uma origem alternativa.
 
 `update --check` não instala nem reinicia. No GitHub, consulta apenas metadados;
 para HTTPS/arquivo local, baixa ou copia o pacote para ler sua versão e descarta
 a cópia ao terminar. `update` usa stable e `update --beta` inclui
 pré-releases. A seleção respeita a versão semântica, sem downgrade ou reinstalação
-de versão igual. O auto-update segue o canal instalado, salvo `--beta` explícito.
+de versão igual. O auto-update também usa stable, inclusive numa instalação beta;
+pré-releases exigem `autoupdate on [HH:MM] --beta`. Após atualizar um CLI antigo,
+repita `autoupdate on` com o horário e canal desejados para renovar o processo.
 Uma origem de arquivo único oferece apenas a versão contida naquele arquivo;
 se for beta, o canal stable não a instala. O pacote deve ser o `.tgz` autocontido
 gerado por `monky-bot-sdk build`, não o ZIP de código-fonte do GitHub.

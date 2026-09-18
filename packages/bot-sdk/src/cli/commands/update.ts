@@ -18,6 +18,7 @@ import {
 } from '../pm2';
 import { compareVersions } from '../updateReleases';
 import { configuredUpdateSource, withUpdateCandidate } from '../updateSources';
+import { projectForUpdates } from '../updateConfiguration';
 import { CliError, cliText } from '../locale';
 import { createUpdateProgressReporter } from '../updateProgress';
 
@@ -161,12 +162,13 @@ function restartInstalledCli(context: CliContext, config: BotConfig, runningProc
 }
 
 export async function updateCommand(context: CliContext, args: string[]): Promise<void> {
-  configuredUpdateSource(context.project);
   const options = parseUpdateArgs(args);
+  const project = projectForUpdates(context);
+  configuredUpdateSource(project);
   const text = (pt: string, en: string): string => cliText(context.locale, pt, en);
   const progress = createUpdateProgressReporter(context.locale);
   try {
-    await withUpdateCandidate(context.project, options.includeBeta, async (latest) => {
+    await withUpdateCandidate(project, options.includeBeta, async (latest) => {
       console.log(text(`Versão instalada: ${context.version}`, `Installed version: ${context.version}`));
       if (!latest) {
         console.log(text('Nenhuma release instalável encontrada no canal solicitado.', 'No installable release found on the requested channel.'));
@@ -272,7 +274,7 @@ export async function autoUpdateCommand(context: CliContext, args: string[]): Pr
     console.log(cliText(context.locale, 'Auto-update desativado.', 'Auto-update disabled.'));
     return;
   }
-  configuredUpdateSource(context.project);
+  configuredUpdateSource(projectForUpdates(context));
   requirePm2(context, 'enable auto-update');
   startOrRestart(context, writeUpdaterEcosystem(context, parsed.schedule, parsed.includeBeta));
   saveProcessList(context);

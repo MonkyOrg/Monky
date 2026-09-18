@@ -846,6 +846,7 @@ test('updater ecosystem uses a PM2-recognized CommonJS filename and retains its 
   assert.equal(apps[0].cwd, context.homeDir);
   assert.deepEqual(apps[0].env, {
     MONKY_BOT_CLI_PACKAGE_ROOT: context.packageRoot,
+    MONKY_BOT_CLI_HOME: f.state,
     MONKY_BOT_CLI_UPDATE_CWD: context.cliInvocation.cwd,
     MONKY_BOT_CLI_UPDATE_ARGS: JSON.stringify([...context.cliInvocation.args, 'update', '--yes']),
     MONKY_BOT_CLI_SCHEDULE: '03:45',

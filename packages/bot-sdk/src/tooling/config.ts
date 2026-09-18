@@ -124,7 +124,7 @@ function fileUpdatePath(value: unknown): string {
   return file;
 }
 
-function updateSource(value: unknown): BotUpdateSource | undefined {
+export function updateSource(value: unknown): BotUpdateSource | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) throw new Error('monkyBot.updateSource must be an object or omitted.');
   if (value.type === 'https') {
@@ -146,7 +146,7 @@ export function releaseAssetName(definition: BotPackageDefinition, version: stri
   return (definition.releases?.assetName ?? `${definition.cliName}-{version}.tgz`).replace('{version}', version);
 }
 
-function releaseSource(value: unknown, cliName: string): GitHubReleaseSource | undefined {
+export function releaseSource(value: unknown, cliName: string): GitHubReleaseSource | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) throw new Error('monkyBot.releases must be an object or omitted.');
   rejectUnknown(value, ['url', 'assetName', 'tokenEnv'], 'monkyBot.releases');
