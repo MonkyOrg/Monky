@@ -187,6 +187,7 @@ jobs:
           check_pair "README.md" "README.en.md"
           check_pair "CONTRIBUTING.md" "CONTRIBUTING.en.md"
           check_pair "apps/light/README.md" "apps/light/README.en.md"
+          check_pair "apps/light/QA.md" "apps/light/QA.en.md"
 
           # O site de docs (VitePress) tem PT na raiz de docs-site/ e EN em
           # docs-site/en/. Cada pagina precisa manter o par no mesmo PR.

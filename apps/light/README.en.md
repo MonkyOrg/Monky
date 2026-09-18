@@ -249,12 +249,48 @@ npm run measure:light
 
 It samples approximately 10-second intervals while connected idle, in P2P,
 in SFU, deafened, and after leaving. The source is synthetic, but AEC, automatic
-gain, and noise suppression use the default policy. Only the native client's
-PID is measured, excluding the server and driver. `oneCoreCpuPercent` uses
-**100% = one logical processor**; `workingSetMiB` and `privateMiB` are distinct
-Windows measurements, not additive. There is no pass threshold or automatic
-Electron comparison. Drivers, other computers, and long-running usage still
-need measurement; resident memory can retain allocator pages after teardown.
+gain, and noise suppression use the default policy. The native client's process
+tree is measured, excluding the server and driver. `oneCoreCpuPercent` uses
+**100% = one logical processor**; `systemCpuPercent` divides by all logical
+processors, like Task Manager. `workingSetMiB` and `privateMiB` are distinct
+Windows measurements, not additive; `peak*` values are the largest across
+samples. There is no pass threshold. Resident memory can retain allocator pages
+after teardown.
+
+For long-running usage and repeated calls, which reveal memory or threads that
+survive teardown:
+
+```powershell
+$env:MONKY_LIGHT_MEASURE_SECONDS = 60   # duration of each phase, at least 10
+$env:MONKY_LIGHT_MEASURE_CYCLES = 20    # joins/leaves before the last phase
+npm run measure:light
+```
+
+Local reference (Windows x64, synthetic audio): 20 call cycles left no relevant
+growth after leaving. In SFU, private memory **while Light is sending** rises by
+about 16 MiB during the first 2 to 6 minutes and then levels off (about 25 MiB
+private and 39 MiB resident in a 12-minute call); when only receiving, or in P2P,
+the call levels off within about 1 minute. The source of this send-side buffer
+has not been identified yet.
+
+### Comparing with the full Monky client
+
+`measure:client` only reads the accounting of an already open client (Light or
+the full Monky client) and adds up every process in its tree: in Electron, the
+renderer, GPU, network, and audio run in separate processes. It never starts,
+stops, or controls the application.
+
+```powershell
+npm run measure:client -- --name Monky --label full-sfu --seconds 300 --output measurements.jsonl
+npm run measure:client -- --name monky-light --label light-sfu --seconds 300 --output measurements.jsonl
+```
+
+`--name` selects the single top-level process with that name; use `--pid` when
+there is more than one. For a valid comparison, measure both editions on the
+same computer, disposable server, channel, topology, participants, devices, and
+audio policy, one at a time with the other closed. Record each phase (connected
+without a call, P2P call, SFU call, deafened, after leaving) for at least 5
+minutes. The full plan is in [QA.en.md](QA.en.md).
 
 Chat, soundboard, miniapps, watching streams, tray UI, and CLI-based hosting are
 later milestones, with optional resources loaded on demand.
