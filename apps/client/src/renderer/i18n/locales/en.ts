@@ -739,6 +739,7 @@ export const en: TranslationMap = {
   'main.screenShareSelfNotice': 'You are sharing your screen',
   'main.screenShareGoToStage': 'Go to stage',
   'main.cameraOn': 'Camera on',
+  'main.playingGame': 'Playing {game}',
   'main.reconnecting': 'Reconnecting…',
   'main.connecting': 'Connecting…',
   'main.connectingTitle': 'Establishing the voice connection',
@@ -974,6 +975,11 @@ export const en: TranslationMap = {
   'settings.appearOfflineSection': 'Visibility',
   'settings.appearOfflineLabel': 'Appear offline',
   'settings.appearOfflineHint': 'You will be invisible to all other users on any server.',
+  'settings.gameActivitySection': 'Game activity',
+  'settings.gameActivityLabel': 'Show the game I am playing',
+  'settings.gameActivityHint': 'People in the channel see the game open on Steam and can ask to join your match.',
+  'userMenu.playingNow': 'Playing now',
+  'userMenu.playingElapsed': 'Time in match',
 
   // ── Keyboard Shortcuts (KeybindsTab.ts) ──────────────────────────────────
   'keybinds.title': 'Keyboard Shortcuts',

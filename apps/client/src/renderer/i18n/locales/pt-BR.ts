@@ -706,6 +706,7 @@ export const ptBR = {
   'main.screenShareSelfNotice': 'Você está compartilhando sua tela',
   'main.screenShareGoToStage': 'Ir para o palco',
   'main.cameraOn': 'Câmera ligada',
+  'main.playingGame': 'Jogando {game}',
   'main.reconnecting': 'Reconectando…',
   'main.connecting': 'Conectando…',
   'main.connectingTitle': 'Estabelecendo a conexão de voz',
@@ -941,6 +942,11 @@ export const ptBR = {
   'settings.appearOfflineSection': 'Visibilidade',
   'settings.appearOfflineLabel': 'Aparecer offline',
   'settings.appearOfflineHint': 'Você ficará invisível para todos os outros usuários em qualquer servidor.',
+  'settings.gameActivitySection': 'Atividade de jogo',
+  'settings.gameActivityLabel': 'Mostrar o jogo que estou jogando',
+  'settings.gameActivityHint': 'Quem estiver no canal vê o jogo aberto na Steam e pode pedir para entrar na partida.',
+  'userMenu.playingNow': 'Jogando agora',
+  'userMenu.playingElapsed': 'Tempo de partida',
 
   // ── Atalhos de Teclado (KeybindsTab.ts) ──────────────────────────────────
   'keybinds.title': 'Atalhos do Teclado',

@@ -65,6 +65,7 @@ import {
   UserUpdateAvatarPayload,
   UserUpdatedPayload,
   UserUpdateVisibilityPayload,
+  UserUpdateActivityPayload,
   BotCreatedPayload,
   BotInstallPayload,
   BotInstalledPayload,
@@ -153,6 +154,7 @@ import { Logger } from '../logger/Logger';
 import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
 import { botVoiceJoinSchema, botVoiceChannelSchema, botVoiceSignalSchema } from '@monky/shared';
+import { userUpdateActivitySchema } from '@monky/shared';
 
 const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
   MessageType.BOT_LOCAL_SOURCE_REQUEST,
@@ -229,6 +231,7 @@ export class WebSocketServer {
     expiresAt: number;
     inFlight: boolean;
   }>();
+  /** Last "ask to join" per requester/host pair, for the spam guard (#675). */
   private botInteractions: BotInteractionHandler;
   private botLocalExecution: BotLocalExecutionService<BotInteractionSession>;
   private botSelectors?: BotSelectorHandler;
@@ -719,6 +722,10 @@ export class WebSocketServer {
 
       case MessageType.USER_UPDATE_VISIBILITY:
         this.handleUserUpdateVisibility(session, payload as UserUpdateVisibilityPayload, requestId);
+        break;
+
+      case MessageType.USER_UPDATE_ACTIVITY:
+        this.handleUserUpdateActivity(session, payload as UserUpdateActivityPayload, requestId);
         break;
 
       case MessageType.SERVER_UPDATE_SETTINGS:
@@ -2408,7 +2415,11 @@ export class WebSocketServer {
     const publicUser: UserSummary = {
       ...user,
       invisible: undefined,
-      ...(invisible ? { status: 'DISCONNECTED', sessionId: undefined, connectedAt: undefined } : {}),
+      // Hiding has to hide the game too, or "aparecer offline" leaks what the
+      // person is doing while claiming they are offline (#675).
+      ...(invisible
+        ? { status: 'DISCONNECTED', sessionId: undefined, connectedAt: undefined, activity: undefined }
+        : {}),
     };
     for (const recipient of this.sessions.values()) {
       if (!recipient.user) continue;
@@ -2452,6 +2463,39 @@ export class WebSocketServer {
     }
 
     Logger.info('NETWORK', `User ${session.user.nickname} is now ${nowInvisible ? 'invisible' : 'visible'}.`);
+  }
+
+  /**
+   * Publishes what this person is playing, or clears it (#675).
+   *
+   * Clearing matters as much as setting: when the settings toggle goes off the
+   * client sends `null`, and without that the last game would stay frozen on
+   * everyone else's card forever.
+   */
+  private handleUserUpdateActivity(
+    session: ClientSession,
+    payload: UserUpdateActivityPayload,
+    requestId?: string
+  ): void {
+    if (!session.user) return;
+    if (session.isBot) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED,
+        'Bots não publicam atividade de jogo.', requestId);
+      return;
+    }
+    const parsed = userUpdateActivitySchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Atividade inválida.', requestId);
+      return;
+    }
+
+    const { activity } = parsed.data;
+    // Applied to every device of this person: otherwise a later broadcast from
+    // another session (a nickname change, say) would carry a stale activity.
+    for (const target of this.getSessionsOfUser(session.user.id)) {
+      if (target.user) target.user = { ...target.user, activity };
+    }
+    this.broadcastUserUpdate(session.user, requestId);
   }
 
   private async handleServerUpdateSettings(

@@ -35,6 +35,7 @@ import { callClient, leaveCurrentCall, rejoinCallOnSession, suspendCallForNetwor
 import { VoiceModeReconnect, type VoiceReconnectCall } from './core/VoiceModeReconnect';
 import { participantManager } from './core/ParticipantManager';
 import { sessionManager } from './core/SessionManager';
+import { gamePresence } from './core/GamePresenceController';
 import type { LocalExecutionTaskNotice } from './core/LocalExecutionController';
 import { currentEventOrigin, emitOutsideRouting, isForegroundEvent } from './core/sessionRouting';
 import { soundEffects } from './core/SoundEffects';
@@ -153,11 +154,14 @@ class App {
     // place before any connection exists, otherwise the first events would be
     // applied to whatever store happens to be active (#400).
     sessionManager.install();
+    // Only starts polling if the person turned game sharing on (#675).
+    gamePresence.start();
     this.connectionView = new ConnectionView(this.appContainer);
     this.mainView = new MainView(this.appContainer);
     window.addEventListener('pagehide', () => {
       this.autoEntryService.dispose();
       this.connectionView.dispose();
+      gamePresence.dispose();
       sessionManager.dispose();
     }, { once: true });
 

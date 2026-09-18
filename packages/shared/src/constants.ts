@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 20;
+export const PROTOCOL_VERSION = 21;
 
 /**
  * Default size of the floating overlay window (#169). Shared so the renderer can
@@ -10,6 +10,13 @@ export const OVERLAY_DEFAULT_HEIGHT = 240;
 
 export const LIMITS = {
   MAX_MESSAGE_LENGTH: 2000,
+  // Game titles come from Steam's own manifests (#675); the cap only guards
+  // against a tampered manifest, not against normal names.
+  MAX_ACTIVITY_NAME_LENGTH: 128,
+  // Steam caches app icons as 32x32 JPEGs, a couple of KB at most. The cap is
+  // three orders of magnitude below MAX_AVATAR_SIZE on purpose: this field is
+  // never a place to put bulk data, and the server has no maxPayload of its own.
+  MAX_ACTIVITY_ICON_LENGTH: 32 * 1024,
   MAX_AVATAR_SIZE: 5 * 1024 * 1024, // 5 MB
   MAX_USERS_DEFAULT: 20,
   // Sentinel stored in `max_users` when the owner chose not to cap membership

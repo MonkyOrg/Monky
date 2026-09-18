@@ -6714,6 +6714,15 @@ button[data-loading="1"]::after {
   min-width: 0;
 }
 
+/* Same slot as the mini icons beside it, so a game never resizes the row. */
+.voice-mini-art {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 3px;
+  object-fit: cover;
+}
+
 .voice-mini-icon {
   flex-shrink: 0;
   color: var(--accent-primary);
@@ -7848,6 +7857,76 @@ button[data-loading="1"]::after {
   height: 1px;
   background-color: var(--border-color);
   margin: 0 -4px;
+}
+
+/* Jogo em andamento no menu do usuário (#675). */
+.context-menu-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.context-menu-activity-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+
+.context-menu-activity-game {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* The art spans both lines beside it, so the glyph fallback takes the same box. */
+.context-menu-activity-icon {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-primary);
+}
+
+.context-menu-activity-art {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.context-menu-activity-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.context-menu-activity-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-menu-activity-elapsed {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  /* Matches the running-game dot elsewhere: this is a live value, not a label. */
+  color: var(--success);
+  font-variant-numeric: tabular-nums;
 }
 
 .context-menu-volume-section {

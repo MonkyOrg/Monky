@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
+import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserActivity, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
 import type {
   BotForm, BotFormValues, BotSettingsContext, BotSettingsDefinition, BotSettingsListResponse,
   BotSettingsPatch, BotSettingsSnapshot, BotServerSettingsSnapshot, CommandAutocompleteResult, CommandValues,
@@ -140,6 +140,8 @@ export enum MessageType {
   SOUNDBOARD_STOP = 'SOUNDBOARD_STOP',
   /** Client -> server: toggle appear-offline visibility while connected (#561). */
   USER_UPDATE_VISIBILITY = 'USER_UPDATE_VISIBILITY',
+  /** Client -> server: publish (or clear, with null) the game being played (#675). */
+  USER_UPDATE_ACTIVITY = 'USER_UPDATE_ACTIVITY',
   SERVER_GET_INVITE_INFO = 'SERVER_GET_INVITE_INFO',
 
   // SFU Client <-> Server Messages (#515)
@@ -695,6 +697,15 @@ export interface UserUpdatedPayload {
 /** Client -> server: toggle appear-offline without reconnecting (#561). */
 export interface UserUpdateVisibilityPayload {
   appearOffline: boolean;
+}
+
+/**
+ * Client -> server: what this person is playing, or `null` to clear it (#675).
+ * Clearing is what the settings toggle sends when turned off — without it the
+ * last game would stay frozen on everyone else's screen.
+ */
+export interface UserUpdateActivityPayload {
+  activity: UserActivity | null;
 }
 
 export interface ChannelCreatedPayload {

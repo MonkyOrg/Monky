@@ -35,6 +35,37 @@ export interface SfuConsumerData {
 
 export type UserStatus = 'ONLINE' | 'IDLE' | 'VOICE' | 'DISCONNECTED';
 
+/**
+ * What a person is playing outside Monky, shown on their card (#675). Opt-in:
+ * absent while the setting is off, and cleared the moment it is turned off
+ * rather than left frozen on the last game everyone saw.
+ *
+ * `source` is generic on purpose. Only Steam exists today, but widening the
+ * union later costs nothing, whereas a `steam`-shaped field would force another
+ * protocol bump for the next source.
+ */
+export interface UserActivity {
+  source: 'steam';
+  /** Steam application id of the running game. */
+  appId: number;
+  /** Title as Steam itself names it, read from the local app manifest. */
+  name: string;
+  /**
+   * Epoch ms of when the game was first *seen* running, not when it launched:
+   * Steam publishes which app is up, never since when. Someone who opens Monky
+   * mid-match therefore starts counting from zero, which is the honest reading
+   * of what we know.
+   */
+  startedAt: number;
+  /**
+   * The app icon Steam already cached on the player's disk, base64 JPEG and
+   * without the data-URI prefix. Optional because the cache layout is Valve's
+   * private business: a missing or unreadable icon falls back to a generic one
+   * rather than hiding the game.
+   */
+  iconBase64?: string;
+}
+
 export interface UserSummary {
   id: string;
   clientId: string;
@@ -60,6 +91,11 @@ export interface UserSummary {
   invisible?: boolean;
   /** True when this account is a bot created via the bot management API (#569). */
   isBot?: boolean;
+  /**
+   * Game this user is playing, when they chose to share it (#675). `null` says
+   * "sharing is on, nothing running"; absent says nothing is being shared.
+   */
+  activity?: UserActivity | null;
 }
 
 export interface ChannelSummary {
