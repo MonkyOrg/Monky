@@ -18,8 +18,6 @@ import {
   voiceRestrictionsUpdatedSchema,
   userActivitySchema,
   userUpdateActivitySchema,
-  gameLobbyInviteSchema,
-  gameInviteSendSchema,
 } from '../src/index.js';
 import './botInteractions.test.js';
 import './botSettings.test.js';
@@ -216,23 +214,6 @@ console.assert(
   'Campos extras são rejeitados: caminho de executável nunca deve trafegar'
 );
 
-const invite = { source: 'steam', appId: 1966720, lobbyId: '109775244618626185', hostSteamId: '76561199149453591' };
-console.assert(
-  gameLobbyInviteSchema.safeParse(invite).success === true,
-  'Convite com as partes separadas é válido'
-);
-console.assert(
-  gameInviteSendSchema.safeParse({ targetUserId: 'u1', invite }).success === true,
-  'Convite dirigido a uma pessoa é válido'
-);
-console.assert(
-  gameLobbyInviteSchema.safeParse({ ...invite, lobbyId: 'steam://joinlobby/1/2/3' }).success === false,
-  'Uma URL steam:// pronta não passa como lobbyId — a URL só nasce no processo main'
-);
-console.assert(
-  gameLobbyInviteSchema.safeParse({ ...invite, hostSteamId: '1; calc.exe' }).success === false,
-  'Identificador Steam só aceita dígitos'
-);
-console.log('✔ Schemas de presença de jogo e convite de partida verificados (#675)');
+console.log('✔ Schemas de presença de jogo verificados (#675)');
 
 console.log('=== Todos os testes unitários passaram com sucesso! ===');

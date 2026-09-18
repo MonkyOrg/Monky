@@ -258,32 +258,3 @@ test('stays quiet when Steam is installed but idle', async () => {
     cleanup();
   }
 });
-
-test('lobby links only become steam:// URLs from validated parts', () => {
-  const { buildLobbyUrl, parseLobbyLink } = load();
-
-  const invite = parseLobbyLink('steam://joinlobby/1966720/109775244618626185/76561199149453591');
-  assert.deepEqual(invite, {
-    source: 'steam',
-    appId: 1966720,
-    lobbyId: '109775244618626185',
-    hostSteamId: '76561199149453591',
-  });
-  assert.equal(
-    buildLobbyUrl(invite),
-    'steam://joinlobby/1966720/109775244618626185/76561199149453591'
-  );
-
-  // Anything that is not exactly a lobby link is refused rather than passed on
-  // to the OS protocol handler.
-  for (const bad of [
-    'steam://run/1966720',
-    'steam://joinlobby/1966720/abc/76561199149453591',
-    'https://example.com',
-    'steam://joinlobby/1966720/1/2 && calc.exe',
-    '',
-  ]) {
-    assert.equal(parseLobbyLink(bad), null, bad);
-  }
-  assert.equal(buildLobbyUrl({ source: 'steam', appId: -1, lobbyId: '1', hostSteamId: '2' }), null);
-});

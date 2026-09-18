@@ -183,10 +183,6 @@ export function isValidMessageContent(content: string): boolean {
 
 /**
  * Game presence and lobby invites (#675).
- *
- * The lobby parts are validated as separate fields and the `steam://` URL is
- * only assembled in the client's main process. Accepting a ready-made protocol
- * URL from the network would hand whoever sent it an OS-level handler call.
  */
 /**
  * The icon is checked by shape, not merely by length: base64 of a JPEG always
@@ -213,21 +209,3 @@ export const userUpdateActivitySchema = z.object({
   activity: userActivitySchema.nullable(),
 }).strict();
 
-/** Steam ids and lobby ids are 64-bit values carried as decimal strings. */
-const steamIdSchema = z.string().regex(/^[0-9]{1,20}$/, 'Identificador Steam inválido');
-
-export const gameLobbyInviteSchema = z.object({
-  source: z.literal('steam'),
-  appId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  lobbyId: steamIdSchema,
-  hostSteamId: steamIdSchema,
-}).strict();
-
-export const gameJoinRequestSchema = z.object({
-  targetUserId: messageReferenceSchema,
-}).strict();
-
-export const gameInviteSendSchema = z.object({
-  targetUserId: messageReferenceSchema,
-  invite: gameLobbyInviteSchema,
-}).strict();

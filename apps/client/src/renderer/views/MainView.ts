@@ -1,6 +1,7 @@
 import { MessageType, Permission, UserSummary, canAccessChannel } from '@monky/shared';
 import type { ChannelType } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
+import { activityIconSrc } from '../utils/activityIcon';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
@@ -824,6 +825,9 @@ export class MainView {
                       ${renderAudioMuteIndicators({ isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened })}
                       ${p.voiceState?.isScreenSharing ? `<span class="material-symbols-outlined md-14 voice-mini-icon live" title="${t('main.sharingScreen')}">screen_share</span>` : ''}
                       ${p.voiceState?.isCameraOn ? `<span class="material-symbols-outlined md-14 voice-mini-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
+                      ${p.user.activity ? (activityIconSrc(p.user.activity.iconBase64)
+                        ? `<img class="voice-mini-art" src="${activityIconSrc(p.user.activity.iconBase64)}" alt="" title="${escapeHtml(t('main.playingGame', { game: p.user.activity.name }))}">`
+                        : `<span class="material-symbols-outlined md-18 voice-mini-icon" title="${escapeHtml(t('main.playingGame', { game: p.user.activity.name }))}">sports_esports</span>`) : ''}
                     </div>
                   `;
                 }).join('')}
