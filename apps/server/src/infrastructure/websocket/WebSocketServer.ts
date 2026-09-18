@@ -66,10 +66,6 @@ import {
   UserUpdatedPayload,
   UserUpdateVisibilityPayload,
   UserUpdateActivityPayload,
-  GameJoinRequestPayload,
-  GameJoinRequestedPayload,
-  GameInviteSendPayload,
-  GameInvitePayload,
   BotCreatedPayload,
   BotInstallPayload,
   BotInstalledPayload,
@@ -158,7 +154,7 @@ import { Logger } from '../logger/Logger';
 import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
 import { botVoiceJoinSchema, botVoiceChannelSchema, botVoiceSignalSchema } from '@monky/shared';
-import { userUpdateActivitySchema, gameJoinRequestSchema, gameInviteSendSchema } from '@monky/shared';
+import { userUpdateActivitySchema } from '@monky/shared';
 
 const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
   MessageType.BOT_LOCAL_SOURCE_REQUEST,
@@ -236,8 +232,6 @@ export class WebSocketServer {
     inFlight: boolean;
   }>();
   /** Last "ask to join" per requester/host pair, for the spam guard (#675). */
-  private gameJoinRequestTimes = new Map<string, number>();
-  private static readonly GAME_JOIN_REQUEST_INTERVAL_MS = 30_000;
   private botInteractions: BotInteractionHandler;
   private botLocalExecution: BotLocalExecutionService<BotInteractionSession>;
   private botSelectors?: BotSelectorHandler;
@@ -732,14 +726,6 @@ export class WebSocketServer {
 
       case MessageType.USER_UPDATE_ACTIVITY:
         this.handleUserUpdateActivity(session, payload as UserUpdateActivityPayload, requestId);
-        break;
-
-      case MessageType.GAME_JOIN_REQUEST:
-        this.handleGameJoinRequest(session, payload as GameJoinRequestPayload, requestId);
-        break;
-
-      case MessageType.GAME_INVITE_SEND:
-        this.handleGameInviteSend(session, payload as GameInviteSendPayload, requestId);
         break;
 
       case MessageType.SERVER_UPDATE_SETTINGS:
@@ -2510,111 +2496,6 @@ export class WebSocketServer {
       if (target.user) target.user = { ...target.user, activity };
     }
     this.broadcastUserUpdate(session.user, requestId);
-  }
-
-  /**
-   * Relays "let me into your match" to the host (#675).
-   *
-   * Both guards answer with the same error on purpose. Telling the requester
-   * *why* it was refused would turn this into a presence oracle: "not sharing"
-   * and "not in your channel" are exactly what someone hiding wants kept quiet.
-   */
-  private handleGameJoinRequest(
-    session: ClientSession,
-    payload: GameJoinRequestPayload,
-    requestId?: string
-  ): void {
-    if (!session.user || session.isBot) return;
-    const parsed = gameJoinRequestSchema.safeParse(payload);
-    if (!parsed.success) {
-      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido inválido.', requestId);
-      return;
-    }
-    const requester = session.user;
-    const targets = this.getSessionsOfUser(parsed.data.targetUserId)
-      .filter((target) => !target.isBot && target.user);
-    const sharing = targets.some((target) => !!target.user?.activity);
-    if (!sharing || !this.sharesVoiceChannel(requester.id, parsed.data.targetUserId)) {
-      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED,
-        'Não é possível pedir para entrar na partida desta pessoa.', requestId);
-      return;
-    }
-    if (!this.allowGameJoinRequest(requester.id, parsed.data.targetUserId)) {
-      this.sendError(session.ws, ProtocolErrorCode.RATE_LIMITED,
-        'Você acabou de pedir para entrar. Aguarde um pouco.', requestId);
-      return;
-    }
-
-    const requested: GameJoinRequestedPayload = {
-      fromUserId: requester.id,
-      nickname: requester.nickname,
-    };
-    for (const target of targets) {
-      this.send(target.ws, { type: MessageType.GAME_JOIN_REQUESTED, payload: requested });
-    }
-  }
-
-  /**
-   * Hands a lobby invite to the person who asked for it (#675).
-   *
-   * The invite is a credential — whoever holds it walks into the match — so it
-   * is only ever sent to one recipient, never broadcast, and the parts stay
-   * separate fields so the `steam://` URL is assembled by the receiving client's
-   * main process rather than arriving ready-made from the network.
-   */
-  private handleGameInviteSend(
-    session: ClientSession,
-    payload: GameInviteSendPayload,
-    requestId?: string
-  ): void {
-    if (!session.user || session.isBot) return;
-    const parsed = gameInviteSendSchema.safeParse(payload);
-    if (!parsed.success) {
-      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Convite inválido.', requestId);
-      return;
-    }
-    const host = session.user;
-    const targets = this.getSessionsOfUser(parsed.data.targetUserId)
-      .filter((target) => !target.isBot && target.user);
-    if (targets.length === 0 || !this.sharesVoiceChannel(host.id, parsed.data.targetUserId)) {
-      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED,
-        'Não é possível convidar esta pessoa agora.', requestId);
-      return;
-    }
-
-    const invite: GameInvitePayload = {
-      fromUserId: host.id,
-      nickname: host.nickname,
-      invite: parsed.data.invite,
-    };
-    for (const target of targets) {
-      this.send(target.ws, { type: MessageType.GAME_INVITE, payload: invite });
-    }
-  }
-
-  /** True when the two people are together in at least one voice channel (#675). */
-  private sharesVoiceChannel(userId: string, otherUserId: string): boolean {
-    const channels = new Set(
-      this.signalingService.getSessionsOfUser(userId).map((state) => state.channelId)
-    );
-    return this.signalingService.getSessionsOfUser(otherUserId)
-      .some((state) => channels.has(state.channelId));
-  }
-
-  /**
-   * One pending ask per pair per window (#675). Without it, "pedir para entrar"
-   * is a button that spams notifications on someone else's machine.
-   */
-  private allowGameJoinRequest(fromUserId: string, targetUserId: string): boolean {
-    const now = Date.now();
-    for (const [key, at] of this.gameJoinRequestTimes) {
-      if (now - at >= WebSocketServer.GAME_JOIN_REQUEST_INTERVAL_MS) this.gameJoinRequestTimes.delete(key);
-    }
-    const key = `${fromUserId}:${targetUserId}`;
-    const last = this.gameJoinRequestTimes.get(key);
-    if (last !== undefined && now - last < WebSocketServer.GAME_JOIN_REQUEST_INTERVAL_MS) return false;
-    this.gameJoinRequestTimes.set(key, now);
-    return true;
   }
 
   private async handleServerUpdateSettings(

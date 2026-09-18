@@ -1,5 +1,6 @@
-import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, LIMITS, MessageType, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
+import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, MessageType, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
+import { activityIconSrc } from '../utils/activityIcon';
 import { avatarFileExtension, getAvatarUrl } from '../utils/avatar';
 import { renderRoleOption } from '../utils/roleOption';
 import { settingsStore } from '../stores/settingsStore';
@@ -17,7 +18,6 @@ import { warnIfMoveBlocked } from '../utils/channelAccess';
 import { t } from '../i18n';
 import { botSettingsMenuItem } from './BotSettingsModal';
 import { showInfoToast } from './CopyToast';
-import { promptLobbyInviteFor } from '../core/gameInvites';
 
 export class UserContextMenu {
   private menuEl: HTMLElement | null = null;
@@ -59,9 +59,7 @@ export class UserContextMenu {
     // Jogo em andamento (#675). O pedido só aparece para quem está compartilhando,
     // e o convite só para quem tem uma partida própria para oferecer.
     const targetActivity = user.activity ?? null;
-    const ownActivity = serverStore.currentUser?.activity ?? null;
-    const canAskToJoin = !isSelf && !user.isBot && !!targetActivity;
-    const canInvite = !isSelf && !user.isBot && !!ownActivity;
+    const activityArt = targetActivity ? activityIconSrc(targetActivity.iconBase64) : null;
 
     this.menuEl = document.createElement('div');
     this.menuEl.className = 'user-context-menu';
@@ -87,31 +85,18 @@ export class UserContextMenu {
       <div class="context-menu-activity">
         <span class="context-menu-activity-label">${t('userMenu.playingNow')}</span>
         <div class="context-menu-activity-game">
-          ${activityIconSrc(targetActivity.iconBase64)
-            ? `<img class="context-menu-activity-art" src="${activityIconSrc(targetActivity.iconBase64)}" alt="">`
-            : `<span class="material-symbols-outlined md-24 context-menu-activity-icon" aria-hidden="true">sports_esports</span>`}
-          <span class="context-menu-activity-text">${escapeHtml(targetActivity.name)}</span>
-        </div>
-        <div class="context-menu-activity-elapsed" title="${t('userMenu.playingElapsed')}">
-          <span class="material-symbols-outlined md-18" aria-hidden="true">schedule</span>
-          <span data-activity-elapsed>${formatElapsed(targetActivity.startedAt)}</span>
+          ${activityArt
+            ? `<img class="context-menu-activity-art" src="${activityArt}" alt="">`
+            : `<span class="material-symbols-outlined md-36 context-menu-activity-icon" aria-hidden="true">sports_esports</span>`}
+          <div class="context-menu-activity-details">
+            <span class="context-menu-activity-text">${escapeHtml(targetActivity.name)}</span>
+            <span class="context-menu-activity-elapsed" title="${t('userMenu.playingElapsed')}">
+              <span class="material-symbols-outlined md-16" aria-hidden="true">sports_esports</span>
+              <span data-activity-elapsed>${formatElapsed(targetActivity.startedAt)}</span>
+            </span>
+          </div>
         </div>
       </div>
-      ` : ''}
-
-      ${canAskToJoin || canInvite ? `
-      <div style="display: flex; flex-direction: column; gap: 8px;">
-        ${canAskToJoin ? `<button type="button" class="btn btn-secondary" data-action="game-ask-join">
-          <span class="material-symbols-outlined md-18" aria-hidden="true">group_add</span>
-          ${t('userMenu.askToJoinGame')}
-        </button>` : ''}
-        ${canInvite ? `<button type="button" class="btn btn-secondary" data-action="game-invite">
-          <span class="material-symbols-outlined md-18" aria-hidden="true">send</span>
-          ${t('userMenu.inviteToGame')}
-        </button>` : ''}
-      </div>
-
-      <div class="context-menu-divider"></div>
       ` : ''}
 
       ${user.isBot ? `<button type="button" class="btn btn-secondary" data-action="bot-settings">
@@ -451,17 +436,6 @@ export class UserContextMenu {
       });
     }
 
-    this.menuEl.querySelector('[data-action="game-ask-join"]')?.addEventListener('click', () => {
-      this.close();
-      getActiveNetworkClient().send(MessageType.GAME_JOIN_REQUEST, { targetUserId: user.id });
-      showInfoToast(t('userMenu.askToJoinGameSent'));
-    });
-
-    this.menuEl.querySelector('[data-action="game-invite"]')?.addEventListener('click', () => {
-      this.close();
-      void promptLobbyInviteFor(user);
-    });
-
     for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
       this.unbindGlobalListeners.push(appEvents.on(event, () => this.close()));
     }
@@ -614,19 +588,6 @@ export class UserContextMenu {
       this.menuEl = null;
     }
   }
-}
-
-/**
- * Rebuilds the data URI here instead of accepting one off the wire, the same
- * rule the `steam://` links follow: the prefix is ours, and only base64 of a
- * JPEG (`/9j/`) ever reaches an `src`. The server validates this too — a
- * renderer that trusted it anyway would be one tampered peer away from
- * rendering whatever it was handed.
- */
-function activityIconSrc(iconBase64: string | undefined): string | null {
-  if (!iconBase64 || iconBase64.length > LIMITS.MAX_ACTIVITY_ICON_LENGTH) return null;
-  if (!/^\/9j\/[A-Za-z0-9+/]*={0,2}$/.test(iconBase64)) return null;
-  return `data:image/jpeg;base64,${iconBase64}`;
 }
 
 /**

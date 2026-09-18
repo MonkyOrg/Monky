@@ -11,7 +11,6 @@ import type {
   ClientLogConfig,
   ClientLogEntry,
   DesktopSource,
-  GameLobbyInvite,
   DevelopmentQaConfig,
   DevelopmentQaReport,
   DiscoveredLanServer,
@@ -182,8 +181,6 @@ export interface ElectronApi {
   // Presença de jogo (#675)
   setGamePresenceEnabled: (enabled: boolean) => Promise<void>;
   getCurrentGameActivity: () => Promise<UserActivity | null>;
-  openGameLobby: (invite: GameLobbyInvite) => Promise<{ success: boolean }>;
-  parseGameLobbyLink: (link: string) => Promise<GameLobbyInvite | null>;
   onGamePresenceChanged: (cb: (activity: UserActivity | null) => void) => () => void;
   openOverlay: (config: OverlayConfig) => Promise<{ success: boolean }>;
   closeOverlay: () => Promise<{ success: boolean }>;
@@ -435,8 +432,6 @@ const api: ElectronApi = {
   // Sobreposição de Tela (Overlay) (#169)
   setGamePresenceEnabled: (enabled) => ipcRenderer.invoke('game-presence:set-enabled', enabled),
   getCurrentGameActivity: () => ipcRenderer.invoke('game-presence:get-current'),
-  openGameLobby: (invite) => ipcRenderer.invoke('game-presence:open-lobby', invite),
-  parseGameLobbyLink: (link) => ipcRenderer.invoke('game-presence:parse-lobby-link', link),
   onGamePresenceChanged: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, activity: UserActivity | null) => cb(activity);
     ipcRenderer.on('game-presence:changed', listener);

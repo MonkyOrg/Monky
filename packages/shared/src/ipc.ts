@@ -25,7 +25,7 @@ import type {
   LocalConnectionState,
   LocalTaskFailureEvent,
 } from './localExecution.js';
-import type { GameLobbyInvite, UserActivity } from './models.js';
+import type { UserActivity } from './models.js';
 
 export interface RendererBootstrapFailure {
   phase: 'constructor' | 'initialization';
@@ -506,8 +506,6 @@ export interface IpcInvokeChannels {
   // Presença de jogo (#675)
   'game-presence:set-enabled': { args: [enabled: boolean]; returnType: void };
   'game-presence:get-current': { args: []; returnType: UserActivity | null };
-  'game-presence:open-lobby': { args: [invite: GameLobbyInvite]; returnType: { success: boolean } };
-  'game-presence:parse-lobby-link': { args: [link: string]; returnType: GameLobbyInvite | null };
 
   // Sistema / App
   'app:set-language': { args: [language: string]; returnType: void };

@@ -66,23 +66,6 @@ export interface UserActivity {
   iconBase64?: string;
 }
 
-/**
- * A Steam lobby someone opened up to a person who asked to join (#675).
- *
- * The parts travel separately and the `steam://` URL is rebuilt in the main
- * process: a ready-made protocol URL arriving over the network would be an
- * OS-level handler invocation chosen by whoever sent it.
- *
- * Treat it as a credential, not an identifier — anyone holding it can enter the
- * match, so it only ever goes to the person who asked.
- */
-export interface GameLobbyInvite {
-  source: 'steam';
-  appId: number;
-  lobbyId: string;
-  hostSteamId: string;
-}
-
 export interface UserSummary {
   id: string;
   clientId: string;

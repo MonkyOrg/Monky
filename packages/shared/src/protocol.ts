@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, GameLobbyInvite, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserActivity, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
+import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserActivity, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
 import type {
   BotForm, BotFormValues, BotSettingsContext, BotSettingsDefinition, BotSettingsListResponse,
   BotSettingsPatch, BotSettingsSnapshot, BotServerSettingsSnapshot, CommandAutocompleteResult, CommandValues,
@@ -142,10 +142,6 @@ export enum MessageType {
   USER_UPDATE_VISIBILITY = 'USER_UPDATE_VISIBILITY',
   /** Client -> server: publish (or clear, with null) the game being played (#675). */
   USER_UPDATE_ACTIVITY = 'USER_UPDATE_ACTIVITY',
-  /** Client -> server: ask someone in the same channel to be let into their match (#675). */
-  GAME_JOIN_REQUEST = 'GAME_JOIN_REQUEST',
-  /** Client -> server: hand a lobby invite to the person who asked (#675). */
-  GAME_INVITE_SEND = 'GAME_INVITE_SEND',
   SERVER_GET_INVITE_INFO = 'SERVER_GET_INVITE_INFO',
 
   // SFU Client <-> Server Messages (#515)
@@ -258,10 +254,6 @@ export enum MessageType {
   VOICE_USER_LEFT = 'VOICE_USER_LEFT',
   VOICE_STATE_CHANGED = 'VOICE_STATE_CHANGED',
   VOICE_RESTRICTIONS_UPDATED = 'VOICE_RESTRICTIONS_UPDATED',
-  /** Server -> host: someone asked to join their match (#675). */
-  GAME_JOIN_REQUESTED = 'GAME_JOIN_REQUESTED',
-  /** Server -> requester: the host opened their lobby (#675). */
-  GAME_INVITE = 'GAME_INVITE',
   SOUNDBOARD_PLAYED = 'SOUNDBOARD_PLAYED',
   /** Server -> clients in the channel: drop this user's ongoing sound (#499). */
   SOUNDBOARD_STOPPED = 'SOUNDBOARD_STOPPED',
@@ -714,30 +706,6 @@ export interface UserUpdateVisibilityPayload {
  */
 export interface UserUpdateActivityPayload {
   activity: UserActivity | null;
-}
-
-/** Client -> server: ask `targetUserId` to be let into their match (#675). */
-export interface GameJoinRequestPayload {
-  targetUserId: string;
-}
-
-/** Server -> host: `fromUserId` would like in (#675). */
-export interface GameJoinRequestedPayload {
-  fromUserId: string;
-  nickname: string;
-}
-
-/** Client (host) -> server: let `targetUserId` into the lobby (#675). */
-export interface GameInviteSendPayload {
-  targetUserId: string;
-  invite: GameLobbyInvite;
-}
-
-/** Server -> requester: the host's lobby, for the "join" button (#675). */
-export interface GameInvitePayload {
-  fromUserId: string;
-  nickname: string;
-  invite: GameLobbyInvite;
 }
 
 export interface ChannelCreatedPayload {

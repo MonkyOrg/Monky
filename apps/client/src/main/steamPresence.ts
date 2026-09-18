@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
-import { GameLobbyInvite, LIMITS, UserActivity } from '@monky/shared';
+import { LIMITS, UserActivity } from '@monky/shared';
 
 const execFileAsync = promisify(execFile);
 
@@ -277,29 +277,3 @@ function parseVdf(text: string): { [key: string]: VdfValue } {
   return root;
 }
 
-/**
- * Rebuilds a Steam lobby URL from validated parts (#675).
- *
- * The parts travel over the network separately and only ever become a
- * `steam://` URL here. A ready-made protocol URL arriving from a peer would be
- * an OS handler invocation chosen by whoever sent it.
- */
-export function buildLobbyUrl(invite: GameLobbyInvite): string | null {
-  if (invite.source !== 'steam') return null;
-  if (!Number.isSafeInteger(invite.appId) || invite.appId <= 0) return null;
-  if (!/^[0-9]{1,20}$/.test(invite.lobbyId) || !/^[0-9]{1,20}$/.test(invite.hostSteamId)) return null;
-  return `steam://joinlobby/${invite.appId}/${invite.lobbyId}/${invite.hostSteamId}`;
-}
-
-/**
- * Reads the link Steam puts behind "Join game" → copy link, so the host can
- * paste it instead of the client inventing a lobby id it has no way to know.
- */
-export function parseLobbyLink(link: string): GameLobbyInvite | null {
-  const match = /^steam:\/\/joinlobby\/([0-9]{1,10})\/([0-9]{1,20})\/([0-9]{1,20})\/?$/
-    .exec(link.trim());
-  if (!match) return null;
-  const appId = Number.parseInt(match[1], 10);
-  if (!Number.isSafeInteger(appId) || appId <= 0) return null;
-  return { source: 'steam', appId, lobbyId: match[2], hostSteamId: match[3] };
-}
