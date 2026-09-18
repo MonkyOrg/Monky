@@ -1,4 +1,4 @@
-import { GameInvitePayload, GameJoinRequestedPayload, MessageType, UserSummary } from '@monky/shared';
+import { GameInvitePayload, GameJoinRequestedPayload, MessageType } from '@monky/shared';
 import { t } from '../i18n';
 import { showAlert, showConfirm, showConfirmWithText } from '../views/Dialog';
 import { showInfoToast } from '../views/CopyToast';
@@ -15,8 +15,14 @@ import { appEvents } from './EventBus';
  * answer carries the link.
  */
 
+/** Who an invite is being addressed to — no more of a user than this is needed. */
+export interface InviteTarget {
+  id: string;
+  nickname: string;
+}
+
 /** Asks the host for the link Steam gives them, then sends it to one person. */
-export async function promptLobbyInviteFor(user: UserSummary): Promise<void> {
+export async function promptLobbyInviteFor(user: InviteTarget): Promise<void> {
   const { confirmed, value } = await showConfirmWithText({
     title: t('gameInvite.promptTitle'),
     message: t('gameInvite.promptMessage', { nickname: user.nickname }),
@@ -65,7 +71,7 @@ export function installGameInviteHandlers(): () => void {
           confirmLabel: t('gameInvite.requestConfirm'),
         });
         if (!accepted) return;
-        await promptLobbyInviteFor({ id: payload.fromUserId, nickname: payload.nickname } as UserSummary);
+        await promptLobbyInviteFor({ id: payload.fromUserId, nickname: payload.nickname });
       })();
     }
   );
