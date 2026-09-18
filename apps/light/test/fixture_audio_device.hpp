@@ -6,8 +6,33 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 namespace monky::light::test {
+
+// Test-only endpoint list shared by the synthetic ADMs of one process, so a
+// scenario can add or remove "devices". Every entry plays the same synthetic
+// tone and sink; only the reported names and selection change.
+class FixtureDeviceCatalog {
+ public:
+  struct Device {
+    std::string id;
+    std::string name;
+  };
+
+  FixtureDeviceCatalog();
+  // Each direction needs at least one device; the first is the system default.
+  void Set(std::vector<Device> inputs, std::vector<Device> outputs);
+  std::vector<Device> Inputs() const;
+  std::vector<Device> Outputs() const;
+
+ private:
+  mutable std::mutex mutex_;
+  std::vector<Device> inputs_;
+  std::vector<Device> outputs_;
+};
 
 // Test-only PCM source/sink. This device never accesses OS audio APIs.
 // Keep the transport alive until RegisterAudioCallback(nullptr) or Terminate()
@@ -16,8 +41,8 @@ namespace monky::light::test {
 // AudioTransport callbacks; reentrant calls return -1. Queries and volume APIs
 // are callback-safe. Stop retains direction initialization for a later restart.
 // The last ADM reference must also be released outside its transport callbacks.
-// Device index 0 and Windows default-device selectors all mean this synthetic
-// source/sink, never the operating system's default microphone or speaker.
+// Device indexes select catalog entries; index 0 and Windows default-device
+// selectors mean its first entry, never the operating system's default device.
 class FixtureAudioDevice : public webrtc::AudioDeviceModule {
  public:
   static constexpr std::uint32_t kSampleRate = 48000;
@@ -40,11 +65,14 @@ class FixtureAudioDevice : public webrtc::AudioDeviceModule {
     double waiting_ms = 0;
     double processing_ms = 0;
     bool worker_running = false;
+    std::string selected_input;
+    std::string selected_output;
   };
 
   // Allocation errors propagate; callers must not fall back to a physical ADM.
-  static webrtc::scoped_refptr<FixtureAudioDevice> Create();
-  FixtureAudioDevice();
+  static webrtc::scoped_refptr<FixtureAudioDevice> Create(
+      std::shared_ptr<const FixtureDeviceCatalog> catalog = nullptr);
+  explicit FixtureAudioDevice(std::shared_ptr<const FixtureDeviceCatalog> catalog = nullptr);
   Counters Snapshot() const;
 
   int32_t ActiveAudioLayer(AudioLayer* layer) const override;
@@ -112,6 +140,7 @@ class FixtureAudioDevice : public webrtc::AudioDeviceModule {
  private:
   struct State;
   std::unique_ptr<State> state_;
+  std::shared_ptr<const FixtureDeviceCatalog> catalog_;
 };
 
 }  // namespace monky::light::test

@@ -40,6 +40,11 @@ constexpr char kMetadataFile[] = "monky-light.json";
 constexpr char kPendingFile[] = "monky-light.json.pending";
 constexpr char kFormat[] = "monky-light-profile";
 constexpr std::size_t kMaxMetadataBytes = 4096;
+constexpr char kSettingsFile[] = "monky-light-settings.json";
+constexpr char kSettingsPendingFile[] = "monky-light-settings.json.pending";
+constexpr char kSettingsFormat[] = "monky-light-settings";
+constexpr std::size_t kMaxSettingsBytes = 16 * 1024;
+constexpr std::size_t kMaxDeviceIdBytes = 1024;
 
 [[noreturn]] void requireRecovery(const char* reason) {
   throw std::runtime_error(std::string(reason) + "; explicit profile recovery is required");
@@ -56,7 +61,8 @@ struct SeedBuffer final {
 void inspectProfile(const fs::path& profile) {
   for (const auto& entry : fs::directory_iterator(profile)) {
     const auto name = entry.path().filename();
-    bool owned = name == ".identity.lock" || name == kMetadataFile || name == kPendingFile;
+    bool owned = name == ".identity.lock" || name == kMetadataFile || name == kPendingFile ||
+                 name == kSettingsFile || name == kSettingsPendingFile;
 #ifdef _WIN32
     owned = owned || name == "identity.dpapi" || name == "identity.dpapi.pending";
 #endif
@@ -199,6 +205,63 @@ class PendingMetadata final {
   fs::path destination_;
   File file_;
 };
+
+std::optional<std::string> readSettings(const fs::path& profile) {
+  File file(CreateFileW((profile / kSettingsFile).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  if (file.get() == INVALID_HANDLE_VALUE) {
+    const DWORD error = GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND) return std::nullopt;
+    failIo("Open profile settings", error);
+  }
+  BY_HANDLE_FILE_INFORMATION info{};
+  if (!GetFileInformationByHandle(file.get(), &info)) failIo("Inspect profile settings file");
+  if ((info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+      info.nNumberOfLinks != 1 || GetFileType(file.get()) != FILE_TYPE_DISK) {
+    throw std::runtime_error("Profile settings must be an ordinary file with a single hard link");
+  }
+  LARGE_INTEGER length{};
+  if (!GetFileSizeEx(file.get(), &length)) failIo("Read profile settings size");
+  if (length.QuadPart <= 0 || length.QuadPart > kMaxSettingsBytes) {
+    throw std::runtime_error("Profile settings size is invalid");
+  }
+  std::string contents(static_cast<std::size_t>(length.QuadPart), '\0');
+  DWORD bytes = 0;
+  if (!ReadFile(file.get(), contents.data(), static_cast<DWORD>(contents.size()), &bytes, nullptr)) {
+    failIo("Read profile settings");
+  }
+  if (bytes != contents.size()) throw std::runtime_error("Profile settings were truncated");
+  file.close();
+  return contents;
+}
+
+void writeSettings(const fs::path& profile, const std::string& contents) {
+  const auto pending = profile / kSettingsPendingFile;
+  // A leftover marker holds no identity state; DeleteFileW removes links, not targets.
+  if (!DeleteFileW(pending.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) {
+    failIo("Remove interrupted profile settings write");
+  }
+  File file(CreateFileW(pending.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  if (file.get() == INVALID_HANDLE_VALUE) failIo("Create profile settings write");
+  DWORD bytes = 0;
+  if (!WriteFile(file.get(), contents.data(), static_cast<DWORD>(contents.size()), &bytes, nullptr) ||
+      bytes != contents.size() || !FlushFileBuffers(file.get())) {
+    failIo("Write profile settings");
+  }
+  const auto name = (profile / kSettingsFile).native();
+  const auto nameBytes = static_cast<DWORD>(name.size() * sizeof(wchar_t));
+  const auto bufferBytes = static_cast<DWORD>(sizeof(FILE_RENAME_INFO) + nameBytes);
+  const auto buffer = std::make_unique<std::byte[]>(bufferBytes);
+  auto* rename = new (buffer.get()) FILE_RENAME_INFO{};
+  rename->ReplaceIfExists = TRUE;
+  rename->FileNameLength = nameBytes;
+  std::memcpy(rename->FileName, name.data(), nameBytes);
+  if (!SetFileInformationByHandle(file.get(), FileRenameInfo, rename, bufferBytes)) {
+    failIo("Publish profile settings");
+  }
+  file.close();
+}
 #else
 [[noreturn]] void failIo(const char* operation) {
   throw std::system_error(errno, std::generic_category(), operation);
@@ -318,6 +381,67 @@ class PendingMetadata final {
   File directory_;
   File file_;
 };
+
+std::optional<std::string> readSettings(const fs::path& profile) {
+  File directory(open(profile.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (directory.get() == -1) failIo("Open profile settings directory");
+  File file(openat(directory.get(), kSettingsFile, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+  if (file.get() == -1) {
+    if (errno == ENOENT) return std::nullopt;
+    failIo("Open profile settings");
+  }
+  struct stat info{};
+  if (fstat(file.get(), &info) == -1) failIo("Inspect profile settings file");
+  if (!S_ISREG(info.st_mode) || info.st_nlink != 1) {
+    throw std::runtime_error("Profile settings must be an ordinary file with a single hard link");
+  }
+  if (info.st_size <= 0 || static_cast<std::uintmax_t>(info.st_size) > kMaxSettingsBytes) {
+    throw std::runtime_error("Profile settings size is invalid");
+  }
+  std::string contents(static_cast<std::size_t>(info.st_size), '\0');
+  std::size_t offset = 0;
+  while (offset < contents.size()) {
+    const auto count = read(file.get(), contents.data() + offset, contents.size() - offset);
+    if (count == -1) {
+      if (errno == EINTR) continue;
+      failIo("Read profile settings");
+    }
+    if (count == 0) throw std::runtime_error("Profile settings were truncated");
+    offset += static_cast<std::size_t>(count);
+  }
+  file.close();
+  directory.close();
+  return contents;
+}
+
+void writeSettings(const fs::path& profile, const std::string& contents) {
+  File directory(open(profile.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (directory.get() == -1) failIo("Open profile settings directory");
+  // A leftover marker holds no identity state; unlinkat removes links, not targets.
+  if (unlinkat(directory.get(), kSettingsPendingFile, 0) == -1 && errno != ENOENT) {
+    failIo("Remove interrupted profile settings write");
+  }
+  File file(openat(directory.get(), kSettingsPendingFile,
+                   O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+  if (file.get() == -1) failIo("Create profile settings write");
+  std::size_t offset = 0;
+  while (offset < contents.size()) {
+    const auto count = write(file.get(), contents.data() + offset, contents.size() - offset);
+    if (count == -1) {
+      if (errno == EINTR) continue;
+      failIo("Write profile settings");
+    }
+    if (count == 0) throw std::runtime_error("Profile settings write was incomplete");
+    offset += static_cast<std::size_t>(count);
+  }
+  if (fsync(file.get()) == -1) failIo("Flush profile settings");
+  if (renameat(directory.get(), kSettingsPendingFile, directory.get(), kSettingsFile) == -1) {
+    failIo("Publish profile settings");
+  }
+  if (fsync(directory.get()) == -1) failIo("Flush profile settings directory");
+  file.close();
+  directory.close();
+}
 #endif
 
 bool isLowerHex(std::string_view value) {
@@ -389,6 +513,57 @@ std::string encodeMetadata(const Metadata& metadata) {
   return result;
 }
 
+std::optional<std::string> settingsDevice(const Json& data, const char* field) {
+  const auto found = data.find(field);
+  if (found == data.end() || found->is_null()) return std::nullopt;
+  if (!found->is_string() || found->get_ref<const std::string&>().empty() ||
+      found->get_ref<const std::string&>().size() > kMaxDeviceIdBytes) {
+    throw std::runtime_error("Profile settings contain an invalid audio device ID");
+  }
+  return found->get<std::string>();
+}
+
+ProfileSettings parseSettings(const std::string& contents) {
+  Json data;
+  try {
+    data = Json::parse(contents, [](int depth, Json::parse_event_t event, Json&) {
+      if (event == Json::parse_event_t::array_start ||
+          (event == Json::parse_event_t::object_start && depth != 0)) {
+        throw std::runtime_error("Profile settings must be a flat JSON object");
+      }
+      return true;
+    });
+  } catch (const Json::exception&) {
+    throw std::runtime_error("Profile settings are malformed JSON");
+  }
+  if (!data.is_object() || data.value("format", "") != kSettingsFormat ||
+      !data.contains("version") || !data["version"].is_number_integer() || data["version"] != 1) {
+    throw std::runtime_error("Profile settings have an unsupported format or version");
+  }
+  return {settingsDevice(data, "inputDeviceId"), settingsDevice(data, "outputDeviceId")};
+}
+
+std::string encodeSettings(const ProfileSettings& settings) {
+  for (const auto* id : {&settings.inputDeviceId, &settings.outputDeviceId}) {
+    if (*id && ((*id)->empty() || (*id)->size() > kMaxDeviceIdBytes)) {
+      throw std::invalid_argument("Audio device ID must be a nonempty string of at most 1024 bytes");
+    }
+  }
+  const auto optional = [](const std::optional<std::string>& value) {
+    return value ? Json(*value) : Json(nullptr);
+  };
+  std::string result;
+  try {
+    result = Json{{"format", kSettingsFormat}, {"version", 1},
+                  {"inputDeviceId", optional(settings.inputDeviceId)},
+                  {"outputDeviceId", optional(settings.outputDeviceId)}}.dump(2) + "\n";
+  } catch (const Json::exception&) {
+    throw std::invalid_argument("Audio device ID must be valid UTF-8");
+  }
+  if (result.size() > kMaxSettingsBytes) throw std::invalid_argument("Profile settings exceed their size limit");
+  return result;
+}
+
 }  // namespace
 
 struct ProfileIdentity::Impl final {
@@ -440,6 +615,15 @@ const std::string& ProfileIdentity::publicKeyHex() const noexcept {
 
 const std::string& ProfileIdentity::deviceId() const noexcept {
   return impl_->device;
+}
+
+ProfileSettings ProfileIdentity::loadSettings() const {
+  const auto contents = readSettings(impl_->profile);
+  return contents ? parseSettings(*contents) : ProfileSettings{};
+}
+
+void ProfileIdentity::saveSettings(const ProfileSettings& settings) const {
+  writeSettings(impl_->profile, encodeSettings(settings));
 }
 
 std::string ProfileIdentity::signChallenge(std::string_view nonceHex) const {

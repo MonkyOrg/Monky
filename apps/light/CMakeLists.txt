@@ -88,6 +88,7 @@ if(MONKY_LIGHT_WITH_RTC)
   target_link_libraries(monky_light_fixture_audio PUBLIC monky_light_rtc)
   add_executable(monky-light-audio-fixture-test test/fixture_audio_device_test.cpp)
   target_link_libraries(monky-light-audio-fixture-test PRIVATE monky_light_fixture_audio)
+  target_include_directories(monky-light-audio-fixture-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   set_target_properties(monky-light-audio-fixture-test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/bin")
@@ -121,8 +122,9 @@ endif()
 
 if(WIN32)
   add_library(monky_light_platform STATIC
-    src/platform/identity_store_windows.cpp src/platform/websocket_windows.cpp)
-  target_link_libraries(monky_light_platform PUBLIC Crypt32 Winhttp)
+    src/platform/identity_store_windows.cpp src/platform/websocket_windows.cpp
+    src/platform/audio_device_watcher_windows.cpp)
+  target_link_libraries(monky_light_platform PUBLIC Crypt32 Winhttp Ole32)
   target_compile_definitions(monky_light_platform PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 else()
   enable_language(OBJCXX)
@@ -132,13 +134,16 @@ else()
   find_library(MONKY_CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
   find_library(MONKY_FOUNDATION_FRAMEWORK Foundation REQUIRED)
   find_library(MONKY_AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
+  find_library(MONKY_COREAUDIO_FRAMEWORK CoreAudio REQUIRED)
   add_library(monky_light_platform STATIC
-    src/platform/identity_store_macos.mm src/platform/websocket_macos.mm src/platform/microphone_access_macos.mm)
+    src/platform/identity_store_macos.mm src/platform/websocket_macos.mm src/platform/microphone_access_macos.mm
+    src/platform/audio_device_watcher_macos.mm)
   set_source_files_properties(src/platform/websocket_macos.mm src/platform/microphone_access_macos.mm
+    src/platform/audio_device_watcher_macos.mm
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   target_link_libraries(monky_light_platform PUBLIC
     "${MONKY_SECURITY_FRAMEWORK}" "${MONKY_CORE_FOUNDATION_FRAMEWORK}" "${MONKY_FOUNDATION_FRAMEWORK}"
-    "${MONKY_AVFOUNDATION_FRAMEWORK}")
+    "${MONKY_AVFOUNDATION_FRAMEWORK}" "${MONKY_COREAUDIO_FRAMEWORK}")
 endif()
 target_include_directories(monky_light_platform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
@@ -187,7 +192,8 @@ if(MONKY_LIGHT_WITH_RTC)
   add_library(monky_light_application STATIC src/headless_application.cpp)
   target_include_directories(monky_light_application PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(monky_light_application PUBLIC
-    monky_light_media monky_light_session monky_light_profile monky_light_console monky_light_loop)
+    monky_light_media monky_light_session monky_light_profile monky_light_console monky_light_loop
+    monky_light_platform)
   add_executable(monky-light src/main.cpp)
   target_link_libraries(monky-light PRIVATE monky_light_application)
   if(APPLE)

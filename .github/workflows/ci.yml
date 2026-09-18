@@ -75,7 +75,7 @@ jobs:
           npm rebuild mediasoup electron esbuild
           npm run build --workspace=apps/server
       - name: Exercise native and Chromium voice through a real isolated server
-        run: node --test apps/light/test/server_fixture.test.cjs apps/light/test/headless_interop.test.cjs apps/light/test/browser_interop.test.cjs
+        run: node --test apps/light/test/server_fixture.test.cjs apps/light/test/headless_interop.test.cjs apps/light/test/audio_devices.test.cjs apps/light/test/browser_interop.test.cjs
       - name: Restore macOS Keychain configuration
         if: always() && runner.os == 'macOS'
         run: python scripts/macos-test-keychain.py restore

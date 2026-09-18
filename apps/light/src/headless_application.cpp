@@ -15,11 +15,13 @@
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace monky::light {
@@ -95,6 +97,7 @@ const char* mediaEventName(media::EventKind kind) {
     case media::EventKind::left: return "media-left";
     case media::EventKind::stats: return "media-stats";
     case media::EventKind::warning: return "media-warning";
+    case media::EventKind::devices: return "audio-device-selected";
   }
   throw std::logic_error("Unknown media event");
 }
@@ -141,6 +144,7 @@ class Application final {
                   }}) {}
 
   ~Application() {
+    stopWatchingDevices();
     if (cancelMicrophoneAccess_) cancelMicrophoneAccess_();
     // Settle app-owned RPCs before joining media workers or retiring the socket.
     if (session_.phase() != SessionPhase::stopped) session_.logout();
@@ -164,6 +168,18 @@ class Application final {
         });
       },
     });
+    try {
+      settings_ = identity_.loadSettings();
+    } catch (const std::exception& error) {
+      output({{"event", "warning"}, {"detail", std::string("Ignoring profile settings: ") + error.what()}});
+    }
+    if (audio_.watchDevices) {
+      stopWatchingDevices_ = audio_.watchDevices([this] {
+        loop_.post([this] {
+          devicesChangedDeadline_ = Clock::now() + kDeviceChangeSettle;
+        });
+      });
+    }
     loop_.post([this] {
       session_.setMuted(options_.muted);
       session_.setDeafened(options_.deafened);
@@ -172,8 +188,10 @@ class Application final {
     });
     loop_.run([this] { return nextDeadline(); }, [this](auto now) {
       session_.tick(now, unixMilliseconds());
+      if (devicesChangedDeadline_ && now >= *devicesChangedDeadline_) devicesChanged();
       finishOperations(now);
     });
+    stopWatchingDevices();
     return exitCode_;
   }
 
@@ -185,6 +203,10 @@ class Application final {
   struct Retiring {
     std::unique_ptr<media::VoiceEngine> engine;
     std::future<void> result;
+  };
+  struct DeviceQuery {
+    Json id;
+    std::future<media::AudioDeviceList> result;
   };
   struct RequestState {
     std::atomic_bool cancelled = false;
@@ -353,6 +375,7 @@ class Application final {
     config.mode = admission.mode == VoiceMode::sfu ? media::VoiceMode::sfu : media::VoiceMode::p2p;
     config.admitted_participants = roster();
     config.policy = audioPolicy();
+    config.devices = devicePreference();
     config.network_ignore_mask = audio_.networkIgnoreMask;
     if (auth.iceServers) {
       for (const auto& value : *auth.iceServers) {
@@ -367,6 +390,66 @@ class Application final {
     joining_.push_back({activeGeneration_, active_->join(std::move(config))});
     operationDeadline_ = Clock::now() + 10ms;
     authorizeMicrophone();
+  }
+
+  media::AudioDevicePreference devicePreference() const {
+    return {settings_.inputDeviceId, settings_.outputDeviceId};
+  }
+
+  static Json deviceList(const std::vector<media::AudioDeviceInfo>& devices) {
+    auto result = Json::array();
+    for (const auto& device : devices) result.push_back({{"id", device.id}, {"name", device.name}});
+    return result;
+  }
+
+  void queryDevices(Json id) {
+    if (!audio_.enumerateDevices) throw std::invalid_argument("Audio device enumeration is unavailable");
+    if (deviceQueries_.size() >= 4) throw std::invalid_argument("Too many pending audio device queries");
+    std::promise<media::AudioDeviceList> promise;
+    auto result = promise.get_future();
+    // A dedicated thread keeps platform COM/apartment state out of reused pools.
+    std::thread([enumerate = audio_.enumerateDevices, promise = std::move(promise)]() mutable {
+      try {
+        promise.set_value(enumerate());
+      } catch (...) {
+        promise.set_exception(std::current_exception());
+      }
+    }).detach();
+    deviceQueries_.push_back({std::move(id), std::move(result)});
+    operationDeadline_ = Clock::now() + 10ms;
+  }
+
+  void selectDevice(bool input, const Json& value) {
+    if (!value.contains("deviceId")) throw std::invalid_argument("deviceId is required; use null for the system default");
+    const auto& device = value.at("deviceId");
+    if (!device.is_null() && !device.is_string()) throw std::invalid_argument("deviceId must be a string or null");
+    auto settings = settings_;
+    (input ? settings.inputDeviceId : settings.outputDeviceId) =
+        device.is_null() ? std::nullopt : std::optional<std::string>(device.get<std::string>());
+    try {
+      identity_.saveSettings(settings);
+    } catch (const std::invalid_argument&) {
+      throw;
+    } catch (const std::exception& error) {
+      throw std::invalid_argument(std::string("Could not save audio device settings: ") + error.what());
+    }
+    settings_ = std::move(settings);
+    if (active_) active_->select_devices(devicePreference());
+  }
+
+  void stopWatchingDevices() {
+    if (!stopWatchingDevices_) return;
+    auto stop = std::move(stopWatchingDevices_);
+    stopWatchingDevices_ = nullptr;
+    stop();
+  }
+
+  void devicesChanged() {
+    devicesChangedDeadline_.reset();
+    if (closing_) return;
+    output({{"event", "audio-devices-changed"}});
+    // Re-resolve the preference: return to a reconnected device, or leave a removed one.
+    if (active_) active_->select_devices(devicePreference());
   }
 
   void retireVoice() {
@@ -485,15 +568,37 @@ class Application final {
       entry = retired_.erase(entry);
       output({{"event", "media-retired"}});
     }
+    for (auto entry = deviceQueries_.begin(); entry != deviceQueries_.end();) {
+      if (entry->result.wait_for(0ms) != std::future_status::ready) {
+        ++entry;
+        continue;
+      }
+      try {
+        const auto devices = entry->result.get();
+        if (!closing_) {
+          output({{"event", "audio-devices"}, {"id", entry->id},
+                  {"inputs", deviceList(devices.inputs)}, {"outputs", deviceList(devices.outputs)},
+                  {"inputDeviceId", settings_.inputDeviceId ? Json(*settings_.inputDeviceId) : Json(nullptr)},
+                  {"outputDeviceId", settings_.outputDeviceId ? Json(*settings_.outputDeviceId) : Json(nullptr)}});
+        }
+      } catch (const std::exception& error) {
+        if (!closing_) {
+          output({{"event", "command-error"}, {"id", entry->id},
+                  {"detail", std::string("Audio device enumeration failed: ") + error.what()}});
+        }
+      }
+      entry = deviceQueries_.erase(entry);
+    }
     if (drainDeadline_ && (!socket_ || !socket_->hasPendingSends() || now >= *drainDeadline_)) {
       if (socket_ && socket_->hasPendingSends()) {
         output({{"event", "warning"}, {"detail", "Graceful logout write deadline exceeded"}});
       }
       closeSocket();
     }
-    operationDeadline_ = joining_.empty() && retired_.empty() && !drainDeadline_
+    operationDeadline_ = joining_.empty() && retired_.empty() && deviceQueries_.empty() && !drainDeadline_
         ? std::nullopt : std::optional<Clock::time_point>(now + 10ms);
-    if (closing_ && !waitingLogoutEvent_ && !socket_ && joining_.empty() && retired_.empty()) {
+    if (closing_ && !waitingLogoutEvent_ && !socket_ && joining_.empty() && retired_.empty() &&
+        deviceQueries_.empty()) {
       output({{"event", "stopped"}});
       loop_.stop();
     }
@@ -502,6 +607,7 @@ class Application final {
   ApplicationLoop::Deadline nextDeadline() const {
     auto result = session_.nextDeadline();
     if (operationDeadline_ && (!result || *operationDeadline_ < *result)) result = operationDeadline_;
+    if (devicesChangedDeadline_ && (!result || *devicesChangedDeadline_ < *result)) result = devicesChangedDeadline_;
     return result;
   }
 
@@ -550,7 +656,14 @@ class Application final {
         if (name == "stats" && active_) active_->poll_stats();
         return;
       }
-      if (name == "join") session_.join(value.at("channelId").get<std::string>(), Clock::now());
+      if (name == "devices") {
+        queryDevices(id);
+        return;
+      }
+      if (name.starts_with("fixture-") && audio_.fixtureCommand) audio_.fixtureCommand(value);
+      else if (name == "set-input") selectDevice(true, value);
+      else if (name == "set-output") selectDevice(false, value);
+      else if (name == "join") session_.join(value.at("channelId").get<std::string>(), Clock::now());
       else if (name == "leave") session_.leave();
       else if (name == "mute") session_.setMuted(value.at("enabled").get<bool>());
       else if (name == "deafen") session_.setDeafened(value.at("enabled").get<bool>());
@@ -560,7 +673,8 @@ class Application final {
         if (epoch) session_.disconnected(*epoch, Clock::now());
         else session_.connectFailed(Clock::now());
       } else if (name != "quit") {
-        throw std::invalid_argument("Unknown command; use join, leave, mute, deafen, stats, channels, reconnect or quit");
+        throw std::invalid_argument("Unknown command; use join, leave, mute, deafen, devices, set-input, "
+                                    "set-output, stats, channels, reconnect or quit");
       }
       output({{"event", "command-accepted"}, {"id", id}, {"command", name}});
       if (name == "quit") quit();
@@ -583,6 +697,12 @@ class Application final {
   std::uint64_t activeGeneration_ = 0;
   std::vector<Joining> joining_;
   std::vector<Retiring> retired_;
+  std::vector<DeviceQuery> deviceQueries_;
+  ProfileSettings settings_;
+  StopWatchingAudioDevices stopWatchingDevices_;
+  // Device notifications arrive in bursts; apply the preference once they settle.
+  static constexpr auto kDeviceChangeSettle = 300ms;
+  ApplicationLoop::Deadline devicesChangedDeadline_;
   ApplicationLoop::Deadline operationDeadline_;
   ApplicationLoop::Deadline drainDeadline_;
   bool closing_ = false;
@@ -606,6 +726,8 @@ int runHeadless(std::vector<std::string> arguments, HeadlessConfiguration audio)
                    "{\"command\":\"join\",\"channelId\":\"...\"}\n"
                    "{\"command\":\"mute\",\"enabled\":true}\n"
                    "{\"command\":\"deafen\",\"enabled\":false}\n"
+                   "{\"command\":\"devices\"} / {\"command\":\"set-input\",\"deviceId\":\"...\"|null}\n"
+                   "{\"command\":\"set-output\",\"deviceId\":\"...\"|null}\n"
                    "{\"command\":\"stats\"} / {\"command\":\"channels\"}\n"
                    "{\"command\":\"leave\"} / {\"command\":\"reconnect\"} / {\"command\":\"quit\"}\n"
                    "EOF and Ctrl+C release the connection and media resources.\n";
