@@ -16,6 +16,8 @@ import { downloadLightboxFile, lightboxModal } from './LightboxModal';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
 import { t } from '../i18n';
 import { botSettingsMenuItem } from './BotSettingsModal';
+import { showInfoToast } from './CopyToast';
+import { promptLobbyInviteFor } from '../core/gameInvites';
 
 export class UserContextMenu {
   private menuEl: HTMLElement | null = null;
@@ -54,6 +56,13 @@ export class UserContextMenu {
       serverStore.hasPermission(Permission.MANAGE_ROLES);
     const showAdminSection = canMuteMembers || canDeafenMembers || canKickMembers || canMoveMembers || canManageRoles || canManageAdmin;
 
+    // Jogo em andamento (#675). O pedido só aparece para quem está compartilhando,
+    // e o convite só para quem tem uma partida própria para oferecer.
+    const targetActivity = user.activity ?? null;
+    const ownActivity = serverStore.currentUser?.activity ?? null;
+    const canAskToJoin = !isSelf && !user.isBot && !!targetActivity;
+    const canInvite = !isSelf && !user.isBot && !!ownActivity;
+
     this.menuEl = document.createElement('div');
     this.menuEl.className = 'user-context-menu';
     this.menuEl.innerHTML = `
@@ -73,6 +82,28 @@ export class UserContextMenu {
       </div>
 
       <div class="context-menu-divider"></div>
+
+      ${targetActivity ? `
+      <div class="context-menu-activity">
+        <span class="material-symbols-outlined md-18" aria-hidden="true">sports_esports</span>
+        <span class="context-menu-activity-text">${t('userMenu.playingGame', { game: escapeHtml(targetActivity.name) })}</span>
+      </div>
+      ` : ''}
+
+      ${canAskToJoin || canInvite ? `
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        ${canAskToJoin ? `<button type="button" class="btn btn-secondary" data-action="game-ask-join">
+          <span class="material-symbols-outlined md-18" aria-hidden="true">group_add</span>
+          ${t('userMenu.askToJoinGame')}
+        </button>` : ''}
+        ${canInvite ? `<button type="button" class="btn btn-secondary" data-action="game-invite">
+          <span class="material-symbols-outlined md-18" aria-hidden="true">send</span>
+          ${t('userMenu.inviteToGame')}
+        </button>` : ''}
+      </div>
+
+      <div class="context-menu-divider"></div>
+      ` : ''}
 
       ${user.isBot ? `<button type="button" class="btn btn-secondary" data-action="bot-settings">
         <span class="material-symbols-outlined md-18" aria-hidden="true">settings</span>
@@ -408,6 +439,17 @@ export class UserContextMenu {
         settingsAction.onClick();
       });
     }
+
+    this.menuEl.querySelector('[data-action="game-ask-join"]')?.addEventListener('click', () => {
+      this.close();
+      getActiveNetworkClient().send(MessageType.GAME_JOIN_REQUEST, { targetUserId: user.id });
+      showInfoToast(t('userMenu.askToJoinGameSent'));
+    });
+
+    this.menuEl.querySelector('[data-action="game-invite"]')?.addEventListener('click', () => {
+      this.close();
+      void promptLobbyInviteFor(user);
+    });
 
     for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
       this.unbindGlobalListeners.push(appEvents.on(event, () => this.close()));

@@ -2312,7 +2312,10 @@ Não implementar inicialmente:
 - integração com Spotify;
 - Rich Presence.
 
-Esses recursos podem ser adicionados posteriormente.
+Esses recursos podem ser adicionados posteriormente. Parte desta lista já saiu do
+papel — bots, por exemplo — e a presença de jogo da Steam, com pedido de entrada
+e convite para a partida, chegou em #675 como um recorte pequeno de Rich
+Presence: opcional, desligada por padrão e limitada ao que a Steam expõe.
 
 ---
 

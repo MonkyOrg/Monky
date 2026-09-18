@@ -7850,6 +7850,26 @@ button[data-loading="1"]::after {
   margin: 0 -4px;
 }
 
+/* Jogo em andamento no menu do usuário (#675). */
+.context-menu-activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--accent-primary);
+}
+
+.context-menu-activity-text {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .context-menu-volume-section {
   display: flex;
   flex-direction: column;

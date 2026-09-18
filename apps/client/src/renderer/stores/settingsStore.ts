@@ -117,6 +117,9 @@ export class SettingsStore {
   public askShutdownOnLastLeave: boolean = true;
   // Appear offline to other users on all servers (#561).
   public appearOffline: boolean = false;
+  // Share the game being played with the channel (#675). Off by default: this
+  // reads what is running on the machine, so it is never opt-out.
+  public shareGameActivity: boolean = false;
   // Per-server / per-channel overrides of the global chat-sound mode (#153).
   // A missing entry (or 'inherit') means "use the level above".
   public chatSoundServerOverrides: Record<string, ChatSoundMode> = {};
@@ -255,6 +258,9 @@ export class SettingsStore {
         }
         if (typeof this.appearOffline !== 'boolean') {
           this.appearOffline = false;
+        }
+        if (typeof this.shareGameActivity !== 'boolean') {
+          this.shareGameActivity = false;
         }
         this.chatSoundServerOverrides = this.sanitizeModeMap(parsed.chatSoundServerOverrides);
         this.chatSoundChannelOverrides = this.sanitizeModeMap(this.chatSoundChannelOverrides);
@@ -598,6 +604,7 @@ export class SettingsStore {
         minimizeToTrayOnClose: this.minimizeToTrayOnClose,
         askShutdownOnLastLeave: this.askShutdownOnLastLeave,
         appearOffline: this.appearOffline,
+        shareGameActivity: this.shareGameActivity,
         chatSoundServerOverrides: this.chatSoundServerOverrides,
         chatSoundChannelOverrides: this.chatSoundChannelOverrides,
         onboardingCompleted: this.onboardingCompleted,
