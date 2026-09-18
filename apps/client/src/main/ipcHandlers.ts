@@ -22,7 +22,9 @@ import { mt, setMainLanguage } from './i18n';
 import { fetchLinkPreview } from './linkPreview';
 import { TrayManager, VoiceStatus } from './trayManager';
 import type { DesktopSource, OverlayBounds, OverlayConfig, OverlaySignalPayload, OverlaySyncState } from '@monky/shared';
+import { gameLobbyInviteSchema, type GameLobbyInvite } from '@monky/shared';
 import { OverlayManager } from './overlayManager';
+import { SteamPresence, buildLobbyUrl, parseLobbyLink } from './steamPresence';
 import {
   HOME_MIN_HEIGHT,
   HOME_MIN_WIDTH,
@@ -359,6 +361,10 @@ export function setupIpcHandlers(
   const audioPreviews = new AudioPreviews();
   const localExecution = setupLocalExecutionIpc(mainWindow, (notifications) =>
     createLocalExecutionService(mainWindow, app.getPath('userData'), notifications));
+  // Presença de jogo (#675): só roda quando a pessoa liga nas configurações.
+  const steamPresence = new SteamPresence((activity) => {
+    if (!mainWindow.isDestroyed()) mainWindow.webContents.send('game-presence:changed', activity);
+  });
   const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
     event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
   ipcMain.handle(SOUND_DOWNLOAD_IPC.availability, async (event, folder: unknown): Promise<SoundboardDownloadAvailability> =>
@@ -1109,6 +1115,30 @@ export function setupIpcHandlers(
   ipcMain.handle('app:get-version', () => app.getVersion());
 
   // Open an external URL in the default browser
+  ipcMain.handle('game-presence:set-enabled', (_event, enabled: boolean) => {
+    steamPresence.setEnabled(enabled === true);
+  });
+
+  ipcMain.handle('game-presence:get-current', () => steamPresence.getCurrent());
+
+  ipcMain.handle('game-presence:parse-lobby-link', (_event, link: string) =>
+    typeof link === 'string' ? parseLobbyLink(link) : null);
+
+  // A URL steam:// nasce aqui, a partir dos campos validados — o renderer e a
+  // rede nunca entregam o link pronto (#675).
+  ipcMain.handle('game-presence:open-lobby', async (_event, invite: GameLobbyInvite) => {
+    const parsed = gameLobbyInviteSchema.safeParse(invite);
+    if (!parsed.success) return { success: false };
+    const url = buildLobbyUrl(parsed.data);
+    if (!url) return { success: false };
+    try {
+      await shell.openExternal(url);
+      return { success: true };
+    } catch {
+      return { success: false };
+    }
+  });
+
   ipcMain.handle('app:open-external', async (_, url: string) => {
     try {
       const parsed = new URL(url);

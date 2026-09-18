@@ -35,6 +35,40 @@ export interface SfuConsumerData {
 
 export type UserStatus = 'ONLINE' | 'IDLE' | 'VOICE' | 'DISCONNECTED';
 
+/**
+ * What a person is playing outside Monky, shown on their card (#675). Opt-in:
+ * absent while the setting is off, and cleared the moment it is turned off
+ * rather than left frozen on the last game everyone saw.
+ *
+ * `source` is generic on purpose. Only Steam exists today, but widening the
+ * union later costs nothing, whereas a `steam`-shaped field would force another
+ * protocol bump for the next source.
+ */
+export interface UserActivity {
+  source: 'steam';
+  /** Steam application id of the running game. */
+  appId: number;
+  /** Title as Steam itself names it, read from the local app manifest. */
+  name: string;
+}
+
+/**
+ * A Steam lobby someone opened up to a person who asked to join (#675).
+ *
+ * The parts travel separately and the `steam://` URL is rebuilt in the main
+ * process: a ready-made protocol URL arriving over the network would be an
+ * OS-level handler invocation chosen by whoever sent it.
+ *
+ * Treat it as a credential, not an identifier — anyone holding it can enter the
+ * match, so it only ever goes to the person who asked.
+ */
+export interface GameLobbyInvite {
+  source: 'steam';
+  appId: number;
+  lobbyId: string;
+  hostSteamId: string;
+}
+
 export interface UserSummary {
   id: string;
   clientId: string;
@@ -60,6 +94,11 @@ export interface UserSummary {
   invisible?: boolean;
   /** True when this account is a bot created via the bot management API (#569). */
   isBot?: boolean;
+  /**
+   * Game this user is playing, when they chose to share it (#675). `null` says
+   * "sharing is on, nothing running"; absent says nothing is being shared.
+   */
+  activity?: UserActivity | null;
 }
 
 export interface ChannelSummary {

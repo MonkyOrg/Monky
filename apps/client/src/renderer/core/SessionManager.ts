@@ -1,4 +1,4 @@
-import { MessageType } from '@monky/shared';
+import { MessageType, type UserActivity } from '@monky/shared';
 import { BotScreenStore, setActiveBotScreenStore } from '../stores/botScreenStore';
 import { appEvents } from './EventBus';
 import { clientLog } from './ClientLogService';
@@ -110,6 +110,20 @@ export class SessionManager {
       if (session.client.getStatus() === 'CONNECTED') {
         session.client.send(MessageType.USER_UPDATE_VISIBILITY, { appearOffline });
       }
+    }
+  }
+
+  /**
+   * Publishes the game being played to every connected server (#675).
+   *
+   * `null` is as meaningful as a game: it is what the settings toggle sends
+   * when switched off, and skipping it would leave the last game frozen on
+   * everyone else's card.
+   */
+  public setGameActivity(activity: UserActivity | null): void {
+    for (const session of this.sessions.values()) {
+      if (session.client.getStatus() !== 'CONNECTED') continue;
+      session.client.send(MessageType.USER_UPDATE_ACTIVITY, { activity });
     }
   }
 

@@ -61,6 +61,24 @@ export class AccountTab {
         </div>
       </div>
 
+      <!-- Game activity (#675) -->
+      <div data-settings-section="game-activity" data-settings-label="${escapeHtml(t('settings.gameActivitySection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+        <label style="display: flex; align-items: center; gap: 6px;">
+          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">sports_esports</span>
+          ${t('settings.gameActivitySection')}
+        </label>
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+          <div style="flex: 1; margin-right: 12px;">
+            <div style="font-size: 13px; color: var(--text-primary);">${t('settings.gameActivityLabel')}</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">${t('settings.gameActivityHint')}</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-game-activity" ${settingsStore.shareGameActivity ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
       <!-- Language (#16) -->
       <div data-settings-section="language" data-settings-label="${escapeHtml(t('settings.languageSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;" for="select-language">
@@ -141,6 +159,7 @@ export class AccountTab {
       onReloadModal: () => void;
       showError: (msg: string) => void;
       onVisibilityChanged?: (appearOffline: boolean) => void;
+      onGameActivityChanged?: (enabled: boolean) => void;
     }
   ): void {
     const inputNickname = container.querySelector<HTMLInputElement>('#settings-nickname-input');
@@ -191,6 +210,13 @@ export class AccountTab {
       if (callbacks.onVisibilityChanged) {
         callbacks.onVisibilityChanged(toggleAppearOffline.checked);
       }
+    });
+
+    const toggleGameActivity = container.querySelector<HTMLInputElement>('#toggle-game-activity');
+    toggleGameActivity?.addEventListener('change', () => {
+      settingsStore.shareGameActivity = toggleGameActivity.checked;
+      settingsStore.save();
+      callbacks.onGameActivityChanged?.(toggleGameActivity.checked);
     });
 
     btnExportIdentity?.addEventListener('click', async () => {

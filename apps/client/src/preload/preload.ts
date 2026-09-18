@@ -11,6 +11,7 @@ import type {
   ClientLogConfig,
   ClientLogEntry,
   DesktopSource,
+  GameLobbyInvite,
   DevelopmentQaConfig,
   DevelopmentQaReport,
   DiscoveredLanServer,
@@ -21,6 +22,7 @@ import type {
   LocalExecutionSnapshot,
   LocalPermissionChange,
   LocalToolId,
+  UserActivity,
   LocalPreparationInput,
   LocalPreparationResult,
   LocalTaskStartInput,
@@ -177,6 +179,12 @@ export interface ElectronApi {
   setAutoStart: (enabled: boolean) => Promise<void>;
   setMinimizeToTray: (enabled: boolean) => Promise<void>;
   // Sobreposição de Tela (Overlay) (#169)
+  // Presença de jogo (#675)
+  setGamePresenceEnabled: (enabled: boolean) => Promise<void>;
+  getCurrentGameActivity: () => Promise<UserActivity | null>;
+  openGameLobby: (invite: GameLobbyInvite) => Promise<{ success: boolean }>;
+  parseGameLobbyLink: (link: string) => Promise<GameLobbyInvite | null>;
+  onGamePresenceChanged: (cb: (activity: UserActivity | null) => void) => () => void;
   openOverlay: (config: OverlayConfig) => Promise<{ success: boolean }>;
   closeOverlay: () => Promise<{ success: boolean }>;
   isOverlayOpen: () => Promise<boolean>;
@@ -425,6 +433,17 @@ const api: ElectronApi = {
   setAutoStart: (enabled: boolean) => ipcRenderer.invoke('app:set-auto-start', enabled),
   setMinimizeToTray: (enabled: boolean) => ipcRenderer.invoke('app:set-minimize-to-tray', enabled),
   // Sobreposição de Tela (Overlay) (#169)
+  setGamePresenceEnabled: (enabled) => ipcRenderer.invoke('game-presence:set-enabled', enabled),
+  getCurrentGameActivity: () => ipcRenderer.invoke('game-presence:get-current'),
+  openGameLobby: (invite) => ipcRenderer.invoke('game-presence:open-lobby', invite),
+  parseGameLobbyLink: (link) => ipcRenderer.invoke('game-presence:parse-lobby-link', link),
+  onGamePresenceChanged: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, activity: UserActivity | null) => cb(activity);
+    ipcRenderer.on('game-presence:changed', listener);
+    return () => {
+      ipcRenderer.removeListener('game-presence:changed', listener);
+    };
+  },
   openOverlay: (config) => ipcRenderer.invoke('overlay:open', config),
   closeOverlay: () => ipcRenderer.invoke('overlay:close'),
   isOverlayOpen: () => ipcRenderer.invoke('overlay:is-open'),

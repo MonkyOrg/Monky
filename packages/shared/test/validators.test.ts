@@ -16,6 +16,10 @@ import {
   adminMuteUserSchema,
   adminDeafenUserSchema,
   voiceRestrictionsUpdatedSchema,
+  userActivitySchema,
+  userUpdateActivitySchema,
+  gameLobbyInviteSchema,
+  gameInviteSendSchema,
 } from '../src/index.js';
 import './botInteractions.test.js';
 import './botSettings.test.js';
@@ -46,7 +50,7 @@ console.assert(QUALITY_PRESETS.GAMING.name === 'Gaming Mode', 'Preset Gaming Mod
 console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version
-if (PROTOCOL_VERSION !== 20) throw new Error('Versão do protocolo deve ser 20');
+if (PROTOCOL_VERSION !== 21) throw new Error('Versão do protocolo deve ser 21');
 console.assert(LIMITS.SFU_DEFAULT_MIN_PORT === 40000, 'Porta mínima padrão SFU');
 console.assert(LIMITS.SFU_DEFAULT_MAX_PORT === 49151, 'Porta máxima padrão SFU');
 console.assert(
@@ -156,5 +160,48 @@ console.assert(
   'Nome curto demais deve ser rejeitado na edição'
 );
 console.log('✔ Schemas de criação e edição de canal verificados (#384)');
+
+// Presença de jogo e convites de partida (#675)
+console.assert(
+  userActivitySchema.safeParse({ source: 'steam', appId: 548430, name: 'Deep Rock Galactic' }).success === true,
+  'Atividade da Steam com appid e nome é válida'
+);
+console.assert(
+  userUpdateActivitySchema.safeParse({ activity: null }).success === true,
+  'Limpar a atividade é tão válido quanto publicá-la — é o que o toggle desligado envia'
+);
+console.assert(
+  userActivitySchema.safeParse({ source: 'epic', appId: 1, name: 'x' }).success === false,
+  'Só a Steam é aceita como fonte hoje'
+);
+console.assert(
+  userActivitySchema.safeParse({ source: 'steam', appId: 0, name: 'x' }).success === false,
+  'AppId precisa ser positivo'
+);
+console.assert(
+  userActivitySchema.safeParse({
+    source: 'steam', appId: 1, name: 'x', executablePath: 'C:/jogo.exe',
+  }).success === false,
+  'Campos extras são rejeitados: caminho de executável nunca deve trafegar'
+);
+
+const invite = { source: 'steam', appId: 1966720, lobbyId: '109775244618626185', hostSteamId: '76561199149453591' };
+console.assert(
+  gameLobbyInviteSchema.safeParse(invite).success === true,
+  'Convite com as partes separadas é válido'
+);
+console.assert(
+  gameInviteSendSchema.safeParse({ targetUserId: 'u1', invite }).success === true,
+  'Convite dirigido a uma pessoa é válido'
+);
+console.assert(
+  gameLobbyInviteSchema.safeParse({ ...invite, lobbyId: 'steam://joinlobby/1/2/3' }).success === false,
+  'Uma URL steam:// pronta não passa como lobbyId — a URL só nasce no processo main'
+);
+console.assert(
+  gameLobbyInviteSchema.safeParse({ ...invite, hostSteamId: '1; calc.exe' }).success === false,
+  'Identificador Steam só aceita dígitos'
+);
+console.log('✔ Schemas de presença de jogo e convite de partida verificados (#675)');
 
 console.log('=== Todos os testes unitários passaram com sucesso! ===');

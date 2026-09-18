@@ -25,6 +25,7 @@ import type {
   LocalConnectionState,
   LocalTaskFailureEvent,
 } from './localExecution.js';
+import type { GameLobbyInvite, UserActivity } from './models.js';
 
 export interface RendererBootstrapFailure {
   phase: 'constructor' | 'initialization';
@@ -502,6 +503,12 @@ export interface IpcInvokeChannels {
   'overlay:send-signal': { args: [payload: OverlaySignalPayload]; returnType: void };
   'overlay:send-sync-state': { args: [state: OverlaySyncState]; returnType: void };
 
+  // Presença de jogo (#675)
+  'game-presence:set-enabled': { args: [enabled: boolean]; returnType: void };
+  'game-presence:get-current': { args: []; returnType: UserActivity | null };
+  'game-presence:open-lobby': { args: [invite: GameLobbyInvite]; returnType: { success: boolean } };
+  'game-presence:parse-lobby-link': { args: [link: string]; returnType: GameLobbyInvite | null };
+
   // Sistema / App
   'app:set-language': { args: [language: string]; returnType: void };
   'app:get-version': { args: []; returnType: string };
@@ -654,6 +661,9 @@ export interface IpcEvents {
   'updater:error': [message: string];
   'server-host:log': [entry: LogEntry];
   'server-host:status-changed': [status: { isRunning: boolean; port: number | null; serverId: string | null }];
+
+  /** Jogo detectado mudou — `null` quando nada está rodando (#675). */
+  'game-presence:changed': [activity: UserActivity | null];
 
   // Eventos de Sobreposição (Overlay) (#169)
   'overlay:state-changed': [isOpen: boolean];
