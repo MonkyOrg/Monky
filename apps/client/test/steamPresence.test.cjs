@@ -85,8 +85,20 @@ function steamFixture() {
 \t"StateFlags"\t\t"4"
 }
 `);
-  return { root, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  return {
+    root,
+    cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+    /** Writes the icon exactly where Steam caches it, hash-named and all. */
+    writeIcon: (appId, bytes) => {
+      const dir = path.join(root, 'appcache', 'librarycache', String(appId));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${'a'.repeat(40)}.jpg`), bytes);
+    },
+  };
 }
+
+/** Smallest thing that still starts with the JPEG magic the validator demands. */
+const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
 
 test('reports the running game by reading what Steam already wrote to disk', async () => {
   const { root, cleanup } = steamFixture();
@@ -99,12 +111,115 @@ test('reports the running game by reading what Steam already wrote to disk', asy
     await settle();
     presence.stop();
 
-    assert.deepEqual(presence.getCurrent(), {
-      source: 'steam', appId: 548430, name: 'Deep Rock Galactic',
-    });
-    // Only the app id and the title travel: the manifest path and anything else
-    // read along the way stay in the main process.
-    assert.deepEqual(seen, [{ source: 'steam', appId: 548430, name: 'Deep Rock Galactic' }]);
+    const { startedAt, ...current } = presence.getCurrent();
+    assert.deepEqual(current, { source: 'steam', appId: 548430, name: 'Deep Rock Galactic' });
+    assert.ok(startedAt > 0 && startedAt <= Date.now(), 'o início é carimbado na detecção');
+    // Only the app id, the title and the start travel: the manifest path and
+    // anything else read along the way stay in the main process.
+    assert.equal(seen.length, 1);
+    const { startedAt: emitted, ...emittedRest } = seen[0];
+    assert.deepEqual(emittedRest, { source: 'steam', appId: 548430, name: 'Deep Rock Galactic' });
+    assert.equal(emitted, startedAt);
+  } finally {
+    cleanup();
+  }
+});
+
+test('the same game keeps its original start across polls', async () => {
+  const { root, cleanup } = steamFixture();
+  try {
+    const { SteamPresence } = load({ registry: { RunningAppID: '0x85e4e', SteamPath: root } });
+    const seen = [];
+    const presence = new SteamPresence((activity) => seen.push(activity));
+
+    presence.setEnabled(true);
+    await settle();
+    const first = presence.getCurrent().startedAt;
+
+    // A second read of the registry is not a second match: restamping here
+    // would reset the counter on everyone else's screen every ten seconds.
+    await presence.poll();
+    await settle();
+    presence.stop();
+
+    assert.equal(presence.getCurrent().startedAt, first);
+    assert.equal(seen.length, 1, 'nada é reemitido enquanto o jogo é o mesmo');
+  } finally {
+    cleanup();
+  }
+});
+
+test('carries the icon Steam already cached for the game', async () => {
+  const { root, cleanup, writeIcon } = steamFixture();
+  try {
+    writeIcon(548430, JPEG_BYTES);
+    const { SteamPresence } = load({ registry: { RunningAppID: '0x85e4e', SteamPath: root } });
+    const presence = new SteamPresence(() => {});
+
+    presence.setEnabled(true);
+    await settle();
+    presence.stop();
+
+    const { iconBase64 } = presence.getCurrent();
+    assert.equal(iconBase64, JPEG_BYTES.toString('base64'));
+    // What the renderer will rebuild into a data URI has to pass the same shape
+    // check the server applies, or the icon is dropped in transit.
+    assert.equal(shared.userActivitySchema.safeParse(presence.getCurrent()).success, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a game with no cached icon still reports, just without one', async () => {
+  const { root, cleanup } = steamFixture();
+  try {
+    const { SteamPresence } = load({ registry: { RunningAppID: '0x85e4e', SteamPath: root } });
+    const presence = new SteamPresence(() => {});
+
+    presence.setEnabled(true);
+    await settle();
+    presence.stop();
+
+    const current = presence.getCurrent();
+    assert.equal(current.name, 'Deep Rock Galactic');
+    assert.equal('iconBase64' in current, false, 'ausência é ausência, não string vazia');
+  } finally {
+    cleanup();
+  }
+});
+
+test('anything that is not a JPEG never becomes an icon', async () => {
+  const { root, cleanup, writeIcon } = steamFixture();
+  try {
+    // A PNG in the icon slot is not a corrupted JPEG: it is a file whose bytes
+    // disagree with its name, and the extension is not what we trust.
+    writeIcon(548430, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const { SteamPresence } = load({ registry: { RunningAppID: '0x85e4e', SteamPath: root } });
+    const presence = new SteamPresence(() => {});
+
+    presence.setEnabled(true);
+    await settle();
+    presence.stop();
+
+    assert.equal('iconBase64' in presence.getCurrent(), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('an oversized icon is refused instead of travelling', async () => {
+  const { root, cleanup, writeIcon } = steamFixture();
+  try {
+    const huge = Buffer.concat([JPEG_BYTES, Buffer.alloc(64 * 1024, 0x41)]);
+    writeIcon(548430, huge);
+    const { SteamPresence } = load({ registry: { RunningAppID: '0x85e4e', SteamPath: root } });
+    const presence = new SteamPresence(() => {});
+
+    presence.setEnabled(true);
+    await settle();
+    presence.stop();
+
+    assert.equal('iconBase64' in presence.getCurrent(), false);
   } finally {
     cleanup();
   }

@@ -7853,21 +7853,58 @@ button[data-loading="1"]::after {
 /* Jogo em andamento no menu do usuário (#675). */
 .context-menu-activity {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
+}
+
+.context-menu-activity-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+
+.context-menu-activity-game {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.context-menu-activity-icon {
+  flex-shrink: 0;
   color: var(--accent-primary);
 }
 
+.context-menu-activity-art {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
 .context-menu-activity-text {
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.context-menu-activity-elapsed {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  /* Matches the running-game dot elsewhere: this is a live value, not a label. */
+  color: var(--success);
+  font-variant-numeric: tabular-nums;
 }
 
 .context-menu-volume-section {

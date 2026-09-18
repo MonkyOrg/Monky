@@ -188,10 +188,25 @@ export function isValidMessageContent(content: string): boolean {
  * only assembled in the client's main process. Accepting a ready-made protocol
  * URL from the network would hand whoever sent it an OS-level handler call.
  */
+/**
+ * The icon is checked by shape, not merely by length: base64 of a JPEG always
+ * begins with `/9j/` (the FF D8 FF magic), so anything else never reaches an
+ * `<img src>`. Deliberately not a data URI — the prefix is added by the client
+ * that renders it, the same way the `steam://` URL is rebuilt rather than
+ * accepted ready-made.
+ */
+const activityIconSchema = z.string()
+  .max(LIMITS.MAX_ACTIVITY_ICON_LENGTH)
+  .regex(/^\/9j\/[A-Za-z0-9+/]*={0,2}$/, 'Ícone de atividade inválido');
+
 export const userActivitySchema = z.object({
   source: z.literal('steam'),
   appId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   name: z.string().min(1).max(LIMITS.MAX_ACTIVITY_NAME_LENGTH),
+  // Stamped by the player's own clock, so the reader clamps the elapsed time
+  // instead of trusting it: a skewed clock must not show a negative counter.
+  startedAt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  iconBase64: activityIconSchema.optional(),
 }).strict();
 
 export const userUpdateActivitySchema = z.object({

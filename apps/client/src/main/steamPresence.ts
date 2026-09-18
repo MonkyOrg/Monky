@@ -8,6 +8,10 @@ const execFileAsync = promisify(execFile);
 
 const POLL_INTERVAL_MS = 10_000;
 const REGISTRY_KEY = 'HKCU\\Software\\Valve\\Steam';
+/** Refuses oversized files before reading them into memory at all. */
+const MAX_ICON_BYTES = 24 * 1024;
+/** Steam names the cached icon after its own content hash. */
+const ICON_FILE = /^[0-9a-f]{40}\.jpg$/;
 
 /**
  * Reads what the local Steam client is running (#675).
@@ -27,6 +31,8 @@ export class SteamPresence {
   private current: UserActivity | null = null;
   /** Titles keyed by app id: manifests only need reading once per game. */
   private readonly names = new Map<number, string>();
+  /** Icons keyed by app id; `null` records "looked and there is none". */
+  private readonly icons = new Map<number, string | null>();
   private steamPath?: string | null;
   private polling = false;
 
@@ -85,7 +91,14 @@ export class SteamPresence {
   private async buildActivity(appId: number): Promise<UserActivity | null> {
     const name = await this.resolveGameName(appId);
     if (!name) return null;
-    return { source: 'steam', appId, name };
+    // The same game across polls keeps its original stamp: re-reading the
+    // registry every ten seconds is not a new match, and restamping here would
+    // reset the counter on everyone else's screen.
+    const startedAt = this.current?.appId === appId ? this.current.startedAt : Date.now();
+    const iconBase64 = await this.resolveIcon(appId);
+    return iconBase64
+      ? { source: 'steam', appId, name, startedAt, iconBase64 }
+      : { source: 'steam', appId, name, startedAt };
   }
 
   /**
@@ -132,15 +145,56 @@ export class SteamPresence {
     return null;
   }
 
-  /** Every `steamapps` folder Steam knows about, main install included. */
-  private async listLibraries(): Promise<string[]> {
+  private async resolveSteamPath(): Promise<string | null> {
     if (this.steamPath === undefined) {
       const value = await this.readRegistryValue('SteamPath');
       this.steamPath = value ? value.replace(/\//g, path.sep) : null;
     }
-    if (!this.steamPath) return [];
+    return this.steamPath;
+  }
 
-    const root = path.join(this.steamPath, 'steamapps');
+  /**
+   * The icon Steam already downloaded for its own library view (#675).
+   *
+   * Read from the local cache rather than from Valve's CDN: the file is
+   * already there, it costs no request, and it works offline. The layout is
+   * undocumented and has changed between Steam versions, so every failure path
+   * ends in `null` — a game with no icon still shows up, just generically.
+   */
+  private async resolveIcon(appId: number): Promise<string | undefined> {
+    const cached = this.icons.get(appId);
+    if (cached !== undefined) return cached ?? undefined;
+
+    const icon = await this.readIcon(appId);
+    this.icons.set(appId, icon ?? null);
+    return icon;
+  }
+
+  private async readIcon(appId: number): Promise<string | undefined> {
+    const steamPath = await this.resolveSteamPath();
+    if (!steamPath) return undefined;
+    const dir = path.join(steamPath, 'appcache', 'librarycache', String(appId));
+    try {
+      const file = fs.readdirSync(dir).find((entry) => ICON_FILE.test(entry));
+      if (!file) return undefined;
+      const full = path.join(dir, file);
+      if (fs.statSync(full).size > MAX_ICON_BYTES) return undefined;
+      const buffer = fs.readFileSync(full);
+      // Trust the bytes, not the extension: what leaves here is declared a JPEG.
+      if (buffer[0] !== 0xff || buffer[1] !== 0xd8 || buffer[2] !== 0xff) return undefined;
+      const encoded = buffer.toString('base64');
+      return encoded.length <= LIMITS.MAX_ACTIVITY_ICON_LENGTH ? encoded : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Every `steamapps` folder Steam knows about, main install included. */
+  private async listLibraries(): Promise<string[]> {
+    const steamPath = await this.resolveSteamPath();
+    if (!steamPath) return [];
+
+    const root = path.join(steamPath, 'steamapps');
     const libraries = [root];
     try {
       const parsed = parseVdf(fs.readFileSync(path.join(root, 'libraryfolders.vdf'), 'utf8'));
@@ -160,6 +214,7 @@ export class SteamPresence {
   }
 }
 
+/** `startedAt` is deliberately not compared: it is when *this* game began. */
 function sameActivity(a: UserActivity | null, b: UserActivity | null): boolean {
   if (a === null || b === null) return a === b;
   return a.appId === b.appId && a.name === b.name;

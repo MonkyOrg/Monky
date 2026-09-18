@@ -1,4 +1,4 @@
-import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, MessageType, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
+import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, LIMITS, MessageType, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { avatarFileExtension, getAvatarUrl } from '../utils/avatar';
 import { renderRoleOption } from '../utils/roleOption';
@@ -85,8 +85,17 @@ export class UserContextMenu {
 
       ${targetActivity ? `
       <div class="context-menu-activity">
-        <span class="material-symbols-outlined md-18" aria-hidden="true">sports_esports</span>
-        <span class="context-menu-activity-text">${t('userMenu.playingGame', { game: escapeHtml(targetActivity.name) })}</span>
+        <span class="context-menu-activity-label">${t('userMenu.playingNow')}</span>
+        <div class="context-menu-activity-game">
+          ${activityIconSrc(targetActivity.iconBase64)
+            ? `<img class="context-menu-activity-art" src="${activityIconSrc(targetActivity.iconBase64)}" alt="">`
+            : `<span class="material-symbols-outlined md-24 context-menu-activity-icon" aria-hidden="true">sports_esports</span>`}
+          <span class="context-menu-activity-text">${escapeHtml(targetActivity.name)}</span>
+        </div>
+        <div class="context-menu-activity-elapsed" title="${t('userMenu.playingElapsed')}">
+          <span class="material-symbols-outlined md-18" aria-hidden="true">schedule</span>
+          <span data-activity-elapsed>${formatElapsed(targetActivity.startedAt)}</span>
+        </div>
       </div>
       ` : ''}
 
@@ -207,6 +216,8 @@ export class UserContextMenu {
     `;
 
     document.body.appendChild(this.menuEl);
+
+    if (targetActivity) this.startElapsedTicker(targetActivity.startedAt);
 
     this.updateSliderTrackFill(currentVol);
     this.updateActiveQuickButton(currentVol);
@@ -582,6 +593,19 @@ export class UserContextMenu {
     });
   }
 
+  /**
+   * The counter is the only part of the menu that changes while it is open, so
+   * it ticks on its own instead of re-rendering everything each second.
+   */
+  private startElapsedTicker(startedAt: number): void {
+    const field = this.menuEl?.querySelector<HTMLElement>('[data-activity-elapsed]');
+    if (!field) return;
+    const timer = window.setInterval(() => {
+      field.textContent = formatElapsed(startedAt);
+    }, 1000);
+    this.unbindGlobalListeners.push(() => window.clearInterval(timer));
+  }
+
   public close(): void {
     this.unbindGlobalListeners.forEach((u) => u());
     this.unbindGlobalListeners = [];
@@ -590,6 +614,32 @@ export class UserContextMenu {
       this.menuEl = null;
     }
   }
+}
+
+/**
+ * Rebuilds the data URI here instead of accepting one off the wire, the same
+ * rule the `steam://` links follow: the prefix is ours, and only base64 of a
+ * JPEG (`/9j/`) ever reaches an `src`. The server validates this too — a
+ * renderer that trusted it anyway would be one tampered peer away from
+ * rendering whatever it was handed.
+ */
+function activityIconSrc(iconBase64: string | undefined): string | null {
+  if (!iconBase64 || iconBase64.length > LIMITS.MAX_ACTIVITY_ICON_LENGTH) return null;
+  if (!/^\/9j\/[A-Za-z0-9+/]*={0,2}$/.test(iconBase64)) return null;
+  return `data:image/jpeg;base64,${iconBase64}`;
+}
+
+/**
+ * Time since the match began, clamped at zero: `startedAt` comes from the other
+ * person's clock, and a skewed one must not render a negative counter.
+ */
+function formatElapsed(startedAt: number): string {
+  const total = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
 }
 
 export const userContextMenu = new UserContextMenu();
