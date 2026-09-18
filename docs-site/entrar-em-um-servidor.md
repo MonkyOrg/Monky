@@ -2,6 +2,8 @@
 
 Na aba **Entrar no Servidor** existem três caminhos.
 
+<AppScreenshot src="/screenshots/inicio-pt.png" alt="Tela inicial do Monky, com as opções de conexão e os campos do servidor." caption="O endereço e a porta precisam apontar para o processo que hospeda o servidor." />
+
 ## Servidores na Rede
 
 Clique em **Buscar**. O app escuta por cerca de 5 segundos os servidores Monky na rede local e lista nome, IP e versão. Clique em **Entrar**.
@@ -26,7 +28,9 @@ Na prática, isso significa que:
 
 Você fala em um servidor por vez, porque o microfone é um só: ao entrar em um canal de voz de outro servidor, a chamada **muda de lugar** e você sai automaticamente do canal anterior. O chat de texto, esse sim, continua ativo em todos ao mesmo tempo.
 
-O botão **Início** (a casinha, no topo da coluna) desconecta de todos os servidores de uma vez.
+O botão **Início** (a casinha, no topo da coluna) pede confirmação para
+desconectar de todos os servidores, incluindo a chamada ativa. Trocar o
+servidor visualizado e confirmar essa saída são ações diferentes.
 
 ## Vários dispositivos ao mesmo tempo
 
@@ -35,7 +39,7 @@ Você pode entrar no mesmo servidor a partir de mais de um computador usando a m
 Alguns detalhes que valem saber:
 
 - O áudio entre os **seus próprios** dispositivos é descartado automaticamente, para não causar microfonia. Câmera e compartilhamento de tela continuam funcionando normalmente entre eles.
-- Silenciar ou ensurdecer atinge apenas o dispositivo escolhido; expulsar do servidor desconecta todos eles.
+- Mute pessoal e volume individual são controles do dispositivo. Um bloqueio administrativo de microfone/áudio vale para sua identidade naquele servidor, incluindo os demais dispositivos; expulsar do servidor desconecta todos eles.
 - O limite é de **3 dispositivos simultâneos** por pessoa.
 
 Se algo falhar, veja [Solução de Problemas](/solucao-de-problemas).

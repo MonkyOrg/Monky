@@ -26,7 +26,7 @@ const t = computed(() =>
         appleSilicon: 'Apple Silicon',
         appleSiliconHint: 'M1, M2, M3 and newer.',
         intel: 'Intel',
-        intelHint: 'Macs released before 2020.',
+        intelHint: 'Macs with an Intel processor.',
         recommended: 'Detected on your system',
         linuxTitle: 'On Linux?',
         linuxBody:
@@ -59,7 +59,7 @@ const t = computed(() =>
         appleSilicon: 'Apple Silicon',
         appleSiliconHint: 'M1, M2, M3 e mais novos.',
         intel: 'Intel',
-        intelHint: 'Macs lançados antes de 2020.',
+        intelHint: 'Macs com processador Intel.',
         recommended: 'Detectado no seu sistema',
         linuxTitle: 'Está no Linux?',
         linuxBody:

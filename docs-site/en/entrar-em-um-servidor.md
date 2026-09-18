@@ -2,6 +2,8 @@
 
 The **Join Server** tab offers three routes.
 
+<AppScreenshot src="/screenshots/inicio-en.png" alt="Monky's home screen with connection options and server fields." caption="The address and port must point to the process hosting the server." />
+
 ## Servers on the Network
 
 Click **Scan**. For about 5 seconds the app listens for Monky servers on the local network and lists name, IP and version. Click **Join**.
@@ -26,7 +28,9 @@ In practice that means:
 
 You talk on one server at a time, because there is only one microphone: joining a voice channel on another server **moves the call** and takes you out of the previous channel automatically. Text chat, on the other hand, stays active everywhere at once.
 
-The **Home** button (the little house at the top of the column) disconnects from every server at once.
+The **Home** button (the house at the top of the column) asks for confirmation
+before disconnecting from every server, including the active call. Switching
+the viewed server and confirming this exit are different actions.
 
 ## Several devices at once
 
@@ -35,7 +39,7 @@ You can join the same server from more than one computer using the same identity
 A few details worth knowing:
 
 - Audio between **your own** devices is dropped automatically so it cannot cause feedback. Camera and screen sharing still work normally between them.
-- Muting or deafening affects only the device you picked; kicking from the server disconnects all of them.
+- Personal mute and individual volume are device controls. An administrative microphone/audio restriction applies to your identity on that server, including the other devices; kicking from the server disconnects all of them.
 - The limit is **3 simultaneous devices** per person.
 
 If anything fails, see [Troubleshooting](/en/solucao-de-problemas).

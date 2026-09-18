@@ -1,106 +1,35 @@
 # Settings
 
-Open from the gear icon on the connection screen or bottom bar.
+Open the **gear icon** on Home or the bottom bar. These are your app's
+preferences. To change something shared with participants, use
+[Server Settings](/en/administrar-servidor).
 
-- **Profile** — nickname and picture.
-- **Servers and settings** — export your saved servers and app settings to a
-  `.monkybackup` file and restore them on another computer. You pick what goes in
-  and what comes out each time, and the data can also ride along with the
-  identity backup. The file is protected by the password you set when exporting:
-  the saved server list may contain server passwords, so it never reaches the
-  disk in the clear. Without that password the backup cannot be recovered.
-- **Devices** — microphone, speaker/headphones and camera, with preview and list refresh.
-- **Camera effects** — blur, color or image virtual backgrounds and physical-background chroma key, processed locally.
-- **Voice sensitivity (VAD)** — adjust while watching the meter; leave the marker above the silent level.
-- **Noise suppression** — choose RNNoise, Speex, GTCRN, WebRTC (built-in) or no noise processing.
-- **General and advanced outputs** — use one device for everything or choose outputs for voice, screen shares and chat media.
-- **Quality and performance profile** — affects only what you transmit.
-- **Behaviour** — keep Monky in the system tray when the window is closed, and
-  ask before shutting down a server hosted on this machine when you are the last
-  person to leave it.
-- **Updates** — current version and manual check.
-- **Community** — shortcuts for ideas, voting and bugs.
+| Tab | What you will find |
+| --- | --- |
+| My Profile | Nickname, picture, visibility, language, identity and backups |
+| Voice and Video | Devices, microphone, PTT, outputs, noise suppression and camera |
+| Soundboard / Stickers | Local folders and library controls |
+| Keybinds | Key combinations for quick actions |
+| Notifications and Sounds | Personal sounds and notices |
+| Quality | Transmission profiles, resolution, FPS, bitrate and codec |
+| Bot tools | Local installations, permissions, cache and tasks |
+| Logs | Local events and client diagnostics |
+| About and Updates | Version, updates, window behavior and community |
 
-### Enter the server when Monky opens
+## My Profile
 
-On Home, select or enter the server and enable **Enter when Monky opens**,
-next to **Join Server**. The choice is saved only after a successful connection.
-There is a single destination: connecting to another server with the switch
-enabled replaces the previous one. A failed attempt leaves the saved destination unchanged.
+Change your nickname and picture here. **Language** immediately applies
+Português (Brasil) or English and saves the preference on this computer.
 
-The preference applies to future launches until you turn that same switch off;
-turning it off disables automatic entry immediately, without having to connect.
-It never starts stopped servers or joins voice. When migrating older settings
-with multiple destinations, only the most recent choice is kept. A short
-animation accompanies the transition from Home to the server, unless reduced
-motion is enabled.
+Under **Identity**, export/import your cryptographic identity to keep being
+recognized on servers. See the precautions in
+[Getting started](/en/primeiros-passos#keep-an-identity-backup).
 
-### Section navigation
-
-In app and server settings, selecting a category expands its section shortcuts
-in the sidebar. Submenus expand and collapse smoothly, including when switching
-quickly between categories. Click one to scroll smoothly to that part of the page.
-The current section is also highlighted while scrolling manually, without
-recreating the form or losing unsaved changes. Hidden or unavailable sections
-are not included in the navigation.
-
-Submenu expansion and collapse, as well as scrolling through settings sections
-and emoji-picker categories, respect the
-system's reduced-motion preference: when enabled, navigation is immediate,
-without animation.
-
-### Server settings: immediate application
-
-Server settings have no final save step. Switches and selections apply
-immediately; names, passwords and limits apply when you finish editing,
-leave the field or press `Enter`. **Done** only closes the window and does
-not undo changes already applied.
-
-While an operation is pending, **Done**, `X`, `Esc`, clicking outside the
-window and other dismissal paths are blocked. TURN installation reaching
-100% does not mean it is finished: the application waits for the server's
-final acknowledgement and reports actual initialization failures.
-
-Errors identify the unconfirmed change and allow correction and retry.
-If the connection or session changes, reopen settings to obtain the current
-state; a request without acknowledgement is not presented as saved. Role
-and bot-profile edits also apply immediately, while creation, installation,
-deletion and revocation still require their explicit actions.
-
-Warnings about incompatible or unverified bots appear in
-**Server Settings → Bots**, next to the bot that needs attention,
-rather than on Home cards. The server dropdown no longer repeats a
-**Bots on this server** entry. Personal preferences remain available through the
-bot's own menu in the member list.
-
-In **Server Settings → General → Server Information**, the version belongs to
-the process hosting that server, not the desktop client on your computer.
-Click the version to copy it. If the server does not provide this information,
-the app states that explicitly rather than substituting the local version.
-
-When a server restarts to install an update, connected clients receive a
-dedicated Monky notice in their selected language, asking them to try reconnecting
-in a few seconds. This also appears for a background server; an ordinary shutdown
-continues to use the server-closed notice.
-
-### Color picker
-
-The physical chroma-key screen color, virtual background color and role
-colors share Monky's color picker. Click the color swatch to open hue,
-saturation and brightness controls, presets and a **HEX** field that accepts
-three or six digits.
-
-Releasing a dragged control or choosing a preset applies the selection.
-After entering a valid HEX code, `Enter`, the close button or an outside
-click confirms it; closing the picker does not undo the chosen color.
-Invalid input is explained in the panel. `Escape` cancels only unfinished
-input and closes the picker without closing the surrounding settings.
-
-The **Eyedropper** lets you choose a screen color. During sampling, `Escape`
-cancels only the eyedropper, retaining the previous color and keeping the
-panel open. Permission and capture failures are reported without replacing
-the color with a default. Sampling does not disable effects or transmit an
-unprocessed camera to the call.
+**Servers and settings** exports a `.monkybackup` protected by your chosen
+password. Select what to include/restore; this data can also accompany an
+identity export. Saved servers can include passwords and are not written
+in plain text in this backup. Without the chosen password, the file cannot
+be recovered.
 
 ### Appear offline
 
@@ -113,6 +42,14 @@ does not make you appear online again.
 
 This does not disconnect the client or interrupt an ongoing call. Your
 participation in a voice channel remains visible in that channel.
+
+## Voice and Video
+
+Choose the microphone and watch its meter before joining a call. Set voice
+detection above the room's level when quiet. Check the audio output and use
+headphones for the local test.
+
+<AppScreenshot src="/screenshots/configuracoes-voz-en.png" alt="The Voice and Video tab showing the microphone, local test and input options." caption="Previews are local. Opening these settings does not unmute or authorize transmission on its own." />
 
 ### Quick audio controls
 
@@ -163,28 +100,26 @@ red. The overlay continues to show the active call's participants.
 Both client and server must be updated to exchange this information before
 joining voice.
 
-### Tooltips and menus
+### Input mode and Push to Talk
 
-Client tooltips use a compact dark design, appear after approximately
-**150 ms** with the mouse and immediately during keyboard navigation.
-`Esc` dismisses the tooltip. Menus and selection lists share the same theme;
-use the arrow keys, type to find an option and confirm with `Enter`.
-`Esc` closes a selection list without changing its value.
+Under **Voice and Video → Input Mode**, choose one of the two cards: **Voice
+Activity (VAD)** or **Push to Talk**. The cards also support keyboard
+activation, without radio buttons.
 
-The bottom-bar controls and the composer's **attachment, emoji and code**
-buttons have their own hover motions: the gear rotates, the screen-sharing
-arrow moves, the soundboard releases musical notes and the emoji laughs.
-The camera effect is an animated viewfinder, not a recording indicator.
-Clicks and state changes also receive brief visual feedback. The floating
-message-action toolbar does not receive these animations. The reduced-motion
-preference disables these effects.
+With PTT enabled, the **microphone button in the bottom-left corner** gains a
+borderless **PTT** label below the icon: yellow with a voice-input icon while
+waiting for the key and green with an open microphone while transmitting.
+Manual mute or deafen shows only a red crossed-out microphone, without the PTT
+label. An administrator restriction adds the red prohibition badge without
+replacing your personal icon or hiding the PTT label. The restriction prevents
+transmission even when your personal mute is off. Outside a call, the waiting
+state is gray.
 
-In the **Code block** dialog, drag the bottom-right corner to adjust its width
-and height; the editor follows the dialog size. Size limits preserve at least
-**24 px** of space between the dialog and the application window edges.
-
-This styling covers the client interface. File dialogs and system-tray
-menus are still drawn by the operating system.
+Clicking the button still toggles **manual mute**. Holding the PTT key does
+not undo that mute: it only opens the microphone when allowed. The state
+follows the actual microphone gate, including the release delay after letting
+go of the key. The configured key and state description appear in the tooltip
+and settings; there is no longer a separate indicator on the call stage.
 
 ### Microphone test
 
@@ -292,6 +227,32 @@ If processing fails, the camera stops and reports the error rather than
 silently reverting to unprocessed video. Turning the effect off requires an
 explicit choice.
 
+### Color picker
+
+The physical chroma-key screen color, virtual background color and role
+colors share Monky's color picker. Click the color swatch to open hue,
+saturation and brightness controls, presets and a **HEX** field that accepts
+three or six digits.
+
+Releasing a dragged control or choosing a preset applies the selection.
+After entering a valid HEX code, `Enter`, the close button or an outside
+click confirms it; closing the picker does not undo the chosen color.
+Invalid input is explained in the panel. `Escape` cancels only unfinished
+input and closes the picker without closing the surrounding settings.
+
+The **Eyedropper** lets you choose a screen color. During sampling, `Escape`
+cancels only the eyedropper, retaining the previous color and keeping the
+panel open. Permission and capture failures are reported without replacing
+the color with a default. Sampling does not disable effects or transmit an
+unprocessed camera to the call.
+
+## Soundboard and stickers
+
+Choose a folder in each tab. These are local libraries, not server folders.
+Configuring a folder does not upload all its files. See
+[Everyday Soundboard and sticker use](/en/usando-o-app#soundboard) for formats,
+sending and permissions.
+
 ### Sound and server favorites
 
 Use stars to mark sounds in the soundboard grid/list and under
@@ -313,16 +274,7 @@ Importing servers preserves stars for retained addresses and removes those
 for removed addresses. Sorting preserves each sound's assigned shortcuts and
 does not change the server rail.
 
-### Starting another server during a call
-
-Starting and viewing an owned offline server from Home or the server rail
-does not join voice automatically or interrupt the current call, microphone,
-camera or screen shares. Joining a different voice channel remains a
-separate action.
-
-If this application instance already hosts another server, it will not stop
-it implicitly. Use the hosting controls to stop it explicitly when safe before
-starting a different server.
+## Keybinds
 
 ### Keyboard shortcuts
 
@@ -360,26 +312,10 @@ Older shortcuts remain readable; re-record an unrecognized combination from
 another layout. Global capture may require input/accessibility permissions.
 Push-to-Talk keeps its separately configured keyboard key or mouse button.
 
-### Input mode and Push to Talk
+## Quality
 
-Under **Voice and Video → Input Mode**, choose one of the two cards: **Voice
-Activity (VAD)** or **Push to Talk**. The cards also support keyboard
-activation, without radio buttons.
-
-With PTT enabled, the **microphone button in the bottom-left corner** gains a
-borderless **PTT** label below the icon: yellow with a voice-input icon while
-waiting for the key and green with an open microphone while transmitting.
-Manual mute or deafen shows only a red crossed-out microphone, without the PTT
-label. An administrator restriction adds the red prohibition badge without
-replacing your personal icon or hiding the PTT label. The restriction prevents
-transmission even when your personal mute is off. Outside a call, the waiting
-state is gray.
-
-Clicking the button still toggles **manual mute**. Holding the PTT key does
-not undo that mute: it only opens the microphone when allowed. The state
-follows the actual microphone gate, including the release delay after letting
-go of the key. The configured key and state description appear in the tooltip
-and settings; there is no longer a separate indicator on the call stage.
+The profile controls what **you transmit**; it does not increase someone
+else's camera or screen resolution.
 
 ### Quality profiles
 
@@ -389,6 +325,10 @@ and settings; there is no longer a separate indicator on the call stage.
 | Normal | 32 kbps | 480p | 720p | General use |
 | High Quality | 48 kbps | 720p | 1080p | Fast internet and a PC to spare |
 | Gaming | 28 kbps | reduced | smooth (60 FPS) | Gaming: prioritises voice and fluid screen |
+| Ultra | 64 kbps | 1080p / 60 FPS | 1080p / 60 FPS | Sufficient bandwidth and hardware for higher rates |
+
+These are configuration targets, not guaranteed observed FPS or bitrate.
+Devices, codecs, networks, participant count and content affect the result.
 
 The **Custom** profile offers dropdowns with the most common values — aspect
 ratio (16:9, 16:10, 4:3 and 21:9), resolution (from the lowest up to 4K), FPS
@@ -398,20 +338,19 @@ resolution closest to the one you were already using.
 
 ### Sharing your screen while gaming
 
-Encoding video is expensive, and the codec decides whether that cost lands on
-the CPU or the GPU. AV1 and VP9 compress better, but almost no PC has a hardware
-encoder for them — at 1080p60 the work falls entirely on the CPU and the game
-loses frames. H.264 is hardware accelerated on practically every graphics card
-(NVENC, QuickSync, AMF).
+Encoding video consumes resources. Acceleration depends on the codec, hardware,
+driver and support available to the app. H.264 has broad hardware support;
+AV1 and VP9 may use the CPU when no compatible encoder is available.
+Choosing a codec does not by itself guarantee GPU encoding.
 
 That is why, on the **Gaming** profile, the **Automatic** codec puts H.264
 first. If you use another profile and the game stutters while sharing, pick
 **H.264 / AVC** under *Preferred Video Codec*.
 
-**Automatic** can negotiate another compatible codec. An explicit choice is
-required for your screen in both P2P and SFU, including when replacing a screen
-or switching voice modes. If it cannot be used, the client explains why rather
-than sending your screen with a different codec.
+**Automatic** negotiates a compatible codec. When you explicitly select a
+codec, it becomes mandatory for your screen in P2P and SFU, including when
+replacing a screen or changing voice modes. If unavailable, the client explains
+why rather than transmitting with another codec.
 
 On Windows, Monky also captures the screen through the **Windows Graphics
 Capture** API, which composites on the GPU and stops delivering frames when
@@ -423,3 +362,110 @@ method on its own. To force the old method, start the app with
 One last tip that holds for any capture software: sharing **the game window**
 usually costs less than sharing the whole monitor, and playing in *borderless
 fullscreen* avoids the mode switches that make a game hitch.
+
+## Notifications and Sounds
+
+Adjust personal sounds and notices here. This does not change mention
+permissions or events published by the server; those belong to
+[server administration](/en/administrar-servidor).
+
+## Bot tools
+
+Inspect installed tools, storage, cache, authorizations and local tasks.
+A server grant does not authorize a bot to run tasks on your computer
+without consent.
+
+<AppScreenshot src="/screenshots/ferramentas-en.png" alt="The Bot tools tab with storage, tools, permissions and task sections." caption="The client centralizes management; consent is specific to each bot and device." />
+
+Revoking authorization or removing a tool ends affected work. Read
+[Tools on your computer](/en/bots#tools-on-your-computer) before approving
+a request.
+
+## Logs
+
+Inspect client events to identify the failing stage of an operation. Review
+and remove sensitive content before sharing logs.
+The [Server Monitor](/en/criar-seu-servidor#server-monitor) is a separate query,
+subject to that server's permissions.
+
+## About and Updates
+
+Check the version, look for updates and revisit the installed release's notes.
+Betas are prereleases and require opting in; prefer stable for everyday use.
+See [Updates](/en/download#updates).
+
+Window behavior and community links are also here. When hosting a server
+on this computer, distinguish **closing the window**, **keeping the app in
+the tray** and **stopping the server**: stopping the process affects connected
+participants.
+
+## Connection and interface
+
+### Enter the server when Monky opens
+
+On Home, select or enter the server and enable **Enter when Monky opens**,
+next to **Join Server**. The choice is saved only after a successful connection.
+There is a single destination: connecting to another server with the switch
+enabled replaces the previous one. A failed attempt leaves the saved destination unchanged.
+
+The preference applies to future launches until you turn that same switch off;
+turning it off disables automatic entry immediately, without having to connect.
+It never starts stopped servers or joins voice. When migrating older settings
+with multiple destinations, only the most recent choice is kept. A short
+animation accompanies the transition from Home to the server, unless reduced
+motion is enabled.
+
+### Section navigation
+
+In app and server settings, selecting a category expands its section shortcuts
+in the sidebar. Submenus expand and collapse smoothly, including when switching
+quickly between categories. Click one to scroll smoothly to that part of the page.
+The current section is also highlighted while scrolling manually, without
+recreating the form or losing unsaved changes. Hidden or unavailable sections
+are not included in the navigation.
+
+Submenu expansion and collapse, as well as scrolling through settings sections
+and emoji-picker categories, respect the
+system's reduced-motion preference: when enabled, navigation is immediate,
+without animation.
+
+### Tooltips and menus
+
+Client tooltips use a compact dark design, appear after approximately
+**150 ms** with the mouse and immediately during keyboard navigation.
+`Esc` dismisses the tooltip. Menus and selection lists share the same theme;
+use the arrow keys, type to find an option and confirm with `Enter`.
+`Esc` closes a selection list without changing its value.
+
+The bottom-bar controls and the composer's **attachment, emoji and code**
+buttons have their own hover motions: the gear rotates, the screen-sharing
+arrow moves, the soundboard releases musical notes and the emoji laughs.
+The camera effect is an animated viewfinder, not a recording indicator.
+Clicks and state changes also receive brief visual feedback. The floating
+message-action toolbar does not receive these animations. The reduced-motion
+preference disables these effects.
+
+In the **Code block** dialog, drag the bottom-right corner to adjust its width
+and height; the editor follows the dialog size. Size limits preserve at least
+**24 px** of space between the dialog and the application window edges.
+
+This styling covers the client interface. File dialogs and system-tray
+menus are still drawn by the operating system.
+
+### Starting another server during a call
+
+Starting and viewing an owned offline server from Home or the server rail
+does not join voice automatically or interrupt the current call, microphone,
+camera or screen shares. Joining a different voice channel remains a
+separate action.
+
+If this application instance already hosts another server, it will not stop
+it implicitly. Use the hosting controls to stop it explicitly when safe before
+starting a different server.
+
+## Server settings: immediate application
+
+These settings are shared and live in the **server name** menu, not your
+personal gear icon. [Manage a server](/en/administrar-servidor) explains
+immediate application, roles, channels, limits, voice mode and process
+version. For bot permissions and compatibility warnings, see [Use bots](/en/bots).

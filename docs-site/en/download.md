@@ -18,27 +18,32 @@ The buttons below point straight at the files from the latest release — no nee
 
 ## After downloading
 
-Windows and macOS may show a warning the first time you open Monky, because the executables are not signed with a paid certificate yet. It is not a sign of a corrupted file.
+Windows and macOS can warn because the app does not yet have a distribution
+signature recognized by those systems. A warning alone proves neither
+corruption nor safety.
 
-- **Windows**: click _More info › Run anyway_.
-- **macOS**: right-click the app and choose _Open_.
+Before allowing execution, confirm the official source and
+[verify the release](/en/verificar-releases). After checking the file:
+
+- **Windows**: when SmartScreen offers it, use _More info › Run anyway_.
+- **macOS**: try the app's context-menu Open action and consult **Privacy & Security** in System Settings. Options vary with the macOS version.
 
 ### macOS: "The application is damaged and can't be opened"
 
-On macOS (especially on Apple Silicon), Gatekeeper may block the app with the message **"is damaged and can't be opened"**. The file is **not** corrupted — it's just the security quarantine, because the app is not notarized by Apple yet.
+This message can result from Gatekeeper quarantine and missing notarization.
+Do not rule out an incomplete or modified download: check the original
+`.dmg` checksum before changing system protections.
 
-After moving **Monky.app** to the *Applications* folder, open Terminal and run:
+After verifying the source, moving **Monky.app** to *Applications* and deciding
+to authorize that copy, remove only this app's quarantine:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Monky.app
 ```
 
-Then open the app normally. If it still complains, force a local (ad-hoc) re-sign:
-
-```bash
-sudo xattr -cr /Applications/Monky.app
-codesign --force --deep --sign - /Applications/Monky.app
-```
+Try opening it again. If still blocked, keep the error message and check
+system compatibility. Do not disable Gatekeeper globally or remove protections
+from other folders to troubleshoot.
 
 ## Updates
 

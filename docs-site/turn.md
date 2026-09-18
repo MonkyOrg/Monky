@@ -4,30 +4,30 @@ Por padrão, a voz e o vídeo do Monky trafegam **direto entre os participantes*
 (P2P). O servidor só intermedeia a apresentação inicial. Isso é ótimo: menos
 latência e banda quase zero para quem hospeda.
 
-O problema aparece quando dois membros estão atrás de **CGNAT** — comum em
+O problema pode aparecer quando membros estão atrás de **CGNAT** — comum em
 internet móvel e em boa parte dos provedores residenciais no Brasil. Nesse
-cenário os dois lados não conseguem se enxergar, e a chamada entre eles não
-conecta, mesmo que cada um conecte normalmente com os demais.
+cenário, dependendo do NAT e do firewall, os dois lados não conseguem uma
+rota direta, mesmo que cada um conecte normalmente com os demais.
 
-O **TURN** resolve isso fazendo o servidor **repassar a mídia** desse par
-específico. É o último recurso: o WebRTC sempre tenta a rota direta primeiro e
-só cai no relay quando não há alternativa.
+O **TURN** oferece um caminho alternativo: o servidor **repassa a mídia**
+desse par. O WebRTC tenta usar a conectividade direta quando possível; o relay
+também precisa estar alcançável e com portas e credenciais corretas.
 
 ::: info Esta página vale para o modo P2P Mesh
 No [modo SFU](/criar-seu-servidor#modos-de-voz-e-midia-p2p-mesh-vs-sfu) cada
-participante já se conecta ao servidor em vez de aos outros, então o CGNAT deixa
-de atrapalhar e o relay perde a função — o próprio SFU é o relay. Ligado junto,
-o coturn só seguraria a porta 3478 e todo o seu range sem servir uma única
-alocação, por isso o Monky recusa a combinação tanto pelo app quanto pela CLI.
-Se você usa SFU e a mídia não flui, o caminho é
-[abrir as portas do SFU](/hospedar-em-vps#abrindo-as-portas-do-modo-sfu),
-não ligar o TURN.
+participante envia mídia ao servidor, em vez de diretamente aos outros.
+O TURN integrado do Monky é oferecido somente para P2P: o app e o CLI recusam
+habilitá-lo junto com SFU. Isso não dispensa uma rota acessível até o servidor.
+Se a mídia SFU não flui, confira IP anunciado, processo e
+[portas do SFU](/hospedar-em-vps#abrindo-as-portas-do-modo-sfu), em vez de
+tentar habilitar uma combinação não suportada.
 :::
 
 ## Requisitos
 
-- Host **Linux** com IP público (uma VPS típica). Não existe pacote do coturn
-  para Windows ou macOS — o relay não está disponível nessas plataformas.
+- Host **Linux** com IP público (uma VPS típica). O Monky só gerencia a
+  instalação e execução desse relay no Linux; não oferece esse controle
+  no Windows ou macOS.
 - **Portas abertas** no firewall (veja abaixo).
 - Banda no host: cada par relayado consome upload **e** download do servidor.
 
@@ -39,10 +39,11 @@ não ligar o TURN.
 | `3478` | **UDP** | Porta de escuta do TURN (sinalização e allocate) |
 | `49152-65535` | **UDP** | Range de portas para relay de mídia |
 
-::: danger As 3 regras são obrigatórias
-Se qualquer uma dessas portas estiver fechada, o coturn até sobe mas os clientes
-não conseguem criar relay candidates — a chamada simplesmente não conecta para
-quem está atrás de CGNAT.
+::: warning O processo online não comprova o caminho de mídia
+Libere os transportes da configuração acima para atender redes com restrições
+diferentes. Alocação e tráfego são etapas distintas: a porta 3478 pode responder
+enquanto a faixa de relay continua bloqueada. Confira a reprodução de mídia,
+não apenas se o processo está rodando.
 :::
 
 ## Abrindo portas no Linux
@@ -98,6 +99,9 @@ sudo iptables -I INPUT -p udp --dport 49152:65535 -j ACCEPT
 sudo netfilter-persistent save
 ```
 
+Esse comando pressupõe `netfilter-persistent` instalado e configurado.
+Em outras distribuições, use o mecanismo de persistência do firewall local.
+
 ::: tip Se usar `ufw` em vez de `iptables`
 ```bash
 sudo ufw allow 3478/tcp
@@ -117,20 +121,49 @@ sudo firewall-cmd --reload
 
 ## Ativando o relay
 
+::: warning Não reutilize o coturn de outro serviço
+O Monky inicia sua própria instância. A instalação automática e o helper do
+repositório tentam desativar o serviço coturn da distribuição para liberar
+a porta 3478. Se outra aplicação depende desse serviço, planeje um host
+separado antes de continuar; não pare um relay compartilhado.
+:::
+
 ```bash
 monky config set turn true
 monky restart
 ```
 
-O coturn é instalado **automaticamente** pela sua distro na primeira vez que
-você liga o relay. Também funciona pelo botão em **Configurações do Servidor →
-Voz e Vídeo** no app.
+O Monky tenta instalar coturn pelo gerenciador de pacotes da distribuição
+quando necessário. Isso exige root ou `sudo` não interativo já autorizado;
+o processo não abre um prompt de senha. Também é possível ativar em
+**Configurações do Servidor → Recursos de Voz e Vídeo** no app.
 
-Se o servidor não rodar como root, rode uma vez:
+### Instalação manual do coturn
+
+Sem esses privilégios, prepare o host antes. Em **Debian/Ubuntu com systemd**,
+num host dedicado ao relay do Monky:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y coturn
+sudo systemctl disable --now coturn
+command -v turnserver
+```
+
+Em outras distribuições, use o pacote `coturn` e o gerenciador de serviços
+correspondentes. Depois volte a `monky config set turn true` e `monky restart`
+com **o mesmo usuário que administra o servidor**, sem executar o Monky
+inteiro como root.
+
+Se você clonou o repositório, há também um helper. Execute a partir da raiz
+do checkout:
 
 ```bash
 sudo bash scripts/install-turn.sh
 ```
+
+Esse arquivo **não acompanha a instalação global do CLI**. O caminho acima
+não funciona em uma pasta arbitrária após `npm install -g`.
 
 ## Verificando se está funcionando
 
@@ -158,6 +191,9 @@ Se aparecer `⚠ porta bloqueada`, revise os firewalls acima.
 nc -zv SEU_IP 3478
 ```
 
+Isso testa somente a conexão **TCP**. Não confirma o transporte UDP, a faixa
+de relay nem uma chamada completa entre duas redes.
+
 ### No próprio servidor
 
 ```bash
@@ -178,7 +214,7 @@ confira com `monky logs`.
 |---|---|---|
 | `monky status` mostra `⚠ porta bloqueada` | Porta 3478 fechada no firewall do provedor ou do Linux | Siga os passos de abertura de porta acima |
 | coturn sobe mas ninguém conecta via relay | Falta `external-ip` no config (VPS com NAT) | Atualize para v4.13.2+ — a detecção é automática |
-| `monky status` mostra `coturn: indisponível` | coturn não está instalado | `sudo bash scripts/install-turn.sh` |
+| `monky status` mostra `coturn: indisponível` | coturn não está instalado | Siga a [instalação manual](#instalacao-manual-do-coturn) |
 | O botão TURN está esmaecido no app | Servidor não é Linux, ou versão antiga | Atualize o servidor; TURN só funciona em Linux |
 | Chamada conecta mas com muita latência | Normal para relay — a mídia passa pelo servidor | Considere uma VPS mais próxima dos membros |
 

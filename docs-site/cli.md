@@ -2,6 +2,9 @@
 
 Ferramenta de linha de comando para criar e administrar servidores Monky.
 
+Este é o **CLI do servidor**, não o CLI gerado para um bot. Para empacotar
+e operar seu próprio bot, consulte [Distribuição de bots](/bots-distribuicao).
+
 ```
 monky <comando> [subcomando] [opções]
 ```
@@ -154,7 +157,7 @@ valores como `true`, `false`, `p2p` e `sfu` não são traduzidos.
 
 ---
 
-# Referência de comandos
+## Referência de comandos
 
 ## `monky create`
 
@@ -170,7 +173,8 @@ Após a escolha inicial de idioma, quando necessária, o comando pergunta:
 1. **Onde guardar os dados** — sugere `./data`, mas você pode informar qualquer
    caminho. Se já houver um servidor na pasta escolhida, ele pede outra.
 2. **Código de identidade do dono** (`MONKY-ID:...`) — exporte pelo app Monky em
-   *Configurações → Identidade → Exportar*.
+   *Configurações → Meu Perfil → Identidade*. Trate o backup e a senha como
+   credenciais: use-os somente em uma máquina de administração confiável.
 3. **Senha da identidade** — a que você definiu ao exportar.
 4. **Nome do servidor**
 5. **Porta do servidor** (padrão: `3000`)
