@@ -84,18 +84,23 @@ monky --data /srv/monky-friends restart
 
 ## CLI language
 
-The first command run in an interactive terminal asks for **English** or
+The first command run in an interactive terminal asks for **English (US)** or
 **Português (Brasil)** and saves the choice in `~/.monky/cli-config.json`.
 `monky`, `--help` and `--version` neither ask this question nor save a
 preference. Commands in scripts or with redirected input/output do not ask
 or change the saved language either.
 
-To change the preference later, use the explicit command:
+To change it later, open `monky config` and choose **Idioma / Language**, or run:
 
 ```bash
-monky --lang en-US
-monky --lang pt-BR
+monky config language en-US
+monky config language pt-BR
 ```
+
+This setting works without creating or selecting a server. The next menu already
+uses the new language; identity, database and server configuration are unchanged.
+`monky config language` without a code opens the picker in a terminal; in scripts,
+it only queries the preference. The `monky --lang pt-BR|en-US` shortcut remains available.
 
 `en-US` is normalized to `en`; English and Portuguese variants, including
 `pt_BR.UTF-8`, use the `en` and `pt-BR` catalogs. An unsupported code, a
@@ -526,10 +531,13 @@ role cannot be removed from a member.
 
 ## `monky config`
 
-Shows or changes the server configuration.
+In a terminal, opens CLI settings, including language and access to the server
+configuration. Without a TTY or in CI, it keeps the direct server query.
 
 ```bash
-monky config                       # show everything
+monky config                       # settings menu in a terminal
+monky config show                  # show server data directly
+monky config language en-US        # CLI language, even without a server
 monky config set                   # pick the key interactively
 monky config set <key> [value]     # change it directly
 ```
@@ -558,7 +566,7 @@ Changing `voiceMode` applies dynamically and notifies all connected clients.
 ### Examples
 
 ```bash
-monky config
+monky config show
 monky config set name "Friends Server"
 monky config set password           # typed hidden
 monky config set password clear     # removes the password

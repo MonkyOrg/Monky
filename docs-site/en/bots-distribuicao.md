@@ -11,7 +11,8 @@ Complete [Your first bot](/en/bots-desenvolvimento) before packaging.
 
 ## Automatic bot CLI and packaging
 
-The SDK also provides `monky-bot-sdk`, a build tool that creates a self-contained
+The SDK provides the [development assistant](/en/bots-desenvolvimento)
+`monky-bot-sdk`; its `build` command creates a self-contained
 `.tgz` with its **management CLI already generated**. Do not copy the MonkyBot CLI
 into every bot: declare the entry and options in `package.json`.
 
@@ -71,9 +72,13 @@ in CI, running without a command still shows help without prompting. Automation
 commands and flags remain available.
 
 On the first access from an interactive terminal, the CLI asks for **Português
-(Brasil)** or **English** and saves the choice in `~/.<cliName>/preferences.json`.
-`language en` or `language pt-BR` changes that preference; `--locale en` applies
-only to that invocation. `en-US` is accepted and normalized to `en`.
+(Brasil)** or **English (US)** and saves the choice in `~/.<cliName>/preferences.json`.
+Later, use **Configuration → Idioma / Language** or
+`my-bot config language pt-BR` / `my-bot config language en-US`.
+The change appears in the next menu, even without setup, without modifying
+identity, connection or token. `language` remains an alias; `--locale en-US`
+applies only to that invocation. `en-US` is normalized internally to `en`.
+This preference is independent of the development assistant's language.
 `--version`, `--help`, redirected input/output, `--non-interactive`, `--yes`,
 `--check`, and CI environments never open that prompt or create a preference
 automatically. `MONKY_BOT_LOCALE` can specify an automation's language; when it

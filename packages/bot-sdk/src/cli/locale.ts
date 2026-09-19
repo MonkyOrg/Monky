@@ -115,6 +115,7 @@ export function shouldPromptCliLocale(
   const command = args[0];
   return isInteractiveCliAccess(args, env) && !explicitLocale &&
     env.MONKY_BOT_LOCALE === undefined && env.MONKY_LANG === undefined &&
+    !(command === 'config' && args[1] === 'language') &&
     (!command || ['menu', 'setup', 'start', 'stop', 'restart', 'status', 'logs', 'config', 'update', 'autoupdate'].includes(command)) &&
     !readSavedCliLocale(homeDir);
 }
@@ -129,6 +130,21 @@ export function isInteractiveCliAccess(args: string[], env: NodeJS.ProcessEnv = 
 export async function chooseCliLocale(current: BotLocale): Promise<BotLocale> {
   const { askCliChoice } = await import('./prompts');
   return askCliChoice(current, 'Idioma / Language', [
-    { value: 'pt-BR', label: 'Português (Brasil)' }, { value: 'en', label: 'English' },
+    { value: 'pt-BR', label: 'Português (Brasil)' }, { value: 'en', label: 'English (US)' },
   ], current);
+}
+
+export async function languageCommand(context: { homeDir: string; locale: BotLocale }, args: string[]): Promise<void> {
+  if (args.length > 1 || (args.length === 1 && !normalizeBotLocale(args[0]))) {
+    throw new CliError('Use config language pt-BR ou config language en-US.',
+      'Use config language pt-BR or config language en-US.');
+  }
+  const selected = normalizeBotLocale(args[0]) ??
+    (!args.length && isInteractiveCliAccess(['language']) ? await chooseCliLocale(context.locale) : undefined);
+  if (selected) {
+    saveCliLocale(context.homeDir, selected);
+    context.locale = selected;
+  }
+  const tag = context.locale === 'en' ? 'en-US' : 'pt-BR';
+  console.log(cliText(context.locale, `Idioma: ${tag}`, `Language: ${tag}`));
 }

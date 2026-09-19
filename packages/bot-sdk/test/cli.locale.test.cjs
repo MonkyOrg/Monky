@@ -141,6 +141,53 @@ test('explicit language changes persist aliases; --locale stays invocation-local
   assert.equal(readSavedCliLocale(f.profile), 'pt-BR');
 });
 
+test('configuration language works without setup and never reads or rewrites bot credentials', async t => {
+  const f = fixture(t);
+  tty(t, false, false);
+  fs.mkdirSync(f.profile, { recursive: true });
+  const config = path.join(f.profile, 'config.json');
+  fs.writeFileSync(config, '{leave-existing-config-alone');
+  await runBotCli(f.bot, ['config', 'language', 'en-US']);
+  assert.equal(readSavedCliLocale(f.profile), 'en');
+  assert.match(f.output.join('\n'), /Language: en-US/);
+  await runBotCli(f.bot, ['config', 'language', 'pt-br']);
+  assert.equal(readSavedCliLocale(f.profile), 'pt-BR');
+  await assert.rejects(runBotCli(f.bot, ['config', 'language', 'invalid']), /config language/);
+  assert.equal(readSavedCliLocale(f.profile), 'pt-BR');
+  assert.equal(fs.readFileSync(config, 'utf8'), '{leave-existing-config-alone');
+  assert.deepEqual(fs.readdirSync(f.profile).sort(), ['config.json', 'preferences.json']);
+});
+
+test('configuration language changes the live menus and persists after reopening', async t => {
+  const f = fixture(t);
+  tty(t, false, false);
+  await runBotCli(f.bot, ['config', 'language', 'en-US']);
+  tty(t, true, true);
+  const questions = answers(t, ['config', 'language', 'pt-BR', 'back', 'exit']);
+  await runBotCli(f.bot, []);
+  assert.deepEqual(questions, ['Locale Bot', 'Configuration', 'Idioma / Language', 'Configuração', 'Locale Bot']);
+  assert.equal(readSavedCliLocale(f.profile), 'pt-BR');
+  assert.equal(createCliContext(f.bot).locale, 'pt-BR');
+  assert.equal(fs.existsSync(path.join(f.profile, 'config.json')), false);
+});
+
+test('cancelled or failed language changes preserve the saved choice and active context', async t => {
+  const f = fixture(t);
+  tty(t, false, false);
+  await runBotCli(f.bot, ['config', 'language', 'en-US']);
+  tty(t, true, true);
+  answers(t, [null]);
+  await runBotCli(f.bot, ['config', 'language']);
+  assert.equal(readSavedCliLocale(f.profile), 'en');
+  const context = createCliContext(f.bot);
+  t.mock.method(fs, 'renameSync', () => { throw new Error('Simulated denied write'); });
+  const { languageCommand } = require('../dist/cli/locale');
+  await assert.rejects(languageCommand(context, ['pt-BR']), /Could not save the language/);
+  assert.equal(context.locale, 'en');
+  assert.equal(readSavedCliLocale(f.profile), 'en');
+  assert.deepEqual(fs.readdirSync(f.profile), ['preferences.json']);
+});
+
 test('cancelled first-run language selection leaves no partial state', async (t) => {
   const f = fixture(t);
   tty(t, true, true);

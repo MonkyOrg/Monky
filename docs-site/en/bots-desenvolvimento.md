@@ -14,9 +14,8 @@ responses.
 - Use **Node.js 22 or 24** and npm.
 - Have a test Monky server and permission to manage its bots.
 - Client, server and bot SDK must use the same `PROTOCOL_VERSION`.
-- This guide's `create`/`doctor` commands and reader-localized messages use
-  **protocol 21**. Check `monky-compatibility-<version>.json` in the selected
-  release before connecting; an earlier stable may not offer these commands.
+- Check `monky-compatibility-<version>.json` in the selected release before
+  connecting. The assistant does not change the protocol or update your server.
 
 ::: info Why does the first example use a token?
 Manual mode lets you test without exposing an HTTP port for the bot. It does
@@ -24,219 +23,151 @@ not automatically approve permissions. To distribute your bot through a
 manifest URL, continue with [Connection and identity](/en/bots-conexao).
 :::
 
-## Quick path: development CLI
+## Install the tools once
 
-In the [Monky release](https://github.com/MonkyOrg/Monky/releases) matching your
-client and server, copy the real URL of `monky-bot-sdk-<version>.tgz`. Replace
-`SDK_URL` below with that URL; no global SDK installation or handwritten
-`package.json` is required:
+There is no need to find a `.tgz` URL, choose a tag manually or prepare
+`package.json` and TypeScript. The installer finds the official SDK release,
+verifies SHA-256 and installs `monky-bot-sdk` **per user, without administrator
+access**, in a dedicated directory.
 
-```text
-npm exec --yes --package="SDK_URL" -- monky-bot-sdk create my-bot --locale en
+::: warning Explicit beta channel
+The examples below include `--beta` to offer the new assistant while it is
+available only in beta releases. Without that option, the installer chooses
+stable. If the release does not offer the assistant yet, installation is refused
+without replacing a previous installation; the channel never changes silently.
+:::
+
+::: code-group
+
+```powershell [Windows — PowerShell]
+& ([scriptblock]::Create((Invoke-RestMethod https://monkyorg.github.io/Monky/install-bot-sdk.ps1))) --beta --locale en-US
 ```
 
-The assistant asks for the package/CLI name and the name displayed in Monky,
-using arrows for choices. It creates `package.json`, `tsconfig.json`, `.gitignore`,
-`src/index.ts` with `/ping`, and `vendor/` containing a self-contained copy of the
-**same SDK** being executed. It does not depend on a path to the global install
-or npm cache. The destination must be new: even an existing empty directory is
-not overwritten.
+```bash [Linux and macOS — Bash]
+curl -fsSL https://monkyorg.github.io/Monky/install-bot-sdk.sh | bash -s -- --beta --locale en-US
+```
 
-By default, it installs dependencies and compiles. Use `--no-install` to generate
-files only, then run `npm install` and `npm run build` yourself. Cancelling the
-questions does not create a project. Installation/build failures are reported
-and preserve files for diagnosis without claiming success.
+:::
+
+Open a **new terminal** and run:
 
 ```text
+monky-bot-sdk
+```
+
+On the first interactive use, choose **Português (Brasil)** or **English (US)**.
+The menu offers project creation/opening and settings. Inside a bot directory,
+it also offers adding features, compiling, checking, packaging and opening the
+runtime manager.
+
+The installer requires Node.js 22+ and npm; Linux/macOS also require Bash and
+curl, but not GNU grep. It uses `%LOCALAPPDATA%\Monky\BotSdk` on Windows and
+`~/.local/share/monky-bot-sdk` on Linux/macOS. It adds the installation to the
+Windows user PATH or the appropriate Bash/Zsh/POSIX profiles, preserving their
+existing contents. `--prefix DIR` chooses another dedicated destination;
+`--no-path` changes neither PATH nor profiles and prints the full command.
+
+Rerun the installer to update the tool. `--version VERSION` chooses a specific
+release without constructing URLs. **Updating the CLI does not update the SDK
+in existing projects.** Each project keeps its copy in `vendor/` and its lockfile;
+project commands use the SDK installed in that project.
+
+## 1. Create the project
+
+Choose **Create a new bot** in the assistant or run:
+
+```text
+monky-bot-sdk create my-bot
 cd my-bot
-npm run doctor
-npm run cli -- setup
-npm run cli -- start --foreground
 ```
 
-`doctor` checks Node/npm, package configuration, SDK/protocol, compiled entry
-and TypeScript types. It does not start the bot, create an identity or claim a
-remote server is compatible. Failures return a nonzero exit code. The generated
-bot uses manual mode and the CLI-provided identity; generate the link in the app
-as described in step 3 below. `/ping` already provides PT-BR/EN reader variants.
+The assistant asks for the directory, package/CLI name, name displayed in Monky
+and initial features. Use arrows/Enter to choose and Esc to cancel. By default,
+it installs dependencies and compiles. Everything is already prepared:
 
-If `monky-bot-sdk` is already installed, invoke it directly. For automation:
+```text
+my-bot/
+  package.json
+  package-lock.json
+  tsconfig.json
+  README.md
+  .gitignore
+  vendor/
+  src/
+    index.ts
+    bot.generated.ts
+    commands/
+      ping.ts
+```
+
+`src/index.ts` handles connection and shutdown; `/ping` lives in an editable
+module and provides PT-BR/EN replies per reader. `src/bot.generated.ts` connects
+commands, settings and capabilities. **Edit the modules, not this registry.**
+Commit the sources, `vendor/`, `package.json` and `package-lock.json`.
+
+The destination must be new; even an existing empty directory is not overwritten.
+`--no-install` only generates files, without a lockfile; run `npm install` and
+`npm run build` afterwards. Cancelling the questions does not create a project.
+If installation/compilation fails, files remain available to fix the cause,
+without a success message.
+
+For automation without questions:
 
 ```text
 monky-bot-sdk create my-bot --name my-bot --display-name "My Bot" --non-interactive
 ```
 
-`build` and `cli` remain available; no additional `dev` command is introduced.
-The following steps explain the same files for those who prefer to prepare
-them manually.
+## 2. Add features
 
-## 1. Prepare the project
+Run `monky-bot-sdk add` to choose everything in the assistant or provide the
+kind and name. Files are **integrated into the project**, not merely copied:
 
-Create an empty directory and save this `package.json` in it. It describes
-**your bot** and its development commands. The installer will add the bot
-SDK dependency; you do not need to copy a release URL into this file.
+| Command | Generated feature |
+| --- | --- |
+| `monky-bot-sdk add command greeting` | An editable command with PT-BR/EN replies |
+| `monky-bot-sdk add form signup` | A command opening a private form, with fields chosen in the assistant |
+| `monky-bot-sdk add selector choice` | A private or public selector, with choices supplied in the assistant |
+| `monky-bot-sdk add settings` | One settings declaration for the server and individual users |
+| `monky-bot-sdk add screen panel` | A voice-stage miniapp translated using each viewer's language |
 
-```json
-{
-  "name": "my-bot",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "build": "tsc",
-    "cli": "monky-bot-sdk cli",
-    "package": "monky-bot-sdk build"
-  },
-  "monkyBot": {
-    "cliName": "my-bot",
-    "displayName": "My Bot",
-    "entry": "dist/index.js",
-    "files": ["dist"],
-    "modes": ["manual"]
-  },
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.9.3"
-  }
-}
-```
-
-Create `tsconfig.json` in the same directory:
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "rootDir": "src",
-    "outDir": "dist",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "noEmitOnError": true
-  },
-  "include": ["src/**/*.ts"]
-}
-```
-
-### Install the bot SDK
-
-In the project directory, choose your terminal. On Linux, the command uses
-the [official installer](https://monkyorg.github.io/install-bot-sdk.sh);
-PowerShell queries the release directly, without requiring Bash:
-
-::: code-group
-
-```powershell [Windows — PowerShell]
-$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/MonkyOrg/Monky/releases/latest' -ErrorAction Stop
-$version = $release.tag_name.TrimStart('v')
-$asset = @($release.assets | Where-Object { $_.name -eq "monky-bot-sdk-$version.tgz" })
-if ($asset.Count -ne 1) { throw 'Bot SDK not found in the stable release.' }
-npm install $asset[0].browser_download_url
-```
-
-```bash [Linux — Bash]
-curl -fsSL https://monkyorg.github.io/install-bot-sdk.sh | bash
-```
-
-:::
-
-Both options query the latest stable Monky release, find its
-`monky-bot-sdk-*.tgz` artifact and run `npm install` in the project. This
-also installs the dependencies declared above and updates `package.json`
-and `package-lock.json`. Commit both files to reproduce the installation.
-This installs the bot library, **not the Monky app**. It does not generate
-your bot's code or create a server registration.
-
-With the Bash script, to include beta releases when choosing a version,
-replace `bash` with `bash -s -- --beta`. First check that your client and
-server use a compatible protocol.
-
-::: info Continue with this page's example
-The Bash installer's final message still prints an outdated code example.
-Use the next step in this guide, which declares capabilities and correctly
-receives the identity created by the CLI.
-:::
-
-<details>
-<summary>macOS, Bash script limitations or a specific version</summary>
-
-The current Bash script requires `curl` and GNU `grep` with `-P` support.
-That option is unavailable in the default macOS `grep` and may fail in
-Windows Git Bash; on Windows, prefer the PowerShell command above.
-
-On macOS, or to choose a specific version, copy the URL
-of the `monky-bot-sdk-<version>.tgz` artifact from the
-[official release](https://github.com/MonkyOrg/Monky/releases) and pass it to
-`npm install`, replacing `SDK_URL` with the real URL you selected:
+Parameters can also be explicit for noninteractive use:
 
 ```text
-npm install "SDK_URL"
+monky-bot-sdk add form signup --field name:text --field age:integer --field notifications:boolean --field "role:select:Reader,Editor" --non-interactive
+monky-bot-sdk add selector poll --public --choice "Option A" --choice "Option B" --non-interactive
 ```
 
-Run it in the project directory, without `-g`. npm writes the dependency
-to `package.json`; there is no need to edit that field manually.
+Fields accept `text`, `integer`, `boolean`, `string-list` and
+`select:ChoiceA,ChoiceB`. The sample form only acknowledges submission; implement
+your behavior using `values`. Translate author-written titles and labels in the
+module using `ctx.locale`; the generator does not invent translations.
+The settings module declares options and their defaults; implement their effects
+in handlers using `ctx.settings.server` and `ctx.settings.user`.
 
-</details>
+Selectors default to private in automation; `--public` creates a public poll
+lasting five minutes, with up to 50 participants and changeable votes.
+The example does not wait for the whole poll inside its handler. The miniapp
+requires voice membership, uses `commands`/`miniapps`, not `publish_voice`, and
+does not include CDNs, computer access or secret state.
 
-## 2. Write the command
+The generator rejects conflicting names/files, multiple settings modules,
+links in managed paths and manual registry edits. Metadata lives in
+`package.json.monkyBotDevelopment`. Older or handwritten projects still support
+`build`, `doctor` and `cli`, but `add` does not migrate them; it requires the
+managed structure created by this version.
 
-Create `src/index.ts`:
+After editing:
 
-```ts
-import {
-  BotClient,
-  validateBotServerUrl,
-  validateBotToken,
-} from '@monky/bot-sdk';
-
-function requiredEnvironment(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing environment variable: ${name}`);
-  return value;
-}
-
-const bot = new BotClient({
-  requestedCapabilities: ['commands'],
-  publicKey: requiredEnvironment('MONKY_BOT_PUBLIC_KEY'),
-  name: process.env.MONKY_BOT_NAME ?? 'My Bot',
-});
-
-bot.command({
-  name: 'ping',
-  description: 'Check whether the bot is online',
-  localizations: {
-    'pt-BR': { description: 'Verifica se o bot está respondendo' },
-  },
-  handler: (ctx) => {
-    ctx.reply(ctx.locale === 'en' ? 'Pong! I am online.' : 'Pong! Estou online.');
-  },
-});
-
-bot.on('error', (error: Error) => {
-  console.error('[bot]', error.message);
-});
-
-const shutdown = () => {
-  void bot.close().catch((error: unknown) => {
-    console.error('[shutdown]', error);
-    process.exitCode = 1;
-  });
-};
-process.once('SIGINT', shutdown);
-process.once('SIGTERM', shutdown);
-
-bot.connect({
-  serverUrl: validateBotServerUrl(requiredEnvironment('MONKY_SERVER_URL')),
-  token: validateBotToken(requiredEnvironment('MONKY_BOT_TOKEN')),
-});
+```text
+npm run build
+monky-bot-sdk doctor
+npm run package
 ```
 
-The bot SDK CLI creates/reuses the identity and provides these environment
-variables to the process. Do not put a token in source code, generate a new
-key on every launch or run `node dist/index.js` without preparing this
-environment.
+`doctor` checks Node/npm, dependencies, protocol, compiled entry and types,
+without starting a bot, creating an identity or connecting to a server. `build`
+produces the self-contained package described in [Distribution](/en/bots-distribuicao).
+`--root DIR` works with `add`, `doctor` and `build`; there is no `dev` command.
 
 ## 3. Link and start
 
@@ -261,8 +192,8 @@ daemon.
 ## 4. Approve and run
 
 In the client, open **Bot settings → Server permissions**, enable the
-requested **commands** capability and save. Being online does not replace
-this approval.
+requested **commands** capability and any other capabilities requested by the
+features you added, then save. Being online does not replace this approval.
 
 In a text channel that allows bots, type `/`, select the bot and run `/ping`.
 The response should appear **only for the caller**.
@@ -274,6 +205,33 @@ Check capability approval, your role's permission and the channel's
 **Allow bot commands** switch. The [diagnostic guide](/en/bots#when-something-goes-wrong)
 separates these cases from connection and protocol failures.
 :::
+
+## Languages and settings
+
+In the SDK, open **Settings → Idioma / Language** or run:
+
+```text
+monky-bot-sdk config language pt-BR
+monky-bot-sdk config language en-US
+```
+
+The next menu uses the new language, saved in
+`~/.monky-bot-sdk/preferences.json`. `MONKY_BOT_SDK_HOME` changes only this
+profile for testing. `--locale pt-BR|en-US` applies to one invocation; `en`
+remains an accepted alias. Menus are not opened without a TTY or in CI.
+
+The **bot runtime manager** has its own preference:
+
+```text
+npm run cli -- config
+npm run cli -- config language en-US
+```
+
+It does not silently inherit the SDK's saved preference. Changing its language
+does not recreate identity or change the connection, token or permissions.
+The server CLI also supports `monky config language pt-BR|en-US`; see
+[CLI](/en/cli). These terminal preferences do not change the language participants
+selected in the application.
 
 ## What you can build
 

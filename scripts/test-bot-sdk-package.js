@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PROTOCOL_VERSION } from '@monky/shared';
+import { runNpm } from '../packages/bot-sdk/dist/tooling/process.js';
+import { runSdkInstaller } from '../packages/bot-sdk/dist/tooling/install.js';
 
 const tarball = path.resolve(process.argv[2] || '');
 assert.ok(process.argv[2] && fs.statSync(tarball).isFile(), 'Pass the SDK tarball to test.');
@@ -11,8 +14,8 @@ const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-sdk-package-'));
 const env = { ...process.env, NODE_PATH: '', npm_config_audit: 'false', npm_config_fund: 'false' };
 
 try {
-  execSync(`npm install --ignore-scripts --no-save --package-lock=false --omit=dev ${JSON.stringify(tarball)}`, {
-    cwd: workspace, env, stdio: 'pipe', timeout: 120000,
+  runNpm(['install', '--offline', '--ignore-scripts', '--no-save', '--package-lock=false', '--omit=dev', tarball], {
+    cwd: workspace, env, timeout: 120000,
   });
   execFileSync(process.execPath, ['-e', `
     const assert = require('node:assert/strict');
@@ -75,7 +78,9 @@ try {
       assert.equal(fs.existsSync(path.join(home, '.operator-bot', '.keys')), false);
     })().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: workspace, env, stdio: 'inherit', timeout: 15000 });
-  console.log('SDK tarball installed, served its manifest and preserved operator update sources outside the monorepo.');
+  await runSdkInstaller(['--file', tarball, '--sha256', createHash('sha256').update(fs.readFileSync(tarball)).digest('hex'),
+    '--prefix', path.join(workspace, 'installed SDK'), '--no-path', '--locale', 'en-US']);
+  console.log('SDK tarball installed offline, served its manifest, preserved operator preferences and passed the per-user installer.');
 } finally {
   fs.rmSync(workspace, { recursive: true, force: true });
 }

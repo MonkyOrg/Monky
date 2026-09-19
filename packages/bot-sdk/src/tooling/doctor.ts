@@ -64,9 +64,9 @@ export function inspectBotProject(root: string): DoctorCheck[] {
   return checks;
 }
 
-export function doctorCommand(args: string[], locale: BotLocale): void {
+export function doctorCommand(args: string[], locale: BotLocale, root = process.cwd()): void {
   if (args.length) throw new CliError('doctor não aceita argumentos; execute na pasta do bot.', 'doctor takes no arguments; run it in the bot directory.');
-  const checks = inspectBotProject(process.cwd());
+  const checks = inspectBotProject(root);
   for (const check of checks) console.log(`[${check.ok ? 'OK' : cliText(locale, 'FALHA', 'FAIL')}] ${check.name}: ${check.detail}`);
   console.log(cliText(locale,
     `Verificação local e sem alterações. Cliente e servidor também precisam do protocolo ${PROTOCOL_VERSION}; nenhuma conexão foi feita.`,
