@@ -8,7 +8,7 @@
     "build": "tsc && vite build && tsc -p tsconfig.electron.json && npm run build:dialog-preload",
     "build:dialog-preload": "vite build --config vite.preload.config.ts",
     "start": "electron .",
-    "test": "tsc -p tsconfig.test.json && node dist-test/test/utils.test.js && node --test dist-test/test/eventBus.test.js dist-test/test/botInteractions.test.js dist-test/test/botScreens.test.js dist-test/test/commandUi.test.js dist-test/test/commandAutocomplete.test.js dist-test/test/soundDownloads.test.js dist-test/test/soundDownloadConfirmation.test.js dist-test/test/presence.test.js dist-test/test/networkClient.test.js dist-test/test/voiceConnection.test.js dist-test/test/voiceModeReconnect.test.js dist-test/test/shortcuts.test.js dist-test/test/releaseNotes.test.js dist-test/test/audioPreferences.test.js dist-test/test/serverSettings.test.js dist-test/test/favorites.test.js dist-test/test/cameraEffects.test.js dist-test/test/screenColorPicker.test.js dist-test/test/serverSettingsStore.test.js dist-test/test/hostedServerLifecycle.test.js dist-test/test/messageEditing.test.js dist-test/test/autoEntry.test.js dist-test/test/botLocalePreferencesStore.test.js dist-test/test/serverMonitor.test.js dist-test/test/localPermissions.test.js dist-test/test/localExecutionService.test.js dist-test/test/localTools.test.js dist-test/test/localExecutionRenderer.test.js dist-test/test/localExecutionTasks.test.js dist-test/test/localAudioSender.test.js dist-test/test/worker.test.js dist-test/test/workerClient.test.js dist-test/test/workerProtocol.test.js test/serverManagerLifecycle.test.cjs test/developmentProfile.test.cjs test/updaterCompatibility.test.cjs test/crashRecovery.test.cjs test/localExecutionIpc.test.cjs test/localToolsTab.test.cjs",
+    "test": "tsc -p tsconfig.test.json && node dist-test/test/utils.test.js && node --test dist-test/test/eventBus.test.js dist-test/test/botInteractions.test.js dist-test/test/botScreens.test.js dist-test/test/commandUi.test.js dist-test/test/commandAutocomplete.test.js dist-test/test/soundDownloads.test.js dist-test/test/soundDownloadConfirmation.test.js dist-test/test/presence.test.js dist-test/test/networkClient.test.js dist-test/test/voiceConnection.test.js dist-test/test/voiceModeReconnect.test.js dist-test/test/shortcuts.test.js dist-test/test/releaseNotes.test.js dist-test/test/audioPreferences.test.js dist-test/test/serverSettings.test.js dist-test/test/favorites.test.js dist-test/test/cameraEffects.test.js dist-test/test/screenColorPicker.test.js dist-test/test/serverSettingsStore.test.js dist-test/test/hostedServerLifecycle.test.js dist-test/test/messageEditing.test.js dist-test/test/autoEntry.test.js dist-test/test/botLocalePreferencesStore.test.js dist-test/test/serverMonitor.test.js dist-test/test/localPermissions.test.js dist-test/test/localExecutionService.test.js dist-test/test/localTools.test.js dist-test/test/localExecutionRenderer.test.js dist-test/test/localExecutionTasks.test.js dist-test/test/localAudioSender.test.js dist-test/test/worker.test.js dist-test/test/workerClient.test.js dist-test/test/workerProtocol.test.js test/serverManagerLifecycle.test.cjs test/developmentProfile.test.cjs test/updaterCompatibility.test.cjs test/crashRecovery.test.cjs test/localExecutionIpc.test.cjs test/localToolsTab.test.cjs test/soundboardLimiter.test.cjs",
     "test:development": "node test/developmentProfileSmoke.cjs",
     "test:updates": "node test/updateCompatibilitySmoke.cjs",
     "test:editing": "tsc -p tsconfig.test.json && node --test dist-test/test/messageEditing.test.js && node test/messageEditingDomSmoke.cjs",
@@ -22,6 +22,7 @@
     "test:recovery": "tsc -p tsconfig.test.json && node --test dist-test/test/networkClient.test.js dist-test/test/voiceConnection.test.js dist-test/test/voiceModeReconnect.test.js test/navigationFavoritesSmoke.cjs test/crashRecovery.test.cjs && node test/voiceRecoverySmoke.cjs && node test/crashRecoverySmoke.cjs",
     "test:crashes": "node --test test/crashRecovery.test.cjs && node test/crashRecoverySmoke.cjs",
     "test:loading": "node --test test/loadingSkeletonSmoke.cjs",
+    "test:invites": "tsc -p tsconfig.test.json && node --test dist-test/test/serverInvites.test.js test/navigationFavoritesSmoke.cjs test/serverInviteWebsiteSmoke.cjs",
     "test:bots": "tsc -p tsconfig.test.json && node --test dist-test/test/botInteractions.test.js dist-test/test/botScreens.test.js dist-test/test/commandUi.test.js dist-test/test/commandAutocomplete.test.js dist-test/test/soundDownloads.test.js dist-test/test/soundDownloadConfirmation.test.js dist-test/test/localPermissions.test.js dist-test/test/localExecutionService.test.js dist-test/test/localTools.test.js dist-test/test/localExecutionRenderer.test.js dist-test/test/localExecutionTasks.test.js dist-test/test/localAudioSender.test.js dist-test/test/worker.test.js dist-test/test/workerClient.test.js dist-test/test/workerProtocol.test.js test/localExecutionIpc.test.cjs test/localToolsTab.test.cjs",
     "test:screens": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && node --test dist-test/test/botScreens.test.js test/botScreenDom.test.cjs",
     "test:bots:ui": "node test/commandDomSmoke.cjs && node --test test/localExecutionCommandDom.test.cjs",
@@ -31,7 +32,8 @@
     "test:local-execution:e2e": "node --test test/localExecutionE2eSmoke.cjs",
     "test:shortcuts": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && node --test dist-test/test/shortcuts.test.js && node test/shortcutWorkerSmoke.cjs",
     "package": "electron-builder --win --dir",
-    "dist": "electron-builder --win"
+    "dist": "electron-builder --win",
+    "test:soundboard": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && node --test dist-test/test/audioPreferences.test.js dist-test/test/soundDownloads.test.js test/soundboardLimiter.test.cjs && node test/soundboardLimiterSmoke.cjs"
   },
   "description": "Monky — P2P Self-Hosted Voice, Video and Chat",
   "author": "Murilo",
@@ -69,6 +71,14 @@
   "build": {
     "appId": "com.monky.app",
     "productName": "Monky",
+    "protocols": [
+      {
+        "name": "Monky",
+        "schemes": [
+          "monky"
+        ]
+      }
+    ],
     "electronVersion": "34.2.0",
     "asar": false,
     "directories": {

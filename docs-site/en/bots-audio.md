@@ -83,7 +83,7 @@ bot.command({
 
 ## Authorized local downloads
 
-Declare `downloadsSound: true` when a command may request **one** soundboard download. The composer explains this capability, requires authorization for each execution, and blocks activation with a notice if the folder is not configured or authorized. **Selecting/executing a command never opens a folder picker.** Configure the folder beforehand in soundboard settings; a previously confirmed folder is reused. This does not grant the bot general filesystem access.
+Declare `downloadsSound: true` when a command may request **one** soundboard download. The composer explains this capability, requires authorization for each execution, and blocks activation with a notice if the folder is unavailable or unauthorized. **Selecting/executing a command never opens a folder picker.** Monky prepares a default folder in the local profile when none has been chosen; a previously confirmed folder is reused. Users can change it in soundboard settings. This does not grant the bot general filesystem access.
 
 ```ts
 bot.command({

@@ -54,7 +54,8 @@ sem formulário de configuração próprio.
 para aquele bot, servidor/endereço e identidade no perfil local. Restaurar os
 padrões volta a seguir o Monky. O idioma efetivo chega em `ctx.locale` também no
 autocomplete e na prévia de áudio. Interações já iniciadas mantêm o idioma
-capturado; o corpo de mensagens antigas não é traduzido retroativamente. O nome
+capturado para formulários e escolhas. Mensagens com variantes fornecidas pelo
+bot acompanham o idioma do aplicativo de cada leitor, inclusive no histórico. O nome
 do comando no cabeçalho de uma resposta acompanha o idioma de quem a lê, usando
 os metadados disponíveis; sem eles, aparece o nome canônico.
 
@@ -128,9 +129,39 @@ bot.command({
 });
 ```
 
-Formulários e corpos das respostas ainda são responsabilidade do handler e
-devem usar `ctx.locale`, não `ctx.settings.user.locale`. `ctx.reply()` mantém a
-ajuda privada; publicar uma ajuda traduzida no canal não a torna individual.
+Formulários e escolhas continuam usando `ctx.locale`, não
+`ctx.settings.user.locale`. `ctx.reply()` mantém a ajuda privada; `ctx.publish()`
+a torna visível para todo o canal, mesmo quando cada leitor vê um idioma diferente.
+
+### Mensagens no idioma de quem lê
+
+`ctx.reply()`, `ctx.replyEphemeral()`, `ctx.publish()`, `bot.sendMessage()` e
+`bot.finalizeSelector()` aceitam uma string simples ou um `BotLocalizedMessage`:
+
+```ts
+ctx.publish({
+  content: 'Track added to the queue.',
+  localizations: {
+    'pt-BR': 'Música adicionada à fila.',
+    en: 'Track added to the queue.',
+  },
+});
+```
+
+O bot escreve as variantes; **não há tradução automática**. Cada leitor escolhe
+a variante pelo idioma do aplicativo, não pelo idioma de quem executou o comando
+nem pela preferência usada no formulário do bot. `content` é obrigatório e serve
+de fallback quando não existe variante. Cada texto aceita de 1 a 2.000 caracteres;
+as chaves suportadas são `pt-BR` e `en`.
+
+As variantes permanecem no histórico e nas referências de resposta; copiar usa
+o texto exibido. Trocar o idioma atualiza a exibição sem modificar a mensagem.
+Excluir apaga também as variantes. Bots que enviam apenas strings continuam
+funcionando, mas essas mensagens não ganham traduções retroativas.
+
+Sorteie dados/moedas uma única vez e gere as variantes do **mesmo resultado**.
+Preserve títulos de músicas, perguntas, opções e textos livres de pessoas.
+O contrato exige cliente, servidor e SDK de bots compatíveis com o protocolo 21.
 
 ## Parâmetros guiados no chat
 

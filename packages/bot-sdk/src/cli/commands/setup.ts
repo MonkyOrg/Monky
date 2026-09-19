@@ -1,8 +1,7 @@
 import os from 'node:os';
-import readline from 'node:readline';
-import { Writable } from 'node:stream';
 import type { BotLocale } from '@monky/shared';
 import { CliError, cliErrorMessage, cliText } from '../locale';
+import { askCliChoice, askCliText } from '../prompts';
 import { assertManifestPortAvailable } from '../ports';
 import {
   ANSI,
@@ -38,18 +37,6 @@ type NonInteractiveSetupInput = {
 );
 
 const SETUP_CANCELLED_MESSAGE = 'Setup cancelado; a configuração não foi alterada.';
-
-function prompt(rl: readline.Interface, question: string, locale: BotLocale): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const onClose = (): void => reject(new Error(cliText(locale, SETUP_CANCELLED_MESSAGE,
-      'Setup cancelled; the configuration was not changed.')));
-    rl.once('close', onClose);
-    rl.question(question, (answer) => {
-      rl.off('close', onClose);
-      resolve(answer.trim());
-    });
-  });
-}
 
 type Ask = (question: string, secret?: boolean) => Promise<string>;
 
@@ -181,27 +168,14 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
       'Use setup --non-interactive when no interactive terminal is available.');
   }
 
-  let muted = false;
-  const output = new Writable({
-    write(chunk: Buffer, _encoding, callback) {
-      if (!muted) process.stdout.write(chunk);
-      callback();
-    },
-  });
-  const rl = readline.createInterface({ input: process.stdin, output, terminal: true, historySize: 0 });
   let closed = false;
-  rl.once('close', () => { closed = true; });
-  rl.on('SIGINT', () => rl.close());
+  const onClose = (): void => { closed = true; };
+  process.stdin.once('end', onClose);
+  process.stdin.once('close', onClose);
+  process.once('SIGINT', onClose);
   const ask: Ask = async (question, secret = false) => {
     if (closed) throw new Error(text(SETUP_CANCELLED_MESSAGE, 'Setup cancelled; the configuration was not changed.'));
-    const answer = prompt(rl, question, context.locale);
-    muted = secret;
-    try {
-      return await answer;
-    } finally {
-      muted = false;
-      if (secret) console.log();
-    }
+    return askCliText(context.locale, question.trim().replace(/:$/, ''), { secret });
   };
   try {
     console.log(color(`${context.displayName} — Setup`, ANSI.bold));
@@ -209,8 +183,10 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     if (existing) {
       console.log(text(`Configuração atual detectada em ${context.configFile}.`, `Current configuration found at ${context.configFile}.`));
       if (!assumeYes) {
-        const answer = await ask(text('Substituir a configuração existente? [s/N] ', 'Replace the existing configuration? [y/N] '));
-        if (!['s', 'sim', 'y', 'yes'].includes(answer.toLowerCase())) {
+        const answer = await askCliChoice(context.locale, text('Substituir a configuração existente?', 'Replace the existing configuration?'), [
+          { value: 'no', label: text('Não', 'No') }, { value: 'yes', label: text('Sim', 'Yes') },
+        ]);
+        if (answer !== 'yes') {
           console.log(text('Setup cancelado.', 'Setup cancelled.'));
           return;
         }
@@ -220,18 +196,8 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     const modes = promptModes(context.project.definition.modes);
     let mode = modes[0] ?? 'manual';
     if (modes.length > 1) {
-      console.log(color(text('Escolha o modo de operação:', 'Choose the operating mode:'), ANSI.bold));
-      for (const [index, available] of modes.entries()) {
-        console.log(`  ${index + 1}. ${promptModeLabel(available, context.locale)}`);
-      }
-      const defaultMode = existing && modes.includes(existing.mode) ? modes.indexOf(existing.mode) + 1 : 1;
-      mode = await validatedPrompt(context.locale, ask, text(`Modo [${defaultMode}]: `, `Mode [${defaultMode}]: `), (answer) => {
-        const selected = Number(answer || defaultMode) - 1;
-        if (!Number.isInteger(selected) || selected < 0 || selected >= modes.length) {
-          throw new Error(text(`Escolha um modo entre 1 e ${modes.length}.`, `Choose a mode between 1 and ${modes.length}.`));
-        }
-        return modes[selected];
-      });
+      mode = await askCliChoice(context.locale, text('Escolha o modo de operação:', 'Choose the operating mode:'),
+        modes.map(value => ({ value, label: promptModeLabel(value, context.locale) })), existing?.mode);
     } else {
       ensureModeSupported(context, mode);
       console.log(text(`Modo suportado: ${promptModeLabel(mode, context.locale)}`, `Supported mode: ${promptModeLabel(mode, context.locale)}`));
@@ -314,7 +280,8 @@ export async function setupCommand(context: CliContext, args: string[]): Promise
     console.log(text(`  ${context.cliName} status   — Verifica o estado`, `  ${context.cliName} status   — Check the status`));
     console.log(text(`  ${context.cliName} logs     — Exibe os logs`, `  ${context.cliName} logs     — Show the logs`));
   } finally {
-    rl.close();
-    output.end();
+    process.stdin.off('end', onClose);
+    process.stdin.off('close', onClose);
+    process.off('SIGINT', onClose);
   }
 }

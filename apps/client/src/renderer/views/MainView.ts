@@ -6,7 +6,7 @@ import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
 import { sessionManager } from '../core/SessionManager';
 import { isForegroundEvent } from '../core/sessionRouting';
-import { callClient, isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession } from '../core/serverConnection';
+import { callClient, isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession, showHome } from '../core/serverConnection';
 import { participantManager } from '../core/ParticipantManager';
 import { serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
@@ -19,6 +19,7 @@ import { webRtcManager } from '../core/WebRtcManager';
 import { videoService } from '../core/VideoService';
 import { screenAudioService } from '../core/ScreenAudioService';
 import { ChatView } from './ChatView';
+import type { ConnectionView } from './ConnectionView';
 import { bindPttIndicators, renderMicrophoneButton } from './PttIndicator';
 import { bindAudioDevicePopovers } from './AudioDevicePopover';
 import { bindFooterControlsMotion } from './FooterControlsMotion';
@@ -79,12 +80,14 @@ export class MainView {
     }
   }
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, private readonly homeView?: ConnectionView) {
     this.container = container;
   }
 
   public render(preserveBotScreen = false): void {
-    const preserve = preserveBotScreen && this.activeContentView === 'stage' && this.callIsHere() && this.voiceStageView?.hasOpenBotScreen();
+    const home = sessionManager.isHome();
+    const preserve = !home && preserveBotScreen && this.activeContentView === 'stage' && this.callIsHere() && this.voiceStageView?.hasOpenBotScreen();
+    this.homeView?.suspend();
     this.unbindListeners();
     this.stopSidebarPing();
 
@@ -102,7 +105,7 @@ export class MainView {
     const enteringFromHome = this.container.querySelector('.connection-layout') !== null;
 
     const markup = `
-      <div class="main-layout">
+      <div class="main-layout${home ? ' main-layout--home' : ''}">
         <!-- Server Rail: saved servers + home (#29) -->
         <div class="server-rail" id="server-rail"></div>
 
@@ -185,6 +188,7 @@ export class MainView {
                 </div>
                 <div class="user-info-text">
                   <span id="main-user-name" class="user-name-display">${escapeHtml(u.nickname)}</span>
+                  ${home ? `<span class="user-status-text" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</span>` : ''}
                   <span id="main-user-status-text" class="user-status-text">${settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline')}</span>
                 </div>
               </div>
@@ -207,7 +211,7 @@ export class MainView {
                 <button id="bar-btn-settings" class="btn btn-icon" title="${t('connection.settingsTitle')}">
                   <span class="material-symbols-outlined md-18">settings</span>
                 </button>
-                <button id="bar-btn-disconnect" class="btn btn-icon" style="color: var(--danger);" title="${t('main.disconnectTitle')}">
+                <button id="bar-btn-disconnect" class="btn btn-icon" style="color: var(--danger);" title="${escapeHtml(t('main.disconnectFrom', { name: s.name }))}">
                   <span class="material-symbols-outlined md-18">logout</span>
                 </button>
               </div>
@@ -230,10 +234,12 @@ export class MainView {
     const preserved = preserve && replaceAroundLiveChild(this.container, markup, '.main-layout', '#main-center-stage');
     if (!preserved) this.container.innerHTML = markup;
 
-    this.renderChannels();
-    this.renderMembers();
+    if (!home) {
+      this.renderChannels();
+      this.renderMembers();
+    }
     serverRailView.render();
-    this.setupChannelsResizer();
+    if (!home) this.setupChannelsResizer();
     this.observeUserCardHeight();
 
     const centerStageEl = document.getElementById('main-center-stage')!;
@@ -252,7 +258,11 @@ export class MainView {
     // who is watching the voice stage back into the text channel. The session
     // check keeps the stage hidden when the call belongs to another server the
     // user has walked away from (#400).
-    if (this.activeContentView === 'stage' && this.callIsHere()) {
+    if (home) {
+      if (!this.homeView) throw new Error('The Home view was not provided to the connected layout');
+      appEvents.emit('stage.visibility_changed', false);
+      this.homeView.render(centerStageEl);
+    } else if (this.activeContentView === 'stage' && this.callIsHere()) {
       this.voiceStageView?.setChannel(voiceStore.currentVoiceChannelId);
     } else if (serverStore.activeTextChannelId) {
       this.setActiveContentView('chat');
@@ -269,7 +279,7 @@ export class MainView {
 
     const soundboardSlot = document.getElementById('soundboard-players-slot');
     if (soundboardSlot) soundboardPlayersBar.mount(soundboardSlot);
-    if (enteringFromHome) this.animateServerEntry();
+    if (!home && enteringFromHome) this.animateServerEntry();
   }
 
   private animateServerEntry(): void {
@@ -601,7 +611,7 @@ export class MainView {
     const sessionKey = voiceStore.voiceSessionKey;
     if (!channelId || !sessionKey || !sessionManager.get(sessionKey)) return;
     // A notice can belong to the background call, never to the current text tab.
-    if (sessionManager.getActiveKey() !== sessionKey) sessionManager.activate(sessionKey);
+    if (sessionManager.isHome() || sessionManager.getActiveKey() !== sessionKey) sessionManager.activate(sessionKey);
     this.setActiveContentView('stage');
     this.voiceStageView?.setChannel(channelId);
     if (watchSessionId) this.voiceStageView?.watchScreenShare(watchSessionId);
@@ -1537,7 +1547,7 @@ export class MainView {
       if (!session) return;
       const confirmed = await showConfirm({
         title: t('main.disconnect'),
-        message: t('main.disconnectMessage'),
+        message: t('main.disconnectServerMessage', { name: session.serverStore.serverDetails?.name ?? session.host }),
         confirmLabel: t('main.disconnect'),
         variant: 'danger',
       });
@@ -1550,6 +1560,9 @@ export class MainView {
         // them down while the call lives on another server would kill the audio
         // and still leave the user listed in that server's voice channel.
         session.client.disconnect();
+        const next = sessionManager.getAll().find(candidate => candidate.client.getStatus() === 'CONNECTED');
+        if (next) sessionManager.activate(next.key);
+        else showHome();
         if (leaveState) await promptShutdownAfterLeave(leaveState);
       }
     });
@@ -1691,23 +1704,13 @@ export class MainView {
       serverRailView.render();
     });
 
-    const u7d = appEvents.on('session.changed', (payload: { key: string | null }) => {
-      this.refreshServerMonitorVisibility();
-      // A null key means every server is gone and the connection screen is
-      // taking over. The DOM check covers the mirror case: while the connection
-      // screen is up, activating a session (a connection starting) must not
-      // paint the server view over it. And a session with no details yet is one
-      // still connecting — rendering it would blank the screen and unbind every
-      // listener while the user waits (#400).
-      if (!payload?.key || !serverStore.serverDetails) return;
-      if (!document.getElementById('main-center-stage')) return;
-      this.render();
-    });
+    const u7d = appEvents.on('session.changed', () => this.refreshServerMonitorVisibility());
 
     const u8 = appEvents.on(`message.${MessageType.CHANNEL_DELETED}`, () => {
       // If the text channel currently shown was removed, fall back to the
       // remaining active channel so the chat view is never left orphaned.
       if (
+        isForegroundEvent() && !sessionManager.isHome() &&
         this.activeContentView === 'chat' &&
         serverStore.activeTextChannelId &&
         this.chatView
@@ -1789,6 +1792,7 @@ export class MainView {
   /** True when the given text channel is the one currently visible on screen (#14). */
   public isViewingTextChannel(channelId: string): boolean {
     return (
+      !sessionManager.isHome() &&
       this.activeContentView === 'chat' &&
       serverStore.activeTextChannelId === channelId
     );
@@ -1826,6 +1830,7 @@ export class MainView {
   }
 
   public destroy(): void {
+    this.homeView?.suspend();
     this.stopSidebarPing();
     this.clearTextChannelDragHover();
     this.unbindListeners();

@@ -602,6 +602,51 @@ input:focus, textarea:focus, select:focus {
   position: relative;
 }
 
+.main-layout--home {
+  display: grid;
+  grid-template-columns: var(--server-rail-width) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.main-layout--home > .server-rail {
+  grid-area: 1 / 1 / 3 / 2;
+}
+
+.main-layout--home > .channels-sidebar {
+  grid-area: 2 / 1 / 3 / 3;
+  width: min(100%, calc(280px + var(--server-rail-width)));
+  min-width: 0;
+  max-width: none;
+  background: transparent;
+  border: 0;
+  z-index: 80;
+}
+
+.main-layout--home > .channels-sidebar > :not(.user-control-bar),
+.main-layout--home > .members-sidebar {
+  display: none;
+}
+
+.main-layout--home > .main-content-area {
+  grid-area: 1 / 2 / 3 / 3;
+  min-width: 0;
+}
+
+.main-layout--home .connection-layout {
+  width: 100%;
+  padding-bottom: calc(var(--user-card-height, 150px) + 24px);
+}
+
+.main-layout--home .user-control-bar {
+  margin-left: 8px;
+}
+
+.server-rail-home[aria-current="page"] {
+  background: var(--accent-primary);
+  color: var(--text-on-accent, #fff);
+  border-radius: 14px;
+}
+
 /* Channels Sidebar */
 .channels-sidebar {
   width: 280px;
@@ -1688,12 +1733,8 @@ input:focus, textarea:focus, select:focus {
    changes with the screen-share notice and the voice connection row — in the
    flow, the channel list simply gives way instead of ending up hidden behind it.
 
-   The z-index sits above the reconnect overlay (4000) on purpose: the overlay
-   covers everything to the right of the rail, so without this the card would be
-   dimmed on one half and bright on the other. Staying above also keeps mute,
-   deafen, settings and disconnect usable while the app retries, which is the
-   same reasoning that already leaves the rail and the title bar clickable
-   (#321). */
+   Keep it above the surrounding layout, but below modal backdrops (1000):
+   settings and confirmations must cover both the card and its controls. */
 .user-control-bar {
   background-color: var(--bg-panel);
   border: 1px solid var(--border-color);
@@ -1706,7 +1747,7 @@ input:focus, textarea:focus, select:focus {
   gap: 6px;
   flex-shrink: 0;
   position: relative;
-  z-index: 4100;
+  z-index: 80;
 }
 
 .user-media-bar {
@@ -4965,7 +5006,22 @@ input:focus, textarea:focus, select:focus {
 }
 
 .chat-inline-media--image {
+  display: inline-grid;
   max-width: min(320px, 100%);
+}
+
+.chat-inline-media--image > .chat-attachment-image {
+  grid-area: 1 / 1;
+  align-self: center;
+}
+
+.chat-inline-media--image > .chat-inline-media-actions {
+  grid-area: 1 / 1;
+  position: relative;
+  inset: auto;
+  align-self: start;
+  justify-self: end;
+  margin: 10px;
 }
 
 .chat-attachment-image {
@@ -8115,6 +8171,155 @@ button[data-loading="1"]::after {
 
 button:hover .role-option-check:not(.checked) {
   border-color: var(--accent-primary);
+}
+
+/* Soundboard limiter */
+.soundboard-modal-card {
+  gap: 0;
+}
+
+.soundboard-modal-card > :not(#sb-sounds-container) {
+  flex-shrink: 0;
+}
+
+.soundboard-modal-card .modal-footer {
+  margin-top: 0;
+}
+
+.sb-limiter-toolbar {
+  padding: 10px 20px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.sb-limiter-controls {
+  display: grid;
+  gap: 6px;
+}
+
+.sb-limiter-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sb-limiter-heading label {
+  margin: 0;
+}
+
+.sb-limiter-description {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.sb-limiter-value {
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.sb-limiter-controls .toggle-switch:has(input:focus-visible),
+.sb-limiter-controls .sb-slider:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 4px;
+}
+
+.sb-limiter-controls .sb-slider:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sb-limiter-track {
+  position: relative;
+  height: 26px;
+}
+
+.sb-limiter-bands {
+  position: absolute;
+  inset: 10px 7px;
+  border-radius: 3px;
+  pointer-events: none;
+  background: linear-gradient(to right,
+    var(--success) 0%, var(--success) var(--near-limit-position),
+    var(--warning) var(--near-limit-position), var(--warning) var(--limit-position),
+    var(--danger) var(--limit-position), var(--danger) 100%);
+}
+
+.sb-limiter-controls .sb-limiter-ceiling {
+  position: absolute;
+  inset: 0;
+  height: 26px;
+  background: transparent !important;
+}
+
+.sb-limiter-meter {
+  position: absolute;
+  top: 0;
+  left: calc(7px + (100% - 14px) * var(--sound-position, 0));
+  width: 2px;
+  height: 26px;
+  transform: translateX(-1px);
+  background: var(--text-primary);
+  box-shadow: 0 0 0 1px var(--bg-app);
+  pointer-events: none;
+}
+
+.sb-limiter-meter::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: -3px;
+  border: 4px solid transparent;
+  border-top-color: var(--text-primary);
+}
+
+.sb-limiter-reading,
+.sb-limiter-legend {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.sb-limiter-reading [data-limiter-current] {
+  font-variant-numeric: tabular-nums;
+}
+
+.sb-limiter-reading [data-limiter-status] {
+  text-align: right;
+}
+
+.sb-limiter-controls[data-intensity-state="above"] [data-limiter-current] {
+  color: var(--danger);
+}
+
+.sb-limiter-legend {
+  justify-content: flex-start;
+  gap: 14px;
+}
+
+.sb-limiter-legend span::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
+  background: var(--success);
+}
+
+.sb-limiter-legend .sb-limiter-near::before {
+  background: var(--warning);
+}
+
+.sb-limiter-legend .sb-limiter-above::before {
+  background: var(--danger);
 }
 
 /* Custom Sliders */

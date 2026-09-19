@@ -195,6 +195,7 @@ export function botCommandMessage(payload: BotCommandMessagePayload): ChatMessag
     userNickname: payload.botName,
     userAvatarUrl: payload.botAvatarUrl,
     content: payload.content,
+    localizations: payload.localizations,
     createdAt: payload.createdAt,
     isBot: true,
     isEphemeral: payload.ephemeral,

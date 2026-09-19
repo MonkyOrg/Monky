@@ -53,10 +53,29 @@ export function assertServerBrowseAvailable(host: string, port: number): void {
   }
 }
 
+export async function updateSessionAvatar(host: string, port: number, avatar: string): Promise<void> {
+  const session = getServerSessionForAddress(host, port);
+  if (!avatar || !session || session.client.getStatus() !== 'CONNECTED') return;
+  try {
+    await session.client.sendRequest(MessageType.USER_UPDATE_AVATAR, { avatarBase64: avatar, mimeType: 'image/png' });
+  } catch (error: unknown) {
+    clientLog.warn('CONNECTION', 'Could not update the avatar on the opened server session', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export function captureServerBrowseIntent(): () => boolean {
   const generation = serverNavigationGeneration;
   const previous = sessionManager.getActive();
-  return () => generation === serverNavigationGeneration && sessionManager.getActive() === previous;
+  const wasHome = sessionManager.isHome();
+  return () => generation === serverNavigationGeneration && sessionManager.getActive() === previous
+    && sessionManager.isHome() === wasHome;
+}
+
+export function showHome(): void {
+  serverNavigationGeneration++;
+  sessionManager.showHome();
 }
 
 async function connectServerSession(
@@ -126,6 +145,7 @@ export async function openServerSession(
   }
 
   const generation = foreground ? ++serverNavigationGeneration : serverNavigationGeneration;
+  const previousHome = sessionManager.isHome();
   const pending = pendingServerOpens.get(key);
   const reusable = pending && pending.session === existing ? pending : undefined;
   const active = sessionManager.getActive();
@@ -160,7 +180,10 @@ export async function openServerSession(
         && (previous.client.getStatus() === 'CONNECTED' || previous.serverStore.serverDetails);
       const fallback = previousSurvives ? previous : sessionManager.getAll()
         .find(candidate => candidate.client.getStatus() === 'CONNECTED');
-      if (fallback) sessionManager.activate(fallback.key);
+      if (fallback) {
+        sessionManager.activate(fallback.key);
+        if (previousHome) sessionManager.showHome();
+      }
     }
     throw err;
   } finally {

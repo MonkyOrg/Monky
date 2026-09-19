@@ -16,6 +16,7 @@ import { sortFavoritesFirst } from '../utils/favoriteOrder';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
+import { bindSoundboardLimiterControls, renderSoundboardLimiterControls } from './SoundboardLimiterControls';
 
 export class SoundboardModal {
   private modalEl: HTMLElement | null = null;
@@ -39,7 +40,7 @@ export class SoundboardModal {
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';
     this.modalEl.innerHTML = `
-      <div class="modal-card" style="max-width: 600px; max-height: 85vh; display: flex; flex-direction: column; padding: 0; overflow: hidden;">
+      <div class="modal-card soundboard-modal-card" style="max-width: 600px; max-height: calc(100vh - 48px); display: flex; flex-direction: column; padding: 0; overflow: hidden;">
         
         <!-- Header -->
         <div class="modal-header" style="padding: 16px 20px 12px; border-bottom: 1px solid var(--border-color);">
@@ -80,6 +81,10 @@ export class SoundboardModal {
               <span id="sb-volume-label" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); min-width: 32px; text-align: right;">${settingsStore.soundboardVolume}%</span>
             </div>
           </div>
+        </div>
+
+        <div class="sb-limiter-toolbar">
+          ${renderSoundboardLimiterControls('soundboard-modal')}
         </div>
 
         <!-- Search Bar & View Mode Switcher (#288, #326) -->
@@ -149,7 +154,7 @@ export class SoundboardModal {
         ` : ''}
 
         <!-- Sounds Grid Area -->
-        <div id="sb-sounds-container" style="flex: 1; overflow-y: auto; padding: 10px 20px 16px; min-height: 220px;">
+        <div id="sb-sounds-container" style="flex: 1; overflow-y: auto; padding: 10px 20px 16px; min-height: 0;">
           ${renderLoadingSkeleton('lines', 5)}
         </div>
 
@@ -562,6 +567,7 @@ export class SoundboardModal {
 
   private attachEvents(): void {
     if (!this.modalEl) return;
+    this.unbindEvents.push(bindSoundboardLimiterControls(this.modalEl));
 
     const btnClose = this.modalEl.querySelector('#modal-close');
     const btnFooterClose = this.modalEl.querySelector('#sb-btn-close');

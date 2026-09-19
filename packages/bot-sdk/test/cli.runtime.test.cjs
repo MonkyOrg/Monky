@@ -13,6 +13,7 @@ const lifecycle = require('../dist/cli/commands/lifecycle');
 const pm2 = require('../dist/cli/pm2');
 const ports = require('../dist/cli/ports');
 const processHelpers = require('../dist/cli/process');
+const prompts = require('../dist/cli/prompts');
 
 function json(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -109,14 +110,28 @@ function mockManagedProcess(t, context, onStop, status = 'online', env = {}, fla
 }
 
 function interactiveAnswers(t, answers) {
-  const descriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
-  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
-  t.after(() => {
-    if (descriptor) Object.defineProperty(process.stdin, 'isTTY', descriptor);
-    else delete process.stdin.isTTY;
-  });
+  for (const stream of [process.stdin, process.stdout]) {
+    const descriptor = Object.getOwnPropertyDescriptor(stream, 'isTTY');
+    Object.defineProperty(stream, 'isTTY', { configurable: true, value: true });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(stream, 'isTTY', descriptor);
+      else delete stream.isTTY;
+    });
+  }
   const pending = [...answers];
   const questions = [];
+  t.mock.method(prompts, 'askCliChoice', async (_locale, question, choices, initial) => {
+    assert.ok(pending.length, `Unexpected choice: ${question}`);
+    questions.push(question);
+    console.log(choices.map(choice => choice.label).join('\n'));
+    const answer = pending.shift();
+    if (answer === null) throw new prompts.CliPromptCancelled();
+    const selected = !answer ? choices.find(choice => choice.value === initial) ?? choices[0]
+      : choices.find(choice => choice.value === answer || choice.value === (answer === 's' ? 'yes' : answer))
+        ?? choices[Number(answer) - 1];
+    assert.ok(selected, `Invalid scripted choice for ${question}`);
+    return selected.value;
+  });
   t.mock.method(readline, 'createInterface', (options) => {
     assert.equal(options.historySize, 0, 'The readline history must not retain the token.');
     const rl = new EventEmitter();
@@ -191,11 +206,11 @@ test('interactive setup defaults to the recommended URL installation for fresh p
   assert.equal(config.servePort, port);
   assert.equal(config.publicHost, 'bot.example.test');
   assert.equal(config.botName, 'Sound Bot');
-  assert.equal(questions[0], 'Modo [1]: ');
+  assert.equal(questions[0], 'Escolha o modo de operação:');
   assert.equal(questions.some((question) => /Token do bot|URL do servidor/.test(question)), false);
   const output = lines.join('\n');
-  assert.match(output, /1\. Instalação por URL — recomendado/);
-  assert.match(output, /2\. Conexão manual por token — avançado/);
+  assert.match(output, /Instalação por URL — recomendado/);
+  assert.match(output, /Conexão manual por token — avançado/);
 });
 
 test('interactive setup opts into the advanced manual flow and saves a hidden token outside the package', async (t) => {
@@ -211,7 +226,7 @@ test('interactive setup opts into the advanced manual flow and saves a hidden to
   } finally {
     write.mock.restore();
   }
-  assert.equal(questions[0], 'Modo [1]: ');
+  assert.equal(questions[0], 'Escolha o modo de operação:');
   assert.match(questions[1], /trabalho/);
   assert.match(questions[2], /URL do servidor/);
   assert.match(questions[3], /Token do bot/);
@@ -227,7 +242,7 @@ test('interactive setup opts into the advanced manual flow and saves a hidden to
   assert.match(lines.join('\n'), /Na seção Avançado, gere um vínculo\/token/);
   assert.doesNotMatch(lines.join('\n'), /Clique "Criar", dê um nome ao bot/);
   assert.equal(terminal.join('').includes(token), false);
-  await runBotCli(f.bot, ['config']);
+  await runBotCli(f.bot, ['config', 'show']);
   assert.equal(lines.join('\n').includes(token), false);
   assert.equal(cliConfig.sanitizeConfig(config).botToken, '[redacted]');
   const runtime = require('../dist/cli/runner').createRuntimeEnvironment(config, 'public-key', {});
@@ -242,7 +257,7 @@ test('interactive marketplace setup retries invalid fields and never requests a 
   const f = fixture(t);
   withEnv(t, { MONKY_BOT_CLI_HOME: f.state });
   const port = await unusedPort(t);
-  const questions = interactiveAnswers(t, ['3', '1', '', 'not-a-port', String(port), '', 'https://bot.example.test', 'bot.example.test', '']);
+  const questions = interactiveAnswers(t, ['1', '', 'not-a-port', String(port), '', 'https://bot.example.test', 'bot.example.test', '']);
   const errors = [];
   t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
   captureLogs(t);
@@ -254,7 +269,7 @@ test('interactive marketplace setup retries invalid fields and never requests a 
   assert.equal(config.botName, 'Sound Bot');
   assert.equal(questions.some((question) => /Token do bot|URL do servidor/.test(question)), false);
   assert.match(questions.at(-1), /Nome do bot/);
-  assert.equal(errors.length, 4);
+  assert.equal(errors.length, 3);
   assert.equal('botToken' in config, false);
   assert.equal('tokenEnv' in config, false);
 });
@@ -287,7 +302,7 @@ test('interactive reconfiguration preserves the existing token and data director
   const questions = interactiveAnswers(t, ['s', '', '', '', '', '']);
   captureLogs(t);
   await runBotCli(f.bot, ['setup']);
-  assert.equal(questions[1], 'Modo [2]: ');
+  assert.equal(questions[1], 'Escolha o modo de operação:');
   assert.deepEqual(cliConfig.readConfig(context), existing);
 });
 
@@ -305,7 +320,7 @@ test('interactive reconfiguration preserves the existing URL installation choice
   const questions = interactiveAnswers(t, ['s', '', '', '', '', '']);
   captureLogs(t);
   await runBotCli(f.bot, ['setup']);
-  assert.equal(questions[1], 'Modo [1]: ');
+  assert.equal(questions[1], 'Escolha o modo de operação:');
   assert.deepEqual(cliConfig.readConfig(context), existing);
 });
 
@@ -316,8 +331,9 @@ test('closing interactive setup leaves the previous configuration untouched', as
   const existing = cliConfig.manualConfig(context, { botToken: 'existing-token' });
   cliConfig.writeConfig(context, existing);
   interactiveAnswers(t, ['s', '', '', null]);
-  captureLogs(t);
-  await assert.rejects(runBotCli(f.bot, ['setup']), /Setup cancelado/);
+  const lines = captureLogs(t);
+  await runBotCli(f.bot, ['setup']);
+  assert.match(lines.join('\n'), /cancelada/);
   assert.deepEqual(cliConfig.readConfig(context), existing);
 });
 
@@ -459,9 +475,10 @@ test('existing config never proves ownership of an occupied port and cancellatio
   interactiveAnswers(t, ['s', '', '', '', null]);
   const errors = [];
   t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
-  captureLogs(t);
+  const lines = captureLogs(t);
 
-  await assert.rejects(runBotCli(f.bot, ['setup']), /Setup cancelado/);
+  await runBotCli(f.bot, ['setup']);
+  assert.match(lines.join('\n'), /cancelada/);
 
   assert.match(errors.join('\n'), /sound-bot stop/);
   assert.deepEqual(fs.readFileSync(context.configFile), before);
@@ -508,7 +525,7 @@ for (const cancelOnProbe of [1, 2]) {
     let calls = 0;
     t.mock.method(ports, 'assertManifestPortAvailable', async (...args) => {
       if (++calls === cancelOnProbe) {
-        readline.createInterface.mock.calls[0].result.emit('close');
+        process.stdin.emit('close');
       }
       await probe(...args);
     });

@@ -39,6 +39,14 @@ Ao passar o mouse sobre uma mensagem (ou chegar aos botões com `Tab`), uma barr
 
 A cópia formatada oferece HTML para aplicativos de texto rico e Markdown para destinos textuais: por exemplo, um negrito pode ser colado como `**texto**` quando o destino não aceita HTML. **Sem formatação** oferece somente o texto visível, sem marcações Markdown nem HTML. Ao colar uma cópia formatada no Monky, a marcação continua editável; HTML externo não é inserido na interface. Os atalhos dos campos de edição continuam nativos. Mensagens só com anexos copiam os nomes dos arquivos, sem transferir os anexos.
 
+Para copiar a **imagem**, e não o nome ou endereço do arquivo, use **Copiar imagem**
+nos controles do anexo ou no menu do botão direito. Isso também funciona no menu
+das figurinhas. Na visualização ampliada, use o botão de copiar ou `Ctrl+C`
+(`Cmd+C` no macOS), sem texto selecionado. O destino recebe uma imagem PNG no
+tamanho original; imagens animadas são copiadas como um quadro estático.
+A cópia aceita até 50 MB e 64 megapixels e avisa se a imagem ou o clipboard
+estiverem indisponíveis, sem substituir a imagem por um link.
+
 **Responder** mantém uma referência à mensagem original, com autor e prévia. A resposta pode incluir texto, anexos, código ou figurinha; mensagens públicas de bots também podem receber respostas. Cancele pelo `×` no campo de composição ou com `Escape`. A referência acompanha o rascunho do canal. Clicar na prévia leva à mensagem original, carregando uma janela do histórico se necessário; **Voltar às mensagens recentes** retorna ao fim da conversa. A prévia acompanha edições e mostra **Mensagem apagada** se o original for excluído, sem preservar seu conteúdo. Mensagens privadas de bots não podem ser usadas como referência.
 
 ## Menções
@@ -86,7 +94,7 @@ A pasta fica só na sua máquina: a imagem é enviada ao servidor quando você u
 
 ## Soundboard
 
-Em **Configurações › Soundboard**, escolha uma pasta com `.mp3`, `.wav` ou `.ogg`. Na chamada, toque pelo botão de soundboard. Volume e mudo local ficam nas mesmas configurações. O anfitrião pode desativar o soundboard do servidor inteiro e, em **Configurações do Servidor › Cargos**, liberar a permissão **Usar soundboard** apenas para os cargos desejados.
+O Monky prepara uma pasta local de soundboard automaticamente. Em **Configurações › Soundboard**, confira o caminho ou escolha outra pasta com `.mp3`, `.wav` ou `.ogg`; pastas já escolhidas são preservadas. Na chamada, toque pelo botão de soundboard. Volume e mudo local ficam nas mesmas configurações. O anfitrião pode desativar o soundboard do servidor inteiro e, em **Configurações do Servidor › Cargos**, liberar a permissão **Usar soundboard** apenas para os cargos desejados.
 
 Use as estrelas e o filtro **Todos/Favoritos** para localizar sons junto com
 a busca. Os favoritos vêm primeiro, e cada grupo fica em ordem alfabética,

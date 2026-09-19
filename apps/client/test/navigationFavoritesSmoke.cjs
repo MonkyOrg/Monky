@@ -53,7 +53,9 @@ if (!process.versions.electron) {
           if (id === '/navigation-favorites-shared.js') return '\0navigation-favorites-shared';
         },
         load(id) {
-          if (id === '\0navigation-favorites-shared') return "export { MessageType } from '@monky/shared';";
+          if (id === '\0navigation-favorites-shared') {
+            return "export { MessageType, createServerInviteLink, parseServerInviteLink } from '@monky/shared';";
+          }
         },
         transform(code, id) {
           if (path.normalize(id.split('?')[0]) === mainPath) {
@@ -80,9 +82,10 @@ if (!process.versions.electron) {
     const address = http.address();
     if (!address || typeof address === 'string') throw new Error('Missing Vite listener');
     window = new BrowserWindow({
-      show: false, width: 1050, height: 850,
+      show: false, width: 1050, height: 850, useContentSize: true,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
     });
+    window.webContents.setAudioMuted(true);
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('console-message', (_event, level, message) => {
       if (level >= 3) console.error(`[renderer:${phase}] ${message}`);
@@ -124,6 +127,17 @@ if (!process.versions.electron) {
     await motionPreference('no-preference');
     phase = 'voice-preserving navigation';
     await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.navigation()', true);
+    phase = 'Home without disconnecting';
+    await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.homeNavigation()', true);
+    phase = 'invitation links and confirmation';
+    await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.invitations()', true);
+    for (const width of [1050, 640]) {
+      phase = `modal stacking at ${width}px`;
+      window.webContents.sendInputEvent({ type: 'mouseLeave', x: 0, y: 0 });
+      window.setContentSize(width, 850);
+      await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.modalStacking()', true);
+    }
+    window.setContentSize(1050, 850);
     phase = 'connection recovery and explicit departures';
     await window.webContents.executeJavaScript('window.navigationFavoritesSmoke.connectionRecovery()', true);
     phase = 'noise quick toggle';
@@ -294,7 +308,8 @@ async function setupNavigationFavoritesSmoke() {
       },
     };
   };
-  replace(NetworkClient.prototype, 'connect', async function (host, port) {
+  replace(NetworkClient.prototype, 'connect', async function (host, port, _identity, nickname) {
+    this.fixtureNickname = nickname;
     connects.push(this.sessionKey);
     this.status = 'CONNECTING';
     const gate = connectGates.get(this.sessionKey);
@@ -319,6 +334,13 @@ async function setupNavigationFavoritesSmoke() {
   });
   replace(NetworkClient.prototype, 'sendRequest', async function (type, payload) {
     sends.push({ key: this.sessionKey, type, payload });
+    if (type === MessageType.SERVER_GET_INVITE_INFO) {
+      const session = sessions.get(this.sessionKey);
+      return {
+        port: session.port, serverName: session.serverStore.serverDetails.name,
+        networkInterfaces: [{ name: 'Fixture', address: session.host, description: 'Fixture LAN', family: 'IPv4', type: 'lan' }],
+      };
+    }
     if (type === MessageType.VOICE_JOIN) {
       const user = sessions.get(this.sessionKey).serverStore.currentUser;
       return {
@@ -995,22 +1017,30 @@ async function setupNavigationFavoritesSmoke() {
       const item = row(zulu);
       const moving = animations().find(animation => animation.effect.target === item);
       check(!!moving, `${mode}: the actual item, not just its star, is animated`);
+      equal(moving.effect.getTiming().duration, 240, `${mode}: production motion retains its duration`);
+      // Keep the observation window open even when an offscreen frame is delayed.
+      moving.playbackRate = 0.1;
       await moving.ready;
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      await until(() => typeof moving.currentTime === 'number' && moving.currentTime >= 60,
+        `${mode}: motion reaches an observable intermediate frame`);
       check(moving.playState === 'running' && moving.currentTime > 0 && moving.currentTime < 240,
         `${mode}: motion advances on the real timeline: ${JSON.stringify({
           state: moving.playState, currentTime: moving.currentTime, pending: moving.pending,
           timeline: document.timeline.currentTime, visibility: document.visibilityState,
         })}`);
+      const observedTime = moving.currentTime;
       const middle = item.getBoundingClientRect();
       moving.pause();
+      moving.playbackRate = 1;
       moving.currentTime = 0;
       const start = item.getBoundingClientRect();
       moving.currentTime = 240;
       const end = item.getBoundingClientRect();
       const distance = (a, b) => Math.hypot(a.left - b.left, a.top - b.top);
       check(distance(start, end) > 2 && distance(middle, start) > 0.5 && distance(middle, end) > 0.5,
-        `${mode}: rendered midpoint differs from both start and final positions`);
+        `${mode}: rendered midpoint differs from both start and final positions: ${JSON.stringify({
+          observedTime, total: distance(start, end), fromStart: distance(middle, start), toEnd: distance(middle, end),
+        })}`);
       await finish();
       focused(zulu);
       expectOrder([zulu, alpha, beta, echoA, echoB], 'animation ends in alphabetical favorite groups');
@@ -1351,6 +1381,316 @@ async function setupNavigationFavoritesSmoke() {
         check(mediaCalls.includes('audio.startMicrophone'), 'Explicit voice join still acquires microphone media');
       }
     },
+    async homeNavigation() {
+      for (const mode of ['p2p', 'sfu']) {
+        const { call, visible, before } = prepareCall('remote.test', mode);
+        visible.chatStore.setDraft('text-room', 'Preserve this draft');
+        click('#server-rail-home');
+        await tick();
+        check(sessions.isHome() && document.querySelector('.main-layout--home .connection-layout'),
+          `${mode}: actual Home control opens Home inside the connected layout`);
+        check(!document.querySelector('.dialog-card'), `${mode}: Home does not ask to disconnect`);
+        equal(sessions.getAll().length, 2, `${mode}: Home preserves every connection`);
+        check(document.querySelector('#server-rail-home').getAttribute('aria-current') === 'page',
+          `${mode}: Home is the selected rail destination`);
+        preserveVoice(before, call, `${mode}: Home`);
+        check(document.getElementById('bar-btn-disconnect').title.includes(visible.serverStore.serverDetails.name),
+          `${mode}: disconnect identifies the last viewed server`);
+        check(!app.mainView.isViewingTextChannel('text-room'), `${mode}: Home never counts as a viewed chat`);
+        for (const session of [call, visible]) {
+          session.client.emitScoped(`message.${MessageType.CHAT_MESSAGE}`, {
+            id: `home-message-${session.key}`, channelId: 'text-room', userId: 'remote-user',
+            nickname: 'Remote', content: 'Unread on Home', timestamp: Date.now(), isSystem: false,
+          });
+          session.client.emitScoped(`message.${MessageType.CHANNEL_DELETED}`, { channelId: 'unused-channel' });
+        }
+        await tick();
+        check(sessions.isHome() && document.querySelector('.main-layout--home .connection-layout'),
+          `${mode}: background messages and channel changes do not repaint Home`);
+        equal(visible.chatStore.getDraft('text-room'), 'Preserve this draft', `${mode}: Home keeps drafts`);
+        check(navigation.showServerSession(visible.key), `${mode}: same-key return is accepted`);
+        check(!sessions.isHome() && !document.querySelector('.connection-layout'),
+          `${mode}: returning to the same server restores its layout`);
+        preserveVoice(before, call, `${mode}: same-key return`);
+        navigation.showHome();
+        click('#bar-btn-disconnect');
+        await settleDialog(false);
+        await tick();
+        check(sessions.isHome() && sessions.has(visible.key), `${mode}: cancelling disconnect stays on Home`);
+        click('#bar-btn-disconnect');
+        await settleDialog();
+        await until(() => !sessions.has(visible.key), `${mode}: disconnect leaves only its named server`);
+        equal(sessions.getActiveKey(), call.key, `${mode}: disconnect opens the next connected server`);
+        check(!sessions.isHome() && !document.querySelector('.connection-layout'),
+          `${mode}: surviving server is visible instead of Home`);
+        preserveVoice(before, call, `${mode}: disconnecting another server from Home`);
+        click('#bar-btn-disconnect');
+        await settleDialog();
+        await until(() => !sessions.getAll().length && document.querySelector('.connection-layout'),
+          `${mode}: final disconnect returns to standalone Home`);
+        check(!document.querySelector('.user-control-bar'), `${mode}: no stale disconnect target on empty Home`);
+      }
+      {
+        const { call, visible } = prepareCall();
+        navigation.showHome();
+        visible.client.disconnect();
+        await tick();
+        check(sessions.isHome() && sessions.getActive() === call, 'Network loss on Home selects a surviving control context');
+        check(document.querySelector('.main-layout--home'), 'Network loss does not force navigation away from Home');
+        check(navigation.callClient() === call.client, 'Routing restores the surviving bundle after removing the old active session');
+        click('#bar-btn-disconnect');
+        await settleDialog();
+        await until(() => !sessions.getAll().length, 'Home control operates on the surviving context, not removed proxies');
+      }
+    },
+    async invitations() {
+      const [{ inviteModal }, { joinInviteModal }] = await Promise.all([
+        import('/views/InviteModal.ts'), import('/views/JoinInviteModal.ts'),
+      ]);
+      const { createServerInviteLink, parseServerInviteLink } = shared;
+      const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      const previousNickname = connection.savedNickname;
+      const storedNickname = localStorage.getItem('monky_nickname');
+      const previousAvatar = connection.savedAvatarBase64;
+      const previousIdentity = connection.hasIdentity ? { publicKey: connection.publicKey, clientId: connection.clientId } : null;
+      const originalSaveProfile = connection.saveUserProfile;
+      let profileSaves = 0;
+      connection.saveUserProfile = function (...args) {
+        profileSaves++;
+        return Reflect.apply(originalSaveProfile, this, args);
+      };
+      let copied = null;
+      let clipboardFailure = false;
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+        writeText: async value => {
+          if (clipboardFailure) throw new Error('Fixture clipboard is unavailable');
+          copied = value;
+        },
+      } });
+      const submit = () => document.getElementById('join-invite-form').requestSubmit();
+      try {
+        const { call, visible, before } = prepareCall();
+        connection.saveUserProfile('Identity <Owner>');
+        visible.password = ' Fixture & password 🐵 ';
+        for (const language of ['pt-BR', 'en']) {
+          setLanguage(language);
+          await inviteModal.open();
+          const toggle = document.getElementById('chk-invite-password');
+          check(!toggle.checked && !toggle.disabled, `${language}: known password is opt-in`);
+          check(!document.querySelector('#input-invite-password'), `${language}: generation never asks to retype a known password`);
+          click('#btn-copy-invite');
+          await tick();
+          let parsed = parseServerInviteLink(copied);
+          check(parsed.ok && parsed.invite.host === visible.host && parsed.invite.port === visible.port,
+            `${language}: the copy action produces a valid connection link`);
+          check(!Object.hasOwn(parsed.invite, 'password'), `${language}: default links do not leak credentials`);
+          toggle.click();
+          click('#btn-copy-invite');
+          await tick();
+          parsed = parseServerInviteLink(copied);
+          equal(parsed.invite.password, visible.password, `${language}: opt-in preserves exact known password`);
+          check(document.getElementById('copy-success-msg').textContent.includes(t('invite.copied')),
+            `${language}: feedback follows the selected language`);
+          inviteModal.close();
+          const reviewing = joinInviteModal.open(parsed.invite);
+          await until(() => document.getElementById('join-invite-form'), 'Known identity review');
+          check(!document.getElementById('invite-join-nickname'), `${language}: configured identities do not get a nickname field`);
+          equal(document.querySelector('[data-invite-identity]').textContent,
+            t('invite.identityNickname', { name: connection.savedNickname }), `${language}: the current identity is shown in the chosen language`);
+          check(!document.querySelector('[data-invite-nickname] owner'), 'Identity names are escaped rather than interpreted as HTML');
+          equal(document.activeElement, document.querySelector('[data-invite-join]'), 'Configured identities can confirm immediately');
+          click('[data-invite-cancel]');
+          check(!(await reviewing), 'Review can be cancelled without changing identity');
+        }
+        visible.password = undefined;
+        await inviteModal.open();
+        check(document.getElementById('chk-invite-password').disabled, 'Unknown passwords cannot be embedded');
+        clipboardFailure = true;
+        click('#btn-copy-invite');
+        await until(() => document.querySelector('.dialog-card'), 'Clipboard failure is reported');
+        check(document.querySelector('.dialog-message').textContent.includes(t('invite.copyFailed')),
+          'Clipboard failure is localized and not success-shaped');
+        await settleDialog();
+        clipboardFailure = false;
+        inviteModal.close();
+
+        navigation.showHome();
+        const input = document.getElementById('join-invite');
+        input.value = createServerInviteLink({ v: 1, host: 'invited.test', port: 4600, name: 'Invited fixture' });
+        click('#btn-review-invite');
+        await until(() => document.getElementById('join-invite-form'), 'Pasting a link opens review without manual address fields');
+        equal(connects.length, 0, 'Opening an invitation never connects automatically');
+        check(document.querySelector('[data-invite-host]').textContent === 'invited.test',
+          'Review shows the actual destination rather than only the supplied name');
+        click('[data-invite-cancel]');
+        await tick();
+        check(sessions.isHome(), 'Cancelling review leaves Home and existing sessions untouched');
+        preserveVoice(before, call, 'Cancelled invitation');
+        const invite = { v: 1, host: 'invited.test', port: 4600, name: '\ufeff<Fixture name>', password: '\ufeff Exact 🐵 password ' };
+        const decodedInvite = parseServerInviteLink(createServerInviteLink(invite));
+        check(decodedInvite.ok, 'The compact link retains the complete invitation');
+        const opening = joinInviteModal.open(decodedInvite.invite);
+        await until(() => document.getElementById('join-invite-form'), 'Direct invitation review');
+        check(!document.querySelector('fixture'), 'Untrusted invitation names stay text');
+        check(!document.getElementById('invite-join-nickname'), 'Joining does not ask to retype a configured identity name');
+        connection.saveUserProfile('Renamed identity');
+        const savesBeforeJoin = profileSaves;
+        check(document.getElementById('invite-join-password').type === 'password', 'Included password stays masked');
+        submit();
+        check(await opening, 'Explicit confirmation joins the invited server');
+        const added = sessions.get(sessionKeyFor(invite.host, invite.port));
+        equal(added.client.fixtureNickname, 'Renamed identity', 'Authentication uses the current profile name, not an old field or another server alias');
+        equal(profileSaves, savesBeforeJoin, 'An invitation does not rewrite a configured identity profile');
+        equal(added.password, invite.password, 'Connection receives the exact invitation password');
+        preserveVoice(before, call, 'Joining an invitation');
+
+        connection.setIdentity(null);
+        const missingIdentity = joinInviteModal.open({ v: 1, host: 'missing-identity.test', port: 4603 });
+        await until(() => document.getElementById('join-invite-form'), 'Missing identity review');
+        check(!!document.getElementById('invite-join-nickname'), 'A cached name without an identity can still be configured');
+        click('[data-invite-cancel]');
+        check(!(await missingIdentity), 'Missing identity setup can be cancelled');
+        connection.setIdentity(identity);
+
+        connection.savedNickname = '';
+        const firstNameKey = sessionKeyFor('first-name.test', 4604);
+        const firstNameGate = deferred();
+        connectGates.set(firstNameKey, firstNameGate);
+        const firstName = joinInviteModal.open({ v: 1, host: 'first-name.test', port: 4604 });
+        await until(() => document.getElementById('invite-join-nickname'), 'First identity name setup');
+        const nickname = document.getElementById('invite-join-nickname');
+        equal(document.activeElement, nickname, 'Only missing profile names focus the nickname input');
+        nickname.value = '  ';
+        const connectsBeforeName = connects.length;
+        submit();
+        await tick();
+        equal(connects.length, connectsBeforeName, 'Whitespace nickname is rejected before authentication');
+        nickname.value = 'Reader';
+        nickname.dispatchEvent(new Event('input'));
+        const savesBeforeName = profileSaves;
+        submit();
+        await until(() => connects.includes(firstNameKey), 'First name authentication started');
+        const avatar = document.createElement('canvas');
+        avatar.width = avatar.height = 1;
+        const updatedAvatar = avatar.toDataURL('image/png');
+        connection.savedAvatarBase64 = updatedAvatar;
+        firstNameGate.resolve();
+        check(await firstName, 'A missing identity name can be configured while joining');
+        equal(connection.savedNickname, 'Reader', 'The first nickname is saved for future invitations');
+        equal(profileSaves, savesBeforeName + 1, 'Only first-time name setup writes the profile');
+        equal(connection.savedAvatarBase64, updatedAvatar, 'Name setup does not overwrite an avatar changed during authentication');
+        equal(sessions.get(firstNameKey).client.fixtureNickname, 'Reader',
+          'Authentication receives the explicitly configured first nickname');
+        const savedNickname = connection.savedNickname;
+        const duplicate = joinInviteModal.open({ ...invite, password: 'Do not replace existing credentials' });
+        await until(() => document.getElementById('join-invite-form'), 'Review an already-connected invitation');
+        check(!document.getElementById('invite-join-nickname'), 'Subsequent invitations reuse the configured identity name');
+        const countBefore = connects.length;
+        const savesBeforeReuse = profileSaves;
+        submit();
+        await duplicate;
+        equal(connects.length, countBefore, 'Existing session is reused without authentication');
+        equal(added.password, invite.password, 'A shared link cannot replace existing session credentials');
+        equal(connection.savedNickname, savedNickname, 'Reusing a session does not rewrite the global nickname');
+        equal(profileSaves, savesBeforeReuse, 'An existing session does not save the profile again');
+
+        navigation.showHome();
+        const gate = deferred();
+        const failedKey = sessionKeyFor('failed-invite.test', 4601);
+        connectGates.set(failedKey, gate);
+        const failing = joinInviteModal.open({ v: 1, host: 'failed-invite.test', port: 4601 });
+        await until(() => document.getElementById('join-invite-form'), 'Review an invitation without a password');
+        equal(document.getElementById('invite-join-password').value, '', 'Passwordless invitations allow entry-time credentials');
+        document.getElementById('invite-join-password').value = 'entered-at-join';
+        submit();
+        await until(() => connects.includes(failedKey), 'Authentication was attempted');
+        gate.reject(new Error('Fixture authentication rejected'));
+        await until(() => !document.querySelector('[data-invite-error]').hidden, 'Authentication failure stays in the dialog');
+        check(!document.getElementById('invite-join-nickname'), 'An authentication failure does not reintroduce a redundant nickname field');
+        check(document.querySelector('[data-invite-error]').textContent.includes('Fixture authentication rejected'),
+          'The concrete connection error is visible');
+        check(sessions.isHome() && !sessions.has(failedKey), 'Failed invitation restores Home without keeping a dead socket');
+        click('[data-invite-cancel]');
+        check(!(await failing), 'Failed invitation can be dismissed');
+        preserveVoice(before, call, 'Failed invitation');
+
+        const pending = [{ ok: true, invite }, { ok: false, reason: 'invalid' }];
+        window.api.takeServerInvite = async () => pending.shift() ?? null;
+        const consuming = app.consumeServerInvites();
+        await until(() => document.getElementById('join-invite-form'), 'Warm/cold inbox delivery waits for confirmation');
+        click('[data-invite-cancel]');
+        await until(() => document.querySelector('.dialog-card'), 'Invalid pending invitation is shown explicitly');
+        await settleDialog();
+        check(await consuming, 'Receiving an invitation suppresses automatic server entry even after cancellation');
+        check(!document.querySelector('#join-invite-form'), 'Inbox delivers sequential dialogs and releases them');
+        delete window.api.takeServerInvite;
+
+        const identityGate = deferred();
+        const originalIdentity = window.api.getIdentity;
+        window.api.getIdentity = () => identityGate.promise;
+        const closing = joinInviteModal.open({ v: 1, host: 'cancelled-invite.test', port: 4602 });
+        await until(() => document.getElementById('join-invite-form'), 'Review before asynchronous identity load');
+        const beforeClose = connects.length;
+        submit();
+        joinInviteModal.close();
+        identityGate.resolve(identity);
+        check(!(await closing), 'Teardown resolves the confirmation as cancelled');
+        await tick();
+        equal(connects.length, beforeClose, 'Late identity result cannot connect after teardown');
+        window.api.getIdentity = originalIdentity;
+      } finally {
+        inviteModal.close();
+        joinInviteModal.close();
+        connection.saveUserProfile = originalSaveProfile;
+        connection.savedNickname = previousNickname;
+        connection.savedAvatarBase64 = previousAvatar;
+        connection.setIdentity(previousIdentity);
+        if (storedNickname === null) localStorage.removeItem('monky_nickname');
+        else localStorage.setItem('monky_nickname', storedNickname);
+        if (clipboardDescriptor) Object.defineProperty(navigator, 'clipboard', clipboardDescriptor);
+        else delete navigator.clipboard;
+        setLanguage('pt-BR');
+      }
+    },
+    async modalStacking() {
+      const [{ settingsModal }, { serverSettingsModal }, { showConfirm }] = await Promise.all([
+        import('/views/SettingsModal.ts'), import('/views/ServerSettingsModal.ts'), import('/views/Dialog.ts'),
+      ]);
+      prepareCall();
+      for (const homeVisible of [false, true]) {
+        if (homeVisible) navigation.showHome();
+        await tick();
+        const assertCovered = label => {
+          const backdrop = document.querySelector('.modal-backdrop');
+          check(!!backdrop, `${label}: real modal is open`);
+          for (const selector of ['#bar-btn-mic', '#bar-btn-settings', '#bar-btn-disconnect']) {
+            const bounds = document.querySelector(selector).getBoundingClientRect();
+            const x = bounds.left + bounds.width / 2, y = bounds.top + bounds.height / 2;
+            check(bounds.width > 0 && x > 0 && x < innerWidth && y > 0 && y < innerHeight,
+              `${label}: ${selector} has an in-viewport hit target`);
+            check(backdrop.contains(document.elementFromPoint(x, y)),
+              `${label}: modal intercepts the actual ${selector} hit target (${innerWidth}px, home=${homeVisible})`);
+          }
+        };
+        await settingsModal.open('notifications');
+        await tick();
+        assertCovered('App settings');
+        settingsModal.close();
+        serverSettingsModal.open();
+        await tick();
+        assertCovered('Server settings');
+        serverSettingsModal.close();
+        const confirmation = showConfirm({ title: 'Fixture', message: 'Modal must cover the footer' });
+        await tick();
+        assertCovered('Confirmation');
+        await settleDialog(false);
+        await confirmation;
+        const button = document.querySelector('#bar-btn-disconnect');
+        const bounds = button.getBoundingClientRect();
+        check(button.contains(document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)),
+          'Closing a modal restores access to the footer controls');
+      }
+    },
     async connectionRecovery() {
       const addLocalParticipant = session => {
         const user = session.serverStore.currentUser;
@@ -1430,10 +1770,16 @@ async function setupNavigationFavoritesSmoke() {
           call.client.setStatus('RECONNECTING');
           visible.client.setStatus('RECONNECTING');
           click('#server-rail-home');
-          await settleDialog();
-          await until(() => sessions.getAll().length === 0 && document.querySelector('.connection-layout'),
+          await until(() => sessions.isHome() && document.querySelector('.connection-layout'),
             `${mode}: Home remains functional while every server is reconnecting`);
-          equal(voice.currentVoiceChannelId, null, `${mode}: Home cancels recovery instead of resurrecting a call later`);
+          equal(sessions.getAll().length, 2, `${mode}: Home does not dispose recovering sockets`);
+          equal(voice.currentVoiceChannelId, 'voice-room', `${mode}: Home preserves the ongoing recovery intention`);
+          const payload = payloadFor(visible.port);
+          visible.client.status = 'CONNECTED';
+          visible.client.emitScoped('network.connected', payload);
+          await tick();
+          check(sessions.isHome() && document.querySelector('.connection-layout'),
+            `${mode}: background authentication must not steal Home`);
         }
         {
           const { call } = prepareCall('remote.test', mode);

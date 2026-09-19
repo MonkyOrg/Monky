@@ -39,6 +39,14 @@ Hover over a message (or reach its buttons with `Tab`) to reveal a floating tool
 
 Formatted copying provides HTML for rich-text applications and Markdown for text destinations: for example, bold text may paste as `**text**` when the destination does not accept HTML. **Without formatting** provides only visible text, without Markdown markers or HTML. Pasting a formatted copy into Monky keeps the markup editable; external HTML is never inserted into the interface. Editing fields keep their native shortcuts. Attachment-only messages copy file names, without transferring attachments.
 
+To copy the **image**, rather than its file name or address, use **Copy image**
+in the attachment controls or its right-click menu. Sticker menus also offer
+this action. In the expanded viewer, use the copy button or `Ctrl+C`
+(`Cmd+C` on macOS), with no text selected. The destination receives a PNG image
+at its original size; animated images are copied as a static frame.
+Copying supports up to 50 MB and 64 megapixels and reports unavailable images
+or clipboard access instead of substituting a link.
+
 **Reply** keeps a reference to the original message with its author and preview. Replies support text, attachments, code and stickers; public bot messages can also receive replies. Cancel with the `×` in the composer or `Escape`. The reference stays with the channel draft. Clicking the preview jumps to the original, loading a history window if needed; **Back to latest messages** returns to recent conversation. Previews reflect edits and show **Message deleted** when the original is deleted, without retaining its content. Private bot messages cannot be referenced.
 
 ## Mentions
@@ -86,7 +94,7 @@ The folder stays on your machine: the image is uploaded to the server when you u
 
 ## Soundboard
 
-Under **Settings › Soundboard**, choose a folder containing `.mp3`, `.wav` or `.ogg`. In the call, play sounds from the soundboard button. Volume and local mute live in the same settings. The host can disable the soundboard for the whole server and, under **Server Settings › Roles**, grant the **Use soundboard** permission only to the desired roles.
+Monky prepares a local soundboard folder automatically. Under **Settings › Soundboard**, check its path or choose another folder containing `.mp3`, `.wav` or `.ogg`; existing folder selections are preserved. In the call, play sounds from the soundboard button. Volume and local mute live in the same settings. The host can disable the soundboard for the whole server and, under **Server Settings › Roles**, grant the **Use soundboard** permission only to the desired roles.
 
 Use stars and the **All/Favorites** filter together with search to find sounds,
 with favorites first and alphabetical order within each group, without changing

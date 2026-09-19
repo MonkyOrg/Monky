@@ -63,6 +63,14 @@ com um processo PM2 e configuração isolados por nome do bot. `start --foregrou
 roda sem PM2 para desenvolvimento. `npm run cli -- setup` usa o mesmo CLI no
 checkout local, depois de compilar.
 
+Execute `meu-bot` sem comando em um terminal para abrir o **menu por setas**,
+ou use `meu-bot menu`. Enter confirma e Esc cancela; o item **Sair do menu**
+não para o processo. **Configuração > Atualizações** reúne origem, token GitHub,
+consulta/instalação de versões e agendamento. `meu-bot config` abre a configuração
+interativa; `meu-bot config show` sempre imprime a versão com segredos ocultos.
+Sem TTY ou em CI, executar sem comando continua mostrando ajuda, sem perguntas.
+Comandos e flags de automação continuam disponíveis.
+
 No primeiro acesso em um terminal interativo, o CLI pede **Português (Brasil)**
 ou **English** e salva a escolha em `~/.<cliName>/preferences.json`.
 `language en` ou `language pt-BR` altera a preferência; `--locale en` vale somente
@@ -186,6 +194,29 @@ Não coloque o token na URL, no `package.json`, no código, em logs ou em uma is
 Para atualização automática, prepare também o ambiente do serviço: uma variável
 criada em um terminal não é, por si só, uma configuração persistente do serviço.
 Esse token de download é diferente do token que vincula o bot ao servidor Monky.
+
+Também é possível colar o token em **Configuração > Atualizações > Token GitHub
+privado (entrada oculta)**, ou executar:
+
+```text
+meu-bot config update-token
+meu-bot config update-token --status
+meu-bot config update-token --clear
+meu-bot config update-token --from-env GH_TOKEN
+```
+
+O CLI mostra o link de criação e explica a permissão antes de pedir o segredo.
+Não exige que o token tenha a sintaxe de um nome de variável: aceita os formatos
+de PAT como valores de autenticação e recusa espaços, controles e quebras de linha.
+**Salvar não confirma acesso**; execute `update --check` para validar o repositório
+e suas permissões.
+
+A credencial fica em `~/.<cliName>/update-credentials.json`, fora do pacote, com
+permissões `600`/`700` no Linux. É limitada ao repositório GitHub escolhido e
+não é reutilizada ao trocar para outro repositório ou uma origem HTTPS/arquivo.
+Variáveis explícitas do ambiente têm prioridade. O auto-update lê a mesma
+credencial nas próximas execuções, sem copiá-la para o ambiente do bot; apagar
+com `--clear` não altera variáveis externas. Não passe o segredo como argumento.
 
 ### Padrão fornecido no pacote
 

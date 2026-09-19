@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
+import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
   ActionShortcutBinding,
   AudioPreviewCancellation,
@@ -41,6 +41,7 @@ import type {
   PttKeyBinding,
   ScreenAudioDiagnostics,
   ServerProbeResult,
+  ServerInviteResult,
   ServerStats,
   SoundboardShortcutBinding,
   SoundboardSoundData,
@@ -66,6 +67,8 @@ import type {
 export type { LinkPreviewData, OverlayBounds, OverlayConfig, OverlayMode, OverlayLayout, OverlayPosition, OverlayParticipantState, OverlaySyncState } from '@monky/shared';
 
 export interface ElectronApi {
+  takeServerInvite: () => Promise<ServerInviteResult | null>;
+  onServerInviteAvailable: (callback: () => void) => () => void;
   getDevelopmentQaConfig: () => Promise<DevelopmentQaConfig | null>;
   reportDevelopmentQaState: (report: DevelopmentQaReport) => Promise<boolean>;
   startLanDiscovery: () => Promise<void>;
@@ -100,6 +103,7 @@ export interface ElectronApi {
   selectImageDialog: () => Promise<ImageSelectionResult | null>;
   selectSoundFile: () => Promise<string | null>;
   selectSoundboardFolder: () => Promise<string | null>;
+  getDefaultSoundboardFolder: () => Promise<string | null>;
   listSoundboardSounds: (folderPath: string) => Promise<SoundboardSoundEntry[]>;
   readSoundboardSound: (filePath: string) => Promise<SoundboardSoundData | null>;
   soundDownloadAvailability: (configuredFolder: string) => Promise<SoundboardDownloadAvailability>;
@@ -232,6 +236,12 @@ const api: ElectronApi = {
   importIdentity: (exportedIdentity, password) => ipcRenderer.invoke('identity:import', exportedIdentity, password),
   saveBackupFile: (contents, suggestedName) => ipcRenderer.invoke('backup:save-file', contents, suggestedName),
   openBackupFile: () => ipcRenderer.invoke('backup:open-file'),
+  takeServerInvite: () => ipcRenderer.invoke(SERVER_INVITE_IPC.take),
+  onServerInviteAvailable: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on(SERVER_INVITE_AVAILABLE, listener);
+    return () => ipcRenderer.removeListener(SERVER_INVITE_AVAILABLE, listener);
+  },
   encryptBackup: (contents, password) => ipcRenderer.invoke('backup:encrypt', contents, password),
   decryptBackup: (payload, password) => ipcRenderer.invoke('backup:decrypt', payload, password),
   hostServerStart: (options) => ipcRenderer.invoke('server-host:start', options),
@@ -260,6 +270,7 @@ const api: ElectronApi = {
   selectImageDialog: () => ipcRenderer.invoke('dialog:select-image'),
   selectSoundFile: () => ipcRenderer.invoke('dialog:select-sound-file'),
   selectSoundboardFolder: () => ipcRenderer.invoke('dialog:select-soundboard-folder'),
+  getDefaultSoundboardFolder: () => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.defaultFolder),
   listSoundboardSounds: (folderPath) => ipcRenderer.invoke('soundboard:list-sounds', folderPath),
   readSoundboardSound: (filePath) => ipcRenderer.invoke('soundboard:read-sound', filePath),
   soundDownloadAvailability: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.availability, folder),

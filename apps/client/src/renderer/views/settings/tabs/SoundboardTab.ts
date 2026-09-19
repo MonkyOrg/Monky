@@ -13,6 +13,7 @@ import { renderFavoriteToggle, renderFavoritesFilter } from '../../FavoritesCont
 import { showAlert } from '../../Dialog';
 import type { SoundboardDownloadAvailability } from '@monky/shared';
 import { renderLoadingError, renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
+import { bindSoundboardLimiterControls, renderSoundboardLimiterControls } from '../../SoundboardLimiterControls';
 
 export class SoundboardTab {
   private searchQuery: string = '';
@@ -95,6 +96,10 @@ export class SoundboardTab {
             <span class="toggle-slider"></span>
           </label>
         </div>
+      </div>
+
+      <div data-settings-section="soundboard-limiter" data-settings-label="${escapeHtml(t('settings.soundboardLimiter'))}" class="form-group" style="margin-top: 16px;">
+        ${renderSoundboardLimiterControls('soundboard')}
       </div>
 
       <!-- Soundboard Shortcuts Table -->
@@ -237,6 +242,7 @@ export class SoundboardTab {
     const sliderVol = container.querySelector<HTMLInputElement>('#slider-soundboard-vol');
     const volVal = container.querySelector<HTMLElement>('#soundboard-vol-val');
     const checkboxMute = container.querySelector<HTMLInputElement>('#checkbox-soundboard-mute');
+    const unbindLimiter = bindSoundboardLimiterControls(container);
     let observedFolder = settingsStore.soundboardFolderPath;
     this.unbindSettings = appEvents.on('settings.updated', () => {
       if (observedFolder === settingsStore.soundboardFolderPath) return;
@@ -293,6 +299,7 @@ export class SoundboardTab {
       btnSelectFolder?.removeEventListener('click', handlePickFolder);
       inputPath?.removeEventListener('click', handlePickFolder);
       btnConfirmFolder?.removeEventListener('click', handleConfirmFolder);
+      unbindLimiter();
     };
     this.setPickingFolder(this.pickingFolder);
     void this.refreshFolderDownloadState(container);

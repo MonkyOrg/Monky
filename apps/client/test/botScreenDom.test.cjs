@@ -25,7 +25,7 @@ if (!process.versions.electron) {
 } else {
   const assert = require('node:assert/strict');
   const { app, BrowserWindow, ipcMain } = require('electron');
-  const { SHORTCUT_IPC, Permission } = require('@monky/shared');
+  const { SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, Permission } = require('@monky/shared');
   const { bindBotScreenIsolation, installBotScreenRequestGuard } = require('../dist-electron/main/botScreenIsolation.js');
   app.setPath('userData', process.env.MONKY_SCREEN_PROFILE);
   let vite;
@@ -37,6 +37,10 @@ if (!process.versions.electron) {
   const owns = event => windows.some(window => !window.isDestroyed()
     && window.webContents === event.sender && event.senderFrame === event.sender.mainFrame);
   ipcMain.handle(SHORTCUT_IPC.setPttConfig, event => owns(event));
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, event => {
+    assert.ok(owns(event));
+    return null;
+  });
   ipcMain.handle('app:set-language', event => owns(event));
   ipcMain.handle('server-host:status', event => owns(event) ? { isRunning: false, port: null, serverId: null } : null);
   ipcMain.handle('client-log:write', (event, entry) => {
@@ -563,6 +567,10 @@ async function setupVoiceStage(id, locale, adminPermission) {
   const offScreens = bindBotScreenEvents();
   const view = new MainView(document.getElementById('app'));
   const offLanguage = appEvents.on('i18n.language_changed', () => view.render(true));
+  // The application, rather than MainView, owns session navigation rendering.
+  const offNavigation = appEvents.on('session.changed', ({ key }) => {
+    if (key && !sessionManager.isHome() && sessionManager.get(key)?.serverStore.serverDetails) view.render();
+  });
   const offNotifications = appEvents.on('voice.bot_screens_updated', () => {
     safeNotifications &&= routing.isForegroundEvent() && routing.currentEventOrigin() === null;
   });
@@ -652,7 +660,7 @@ async function setupVoiceStage(id, locale, adminPermission) {
       finishFullscreenExit?.();
       window.removeEventListener('error', onError);
       window.removeEventListener('unhandledrejection', onRejection);
-      offLanguage(); offNotifications(); view.destroy(); offScreens();
+      offLanguage(); offNavigation(); offNotifications(); view.destroy(); offScreens();
       voiceStore.reset(); sessionManager.removeAll();
       return listenerCount() === before;
     },

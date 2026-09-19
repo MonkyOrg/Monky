@@ -279,13 +279,13 @@ export class WebSocketServer {
         accessVersion: () => this.botSettingsPermissionVersion,
         send: (session, message) => this.send(session.ws, message),
         authorizeInvocation: (session, invocationId, channelId) => this.botInteractions.authorizeSelector(session, invocationId, channelId),
-        publish: async (bot, channelId, content, messageId, canSend, accessUserId) => {
+        publish: async (bot, channelId, content, messageId, canSend, accessUserId, localizations) => {
           const record = await this.botService?.findById(bot.id);
           if (!record) throw new Error('Bot is unavailable.');
           const session = this.findSessionById(`bot:${record.id}`);
           if (!session || !this.isCurrentSession(session) || !canSend()) throw new Error('Bot is disconnected.');
           const result = await this.chatService.sendBotMessage(
-            record, channelId, content, undefined, messageId, () => canSend() && this.isCurrentSession(session), accessUserId
+            record, channelId, content, undefined, messageId, () => canSend() && this.isCurrentSession(session), accessUserId, undefined, localizations
           );
           if (!result.success) throw new Error(result.errorMessage);
           return result.message;
@@ -2000,8 +2000,12 @@ export class WebSocketServer {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Bots devem enviar mensagens de texto.', requestId);
       return;
     }
+    if (!bot && payload.localizations !== undefined) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Somente bots podem fornecer traduções de mensagens.', requestId);
+      return;
+    }
     const result = bot
-      ? await this.chatService.sendBotMessage(bot, payload.channelId, payload.content, undefined, undefined, () => this.isCurrentSession(session), bot.id, payload.replyToMessageId)
+      ? await this.chatService.sendBotMessage(bot, payload.channelId, payload.content, undefined, undefined, () => this.isCurrentSession(session), bot.id, payload.replyToMessageId, payload.localizations)
       : await this.chatService.sendMessage(
       session.user.id,
       payload.channelId,
@@ -2043,7 +2047,7 @@ export class WebSocketServer {
       invocationId: response.invocationId, commandName: response.commandName,
       invokerId: response.invokerId, invokerNickname: response.invokerNickname,
       invokerAvatarUrl: response.invokerAvatarUrl,
-    }, response.messageId, () => canSend() && this.isCurrentSession(session), response.invokerId);
+    }, response.messageId, () => canSend() && this.isCurrentSession(session), response.invokerId, undefined, response.localizations);
     if (!result.success) {
       this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
       return;

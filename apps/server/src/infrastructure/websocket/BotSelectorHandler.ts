@@ -21,7 +21,8 @@ interface SelectorTransport {
   accessVersion(): number;
   send(session: BotInteractionSession, message: ProtocolMessage): void;
   authorizeInvocation(session: BotInteractionSession, invocationId: string, channelId: string): Promise<SelectorInvocationAuthorization | undefined>;
-  publish(bot: UserSummary, channelId: string, content: string, messageId: string, canSend: () => boolean, accessUserId: string): Promise<ChatMessage>;
+  publish(bot: UserSummary, channelId: string, content: string, messageId: string, canSend: () => boolean, accessUserId: string,
+    localizations?: import('@monky/shared').BotMessageLocalizations): Promise<ChatMessage>;
   broadcastMessage(message: ChatMessage): Promise<void>;
 }
 
@@ -189,7 +190,7 @@ export class BotSelectorHandler {
             if (existing.resultMessageId) selector = existing;
             else {
               const messageId = createHash('sha256').update(`selector-result:${existing.id}`).digest('hex');
-              const message = await this.publish(session, existing, final.content, messageId, false);
+              const message = await this.publish(session, existing, final.content, messageId, false, undefined, final.localizations);
               selector = this.selectors.markFinalized(existing.id, session.botId!, message.id);
               await this.transport.broadcastMessage(message);
             }
@@ -275,13 +276,14 @@ export class BotSelectorHandler {
 
   private async publish(
     session: BotInteractionSession, selector: BotSelector, content: string, messageId: string,
-    requireEnabled: boolean, invocation?: SelectorInvocationAuthorization
+    requireEnabled: boolean, invocation?: SelectorInvocationAuthorization,
+    localizations?: import('@monky/shared').BotMessageLocalizations
   ): Promise<ChatMessage> {
     const principal = await this.requireOwnerAccess(session, selector, requireEnabled);
     if (!session.user) throw new SelectorAccessError('Authentication is required.', ProtocolErrorCode.UNAUTHORIZED);
     const canSend = () => this.transport.isCurrent(session) && (invocation?.isCurrent() ?? true);
     if (!canSend()) throw new SelectorAccessError('The requesting session or invocation has ended.', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
-    return this.transport.publish(session.user, selector.channelId, content, messageId, canSend, principal);
+    return this.transport.publish(session.user, selector.channelId, content, messageId, canSend, principal, localizations);
   }
 
   private async publicSnapshot(selector: BotSelector, session: BotInteractionSession): Promise<BotSelectorPublic> {

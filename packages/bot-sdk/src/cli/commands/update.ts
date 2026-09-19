@@ -19,6 +19,7 @@ import {
 import { compareVersions } from '../updateReleases';
 import { configuredUpdateSource, withUpdateCandidate } from '../updateSources';
 import { projectForUpdates } from '../updateConfiguration';
+import { updateEnvironment } from '../updateCredentials';
 import { CliError, cliText } from '../locale';
 import { createUpdateProgressReporter } from '../updateProgress';
 
@@ -221,7 +222,7 @@ export async function updateCommand(context: CliContext, args: string[]): Promis
         restartInstalledCli(context, config, runningProcess);
         console.log(text('Processo reiniciado com a mesma configuração.', 'Process restarted with the same configuration.'));
       }
-    }, process.env, progress.report);
+    }, updateEnvironment(context, project), progress.report);
   } finally {
     progress.close();
   }

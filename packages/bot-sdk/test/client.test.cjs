@@ -619,8 +619,10 @@ test('durable selectors correlate acknowledgements, emit updates and outlive inv
   const closedSelector = { ...selector, closedAt: 2 };
   server.send(MessageType.SELECTOR_SNAPSHOT, closedSelector, closeRequest.requestId);
   await close;
-  const finalize = bot.finalizeSelector('selector-server', selector.id, 'Final result');
+  const localizations = { 'pt-BR': 'Resultado final', en: 'Final result' };
+  const finalize = bot.finalizeSelector('selector-server', selector.id, { content: 'Final result', localizations });
   const finalRequest = await server.next(MessageType.SELECTOR_FINALIZE);
+  assert.deepEqual(finalRequest.payload.localizations, localizations);
   server.send(MessageType.SELECTOR_SNAPSHOT, { ...closedSelector, resultMessageId: 'final-one' }, finalRequest.requestId);
   assert.equal((await finalize).resultMessageId, 'final-one');
   const denied = bot.closeSelector('selector-server', 'another-bots-selector');
@@ -641,15 +643,19 @@ test('public message reply option preserves trusted acknowledgement metadata', {
   const connected = once(bot, 'connected');
   bot.connect({ serverId: 'reply-server' });
   await connected;
-  const sent = bot.sendMessage('reply-server', 'channel-one', 'Answer', { replyToMessageId: 'original' });
+  const localizations = { 'pt-BR': 'Resposta', en: 'Answer' };
+  const sent = bot.sendMessage('reply-server', 'channel-one', { content: 'Answer', localizations }, { replyToMessageId: 'original' });
   const frame = await server.next(MessageType.CHAT_SEND);
+  assert.deepEqual(frame.payload.localizations, localizations);
   assert.equal(frame.payload.replyToMessageId, 'original');
   const reply = { messageId: 'original', userNickname: 'Alice', content: 'Question', deleted: false, hasAttachments: false };
   server.send(MessageType.CHAT_MESSAGE, {
     id: 'response', channelId: 'channel-one', userId: 'bot-one', userNickname: 'Answer bot',
-    content: frame.payload.content, createdAt: Date.now(), isBot: true, reply,
+    content: frame.payload.content, localizations: frame.payload.localizations, createdAt: Date.now(), isBot: true, reply,
   }, frame.requestId);
   assert.deepEqual((await sent).reply, reply);
+  assert.deepEqual((await sent).localizations, localizations);
+  await assert.rejects(bot.sendMessage('reply-server', 'channel-one', { content: 'Fallback', localizations: { en: '' } }));
   await assert.rejects(bot.sendMessage('reply-server', 'channel-one', 'Invalid', { replyToMessageId: '' }));
   await bot.close();
   assert.deepEqual(errors, []);
@@ -757,7 +763,7 @@ test('named options retain their types and public output is explicit', { timeout
     handler: (ctx) => {
       context = ctx;
       ctx.reply('Only you');
-      ctx.publish('For the channel');
+      ctx.publish({ content: 'For the channel', localizations: { 'pt-BR': 'Para o canal', en: 'For the channel' } });
     },
   });
   bot.connect();
@@ -770,6 +776,7 @@ test('named options retain their types and public output is explicit', { timeout
   assert.equal(context.locale, 'en');
   assert.equal(privateReply.payload.ephemeral, true);
   assert.equal(publicReply.payload.ephemeral, false);
+  assert.deepEqual(publicReply.payload.localizations, { 'pt-BR': 'Para o canal', en: 'For the channel' });
   assert.equal(privateReply.payload.invocationId, 'typed');
   assert.equal(completed.payload.failed, false);
   assert.equal(context.signal.aborted, true);
@@ -2002,7 +2009,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 20);
+  assert.equal(PROTOCOL_VERSION, 21);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

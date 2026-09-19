@@ -17,6 +17,7 @@ const updates = require('../dist/cli/commands/update');
 const releases = require('../dist/cli/updateReleases');
 const sources = require('../dist/cli/updateSources');
 const updateConfiguration = require('../dist/cli/updateConfiguration');
+const credentials = require('../dist/cli/updateCredentials');
 const lifecycle = require('../dist/cli/commands/lifecycle');
 const updater = require('../dist/cli/updater');
 const { formatUpdateProgress, createUpdateProgressReporter } = require('../dist/cli/updateProgress');
@@ -1103,6 +1104,91 @@ test('operator source persists outside the package, survives upgrades and resets
   assert.equal(sources.configuredUpdateSource(updateConfiguration.projectForUpdates(upgraded)).releases.repository, 'example/new-default');
   assert.deepEqual(fs.readFileSync(context.configFile), originalConfig);
   assert.deepEqual(fs.readFileSync(keys), originalKeys);
+});
+
+test('GitHub credentials are saved per profile and repository without leaking into logs or other update origins', async t => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot);
+  const token = 'github_pat_SYNTHETIC_fixture_1234567890';
+  const previous = Object.fromEntries(['GH_TOKEN', 'GITHUB_TOKEN', 'SDK_GH_TOKEN_FIXTURE'].map(key => [key, process.env[key]]));
+  delete process.env.GH_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  process.env.SDK_GH_TOKEN_FIXTURE = token;
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const output = [];
+  t.mock.method(console, 'log', value => output.push(String(value)));
+  cliConfig.writeConfig(context, cliConfig.manualConfig(context));
+  const originalConfig = fs.readFileSync(context.configFile);
+  const originalPackage = fs.readFileSync(path.join(f.bot, 'package.json'));
+  await lifecycle.configCommand(context, ['update-token', '--from-env', 'SDK_GH_TOKEN_FIXTURE']);
+  const file = path.join(context.homeDir, 'update-credentials.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { repository: 'example/sound-bot', token });
+  if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  const network = mockHttp(t, call => {
+    if (!call.url.includes('/repos/example/sound-bot/')) return { statusCode: 404 };
+    assert.equal(call.options.headers.Authorization, `Bearer ${token}`);
+    return { body: JSON.stringify([release(context.project.definition, '1.2.4')]) };
+  });
+  await updates.updateCommand(cliConfig.createCliContext(f.bot), ['--check']);
+  assert.equal(network.length, 1, 'A fresh CLI reads the saved credential without requiring an exported shell variable');
+  assert.equal(process.env.GH_TOKEN, undefined, 'The saved credential is not injected into the bot or PM2 environment');
+  assert.equal(credentials.updateEnvironment(context, context.project, { GH_TOKEN: 'explicit-fixture' }).GH_TOKEN, 'explicit-fixture');
+  assert.equal(credentials.updateEnvironment(context, context.project, { GITHUB_TOKEN: 'explicit-fallback' }).GH_TOKEN, undefined);
+  const otherProfile = cliConfig.createCliContext(f.bot, { MONKY_BOT_CLI_HOME: path.join(f.root, 'other') });
+  assert.deepEqual(credentials.updateEnvironment(otherProfile, otherProfile.project, {}), {});
+
+  await lifecycle.configCommand(context, ['update-source', 'github', 'https://github.com/example/another']);
+  await assert.rejects(updates.updateCommand(context, ['--check']), error => {
+    assert.match(error.message, /config update-token/);
+    assert.match(error.message, /https:\/\/github.com\/settings\/personal-access-tokens\/new/);
+    assert.equal(error.message.includes(token), false);
+    return true;
+  });
+  assert.equal(network.at(-1).options.headers.Authorization, undefined);
+  await lifecycle.configCommand(context, ['update-source', 'https', 'https://downloads.example.test/bot.tgz', '--token-env', 'GH_TOKEN']);
+  assert.deepEqual(credentials.updateEnvironment(context, updateConfiguration.projectForUpdates(context), {}), {});
+  await lifecycle.configCommand(context, ['show']);
+  await lifecycle.configCommand(context, ['update-token', '--status']);
+  assert.equal(output.join('\n').includes(token), false);
+  assert.deepEqual(fs.readFileSync(context.configFile), originalConfig);
+  assert.deepEqual(fs.readFileSync(path.join(f.bot, 'package.json')), originalPackage);
+  await lifecycle.configCommand(context, ['update-token', '--clear']);
+  assert.equal(fs.existsSync(file), false);
+});
+
+test('update tokens accept PAT formats instead of environment-name syntax and reject unsafe headers without echoing secrets', async t => {
+  const f = fixture(t);
+  const context = cliConfig.createCliContext(f.bot);
+  const output = [];
+  t.mock.method(console, 'log', value => output.push(String(value)));
+  for (const token of ['github_pat_fixture_aBc_1234567890', 'ghp_fixture0123456789', 'future-format.fixture+safe']) {
+    assert.equal(releases.validateUpdateToken(token), token);
+    credentials.saveUpdateCredential(context, context.project, token);
+    assert.equal(credentials.updateEnvironment(context, context.project, {}).GH_TOKEN, token);
+  }
+  const file = path.join(context.homeDir, 'update-credentials.json');
+  const before = fs.readFileSync(file);
+  for (const token of ['', 'space fixture', 'line\r\nfixture', '\0fixture', 'x'.repeat(8193)]) {
+    assert.throws(() => credentials.saveUpdateCredential(context, context.project, token), /header-safe/);
+    assert.deepEqual(fs.readFileSync(file), before);
+  }
+  const invalid = 'DO_NOT_ECHO_SYNTHETIC_CREDENTIAL';
+  await assert.rejects(lifecycle.configCommand(context, ['update-token', invalid]), error => {
+    assert.equal(error.message.includes(invalid), false);
+    return true;
+  });
+  fs.writeFileSync(file, `{${invalid}`);
+  assert.throws(() => credentials.updateEnvironment(context, context.project, {}), error => {
+    assert.equal(error.message.includes(invalid), false);
+    return true;
+  });
+  await lifecycle.configCommand(context, ['update-token', '--clear']);
+  assert.deepEqual(credentials.updateEnvironment(context, context.project, {}), {});
+  assert.equal(output.join('\n').includes(invalid), false);
 });
 
 test('saved local sources use the operator path and retain identity checks and stable defaults', async t => {

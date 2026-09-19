@@ -100,6 +100,56 @@ test('new audio preferences survive an actual settings-store save and reload', (
   });
 });
 
+test('soundboard limiting is opt-in and preserves its local ceiling across restarts', () => {
+  withSettingsStorage((storage) => {
+    const settings = new SettingsStore();
+    assert.equal(settings.soundboardLimiterEnabled, false);
+    assert.equal(settings.soundboardLoudnessLimit, 6);
+    settings.soundboardLimiterEnabled = true;
+    settings.soundboardLoudnessLimit = 4;
+    settings.save();
+    const reloaded = new SettingsStore();
+    assert.equal(reloaded.soundboardLimiterEnabled, true);
+    assert.equal(reloaded.soundboardLoudnessLimit, 4);
+    storage.removeItem('monky_settings');
+    reloaded.load(false);
+    assert.equal(reloaded.soundboardLimiterEnabled, false);
+    assert.equal(reloaded.soundboardLoudnessLimit, 6);
+  });
+});
+
+test('corrupt soundboard limiter preferences cannot become invalid audio parameters', () => {
+  withSettingsStorage((storage) => {
+    for (const value of [null, 'loud', 0, 11, 2.5, -6, {}, []]) {
+      storage.setItem('monky_settings', JSON.stringify({
+        soundboardLimiterEnabled: 'true', soundboardLoudnessLimit: value,
+      }));
+      const settings = new SettingsStore();
+      assert.equal(settings.soundboardLimiterEnabled, false);
+      assert.equal(settings.soundboardLoudnessLimit, 6);
+    }
+    for (const value of [1, 6, 10]) {
+      storage.setItem('monky_settings', JSON.stringify({
+        soundboardLimiterEnabled: true, soundboardLoudnessLimit: value,
+      }));
+      assert.equal(new SettingsStore().soundboardLoudnessLimit, value);
+    }
+  });
+});
+
+test('unreleased peak-ceiling preferences are not interpreted as a loudness level', () => {
+  withSettingsStorage((storage) => {
+    storage.setItem('monky_settings', JSON.stringify({
+      soundboardLimiterEnabled: true, soundboardLimiterCeilingDb: -30,
+    }));
+    const settings = new SettingsStore();
+    assert.equal(settings.soundboardLimiterEnabled, true);
+    assert.equal(settings.soundboardLoudnessLimit, 6);
+    settings.save();
+    assert.equal(Object.hasOwn(JSON.parse(storage.getItem('monky_settings')!), 'soundboardLimiterCeilingDb'), false);
+  });
+});
+
 test('store migration prioritizes an explicit engine regardless of JSON field order', () => {
   withSettingsStorage((storage) => {
     storage.setItem('monky_settings', JSON.stringify({ noiseSuppressionMode: 'speex', noiseSuppressionEnabled: false }));

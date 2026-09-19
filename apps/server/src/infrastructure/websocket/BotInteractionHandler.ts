@@ -728,6 +728,7 @@ export class BotInteractionHandler {
       invokerNickname: invocation.invokerNickname,
       invokerAvatarUrl: invocation.invokerAvatarUrl,
       content: parsed.data.content,
+      localizations: parsed.data.localizations,
       ephemeral: parsed.data.ephemeral !== false,
       messageId: randomUUID(),
       channelId: invocation.channelId,

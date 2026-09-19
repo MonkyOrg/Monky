@@ -254,10 +254,44 @@ câmera sem filtro para a chamada.
 
 ## Soundboard e figurinhas
 
-Escolha uma pasta em cada aba. As bibliotecas são locais, não pastas do
-servidor. Configurar uma pasta não envia todos os seus arquivos.
+O soundboard cria uma pasta padrão no perfil local do Monky automaticamente.
+Você pode trocar essa pasta em **Configurações → Soundboard**; uma pasta já
+escolhida não é substituída. Para figurinhas, escolha uma pasta na aba
+correspondente. As bibliotecas são locais, não pastas do servidor.
+Configurar uma pasta não envia todos os seus arquivos.
 Consulte [Soundboard e figurinhas no uso diário](/usando-o-app#soundboard)
 para formatos, envio e permissões.
+
+### Limite local do soundboard
+
+**Controlar sons muito altos** fica desligado por padrão. Mesmo desligado,
+ajuste o **Teto de intensidade** de **1 a 10**; o valor inicial é **6**.
+Ative o switch para aplicar o teto escolhido.
+Quanto menor o teto, maior a redução dos sons excessivamente altos.
+Sons abaixo do teto mantêm o volume; sons mais baixos nunca são amplificados.
+O mesmo switch e o ajuste do teto ficam diretamente no **modal do Soundboard**,
+logo abaixo dos controles de volume, sem precisar abrir as configurações.
+As duas telas compartilham a preferência e podem ser operadas pelo teclado.
+Durante a reprodução, um marcador na barra mostra a intensidade **antes da
+redução**, na mesma escala do teto. A bolinha de arraste define o limite;
+o marcador móvel e o valor “Antes do limite” mostram o áudio real.
+Verde indica abaixo do teto, amarelo indica até um nível abaixo dele e vermelho
+indica acima. As faixas acompanham o teto escolhido. Um valor maior que 10
+continua visível no texto, mesmo quando o marcador chega ao fim da barra.
+As cores ajudam a escolher o corte; não diagnosticam distorção no arquivo.
+
+O teto é aplicado depois de misturar os soundboards, inclusive suas prévias
+locais, e depois do volume escolhido: vários sons simultâneos também respeitam
+o limite. Voz, música e o áudio recebido pelos outros participantes não mudam.
+
+A decisão considera a energia do áudio ao longo do tempo, ponderada pela
+frequência, em vez de apenas seu maior pico. Uma proteção separada evita
+picos digitais excessivos. O processamento antecipa aproximadamente 100 ms
+para reduzir o som alto desde o início, inclusive em efeitos curtos.
+
+A escala é relativa: não mede nem garante volume físico no fone ou nas caixas,
+que também depende do sistema e do dispositivo. Não recupera a qualidade de
+um arquivo já distorcido. A escolha e o teto persistem ao reiniciar.
 
 ### Favoritos de sons e servidores
 
@@ -377,6 +411,15 @@ engasgar.
 Ajuste os sons e avisos pessoais nesta aba. Isso não altera as permissões
 de menção ou os eventos publicados pelo servidor; esses controles pertencem
 à [administração](/administrar-servidor).
+
+Em **Sons Personalizados**, todos os efeitos do aplicativo têm controles de
+prévia, escolha de arquivo e restauração: microfone, áudio recebido,
+entrada/saída da chamada, início/fim de compartilhamento, notificação do chat,
+pressionar/soltar push-to-talk e reconexão. Os arquivos escolhidos persistem
+ao reiniciar, inclusive nos efeitos cujo padrão é sintetizado.
+Restaurar um efeito recupera seu arquivo ou tom original; **Restaurar todos**
+remove todas as substituições. Isso não ativa notificações de chat nem sons
+de PTT que você tenha desligado nas respectivas opções.
 
 ## Ferramentas de bots
 

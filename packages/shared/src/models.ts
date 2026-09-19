@@ -126,6 +126,8 @@ export interface BotCommandContext {
 
 /** Resolved by the server from the original, never supplied by the sender. */
 export interface MessageReply {
+  isBot?: boolean;
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   messageId: string;
   userNickname: string;
   content: string;
@@ -134,6 +136,7 @@ export interface MessageReply {
 }
 
 export interface ChatMessage {
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   reply?: MessageReply;
   reactions?: import('./reactions.js').MessageReaction[];
   id: string;

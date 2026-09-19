@@ -305,6 +305,8 @@ export interface AuthFailedPayload {
 }
 
 export interface ChatSendPayload {
+  /** Bot-authored variants; rejected for human messages. */
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   replyToMessageId?: string;
   channelId: string;
   content: string;
@@ -996,6 +998,7 @@ export interface CommandInvokedPayload {
 
 /** Bot -> server. The destination and author come from the stored invocation. */
 export interface CommandResponsePayload {
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   invocationId: string;
   content: string;
   /** Private by default. Public output must be explicitly requested. */

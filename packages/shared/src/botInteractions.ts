@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { LIMITS } from './constants.js';
+import { botMessageLocalizationsSchema } from './botMessages.js';
 import { botCapabilitiesSchema, botPermissionsSchema } from './botPermissions.js';
 import type { CommandOption } from './models.js';
 import {
@@ -460,6 +461,7 @@ export const commandFinishedSchema = commandCancelSchema.extend({
 });
 export const commandResponseSchema = commandCancelSchema.extend({
   content: z.string().trim().min(1).max(LIMITS.MAX_MESSAGE_LENGTH),
+  localizations: botMessageLocalizationsSchema.optional(),
   ephemeral: z.boolean().optional(),
 });
 

@@ -14,15 +14,61 @@ responses.
 - Use **Node.js 22 or 24** and npm.
 - Have a test Monky server and permission to manage its bots.
 - Client, server and bot SDK must use the same `PROTOCOL_VERSION`.
-- This example was prepared with **bot SDK 22.1.0, protocol 20**.
-  The installer selects the latest stable release; if it differs, check that
-  release's `monky-compatibility-<version>.json` file before connecting.
+- This guide's `create`/`doctor` commands and reader-localized messages use
+  **protocol 21**. Check `monky-compatibility-<version>.json` in the selected
+  release before connecting; an earlier stable may not offer these commands.
 
 ::: info Why does the first example use a token?
 Manual mode lets you test without exposing an HTTP port for the bot. It does
 not automatically approve permissions. To distribute your bot through a
 manifest URL, continue with [Connection and identity](/en/bots-conexao).
 :::
+
+## Quick path: development CLI
+
+In the [Monky release](https://github.com/MonkyOrg/Monky/releases) matching your
+client and server, copy the real URL of `monky-bot-sdk-<version>.tgz`. Replace
+`SDK_URL` below with that URL; no global SDK installation or handwritten
+`package.json` is required:
+
+```text
+npm exec --yes --package="SDK_URL" -- monky-bot-sdk create my-bot --locale en
+```
+
+The assistant asks for the package/CLI name and the name displayed in Monky,
+using arrows for choices. It creates `package.json`, `tsconfig.json`, `.gitignore`,
+`src/index.ts` with `/ping`, and `vendor/` containing a self-contained copy of the
+**same SDK** being executed. It does not depend on a path to the global install
+or npm cache. The destination must be new: even an existing empty directory is
+not overwritten.
+
+By default, it installs dependencies and compiles. Use `--no-install` to generate
+files only, then run `npm install` and `npm run build` yourself. Cancelling the
+questions does not create a project. Installation/build failures are reported
+and preserve files for diagnosis without claiming success.
+
+```text
+cd my-bot
+npm run doctor
+npm run cli -- setup
+npm run cli -- start --foreground
+```
+
+`doctor` checks Node/npm, package configuration, SDK/protocol, compiled entry
+and TypeScript types. It does not start the bot, create an identity or claim a
+remote server is compatible. Failures return a nonzero exit code. The generated
+bot uses manual mode and the CLI-provided identity; generate the link in the app
+as described in step 3 below. `/ping` already provides PT-BR/EN reader variants.
+
+If `monky-bot-sdk` is already installed, invoke it directly. For automation:
+
+```text
+monky-bot-sdk create my-bot --name my-bot --display-name "My Bot" --non-interactive
+```
+
+`build` and `cli` remain available; no additional `dev` command is introduced.
+The following steps explain the same files for those who prefer to prepare
+them manually.
 
 ## 1. Prepare the project
 
@@ -123,10 +169,10 @@ Windows Git Bash; on Windows, prefer the PowerShell command above.
 On macOS, or to choose a specific version, copy the URL
 of the `monky-bot-sdk-<version>.tgz` artifact from the
 [official release](https://github.com/MonkyOrg/Monky/releases) and pass it to
-`npm install`. For example, for the version used in this guide:
+`npm install`, replacing `SDK_URL` with the real URL you selected:
 
 ```text
-npm install https://github.com/MonkyOrg/Monky/releases/download/v22.1.0/monky-bot-sdk-22.1.0.tgz
+npm install "SDK_URL"
 ```
 
 Run it in the project directory, without `-g`. npm writes the dependency
