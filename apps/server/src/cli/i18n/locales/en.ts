@@ -425,6 +425,12 @@ export const en: CliTranslationMap = {
 
   // ── Language setup ─────────────────────────────────────────────────────
   'language.selectPrompt': 'Select your language / Selecione seu idioma:',
+  'language.current': 'CLI language: {language}.',
+  'language.configUsage': 'Use monky config language [pt-BR|en-US].',
+  'cliSettings.title': 'Settings',
+  'cliSettings.language': 'Idioma / Language',
+  'cliSettings.server': 'Show server configuration',
+  'cliSettings.back': 'Back',
   'language.invalidSelection': 'Choose 1 (English), 2 (Português), or a code: en, en-US, pt-BR.',
   'language.saved': 'CLI language saved: {language}.',
   'language.missingValue': 'Provide a language after --lang (en, en-US or pt-BR).',

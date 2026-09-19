@@ -3,7 +3,7 @@ import { createCliContext, type CliContext } from './config';
 import { normalizeBotLocale, type BotLocale } from '@monky/shared';
 import {
   chooseCliLocale, CliError, cliErrorMessage, cliText, isInteractiveCliAccess, parseCliLocaleArgs,
-  saveCliLocale, shouldPromptCliLocale,
+  languageCommand, saveCliLocale, shouldPromptCliLocale,
 } from './locale';
 import { autoUpdateCommand, updateCommand } from './commands/update';
 import {
@@ -33,6 +33,7 @@ ${color('COMANDOS', ANSI.bold)}
   status                        Mostra estado do processo e configuração
   logs [--lines N] [--no-follow]
   config                        Exibe a configuração atual
+  config language [pt-BR|en-US]  Consulta ou altera o idioma em Configuração
   config set <k> <v>             Ajusta mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
   config update-source          Consulta a origem de atualização deste perfil
   config update-source github <URL> [--asset-name <nome.tgz>] [--token-env <VAR>]
@@ -46,12 +47,12 @@ ${color('COMANDOS', ANSI.bold)}
   autoupdate on [HH:MM] [--beta]
   autoupdate off
   autoupdate status
-  language [pt-BR|en]           Consulta ou salva o idioma do CLI
+  language [pt-BR|en-US]        Atalho para config language
 
 ${color('OPÇÕES GLOBAIS', ANSI.bold)}
   --version, -v                 Exibe a versão do bot
   --help, -h                    Exibe esta ajuda
-  --locale pt-BR|en             Usa este idioma somente nesta execução
+  --locale pt-BR|en-US          Usa este idioma somente nesta execução
 
 ${color('SETUP NÃO INTERATIVO', ANSI.bold)}
   ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
@@ -75,6 +76,7 @@ ${color('COMMANDS', ANSI.bold)}
   status                        Show the process state and configuration
   logs [--lines N] [--no-follow]
   config                        Show the current configuration
+  config language [pt-BR|en-US]  Show or change language in Configuration
   config set <k> <v>             Set mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
   config update-source          Show the update source for this profile
   config update-source github <URL> [--asset-name <name.tgz>] [--token-env <VAR>]
@@ -88,12 +90,12 @@ ${color('COMMANDS', ANSI.bold)}
   autoupdate on [HH:MM] [--beta]
   autoupdate off
   autoupdate status
-  language [pt-BR|en]           Show or save the CLI language
+  language [pt-BR|en-US]        Alias for config language
 
 ${color('GLOBAL OPTIONS', ANSI.bold)}
   --version, -v                 Show the bot version
   --help, -h                    Show this help
-  --locale pt-BR|en             Use this language for this invocation only
+  --locale pt-BR|en-US          Use this language for this invocation only
 
 ${color('NON-INTERACTIVE SETUP', ANSI.bold)}
   ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "My Bot"] [--bot-dir <directory>] [--yes]
@@ -109,8 +111,9 @@ ${color('UPDATE SOURCE', ANSI.bold)}
 export async function runBotCli(packageRoot: string, args: string[] = process.argv.slice(2)): Promise<void> {
   const parsed = parseCliLocaleArgs(args);
   const versionOnly = ['--version', '-v', 'version'].includes(parsed.args[0]);
-  const selectedLanguage = parsed.args[0] === 'language' && parsed.args.length === 2
-    ? normalizeBotLocale(parsed.args[1]) : undefined;
+  const languageArgs = parsed.args[0] === 'language' ? parsed.args.slice(1)
+    : parsed.args[0] === 'config' && parsed.args[1] === 'language' ? parsed.args.slice(2) : [];
+  const selectedLanguage = languageArgs.length === 1 ? normalizeBotLocale(languageArgs[0]) : undefined;
   const context = createCliContext(packageRoot, process.env, {
     locale: parsed.locale ?? selectedLanguage ?? (versionOnly ? 'pt-BR' : undefined),
     toleratePreferenceErrors: !isInteractiveCliAccess(parsed.args),
@@ -152,16 +155,7 @@ async function dispatchBotCli(context: CliContext, args: string[], explicitLocal
     return;
   }
   if (command === 'language') {
-    if (rest.length > 1 || (rest.length === 1 && !normalizeBotLocale(rest[0]))) {
-      throw new Error(cliText(context.locale, 'Use language pt-BR ou language en.', 'Use language pt-BR or language en.'));
-    }
-    const selected = normalizeBotLocale(rest[0]) ??
-      (!rest.length && isInteractiveCliAccess(args) ? await chooseCliLocale(context.locale) : undefined);
-    if (selected) {
-      saveCliLocale(context.homeDir, selected);
-      context.locale = selected;
-    }
-    console.log(cliText(context.locale, `Idioma: ${context.locale}`, `Language: ${context.locale}`));
+    await languageCommand(context, rest);
     return;
   }
   if (command === 'setup') {

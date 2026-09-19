@@ -40,7 +40,7 @@ import { spawnCommand } from '../process';
 import { createRuntimeEnvironment } from '../runner';
 import { loadBotProject } from '../../tooling/config';
 import { runNpm } from '../../tooling/process';
-import { CliError, cliText } from '../locale';
+import { CliError, cliText, languageCommand } from '../locale';
 import { updateSourceConfigCommand } from '../updateConfiguration';
 import { updateCredentialCommand } from '../updateCredentials';
 import { isInteractiveCliAccess } from '../locale';
@@ -330,6 +330,10 @@ export function logsCommand(context: CliContext, args: string[]): void {
 }
 
 export async function configCommand(context: CliContext, args: string[]): Promise<void> {
+  if (args[0] === 'language') {
+    await languageCommand(context, args.slice(1));
+    return;
+  }
   if (!args.length && isInteractiveCliAccess(['config'])) {
     const { configurationMenu } = await import('../menu');
     await configurationMenu(context);

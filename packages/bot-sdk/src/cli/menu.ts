@@ -1,7 +1,7 @@
 import type { CliContext } from './config';
 import { readConfig, validateTokenEnv } from './config';
 import { askCliChoice, askCliText, askCliValue, type CliChoice } from './prompts';
-import { chooseCliLocale, cliText, saveCliLocale } from './locale';
+import { cliText, languageCommand } from './locale';
 import { configCommand, logsCommand, restartCommand, startCommand, statusCommand, stopCommand } from './commands/lifecycle';
 import { setupCommand } from './commands/setup';
 import { autoUpdateCommand, updateCommand } from './commands/update';
@@ -95,12 +95,14 @@ export async function configurationMenu(context: CliContext): Promise<void> {
       choice(context, 'show', 'Mostrar configuração (segredos ocultos)', 'Show configuration (secrets hidden)'),
       choice(context, 'setup', 'Configurar conexão e identidade', 'Configure connection and identity'),
       choice(context, 'edit', 'Alterar uma configuração', 'Change a setting'),
+      choice(context, 'language', 'Idioma / Language', 'Idioma / Language'),
       choice(context, 'updates', 'Atualizações', 'Updates'),
       choice(context, 'back', 'Voltar', 'Back'),
     ]);
     if (action === 'back') return;
     if (action === 'show') await configCommand(context, ['show']);
     else if (action === 'setup') await setupCommand(context, []);
+    else if (action === 'language') await languageCommand(context, []);
     else if (action === 'updates') await updatesMenu(context);
     else {
       const config = readConfig(context);
@@ -142,9 +144,6 @@ export async function botCliMenu(context: CliContext): Promise<void> {
     else if (action === 'status') statusCommand(context, []);
     else if (action === 'logs') logsCommand(context, ['--no-follow']);
     else if (action === 'config') await configurationMenu(context);
-    else {
-      context.locale = await chooseCliLocale(context.locale);
-      saveCliLocale(context.homeDir, context.locale);
-    }
+    else await languageCommand(context, []);
   }
 }

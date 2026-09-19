@@ -86,18 +86,23 @@ monky --data /srv/monky-amigos restart
 
 ## Idioma do CLI
 
-O primeiro comando executado em um terminal interativo pergunta **English** ou
+O primeiro comando executado em um terminal interativo pergunta **English (US)** ou
 **Português (Brasil)** e salva a escolha em `~/.monky/cli-config.json`.
 `monky`, `--help` e `--version` não fazem essa pergunta nem salvam preferências.
 Comandos em scripts ou com entrada/saída redirecionada também não perguntam
 nem alteram o idioma salvo.
 
-Para trocar a preferência depois, use o comando explícito:
+Para trocar depois, abra `monky config` e escolha **Idioma / Language**, ou use:
 
 ```bash
-monky --lang pt-BR
-monky --lang en-US
+monky config language pt-BR
+monky config language en-US
 ```
+
+Essa configuração funciona sem criar ou escolher um servidor. O menu seguinte
+já usa o novo idioma; identidade, banco e configuração do servidor não mudam.
+`monky config language` sem código abre a escolha em um terminal; em scripts,
+apenas consulta. O atalho `monky --lang pt-BR|en-US` continua disponível.
 
 `en-US` é normalizado para `en`; variantes de inglês e português, incluindo
 `pt_BR.UTF-8`, usam os catálogos `en` e `pt-BR`. Um código não suportado,
@@ -528,10 +533,13 @@ do servidor não pode ser removido de um membro.
 
 ## `monky config`
 
-Exibe ou altera a configuração do servidor.
+Em um terminal, abre as configurações do CLI, incluindo idioma e acesso à
+configuração do servidor. Sem TTY ou em CI, mantém a consulta direta do servidor.
 
 ```bash
-monky config                        # exibe tudo
+monky config                        # menu de configurações em um terminal
+monky config show                   # exibe diretamente os dados do servidor
+monky config language en-US         # idioma do CLI, mesmo sem servidor
 monky config set                    # escolhe a chave interativamente
 monky config set <chave> [valor]    # altera direto
 ```
@@ -560,7 +568,7 @@ Alterar `voiceMode` aplica dinamicamente e notifica todos os clientes conectados
 ### Exemplos
 
 ```bash
-monky config
+monky config show
 monky config set name "Servidor dos Amigos"
 monky config set voiceMode sfu      # ativa modo SFU com estimativa de capacidade
 monky config set password           # digitada de forma oculta

@@ -425,6 +425,12 @@ export const ptBR = {
 
   // ── Language setup ─────────────────────────────────────────────────────
   'language.selectPrompt': 'Select your language / Selecione seu idioma:',
+  'language.current': 'Idioma do CLI: {language}.',
+  'language.configUsage': 'Use monky config language [pt-BR|en-US].',
+  'cliSettings.title': 'Configurações',
+  'cliSettings.language': 'Idioma / Language',
+  'cliSettings.server': 'Mostrar configuração do servidor',
+  'cliSettings.back': 'Voltar',
   'language.invalidSelection': 'Escolha 1 (English), 2 (Português) ou um código: en, en-US, pt-BR.',
   'language.saved': 'Idioma do CLI salvo: {language}.',
   'language.missingValue': 'Informe um idioma após --lang (en, en-US ou pt-BR).',

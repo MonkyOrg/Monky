@@ -39,8 +39,8 @@
     "test:light:hardware": "npm run build:light && npm run build --workspace=apps/server && node --test apps/light/test/hardware_voice.cjs",
     "measure:light": "npm run build:light && npm run build --workspace=apps/server && node --test apps/light/test/resource_usage.cjs",
     "measure:client": "node apps/light/test/measure_client.cjs",
-    "docs:dev": "vitepress dev docs-site",
-    "docs:build": "vitepress build docs-site",
+    "docs:dev": "node scripts/prepare-sdk-installer.js && vitepress dev docs-site",
+    "docs:build": "node scripts/prepare-sdk-installer.js && vitepress build docs-site",
     "docs:preview": "vitepress preview docs-site"
   },
   "keywords": [

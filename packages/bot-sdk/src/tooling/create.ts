@@ -8,6 +8,7 @@ import { validateBotName } from '../cli/config';
 import { isRecord, loadBotProject } from './config';
 import { runNpm } from './process';
 import { bundleDependencies } from './bundle';
+import { askBotFeature, featureProjectFiles, validateFeatures, type BotFeature } from './features';
 
 export function validateProjectName(value: string): string {
   if (!/^[a-z0-9][a-z0-9_-]{1,63}$/.test(value) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(value)) {
@@ -19,6 +20,7 @@ export function validateProjectName(value: string): string {
 
 function entrySource(displayName: string): string {
   return `import { BotClient, validateBotServerUrl, validateBotToken } from '@monky/bot-sdk';
+import { registerFeatures, requestedCapabilities } from './bot.generated.js';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -29,21 +31,10 @@ function required(name: string): string {
 const bot = new BotClient({
   name: process.env.MONKY_BOT_NAME ?? ${JSON.stringify(displayName)},
   publicKey: required('MONKY_BOT_PUBLIC_KEY'),
-  requestedCapabilities: ['commands'],
+  requestedCapabilities,
 });
 
-bot.command({
-  name: 'ping',
-  description: 'Check whether the bot is online',
-  localizations: { 'pt-BR': { description: 'Verifica se o bot está respondendo' } },
-  handler: ctx => {
-    if (ctx.signal.aborted) return;
-    ctx.reply({
-      content: 'Pong! I am online.',
-      localizations: { 'pt-BR': 'Pong! Estou online.', en: 'Pong! I am online.' },
-    });
-  },
-});
+registerFeatures(bot);
 
 bot.on('error', (error: Error) => { console.error('[bot]', error.message); });
 let closing = false;
@@ -70,11 +61,13 @@ export interface CreateBotOptions {
   name: string;
   displayName: string;
   install: boolean;
+  features?: BotFeature[];
 }
 
 export function createBotProject(options: CreateBotOptions): string {
   const name = validateProjectName(options.name);
   const displayName = validateBotName(options.displayName);
+  const features = validateFeatures([{ kind: 'command', name: 'ping' }, ...(options.features ?? [])]);
   const target = path.resolve(options.directory);
   const sdkRoot = path.resolve(__dirname, '..', '..');
   const sdk = loadBotProject(sdkRoot).manifest;
@@ -104,6 +97,7 @@ export function createBotProject(options: CreateBotOptions): string {
       engines: { node: '>=22' },
       scripts: { build: 'tsc', cli: 'monky-bot-sdk cli', package: 'monky-bot-sdk build', doctor: 'monky-bot-sdk doctor' },
       monkyBot: { cliName: name, displayName, entry: 'dist/index.js', files: ['dist'], modes: ['manual'] },
+      monkyBotDevelopment: { version: 1, features },
       dependencies: { '@monky/bot-sdk': `file:vendor/${archives[0]}` },
       devDependencies: { '@types/node': '^22.0.0', typescript: '^5.9.3' },
     };
@@ -116,10 +110,43 @@ export function createBotProject(options: CreateBotOptions): string {
         },
         include: ['src/**/*.ts'],
       }, null, 2) + '\n',
-      '.gitignore': 'node_modules/\ndist/\nrelease/\n.keys/\n.env\n*.log\n',
+      '.gitignore': 'node_modules/\ndist/\nrelease/\n.keys/\n.env\n*.log\n.monky-sdk-add.lock\n.monky-sdk-*.pending\n',
       [path.join('src', 'index.ts')]: entrySource(displayName),
+      ...featureProjectFiles(features),
+      'README.md': `# ${displayName}
+
+## Desenvolvimento / Development
+
+\`monky-bot-sdk\` abre o assistente; \`monky-bot-sdk config language pt-BR\` ou
+\`monky-bot-sdk config language en-US\` altera o idioma da ferramenta.
+
+\`monky-bot-sdk\` opens the assistant; \`config language\` changes the tool language.
+
+- \`npm run build\`: compilar / compile.
+- \`monky-bot-sdk add\`: adicionar e registrar uma funcionalidade / add and register a feature.
+- \`npm run doctor\`: verificar projeto e tipos / check project and types.
+- \`npm run cli -- setup\`: configurar conexão e identidade / configure connection and identity.
+- \`npm run cli -- start --foreground\`: executar no terminal / run in the terminal.
+- \`npm run package\`: gerar pacote autocontido / create a self-contained package.
+
+Edite os módulos em \`src\`; \`src/bot.generated.ts\` pertence ao gerador.
+Edit individual modules in \`src\`; \`src/bot.generated.ts\` belongs to the generator.
+O SDK fica fixado em \`vendor\`; atualizar o CLI global não atualiza este projeto.
+The SDK is pinned in \`vendor\`; updating the global CLI does not update this project.
+
+Capacidades precisam de aprovação no servidor. O miniapp exige presença em voz.
+Capabilities require server approval. Miniapps require voice membership.
+Textos escritos pelo autor devem receber suas próprias traduções.
+Author-written labels need their own translations.
+
+https://monkyorg.github.io/Monky/bots-desenvolvimento
+https://monkyorg.github.io/Monky/en/bots-desenvolvimento
+`,
     };
-    for (const [file, content] of Object.entries(files)) fs.writeFileSync(path.join(target, file), content, { flag: 'wx' });
+    for (const [file, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(target, file)), { recursive: true });
+      fs.writeFileSync(path.join(target, file), content, { flag: 'wx' });
+    }
     if (options.install) {
       stage = 'npm install';
       runNpm(['install', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: target, stdio: 'inherit', timeout: 300_000 });
@@ -135,9 +162,10 @@ export function createBotProject(options: CreateBotOptions): string {
   return target;
 }
 
-export async function createBotCommand(args: string[], locale: BotLocale): Promise<void> {
+export async function createBotCommand(args: string[], locale: BotLocale): Promise<string> {
   let directory: string | undefined, name: string | undefined, displayName: string | undefined;
   let install = true;
+  const features: BotFeature[] = [];
   for (let i = 0; i < args.length; i++) {
     const argument = args[i];
     if (argument === '--no-install') { install = false; continue; }
@@ -160,6 +188,13 @@ export async function createBotCommand(args: string[], locale: BotLocale): Promi
       validateProjectName, { defaultValue: path.basename(path.resolve(directory)) });
     displayName ??= await askCliValue(locale, text('Nome exibido no Monky', 'Name displayed in Monky'),
       validateBotName, { defaultValue: name });
+    while (await askCliChoice(locale, text('Funcionalidades iniciais', 'Initial features'), [
+      { value: 'done', label: text('Continuar com /ping e as escolhas atuais', 'Continue with /ping and current choices') },
+      { value: 'add', label: text('Adicionar uma funcionalidade', 'Add a feature') },
+    ]) === 'add') {
+      features.push(await askBotFeature([], locale, ['ping', ...features.map(feature => feature.name)]));
+      validateFeatures([{ kind: 'command', name: 'ping' }, ...features]);
+    }
     if (install) install = await askCliChoice(locale, text('Instalar dependências e compilar agora?', 'Install dependencies and build now?'), [
       { value: 'yes', label: text('Sim', 'Yes') }, { value: 'no', label: text('Não; apenas criar arquivos', 'No; create files only') },
     ]) === 'yes';
@@ -168,7 +203,7 @@ export async function createBotCommand(args: string[], locale: BotLocale): Promi
     'Provide create <directory> or run in an interactive terminal.');
   name ??= validateProjectName(path.basename(path.resolve(directory)));
   displayName ??= name;
-  const target = createBotProject({ directory, name, displayName, install });
+  const target = createBotProject({ directory, name, displayName, install, features });
   console.log(text(`Projeto criado em ${target}. SDK de bots: ${PROTOCOL_VERSION} (protocolo).`,
     `Project created in ${target}. Bot SDK protocol: ${PROTOCOL_VERSION}.`));
   if (!install) console.log('npm install\nnpm run build');
@@ -176,4 +211,5 @@ export async function createBotCommand(args: string[], locale: BotLocale): Promi
     'In that directory: npm run doctor; then npm run cli -- setup and npm run cli -- start --foreground.'));
   console.log(text('Gere o token do bot em Configurações do Servidor > Bots > Mostrar opção avançada. Não use um token GitHub.',
     'Generate the bot token in Server Settings > Bots > Show advanced option. Do not use a GitHub token.'));
+  return target;
 }
