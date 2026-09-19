@@ -48,7 +48,8 @@ function fixture() {
       if (flags.restartFails) throw new Error('fixture');
       actions.relaunches++;
     } },
-    clipboard: { writeText: (text) => {
+    clipboard: { writeText: async (text) => {
+      if (flags.copyWait) await flags.copyWait;
       if (flags.copyFails) throw new Error('fixture');
       actions.copies.push(text);
     } },
@@ -290,7 +291,7 @@ test('report/copy/reopen failures are contained and permit another explicit atte
   assert.equal(report.reason, 'open-failed');
   assert.equal(report.copied, true);
   f.flags.copyFails = true;
-  assert.equal(f.invoke('copy', window).reason, 'copy-failed');
+  assert.equal((await f.invoke('copy', window)).reason, 'copy-failed');
   f.flags.browserFails = false;
   const withoutCopy = await f.invoke('report', window);
   assert.equal(withoutCopy.ok, true);
@@ -302,6 +303,31 @@ test('report/copy/reopen failures are contained and permit another explicit atte
   assert.equal(f.invoke('reopen', window).ok, true);
   assert.equal(f.actions.quits, 1);
   f.recovery.dispose();
+});
+
+test('clipboard completion is awaited and shutdown prevents a late browser launch', async () => {
+  for (const shutdown of [null, 'dispose', 'close']) {
+    const f = fixture();
+    const window = fatal(f);
+    let finishCopy;
+    f.flags.copyWait = new Promise(resolve => { finishCopy = resolve; });
+    let completed = false;
+    const reporting = f.invoke('report', window).then(result => { completed = true; return result; });
+    await Promise.resolve();
+    assert.equal(completed, false);
+    assert.equal(f.actions.copies.length, 0);
+    assert.equal(f.actions.urls.length, 0);
+    if (shutdown === 'dispose') f.recovery.dispose();
+    if (shutdown === 'close') assert.equal(f.invoke('close', window), true);
+    finishCopy();
+    const result = await reporting;
+    assert.equal(result.copied, true);
+    assert.equal(result.ok, shutdown === null);
+    if (shutdown) assert.equal(result.reason, 'unavailable');
+    assert.equal(f.actions.copies.length, 1);
+    assert.equal(f.actions.urls.length, shutdown ? 0 : 1);
+    f.recovery.dispose();
+  }
 });
 
 test('a dead recovery renderer falls back to a native consent dialog without a recovery loop', async () => {

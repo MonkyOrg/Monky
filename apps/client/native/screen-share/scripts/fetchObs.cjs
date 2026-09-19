@@ -3,8 +3,9 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const https = require('node:https');
 const path = require('node:path');
-const { pipeline } = require('node:stream/promises');
+const { finished, pipeline } = require('node:stream/promises');
 const { root, execute, write, verify, fingerprint } = require('./buildTools.cjs');
 
 const repository = path.resolve(root, '..', '..', '..', '..');
@@ -107,6 +108,30 @@ function readRecipe(directory, relative) {
   return { name, version, url, sha256, recipe: relative };
 }
 
+async function archiveResponse(url, signal, redirects = 0) {
+  const address = new URL(url);
+  assert.ok(address.protocol === 'https:' && !address.username && !address.password,
+    'Native archives require HTTPS without URL credentials.');
+  // Node 22 fetch can terminate the process with an undici parser assertion on SourceForge.
+  const response = await new Promise((resolve, reject) => {
+    const request = https.get(address, {
+      signal, headers: { 'User-Agent': 'Monky-native-source-builder', 'Accept-Encoding': 'identity' },
+    }, value => {
+      value.once('error', reject);
+      resolve(value);
+    });
+    request.once('error', reject);
+  });
+  if (response.statusCode === 200) return response;
+  response.resume();
+  await finished(response, { cleanup: true });
+  assert.ok([301, 302, 303, 307, 308].includes(response.statusCode),
+    `Native archive download failed (${response.statusCode}): ${address}`);
+  assert.ok(redirects < 10 && typeof response.headers.location === 'string',
+    'Native archive redirect is missing its location or exceeds its limit.');
+  return archiveResponse(new URL(response.headers.location, address), signal, redirects + 1);
+}
+
 async function download(record) {
   const extension = new URL(record.url).pathname.match(/\.(?:tar\.gz|tar\.xz|zip)$/u)?.[0];
   assert.ok(extension, `Unsupported native archive: ${record.url}`);
@@ -122,11 +147,8 @@ async function download(record) {
   const temporary = filename + '.' + crypto.randomUUID() + '.part';
   console.log(`Archive: ${record.url}`);
   try {
-    const response = await fetch(record.url, {
-      headers: { 'User-Agent': 'Monky-native-source-builder' }, signal: AbortSignal.timeout(600_000),
-    });
-    assert.ok(response.ok && response.body, `Download failed (${response.status}): ${record.url}`);
-    await pipeline(response.body, fs.createWriteStream(temporary, { flags: 'wx' }));
+    const response = await archiveResponse(record.url, AbortSignal.timeout(600_000));
+    await pipeline(response, fs.createWriteStream(temporary, { flags: 'wx' }));
     const actual = fingerprint(temporary);
     assert.equal(actual.sha256, record.sha256, `Archive checksum mismatch: ${record.url}`);
     if (record.bytes !== undefined) assert.equal(actual.bytes, record.bytes);
@@ -195,7 +217,7 @@ async function fetchObs({ sources = true } = {}) {
   return { stock, dependencies, studio, recipes, manifest };
 }
 
-module.exports = { cache, checkout, readRecipe, download, extract, safeArchiveEntries, assertPinnedSubmodules, fetchObs, recipeFiles };
+module.exports = { cache, checkout, readRecipe, archiveResponse, download, extract, safeArchiveEntries, assertPinnedSubmodules, fetchObs, recipeFiles };
 if (require.main === module) {
   const args = process.argv.slice(2);
   assert.ok(args.length === 0 || (args.length === 1 && args[0] === '--runtime-only'));

@@ -63,8 +63,8 @@ export class CrashRecovery {
     });
     ipcMain.handle(CRASH_RECOVERY_IPC.report, (event, ...args: unknown[]): Promise<CrashRecoveryActionResult> =>
       !args.length && this.ownsRecovery(event) ? this.report() : Promise.resolve({ ok: false, reason: 'unavailable' }));
-    ipcMain.handle(CRASH_RECOVERY_IPC.copy, (event, ...args: unknown[]): CrashRecoveryActionResult =>
-      !args.length && this.ownsRecovery(event) ? this.copy() : { ok: false, reason: 'unavailable' });
+    ipcMain.handle(CRASH_RECOVERY_IPC.copy, (event, ...args: unknown[]): Promise<CrashRecoveryActionResult> =>
+      !args.length && this.ownsRecovery(event) ? this.copy() : Promise.resolve({ ok: false, reason: 'unavailable' }));
     ipcMain.handle(CRASH_RECOVERY_IPC.reopen, (event, ...args: unknown[]): CrashRecoveryActionResult =>
       !args.length && this.ownsRecovery(event) ? this.reopen() : { ok: false, reason: 'unavailable' });
     ipcMain.handle(CRASH_RECOVERY_IPC.close, (event, ...args: unknown[]): boolean => {
@@ -231,10 +231,10 @@ export class CrashRecovery {
     return true;
   }
 
-  private copy(): CrashRecoveryActionResult {
+  private async copy(): Promise<CrashRecoveryActionResult> {
     if (!this.diagnostic || this.disposed) return { ok: false, reason: 'unavailable' };
     try {
-      clipboard.writeText(formatCrashDiagnostic(this.diagnostic));
+      await clipboard.writeText(formatCrashDiagnostic(this.diagnostic));
       return { ok: true, copied: true };
     } catch {
       return { ok: false, reason: 'copy-failed' };
@@ -244,8 +244,9 @@ export class CrashRecovery {
   private async report(): Promise<CrashRecoveryActionResult> {
     if (!this.diagnostic || this.disposed || this.reporting) return { ok: false, reason: 'unavailable' };
     this.reporting = true;
-    const copied = this.copy().ok;
+    const copied = (await this.copy()).ok;
     try {
+      if (this.disposed || this.options.isQuitting()) return { ok: false, reason: 'unavailable', copied };
       // Keep diagnostics local until the user pastes and publishes the report.
       await shell.openExternal(BUG_REPORT_URL);
       return { ok: true, copied };
