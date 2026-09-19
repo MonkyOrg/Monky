@@ -1,6 +1,7 @@
 import type { SelectionChoice } from './selection.js';
 import type { CommandLocalizations } from './botLocales.js';
 import type { LocalCapabilityId } from './localExecution.js';
+import type { NativeScreenSource } from './screenSharing.js';
 
 export type ChannelType = 'VOICE' | 'TEXT';
 
@@ -215,6 +216,8 @@ export interface VoiceParticipantState extends VoiceRestrictions {
    * source of truth for clients that predate this field.
    */
   screenShareIds?: string[];
+  /** Descriptors only: native capture starts when an authenticated viewer watches. */
+  nativeScreenShares?: NativeScreenSource[];
 }
 
 /** CPU and RAM of the machine hosting the server, as measured by the server. */
@@ -397,14 +400,32 @@ export interface TurnAvailability {
  */
 export type TurnInstallStage = 'refreshing' | 'installing' | 'configuring';
 
+export type RtcTransportPurpose = 'call' | 'screen';
+
 export interface WebRtcSignalPayload {
   /** Peers are addressed per connection, not per person (#309). */
   targetSessionId: string;
   fromSessionId: string;
-  signalType: 'offer' | 'answer' | 'candidate' | 'user-left' | 'screen-audio-meta' | 'screen-video-meta';
+  signalType: 'offer' | 'answer' | 'candidate' | 'user-left' | 'screen-audio-meta' | 'screen-video-meta' | 'screen-watch';
   sdp?: any; // RTCSessionDescriptionInit
   candidate?: any; // RTCIceCandidateInit
   streamId?: string; // For screen-audio-meta/screen-video-meta: the MediaStream ID of the screen track
+  /** Sender's epoch for SDP/metadata; publisher's epoch for a Watch command. */
+  subscriptionId?: string;
+  /** Prevents a previous call on the same device/session ID from authorizing reception. */
+  watcherSubscriptionId?: string;
+  watching?: boolean;
+  /** Monotonic per share and subscriptionId, including Stop commands. */
+  subscriptionRevision?: number;
+}
+
+export interface ScreenWatchSignalPayload extends WebRtcSignalPayload {
+  signalType: 'screen-watch';
+  streamId: string;
+  subscriptionId: string;
+  watcherSubscriptionId: string;
+  subscriptionRevision: number;
+  watching: boolean;
 }
 
 export interface BandwidthSettings {

@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
+import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, RtcTransportPurpose, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
 import type {
   BotForm, BotFormValues, BotSettingsContext, BotSettingsDefinition, BotSettingsListResponse,
   BotSettingsPatch, BotSettingsSnapshot, BotServerSettingsSnapshot, CommandAutocompleteResult, CommandValues,
@@ -7,6 +7,7 @@ import type { SoundDownloadRequest, SoundDownloadResult } from './soundDownloads
 import type { CommandCallerContext, LocalCommandPreparation } from './localExecutionProtocol.js';
 import type { ServerShutdownReason } from './serverLifecycle.js';
 import type { BotCapability, BotPermissions } from './botPermissions.js';
+import type { NativeScreenSource } from './screenSharing.js';
 
 export enum ProtocolErrorCode {
   AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
@@ -128,6 +129,8 @@ export enum MessageType {
   ADMIN_MOVE_USER = 'ADMIN_MOVE_USER',
   MEMBER_KICK = 'MEMBER_KICK',
   RTC_SIGNAL = 'RTC_SIGNAL',
+  NATIVE_SCREEN_SIGNAL = 'NATIVE_SCREEN_SIGNAL',
+  NATIVE_SCREEN_SIGNAL_ACK = 'NATIVE_SCREEN_SIGNAL_ACK',
   RTC_DIAGNOSTICS_REPORT = 'RTC_DIAGNOSTICS_REPORT',
   PING = 'PING',
   USER_LOGOUT = 'USER_LOGOUT',
@@ -149,11 +152,14 @@ export enum MessageType {
   SFU_WEBRTC_TRANSPORT_CREATED = 'SFU_WEBRTC_TRANSPORT_CREATED',
   SFU_CONNECT_WEBRTC_TRANSPORT = 'SFU_CONNECT_WEBRTC_TRANSPORT',
   SFU_WEBRTC_TRANSPORT_CONNECTED = 'SFU_WEBRTC_TRANSPORT_CONNECTED',
+  SFU_CLOSE_WEBRTC_TRANSPORT = 'SFU_CLOSE_WEBRTC_TRANSPORT',
+  SFU_WEBRTC_TRANSPORT_CLOSED = 'SFU_WEBRTC_TRANSPORT_CLOSED',
   SFU_PRODUCE = 'SFU_PRODUCE',
   SFU_PRODUCED = 'SFU_PRODUCED',
   SFU_CONSUME = 'SFU_CONSUME',
   SFU_CONSUMED = 'SFU_CONSUMED',
   SFU_PRODUCER_CLOSED = 'SFU_PRODUCER_CLOSED',
+  SFU_PRODUCER_SET_PAUSED = 'SFU_PRODUCER_SET_PAUSED',
   SFU_CONSUMER_CLOSED = 'SFU_CONSUMER_CLOSED',
   SFU_CONSUMER_SET_PAUSED = 'SFU_CONSUMER_SET_PAUSED',
   SFU_NEW_PRODUCER = 'SFU_NEW_PRODUCER',
@@ -506,6 +512,7 @@ export interface VoiceStateUpdatePayload {
   isSharingScreenAudio?: boolean;
   /** See VoiceParticipantState.screenShareIds (#253). */
   screenShareIds?: string[];
+  nativeScreenShares?: NativeScreenSource[];
 }
 
 export interface AdminMuteUserPayload {
@@ -776,11 +783,17 @@ export interface SfuRouterRtpCapabilitiesPayload {
 export interface SfuCreateWebRtcTransportPayload {
   channelId: string;
   direction: 'send' | 'recv';
+  /** Omitted by the browser's existing call; native screen media uses its own pair. */
+  purpose?: RtcTransportPurpose;
+  /** One native engine/rendition; replacing it must not close other screen profiles. */
+  screenSessionId?: string;
 }
 
 export interface SfuWebRtcTransportCreatedPayload {
   channelId: string;
   direction: 'send' | 'recv';
+  purpose?: RtcTransportPurpose;
+  screenSessionId?: string;
   transportOptions: {
     id: string;
     iceParameters: any;
@@ -794,6 +807,12 @@ export interface SfuConnectWebRtcTransportPayload {
   channelId: string;
   transportId: string;
   dtlsParameters: any;
+}
+
+export interface SfuCloseWebRtcTransportPayload {
+  channelId: string;
+  transportId: string;
+  purpose: 'screen';
 }
 
 export interface SfuProducePayload {
@@ -831,6 +850,11 @@ export interface SfuProducerClosedPayload {
   producerId: string;
 }
 
+export interface SfuProducerSetPausedPayload extends SfuProducerClosedPayload {
+  paused: boolean;
+  purpose: 'screen';
+}
+
 export interface SfuConsumerClosedPayload {
   channelId: string;
   consumerId: string;
@@ -839,6 +863,7 @@ export interface SfuConsumerClosedPayload {
 export interface SfuConsumerSetPausedPayload {
   channelId: string;
   consumerId: string;
+  /** Screen consumers start paused and only resume after an explicit Watch. */
   paused: boolean;
 }
 

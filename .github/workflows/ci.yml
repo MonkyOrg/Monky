@@ -188,6 +188,7 @@ jobs:
           check_pair "CONTRIBUTING.md" "CONTRIBUTING.en.md"
           check_pair "apps/light/README.md" "apps/light/README.en.md"
           check_pair "apps/light/QA.md" "apps/light/QA.en.md"
+          check_pair "apps/client/native/screen-share/README.md" "apps/client/native/screen-share/README.en.md"
 
           # O site de docs (VitePress) tem PT na raiz de docs-site/ e EN em
           # docs-site/en/. Cada pagina precisa manter o par no mesmo PR.
@@ -268,6 +269,18 @@ jobs:
 
       - name: Build workspaces
         run: npm run build
+
+      - name: Build native screen runtime and corresponding-source inputs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PYTHON = (Get-Command python).Source
+          npm run prepare:native-screen -- --python="$env:PYTHON" --jobs=4
+
+      - name: Exercise native screen contracts and legal metadata
+        run: |
+          npm run test:native-screen --workspace=apps/client
+          npm run test:legal
 
       - name: Install FFmpeg for generated voice fixtures
         shell: bash

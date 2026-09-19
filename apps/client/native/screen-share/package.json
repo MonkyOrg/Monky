@@ -1,0 +1,17 @@
+{
+  "name": "@monky/screen-share",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Owned native screen capture, transport and presentation for Monky",
+  "license": "GPL-3.0-or-later",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "files": ["index.cjs", "index.d.ts", "runtime", "bin", "licenses", "LICENSE", "LICENSE-MIT", "THIRD_PARTY_NOTICES", "README.md", "README.en.md"],
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "test:capture": "node test/nativeCaptureSmoke.cjs"
+  },
+  "dependencies": {
+    "@monky/shared": "*"
+  }
+}

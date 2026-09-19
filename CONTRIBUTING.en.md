@@ -6,7 +6,7 @@ Thanks for your interest! This document explains how to propose ideas, vote on
 what comes first and — if you want to write code — how to open a PR that lands
 without friction.
 
-Monky is MIT and development happens entirely in public, in the
+Monky is GPL-3.0-or-later and development happens entirely in public, in the
 [Issues](https://github.com/MonkyOrg/Monky/issues).
 
 ---
@@ -107,6 +107,14 @@ npm install
 npm run build
 npm start
 ```
+
+Native window sharing on Windows requires an additional preparation step with
+pinned libobs/AMF and WebRTC. Read the [module guide](apps/client/native/screen-share/README.en.md)
+before testing or packaging that path. `npm run build` alone does not download
+the native SDK; other platforms and sources retain the Chromium path.
+When redistributing a build, include the licenses and Corresponding Source
+described in the guide. `npm run package` uses electron-builder and produces
+`release\win-unpacked\Monky.exe` and `release\Monky-Windows.zip`.
 
 While developing, in two terminals:
 
@@ -375,4 +383,5 @@ ideas in the abstract.
 ## 📜 License
 
 By contributing, you agree that your contribution will be licensed under the
-project's [MIT license](LICENSE).
+project's [GNU GPL version 3 or later](LICENSE). Preserve copyright notices and
+third-party licenses; the libobs integration does not replace them.

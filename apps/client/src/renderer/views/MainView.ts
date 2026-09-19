@@ -16,8 +16,8 @@ import { connectionStore, SavedServer } from '../stores/connectionStore';
 import { audioProcessor } from '../core/AudioProcessor';
 import { selectNoiseSuppression } from '../core/AudioDeviceService';
 import { webRtcManager } from '../core/WebRtcManager';
-import { videoService } from '../core/VideoService';
 import { screenAudioService } from '../core/ScreenAudioService';
+import { stopLocalScreenShares } from '../core/screenShareControls';
 import { ChatView } from './ChatView';
 import type { ConnectionView } from './ConnectionView';
 import { bindPttIndicators, renderMicrophoneButton } from './PttIndicator';
@@ -551,15 +551,14 @@ export class MainView {
 
     // Stop self-sharing handler
     document.getElementById('screenshare-self-stop-btn')?.addEventListener('click', async () => {
-      videoService.stopScreenShare();
-      await webRtcManager.removeAllLocalScreenTracks();
-      voiceStore.setScreenSharing(false);
-      callClient().send(MessageType.VOICE_STATE_UPDATE, {
-        screenShareIds: [],
-        isScreenSharing: false,
-      });
-      if (screenAudioService.getIsCapturing()) {
-        await screenAudioService.stop();
+      try {
+        await stopLocalScreenShares(screenAudioService);
+      } catch (error) {
+        await showAlert({
+          title: t('screenShare.errorTitle'),
+          message: t('screenShare.errorMessage', { error: error instanceof Error ? error.message : String(error) }),
+          variant: 'danger',
+        });
       }
       this.updateScreenShareNotice();
     });
@@ -1249,22 +1248,6 @@ export class MainView {
     this.voiceStageView?.setChannel(channelId);
     this.renderChannels();
     this.updateScreenShareNotice();
-  }
-
-  /**
-   * Fully stops every local screen share because the participant's voice
-   * channel is changing (moved by an admin or switching rooms). Stops the OS
-   * capture (which plays the stop cue and auto-stops screen audio), removes the
-   * WebRTC producers/senders so nothing is re-announced into the new room, and
-   * clears the derived store flags. No-ops when nothing is being shared (#565).
-   */
-  private async stopLocalScreenSharesForChannelChange(): Promise<void> {
-    if (videoService.getScreenShareCount() === 0 && !voiceStore.isScreenSharing) {
-      return;
-    }
-    videoService.stopScreenShare();
-    await webRtcManager.removeAllLocalScreenTracks();
-    voiceStore.setScreenSharing(false);
   }
 
   private async handleDeleteChannel(channelId: string): Promise<void> {

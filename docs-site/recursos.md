@@ -13,7 +13,8 @@ Windows e macOS; não é preciso programar ou instalar um bot para conversar.
 - **Áudio local:** RNNoise, Speex, GTCRN ou WebRTC para supressão de ruído,
   teste do microfone e saídas por categoria.
 - **Vídeo:** câmera, efeitos de fundo e compartilhamento de tela/janela;
-  áudio de compartilhamento depende da plataforma e da fonte.
+  imagem e som do compartilhamento só são recebidos quando você escolhe
+  assistir. O áudio disponível depende da plataforma e da fonte.
 - **Soundboard:** biblioteca local, favoritos, busca, atalhos e permissões
   controladas pelo servidor.
 

@@ -15,6 +15,7 @@ import { SoundboardDownloads } from './soundboardDownload';
 import { AudioPreviews } from './audioPreviews';
 import { createLocalExecutionService } from './localExecution/createService';
 import { setupLocalExecutionIpc, type LocalExecutionIpc } from './localExecution/ipc';
+import { setupNativeScreenSharingIpc } from './nativeScreenSharing';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
@@ -359,6 +360,15 @@ export function setupIpcHandlers(
   const audioPreviews = new AudioPreviews();
   const localExecution = setupLocalExecutionIpc(mainWindow, (notifications) =>
     createLocalExecutionService(mainWindow, app.getPath('userData'), notifications));
+  const nativeScreenSharing = setupNativeScreenSharingIpc(mainWindow, (sourceId) => {
+    const hwnd = nativeWindowIdFromSourceId(sourceId);
+    if (hwnd === null || !Number.isSafeInteger(hwnd) || hwnd <= 0) throw new Error('Invalid native screen window.');
+    const window = listNativeWindows().find(candidate => candidate.hwnd === hwnd);
+    if (!window || isGhostWindow(window) || window.isIconic || !window.isVisible
+      || !Number.isSafeInteger(window.processId) || window.processId <= 0)
+      throw new Error('The selected screen-sharing window is unavailable.');
+    return { hwnd, expectedProcessId: window.processId };
+  });
   const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
     event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
@@ -1340,5 +1350,12 @@ export function setupIpcHandlers(
     void lanDiscovery.stop();
     globalInputHook.destroy();
   });
-  return localExecution;
+  return {
+    service: localExecution.service,
+    async dispose() {
+      const results = await Promise.allSettled([nativeScreenSharing.dispose(), localExecution.dispose()]);
+      const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (errors.length) throw new AggregateError(errors, 'Application resource shutdown failed.');
+    },
+  };
 }

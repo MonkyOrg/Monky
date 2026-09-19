@@ -5934,6 +5934,56 @@ input:focus, textarea:focus, select:focus {
   background-color: #000000;
 }
 
+.native-screen-presentation-owner {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.stage-native-thumbnail {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg-primary);
+}
+
+.stage-native-thumbnail img {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  opacity: 0.4;
+}
+
+.stage-native-thumbnail span {
+  position: relative;
+  max-width: 85%;
+  padding: 12px;
+  text-align: center;
+  color: var(--text-primary);
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: var(--radius-md);
+}
+
+.stage-native-error {
+  position: absolute;
+  inset: 0 0 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+  text-align: center;
+  background: var(--bg-primary);
+  z-index: 3;
+}
+
 /* #150 — remote screen share gated behind an explicit "Assistir transmissão".
    The preview is shown blurred and silent until the viewer opts in. */
 .stage-video-element.screen-locked {
@@ -6096,7 +6146,9 @@ input:focus, textarea:focus, select:focus {
 .telemetry-overlay {
   position: absolute;
   z-index: 4;
-  max-width: min(220px, calc(100% - 24px));
+  max-width: min(310px, calc(100% - 24px));
+  max-height: calc(100% - 72px);
+  overflow: hidden;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
   background-color: rgba(0, 0, 0, 0.62);
@@ -6169,13 +6221,15 @@ input:focus, textarea:focus, select:focus {
 }
 
 /* Vertical volume popup — appears on hover over the volume button */
-.stage-volume-wrapper {
+.stage-volume-wrapper,
+.stage-quality-wrapper {
   position: relative;
   display: flex;
   align-items: center;
 }
 
-.stage-volume-btn {
+.stage-volume-btn,
+.stage-quality-button {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6190,8 +6244,49 @@ input:focus, textarea:focus, select:focus {
   backdrop-filter: blur(4px);
 }
 
-.stage-volume-btn:hover {
+.stage-volume-btn:hover,
+.stage-quality-button:hover {
   background-color: rgba(0, 0, 0, 0.85);
+}
+
+.stage-quality-menu:not([hidden]) {
+  display: grid;
+  gap: 4px;
+}
+
+.stage-quality-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  width: max-content;
+  max-width: min(320px, 80vw);
+  padding: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+  z-index: 10;
+}
+
+.stage-quality-menu button {
+  display: grid;
+  gap: 4px;
+  padding: 8px 12px;
+  text-align: left;
+  font: inherit;
+  color: var(--text-primary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  cursor: pointer;
+}
+
+.stage-quality-menu button[aria-pressed="true"] {
+  border-color: var(--accent-primary);
+}
+
+.stage-quality-menu button:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
 }
 
 .stage-volume-popup {
@@ -6242,7 +6337,8 @@ input:focus, textarea:focus, select:focus {
   accent-color: var(--accent-primary);
 }
 
-.stage-fullscreen-btn {
+.stage-fullscreen-btn,
+.stage-diagnostics-btn {
   position: relative;
   bottom: auto;
   right: auto;
@@ -6267,7 +6363,8 @@ input:focus, textarea:focus, select:focus {
   opacity: 1;
 }
 
-.stage-fullscreen-btn:hover {
+.stage-fullscreen-btn:hover,
+.stage-diagnostics-btn:hover {
   background-color: rgba(0, 0, 0, 0.85);
 }
 
@@ -6629,6 +6726,43 @@ button[data-loading="1"]::after {
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.2;
+}
+
+.quality-label-with-help {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.quality-label-with-help label {
+  margin: 0;
+  color: inherit;
+  font: inherit;
+}
+
+.quality-bitrate-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: help;
+}
+
+.quality-bitrate-help:hover,
+.quality-bitrate-help:focus-visible {
+  color: var(--accent-primary);
+}
+
+.quality-bitrate-help:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
 }
 
 .quality-custom-control {

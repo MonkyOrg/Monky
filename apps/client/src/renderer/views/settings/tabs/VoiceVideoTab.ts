@@ -192,51 +192,6 @@ export class VoiceVideoTab {
         ${this.cameraEffectsControl.renderHtml()}
       </div>
 
-      <!-- Screen Share -->
-      <div data-settings-section="screen-share" data-settings-label="${escapeHtml(t('settings.screenShareSection'))}" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-          <span style="font-size: 13px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px;">
-            <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">screen_share</span>
-            ${t('settings.screenShareSection')}
-          </span>
-        </div>
-
-        <div class="form-group" style="padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); margin-bottom: 12px;">
-          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-            <div>
-              <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-screen-telemetry">
-                <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">monitoring</span>
-                ${t('settings.telemetryLabel')}
-              </label>
-              <div style="font-size: 11px; color: var(--text-muted);">
-                ${t('settings.telemetryDesc')}
-              </div>
-            </div>
-            <label class="toggle-switch" aria-label="${t('settings.telemetryLabel')}">
-              <input id="checkbox-screen-telemetry" type="checkbox" ${settingsStore.screenShareTelemetryEnabled ? 'checked' : ''}>
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-        </div>
-
-        <div class="form-group" style="margin-bottom: 12px;">
-          <label for="select-screen-telemetry-position">${t('settings.telemetryPosition')}</label>
-          <select id="select-screen-telemetry-position">
-            <option value="top-right" ${settingsStore.screenShareTelemetryPosition === 'top-right' ? 'selected' : ''}>${t('settings.positionTopRight')}</option>
-            <option value="top-left" ${settingsStore.screenShareTelemetryPosition === 'top-left' ? 'selected' : ''}>${t('settings.positionTopLeft')}</option>
-            <option value="bottom-right" ${settingsStore.screenShareTelemetryPosition === 'bottom-right' ? 'selected' : ''}>${t('settings.positionBottomRight')}</option>
-            <option value="bottom-left" ${settingsStore.screenShareTelemetryPosition === 'bottom-left' ? 'selected' : ''}>${t('settings.positionBottomLeft')}</option>
-          </select>
-        </div>
-
-        <div class="form-group" style="margin-bottom: 0;">
-          <label for="select-screen-telemetry-mode">${t('settings.telemetryMode')}</label>
-          <select id="select-screen-telemetry-mode">
-            <option value="simple" ${settingsStore.screenShareTelemetryMode === 'simple' ? 'selected' : ''}>${t('settings.telemetryModeSimple')}</option>
-            <option value="complete" ${settingsStore.screenShareTelemetryMode === 'complete' ? 'selected' : ''}>${t('settings.telemetryModeComplete')}</option>
-          </select>
-        </div>
-      </div>
     `;
   }
 
@@ -278,9 +233,6 @@ export class VoiceVideoTab {
     this.audioOutputControls.attachEvents(container);
     this.cameraEffectsControl.attachEvents(container);
     const btnRefreshDevices = container.querySelector<HTMLButtonElement>('#btn-refresh-devices');
-    const checkboxScreenTelemetry = container.querySelector<HTMLInputElement>('#checkbox-screen-telemetry');
-    const selectScreenTelemetryPos = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-position');
-    const selectScreenTelemetryMode = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-mode');
 
     // Input mode cards keep the same persisted modes without native radios.
     const containerVad = container.querySelector<HTMLElement>('#container-vad-settings');
@@ -488,21 +440,6 @@ export class VoiceVideoTab {
 
     btnRefreshDevices?.addEventListener('click', async () => {
       await this.refreshDevices(container);
-    });
-
-    checkboxScreenTelemetry?.addEventListener('change', () => {
-      settingsStore.screenShareTelemetryEnabled = checkboxScreenTelemetry.checked;
-      settingsStore.save();
-    });
-
-    selectScreenTelemetryPos?.addEventListener('change', () => {
-      settingsStore.screenShareTelemetryPosition = selectScreenTelemetryPos.value as any;
-      settingsStore.save();
-    });
-
-    selectScreenTelemetryMode?.addEventListener('change', () => {
-      settingsStore.screenShareTelemetryMode = selectScreenTelemetryMode.value as any;
-      settingsStore.save();
     });
 
     this.updateVadThresholdLine(container, settingsStore.vadSensitivity);

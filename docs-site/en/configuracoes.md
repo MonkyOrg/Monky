@@ -31,6 +31,80 @@ identity export. Saved servers can include passwords and are not written
 in plain text in this backup. Without the chosen password, the file cannot
 be recovered.
 
+### Quality, bitrate and telemetry
+
+Under **Quality**, presets, codec and custom values are grouped with
+**Video telemetry**. **Voice and Video** contains devices, audio processing
+and previews. To show FPS, resolution and bitrate over camera/screen video,
+use **Quality → Video telemetry**: the switch, position and mode are saved
+and applied without restarting the stream.
+
+In the **Custom** profile, hover or use `Tab` to reach the question icon next to
+each **Bitrate**. The tooltip explains the effect and cost: higher bitrate can
+preserve detail; lower bitrate saves bandwidth but may reduce fidelity or produce
+video blocks. It does not increase resolution or FPS by itself.
+
+As a starting point for **one outgoing video copy**, use measured upload,
+not the advertised download speed:
+
+| Upload | Initial bitrate ceiling |
+| --- | --- |
+| 5 Mbps | 2000 kbps |
+| 10 Mbps | 5000 kbps |
+| 20 Mbps | 10000 kbps |
+| 50 Mbps or more | 20000 kbps |
+
+Leave at least **30% headroom** and subtract other traffic, including audio,
+camera and simultaneous screen shares. In P2P, each recipient gets a copy;
+in SFU, count the outgoing stream to the server. These are starting points,
+not quality guarantees: codec, content, resolution and FPS also affect bandwidth
+needs. For voice, start at 24–32 kbps per copy; 48–64 kbps provides higher
+fidelity. With 1 Mbps upload, 64 kbps uses 6.4% per copy before other costs.
+
+### Watching shared screens
+
+In the voice channel, click **Watch broadcast** on the screen you want to open.
+The announcement that someone is sharing does not start receiving its video
+and audio on its own. **Stop watching** stops delivery of that screen only to
+you, without turning off your microphone, camera or the stream for other
+viewers. This applies to both P2P and SFU.
+
+Shared audio belongs to the publisher: if you are watching two of their screens,
+stopping one keeps the audio needed by the other. Stopping the last one also
+ends that audio reception. Muting is a separate playback preference; it does
+not replace **Stop watching** when you want to save bandwidth.
+
+Changing pages, using a pop-out window or enabling the overlay does not change
+the screens you chose to watch in the call. Leaving the call or ending the
+source clears that choice; a new broadcast must be selected again. A transport
+reconnection preserves the choice while the same source remains valid.
+
+On the native path, the last viewer to stop also closes that profile's capture,
+encoder and sending pipeline, including the upload to the SFU.
+The source announcement remains available to watch again. The Chromium path
+preserves capture/preview and may continue uploading to the SFU.
+Signaling, connection control, voice and camera can still use the network.
+
+### Native sharing and viewer quality
+
+The picker identifies the available path. Qualified native publishing uses
+**Windows x64, window capture and AMD/AMF H.264**; monitors, other encoders and
+other platforms retain the Chromium path. Native unavailability is not hidden
+behind a silent backend switch.
+
+For up to **1920×1080 at 120 FPS**, select **Custom** under Quality; existing
+presets were not automatically changed to 120 FPS. Native video is stretched
+to the selected dimensions, without adding bars to preserve a 4:3 aspect ratio.
+
+When watching a native screen, **Received quality** requests a real sender
+profile: **Source maximum** or profiles capped at **1080p/60**,
+**720p/60** and **480p/30**. All respect the publisher's configured limit;
+equivalent choices are not repeated. The 480p ceiling uses 852×480 for encoder
+compatibility. This changes transmitted media, not just the player's size.
+Different profiles can require additional encoders and upload bandwidth.
+Configured resolution, FPS and bitrate are limits, not performance guarantees.
+Update both client and server together to use this behavior.
+
 ### Appear offline
 
 Under **My Profile → Visibility → Appear offline**, the switch changes your

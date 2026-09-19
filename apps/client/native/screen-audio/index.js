@@ -38,6 +38,12 @@ function getStatus() {
   return binding.getStatus();
 }
 
+const { createPacketCaptureFactory } = require('./packet_capture');
+const createPacketCapture = createPacketCaptureFactory(binding, process.platform);
+function isPacketCaptureSupported() {
+  return process.platform === 'win32' && !!binding && typeof binding.createPacketCapture === 'function' && binding.isSupported();
+}
+
 function listWindowOwners() {
   if (!binding || typeof binding.listWindowOwners !== 'function') return [];
   return binding.listWindowOwners();
@@ -58,4 +64,7 @@ function getKeyboardLayout(previousId = '', characters = '') {
   return binding.getKeyboardLayout(previousId, characters);
 }
 
-module.exports = { isSupported, start, stop, getLastError, getStatus, listWindowOwners, listWindows, restoreWindow, getKeyboardLayout };
+module.exports = {
+  isSupported, isPacketCaptureSupported, start, stop, getLastError, getStatus, createPacketCapture,
+  listWindowOwners, listWindows, restoreWindow, getKeyboardLayout,
+};

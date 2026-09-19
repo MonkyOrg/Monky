@@ -267,7 +267,7 @@ test('voice grants permit only publishing and revocation tears down the active r
   const botSession = text(record(bot.auth.payload.currentUser).sessionId);
   const callerSession = text(record(f.caller.auth.payload.currentUser).sessionId);
   const signal = (from: string, target: string, direction: string) => ({
-    fromSessionId: from, targetSessionId: target, signalType: 'offer',
+    fromSessionId: from, targetSessionId: target, signalType: 'offer', subscriptionId: 'peer-epoch',
     sdp: { type: 'offer', sdp: `v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=${direction}\r\n` },
   });
   await bot.peer.error(MessageType.RTC_SIGNAL, signal(botSession, callerSession, 'recvonly'), ProtocolErrorCode.PERMISSION_DENIED);

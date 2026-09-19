@@ -9,7 +9,7 @@ import { authConnectSchema } from '../src/validators.js';
 
 test('protocol 20 requires clients and bots to update with the server', () => {
   const input = { nickname: 'Member', publicKey: 'ab'.repeat(32), protocolVersion: PROTOCOL_VERSION };
-  assert.equal(PROTOCOL_VERSION, 21);
+  assert.equal(PROTOCOL_VERSION, 22);
   assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: 19 }).success, false);
   assert.equal(authConnectSchema.safeParse(input).success, true);
   assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: 17 }).success, false);

@@ -19,6 +19,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { license, copyMonkyLicenses } from './legal.cjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER_DIR = path.join(ROOT, 'apps', 'server');
@@ -47,6 +48,7 @@ export function buildSharedPackageJson(sharedPkg) {
   return {
     name: sharedPkg.name,
     version: sharedPkg.version,
+    license,
     main: sharedPkg.main,
     types: sharedPkg.types,
   };
@@ -65,7 +67,7 @@ export function buildCliPackageJson(serverPkg, sharedPkg, version) {
     name: serverPkg.name,
     version,
     description: 'Monky CLI — self-hosted voice, video and chat server',
-    license: 'MIT',
+    license,
     repository: { type: 'git', url: 'https://github.com/MonkyOrg/Monky.git' },
     homepage: 'https://github.com/MonkyOrg/Monky#readme',
     main: serverPkg.main,
@@ -100,6 +102,7 @@ function main() {
   fs.mkdirSync(staging, { recursive: true });
 
   fs.cpSync(serverDist, path.join(staging, 'dist'), { recursive: true });
+  copyMonkyLicenses(staging);
 
   // tsc leaves the .sql files behind, and DatabaseConnection looks for them
   // next to the compiled output first.
@@ -113,6 +116,7 @@ function main() {
 
   const bundledShared = path.join(staging, 'node_modules', '@monky', 'shared');
   fs.mkdirSync(bundledShared, { recursive: true });
+  copyMonkyLicenses(bundledShared);
   fs.cpSync(sharedDist, path.join(bundledShared, 'dist'), { recursive: true });
   fs.writeFileSync(
     path.join(bundledShared, 'package.json'),

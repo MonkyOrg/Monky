@@ -1,0 +1,914 @@
+{
+  "version": "32.1.1",
+  "repository": "https://github.com/obsproject/obs-studio",
+  "revision": "7272af1375b38bc3cf4e0f98a5d999e8b76e9309",
+  "files": [
+    {
+      "path": "cmake\\common\\buildspec_common.cmake",
+      "bytes": 7002,
+      "sha256": "dd75652499ce86cbfebbcd5b86b15889ca381865cae8782ae413e0a7c6d4e3bd"
+    },
+    {
+      "path": "cmake\\windows\\compilerconfig.cmake",
+      "bytes": 3203,
+      "sha256": "0215f1313fe77a07a13282da554ede13e4d756fc02f22470bba6b23a01831c06"
+    },
+    {
+      "path": "cmake\\windows\\defaults.cmake",
+      "bytes": 879,
+      "sha256": "06fe7d9a3ff57a433bc7cf5fc8eaf650503477b239c4cca5a26c87d7e4fbcc13"
+    },
+    {
+      "path": "cmake\\windows\\helpers.cmake",
+      "bytes": 22351,
+      "sha256": "38102d8e06368f50e8f8f38c8127e363afff063c1edb7440546ca0f6f060908e"
+    },
+    {
+      "path": "CMakePresets.json",
+      "bytes": 9372,
+      "sha256": "053d4c1edc51e48e71a525d85f1c8fa709b0c7d841c147a9f1e362001da87799"
+    },
+    {
+      "path": "COPYING",
+      "bytes": 18092,
+      "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643"
+    },
+    {
+      "path": "deps\\w32-pthreads\\config.h",
+      "bytes": 4557,
+      "sha256": "139fc4cec4dd4de3488fba35ab3f9c85e57388f7e74c276d01689e018166f65a"
+    },
+    {
+      "path": "deps\\w32-pthreads\\context.h",
+      "bytes": 2379,
+      "sha256": "ad9451a330b9e691d909b2f5cf021b438c3c0083452ea1f262058f751a459eb5"
+    },
+    {
+      "path": "deps\\w32-pthreads\\implement.h",
+      "bytes": 35347,
+      "sha256": "210b811e3adaac6b3b543363a37c40105eabfe982a4db62bd4baeb4185b100ac"
+    },
+    {
+      "path": "deps\\w32-pthreads\\need_errno.h",
+      "bytes": 3042,
+      "sha256": "d4b694f45e87b930efa1e7ec8ad5a4e60871846f956967356b32c6928465f63b"
+    },
+    {
+      "path": "deps\\w32-pthreads\\pthread.h",
+      "bytes": 42559,
+      "sha256": "8c37f99149e2439dfe5f57deaa5d204d24384e3b7a36d4aab891e91722f90129"
+    },
+    {
+      "path": "deps\\w32-pthreads\\sched.h",
+      "bytes": 4976,
+      "sha256": "058404657486b2428ac198893856986a6ca4922fab7af6577242e1f298b241f6"
+    },
+    {
+      "path": "deps\\w32-pthreads\\semaphore.h",
+      "bytes": 4544,
+      "sha256": "360523d42d97b6e59ed3dcab8cda4b17f625517af10f0bb9cc0b534cefc86f6b"
+    },
+    {
+      "path": "deps\\w32-pthreads\\tests\\benchtest.h",
+      "bytes": 2336,
+      "sha256": "7a3e86145f2d2bce7b813f3b0541de36faabce0fe7de0aba4adbaab2475e2953"
+    },
+    {
+      "path": "deps\\w32-pthreads\\tests\\test.h",
+      "bytes": 4916,
+      "sha256": "19ecc47e9176c7022b046a832229f34c52c4c619da3ef4a81b20b0853d8ea3c7"
+    },
+    {
+      "path": "libobs\\audio-monitoring\\osx\\mac-helpers.h",
+      "bytes": 275,
+      "sha256": "f578649af18cffffc8abc2c11ff4e81ce8db1a1ea397ef7243826714bb882a22"
+    },
+    {
+      "path": "libobs\\audio-monitoring\\pulse\\pulseaudio-wrapper.h",
+      "bytes": 6164,
+      "sha256": "79fffea721a2a278469aea33e8dc84071cd783b3e0c7d6b371d1c8e62beaa636"
+    },
+    {
+      "path": "libobs\\audio-monitoring\\win32\\wasapi-output.h",
+      "bytes": 645,
+      "sha256": "839b8615d25f56f360001d72fada6a7e344b32cd0a61eaf46c9d4d2ae4b9c154"
+    },
+    {
+      "path": "libobs\\callback\\calldata.h",
+      "bytes": 5269,
+      "sha256": "ff17692b20cd9bcfd0e40bb01befaa868471434c19ec0d04f08ce86a4e0edec4"
+    },
+    {
+      "path": "libobs\\callback\\decl.h",
+      "bytes": 1601,
+      "sha256": "a089502c850eb5bd6e40bc68a68c3c07c419ef19626f52d44dea609f214540c1"
+    },
+    {
+      "path": "libobs\\callback\\proc.h",
+      "bytes": 1708,
+      "sha256": "177ce8106f79f15ed3f645fdefc4c4d3bf0dd69553462ed20d2f08fc39fc10ec"
+    },
+    {
+      "path": "libobs\\callback\\signal.h",
+      "bytes": 2564,
+      "sha256": "9de0e2eb85261321efde9a18933c0a77e3cd96113f344b49963fdfc34bef3e6e"
+    },
+    {
+      "path": "libobs\\graphics\\axisang.h",
+      "bytes": 1575,
+      "sha256": "36d668807c3dac7be38f5cedaa7f44afed3179587097bdb6b4f233b262a7f10f"
+    },
+    {
+      "path": "libobs\\graphics\\bounds.h",
+      "bytes": 4045,
+      "sha256": "c8f92b0c6f40a0023e266ce190ab9e29fb2db316f9740b23d7f28213c3bb69d9"
+    },
+    {
+      "path": "libobs\\graphics\\device-exports.h",
+      "bytes": 10665,
+      "sha256": "285fc98596e361ea7f9847087d14514d657258c7e780708bb44a7e698f5e1875"
+    },
+    {
+      "path": "libobs\\graphics\\effect-parser.h",
+      "bytes": 7118,
+      "sha256": "0a00d7797a9b9130803bf2fcd192b976d7efd9afc745307864fc6d1e1f85c130"
+    },
+    {
+      "path": "libobs\\graphics\\effect.h",
+      "bytes": 5098,
+      "sha256": "def1c5efd42771b896829a0ed2dccee77235c644d4600ba56081dd2ccad58118"
+    },
+    {
+      "path": "libobs\\graphics\\graphics-internal.h",
+      "bytes": 18348,
+      "sha256": "dbbfceccc646fb82412f8c943e4df7ec67c168fe77e534f31b597bf39b3c2413"
+    },
+    {
+      "path": "libobs\\graphics\\graphics.h",
+      "bytes": 34538,
+      "sha256": "e98b3078aed401725875a37d4e6a5a47264661720042d326faf0f14f03acaaa1"
+    },
+    {
+      "path": "libobs\\graphics\\half.h",
+      "bytes": 3483,
+      "sha256": "a312abd49ad20f67a4524c5f3702d6636a74c03a83abcd0bde98e62138b20ee9"
+    },
+    {
+      "path": "libobs\\graphics\\image-file.h",
+      "bytes": 3653,
+      "sha256": "3c942527a13ab3015627d136f778fd02263ac01dee6e4d5043d03c19af64b8be"
+    },
+    {
+      "path": "libobs\\graphics\\input.h",
+      "bytes": 1165,
+      "sha256": "e1d0ac2ed6848e6dc60afdacd60e96b489810bc14bf46baac9d0be05baf1207a"
+    },
+    {
+      "path": "libobs\\graphics\\libnsgif\\libnsgif.h",
+      "bytes": 6022,
+      "sha256": "b3db29ded6a08083b836db67c8e97ab8d8c9cd409be6cbc7ce353fee42c2d032"
+    },
+    {
+      "path": "libobs\\graphics\\math-defs.h",
+      "bytes": 1412,
+      "sha256": "b7fb2e0615a1746a2e0136aad29496c7ad041b43074d55be5c57c4926a8a2621"
+    },
+    {
+      "path": "libobs\\graphics\\math-extra.h",
+      "bytes": 1984,
+      "sha256": "465b2e407513a7c3b2bb55e13ac6461dab213af2a86d82ee1ead95b4f6f85541"
+    },
+    {
+      "path": "libobs\\graphics\\matrix3.h",
+      "bytes": 3204,
+      "sha256": "95e3a74056ab8a1e96fb33d9427ab2382f4b72538e90a44b34e2bf234a1f3457"
+    },
+    {
+      "path": "libobs\\graphics\\matrix4.h",
+      "bytes": 3620,
+      "sha256": "222aba49595189a38b95350b5ef5b2ae2efe875319fc762f5dd7b719ae2ea658"
+    },
+    {
+      "path": "libobs\\graphics\\plane.h",
+      "bytes": 2872,
+      "sha256": "0aebeaf00f8bccc95ba9795a980c02ad1993a9a29aad796d130fb216221117e7"
+    },
+    {
+      "path": "libobs\\graphics\\quat.h",
+      "bytes": 4794,
+      "sha256": "e2b8e0f04d957dc294c88199489a81302fa98f0ecd5793836dae78e2dae87bdf"
+    },
+    {
+      "path": "libobs\\graphics\\shader-parser.h",
+      "bytes": 6726,
+      "sha256": "15b69e9fe094e85ddf013fe7aa098ee19a6c9aea0fde68c75336c5ceafb3a34e"
+    },
+    {
+      "path": "libobs\\graphics\\srgb.h",
+      "bytes": 4536,
+      "sha256": "9db1900bd8dfeb20db2ee432217a9bdaf4605f42f90e43de7df715b44b2973d1"
+    },
+    {
+      "path": "libobs\\graphics\\vec2.h",
+      "bytes": 3927,
+      "sha256": "69f617416e4d7667c78faccd8e3754c18e2b644bb5cca6cbd280e37ebd47f845"
+    },
+    {
+      "path": "libobs\\graphics\\vec3.h",
+      "bytes": 5974,
+      "sha256": "4cfba62815fc307bca44cd02dd165856d7e353963afbe9314cfa7cbbb9d15131"
+    },
+    {
+      "path": "libobs\\graphics\\vec4.h",
+      "bytes": 5854,
+      "sha256": "891d7f540eadda01a721d41a001b9719aa3756cfb7e8b18ce8d98242f896735c"
+    },
+    {
+      "path": "libobs\\media-io\\audio-io.h",
+      "bytes": 6346,
+      "sha256": "b088b6a2bdd5b50b2aa51a110ad4a6311b1d2d8fc94abf9d7e0a63c13bc095a1"
+    },
+    {
+      "path": "libobs\\media-io\\audio-math.h",
+      "bytes": 1335,
+      "sha256": "d27ca0475c3fe9b8144eccbbc850b8f7f1015fdac344b170641d3997834baa53"
+    },
+    {
+      "path": "libobs\\media-io\\audio-resampler.h",
+      "bytes": 1569,
+      "sha256": "f10fe20d41dab554661ea590b9274bb58035dd7d0ffbda91ba5e197b407b7e57"
+    },
+    {
+      "path": "libobs\\media-io\\format-conversion.h",
+      "bytes": 2068,
+      "sha256": "6ddbba966f6e6d85036a9f530e8cb25b640f6c2834ceb079683f936642dde08b"
+    },
+    {
+      "path": "libobs\\media-io\\frame-rate.h",
+      "bytes": 593,
+      "sha256": "c719ce2f3f3121b3ce3fd20c1748bc7764b162c8d2425e5a113ebb124b8d2487"
+    },
+    {
+      "path": "libobs\\media-io\\media-io-defs.h",
+      "bytes": 912,
+      "sha256": "c473c0635b89090b707653420af1213f36c14f1a5365eb6f49cedc4ce4a1af97"
+    },
+    {
+      "path": "libobs\\media-io\\media-remux.h",
+      "bytes": 1416,
+      "sha256": "5c77cbb193c6e49dc4222da4f27a1f6365de6ac59dd64280dda076d0f0372668"
+    },
+    {
+      "path": "libobs\\media-io\\video-frame.h",
+      "bytes": 1916,
+      "sha256": "df67215e4ed9d5e033407e556f5e51f33c707eae68bc76e6d4c39671aed96e7a"
+    },
+    {
+      "path": "libobs\\media-io\\video-io.h",
+      "bytes": 8913,
+      "sha256": "1eadbb41dae53b0bd0b01b7fa6a9cfe528efc4b6da8b528bc34bb58d6f6f385a"
+    },
+    {
+      "path": "libobs\\media-io\\video-scaler.h",
+      "bytes": 1579,
+      "sha256": "56c48cfa13ddc99c6602a342d4d95112eb1b10946207f64021290902cad6c9cc"
+    },
+    {
+      "path": "libobs\\obs-audio-controls.h",
+      "bytes": 7826,
+      "sha256": "5f76c947228a37bb32d8b7f41d1e8702e27967f88d97fc89e28f513109f15566"
+    },
+    {
+      "path": "libobs\\obs-av1.h",
+      "bytes": 1237,
+      "sha256": "6101b9146afd8445bd955b603369f353b1c8ce0dfb576e99f84d187314ed64ce"
+    },
+    {
+      "path": "libobs\\obs-avc.h",
+      "bytes": 1930,
+      "sha256": "4f6712654eca6c0151393d3409bb58140ce0ab09965b04fb4112609a118425f7"
+    },
+    {
+      "path": "libobs\\obs-config.h",
+      "bytes": 1681,
+      "sha256": "2b2054f3029cbc34fd0297ed963a3be31879ae45b2add949ddd5183664d00e79"
+    },
+    {
+      "path": "libobs\\obs-data.h",
+      "bytes": 16973,
+      "sha256": "2d9e4831b2b81050f6e881b0da7401a50526d29c12f271089c227e3f4a216253"
+    },
+    {
+      "path": "libobs\\obs-defs.h",
+      "bytes": 1929,
+      "sha256": "1d26324fc42e8472856069cdccac4c1140498245a79ef80d79c71f166749861f"
+    },
+    {
+      "path": "libobs\\obs-encoder.h",
+      "bytes": 11667,
+      "sha256": "470d7cc99c50b42e55c7201422a21be150075762dadfecccfadaf9440b202279"
+    },
+    {
+      "path": "libobs\\obs-ffmpeg-compat.h",
+      "bytes": 599,
+      "sha256": "6ccaf960ba04a1b05b6e90feb9acbbef3ad74631c0170442d16132622330af53"
+    },
+    {
+      "path": "libobs\\obs-hevc.h",
+      "bytes": 2651,
+      "sha256": "54f602202a6f2966c03a33b62b87bf14500e7bb08181eb31ce06b2046a2c34c5"
+    },
+    {
+      "path": "libobs\\obs-hotkey.h",
+      "bytes": 10499,
+      "sha256": "54243d601a109732038238158742f5cb66a8c3af6b3d0eb3c002e7d1b596505d"
+    },
+    {
+      "path": "libobs\\obs-hotkeys.h",
+      "bytes": 18208,
+      "sha256": "5f9049d289e2a50596218d297734bfd704169d64d1195105a8f82f26ba7b1ac7"
+    },
+    {
+      "path": "libobs\\obs-interaction.h",
+      "bytes": 1587,
+      "sha256": "f48a34d5eea2118124dd727538885d09095368f2fbeb5f373ca834a03c7d87f5"
+    },
+    {
+      "path": "libobs\\obs-internal.h",
+      "bytes": 43659,
+      "sha256": "ecb9b929d3a4a9cf10a0fe9e510a9360c5598e41d635fc1ae6476b20a94a9fc5"
+    },
+    {
+      "path": "libobs\\obs-missing-files.h",
+      "bytes": 2290,
+      "sha256": "7d171310061c1c8914a390532255f47a79021c35a9edfc8b2fece2dc58efc749"
+    },
+    {
+      "path": "libobs\\obs-module.h",
+      "bytes": 8403,
+      "sha256": "e177a961500bab34b907b6bbf9261f0071fdaf97727a43095927365963a000c3"
+    },
+    {
+      "path": "libobs\\obs-nal.h",
+      "bytes": 1199,
+      "sha256": "1d10fda3499d99cc29652dc347dae70101876bf64a10a591391dcb0dda1bac13"
+    },
+    {
+      "path": "libobs\\obs-nix-platform.h",
+      "bytes": 1607,
+      "sha256": "431b25213fa13480979e5e7c724bbd7e68954d2d17e29d8dab1e2975d9e48442"
+    },
+    {
+      "path": "libobs\\obs-nix-wayland.h",
+      "bytes": 1025,
+      "sha256": "cbd8092d58d42c2d9ef6f2b354c33632833c51a25a74436e803403f905d26ac1"
+    },
+    {
+      "path": "libobs\\obs-nix-x11.h",
+      "bytes": 1015,
+      "sha256": "10ab694facd89909fafe3524c2429085d2d7c43c75b94997a41e941ee6cb1e37"
+    },
+    {
+      "path": "libobs\\obs-nix.h",
+      "bytes": 1360,
+      "sha256": "ab741bdba181d14dd4e20a8e920371f5de8a45f01814c4b328bf3b2e8aed8a84"
+    },
+    {
+      "path": "libobs\\obs-output.h",
+      "bytes": 2970,
+      "sha256": "ed4680df934a89b5a3210a14e02994acd84561441b46bf1da3a5b38da72ca753"
+    },
+    {
+      "path": "libobs\\obs-properties.h",
+      "bytes": 15460,
+      "sha256": "aa9fdd9616894039e9df72d7bc5f436edbfaa502c1f580c8779b7b1bb6b074af"
+    },
+    {
+      "path": "libobs\\obs-scene.h",
+      "bytes": 2834,
+      "sha256": "32fb5496e61e851f91c29076a85dd6cc363fea2986e581044c2db2c19c5304e6"
+    },
+    {
+      "path": "libobs\\obs-service.h",
+      "bytes": 3629,
+      "sha256": "49ebb2257380e9f1ff912b6f0c6d9fd3d0ca078fd22cf2621d383214b123c738"
+    },
+    {
+      "path": "libobs\\obs-source.h",
+      "bytes": 17505,
+      "sha256": "0f0751174bb2e2590b7b1cd798e87fc5e6638e757a731ca5a582f56acc41f3f6"
+    },
+    {
+      "path": "libobs\\obs.h",
+      "bytes": 107270,
+      "sha256": "210cd25207393597b2772ef0e7a10381df731ff6709aef1f5d6293d32bc5b5e7"
+    },
+    {
+      "path": "libobs\\obsversion.h",
+      "bytes": 119,
+      "sha256": "02180eae98a0af14b0a78918e1cd09d99da4cc66ba3b0d524bb7ead3ea6513e6"
+    },
+    {
+      "path": "libobs\\util\\apple\\cfstring-utils.h",
+      "bytes": 301,
+      "sha256": "4da1d749dcfcc6cc5dd00fd2a7b10f0a2beb779db4f1d43a3a6d8351ea72bc26"
+    },
+    {
+      "path": "libobs\\util\\array-serializer.h",
+      "bytes": 1238,
+      "sha256": "ad45a4cf58dc4a5308624fe0461e043b2185b9b74396ca9fab8166872609fc5f"
+    },
+    {
+      "path": "libobs\\util\\base.h",
+      "bytes": 2579,
+      "sha256": "ac7518e37fbd34ab6e4a95d27b200ef01d8a894214ee273fa948fcc5a783cf49"
+    },
+    {
+      "path": "libobs\\util\\bitstream.h",
+      "bytes": 639,
+      "sha256": "5a11bc6b4e04214576f27d757882bf4fe17fdfb8595b5785010c2a157e7213a3"
+    },
+    {
+      "path": "libobs\\util\\bmem.h",
+      "bytes": 2020,
+      "sha256": "a6a98b93ef6bdabe9bf880d389397846ac2952fcd17a6f9afa332748cff9d52e"
+    },
+    {
+      "path": "libobs\\util\\buffered-file-serializer.h",
+      "bytes": 1193,
+      "sha256": "b034ca2fdd85deeec014311610262e300f5a2312aa7de2315384d071b094b493"
+    },
+    {
+      "path": "libobs\\util\\c99defs.h",
+      "bytes": 2732,
+      "sha256": "7254b872882dda6ac3bdabad1981aba3f34548d5f7c46e43ec67b4c7fee6fca7"
+    },
+    {
+      "path": "libobs\\util\\cf-lexer.h",
+      "bytes": 5697,
+      "sha256": "fa4077ae149ed905d10d3e7102ab4008147e118ada2d90c3771c6d80dc27d34c"
+    },
+    {
+      "path": "libobs\\util\\cf-parser.h",
+      "bytes": 7143,
+      "sha256": "401a6083309e6cecbfd3889203f7ab6511986ea280f65df074d14091c8d78f44"
+    },
+    {
+      "path": "libobs\\util\\config-file.h",
+      "bytes": 4864,
+      "sha256": "ec9742215d2eb269451118e71605dd3bcbbd3e9725d08d6be3664c5b678c8d3a"
+    },
+    {
+      "path": "libobs\\util\\crc32.h",
+      "bytes": 971,
+      "sha256": "f89503fc6acaa3186ea5d393ca471dc171f8c32da6f3e796ddfe307f03ad3f03"
+    },
+    {
+      "path": "libobs\\util\\curl\\curl-helper.h",
+      "bytes": 1228,
+      "sha256": "d2cbef95ffecc5d05bf03e6de09995e57b7781013b34647af1fe8dc497b13cbd"
+    },
+    {
+      "path": "libobs\\util\\darray.h",
+      "bytes": 17531,
+      "sha256": "47cda306b0a6109cfa804b950cf9c3e739aaa63260016f90eace20455cfe08c9"
+    },
+    {
+      "path": "libobs\\util\\deque.h",
+      "bytes": 7674,
+      "sha256": "ef0f9e52e444e3921d0ec3b24902fe3b60d550046ed3b0dd6a279cbac0fa1859"
+    },
+    {
+      "path": "libobs\\util\\dstr.h",
+      "bytes": 9476,
+      "sha256": "a1f9883a52b6ebf069acc77f9449c7a97290a5f089f49f9c63aa6fede6942159"
+    },
+    {
+      "path": "libobs\\util\\file-serializer.h",
+      "bytes": 1296,
+      "sha256": "3ad8c160a1e60dbba52448867a169a620ac7991fefd99aac4783a81c3d1adb6d"
+    },
+    {
+      "path": "libobs\\util\\lexer.h",
+      "bytes": 6553,
+      "sha256": "45b863a5ad1276866e3a5d0ede757413eadf17f0b9a550ef961aa9bdfa67cae2"
+    },
+    {
+      "path": "libobs\\util\\pipe.h",
+      "bytes": 2107,
+      "sha256": "0a3f9b118cdfa0c62922296548844e6434757d647218fc23464070b3ac3c2f9c"
+    },
+    {
+      "path": "libobs\\util\\platform.h",
+      "bytes": 7266,
+      "sha256": "af2afe7059d2d911a36b62ce4ff4429d2cb15cc69794cb174bf0568dc3792bba"
+    },
+    {
+      "path": "libobs\\util\\profiler.h",
+      "bytes": 3734,
+      "sha256": "79173e705ac288dccc2ac28d7b03e33dfb73c011cddfdb464843d91f330b27b1"
+    },
+    {
+      "path": "libobs\\util\\serializer.h",
+      "bytes": 3777,
+      "sha256": "e88f877084ffec435d3f02ec3d7cc40f3a610aa99925b03a0ec6ca6f3693e961"
+    },
+    {
+      "path": "libobs\\util\\source-profiler.h",
+      "bytes": 2231,
+      "sha256": "3a0f64049e1d6cf180e7c9f12c5cb4b0ff121a00e641741c1535d46f8deb94b0"
+    },
+    {
+      "path": "libobs\\util\\sse-intrin.h",
+      "bytes": 1346,
+      "sha256": "2e9def7ff81f9045b523cef2e1b6b4f0928e17e58f8cabb7bacb737104575d76"
+    },
+    {
+      "path": "libobs\\util\\task.h",
+      "bytes": 519,
+      "sha256": "a3b3a455ae641e9b3cd56a98a0f5644a17fcdcd13600f8418fd680569ff3467e"
+    },
+    {
+      "path": "libobs\\util\\text-lookup.h",
+      "bytes": 1479,
+      "sha256": "8919f3a9ff55cc4fc523a711795a820a469a6769c70a4bac687ad274715696ca"
+    },
+    {
+      "path": "libobs\\util\\threading-posix.h",
+      "bytes": 2424,
+      "sha256": "e25c1d1634aa75ab2ba1ac08f6d360bfdb3c43ee03c80daf69f68916645084cf"
+    },
+    {
+      "path": "libobs\\util\\threading-windows.h",
+      "bytes": 3718,
+      "sha256": "9b8984dc59da3b85c75fa31f97760df57a3743da44d176209cf9eab7beb31dee"
+    },
+    {
+      "path": "libobs\\util\\threading.h",
+      "bytes": 2807,
+      "sha256": "3b08da4ca31879c3a0740b567bef7ec88c4d0167a369d17d741674bcaf3e9897"
+    },
+    {
+      "path": "libobs\\util\\utf8.h",
+      "bytes": 1193,
+      "sha256": "53448d739e0cacb4eb45b50ed9f712783ba86f170ec27dcc8639299f1e44ce5e"
+    },
+    {
+      "path": "libobs\\util\\uthash.h",
+      "bytes": 1241,
+      "sha256": "41e616577a488439f7f50e62bbfadec1314d83c3ed33b97be9edad0f2d205d1c"
+    },
+    {
+      "path": "libobs\\util\\util_uint128.h",
+      "bytes": 2546,
+      "sha256": "5f115aea5a2307b2398945781d49b229f4be64ea97d0ea5aef0baea7e350c83d"
+    },
+    {
+      "path": "libobs\\util\\util_uint64.h",
+      "bytes": 1264,
+      "sha256": "31d623b6a25705883addd86b11a8da309aab3770f0376f3d7e6cd77b52427823"
+    },
+    {
+      "path": "libobs\\util\\windows\\device-enum.h",
+      "bytes": 263,
+      "sha256": "72e9c0d423b3fd1ab51faa0e1fbc2de9aa7bda6b3f90453d8901442a176dc204"
+    },
+    {
+      "path": "libobs\\util\\windows\\obfuscate.c",
+      "bytes": 807,
+      "sha256": "65d6fb6bcdb20624665171ec048787a4c3084d0b8c3ccb60903a6e2a9a59ed72"
+    },
+    {
+      "path": "libobs\\util\\windows\\obfuscate.h",
+      "bytes": 314,
+      "sha256": "32857abeeb7ade6654ff39cc4d6f8b8d74e907f1efd661b8fe60ec3462a7ea1f"
+    },
+    {
+      "path": "libobs\\util\\windows\\win-registry.h",
+      "bytes": 1148,
+      "sha256": "f024fce7ca93eaf70b5a73aefb38756cec2d9214453ccd04d82bb1756a30cbe0"
+    },
+    {
+      "path": "libobs\\util\\windows\\win-version.h",
+      "bytes": 1603,
+      "sha256": "79708e0d1ec1228bb6dea1ec08c8504be00578a3577dd7a37e00db058678d2d7"
+    },
+    {
+      "path": "libobs\\util\\windows\\window-helpers.h",
+      "bytes": 1522,
+      "sha256": "23551ec6f99ca1223169c4d4b057a42b91267b7deaf1c2f8efb013445b6691a1"
+    },
+    {
+      "path": "plugins\\win-capture\\app-helpers.c",
+      "bytes": 2165,
+      "sha256": "721ac20aa707216fcea5451cf6c572c55aeee71eb2d09c453feb5df90d2a9dcc"
+    },
+    {
+      "path": "plugins\\win-capture\\app-helpers.h",
+      "bytes": 373,
+      "sha256": "368a7e64508b07fd011d9e5a2ac2603d7d0760bd2294bc85aff51d393dbe6ee3"
+    },
+    {
+      "path": "plugins\\win-capture\\audio-helpers.c",
+      "bytes": 3594,
+      "sha256": "ce021c5a8b82a6767489f0707ea2b2d9b6a5e20e17da712f1ad9aee94a493128"
+    },
+    {
+      "path": "plugins\\win-capture\\audio-helpers.h",
+      "bytes": 902,
+      "sha256": "437de9c20b8ce37706ece20d87bb4498ac324b3a9f4f746342548767111b26c5"
+    },
+    {
+      "path": "plugins\\win-capture\\compat-format-ver.h",
+      "bytes": 46,
+      "sha256": "ec7578ac87bdee2b078fb2a355928abc205b4be39dbc5c2a46db439783de2990"
+    },
+    {
+      "path": "plugins\\win-capture\\compat-helpers.c",
+      "bytes": 4611,
+      "sha256": "d3dc01da05248bd79813ac54dcf627d01b7f6bcf6594da736c9469bf7716f951"
+    },
+    {
+      "path": "plugins\\win-capture\\compat-helpers.h",
+      "bytes": 409,
+      "sha256": "b79a4255c05b9357b7f2ec3c9e8bbed0b3252784d8a63809a0c24b9781295e54"
+    },
+    {
+      "path": "plugins\\win-capture\\cursor-capture.c",
+      "bytes": 5835,
+      "sha256": "233141d9d5be8a4cd5e356037bf5f20bd335f7963ef7aa8894b672abdf433a1f"
+    },
+    {
+      "path": "plugins\\win-capture\\cursor-capture.h",
+      "bytes": 577,
+      "sha256": "f4f31f76502b6c085bf0fbefb2b7a5538a217a753fe09f70fc64aab42b78e488"
+    },
+    {
+      "path": "plugins\\win-capture\\dc-capture.c",
+      "bytes": 5990,
+      "sha256": "1e945833a611c4bcc085bf1e5c80e132e109bead3a8b232c92a28150a11e213a"
+    },
+    {
+      "path": "plugins\\win-capture\\dc-capture.h",
+      "bytes": 760,
+      "sha256": "dfeaa86e7d53e20791735341909f30b670e1ed1aae9add5dcc4f7ea4394ce746"
+    },
+    {
+      "path": "plugins\\win-capture\\duplicator-monitor-capture.c",
+      "bytes": 26058,
+      "sha256": "40150f379d9ab1ac8f1381622eb868fecbd891ff983a4c69b296a87984bd1054"
+    },
+    {
+      "path": "plugins\\win-capture\\game-capture-file-init.c",
+      "bytes": 8458,
+      "sha256": "c187da6dfbd0735a6e7c98a3c65be5abb9c1097cdc3cdcb94ae3fdcbdd424a7c"
+    },
+    {
+      "path": "plugins\\win-capture\\game-capture.c",
+      "bytes": 69404,
+      "sha256": "771f85583aabaa00c829a0ef87d42bbda7ccfd3137108574c1a38ce57fdaa889"
+    },
+    {
+      "path": "plugins\\win-capture\\load-graphics-offsets.c",
+      "bytes": 6101,
+      "sha256": "622fa30ad3d52a51e51a2051d52bcbda7ff9dce28b61d61bff336830c1960591"
+    },
+    {
+      "path": "plugins\\win-capture\\monitor-capture.c",
+      "bytes": 6281,
+      "sha256": "1b22642a793029239cd7df13a3f0083a9d1f0515b166e787dce66ed17f08e77e"
+    },
+    {
+      "path": "plugins\\win-capture\\nt-stuff.c",
+      "bytes": 6520,
+      "sha256": "75a070179808b5a4691e48a8bc4e3c1e63837203bf74e639b587d3872b38946c"
+    },
+    {
+      "path": "plugins\\win-capture\\nt-stuff.h",
+      "bytes": 247,
+      "sha256": "c7747a7c73166a88376c3a615436caee184bf98020d0202b8cbf1081930c20c7"
+    },
+    {
+      "path": "plugins\\win-capture\\plugin-main.c",
+      "bytes": 4187,
+      "sha256": "42ab7dd61b4046589429db36295b620336c4ad4ffe2336545b2aee1db0bba9e8"
+    },
+    {
+      "path": "plugins\\win-capture\\window-capture.c",
+      "bytes": 25435,
+      "sha256": "ec973cdae2bb96bce988a1ff7735fceb0545c8a53b6d4cf112a670de7ef3db57"
+    },
+    {
+      "path": "shared\\file-updater\\CMakeLists.txt",
+      "bytes": 443,
+      "sha256": "4f4e9391ac5f366747533205f4402305b9207c5b01c1e1ebd602b61e18685452"
+    },
+    {
+      "path": "shared\\file-updater\\file-updater\\file-updater.c",
+      "bytes": 13575,
+      "sha256": "1d048bbbbb1e0ac0998b76b6786baac9ab1390f280128ddb8a8d542ebd4be534"
+    },
+    {
+      "path": "shared\\file-updater\\file-updater\\file-updater.h",
+      "bytes": 722,
+      "sha256": "97c0a4ee56d4bbb82d302ec0421f42a6590f6859c096198cd30ff702a39efd19"
+    },
+    {
+      "path": "shared\\ipc-util\\CMakeLists.txt",
+      "bytes": 483,
+      "sha256": "978feadfea34bc3cf89f2fbb2f15c1a0af02e181973669c3d8f93f17e34ae5d1"
+    },
+    {
+      "path": "shared\\ipc-util\\ipc-util\\pipe-posix.c",
+      "bytes": 804,
+      "sha256": "0804fd0874a7ba3f01dd15e600274f3e8eea97e5fb3adbeeb970c42c45402eca"
+    },
+    {
+      "path": "shared\\ipc-util\\ipc-util\\pipe-posix.h",
+      "bytes": 840,
+      "sha256": "f8b341557ab9aaddc253909b9c6ddd3acabeb40b119aa2bd46d4eb4e2bc8e2e6"
+    },
+    {
+      "path": "shared\\ipc-util\\ipc-util\\pipe-windows.c",
+      "bytes": 6790,
+      "sha256": "3882024bda966d2722de90012c5647f8df6fb785b53e404d40d5f6b0060b4363"
+    },
+    {
+      "path": "shared\\ipc-util\\ipc-util\\pipe-windows.h",
+      "bytes": 1238,
+      "sha256": "9a2ce1cb82ab658b82953a54448591a3964043bd28bb5ca491c32e73bbe35f89"
+    },
+    {
+      "path": "shared\\ipc-util\\ipc-util\\pipe.h",
+      "bytes": 1741,
+      "sha256": "b7fa00c4eb9f668070121be55b4d74933cd49c7510df24f964de55b767c303d4"
+    },
+    {
+      "path": "shared\\obs-hook-config\\CMakeLists.txt",
+      "bytes": 302,
+      "sha256": "fc7748c7d6a3b2217b278d387c4651ef9441053caf2ae3658a8cb2f689c39a3d"
+    },
+    {
+      "path": "shared\\obs-hook-config\\graphics-hook-info.h",
+      "bytes": 2771,
+      "sha256": "e7a6044b45a4e83eb758145c324da93bd579863f4d7afd37b551f66994fb8ed7"
+    },
+    {
+      "path": "shared\\obs-hook-config\\graphics-hook-ver.h",
+      "bytes": 842,
+      "sha256": "e80e310a75bb311bc8520a5b865e07e15456f7dc1924405a43a4cc6494864192"
+    },
+    {
+      "path": "shared\\obs-hook-config\\hook-helpers.h",
+      "bytes": 1111,
+      "sha256": "a34e27ed58283b9b20b3310dd3062c9d57b360ba9fe90fa868b660370a833d4e"
+    },
+    {
+      "path": "shared\\obs-inject-library\\CMakeLists.txt",
+      "bytes": 475,
+      "sha256": "cd80131075aef12e9c86258aad148c3b78b9555b7a06b6ae9e618d586fcc6db9"
+    },
+    {
+      "path": "shared\\obs-inject-library\\inject-library.c",
+      "bytes": 4296,
+      "sha256": "e5d52f171d85562bd35c6b745c6a88fd87d36b9d368f804e153089b2bb57d61c"
+    },
+    {
+      "path": "shared\\obs-inject-library\\inject-library.h",
+      "bytes": 677,
+      "sha256": "838c3d35190b895ab3a7e6bab7e006f050e5ee6056f4698bd40af09e5c3fb407"
+    },
+    {
+      "path": "libobs-winrt\\winrt-capture.h",
+      "bytes": 1082,
+      "sha256": "c0f6aecb6d715279abf4c10c12af1723a54cd8e88c8e03dc76ea556a4858fae4"
+    },
+    {
+      "path": "libobs-winrt\\winrt-dispatch.h",
+      "bytes": 353,
+      "sha256": "fd701b9d969842dcb74c9abfb9d70b1400bfcf27c36d2f2afd081c066be56476"
+    },
+    {
+      "path": "libobs\\obsconfig.h.in",
+      "bytes": 366,
+      "sha256": "5b2bb343ddc6c1f8ca0c683a3d87a99029f7d82c7df13da0bda00aca0ec32f44"
+    },
+    {
+      "path": "deps\\w32-pthreads\\CMakeLists.txt",
+      "bytes": 669,
+      "sha256": "1f3bfb419d51bf00ecc11823ae6cc1c281eb90fa4737233b56f64f8d58d4fb97"
+    }
+  ],
+  "dependencies": {
+    "url": "https://github.com/obsproject/obs-deps/releases/download/2025-08-23/windows-deps-2025-08-23-x64.zip",
+    "bytes": 58753420,
+    "sha256": "8de229cff6f1981508c0eb646b35e644633a5855787b9f5d3b90ae2aeb87ffc1",
+    "files": [
+      {
+        "path": "include\\curl\\curl.h",
+        "bytes": 135514,
+        "sha256": "a9743c170f60477bed68c3b758d8eaddf2c81224b0dc84b9e7466792a05a1a86"
+      },
+      {
+        "path": "include\\curl\\stdcheaders.h",
+        "bytes": 1397,
+        "sha256": "9d0b5afefc537de44975cf6d74d73b81393aa477c5f27d32c63e628f5eadd609"
+      },
+      {
+        "path": "include\\curl\\curlver.h",
+        "bytes": 3130,
+        "sha256": "f2623f2b7c2f683ba16321dc348eb2c9a66cab07c71310602f336567c8c77ce3"
+      },
+      {
+        "path": "include\\curl\\websockets.h",
+        "bytes": 2825,
+        "sha256": "e41c756233d16de30677628048578750f648b313954421eedcdfd1c07d3524fc"
+      },
+      {
+        "path": "include\\curl\\system.h",
+        "bytes": 17095,
+        "sha256": "578b09c046d3e97af8831e81434e0adee68d70d35572cd6a4e9262ce4c81cf98"
+      },
+      {
+        "path": "include\\curl\\multi.h",
+        "bytes": 18716,
+        "sha256": "28ce016fd3f6612e4ad7fb512f837276d502e2eaf3b35a23db255ab1b8d7a2d4"
+      },
+      {
+        "path": "include\\curl\\typecheck-gcc.h",
+        "bytes": 44349,
+        "sha256": "fd5539363503821977bdb59321763e85b1b3c1e450af0530763077d215ee6fd4"
+      },
+      {
+        "path": "include\\curl\\options.h",
+        "bytes": 2471,
+        "sha256": "1b79655d1948442bb3cf7118eb2ac8b54493002a48b393ff37b519e853149f1b"
+      },
+      {
+        "path": "include\\curl\\header.h",
+        "bytes": 2984,
+        "sha256": "199a72e4a6b280c6934ec63a9433b8a4d80d510ccf00cb23b38b4b61583588c0"
+      },
+      {
+        "path": "include\\curl\\mprintf.h",
+        "bytes": 3171,
+        "sha256": "d536ae9b5eb1cea4a3e915d9f8785b7ee66983300f554ddcc304451fdbeb5cb4"
+      },
+      {
+        "path": "include\\curl\\urlapi.h",
+        "bytes": 5957,
+        "sha256": "ec0f7cd7ae9107eb7a4c8695935b4097dd7659362ffaa19a0227dcad68c58de6"
+      },
+      {
+        "path": "include\\curl\\easy.h",
+        "bytes": 4137,
+        "sha256": "baa80dcf6cad0531fd3fb08cfa69f9b5cbdbf69656655bd11cc2de92009ac0d9"
+      },
+      {
+        "path": "include\\jansson.h",
+        "bytes": 16755,
+        "sha256": "6f328f12e8b5a0376927f0e86cb024fc6f9bf88e12eeaa3e40ca047d7ace23bc"
+      },
+      {
+        "path": "include\\jansson_config.h",
+        "bytes": 2088,
+        "sha256": "05666880f9a38e57313ad8e9f67c59977e9c64ab4a41137688e176c5519d93c2"
+      },
+      {
+        "path": "lib\\libcurl_imp.lib",
+        "bytes": 21338,
+        "sha256": "2017ebe54584b55c5b7374c2243b493a4e7b944418a4fffb56a764deed92b8d6"
+      },
+      {
+        "path": "lib\\jansson.lib",
+        "bytes": 259948,
+        "sha256": "663f9bd007845e8239c7cc9b28dc10181761bfe8bdc7f9610d1a083a4d7089ca"
+      },
+      {
+        "path": "lib\\cmake\\CURL\\CURLConfigVersion.cmake",
+        "bytes": 3082,
+        "sha256": "594b6194435944343b4d80efac4b284836295d1330d38a09f0ae3e57e0943dc9"
+      },
+      {
+        "path": "lib\\cmake\\CURL\\CURLConfig.cmake",
+        "bytes": 3407,
+        "sha256": "ed4e172695bbbceb0ee67618d9bd6533d31ed797ac3b0a3a8da53acf34df3749"
+      },
+      {
+        "path": "lib\\cmake\\CURL\\CURLTargets.cmake",
+        "bytes": 4244,
+        "sha256": "4982582987e56149f6d3eb8b0c6464955d853cfbf7f4caf990f2c42e4470e75e"
+      },
+      {
+        "path": "lib\\cmake\\CURL\\CURLTargets-release.cmake",
+        "bytes": 948,
+        "sha256": "10801fc59bc7e68c5543886c698226802b89d2f40907d89f5d9ccfced28b68cc"
+      },
+      {
+        "path": "share\\obs-deps\\VERSION",
+        "bytes": 12,
+        "sha256": "30ab5f1cb9fca949c72593a7cd45ae36b6a3820e45118eaff9d56977cc2efb11"
+      }
+    ]
+  }
+}

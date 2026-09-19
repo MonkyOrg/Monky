@@ -16,6 +16,7 @@
 #include <api/stats/rtc_stats_report.h>
 #include <api/video_codecs/video_decoder_factory.h>
 #include <api/video_codecs/video_encoder_factory.h>
+#include <rtc_base/crypto_random.h>
 #include <rtc_base/ssl_adapter.h>
 #include <rtc_base/thread.h>
 #if defined(WEBRTC_WIN)
@@ -544,6 +545,7 @@ struct VoiceEngine::Impl::Peer : webrtc::PeerConnectionObserver,
   std::weak_ptr<Impl> owner;
   std::shared_ptr<CallToken> token;
   Participant participant;
+  const std::string subscription_id = webrtc::CreateRandomUuid();
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
   webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> mic_transceiver;
   std::vector<SdpSection> remote_sections;
@@ -1187,6 +1189,7 @@ void VoiceEngine::Impl::Offer(Peer &peer, bool restart) {
   Notify(msg::RTC_SIGNAL, {{"targetSessionId", peer.participant.session_id},
                            {"fromSessionId", config.self_session_id},
                            {"signalType", "offer"},
+                           {"subscriptionId", peer.subscription_id},
                            {"sdp", {{"type", "offer"}, {"sdp", sdp}}}});
   ApplyProcessing();
 }
@@ -1353,6 +1356,7 @@ void VoiceEngine::Impl::Signal(const Json &payload) {
            {{"targetSessionId", session},
             {"fromSessionId", config.self_session_id},
             {"signalType", "answer"},
+            {"subscriptionId", peer->subscription_id},
             {"sdp", {{"type", "answer"}, {"sdp", answer_sdp}}}});
   }
   ApplyProcessing();
