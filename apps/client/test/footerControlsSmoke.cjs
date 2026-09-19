@@ -163,22 +163,47 @@ if (!process.versions.electron) {
     phase = 'stage cleanup';
     const stageChecks = await window.webContents.executeJavaScript('window.stageSmoke.cleanup()', true);
     const checks = await window.webContents.executeJavaScript('window.footerSmoke.checkCount()');
+    phase = 'writing motion samples';
+    const samples = await window.webContents.executeJavaScript(
+      `(${renderMotionSamples.toString()})(${JSON.stringify(hoverSamples)})`);
+    const prefix = 'data:image/png;base64,';
+    if (!samples.startsWith(prefix)) throw new Error('Motion contact sheet did not produce a PNG.');
+    fs.writeFileSync(path.join(clientRoot, 'dist-test', 'control-motion-samples.png'), Buffer.from(samples.slice(prefix.length), 'base64'));
     console.log(`Footer/composer/stage controls smoke: ${checks + stageChecks} checks passed (motion, layout, PTT, reduced motion, lifecycle)`);
-    window.setContentSize(1100, Math.ceil(hoverSamples.length / 3) * 170 + 40);
-    await window.webContents.executeJavaScript(`document.body.innerHTML = '<main id="motion-samples"></main>';
-      document.body.style.cssText = 'margin:0;padding:20px;background:#18191d;color:white;overflow:auto';
-      document.querySelector('#motion-samples').style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:18px';
-      for (const row of ${JSON.stringify(hoverSamples)}) {
-        const tile = document.createElement('section');
-        tile.innerHTML = '<h3 style="font-size:14px;margin:0 0 8px">' + row.id + '</h3>'
-          + row.images.map((image, index) => '<div style="display:inline-block;margin-right:8px"><div style="font-size:11px">'
-            + [200,460][index] + 'ms</div><img style="max-width:145px;height:105px;object-fit:contain" src="' + image + '"></div>').join('');
-        document.querySelector('#motion-samples').append(tile);
-      }
-      new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
-    fs.writeFileSync(path.join(clientRoot, 'dist-test', 'control-motion-samples.png'), (await window.webContents.capturePage()).toPNG());
     await finish(0);
   }).catch(async (error) => { console.error(`Footer/composer smoke failed during ${phase}`, error); await finish(1); });
+}
+
+async function renderMotionSamples(samples) {
+  // Compose the captured pixels without resizing the offscreen compositor after teardown.
+  const canvas = document.createElement('canvas');
+  canvas.width = 1100;
+  canvas.height = Math.ceil(samples.length / 3) * 170 + 40;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Motion contact sheet canvas is unavailable.');
+  context.fillStyle = '#18191d';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.textBaseline = 'top';
+  await document.fonts.ready;
+  for (const [index, row] of samples.entries()) {
+    if (row.images.length !== 2) throw new Error('Each control needs both captured motion samples.');
+    const x = 20 + index % 3 * 360, y = 20 + Math.floor(index / 3) * 170;
+    context.fillStyle = 'white';
+    context.font = 'bold 14px Inter, sans-serif';
+    context.fillText(row.id, x, y);
+    for (const [frame, source] of row.images.entries()) {
+      const image = new Image();
+      image.src = source;
+      await image.decode();
+      const scale = Math.min(145 / image.naturalWidth, 105 / image.naturalHeight);
+      const width = image.naturalWidth * scale, height = image.naturalHeight * scale;
+      const left = x + frame * 160;
+      context.font = '11px Inter, sans-serif';
+      context.fillText(`${[200, 460][frame]}ms`, left, y + 24);
+      context.drawImage(image, left + (145 - width) / 2, y + 43 + (105 - height) / 2, width, height);
+    }
+  }
+  return canvas.toDataURL('image/png');
 }
 
 async function setupFooterSmoke() {
