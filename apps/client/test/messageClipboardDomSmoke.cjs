@@ -172,6 +172,7 @@ async function runSystemClipboardSmoke(sourceWindow) {
   external.webContents.on('will-navigate', event => event.preventDefault());
   const destination = code => external.webContents.executeJavaScript(code, true);
   const click = async (selector, clickCount = 1) => {
+    sourceWindow.webContents.focus();
     await dispatchClick(sourceWindow, await fixture(`point(${JSON.stringify(selector)})`), clickCount);
     await fixture('settle()');
   };
@@ -461,6 +462,16 @@ async function runSmoke(window) {
 
     checks += await fixture('testScopesAndPaste()');
     checks += await fixture('testLifecycleAndFailures()');
+    await fixture('prepareImages("en")');
+    const imageCopySelector = '[data-message-id="photo"] .chat-attachment-copy';
+    const imagePoint = await fixture(`point(${JSON.stringify(imageCopySelector)})`);
+    check(await evaluate(`document.querySelector(${JSON.stringify(imageCopySelector)})
+      .contains(document.elementFromPoint(${imagePoint.x}, ${imagePoint.y}))`),
+    `The image copy button must have a reachable pointer target, including tiny images: ${JSON.stringify(imagePoint)}`);
+    await click(imageCopySelector);
+    state = await fixture('state()');
+    check(state.writes === 1 && state.last?.kind === 'image' && state.last.width === 2 && state.last.height === 1,
+      'A trusted pointer click copies the original tiny image through the real button handler');
     checks += await fixture('testImages()');
     checks += await fixture('testReaderLocales()');
     state = await fixture('state()');

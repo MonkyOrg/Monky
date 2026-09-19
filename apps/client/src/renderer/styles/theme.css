@@ -5006,7 +5006,22 @@ input:focus, textarea:focus, select:focus {
 }
 
 .chat-inline-media--image {
+  display: inline-grid;
   max-width: min(320px, 100%);
+}
+
+.chat-inline-media--image > .chat-attachment-image {
+  grid-area: 1 / 1;
+  align-self: center;
+}
+
+.chat-inline-media--image > .chat-inline-media-actions {
+  grid-area: 1 / 1;
+  position: relative;
+  inset: auto;
+  align-self: start;
+  justify-self: end;
+  margin: 10px;
 }
 
 .chat-attachment-image {

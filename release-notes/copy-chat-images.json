@@ -1,5 +1,5 @@
 {
   "group": "novidades",
-  "pt-BR": "Copie imagens e figurinhas do chat para a área de transferência, sem salvar o arquivo antes. A opção está nos controles da imagem, no menu do botão direito e no visualizador ampliado.",
-  "en": "Copy chat images and stickers to the clipboard without saving the file first. The action is available in image controls, the right-click menu and the expanded viewer."
+  "pt-BR": "Copie imagens e figurinhas do chat para a área de transferência, sem salvar o arquivo antes. A opção está nos controles da imagem, no menu do botão direito e no visualizador ampliado. Os controles continuam acessíveis em imagens pequenas.",
+  "en": "Copy chat images and stickers to the clipboard without saving the file first. The action is available in image controls, the right-click menu and the expanded viewer. Controls remain accessible on tiny images."
 }
