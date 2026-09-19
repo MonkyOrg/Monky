@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const sdkRoot = path.resolve(__dirname, '..');
@@ -17,13 +18,14 @@ if (!process.versions.electron) {
   const { app, BrowserWindow, powerSaveBlocker } = require('electron');
   const { OpusPeer } = require('../dist/voice/OpusPeer');
   const { BotVoiceConnection, validateOpus } = require('../dist/voice/BotVoiceConnection');
-  const { MessageType, botVoiceSignalSchema } = require('@monky/shared');
+  const { MessageType, botVoiceSignalSchema, rtcSignalSchema } = require('@monky/shared');
   app.setPath('userData', process.env.MONKY_VOICE_RENDERER_PROFILE);
   app.commandLine.appendSwitch('allow-loopback-in-peer-connection');
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
   app.on('window-all-closed', () => {});
   let vite, window, worker, router, p2p, sfu, botProducer, timeout, rosterVoice, rosterJoin, retiredPeer;
   let p2pTimer;
+  let p2pSubscriptionId;
   let powerBlocker;
   let mediaPaused = false;
   let mediaWrite = Promise.resolve();
@@ -157,19 +159,22 @@ if (!process.versions.electron) {
           rosterVoice.handle({ type: MessageType.VOICE_STATE_CHANGED, payload: { voiceState: roster[0].voiceState } });
           return {};
         case 'fixture.offer':
-          p2p = new OpusPeer([], (error) => errors.push(error.message), (signal) => outgoingSignals.push({
-            ...signal, fromSessionId: botId, targetSessionId: humanId,
-          }));
+          p2pSubscriptionId = randomUUID();
+          p2p = new OpusPeer([], (error) => errors.push(error.message), (signal) => outgoingSignals.push(rtcSignalSchema.parse({
+            ...signal, fromSessionId: botId, targetSessionId: humanId, subscriptionId: p2pSubscriptionId,
+          })));
           streams.add(p2p);
           await p2p.pc.setLocalDescription(await p2p.pc.createOffer());
-          return { fromSessionId: botId, targetSessionId: humanId, signalType: 'offer', sdp: p2p.pc.localDescription };
+          return rtcSignalSchema.parse({ fromSessionId: botId, targetSessionId: humanId,
+            signalType: 'offer', sdp: p2p.pc.localDescription, subscriptionId: p2pSubscriptionId });
         case 'fixture.answerer':
           await stopMedia();
           await p2p.close();
           outgoingSignals.length = 0;
-          p2p = new OpusPeer([], (error) => errors.push(error.message), (signal) => outgoingSignals.push({
-            ...signal, fromSessionId: botId, targetSessionId: humanId,
-          }));
+          p2pSubscriptionId = randomUUID();
+          p2p = new OpusPeer([], (error) => errors.push(error.message), (signal) => outgoingSignals.push(rtcSignalSchema.parse({
+            ...signal, fromSessionId: botId, targetSessionId: humanId, subscriptionId: p2pSubscriptionId,
+          })));
           streams.add(p2p);
           return {};
         case MessageType.RTC_SIGNAL:
@@ -211,7 +216,7 @@ if (!process.versions.electron) {
               }));
               else if (message.type === MessageType.RTC_SIGNAL) {
                 if (message.payload.signalType === 'offer') rosterOffers++;
-                outgoingSignals.push(message.payload);
+                outgoingSignals.push(rtcSignalSchema.parse(message.payload));
               }
               else if (message.type === MessageType.VOICE_STATE_UPDATE) {
                 if (Object.keys(message.payload).join() !== 'isSpeaking' || typeof message.payload.isSpeaking !== 'boolean') {
