@@ -42,6 +42,8 @@ import { loadBotProject } from '../../tooling/config';
 import { runNpm } from '../../tooling/process';
 import { CliError, cliText } from '../locale';
 import { updateSourceConfigCommand } from '../updateConfiguration';
+import { updateCredentialCommand } from '../updateCredentials';
+import { isInteractiveCliAccess } from '../locale';
 
 function loadConfigOrThrow(context: CliContext): BotConfig {
   const config = readConfig(context);
@@ -328,6 +330,15 @@ export function logsCommand(context: CliContext, args: string[]): void {
 }
 
 export async function configCommand(context: CliContext, args: string[]): Promise<void> {
+  if (!args.length && isInteractiveCliAccess(['config'])) {
+    const { configurationMenu } = await import('../menu');
+    await configurationMenu(context);
+    return;
+  }
+  if (args[0] === 'update-token') {
+    await updateCredentialCommand(context, args.slice(1));
+    return;
+  }
   if (args[0] === 'update-source') {
     updateSourceConfigCommand(context, args.slice(1));
     return;

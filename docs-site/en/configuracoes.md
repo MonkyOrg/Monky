@@ -248,10 +248,44 @@ unprocessed camera to the call.
 
 ## Soundboard and stickers
 
-Choose a folder in each tab. These are local libraries, not server folders.
-Configuring a folder does not upload all its files. See
+The soundboard automatically creates a default folder in your local Monky
+profile. You can change it under **Settings → Soundboard**; an existing folder
+selection is never replaced. For stickers, choose a folder in the corresponding
+tab. These are local libraries, not server folders. Configuring a folder does
+not upload all its files. See
 [Everyday Soundboard and sticker use](/en/usando-o-app#soundboard) for formats,
 sending and permissions.
+
+### Local soundboard limit
+
+**Control overly loud sounds** is off by default. Even while off, set the
+**Loudness ceiling** from **1 to 10**; the initial value is **6**.
+Enable the switch to apply the selected ceiling.
+A lower ceiling reduces excessively loud sounds more.
+Sounds below the ceiling keep their volume; quieter sounds are never boosted.
+The same switch and ceiling control are available directly in the **Soundboard
+modal**, below the volume controls, without opening settings. Both views share
+the preference and support keyboard operation.
+During playback, a marker on the bar shows loudness **before reduction**, on
+the same scale as the ceiling. The round slider thumb sets the ceiling;
+the moving marker and “Before limiting” value show the actual audio.
+Green means below the ceiling, yellow means within one level below it, and
+red means above it. The bands follow your chosen ceiling. Values above 10
+remain visible in the text even when the marker reaches the end of the bar.
+The colors help choose the cutoff; they do not diagnose distortion in a file.
+
+The ceiling applies after mixing soundboard clips, including local library
+previews, and after your selected volume: simultaneous sounds also respect
+the limit. Voice, music and what other participants hear do not change.
+
+The decision considers frequency-weighted audio energy over time, rather
+than just the highest peak. Separate protection prevents excessive digital
+peaks. Processing looks ahead by approximately 100 ms to reduce loud sounds
+from the start, including short effects.
+
+The scale is relative: it neither measures nor guarantees physical headphone
+or speaker loudness, which also depends on the system and device. It cannot
+restore an already distorted recording. Both settings persist across restarts.
 
 ### Sound and server favorites
 
@@ -368,6 +402,14 @@ fullscreen* avoids the mode switches that make a game hitch.
 Adjust personal sounds and notices here. This does not change mention
 permissions or events published by the server; those belong to
 [server administration](/en/administrar-servidor).
+
+Under **Custom sounds**, every app effect has preview, file selection and reset
+controls: microphone, received audio, joining/leaving calls, starting/stopping
+screen sharing, chat notifications, pressing/releasing push-to-talk and
+reconnection. Selected files survive restarts, including effects with
+synthesized defaults. Resetting an effect restores its original file or tone;
+**Reset all** removes every override. This does not enable chat notifications
+or PTT cues that you disabled in their respective options.
 
 ## Bot tools
 

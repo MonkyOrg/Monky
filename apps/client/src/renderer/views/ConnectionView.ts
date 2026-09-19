@@ -1,9 +1,9 @@
 import { escapeHtml } from '../utils/html';
-import { LIMITS, MessageType } from '@monky/shared';
+import { LIMITS, MAX_SERVER_INVITE_LENGTH, parseServerInviteLink } from '@monky/shared';
 import { connectionStore, type CreatedServer, type SavedServer } from '../stores/connectionStore';
 import { favoritesStore, savedServerFavoriteKey } from '../stores/favoritesStore';
 import {
-  assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession,
+  assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, updateSessionAvatar,
 } from '../core/serverConnection';
 import { ensureHostedServerStarted, findOwnedServer } from '../core/hostedServerStart';
 import { clientLog } from '../core/ClientLogService';
@@ -24,6 +24,7 @@ import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } fr
 import { renderServerAutoEntryToggle } from './ServerAutoEntryControls';
 import { parseHomeVoicePreview } from '../utils/voicePreview';
 import { onboardingWizard } from './OnboardingWizard';
+import { joinInviteModal } from './JoinInviteModal';
 import logoUrl from '../assets/Logo.png';
 import { getLanguage, t } from '../i18n';
 import {
@@ -256,8 +257,9 @@ export class ConnectionView {
     `;
   }
 
-  public render(): void {
+  public render(container = this.container): void {
     this.suspend();
+    this.container = container;
     try {
       settingsStore.retainAutoEntryServers(connectionStore.savedServers);
     } catch (error: unknown) {
@@ -319,6 +321,15 @@ export class ConnectionView {
 
           <!-- Tab 1: Join Server -->
           <form id="form-join" style="display: ${this.activeTab === 'join' ? 'block' : 'none'};">
+            <div class="form-group">
+              <label for="join-invite">${t('invite.pasteLabel')}</label>
+              <div style="display: flex; gap: 8px;">
+                <input id="join-invite" type="text" maxlength="${MAX_SERVER_INVITE_LENGTH}" autocomplete="off" spellcheck="false"
+                  placeholder="${t('invite.pastePlaceholder')}" style="flex: 1; min-width: 0;">
+                <button id="btn-review-invite" type="button" class="btn btn-secondary">${t('invite.reviewButton')}</button>
+              </div>
+              <small>${t('invite.pasteHint')}</small>
+            </div>
             <div id="lan-discovery-section">
               ${this.getDiscoveredServersSectionHtml()}
             </div>
@@ -592,6 +603,7 @@ export class ConnectionView {
    * changes. The main process caps the result at the display's work area.
    */
   private observeContentHeight(): void {
+    if (this.container.closest('.main-layout')) return;
     const layout = this.container.querySelector('.connection-layout') as HTMLElement | null;
     const card = layout?.querySelector('.connection-card') as HTMLElement | null;
     if (!layout || !card || typeof ResizeObserver === 'undefined') return;
@@ -642,21 +654,9 @@ export class ConnectionView {
         lastConnected: Date.now(),
       });
       await window.api?.maximize?.();
-      await this.updateSessionAvatar('127.0.0.1', server.port, avatar);
+      await updateSessionAvatar('127.0.0.1', server.port, avatar);
     } finally {
       this.setConnectionPending(false);
-    }
-  }
-
-  private async updateSessionAvatar(host: string, port: number, avatar: string): Promise<void> {
-    const session = getServerSessionForAddress(host, port);
-    if (!avatar || !session || session.client.getStatus() !== 'CONNECTED') return;
-    try {
-      await session.client.sendRequest(MessageType.USER_UPDATE_AVATAR, { avatarBase64: avatar, mimeType: 'image/png' });
-    } catch (error: unknown) {
-      clientLog.warn('CONNECTION', 'Could not update the avatar on the opened server session', {
-        error: error instanceof Error ? error.message : String(error),
-      });
     }
   }
 
@@ -1033,6 +1033,11 @@ export class ConnectionView {
   private async submitJoinForm(): Promise<void> {
     if (this.connectionPending) return;
     this.hideError();
+    const invitation = this.container.querySelector<HTMLInputElement>('#join-invite')?.value.trim();
+    if (invitation) {
+      await this.reviewInviteLink(invitation);
+      return;
+    }
 
     const nickname = (document.getElementById('join-nickname') as HTMLInputElement).value.trim();
     const host = (document.getElementById('join-host') as HTMLInputElement).value.trim();
@@ -1092,7 +1097,7 @@ export class ConnectionView {
       }
 
       await window.api?.maximize?.();
-      await this.updateSessionAvatar(host, port, avatar);
+      await updateSessionAvatar(host, port, avatar);
       await window.api?.stopLanDiscovery?.();
     } catch (err: unknown) {
       this.showError(err instanceof Error && err.message ? err.message : t('connection.connectError'));
@@ -1102,7 +1107,32 @@ export class ConnectionView {
     }
   }
 
+  private async reviewInviteLink(value: string): Promise<void> {
+    const parsed = parseServerInviteLink(value);
+    if (!parsed.ok) {
+      clientLog.warn('CONNECTION', 'Invalid pasted server invitation');
+      this.showError(t('invite.invalidLink'));
+      this.container.querySelector<HTMLInputElement>('#join-invite')?.focus();
+      return;
+    }
+    this.hideError();
+    try {
+      await joinInviteModal.open(parsed.invite);
+    } catch (error: unknown) {
+      clientLog.warn('CONNECTION', 'Could not open the invitation confirmation');
+      this.showError(t('invite.readFailed'));
+    }
+  }
+
   private attachEvents(): void {
+    const invitation = this.container.querySelector<HTMLInputElement>('#join-invite');
+    const reviewInvite = () => { if (invitation) void this.reviewInviteLink(invitation.value); };
+    this.container.querySelector('#btn-review-invite')?.addEventListener('click', reviewInvite);
+    invitation?.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' || event.isComposing) return;
+      event.preventDefault();
+      reviewInvite();
+    });
     const tabJoin = document.getElementById('tab-join');
     const tabHost = document.getElementById('tab-host');
     const formJoin = document.getElementById('form-join') as HTMLFormElement;

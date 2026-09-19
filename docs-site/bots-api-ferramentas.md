@@ -9,6 +9,36 @@ Assinaturas públicas completas do SDK de bots do Monky, geradas da entrada Type
 
 [Visão geral do SDK de bots e eventos](/bots-api) · [Distribuição](/bots-distribuicao)
 
+## `askCliChoice` {#askclichoice}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/prompts.ts#L29)
+
+```ts
+export function askCliChoice<T extends string>(locale: BotLocale, question: string, choices: readonly CliChoice<T>[], initial?: T, io?: CliPromptIO): Promise<T>;
+```
+
+## `askCliText` {#askclitext}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/prompts.ts#L89)
+
+```ts
+export function askCliText(locale: BotLocale, question: string, options?: {
+    defaultValue?: string;
+    secret?: boolean;
+}, io?: CliPromptIO): Promise<string>;
+```
+
+## `askCliValue` {#askclivalue}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/prompts.ts#L130)
+
+```ts
+export function askCliValue<T>(locale: BotLocale, question: string, validate: (value: string) => T | Promise<T>, options?: {
+    defaultValue?: string;
+    secret?: boolean;
+}): Promise<T>;
+```
+
 ## `BOT_CAPABILITIES` {#bot_capabilities}
 
 [Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botPermissions.ts#L4)
@@ -92,6 +122,45 @@ export interface BuiltBotPackage {
     cliName: string;
     protocolVersion: number;
     packageCount: number;
+}
+```
+
+## `CliChoice` {#clichoice}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/prompts.ts#L12)
+
+```ts
+export interface CliChoice<T extends string> {
+    value: T;
+    label: string;
+}
+```
+
+## `CliPromptCancelled` {#clipromptcancelled}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/prompts.ts#L17)
+
+```ts
+export class CliPromptCancelled extends CliError {
+    constructor();
+}
+```
+
+## `CliPromptIO` {#clipromptio}
+
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/prompts.ts#L7)
+
+```ts
+export interface CliPromptIO {
+    input: Readable & {
+        isTTY?: boolean;
+        isRaw?: boolean;
+        setRawMode?: (raw: boolean) => void;
+    };
+    output: Writable & {
+        isTTY?: boolean;
+        columns?: number;
+    };
 }
 ```
 
@@ -567,7 +636,7 @@ export enum MessageType {
 [Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L1)
 
 ```ts
-export const PROTOCOL_VERSION = 20;
+export const PROTOCOL_VERSION = 21;
 ```
 
 ## `ProtocolErrorCode` {#protocolerrorcode}
@@ -629,7 +698,7 @@ export enum ProtocolErrorCode {
 
 ## `runBotCli` {#runbotcli}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/index.ts#L102)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/index.ts#L109)
 
 ```ts
 export function runBotCli(packageRoot: string, args?: string[]): Promise<void>;

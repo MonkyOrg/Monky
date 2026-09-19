@@ -15,6 +15,7 @@ import {
   stopCommand,
 } from './commands/lifecycle';
 import { setupCommand } from './commands/setup';
+import { CliPromptCancelled } from './prompts';
 
 function printUsage(context: CliContext): void {
   const modes = context.project.definition.modes.join(', ');
@@ -38,6 +39,9 @@ ${color('COMANDOS', ANSI.bold)}
   config update-source https <URL.tgz> [--token-env <VAR>]
   config update-source file <caminho.tgz>
   config update-source reset    Restaura a origem padrão do pacote
+  config update-token           Salva token GitHub com entrada oculta (não é o token Monky)
+  config update-token --from-env VAR | --status | --clear
+  menu                          Abre o menu por setas (também ao executar sem comando)
   update [--check] [--beta] [--yes]
   autoupdate on [HH:MM] [--beta]
   autoupdate off
@@ -77,6 +81,9 @@ ${color('COMMANDS', ANSI.bold)}
   config update-source https <URL.tgz> [--token-env <VAR>]
   config update-source file <path.tgz>
   config update-source reset    Restore the package default source
+  config update-token           Save GitHub token through hidden input (not the Monky token)
+  config update-token --from-env VAR | --status | --clear
+  menu                          Open arrow menu (also used when no command is provided)
   update [--check] [--beta] [--yes]
   autoupdate on [HH:MM] [--beta]
   autoupdate off
@@ -111,6 +118,7 @@ export async function runBotCli(packageRoot: string, args: string[] = process.ar
   try {
     await dispatchBotCli(context, parsed.args, parsed.locale);
   } catch (error) {
+    if (error instanceof CliPromptCancelled) { console.log(cliErrorMessage(error, context.locale)); return; }
     if (error instanceof CliError) throw new Error(cliErrorMessage(error, context.locale));
     throw error;
   }
@@ -126,8 +134,21 @@ async function dispatchBotCli(context: CliContext, args: string[], explicitLocal
     context.locale = await chooseCliLocale(context.locale);
     saveCliLocale(context.homeDir, context.locale);
   }
-  if (!command || command === '--help' || command === '-h' || command === 'help') {
+  if (!command || command === '--help' || command === '-h' || command === 'help' || rest.includes('--help') || rest.includes('-h')) {
+    if (!command && isInteractiveCliAccess(args)) {
+      const { botCliMenu } = await import('./menu');
+      await botCliMenu(context);
+      return;
+    }
     printUsage(context);
+    return;
+  }
+  if (command === 'menu') {
+    if (rest.length) throw new CliError('menu não aceita argumentos.', 'menu does not take arguments.');
+    if (!isInteractiveCliAccess(args)) throw new CliError('O menu exige um terminal interativo, fora de CI. Use --help para comandos de automação.',
+      'The menu requires an interactive terminal outside CI. Use --help for automation commands.');
+    const { botCliMenu } = await import('./menu');
+    await botCliMenu(context);
     return;
   }
   if (command === 'language') {

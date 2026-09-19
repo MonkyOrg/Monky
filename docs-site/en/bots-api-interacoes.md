@@ -43,7 +43,7 @@ export type BotFieldLocalization = {
 
 ## `BotForm` {#botform}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L310)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L311)
 
 ```ts
 export type BotForm = {
@@ -118,7 +118,7 @@ export type BotForm = {
 
 ## `BotFormField` {#botformfield}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L285)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L286)
 
 ```ts
 export type BotFormField = {
@@ -188,7 +188,7 @@ export type BotFormField = {
 
 ## `BotFormValues` {#botformvalues}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L39)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L40)
 
 ```ts
 export type BotFormValues = {
@@ -198,7 +198,7 @@ export type BotFormValues = {
 
 ## `BotInputResult` {#botinputresult}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L575)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L577)
 
 ```ts
 export type BotInputResult<T> = {
@@ -230,9 +230,48 @@ type Input = "pt-BR" | "en" | "en-US";
 type Output = "pt-BR" | "en";
 ```
 
+## `BotLocalizedMessage` {#botlocalizedmessage}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts#L16)
+
+```ts
+export type BotLocalizedMessage = {
+    content: string;
+    localizations?: {
+        'pt-BR'?: string | undefined;
+        en?: string | undefined;
+    } | undefined;
+};
+```
+
+## `BotMessageContent` {#botmessagecontent}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts#L17)
+
+```ts
+export type BotMessageContent = string | {
+    content: string;
+    localizations?: {
+        'pt-BR'?: string | undefined;
+        en?: string | undefined;
+    } | undefined;
+};
+```
+
+## `BotMessageLocalizations` {#botmessagelocalizations}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botMessages.ts#L10)
+
+```ts
+export type BotMessageLocalizations = {
+    'pt-BR'?: string | undefined;
+    en?: string | undefined;
+};
+```
+
 ## `BotSelector` {#botselector}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L53)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L55)
 
 ```ts
 export interface BotSelector {
@@ -274,7 +313,7 @@ export interface BotSelector {
 
 ## `BotSelectorCreate` {#botselectorcreate}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L51)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L53)
 
 ```ts
 export type BotSelectorCreate = {
@@ -308,7 +347,7 @@ export type BotSelectorCreate = {
 
 ## `BotSelectorPatch` {#botselectorpatch}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L52)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L54)
 
 ```ts
 export type BotSelectorPatch = {
@@ -320,7 +359,7 @@ export type BotSelectorPatch = {
 
 ## `BotSelectorPublic` {#botselectorpublic}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L81)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L83)
 
 ```ts
 export interface BotSelectorPublic {
@@ -361,7 +400,7 @@ export interface BotSelectorPublic {
 
 ## `BotSelectorRespondedPayload` {#botselectorrespondedpayload}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L46)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L47)
 
 ```ts
 export type BotSelectorRespondedPayload = {
@@ -380,7 +419,7 @@ export type BotSelectorRespondedPayload = {
 
 ## `botSelectorRespondedSchema` {#botselectorrespondedschema}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L42)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botSelectors.ts#L43)
 
 This is a Zod validator. `parse(value)` returns `Output` or throws; `safeParse(value)` returns a discriminated success/error result. `Input` describes the accepted structural shape; the source also enforces refinements and size limits.
 
@@ -413,7 +452,7 @@ type Output = {
 
 ## `BotServerSettingsSnapshot` {#botserversettingssnapshot}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L55)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L56)
 
 ```ts
 export type BotServerSettingsSnapshot = {
@@ -425,7 +464,7 @@ export type BotServerSettingsSnapshot = {
 
 ## `botServerSettingsSnapshotSchema` {#botserversettingssnapshotschema}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L50)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L51)
 
 This is a Zod validator. `parse(value)` returns `Output` or throws; `safeParse(value)` returns a discriminated success/error result. `Input` describes the accepted structural shape; the source also enforces refinements and size limits.
 
@@ -444,7 +483,7 @@ type Output = {
 
 ## `BotSettingsContext` {#botsettingscontext}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L63)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L64)
 
 ```ts
 export type BotSettingsContext = {
@@ -457,7 +496,7 @@ export type BotSettingsContext = {
 
 ## `botSettingsContextSchema` {#botsettingscontextschema}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L57)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L58)
 
 This is a Zod validator. `parse(value)` returns `Output` or throws; `safeParse(value)` returns a discriminated success/error result. `Input` describes the accepted structural shape; the source also enforces refinements and size limits.
 
@@ -478,7 +517,7 @@ type Output = {
 
 ## `BotSettingsDefinition` {#botsettingsdefinition}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L371)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L372)
 
 ```ts
 export type BotSettingsDefinition = {
@@ -685,7 +724,7 @@ export type BotSettingsDefinition = {
 
 ## `botSettingsDefinitionSchema` {#botsettingsdefinitionschema}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L323)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L324)
 
 This is a Zod validator. `parse(value)` returns `Output` or throws; `safeParse(value)` returns a discriminated success/error result. `Input` describes the accepted structural shape; the source also enforces refinements and size limits.
 
@@ -1094,7 +1133,7 @@ type Output = {
 
 ## `BotSettingsSnapshot` {#botsettingssnapshot}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L555)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L557)
 
 ```ts
 export type BotSettingsSnapshot = {
@@ -1331,7 +1370,7 @@ export type BotSettingsSnapshot = {
 
 ## `botSettingsSnapshotSchema` {#botsettingssnapshotschema}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L533)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L535)
 
 This is a Zod validator. `parse(value)` returns `Output` or throws; `safeParse(value)` returns a discriminated success/error result. `Input` describes the accepted structural shape; the source also enforces refinements and size limits.
 
@@ -1800,7 +1839,7 @@ type Output = {
 
 ## `BotSettingsSummary` {#botsettingssummary}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L531)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L533)
 
 ```ts
 export type BotSettingsSummary = {
@@ -1830,7 +1869,7 @@ export type BotSettingsSummary = {
 
 ## `botSettingsValuesSchema` {#botsettingsvaluesschema}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L45)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L46)
 
 This is a Zod validator. `parse(value)` returns `Output` or throws; `safeParse(value)` returns a discriminated success/error result. `Input` describes the accepted structural shape; the source also enforces refinements and size limits.
 
@@ -1845,10 +1884,11 @@ type Output = {
 
 ## `ChatMessage` {#chatmessage}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L136)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L138)
 
 ```ts
 export interface ChatMessage {
+    localizations?: import('./botMessages.js').BotMessageLocalizations;
     reply?: MessageReply;
     reactions?: import('./reactions.js').MessageReaction[];
     id: string;
@@ -1883,7 +1923,7 @@ export interface ChatMessage {
 
 ## `ChatReactionEventPayload` {#chatreactioneventpayload}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/reactions.ts#L38)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/reactions.ts#L39)
 
 ```ts
 export type ChatReactionEventPayload = {
@@ -1897,7 +1937,7 @@ export type ChatReactionEventPayload = {
 
 ## `CommandAudioPreviewMimeType` {#commandaudiopreviewmimetype}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L208)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L209)
 
 ```ts
 export type CommandAudioPreviewMimeType = "audio/ogg" | "audio/mpeg" | "audio/wav";
@@ -1905,7 +1945,7 @@ export type CommandAudioPreviewMimeType = "audio/ogg" | "audio/mpeg" | "audio/wa
 
 ## `CommandAutocompleteChoice` {#commandautocompletechoice}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L136)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L137)
 
 ```ts
 export type CommandAutocompleteChoice = {
@@ -1926,7 +1966,7 @@ export type CommandAutocompleteChoice = {
 
 ## `CommandAutocompletePage` {#commandautocompletepage}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L149)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L150)
 
 ```ts
 export type CommandAutocompletePage = {
@@ -2009,7 +2049,7 @@ export type CommandLocalizations = {
 
 ## `CommandOption` {#commandoption}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L229)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L232)
 
 ```ts
 export interface CommandOption {
@@ -2042,10 +2082,11 @@ export interface CommandPresentation {
 
 ## `CommandResponsePayload` {#commandresponsepayload}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L998)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1000)
 
 ```ts
 export interface CommandResponsePayload {
+    localizations?: import('./botMessages.js').BotMessageLocalizations;
     invocationId: string;
     content: string;
     /** Private by default. Public output must be explicitly requested. */
@@ -2055,7 +2096,7 @@ export interface CommandResponsePayload {
 
 ## `CommandValue` {#commandvalue}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L37)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L38)
 
 ```ts
 export type CommandValue = string | number | boolean;
@@ -2063,7 +2104,7 @@ export type CommandValue = string | number | boolean;
 
 ## `CommandValues` {#commandvalues}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L38)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L39)
 
 ```ts
 export type CommandValues = {
@@ -2073,7 +2114,7 @@ export type CommandValues = {
 
 ## `CommandVoiceRequirement` {#commandvoicerequirement}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L244)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L247)
 
 ```ts
 export type CommandVoiceRequirement = "joined" | "same-bot-channel";
@@ -2104,7 +2145,7 @@ export function localizeCommand<T extends {
 
 ## `MessageReaction` {#messagereaction}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/reactions.ts#L26)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/reactions.ts#L27)
 
 ```ts
 export interface MessageReaction {
@@ -2131,7 +2172,7 @@ export function resolveBotLocale(requested: unknown, supported?: readonly BotLoc
 
 ## `resolveBotSettingsValues` {#resolvebotsettingsvalues}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L584)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botInteractions.ts#L586)
 
 ```ts
 export function resolveBotSettingsValues(form: BotForm | undefined, input: unknown): BotInputResult<BotFormValues>;
@@ -2160,7 +2201,7 @@ export type SelectionChoice = {
 
 ## `SlashCommand` {#slashcommand}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L247)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L250)
 
 ```ts
 export interface SlashCommand {

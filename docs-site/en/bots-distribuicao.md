@@ -62,6 +62,14 @@ with a PM2 process and configuration isolated by bot name. `start --foreground`
 runs without PM2 for development. `npm run cli -- setup` uses the same CLI in a
 local checkout after compilation.
 
+Run `my-bot` without a command in a terminal to open the **arrow menu**, or use
+`my-bot menu`. Enter confirms and Esc cancels; **Exit menu** does not stop the
+process. **Configuration > Updates** groups the source, GitHub token, version
+checks/installation and scheduling. `my-bot config` opens interactive settings;
+`my-bot config show` always prints the redacted configuration. Without a TTY or
+in CI, running without a command still shows help without prompting. Automation
+commands and flags remain available.
+
 On the first access from an interactive terminal, the CLI asks for **Português
 (Brasil)** or **English** and saves the choice in `~/.<cliName>/preferences.json`.
 `language en` or `language pt-BR` changes that preference; `--locale en` applies
@@ -185,6 +193,30 @@ Do not put the token in URLs, `package.json`, code, logs or issues.
 For automatic updates, configure the service environment too: a variable set
 in a terminal is not, by itself, persistent service configuration. This
 download token is different from the token linking a bot to a Monky server.
+
+You can also paste the token in **Configuration > Updates > Private GitHub token
+(hidden input)**, or run:
+
+```text
+my-bot config update-token
+my-bot config update-token --status
+my-bot config update-token --clear
+my-bot config update-token --from-env GH_TOKEN
+```
+
+The CLI shows the creation link and explains the permission before asking for
+the secret. Tokens are not validated as environment-variable names: PAT formats
+are accepted as authentication values, while spaces, controls and line breaks
+are rejected. **Saving does not confirm access**; run `update --check` to validate
+the repository and permissions.
+
+The credential lives in `~/.<cliName>/update-credentials.json`, outside the
+package, with `600`/`700` permissions on Linux. It is limited to the selected
+GitHub repository and is not reused after switching to another repository or an
+HTTPS/file source. Explicit environment variables take precedence. Auto-update
+reads the same credential on subsequent runs without copying it into the bot's
+environment; `--clear` does not change external variables. Never pass a secret
+as an argument.
 
 ### Package-provided default
 

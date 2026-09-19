@@ -1,4 +1,4 @@
-import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, getCommandPresentation, hasEveryoneMention } from '@monky/shared';
+import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, getCommandPresentation, getMessageText, hasEveryoneMention } from '@monky/shared';
 import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, CommandPresentation, MessageReply, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
@@ -17,6 +17,7 @@ import { uploadAttachment, UploadHandle } from '../core/AttachmentUploader';
 import { getAttachmentUrl, formatBytes, fileIconName } from '../utils/attachment';
 import { showAlert, showConfirm } from './Dialog';
 import { showCopyToast } from './CopyToast';
+import { ImageClipboard } from '../utils/imageClipboard';
 import { downloadLightboxFile, lightboxModal, LightboxMedia } from './LightboxModal';
 import { linkPreviewService } from '../core/LinkPreviewService';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
@@ -96,6 +97,7 @@ export class ChatView {
   private pendingJumpId: string | null = null;
   private copyRequestId = 0;
   private clearCopyFeedback: (() => void) | null = null;
+  private readonly imageClipboard = new ImageClipboard();
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -391,6 +393,17 @@ export class ChatView {
       });
       row.addEventListener('contextmenu', (e: Event) => {
         const mouseEvent = e as MouseEvent;
+        const image = mouseEvent.target instanceof Element
+          ? mouseEvent.target.closest<HTMLImageElement>('img.chat-attachment-image, img.chat-sticker') : null;
+        if (image && row.contains(image)) {
+          mouseEvent.preventDefault();
+          userContextMenu.close();
+          contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, [{
+            label: t('chat.copyImage'), icon: 'content_copy',
+            onClick: () => { void this.copyAttachmentImage(image); },
+          }, ...this.buildMessageMenuItems(row.dataset.messageId ?? null)]);
+          return;
+        }
         // If text is currently highlighted / selected, allow normal browser selection copy
         const selection = window.getSelection()?.toString();
         if (selection && selection.trim().length > 0) {
@@ -882,6 +895,7 @@ export class ChatView {
 
   private renderMessageRow(m: ChatMessage): string {
     const time = this.formatDateTime(m.createdAt);
+    const messageText = getMessageText(m, getLanguage());
 
     if (m.isSystem) {
       return `
@@ -895,7 +909,7 @@ export class ChatView {
 
     const me = serverStore.currentUser;
     const currentNickname = me?.nickname?.trim();
-    const isMentioned = !m.isSystem && this.isUserMentioned(m.content, currentNickname ?? '');
+    const isMentioned = !m.isSystem && this.isUserMentioned(messageText, currentNickname ?? '');
 
     const knownNicknames = Array.from(serverStore.knownMembers.values()).map((u) => u.nickname);
     if (currentNickname && !knownNicknames.includes(currentNickname)) {
@@ -939,12 +953,12 @@ export class ChatView {
     // hand-typed marker, an id that no longer exists, a video/file attachment)
     // is left alone so no text or attachment can disappear from the UI.
     const stickers: AttachmentMeta[] = [];
-    for (const id of extractStickerIds(m.content)) {
+    for (const id of extractStickerIds(messageText)) {
       const found = m.attachments?.find((a) => a.id === id);
       if (found && found.kind === 'image') stickers.push(found);
     }
     const stickerIds = stickers.map((a) => a.id);
-    const visibleText = stickerIds.length > 0 ? stripStickerTokens(m.content, stickerIds) : m.content;
+    const visibleText = stickerIds.length > 0 ? stripStickerTokens(messageText, stickerIds) : messageText;
     const otherAttachments =
       stickerIds.length > 0 ? m.attachments?.filter((a) => !stickerIds.includes(a.id)) : m.attachments;
 
@@ -1018,8 +1032,9 @@ export class ChatView {
   }
 
   private replyPreview(reply: MessageReply): string {
-    return reply.deleted ? t('chat.messageDeleted') : stripStickerTokens(reply.content, extractStickerIds(reply.content)).trim()
-      || (reply.hasAttachments ? t('chat.replyAttachment') : reply.content);
+    const content = getMessageText(reply, getLanguage());
+    return reply.deleted ? t('chat.messageDeleted') : stripStickerTokens(content, extractStickerIds(content)).trim()
+      || (reply.hasAttachments ? t('chat.replyAttachment') : content);
   }
 
   private renderReplyReference(reply: MessageReply): string {
@@ -1062,9 +1077,10 @@ export class ChatView {
   private messageClipboard(messageId: string): MessageClipboardContent | null {
     const message = this.currentChannelId ? chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === messageId) : undefined;
     if (!message || message.deletedAt || message.isSystem) return null;
-    const stickerIds = extractStickerIds(message.content).filter((id) =>
+    const messageText = getMessageText(message, getLanguage());
+    const stickerIds = extractStickerIds(messageText).filter((id) =>
       message.attachments?.some((attachment) => attachment.id === id && attachment.kind === 'image'));
-    const content = stripStickerTokens(message.content, stickerIds);
+    const content = stripStickerTokens(messageText, stickerIds);
     if (!content.trim()) {
       return { text: message.attachments?.map((entry) => entry.originalName).join('\n') || content };
     }
@@ -1106,6 +1122,7 @@ export class ChatView {
   }
 
   private async copyContent(content: MessageClipboardContent, mode: MessageCopyMode, event?: ClipboardEvent): Promise<void> {
+    this.imageClipboard.cancel();
     const requestId = ++this.copyRequestId;
     this.clearCopyFeedback?.();
     try {
@@ -1122,6 +1139,13 @@ export class ChatView {
     }
     if (requestId !== this.copyRequestId) return;
     this.clearCopyFeedback = showCopyToast(t('chat.messageCopied'));
+  }
+
+  private async copyAttachmentImage(image: HTMLImageElement): Promise<void> {
+    if (!this.isCurrentSession() || !image.isConnected) return;
+    this.copyRequestId++;
+    this.clearCopyFeedback?.();
+    await this.imageClipboard.copy(image.currentSrc || image.src);
   }
 
   private jumpToMessage(messageId: string): void {
@@ -1247,6 +1271,14 @@ export class ChatView {
     `;
     const inlineActions = `
       <div class="chat-inline-media-actions">
+        ${a.kind === 'image' ? `<button
+          type="button"
+          class="chat-attachment-action chat-attachment-copy"
+          title="${t('chat.copyImage')}"
+          aria-label="${t('chat.copyImage')}"
+        >
+          <span class="material-symbols-outlined md-18">content_copy</span>
+        </button>` : ''}
         <button
           type="button"
           class="chat-attachment-action chat-attachment-lightbox-trigger"
@@ -1317,6 +1349,14 @@ export class ChatView {
   }
 
   private bindMediaInteractions(feed: HTMLElement): void {
+    feed.querySelectorAll<HTMLButtonElement>('.chat-attachment-copy').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const image = button.closest('.chat-inline-media')?.querySelector<HTMLImageElement>('.chat-attachment-image');
+        if (image) void this.copyAttachmentImage(image);
+      });
+    });
     feed.querySelectorAll('.chat-inline-media[data-lightbox-kind="image"] .chat-attachment-image').forEach((img) => {
       img.addEventListener('click', () => {
         const source = (img as HTMLElement).closest('[data-lightbox-kind]') as HTMLElement | null;
@@ -2812,6 +2852,7 @@ export class ChatView {
     this.rememberComposerText();
     this.commandSelection++;
     this.copyRequestId++;
+    this.imageClipboard.cancel();
     this.clearCopyFeedback?.();
     contextMenu.close();
     this.pendingJumpId = null;

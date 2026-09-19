@@ -74,6 +74,7 @@ export function sessionKeyFor(host: string, port: number): string {
 export class SessionManager {
   private sessions: Map<string, ServerSession> = new Map();
   private activeKey: string | null = null;
+  private viewingHome = false;
   /** Session the global proxies currently resolve to — not always the visible
    * one, since `route()` borrows them while a background event is handled. */
   private installedBundle: ServerSession | null = null;
@@ -93,6 +94,23 @@ export class SessionManager {
 
   public getActiveKey(): string | null {
     return this.activeKey;
+  }
+
+  public isHome(): boolean {
+    return this.viewingHome;
+  }
+
+  public showHome(): void {
+    if (this.viewingHome) return;
+    this.viewingHome = true;
+    if (!this.activeKey) {
+      const remaining = this.getAll()[0];
+      this.activeKey = remaining?.key ?? null;
+      if (remaining) this.applyBundle(remaining);
+    }
+    const active = this.getActive();
+    if (active) this.mute(active);
+    appEvents.emit('navigation.home');
   }
 
   public get(key: string): ServerSession | undefined {
@@ -171,13 +189,14 @@ export class SessionManager {
    */
   public activate(key: string): void {
     const session = this.sessions.get(key);
-    if (!session || this.activeKey === key) return;
+    if (!session || (this.activeKey === key && !this.viewingHome)) return;
     clientLog.info('CONNECTION', `Activating session: ${key}`);
 
     const previous = this.getActive();
     if (previous) this.mute(previous);
 
     this.activeKey = key;
+    this.viewingHome = false;
     session.serverStore.bus = appEvents;
     session.chatStore.bus = appEvents;
     session.botScreenStore.bus = appEvents;
@@ -200,9 +219,13 @@ export class SessionManager {
     // The disconnect above may have already handed the screen to another
     // session, and clearing the key then would undo it.
     if (wasActive && this.activeKey === key) {
-      this.activeKey = null;
-      appEvents.emit('session.changed', { key: null });
+      const next = this.viewingHome ? this.getAll().find(candidate => candidate.client.getStatus() === 'CONNECTED')
+        ?? this.getAll()[0] : undefined;
+      this.activeKey = next?.key ?? null;
+      if (next) this.applyBundle(next);
+      appEvents.emit('session.changed', { key: this.activeKey });
     }
+    emitOutsideRouting(() => appEvents.emit('session.connections_changed'));
   }
 
   public removeAll(): void {
@@ -253,11 +276,13 @@ export class SessionManager {
     const previousForeground = isForegroundEvent();
     const previousOrigin = currentEventOrigin();
 
-    if (!session || session.key === this.activeKey) {
+    if (!session || (session.key === this.activeKey && !this.viewingHome)) {
+      if (this.viewingHome) setForegroundContext(false);
       setEventOrigin(sessionKey || this.activeKey);
       try {
         emit();
       } finally {
+        setForegroundContext(previousForeground);
         setEventOrigin(previousOrigin);
       }
       this.notifyVoiceContext(sessionKey, event);
@@ -273,7 +298,7 @@ export class SessionManager {
     } finally {
       setForegroundContext(previousForeground);
       setEventOrigin(previousOrigin);
-      this.applyBundle(previousBundle);
+      this.applyBundle(previousBundle && this.sessions.has(previousBundle.key) ? previousBundle : this.getActive());
     }
     this.notifyVoiceContext(sessionKey, event);
 

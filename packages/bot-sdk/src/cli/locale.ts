@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import readline from 'node:readline';
 import { normalizeBotLocale, type BotLocale } from '@monky/shared';
 import { ensurePrivateDirectory, writePrivateJson } from './fs';
 
@@ -116,40 +115,20 @@ export function shouldPromptCliLocale(
   const command = args[0];
   return isInteractiveCliAccess(args, env) && !explicitLocale &&
     env.MONKY_BOT_LOCALE === undefined && env.MONKY_LANG === undefined &&
-    (!command || ['setup', 'start', 'stop', 'restart', 'status', 'logs', 'config', 'update', 'autoupdate'].includes(command)) &&
+    (!command || ['menu', 'setup', 'start', 'stop', 'restart', 'status', 'logs', 'config', 'update', 'autoupdate'].includes(command)) &&
     !readSavedCliLocale(homeDir);
 }
 
 export function isInteractiveCliAccess(args: string[], env: NodeJS.ProcessEnv = process.env): boolean {
   return !!process.stdin.isTTY && !!process.stdout.isTTY && !env.CI &&
     !['help', 'version'].includes(args[0]) &&
-    !args.some((arg) => ['--non-interactive', '--yes', '-y', '--check', '--help', '-h', '--version', '-v'].includes(arg));
+    !args.some((arg) => ['--non-interactive', '--yes', '-y', '--check', '--help', '-h', '--version', '-v',
+      '--from-env', '--status', '--clear'].includes(arg));
 }
 
 export async function chooseCliLocale(current: BotLocale): Promise<BotLocale> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true, historySize: 0 });
-  let closed = false;
-  rl.once('close', () => { closed = true; });
-  rl.on('SIGINT', () => rl.close());
-  console.log('Idioma / Language\n  1. Português (Brasil)\n  2. English');
-  try {
-    while (!closed) {
-      const answer = await new Promise<string>((resolve, reject) => {
-        const onClose = (): void => reject(new Error(cliText(current,
-          'Seleção de idioma cancelada; nenhuma preferência foi alterada.',
-          'Language selection cancelled; no preferences were changed.')));
-        rl.once('close', onClose);
-        rl.question(`Idioma / Language [${current === 'en' ? '2' : '1'}]: `, (value) => {
-          rl.off('close', onClose);
-          resolve(value.trim());
-        });
-      });
-      const locale = !answer ? current : answer === '1' ? 'pt-BR' : answer === '2' ? 'en' : normalizeBotLocale(answer);
-      if (locale) return locale;
-      console.log('Escolha 1 ou 2. / Choose 1 or 2.');
-    }
-    throw new Error('Seleção cancelada. / Selection cancelled.');
-  } finally {
-    rl.close();
-  }
+  const { askCliChoice } = await import('./prompts');
+  return askCliChoice(current, 'Idioma / Language', [
+    { value: 'pt-BR', label: 'Português (Brasil)' }, { value: 'en', label: 'English' },
+  ], current);
 }

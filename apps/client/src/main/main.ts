@@ -24,6 +24,8 @@ import { bindDevelopmentQa, loadDevelopmentQa } from './developmentQa';
 import { CrashRecovery } from './crashRecovery';
 import type { LocalExecutionIpc } from './localExecution/ipc';
 import { initializeMainLanguage, mt } from './i18n';
+import { SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
+import { ServerInviteInbox } from './serverInvites';
 
 import fs from 'fs';
 
@@ -83,6 +85,7 @@ if (process.platform === 'win32' && process.env.MONKY_DISABLE_WGC !== '1') {
 }
 
 let mainWindow: BrowserWindow | null = null;
+const serverInviteInbox = new ServerInviteInbox();
 let overlayManager: OverlayManager | null = null;
 let trayManager: TrayManager | null = null;
 const serverManager = new ServerManager();
@@ -95,6 +98,38 @@ let leaveAnnounced = false;
 let localExecution: LocalExecutionIpc | null = null;
 let localExecutionStopping = false;
 let localExecutionStopped = false;
+
+function notifyServerInvite(): void {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(SERVER_INVITE_AVAILABLE);
+  }
+}
+
+const onOpenInviteUrl = (event: Electron.Event, url: string): void => {
+  if (!serverInviteInbox.receive(url)) return;
+  event.preventDefault();
+  notifyServerInvite();
+  if (mainWindow && !mainWindow.isDestroyed() && !isInstallSplashActive()) {
+    if (!mainWindow.isVisible()) mainWindow.show();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+};
+app.on('open-url', onOpenInviteUrl);
+serverInviteInbox.receiveArguments(process.argv);
+ipcMain.handle(SERVER_INVITE_IPC.take, (event: Electron.IpcMainInvokeEvent, ...args: unknown[]): ServerInviteResult | null => {
+  const window = mainWindow;
+  if (!window || window.isDestroyed() || event.sender !== window.webContents
+    || event.senderFrame !== window.webContents.mainFrame || args.length !== 0) {
+    console.warn('[Invites] Rejected an invitation read outside the main application frame.');
+    throw new Error(mt('error.serverInviteUnavailable'));
+  }
+  return serverInviteInbox.take();
+});
+app.once('will-quit', () => {
+  ipcMain.removeHandler(SERVER_INVITE_IPC.take);
+  app.removeListener('open-url', onOpenInviteUrl);
+});
 
 /**
  * How long the quit waits for the renderer to say goodbye to the servers.
@@ -433,7 +468,8 @@ const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, commandLine) => {
+    if (serverInviteInbox.receiveArguments(commandLine)) notifyServerInvite();
     if (crashRecovery?.focus()) return;
     if (mainWindow) {
       if (!mainWindow.isVisible()) mainWindow.show();

@@ -1,9 +1,20 @@
 import { settingsStore } from '../../../stores/settingsStore';
-import { soundEffects, getSoundLabels, SoundEffectType } from '../../../core/SoundEffects';
+import { soundEffects, getSoundLabels, isSoundEffectType, SOUND_EFFECT_TYPES } from '../../../core/SoundEffects';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { clientLog } from '../../../core/ClientLogService';
+import { showAlert } from '../../Dialog';
 
 export class NotificationsTab {
+  private unbind: (() => void) | null = null;
+  private generation = 0;
+
+  public cleanup(): void {
+    this.generation++;
+    this.unbind?.();
+    this.unbind = null;
+  }
+
   public renderHtml(): string {
     return `
       <!-- Chat Notifications -->
@@ -20,13 +31,13 @@ export class NotificationsTab {
             <div>
               <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-chat-sound">
                 <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">notifications_active</span>
-                Tocar som ao receber mensagens
+                ${t('settings.chatSoundEnabled')}
               </label>
               <div style="font-size: 11px; color: var(--text-muted);">
-                Reproduz um breve som quando uma nova mensagem de outra pessoa chega em qualquer canal de texto.
+                ${t('settings.chatSoundEnabledDesc')}
               </div>
             </div>
-            <label class="toggle-switch" aria-label="Tocar som ao receber mensagens">
+            <label class="toggle-switch" aria-label="${escapeHtml(t('settings.chatSoundEnabled'))}">
               <input id="checkbox-chat-sound" type="checkbox" ${settingsStore.chatMessageSoundEnabled ? 'checked' : ''}>
               <span class="toggle-slider"></span>
             </label>
@@ -40,7 +51,7 @@ export class NotificationsTab {
                 ${t('settings.chatSoundMentionsOnly')}
               </label>
               <div style="font-size: 11px; color: var(--text-muted);">
-                Toca o som somente quando seu apelido for citado na mensagem (ex.: @seu_apelido).
+                ${t('settings.chatSoundMentionsDesc')}
               </div>
             </div>
             <label class="toggle-switch" aria-label="${t('settings.chatSoundMentionsOnly')}">
@@ -70,8 +81,7 @@ export class NotificationsTab {
 
   public getCustomSoundsHtml(): string {
     const labels = getSoundLabels();
-    const keys = Object.keys(labels) as SoundEffectType[];
-    return keys.map((key) => {
+    return SOUND_EFFECT_TYPES.map((key) => {
       const label = labels[key];
       const isCustom = Boolean(settingsStore.customSounds[key]);
       return `
@@ -92,74 +102,90 @@ export class NotificationsTab {
   }
 
   public attachEvents(container: HTMLElement): void {
+    this.cleanup();
+    const generation = this.generation;
     const checkboxChatSound = container.querySelector<HTMLInputElement>('#checkbox-chat-sound');
     const checkboxChatSoundMentions = container.querySelector<HTMLInputElement>('#checkbox-chat-sound-mentions');
-    const btnResetAll = container.querySelector<HTMLButtonElement>('#btn-reset-all-sounds');
 
-    checkboxChatSound?.addEventListener('change', () => {
-      settingsStore.chatMessageSoundEnabled = checkboxChatSound.checked;
-      settingsStore.save();
-    });
-
-    checkboxChatSoundMentions?.addEventListener('change', () => {
-      settingsStore.chatMessageSoundMentionsOnly = checkboxChatSoundMentions.checked;
-      settingsStore.save();
-    });
-
-    btnResetAll?.addEventListener('click', () => {
-      settingsStore.customSounds = {};
-      settingsStore.save();
-      soundEffects.loadAll();
-      const list = container.querySelector<HTMLElement>('#custom-sounds-list');
-      if (list) {
-        list.innerHTML = this.getCustomSoundsHtml();
-        this.attachCustomSoundsListeners(container);
+    const onChatSound = () => {
+      if (checkboxChatSound) {
+        settingsStore.chatMessageSoundEnabled = checkboxChatSound.checked;
+        settingsStore.save();
       }
-    });
+    };
 
-    this.attachCustomSoundsListeners(container);
+    const onMentions = () => {
+      if (checkboxChatSoundMentions) {
+        settingsStore.chatMessageSoundMentionsOnly = checkboxChatSoundMentions.checked;
+        settingsStore.save();
+      }
+    };
+
+    const onClick = (event: MouseEvent) => {
+      const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>(
+        '.btn-sound-preview, .btn-sound-change, .btn-sound-reset, #btn-reset-all-sounds') : null;
+      if (!button || !container.contains(button) || button.disabled) return;
+      event.preventDefault();
+      void this.handleSoundAction(button, container, generation);
+    };
+    checkboxChatSound?.addEventListener('change', onChatSound);
+    checkboxChatSoundMentions?.addEventListener('change', onMentions);
+    container.addEventListener('click', onClick);
+    this.unbind = () => {
+      checkboxChatSound?.removeEventListener('change', onChatSound);
+      checkboxChatSoundMentions?.removeEventListener('change', onMentions);
+      container.removeEventListener('click', onClick);
+    };
   }
 
-  public attachCustomSoundsListeners(container: HTMLElement): void {
-    container.querySelectorAll('.btn-sound-preview').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const key = btn.getAttribute('data-sound-key') as SoundEffectType;
-        if (key) soundEffects.play(key);
-      });
-    });
+  private saveCustomSounds(next: typeof settingsStore.customSounds): void {
+    const previous = settingsStore.customSounds;
+    settingsStore.customSounds = next;
+    try {
+      settingsStore.save();
+    } catch (error: unknown) {
+      settingsStore.customSounds = previous;
+      throw error;
+    }
+  }
 
-    container.querySelectorAll('.btn-sound-change').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const key = btn.getAttribute('data-sound-key') as SoundEffectType;
-        if (!key || !window.api?.selectSoundFile) return;
-        const dataUrl = await window.api.selectSoundFile();
-        if (dataUrl) {
-          settingsStore.customSounds[key] = dataUrl;
-          settingsStore.save();
-          soundEffects.loadAll();
-          const list = container.querySelector<HTMLElement>('#custom-sounds-list');
-          if (list) {
-            list.innerHTML = this.getCustomSoundsHtml();
-            this.attachCustomSoundsListeners(container);
-          }
+  private async handleSoundAction(button: HTMLButtonElement, container: HTMLElement, generation: number): Promise<void> {
+    button.disabled = true;
+    try {
+      if (button.id === 'btn-reset-all-sounds') {
+        this.saveCustomSounds({});
+        soundEffects.loadAll();
+      } else {
+        const key = button.dataset.soundKey;
+        if (!isSoundEffectType(key)) throw new Error('Unknown sound effect control');
+        if (button.classList.contains('btn-sound-preview')) {
+          soundEffects.play(key);
+          return;
         }
-      });
-    });
-
-    container.querySelectorAll('.btn-sound-reset').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const key = btn.getAttribute('data-sound-key') as SoundEffectType;
-        if (key) {
-          delete settingsStore.customSounds[key];
-          settingsStore.save();
-          soundEffects.loadAll();
-          const list = container.querySelector<HTMLElement>('#custom-sounds-list');
-          if (list) {
-            list.innerHTML = this.getCustomSoundsHtml();
-            this.attachCustomSoundsListeners(container);
-          }
+        if (button.classList.contains('btn-sound-change')) {
+          if (!window.api?.selectSoundFile) throw new Error('Native sound selection is unavailable');
+          const dataUrl = await window.api.selectSoundFile();
+          if (generation !== this.generation || !button.isConnected || !dataUrl) return;
+          this.saveCustomSounds({ ...settingsStore.customSounds, [key]: dataUrl });
+          soundEffects.reloadSound(key, dataUrl);
+        } else {
+          const next = { ...settingsStore.customSounds };
+          delete next[key];
+          this.saveCustomSounds(next);
+          soundEffects.reloadSound(key);
         }
+      }
+      const list = container.querySelector<HTMLElement>('#custom-sounds-list');
+      if (list) list.innerHTML = this.getCustomSoundsHtml();
+    } catch (error: unknown) {
+      clientLog.warn('AUDIO', 'Could not update custom sound preferences', {
+        error: error instanceof Error ? error.message : String(error),
       });
-    });
+      if (generation === this.generation && container.isConnected) {
+        await showAlert({ message: t('settings.customSoundFailed'), variant: 'danger' });
+      }
+    } finally {
+      if (button.isConnected) button.disabled = false;
+    }
   }
 }

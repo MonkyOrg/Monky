@@ -6,6 +6,7 @@ import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
+import { SoundboardAudioOutput } from './SoundboardAudioOutput';
 import { setAudioOutputSink } from './AudioOutputSink';
 
 export interface SoundItem {
@@ -25,6 +26,11 @@ export interface ActiveSoundPlayback {
 
 interface PendingSoundPlayback {
   audio: HTMLAudioElement | null;
+  controller: AbortController;
+}
+
+interface ManagedSoundPlayback extends ActiveSoundPlayback {
+  dispose: () => void;
 }
 
 export class SoundboardService {
@@ -32,8 +38,13 @@ export class SoundboardService {
   private loadGeneration = 0;
   private loadStatus: 'loading' | 'ready' | 'error' = 'ready';
   private sinkId: string = settingsStore.selectedSpeakerId;
-  private activePlaybacks: Map<string, ActiveSoundPlayback> = new Map();
+  private activePlaybacks: Map<string, ManagedSoundPlayback> = new Map();
   private pendingPlaybacks = new Map<string, PendingSoundPlayback>();
+  private intensity: number | null = null;
+  private readonly audioOutput = new SoundboardAudioOutput((value) => {
+    this.intensity = value;
+    appEvents.emit('soundboard.intensity', value);
+  });
 
   constructor() {
     this.setupListeners();
@@ -54,9 +65,7 @@ export class SoundboardService {
     // Update active soundboard playbacks when local user deafens
     appEvents.on('local.deafened', (deafened: boolean) => {
       const vol = deafened ? 0 : this.getEffectiveVolume();
-      for (const playback of this.activePlaybacks.values()) {
-        playback.audio.volume = vol;
-      }
+      this.audioOutput.setVolume(vol);
     });
 
     // Update speaker device and active audio volume when settings change
@@ -67,9 +76,8 @@ export class SoundboardService {
         });
       }
       const vol = this.getEffectiveVolume();
-      for (const playback of this.activePlaybacks.values()) {
-        playback.audio.volume = vol;
-      }
+      this.audioOutput.setVolume(vol);
+      this.audioOutput.updateLimiter();
     });
 
     // Listen to global shortcuts triggered via Electron
@@ -102,29 +110,47 @@ export class SoundboardService {
 
   public async setSinkId(sinkId: string): Promise<void> {
     this.sinkId = sinkId;
-    for (const playback of this.activePlaybacks.values()) {
-      if (typeof playback.audio.setSinkId !== 'function') throw new Error('Output selection unavailable');
-      await setAudioOutputSink(playback.audio, sinkId);
-    }
+    await this.audioOutput.setSinkId(sinkId);
+    for (const playback of this.activePlaybacks.values()) await setAudioOutputSink(playback.audio, sinkId);
     for (const pending of this.pendingPlaybacks.values()) {
       if (pending.audio) await setAudioOutputSink(pending.audio, sinkId);
     }
   }
 
+  public async prepareLimiter(): Promise<void> {
+    await this.audioOutput.prepareLimiter();
+  }
+
+  public getIntensity(): number | null {
+    return this.intensity;
+  }
+
   public async loadSounds(): Promise<SoundItem[]> {
     const generation = ++this.loadGeneration;
-    const folder = settingsStore.soundboardFolderPath;
+    let folder = settingsStore.soundboardFolderPath;
     const isCurrent = () => generation === this.loadGeneration && folder === settingsStore.soundboardFolderPath;
-    if (!folder) {
-      this.sounds = [];
-      this.loadStatus = 'ready';
-      appEvents.emit('soundboard.sounds_loaded', this.sounds);
-      return [];
-    }
-
     this.loadStatus = 'loading';
     appEvents.emit('soundboard.sounds_loading');
     try {
+      if (!folder) {
+        if (!window.api?.getDefaultSoundboardFolder) throw new Error('Default soundboard folder access is unavailable');
+        const defaultFolder = await window.api.getDefaultSoundboardFolder();
+        if (!isCurrent()) return this.sounds;
+        if (defaultFolder === null) {
+          this.sounds = [];
+          this.loadStatus = 'ready';
+          appEvents.emit('soundboard.sounds_loaded', this.sounds);
+          return this.sounds;
+        }
+        settingsStore.soundboardFolderPath = defaultFolder;
+        try {
+          settingsStore.save();
+        } catch (error: unknown) {
+          settingsStore.soundboardFolderPath = folder;
+          throw error;
+        }
+        folder = defaultFolder;
+      }
       if (!window.api?.listSoundboardSounds) throw new Error('Soundboard folder access is unavailable');
       const sounds = await window.api.listSoundboardSounds(folder);
       if (!isCurrent()) return this.sounds;
@@ -188,22 +214,13 @@ export class SoundboardService {
   public stopSoundForUser(userId: string): void {
     const pending = this.pendingPlaybacks.get(userId);
     this.pendingPlaybacks.delete(userId);
+    pending?.controller.abort();
     if (pending?.audio) {
       pending.audio.pause();
       pending.audio.src = '';
     }
     const existing = this.activePlaybacks.get(userId);
-    if (existing) {
-      this.activePlaybacks.delete(userId);
-      try {
-        existing.audio.pause();
-        existing.audio.currentTime = 0;
-        existing.audio.src = '';
-      } catch (err) {
-        console.warn('[SoundboardService] Error stopping user audio:', err);
-      }
-      appEvents.emit('soundboard.playback_ended', { userId, soundName: existing.soundName });
-    }
+    existing?.dispose();
   }
 
   /**
@@ -253,19 +270,7 @@ export class SoundboardService {
       this.stopSoundForUser(userId);
       return;
     }
-    for (const pendingUserId of [...this.pendingPlaybacks.keys()]) this.stopSoundForUser(pendingUserId);
-    for (const [uid, playback] of Array.from(this.activePlaybacks.entries())) {
-      this.activePlaybacks.delete(uid);
-      try {
-        playback.audio.pause();
-        playback.audio.currentTime = 0;
-        playback.audio.src = '';
-      } catch (err) {
-        console.warn('[SoundboardService] Error stopping audio:', err);
-      }
-      appEvents.emit('soundboard.playback_ended', { userId: uid, soundName: playback.soundName });
-    }
-    this.activePlaybacks.clear();
+    for (const id of new Set([...this.pendingPlaybacks.keys(), ...this.activePlaybacks.keys()])) this.stopSoundForUser(id);
     appEvents.emit('soundboard.playback_ended', {});
   }
 
@@ -348,11 +353,12 @@ export class SoundboardService {
     userName: string | undefined,
     soundName: string
   ): void {
-    const playback: ActiveSoundPlayback = {
+    const playback: ManagedSoundPlayback = {
       userId,
       userName,
       soundName,
       audio,
+      dispose: () => cleanup(),
     };
     this.activePlaybacks.set(userId, playback);
 
@@ -389,10 +395,13 @@ export class SoundboardService {
       audio.removeEventListener('error', onError);
     };
 
-    const cleanup = () => {
+    const cleanup = (drain = false) => {
       if (isCleanedUp) return;
       isCleanedUp = true;
       removeListeners();
+      audio.pause();
+      audio.src = '';
+      this.audioOutput.disconnect(audio, drain);
 
       if (this.activePlaybacks.get(userId)?.audio === audio) {
         this.activePlaybacks.delete(userId);
@@ -400,7 +409,7 @@ export class SoundboardService {
       }
     };
 
-    const onEnded = () => cleanup();
+    const onEnded = () => cleanup(true);
     const onError = (e: Event) => {
       console.warn('[SoundboardService] Audio error:', e);
       cleanup();
@@ -412,6 +421,7 @@ export class SoundboardService {
     audio.addEventListener('error', onError);
 
     audio.play().catch((err) => {
+      if (isCleanedUp) return;
       console.warn('[SoundboardService] Audio play error:', err);
       cleanup();
     });
@@ -426,7 +436,7 @@ export class SoundboardService {
 
   private beginPlayback(userId: string): PendingSoundPlayback {
     this.stopSoundForUser(userId);
-    const pending: PendingSoundPlayback = { audio: null };
+    const pending: PendingSoundPlayback = { audio: null, controller: new AbortController() };
     this.pendingPlaybacks.set(userId, pending);
     return pending;
   }
@@ -440,15 +450,17 @@ export class SoundboardService {
 
       const audio = new Audio(soundData.dataUrl);
       pending.audio = audio;
-      audio.volume = this.getEffectiveVolume();
+      this.audioOutput.setVolume(this.getEffectiveVolume());
 
       await setAudioOutputSink(audio, this.sinkId);
+      await this.audioOutput.connect(audio, pending.controller.signal);
       if (this.pendingPlaybacks.get('local') !== pending) return false;
 
       this.playAudioForUser(audio, 'local', t('common.you'), soundData.soundName);
       return true;
     } catch (err) {
-      console.warn('[SoundboardService] Local preview failed:', err);
+      if (!pending.controller.signal.aborted) console.warn('[SoundboardService] Local preview failed:', err);
+      pending.controller.abort();
       return false;
     } finally {
       if (this.pendingPlaybacks.get('local') === pending) this.pendingPlaybacks.delete('local');
@@ -471,14 +483,16 @@ export class SoundboardService {
 
       const audio = new Audio(dataUrl);
       pending.audio = audio;
-      audio.volume = this.getEffectiveVolume();
+      this.audioOutput.setVolume(this.getEffectiveVolume());
 
       await setAudioOutputSink(audio, this.sinkId);
+      await this.audioOutput.connect(audio, pending.controller.signal);
       if (this.pendingPlaybacks.get(userId) !== pending) return;
 
       this.playAudioForUser(audio, userId, payload.userName, payload.soundName);
     } catch (err) {
-      console.warn('[SoundboardService] Failed to play incoming soundboard audio:', err);
+      if (!pending.controller.signal.aborted) console.warn('[SoundboardService] Failed to play incoming soundboard audio:', err);
+      pending.controller.abort();
     } finally {
       if (this.pendingPlaybacks.get(userId) === pending) this.pendingPlaybacks.delete(userId);
     }

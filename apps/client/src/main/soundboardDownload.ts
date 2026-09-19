@@ -45,6 +45,7 @@ export class SoundboardDownloads {
   private loaded: Promise<void> | null = null;
   private loadFailed = false;
   private confirmingConfiguredFolder = false;
+  private preparingDefaultFolder: Promise<string | null> | null = null;
   private grants = new Map<string, Grant>();
   private targets = new Set<string>();
   private ownerGeneration = new Map<number, number>();
@@ -69,6 +70,29 @@ export class SoundboardDownloads {
     await this.load();
     const canonical = await fs.realpath(folder);
     return this.persistConfirmedFolder(canonical, selection);
+  }
+
+  public getDefaultFolder(): Promise<string | null> {
+    return this.preparingDefaultFolder ??= this.prepareDefaultFolder().finally(() => {
+      this.preparingDefaultFolder = null;
+    });
+  }
+
+  private async prepareDefaultFolder(): Promise<string | null> {
+    const selection = this.folderSelection;
+    await this.load();
+    if (this.loadFailed) throw new SoundDownloadError('write_failed');
+    if (this.confirmedFolder) return this.confirmedFolder;
+    // A native folder selection, including one still being saved, takes precedence.
+    if (selection !== 0 || selection !== this.folderSelection) return null;
+    const profile = await fs.realpath(path.dirname(this.configFile));
+    const folder = path.join(profile, 'soundboard');
+    await fs.mkdir(folder, { recursive: true });
+    if (selection !== this.folderSelection) return null;
+    if ((await fs.lstat(folder)).isSymbolicLink() || !samePath(await fs.realpath(folder), folder)) {
+      throw new SoundDownloadError('write_failed');
+    }
+    return this.persistConfirmedFolder(folder, selection);
   }
 
   public async confirmConfiguredFolder(configuredFolder: unknown, approve: (folder: string) => Promise<boolean>): Promise<boolean> {

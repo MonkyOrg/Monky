@@ -98,6 +98,8 @@ export class SettingsStore {
   public botLocalePreferences: Record<string, BotLocale> = {};
   public soundboardVolume: number = 80; // 0 - 100
   public soundboardMuted: boolean = false;
+  public soundboardLimiterEnabled: boolean = false;
+  public soundboardLoudnessLimit: number = 6;
   /** Folder the user picked for custom chat stickers (#356). */
   public stickersFolderPath: string = '';
   public screenAudioVolumes: Record<string, number> = {}; // per-connection screen audio volume (#75), keyed by sessionId (#363)
@@ -140,6 +142,8 @@ export class SettingsStore {
   }
 
   public load(notify = true): void {
+    this.soundboardLimiterEnabled = false;
+    this.soundboardLoudnessLimit = 6;
     this.botDownloadConfirmationExceptions = [];
     this.botUserPreferences = {};
     this.botLocalePreferences = {};
@@ -187,6 +191,16 @@ export class SettingsStore {
         }
         if (typeof this.soundboardMuted !== 'boolean') {
           this.soundboardMuted = false;
+        }
+        if (parsed.soundboardLimiterEnabled !== undefined && typeof parsed.soundboardLimiterEnabled !== 'boolean') {
+          console.warn('[Settings] Invalid soundboard limiter state; the limiter remains disabled.');
+        }
+        this.soundboardLimiterEnabled = parsed.soundboardLimiterEnabled === true;
+        if (parsed.soundboardLoudnessLimit !== undefined &&
+            (typeof parsed.soundboardLoudnessLimit !== 'number' || !Number.isInteger(parsed.soundboardLoudnessLimit)
+              || parsed.soundboardLoudnessLimit < 1 || parsed.soundboardLoudnessLimit > 10)) {
+          console.warn('[Settings] Invalid soundboard loudness limit; using level 6.');
+          this.soundboardLoudnessLimit = 6;
         }
         if (!this.screenAudioVolumes || typeof this.screenAudioVolumes !== 'object') {
           this.screenAudioVolumes = {};
@@ -582,6 +596,8 @@ export class SettingsStore {
         botLocalePreferences: this.botLocalePreferences,
         soundboardVolume: this.soundboardVolume,
         soundboardMuted: this.soundboardMuted,
+        soundboardLimiterEnabled: this.soundboardLimiterEnabled,
+        soundboardLoudnessLimit: this.soundboardLoudnessLimit,
         stickersFolderPath: this.stickersFolderPath,
         screenAudioVolumes: this.screenAudioVolumes,
         screenShareTelemetryEnabled: this.screenShareTelemetryEnabled,

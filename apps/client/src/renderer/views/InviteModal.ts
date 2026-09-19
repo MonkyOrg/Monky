@@ -1,12 +1,14 @@
-import { MessageType, ServerInviteInfoPayload, ServerNetworkInterface } from '@monky/shared';
+import { createServerInviteLink, MessageType, ServerInviteInfoPayload, ServerNetworkInterface } from '@monky/shared';
 import { v4 as uuidv4 } from 'uuid';
 import { getActiveNetworkClient, networkClient, type NetworkClient } from '../core/NetworkClient';
 import { appEvents } from '../core/EventBus';
 import { serverStore } from '../stores/serverStore';
-import { connectionStore } from '../stores/connectionStore';
+import { sessionManager } from '../core/SessionManager';
+import { findOwnedServer } from '../core/hostedServerStart';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
 import { t } from '../i18n';
+import { showAlert } from './Dialog';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
 
 function isNetworkInterface(value: unknown): value is ServerNetworkInterface {
@@ -38,6 +40,7 @@ export class InviteModal {
   private pendingRequest: { client: NetworkClient; id: string } | null = null;
   private unbindSession: (() => void) | null = null;
   private copyTimer: ReturnType<typeof setTimeout> | null = null;
+  private knownPassword: string | undefined;
 
   public async open(): Promise<void> {
     this.close();
@@ -48,17 +51,9 @@ export class InviteModal {
     this.isLoading = true;
     this.networkInterfaces = [];
 
-    const currentUrl = networkClient.getCurrentServerUrl();
-    let defaultPassword = '';
-    if (currentUrl) {
-      try {
-        const parsed = new URL(currentUrl);
-        const host = parsed.hostname;
-        const port = parsed.port ? parseInt(parsed.port, 10) : 3000;
-        const found = connectionStore.savedServers.find((s) => s.host === host && s.port === port);
-        if (found?.password) defaultPassword = found.password;
-      } catch {}
-    }
+    const active = sessionManager.getActive();
+    this.knownPassword = active?.password
+      || (active ? findOwnedServer(active.host, active.port)?.password : undefined);
 
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';
@@ -107,13 +102,11 @@ export class InviteModal {
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
               <label for="chk-invite-password" style="font-size: 12px; font-weight: 500; color: var(--text-primary); cursor: pointer; user-select: none;">${t('invite.includePassword')}</label>
               <label class="toggle-switch" aria-label="${t('invite.includePassword')}">
-                <input id="chk-invite-password" type="checkbox" ${defaultPassword ? 'checked' : ''}>
+                <input id="chk-invite-password" type="checkbox" ${this.knownPassword ? '' : 'disabled'}>
                 <span class="toggle-slider"></span>
               </label>
             </div>
-            <div id="invite-password-container" style="${defaultPassword ? 'display: block;' : 'display: none;'}">
-              <input id="input-invite-password" type="text" value="${escapeHtml(defaultPassword)}" placeholder="${t('invite.passwordPlaceholder')}" style="width: 100%; font-size: 12px; padding: 6px 10px;">
-            </div>
+            <small>${t(this.knownPassword ? 'invite.passwordSharingWarning' : 'invite.passwordUnavailable')}</small>
           </div>
         </div>
 
@@ -348,19 +341,10 @@ export class InviteModal {
     const customContainer = this.modalEl.querySelector('#custom-ip-container') as HTMLElement | null;
     const inputCustomIp = this.modalEl.querySelector('#input-custom-ip') as HTMLInputElement | null;
     const chkPassword = this.modalEl.querySelector('#chk-invite-password') as HTMLInputElement | null;
-    const passwordContainer = this.modalEl.querySelector('#invite-password-container') as HTMLElement | null;
-    const inputPassword = this.modalEl.querySelector('#input-invite-password') as HTMLInputElement | null;
     const copyMsg = this.modalEl.querySelector('#copy-success-msg') as HTMLElement | null;
 
     btnClose?.addEventListener('click', () => this.close());
     enableBackdropClose(this.modalEl, () => this.close());
-
-    chkPassword?.addEventListener('change', () => {
-      if (passwordContainer) {
-        passwordContainer.style.display = chkPassword.checked ? 'block' : 'none';
-        if (chkPassword.checked) inputPassword?.focus();
-      }
-    });
 
     selectIp?.addEventListener('change', () => {
       if (selectIp.value === '__custom__') {
@@ -393,29 +377,22 @@ export class InviteModal {
 
     btnCopy?.addEventListener('click', async () => {
       if (this.isLoading || this.modalEl !== modal) return;
-      const host = this.selectedIp || this.getFallbackHost();
-      const includePass = chkPassword?.checked;
-      const passValue = inputPassword?.value.trim() || '';
-      const passwordLine = includePass && passValue ? t('invite.clipboardPassword', { password: passValue }) : '';
-
-      const textToCopy = t('invite.clipboardText', {
-        server: this.serverName,
-        host,
-        port: this.selectedPort,
-        passwordLine,
-        tab: t('connection.tabJoin'),
-      });
-
       try {
+        const textToCopy = createServerInviteLink({
+          v: 1, name: this.serverName, host: this.selectedIp, port: this.selectedPort,
+          ...(chkPassword?.checked && this.knownPassword ? { password: this.knownPassword } : {}),
+        });
         await navigator.clipboard.writeText(textToCopy);
         if (this.modalEl === modal) triggerCopyFeedback(t('invite.copied'));
       } catch (err) {
-        console.warn('Could not copy to clipboard', err);
+        console.warn('[InviteModal] Could not create or copy the invitation.');
+        if (this.modalEl === modal) await showAlert({ message: t('invite.copyFailed'), variant: 'danger' });
       }
     });
   }
 
   public close(): void {
+    this.knownPassword = undefined;
     this.requestAbort?.abort();
     this.requestAbort = null;
     if (this.pendingRequest) this.pendingRequest.client.cancelRequest(this.pendingRequest.id);

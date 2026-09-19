@@ -1,8 +1,45 @@
 # Join a Server
 
-The **Join Server** tab offers three routes.
+The **Join Server** tab offers four routes.
 
 <AppScreenshot src="/screenshots/inicio-en.png" alt="Monky's home screen with connection options and server fields." caption="The address and port must point to the process hosting the server." />
+
+## Invitation link
+
+Paste the link under **Join with an invitation** and click **Review invitation**,
+or open the received HTTPS link in your browser. The official page attempts
+to open the installed app using `monky://` and offers buttons to open, copy
+or download Monky. Your browser may ask for confirmation. For development or
+portable runs, paste the link into the app; local testing does not register a
+global protocol handler on your system.
+
+The short link uses the homepage itself, in the form
+`https://monkyorg.github.io/Monky/#~...`; direct app opening uses
+`monky://#~...`. The part after `#~` contains the complete connection data in
+binary form, with lossless compression when it reduces the size. There is no
+shortener, registered code or central service needed to resolve the invitation:
+the app reads the link itself, even without loading the website.
+
+Review the name, address and port, then click **Join**. Monky automatically
+uses your current identity name, without asking you to enter it again.
+A nickname field only appears when the identity or its name has not been set.
+Received links never connect on their own or close your other sessions or
+current call. An already connected server reuses its session without replacing
+saved credentials.
+
+To generate a link, open **Invite Friends** on the server and copy the invitation.
+It **omits the password by default**. The **Include password in invite** switch
+uses the password the client already knows, without asking you to type it again.
+When the password is unavailable, the link still works without it: recipients
+enter it if the server requires one.
+With the password included, recipients do not need a separate address, port
+or password: just the invitation and confirmation in the app.
+
+Data stays in the fragment after `#`, not in an HTTP query to the website.
+This is encoding, not encryption: anyone with a password-bearing invitation
+can use that password. The HTTPS certificate belongs to the official website;
+you do not need a certificate on your server to share the link. Invitations
+do not change the server transport or configure ports, VPNs or firewalls.
 
 ## Servers on the Network
 
@@ -28,9 +65,11 @@ In practice that means:
 
 You talk on one server at a time, because there is only one microphone: joining a voice channel on another server **moves the call** and takes you out of the previous channel automatically. Text chat, on the other hand, stays active everywhere at once.
 
-The **Home** button (the house at the top of the column) asks for confirmation
-before disconnecting from every server, including the active call. Switching
-the viewed server and confirming this exit are different actions.
+The **Home** button (the house at the top of the column) opens the start screen
+without disconnecting servers or ending the call. The rail lets you reopen
+a connection, and the bottom controls remain available. **Disconnect** in the
+bottom bar leaves only the server named in its tooltip, after confirmation.
+Monky then opens the next connected server; if none remains, it shows Home.
 
 ## Several devices at once
 

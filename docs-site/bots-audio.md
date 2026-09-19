@@ -83,7 +83,7 @@ bot.command({
 
 ## Downloads locais autorizados
 
-Declare `downloadsSound: true` quando um comando puder pedir **um** download para a soundboard. O compositor informa essa capacidade, exige autorização por execução e bloqueia a ativação com um aviso se a pasta não estiver configurada ou autorizada. **Selecionar/executar o comando nunca abre o seletor de pastas.** Configure a pasta previamente nas configurações da soundboard; uma pasta já confirmada é reutilizada. Isso não concede ao bot uma permissão geral para acessar arquivos.
+Declare `downloadsSound: true` quando um comando puder pedir **um** download para a soundboard. O compositor informa essa capacidade, exige autorização por execução e bloqueia a ativação com um aviso se a pasta estiver indisponível ou não autorizada. **Selecionar/executar o comando nunca abre o seletor de pastas.** O Monky prepara uma pasta padrão no perfil local quando nenhuma foi escolhida; uma pasta já confirmada é reutilizada. O usuário pode trocar a pasta nas configurações da soundboard. Isso não concede ao bot uma permissão geral para acessar arquivos.
 
 ```ts
 bot.command({

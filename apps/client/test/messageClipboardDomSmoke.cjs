@@ -25,13 +25,14 @@ if (!process.versions.electron) {
   child.once('error', error => { console.error(error); cleanup(); process.exitCode = 1; });
   child.once('exit', code => { cleanup(); process.exitCode = code ?? 1; });
 } else {
-  const { app, BrowserWindow, Menu } = require('electron');
+  const { app, BrowserWindow, Menu, nativeImage } = require('electron');
   if (systemClipboard) assertIsolatedSystemClipboard();
   app.setPath('userData', process.env.MONKY_CLIPBOARD_PROFILE);
   app.on('window-all-closed', () => {});
   let vite;
   let window;
   let timeout;
+  let imageServer;
   const finish = async code => {
     clearTimeout(timeout);
     if (window && !window.isDestroyed()) {
@@ -39,10 +40,35 @@ if (!process.versions.electron) {
       window.destroy();
     }
     if (vite) await vite.close();
+    if (imageServer?.listening) await new Promise(resolve => imageServer.close(resolve));
     app.exit(code);
   };
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null);
+    const authoredImage = nativeImage.createFromBitmap(Buffer.from([0, 0, 255, 255, 255, 0, 0, 255]), {
+      width: 2, height: 1, scaleFactor: 1,
+    });
+    imageServer = require('node:http').createServer((request, response) => {
+      response.setHeader('Access-Control-Allow-Origin', '*');
+      if (request.url === '/too-large.png') {
+        response.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': 51 * 1024 * 1024 });
+        response.end();
+        return;
+      }
+      if (!['/authored.png', '/authored.jpg'].includes(request.url)) {
+        response.writeHead(404, { 'Content-Type': 'text/plain' });
+        response.end('Image fixture not found');
+        return;
+      }
+      response.setHeader('Content-Type', request.url.endsWith('.jpg') ? 'image/jpeg' : 'image/png');
+      response.end(request.url.endsWith('.jpg') ? authoredImage.toJPEG(100) : authoredImage.toPNG());
+    });
+    await new Promise((resolve, reject) => {
+      imageServer.once('error', reject);
+      imageServer.listen(0, '127.0.0.1', resolve);
+    });
+    const imageAddress = imageServer.address();
+    if (!imageAddress || typeof imageAddress === 'string') throw new Error('Missing image fixture address');
     const { createServer } = await import('vite');
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'),
@@ -79,6 +105,7 @@ if (!process.versions.electron) {
     });
     timeout = setTimeout(() => { console.error('Message clipboard smoke timed out'); void finish(1); }, 90_000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__message_clipboard_smoke__`);
+    await window.webContents.executeJavaScript(`window.clipboardImageOrigin = ${JSON.stringify(`http://127.0.0.1:${imageAddress.port}`)}`);
     window.webContents.debugger.attach('1.3');
     await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
     window.webContents.focus();
@@ -239,6 +266,19 @@ async function runSystemClipboardSmoke(sourceWindow) {
     check(plainFragment.text === selected && !clipboard.availableFormats().includes('text/html'),
       'Plain external copying preserves the exact native selection without copying the whole message');
     check((await fixture('state()')).input === 'Untouched draft', 'External copying never mutates the existing composer draft');
+    await fixture('prepareImages("en")');
+    await click('[data-message-id="photo"] .chat-attachment-copy');
+    await until(() => {
+      const image = clipboard.readImage();
+      const size = image.getSize();
+      return !image.isEmpty() && size.width === 2 && size.height === 1;
+    }, 'real image clipboard write');
+    check(clipboard.readImage().getSize().width === 2, 'Image copying preserves the original bitmap dimensions in the OS clipboard');
+    const pastedImage = await paste('rich');
+    check(pastedImage.types.includes('Files'), 'An independent editor receives an actual image file on native paste');
+    await until(() => destination('document.querySelector("#rich img")?.naturalWidth === 2'),
+      'original-size image pasted into an independent editor');
+    checks++;
   } finally {
     if (external.webContents.debugger.isAttached()) external.webContents.debugger.detach();
     external.destroy();
@@ -421,6 +461,8 @@ async function runSmoke(window) {
 
     checks += await fixture('testScopesAndPaste()');
     checks += await fixture('testLifecycleAndFailures()');
+    checks += await fixture('testImages()');
+    checks += await fixture('testReaderLocales()');
     state = await fixture('state()');
     check(state.trustedKeys > 20 && state.trustedClicks > 5, 'Smoke scenarios actually exercise native keyboard and pointer events');
     check(state.trustedCopyEvents === 0, 'Native copies are intercepted before browser clipboard mutation; the user clipboard remains untouched');
@@ -546,6 +588,23 @@ async function installFixture(systemClipboard = false) {
     if (entry.kind === 'plain') return { kind: 'plain', text: entry.text, types: ['text/plain'] };
     check(entry.items.length === 1 && entry.items[0] instanceof ClipboardItem, 'Formatted copies must use an actual ClipboardItem');
     const item = entry.items[0];
+    if (item.types.includes('image/png')) {
+      const blob = await item.getType('image/png');
+      const bitmap = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      try {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const context = canvas.getContext('2d');
+        context.drawImage(bitmap, 0, 0);
+        return { kind: 'image', types: item.types, width: bitmap.width, height: bitmap.height,
+          pixels: Array.from(context.getImageData(0, 0, bitmap.width, bitmap.height).data) };
+      } finally {
+        bitmap.close();
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+    }
     return { kind: 'formatted', types: item.types,
       text: await (await item.getType('text/plain')).text(), html: await (await item.getType('text/html')).text() };
   };
@@ -639,8 +698,153 @@ async function installFixture(systemClipboard = false) {
     await settle();
   };
 
+  const prepareImages = async (locale = 'en') => {
+    await prepare(locale);
+    const message = { channelId: 'chat', userId: user.id, userNickname: user.nickname, createdAt: 1, isSystem: false };
+    const photo = { id: 'photo-image', messageId: 'photo', kind: 'image',
+      url: `${window.clipboardImageOrigin}/authored.png`, originalName: 'authored.png',
+      mimeType: 'image/png', sizeBytes: 100, createdAt: 1 };
+    session.chatStore.setHistory('chat', [
+      { ...message, id: 'photo', content: '**Photo caption**', attachments: [photo] },
+      { ...message, id: 'jpeg', content: '', attachments: [{
+        ...photo, id: 'jpeg-image', messageId: 'jpeg', url: `${window.clipboardImageOrigin}/authored.jpg`,
+        originalName: 'authored.jpg', mimeType: 'image/jpeg',
+      }] },
+      { ...message, id: 'image-sticker', content: stickerToken('sticker-copy'),
+        attachments: [{ ...photo, id: 'sticker-copy', messageId: 'image-sticker' }] },
+    ]);
+    view.render();
+    await Promise.all([...root.querySelectorAll('img.chat-attachment-image, img.chat-sticker')].map(image => image.decode()));
+    await settle();
+  };
+
   window.messageClipboardFixture = {
-    prepare, settle, select, clearSelection, focusRow, preparePaste,
+    prepare, prepareImages, settle, select, clearSelection, focusRow, preparePaste,
+    async testReaderLocales() {
+      let count = 0;
+      const check = (condition, message) => { if (!condition) throw new Error(message); count++; };
+      const bot = {
+        id: 'localized-bot', channelId: 'chat', userId: 'fixture-bot', userNickname: 'Fixture bot',
+        createdAt: 1, isBot: true, content: 'Default text',
+        localizations: { 'pt-BR': 'Música **adicionada** à fila.', en: 'Track **added** to the queue.' },
+      };
+      await prepare('en');
+      session.chatStore.setHistory('chat', [bot, {
+        id: 'reader-reply', channelId: 'chat', userId: user.id, userNickname: user.nickname,
+        createdAt: 2, content: 'User text is not translated',
+        reply: session.chatStore.messageReply(bot),
+      }]);
+      for (const locale of ['en', 'pt-BR', 'en']) {
+        language.setLanguage(locale);
+        view.render();
+        await settle();
+        const expected = locale === 'en' ? 'Track added to the queue.' : 'Música adicionada à fila.';
+        const row = root.querySelector('[data-message-id="localized-bot"]');
+        check(row.querySelector('.chat-message-text').textContent.includes(expected),
+          `${locale}: the reader, not the invoker, selects the bot message`);
+        check(root.querySelector('[data-message-id="reader-reply"] .chat-reply-reference').textContent.includes(bot.localizations[locale]),
+          `${locale}: replies show the same localized source text`);
+        check(root.querySelector('[data-message-id="reader-reply"] .chat-message-text').textContent.includes('User text is not translated'),
+          `${locale}: human-authored text remains unchanged`);
+        const copied = view.messageClipboard(bot.id);
+        check(copied.text === expected && copied.markdown === bot.localizations[locale],
+          `${locale}: copying preserves both plain and formatted text in the reader language`);
+        check(session.chatStore.getMessages('chat')[0].content === 'Default text', 'Rendering never destroys the fallback or other variants');
+      }
+      session.chatStore.updateMessage({ ...bot, content: '', localizations: undefined, deletedAt: 3 });
+      await settle();
+      check(!root.textContent.includes('Track added to the queue.'), 'Deleting a localized original clears its reply previews');
+      check(view.messageClipboard(bot.id) === null, 'Deleted bot translations cannot be copied');
+      return count;
+    },
+    async testImages() {
+      const { writeImageClipboard } = await import('/utils/imageClipboard.ts');
+      const { lightboxModal } = await import('/views/LightboxModal.ts');
+      let count = 0;
+      const expect = (value, message) => { check(value, message); count++; };
+      const expectImage = async (exact = true) => {
+        await settle();
+        const result = await last();
+        await settle();
+        expect(result?.kind === 'image' && result.types.join(',') === 'image/png',
+          `Image copying provides a real image/png ClipboardItem, never file names, HTML or URLs: ${JSON.stringify(result)}`);
+        expect(result.width === 2 && result.height === 1, 'The PNG has original image dimensions, not thumbnail dimensions');
+        if (exact) expect(JSON.stringify(result.pixels) === JSON.stringify([255, 0, 0, 255, 0, 0, 255, 255]),
+          'The decoded clipboard PNG preserves the authored red and blue pixels');
+      };
+      for (const locale of ['en', 'pt-BR']) {
+        await prepareImages(locale);
+        const label = locale === 'en' ? 'Copy image' : 'Copiar imagem';
+        const copied = locale === 'en' ? 'Image copied!' : 'Imagem copiada!';
+        const button = find('[data-message-id="photo"] .chat-attachment-copy');
+        expect(button.title === label && button.getAttribute('aria-label') === label, 'Image controls follow the app language');
+        button.click();
+        await expectImage();
+        expect(find('.chat-copy-toast-label').textContent === copied, 'Image copy success is localized and shown after encoding');
+        find('[data-message-id="jpeg"] .chat-attachment-copy').click();
+        await expectImage(false);
+        await view.copyMessage('photo', 'plain');
+        expect((await last()).text === 'Photo caption', 'Copy message keeps its text semantics after adding a separate image action');
+
+        for (const selector of ['[data-message-id="photo"] .chat-attachment-image', '[data-message-id="image-sticker"] .chat-sticker']) {
+          clearSelection();
+          find(selector).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
+          const item = find('.floating-context-menu [role="menuitem"]');
+          expect(item.textContent.includes(label), 'Image and sticker context menus expose Copy image');
+          item.click();
+          await expectImage();
+          expect(!document.querySelector('.floating-context-menu'), 'Copying dismisses the image context menu');
+        }
+
+        const baseline = listenerCount();
+        for (let index = 0; index < 3; index++) {
+          find('[data-message-id="photo"] .chat-attachment-lightbox-trigger').click();
+          expect(find('.lightbox-copy').title === label && !find('.lightbox-copy').hidden,
+            'The expanded image viewer exposes a localized copy button');
+          find('.lightbox-copy').click();
+          await expectImage();
+          find('.lightbox-close').click();
+          expect(listenerCount() === baseline, 'Closing the viewer releases its copy shortcut and existing global listeners');
+        }
+        find('[data-message-id="photo"] .chat-attachment-lightbox-trigger').click();
+        clearSelection();
+        find('.lightbox-copy').focus();
+        const key = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
+        find('.lightbox-copy').dispatchEvent(key);
+        expect(key.defaultPrevented, 'Ctrl+C in the image viewer uses image copying');
+        await expectImage();
+        lightboxModal.close();
+      }
+
+      await prepareImages('en');
+      writeMode = 'reject';
+      await view.copyAttachmentImage(find('[data-message-id="photo"] .chat-attachment-image'));
+      expect(!document.querySelector('.chat-copy-toast') && find('.dialog-message').textContent.startsWith('Could not copy the image.'),
+        'Clipboard rejection is explicit, without a link fallback or success toast');
+      dismissAlert();
+      writeMode = 'resolve';
+      for (const url of ['file:///not-an-allowed-source.png', `${window.clipboardImageOrigin}/missing.png`,
+        `${window.clipboardImageOrigin}/too-large.png`]) {
+        let failed = false;
+        try { await writeImageClipboard(url, new AbortController().signal); } catch { failed = true; }
+        expect(failed, 'Unsupported schemes, missing images and oversized transfers are rejected');
+      }
+      const aborted = new AbortController();
+      aborted.abort();
+      const before = writes.length;
+      try { await writeImageClipboard(`${window.clipboardImageOrigin}/authored.png`, aborted.signal); } catch {}
+      expect(writes.length === before, 'An already cancelled image copy never requests clipboard access');
+      writeMode = 'hold';
+      const copying = view.copyAttachmentImage(find('[data-message-id="photo"] .chat-attachment-image'));
+      await settle();
+      expect(pending.length === 1, 'An in-flight image write is exercised before teardown');
+      view.destroy();
+      pending.shift().resolve();
+      await copying;
+      expect(!document.querySelector('.chat-copy-toast'), 'Destroying the chat cancels pending image feedback and I/O');
+      writeMode = 'resolve';
+      return count;
+    },
     focusMore() { find('[data-message-id="rich"] [data-message-action="more"]').focus(); },
     async point(selector) {
       const element = find(selector);

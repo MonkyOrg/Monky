@@ -8,6 +8,7 @@ import type { DevelopmentQaConfig, DevelopmentQaReport } from './developmentQa.j
 import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
+import type { ServerInviteResult } from './serverInvites.js';
 import type {
   LocalExecutionMutationResult,
   LocalExecutionSnapshot,
@@ -37,6 +38,11 @@ export const DEVELOPMENT_QA_IPC = {
   config: 'development-qa:config',
   report: 'development-qa:report',
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const SERVER_INVITE_IPC = {
+  take: 'server-invite:take',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const SERVER_INVITE_AVAILABLE = 'server-invite:available' satisfies keyof IpcEvents;
 
 export type CrashRecoveryActionResult =
   | { ok: true; copied?: boolean }
@@ -114,6 +120,7 @@ export interface SoundboardDownloadProgress extends SoundboardDownloadKey {
 export type SoundboardDownloadCancellation = Omit<SoundboardDownloadKey, 'downloadId'> & { downloadId?: string };
 
 export const SOUND_DOWNLOAD_IPC = {
+  defaultFolder: 'soundboard:default-folder',
   availability: 'soundboard:download-availability',
   confirmFolder: 'soundboard:confirm-download-folder',
   authorize: 'soundboard:authorize-download',
@@ -474,6 +481,7 @@ export interface OverlaySignalPayload {
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
  */
 export interface IpcInvokeChannels {
+  'server-invite:take': { args: []; returnType: ServerInviteResult | null };
   'development-qa:config': { args: []; returnType: DevelopmentQaConfig | null };
   'development-qa:report': { args: [report: DevelopmentQaReport]; returnType: boolean };
   // Local fatal-failure recovery, not a client/server protocol change (#454).
@@ -552,6 +560,7 @@ export interface IpcInvokeChannels {
   'dialog:select-stickers-folder': { args: []; returnType: string | null };
 
   // Soundboard
+  'soundboard:default-folder': { args: []; returnType: string | null };
   'soundboard:list-sounds': { args: [folderPath: string]; returnType: SoundboardSoundEntry[] };
   'soundboard:read-sound': { args: [filePath: string]; returnType: SoundboardSoundData | null };
   'soundboard:download-availability': { args: [configuredFolder: string]; returnType: SoundboardDownloadAvailability };
@@ -631,6 +640,7 @@ export interface IpcInvokeChannels {
  * Mapeamento de Eventos Unidirecionais (Main -> Renderer via webContents.send)
  */
 export interface IpcEvents {
+  'server-invite:available': [];
   // Pedido de despedida antes do processo morrer: o renderer sai das chamadas e
   // avisa os servidores enquanto ainda esta vivo (#458)
   'app:before-quit': [];

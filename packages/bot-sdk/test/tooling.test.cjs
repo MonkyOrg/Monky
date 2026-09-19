@@ -257,14 +257,14 @@ test('source-local module aliases survive bundling without copying private runti
   assert.equal(fs.existsSync(path.join(f.output, 'node_modules', 'voice', 'src', 'node_modules', 'internal', '.env')), false);
 });
 
-test('the real SDK voice dependency tree survives packaging and offline installation', { timeout: 120000 }, (t) => {
+test('the real SDK voice dependency tree survives packaging and offline installation', { timeout: 360000 }, (t) => {
   const f = fixture(t);
   botAt(f.source, {}, path.resolve(__dirname, '..'));
   const result = buildBotPackage({ root: f.source, out: f.output, skipBuild: true });
   assert.ok(result.packageCount > 1);
   const install = path.join(f.root, 'isolated voice install');
   runNpm(['install', '--prefix', install, '--cache', path.join(f.root, 'empty cache'), '--offline',
-    '--ignore-scripts', '--no-audit', '--no-fund', result.file], { cwd: f.root });
+    '--ignore-scripts', '--no-audit', '--no-fund', result.file], { cwd: f.root, timeout: 240000 });
   const packageRoot = path.join(install, 'node_modules', '@fixture', 'sound-bot');
   const packagedSdk = path.join(packageRoot, 'node_modules', '@monky', 'bot-sdk', 'package.json');
   const loaded = spawnSync(process.execPath, ['--no-global-search-paths', '-e', `
@@ -272,6 +272,13 @@ test('the real SDK voice dependency tree survives packaging and offline installa
     const { RTCPeerConnection } = fromSdk('werift');
     const { BotClient } = fromSdk('./dist/index.js');
     if (typeof BotClient.prototype.joinVoice !== 'function') throw new Error('Missing voice API');
+    const fromShared = require('node:module').createRequire(fromSdk.resolve('@monky/shared'));
+    const codecPath = require('node:path').relative(${JSON.stringify(packageRoot)}, fromShared.resolve('fflate'));
+    if (codecPath.startsWith('..') || require('node:path').isAbsolute(codecPath)) throw new Error('Compression dependency escaped the installed package');
+    const { createServerInviteLink, parseServerInviteLink } = fromSdk('@monky/shared');
+    const invite = { v: 1, host: '[2001:db8::7]', port: 3000, name: 'Packaged invitation', password: 'fixture-only-'.repeat(30) };
+    const result = parseServerInviteLink(createServerInviteLink(invite));
+    if (!result.ok || JSON.stringify(result.invite) !== JSON.stringify(invite)) throw new Error('Packaged invitation codec lost data');
     const peer = new RTCPeerConnection({ iceServers: [] });
     peer.close().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: install, env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', timeout: 15000 });
@@ -343,6 +350,9 @@ test('private files inside a runtime directory, compiler recursion and incompati
   fs.writeFileSync(path.join(f.source, 'dist', '.npmrc'), '//registry.example/:_authToken=not-for-releases');
   assert.throws(() => buildBotPackage({ root: f.source, out: f.output }), /private runtime data/);
   fs.unlinkSync(path.join(f.source, 'dist', '.npmrc'));
+  json(path.join(f.source, 'dist', 'update-credentials.json'), { repository: 'example/private', token: 'synthetic-not-for-releases' });
+  assert.throws(() => buildBotPackage({ root: f.source, out: f.output }), /private runtime data/);
+  fs.unlinkSync(path.join(f.source, 'dist', 'update-credentials.json'));
   botAt(f.source, { scripts: { build: 'monky-bot-sdk build' } });
   assert.throws(() => buildBotPackage({ root: f.source, out: f.output }), /recursively/);
   botAt(f.source);

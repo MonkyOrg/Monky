@@ -27,6 +27,7 @@ import {
   VoiceUserJoinedPayload,
   VoiceUserLeftPayload,
   hasEveryoneMention,
+  getMessageText,
 } from '@monky/shared';
 import { audioProcessor } from './core/AudioProcessor';
 import { appEvents } from './core/EventBus';
@@ -50,12 +51,13 @@ import { serverStore } from './stores/serverStore';
 import { settingsStore } from './stores/settingsStore';
 import { voiceStore } from './stores/voiceStore';
 import { ConnectionView } from './views/ConnectionView';
+import { joinInviteModal } from './views/JoinInviteModal';
 import { MainView } from './views/MainView';
 import { screenAudioService } from './core/ScreenAudioService';
 import { screenSharePickerModal } from './views/ScreenSharePickerModal';
 import { showAlert } from './views/Dialog';
 import { showIdentityImportDialog } from './views/IdentityDialogs';
-import { initI18n, t } from './i18n';
+import { getLanguage, initI18n, t } from './i18n';
 import { translateProtocolError } from './i18n/protocolErrors';
 import { toAbsoluteServerIconUrl } from './utils/avatar';
 import { installImageFallback } from './utils/imageFallback';
@@ -78,6 +80,9 @@ class App {
   private connectionView!: ConnectionView;
   private mainView!: MainView;
   private rendererReadySignalled = false;
+  private inviteWork: Promise<boolean> | null = null;
+  private unbindInvites: (() => void) | null = null;
+  private disposed = false;
   private readonly autoEntryService = new AutoEntryService(message => this.connectionView?.reportStartupNotice(message));
   private readonly voiceModeReconnect = new VoiceModeReconnect({
     currentCall: () => {
@@ -138,6 +143,9 @@ class App {
     const disposeTooltips = initTooltips();
     selectEnhancer.init();
     window.addEventListener('pagehide', () => {
+      this.disposed = true;
+      this.unbindInvites?.();
+      joinInviteModal.close();
       selectEnhancer.dispose();
       disposeTooltips();
     }, { once: true });
@@ -154,7 +162,7 @@ class App {
     // applied to whatever store happens to be active (#400).
     sessionManager.install();
     this.connectionView = new ConnectionView(this.appContainer);
-    this.mainView = new MainView(this.appContainer);
+    this.mainView = new MainView(this.appContainer, this.connectionView);
     window.addEventListener('pagehide', () => {
       this.autoEntryService.dispose();
       this.connectionView.dispose();
@@ -212,6 +220,8 @@ class App {
     // The main UI has now been written to the DOM — let the main process lift
     // the post-update splash once it actually paints (#498).
     this.signalRendererReady();
+    this.unbindInvites = window.api?.onServerInviteAvailable?.(() => { void this.consumeServerInvites(); }) ?? null;
+    const invitations = this.consumeServerInvites();
 
     // Load soundboard sounds if configured
     soundboardService.loadSounds().catch(() => {});
@@ -228,7 +238,9 @@ class App {
     if (developmentQa) void startDevelopmentQa(developmentQa);
     else {
       updateService.init();
-      void this.autoEntryService.start();
+      void invitations.then(received => {
+        if (!received && !this.disposed) void this.autoEntryService.start();
+      });
     }
 
     // Debug helper to check voice engine status in console
@@ -238,6 +250,36 @@ class App {
       console.table(status);
       return status;
     };
+  }
+
+  private consumeServerInvites(): Promise<boolean> {
+    if (this.inviteWork) return this.inviteWork;
+    const work = (async () => {
+      let received = false;
+      if (!window.api?.takeServerInvite) return false;
+      try {
+        while (!this.disposed) {
+          await joinInviteModal.waitUntilClosed();
+          if (this.disposed) return received;
+          const pending = await window.api.takeServerInvite();
+          if (!pending || this.disposed) return received;
+          received = true;
+          this.autoEntryService.dispose();
+          if (!pending.ok) {
+            clientLog.warn('CONNECTION', 'Invalid server invitation');
+            await showAlert({ message: t('invite.invalidLink'), variant: 'danger' });
+          } else {
+            await joinInviteModal.open(pending.invite);
+          }
+        }
+      } catch (error: unknown) {
+        clientLog.warn('CONNECTION', 'Could not process the pending server invitation');
+        if (!this.disposed) await showAlert({ message: t('invite.readFailed'), variant: 'danger' });
+      }
+      return received;
+    })();
+    this.inviteWork = work.finally(() => { this.inviteWork = null; });
+    return this.inviteWork;
   }
 
   /**
@@ -390,6 +432,28 @@ class App {
   }
 
   private setupGlobalEventListeners(): void {    // Global Keybind Actions (#252)
+    const renderHome = (): void => {
+      this.autoEntryService.dispose();
+      if (sessionManager.getActive()?.serverStore.serverDetails) {
+        this.mainView.render();
+      } else {
+        this.mainView.destroy();
+        void window.api?.setWindowInServer?.(false);
+        this.connectionView.render(this.appContainer);
+      }
+    };
+    const unbindNavigation = [
+      appEvents.on('navigation.home', renderHome),
+      appEvents.on('session.changed', ({ key }: { key: string | null }) => {
+        if (!key || sessionManager.isHome() || !sessionManager.get(key)?.serverStore.serverDetails) return;
+        this.connectionView.suspend();
+        this.mainView.render();
+      }),
+      appEvents.on('session.connections_changed', () => {
+        if (sessionManager.isHome() || !sessionManager.getAll().length) renderHome();
+      }),
+    ];
+    window.addEventListener('pagehide', () => unbindNavigation.forEach(unbind => unbind()), { once: true });
     const unbindCameraPublication = bindCameraPublication();
     window.addEventListener('pagehide', unbindCameraPublication, { once: true });
     const unbindLocalExecution = appEvents.on('localExecution.task_failed', (notice: LocalExecutionTaskNotice) => {
@@ -474,7 +538,7 @@ class App {
       if (serverStore.serverDetails) {
         this.mainView.render(true);
       } else {
-        this.connectionView.render();
+        this.connectionView.render(this.appContainer);
       }
     });
 
@@ -622,7 +686,6 @@ class App {
         .find((session) => session.client.getStatus() === 'CONNECTED');
       if (next) {
         sessionManager.activate(next.key);
-        this.mainView.render();
         return;
       }
 
@@ -630,7 +693,7 @@ class App {
       // and ping timer would outlive the server view behind the home screen.
       this.mainView.destroy();
       void window.api?.setWindowInServer?.(false);
-      this.connectionView.render();
+      this.connectionView.render(this.appContainer);
     });
 
     // Protocol Server -> Client Broadcast Handlers
@@ -740,9 +803,10 @@ class App {
           // `@todos` counts as a mention for everyone in the channel when the
           // server allows it (#464).
           const everyoneAllowed = serverStore.serverDetails?.allowEveryoneMention !== false;
+          const content = getMessageText(message, getLanguage());
           const isMention =
-            (!!nick && message.content.toLowerCase().includes(`@${nick}`)) ||
-            (everyoneAllowed && hasEveryoneMention(message.content));
+            (!!nick && content.toLowerCase().includes(`@${nick}`)) ||
+            (everyoneAllowed && hasEveryoneMention(content));
 
           // Resolve the chat-sound mode with the 3-level precedence
           // channel → server → global (#153).

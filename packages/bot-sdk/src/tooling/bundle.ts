@@ -51,7 +51,7 @@ export function resolvePackage(requester: string, name: string): string | null {
 
 export function isPrivateRuntimePath(relative: string): boolean {
   return relative.split(/[\\/]/).some((part) =>
-    ['.git', '.hg', '.svn', '.keys', '.pm2', '.ssh', '.aws', '.azure', '.npmrc', '.yarnrc', '.yarnrc.yml', '.netrc', 'registrations.json'].includes(part) ||
+    ['.git', '.hg', '.svn', '.keys', '.pm2', '.ssh', '.aws', '.azure', '.npmrc', '.yarnrc', '.yarnrc.yml', '.netrc', 'registrations.json', 'update-credentials.json'].includes(part) ||
     (part === '.env' || part.startsWith('.env.')) && !['.env.example', '.env.sample'].includes(part));
 }
 

@@ -1850,10 +1850,14 @@ test('persistent text reactions support bot events and enforce privacy', async (
   const created = await owner.peer.request(MessageType.BOT_CREATE, {});
   const botId = text(record(created.payload.bot).id);
   const bot = await fixture.bot(text(created.payload.token), undefined, 'Question bot');
-  const question = await bot.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Choose with reactions' });
+  const localizations = { 'pt-BR': 'Escolha com reações', en: 'Choose with reactions' };
+  const question = await bot.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Choose with reactions', localizations });
   assert.equal(question.type, MessageType.CHAT_MESSAGE);
   assert.equal(question.payload.userId, botId);
   assert.equal(question.payload.isBot, true);
+  assert.deepEqual(question.payload.localizations, localizations);
+  await owner.peer.error(MessageType.CHAT_SEND, { channelId, content: 'Human text', localizations }, ProtocolErrorCode.BAD_REQUEST);
+  await bot.peer.error(MessageType.CHAT_SEND, { channelId, content: 'Invalid bot text', localizations: { fr: 'Unknown locale' } }, ProtocolErrorCode.BAD_REQUEST);
   const messageId = text(question.payload.id);
   const reaction = { channelId, messageId, emoji: '👍' };
   const added = await alice.peer.request(MessageType.CHAT_REACTION_ADD, reaction);
@@ -1868,6 +1872,7 @@ test('persistent text reactions support bot events and enforce privacy', async (
   assert.equal(historyMessage.userId, botId);
   assert.equal(historyMessage.isBot, true);
   assert.equal(historyMessage.userNickname, 'Question bot');
+  assert.deepEqual(historyMessage.localizations, localizations);
   const reactions = records(historyMessage.reactions);
   assert.equal(reactions.length, 2);
   assert.equal(records(reactions.find((entry) => entry.emoji === '👍')?.users).length, 2);
@@ -1940,6 +1945,7 @@ test('reaction rows survive reopening SQLite and enforce atomic bounds and clean
   });
   const botMessage = {
     id: botMessageId, channelId: channel.id, userId: botId, content: 'Persistent bot question', createdAt: 2,
+    localizations: { 'pt-BR': 'Pergunta persistida', en: 'Persistent bot question' },
     botAuthor: { id: botId, name: 'Persistent bot', avatarPath: null, ownerUserId: userId },
     botCommand: { invocationId: randomUUID(), commandName: 'question', invokerId: userId, invokerNickname: 'Reactor' },
     replyToMessageId: messageId,
@@ -1957,6 +1963,7 @@ test('reaction rows survive reopening SQLite and enforce atomic bounds and clean
   assert.equal(restoredBotMessage?.userId, botId);
   assert.equal(restoredBotMessage?.botAuthor?.name, 'Persistent bot');
   assert.deepEqual(restoredBotMessage?.botCommand, botMessage.botCommand);
+  assert.deepEqual(restoredBotMessage?.localizations, botMessage.localizations);
   assert.equal(restoredBotMessage?.replyToMessageId, messageId);
   assert.equal((await repo.listReactions([botMessageId])).length, 1);
   await new SqliteBotRepository(db).delete(botId);
@@ -2257,11 +2264,14 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   await t.test('isolates callers and devices, defaults to private, and scopes explicit public replies', async () => {
     const first = await invoke();
     const second = await invoke(bob.peer);
-    bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Only Alice' });
+    const localizations = { 'pt-BR': 'Canal público', en: 'Public channel' };
+    bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Only Alice',
+      localizations: { 'pt-BR': 'Somente Alice', en: 'Only Alice' } });
     bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: second.id, content: 'Only Bob' });
     await barrier();
     const privateMessage = await alice.peer.wait((m) => hasInvocation(m, MessageType.COMMAND_RESPONSE, first.id));
     assert.equal(privateMessage.payload.ephemeral, true);
+    assert.deepEqual(privateMessage.payload.localizations, { 'pt-BR': 'Somente Alice', en: 'Only Alice' });
     assert.equal(privateMessage.payload.botId, botId);
     assert.equal(privateMessage.payload.botName, 'Updated Bot');
     assert.equal(privateMessage.payload.channelId, textChannel);
@@ -2282,7 +2292,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       invokerId: bob.id, invokerNickname: 'Bob', invokerAvatarUrl: PNG,
     }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     await otherBot.peer.error(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Forged' }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
-    bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Public channel', ephemeral: false });
+    bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Public channel', localizations, ephemeral: false });
     await barrier();
     const publicMessage = bob.peer.messages.find((m) => m.payload.content === 'Public channel');
     assert.ok(publicMessage);
@@ -2290,11 +2300,17 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.equal(publicMessage.payload.invokerId, alice.id);
     assert.equal(publicMessage.payload.invokerNickname, 'Alice');
     assert.equal(publicMessage.payload.options, undefined);
+    assert.deepEqual(publicMessage.payload.localizations, localizations);
     const persistedHistory = await bob.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId: textChannel });
     const persisted = records(persistedHistory.payload.messages).find((message) => message.id === publicMessage.payload.messageId);
     assert.ok(persisted);
     assert.equal(persisted.isBot, true);
     assert.equal(persisted.userId, botId);
+    assert.deepEqual(persisted.localizations, localizations);
+    const reply = await bob.peer.request(MessageType.CHAT_SEND, {
+      channelId: textChannel, content: 'Reply in my own language', replyToMessageId: publicMessage.payload.messageId,
+    });
+    assert.deepEqual(record(reply.payload.reply).localizations, localizations);
     assert.equal(record(persisted.botCommand).invocationId, first.id);
     assert.equal(record(persisted.botCommand).invokerId, alice.id);
     assert.equal(records(persistedHistory.payload.messages).some((message) => message.id === privateMessage.payload.messageId), false);
@@ -2311,6 +2327,16 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await finish(secret.id);
     await bob.peer.request(MessageType.CHAT_REACTION_ADD, { channelId: textChannel, messageId: text(publicMessage.payload.messageId), emoji: '👍' });
     await bot.peer.wait((message) => message.type === MessageType.CHAT_REACTION_ADDED && message.payload.messageId === publicMessage.payload.messageId);
+    await owner.peer.request(MessageType.CHAT_DELETE, { channelId: textChannel, messageId: publicMessage.payload.messageId });
+    const deletedHistory = await bob.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId: textChannel });
+    const deleted = records(deletedHistory.payload.messages).find(message => message.id === publicMessage.payload.messageId);
+    assert.equal(deleted?.content, '');
+    assert.equal(deleted?.localizations, undefined);
+    const deletedReference = records(deletedHistory.payload.messages).find(message => message.id === reply.payload.id);
+    assert.equal(record(deletedReference?.reply).localizations, undefined);
+    const stored = fixture.database.getDb().prepare('SELECT bot_localizations_json AS variants FROM messages WHERE id = ?')
+      .get(publicMessage.payload.messageId) as { variants: string | null };
+    assert.equal(stored.variants, null, 'deletion erases variants from storage, not only the response');
   });
 
   await t.test('delivers the last asynchronous private-channel publication before completion', async () => {

@@ -1,7 +1,7 @@
 import { escapeHtml } from '../utils/html';
 import { sessionManager, sessionKeyFor } from '../core/SessionManager';
 import {
-  assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, showServerSession,
+  assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, showHome, showServerSession,
 } from '../core/serverConnection';
 import { ensureHostedServerStarted, findOwnedServer } from '../core/hostedServerStart';
 import { voiceStore } from '../stores/voiceStore';
@@ -53,7 +53,7 @@ export class ServerRailView {
 
     // The active key (not the proxied client) is what identifies the server on
     // screen: during a background event the proxy points elsewhere (#400).
-    const currentUrl = sessionManager.getActiveKey();
+    const currentUrl = sessionManager.isHome() ? null : sessionManager.getActiveKey();
     const busy = this.connectingKey !== null;
     const savedByKey = new Map(
       (connectionStore.savedServers || []).map((server) => [ServerRailView.keyOf(server.host, server.port), server])
@@ -67,7 +67,7 @@ export class ServerRailView {
     }).join('');
 
     railEl.innerHTML = `
-      <button class="server-rail-home" id="server-rail-home" title="${t('main.homeTitle')}" ${busy ? 'disabled' : ''}>
+      <button class="server-rail-home" id="server-rail-home" title="${t('main.homeTitle')}" aria-current="${sessionManager.isHome() ? 'page' : 'false'}" ${busy ? 'disabled' : ''}>
         <span class="material-symbols-outlined md-22">home</span>
       </button>
       <div class="server-rail-divider"></div>
@@ -77,25 +77,7 @@ export class ServerRailView {
       </div>
     `;
 
-    railEl.querySelector('#server-rail-home')?.addEventListener('click', async () => {
-      const confirmed = await showConfirm({
-        title: t('main.backHomeTitle'),
-        message: t('main.backHomeMessage'),
-        confirmLabel: t('main.backHomeTitle'),
-        variant: 'warning',
-      });
-      if (!confirmed) return;
-      // Captured before the socket closes: afterwards there is no way to tell
-      // whether this user was hosting the server they just left (#334).
-      const leaveState = await captureHostedServerLeaveState();
-      soundEffects.play('leave_voice');
-      audioProcessor.stopMicrophone();
-      webRtcManager.closeAllPeers();
-      // Going home means leaving everything, including servers kept alive in
-      // the background for an ongoing call (#400).
-      sessionManager.removeAll();
-      if (leaveState) await promptShutdownAfterLeave(leaveState);
-    });
+    railEl.querySelector('#server-rail-home')?.addEventListener('click', showHome);
 
     this.bindServerClicks();
     this.bindFolderToggles();

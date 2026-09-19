@@ -53,8 +53,9 @@ dropdown and confirm with **Save**, even for bots without their own settings for
 language; an explicit choice applies only to that bot, server/address, and
 identity in the local profile. Restoring defaults follows Monky again.
 The effective language arrives in `ctx.locale`, including autocomplete and
-audio previews. Existing interactions retain their captured language; old
-message bodies are not translated retroactively. A response's command attribution
+audio previews. Existing interactions retain their captured language for forms
+and choices. Bot-authored message variants follow each reader's app language,
+including in history. A response's command attribution
 follows each reader's language using the available metadata; without that
 metadata, it falls back to the canonical name.
 
@@ -128,9 +129,39 @@ bot.command({
 });
 ```
 
-Handlers still own forms and response bodies: use `ctx.locale`, not
-`ctx.settings.user.locale`. `ctx.reply()` keeps help private; publishing
-translated help to a channel does not make it individual.
+Forms and choices still use `ctx.locale`, not `ctx.settings.user.locale`.
+`ctx.reply()` keeps help private; `ctx.publish()` makes it visible to the entire
+channel, even when each reader sees a different language.
+
+### Messages in the reader's language
+
+`ctx.reply()`, `ctx.replyEphemeral()`, `ctx.publish()`, `bot.sendMessage()` and
+`bot.finalizeSelector()` accept a plain string or a `BotLocalizedMessage`:
+
+```ts
+ctx.publish({
+  content: 'Track added to the queue.',
+  localizations: {
+    'pt-BR': 'Música adicionada à fila.',
+    en: 'Track added to the queue.',
+  },
+});
+```
+
+The bot authors the variants; **there is no automatic translation**. Each reader
+selects a variant through their app language, not the command caller's language
+or the preference used for the bot's forms. `content` is required and serves as
+the fallback when a variant is unavailable. Each text accepts 1–2,000 characters;
+supported keys are `pt-BR` and `en`.
+
+Variants remain in history and reply references; copying uses the displayed text.
+Changing language updates the presentation without modifying the message.
+Deleting also removes its variants. Bots sending only strings still work, but
+those messages do not acquire retroactive translations.
+
+Roll dice/coins once and render variants of the **same result**. Preserve track
+titles, questions, options and human-authored free text. The contract requires
+client, server and bot SDK versions compatible with protocol 21.
 
 ## Guided parameters in chat
 

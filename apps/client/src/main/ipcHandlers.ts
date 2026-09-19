@@ -361,6 +361,15 @@ export function setupIpcHandlers(
     createLocalExecutionService(mainWindow, app.getPath('userData'), notifications));
   const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
     event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
+    if (!ownsSoundDownload(event)) throw new Error(mt('error.defaultSoundboardFolder'));
+    try {
+      return await soundDownloads.getDefaultFolder();
+    } catch (error: unknown) {
+      console.warn('[Soundboard] Could not initialize the default sound folder:', error);
+      throw new Error(mt('error.defaultSoundboardFolder'));
+    }
+  });
   ipcMain.handle(SOUND_DOWNLOAD_IPC.availability, async (event, folder: unknown): Promise<SoundboardDownloadAvailability> =>
     ownsSoundDownload(event) ? soundDownloads.availability(folder) : 'unavailable');
   ipcMain.handle(SOUND_DOWNLOAD_IPC.confirmFolder, async (event, folder: unknown): Promise<boolean> => {

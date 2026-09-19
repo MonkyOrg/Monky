@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { botMessageLocalizationsSchema } from './botMessages.js';
 
 export const REACTION_LIMITS = {
   MAX_EMOJI_LENGTH: 64,
@@ -40,6 +41,8 @@ export type ChatReactionEventPayload = z.infer<typeof chatReactionEventSchema>;
 /** An acknowledged, persistent plain-text bot post. */
 export const botChatMessageSchema = z.object({
   reply: z.object({
+    isBot: z.boolean().optional(),
+    localizations: botMessageLocalizationsSchema.optional(),
     messageId: z.string().min(1).max(128),
     userNickname: z.string(),
     content: z.string().max(200),
@@ -52,6 +55,7 @@ export const botChatMessageSchema = z.object({
   userNickname: z.string(),
   userAvatarUrl: z.string().nullable().optional(),
   content: z.string(),
+  localizations: botMessageLocalizationsSchema.optional(),
   createdAt: z.number().finite(),
   isSystem: z.boolean().optional(),
   isBot: z.boolean().optional(),

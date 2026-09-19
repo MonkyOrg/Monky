@@ -1,6 +1,7 @@
 import {
   LIMITS,
   botFormSchema,
+  botMessagePreviewLocalizations,
   type BotForm,
   type BotFormValues,
   type ChatMessage,
@@ -274,6 +275,8 @@ export class ChatStore {
       messageId: message.id,
       userNickname: message.deletedAt ? '' : message.userNickname,
       content: message.deletedAt ? '' : message.content.slice(0, 200),
+      ...(message.isBot && !message.deletedAt
+        ? { isBot: true, localizations: botMessagePreviewLocalizations(message.localizations) } : {}),
       deleted: !!message.deletedAt,
       hasAttachments: !message.deletedAt && !!message.attachments?.length,
     };

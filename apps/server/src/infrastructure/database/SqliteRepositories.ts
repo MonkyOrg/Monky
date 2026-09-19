@@ -1,5 +1,5 @@
 import { IDatabaseDriver } from './SqliteWrapper';
-import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema } from '@monky/shared';
+import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema, botMessageLocalizationsSchema } from '@monky/shared';
 import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
 import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 
@@ -385,6 +385,7 @@ export class SqliteChannelRepository implements IChannelRepository {
 }
 
 interface SqliteMessageRow {
+  botLocalizationsJson: string | null;
   replyToMessageId: string | null;
   authorBotId: string | null;
   authorBotName: string | null;
@@ -402,7 +403,7 @@ interface SqliteMessageRow {
 
 /** Columns every message read shares, so the three queries cannot drift (#504). */
 const MESSAGE_COLUMNS =
-  'id, channel_id as channelId, user_id as userId, content, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId';
+  'id, channel_id as channelId, user_id as userId, content, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId, bot_localizations_json as botLocalizationsJson';
 
 function toMessageRecord(r: SqliteMessageRow): MessageRecord {
   if (r.authorBotId && !r.authorBotName) throw new Error('Stored bot message is missing its author name.');
@@ -416,6 +417,8 @@ function toMessageRecord(r: SqliteMessageRow): MessageRecord {
       : undefined,
     botCommand: r.botCommandJson ? botCommandContextSchema.parse(JSON.parse(r.botCommandJson)) : undefined,
     content: r.content,
+    localizations: r.authorBotId && !r.deletedAt && r.botLocalizationsJson
+      ? botMessageLocalizationsSchema.parse(JSON.parse(r.botLocalizationsJson)) : undefined,
     createdAt: r.createdAt,
     isSystem: Boolean(r.isSystem),
     editedAt: r.editedAt ?? null,
@@ -485,11 +488,12 @@ export class SqliteMessageRepository implements IMessageRepository {
 
   private insertMessage(message: MessageRecord, idempotent = false): void {
     this.db.prepare(
-      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json, reply_to_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
+      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json, reply_to_message_id, bot_localizations_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
       (idempotent ? ' ON CONFLICT(id) DO NOTHING' : '')
     ).run(message.id, message.channelId, message.botAuthor?.ownerUserId ?? message.userId, message.content, message.createdAt, message.isSystem ? 1 : 0,
       message.botAuthor?.id ?? null, message.botAuthor?.name ?? null, message.botAuthor?.avatarPath ?? null,
-      message.botCommand ? JSON.stringify(message.botCommand) : null, message.replyToMessageId ?? null);
+      message.botCommand ? JSON.stringify(message.botCommand) : null, message.replyToMessageId ?? null,
+      message.botAuthor && message.localizations ? JSON.stringify(message.localizations) : null);
   }
 
   async findById(messageId: string): Promise<MessageRecord | null> {
@@ -516,13 +520,13 @@ export class SqliteMessageRepository implements IMessageRepository {
   }
 
   async updateContent(messageId: string, content: string, editedAt: number): Promise<void> {
-    this.db.prepare('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?').run(content, editedAt, messageId);
+    this.db.prepare('UPDATE messages SET content = ?, bot_localizations_json = NULL, edited_at = ? WHERE id = ?').run(content, editedAt, messageId);
   }
 
   async markDeleted(messageId: string, deletedAt: number): Promise<void> {
     // The content goes with the deletion: keeping it would leave the text one
     // query away from anyone with access to the database file (#504).
-    this.db.prepare("UPDATE messages SET content = '', deleted_at = ? WHERE id = ?").run(deletedAt, messageId);
+    this.db.prepare("UPDATE messages SET content = '', bot_localizations_json = NULL, deleted_at = ? WHERE id = ?").run(deletedAt, messageId);
   }
 
   async deleteByChannel(channelId: string): Promise<void> {

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { LIMITS } from './constants.js';
+import { botMessageLocalizationsSchema } from './botMessages.js';
 import { selectionChoiceSchema } from './selection.js';
 import { botSettingsContextSchema, botSettingsValuesSchema } from './botInteractions.js';
 
@@ -46,6 +47,7 @@ export const botSelectorRespondedSchema = z.object({
 export type BotSelectorRespondedPayload = z.infer<typeof botSelectorRespondedSchema>;
 export const botSelectorFinalizeSchema = z.object({
   id, content: z.string().trim().min(1).max(LIMITS.MAX_MESSAGE_LENGTH),
+  localizations: botMessageLocalizationsSchema.optional(),
 }).strict();
 
 export type BotSelectorCreate = z.infer<typeof botSelectorCreateSchema>;
