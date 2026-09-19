@@ -100,13 +100,13 @@ class Fixture {
     put(path.join(this.vs, 'VC', 'Auxiliary', 'Build', 'Microsoft.VCToolsVersion.default.txt'), '14.44.35207');
     for (const file of ['include\\vector', 'bin\\Hostx64\\x64\\cl.exe', 'atlmfc\\include\\atlbase.h',
       'atlmfc\\include\\afxwin.h', 'atlmfc\\lib\\x64\\atls.lib']) {
-      put(path.join(this.vs, 'VC', 'Tools', 'MSVC', '14.44.35207', file));
+      put(path.join(this.vs, 'VC', 'Tools', 'MSVC', '14.44.35207', ...file.split('\\')));
     }
     for (const file of [
       'Include\\10.0.26100.0\\um\\Windows.h', 'Include\\10.0.26100.0\\shared\\sdkddkver.h',
       'Include\\10.0.26100.0\\ucrt\\stdio.h', 'Lib\\10.0.26100.0\\um\\x64\\kernel32.lib',
       'Lib\\10.0.26100.0\\ucrt\\x64\\ucrt.lib', ...Object.keys(this.sdkVersions),
-    ]) put(path.join(this.sdk, file));
+    ]) put(path.join(this.sdk, ...file.split('\\')));
     const mutators = new Set(['mkdirSync', 'writeFileSync', 'openSync', 'unlinkSync',
       'renameSync', 'rmSync', 'rmdirSync', 'fsyncSync']);
     const io = new Proxy(fs, {
@@ -344,7 +344,7 @@ test('platform, ambiguous tools, components and SDK patch block before writes/do
       if (scenario === 'python-arch') fixture.pythonPointerBits = 32;
       if (scenario === 'components') fixture.vsInstances = [];
       if (scenario === 'sdk-version') fixture.sdkVersions['bin\\10.0.26100.0\\x64\\rc.exe'] = '10.0.26100.1';
-      if (scenario === 'sdk-file') fs.unlinkSync(path.join(fixture.sdk, 'Debuggers\\x64\\dbgcore.dll'));
+      if (scenario === 'sdk-file') fs.unlinkSync(path.join(fixture.sdk, 'Debuggers', 'x64', 'dbgcore.dll'));
       const report = await execute(fixture.context, { action: 'fetch' });
       assert.equal(report.status, 'blocked');
       assert.equal(report.canFetch, false);
@@ -391,6 +391,21 @@ test('a gclient runtime must be explicitly selected, isolated and complete befor
       if (scenario === 'missing-dependency') assert.match(report.issues[0].message, /httplib2/u);
     });
   }
+});
+
+test('multiple Git installations require one explicit executable before acquisition', async t => {
+  const fixture = new Fixture(t);
+  const other = path.join(fixture.root, 'other-git');
+  put(path.join(other, 'git.exe'));
+  fixture.context.env.PATH = [fixture.toolDir, other].join(path.delimiter);
+  const ambiguous = await execute(fixture.context);
+  assert.equal(ambiguous.canFetch, false);
+  assert.ok(ambiguous.issues.some(issue => issue.code === 'ERR_RTC_TOOL_SELECTION'));
+  const selected = await execute(fixture.context, { git: fixture.git });
+  assert.equal(selected.canFetch, true, JSON.stringify(selected.issues));
+  assert.equal(selected.tools.git.path, fixture.git);
+  assert.equal(selected.downloadCommandsExecuted, 0);
+  assert.deepEqual(fixture.writes, []);
 });
 
 test('shared Debuggers allow newer families while rc.exe retains its SDK family', async t => {

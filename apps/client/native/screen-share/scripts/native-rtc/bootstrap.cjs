@@ -389,7 +389,7 @@ async function prerequisites(context, options, report) {
     const toolsRoot = path.join(selected.installationPath, 'VC', 'Tools', 'MSVC', toolsVersion);
     for (const relative of ['include\\vector', 'bin\\Hostx64\\x64\\cl.exe',
       'atlmfc\\include\\atlbase.h', 'atlmfc\\include\\afxwin.h', 'atlmfc\\lib\\x64\\atls.lib']) {
-      if (!exists(context, path.join(toolsRoot, relative))) {
+      if (!exists(context, path.join(toolsRoot, ...relative.split('\\')))) {
         report.issues.push({ code: 'ERR_RTC_VC_FILES', message: `Required C++/ATL/MFC file is missing: ${relative}` });
       }
     }
@@ -404,7 +404,7 @@ async function prerequisites(context, options, report) {
   } else {
     const root = path.resolve(metadata.selectedSdkRoot);
     for (const relative of SDK_FILES) {
-      if (!exists(context, path.join(root, relative))) {
+      if (!exists(context, path.join(root, ...relative.split('\\')))) {
         report.issues.push({ code: 'ERR_RTC_SDK_FILES', message: `Required SDK/debugging-tools file is missing: ${relative}` });
       }
     }
@@ -542,7 +542,7 @@ async function inspectCheckout(context, directory, expected, repositories = []) 
     'ERR_RTC_CHECKOUT_PARTIAL', `Expected an independent, complete Git checkout: ${directory}`);
   inspectPath(context, gitDirectory, context.paths.workspace);
   for (const name of ['objects\\info\\alternates', 'info\\grafts', 'commondir']) {
-    requireValue(!exists(context, path.join(gitDirectory, name)), 'ERR_RTC_GIT_SHARED',
+    requireValue(!exists(context, path.join(gitDirectory, ...name.split('\\'))), 'ERR_RTC_GIT_SHARED',
       'Shared objects, grafts and linked worktree metadata are not accepted.');
   }
   const values = parseLocalConfig(await git(context, directory,
@@ -650,7 +650,7 @@ async function workspaceState(context, report) {
   requireValue(context.fs.readdirSync(workspace).every(name => allowed.has(name)),
     'ERR_RTC_WORKSPACE_CONTENT', 'Unexpected workspace content; no cleanup or adoption is attempted.');
   for (const relative of ['.hooks-disabled', 'cache', 'cache\\home', 'cache\\tmp', 'cache\\cipd', 'cache\\vpython',
-    ...Object.values(DIRECTORIES)]) inspectPath(context, path.join(workspace, relative), workspace);
+    ...Object.values(DIRECTORIES)]) inspectPath(context, path.join(workspace, ...relative.split('\\')), workspace);
   const hooks = path.join(workspace, '.hooks-disabled');
   requireValue(!exists(context, hooks) || context.fs.readdirSync(hooks).length === 0,
     'ERR_RTC_HOOKS', 'The isolated disabled-hooks directory must remain empty.');
@@ -971,7 +971,7 @@ async function fetchWorkspace(context, checked) {
     requireValue(!exists(context, path.join(workspace, STATE)), 'ERR_RTC_STATE_RACE', 'Completed state appeared while locking.');
     for (const relative of ['.hooks-disabled', 'cache', 'cache\\home', 'cache\\home\\AppData',
       'cache\\home\\AppData\\Local', 'cache\\home\\AppData\\Roaming', 'cache\\tmp', 'cache\\cipd', 'cache\\vpython']) {
-      const directory = path.join(workspace, relative);
+      const directory = path.join(workspace, ...relative.split('\\'));
       if (!exists(context, directory)) createDirectory(context, directory);
       else inspectPath(context, directory);
     }

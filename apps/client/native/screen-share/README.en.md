@@ -30,7 +30,7 @@ From the repository root in PowerShell, adjust the Python path:
 
 ```powershell
 $Python = "C:\Python311\python.exe"
-$Git = (Get-Command git -CommandType Application).Source
+$Git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
 npm ci
 npm run prepare:native-screen -- --python="$Python" --git="$Git" --jobs=4
 npm run build
