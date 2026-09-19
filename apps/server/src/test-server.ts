@@ -966,6 +966,29 @@ async function runTests() {
       // O handshake do SFU precisa continuar funcionando com o modo ligado: o
       // gate de dispatch consulta o voiceMode gravado antes de qualquer
       // handler, e um erro aqui derrubaria a voz inteira (#515).
+      const sfuChannels: unknown = authResSfu.payload?.server?.channels;
+      const sfuVoiceChannel = Array.isArray(sfuChannels) ? sfuChannels.find(
+        (value: unknown): value is { id: string; type: 'VOICE' } =>
+          typeof value === 'object' && value !== null && 'id' in value && typeof value.id === 'string' &&
+          'type' in value && value.type === 'VOICE'
+      ) : undefined;
+      if (!sfuVoiceChannel) throw new Error('Teste 19: canal de voz SFU ausente no login');
+      await withTimeout(new Promise<void>((resolve, reject) => {
+        const handler = (data: RawData) => {
+          const res = JSON.parse(data.toString());
+          if (res.requestId !== 'req-sfu-join') return;
+          wsSfu.off('message', handler);
+          if (res.type !== MessageType.VOICE_USER_JOINED || res.payload?.channelId !== sfuVoiceChannel.id) {
+            reject(new Error('Teste 19: entrada no canal de voz SFU recusada'));
+            return;
+          }
+          resolve();
+        };
+        wsSfu.on('message', handler);
+        wsSfu.send(JSON.stringify({
+          type: MessageType.VOICE_JOIN, requestId: 'req-sfu-join', payload: { channelId: sfuVoiceChannel.id },
+        } satisfies ProtocolMessage));
+      }), 5000, 'Teste 19: participação ativa antes de alocar mídia SFU');
       await withTimeout(new Promise<void>((resolve, reject) => {
         const handler = (data: RawData) => {
           const res = JSON.parse(data.toString());
@@ -985,7 +1008,7 @@ async function runTests() {
         wsSfu.send(JSON.stringify({
           type: MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES,
           requestId: 'req-sfu-caps',
-          payload: { channelId: 'canal-sfu-handshake' },
+          payload: { channelId: sfuVoiceChannel.id },
         } satisfies ProtocolMessage));
       }), 10000, 'Teste 19: handshake do SFU aceito em modo SFU');
 
@@ -1058,7 +1081,7 @@ async function runTests() {
         wsSfu.send(JSON.stringify({
           type: MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES,
           requestId: 'req-p2p-caps',
-          payload: { channelId: 'canal-sfu-handshake' },
+          payload: { channelId: sfuVoiceChannel.id },
         } satisfies ProtocolMessage));
       }), 5000, 'Teste 19: handshake do SFU recusado em modo P2P');
 

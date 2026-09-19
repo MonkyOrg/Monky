@@ -1,4 +1,10 @@
 #include <napi.h>
+#if defined(_WIN32)
+#include "packet_core.h"
+#include <memory>
+namespace screen_audio { Napi::Value CreatePacketCapture(const Napi::CallbackInfo& info); }
+static std::unique_ptr<screen_audio::CaptureLease> g_legacyLease;
+#endif
 
 // Platform-specific forward declarations
 #if defined(_WIN32)
@@ -54,6 +60,14 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
   Napi::Object opts = info[0].As<Napi::Object>();
   Napi::Function callback = info[1].As<Napi::Function>();
 
+#if defined(_WIN32)
+  auto lease = std::make_unique<screen_audio::CaptureLease>(screen_audio::CaptureOwner::legacy);
+  if (!lease->held()) {
+    result.Set("success", false);
+    result.Set("error", "Already capturing");
+    return result;
+  }
+#endif
   uint32_t excludePid = 0;
   uint32_t sampleRate = 48000;
   uint32_t channels = 2;
@@ -103,6 +117,9 @@ Napi::Value Start(const Napi::CallbackInfo& info) {
   bool ok = platform_start(targetPid, loopbackMode, includeWindowId, sampleRate, channels, g_tsfn);
   if (ok) {
     g_running = true;
+#if defined(_WIN32)
+    g_legacyLease = std::move(lease);
+#endif
     result.Set("success", Napi::Boolean::New(env, true));
   } else {
     g_tsfn.Release();
@@ -122,6 +139,9 @@ Napi::Value Stop(const Napi::CallbackInfo& info) {
     g_running = false;
     platform_stop();
     g_tsfn.Release();
+#if defined(_WIN32)
+    g_legacyLease.reset();
+#endif
     result.Set("success", Napi::Boolean::New(env, true));
   } else {
     result.Set("success", Napi::Boolean::New(env, false));
@@ -185,6 +205,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("restoreWindow", Napi::Function::New(env, RestoreWindow));
 #if defined(_WIN32)
   exports.Set("getKeyboardLayout", Napi::Function::New(env, GetKeyboardLayoutSnapshot));
+  exports.Set("createPacketCapture", Napi::Function::New(env, screen_audio::CreatePacketCapture));
 #endif
   return exports;
 }

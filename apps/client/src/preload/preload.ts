@@ -1,4 +1,10 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, sharedTexture } from 'electron';
+import { readFileSync } from 'node:fs';
+import {
+  createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
+} from '@monky/screen-share';
+import * as nativeAudioProtocol from '@monky/shared';
+import { NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
 import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
   ActionShortcutBinding,
@@ -61,12 +67,25 @@ import type {
   UpdateOutcome,
   ReleaseNotesResult,
   RendererBootstrapFailure,
+  NativeScreenCommand,
+  NativeScreenCommandResult,
+  NativeScreenEvent,
+  NativeScreenReply,
+  NativeScreenPresentation,
+  NativeScreenPresentationSample,
   UpdateSimpleResult,
 } from '@monky/shared';
 
 export type { LinkPreviewData, OverlayBounds, OverlayConfig, OverlayMode, OverlayLayout, OverlayPosition, OverlayParticipantState, OverlaySyncState } from '@monky/shared';
 
 export interface ElectronApi {
+  nativeScreenCommand: (command: NativeScreenCommand) => Promise<NativeScreenCommandResult>;
+  nativeScreenReply: (reply: NativeScreenReply) => Promise<void>;
+  onNativeScreenEvent: (callback: (event: NativeScreenEvent) => void) => () => void;
+  attachNativeScreenPresentation: (input: NativeScreenPresentation) => Promise<void>;
+  stopNativeScreenPresentation: (presentationId: string) => Promise<void>;
+  sampleNativeScreenPresentation: (presentationId: string) => Promise<NativeScreenPresentationSample | null>;
+  onNativeScreenPresentationError: (callback: (value: { presentationId: string | null; message: string }) => void) => () => void;
   takeServerInvite: () => Promise<ServerInviteResult | null>;
   onServerInviteAvailable: (callback: () => void) => () => void;
   getDevelopmentQaConfig: () => Promise<DevelopmentQaConfig | null>;
@@ -208,7 +227,56 @@ export interface ElectronApi {
 }
 
 const preparedQa = process.argv.includes('--monky-prepared-qa');
+let nativePresentation: NativeScreenPresentationController | null = null;
+let nativeAudio: ReturnType<typeof registerNativeAudioPortReceiver> | null = null;
+let nativeAudioWorkletUrl: string | null = null;
+function prepareNativeAudio(): void {
+  if (nativeAudio) return;
+  const code = readFileSync(require.resolve('@monky/screen-share/runtime/nativePcmPlayout.worklet.js'), 'utf8');
+  const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+  try {
+    nativeAudio = registerNativeAudioPortReceiver(ipcRenderer, nativeAudioProtocol, {
+      workletUrl: url, onError: error => console.error('[NativeScreen] Audio output failed:', error),
+    });
+    nativeAudioWorkletUrl = url;
+  } catch (error) { URL.revokeObjectURL(url); throw error; }
+}
+const nativePresentationErrors = new Set<(value: { presentationId: string | null; message: string }) => void>();
+function presentationController(): NativeScreenPresentationController {
+  if (!nativePresentation) nativePresentation = createNativeScreenPresentation(sharedTexture, document, (presentationId, error) => {
+    console.error('[NativeScreen] Presentation failed:', error);
+    for (const callback of nativePresentationErrors) {
+      try { callback({ presentationId, message: error.message }); }
+      catch (observerError) { console.error('[NativeScreen] Presentation error observer failed:', observerError); }
+    }
+  });
+  return nativePresentation;
+}
+window.addEventListener('beforeunload', () => {
+  void nativePresentation?.close().catch(error => console.error('[NativeScreen] Document presentation cleanup failed:', error));
+  void nativeAudio?.dispose().catch(error => console.error('[NativeScreen] Document audio cleanup failed:', error)).finally(() => {
+    if (nativeAudioWorkletUrl) URL.revokeObjectURL(nativeAudioWorkletUrl);
+  });
+  nativePresentationErrors.clear();
+});
 const api: ElectronApi = {
+  nativeScreenCommand: command => {
+    if (command?.action === 'watch') prepareNativeAudio();
+    return ipcRenderer.invoke(NATIVE_SCREEN_IPC.invoke, command);
+  },
+  nativeScreenReply: reply => ipcRenderer.invoke(NATIVE_SCREEN_IPC.reply, reply),
+  onNativeScreenEvent: callback => {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown): void => callback(nativeScreenEventSchema.parse(value));
+    ipcRenderer.on(NATIVE_SCREEN_EVENT, listener);
+    return () => ipcRenderer.removeListener(NATIVE_SCREEN_EVENT, listener);
+  },
+  attachNativeScreenPresentation: input => presentationController().attach(input),
+  stopNativeScreenPresentation: presentationId => presentationController().stop(presentationId),
+  sampleNativeScreenPresentation: presentationId => presentationController().sample(presentationId),
+  onNativeScreenPresentationError: callback => {
+    nativePresentationErrors.add(callback);
+    return () => { nativePresentationErrors.delete(callback); };
+  },
   getDevelopmentQaConfig: () => preparedQa ? ipcRenderer.invoke(DEVELOPMENT_QA_IPC.config) : Promise.resolve(null),
   reportDevelopmentQaState: (report) => ipcRenderer.invoke(DEVELOPMENT_QA_IPC.report, report),
   startLanDiscovery: () => preparedQa ? Promise.resolve() : ipcRenderer.invoke('lan:start'),

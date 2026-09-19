@@ -7,7 +7,7 @@
     <a href="https://github.com/MonkyOrg/Monky/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/MonkyOrg/Monky?label=download&color=5865f2"></a>
     <a href="https://monkyorg.github.io/Monky/"><img alt="Documentação" src="https://img.shields.io/badge/docs-monkyorg.github.io-blue"></a>
     <a href="https://buymeacoffee.com/monkyorg"><img alt="Buy Me A Coffee" src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Apoiar-yellow.svg"></a>
-    <a href="LICENSE"><img alt="Licença MIT" src="https://img.shields.io/badge/licen%C3%A7a-MIT-green"></a>
+    <a href="LICENSE"><img alt="Licença GPL-3.0-or-later" src="https://img.shields.io/badge/licen%C3%A7a-GPL--3.0--or--later-green"></a>
     <a href="https://github.com/MonkyOrg/Monky/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/MonkyOrg/Monky/actions/workflows/ci.yml/badge.svg"></a>
     <a href="https://github.com/MonkyOrg/Monky/discussions/categories/ideas"><img alt="Ideias" src="https://img.shields.io/badge/ideias-vote%20aqui-orange"></a>
   </p>
@@ -104,6 +104,10 @@ npm start
 npm test
 ```
 
+Para transmitir janelas pelo caminho nativo libobs/AMF no Windows, prepare
+também o runtime conforme o [guia do módulo](apps/client/native/screen-share/README.md).
+Essa preparação é obrigatória antes de empacotar o aplicativo Windows.
+
 Detalhes de arquitetura estão em [Arquitetura](https://monkyorg.github.io/Monky/arquitetura), o fluxo de contribuição em [CONTRIBUTING.md](CONTRIBUTING.md) e os comandos do servidor no [manual do Monky CLI](https://monkyorg.github.io/Monky/cli). A especificação original do projeto — com MVP e roadmap — ficou registrada em [docs/especificacao-tecnica.md](docs/especificacao-tecnica.md).
 
 ## ☕ Apoie o Projeto
@@ -114,4 +118,9 @@ Se você gosta do Monky e quer apoiar o desenvolvimento contínuo, pague um caf�
 
 ## 📄 Licença
 
-[MIT](LICENSE) — use, modifique e hospede à vontade.
+[GNU GPL versão 3 ou posterior](LICENSE) — software livre, sem garantia.
+Você pode usar, modificar e redistribuir o Monky sob esses termos; ao distribuir
+binários, disponibilize também o código-fonte correspondente e os avisos de licença.
+Copyright (c) 2026 Monky Contributors. O aviso [MIT original](LICENSE-MIT) permanece
+preservado para o código anteriormente publicado sob essa licença. Dependências
+de terceiros mantêm seus próprios avisos e licenças.

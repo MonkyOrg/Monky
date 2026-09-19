@@ -1,0 +1,5 @@
+{
+  "group": "novidades",
+  "pt-BR": "Compartilhamento nativo de janelas no Windows com AMD/AMF, perfil personalizado até Full HD a 120 FPS e imagem esticada sem barras. A qualidade escolhida pelo espectador muda o envio real; sem espectadores, o pipeline nativo é encerrado.",
+  "en": "Native window sharing on Windows with AMD/AMF, a custom profile up to Full HD at 120 FPS, and stretched video without bars. Viewer quality changes the actual transmitted media; with no viewers, the native pipeline shuts down."
+}

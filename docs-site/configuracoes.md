@@ -31,6 +31,81 @@ também podem acompanhar a exportação da identidade. A lista de servidores
 pode conter senhas e não é gravada em texto aberto nesse backup.
 Sem a senha escolhida, não há recuperação do arquivo.
 
+### Qualidade, bitrate e telemetria
+
+Em **Qualidade**, os presets, codec e valores personalizados ficam junto de
+**Telemetria de vídeo**. **Voz e Vídeo** concentra dispositivos, processamento
+de áudio e prévias. Para ver FPS, resolução e bitrate sobre câmera/tela, use
+**Qualidade → Telemetria de vídeo**: o switch, a posição e o modo ficam salvos
+e são aplicados sem reiniciar a transmissão.
+
+No perfil **Personalizado**, passe o mouse ou navegue com `Tab` até a
+interrogação ao lado de cada **Bitrate**. A dica explica o efeito e o custo:
+mais bitrate pode preservar detalhes; menos economiza banda, mas pode reduzir
+a fidelidade ou criar blocos no vídeo. Isso não aumenta sozinho resolução ou FPS.
+
+Como ponto de partida para **um envio de vídeo**, use o upload real medido,
+não a velocidade de download contratada:
+
+| Upload | Teto inicial de bitrate |
+| --- | --- |
+| 5 Mbps | 2000 kbps |
+| 10 Mbps | 5000 kbps |
+| 20 Mbps | 10000 kbps |
+| 50 Mbps ou mais | 20000 kbps |
+
+Reserve ao menos **30% de margem** e desconte os outros usos, incluindo áudio,
+câmera e telas simultâneas. Em P2P, cada destinatário recebe uma cópia; no SFU,
+conte o envio ao servidor. Os valores são referências, não garantias de qualidade:
+codec, conteúdo, resolução e FPS também influenciam a necessidade de banda.
+Para voz, 24–32 kbps por envio são um ponto de partida; 48–64 kbps dão mais
+fidelidade. Com 1 Mbps de upload, 64 kbps usam 6,4% por envio antes dos demais custos.
+
+### Assistir a telas compartilhadas
+
+No canal de voz, clique em **Assistir transmissão** na tela que deseja abrir.
+O aviso de que alguém está compartilhando não inicia sozinho o recebimento
+da imagem e do som. **Parar de assistir** interrompe a entrega daquela tela
+somente para você, sem desligar seu microfone, sua câmera ou a transmissão
+dos outros espectadores. Isso vale tanto em P2P quanto em SFU.
+
+O som compartilhado pertence à pessoa que transmite: se você estiver assistindo
+a duas telas dela, parar uma mantém o som necessário para a outra. Parar a última
+encerra também esse recebimento de áudio. Mutar o som é uma preferência de
+reprodução separada; não substitui **Parar de assistir** para economizar banda.
+
+Trocar de página, usar a janela destacada ou ativar a sobreposição não altera
+as telas que você escolheu assistir na chamada. Sair da chamada ou encerrar a
+fonte remove essa escolha; uma nova transmissão precisa ser escolhida novamente.
+Uma reconexão de transporte preserva a escolha enquanto a mesma fonte continuar
+válida.
+
+No caminho nativo, a última pessoa que para de assistir encerra também o
+pipeline de captura, encoder e envio daquele perfil, inclusive ao SFU.
+O anúncio da fonte permanece disponível para voltar a assistir. O caminho
+Chromium preserva sua captura/prévia e pode continuar enviando ao SFU.
+Sinalização, controle da conexão, voz e câmera podem continuar usando a rede.
+
+### Compartilhamento nativo e qualidade do espectador
+
+O seletor identifica o caminho disponível. A transmissão nativa qualificada
+usa **Windows x64, captura de janela e AMD/AMF H.264**; monitores, outros encoders
+e outras plataformas mantêm o caminho Chromium. Indisponibilidade nativa não
+é escondida como uma troca silenciosa de backend.
+
+Para até **1920×1080 a 120 FPS**, use **Personalizado** em Qualidade; os presets
+existentes não foram convertidos automaticamente para 120 FPS. A imagem nativa
+é esticada para o tamanho escolhido, sem adicionar barras para preservar 4:3.
+
+Ao assistir a uma tela nativa, **Qualidade recebida** solicita um perfil real
+ao transmissor: **Máxima da fonte** ou perfis com tetos de **1080p/60**,
+**720p/60** e **480p/30**. Todos respeitam o limite de quem transmite;
+opções equivalentes não se repetem. O teto de 480p usa 852×480 para
+compatibilidade com o encoder. Isso muda a mídia enviada, não apenas o tamanho
+do player. Perfis diferentes podem usar encoders e upload adicionais.
+Resolução, FPS e bitrate configurados são limites, não garantias de desempenho.
+Cliente e servidor precisam ser atualizados juntos para usar esse comportamento.
+
 ### Aparecer offline
 
 Em **Meu Perfil → Visibilidade → Aparecer offline**, o switch altera sua

@@ -3,6 +3,7 @@ import { settingsStore } from '../../../stores/settingsStore';
 import { webRtcManager } from '../../../core/WebRtcManager';
 import { t } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
+import { showAlert } from '../../Dialog';
 import {
   ASPECT_RATIO_GROUPS,
   AUDIO_BITRATE_OPTIONS,
@@ -17,6 +18,11 @@ import {
 } from '../qualityOptions';
 
 export class QualityTab {
+  private settingsError(error: unknown): void {
+    console.warn('[QualityTab] Could not apply screen sharing settings:', error);
+    void showAlert({ variant: 'danger', message: error instanceof Error ? error.message : t('screenShare.nativeProfileChangeBlocked') });
+  }
+
   public renderHtml(): string {
     return `
       <!-- Quality Preset -->
@@ -64,6 +70,42 @@ export class QualityTab {
           ${t('settings.videoCodecDesc')}
         </small>
       </div>
+
+      <div data-settings-section="video-telemetry" data-settings-label="${escapeHtml(t('settings.telemetrySection'))}" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+        <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; font-weight: 700; color: var(--text-primary);">
+          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);" aria-hidden="true">monitoring</span>
+          ${t('settings.telemetrySection')}
+        </div>
+        <div class="form-group" style="padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); margin-bottom: 12px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+            <div>
+              <label style="margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-screen-telemetry">${t('settings.telemetryLabel')}</label>
+              <div style="font-size: 11px; color: var(--text-muted);">${t('settings.telemetryDesc')}</div>
+            </div>
+            <label class="toggle-switch" aria-label="${escapeHtml(t('settings.telemetryLabel'))}">
+              <input id="checkbox-screen-telemetry" type="checkbox" ${settingsStore.screenShareTelemetryEnabled ? 'checked' : ''}>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label for="select-screen-telemetry-position">${t('settings.telemetryPosition')}</label>
+          <select id="select-screen-telemetry-position">
+            <option value="top-right" ${settingsStore.screenShareTelemetryPosition === 'top-right' ? 'selected' : ''}>${t('settings.positionTopRight')}</option>
+            <option value="top-left" ${settingsStore.screenShareTelemetryPosition === 'top-left' ? 'selected' : ''}>${t('settings.positionTopLeft')}</option>
+            <option value="bottom-right" ${settingsStore.screenShareTelemetryPosition === 'bottom-right' ? 'selected' : ''}>${t('settings.positionBottomRight')}</option>
+            <option value="bottom-left" ${settingsStore.screenShareTelemetryPosition === 'bottom-left' ? 'selected' : ''}>${t('settings.positionBottomLeft')}</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom: 0;">
+          <label for="select-screen-telemetry-mode">${t('settings.telemetryMode')}</label>
+          <select id="select-screen-telemetry-mode">
+            <option value="simple" ${settingsStore.screenShareTelemetryMode === 'simple' ? 'selected' : ''}>${t('settings.telemetryModeSimple')}</option>
+            <option value="complete" ${settingsStore.screenShareTelemetryMode === 'complete' ? 'selected' : ''}>${t('settings.telemetryModeComplete')}</option>
+          </select>
+          <small style="display: block; margin-top: 6px; color: var(--text-muted);">${t('settings.telemetryHelp')}</small>
+        </div>
+      </div>
     `;
   }
 
@@ -79,7 +121,7 @@ export class QualityTab {
               <span class="material-symbols-outlined" style="font-size: 16px; color: var(--accent-primary);">mic</span>
               <strong style="color: var(--text-secondary);">${t('settings.audio')}</strong>
             </div>
-            ${this.renderNumberChoice('audioBitrate', t('settings.bitrate'), AUDIO_BITRATE_OPTIONS, p.audioBitrateKbps, 'kbps')}
+            ${this.renderNumberChoice('audioBitrate', t('settings.bitrate'), AUDIO_BITRATE_OPTIONS, p.audioBitrateKbps, 'kbps', 'audio')}
           </div>
           <div class="quality-custom-block" data-settings-section="custom-camera" data-settings-label="${escapeHtml(t('settings.cameraShort'))}">
             <div class="quality-custom-title">
@@ -134,11 +176,25 @@ export class QualityTab {
    * every row keeps the same three columns and nothing shifts sideways when a
    * field is switched to custom.
    */
-  private renderNumberChoice(id: string, label: string, options: number[], value: number, unit: string): string {
+  private renderNumberChoice(
+    id: string, label: string, options: number[], value: number, unit: string,
+    bitrateHelp?: 'audio' | 'camera' | 'screen',
+  ): string {
     const isKnown = options.includes(value);
+    const mediaLabel = bitrateHelp === 'audio' ? t('settings.audio')
+      : bitrateHelp === 'camera' ? t('settings.cameraShort') : t('settings.screen');
+    const help = bitrateHelp ? `
+      <button type="button" class="quality-bitrate-help" data-bitrate-help="${bitrateHelp}"
+        aria-label="${escapeHtml(t('settings.bitrateHelpLabel', { media: mediaLabel }))}"
+        data-tooltip="${escapeHtml(t(bitrateHelp === 'audio' ? 'settings.audioBitrateHelp' : 'settings.videoBitrateHelp'))}">
+        <span class="material-symbols-outlined md-16" aria-hidden="true">help</span>
+      </button>` : '';
     return `
       <div class="quality-custom-row">
-        <label class="quality-custom-label" for="q-select-${id}">${label}</label>
+        <div class="quality-custom-label quality-label-with-help">
+          <label for="q-select-${id}">${label}</label>
+          ${help}
+        </div>
         <select id="q-select-${id}" class="quality-custom-control">
           ${options.map((option) => `<option value="${option}" ${option === value ? 'selected' : ''}>${option}${unit ? ` ${unit}` : ''}</option>`).join('')}
           <option value="${CUSTOM_OPTION}" ${isKnown ? '' : 'selected'}>${t('settings.optionCustom')}</option>
@@ -184,7 +240,7 @@ export class QualityTab {
         <span class="quality-custom-unit">px</span>
       </div>
       ${this.renderNumberChoice(`${kind}Fps`, 'FPS', FPS_OPTIONS, fps, 'fps')}
-      ${this.renderNumberChoice(`${kind}Bitrate`, t('settings.bitrate'), VIDEO_BITRATE_OPTIONS, bitrate, 'kbps')}
+      ${this.renderNumberChoice(`${kind}Bitrate`, t('settings.bitrate'), VIDEO_BITRATE_OPTIONS, bitrate, 'kbps', kind)}
     `;
   }
 
@@ -199,9 +255,43 @@ export class QualityTab {
   public attachEvents(container: HTMLElement): void {
     const selectPreset = container.querySelector<HTMLSelectElement>('#select-preset');
     const presetDetails = container.querySelector<HTMLElement>('#preset-details');
+    const checkboxScreenTelemetry = container.querySelector<HTMLInputElement>('#checkbox-screen-telemetry');
+    const selectScreenTelemetryPos = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-position');
+    const selectScreenTelemetryMode = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-mode');
+
+    checkboxScreenTelemetry?.addEventListener('change', () => {
+      settingsStore.screenShareTelemetryEnabled = checkboxScreenTelemetry.checked;
+      settingsStore.save();
+    });
+    selectScreenTelemetryPos?.addEventListener('change', () => {
+      const position = selectScreenTelemetryPos.value;
+      if (position === 'top-right' || position === 'top-left' || position === 'bottom-right' || position === 'bottom-left') {
+        settingsStore.screenShareTelemetryPosition = position;
+        settingsStore.save();
+      } else {
+        console.warn('[QualityTab] Invalid telemetry position:', position);
+      }
+    });
+    selectScreenTelemetryMode?.addEventListener('change', () => {
+      const mode = selectScreenTelemetryMode.value;
+      if (mode === 'simple' || mode === 'complete') {
+        settingsStore.screenShareTelemetryMode = mode;
+        settingsStore.save();
+      } else {
+        console.warn('[QualityTab] Invalid telemetry mode:', mode);
+      }
+    });
 
     selectPreset?.addEventListener('change', () => {
-      const val = selectPreset.value as QualityPresetType;
+      const choices: QualityPresetType[] = ['ECONOMIC', 'NORMAL', 'HIGH', 'GAMING', 'ULTRA', 'CUSTOM'];
+      const val = choices.find(choice => choice === selectPreset.value);
+      if (!val) {
+        console.warn('[QualityTab] Invalid quality preset:', selectPreset.value);
+        selectPreset.value = settingsStore.qualityPreset;
+        return;
+      }
+      try { webRtcManager.assertScreenSharingSettings(val === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[val]); }
+      catch (error) { selectPreset.value = settingsStore.qualityPreset; this.settingsError(error); return; }
       settingsStore.qualityPreset = val;
       settingsStore.save();
       webRtcManager.setQualityPreset(val);
@@ -215,10 +305,18 @@ export class QualityTab {
 
     const selectCodec = container.querySelector<HTMLSelectElement>('#select-video-codec');
     selectCodec?.addEventListener('change', () => {
-      const val = selectCodec.value as any;
+      const val = (['auto', 'av1', 'vp9', 'vp8', 'h264'] as const).find(choice => choice === selectCodec.value);
+      if (!val) {
+        console.warn('[QualityTab] Invalid video codec:', selectCodec.value);
+        selectCodec.value = settingsStore.preferredVideoCodec;
+        return;
+      }
+      const profile = settingsStore.qualityPreset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[settingsStore.qualityPreset];
+      try { webRtcManager.assertScreenSharingSettings(profile, val); }
+      catch (error) { selectCodec.value = settingsStore.preferredVideoCodec; this.settingsError(error); return; }
       settingsStore.preferredVideoCodec = val;
       settingsStore.save();
-      void webRtcManager.reapplyCodecPreferences();
+      void webRtcManager.reapplyCodecPreferences().catch(error => this.settingsError(error));
     });
 
     if (settingsStore.qualityPreset === 'CUSTOM') {
@@ -227,14 +325,27 @@ export class QualityTab {
   }
 
   private attachCustomProfileListeners(container: HTMLElement): void {
+    let previousProfile = { ...settingsStore.customProfile };
     const apply = () => {
+      try { webRtcManager.assertScreenSharingSettings(settingsStore.customProfile); }
+      catch (error) {
+        settingsStore.customProfile = { ...previousProfile };
+        const details = container.querySelector<HTMLElement>('#preset-details');
+        if (details) {
+          details.innerHTML = this.getPresetDetailsHtml('CUSTOM');
+          this.attachCustomProfileListeners(container);
+        }
+        this.settingsError(error);
+        return;
+      }
       settingsStore.save();
       webRtcManager.setQualityPreset('CUSTOM');
+      previousProfile = { ...settingsStore.customProfile };
     };
 
     const setValue = <K extends keyof QualityProfile>(key: K, value: number) => {
       if (typeof settingsStore.customProfile[key] !== 'number') return;
-      (settingsStore.customProfile[key] as number) = value;
+      settingsStore.customProfile = { ...settingsStore.customProfile, [key]: value };
     };
 
     // The free-form number box behind each "custom" entry.

@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'node:module';
+import { license, copyMonkyLicenses } from './legal.cjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SDK_DIR = path.join(ROOT, 'packages', 'bot-sdk');
@@ -56,7 +57,7 @@ function main() {
 
   // Copy bot-sdk dist.
   fs.cpSync(sdkDist, path.join(staging, 'dist'), { recursive: true });
-  fs.copyFileSync(path.join(ROOT, 'LICENSE'), path.join(staging, 'LICENSE'));
+  copyMonkyLicenses(staging);
 
   const { dependencies, packageCount } = bundleDependencies(SDK_DIR, staging,
     new Map([['@monky/shared', SHARED_DIR]]));
@@ -66,7 +67,7 @@ function main() {
     name: sdkPkg.name,
     version,
     description: sdkPkg.description,
-    license: 'MIT',
+    license,
     repository: { type: 'git', url: 'https://github.com/MonkyOrg/Monky.git' },
     homepage: 'https://github.com/MonkyOrg/Monky/tree/main/packages/bot-sdk',
     main: sdkPkg.main,

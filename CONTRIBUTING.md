@@ -5,7 +5,7 @@
 Obrigado pelo interesse! Este documento explica como propor ideias, votar no que
 vem primeiro e — se você quiser codar — como abrir um PR que entra sem atrito.
 
-O Monky é MIT e o desenvolvimento acontece todo em público, nas
+O Monky é GPL-3.0-or-later e o desenvolvimento acontece todo em público, nas
 [Issues](https://github.com/MonkyOrg/Monky/issues).
 
 ---
@@ -105,6 +105,14 @@ npm install
 npm run build
 npm start
 ```
+
+O compartilhamento nativo de janela no Windows tem uma preparação adicional,
+com libobs/AMF e WebRTC fixados. Consulte o [guia do módulo](apps/client/native/screen-share/README.md)
+antes de testar ou empacotar esse caminho. `npm run build` sozinho não baixa o SDK
+nativo; outras plataformas e fontes continuam usando o caminho Chromium.
+Para redistribuir um build, inclua as licenças e as fontes correspondentes
+descritas no guia. `npm run package` usa electron-builder e gera
+`release\win-unpacked\Monky.exe` e `release\Monky-Windows.zip`.
 
 Durante o desenvolvimento, em dois terminais:
 
@@ -368,4 +376,5 @@ abstrato.
 ## 📜 Licença
 
 Ao contribuir, você concorda que sua contribuição será licenciada sob a
-[licença MIT](LICENSE) do projeto.
+[GNU GPL versão 3 ou posterior](LICENSE) do projeto. Preserve os avisos de
+copyright e as licenças de terceiros; a integração com libobs não os substitui.

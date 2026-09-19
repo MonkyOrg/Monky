@@ -22,9 +22,16 @@ try {
     const { BotClient, PROTOCOL_VERSION } = require('@monky/bot-sdk');
     const fs = require('node:fs');
     const path = require('node:path');
+    const sdkRequire = require('node:module').createRequire(require.resolve('@monky/bot-sdk/package.json'));
     const { runBotCli } = require('@monky/bot-sdk/dist/cli/index.js');
     (async () => {
       assert.equal(PROTOCOL_VERSION, ${PROTOCOL_VERSION});
+      for (const packageName of ['@monky/bot-sdk', '@monky/shared']) {
+        const packageRoot = path.dirname(sdkRequire.resolve(packageName + '/package.json'));
+        assert.equal(sdkRequire(packageName + '/package.json').license, 'GPL-3.0-or-later');
+        assert.ok(fs.readFileSync(path.join(packageRoot, 'LICENSE'), 'utf8').includes('GNU GENERAL PUBLIC LICENSE'));
+        assert.ok(fs.readFileSync(path.join(packageRoot, 'LICENSE-MIT'), 'utf8').includes('MIT License'));
+      }
       const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities: ['commands'], autoReconnect: false });
       for (const method of [
         'joinVoice', 'leaveVoice', 'getVoiceConnection', 'getPermissions',

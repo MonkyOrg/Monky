@@ -2,6 +2,7 @@ import {
   ProtocolErrorCode,
   VoiceParticipantState,
   WebRtcSignalPayload,
+  type NativeScreenSignalPayload,
 } from '@monky/shared';
 import { IChannelRepository, IVoiceRestrictionRepository } from '../../domain/repositories';
 import type { VoiceRestrictions } from '../../domain/entities';
@@ -15,6 +16,10 @@ export class SignalingService {
   // person, so the same user can be in voice from two devices at once (#309).
   private voiceStates: Map<string, VoiceParticipantState> = new Map();
   private voiceMembershipListener?: () => void;
+  private nativeScreenSubscriptions = new Map<string, {
+    request: Readonly<Extract<NativeScreenSignalPayload, { action: 'watch' }>>;
+    generation: number | null;
+  }>();
 
   constructor(
     private channelRepo: IChannelRepository,
@@ -87,8 +92,10 @@ export class SignalingService {
       isScreenSharing: isChannelChange ? false : (previousState?.isScreenSharing ?? false),
       isSharingScreenAudio: isChannelChange ? false : (previousState?.isSharingScreenAudio ?? false),
       screenShareIds: isChannelChange ? [] : (previousState?.screenShareIds ?? []),
+      nativeScreenShares: isChannelChange ? [] : (previousState?.nativeScreenShares ?? []),
     };
 
+    this.dropNativeScreenSubscriptionsFor(sessionId);
     this.voiceStates.set(sessionId, newState);
     this.voiceMembershipListener?.();
     Logger.info('WEBRTC', `Session ${sessionId} joined voice channel ${channelId}`);
@@ -105,6 +112,7 @@ export class SignalingService {
     const current = this.voiceStates.get(sessionId);
     if (current) {
       this.voiceStates.delete(sessionId);
+      this.dropNativeScreenSubscriptionsFor(sessionId);
       this.voiceMembershipListener?.();
       Logger.info('WEBRTC', `Session ${sessionId} left voice channel ${current.channelId}`);
       return current;
@@ -140,6 +148,15 @@ export class SignalingService {
       updated.isScreenSharing = updated.screenShareIds.length > 0;
     } else if (updates.isScreenSharing === false) {
       updated.screenShareIds = [];
+    }
+    updated.nativeScreenShares = (updated.nativeScreenShares ?? [])
+      .filter(source => updated.screenShareIds?.includes(source.shareId));
+    for (const [key, subscription] of this.nativeScreenSubscriptions) {
+      if (subscription.request.publisherSessionId === sessionId
+        && !updated.nativeScreenShares.some(source => source.shareId === subscription.request.shareId
+          && source.instanceId === subscription.request.sourceInstanceId)) {
+        this.nativeScreenSubscriptions.delete(key);
+      }
     }
 
     this.voiceStates.set(sessionId, updated);
@@ -215,11 +232,12 @@ export class SignalingService {
   public clearAllVoiceStates(): VoiceParticipantState[] {
     const list = Array.from(this.voiceStates.values());
     this.voiceStates.clear();
+    this.nativeScreenSubscriptions.clear();
     if (list.length) this.voiceMembershipListener?.();
     return list;
   }
 
-  public validateSignalRouting(signal: WebRtcSignalPayload): boolean {
+  public validateSignalRouting(signal: Pick<WebRtcSignalPayload, 'fromSessionId' | 'targetSessionId'>): boolean {
     const fromState = this.voiceStates.get(signal.fromSessionId);
     const targetState = this.voiceStates.get(signal.targetSessionId);
 
@@ -229,5 +247,72 @@ export class SignalingService {
 
     // Peers must be in the same voice channel to exchange WebRTC signals
     return fromState.channelId === targetState.channelId;
+  }
+
+  private dropNativeScreenSubscriptionsFor(sessionId: string): void {
+    for (const [key, subscription] of this.nativeScreenSubscriptions) {
+      if (subscription.request.fromSessionId === sessionId || subscription.request.publisherSessionId === sessionId) {
+        this.nativeScreenSubscriptions.delete(key);
+      }
+    }
+  }
+
+  public authorizeNativeScreenSignal(signal: NativeScreenSignalPayload):
+    { success: true; forward?: false } | { success: false; code: ProtocolErrorCode; message: string } {
+    const reject = (message: string) => ({ success: false as const, code: ProtocolErrorCode.PERMISSION_DENIED, message });
+    const viewerId = signal.fromSessionId === signal.publisherSessionId ? signal.targetSessionId : signal.fromSessionId;
+    const key = JSON.stringify([signal.publisherSessionId, viewerId, signal.shareId]);
+    const current = this.nativeScreenSubscriptions.get(key);
+    if (signal.action === 'stop' && this.voiceStates.get(viewerId)?.channelId === signal.channelId
+      && (!current || current.request.subscriptionId !== signal.subscriptionId
+        || current.request.sourceInstanceId !== signal.sourceInstanceId)) {
+      // Expired leases are already stopped; never forward an old Stop to a replacement source.
+      return { success: true, forward: false };
+    }
+    const publisher = this.voiceStates.get(signal.publisherSessionId);
+    if (!this.validateSignalRouting(signal) || publisher?.channelId !== signal.channelId) {
+      return reject('A transmissão pertence a outra chamada.');
+    }
+    const source = publisher.nativeScreenShares?.find(value =>
+      value.shareId === signal.shareId && value.instanceId === signal.sourceInstanceId);
+    if (!source || !publisher.screenShareIds?.includes(source.shareId)) {
+      return reject('A fonte desta transmissão não está mais disponível.');
+    }
+    if (signal.action === 'watch') {
+      if (current?.request.subscriptionId === signal.subscriptionId) {
+        return current.request.sourceInstanceId === signal.sourceInstanceId
+          && current.request.quality === signal.quality && current.request.backend === signal.backend
+          ? { success: true } : reject('Uma assinatura existente não pode mudar de identidade.');
+      }
+      if (!current && [...this.nativeScreenSubscriptions.values()]
+        .filter(value => value.request.fromSessionId === viewerId).length >= 64) {
+        return reject('O limite de transmissões assistidas foi atingido.');
+      }
+      this.nativeScreenSubscriptions.set(key, { request: Object.freeze({ ...signal }), generation: null });
+      return { success: true };
+    }
+    if (!current || current.request.subscriptionId !== signal.subscriptionId
+      || current.request.sourceInstanceId !== signal.sourceInstanceId) {
+      return reject('A assinatura desta transmissão expirou.');
+    }
+    if (signal.action === 'stop' || signal.action === 'closed') {
+      this.nativeScreenSubscriptions.delete(key);
+      return { success: true };
+    }
+    if (signal.action === 'accepted') {
+      if (signal.quality !== current.request.quality || signal.backend !== current.request.backend
+        || (current.generation !== null && current.generation !== signal.generation)) {
+        return reject('A resposta não corresponde ao perfil solicitado.');
+      }
+      current.generation = signal.generation;
+      return { success: true };
+    }
+    if (signal.control.generation !== current.generation) {
+      return reject('O controle nativo não pertence à assinatura confirmada.');
+    }
+    if ('kind' in signal.control && signal.control.kind === 'audio' && !source.audio) {
+      return reject('Esta transmissão não publicou áudio.');
+    }
+    return { success: true };
   }
 }

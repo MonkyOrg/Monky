@@ -26,6 +26,7 @@ export class OverlayBridgeService {
   private localPeerConnection: RTCPeerConnection | null = null;
   private videoSenders: RTCRtpSender[] = [];
   private pendingVideoUpdates = new WeakMap<RTCRtpSender, { track: MediaStreamTrack; task: Promise<void> }>();
+  private retiredVideoTracks = new WeakSet<MediaStreamTrack>();
   private cameraSubscriptions: Array<() => void> = [];
   private dummyTrack: MediaStreamTrack | null = null;
   private unbindListeners: Array<() => void> = [];
@@ -126,6 +127,8 @@ export class OverlayBridgeService {
     appEvents.on('voice.state_updated', triggerSync);
     appEvents.on('voice.speaking_changed', triggerSync);
     appEvents.on('participants.updated', triggerSync);
+    this.unbindListeners.push(appEvents.on('native_screen.updated', triggerSync));
+    this.unbindListeners.push(appEvents.on('voice.screen_watch_changed', triggerSync));
     appEvents.on('participants.speaking_changed', triggerSync);
     appEvents.on('settings.updated', triggerSync);
     appEvents.on('overlay_settings.updated', () => {
@@ -240,7 +243,7 @@ export class OverlayBridgeService {
     const apply = async () => {
       if (!this.isWebRtcReady || this.localPeerConnection !== connection || this.videoSenders[index] !== sender
         || this.pendingVideoUpdates.get(sender) !== update) return;
-      await sender.replaceTrack(track.readyState === 'live' ? track : this.getOrCreateDummyTrack());
+      await sender.replaceTrack(track.readyState === 'live' && !this.retiredVideoTracks.has(track) ? track : this.getOrCreateDummyTrack());
     };
     const task = (pending?.task ?? Promise.resolve()).then(apply, apply);
     const update = { track, task };
@@ -252,6 +255,18 @@ export class OverlayBridgeService {
       clear();
       if (this.localPeerConnection === connection) console.error(`[OverlayBridge] Could not replace video slot ${index}:`, error);
     });
+  }
+
+  public async retireScreenStream(stream: MediaStream): Promise<void> {
+    const tracks = new Set<MediaStreamTrack>(stream.getVideoTracks());
+    for (const track of tracks) this.retiredVideoTracks.add(track);
+    const connection = this.localPeerConnection;
+    await Promise.all(this.videoSenders.map(async sender => {
+      const pending = this.pendingVideoUpdates.get(sender);
+      if (pending && tracks.has(pending.track)) await pending.task;
+      if (this.localPeerConnection === connection && sender.track && tracks.has(sender.track))
+        await sender.replaceTrack(this.getOrCreateDummyTrack());
+    }));
   }
 
   private getOrCreateDummyTrack(): MediaStreamTrack {
@@ -357,6 +372,8 @@ export class OverlayBridgeService {
     this.isWebRtcReady = false;
     this.videoSenders = [];
     this.pendingVideoUpdates = new WeakMap();
+    this.dummyTrack?.stop();
+    this.dummyTrack = null;
   }
 
   public syncState(): void {
@@ -445,6 +462,7 @@ export class OverlayBridgeService {
         // Atribuir slot para Compartilhamento de Telas (se habilitado)
         if (config.mode === 'cameras-and-screens') {
           for (const shareId of shareIds) {
+            if (!isLocal && !voiceStore.isWatchingScreen(sidOf(p), shareId)) continue;
             if (nextSlotIndex < MAX_VIDEO_SLOTS) {
               const stream = isLocal
                 ? videoService.getScreenStream(shareId)

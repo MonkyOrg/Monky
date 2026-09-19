@@ -13,6 +13,7 @@ and macOS; you do not need to program or install a bot to talk.
 - **Local audio:** RNNoise, Speex, GTCRN or WebRTC noise suppression, microphone
   testing and per-category outputs.
 - **Video:** camera, background effects and screen/window sharing; shared
+  video and sound are received only when you choose to watch. Available
   audio depends on the platform and source.
 - **Soundboard:** local library, favorites, search, keybinds and server-controlled
   permissions.

@@ -3,7 +3,8 @@ import net from 'net';
 import dgram from 'dgram';
 import * as mediasoup from 'mediasoup';
 import type { RouterRtpCodecCapability, TransportListenInfo } from 'mediasoup/node/lib/types.js';
-import { LIMITS, aggregateTransportHealth, VoiceConnectionHealth } from '@monky/shared';
+import { LIMITS, aggregateTransportHealth, VoiceConnectionHealth, type RtcTransportPurpose,
+  sfuCreateWebRtcTransportSchema, nativeScreenRenditionSchema } from '@monky/shared';
 import { getPublicIp } from '../discovery/ServerIpScanner';
 import { describeFailure } from '../lifecycle/ServerResourceScope';
 
@@ -44,6 +45,28 @@ const MEDIA_CODECS: RouterRtpCodecCapability[] = [
       'level-asymmetry-allowed': 1,
     },
   },
+  // Keep Constrained Baseline first for existing clients, but also negotiate
+  // Baseline: some hardware encoders do not advertise the constrained profile.
+  {
+    kind: 'video',
+    mimeType: 'video/H264',
+    clockRate: 90000,
+    parameters: {
+      'packetization-mode': 1,
+      'profile-level-id': '42001f',
+      'level-asymmetry-allowed': 1,
+    },
+  },
+  {
+    kind: 'video',
+    mimeType: 'video/H264',
+    clockRate: 90000,
+    parameters: {
+      'packetization-mode': 1,
+      'profile-level-id': '4d0033',
+      'level-asymmetry-allowed': 1,
+    },
+  },
 ];
 
 export interface SfuManagerOptions {
@@ -55,6 +78,7 @@ export interface SfuManagerOptions {
 
 export interface SfuProducerRecord {
   producer: mediasoup.types.Producer;
+  transportId: string;
   sessionId: string;
   channelId: string;
   kind: 'audio' | 'video';
@@ -63,6 +87,7 @@ export interface SfuProducerRecord {
 
 export interface SfuConsumerRecord {
   consumer: mediasoup.types.Consumer;
+  transportId: string;
   sessionId: string;
   channelId: string;
   producerId: string;
@@ -73,8 +98,14 @@ export interface SfuTransportRecord {
   sessionId: string;
   channelId: string;
   direction: 'send' | 'recv';
+  purpose: RtcTransportPurpose;
+  screenSessionId?: string;
   healthState?: string;
 }
+
+type PendingSfuTransport = Pick<SfuTransportRecord, 'sessionId' | 'channelId' | 'direction' | 'purpose' | 'screenSessionId'> & {
+  cancelled: boolean;
+};
 
 /**
  * Why the configured UDP range cannot carry media.
@@ -125,6 +156,10 @@ export class SfuProducerClosedError extends Error {
   }
 }
 
+function isScreenMedia(appData: Record<string, unknown>): boolean {
+  return appData.mediaType === 'screen_video' || appData.mediaType === 'screen_audio';
+}
+
 export class SfuManager {
   private healthListener?: (sessionId: string, channelId: string, health: VoiceConnectionHealth) => void;
 
@@ -132,9 +167,11 @@ export class SfuManager {
     this.healthListener = listener;
   }
 
-  public getConnectionHealth(sessionId: string, channelId: string): VoiceConnectionHealth {
+  public getConnectionHealth(
+    sessionId: string, channelId: string, purpose: RtcTransportPurpose = 'call'
+  ): VoiceConnectionHealth {
     return aggregateTransportHealth(Array.from(this.transports.values())
-      .filter((r) => r.sessionId === sessionId && r.channelId === channelId)
+      .filter((r) => r.sessionId === sessionId && r.channelId === channelId && r.purpose === purpose)
       .map((r) => r.healthState ?? 'new'));
   }
 
@@ -148,11 +185,21 @@ export class SfuManager {
       : transport.dtlsState === 'connected' && (transport.iceState === 'connected' || transport.iceState === 'completed')
         ? 'connected'
         : transport.iceState === 'new' && transport.dtlsState === 'new' ? 'new' : 'connecting';
-    this.healthListener?.(record.sessionId, record.channelId, this.getConnectionHealth(record.sessionId, record.channelId));
+    if (record.purpose === 'call') {
+      this.healthListener?.(record.sessionId, record.channelId, this.getConnectionHealth(record.sessionId, record.channelId));
+    }
   }
+
+  private cancelPendingTransports(matches: (pending: PendingSfuTransport) => boolean): void {
+    for (const pending of this.pendingTransports) {
+      if (matches(pending)) pending.cancelled = true;
+    }
+  }
+
   private worker: mediasoup.types.Worker | null = null;
   private routers: Map<string, mediasoup.types.Router> = new Map(); // key = channelId
   private transports: Map<string, SfuTransportRecord> = new Map(); // key = transportId
+  private readonly pendingTransports = new Set<PendingSfuTransport>();
   private producers: Map<string, SfuProducerRecord> = new Map(); // key = producerId
   private consumers: Map<string, SfuConsumerRecord> = new Map(); // key = consumerId
 
@@ -439,7 +486,9 @@ export class SfuManager {
     sessionId: string,
     channelId: string,
     direction: 'send' | 'recv',
-    clientHost?: string
+    clientHost?: string,
+    purpose: RtcTransportPurpose = 'call',
+    screenSessionId?: string
   ): Promise<{
     id: string;
     iceParameters: mediasoup.types.IceParameters;
@@ -447,56 +496,78 @@ export class SfuManager {
     dtlsParameters: mediasoup.types.DtlsParameters;
     sctpParameters?: mediasoup.types.SctpParameters;
   }> {
-    const router = await this.getOrCreateRouter(channelId);
-    const listenInfos = this.getListenInfos(clientHost);
+    sfuCreateWebRtcTransportSchema.parse({ channelId, direction, purpose, screenSessionId });
+    // 64 watched sources, two publications with four profiles, and the legacy pair.
+    if (purpose === 'screen' && [...this.transports.values(), ...this.pendingTransports]
+      .filter(record => record.sessionId === sessionId && record.purpose === 'screen').length >= 74) {
+      throw new Error('Too many screen transports for this voice session');
+    }
+    const pending: PendingSfuTransport = { sessionId, channelId, direction, purpose, screenSessionId, cancelled: false };
+    this.pendingTransports.add(pending);
+    let allocated: mediasoup.types.WebRtcTransport | undefined;
+    let registered = false;
+    try {
+      const router = await this.getOrCreateRouter(channelId);
+      if (pending.cancelled) throw new Error('Transport creation was cancelled before setup');
+      const listenInfos = this.getListenInfos(clientHost);
 
-    const transport = await router.createWebRtcTransport({
-      listenInfos,
-      enableUdp: true,
-      enableTcp: true,
-      preferUdp: true,
-      initialAvailableOutgoingBitrate: 2000000,
-    });
-
-    console.log(`[SFU Server] Created ${direction} transport ${transport.id} for session ${sessionId} in channel ${channelId}`);
-    console.log(`[SFU Server] Transport ${transport.id} ICE candidates (${transport.iceCandidates.length}):`, transport.iceCandidates.map((c) => `${c.protocol?.toUpperCase()} ${c.ip || (c as any).address}:${c.port}`));
-
-    transport.on('icestatechange', (iceState) => {
-      console.log(`[SFU Server] Transport ${transport.id} (${direction}, session ${sessionId}) ICE state changed: ${iceState}`);
-      this.updateTransportHealth(transport.id);
-    });
-
-    transport.on('dtlsstatechange', (dtlsState) => {
-      console.log(`[SFU Server] Transport ${transport.id} (${direction}, session ${sessionId}) DTLS state changed: ${dtlsState}`);
-      this.updateTransportHealth(transport.id);
-      if (dtlsState === 'failed' || dtlsState === 'closed') {
-        transport.close();
+      const transport = await router.createWebRtcTransport({
+        listenInfos,
+        enableUdp: true,
+        enableTcp: true,
+        preferUdp: true,
+        initialAvailableOutgoingBitrate: 2000000,
+      });
+      allocated = transport;
+      if (pending.cancelled || transport.closed) {
+        throw new Error('Transport creation was cancelled or closed during setup');
       }
-    });
 
-    transport.on('@close', () => {
-      console.log(`[SFU Server] Transport ${transport.id} closed`);
-      // Keep the failed direction until replacement/leave; forgetting it would
-      // let the opposite transport falsely report the whole session healthy.
+      console.log(`[SFU Server] Created ${purpose}/${direction} transport ${transport.id} for session ${sessionId} in channel ${channelId}`);
+      console.log(`[SFU Server] Transport ${transport.id} ICE candidates (${transport.iceCandidates.length}):`, transport.iceCandidates.map((c) => `${c.protocol?.toUpperCase()} ${c.ip || ('address' in c ? c.address : '')}:${c.port}`));
+
+      transport.on('icestatechange', (iceState) => {
+        console.log(`[SFU Server] Transport ${transport.id} (${direction}, session ${sessionId}) ICE state changed: ${iceState}`);
+        this.updateTransportHealth(transport.id);
+      });
+
+      transport.on('dtlsstatechange', (dtlsState) => {
+        console.log(`[SFU Server] Transport ${transport.id} (${direction}, session ${sessionId}) DTLS state changed: ${dtlsState}`);
+        this.updateTransportHealth(transport.id);
+        if (dtlsState === 'failed' || dtlsState === 'closed') {
+          transport.close();
+        }
+      });
+
+      transport.on('@close', () => {
+        console.log(`[SFU Server] Transport ${transport.id} closed`);
+        // Keep the failed direction until replacement/leave; forgetting it would
+        // let the opposite transport falsely report the whole session healthy.
+        this.updateTransportHealth(transport.id);
+      });
+      transport.on('routerclose', () => this.updateTransportHealth(transport.id));
+
+      const record: SfuTransportRecord = { transport, sessionId, channelId, direction, purpose, screenSessionId };
+      this.transports.set(transport.id, record);
       this.updateTransportHealth(transport.id);
-    });
-    transport.on('routerclose', () => this.updateTransportHealth(transport.id));
-
-    this.transports.set(transport.id, {
-      transport,
-      sessionId,
-      channelId,
-      direction,
-    });
-    this.updateTransportHealth(transport.id);
-
-    return {
-      id: transport.id,
-      iceParameters: transport.iceParameters,
-      iceCandidates: transport.iceCandidates,
-      dtlsParameters: transport.dtlsParameters,
-      sctpParameters: transport.sctpParameters,
-    };
+      if (pending.cancelled || transport.closed || this.transports.get(transport.id) !== record) {
+        throw new Error('Transport creation was cancelled or closed during registration');
+      }
+      registered = true;
+      return {
+        id: transport.id,
+        iceParameters: transport.iceParameters,
+        iceCandidates: transport.iceCandidates,
+        dtlsParameters: transport.dtlsParameters,
+        sctpParameters: transport.sctpParameters,
+      };
+    } finally {
+      this.pendingTransports.delete(pending);
+      if (allocated && !registered) {
+        if (this.transports.get(allocated.id)?.transport === allocated) this.transports.delete(allocated.id);
+        allocated.close();
+      }
+    }
   }
 
   /** Reaps an allocation abandoned before its response, without touching a newer bot session. */
@@ -508,11 +579,11 @@ export class SfuManager {
   }
 
   /**
-   * Closes whatever this session already had for one direction in a channel,
+   * Closes what this session already had for one purpose/direction in a channel,
    * and reports the producers that went with it.
    *
-   * A client only ever uses one transport per direction, so an earlier one is
-   * abandoned by definition once it asks for another — which is what a rejoin
+   * Each purpose/screen engine uses one transport per direction, so an earlier
+   * one in that same scope is abandoned on replacement — which is what a rejoin
    * does. Nothing on the wire says so: the client's `leave()` is local, and a
    * transport whose ICE never completed never reaches the `dtlsstatechange`
    * that would close it. Without this, a client retrying behind a broken
@@ -522,50 +593,52 @@ export class SfuManager {
   public closeTransportsFor(
     sessionId: string,
     channelId: string,
-    direction: 'send' | 'recv'
+    direction: 'send' | 'recv',
+    purpose: RtcTransportPurpose = 'call',
+    screenSessionId?: string
   ): { closedProducerIds: string[] } {
+    this.cancelPendingTransports(pending => pending.sessionId === sessionId && pending.channelId === channelId
+      && pending.direction === direction && pending.purpose === purpose && pending.screenSessionId === screenSessionId);
     const staleTransportIds = new Set<string>();
     for (const [id, record] of Array.from(this.transports.entries())) {
-      if (record.sessionId === sessionId && record.channelId === channelId && record.direction === direction) {
+      if (record.sessionId === sessionId && record.channelId === channelId
+        && record.direction === direction && record.purpose === purpose && record.screenSessionId === screenSessionId) {
         staleTransportIds.add(id);
       }
     }
     if (staleTransportIds.size === 0) return { closedProducerIds: [] };
+    return this.closeTransportRecords(staleTransportIds);
+  }
 
-    // Closing a transport closes its producers and consumers in mediasoup, but
-    // our own bookkeeping is not notified — leaving entries behind that other
-    // participants would still be told to consume. A session's producers live
-    // on its send transport and its consumers on its recv one, and this runs
-    // before the replacement exists, so everything it has for this direction
-    // in this channel belongs to the transports being dropped.
+  public closeTransport(
+    sessionId: string, channelId: string, transportId: string, purpose: RtcTransportPurpose
+  ): { closedProducerIds: string[] } | null {
+    const record = this.transports.get(transportId);
+    if (!record) return { closedProducerIds: [] };
+    if (record.sessionId !== sessionId || record.channelId !== channelId || record.purpose !== purpose) return null;
+    return this.closeTransportRecords(new Set([transportId]));
+  }
+
+  private closeTransportRecords(transportIds: ReadonlySet<string>): { closedProducerIds: string[] } {
     const closedProducerIds: string[] = [];
-    if (direction === 'send') {
-      for (const [id, record] of Array.from(this.producers.entries())) {
-        if (record.sessionId === sessionId && record.channelId === channelId) {
-          closedProducerIds.push(id);
-          this.producers.delete(id);
-        }
-      }
-    } else {
-      for (const [id, record] of Array.from(this.consumers.entries())) {
-        if (record.sessionId === sessionId && record.channelId === channelId) {
-          this.consumers.delete(id);
-        }
-      }
-    }
-
-    for (const id of staleTransportIds) {
+    for (const id of transportIds) {
       const record = this.transports.get(id);
       if (!record) continue;
+      const producers = [...this.producers].filter(([, producer]) => producer.transportId === id);
+      const consumers = [...this.consumers].filter(([, consumer]) => consumer.transportId === id);
       console.log(
-        `[SFU Server] Replacing abandoned ${direction} transport ${id} for session ${sessionId} in channel ${channelId}`
+        `[SFU Server] Closing ${record.purpose}/${record.direction} transport ${id} for session ${record.sessionId} in channel ${record.channelId}`
       );
-      try {
-        record.transport.close();
-      } catch {}
+      record.transport.close();
       this.transports.delete(id);
+      for (const [producerId, producer] of producers) {
+        if (this.producers.get(producerId) === producer) this.producers.delete(producerId);
+        closedProducerIds.push(producerId);
+      }
+      for (const [consumerId, consumer] of consumers) {
+        if (this.consumers.get(consumerId) === consumer) this.consumers.delete(consumerId);
+      }
     }
-
     return { closedProducerIds };
   }
 
@@ -581,6 +654,7 @@ export class SfuManager {
     sessionId: string,
     keepChannelId: string
   ): { closedProducerIds: Array<{ channelId: string; producerId: string }> } {
+    this.cancelPendingTransports(pending => pending.sessionId === sessionId && pending.channelId !== keepChannelId);
     const closedProducerIds: Array<{ channelId: string; producerId: string }> = [];
 
     for (const [id, record] of Array.from(this.producers.entries())) {
@@ -662,12 +736,28 @@ export class SfuManager {
     if (!record) {
       throw new Error(`Transport ${transportId} not found`);
     }
+    if (!this.ownsTransport(sessionId, channelId, transportId, 'send')) {
+      throw new Error('Producer transport does not belong to this voice session');
+    }
+    if (record.purpose === 'screen' && !isScreenMedia(appData)) {
+      throw new Error('Screen transport only accepts screen video and screen audio');
+    }
+    if (appData.nativeScreen !== undefined) {
+      const nativeScreen = nativeScreenRenditionSchema.parse(appData.nativeScreen);
+      if (record.purpose !== 'screen' || record.screenSessionId !== nativeScreen.pipelineId || !isScreenMedia(appData)) {
+        throw new Error('Native screen media must belong to its own rendition transport');
+      }
+    }
 
     const producer = await record.transport.produce({
       kind,
       rtpParameters,
       appData,
     });
+    if (this.transports.get(transportId) !== record || record.transport.closed) {
+      producer.close();
+      throw new Error('Producer transport was closed during setup');
+    }
 
     console.log(`[SFU Server] Producer created ${producer.id} (${kind}, mediaType: ${appData?.mediaType || 'unknown'}) on transport ${transportId} for session ${sessionId}`);
 
@@ -683,6 +773,7 @@ export class SfuManager {
 
     this.producers.set(producer.id, {
       producer,
+      transportId,
       sessionId,
       channelId,
       kind,
@@ -710,15 +801,31 @@ export class SfuManager {
     if (!transportRecord) {
       throw new Error(`Transport ${transportId} not found`);
     }
+    if (!this.ownsTransport(sessionId, channelId, transportId, 'recv')) {
+      throw new Error('Consumer transport does not belong to this voice session');
+    }
 
     const producerRecord = this.producers.get(producerId);
     if (!producerRecord || producerRecord.producer.closed) {
       throw new SfuProducerClosedError(producerId);
     }
+    if (producerRecord.channelId !== channelId || producerRecord.sessionId === sessionId) {
+      throw new Error('Producer is not a remote source in this voice channel');
+    }
+    if (transportRecord.purpose === 'screen' && !isScreenMedia(producerRecord.appData)) {
+      throw new Error('Screen transport only receives screen video and screen audio');
+    }
+    const channelProducerCount = this.getProducersInChannel(channelId).length;
+    const consumerCount = [...this.consumers.values()].filter(record => record.sessionId === sessionId).length;
+    if (consumerCount >= Math.max(16, channelProducerCount * 2)) {
+      throw new Error('Too many consumers for this voice session');
+    }
 
     const router = await this.getOrCreateRouter(channelId);
     const producerIsGone = () => this.producers.get(producerId) !== producerRecord || producerRecord.producer.closed;
+    const transportIsGone = () => this.transports.get(transportId) !== transportRecord || transportRecord.transport.closed;
     if (producerIsGone()) throw new SfuProducerClosedError(producerId);
+    if (transportIsGone()) throw new Error('Consumer transport was closed during setup');
     if (!router.canConsume({ producerId, rtpCapabilities })) {
       throw new Error(`Cannot consume producer ${producerId} with provided capabilities`);
     }
@@ -728,7 +835,7 @@ export class SfuManager {
       consumer = await transportRecord.transport.consume({
         producerId,
         rtpCapabilities,
-        paused: false,
+        paused: isScreenMedia(producerRecord.appData),
       });
     } catch (error) {
       if (producerIsGone()) throw new SfuProducerClosedError(producerId);
@@ -737,6 +844,10 @@ export class SfuManager {
     if (producerIsGone()) {
       consumer.close();
       throw new SfuProducerClosedError(producerId);
+    }
+    if (transportIsGone()) {
+      consumer.close();
+      throw new Error('Consumer transport was closed during setup');
     }
 
     console.log(`[SFU Server] Consumer created ${consumer.id} (${consumer.kind}) for session ${sessionId} consuming producer ${producerId} (owner: ${producerRecord.sessionId}, type: ${producerRecord.appData?.mediaType})`);
@@ -758,6 +869,7 @@ export class SfuManager {
 
     this.consumers.set(consumer.id, {
       consumer,
+      transportId,
       sessionId,
       channelId,
       producerId,
@@ -781,6 +893,16 @@ export class SfuManager {
     }
   }
 
+  public closeProducerForSession(
+    sessionId: string, channelId: string, producerId: string
+  ): { closedProducerIds: string[] } | null {
+    const record = this.producers.get(producerId);
+    if (!record) return { closedProducerIds: [] };
+    if (record.sessionId !== sessionId || record.channelId !== channelId) return null;
+    this.closeProducer(producerId);
+    return { closedProducerIds: [producerId] };
+  }
+
   public discardPendingConsumer(consumerId: string): void {
     const record = this.consumers.get(consumerId);
     if (!record) return;
@@ -788,23 +910,66 @@ export class SfuManager {
     record.consumer.close();
   }
 
-  public async setConsumerPaused(consumerId: string, paused: boolean): Promise<void> {
+  public ownsTransport(
+    sessionId: string, channelId: string, transportId: string, direction?: 'send' | 'recv', purpose?: RtcTransportPurpose
+  ): boolean {
+    const record = this.transports.get(transportId);
+    return !!record && record.sessionId === sessionId && record.channelId === channelId
+      && !record.transport.closed && (!direction || record.direction === direction)
+      && (!purpose || record.purpose === purpose);
+  }
+
+  public ownsProducer(sessionId: string, channelId: string, producerId: string, purpose?: RtcTransportPurpose): boolean {
+    const record = this.producers.get(producerId);
+    return !!record && record.sessionId === sessionId && record.channelId === channelId
+      && (!purpose || this.ownsTransport(sessionId, channelId, record.transportId, 'send', purpose));
+  }
+
+  public closeConsumer(sessionId: string, channelId: string, consumerId: string): boolean {
     const record = this.consumers.get(consumerId);
-    if (!record) return;
+    // The producer or parent transport may have closed it before this request.
+    if (!record) return true;
+    if (record.sessionId !== sessionId || record.channelId !== channelId) return false;
+    record.consumer.close();
+    if (this.consumers.get(consumerId) === record) this.consumers.delete(consumerId);
+    return true;
+  }
+
+  public async setProducerPaused(sessionId: string, channelId: string, producerId: string, paused: boolean): Promise<void> {
+    const record = this.producers.get(producerId);
+    if (!record || record.producer.closed) throw new SfuProducerClosedError(producerId);
+    if (!this.ownsProducer(sessionId, channelId, producerId, 'screen') || !isScreenMedia(record.appData)) {
+      throw new Error('Producer is not owned screen media in this voice session');
+    }
+    if (paused) await record.producer.pause();
+    else await record.producer.resume();
+    if (this.producers.get(producerId) !== record || record.producer.closed) {
+      record.producer.close();
+      throw new SfuProducerClosedError(producerId);
+    }
+  }
+
+  public async setConsumerPaused(sessionId: string, channelId: string, consumerId: string, paused: boolean): Promise<boolean> {
+    const record = this.consumers.get(consumerId);
+    if (!record || record.sessionId !== sessionId || record.channelId !== channelId || record.consumer.closed) return false;
     const producer = this.producers.get(record.producerId);
     const retired = () => record.consumer.closed || this.consumers.get(consumerId) !== record ||
       !producer || producer.producer.closed || this.producers.get(record.producerId) !== producer;
-    // The worker may remove a consumer before its producerclose notification reaches Node.
-    if (retired()) return;
+    // A worker can retire the consumer before Node receives producerclose.
+    if (retired()) return false;
     try {
-      if (paused) {
-        await record.consumer.pause();
-      } else {
-        await record.consumer.resume();
-      }
+      if (paused) await record.consumer.pause();
+      else await record.consumer.resume();
     } catch (error) {
       if (!retired()) throw error;
+      return false;
     }
+    // Closing a producer/transport can interleave with a worker response.
+    if (retired()) {
+      record.consumer.close();
+      return false;
+    }
+    return true;
   }
 
   public getProducersForChannel(channelId: string, excludeSessionId?: string): SfuProducerRecord[] {
@@ -820,6 +985,7 @@ export class SfuManager {
   }
 
   public closeSession(sessionId: string): { closedProducerIds: string[] } {
+    this.cancelPendingTransports(pending => pending.sessionId === sessionId);
     const closedProducerIds: string[] = [];
 
     // Close producers for session
@@ -851,6 +1017,7 @@ export class SfuManager {
   }
 
   public closeChannel(channelId: string): void {
+    this.cancelPendingTransports(pending => pending.channelId === channelId);
     for (const [id, record] of Array.from(this.producers.entries())) {
       if (record.channelId === channelId) {
         record.producer.close();
@@ -883,6 +1050,8 @@ export class SfuManager {
     this.generation++;
     this.initializationPromise = null;
     const errors: unknown[] = [];
+    this.cancelPendingTransports(() => true);
+    this.pendingTransports.clear();
     for (const router of this.routers.values()) {
       try {
         router.close();
