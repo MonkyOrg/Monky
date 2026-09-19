@@ -48,9 +48,10 @@ function configText(value = solution()) {
 
 class Fixture {
   constructor(t) {
-    this.root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-rtc-bootstrap-'));
+    const temporary = fs.realpathSync(os.tmpdir());
+    this.root = fs.mkdtempSync(path.join(temporary, 'monky-rtc-bootstrap-'));
     t.after(() => {
-      assert.equal(path.dirname(this.root), os.tmpdir());
+      assert.equal(path.dirname(this.root), temporary);
       assert.ok(path.basename(this.root).startsWith('monky-rtc-bootstrap-'));
       fs.rmSync(this.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     });
@@ -311,8 +312,8 @@ test('source dependency pins do not opt into downloads or claim a binary build',
   assert.equal(argumentsFor([]).action, 'check');
   assert.equal(argumentsFor(['--json']).action, 'check');
   assert.equal(argumentsFor(['fetch']).action, 'fetch');
-  assert.equal(argumentsFor(['--gclient-python=C:\\native-tools\\venv\\Scripts\\python.exe']).gclientPython,
-    'C:\\native-tools\\venv\\Scripts\\python.exe');
+  const runtime = path.resolve('native-tools', 'venv', 'Scripts', 'python.exe');
+  assert.equal(argumentsFor([`--gclient-python=${runtime}`]).gclientPython, runtime);
   for (const args of [['sync'], ['--workspace=C:\\rtc'], ['fetch', 'fetch'], ['--git=relative.exe'],
     ['--gclient-python=relative.exe'],
     ['--command-timeout-seconds=0'], ['--command-timeout-seconds=7201'], ['fetch', '--help']]) {
@@ -343,7 +344,7 @@ test('platform, ambiguous tools, components and SDK patch block before writes/do
       if (scenario === 'python-arch') fixture.pythonPointerBits = 32;
       if (scenario === 'components') fixture.vsInstances = [];
       if (scenario === 'sdk-version') fixture.sdkVersions['bin\\10.0.26100.0\\x64\\rc.exe'] = '10.0.26100.1';
-      if (scenario === 'sdk-file') fs.unlinkSync(path.join(fixture.sdk, 'Debuggers', 'x64', 'dbgcore.dll'));
+      if (scenario === 'sdk-file') fs.unlinkSync(path.join(fixture.sdk, 'Debuggers\\x64\\dbgcore.dll'));
       const report = await execute(fixture.context, { action: 'fetch' });
       assert.equal(report.status, 'blocked');
       assert.equal(report.canFetch, false);
@@ -903,8 +904,9 @@ test('Python Manager is never launched or used to install an absent interpreter'
   assert.deepEqual(fixture.calls, []);
 });
 
-test('real Python literal helper stays offline and does not execute configuration', async () => {
-  const python = selectExecutable(createContext(), undefined, ['python.exe', 'python3.exe'], 'Python');
+test('real Python literal helper stays offline and does not execute configuration',
+  { skip: process.platform !== 'win32' }, async () => {
+  const python = selectExecutable(createContext(), process.env.PYTHON, ['python.exe', 'python3.exe'], 'Python');
   const result = await spawnRunner({
     exe: python, args: ['-I', '-S', '-B', path.join(toolsDirectory, 'windows_support.py'), 'self-test'],
     cwd: __dirname, env: { ...process.env }, timeoutMs: 15000, maxOutputBytes: 65536, guarded: false,
@@ -914,9 +916,10 @@ test('real Python literal helper stays offline and does not execute configuratio
   assert.deepEqual(JSON.parse(result.stdout), { success: true, tests: 6, network: false, mutations: false });
 });
 
-test('real offline venv probe validates imports, versions, origins and isolation without pip', async t => {
+test('real offline venv probe validates imports, versions, origins and isolation without pip',
+  { skip: process.platform !== 'win32' }, async t => {
   const fixture = new Fixture(t);
-  const python = selectExecutable(createContext(), undefined, ['python.exe', 'python3.exe'], 'Python');
+  const python = selectExecutable(createContext(), process.env.PYTHON, ['python.exe', 'python3.exe'], 'Python');
   const run = (exe, args, input) => spawnRunner({
     exe, args, input, cwd: fixture.root,
     env: { ...process.env, PYTHONPATH: path.join(fixture.root, 'foreign'), PYTHONDONTWRITEBYTECODE: '1' },
@@ -986,9 +989,10 @@ test('real offline venv probe validates imports, versions, origins and isolation
   assert.match(foreignModule.stderr, /outside its dedicated venv/u);
 });
 
-test('private Windows job executes only a small owned Node command without a shell', async t => {
+test('private Windows job executes only a small owned Node command without a shell',
+  { skip: process.platform !== 'win32' }, async t => {
   const fixture = new Fixture(t);
-  const python = selectExecutable(createContext(), undefined, ['python.exe', 'python3.exe'], 'Python');
+  const python = selectExecutable(createContext(), process.env.PYTHON, ['python.exe', 'python3.exe'], 'Python');
   const result = await spawnRunner({
     exe: python,
     args: ['-I', '-S', '-B', path.join(toolsDirectory, 'owned_process.py'),
@@ -1001,9 +1005,10 @@ test('private Windows job executes only a small owned Node command without a she
   assert.deepEqual(JSON.parse(result.stdout), ['space and "quote"']);
 });
 
-test('private job deadline closes only its own non-media Node process', async t => {
+test('private job deadline closes only its own non-media Node process',
+  { skip: process.platform !== 'win32' }, async t => {
   const fixture = new Fixture(t);
-  const python = selectExecutable(createContext(), undefined, ['python.exe', 'python3.exe'], 'Python');
+  const python = selectExecutable(createContext(), process.env.PYTHON, ['python.exe', 'python3.exe'], 'Python');
   const result = await spawnRunner({
     exe: python,
     args: ['-I', '-S', '-B', path.join(toolsDirectory, 'owned_process.py'),

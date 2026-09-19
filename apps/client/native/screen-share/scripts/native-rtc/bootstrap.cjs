@@ -80,7 +80,9 @@ function validateManifest(manifest) {
   for (const name of REPOSITORIES) {
     const repo = manifest.repositories[name];
     requireValue(SHA.test(repo.commit) && httpsSource(repo.url) &&
-      samePath(repo.directory, DIRECTORIES[name]) && repo.license?.file === 'LICENSE',
+      typeof repo.directory === 'string' &&
+      path.win32.normalize(repo.directory).toLowerCase() === path.win32.normalize(DIRECTORIES[name]).toLowerCase() &&
+      repo.license?.file === 'LICENSE',
     'ERR_RTC_MANIFEST', `Invalid immutable pin/source/directory/license for ${name}.`);
   }
   requireValue(manifest.bootstrap.solutionName === 'src' && manifest.bootstrap.managed === false &&

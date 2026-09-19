@@ -12,14 +12,16 @@ function options(argv) {
   const seen = new Set();
   for (const argument of argv) {
     const at = argument.indexOf('='), key = argument.slice(0, at), value = argument.slice(at + 1);
-    assert.ok(at > 0 && value && !seen.has(key), 'Use unique --python= and --jobs= options.');
+    assert.ok(at > 0 && value && !seen.has(key), 'Use unique --python=, --git= and --jobs= options.');
     seen.add(key);
     if (key === '--python') result.python = value;
+    else if (key === '--git') result.git = value;
     else if (key === '--jobs') result.jobs = Number(value);
     else throw new Error(`Unknown native preparation option: ${key}`);
   }
   assert.ok(result.python && path.isAbsolute(result.python),
     'Provide --python=<absolute CPython 3.11 executable>, or set PYTHON. Python launchers are not supported.');
+  assert.ok(result.git === undefined || path.isAbsolute(result.git), 'Select Git with an absolute executable path.');
   assert.ok(Number.isInteger(result.jobs) && result.jobs >= 1 && result.jobs <= 16, 'Native build jobs must be 1..16.');
   return result;
 }
@@ -41,7 +43,8 @@ async function prepare(config) {
       'install', '--no-warn-script-location', ...requirements]);
   }
   execute(process.execPath, [path.join(__dirname, 'native-rtc', 'bootstrap.cjs'), 'fetch',
-    `--python=${config.python}`, `--gclient-python=${interpreter}`]);
+    `--python=${config.python}`, `--gclient-python=${interpreter}`,
+    ...(config.git ? [`--git=${config.git}`] : [])]);
   const capture = await fetchObs();
   require('./buildRtc.cjs').build({
     webrtcRoot: path.join(cache, 'rtc', 'webrtc', 'src'), python: interpreter, jobs: config.jobs,

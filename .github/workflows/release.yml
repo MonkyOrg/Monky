@@ -133,7 +133,9 @@ jobs:
         shell: pwsh
         run: |
           $env:PYTHON = (Get-Command python).Source
-          npm run prepare:native-screen -- --python="$env:PYTHON" --jobs=4
+          "PYTHON=$env:PYTHON" >> $env:GITHUB_ENV
+          $Git = (Get-Command git -CommandType Application).Source
+          npm run prepare:native-screen -- --python="$env:PYTHON" --git="$Git" --jobs=4
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run pack:native-sources -- --version=${{ needs.version.outputs.version }}
 

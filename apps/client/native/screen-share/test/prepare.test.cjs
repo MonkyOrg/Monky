@@ -14,3 +14,11 @@ test('native preparation requires explicit Python and bounded build parallelism'
     [`--python=${python}`, '--jobs=2', '--jobs=3'], ['--python'],
   ]) assert.throws(() => options(args));
 });
+
+test('native preparation can select Git explicitly without accepting ambiguous or relative arguments', () => {
+  const python = path.resolve('tools', 'python.exe');
+  const git = path.resolve('tools', 'git.exe');
+  assert.deepEqual(options([`--python=${python}`, `--git=${git}`]), { python, git, jobs: 4 });
+  assert.throws(() => options([`--python=${python}`, '--git=relative.exe']));
+  assert.throws(() => options([`--python=${python}`, `--git=${git}`, `--git=${git}`]));
+});
