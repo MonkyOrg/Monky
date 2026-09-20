@@ -7,7 +7,7 @@ import { CliError, cliText, isInteractiveCliAccess } from '../cli/locale';
 import { validateBotName } from '../cli/config';
 import { isRecord, loadBotProject } from './config';
 import { runNpm } from './process';
-import { bundleDependencies } from './bundle';
+import { bundlePackage } from './bundle';
 import { askBotFeature, featureProjectFiles, validateFeatures, type BotFeature } from './features';
 
 export function validateProjectName(value: string): string {
@@ -84,10 +84,9 @@ export function createBotProject(options: CreateBotOptions): string {
   let stage = 'SDK / npm pack';
   const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-bot-create-'));
   try {
-    fs.writeFileSync(path.join(staging, 'package.json'), JSON.stringify({ name: 'monky-scaffold-sdk', version: '1.0.0' }));
-    bundleDependencies(staging, staging, new Map([['@monky/bot-sdk', sdkRoot]]));
+    bundlePackage(sdkRoot, staging);
     runNpm(['pack', '--ignore-scripts', '--silent', '--pack-destination', path.join(target, 'vendor')], {
-      cwd: path.join(staging, 'node_modules', '@monky', 'bot-sdk'),
+      cwd: staging,
     });
     const archives = fs.readdirSync(path.join(target, 'vendor')).filter(file => file.endsWith('.tgz'));
     if (archives.length !== 1) throw new Error('SDK packaging did not produce exactly one archive.');

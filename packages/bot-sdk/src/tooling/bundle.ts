@@ -40,13 +40,19 @@ function lookupPaths(requester: string, name: string): string[] {
   return createRequire(path.join(requester, 'package.json')).resolve.paths(`${name}/package.json`) ?? [];
 }
 
-export function resolvePackage(requester: string, name: string): string | null {
+function packageLocation(requester: string, name: string): { source: string; modules: string } | null {
   packageName(name);
   for (const directory of lookupPaths(requester, name)) {
     const candidate = path.join(directory, name);
-    if (fs.existsSync(path.join(candidate, 'package.json'))) return fs.realpathSync(candidate);
+    if (fs.existsSync(path.join(candidate, 'package.json'))) {
+      return { source: fs.realpathSync(candidate), modules: fs.realpathSync(directory) };
+    }
   }
   return null;
+}
+
+export function resolvePackage(requester: string, name: string): string | null {
+  return packageLocation(requester, name)?.source ?? null;
 }
 
 export function isPrivateRuntimePath(relative: string): boolean {
@@ -132,14 +138,20 @@ export function bundleDependencies(
   sourceRoot: string, destinationRoot: string, extraRootDependencies: ReadonlyMap<string, string> = new Map()
 ): { dependencies: Record<string, string>; packageCount: number } {
   const placed = new Map<string, string>();
+  const copied = new Set<string>();
+  const locations = new Map<string, string>([[fs.realpathSync(sourceRoot), path.resolve(destinationRoot)]]);
+  const rootModules = path.join(path.resolve(destinationRoot), 'node_modules');
+  const moduleDirectories = new Map<string, string>();
+  const edges: Array<{ name: string; requester: string; destination: string }> = [];
   let packageCount = 0;
 
   function copyDependency(
     name: string, requesterSource: string, requesterDestination: string, optional: boolean,
-    ancestors: string[], override?: string
+    override?: string
   ): string | null {
     packageName(name);
-    const source = override ? fs.realpathSync(override) : resolvePackage(requesterSource, name);
+    const resolved = packageLocation(requesterSource, name);
+    const source = override ? fs.realpathSync(override) : resolved?.source;
     if (!source) {
       if (optional) return null;
       throw new Error(`Missing required dependency "${name}", requested by ${requesterSource}.`);
@@ -148,21 +160,32 @@ export function bundleDependencies(
     if (typeof pkg.name !== 'string' || !isBotVersion(pkg.version)) throw new Error(`Invalid dependency metadata at ${source}.`);
     packageName(pkg.name);
     const spec = name === pkg.name ? pkg.version : `npm:${pkg.name}@${pkg.version}`;
-    for (const directory of lookupPaths(requesterDestination, name)) {
-      const existing = placed.get(path.join(directory, name));
-      if (existing !== undefined) {
-        if (existing === source) return spec;
-        break;
-      }
+    const modules = resolved?.source === source ? resolved.modules : path.join(requesterSource, 'node_modules');
+    let destinationModules = moduleDirectories.get(modules);
+    if (!destinationModules) {
+      const owner = locations.get(path.dirname(modules));
+      destinationModules = owner ? path.join(owner, 'node_modules') : rootModules;
+      moduleDirectories.set(modules, destinationModules);
     }
-    if (ancestors.includes(source)) throw new Error(`Cannot preserve a shadowed dependency cycle involving "${name}".`);
-    const destination = path.join(requesterDestination, 'node_modules', name);
-    copyPackage(source, destination, pkg);
+    // Cloning a shared module per consumer splits class identities and registries (e.g. ASN.1).
+    let destination = locations.get(source) ?? path.join(destinationModules, name);
+    if (!locations.has(source) && placed.has(destination) && placed.get(destination) !== source) {
+      destination = path.join(requesterDestination, 'node_modules', name);
+    }
+    const existing = placed.get(destination);
+    if (existing !== undefined && existing !== source) {
+      throw new Error(`Conflicting dependency locations for "${name}" at ${destination}.`);
+    }
+    edges.push({ name, requester: requesterDestination, destination });
+    if (copied.has(destination)) return spec;
+    locations.set(source, destination);
     placed.set(destination, source);
+    copied.add(destination);
+    copyPackage(source, destination, pkg);
     packageCount++;
     const children: Array<[string, string]> = [];
     for (const [child, isOptional] of productionDependencies(pkg)) {
-      const childSpec = copyDependency(child, source, destination, isOptional, [...ancestors, source]);
+      const childSpec = copyDependency(child, source, destination, isOptional);
       if (childSpec !== null) children.push([child, childSpec]);
     }
     fs.writeFileSync(path.join(destination, 'package.json'),
@@ -185,10 +208,46 @@ export function bundleDependencies(
 
   const requested = productionDependencies(packageJson(sourceRoot));
   for (const name of extraRootDependencies.keys()) requested.set(name, false);
+  for (const name of requested.keys()) {
+    const resolved = packageLocation(sourceRoot, name);
+    const override = extraRootDependencies.get(name);
+    const source = override ? fs.realpathSync(override) : resolved?.source;
+    if (source) {
+      const destination = path.join(rootModules, name);
+      const existing = locations.get(source);
+      if (existing !== undefined && existing !== destination) {
+        throw new Error(`Cannot preserve the shared identity of "${name}" at ${source}.`);
+      }
+      locations.set(source, destination);
+      placed.set(destination, source);
+    }
+    if (resolved && (!override || resolved.source === fs.realpathSync(override))) {
+      moduleDirectories.set(resolved.modules, rootModules);
+    }
+  }
   const dependencies: Array<[string, string]> = [];
   for (const [name, optional] of requested) {
-    const spec = copyDependency(name, fs.realpathSync(sourceRoot), destinationRoot, optional, [], extraRootDependencies.get(name));
+    const spec = copyDependency(name, fs.realpathSync(sourceRoot), path.resolve(destinationRoot), optional, extraRootDependencies.get(name));
     if (spec !== null) dependencies.push([name, spec]);
   }
+  for (const { name, requester, destination } of edges) {
+    if (resolvePackage(requester, name) !== fs.realpathSync(destination)) {
+      throw new Error(`Bundled dependency "${name}" resolves to the wrong instance from ${requester}.`);
+    }
+  }
   return { dependencies: Object.fromEntries(dependencies), packageCount };
+}
+
+export function bundlePackage(
+  sourceRoot: string, destinationRoot: string, extraRootDependencies: ReadonlyMap<string, string> = new Map()
+): { dependencies: Record<string, string>; packageCount: number } {
+  const source = fs.realpathSync(sourceRoot);
+  const pkg = packageJson(source);
+  if (typeof pkg.name !== 'string' || !isBotVersion(pkg.version)) throw new Error(`Invalid dependency metadata at ${source}.`);
+  packageName(pkg.name);
+  copyPackage(source, destinationRoot, pkg);
+  const result = bundleDependencies(source, destinationRoot, extraRootDependencies);
+  fs.writeFileSync(path.join(destinationRoot, 'package.json'),
+    JSON.stringify(sanitizedPackage(pkg, result.dependencies), null, 2) + '\n');
+  return result;
 }

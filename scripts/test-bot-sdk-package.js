@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { PROTOCOL_VERSION } from '@monky/shared';
 import { runNpm } from '../packages/bot-sdk/dist/tooling/process.js';
 import { runSdkInstaller } from '../packages/bot-sdk/dist/tooling/install.js';
@@ -11,10 +13,11 @@ import { runSdkInstaller } from '../packages/bot-sdk/dist/tooling/install.js';
 const tarball = path.resolve(process.argv[2] || '');
 assert.ok(process.argv[2] && fs.statSync(tarball).isFile(), 'Pass the SDK tarball to test.');
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-sdk-package-'));
-const env = { ...process.env, NODE_PATH: '', npm_config_audit: 'false', npm_config_fund: 'false' };
+const env = { ...process.env, NODE_PATH: '', NODE_OPTIONS: '', npm_config_audit: 'false', npm_config_fund: 'false' };
 
 try {
-  runNpm(['install', '--offline', '--ignore-scripts', '--no-save', '--package-lock=false', '--omit=dev', tarball], {
+  runNpm(['install', '--prefix', workspace, '--cache', path.join(workspace, 'sdk-cache'), '--offline',
+    '--ignore-scripts', '--no-save', '--package-lock=false', '--omit=dev', tarball], {
     cwd: workspace, env, timeout: 120000,
   });
   execFileSync(process.execPath, ['-e', `
@@ -78,9 +81,34 @@ try {
       assert.equal(fs.existsSync(path.join(home, '.operator-bot', '.keys')), false);
     })().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: workspace, env, stdio: 'inherit', timeout: 15000 });
+  const fromInstalled = createRequire(path.join(workspace, 'package.json'));
+  const voiceFixture = fileURLToPath(new URL('./fixtures/packaged-sdk-voice.cjs', import.meta.url));
+  execFileSync(process.execPath, ['--no-global-search-paths', voiceFixture,
+    fromInstalled.resolve('@monky/bot-sdk/package.json'), workspace], {
+    cwd: workspace, env, stdio: 'inherit', timeout: 40000,
+  });
+  const project = path.join(workspace, 'generated-bot');
+  fromInstalled('@monky/bot-sdk/dist/tooling/create.js').createBotProject({
+    directory: project, name: 'generated-bot', displayName: 'Generated Bot', install: false,
+  });
+  const generated = JSON.parse(fs.readFileSync(path.join(project, 'package.json'), 'utf8'));
+  const sdkDependency = generated.dependencies['@monky/bot-sdk'];
+  assert.ok(sdkDependency.startsWith('file:vendor/'));
+  const generatedSdk = path.resolve(project, sdkDependency.slice('file:'.length));
+  const generatedInstall = path.join(workspace, 'generated-sdk-install');
+  fs.mkdirSync(generatedInstall);
+  runNpm(['install', '--prefix', generatedInstall, '--cache', path.join(workspace, 'generated-cache'), '--offline',
+    '--ignore-scripts', '--no-save', '--package-lock=false', '--omit=dev', generatedSdk], {
+    cwd: generatedInstall, env, timeout: 120000,
+  });
+  const fromGenerated = createRequire(path.join(generatedInstall, 'package.json'));
+  execFileSync(process.execPath, ['--no-global-search-paths', voiceFixture,
+    fromGenerated.resolve('@monky/bot-sdk/package.json'), generatedInstall], {
+    cwd: generatedInstall, env, stdio: 'inherit', timeout: 40000,
+  });
   await runSdkInstaller(['--file', tarball, '--sha256', createHash('sha256').update(fs.readFileSync(tarball)).digest('hex'),
     '--prefix', path.join(workspace, 'installed SDK'), '--no-path', '--locale', 'en-US']);
-  console.log('SDK tarball installed offline, served its manifest, preserved operator preferences and passed the per-user installer.');
+  console.log('SDK and scaffold tarballs installed offline and delivered real Opus; manifest, preferences and per-user installer passed.');
 } finally {
   fs.rmSync(workspace, { recursive: true, force: true });
 }
