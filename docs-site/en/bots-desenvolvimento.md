@@ -169,6 +169,12 @@ without starting a bot, creating an identity or connecting to a server. `build`
 produces the self-contained package described in [Distribution](/en/bots-distribuicao).
 `--root DIR` works with `add`, `doctor` and `build`; there is no `dev` command.
 
+Packaging the SDK, the SDK pinned by `create`, and the bot preserves shared
+dependency instances, including those used by voice certificates. Distinct
+versions or installations remain separate. If this resolution cannot be
+preserved, packaging fails explicitly instead of producing an archive that
+only fails when voice starts.
+
 ## 3. Link and start
 
 1. In Monky, open **server name → Server Settings → Bots**.

@@ -169,6 +169,12 @@ sem iniciar o bot, criar identidade ou conectar ao servidor. `build` gera o
 pacote autocontido descrito em [Distribuição](/bots-distribuicao).
 `--root PASTA` funciona com `add`, `doctor` e `build`; não existe comando `dev`.
 
+O empacotamento do SDK, do SDK fixado por `create` e do bot preserva as
+instâncias de dependências compartilhadas, inclusive as usadas pelos
+certificados de voz. Versões ou instalações distintas continuam separadas.
+Se essa resolução não puder ser preservada, o empacotamento falha explicitamente
+em vez de gerar um arquivo que só apresenta erro ao iniciar a voz.
+
 ## 3. Crie o vínculo e inicie
 
 1. No Monky, abra **nome do servidor → Configurações do Servidor → Bots**.
