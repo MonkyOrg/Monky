@@ -242,6 +242,7 @@ no aplicativo.
 | Preferências pessoais e comportamento por servidor | [Configurações](/bots-configuracao) | Escopos e permissões do servidor |
 | Prévia de áudio e download para Soundboard | [Áudio](/bots-audio) | `commands`; download também exige `sound_download` |
 | Publicar áudio P2P ou SFU | [Voz](/bots-voz) | `publish_voice` |
+| Receber microfones P2P ou SFU | [Recepção de voz](/bots-voz#receber-microfones) | `receive_voice` e opt-in na conexão |
 | Tarefas autorizadas no computador do usuário | [Execução local](/bots-execucao-local) | `local_execution` |
 | Telas HTML compartilhadas na sala de voz | [Miniapps](/bots-miniapps) | `miniapps` |
 | CLI, pacote instalável e atualização | [Distribuição](/bots-distribuicao) | Configuração do pacote |

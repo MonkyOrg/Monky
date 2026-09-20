@@ -3585,7 +3585,8 @@ input:focus, textarea:focus, select:focus {
   padding: 0;
   justify-content: center;
 }
-.bot-compact-command-form > .bot-error {
+.bot-compact-command-form > .bot-error,
+.bot-compact-command-form > .bot-command-preparation {
   margin: 4px 10px 8px;
 }
 .bot-parameter-menu {
@@ -6855,6 +6856,15 @@ button[data-loading="1"]::after {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+.bot-voice-listening {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--warning);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .bot-loading-spinner {

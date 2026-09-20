@@ -63,16 +63,32 @@ async function startBot() {
       'Production MonkyBot must export its actual requestedCapabilities alongside registerAllCommands; QA never invents a production declaration.');
   }
   const requestedCapabilities = shared.botCapabilitiesSchema.parse(production ? definition.requestedCapabilities :
-    ['commands', 'local_execution', ...(config.scenario === 'voice' ? ['publish_voice'] : [])]);
+    ['commands', 'local_execution', ...(config.scenario === 'voice' ? ['publish_voice'] :
+      config.scenario === 'voice-receive' ? ['receive_voice'] : [])]);
   const key = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' }).toString('hex');
   const bot = new sdk.BotClient({
     requestedCapabilities,
     publicKey: key, name: production ? 'MonkyBot QA production' : 'SDK QA fixture',
     registrationFile: path.join(process.cwd(), 'registrations.json'),
   });
-  let disposeCommands, voice;
+  let disposeCommands, voice, voiceReader;
+  let receivedPackets = 0;
   const connected = new Set();
-  const close = async () => { try { if (disposeCommands) await disposeCommands(); } finally { await bot.close(); } };
+  const close = async () => {
+    try { if (disposeCommands) await disposeCommands(); }
+    finally { await bot.close(); await voiceReader; }
+  };
+  const receive = connection => {
+    receivedPackets = 0;
+    voiceReader = (async () => {
+      for await (const packet of connection.receiveAudio()) {
+        assert.equal(packet.channelId, connection.channelId);
+        assert.ok(packet.sessionId && packet.userId && packet.opus.length);
+        receivedPackets++;
+      }
+    })().catch(error => { console.error('[QA voice receiver]', error); throw error; });
+    void voiceReader.catch(() => {});
+  };
   const approvedPermissions = async serverId => {
     const deadline = Date.now() + 20_000;
     while (!stopping && Date.now() < deadline) {
@@ -98,6 +114,28 @@ async function startBot() {
         localCapabilities: ['youtube-audio'],
         handler: context => context.reply('SDK consent fixture only; no music provider is simulated.'),
       });
+      if (config.scenario === 'voice-receive') bot.command({
+        name: 'qa-listen', description: 'Toggle the SDK fixture microphone reception.',
+        localizations: { 'pt-BR': { description: 'Alternar a escuta da fixture SDK.' } },
+        voiceRequirement: 'same-bot-channel',
+        handler: async context => {
+          const current = bot.getVoiceConnection(context.serverId);
+          if (current) {
+            await current.setDeafened(current.isReceivingAudio);
+            voice = current;
+          } else {
+            const channelId = await context.getVoiceChannel();
+            if (!channelId) throw new Error('Join the isolated QA voice room first.');
+            voice = await bot.joinVoice(context.serverId, channelId, {
+              receiveAudio: true, invocationId: context.invocationId,
+            });
+            receive(voice);
+          }
+          context.reply(context.locale === 'en'
+            ? `Listening: ${voice.isReceivingAudio ? 'on' : 'off'}. Packets received: ${receivedPackets}. No recording.`
+            : `Escuta: ${voice.isReceivingAudio ? 'ligada' : 'desligada'}. Pacotes recebidos: ${receivedPackets}. Sem gravação.`);
+        },
+      });
     }
     bot.on('connected', info => connected.add(info.serverId));
     bot.on('disconnected', info => connected.delete(info.serverId));
@@ -115,15 +153,17 @@ async function startBot() {
       ready: { manifestUrl: `http://127.0.0.1:${server.address().port}/manifest`, kind: production ? 'production' : 'sdk-fixture' },
       async snapshot() {
         const permissions = config.scenario === 'bot-install' ? null : await approvedPermissions();
-        return { connected: [...connected], permissions, voice: !!voice && !voice.isClosed, humanPeers: voice?.humanParticipantCount ?? 0 };
+        return { connected: [...connected], permissions, voice: !!voice && !voice.isClosed,
+          humanPeers: voice?.humanParticipantCount ?? 0, receiving: voice?.isReceivingAudio ?? false, receivedPackets };
       },
       async joinVoice(value) {
         assert.ok(value && typeof value.serverId === 'string' && typeof value.channelId === 'string');
         await approvedPermissions(value.serverId);
         assert.ok(connected.has(value.serverId), 'The bot has not authenticated with this QA server.');
-        voice = await bot.joinVoice(value.serverId, value.channelId);
+        voice = await bot.joinVoice(value.serverId, value.channelId, config.scenario === 'voice-receive' ? { receiveAudio: true } : {});
         assert.ok(!voice.isClosed && voice.humanParticipantCount > 0);
-        if (!production) await voice.writeOpus(Uint8Array.from([0xf8, 0xff, 0xfe]));
+        if (config.scenario === 'voice-receive') receive(voice);
+        else if (!production) await voice.writeOpus(Uint8Array.from([0xf8, 0xff, 0xfe]));
         return { joined: true };
       },
       close,

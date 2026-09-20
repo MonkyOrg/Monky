@@ -9,7 +9,7 @@ if (!process.versions.electron) {
   fs.mkdirSync(profile, { recursive: true });
   const env = { ...process.env, MONKY_VOICE_RENDERER_PROFILE: profile };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require('electron'), [__filename], { cwd: sdkRoot, env, stdio: 'inherit' });
+  const child = spawn(require('electron'), [__filename, ...process.argv.slice(2)], { cwd: sdkRoot, env, stdio: 'inherit' });
   const cleanup = () => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   child.once('error', (error) => { console.error(error); cleanup(); process.exitCode = 1; });
   child.once('exit', (code) => { cleanup(); process.exitCode = code ?? 1; });
@@ -24,10 +24,22 @@ if (!process.versions.electron) {
   app.on('window-all-closed', () => {});
   let vite, window, worker, router, p2p, sfu, botProducer, timeout, rosterVoice, rosterJoin, retiredPeer;
   let p2pTimer;
+  let listener, listenerJoin, listenerReader, listenerRecvTransport, humanProducer;
+  let received = { packets: 0, bytes: 0 };
+  const listenerJobs = new Set();
+  const human = {
+    user: { id: 'human', sessionId: 'aaa:human' },
+    voiceState: { sessionId: 'aaa:human', userId: 'human', channelId: 'room', isMuted: false, isDeafened: false },
+  };
   let powerBlocker;
   let mediaPaused = false;
   let mediaWrite = Promise.resolve();
   const outgoingSignals = [];
+  const listenerSignals = [];
+  const describeSignal = signal => ({
+    type: signal.signalType, from: signal.fromSessionId,
+    media: signal.sdp?.sdp.split(/\r?\n/).filter(line => /^(m=|a=mid:|a=(sendrecv|sendonly|recvonly|inactive)$)/.test(line)),
+  });
   const activityUpdates = [];
   const transports = new Map();
   const timers = new Set();
@@ -115,6 +127,8 @@ if (!process.versions.electron) {
     if (powerBlocker !== undefined) powerSaveBlocker.stop(powerBlocker);
     await stopMedia();
     for (const stream of streams) await stream.close();
+    await listenerReader;
+    await Promise.all(listenerJobs);
     if (window && !window.isDestroyed()) window.destroy();
     worker?.close();
     if (vite) await vite.close();
@@ -123,7 +137,7 @@ if (!process.versions.electron) {
   app.whenReady().then(async () => {
     // The hidden Electron fixture must stay awake like the real bot's Node process.
     powerBlocker = powerSaveBlocker.start('prevent-app-suspension');
-    audioFrames = generatedSine();
+    if (!process.argv.includes('--receive-only')) audioFrames = generatedSine();
     const [{ createServer }, mediasoup] = await Promise.all([import('vite'), import('mediasoup')]);
     worker = await mediasoup.createWorker({ logLevel: 'error' });
     router = await worker.createRouter({ mediaCodecs: [
@@ -133,8 +147,115 @@ if (!process.versions.electron) {
       id: transport.id, iceParameters: transport.iceParameters,
       iceCandidates: transport.iceCandidates, dtlsParameters: transport.dtlsParameters,
     });
+    async function listenerRequest(message) {
+      const payload = message.payload;
+      switch (message.type) {
+        case MessageType.VOICE_JOIN:
+          return { type: MessageType.VOICE_USER_JOINED, payload: {
+            ...roster[0], channelId: 'room', sessionId: botId, participants: [roster[0], human],
+          } };
+        case MessageType.VOICE_LEAVE:
+          listenerRecvTransport?.close();
+          return { type: MessageType.VOICE_USER_LEFT, payload: { channelId: 'room', sessionId: botId } };
+        case MessageType.VOICE_STATE_UPDATE:
+          roster[0].voiceState = { ...roster[0].voiceState, ...payload };
+          if (payload.isDeafened) listenerRecvTransport?.close();
+          return { type: MessageType.VOICE_STATE_CHANGED, payload: { voiceState: roster[0].voiceState } };
+        case MessageType.SFU_CREATE_WEBRTC_TRANSPORT: {
+          const response = await request(message.type, payload);
+          listenerRecvTransport = transports.get(response.transportOptions.id);
+          return { type: MessageType.SFU_WEBRTC_TRANSPORT_CREATED, payload: response };
+        }
+        case MessageType.SFU_CONNECT_WEBRTC_TRANSPORT:
+          await request(message.type, payload);
+          return { type: MessageType.SFU_WEBRTC_TRANSPORT_CONNECTED, payload: { channelId: 'room', transportId: payload.transportId } };
+        case MessageType.SFU_GET_PRODUCERS:
+          return { type: MessageType.SFU_PRODUCERS_LIST, payload: {
+            channelId: 'room', participants: [roster[0], human], producers: humanProducer ? [{
+              channelId: 'room', producerId: humanProducer.id, producerSessionId: humanId,
+              kind: 'audio', appData: { mediaType: 'mic' },
+            }] : [],
+          } };
+        case MessageType.SFU_CONSUME: {
+          if (payload.producerId !== humanProducer?.id) throw new Error('Listener requested something other than the human microphone');
+          const consumer = await transports.get(payload.transportId).consume({
+            producerId: payload.producerId, rtpCapabilities: payload.rtpCapabilities,
+          });
+          return { type: MessageType.SFU_CONSUMED, payload: {
+            channelId: 'room', id: consumer.id, producerId: humanProducer.id, producerSessionId: humanId,
+            kind: 'audio', appData: { mediaType: 'mic' }, rtpParameters: consumer.rtpParameters,
+          } };
+        }
+        default: throw new Error(`Unexpected listener request ${message.type}`);
+      }
+    }
     async function request(type, payload) {
       switch (type) {
+        case 'fixture.prepare-listener': {
+          await stopMedia();
+          await rosterVoice?.close();
+          await listener?.close();
+          await listenerReader;
+          rosterVoice = undefined;
+          outgoingSignals.length = 0;
+          humanProducer = undefined;
+          received = { packets: 0, bytes: 0 };
+          roster[0].voiceState = { ...roster[0].voiceState, receivesVoice: true,
+            isMuted: false, isDeafened: false, serverMuted: false, serverDeafened: false, isSpeaking: false,
+            botVoicePermissions: { publish: false, receive: true, publishRequested: false, receiveRequested: true } };
+          listener = new BotVoiceConnection('room', {
+            currentUser: roster[0].user, server: { voiceMode: payload.mode }, iceServers: [],
+          }, {
+            send(message) {
+              if (message.type === MessageType.RTC_SIGNAL) {
+                listenerSignals.push(describeSignal(message.payload));
+                outgoingSignals.push(message.payload);
+                return;
+              }
+              const connection = listener;
+              const job = listenerRequest(message).then(response => connection.handle({
+                ...response, requestId: message.requestId,
+              })).catch(error => {
+                errors.push(error.message);
+                connection.handle({ type: MessageType.SERVER_ERROR, requestId: message.requestId, payload: { message: error.message } });
+              }).finally(() => listenerJobs.delete(job));
+              listenerJobs.add(job);
+            },
+            participants() {}, disconnected() {}, error(error) { errors.push(error.message); },
+          }, false);
+          streams.add(listener);
+          listenerJoin = listener.join({ receiveAudio: true }).then(() => {
+            const receiver = listener.receiveAudio();
+            listenerReader = (async () => {
+              for await (const packet of receiver) {
+                if (packet.sessionId !== humanId || packet.userId !== 'human' || packet.channelId !== 'room' ||
+                    packet.codec !== 'opus' || packet.clockRate !== 48000 || !(packet.opus instanceof Uint8Array)) {
+                  throw new Error('Received microphone has invalid source or encoding metadata');
+                }
+                validateOpus(packet.opus);
+                received.packets++;
+                received.bytes += packet.opus.length;
+              }
+            })().catch(error => errors.push(error.message));
+          });
+          void listenerJoin.catch(error => errors.push(error.message));
+          return { voiceState: roster[0].voiceState };
+        }
+        case 'fixture.listener-ready':
+          await listenerJoin;
+          return received;
+        case 'fixture.listener-stats':
+          return received;
+        case 'fixture.listener-deafen':
+          await listener.setDeafened(payload.deafened);
+          return { voiceState: roster[0].voiceState };
+        case 'fixture.listener-stop': {
+          const pcs = [...listener.peers.values()].map(peer => peer.pc);
+          if (listener.sfuReceive) pcs.push(listener.sfuReceive.peer.pc);
+          await listener.close();
+          await listenerReader;
+          return { closed: pcs.every(pc => pc.connectionState === 'closed'), ...received };
+        }
         case 'fixture.stop-media':
           await stopMedia();
           return {};
@@ -174,7 +295,10 @@ if (!process.versions.electron) {
           return {};
         case MessageType.RTC_SIGNAL:
           if (payload.signalType === 'candidate') candidateSignals++;
-          if (rosterVoice) {
+          if (listener) {
+            if (payload.signalType !== 'candidate') listenerSignals.push(describeSignal(payload));
+            listener.handle({ type: MessageType.RTC_SIGNAL, payload: botVoiceSignalSchema.parse(payload) });
+          } else if (rosterVoice) {
             rosterVoice.handle({ type: MessageType.RTC_SIGNAL, payload: botVoiceSignalSchema.parse(payload) });
           } else await p2p.accept(botVoiceSignalSchema.parse(payload), false);
           return { signals: outgoingSignals.splice(0) };
@@ -281,10 +405,29 @@ if (!process.versions.electron) {
           await transports.get(payload.transportId).connect({ dtlsParameters: payload.dtlsParameters });
           return {};
         case MessageType.SFU_GET_PRODUCERS:
+          if (listener) return { channelId: 'room', participants: roster, producers: [] };
           return { channelId: 'room', participants: roster, producers: [{
             channelId: 'room', producerId: botProducer.id, producerSessionId: botId,
             kind: 'audio', appData: botProducer.appData,
           }] };
+        case MessageType.SFU_PRODUCE: {
+          const producer = await transports.get(payload.transportId).produce(payload);
+          if (payload.kind === 'audio' && payload.appData.mediaType === 'mic') {
+            humanProducer = producer;
+            listener?.handle({ type: MessageType.SFU_NEW_PRODUCER, payload: {
+              channelId: 'room', producerId: producer.id, producerSessionId: humanId,
+              kind: 'audio', appData: { mediaType: 'mic' },
+            } });
+          }
+          return { channelId: 'room', id: producer.id };
+        }
+        case MessageType.SFU_PRODUCER_CLOSED:
+          if (humanProducer?.id === payload.producerId) {
+            humanProducer.close();
+            humanProducer = undefined;
+            listener?.handle({ type, payload });
+          }
+          return {};
         case MessageType.SFU_CONSUME: {
           const consumer = await transports.get(payload.transportId).consume({
             producerId: payload.producerId, rtpCapabilities: payload.rtpCapabilities, paused: false,
@@ -292,7 +435,9 @@ if (!process.versions.electron) {
           return { channelId: 'room', id: consumer.id, producerId: botProducer.id,
             kind: 'audio', rtpParameters: consumer.rtpParameters, producerSessionId: botId, appData: botProducer.appData };
         }
-        case 'fixture.errors': return { errors, candidateSignals, activityUpdates };
+        case 'fixture.errors': return { errors, candidateSignals, activityUpdates,
+          listener: listener ? { closed: listener.isClosed, receiving: listener.isReceivingAudio, signals: listenerSignals,
+            peers: [...listener.peers].map(([id, peer]) => ({ id, connection: peer.pc.connectionState, signaling: peer.pc.signalingState })) } : undefined };
         default: throw new Error(`Unexpected voice fixture request ${type}`);
       }
     }
@@ -341,11 +486,145 @@ if (!process.versions.electron) {
     });
     timeout = setTimeout(() => { console.error('Bot voice renderer smoke timed out'); void finish(1); }, 120000);
     await window.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/__voice_renderer__`);
-    const result = await window.webContents.executeJavaScript(
-      `(${runRenderer.toString()})(${JSON.stringify(MessageType)},${JSON.stringify(roster)},${JSON.stringify(humanId)})`, true);
-    console.log(`Bot voice renderer: ${JSON.stringify(result)}`);
+    if (!process.argv.includes('--receive-only')) {
+      const result = await window.webContents.executeJavaScript(
+        `(${runRenderer.toString()})(${JSON.stringify(MessageType)},${JSON.stringify(roster)},${JSON.stringify(humanId)})`, true);
+      console.log(`Bot voice renderer: ${JSON.stringify(result)}`);
+    }
+    const reception = await window.webContents.executeJavaScript(
+      `(${runReceiveRenderer.toString()})(${JSON.stringify(roster)},${JSON.stringify(humanId)})`, true);
+    console.log(`Bot microphone reception renderer: ${JSON.stringify(reception)}`);
     await finish(0);
   }).catch(async (error) => { console.error(error); await finish(1); });
+}
+
+async function runReceiveRenderer(roster, humanId) {
+  const [{ WebRtcManager }, { ParticipantManager }, { voiceStore }, { settingsStore }] = await Promise.all([
+    import('/core/WebRtcManager.ts'), import('/core/ParticipantManager.ts'),
+    import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
+  ]);
+  const request = async (type, payload = {}) => {
+    const response = await fetch('/__voice_request__', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type, payload }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error);
+    return result;
+  };
+  const check = (condition, message) => { if (!condition) throw new Error(message); };
+  const audio = new AudioContext({ sampleRate: 48000 });
+  const tones = [440, 660].map(frequency => {
+    const oscillator = audio.createOscillator();
+    oscillator.frequency.value = frequency;
+    const destination = audio.createMediaStreamDestination();
+    oscillator.connect(destination);
+    oscillator.start();
+    return { oscillator, destination, track: destination.stream.getAudioTracks()[0] };
+  });
+  await audio.resume();
+  const results = {};
+  try {
+    for (const mode of ['p2p', 'sfu']) {
+      const prepared = await request('fixture.prepare-listener', { mode });
+      const botId = prepared.voiceState.sessionId;
+      const participants = new ParticipantManager();
+      participants.reconcileVoiceChannel('room', [{ ...roster[0], voiceState: prepared.voiceState }]);
+      const rtc = new WebRtcManager();
+      const errors = [];
+      const client = {
+        getStatus: () => 'CONNECTED', getConnectionId: () => `listener-${mode}`,
+        send(type, payload) {
+          void request(type, payload).then(async response => {
+            for (const signal of response.signals ?? []) await rtc.handleIncomingSignal(signal);
+          }).catch(error => errors.push(error.message));
+        },
+        sendRequest: request,
+      };
+      Object.defineProperty(rtc, 'voiceServerStore', { value: {
+        serverDetails: { voiceMode: mode }, currentUser: { id: 'human', sessionId: humanId },
+      } });
+      Object.defineProperty(rtc, 'voiceParticipants', { value: participants });
+      Object.defineProperty(rtc, 'signalClient', { value: client });
+      rtc.rtcConfig = { iceServers: [], iceCandidatePoolSize: 0 };
+      rtc.setCurrentSessionId(humanId);
+      voiceStore.setChannel('room');
+      settingsStore.save = () => {};
+      const pump = async () => {
+        for (const signal of (await request('fixture.signals')).signals) await rtc.handleIncomingSignal(signal);
+      };
+      const until = async (predicate, message) => {
+        for (let index = 0; index < 160; index++) {
+          await pump();
+          if (await predicate()) return;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        throw new Error(`${mode}: ${message}; ${errors.join('; ')}; ${JSON.stringify(await request('fixture.errors'))}`);
+      };
+      try {
+        await rtc.setLocalAudioTrack(tones[0].track);
+        if (mode === 'p2p') {
+          await until(() => rtc.getPeerConnection(botId)?.connectionState === 'connected', 'microphone P2P did not connect');
+        }
+        await request('fixture.listener-ready');
+        await until(async () => (await request('fixture.listener-stats')).packets >= 12, 'SDK did not receive Chromium Opus');
+        if (mode === 'p2p') {
+          const pc = rtc.getPeerConnection(botId);
+          check(pc.getTransceivers().length === 1 && pc.getTransceivers()[0].currentDirection === 'sendonly',
+            'A receive-only bot must negotiate only the human microphone');
+          const canvas = document.createElement('canvas');
+          canvas.width = canvas.height = 32;
+          canvas.getContext('2d').fillRect(0, 0, 32, 32);
+          const video = canvas.captureStream(5);
+          try {
+            await rtc.setLocalCameraTrack(video.getVideoTracks()[0]);
+            await rtc.addLocalScreenTrack(video);
+            check(pc.getTransceivers().length === 1 && pc.getSenders().every(sender => sender.track?.kind !== 'video'),
+              'Camera and screen sharing must never reach a listening bot');
+          } finally {
+            await rtc.removeLocalScreenTrack(video.id);
+            await rtc.setLocalCameraTrack(null);
+            for (const track of video.getTracks()) track.stop();
+          }
+          await rtc.setLocalScreenAudioTrack(tones[1].track);
+          check(pc.getSenders().filter(sender => sender.track).length === 1, 'Screen audio must not be sent to the listening bot');
+          await rtc.setLocalScreenAudioTrack(null);
+          await rtc.setLocalAudioTrack(tones[1].track);
+          check(pc.getSenders()[0].track === tones[1].track, 'Microphone device replacement must reach authorized listening bots');
+          await rtc.setLocalAudioTrack(null);
+          check(pc.getSenders()[0].track === null, 'Removing the microphone must detach it from the listening bot');
+          await rtc.setLocalAudioTrack(tones[0].track);
+        }
+        let changed = await request('fixture.listener-deafen', { deafened: true });
+        participants.updateVoiceState(changed.voiceState);
+        rtc.syncBotVoiceReception(botId);
+        await until(() => mode === 'sfu' || rtc.getPeerConnection(botId).getSenders()[0].track === null,
+          'Deafen did not remove the human microphone');
+        const paused = await request('fixture.listener-stats');
+        for (let index = 0; index < 8; index++) { await pump(); await new Promise(resolve => setTimeout(resolve, 40)); }
+        check((await request('fixture.listener-stats')).packets === paused.packets, 'Deafen must stop SDK delivery');
+        changed = await request('fixture.listener-deafen', { deafened: false });
+        participants.updateVoiceState(changed.voiceState);
+        rtc.syncBotVoiceReception(botId);
+        await until(async () => (await request('fixture.listener-stats')).packets >= paused.packets + 8, 'Undeafen did not restore reception');
+        results[mode] = await request('fixture.listener-stop');
+        check(results[mode].closed && results[mode].bytes > 100, 'Reception must deliver data and close every peer');
+        check(errors.length === 0, errors.join('; '));
+      } finally {
+        rtc.closeAllPeers();
+      }
+    }
+    const signaling = await request('fixture.errors');
+    check(signaling.errors.length === 0, signaling.errors.join('; '));
+    return results;
+  } finally {
+    for (const tone of tones) {
+      tone.track.stop();
+      tone.oscillator.stop();
+      tone.oscillator.disconnect();
+      tone.destination.disconnect();
+    }
+    await audio.close();
+  }
 }
 
 async function runRenderer(MessageType, roster, humanId) {

@@ -170,6 +170,7 @@ function moderationFixture() {
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
   server['signalingService'] = service;
   server['closing'] = false;
+  server['sfuManager'] = new SfuManager();
   const grants = { bits: Permission.MUTE_MEMBERS | Permission.DEAFEN_MEMBERS };
   const permissions = Object.create(PermissionService.prototype) as PermissionService;
   permissions.getUserPermissions = async (id) => id === 'moderator' ? grants.bits : 0;

@@ -1151,8 +1151,8 @@ export type BotSettingsSnapshot = {
         canConfigure: boolean;
         avatarUrl?: string | null | undefined;
         permissions?: {
-            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
-            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
+            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
+            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
             revision: number;
             reviewRequired: boolean;
             reviewedBy: string | null;
@@ -1390,8 +1390,8 @@ type Input = {
         canConfigure: boolean;
         avatarUrl?: string | null | undefined;
         permissions?: {
-            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
-            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
+            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
+            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
             revision: number;
             reviewRequired: boolean;
             reviewedBy: string | null;
@@ -1620,8 +1620,8 @@ type Output = {
         canConfigure: boolean;
         avatarUrl?: string | null | undefined;
         permissions?: {
-            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
-            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
+            requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
+            granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
             revision: number;
             reviewRequired: boolean;
             reviewedBy: string | null;
@@ -1856,8 +1856,8 @@ export type BotSettingsSummary = {
     canConfigure: boolean;
     avatarUrl?: string | null | undefined;
     permissions?: {
-        requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
-        granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
+        requested: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[] | null;
+        granted: ("commands" | "read_messages" | "send_messages" | "publish_voice" | "receive_voice" | "local_execution" | "sound_download" | "selectors" | "miniapps")[];
         revision: number;
         reviewRequired: boolean;
         reviewedBy: string | null;
@@ -2049,7 +2049,7 @@ export type CommandLocalizations = {
 
 ## `CommandOption` {#commandoption}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L232)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L241)
 
 ```ts
 export interface CommandOption {
@@ -2082,7 +2082,7 @@ export interface CommandPresentation {
 
 ## `CommandResponsePayload` {#commandresponsepayload}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1000)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/protocol.ts#L1002)
 
 ```ts
 export interface CommandResponsePayload {
@@ -2114,7 +2114,7 @@ export type CommandValues = {
 
 ## `CommandVoiceRequirement` {#commandvoicerequirement}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L247)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L256)
 
 ```ts
 export type CommandVoiceRequirement = "joined" | "same-bot-channel";
@@ -2201,7 +2201,7 @@ export type SelectionChoice = {
 
 ## `SlashCommand` {#slashcommand}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L250)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/models.ts#L259)
 
 ```ts
 export interface SlashCommand {

@@ -4,6 +4,7 @@ import {
   QUALITY_PRESETS,
   QualityPresetType,
   WebRtcSignalPayload,
+  isReceivingBotVoice,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { networkClient, type NetworkClient } from './NetworkClient';
@@ -35,8 +36,10 @@ interface CodecSendParameters extends RTCRtpSendParameters {
 }
 
 export interface PeerSession {
-  /** Bot peers publish audio only; never attach local capture to their link. */
+  /** Bots may receive one authorized microphone, never camera or screen media. */
+  botPeer?: boolean;
   receiveOnly?: boolean;
+  botAudioSync?: Promise<void>;
   peerSessionId: string;
   pc: RTCPeerConnection;
   remoteStream: MediaStream;
@@ -1183,6 +1186,29 @@ export class WebRtcManager {
     return this.voiceParticipants.get(peerSessionId)?.user.id === myUserId;
   }
 
+  private botAudioDirection(session: PeerSession): RTCRtpTransceiverDirection {
+    const publish = this.voiceParticipants.get(session.peerSessionId)?.voiceState?.botVoicePermissions?.publish !== false;
+    return session.receiveOnly ? publish ? 'recvonly' : 'inactive' : publish ? 'sendrecv' : 'sendonly';
+  }
+
+  public syncBotVoiceReception(peerSessionId: string): void {
+    const session = this.peers.get(peerSessionId);
+    if (!session?.botPeer) return;
+    session.receiveOnly = !isReceivingBotVoice(this.voiceParticipants.get(peerSessionId)?.voiceState);
+    session.botAudioSync = (session.botAudioSync ?? Promise.resolve()).then(async () => {
+      if (!this.isCurrentPeer(session)) return;
+      const primary = session.pc.getTransceivers().find((entry) => entry.receiver.track.kind === 'audio');
+      if (!primary) return;
+      session.receiveOnly = !isReceivingBotVoice(this.voiceParticipants.get(peerSessionId)?.voiceState);
+      primary.direction = this.botAudioDirection(session);
+      await primary.sender.replaceTrack(session.receiveOnly ? null : this.localAudioTrack);
+      if (this.isCurrentPeer(session)) await this.renegotiateIfNeeded(session);
+    }).catch((error: unknown) => {
+      clientLog.error('WEBRTC', 'Could not apply bot microphone reception permission', { error: String(error) });
+      if (this.isCurrentPeer(session)) this.removePeer(peerSessionId);
+    });
+  }
+
   public async connectToPeer(peerSessionId: string, isInitiator: boolean): Promise<void> {
     if (this.voiceReconnectSuspended) return;
     if (this.isSfuMode()) {
@@ -1215,9 +1241,12 @@ export class WebRtcManager {
     const remoteStream = new MediaStream();
     const isPolite = this.currentSessionId.localeCompare(peerSessionId) < 0;
 
+    const participant = this.voiceParticipants.get(peerSessionId);
+    const botPeer = peerSessionId.startsWith('bot:') || participant?.user.isBot === true;
     const session: PeerSession = {
       peerSessionId,
-      receiveOnly: peerSessionId.startsWith('bot:') || this.voiceParticipants.get(peerSessionId)?.user.isBot === true,
+      botPeer,
+      receiveOnly: botPeer && !isReceivingBotVoice(participant?.voiceState),
       pc,
       remoteStream,
       remoteScreenStreams: new Map(),
@@ -1232,8 +1261,14 @@ export class WebRtcManager {
     this.peers.set(peerSessionId, session);
 
     // Setup Audio Transceiver
-    if (session.receiveOnly) {
-      pc.addTransceiver('audio', { direction: 'recvonly' });
+    if (session.botPeer) {
+      // An answerer must attach to the offered m-line. Pre-creating sendonly
+      // here makes Chromium retain an unassociated second microphone.
+      if (isInitiator) {
+        const transceiver = pc.addTransceiver('audio', { direction: this.botAudioDirection(session) });
+        session.audioSender = transceiver.sender;
+        if (!session.receiveOnly && this.localAudioTrack) await transceiver.sender.replaceTrack(this.localAudioTrack);
+      }
     } else if (this.localAudioTrack) {
       session.audioSender = pc.addTrack(this.localAudioTrack, new MediaStream([this.localAudioTrack]));
     } else {
@@ -1243,7 +1278,7 @@ export class WebRtcManager {
     // Setup Video Transceiver (Camera on the primary video m-line). Screen
     // share now rides its own second sender (see below) so camera + screen can
     // be sent simultaneously as two independent tiles (#26).
-    if (!session.receiveOnly) {
+    if (!session.botPeer) {
       if (this.localCameraTrack) {
         session.videoSender = pc.addTrack(this.localCameraTrack, new MediaStream([this.localCameraTrack]));
       } else {
@@ -1256,7 +1291,7 @@ export class WebRtcManager {
     // apart from the camera track and from each other (mirrors the
     // screen-audio-meta mechanism) — #26, #253.
     for (const [shareId, screenTrack] of this.localScreenTracks) {
-      if (session.receiveOnly) break;
+      if (session.botPeer) break;
       const stream = this.localScreenStreams.get(shareId);
       if (!stream) continue;
       this.signalClient.send(MessageType.RTC_SIGNAL, {
@@ -1271,7 +1306,7 @@ export class WebRtcManager {
     }
 
     // Setup Screen Audio Track (if currently sharing)
-    if (!session.receiveOnly && this.localScreenAudioTrack && this.screenAudioStream) {
+    if (!session.botPeer && this.localScreenAudioTrack && this.screenAudioStream) {
       // Announce stream ID before adding track
       this.signalClient.send(MessageType.RTC_SIGNAL, {
         targetSessionId: peerSessionId,
@@ -1523,8 +1558,7 @@ export class WebRtcManager {
       if (!isCurrent()) return;
       applyVideoCodecPreferences(session.pc, preferred, session.screenVideoSenders.values());
       const offer = await session.pc.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: !session.receiveOnly,
+        ...(!session.botPeer ? { offerToReceiveAudio: true, offerToReceiveVideo: true } : {}),
         iceRestart,
       });
       if (!isCurrent()) return;
@@ -1721,6 +1755,15 @@ export class WebRtcManager {
           }
         }
 
+        if (session.botPeer) {
+          session.receiveOnly = !isReceivingBotVoice(this.voiceParticipants.get(fromSessionId)?.voiceState);
+          const primary = session.pc.getTransceivers().find((entry) => entry.receiver.track.kind === 'audio');
+          if (primary) {
+            primary.direction = this.botAudioDirection(session);
+            await primary.sender.replaceTrack(session.receiveOnly ? null : this.localAudioTrack);
+            session.audioSender = primary.sender;
+          }
+        }
         // 1. Ensure local audio track is attached to audio transceiver
         if (!session.receiveOnly && this.localAudioTrack) {
           const transceivers = session.pc.getTransceivers();
@@ -1745,7 +1788,7 @@ export class WebRtcManager {
         //    video transceiver that isn't the screen sender is the camera one.
         //    Screen shares ride their own extra senders and are negotiated
         //    separately (via screen-video-meta + renegotiateIfNeeded).
-        const cameraTrack = session.receiveOnly ? null : this.localCameraTrack;
+        const cameraTrack = session.botPeer ? null : this.localCameraTrack;
         const transceivers = session.pc.getTransceivers();
         const videoTransceiver = transceivers.find(
           (t) =>
@@ -1753,7 +1796,7 @@ export class WebRtcManager {
             !this.isScreenVideoSender(session, t.sender)
         );
         if (videoTransceiver) {
-          videoTransceiver.direction = session.receiveOnly ? 'inactive' : cameraTrack ? 'sendrecv' : 'recvonly';
+          videoTransceiver.direction = session.botPeer ? 'inactive' : cameraTrack ? 'sendrecv' : 'recvonly';
           await videoTransceiver.sender.replaceTrack(cameraTrack);
           session.videoSender = videoTransceiver.sender;
         } else if (cameraTrack) {
@@ -2035,7 +2078,7 @@ export class WebRtcManager {
         return;
       }
       for (const session of [...this.peers.values()]) {
-        if (session.receiveOnly) continue;
+        if (session.botPeer) continue;
         try {
           const stable = await this.waitForStable(session.pc);
           if (!this.isCurrentPeer(session)) continue;
@@ -2294,7 +2337,7 @@ export class WebRtcManager {
 
       // Announce stream ID to all peers BEFORE adding the track
       for (const session of this.peers.values()) {
-        if (session.receiveOnly) continue;
+        if (session.botPeer) continue;
         this.signalClient.send(MessageType.RTC_SIGNAL, {
           targetSessionId: session.peerSessionId,
           fromSessionId: this.currentSessionId,
@@ -2306,7 +2349,7 @@ export class WebRtcManager {
       // Add track to all peers — wait for stable signaling state before
       // renegotiating, since screen video may have just triggered an offer.
       for (const session of this.peers.values()) {
-        if (session.receiveOnly) continue;
+        if (session.botPeer) continue;
         try {
           await this.waitForStable(session.pc);
           session.screenAudioSender = session.pc.addTrack(track, stream);
@@ -2347,7 +2390,7 @@ export class WebRtcManager {
   private async updateVideoTrackAcrossPeers(track: MediaStreamTrack | null, ensureCurrent: () => void): Promise<void> {
     for (const session of this.peers.values()) {
       ensureCurrent();
-      if (session.receiveOnly || session.pc.connectionState === 'closed') continue;
+      if (session.botPeer || session.pc.connectionState === 'closed') continue;
       try {
         const videoTransceiver = this.cameraTransceiver(session);
         let negotiate = false;

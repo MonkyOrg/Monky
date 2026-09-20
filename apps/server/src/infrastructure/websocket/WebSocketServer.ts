@@ -122,7 +122,9 @@ import {
   botPermissionsGetSchema,
   botPermissionsUpdateSchema,
   type BotCapability,
-  isBotPublishSignalAllowed,
+  isBotVoiceSignalAllowed,
+  isReceivingBotVoice,
+  botVoiceStateUpdateSchema,
 } from '@monky/shared';
 import { AuthService } from '../../application/services/AuthService';
 import { AttachmentService } from '../../application/services/AttachmentService';
@@ -183,6 +185,7 @@ interface ClientSession {
   /** True when this connection is a bot, not a human user (#569). */
   isBot?: boolean;
   botVoiceTransports?: Map<string, { channelId: string; direction: 'send' | 'recv' }>;
+  botVoiceReceiveEpoch?: number;
   botVoiceJoinAttempt?: object;
   botVoiceGrant?: {
     channelId: string; creatorUserId: string; originChannelId: string; accessVersion: number;
@@ -2912,6 +2915,16 @@ export class WebSocketServer {
         channelId: payload.channelId, creatorUserId: authorization.creatorUserId,
         originChannelId: authorization.originChannelId, accessVersion,
       } : undefined;
+      const permissions = session.botId ? this.botService?.permissions?.get(session.botId) : undefined;
+      result.voiceState = this.signalingService.updateVoiceState(session.sessionId, {
+        receivesVoice: payload.receiveAudio === true,
+        botVoicePermissions: {
+          publish: this.isCurrentBotOperation(session, 'publish_voice'),
+          receive: this.isCurrentBotOperation(session, 'receive_voice'),
+          publishRequested: permissions?.requested?.includes('publish_voice') === true,
+          receiveRequested: permissions?.requested?.includes('receive_voice') === true,
+        },
+      }) ?? result.voiceState;
     }
     if (isSfu) {
       result.voiceState = this.signalingService.updateVoiceState(session.sessionId, {
@@ -3039,8 +3052,13 @@ export class WebSocketServer {
     if (!session.user || !sessionId) return;
 
     const current = this.signalingService.getVoiceState(sessionId);
+    if (session.isBot && (!current || !botVoiceStateUpdateSchema.safeParse(payload).success ||
+        (!this.isCurrentBotOperation(session, 'publish_voice') && !this.isCurrentBotOperation(session, 'receive_voice')))) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bot voice state update is not permitted.', requestId);
+      return;
+    }
     const effectivePayload: VoiceStateUpdatePayload = { ...payload };
-    if (current?.serverMuted) {
+    if (current?.serverMuted || (session.isBot && !this.isCurrentBotOperation(session, 'publish_voice'))) {
       effectivePayload.isSpeaking = false;
     }
 
@@ -3048,14 +3066,32 @@ export class WebSocketServer {
     const updated = this.signalingService.updateVoiceState(sessionId, {
       ...effectivePayload,
       connectionHealth: current?.connectionHealth,
+      receivesVoice: current?.receivesVoice,
+      botVoicePermissions: current?.botVoicePermissions,
     });
     if (updated) {
+      if (session.isBot && !isReceivingBotVoice(updated)) {
+        this.closeBotVoiceReception(session, updated.channelId);
+      }
+      if (!current || current.isMuted !== updated.isMuted || current.isDeafened !== updated.isDeafened ||
+          current.serverMuted !== updated.serverMuted || current.serverDeafened !== updated.serverDeafened) {
+        await this.syncSfuMicrophoneMute(sessionId);
+      }
       const changedPayload: VoiceStateChangedPayload = { voiceState: updated };
       await this.broadcastToChannel(updated.channelId, {
         type: MessageType.VOICE_STATE_CHANGED,
-        requestId,
+        requestId: session.isBot ? undefined : requestId,
         payload: changedPayload,
       }, undefined, () => this.signalingService.getVoiceState(sessionId) === updated);
+      if (session.isBot && requestId && this.isCurrentSession(session)) {
+        const acknowledged = this.signalingService.getVoiceState(sessionId);
+        if (acknowledged?.channelId === updated.channelId) {
+          this.send(session.ws, {
+            type: MessageType.VOICE_STATE_CHANGED, requestId,
+            payload: { voiceState: acknowledged } satisfies VoiceStateChangedPayload,
+          });
+        } else this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Bot left voice before the update completed.', requestId);
+      }
     }
   }
 
@@ -3075,11 +3111,14 @@ export class WebSocketServer {
     const target = this.findSessionById(payload.targetSessionId);
     if (session.isBot || target?.isBot) {
       const bot = session.isBot ? session : target;
+      const state = bot?.sessionId ? this.signalingService.getVoiceState(bot.sessionId) : undefined;
+      const publish = !!bot && this.isCurrentBotOperation(bot, 'publish_voice');
+      const receive = !!bot && this.isCurrentBotOperation(bot, 'receive_voice') && isReceivingBotVoice(state);
       if (!bot || (session.isBot && target?.isBot) ||
-          !this.isCurrentBotOperation(bot, 'publish_voice') ||
-          !isBotPublishSignalAllowed(payload, session.isBot === true)) {
+          (!publish && !this.isCurrentBotOperation(bot, 'receive_voice')) ||
+          !isBotVoiceSignalAllowed(payload, session.isBot === true, { publish, receive })) {
         this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED,
-          'Bot voice links support publishing audio only; receiving channel media is unavailable.', requestId);
+          'Bot voice signaling exceeds its authorized microphone directions.', requestId);
         return;
       }
     }
@@ -3100,8 +3139,35 @@ export class WebSocketServer {
   }
 
   // SFU Handlers (#515)
+  private closeBotVoiceReception(session: ClientSession, channelId: string): void {
+    if (!session.sessionId) return;
+    session.botVoiceReceiveEpoch = (session.botVoiceReceiveEpoch ?? 0) + 1;
+    this.sfuManager.closeTransportsFor(session.sessionId, channelId, 'recv');
+    for (const [id, transport] of session.botVoiceTransports ?? []) {
+      if (transport.direction === 'recv' && transport.channelId === channelId) session.botVoiceTransports?.delete(id);
+    }
+  }
+
+  private isCurrentBotVoiceReceiver(session: ClientSession, channelId: string): boolean {
+    const state = session.sessionId ? this.signalingService.getVoiceState(session.sessionId) : undefined;
+    return this.isCurrentBotOperation(session, 'receive_voice') &&
+      state?.channelId === channelId && isReceivingBotVoice(state);
+  }
+
+  private isBotMicrophoneSource(sessionId: string, channelId: string): boolean {
+    const source = this.findSessionById(sessionId);
+    return !!source && !source.isBot && this.isCurrentSession(source) &&
+      this.signalingService.getVoiceState(sessionId)?.channelId === channelId;
+  }
+
+  private syncSfuMicrophoneMute(sessionId: string): Promise<void> {
+    const state = this.signalingService.getVoiceState(sessionId);
+    return this.sfuManager.setMicrophonesMuted(sessionId,
+      !state || state.isMuted || state.isDeafened || !!state.serverMuted || !!state.serverDeafened);
+  }
+
   private async authorizeBotVoiceMedia(
-    session: ClientSession, payload: unknown, requestId?: string, transportId?: string
+    session: ClientSession, payload: unknown, requestId?: string, transportId?: string, direction?: 'send' | 'recv',
   ): Promise<boolean> {
     const parsed = botVoiceChannelSchema.safeParse(payload);
     if (!parsed.success || !session.sessionId ||
@@ -3112,9 +3178,19 @@ export class WebSocketServer {
     if (!(await this.requirePermission(session, Permission.SPEAK, requestId)) ||
         (!this.hasBotVoiceGrant(session, parsed.data.channelId) &&
           !(await this.requireChannelAccess(session, parsed.data.channelId, requestId)))) return false;
+    const transport = transportId === undefined ? undefined : session.botVoiceTransports?.get(transportId);
+    const mediaDirection = direction ?? transport?.direction;
+    const allowed = mediaDirection === 'recv' ? this.isCurrentBotVoiceReceiver(session, parsed.data.channelId)
+      : mediaDirection === 'send' ? this.isCurrentBotOperation(session, 'publish_voice')
+      : this.isCurrentBotVoiceReceiver(session, parsed.data.channelId) || this.isCurrentBotOperation(session, 'publish_voice');
+    if (!allowed) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bot microphone capability is unavailable or reception is deafened.', requestId);
+      return false;
+    }
     if (!this.isCurrentSession(session) ||
         this.signalingService.getVoiceState(session.sessionId)?.channelId !== parsed.data.channelId) return false;
-    if (transportId !== undefined && session.botVoiceTransports?.get(transportId)?.channelId !== parsed.data.channelId) {
+    if (transportId !== undefined && (transport?.channelId !== parsed.data.channelId ||
+        (direction !== undefined && direction !== transport.direction))) {
       this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Transport does not belong to this bot voice connection.', requestId);
       return false;
     }
@@ -3154,16 +3230,22 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
-    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId))) return;
-    if (session.isBot && payload.direction !== 'send') {
-      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Bot voice supports send transports only.', requestId);
+    if (session.isBot && payload.direction !== 'send' && payload.direction !== 'recv') {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid bot voice transport direction.', requestId);
       return;
     }
+    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, undefined, payload.direction))) return;
+    const receiveEpoch = session.isBot && payload.direction === 'recv'
+      ? (session.botVoiceReceiveEpoch = (session.botVoiceReceiveEpoch ?? 0) + 1) : undefined;
     try {
       if (!this.sfuManager.isReady()) {
         await this.sfuManager.init();
       }
       if (!this.isCurrentSession(session)) return;
+      if (receiveEpoch !== undefined && receiveEpoch !== session.botVoiceReceiveEpoch) {
+        this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Voice reception changed during transport preparation.', requestId);
+        return;
+      }
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) creating ${payload.direction} transport for channel ${payload.channelId}`);
       // A client asking for a transport it already has is rejoining after a
       // failure. Its previous one is never coming back, and nothing else would
@@ -3203,15 +3285,22 @@ export class WebSocketServer {
         session.requestHost
       );
       if (!this.isCurrentSession(session) ||
-          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId) {
+          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId ||
+          (receiveEpoch !== undefined && receiveEpoch !== session.botVoiceReceiveEpoch) ||
+          (session.isBot && payload.direction === 'recv' && !this.isCurrentBotVoiceReceiver(session, payload.channelId))) {
         // A reconnected device keeps its logical session ID. Reap only this
         // late allocation, never the replacement connection's media.
         this.sfuManager.discardPendingTransport(transportOptions.id);
+        if (this.isCurrentSession(session)) {
+          this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Voice reception changed during transport allocation.', requestId);
+        }
         return;
       }
       if (session.isBot) {
         session.botVoiceTransports ??= new Map();
-        session.botVoiceTransports.clear();
+        for (const [id, transport] of session.botVoiceTransports) {
+          if (transport.direction === payload.direction) session.botVoiceTransports.delete(id);
+        }
         session.botVoiceTransports.set(transportOptions.id, { channelId: payload.channelId, direction: payload.direction });
       }
       this.send(session.ws, {
@@ -3259,7 +3348,7 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
-    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId))) return;
+    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId, 'send'))) return;
     const voiceRestrictions = session.isBot ? this.signalingService.getVoiceRestrictions(session.user.id) : undefined;
     if (session.isBot && (payload.kind !== 'audio' || payload.appData?.mediaType !== 'mic' ||
         voiceRestrictions?.serverMuted || voiceRestrictions?.serverDeafened)) {
@@ -3274,13 +3363,15 @@ export class WebSocketServer {
         payload.transportId,
         payload.kind,
         payload.rtpParameters,
-        payload.appData || {}
+        payload.appData || {},
+        payload.kind === 'audio' && payload.appData?.mediaType === 'mic'
       );
       if (!this.isCurrentSession(session) ||
           this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId) {
         this.sfuManager.closeProducer(id);
         return;
       }
+      await this.syncSfuMicrophoneMute(session.sessionId);
 
       this.send(session.ws, {
         type: MessageType.SFU_PRODUCED,
@@ -3304,6 +3395,9 @@ export class WebSocketServer {
       console.log(`[SFU Server:WS] Broadcasting SFU_NEW_PRODUCER to ${participants.length - 1} other participants in channel ${payload.channelId}`);
       for (const p of participants) {
         if (p.sessionId === session.sessionId) continue;
+        const recipient = this.findSessionById(p.sessionId);
+        if (recipient?.isBot && (!this.isCurrentBotVoiceReceiver(recipient, payload.channelId) ||
+            session.isBot || payload.kind !== 'audio' || payload.appData?.mediaType !== 'mic')) continue;
         const sock = this.sessionSockets.get(p.sessionId);
         if (sock && sock.readyState === WebSocket.OPEN) {
           this.send(sock, {
@@ -3325,8 +3419,14 @@ export class WebSocketServer {
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
     if (session.isBot) {
-      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bot voice is send-only.', requestId);
-      return;
+      if (!(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId, 'recv'))) return;
+      const producer = this.sfuManager.getProducersInChannel(payload.channelId)
+        .find((entry) => entry.producerId === payload.producerId);
+      if (!producer || producer.kind !== 'audio' || producer.appData.mediaType !== 'mic' ||
+          !this.isBotMicrophoneSource(producer.producerSessionId, payload.channelId)) {
+        this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bots may only receive human microphones in their authorized room.', requestId);
+        return;
+      }
     }
     try {
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) consuming producer ${payload.producerId}`);
@@ -3338,8 +3438,19 @@ export class WebSocketServer {
         payload.rtpCapabilities
       );
       if (!this.isCurrentSession(session) ||
-          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId) {
+          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId ||
+          (session.isBot && (!this.isCurrentBotVoiceReceiver(session, payload.channelId) ||
+            session.botVoiceTransports?.get(payload.transportId)?.direction !== 'recv' ||
+            !this.isBotMicrophoneSource(consumed.producerSessionId, payload.channelId)))) {
         this.sfuManager.discardPendingConsumer(consumed.id);
+        if (this.isCurrentSession(session)) {
+          if (session.isBot && !this.isBotMicrophoneSource(consumed.producerSessionId, payload.channelId)) {
+            this.send(session.ws, {
+              type: MessageType.SFU_PRODUCER_CLOSED, requestId,
+              payload: { channelId: payload.channelId, producerId: payload.producerId } satisfies SfuProducerClosedPayload,
+            });
+          } else this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Voice connection changed during microphone subscription.', requestId);
+        }
         return;
       }
 
@@ -3392,9 +3503,11 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
-    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId))) return;
+    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, undefined, 'recv'))) return;
     try {
-      const channelProducers = this.sfuManager.getProducersInChannel(payload.channelId);
+      const channelProducers = this.sfuManager.getProducersInChannel(payload.channelId).filter((producer) =>
+        !session.isBot || (producer.kind === 'audio' && producer.appData.mediaType === 'mic' &&
+          this.isBotMicrophoneSource(producer.producerSessionId, payload.channelId)));
       console.log(`[SFU Server:WS] User ${session.user.nickname} requested producers list for channel ${payload.channelId} (found ${channelProducers.length})`);
       const producers: SfuNewProducerPayload[] = channelProducers.map((p) => ({
         channelId: payload.channelId,
@@ -3425,8 +3538,11 @@ export class WebSocketServer {
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
     if (session.isBot) {
-      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bot voice is send-only.');
-      return;
+      if (!(await this.authorizeBotVoiceMedia(session, payload, undefined, undefined, 'recv'))) return;
+      if (!this.sfuManager.ownsConsumer(session.sessionId, payload.channelId, payload.consumerId)) {
+        this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Consumer does not belong to this bot.');
+        return;
+      }
     }
     await this.sfuManager.setConsumerPaused(payload.consumerId, payload.paused);
   }
@@ -3629,7 +3745,13 @@ export class WebSocketServer {
       ? this.signalingService.setServerMuted(userId, value)
       : this.signalingService.setServerDeafened(userId, value);
     const updated: VoiceRestrictionsUpdatedPayload = { userId, ...this.signalingService.getVoiceRestrictions(userId) };
+    for (const state of states) {
+      const target = this.findSessionById(state.sessionId);
+      if (target?.isBot && !isReceivingBotVoice(state)) this.closeBotVoiceReception(target, state.channelId);
+    }
+    const muteApplied = Promise.all(states.map((state) => this.syncSfuMicrophoneMute(state.sessionId)));
     this.notifyVoiceRestrictions(updated);
+    await muteApplied;
     await Promise.all(states.map((voiceState) => this.broadcastToChannel(voiceState.channelId, {
       type: MessageType.VOICE_STATE_CHANGED,
       payload: { voiceState } satisfies VoiceStateChangedPayload,
@@ -3913,6 +4035,7 @@ export class WebSocketServer {
       session.botVoiceJoinAttempt = undefined;
       session.botVoiceGrant = undefined;
       session.botVoiceTransports?.clear();
+      if (session.isBot) session.botVoiceReceiveEpoch = (session.botVoiceReceiveEpoch ?? 0) + 1;
     }
     if (!this.sfuManager) return;
     const { closedProducerIds } = this.sfuManager.closeSession(sessionId);

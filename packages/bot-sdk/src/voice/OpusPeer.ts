@@ -30,12 +30,19 @@ export class OpusPeer {
   private readyReject!: (error: Error) => void;
   readonly ready: Promise<void>;
   private timer: ReturnType<typeof setTimeout>;
+  private readonly subscriptions: Array<() => void> = [];
+  private readonly remoteTracks = new Set<MediaStreamTrack>();
+  private receiving: boolean;
 
   constructor(
     iceServers: BotVoiceAuth['iceServers'],
     private readonly failed: (error: Error) => void,
     private readonly signal?: (signal: Pick<BotVoiceSignal, 'signalType' | 'sdp'>) => void,
+    private readonly media: {
+      publish?: boolean; receive?: boolean; packet?: (packet: RtpPacket) => void;
+    } = {},
   ) {
+    this.receiving = media.receive === true;
     this.pc = new RTCPeerConnection({
       codecs: {
         audio: [opusCodec()],
@@ -48,7 +55,15 @@ export class OpusPeer {
       iceServers, bundlePolicy: 'max-bundle',
     });
     this.sender = this.pc.addTrack(this.track, new MediaStream([this.track]));
-    this.pc.getTransceivers()[0].direction = 'sendonly';
+    this.pc.getTransceivers()[0].direction = this.direction;
+    this.subscriptions.push(this.pc.onTrack.subscribe((track) => {
+      const primary = this.pc.getTransceivers().find((entry) => entry.sender === this.sender);
+      if (track.kind !== 'audio' || !primary?.receiver.tracks.includes(track) || this.remoteTracks.has(track)) return;
+      this.remoteTracks.add(track);
+      this.subscriptions.push(track.onReceiveRtp.subscribe((packet) => {
+        if (!this.closed && this.receiving) this.media.packet?.(packet);
+      }).unSubscribe);
+    }).unSubscribe);
     this.ready = new Promise<void>((resolve, reject) => {
       this.readyResolve = resolve;
       this.readyReject = reject;
@@ -70,6 +85,19 @@ export class OpusPeer {
   }
 
   get isClosed(): boolean { return this.closed; }
+  private get direction(): 'sendrecv' | 'sendonly' | 'recvonly' | 'inactive' {
+    return this.media.publish !== false
+      ? this.receiving ? 'sendrecv' : 'sendonly'
+      : this.receiving ? 'recvonly' : 'inactive';
+  }
+
+  setReceiving(receiving: boolean): Promise<void> {
+    if (this.receiving === receiving || this.closed) return Promise.resolve();
+    this.receiving = receiving;
+    const primary = this.pc.getTransceivers().find((entry) => entry.sender === this.sender);
+    if (primary) primary.direction = this.direction;
+    return this.offer();
+  }
   get isReady(): boolean {
     return !this.closed && !this.failureReported && this.pc.connectionState === 'connected' &&
       this.sender.dtlsTransport.state === 'connected' && this.sender.codec !== undefined && !this.sender.stopped;
@@ -104,7 +132,7 @@ export class OpusPeer {
       if (this.closed) return;
       await this.pc.setLocalDescription(offer);
       const sdp = this.pc.localDescription;
-      if (!this.closed && sdp) this.signal?.({ signalType: 'offer', sdp: { type: 'offer', sdp: sdp.sdp } });
+      if (!this.closed && sdp) this.signal?.({ signalType: 'offer', sdp: this.outgoingSdp('offer', sdp.sdp) });
     });
   }
 
@@ -135,14 +163,14 @@ export class OpusPeer {
         await this.flushCandidates();
         if (this.closed) return;
         for (const transceiver of this.pc.getTransceivers()) {
-          transceiver.direction = transceiver.sender === this.sender ? 'sendonly' : 'inactive';
+          transceiver.direction = transceiver.sender === this.sender ? this.direction : 'inactive';
         }
         this.candidateCount = 0;
         const answer = await this.pc.createAnswer();
         if (this.closed) return;
         await this.pc.setLocalDescription(answer);
         const sdp = this.pc.localDescription;
-        if (!this.closed && sdp) this.signal?.({ signalType: 'answer', sdp: { type: 'answer', sdp: sdp.sdp } });
+        if (!this.closed && sdp) this.signal?.({ signalType: 'answer', sdp: this.outgoingSdp('answer', sdp.sdp) });
       } else if (signal.signalType === 'answer' && this.pc.signalingState === 'have-local-offer') {
         await this.pc.setRemoteDescription(signal.sdp);
         if (this.closed) return;
@@ -150,6 +178,22 @@ export class OpusPeer {
         this.candidateCount = 0;
       }
     });
+  }
+
+  private outgoingSdp(type: 'offer' | 'answer', sdp: string): { type: 'offer' | 'answer'; sdp: string } {
+    const description = SessionDescription.parse(sdp);
+    const primary = this.pc.getTransceivers().find((entry) => entry.sender === this.sender);
+    const microphone = description.media.find((entry) => entry.rtp.muxId === primary?.mid);
+    const remote = type === 'answer' && this.pc.remoteDescription
+      ? SessionDescription.parse(this.pc.remoteDescription.sdp).media.find((entry) => entry.rtp.muxId === primary?.mid)
+      : undefined;
+    // werift emits port 0 for inactive media. That rejects the m-line in
+    // Chromium permanently; a temporary deafen must retain its transport.
+    if (microphone?.direction === 'inactive' && microphone.port === 0 && remote?.port !== 0) {
+      microphone.port = 9;
+      return { type, sdp: description.toSdp().sdp };
+    }
+    return { type, sdp };
   }
 
   private async applyCandidate(candidate: VoiceCandidate): Promise<boolean> {
@@ -236,6 +280,7 @@ export class OpusPeer {
   }
 
   async write(frame: Uint8Array): Promise<void> {
+    if (this.media.publish === false) throw new Error('This voice connection is receive-only.');
     await this.ready;
     if (!this.isReady) throw new Error('Voice transport is not connected.');
     this.sequence = (this.sequence + 1) & 0xffff;
@@ -252,6 +297,9 @@ export class OpusPeer {
     clearTimeout(this.timer);
     this.readyReject(new Error('Voice peer closed.'));
     this.track.stop();
+    for (const unsubscribe of this.subscriptions.splice(0)) unsubscribe();
+    for (const track of this.remoteTracks) track.stop();
+    this.remoteTracks.clear();
     return this.closing = this.pc.close();
   }
 }

@@ -141,6 +141,7 @@ instalação continuam inalterados. Nada é copiado do perfil instalado.
 | `connected` (padrão) | Identidade nova, autenticação como primeiro administrador, canais e mensagem de exemplo | A funcionalidade que será exercitada no chat |
 | `server-settings` | O mesmo, com Geral nas configurações reais aberto | Alterar/aplicar configurações |
 | `voice` | Usuário mutado, dispositivos sintéticos e segundo participante SDK por P2P real | Teste de voz; a fixture é identificada e não simula música de produção |
+| `voice-receive` | Fixture SDK com permissão somente para ouvir, usuário mutado e indicadores reais na sala | `/qa-listen` alterna a escuta; desmutar envia áudio sintético, sem captura física nem gravação |
 | `home` | Identidade nova e introdução concluída; Home sem servidores salvos | Navegação/adição na Home e entrada no servidor |
 | `login` | Home com endereço local, apelido e senha de teste preenchidos | Enviar o formulário e autenticar |
 | `bot-install` | Servidor conectado e URL do bot preenchida nas configurações | Instalar/vincular o bot |
@@ -150,6 +151,7 @@ instalação continuam inalterados. Nada é copiado do perfil instalado.
 ```powershell
 npm run qa -- server-settings
 npm run qa -- voice
+npm run qa -- voice-receive
 npm run qa -- bot-install --bot=fixture
 npm run qa -- tool-consent --bot=fixture
 npm run qa -- music --bot-root="C:\Projetos\MonkyBot"
@@ -167,11 +169,16 @@ O módulo compilado `dist\commands\index.js` do MonkyBot precisa exportar
 `BotClient`: QA não inventa a declaração de produção. Nos cenários preparados,
 o owner realiza o preview real e aprova as capacidades declaradas via instalação
 autorizada. A fixture solicita apenas comandos e execução local, mais publicação
-de voz em `voice`. `bot-install` deixa instalação e revisão pendentes; permissão
+de voz em `voice` ou recepção em `voice-receive`. Neste último, o bot conta pacotes
+sem guardar seu conteúdo e não mostra proibição de transmitir, pois não solicita
+essa capacidade. Mute/deafen administrativo ainda exibe o respectivo bloqueio.
+`/qa-local-consent` também permite exercitar a preparação de comandos
+sem conceder consentimento local automaticamente. `bot-install` deixa instalação
+e revisão pendentes; permissão
 do servidor nunca substitui o consentimento local de `tool-consent`/`music`.
 
 Para testar a admissão do bot na chamada, use `connected --bot-root=...`, não
-`voice`/`music`: esses dois cenários já colocam o bot na voz.
+`voice`/`voice-receive`/`music`: esses cenários já colocam o bot na voz.
 
 Aguarde **QA_READY**, não apenas a abertura da janela. O launcher confere que a
 janela está visível no modo interativo e oculta em `--smoke`. Servidor, autenticação,

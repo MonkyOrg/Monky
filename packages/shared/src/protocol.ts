@@ -480,6 +480,8 @@ export interface VoiceJoinPayload {
   isDeafened?: boolean;
   /** Bot-only admission scoped to the originating command invocation. */
   invocationId?: string;
+  /** Bot-only opt-in, requiring the separate receive_voice capability. */
+  receiveAudio?: boolean;
 }
 
 export interface VoiceModeTransition {

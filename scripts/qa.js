@@ -8,7 +8,7 @@ import { startOwnedProcess } from './qa/process.js';
 
 const require = createRequire(import.meta.url);
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const scenarios = ['connected', 'server-settings', 'voice', 'music', 'home', 'login', 'bot-install', 'tool-consent'];
+export const scenarios = ['connected', 'server-settings', 'voice', 'voice-receive', 'music', 'home', 'login', 'bot-install', 'tool-consent'];
 
 export function parseQaArguments(args) {
   const result = { scenario: 'connected', smoke: false, bot: null, botRoot: null };
@@ -31,7 +31,8 @@ export function parseQaArguments(args) {
     } else throw new Error(`Unknown QA argument/scenario: ${argument}. Use --help.`);
   }
   if (['home', 'login'].includes(result.scenario) && result.bot) throw new Error('Home/login QA must not install a bot before the tested login.');
-  if (result.scenario === 'voice' && !result.bot) result.bot = 'sdk-fixture';
+  if (['voice', 'voice-receive'].includes(result.scenario) && !result.bot) result.bot = 'sdk-fixture';
+  if (result.scenario === 'voice-receive' && result.bot !== 'sdk-fixture') throw new Error('Voice reception QA uses its explicit SDK fixture.');
   if (['bot-install', 'tool-consent'].includes(result.scenario) && !result.bot) throw new Error('Choose --bot=fixture or an explicit --bot-root for this scenario.');
   if (result.scenario === 'music' && result.bot !== 'production') throw new Error('Music QA requires --bot-root. An SDK fixture is never production music.');
   return result;
@@ -58,6 +59,7 @@ export const scenarioPreparation = {
   connected: 'Fresh identity, authenticated owner, seeded chat; no voice or local consent.',
   'server-settings': 'Connected owner and real General settings; no setting is edited for the test.',
   voice: 'Connected owner, muted synthetic input and real P2P SDK peer. The SDK fixture is not production music.',
+  'voice-receive': 'Listening-only SDK fixture, muted synthetic input and a listening indicator without a block for unrequested publication. /qa-listen toggles reception; no audio is recorded.',
   music: 'Explicit production MonkyBot and real voice; waits for actual local consent and verified tools before ready. Playback itself is not invoked.',
   home: 'Fresh identity and completed introductory wizard only; no saved server or authentication.',
   login: 'Home with loopback address, nickname and test password filled; login is deliberately not submitted.',
@@ -185,9 +187,10 @@ export async function runQa(options, hooks = {}) {
           JSON.stringify(state.permissions) !== JSON.stringify(ready.botPermissions))) {
         throw new Error('The SDK and administrator disagree about the real reviewed bot permissions.');
       }
-      if (['voice', 'music'].includes(options.scenario) && (!state.voice || state.humanPeers < 1 || !ready.peers)) {
+      if (['voice', 'voice-receive', 'music'].includes(options.scenario) && (!state.voice || state.humanPeers < 1 || !ready.peers)) {
         throw new Error('The required real voice connection is no longer ready.');
       }
+      if (options.scenario === 'voice-receive' && !state.receiving) throw new Error('The SDK fixture is not receiving voice.');
     }
     result = { scenario: options.scenario, root, runId, serverUrl: `ws://127.0.0.1:${serverReady.port}`,
       botManifestUrl: botReady?.manifestUrl, botKind: botReady?.kind, pids: children.map(child => child.child.pid),

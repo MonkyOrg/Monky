@@ -32,6 +32,7 @@ test('QA scenarios validate explicit production, fixture and unprepared paths', 
   assert.deepEqual(scenarios, [...shared.DEVELOPMENT_QA_SCENARIOS]);
   assert.equal(parseQaArguments([]).scenario, 'connected');
   assert.equal(parseQaArguments(['voice']).bot, 'sdk-fixture');
+  assert.equal(parseQaArguments(['voice-receive']).bot, 'sdk-fixture');
   assert.equal(parseQaArguments(['tool-consent', '--bot=fixture']).bot, 'sdk-fixture');
   const production = parseQaArguments(['music', '--bot-root', path.join(repoRoot, 'explicit-bot'), '--smoke']);
   assert.equal(production.bot, 'production');
@@ -41,6 +42,7 @@ test('QA scenarios validate explicit production, fixture and unprepared paths', 
     ['home', '--bot=fixture'], ['login', '--bot=fixture'], ['bot-install'], ['tool-consent'],
     ['--bot-root'], ['--bot-root=relative'], ['--bot=fixture', '--bot=fixture'],
     ['--bot=fixture', `--bot-root=${repoRoot}`],
+    ['voice-receive', `--bot-root=${repoRoot}`],
   ]) assert.throws(() => parseQaArguments(args), Error, args.join(' '));
   const valid = baseConfig();
   assert.equal(shared.developmentQaConfigSchema.safeParse(valid).success, true);
@@ -49,6 +51,8 @@ test('QA scenarios validate explicit production, fixture and unprepared paths', 
     { ...valid, server: { ...valid.server, password: 'short' } },
     { ...valid, scenario: 'music', bot: { kind: 'sdk-fixture', manifestUrl: 'http://127.0.0.1:54322/manifest' } },
     { ...valid, scenario: 'voice' },
+    { ...valid, scenario: 'voice-receive' },
+    { ...valid, scenario: 'voice-receive', bot: { kind: 'production', manifestUrl: 'http://127.0.0.1:54322/manifest' } },
     { ...valid, bot: { kind: 'production', manifestUrl: 'https://external.invalid/manifest' } },
     { ...valid, bot: { kind: 'sdk-fixture', manifestUrl: 'http://secret@127.0.0.1:54322/manifest' } },
     { ...valid, bot: { kind: 'sdk-fixture', manifestUrl: 'http://127.0.0.1:54322/manifest?token=secret' } },
@@ -252,7 +256,7 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
   const paths = new Set();
   for (const args of [
     ['home'], ['login'], ['connected'], ['server-settings'], ['connected', '--bot=fixture'],
-    ['bot-install', '--bot=fixture'], ['tool-consent', '--bot=fixture'], ['voice'],
+    ['bot-install', '--bot=fixture'], ['tool-consent', '--bot=fixture'], ['voice'], ['voice-receive'],
   ]) {
     if (t.signal.aborted) break;
     await t.test(args.join(' '), async () => {
@@ -280,15 +284,16 @@ test('real prepared Electron scenarios authenticate, seed, install or deliberate
             assert.equal(state.ready.botPermissions, undefined);
           } else if (state.botKind) {
             assert.equal(state.botKind, 'sdk-fixture');
-            assert.equal(state.ready.commandCount, 2);
-            const expected = state.scenario === 'voice' ? ['commands', 'publish_voice', 'local_execution'] : ['commands', 'local_execution'];
+            assert.equal(state.ready.commandCount, state.scenario === 'voice-receive' ? 3 : 2);
+            const expected = state.scenario === 'voice' ? ['commands', 'publish_voice', 'local_execution'] :
+              state.scenario === 'voice-receive' ? ['commands', 'receive_voice', 'local_execution'] : ['commands', 'local_execution'];
             assert.deepEqual(state.ready.botPermissions.requested, expected);
             assert.deepEqual(state.ready.botPermissions.granted, expected);
             assert.equal(state.ready.botPermissions.reviewRequired, false);
             assert.equal(state.ready.botPermissions.reviewedBy, state.ready.userId);
             assert.ok(state.ready.botPermissions.revision > 0);
           }
-          if (state.scenario === 'voice') { assert.ok(state.ready.peers > 0); assert.equal(state.ready.muted, true); }
+          if (['voice', 'voice-receive'].includes(state.scenario)) { assert.ok(state.ready.peers > 0); assert.equal(state.ready.muted, true); }
           if (state.scenario === 'tool-consent') {
             assert.equal(state.ready.localConsentCount, 0);
             assert.equal(state.ready.localToolStatus, 'absent');
