@@ -6,6 +6,7 @@ export const BOT_CAPABILITIES = [
   'read_messages',
   'send_messages',
   'publish_voice',
+  'receive_voice',
   'local_execution',
   'sound_download',
   'selectors',

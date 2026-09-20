@@ -217,11 +217,19 @@ async function runSelectionPreflight(language) {
         'An empty selected command starts preparation without waiting for a search query');
       check(input.disabled && root.querySelector('.bot-command-run').getAttribute('aria-busy') === 'true',
         'Arguments and execution wait for the Main-owned prerequisite');
+      const status = root.querySelector('.bot-command-preparation');
+      check(status?.getAttribute('role') === 'status' && status.textContent.trim() === t('localExecution.preparing')
+        && status.getBoundingClientRect().height > 0 && !!status.querySelector('.bot-loading-spinner'),
+      'Mouse and keyboard selection immediately explain the tool check with a visible localized spinner');
+      view.botChat.renderComposer();
+      check(root.querySelector('.bot-command-preparation')?.textContent.trim() === t('localExecution.preparing'),
+        'The loading message remains visible while an already-authorized tool check is unresolved');
       check(operations().length === beforeOperations, 'Selection must not send a search, preview or invocation');
       native.at(-1).resolve({ status: 'prepared', permit: '1'.repeat(64) });
       await waitFor(() => !!root.querySelector('[data-bot-autocomplete]') && !root.querySelector('[data-bot-autocomplete]').disabled,
         'Prepared command did not become editable');
       check(document.activeElement === root.querySelector('[data-bot-autocomplete]'), 'Focus returns to the command after preparation');
+      check(!root.querySelector('.bot-command-preparation'), 'Successful preparation removes its loading message');
       check(operations().length === beforeOperations, 'An empty query stays idle after successful preparation');
       type(root.querySelector('[data-bot-autocomplete]'), 'prepared search');
       await waitFor(() => operations().length > beforeOperations, 'Prepared search did not dispatch');
@@ -230,6 +238,7 @@ async function runSelectionPreflight(language) {
         && native.length === before + 1, 'Typing uses the selected command preparation without another prompt');
       client.handleIncomingMessage({ type: 'COMMAND_AUTOCOMPLETE_RESULT', requestId: request.requestId, payload: { status: 'ok', choices: [] } });
       await close();
+      check(!root.querySelector('.bot-command-preparation'), 'Closing the command removes its loading message immediately');
       await select(name, keyboard);
       await waitFor(() => !!root.querySelector('[data-bot-autocomplete]') && !root.querySelector('[data-bot-autocomplete]').disabled,
         'Cached preparation did not unlock the reselected command');
@@ -262,6 +271,8 @@ async function runSelectionPreflight(language) {
     await waitFor(() => native.length === beforeDirect + 1, 'Zero-argument command did not prepare');
     check(!sent.some(request => request.type === 'COMMAND_INVOKE' && request.payload.commandName === 'direct'),
       'Zero-argument auto-execution must wait for consent and tools');
+    check(!!root.querySelector('.bot-command-preparation .bot-loading-spinner'),
+      'Zero-argument commands explain preparation before automatic execution too');
     native.at(-1).resolve({ status: 'prepared', permit: '3'.repeat(64) });
     await waitFor(() => !store.getCommandDraft('text'), 'Prepared zero-argument command did not complete');
     check(sent.filter(request => request.type === 'COMMAND_INVOKE' && request.payload.commandName === 'direct').length === 1
@@ -277,6 +288,7 @@ async function runSelectionPreflight(language) {
     await flush();
     check(native.length === beforeDenial + 1 && !root.querySelector('[data-bot-input]').disabled,
       'Rendering a denied command neither traps its controls nor reopens consent');
+    check(!root.querySelector('.bot-command-preparation'), 'A failed check replaces loading with its explicit error');
     await close();
 
     const beforeLeave = native.length;
@@ -285,6 +297,7 @@ async function runSelectionPreflight(language) {
     const leaving = native.at(-1);
     const beforeChannelChange = operations().length;
     view.setChannel('other');
+    check(!root.querySelector('.bot-command-preparation'), 'Changing channel removes the previous command loading state');
     await waitFor(() => cancelled.includes(leaving.input.requestId), 'Changing channel did not cancel selection preparation');
     leaving.resolve({ status: 'prepared', permit: '4'.repeat(64) });
     await flush();

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { botPermissionsSchema } from './botPermissions.js';
 
-export const DEVELOPMENT_QA_SCENARIOS = ['connected', 'server-settings', 'voice', 'music', 'home', 'login', 'bot-install', 'tool-consent'] as const;
+export const DEVELOPMENT_QA_SCENARIOS = ['connected', 'server-settings', 'voice', 'voice-receive', 'music', 'home', 'login', 'bot-install', 'tool-consent'] as const;
 export type DevelopmentQaScenario = typeof DEVELOPMENT_QA_SCENARIOS[number];
 
 const loopbackManifest = z.string().max(2048).refine((value) => {
@@ -28,11 +28,14 @@ export const developmentQaConfigSchema = z.object({
     manifestUrl: loopbackManifest,
   }).strict().optional(),
 }).strict().superRefine((value, context) => {
-  if (['voice', 'music', 'bot-install', 'tool-consent'].includes(value.scenario) && !value.bot) {
+  if (['voice', 'voice-receive', 'music', 'bot-install', 'tool-consent'].includes(value.scenario) && !value.bot) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'This QA scenario requires a bot.' });
   }
   if (value.scenario === 'music' && value.bot?.kind !== 'production') {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Music QA requires the explicit production MonkyBot checkout, never an SDK fixture.' });
+  }
+  if (value.scenario === 'voice-receive' && value.bot?.kind !== 'sdk-fixture') {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Voice reception QA requires the explicit listening SDK fixture.' });
   }
   if (['home', 'login'].includes(value.scenario) && value.bot) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Home/login QA must not install a bot before the tested login.' });

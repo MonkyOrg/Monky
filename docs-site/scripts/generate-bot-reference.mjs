@@ -84,11 +84,12 @@ function typeText(type, declaration) {
 }
 
 function signature(node, name) {
-  const parameters = node.parameters.map(parameter => {
+  const parameters = node.parameters.map((parameter, index) => {
     const optional = parameter.questionToken || parameter.initializer;
     const type = parameter.type?.getText()
       ?? checker.typeToString(checker.getTypeAtLocation(parameter), parameter, ts.TypeFormatFlags.NoTruncation);
-    return `${parameter.dotDotDotToken ? '...' : ''}${parameter.name.getText()}${optional ? '?' : ''}: ${type}`;
+    const name = ts.isIdentifier(parameter.name) ? parameter.name.getText() : `argument${index}`;
+    return `${parameter.dotDotDotToken ? '...' : ''}${name}${optional ? '?' : ''}: ${type}`;
   }).join(', ');
   const generics = node.typeParameters?.length
     ? `<${node.typeParameters.map(parameter => parameter.getText()).join(', ')}>` : '';
@@ -145,7 +146,8 @@ function declarationText(name, symbol, declaration) {
       const readonly = location.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ReadonlyKeyword) ? 'readonly ' : '';
       const optional = property.flags & ts.SymbolFlags.Optional ? '?' : '';
       const value = checker.typeToString(checker.getTypeOfSymbolAtLocation(property, location), location, ts.TypeFormatFlags.NoTruncation);
-      return `  ${readonly}${property.name}${optional}: ${value};`;
+      const propertyName = location.name && ts.isComputedPropertyName(location.name) ? location.name.getText() : property.name;
+      return `  ${readonly}${propertyName}${optional}: ${value};`;
     });
     return `export interface ${name} {\n${fields.join('\n')}\n}`;
   }
@@ -171,12 +173,12 @@ function declarationText(name, symbol, declaration) {
   throw new Error(`Unsupported public declaration ${name}: ${ts.SyntaxKind[declaration.kind]}`);
 }
 
-function formatted(code) {
+function formatted(code, name) {
   const file = ts.createSourceFile('reference.ts', code, ts.ScriptTarget.Latest, true);
-  if (file.parseDiagnostics.length) throw new Error(file.parseDiagnostics.map(error =>
+  if (file.parseDiagnostics.length) throw new Error(`Invalid public reference for ${name}:\n` + file.parseDiagnostics.map(error =>
     ts.flattenDiagnosticMessageText(error.messageText, '\n')).join('\n'));
   function rejectUnresolvedTypes(node) {
-    if (node.kind === ts.SyntaxKind.AnyKeyword) throw new Error('A public signature contains an unresolved any type.');
+    if (node.kind === ts.SyntaxKind.AnyKeyword) throw new Error(`The public signature for ${name} contains an unresolved any type.`);
     ts.forEachChild(node, rejectUnresolvedTypes);
   }
   rejectUnresolvedTypes(file);
@@ -197,7 +199,7 @@ for (const exported of exports) {
   if (relative.startsWith('../') || relative.includes('node_modules/')) throw new Error(`Unexpected SDK export origin: ${name}`);
   groupFor(name, declaration).items.push({
     name,
-    code: formatted(declarationText(name, symbol, declaration)),
+    code: formatted(declarationText(name, symbol, declaration), name),
     url: `https://github.com/MonkyOrg/Monky/blob/main/${relative}#L${line}`,
     schema: name.endsWith('Schema'),
   });

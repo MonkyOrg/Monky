@@ -125,6 +125,11 @@ to prepare local tools. The request explains their purpose, tools and space
 requirements; you can deny it, allow until disconnecting or remember
 authorization until you revoke it.
 
+When you select the command, **Checking local permissions and tools...**
+shows preparation before its fields become available, even when permission
+has already been granted. Close the command to cancel; a failed check shows
+an error instead of leaving the loading indicator active.
+
 In **Settings → Bot tools**, inspect installed tools, storage, cache,
 permissions and tasks. Removing a tool or revoking access stops affected
 work. Monky manages these installations; they do not authorize a bot to send
@@ -151,9 +156,28 @@ card appear in the **voice stage**, not as an external site opening by itself.
 view. **End miniapp**, available to its creator or an authorized
 administrator, ends that instance for everyone.
 
-The current SDK lets bots **publish audio**, but not receive participants'
-microphones, cameras or screen shares. There is no switch that grants
-listening permission.
+## Bots that receive voice
+
+A bot can receive microphones only if it requests **Listen to voice-room microphones** and an
+administrator approves it in **Bot settings → Server permissions**.
+Publishing audio is a separate permission: music bots do not start
+listening automatically.
+
+The participant list shows **Listening to voices** while authorized
+reception is active. Microphone and headphone icons use the administrative
+block badge when permission to transmit or listen, respectively, is
+missing. Having permission without activating reception does not show a
+listening notice.
+
+Deafening the bot stops reception; muting your microphone prevents it from
+being received. **Muting the bot only for yourself** affects local playback,
+not its permission to listen. Cameras, screen sharing, Soundboard and
+private previews are outside this API.
+
+The SDK does not record or transcribe conversations. Bot operators are
+responsible for disclosing any processing, external transmission or
+retention they implement. Read the [voice guide](/en/bots-voz) before
+granting access.
 
 ## Monky Bot (official bot)
 

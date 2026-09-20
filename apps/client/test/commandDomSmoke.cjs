@@ -85,6 +85,37 @@ if (!process.versions.electron) {
       features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
     });
     console.log(`Command waiting indicators: ${waitingChecks} checks plus reduced-motion coverage passed`);
+    const captureBotVoiceIndicators = async () => {
+      const markup = await window.webContents.executeJavaScript('window.botVoicePreviewMarkup.join("")');
+      const preview = new BrowserWindow({
+        show: false, width: 280, height: 720, useContentSize: true,
+        webPreferences: { contextIsolation: true, nodeIntegration: false, offscreen: true, backgroundThrottling: false },
+      });
+      try {
+        await preview.loadURL(window.webContents.getURL());
+        await preview.webContents.executeJavaScript(`(async () => {
+          document.body.innerHTML = '<div style="width:250px;padding:12px;">' + ${JSON.stringify(markup)} + '</div>';
+          await document.fonts.ready;
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        })()`, true);
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => { preview.webContents.removeListener('paint', painted); reject(new Error('Bot indicators did not paint')); }, 5000);
+          const painted = () => { clearTimeout(timer); resolve(); };
+          preview.webContents.once('paint', painted);
+          preview.webContents.invalidate();
+        });
+        fs.writeFileSync(path.join(output, 'bot-voice-indicators.png'), (await preview.webContents.capturePage()).toPNG());
+      } finally {
+        preview.destroy();
+      }
+    };
+    if (process.argv.includes('--sidebar-only')) {
+      const checks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
+      await captureBotVoiceIndicators();
+      console.log(`Sidebar voice indicators: ${checks} checks passed`);
+      await finish(0);
+      return;
+    }
     if (process.argv.includes('--bot-settings-only')) {
       const checks = await window.webContents.executeJavaScript(`(${runBotSettingsDomSmoke.toString()})()`, true);
       await window.webContents.executeJavaScript('document.body.innerHTML = window.botSettingsPreviewMarkup', true);
@@ -150,6 +181,7 @@ if (!process.versions.electron) {
     const paginationChecks = await window.webContents.executeJavaScript('window.autocompletePaginationSmoke()', true);
     await window.webContents.executeJavaScript('window.autocompleteDomCleanup()', true);
     const sidebarChecks = await window.webContents.executeJavaScript(`(${runSidebarPttSmoke.toString()})()`, true);
+    await captureBotVoiceIndicators();
     const restrictionChecks = await window.webContents.executeJavaScript(`(${runServerRestrictionSmoke.toString()})()`, true);
     const settingsChecks = await window.webContents.executeJavaScript(`(${runSettingsNavigationSmoke.toString()})()`, true);
     const botSettingsChecks = await window.webContents.executeJavaScript(`(${runBotSettingsDomSmoke.toString()})()`, true);
@@ -2593,6 +2625,50 @@ async function runSidebarPttSmoke() {
       const originalApi = window.api;
       try {
         speaking(bot.sessionId, true, 'The actual transmitting bot is green in the listening room');
+        window.botVoicePreviewMarkup = [];
+        for (const locale of ['pt-BR', 'en']) {
+          language.setLanguage(locale);
+          for (const permissions of [
+            { publish: true, receive: true, publishRequested: true, receiveRequested: true },
+            { publish: false, receive: true, publishRequested: false, receiveRequested: true },
+            { publish: true, receive: false, publishRequested: true, receiveRequested: false },
+            { publish: false, receive: true, publishRequested: true, receiveRequested: true },
+            { publish: true, receive: false, publishRequested: true, receiveRequested: true },
+          ]) {
+            manager.updateVoiceState({ ...botState, receivesVoice: true, botVoicePermissions: permissions });
+            await frame();
+            const row = root.querySelector(`#voice-mini-user-${CSS.escape(bot.sessionId)}`);
+            const card = document.querySelector(`#ptt-stage-fixture [data-session-id="${CSS.escape(bot.sessionId)}"][data-kind="voice"]`);
+            for (const element of [row, card]) {
+              check(!!element.querySelector('.bot-voice-listening') === permissions.receive, 'Listening reflects the actual receive permission');
+              check(element.querySelectorAll('.audio-state-icon--blocked').length ===
+                Number(permissions.publishRequested && !permissions.publish) + Number(permissions.receiveRequested && !permissions.receive),
+                'Only requested but denied bot directions use the administrative block badge');
+              if (permissions.receive) check(element.textContent.includes(language.t('botVoice.listening')), 'Listening has visible localized text');
+            }
+            check(row.scrollWidth <= row.clientWidth + 1, 'Bot indicators fit the narrow voice sidebar');
+            check(row.querySelector('.voice-mini-name').getBoundingClientRect().width >= 24, 'Listening must not hide the entire bot name');
+            window.botVoicePreviewMarkup.push(`<div style="margin-bottom:12px"><small>${locale}</small>${row.outerHTML}</div>`);
+          }
+          for (const restriction of ['isDeafened', 'serverMuted', 'serverDeafened']) {
+            manager.updateVoiceState({ ...botState, receivesVoice: true,
+              botVoicePermissions: { publish: true, receive: true, publishRequested: true, receiveRequested: true },
+              [restriction]: true });
+            await frame();
+            const row = root.querySelector(`#voice-mini-user-${CSS.escape(bot.sessionId)}`);
+            const card = document.querySelector(`#ptt-stage-fixture [data-session-id="${CSS.escape(bot.sessionId)}"][data-kind="voice"]`);
+            for (const element of [row, card]) {
+              check(!!element.querySelector('.bot-voice-listening') === (restriction === 'serverMuted'),
+                'Administrative mute preserves listening; personal and administrative deafen stop it');
+              check(element.querySelectorAll('.audio-state-icon--blocked').length ===
+                (restriction === 'serverMuted' ? 1 : restriction === 'serverDeafened' ? 2 : 0),
+                'Administrative restrictions stay visible even when both bot capabilities are granted');
+            }
+          }
+        }
+        language.setLanguage('pt-BR');
+        manager.updateVoiceState(botState);
+        await frame();
         speaking(remoteUser.sessionId, false, 'A bot cannot light a muted human with published speaking metadata');
         speaking(quietBot.sessionId, false, 'A bot cannot light another silent bot');
         appEvents.emit('participants.speaking_changed', { sessionId: bot.sessionId, speaking: true });

@@ -950,6 +950,11 @@ class App {
       }
 
       participantManager.updateVoiceState(payload.voiceState);
+      if (isRemoteUser && isSameVoiceChannel && (
+        previousVoiceState?.receivesVoice !== payload.voiceState.receivesVoice ||
+        previousVoiceState?.isDeafened !== payload.voiceState.isDeafened ||
+        previousVoiceState?.serverDeafened !== payload.voiceState.serverDeafened
+      )) webRtcManager.syncBotVoiceReception(payload.voiceState.sessionId);
       if (serverStore.isMySession(payload.voiceState.sessionId) && this.eventOwnsCall()
         && voiceStore.currentVoiceChannelId === payload.voiceState.channelId) {
         voiceStore.setServerMuted(payload.voiceState.serverMuted);

@@ -17,6 +17,7 @@ export type {
   LocalTaskSpec, LocalWirePreviewResult, LocalWireTaskResult,
 } from '@monky/shared';
 export { BotVoiceConnection } from './voice/BotVoiceConnection';
+export type { BotVoicePacket, BotVoiceAudioReceiver } from './voice/VoiceAudioReceiver';
 export { BotScreenClient } from './BotScreenClient';
 export * from './managedTools';
 export * from './localExecution/contracts';
@@ -471,11 +472,17 @@ export class BotClient extends EventEmitter {
     const conn = this.requireConnection(serverId);
     const parsed = botVoiceJoinOptionsSchema.safeParse(options);
     if (!parsed.success) return Promise.reject(new Error('Invalid voice join options.'));
+    if (parsed.data.receiveAudio && !this.options.requestedCapabilities.includes('receive_voice')) {
+      return Promise.reject(new Error('Declare receive_voice and have it approved before receiving audio.'));
+    }
     if (!conn.voiceAuth) return Promise.reject(new Error('Server did not supply valid authenticated voice metadata.'));
     if (!channelId || channelId.length > 256) return Promise.reject(new Error('Invalid voice channel ID.'));
     if (conn.voice) {
       if (conn.voice.isClosed) return Promise.reject(new Error('Voice connection is closing; await leaveVoice before rejoining.'));
       if (conn.voice.channelId !== channelId) return Promise.reject(new Error('Leave the current voice channel before joining another.'));
+      if (conn.voice.receivesAudio !== (parsed.data.receiveAudio === true)) {
+        return Promise.reject(new Error('Leave the current voice channel before changing its reception opt-in.'));
+      }
       return conn.voiceJoin ?? Promise.resolve(conn.voice);
     }
     const voice = new BotVoiceConnection(channelId, conn.voiceAuth, {
@@ -494,7 +501,7 @@ export class BotClient extends EventEmitter {
         this.emit('voiceDisconnected', { serverId: conn.serverId, channelId, reason });
       },
       error: (error) => this.reportError(error, conn),
-    });
+    }, (conn.permissions?.granted ?? this.options.requestedCapabilities).includes('publish_voice'));
     conn.voice = voice;
     const joining = voice.join(parsed.data).then(() => voice).finally(() => {
       if (conn.voice === voice) conn.voiceJoin = undefined;

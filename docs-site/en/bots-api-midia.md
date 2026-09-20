@@ -142,17 +142,41 @@ export type BotScreenRemoved = {
 };
 ```
 
+## `BotVoiceAudioReceiver` {#botvoiceaudioreceiver}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/voice/VoiceAudioReceiver.ts#L17)
+
+```ts
+export interface BotVoiceAudioReceiver {
+    readonly droppedPackets: number;
+    return: () => Promise<IteratorResult<BotVoicePacket, undefined>>;
+    throw: (error: unknown) => Promise<IteratorResult<BotVoicePacket, undefined>>;
+    [Symbol.asyncIterator]: () => AsyncIterableIterator<import("C:/Projetos/Monky-batch-670-682/packages/bot-sdk/src/index").BotVoicePacket, undefined, undefined>;
+    next: (...[value]: [
+    ] | [
+        undefined
+    ]) => Promise<IteratorResult<import("C:/Projetos/Monky-batch-670-682/packages/bot-sdk/src/index").BotVoicePacket, undefined>>;
+}
+```
+
 ## `BotVoiceConnection` {#botvoiceconnection}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/voice/BotVoiceConnection.ts#L28)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/voice/BotVoiceConnection.ts#L32)
 
 ```ts
 export class BotVoiceConnection {
-    constructor(channelId: string, auth: BotVoiceAuth, callbacks: VoiceCallbacks);
+    constructor(channelId: string, auth: BotVoiceAuth, callbacks: VoiceCallbacks, publishAudio?: boolean);
     readonly channelId: string;
     get humanParticipantCount(): number;
     get isClosed(): boolean;
+    get isReceivingAudio(): boolean;
+    get receivesAudio(): boolean;
     join(options?: BotVoiceJoinOptions): Promise<void>;
+    receiveAudio(argument0?: {
+        signal?: AbortSignal;
+    }): BotVoiceAudioReceiver;
+    setMuted(muted: boolean): Promise<void>;
+    setDeafened(deafened: boolean): Promise<void>;
     handle(message: VoiceMessage): boolean;
     writeOpus(frame: Uint8Array): Promise<void>;
     stopSpeaking(): void;
@@ -163,12 +187,35 @@ export class BotVoiceConnection {
 
 ## `BotVoiceJoinOptions` {#botvoicejoinoptions}
 
-[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botVoice.ts#L12)
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/botVoice.ts#L15)
 
 ```ts
 export type BotVoiceJoinOptions = {
     invocationId?: string | undefined;
+    receiveAudio?: boolean | undefined;
 };
+```
+
+## `BotVoicePacket` {#botvoicepacket}
+
+[Source and validation](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/voice/VoiceAudioReceiver.ts#L1)
+
+```ts
+export interface BotVoicePacket {
+    channelId: string;
+    userId: string;
+    sessionId: string;
+    codec: 'opus';
+    clockRate: 48000;
+    channels: 2;
+    /** Raw Opus, not PCM or an Ogg container. Owned by this packet's caller. */
+    opus: Uint8Array;
+    sequenceNumber: number;
+    timestamp: number;
+    ssrc: number;
+    /** Monotonic milliseconds in this process, not wall time or RTP time. */
+    receivedAt: number;
+}
 ```
 
 ## `LocalCapabilityId` {#localcapabilityid}

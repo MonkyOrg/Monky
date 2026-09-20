@@ -1,3 +1,4 @@
+import { isReceivingBotVoice, type VoiceParticipantState } from '@monky/shared';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
 
@@ -24,13 +25,23 @@ export function renderAudioMuteIndicators(state: {
   isDeafened: boolean;
   serverMuted?: boolean;
   serverDeafened?: boolean;
+  receivesVoice?: boolean;
+  botVoicePermissions?: VoiceParticipantState['botVoicePermissions'];
 }, { size = 14, showMicrophone = true }: { size?: IconSize; showMicrophone?: boolean } = {}): string {
-  const micBlocked = !!(state.serverMuted || state.serverDeafened);
+  const permissions = state.botVoicePermissions;
+  const publishDenied = permissions?.publishRequested === true && !permissions.publish;
+  const receiveDenied = permissions?.receiveRequested === true && !permissions.receive;
+  const micBlocked = !!(state.serverMuted || state.serverDeafened || publishDenied);
   const micMuted = state.isMuted || state.isDeafened || micBlocked;
-  const audioMuted = state.isDeafened || state.serverDeafened;
-  const micLabel = state.serverDeafened ? t('permissions.serverDeafened')
+  const audioBlocked = !!(state.serverDeafened || receiveDenied);
+  const audioMuted = state.isDeafened || audioBlocked;
+  const micLabel = publishDenied ? t('botVoice.publishDenied') : state.serverDeafened ? t('permissions.serverDeafened')
     : state.serverMuted ? t('permissions.serverMuted') : t('main.micMuted');
+  const audioLabel = receiveDenied ? t('botVoice.receiveDenied')
+    : t(state.serverDeafened ? 'permissions.serverDeafened' : 'main.audioMuted');
   return (showMicrophone && micMuted ? renderAudioStateIcon(micBlocked ? 'mic' : 'mic_off', micBlocked, size, micLabel) : '')
-    + (audioMuted ? renderAudioStateIcon(state.serverDeafened ? 'headphones' : 'headset_off',
-      !!state.serverDeafened, size, t(state.serverDeafened ? 'permissions.serverDeafened' : 'main.audioMuted')) : '');
+    + (audioMuted ? renderAudioStateIcon(audioBlocked ? 'headphones' : 'headset_off', audioBlocked, size, audioLabel) : '')
+    + (permissions?.receive === true && isReceivingBotVoice(state)
+      ? `<span class="bot-voice-listening" role="status" title="${escapeHtml(t('botVoice.listeningDescription'))}"><span class="material-symbols-outlined md-${size}" aria-hidden="true">hearing</span><span>${escapeHtml(t('botVoice.listening'))}</span></span>`
+      : '');
 }

@@ -24,6 +24,7 @@ When creating or editing a text channel, the **Allow bot commands** switch start
 | `read_messages` | Messages, history, and reactions in accessible channels; also required to quote another message |
 | `send_messages` | Messages, replies, reactions, and public command results |
 | `publish_voice` | Publishing audio in permitted rooms, without receiving participant media |
+| `receive_voice` | Receiving human microphones in an authorized room, only after opting in on the voice connection |
 | `local_execution` | Requesting tasks and tool preparation on the client; may receive media produced by an authorized task |
 | `sound_download` | Requesting a Soundboard audio save on the caller's device, without general filesystem access |
 | `selectors` | Persistent public choice controls and their responses; publication also requires `send_messages` |
@@ -31,7 +32,11 @@ When creating or editing a text channel, the **Allow bot commands** switch start
 
 Registering commands requires `commands`; commands with `downloadsSound` also declare `sound_download`, and those with `localCapabilities` declare `local_execution`. Public replies require `send_messages`; default private replies require only `commands`. Role, channel, and initiating-user permissions still apply.
 
-**Voice reception is unavailable.** Requests such as `receive_voice` are rejected. The server refuses bot SFU consumption and P2P negotiations that would receive microphone, camera, or screen sharing; clients do not publish those tracks to bots. Media from consented local tasks is a separate route, not channel listening.
+**Reception is an independent authorization.** Declaring `receive_voice` does not grant access: the new capability starts switched off during review. Even after approval, the bot must join with `receiveAudio: true`. Without this opt-in, the connection still receives no voice. Reception, publication or both may be approved independently. The server limits reception to human microphones in the same room; it excludes other bots, cameras, screen sharing, Soundboard and private previews. Media from consented local tasks is a separate route.
+
+While reception is active, the participant list shows **Listening to voices**. The block badge appears when the bot requested publication or reception but that permission was not granted; unrequested capabilities do not appear denied. Administrative mute/deafen also shows the block independently of granted permissions, without revoking them. Personal/administrative deafen stops reception and clears buffers; mute controls transmission. Muting a bot's playback only on your device does not revoke listening permission. The app and SDK respect source microphone mute; in SFU mode, the server also pauses these producers so a consumer cannot bypass the restriction.
+
+The SDK does not record, transcribe or send audio to AI services. Bot operators must disclose their processing and retention and comply with applicable consent and privacy rules. Read [format, example and cleanup](/en/bots-voz#receive-microphones) before enabling the capability.
 
 **Device consent is separate.** Granting `local_execution` or `sound_download` on the server neither installs tools nor authorizes a computer. The person still controls local requests and can deny or revoke them in local tool settings. Personal preferences, bot language, and file-name confirmation do not become administrator-controlled permissions.
 

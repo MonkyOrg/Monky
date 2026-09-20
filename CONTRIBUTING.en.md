@@ -143,6 +143,7 @@ and the installed application are unchanged. No installed profile is copied.
 | `connected` (default) | Fresh identity, real first-owner authentication, channels and sample message | The chat feature under test |
 | `server-settings` | Connected owner and the real General settings panel | Editing/applying settings |
 | `voice` | Muted user, synthetic devices and a second SDK participant over real P2P | Voice behavior; the labeled fixture is not production music |
+| `voice-receive` | Listening-only SDK fixture, muted user and real room indicators | `/qa-listen` toggles reception; unmuting sends synthetic audio without physical capture or recording |
 | `home` | Fresh identity and completed introduction; Home with no saved servers | Home navigation/addition and server entry |
 | `login` | Home with loopback address, nickname and test password filled | Submitting the form and authenticating |
 | `bot-install` | Connected server and bot URL filled in settings | Installing/linking the bot |
@@ -152,6 +153,7 @@ and the installed application are unchanged. No installed profile is copied.
 ```powershell
 npm run qa -- server-settings
 npm run qa -- voice
+npm run qa -- voice-receive
 npm run qa -- bot-install --bot=fixture
 npm run qa -- tool-consent --bot=fixture
 npm run qa -- music --bot-root="C:\Projects\MonkyBot"
@@ -169,11 +171,16 @@ and the same `requestedCapabilities` used by its own `BotClient`; QA never inven
 a production declaration. Prepared scenarios use the owner's real manifest
 preview and authorized installation to approve the declared capabilities. The
 fixture requests only commands and local execution, plus voice publishing in
-`voice`. `bot-install` leaves installation and review pending; server permission
+`voice` or reception in `voice-receive`. In the latter, the bot counts packets
+without keeping their contents and shows no publication block because it does
+not request that capability. Administrative mute/deafen still shows the
+corresponding block. `/qa-local-consent` also exercises command preparation
+without automatically granting local consent. `bot-install` leaves installation
+and review pending; server permission
 never substitutes for local consent in `tool-consent`/`music`.
 
 To test the bot's voice admission, use `connected --bot-root=...`, not
-`voice`/`music`: those scenarios already join the bot to the call.
+`voice`/`voice-receive`/`music`: those scenarios already join the bot to the call.
 
 Wait for **QA_READY**, not merely a visible window. The launcher checks that the
 window is visible in interactive mode and hidden with `--smoke`. Server health, authentication,

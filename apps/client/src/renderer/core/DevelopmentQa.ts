@@ -106,7 +106,7 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
       }
       report.botPermissions = permissions;
     }
-    if (config.scenario === 'voice' || config.scenario === 'music') {
+    if (config.scenario === 'voice' || config.scenario === 'voice-receive' || config.scenario === 'music') {
       await joinCallOnSession(session.key, voice.id);
       report.voiceChannelId = voice.id;
       await publish('voice-joined');
@@ -114,6 +114,41 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
       report.peers = webRtcManager.getVoiceStatus().connectedP2pPeers.length;
       report.muted = voiceStore.isMuted;
       if (!report.muted) throw new Error('Prepared QA must start with its synthetic microphone muted.');
+      if (config.scenario === 'voice-receive') {
+        const botRow = () => {
+          const user = session.serverStore.serverDetails?.members.find((member) => member.id === report.botId);
+          return user ? document.getElementById(`voice-mini-user-${user.sessionId}`) : null;
+        };
+        await until(() => {
+          const row = botRow();
+          return !!row?.querySelector('.bot-voice-listening') && !row.querySelector('.audio-state-icon--blocked');
+        }, 'visible listening notice without a denial for unrequested publication', owner.signal);
+        if (config.smoke) {
+          for (const listening of [false, true]) {
+            await session.client.sendRequest(MessageType.COMMAND_INVOKE, {
+              botId: report.botId, channelId: text.id, commandName: 'qa-listen',
+            }, undefined, 30_000);
+            await until(() => {
+              const row = botRow();
+              return !!row && !row.querySelector('.audio-state-icon--blocked') &&
+                !!row.querySelector('.bot-voice-listening') === listening;
+            }, 'listening toggle through the real SDK command and voice roster', owner.signal);
+          }
+          for (const [type, key, blocked] of [
+            [MessageType.ADMIN_MUTE_USER, 'muted', 1],
+            [MessageType.ADMIN_DEAFEN_USER, 'deafened', 2],
+          ] as const) {
+            for (const enabled of [true, false]) {
+              await session.client.sendRequest(type, { targetUserId: report.botId, [key]: enabled }, undefined, 30_000);
+              await until(() => {
+                const row = botRow();
+                return !!row && row.querySelectorAll('.audio-state-icon--blocked').length === (enabled ? blocked : 0) &&
+                  !!row.querySelector('.bot-voice-listening') === !(key === 'deafened' && enabled);
+              }, 'administrative restrictions independent of bot capability requests', owner.signal);
+            }
+          }
+        }
+      }
     }
     if (config.scenario === 'tool-consent' || config.scenario === 'music') {
       const command = session.chatStore.getCommands().find((candidate) => candidate.botId === report.botId &&
@@ -152,7 +187,7 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
       if (!document.querySelector('.server-settings-modal-card')) throw new Error('The real server-settings UI did not open.');
     }
     if (session.client.getStatus() !== 'CONNECTED') throw new Error('The QA session disconnected during preparation.');
-    if (config.scenario === 'voice' || config.scenario === 'music') {
+    if (config.scenario === 'voice' || config.scenario === 'voice-receive' || config.scenario === 'music') {
       const current = webRtcManager.getVoiceStatus();
       if (current.channelId !== voice.id || current.connectedP2pPeers.length === 0) {
         throw new Error('The real voice peer disconnected during preparation.');

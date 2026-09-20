@@ -205,6 +205,15 @@ export interface VoiceParticipantState extends VoiceRestrictions {
   isCameraOn: boolean;
   isScreenSharing: boolean;
   isSharingScreenAudio: boolean;
+  /** Server-authorized bot microphone reception; never granted by a renderer update. */
+  receivesVoice?: boolean;
+  /** Requested and granted bot directions, independent of administrative mute/deafen. */
+  botVoicePermissions?: {
+    publish: boolean;
+    receive: boolean;
+    publishRequested: boolean;
+    receiveRequested: boolean;
+  };
   /** SFU transport health, measured by the server rather than signaling presence. */
   connectionHealth?: VoiceConnectionHealth;
   /**
