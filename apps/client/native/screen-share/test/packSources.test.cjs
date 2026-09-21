@@ -37,7 +37,7 @@ test('source archive names use an unprefixed semantic version and reject path in
 const python = process.env.PYTHON ?? path.resolve(__dirname, '..', '..', '..', '..', '..', '.native-screen', 'python', 'Scripts', 'python.exe');
 test('the source archiver preserves a real file inventory without local-account metadata',
   { skip: !path.isAbsolute(python) || !fs.existsSync(python) }, t => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-source-archive-'));
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'monky-source-archive-'));
     t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
     fs.mkdirSync(path.join(directory, 'input'));
     fs.mkdirSync(path.join(directory, 'metadata'));
@@ -73,5 +73,5 @@ test('the source archiver preserves a real file inventory without local-account 
     const extractedSdk = path.join(extracted, 'rtc', 'webrtc', 'src');
     const checkout = spawnSync('git', ['-C', extractedSdk, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
     assert.equal(checkout.status, 0, checkout.stderr);
-    assert.equal(fs.realpathSync(checkout.stdout.trim()), fs.realpathSync(extractedSdk));
+    assert.equal(fs.realpathSync.native(checkout.stdout.trim()), fs.realpathSync.native(extractedSdk));
   });

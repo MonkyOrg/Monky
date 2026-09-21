@@ -216,6 +216,12 @@ o RTC e a captura de `screen-share` e reúne as licenças; **não compila
 build do `gclient`. Checkouts modificados ou incompletos interrompem a
 preparação; não são resetados ou substituídos silenciosamente.
 
+Downloads de arquivos compactados têm até três tentativas para falhas
+transitórias de rede/servidor, com espera e descarte do arquivo parcial.
+Cada tentativa concluída precisa validar o SHA-256 e o tamanho, quando fixado.
+Falhas de integridade, certificado, redirecionamento inseguro ou HTTP
+permanente interrompem o preparo sem repetir nem substituir o cache.
+
 Esse roteiro não instala os pré-requisitos de sistema nem promete um preparo
 completo em um comando em qualquer máquina. `nativeScreenReady: true` confirma
 o build/runtime, não a captura, o driver ou o envio NVIDIA. O preparo em uma

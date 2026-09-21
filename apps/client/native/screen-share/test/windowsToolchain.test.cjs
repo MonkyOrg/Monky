@@ -27,7 +27,7 @@ function installation(directory, version = '14.44.35207', release = '17.14.37614
 }
 
 function fixture(t) {
-  const temporary = fs.realpathSync(os.tmpdir());
+  const temporary = fs.realpathSync.native(os.tmpdir());
   const root = fs.mkdtempSync(path.join(temporary, 'monky-windows-toolchain-'));
   t.after(() => {
     assert.equal(path.dirname(root), temporary);
@@ -378,12 +378,12 @@ test('screen-audio uses installed Electron/local node-gyp and exact MSBuild prop
   for (const call of calls) assert.equal(call.opts.env, env);
 });
 
-function modelBuilder(name, f, selected, env) {
+function modelBuilder(name, f, selected, env, paths = path) {
   const real = require('../scripts/buildTools.cjs');
-  const packageRoot = path.join(f.root, 'modeled package');
+  const packageRoot = paths.join(f.root, 'modeled package');
   const files = new Map(), directories = new Set(), calls = [];
   const stopped = new Error('Modeled command captured; no compiler was executed');
-  const source = path.join(packageRoot, 'src');
+  const source = paths.join(packageRoot, 'src');
   const realSource = path.join(real.root, 'src');
   const save = (filename, bytes) => files.set(filename, Buffer.from(bytes));
   const io = {
@@ -394,28 +394,28 @@ function modelBuilder(name, f, selected, env) {
     readFileSync(filename, encoding) {
       let bytes = files.get(filename);
       if (!bytes) {
-        const relative = path.relative(source, filename);
-        if (!relative.startsWith('..') && !path.isAbsolute(relative))
-          bytes = fs.readFileSync(path.join(realSource, relative));
+        const relative = paths.relative(source, filename);
+        if (!relative.startsWith('..') && !paths.isAbsolute(relative))
+          bytes = fs.readFileSync(path.join(realSource, ...relative.split(paths.sep)));
         else bytes = Buffer.from('modeled build input');
       }
       return encoding ? bytes.toString(encoding) : bytes;
     },
     openSync: () => 1, closeSync() {}, unlinkSync: filename => files.delete(filename),
   };
-  save(path.join(packageRoot, 'build', 'tools', 'monky_msvc_job.exe'), 'modeled job: never executed');
+  save(paths.join(packageRoot, 'build', 'tools', 'monky_msvc_job.exe'), 'modeled job: never executed');
   const inputs = {};
-  for (const relative of [path.join('vendor', 'obs', 'sources.json'),
-    path.join('vendor', 'obs', 'runtime-inputs.json'), path.join('capture', 'runtime-additions.json')])
-    inputs[path.join(source, relative)] = require(path.join(realSource, relative));
+  for (const relative of [paths.join('vendor', 'obs', 'sources.json'),
+    paths.join('vendor', 'obs', 'runtime-inputs.json'), paths.join('capture', 'runtime-additions.json')])
+    inputs[paths.join(source, relative)] = require(path.join(realSource, ...relative.split(paths.sep)));
   const module = script(name, {
-    ...inputs, 'node:fs': io,
+    ...inputs, 'node:fs': io, 'node:path': paths,
     './windowsToolchain.cjs': { ...tools, resolveWindowsToolchain: () => selected, msvcEnvironment: () => env },
     './buildTools.cjs': { ...real, root: packageRoot, write: save, regularFiles: () => [],
       fingerprint: () => ({ bytes: 1, sha256: '0'.repeat(64) }), verify() {},
       execute(exe, args, options) {
         calls.push({ exe, args, options });
-        const base = path.basename(exe);
+        const base = paths.basename(exe);
         if (base === 'monky_msvc_job.exe') throw stopped;
         if (exe === 'git') return args.includes('rev-parse') ? pins.repositories.webrtc.commit : '1700000000';
         if (base === 'clang-cl.exe') return 'clang version 21.0.0git bd809ffb';
@@ -470,19 +470,22 @@ test('RTC uses the resolved Python consistently when its programmatic caller rel
   assert.ok(modeled.calls.some(call => call.exe === f.python && call.args.some(value => value.endsWith('licenses.py'))));
 });
 
-test('capture import libraries, dumpbin and the owned cl job use selected absolute tools without another vswhere', t => {
+test('capture imports and the owned cl job preserve Windows pins on Windows and POSIX hosts', async t => {
   const f = fixture(t), selected = f.resolve(), env = tools.msvcEnvironment(selected, f.env, f.vcvars);
-  const modeled = modelBuilder('buildCapture.cjs', f, selected, env);
-  assert.throws(() => modeled.module.build({ python: f.python,
-    stock: path.join(f.root, 'pinned OBS runtime'), dependencies: path.join(f.root, 'pinned OBS dependencies') }),
-  error => error === modeled.stopped);
-  const compiler = selected.compilerDirectory;
-  for (const call of modeled.calls.slice(0, -1))
-    assert.ok([path.join(compiler, 'dumpbin.exe'), path.join(compiler, 'lib.exe')].includes(call.exe));
-  const build = modeled.calls.at(-1);
-  assert.equal(build.exe, path.join(modeled.packageRoot, 'build', 'tools', 'monky_msvc_job.exe'));
-  assert.deepEqual([...build.args.slice(0, 2)], [compiler, path.join(compiler, 'cl.exe')]);
-  assert.equal(build.args[2], `@${path.join(modeled.packageRoot, 'build', 'capture-production', 'module.rsp')}`);
-  assert.ok(modeled.calls.every(call => call.options.env === env));
-  assert.equal(env.WindowsSDKVersion, '10.0.26100.0\\');
+  for (const [name, paths] of [['Windows', path.win32], ['POSIX', path.posix]]) await t.test(name, () => {
+    const modeled = modelBuilder('buildCapture.cjs', f, selected, env, paths);
+    const stock = paths.join(f.root, 'pinned OBS runtime');
+    assert.throws(() => modeled.module.build({ python: f.python,
+      stock, dependencies: paths.join(f.root, 'pinned OBS dependencies') }), error => error === modeled.stopped);
+    const compiler = selected.compilerDirectory;
+    for (const call of modeled.calls.slice(0, -1))
+      assert.ok([paths.join(compiler, 'dumpbin.exe'), paths.join(compiler, 'lib.exe')].includes(call.exe));
+    assert.equal(modeled.calls[0].args.at(-1), paths.join(stock, 'bin', '64bit', 'obs.dll'));
+    const build = modeled.calls.at(-1);
+    assert.equal(build.exe, paths.join(modeled.packageRoot, 'build', 'tools', 'monky_msvc_job.exe'));
+    assert.deepEqual([...build.args.slice(0, 2)], [compiler, paths.join(compiler, 'cl.exe')]);
+    assert.equal(build.args[2], `@${paths.join(modeled.packageRoot, 'build', 'capture-production', 'module.rsp')}`);
+    assert.ok(modeled.calls.every(call => call.options.env === env));
+    assert.equal(env.WindowsSDKVersion, '10.0.26100.0\\');
+  });
 });

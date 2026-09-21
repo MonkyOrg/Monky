@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const https = require('node:https');
 const path = require('node:path');
 const { finished, pipeline } = require('node:stream/promises');
+const timers = require('node:timers/promises');
 const { root, execute, write, verify, fingerprint } = require('./buildTools.cjs');
 
 const repository = path.resolve(root, '..', '..', '..', '..');
@@ -124,19 +125,29 @@ async function archiveResponse(url, signal, redirects = 0) {
     request.once('error', reject);
   });
   if (response.statusCode === 200) return response;
+  if (![301, 302, 303, 307, 308].includes(response.statusCode)) {
+    response.destroy();
+    throw Object.assign(new Error(`Native archive download failed (${response.statusCode}): ${address}`),
+      { code: 'ERR_NATIVE_ARCHIVE_HTTP', statusCode: response.statusCode });
+  }
   response.resume();
   await finished(response, { cleanup: true });
-  assert.ok([301, 302, 303, 307, 308].includes(response.statusCode),
-    `Native archive download failed (${response.statusCode}): ${address}`);
   assert.ok(redirects < 10 && typeof response.headers.location === 'string',
     'Native archive redirect is missing its location or exceeds its limit.');
   return archiveResponse(new URL(response.headers.location, address), signal, redirects + 1);
 }
 
-async function download(record) {
+function retryableDownloadFailure(error) {
+  if (error?.code === 'ERR_NATIVE_ARCHIVE_HTTP')
+    return [408, 429, 500, 502, 503, 504].includes(error.statusCode);
+  return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH',
+    'EHOSTUNREACH', 'ERR_STREAM_PREMATURE_CLOSE'].includes(error?.code)
+    || error?.code === 'ABORT_ERR' && error.cause?.name === 'TimeoutError';
+}
+
+async function download(record, directory = path.join(cache, 'downloads')) {
   const extension = new URL(record.url).pathname.match(/\.(?:tar\.gz|tar\.xz|zip)$/u)?.[0];
   assert.ok(extension, `Unsupported native archive: ${record.url}`);
-  const directory = path.join(cache, 'downloads');
   fs.mkdirSync(directory, { recursive: true });
   const filename = path.join(directory, record.sha256 + extension);
   if (fs.existsSync(filename)) {
@@ -145,18 +156,26 @@ async function download(record) {
     if (record.bytes !== undefined) assert.equal(actual.bytes, record.bytes);
     return filename;
   }
-  const temporary = filename + '.' + crypto.randomUUID() + '.part';
   console.log(`Archive: ${record.url}`);
-  try {
-    const response = await archiveResponse(record.url, AbortSignal.timeout(600_000));
-    await pipeline(response, fs.createWriteStream(temporary, { flags: 'wx' }));
-    const actual = fingerprint(temporary);
-    assert.equal(actual.sha256, record.sha256, `Archive checksum mismatch: ${record.url}`);
-    if (record.bytes !== undefined) assert.equal(actual.bytes, record.bytes);
-    fs.renameSync(temporary, filename);
-    return filename;
-  } finally {
-    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  for (let attempt = 1; ; attempt++) {
+    const temporary = filename + '.' + crypto.randomUUID() + '.part';
+    let retry;
+    try {
+      const response = await archiveResponse(record.url, AbortSignal.timeout(600_000));
+      await pipeline(response, fs.createWriteStream(temporary, { flags: 'wx' }));
+      const actual = fingerprint(temporary);
+      assert.equal(actual.sha256, record.sha256, `Archive checksum mismatch: ${record.url}`);
+      if (record.bytes !== undefined) assert.equal(actual.bytes, record.bytes);
+      fs.renameSync(temporary, filename);
+      return filename;
+    } catch (error) {
+      if (attempt >= 3 || !retryableDownloadFailure(error)) throw error;
+      retry = error;
+    } finally {
+      if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    }
+    console.warn(`Native archive attempt ${attempt}/3 failed (${retry.code}): ${record.url}; retrying from the beginning.`);
+    await timers.setTimeout(1000 * attempt);
   }
 }
 

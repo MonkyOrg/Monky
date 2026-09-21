@@ -49,7 +49,7 @@ function configText(value = solution()) {
 
 class Fixture {
   constructor(t) {
-    const temporary = fs.realpathSync(os.tmpdir());
+    const temporary = fs.realpathSync.native(os.tmpdir());
     this.root = fs.mkdtempSync(path.join(temporary, 'monky-rtc-bootstrap-'));
     t.after(() => {
       assert.equal(path.dirname(this.root), temporary);

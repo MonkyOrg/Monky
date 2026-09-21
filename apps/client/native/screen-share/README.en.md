@@ -216,6 +216,12 @@ build `screen-audio`**. It does not use experimental directories or execute
 `gclient` build hooks. Modified or incomplete source checkouts stop preparation;
 they are not silently reset or replaced.
 
+Archive downloads allow up to three attempts for transient network/server
+failures, with backoff and partial-file cleanup. Every completed attempt must
+validate its pinned SHA-256 and any declared size. Integrity, certificate, unsafe-redirect
+or permanent HTTP failures stop preparation without retrying or replacing
+the cache.
+
 This sequence does not install system prerequisites or promise a complete
 one-command setup on any machine. `nativeScreenReady: true` confirms the
 build/runtime, not capture, driver support or NVIDIA sending. A clean-machine

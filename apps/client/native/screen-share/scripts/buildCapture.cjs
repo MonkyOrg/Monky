@@ -45,6 +45,7 @@ function build(config) {
   const env = windowsToolchain.msvcEnvironment(toolchain);
   console.log(JSON.stringify({ windowsToolchain: windowsToolchain.summary(toolchain) }));
   const stock = fs.realpathSync(config.stock), dependencies = fs.realpathSync(config.dependencies);
+  const stockPath = relative => path.join(stock, ...relative.split('\\'));
   const sourceFiles = regularFiles(source).map(relative => ({ path: relative, ...fingerprint(path.join(source, relative)) }));
   for (const file of inputs.files) verify(path.join(vendor, file.path), file);
   for (const file of inputs.dependencies.files) verify(path.join(dependencies, file.path), file);
@@ -95,15 +96,15 @@ function build(config) {
       if (selected.has(relative)) return;
       const record = byPath.get(relative);
       assert.ok(record, `Unpinned runtime dependency: ${relative}`);
-      verify(path.join(stock, relative), record);
+      verify(stockPath(relative), record);
       selected.set(relative, record);
     };
     const importLibraries = [];
     for (const name of ['obs', 'w32-pthreads']) {
-      const relative = path.join('bin', '64bit', `${name}.dll`);
+      const relative = path.win32.join('bin', '64bit', `${name}.dll`);
       select(relative);
       const exports = execute(path.join(compiler, 'dumpbin.exe'),
-        ['/nologo', '/exports', path.join(stock, relative)], { env, capture: true });
+        ['/nologo', '/exports', stockPath(relative)], { env, capture: true });
       const names = [...exports.matchAll(/^\s+\d+\s+[a-f0-9]+\s+[a-f0-9]+\s+([a-z_][a-z0-9_]*)(?:[ \t]+= [^\r\n]*)?[ \t]*\r?$/gmi)]
         .map(match => match[1]);
       assert.ok(names.length > 50 && new Set(names).size === names.length);
@@ -148,7 +149,7 @@ function build(config) {
       assert.ok(new RegExp(`\\b${name}\\b`, 'u').test(moduleExports), `Missing capture module export: ${name}`);
 
     const dlls = new Map(runtimeInputs.files.filter(file => file.path.startsWith('bin\\64bit\\'))
-      .map(file => [path.basename(file.path).toLowerCase(), file.path]));
+      .map(file => [path.win32.basename(file.path).toLowerCase(), file.path]));
     const inspected = new Set(), systemDependencies = new Set(), selectedCrt = new Map();
     const inspect = filename => {
       if (inspected.has(filename)) return;
@@ -156,7 +157,7 @@ function build(config) {
       const output = execute(path.join(compiler, 'dumpbin.exe'), ['/nologo', '/dependents', filename], { env, capture: true });
       for (const [, name] of output.matchAll(/^[ \t]+([\w.-]+\.dll)[ \t]*\r?$/gmi)) {
         const relative = dlls.get(name.toLowerCase());
-        if (relative) { select(relative); inspect(path.join(stock, relative)); }
+        if (relative) { select(relative); inspect(stockPath(relative)); }
         else if (crt.files.has(name.toLowerCase())) {
           const filename = crt.files.get(name.toLowerCase());
           selectedCrt.set(name.toLowerCase(), filename);
@@ -176,8 +177,8 @@ function build(config) {
       'obs-plugins\\64bit\\obs-ffmpeg.dll', 'obs-plugins\\64bit\\obs-nvenc.dll',
       ...['32', '64'].flatMap(arch => ['graphics-hook' + arch + '.dll',
         'inject-helper' + arch + '.exe', 'get-graphics-offsets' + arch + '.exe']
-        .map(name => path.join('data', 'obs-plugins', 'win-capture', name)))]) {
-      select(relative); inspect(path.join(stock, relative));
+        .map(name => path.win32.join('data', 'obs-plugins', 'win-capture', name)))]) {
+      select(relative); inspect(stockPath(relative));
     }
     inspect(module);
     for (const file of stockFiles) {
@@ -235,10 +236,10 @@ function build(config) {
     }
     contracts.crossLanguageEncoderProbeMessages = encoderProbe.messages.length;
     for (const file of inputs.files) verify(path.join(vendor, file.path), file);
-    for (const file of runtime) verify(path.join(stock, file.path), file);
+    for (const file of runtime) verify(stockPath(file.path), file);
     for (const file of sourceFiles) verify(path.join(source, file.path), file);
     const bin = config.output ?? path.join(root, 'bin', 'win32-x64');
-    for (const file of runtime) write(path.join(bin, 'obs', file.path), fs.readFileSync(path.join(stock, file.path)));
+    for (const file of runtime) write(path.join(bin, 'obs', ...file.path.split('\\')), fs.readFileSync(stockPath(file.path)));
     for (const probe of ['obs-amf-test.exe', 'obs-nvenc-test.exe'])
       write(path.join(bin, probe), fs.readFileSync(path.join(stock, 'bin', '64bit', probe)));
     write(path.join(bin, 'monky-screen-capture.exe'), fs.readFileSync(executable));
