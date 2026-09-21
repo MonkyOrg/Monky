@@ -53,6 +53,38 @@ inline std::string TargetJson(const Arguments& arguments, const Common& common) 
       ",\"width\":" + std::to_string(monitor.width) + ",\"height\":" + std::to_string(monitor.height) + "}}";
 }
 
+inline std::string SerializeAdmissionFailure(const Arguments& arguments, const Common& common,
+                                             std::uint64_t sequence, const Observation& observation,
+                                             const Retirement& retirement, const NativeFailure& failure) {
+  Require(!arguments.encoderProbe && ValidRunId(common.runId) && common.runId == arguments.runId &&
+          common.helperProcessId > 0 && common.processId == arguments.processId && common.hwnd == arguments.hwnd &&
+          common.processCreationTime100ns == arguments.expectedCreation &&
+          common.qpc > 0 && common.qpcFrequency > 0 && sequence <= kMaxCommands,
+          "Incomplete source admission ownership");
+  Require(!observation.sourceAttached && observation.outputPackets == 0 && observation.outputBytes == 0 &&
+          observation.obsTotalFrames == 0 && observation.state == ObservationState::Failed &&
+          !failure.code.empty() && failure.code.size() <= 96 && !failure.message.empty() && failure.message.size() <= 1024,
+          "Source admission failure cannot claim initialized capture");
+  ValidateVideoConfiguration(arguments.video);
+  const auto target = arguments.kind == CaptureKind::Window && arguments.expectedCreation == 0
+      ? "{\"hwnd\":" + std::to_string(arguments.hwnd) +
+          ",\"expectedProcessId\":" + std::to_string(arguments.processId) + "}"
+      : TargetJson(arguments, common);
+  const auto& video = arguments.video;
+  return FinishLine(std::string{"{\"schemaVersion\":1,\"kind\":\"capture-admission-error\",\"type\":\"error\",\"runId\":"} +
+      JsonString(common.runId) + ",\"sequence\":" + std::to_string(sequence) +
+      ",\"helperProcessId\":" + std::to_string(common.helperProcessId) +
+      ",\"qpc\":" + JsonString(std::to_string(common.qpc)) +
+      ",\"qpcFrequency\":" + JsonString(std::to_string(common.qpcFrequency)) +
+      ",\"target\":" + target +
+      ",\"video\":{\"width\":" + std::to_string(video.width) + ",\"height\":" + std::to_string(video.height) +
+      ",\"fps\":" + std::to_string(video.fps) + ",\"bitrateKbps\":" + std::to_string(video.bitrateKbps) + "}" +
+      ",\"encoder\":" + JsonString(arguments.encoder == EncoderKind::Auto ? "auto" : EncoderId(arguments.encoder)) +
+      ",\"captureStarted\":false,\"observation\":{\"outputPackets\":0}" +
+      ",\"error\":{\"code\":" + JsonString(failure.code) + ",\"message\":" + JsonString(failure.message) + "}" +
+      ",\"retirement\":" + RetirementJson(retirement));
+}
+
 inline std::string SerializePlatformEvent(const Arguments& arguments, const Common& common,
                                           const EncoderCapability& capability, std::string_view type,
                                           std::uint64_t sequence, const Observation& observation,

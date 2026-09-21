@@ -11,6 +11,7 @@ const {
   spawnRunner, selectExecutable, dependencyEntry, inspectCompletedSources, constants,
 } = require('../scripts/native-rtc/bootstrap.cjs');
 const pins = require('../scripts/native-rtc/pins.json');
+const { VC_FILES, VS_FILES } = require('../scripts/windowsToolchain.cjs');
 const toolsDirectory = path.resolve(__dirname, '..', 'scripts', 'native-rtc');
 
 const OWNER_ID = '11111111-2222-3333-4444-555555555555';
@@ -98,10 +99,13 @@ class Fixture {
     put(path.join(this.gclientVenv, 'pyvenv.cfg'), `home = ${this.toolDir}\ninclude-system-site-packages = false\n`);
     put(this.vswhere);
     put(path.join(this.vs, 'VC', 'Auxiliary', 'Build', 'Microsoft.VCToolsVersion.default.txt'), '14.44.35207');
-    for (const file of ['include\\vector', 'bin\\Hostx64\\x64\\cl.exe', 'atlmfc\\include\\atlbase.h',
-      'atlmfc\\include\\afxwin.h', 'atlmfc\\lib\\x64\\atls.lib']) {
+    for (const file of VC_FILES) {
       put(path.join(this.vs, 'VC', 'Tools', 'MSVC', '14.44.35207', ...file.split('\\')));
     }
+    for (const file of VS_FILES) put(path.join(this.vs, ...file.split('\\')));
+    put(path.join(this.vs, 'VC', 'Auxiliary', 'Build', 'Microsoft.VCRedistVersion.default.txt'), '14.44.35112');
+    for (const file of ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'])
+      put(path.join(this.vs, 'VC', 'Redist', 'MSVC', '14.44.35112', 'x64', 'Microsoft.VC143.CRT', file));
     for (const file of [
       'Include\\10.0.26100.0\\um\\Windows.h', 'Include\\10.0.26100.0\\shared\\sdkddkver.h',
       'Include\\10.0.26100.0\\ucrt\\stdio.h', 'Lib\\10.0.26100.0\\um\\x64\\kernel32.lib',

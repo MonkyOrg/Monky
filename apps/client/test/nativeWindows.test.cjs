@@ -37,6 +37,66 @@ function fixture(module = moduleFor()) {
     setState: value => { state = value; } };
 }
 
+test('identical monitor names get stable numbers and exact display thumbnails across mixed DPI and enumeration order', () => {
+  const { nativeMonitorDesktopSources } = moduleFor();
+  const physical = [
+    { x: 0, y: 0, width: 1920, height: 1080 },
+    { x: 1920, y: 0, width: 2560, height: 1440 },
+    { x: -1080, y: 0, width: 1080, height: 1920 },
+    { x: 0, y: -2160, width: 3840, height: 2160 },
+  ];
+  const dips = [
+    physical[0], { x: 1920, y: 0, width: 2048, height: 1152 },
+    { x: -864, y: 0, width: 864, height: 1536 }, { x: 0, y: -1440, width: 2560, height: 1440 },
+  ];
+  const displayIds = [441, -12, 0, 991];
+  const selected = physical.map((bounds, index) => ({
+    id: `native-monitor:${String(index + 1).repeat(64)}`,
+    monitor: { ...monitor, name: 'Generic PnP Monitor', deviceName: `\\\\.\\DISPLAY${index + 1}`, bounds },
+  }));
+  const displays = dips.map((bounds, index) => ({ id: displayIds[index], bounds })).reverse();
+  const previews = [2, 0, 3, 1].map(index => ({
+    id: `screen:${index}:0`, display_id: String(displayIds[index]),
+    thumbnail: { isEmpty: () => false, toDataURL: () => `data:image/png;base64,owned-${index + 1}` },
+  }));
+  const converted = [], warnings = [];
+  const shuffled = [selected[3], selected[1], selected[2], selected[0]];
+  const result = nativeMonitorDesktopSources(shuffled, previews, displays, bounds => {
+    converted.push(bounds);
+    return dips[physical.findIndex(value => JSON.stringify(value) === JSON.stringify(bounds))];
+  }, warning => warnings.push(warning));
+  assert.deepEqual(result.map(source => source.displayNumber), [1, 2, 3, 4]);
+  assert.deepEqual(result.map(source => source.id), selected.map(source => source.id));
+  assert.deepEqual(result.map(source => source.thumbnailDataUrl),
+    [1, 2, 3, 4].map(number => `data:image/png;base64,owned-${number}`));
+  assert.deepEqual(converted, physical);
+  assert.deepEqual(warnings, []);
+  assert.equal(shuffled[0], selected[3], 'Presentation ordering must not mutate native identity enumeration.');
+});
+
+test('monitor thumbnails never fall back to ordinal, name, primary display or an ambiguous display identity', () => {
+  const { nativeMonitorDesktopSources } = moduleFor();
+  const selected = [{ id: `native-monitor:${'a'.repeat(64)}`, monitor }];
+  const display = { id: 55, bounds: monitor.bounds };
+  const preview = { id: 'screen:0:0', display_id: '55',
+    thumbnail: { isEmpty: () => false, toDataURL: () => 'data:image/png;base64,owned' } };
+  for (const [displays, previews] of [
+    [[], [preview]], [[{ ...display, bounds: { ...monitor.bounds, x: 0 } }], [preview]],
+    [[display, { ...display, id: 56 }], [preview]], [[display], [preview, preview]],
+    [[display], [{ ...preview, display_id: '' }]], [[display], [{ ...preview, id: 'window:55:0' }]],
+    [[display], [{ ...preview, thumbnail: { isEmpty: () => true, toDataURL: () => assert.fail('Empty thumbnail') } }]],
+  ]) {
+    const warnings = [];
+    const [source] = nativeMonitorDesktopSources(selected, previews, displays, bounds => bounds,
+      warning => warnings.push(warning));
+    assert.equal(source.id, selected[0].id);
+    assert.equal(source.displayNumber, 1);
+    assert.equal(source.thumbnailDataUrl, '');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /unambiguous, nonempty thumbnail/);
+  }
+});
+
 test('native monitor IDs bind exact device and physical geometry, independent of order and primary flags', () => {
   const f = fixture();
   const [selected] = f.sources.listMonitors();

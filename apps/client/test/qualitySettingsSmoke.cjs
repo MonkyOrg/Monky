@@ -240,15 +240,23 @@ async function runQualitySettingsSmoke() {
       const previousCapabilities = webRtcManager.getNativeScreenCapabilities;
       const picker = new ScreenSharePickerModal();
       const windowId = `window:123:${'a'.repeat(64)}`;
-      const monitorId = `native-monitor:${'b'.repeat(64)}`;
-      const candidate = (id, type) => ({ id, type, name: 'Synthetic <application> & title', thumbnailDataUrl: '', appIconDataUrl: null });
-      let nativeCommands = 0;
+      const candidate = (id, type, name = 'Synthetic <application> & title') => ({ id, type, name, thumbnailDataUrl: '', appIconDataUrl: null });
+      const monitors = ['a', 'b', 'c', 'd'].map((token, index) => Object.freeze({
+        ...candidate(`native-monitor:${token.repeat(64)}`, 'screen', 'Generic PnP Monitor'),
+        displayNumber: [3, 1, 4, 2][index],
+        thumbnailDataUrl: index === 0
+          ? `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="9"><rect width="16" height="9" fill="#18a"/></svg>')}` : '',
+      }));
+      let sources = [{ ...candidate(windowId, 'window'), displayNumber: 1 }, candidate(`window:456:${'c'.repeat(64)}`, 'window'),
+        ...monitors, candidate('screen:0:0', 'screen')];
+      let nativeCommands = 0, enumerations = 0;
       const capabilities = { capture: false, captureAudio: true, receive: true, backend: null, reason: null,
         requiresSelectionProbe: true, captureKinds: ['window', 'monitor', 'game'] };
       window.api = {
         platform: 'win32',
         nativeScreenCommand: async () => { nativeCommands++; throw new Error('Picker UI must not probe or capture native media.'); },
-        getDesktopSources: async () => [candidate(windowId, 'window'), candidate(monitorId, 'screen'), candidate('screen:0:0', 'screen')],
+        prepareScreenShareWindow: async () => { nativeCommands++; throw new Error('Choosing a method must not prepare its window.'); },
+        getDesktopSources: async () => { enumerations++; return sources; },
       };
       webRtcManager.getNativeScreenCapabilities = async () => capabilities;
       try {
@@ -256,11 +264,13 @@ async function runQualitySettingsSmoke() {
         const pickerRoot = document.querySelector('.screen-share-picker-card');
         const info = pickerRoot.querySelector('#share-capture-info');
         const tabs = [...pickerRoot.querySelectorAll('[role="tab"]')];
-        check(tabs.length === 3 && tabs.every(tab => !tab.disabled &&
+        check(tabs.length === 2 && !pickerRoot.querySelector('#share-tab-game') && tabs.every(tab => !tab.disabled &&
           tab.querySelector('.share-tab-status').textContent === language.t('screenShare.probePending')),
-        'Explicit selection support must show three selectable methods with a pending-probe label.');
+        'Explicit selection support must show two source types, never a duplicate Games list.');
         check(info.dataset.backend === 'probe-pending' && nativeCommands === 0,
           'Opening the picker must not probe hardware or present an unverified encoder as available.');
+        check(pickerRoot.querySelector('#share-window-methods').hidden,
+          'Window capture methods must wait for an explicitly selected window.');
         const choose = () => pickerRoot.querySelector('.source-item')
           .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
         choose();
@@ -268,34 +278,109 @@ async function runQualitySettingsSmoke() {
           info.dataset.backend === 'probe-pending' && nativeCommands === 0,
         'Selecting the opaque window ID permits confirmation but does not itself verify or capture.');
         check(!pickerRoot.querySelector('application') &&
-          pickerRoot.querySelector('.source-name').textContent.includes('Synthetic <application> & title'),
-        'Source names must be painted as escaped text.');
+          pickerRoot.querySelector('.source-name').textContent.includes('Synthetic <application> & title') &&
+          pickerRoot.querySelector('.source-item').getAttribute('aria-label') === 'Synthetic <application> & title' &&
+          pickerRoot.querySelector('#share-method-label').textContent.includes('Synthetic <application> & title'),
+        'Application names remain escaped display/accessibility text even when displayNumber is present.');
+        const windowMethod = pickerRoot.querySelector('#share-method-window');
+        const gameMethod = pickerRoot.querySelector('#share-method-game');
+        const windowCards = [...pickerRoot.querySelectorAll('.source-item')];
+        check(!pickerRoot.querySelector('#share-window-methods').hidden &&
+          windowMethod.getAttribute('aria-pressed') === 'true' && gameMethod.getAttribute('aria-pressed') === 'false' &&
+          windowMethod.tabIndex === 0 && gameMethod.tabIndex === -1,
+        'A selected window must default to the accessible WGC card, not a hook.');
+        check([windowMethod, gameMethod].every(button => !button.disabled &&
+          button.querySelector('.share-method-status').textContent === language.t('screenShare.probePending') &&
+          button.getAttribute('aria-describedby').includes(`${button.id}-description`)),
+        'Both supported methods must describe the still-pending selected-target verification.');
+        const enumerationsBeforeMethod = enumerations;
+        windowMethod.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+        check(gameMethod.getAttribute('aria-pressed') === 'true' && windowMethod.getAttribute('aria-pressed') === 'false' &&
+          document.activeElement === gameMethod && picker.selectedSourceId === windowId &&
+          [...pickerRoot.querySelectorAll('.source-item')].every((card, index) => card === windowCards[index]) &&
+          enumerations === enumerationsBeforeMethod && nativeCommands === 0,
+        'Keyboard method changes must keep the same opaque window and DOM list, without enumeration or native work.');
+        check(!pickerRoot.querySelector('#share-game-tip').hidden &&
+          pickerRoot.querySelector('#share-game-tip').textContent.includes(language.t('screenShare.gameCompatibility')) &&
+          pickerRoot.querySelector('#share-game-tip').textContent.includes(language.t('screenShare.gameWindowAlternative')),
+        'Game Capture must explain protections, compatibility and the explicit same-window WGC alternative.');
+        windowCards[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+        await wait();
+        check(nativeCommands === 0 && picker.modalEl && picker.windowCaptureMethod === 'game',
+          'A source-list double-click must not confirm a game hook.');
+        const audio = pickerRoot.querySelector('#chk-share-audio');
+        audio.checked = false;
+        audio.dispatchEvent(new Event('change', { bubbles: true }));
+        gameMethod.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+        check(picker.windowCaptureMethod === 'window' && picker.selectedSourceId === windowId &&
+          !audio.checked && pickerRoot.querySelector('#share-audio-text').textContent === language.t('screenShare.shareAppAudio'),
+        'Returning to WGC must keep the chosen window and its app-audio preference.');
+        check(!pickerRoot.querySelector('input[type="radio"]') &&
+          [...pickerRoot.querySelectorAll('input[type="checkbox"]')].every(input => input.closest('.toggle-switch')),
+        'Capture methods must use cards, never standalone native radio/checkbox controls.');
         pickerRoot.querySelector('#share-tab-screen').click();
         const monitorCards = [...pickerRoot.querySelectorAll('.source-item')];
-        check(monitorCards.length === 1 && monitorCards[0].dataset.sourceId === monitorId,
-          'Native monitors must use their opaque identity, never an Electron ordinal.');
+        check(monitorCards.length === 4 && monitorCards.every((card, index) => {
+          const label = language.t('screenShare.screenNumber', { number: monitors[index].displayNumber });
+          return card.dataset.sourceId === monitors[index].id && card.getAttribute('aria-label') === label &&
+            card.querySelector('.source-name').title === label && card.querySelector('.source-name').textContent.includes(label);
+        }) &&
+          new Set(monitorCards.map(card => card.querySelector('.source-name').title)).size === 4,
+        'Monitor labels must localize the supplied displayNumber, not infer it from a name, ID or array ordinal.');
+        check(monitorCards[0].querySelector('img.source-thumbnail').alt ===
+          language.t('screenShare.screenNumber', { number: monitors[0].displayNumber }) &&
+          monitorCards.slice(1).every(card => card.querySelector('.source-thumbnail-label').textContent ===
+            language.t('screenShare.previewUnavailable')) &&
+          monitors.every(source => source.name === 'Generic PnP Monitor'),
+        'Thumbnail accessibility uses the localized monitor label without modifying raw Main metadata or inventing previews.');
+        check(audio.checked && pickerRoot.querySelector('#share-window-methods').hidden &&
+          pickerRoot.querySelector('#share-audio-text').textContent === language.t('screenShare.shareAudio'),
+        'Screens keep their separate system-audio choice and do not display window capture methods.');
         choose();
-        check(picker.selectedSourceId === monitorId && nativeCommands === 0,
+        check(picker.selectedSourceId === monitors[0].id && monitorCards[0].getAttribute('aria-pressed') === 'true' && nativeCommands === 0,
           'Monitor selection must preserve the original ID without probing.');
         pickerRoot.querySelector('#share-tab-screen')
           .dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
-        check(pickerRoot.querySelector('#share-tab-game').getAttribute('aria-selected') === 'true' &&
-          pickerRoot.querySelector('#share-sources-panel').getAttribute('aria-labelledby') === 'share-tab-game' &&
-          picker.selectedSourceId === null, 'Keyboard method changes must update the panel and require a new explicit selection.');
-        check(pickerRoot.textContent.includes(language.t('screenShare.gameCompatibility')) &&
-          pickerRoot.textContent.includes(language.t('screenShare.gameWindowAlternative')),
-        'Game Capture must explain candidate compatibility and its manual same-window alternative.');
+        check(pickerRoot.querySelector('#share-tab-window').getAttribute('aria-selected') === 'true' &&
+          pickerRoot.querySelector('#share-sources-panel').getAttribute('aria-labelledby') === 'share-tab-window' &&
+          picker.selectedSourceId === null && !audio.checked,
+        'Keyboard source-type changes require a new source selection and restore that type of audio.');
+        choose();
+        windowMethod.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+        gameMethod.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        await wait();
         const bounds = pickerRoot.getBoundingClientRect();
         check(bounds.left >= 23 && bounds.top >= 23 && bounds.right <= innerWidth - 23 && bounds.bottom <= innerHeight - 23,
           'The picker, including pending-probe guidance, must retain a 24px viewport margin.');
-        picker.close();
+        check(pickerRoot.scrollWidth <= pickerRoot.clientWidth + 1 &&
+          [windowMethod, gameMethod].every(button => button.scrollWidth <= button.clientWidth + 1),
+        'Method cards and localized guidance must fit the small viewport without horizontal clipping.');
+        const confirmation = pickerRoot.querySelector('#btn-share');
+        confirmation.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        await wait();
+        const confirmBounds = confirmation.getBoundingClientRect();
+        check(confirmBounds.top >= bounds.top && confirmBounds.bottom <= bounds.bottom,
+          'The explicit confirmation must remain reachable within the scrollable picker.');
         capabilities.captureKinds = ['window'];
-        await picker.open();
-        check(document.querySelector('#share-tab-screen').disabled && document.querySelector('#share-tab-game').disabled &&
-          !document.querySelector('#share-tab-window').disabled && document.querySelector('#share-tab-game').title,
+        picker.updateCaptureInfo();
+        check(pickerRoot.querySelector('#share-tab-screen').disabled && gameMethod.disabled &&
+          !windowMethod.disabled && !pickerRoot.querySelector('#share-tab-window').disabled && gameMethod.title,
         'A pending probe must not enable methods the backend did not advertise.');
-        check(picker.activeTab === 'game' && picker.selectedSourceId === null && document.querySelector('#btn-share').disabled,
-          'Losing Game Capture selection support must not switch to another method or source.');
+        check(picker.activeTab === 'window' && picker.windowCaptureMethod === 'game' &&
+          picker.selectedSourceId === windowId && confirmation.disabled && gameMethod.getAttribute('aria-pressed') === 'true',
+        'Losing Game Capture support must not silently select WGC or a different window.');
+        capabilities.captureKinds = ['window', 'monitor', 'game'];
+        sources = sources.filter(source => source.id !== windowId);
+        await picker.loadSources(picker.modalEl);
+        check(picker.selectedSourceId === null && pickerRoot.querySelector('#share-window-methods').hidden &&
+          !pickerRoot.querySelector(`[data-source-id="${windowId}"]`) && confirmation.disabled && !audio.checked,
+        'Refreshing away a closed window must clear selection/method controls without changing its audio preference.');
+        picker.close();
+        await picker.open();
+        document.querySelector('.source-item').click();
+        gameMethod.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        check(picker.windowCaptureMethod === 'window' && document.querySelector('#share-method-window').getAttribute('aria-pressed') === 'true',
+          'Detached method-card listeners must not mutate the next picker opening.');
         check(nativeCommands === 0 && capabilities.capture === false && capabilities.backend === null,
           'The picker must never manufacture hardware qualification while browsing sources.');
       } finally {

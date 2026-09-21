@@ -98,6 +98,28 @@ test('an underrun or replacement invalidates old anchors and delayed feedback ca
   assert.equal(f.clock.sample(f.context).reason, 'no-render-anchor');
 });
 
+test('a repeated graph timestamp withdraws the old speaker anchor before clock recovery', () => {
+  const f = fixture();
+  f.clock.update(feedback());
+  assert.equal(f.clock.sample(f.context).available, true);
+  f.at(1101);
+  assert.equal(f.clock.update(feedback({ clockEpoch: 2, state: 'buffering',
+    firstPlayoutFrame: null, mediaFrames: 0, queuedFrames: 0 })), true);
+  assert.deepEqual(f.clock.sample(f.context), { available: false, epoch: 1, reason: 'buffering' });
+  assert.equal(f.clock.latest.contextFrame, 48000, 'Invalidation must accept the actual repeated timestamp.');
+  assert.equal(f.clock.update(feedback({ contextFrame: 48512 })), false);
+  assert.equal(f.clock.sample(f.context).available, false);
+  f.at(1102);
+  f.clock.update(feedback({ clockEpoch: 2, contextFrame: 48256, firstPlayoutFrame: 24960 }));
+  f.context.getOutputTimestamp = () => ({ contextTime: 48128 / 48000, performanceTime: 1102 });
+  const recovered = f.clock.sample(f.context);
+  assert.equal(recovered.available, true);
+  assert.equal(recovered.clockEpoch, 2);
+  assert.equal(recovered.epoch, 1);
+  assert.equal(recovered.estimatedPlayoutFrame, 24832);
+  assert.deepEqual(recovered.renderAnchor, { firstPlayoutFrame: 24960, contextFrame: 48256 });
+});
+
 test('the clock never extrapolates through missing PCM as if an unseen underrun had not occurred', () => {
   const f = fixture();
   f.clock.update(feedback({ queuedFrames: 0 }));

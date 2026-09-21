@@ -638,11 +638,12 @@ Host* callbackHost = nullptr;
 
 class Host {
  public:
-  Host(Arguments arguments, Target target, Parent parent, std::unique_ptr<OwnedRun> run)
-      : arguments_(std::move(arguments)), target_(std::move(target)), parent_(std::move(parent)), run_(std::move(run)),
+  Host(Arguments arguments, Parent parent, std::unique_ptr<OwnedRun> run)
+      : arguments_(std::move(arguments)), parent_(std::move(parent)), run_(std::move(run)),
         buffer_(arguments_.video), processStarted_(GetTickCount64()) {
     if (arguments_.encoder != EncoderKind::Auto) capability_.encoder = arguments_.encoder;
-    common_ = {arguments_.runId, GetCurrentProcessId(), arguments_.processId, arguments_.hwnd, target_.creation, Qpc(), QpcFrequency()};
+    common_ = {arguments_.runId, GetCurrentProcessId(), arguments_.processId, arguments_.hwnd,
+        arguments_.expectedCreation, Qpc(), QpcFrequency()};
     input_ = GetStdHandle(STD_INPUT_HANDLE); outputPipe_ = GetStdHandle(STD_OUTPUT_HANDLE); errorPipe_ = GetStdHandle(STD_ERROR_HANDLE);
     Require(input_ && outputPipe_ && errorPipe_ && GetFileType(input_) == FILE_TYPE_PIPE &&
         GetFileType(outputPipe_) == FILE_TYPE_PIPE && GetFileType(errorPipe_) == FILE_TYPE_PIPE,
@@ -658,6 +659,11 @@ class Host {
   int Execute() noexcept {
     try {
       watchdog_ = std::thread([this] { Watchdog(); });
+      if (!arguments_.encoderProbe) {
+        target_ = BindTarget(arguments_);
+        common_.processCreationTime100ns = target_.creation;
+        targetBound_ = true;
+      }
       Prepare();
       while (life_.phase != Phase::Stopping) {
         Tick();
@@ -713,6 +719,12 @@ class Host {
         if (arguments_.encoderProbe)
           WriteEnvelope(SerializeEncoderProbeEvent(arguments_, AtNow(), capability_, "error", life_.lastSequence,
               sourcePlatformVerified_, encoderInitialized_, &retirement_, &failure));
+        else if (!targetBound_) {
+          Require(!obsStarted_ && !source_ && !scene_ && !encoder_ && !output_,
+                  "Source admission failure retained initialized capture", "ERR_SCREEN_CAPTURE_RETIREMENT");
+          WriteEnvelope(SerializeAdmissionFailure(arguments_, AtNow(), life_.lastSequence,
+              observation_, retirement_, failure));
+        }
         else WriteEnvelope(SerializePlatformEvent(arguments_, AtNow(), capability_, "error", life_.lastSequence,
             observation_, target_.key, hooked_, &retirement_, &failure));
       } else {
@@ -1775,6 +1787,7 @@ class Host {
   const std::uint64_t processStarted_;
   std::uint64_t lastUniqueCheck_ = 0;
   bool eof_ = false, obsStarted_ = false, videoStarted_ = false, comInitialized_ = false;
+  bool targetBound_ = false;
   bool matchingDevice_ = false, nvencProbeVerified_ = false, sourcePlatformVerified_ = false, encoderInitialized_ = false;
 };
 }  // namespace
@@ -1797,9 +1810,8 @@ int wmain(int argc, wchar_t** argv) {
     // This self-containing job has process lifetime. Closing it early would kill
     // the host before its retirement evidence reaches the parent.
     job.Take();
-    auto target = arguments.encoderProbe ? Target{} : BindTarget(arguments);
     auto run = std::make_unique<OwnedRun>(arguments, parent.pid);
-    auto host = std::make_unique<Host>(std::move(arguments), std::move(target), std::move(parent), std::move(run));
+    auto host = std::make_unique<Host>(std::move(arguments), std::move(parent), std::move(run));
     callbackHost = host.get();
     const auto result = host->Execute();
     faultDiagnostics.Close();

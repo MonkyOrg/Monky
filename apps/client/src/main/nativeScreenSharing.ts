@@ -122,7 +122,10 @@ class SelectedCaptureProbe {
       capability = proof;
     } catch (error) {
       try { await this.close(); }
-      catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Selected source probing and retirement failed.'); }
+      catch (cleanupError) {
+        if (!this.retired || cleanupError !== error)
+          throw new AggregateError([error, cleanupError], 'Selected source probing and retirement failed.');
+      }
       throw error;
     }
     await this.close();
@@ -801,7 +804,12 @@ export function setupNativeScreenSharingIpc(
       throw new Error('Native screen IPC requires the owned main frame.');
     }
     try { return await action(); }
-    catch (error) { console.error('[NativeScreen] IPC operation failed:', errorMessage(error), error); throw error; }
+    catch (error) {
+      const message = errorMessage(error);
+      console.error('[NativeScreen] IPC operation failed:', message, error);
+      if (error instanceof AggregateError) throw new Error(message, { cause: error });
+      throw error;
+    }
   };
   ipcMain.handle(NATIVE_SCREEN_IPC.invoke, (event, input: unknown) => invoke(event, async (): Promise<NativeScreenCommandResult> => {
     try { return await service.invoke(input); }

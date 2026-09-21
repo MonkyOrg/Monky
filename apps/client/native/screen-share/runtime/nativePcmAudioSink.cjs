@@ -160,7 +160,7 @@ class NativePcmAudioSink {
     if (!Object.hasOwn(message, 'playout')) return;
     const value = message.playout;
     const counters = ['acceptedFrames', 'renderedFrames', 'silenceFrames', 'underruns', 'stalePackets', 'discardedFrames',
-      'contextDiscontinuities', 'skippedContextFrames'];
+      'contextDiscontinuities', 'skippedContextFrames', 'repeatedContextFrames'];
     const numbers = [...counters, 'epoch', 'clockEpoch', 'queuedFrames', 'outstandingFrames', 'capacityFrames', 'targetFrames'];
     if (!value || numbers.some(name => !Number.isSafeInteger(value[name]) || value[name] < 0)
       || value.epoch !== this.epoch || value.clockEpoch !== message.clockEpoch || value.state !== message.state

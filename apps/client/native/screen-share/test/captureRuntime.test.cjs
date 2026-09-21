@@ -66,6 +66,88 @@ function observation(video, type, sequence) {
   };
 }
 
+function admissionFailure(target = source, video = profiles[0]) {
+  return {
+    schemaVersion: 1, kind: 'capture-admission-error', type: 'error', runId, sequence: 0, helperProcessId: 42,
+    qpc: '1000000', qpcFrequency: '10000000', target: structuredClone(target), video: { ...video }, encoder: 'auto',
+    captureStarted: false, observation: { outputPackets: 0 }, retirement: { ...retirement },
+    error: { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST', message: 'Selected window is no longer available.' },
+  };
+}
+
+test('failed source admission identifies only the requested target and cannot fabricate initialization or packets', () => {
+  for (const target of [
+    source, { kind: 'window', ...source, expectedProcessCreationTime100ns: '123' },
+    { kind: 'game', ...source, expectedProcessCreationTime100ns: '123' },
+    { kind: 'monitor', deviceId: String.raw`\\?\DISPLAY#OWNED#ONE`, deviceName: String.raw`\\.\DISPLAY1`,
+      bounds: { x: -1920, y: 0, width: 1920, height: 1080 } },
+  ]) {
+    const message = admissionFailure(target);
+    const expected = { source: target, video: profiles[0], runId, helperProcessId: 42, encoder: 'auto' };
+    assert.equal(protocol.validateMessage(message, expected), message);
+    for (const corrupt of [
+      value => { value.helperProcessId++; }, value => { value.runId = 'b'.repeat(32); },
+      value => { value.captureStarted = true; }, value => { value.observation.outputPackets = 1; },
+      value => { value.target = { hwnd: 999, expectedProcessId: 888 }; },
+      value => { value.video.fps--; }, value => { value.encoder = 'obs_nvenc_h264_tex'; },
+      value => { value.retirement.encoderReleased = 'true'; }, value => { value.capability = {}; },
+      value => { value.type = 'prepared'; }, value => { value.qpc = '0'; },
+    ]) {
+      const changed = structuredClone(message); corrupt(changed);
+      assert.throws(() => protocol.validateMessage(changed, expected));
+    }
+    assert.throws(() => protocol.validateProgress(message, message), /first and terminal/);
+    assert.throws(() => protocol.validateProgress(observation(profiles[0], 'prepared', 0), message), /first and terminal/);
+  }
+});
+
+test('source admission rejection proves native retirement only with its full terminal, media EOF and exact child exit', async () => {
+  for (const corrupt of [null, 'target', 'encoderReleased', 'media', 'exit']) {
+    const child = Object.assign(new EventEmitter(), { pid: 42, stdout: new PassThrough(), stderr: new PassThrough(),
+      stdin: new Writable({ write(_bytes, _encoding, done) { done(); } }) });
+    const media = new PassThrough();
+    child.stdio = [child.stdin, child.stdout, child.stderr, media, new PassThrough()];
+    const directory = path.join(__dirname, 'capture-runtime-fixture');
+    const failure = admissionFailure();
+    if (corrupt === 'target') failure.target.hwnd++;
+    if (corrupt === 'encoderReleased') failure.retirement.encoderReleased = false;
+    const bridge = new CaptureBridge({
+      host: { kind: 'verified-native-screen-capture-host', executable: path.join(directory, 'host.exe'), sha256: 'a'.repeat(64) },
+      runtime: { kind: 'verified-stock-obs-runtime', version: '32.1.1', stockDirectory: directory, binaryDirectory: directory },
+      runId, runDirectory: path.join(directory, `monky-screen-capture-${runId}`), video: profiles[0],
+      onError() {}, onPacket() { assert.fail('A rejected source cannot capture media.'); }, onNotice() {},
+    }, {
+      spawnProcess() {
+        queueMicrotask(() => {
+          media.write(notice(1, { kind: 'hello', runId, processId: 42, protocol: 1,
+            transmitterReencode: false, timestampSemantics: 'obs-system-pts' }));
+          child.stdout.end(JSON.stringify(failure) + '\n');
+          if (corrupt !== 'media') media.write(notice(2, { ...closed(0), failure: failure.error }, 3));
+          media.end(); child.stderr.end();
+          const code = corrupt === 'exit' ? 0 : 1;
+          setImmediate(() => { child.emit('exit', code, null); child.emit('close', code, null); });
+        });
+        return child;
+      },
+    });
+    try {
+      await assert.rejects(bridge.prepare(source));
+      await assert.rejects(bridge.stop());
+      const snapshot = bridge.snapshot();
+      assert.equal(snapshot.nativeClosed, corrupt === null);
+      assert.equal(snapshot.forcedTermination, false);
+      assert.equal(snapshot.events.prepared, 0);
+      assert.equal(snapshot.events.ready, 0);
+      assert.equal(snapshot.live.packets, 0);
+      assert.equal(bridge.getCapabilities(), null);
+      if (!corrupt) assert.equal(snapshot.failure.error.code, 'ERR_SCREEN_CAPTURE_SOURCE_LOST');
+    } finally {
+      bridge.detach();
+      for (const stream of child.stdio) stream.destroy();
+    }
+  }
+});
+
 test('cancelling before PREPARED still verifies the requested terminal response and exact native retirement', async () => {
   for (const corrupt of [null, 'runId', 'sequence', 'encoderReleased']) {
     const video = profiles[0], errors = [], controller = new AbortController();

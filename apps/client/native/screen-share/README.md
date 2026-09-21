@@ -16,7 +16,13 @@ dispositivo receptor consiga decodificar; isso não comprova capacidade de envio
 
 ## Fontes e verificação de disponibilidade
 
-| Seleção | Fonte libobs | Identidade preservada | Áudio opcional |
+O seletor tem duas abas: **Telas** e **Janelas**. Após selecionar uma janela,
+os cards oferecem **Captura de janela (WGC)** (padrão) e **Captura de jogo (hook)**
+para essa mesma fonte. Não há aba Jogos nem detecção automática de jogos.
+Trocar o método preserva o ID da janela; escolher outra janela volta ao WGC.
+A seleção não executa probe/hook antes da confirmação explícita.
+
+| Método nativo | Fonte libobs | Identidade preservada | Áudio opcional |
 |---|---|---|---|
 | Janela (`window`) | `window_capture`, Windows Graphics Capture (WGC) | HWND, PID e instante de criação do processo | Aplicativo/processo selecionado |
 | Monitor (`monitor`) | `monitor_capture`, WGC | Interface do dispositivo, nome GDI e limites físicos do monitor | Sistema, excluindo o Monky |
@@ -93,6 +99,19 @@ estiver disponível, é preciso desativá-la explicitamente para enviar só víd
 não há troca silenciosa de escopo. Suporte do módulo e testes sem dispositivos
 não substituem a validação do áudio físico no Windows de destino.
 
+Na reprodução, `currentFrame` é uma observação do relógio do grafo, não do
+alto-falante. O Chromium 152.0.7977.130 [avança o grafo antes de atualizar o
+worklet](https://raw.githubusercontent.com/chromium/chromium/152.0.7977.130/third_party/blink/renderer/modules/webaudio/realtime_audio_destination_handler.cc);
+essa [atualização pode ser pulada por um try-lock](https://raw.githubusercontent.com/chromium/chromium/152.0.7977.130/third_party/blink/renderer/modules/webaudio/base_audio_context.cc),
+repetindo o timestamp mesmo com callbacks novos. O receptor retira imediatamente
+a âncora de sincronização e incrementa apenas `clockEpoch`, sem trocar o epoch
+de saída, o dispositivo ou o owner. O PCM ainda não reproduzido é contabilizado
+em `discardedFrames`; os créditos em trânsito continuam válidos e limitados.
+Enquanto o relógio estiver congelado, a saída fica em buffering/silêncio,
+contabilizado em `repeatedContextFrames`. Só um avanço realmente observado e
+a profundidade de buffer exigida permitem nova âncora; não se inventam timestamps.
+Retrocesso real ou sobreposição parcial continua sendo erro explícito.
+
 ## Dependências OBS e Captura de Jogo
 
 `scripts\buildCapture.cjs` gera `bin\win32-x64\capture-build.json` no **schema 3**.
@@ -119,18 +138,36 @@ Mantém-se a configuração normal OBS `anti_cheat_hook=true`; ela não autoriza
 desativar anti-cheat, Trusted Mode ou alterar argumentos de lançamento.
 Jogos protegidos, inclusive CS2 nas configurações protegidas, podem recusar
 Captura de Jogo. Nesse caso, mantenha as proteções e, se desejar tentar WGC,
-escolha **Janelas** e selecione manualmente a mesma janela. Não há promessa
-de compatibilidade com o jogo nem troca automática de método/fonte.
+na aba **Janelas** escolha manualmente **Captura de janela (WGC)** para a
+mesma janela e confirme. Não há promessa de compatibilidade com o jogo nem
+troca automática de método/fonte.
 
 ## Build a partir de um checkout
 
 Requisitos: Windows x64, Node.js 22+ x64, npm, Git, CPython **3.11.8+ da série
-3.11, x64**, Visual Studio 2022 C++ (MSVC v143) com ATL/MFC, Windows SDK
+3.11, x64**, Visual Studio **2022 (17.x)** C++ com **v143/MSVC 14.30–14.44**,
+ATL/MFC e CRT redistribuível de release, Windows SDK
 **10.0.26100.0** com servicing **10.0.26100.3323 ou posterior** e Debugging Tools
 x64. Reserve vários GB para fontes, ferramentas e build.
 O Python deve ser um executável instalado, não o launcher da Microsoft Store.
 
-Na raiz do checkout já atualizado, em PowerShell, ajuste o caminho do Python
+O seletor compartilhado em `scripts\windowsToolchain.cjs` considera somente
+VS2022 completo e não preview, mesmo com VS2026 instalado. Escolhe a instalação
+compatível mais recente dentro dessa faixa, informa versões/caminhos e rejeições,
+e verifica ferramentas, integração v143, SDK e servicing antes de criar o venv,
+baixar fontes ou compilar. **17.13.4 é a referência upstream dos pins, não um
+patch exato obrigatório**; não implica suporte a VS2026 ou MSVC 14.5x.
+O SDK 28000 sozinho não substitui o diretório 26100: `rc.exe` precisa continuar
+na família 26100; as DLLs compartilhadas de Debugging Tools podem ser mais novas.
+
+`--vs-install=<caminho absoluto>`, `--sdk-root=<caminho absoluto>` e
+`--vswhere=<executável absoluto>` estão disponíveis no seletor, preparo,
+bootstrap e builders. Uma seleção explícita inválida falha, sem escolher outra
+instalação. O ambiente de outro Developer Prompt não é herdado pelos builds:
+`vcvars`, GN, node-gyp e MSBuild recebem a instalação e as versões verificadas.
+Nenhuma dessas etapas instala ou atualiza Visual Studio, MSVC ou SDK.
+
+Na raiz do checkout já atualizado, em PowerShell comum, ajuste o caminho do Python
 e execute as etapas separadamente, interrompendo no primeiro erro. Antes do
 rebuild, feche somente o Monky Dev desse checkout, não a versão instalada:
 
@@ -139,30 +176,40 @@ $Python = "C:\Python311\python.exe"
 $env:PYTHON = $Python
 $env:NODE_GYP_FORCE_PYTHON = $Python
 $Git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+node apps\client\native\screen-share\scripts\windowsToolchain.cjs --python="$Python"
+if ($LASTEXITCODE -ne 0) { throw 'Windows toolchain preflight failed.' }
 npm ci
 if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
-$ElectronVersion = node -p "require('electron/package.json').version"
-if ($LASTEXITCODE -ne 0) { throw 'Cannot read installed Electron version.' }
-node node_modules\node-gyp\bin\node-gyp.js rebuild --directory=apps\client\native\screen-audio --target="$ElectronVersion" --arch=x64 --dist-url=https://electronjs.org/headers --python="$Python"
-if ($LASTEXITCODE -ne 0) { throw 'screen-audio rebuild failed.' }
 npm run prepare:native-screen -- --python="$Python" --git="$Git" --jobs=4
 if ($LASTEXITCODE -ne 0) { throw 'Native screen preparation failed.' }
+node apps\client\native\screen-share\scripts\buildScreenAudio.cjs --python="$Python"
+if ($LASTEXITCODE -ne 0) { throw 'screen-audio rebuild failed.' }
 npm run build
 if ($LASTEXITCODE -ne 0) { throw 'Monky build failed.' }
 npm start
 ```
 
 `npm ci` usa o lockfile, mas o script de instalação de `screen-audio` adia
-seu build. O `rebuild` usa o `node-gyp` já instalado no repositório e a versão
-do Electron instalado **depois de `npm ci`**, não a versão do Node do terminal.
-Ele recompila `apps\client\native\screen-audio\build\Release\screen_audio.node`.
-Essa etapa é obrigatória também ao atualizar um checkout: as novas funções de
-monitor/identidade de processo e os ACKs assíncronos de PCM exigem um addon
-atualizado. As fixtures de `screen-audio\test` não substituem o addon de produção.
+seu build. `buildScreenAudio.cjs` usa o `node-gyp` já instalado no repositório
+para configurar os headers do Electron instalado **depois de `npm ci`**, não
+os do Node do terminal. Em seguida, recompila
+`apps\client\native\screen-audio\build\Release\screen_audio.node` com MSBuild,
+fixando instalação/MSVC/SDK e usando o job privado gerado pelo preparo RTC.
+Por isso esse comando vem **depois de `prepare:native-screen`**.
+Execute-o no primeiro preparo ou quando mudarem as fontes do addon ou o Electron;
+um addon anterior às funções de monitor/identidade e ACKs PCM precisa ser atualizado.
+Se o addon já corresponde a essas fontes e ao Electron instalado, uma alteração
+somente de scripts/TypeScript não exige outro rebuild de `screen-audio`.
+As fixtures de `screen-audio\test` não substituem o addon de produção.
 Não instale outro Electron ou `node-gyp` global nem reutilize um `.node` antigo
 para contornar falhas.
 
-`prepare:native-screen` usa `.native-screen`, ignorado pelo Git. Cria um venv
+O primeiro comando é um preflight somente leitura, sem build, download ou GPU,
+e funciona antes de `npm ci`. Ele não altera o ambiente global nem os hooks de
+instalação de outros pacotes que `npm ci` possa executar; use PowerShell comum,
+não um Developer Prompt de outra versão do VS.
+
+`prepare:native-screen` usa `.native-screen`, ignorado pelo Git. Após o preflight, cria um venv
 privado, obtém revisões fixadas, verifica os arquivos OBS por SHA-256, compila
 o RTC e a captura de `screen-share` e reúne as licenças; **não compila
 `screen-audio`**. Não usa diretórios de experimentos nem executa os hooks de
@@ -230,22 +277,28 @@ Em um checkout novo, sem `.native-screen`, substitua `<versao>` pelo nome do
 arquivo baixado e execute cada etapa, parando em qualquer erro:
 
 ```powershell
-New-Item -ItemType Directory .native-screen
 $Python = "C:\Python311\python.exe"
 $env:PYTHON = $Python
 $env:NODE_GYP_FORCE_PYTHON = $Python
+node apps\client\native\screen-share\scripts\windowsToolchain.cjs --python="$Python"
+if ($LASTEXITCODE -ne 0) { throw 'Windows toolchain preflight failed.' }
+New-Item -ItemType Directory .native-screen -ErrorAction Stop
 & $Python -c "import tarfile; tarfile.open('monky-native-sources-<versao>.tar.xz', 'r|xz').extractall('.native-screen', filter='data')"
+if ($LASTEXITCODE -ne 0) { throw 'Source extraction failed.' }
 npm ci
 if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
-$ElectronVersion = node -p "require('electron/package.json').version"
-if ($LASTEXITCODE -ne 0) { throw 'Cannot read installed Electron version.' }
-node node_modules\node-gyp\bin\node-gyp.js rebuild --directory=apps\client\native\screen-audio --target="$ElectronVersion" --arch=x64 --dist-url=https://electronjs.org/headers --python="$Python"
-if ($LASTEXITCODE -ne 0) { throw 'screen-audio rebuild failed.' }
 node apps\client\native\screen-share\scripts\buildRtc.cjs --webrtc-root="$PWD\.native-screen\rtc\webrtc\src" --python="$Python" --jobs=4
+if ($LASTEXITCODE -ne 0) { throw 'RTC build failed.' }
 node apps\client\native\screen-share\scripts\fetchObs.cjs --runtime-only
-node apps\client\native\screen-share\scripts\buildCapture.cjs --obs-root="$PWD\.native-screen\obs-runtime" --deps-root="$PWD\.native-screen\obs-dependencies"
+if ($LASTEXITCODE -ne 0) { throw 'Pinned OBS acquisition failed.' }
+node apps\client\native\screen-share\scripts\buildCapture.cjs --obs-root="$PWD\.native-screen\obs-runtime" --deps-root="$PWD\.native-screen\obs-dependencies" --python="$Python"
+if ($LASTEXITCODE -ne 0) { throw 'Capture build failed.' }
+node apps\client\native\screen-share\scripts\buildScreenAudio.cjs --python="$Python"
+if ($LASTEXITCODE -ne 0) { throw 'screen-audio rebuild failed.' }
 node apps\client\native\screen-share\scripts\notices.cjs
+if ($LASTEXITCODE -ne 0) { throw 'Native notices failed.' }
 npm run build
+if ($LASTEXITCODE -ne 0) { throw 'Monky build failed.' }
 ```
 
 Use esses comandos diretos, não o bootstrap de aquisição, sobre o snapshot:
@@ -254,7 +307,7 @@ A extração via Python preserva os nomes Unicode das fontes no Windows.
 Ferramentas genéricas ainda exigem Node/Python/MSVC/SDK instalados; a etapa
 `--runtime-only` baixa os binários OBS e as dependências fixadas para o build
 padrão, incluindo NVENC e hooks; não é uma reconstrução offline completa.
-`buildRtc.cjs` deve preceder `buildCapture.cjs`: ele gera também
+`buildRtc.cjs` deve preceder `buildCapture.cjs` e `buildScreenAudio.cjs`: ele gera também
 `build\tools\monky_msvc_job.exe`, dentro deste módulo. Para alterar OBS/FFmpeg,
 use suas fontes, receitas e ajustes Monky e atualize os pins do runtime para
 seus novos binários; não misture helpers/hooks de outra versão do OBS.

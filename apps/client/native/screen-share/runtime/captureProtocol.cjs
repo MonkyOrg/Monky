@@ -141,7 +141,36 @@ function validateFailure(value) {
   return value;
 }
 
+function validateAdmissionFailure(message, expected) {
+  exact(message, ['schemaVersion', 'kind', 'type', 'runId', 'sequence', 'helperProcessId', 'qpc', 'qpcFrequency',
+    'target', 'video', 'encoder', 'captureStarted', 'observation', 'error', 'retirement'], 'capture admission failure');
+  assert.equal(message.schemaVersion, 1);
+  assert.equal(message.kind, 'capture-admission-error');
+  assert.equal(message.type, 'error');
+  assert.match(message.runId, /^[a-f0-9]{32}$/);
+  integer(message.sequence);
+  integer(message.helperProcessId, 1, 0xffffffff);
+  assert.ok(decimal(message.qpc) > 0n && decimal(message.qpcFrequency) > 0n);
+  validateSource(message.target);
+  validateVideo(message.video);
+  validateEncoder(message.encoder);
+  assert.equal(message.captureStarted, false);
+  assert.deepEqual(message.observation, { outputPackets: 0 });
+  validateFailure(message.error);
+  exact(message.retirement, RETIREMENT_FIELDS, 'capture admission retirement');
+  for (const field of RETIREMENT_FIELDS) assert.equal(typeof message.retirement[field], 'boolean');
+  if (expected) {
+    assert.equal(message.runId, expected.runId);
+    assert.equal(message.helperProcessId, expected.helperProcessId);
+    assert.deepEqual(message.target, expected.source);
+    assert.deepEqual(message.video, expected.video);
+    assert.equal(message.encoder, expected.encoder ?? 'auto');
+  }
+  return message;
+}
+
 function validateMessage(message, expected) {
+  if (message?.kind === 'capture-admission-error') return validateAdmissionFailure(message, expected);
   assert.ok(['prepared', 'ready', 'stats', 'stopped', 'error'].includes(message?.type), 'Unknown capture message.');
   const extra = message.type === 'stopped' ? ['retirement'] : message.type === 'error' ? ['error', 'retirement'] : [];
   const extended = message.schemaVersion === 2;
@@ -264,6 +293,8 @@ function validateMessage(message, expected) {
 }
 
 function validateProgress(previous, next) {
+  assert.ok(previous.kind !== 'capture-admission-error' && next.kind !== 'capture-admission-error',
+    'A source admission failure must be the first and terminal control response.');
   for (const name of ['runId', 'helperProcessId', 'hwnd', 'processId', 'processCreationTime100ns', 'qpcFrequency'])
     assert.equal(next[name], previous[name], `Native identity changed: ${name}`);
   assert.deepEqual(next.configuration, previous.configuration);

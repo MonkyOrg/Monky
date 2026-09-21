@@ -7870,6 +7870,57 @@ button[data-loading="1"]::after {
   white-space: pre-line;
 }
 
+.share-window-methods {
+  display: grid;
+  gap: 12px;
+}
+
+.share-window-methods[hidden],
+.share-window-methods #share-game-tip[hidden],
+.share-method-status[hidden] {
+  display: none;
+}
+
+.share-method-label {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.share-capture-methods .input-mode-card {
+  min-width: 0;
+}
+
+.share-capture-methods .input-mode-card:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.share-capture-methods .input-mode-card-description,
+.share-method-status {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.share-method-status {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.share-window-methods .share-game-tip {
+  margin: 0;
+}
+
+@media (max-width: 540px) {
+  .share-capture-methods {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .screen-sources-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

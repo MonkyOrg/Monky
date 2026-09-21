@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
+const windowsToolchain = require('../windowsToolchain.cjs');
 
 const OWNER = '.native-rtc-owner.json';
 const STATE = '.native-rtc-state.json';
@@ -20,17 +21,6 @@ const SHA = /^[0-9a-f]{40}$/u;
 const MAX_TEXT = 1024 * 1024;
 const MAX_GIT_INDEX_BYTES = 32 * 1024 * 1024;
 const MAX_REPOSITORIES = 1024;
-const SDK_FILES = [
-  'Include\\10.0.26100.0\\um\\Windows.h',
-  'Include\\10.0.26100.0\\shared\\sdkddkver.h',
-  'Include\\10.0.26100.0\\ucrt\\stdio.h',
-  'Lib\\10.0.26100.0\\um\\x64\\kernel32.lib',
-  'Lib\\10.0.26100.0\\ucrt\\x64\\ucrt.lib',
-  'bin\\10.0.26100.0\\x64\\rc.exe',
-  'Debuggers\\x64\\dbghelp.dll',
-  'Debuggers\\x64\\dbgcore.dll',
-];
-const SDK_VERSIONS = SDK_FILES.slice(-3);
 
 class BootstrapError extends Error {
   constructor(code, message) {
@@ -183,7 +173,8 @@ function envValue(env, name) {
 
 function childEnvironment(context) {
   const result = {};
-  for (const [key, value] of Object.entries(context.env)) {
+  const clean = windowsToolchain.cleanWindowsEnvironment(context.env);
+  for (const [key, value] of Object.entries(clean)) {
     if (/^(GIT_|GCM_|PYTHON|DEPOT_TOOLS_|VPYTHON_|CIPD_|GCLIENT_|GYP_|GN_)/iu.test(key) ||
         /^(PATH|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|LOCALAPPDATA|APPDATA|TEMP|TMP|INCLUDE|LIB|LIBPATH|VIRTUAL_ENV|__PYVENV_LAUNCHER__|ELECTRON_RUN_AS_NODE)$/iu.test(key)) continue;
     result[key] = value;
@@ -195,7 +186,7 @@ function childEnvironment(context) {
     context.tools.git && path.dirname(context.tools.git),
     context.tools.python && path.dirname(context.tools.python),
     path.join(context.paths.workspace, 'depot_tools'),
-    envValue(context.env, 'PATH'),
+    clean.PATH,
   ].filter(Boolean);
   Object.assign(result, {
     PATH: pathParts.join(path.delimiter),
@@ -217,6 +208,11 @@ function childEnvironment(context) {
     GIT_CONFIG_KEY_4: 'core.longpaths', GIT_CONFIG_VALUE_4: 'true',
     PYTHONDONTWRITEBYTECODE: '1',
   });
+  if (context.tools.windowsToolchain) {
+    const selected = windowsToolchain.buildEnvironment(context.tools.windowsToolchain,
+      context.tools.gclientPython || context.tools.python, result);
+    Object.assign(result, selected, { PATH: result.PATH });
+  }
   if (context.tools.gclientPython) result.VIRTUAL_ENV = path.dirname(path.dirname(context.tools.gclientPython));
   return result;
 }
@@ -331,8 +327,7 @@ function executable(context, explicit, names, label) {
     const stat = context.fs.lstatSync(filename);
     if (!stat.isFile() || stat.isSymbolicLink() || !stat.size) continue;
     const canonical = context.fs.realpathSync(filename);
-    if (python && (!exists(context, path.join(path.dirname(canonical), 'python3.dll')) ||
-        !exists(context, path.join(path.dirname(canonical), 'Lib', 'os.py')))) continue;
+    if (python && !windowsToolchain.installedPython(canonical, context.fs)) continue;
     const identity = stat.ino ? `${stat.dev}:${stat.ino}` : canonical.toLowerCase();
     selected.set(identity, canonical);
   }
@@ -355,8 +350,7 @@ async function prerequisites(context, options, report) {
     'ERR_RTC_GIT_VERSION', 'Git 2.31+ is required for isolated per-child configuration.');
   report.tools.git = { path: context.tools.git, version: matched[1] };
   const metadata = parseJsonOutput(await command(context, context.tools.python,
-    ['-I', '-S', '-B', path.join(context.paths.moduleDir, 'windows_support.py'), 'metadata',
-      ...(options.sdkRoot ? ['--sdk-root', options.sdkRoot] : [])],
+    windowsToolchain.metadataArguments(options),
     { label: 'Read-only Windows SDK/Python metadata' }), 'Windows metadata');
   requireValue(Array.isArray(metadata.pythonVersion) && version(metadata.pythonVersion.join('.'), baseline.pythonMinimum),
     'ERR_RTC_PYTHON_VERSION', 'A preinstalled Python 3.8+ is required; no interpreter is bootstrapped automatically.');
@@ -365,64 +359,13 @@ async function prerequisites(context, options, report) {
   report.tools.python = { path: context.tools.python, version: metadata.pythonVersion.join('.'), pointerBits: 64 };
   await gclientPrerequisite(context, options, report);
 
-  const installerRoot = envValue(context.env, 'ProgramFiles(x86)');
-  const locator = options.vswhere || (installerRoot &&
-    path.join(installerRoot, 'Microsoft Visual Studio', 'Installer', 'vswhere.exe'));
-  requireValue(locator && path.isAbsolute(locator) && exists(context, locator) &&
-    context.fs.lstatSync(locator).isFile(), 'ERR_RTC_VSWHERE', 'Existing VS2022 vswhere.exe was not found.');
-  const instances = parseJsonOutput(await command(context, locator,
-    ['-all', '-products', '*', '-version', '[17.0,18.0)', '-requires',
-      ...baseline.visualStudioComponents, '-format', 'json', '-utf8'],
+  const request = windowsToolchain.vswhereRequest(options, context.env, context.fs);
+  const instances = parseJsonOutput(await command(context, request.executable, request.args,
     { label: 'VS2022 C++/ATL/MFC component metadata' }), 'vswhere');
-  requireValue(Array.isArray(instances), 'ERR_RTC_VS_OUTPUT', 'vswhere did not return an instance array.');
-  const suitable = instances.filter(instance => instance.isComplete === true && instance.installationPath &&
-    version(instance.installationVersion, [17]) && Number(instance.installationVersion.split('.')[0]) === 17 &&
-    (!options.vsInstall || samePath(instance.installationPath, options.vsInstall)));
-  if (suitable.length !== 1) {
-    report.issues.push({ code: 'ERR_RTC_VS_COMPONENTS',
-      message: `Expected one VS2022 installation with C++/ATL/MFC; found ${suitable.length}. No components were installed.` });
-  } else {
-    const selected = suitable[0];
-    const toolsVersion = boundedText(context,
-      path.join(selected.installationPath, 'VC', 'Auxiliary', 'Build', 'Microsoft.VCToolsVersion.default.txt'), 128).trim();
-    requireValue(/^[0-9]+(?:\.[0-9]+){2}$/u.test(toolsVersion), 'ERR_RTC_VC_VERSION', 'Invalid installed VC tools version.');
-    const toolsRoot = path.join(selected.installationPath, 'VC', 'Tools', 'MSVC', toolsVersion);
-    for (const relative of ['include\\vector', 'bin\\Hostx64\\x64\\cl.exe',
-      'atlmfc\\include\\atlbase.h', 'atlmfc\\include\\afxwin.h', 'atlmfc\\lib\\x64\\atls.lib']) {
-      if (!exists(context, path.join(toolsRoot, ...relative.split('\\')))) {
-        report.issues.push({ code: 'ERR_RTC_VC_FILES', message: `Required C++/ATL/MFC file is missing: ${relative}` });
-      }
-    }
-    report.tools.visualStudio = { path: selected.installationPath,
-      version: selected.installationVersion, toolsVersion, components: baseline.visualStudioComponents };
-  }
-
-  requireValue(Array.isArray(metadata.sdkRoots), 'ERR_RTC_SDK_OUTPUT', 'Invalid SDK root metadata.');
-  if (!metadata.selectedSdkRoot) {
-    report.issues.push({ code: 'ERR_RTC_SDK_SELECTION',
-      message: 'SDK root is missing or ambiguous; choose --sdk-root explicitly. No SDK was installed.' });
-  } else {
-    const root = path.resolve(metadata.selectedSdkRoot);
-    for (const relative of SDK_FILES) {
-      if (!exists(context, path.join(root, ...relative.split('\\')))) {
-        report.issues.push({ code: 'ERR_RTC_SDK_FILES', message: `Required SDK/debugging-tools file is missing: ${relative}` });
-      }
-    }
-    const observed = metadata.sdkFileVersions;
-    requireValue(observed && typeof observed === 'object', 'ERR_RTC_SDK_OUTPUT', 'Invalid SDK file-version metadata.');
-    for (const relative of SDK_VERSIONS) {
-      const value = observed[relative];
-      const sdkRc = relative === SDK_VERSIONS[0];
-      if (typeof value !== 'string' || !/^\d+\.\d+\.\d+\.\d+$/u.test(value) ||
-          (sdkRc && !value.startsWith('10.0.26100.')) ||
-          !version(value, baseline.sdkMinimumServicingVersion.split('.').map(Number))) {
-        report.issues.push({ code: 'ERR_RTC_SDK_SERVICING',
-          message: `${relative} does not meet ${sdkRc ? 'the SDK 10.0.26100 family and' : 'the shared debugger'} minimum ${baseline.sdkMinimumServicingVersion}.` });
-      }
-    }
-    report.tools.sdk = { root, directoryVersion: baseline.sdkDirectoryVersion,
-      requiredServicing: baseline.sdkMinimumServicingVersion, fileVersions: observed };
-  }
+  const selected = windowsToolchain.inspectWindowsToolchain(instances, metadata, options, context.fs);
+  context.tools.windowsToolchain = selected;
+  Object.assign(report.tools, { visualStudio: selected.visualStudio, sdk: selected.sdk,
+    rejectedVisualStudioInstallations: selected.rejected });
 }
 
 async function gclientPrerequisite(context, options, report) {
@@ -723,7 +666,7 @@ async function preflight(context, options = {}) {
     await prerequisites(context, options, report);
     ownership = await workspaceState(context, report);
   } catch (error) {
-    if (!(error instanceof BootstrapError)) throw error;
+    if (!(error instanceof BootstrapError) && !(error instanceof windowsToolchain.WindowsToolchainError)) throw error;
     report.issues.push({ code: error.code, message: error.message });
   }
   report.canFetch = report.issues.length === 0;

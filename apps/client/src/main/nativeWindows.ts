@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
+import type { DesktopCapturerSource, Display, Rectangle } from 'electron';
 import type { NativeMonitorInfo, NativeWindowInfo, NativeWindowState } from '@monky/screen-audio';
 import { validateCaptureTarget, type NativeScreenCaptureTarget } from '@monky/screen-share';
-import type { NativeScreenCaptureKind } from '@monky/shared';
+import type { DesktopSource, NativeScreenCaptureKind } from '@monky/shared';
 
 export function nativeWindowIdFromSourceId(sourceId: string): number | null {
   const match = /^window:([1-9][0-9]{0,15}):(?:[0-9]{1,10}|[a-f0-9]{64})$/.exec(sourceId);
@@ -35,6 +36,29 @@ function monitorTarget(monitor: NativeMonitorInfo): MonitorTarget {
 function monitorIdentity(target: MonitorTarget): string {
   const { x, y, width, height } = target.bounds;
   return JSON.stringify([target.deviceId, target.deviceName, x, y, width, height]);
+}
+
+export function nativeMonitorDesktopSources(
+  monitors: readonly { id: string; monitor: NativeMonitorInfo }[],
+  previews: readonly Pick<DesktopCapturerSource, 'id' | 'display_id' | 'thumbnail'>[],
+  displays: readonly Pick<Display, 'id' | 'bounds'>[],
+  toDipRect: (bounds: Rectangle) => Rectangle,
+  warn: (message: string) => void,
+): DesktopSource[] {
+  return [...monitors].sort((a, b) => a.monitor.deviceName.localeCompare(b.monitor.deviceName, 'en', { numeric: true }))
+    .map(({ id, monitor }, index) => {
+      const bounds = toDipRect({ ...monitor.bounds });
+      const matches = displays.filter(display => display.bounds.x === bounds.x && display.bounds.y === bounds.y
+        && display.bounds.width === bounds.width && display.bounds.height === bounds.height);
+      const images = matches.length === 1
+        ? previews.filter(source => source.id.startsWith('screen:') && source.display_id === String(matches[0].id))
+        : [];
+      let thumbnailDataUrl = '';
+      if (images.length === 1 && !images[0].thumbnail.isEmpty()) thumbnailDataUrl = images[0].thumbnail.toDataURL();
+      else warn(`Native monitor preview unavailable for ${monitor.deviceName}: `
+        + `${matches.length} matching displays, ${images.length} matching images; an unambiguous, nonempty thumbnail is required.`);
+      return { id, name: monitor.name, displayNumber: index + 1, type: 'screen', thumbnailDataUrl, appIconDataUrl: null };
+    });
 }
 
 export class NativeDesktopSources {

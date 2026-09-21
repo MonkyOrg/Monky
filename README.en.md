@@ -95,7 +95,7 @@ Bugs start in [Discussions › Bug Reports](https://github.com/MonkyOrg/Monky/di
 
 ## 💻 For developers
 
-Requirements: Node.js 22+ (the version CI uses) and npm. On Windows, native modules need Python 3.11 x64 and Visual Studio 2022 C++ tools (MSVC). For screen capture, also check ATL/MFC and the Windows SDK version in the guide below.
+Requirements: Node.js 22+ (the version CI uses) and npm. On Windows, native modules need Python 3.11 x64 and Visual Studio **2022 (17.x)** C++ tools. Capture preparation selects v143/MSVC 14.30–14.44 even with a newer VS installed; VS2026 does not replace this prerequisite. Also check ATL/MFC and SDK 10.0.26100.0 with minimum servicing 10.0.26100.3323 in the guide below.
 
 ```bash
 npm ci
@@ -104,6 +104,11 @@ npm start
 npm test
 ```
 
+The screen-sharing picker has two tabs: **Screens** and **Windows**.
+After selecting a window, choose **Window Capture (WGC)** (default)
+or **Game Capture (hook)** and confirm. These are methods for the same window,
+not separate lists or automatic game detection.
+
 For native **window, monitor or Game Capture** on Windows x64, follow the
 [module guide](apps/client/native/screen-share/README.en.md): rebuilding addons
 for the pinned Electron, preparing libobs/WebRTC and meeting Python 3.11/MSVC/SDK
@@ -111,9 +116,11 @@ prerequisites are separate steps. Video uses H.264 through AMD AMF or NVIDIA
 NVENC; AV1 is unavailable. The selected source is probed after confirmation,
 with no automatic Chromium/software fallback and no compatibility guarantee
 based on GPU brand. `npm ci` and `npm run build` alone do not prepare this runtime.
-Explicitly rebuilding `screen-audio` with the local `node-gyp` after `npm ci`
-is also mandatory in an existing checkout; `prepare:native-screen` builds
-`screen-share` RTC/capture, not `screen_audio.node`.
+On first setup, or when `screen-audio` sources or Electron change, follow the
+guide's `buildScreenAudio.cjs`: it uses local `node-gyp` and the same VS2022/MSVC/SDK
+selector, after `prepare:native-screen`. Preparation builds `screen-share`
+RTC/capture, not `screen_audio.node`. An already-compatible addon does not need
+rebuilding for a scripts/TypeScript-only update.
 
 Preparation is required before Windows packaging. When redistributing, include
 licenses, the same-tag code and the native source archive with its JSON manifest

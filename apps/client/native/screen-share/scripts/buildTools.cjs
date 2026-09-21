@@ -10,9 +10,9 @@ const root = path.resolve(__dirname, '..');
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
 function execute(executable, args, { cwd = root, env = process.env, capture = false,
-  windowsVerbatimArguments = false } = {}) {
+  windowsVerbatimArguments = false, timeout } = {}) {
   const result = spawnSync(executable, args, {
-    cwd, env, windowsHide: true, encoding: 'utf8', windowsVerbatimArguments,
+    cwd, env, windowsHide: true, encoding: 'utf8', windowsVerbatimArguments, timeout,
     stdio: capture ? 'pipe' : 'inherit', maxBuffer: 16 * 1024 * 1024,
   });
   if (result.error) throw result.error;
@@ -38,12 +38,12 @@ function verify(filename, expected) {
     `Native build input differs from its pin: ${filename}`);
 }
 
-function redistributableCrt(visualStudio) {
-  const version = fs.readFileSync(path.join(visualStudio, 'VC', 'Auxiliary', 'Build',
+function redistributableCrt(visualStudio, io = fs) {
+  const version = io.readFileSync(path.join(visualStudio, 'VC', 'Auxiliary', 'Build',
     'Microsoft.VCRedistVersion.default.txt'), 'utf8').trim();
   assert.match(version, /^14\.\d+\.\d+$/u, 'Invalid Visual C++ redistributable version.');
   const directory = path.join(visualStudio, 'VC', 'Redist', 'MSVC', version, 'x64', 'Microsoft.VC143.CRT');
-  const files = new Map(fs.readdirSync(directory, { withFileTypes: true })
+  const files = new Map(io.readdirSync(directory, { withFileTypes: true })
     .filter(entry => entry.isFile() && /^[a-z0-9_]+\.dll$/u.test(entry.name))
     .map(entry => [entry.name, path.join(directory, entry.name)]));
   for (const name of ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'])

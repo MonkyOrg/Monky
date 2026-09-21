@@ -34,7 +34,7 @@ const monitorId = `native-monitor:${'a'.repeat(64)}`;
 
 function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   encoder = 'h264_texture_amf', probeFailure, probeFailureBeforeSpawn, probeStop,
-  probeVerified = true, probeRetires = true } = {}) {
+  probeVerified = true, probeRetires = true, probeStopReportsFailure = false } = {}) {
   const handlers = new Map(), sent = [], endpoints = [], selections = [], errors = [], captures = [], directories = [];
   const probes = [], removedDirectories = [];
   let target = { kind: 'window', hwnd: 12345, expectedProcessId: 56789,
@@ -78,7 +78,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
         void gpu.promise.then(() => { signal.removeEventListener('abort', abort); resolve(); });
       });
       signal.throwIfAborted();
-      if (probeFailure) throw probeFailure;
+      if (probeFailure) { this.failure = probeFailure; throw probeFailure; }
       this.prepared = true;
     }
     start() { assert.fail('Source admission cannot start capture or inject a game.'); }
@@ -95,8 +95,10 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
       if (probeStop) await probeStop.promise;
       if (!this.closed && probeRetires) {
         this.closed = true;
-        this.child?.emit('exit', 0, null); this.child?.emit('close', 0, null);
+        const code = this.failure ? 1 : 0;
+        this.child?.emit('exit', code, null); this.child?.emit('close', code, null);
       }
+      if (this.failure && probeStopReportsFailure) throw this.failure;
       return this.snapshot();
     }
     snapshot() { return { nativeClosed: true, forcedTermination: false }; }
@@ -201,6 +203,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     frame, contents, event, endpoints, sent, errors, selections, captures, directories, probes, removedDirectories, captureModule,
     replaceMonitor: value => { monitor = value; },
     allowProbeRetirement: () => { probeRetires = true; },
+    setProbeFailure: value => { probeFailure = value; },
     replaceTarget: value => { target = value; },
     closeWindow: () => { windowOpen = false; },
     pauseWindow: value => { windowPaused = value; },
@@ -335,6 +338,42 @@ test('encoder probe rejection does not substitute WGC for Game or publish a succ
   assert.equal(f.probes.length, 1); assert.equal(f.probes[0].target.kind, 'game');
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
   assert.equal(f.probes[0].closed, true); assert.equal(f.captures.length + f.endpoints.length, 0);
+});
+
+test('monitor Stop then rejected window releases its audio reservation and permits retry and call reentry', async t => {
+  const f = fixture(t, { probeStopReportsFailure: true });
+  await f.join();
+  await f.addSource('monitor', { captureKind: 'monitor', desktopSourceId: monitorId });
+  await f.command({ action: 'source-remove', shareId: 'monitor' });
+  const failure = Object.assign(new Error('The selected window disappeared during native admission.'),
+    { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST' });
+  f.setProbeFailure(failure);
+  await assert.rejects(f.addSource('rejected-window'), error => error === failure);
+  assert.equal(f.probes[1].closed, true);
+  assert.equal(f.removedDirectories.length, 2);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
+  f.setProbeFailure(null);
+  assert.equal((await f.addSource('retry-window')).kind, 'source');
+  await f.command({ action: 'leave' });
+  await f.join();
+  assert.equal((await f.addSource('after-rejoin')).kind, 'source');
+  await f.command({ action: 'leave-local' });
+  await f.join();
+  assert.equal((await f.addSource('after-reconnect')).kind, 'source');
+  assert.equal(f.captures.length + f.endpoints.length, 0, 'Source preparation cannot activate PCM or transport.');
+});
+
+test('IPC error serialization keeps the actual nested cleanup failure instead of only AggregateError', async t => {
+  const failure = new AggregateError([new Error('Specific native preparation reason')],
+    'Modeled aggregate preparation failure');
+  const f = fixture(t, { probeFailure: failure });
+  await f.join();
+  await assert.rejects(f.addSource(), error => {
+    assert.match(error.message, /Modeled aggregate preparation failure/);
+    assert.match(error.message, /Specific native preparation reason/);
+    assert.equal(error.cause, failure);
+    return true;
+  });
 });
 
 test('preparation failure before process creation still awaits the original bridge stop', async t => {

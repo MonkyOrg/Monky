@@ -28,10 +28,11 @@ const sessionNavigation = process.argv.includes('--session-navigation');
 const serverLoss = process.argv.includes('--server-loss');
 const windowLifecycle = process.argv.includes('--window-lifecycle');
 const idleSourceClose = process.argv.includes('--idle-source-close');
+const admissionRecovery = process.argv.includes('--admission-recovery');
 assert.ok(!unsupportedBrowserCodec || (browserReceiver && mode === 'p2p'), 'The unsupported-codec case requires a browser P2P receiver.');
 assert.ok(!incompatibleViewer || (!browserReceiver && mode === 'p2p'), 'Mixed compatibility requires a native primary P2P receiver.');
 const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbols='))?.slice('--debug-symbols='.length);
-const report = { mode, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss,
+const report = { mode, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery,
   normalMain: true, normalPreload: true, ownedSyntheticSource: true,
   qaFocusHooks: 'owned parent IPC only; normal Main and preload checks unchanged',
   capabilityOverride: browserReceiver ? 'viewer.receive=false (real Chromium receiver, not a macOS hardware test)' : null,
@@ -387,7 +388,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
     return matches[0];
   };
   window.nativeAppSmoke = {
-    async share(ownedHwnd) {
+    async share(ownedHwnd, expectedFailure = false) {
       const wait = async (condition, message) => {
         const deadline = performance.now() + 20000;
         while (!condition()) {
@@ -395,17 +396,22 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
           await new Promise(resolve => setTimeout(resolve, 50));
         }
       };
-      const button = document.querySelector('#stage-btn-screen');
-      if (!(button instanceof HTMLButtonElement)) throw new Error('The real Share Screen control is missing.');
-      button.click();
+      if (!document.querySelector('#share-sources-panel')) {
+        const button = document.querySelector('#stage-btn-screen');
+        if (!(button instanceof HTMLButtonElement)) throw new Error('The real Share Screen control is missing.');
+        button.click();
+      }
       await wait(() => document.querySelector('#share-tab-window'), 'The real screen picker did not open.');
       await wait(() => document.querySelector('#share-sources-panel')?.getAttribute('aria-busy') === 'false',
         'The native source capabilities did not settle.');
       const capabilities = await webRtcManager.getNativeScreenCapabilities();
       const kinds = capabilities.captureKinds ?? (capabilities.capture ? ['window'] : []);
-      for (const [tab, kind] of [['screen', 'monitor'], ['window', 'window'], ['game', 'game']]) {
+      if (document.querySelector('#share-tab-game'))
+        throw new Error('Game Capture must be a method of the selected window, not a duplicate source tab.');
+      for (const [tab, kind] of [['screen', 'monitor'], ['window', 'window']]) {
         const control = document.querySelector(`#share-tab-${tab}`);
-        const supported = (capabilities.capture || capabilities.requiresSelectionProbe === true) && kinds.includes(kind);
+        const supported = (capabilities.capture || capabilities.requiresSelectionProbe === true)
+          && (kinds.includes(kind) || kind === 'window' && kinds.includes('game'));
         if (!(control instanceof HTMLButtonElement) || control.disabled === supported ||
           control.getAttribute('role') !== 'tab' || (!supported && !control.title))
           throw new Error('Capture methods must reflect actual native capabilities with an explicit unavailable reason.');
@@ -416,6 +422,15 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       await wait(card, 'The real picker did not enumerate the owned synthetic window.');
       card().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       if (card().getAttribute('aria-pressed') !== 'true') throw new Error('Keyboard source selection was not acknowledged.');
+      if (document.querySelector('#share-window-methods')?.hidden !== false)
+        throw new Error('Selecting a window did not expose its capture methods.');
+      for (const kind of ['window', 'game']) {
+        const method = document.querySelector(`#share-method-${kind}`);
+        const supported = (capabilities.capture || capabilities.requiresSelectionProbe === true) && kinds.includes(kind);
+        if (!(method instanceof HTMLButtonElement) || method.disabled === supported
+          || method.getAttribute('aria-pressed') !== String(kind === 'window'))
+          throw new Error('Window capture methods must show real capabilities and select WGC by default.');
+      }
       const audioToggle = document.querySelector('#chk-share-audio');
       if (!(audioToggle instanceof HTMLInputElement)) throw new Error('The real audio switch is missing.');
       if (audioToggle.checked !== audioEnabled) audioToggle.closest('.toggle-switch').querySelector('.toggle-slider').click();
@@ -428,6 +443,19 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       if (!(confirm instanceof HTMLButtonElement) || confirm.disabled) throw new Error('The real share confirmation is unavailable.');
       confirm.click();
       const capture = () => videoService.getNativeScreenCaptures().find(value => value.desktopSourceId === desktopSourceId);
+      if (expectedFailure) {
+        await wait(() => document.querySelector('.dialog-card[role="dialog"] .dialog-message'),
+          'The deliberately ambiguous owned source did not show its native rejection.');
+        const error = document.querySelector('.dialog-card .dialog-message').textContent;
+        if (!error.includes('Stock title matching is ambiguous') || capture())
+          throw new Error('Source admission did not report the actual native ambiguity before starting capture.');
+        document.querySelector('.dialog-card button[data-action="confirm"]').click();
+        await wait(() => !document.querySelector('.dialog-card') && !confirm.disabled,
+          'Dismissing a source rejection did not re-enable the existing picker.');
+        if (card()?.getAttribute('aria-pressed') !== 'true')
+          throw new Error('A rejected source lost its picker selection.');
+        return { error, desktopSourceId, audio: audioEnabled };
+      }
       await wait(() => !document.querySelector('#share-sources-panel') && capture(), 'Picker confirmation did not announce its native source.');
       return { source: capture().source, self: auth.currentUser.sessionId, desktopSourceId,
         picker: { backend, audio: audioEnabled, keyboardSelection: true, ownedHwnd } };
@@ -782,10 +810,32 @@ async function run() {
     return state.previewState === 'paused' && stats.publishers.length === 1 && stats.publishers[0].pipelines.length === 0;
   }, 'Blur with the default preference did not retire all unwatched capture/decoder pipelines.');
 
-  phase('previewing-an-owned-source-before-watch');
   assert.equal(publisher.identity.previewPauseWhenUnfocused, true, 'A fresh profile must pause local preview on blur by default.');
   await focusOwned(publisher);
+  let rejectedCallId;
+  if (admissionRecovery) {
+    phase('rejecting-an-owned-ambiguous-source-without-losing-the-call');
+    await sourceCommand('duplicate-title');
+    report.admissionRejected = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(sourceReady.hwnd)}, true)`);
+    const rejected = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+    rejectedCallId = rejected.mainCall;
+    assert.ok(rejectedCallId, 'Native admission did not exercise a real Main call.');
+    assert.equal(rejected.channelId, publisher.identity.channelId);
+    assert.equal(rejected.localNativeSources, 0);
+    assert.deepEqual(rejected.errors, []);
+    assert.equal((await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers.length, 0);
+    assert.equal((await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).sources.length, 0);
+    await sourceCommand('close-duplicate');
+  }
+
+  phase('previewing-an-owned-source-before-watch');
   report.published = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(sourceReady.hwnd)})`);
+  if (admissionRecovery) {
+    assert.equal(report.published.desktopSourceId, report.admissionRejected.desktopSourceId);
+    assert.equal((await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).mainCall, rejectedCallId,
+      'Retry replaced the Main call instead of retiring the rejected source selection.');
+    report.admissionRecoveredInSameCall = true;
+  }
   await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).watchButton, 'Normal Watch control did not appear.');
   await waitForLocalPreview();
   const initial = await collectEvidence('initialLocalPreview', publisher, viewer);
@@ -911,6 +961,7 @@ async function run() {
       assert.equal(paused.publishers[0].pipelines[0].pipelineId, pipelineId);
       assert.deepEqual((await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).errors, []);
       const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+      assert.ok(before.video, `Minimizing the source lost receiver playback: ${JSON.stringify(before.watchStates)}`);
       await sourceCommand('restore-source');
       await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).video?.frames >= before.video.frames + 20,
         'The original subscription did not resume after restoring the window.');
@@ -918,8 +969,10 @@ async function run() {
     report.windowLifecyclePreserved = true;
   }
   const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+  assert.ok(before.video, `The receiver has no video before the FPS interval: ${JSON.stringify(before.watchStates)}`);
   await delay(3000);
   const after = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+  assert.ok(after.video, `The receiver lost video during the FPS interval: ${JSON.stringify(after.watchStates)}`);
   report.stage = { ...after, fps: (after.video.frames - before.video.frames) * 1000 / (after.video.at - before.video.at) };
   report.stageBefore = before;
   const sourceRate = await collectEvidence('sourceRateBeforeAssertion', publisher, viewer);

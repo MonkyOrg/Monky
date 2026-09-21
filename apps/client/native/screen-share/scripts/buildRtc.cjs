@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { root, execute, write, digest, regularFiles } = require('./buildTools.cjs');
+const windowsToolchain = require('./windowsToolchain.cjs');
 
 const source = path.join(root, 'src', 'rtc');
 const revision = '36ea4535a500ac137dbf1f577ce40dc1aaa774ef';
@@ -27,12 +28,12 @@ function options(argv) {
   for (const argument of argv) {
     const at = argument.indexOf('=');
     const key = argument.slice(0, at), value = argument.slice(at + 1);
-    assert.ok(at > 0 && value && !seen.has(key), 'Use unique --webrtc-root=, --python= and --jobs= options.');
+    assert.ok(at > 0 && value && !seen.has(key), 'Use unique --webrtc-root=, --python=, --jobs=, --vs-install=, --sdk-root= and --vswhere= options.');
     seen.add(key);
     if (key === '--webrtc-root') result.webrtcRoot = value;
     else if (key === '--python') result.python = value;
     else if (key === '--jobs') result.jobs = Number(value);
-    else throw new Error(`Unknown native RTC build option: ${key}`);
+    else if (!windowsToolchain.selectionOption(result, key, value)) throw new Error(`Unknown native RTC build option: ${key}`);
   }
   assert.ok(result.webrtcRoot && path.isAbsolute(result.webrtcRoot), 'Set MONKY_WEBRTC_SOURCE to the pinned WebRTC source checkout.');
   assert.ok(result.python && path.isAbsolute(result.python), 'Set PYTHON to the provisioned Python 3.11 executable.');
@@ -43,29 +44,13 @@ function options(argv) {
 function build(config) {
   assert.equal(process.platform, 'win32', 'Native screen RTC currently builds on Windows.');
   assert.equal(process.arch, 'x64', 'Native screen RTC requires x64.');
+  const toolchain = windowsToolchain.resolveWindowsToolchain(config);
+  const python = toolchain.python;
+  const env = windowsToolchain.msvcEnvironment(toolchain);
+  console.log(JSON.stringify({ windowsToolchain: windowsToolchain.summary(toolchain) }));
   const sdk = fs.realpathSync(config.webrtcRoot);
-  assert.equal(execute('git', ['--no-pager', '-C', sdk, 'rev-parse', 'HEAD'], { capture: true }), revision,
+  assert.equal(execute('git', ['--no-pager', '-C', sdk, 'rev-parse', 'HEAD'], { env, capture: true }), revision,
     'WebRTC revision differs from the pinned native media toolchain.');
-  const python = JSON.parse(execute(config.python, ['-I', '-c',
-    'import json,sys; print(json.dumps(list(sys.version_info[:2])))'], { capture: true }));
-  assert.deepEqual(python, [3, 11], 'The native addon builder requires Python 3.11.');
-
-  const vswhere = path.join(process.env['ProgramFiles(x86)'], 'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
-  const visualStudio = execute(vswhere, ['-latest', '-products', '*', '-requires',
-    'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'], { capture: true });
-  assert.ok(visualStudio && path.isAbsolute(visualStudio), 'Visual Studio 2022 C++ build tools are required.');
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (/^(RBE_|RECLIENT_|SISO_|GOMA_|DISTCC_|CCACHE_)/iu.test(key) ||
-      /^(CC|CXX|CL|_CL_|LINK|CFLAGS|CXXFLAGS|LDFLAGS|CPATH|CPLUS_INCLUDE_PATH|C_INCLUDE_PATH|LIBRARY_PATH|NODE_OPTIONS|NODE_PATH)$/iu.test(key))
-      delete env[key];
-  }
-  Object.assign(env, {
-    DEPOT_TOOLS_WIN_TOOLCHAIN: '0', DEPOT_TOOLS_UPDATE: '0',
-    GYP_MSVS_OVERRIDE_PATH: visualStudio, vs2022_install: visualStudio, GYP_MSVS_VERSION: '2022',
-    PYTHON: config.python, NODE_GYP_FORCE_PYTHON: config.python, PYTHONNOUSERSITE: '1',
-    SETUPTOOLS_USE_DISTUTILS: 'stdlib', MSBUILDDISABLENODEREUSE: '1', VSCMD_SKIP_SENDTELEMETRY: '1',
-  });
 
   const key = digest(fs.realpathSync(root).toLowerCase()).slice(0, 6);
   const inputs = ownedDirectory(path.join(sdk, 'out', `ms${key}i`));
@@ -80,7 +65,7 @@ function build(config) {
       return { path: relative, sha256: digest(bytes) };
     });
     write(path.join(inputs, 'pinned_timestamp.py'), fs.readFileSync(path.join(__dirname, 'pinned_timestamp.py')));
-    const epoch = execute('git', ['--no-pager', '-C', sdk, 'show', '--no-patch', '--format=%ct', revision], { capture: true });
+    const epoch = execute('git', ['--no-pager', '-C', sdk, 'show', '--no-patch', '--format=%ct', revision], { env, capture: true });
     assert.match(epoch, /^\d{1,10}$/u);
     write(path.join(inputs, 'pinned_epoch.txt'), `${epoch}\n`);
 
@@ -106,7 +91,7 @@ function build(config) {
       rtc_enable_protobuf: false, rtc_use_h264: false, rtc_use_h265: false,
       enable_libaom: false, enable_rust: false, enable_rust_cxx: false, enable_chromium_prelude: false,
       compute_build_timestamp: `${rootTarget}/pinned_timestamp.py`,
-      cc_wrapper: `"${config.python}" -I -S -B "${wrapper}" "${vfsPath}" ${overlayHash} --`,
+      cc_wrapper: `"${python}" -I -S -B "${wrapper}" "${vfsPath}" ${overlayHash} --`,
     };
     write(path.join(output, 'args.gn'), Object.entries(gnValues)
       .map(([name, value]) => `${name}=${JSON.stringify(value)}`).join('\n') + '\n');
@@ -114,7 +99,7 @@ function build(config) {
     const ninja = path.join(sdk, 'third_party', 'ninja', 'ninja.exe');
     const clang = path.join(sdk, 'third_party', 'llvm-build', 'Release+Asserts', 'bin', 'clang-cl.exe');
     assert.match(execute(clang, ['--version'], { env, capture: true }), /21\.0\.0git[\s\S]*bd809ffb/u);
-    const graphArgs = [`--root=${sdk}`, `--root-target=${rootTarget}`, `--script-executable=${config.python}`, '--threads=1'];
+    const graphArgs = [`--root=${sdk}`, `--root-target=${rootTarget}`, `--script-executable=${python}`, '--threads=1'];
     execute(gn, ['gen', output, '--fail-on-unused-args', ...graphArgs], { cwd: sdk, env });
     const graph = JSON.parse(execute(gn, ['desc', output, `${rootTarget}:*`, '--format=json', ...graphArgs],
       { cwd: sdk, env, capture: true }));
@@ -129,7 +114,7 @@ function build(config) {
       { cwd: sdk, env });
     const contracts = JSON.parse(execute(path.join(output, 'monky_rtc_engine_contract_probe.exe'), [], { env, capture: true }));
     assert.ok(contracts.checks > 85000 && contracts.devicesOpened === false, 'Native device-free contract checks did not complete.');
-    execute(config.python, ['-I', path.join(__dirname, 'native-rtc', 'licenses.py'),
+    execute(python, ['-I', path.join(__dirname, 'native-rtc', 'licenses.py'),
       `--sdk=${sdk}`, `--output=${output}`, `--root-target=${rootTarget}`,
       `--licenses=${path.join(root, 'licenses', 'webrtc')}`], { cwd: sdk, env });
 
@@ -154,15 +139,11 @@ function build(config) {
       },
     }] }, null, 2) + '\n');
     execute(process.execPath, [require.resolve('node-gyp/bin/node-gyp.js'), 'configure', '--release',
-      '--jobs=1', '--msvs_version=2022', `--directory=${addonBuild}`], { env });
-    const toolsVersion = fs.readFileSync(path.join(visualStudio, 'VC', 'Auxiliary', 'Build',
-      'Microsoft.VCToolsVersion.default.txt'), 'utf8').trim();
-    assert.match(toolsVersion, /^14\.\d+\.\d+$/u);
+      '--jobs=1', `--msvs_version=${toolchain.visualStudio.path}`, `--directory=${addonBuild}`], { env });
     execute(path.join(output, 'monky_msvc_job.exe'), [
-      path.join(visualStudio, 'VC', 'Tools', 'MSVC', toolsVersion, 'bin', 'Hostx64', 'x64'),
-      path.join(visualStudio, 'MSBuild', 'Current', 'Bin', 'MSBuild.exe'),
+      toolchain.compilerDirectory, toolchain.msbuild,
       path.join(addonBuild, 'build', 'binding.sln'), '/nologo', '/clp:Verbosity=minimal', '/m:1', '/nr:false',
-      '/t:Build', '/p:Configuration=Release;Platform=x64;PlatformToolset=v143',
+      '/t:Build', '/p:Configuration=Release;Platform=x64', ...windowsToolchain.msbuildArguments(toolchain),
     ], { cwd: addonBuild, env });
     const addon = path.join(addonBuild, 'build', 'Release', 'monky_screen_rtc.node');
     fs.copyFileSync(dll, path.join(path.dirname(addon), 'monky_screen_rtc.dll'));

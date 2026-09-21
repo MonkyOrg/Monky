@@ -251,7 +251,9 @@ test('probe timeout terminates only its owned helper and never reports verified 
 
 test('native encoder-only mode reuses initialization without selecting, creating or starting a source', () => {
   const host = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'host.cpp'), 'utf8');
-  assert.match(host, /arguments\.encoderProbe \? Target\{\} : BindTarget\(arguments\)/u);
+  assert.match(host, /int Execute\(\) noexcept \{\s*try \{\s*watchdog_ = [^\n]+\n\s*if \(!arguments_\.encoderProbe\) \{\s*target_ = BindTarget\(arguments_\);/u);
+  assert.equal((host.match(/BindTarget\(/gu) ?? []).length, 2);
+  assert.doesNotMatch(host.slice(host.indexOf('int wmain(')), /BindTarget\(/u);
   assert.match(host, /const bool gameHooks = !arguments_\.encoderProbe && arguments_\.kind == CaptureKind::Game/u);
   assert.match(host, /ValidateCommandMode\(arguments_, \*command\)/u);
   assert.match(host, /if \(!arguments_\.encoderProbe\) \{\s*live_ =/u);

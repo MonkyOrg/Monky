@@ -49,6 +49,27 @@ static std::vector<std::uint8_t> ParameterSets(const VideoConfiguration& video) 
 
 int main(int argc, char** argv) {
   try {
+    if (argc == 2 && std::string_view(argv[1]) == "--admission-probe") {
+      std::cout << "{\"deviceFree\":true,\"synthetic\":true,\"messages\":[";
+      for (unsigned variant = 0; variant < 4; ++variant) {
+        Arguments arguments;
+        arguments.runId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        arguments.kind = variant == 3 ? CaptureKind::Monitor : variant == 2 ? CaptureKind::Game : CaptureKind::Window;
+        arguments.hwnd = variant == 3 ? 0 : 19;
+        arguments.processId = variant == 3 ? 0 : 10;
+        arguments.expectedCreation = variant == 0 || variant == 3 ? 0 : 123456789;
+        arguments.monitor = {L"\\\\?\\DISPLAY#TEST#{1234}", L"\\\\.\\DISPLAY2", -1920, 0, 1920, 1080};
+        Common common{arguments.runId, 42, arguments.processId, arguments.hwnd, arguments.expectedCreation, 1000, 10000000};
+        Observation observation;
+        observation.state = ObservationState::Failed;
+        const Retirement retired{true, true, true, true, true};
+        const NativeFailure failure{"ERR_SCREEN_CAPTURE_SOURCE_LOST", "Synthetic source disappeared before admission"};
+        if (variant) std::cout << ',';
+        std::cout << SerializeAdmissionFailure(arguments, common, 0, observation, retired, failure);
+      }
+      std::cout << "]}\n";
+      return 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--encoder-probe-contract") {
       std::cout << "{\"deviceFree\":true,\"synthetic\":true,\"messages\":[";
       bool first = true;
@@ -346,6 +367,20 @@ int main(int argc, char** argv) {
     rejects([&] { SerializeEncoderProbeEvent(probe, monitorCommon, capability, "stopped", 1, true, true, &probeRetired); });
     check(StockProbePath(L"C:\\qa\\monky-screen-capture.exe", L"obs-nvenc-test.exe") == L"C:\\qa\\obs-nvenc-test.exe");
     rejects([&] { StockProbePath(L"C:\\qa\\monky-screen-capture.exe", L"arbitrary.exe"); });
+    Arguments rejectedTarget;
+    rejectedTarget.runId = monitorCommon.runId; rejectedTarget.hwnd = 19; rejectedTarget.processId = 10;
+    Common rejectedCommon{rejectedTarget.runId, 42, 10, 19, 0, 1000, 10000000};
+    Observation rejectedObservation; rejectedObservation.state = ObservationState::Failed;
+    const Retirement admissionRetired{true, true, true, true, true};
+    const NativeFailure admissionFailure{"ERR_SCREEN_CAPTURE_SOURCE_LOST", "Synthetic source is unavailable"};
+    const auto admission = [&] {
+      return SerializeAdmissionFailure(rejectedTarget, rejectedCommon, 0, rejectedObservation, admissionRetired, admissionFailure);
+    };
+    check(admission().find("\"kind\":\"capture-admission-error\"") != std::string::npos);
+    check(admission().find("\"target\":{\"hwnd\":19,\"expectedProcessId\":10}") != std::string::npos);
+    ++rejectedCommon.processId; rejects(admission); --rejectedCommon.processId;
+    rejectedObservation.outputPackets = 1; rejects(admission); rejectedObservation.outputPackets = 0;
+    rejectedTarget.encoderProbe = true; rejects(admission);
     std::cout << "{\"checks\":" << checks << ",\"deviceFree\":true,\"headerBytes\":96}\n";
     return 0;
   } catch (const std::exception& error) {

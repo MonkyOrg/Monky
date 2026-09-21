@@ -16,7 +16,7 @@ import { AudioPreviews } from './audioPreviews';
 import { createLocalExecutionService } from './localExecution/createService';
 import { setupLocalExecutionIpc, type LocalExecutionIpc } from './localExecution/ipc';
 import { setupNativeScreenSharingIpc } from './nativeScreenSharing';
-import { NativeDesktopSources, nativeWindowIdFromSourceId, isGhostWindow } from './nativeWindows';
+import { NativeDesktopSources, nativeWindowIdFromSourceId, nativeMonitorDesktopSources, isGhostWindow } from './nativeWindows';
 import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
@@ -624,9 +624,9 @@ export function setupIpcHandlers(
 
     if (process.platform === 'win32') {
       try {
-        for (const { id, monitor } of nativeSources.listMonitors()) result.push({
-          id, name: monitor.name, type: 'screen', thumbnailDataUrl: '', appIconDataUrl: null,
-        });
+        result.push(...nativeMonitorDesktopSources(nativeSources.listMonitors(), sources, screen.getAllDisplays(),
+          bounds => screen.screenToDipRect(null, bounds),
+          message => console.warn('[ScreenShare:Main]', message)));
       } catch (error) {
         console.warn('[ScreenShare:Main] Native monitor identity enumeration failed:', error);
       }

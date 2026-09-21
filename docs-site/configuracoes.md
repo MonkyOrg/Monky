@@ -470,11 +470,21 @@ codec, ele passa a ser obrigatório para sua tela em P2P e SFU, inclusive ao
 trocar de tela ou de modo de voz. Se não puder ser usado, o cliente informa
 o motivo e não transmite usando outro codec.
 
-No Windows, o Monky também captura a tela pela API **Windows Graphics Capture**,
-que compõe na GPU e não entrega quadros quando nada muda na tela. Ela precisa do
-Windows 10 1809 ou mais novo, e não funciona dentro de sessões de Área de
-Trabalho Remota — nesses casos o Monky volta sozinho para o método antigo. Para
-forçar o método antigo, inicie o app com a variável `MONKY_DISABLE_WGC=1`.
+O seletor separa **Telas** e **Janelas**. Cada janela aparece uma única vez
+na lista de janelas; não existe uma lista de jogos detectados. Depois de
+selecionar uma janela, os cards de método oferecem **Captura de janela (WGC)**
+como padrão e **Captura de jogo (hook)** como escolha explícita. Trocar o método
+mantém a mesma janela e sua escolha de áudio. Selecionar outra janela volta ao
+padrão WGC, sem levar junto uma autorização de hook da janela anterior.
+
+Escolher o card de Captura de jogo não inicia um probe nem injeta um hook:
+é preciso confirmar em **Compartilhar**, **Trocar Fonte** ou **Adicionar tela**.
+Só ficam disponíveis os métodos informados pelo backend; compatibilidade com
+a janela escolhida ainda precisa ser verificada. Se houver falha, o Monky não
+troca automaticamente de janela, método ou caminho de captura. Mantenha
+anti-cheat, Trusted Mode e outras proteções ativados. Para tentar WGC na mesma
+janela, selecione seu card e confirme novamente. Atualizar a lista exige uma
+nova seleção; uma janela que desapareceu nunca é substituída por outra.
 
 Uma última dica que vale para qualquer programa de captura: compartilhar **a
 janela do jogo** costuma custar menos que compartilhar o monitor inteiro, e

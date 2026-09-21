@@ -95,7 +95,7 @@ Bugs começam em [Discussions › Bug Reports](https://github.com/MonkyOrg/Monky
 
 ## 💻 Para desenvolvedores
 
-Requisitos: Node.js 22+ (versão usada pelo CI) e npm. No Windows, os módulos nativos precisam de Python 3.11 x64 e ferramentas C++ do Visual Studio 2022 (MSVC). Para captura de tela, confira também ATL/MFC e a versão do Windows SDK no guia abaixo.
+Requisitos: Node.js 22+ (versão usada pelo CI) e npm. No Windows, os módulos nativos precisam de Python 3.11 x64 e ferramentas C++ do Visual Studio **2022 (17.x)**. O preparo de captura seleciona v143/MSVC 14.30–14.44, mesmo com VS mais novo instalado; VS2026 não substitui esse pré-requisito. Confira também ATL/MFC e o SDK 10.0.26100.0 com servicing mínimo 10.0.26100.3323 no guia abaixo.
 
 ```bash
 npm ci
@@ -103,6 +103,11 @@ npm run build
 npm start
 npm test
 ```
+
+O seletor de compartilhamento tem duas abas: **Telas** e **Janelas**.
+Após selecionar uma janela, escolha **Captura de janela (WGC)** (padrão)
+ou **Captura de jogo (hook)** e confirme. São métodos da mesma janela,
+não listas separadas nem detecção automática de jogos.
 
 Para captura nativa de **janela, monitor ou Game Capture** no Windows x64,
 siga o [guia do módulo](apps/client/native/screen-share/README.md): recompilação
@@ -112,9 +117,11 @@ NVIDIA NVENC; AV1 está indisponível. A fonte escolhida passa por um probe apó
 confirmação, sem fallback automático para Chromium/software e sem garantia
 de compatibilidade pela marca da GPU. `npm ci` e `npm run build` sozinhos não
 preparam esse runtime.
-O rebuild explícito de `screen-audio` com o `node-gyp` local, após `npm ci`,
-também é obrigatório em um checkout existente; `prepare:native-screen`
-compila RTC/captura de `screen-share`, não o `screen_audio.node`.
+No primeiro preparo, ou se mudarem as fontes de `screen-audio` ou o Electron,
+siga `buildScreenAudio.cjs` no guia: ele usa o `node-gyp` local e o mesmo
+seletor VS2022/MSVC/SDK, depois de `prepare:native-screen`. Esse preparo compila
+RTC/captura de `screen-share`, não o `screen_audio.node`. Um addon já compatível
+não precisa ser reconstruído por uma atualização somente de scripts/TypeScript.
 
 O preparo é obrigatório antes de empacotar no Windows. Ao redistribuir, inclua
 as licenças, o código da mesma tag e o arquivo de fontes nativas com manifesto

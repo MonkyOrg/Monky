@@ -3,7 +3,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { root, execute, write, fingerprint, verify, redistributableCrt, regularFiles } = require('./buildTools.cjs');
+const { root, execute, write, fingerprint, verify, regularFiles } = require('./buildTools.cjs');
+const windowsToolchain = require('./windowsToolchain.cjs');
 
 const vendor = path.join(root, 'src', 'vendor', 'obs');
 const source = path.join(root, 'src', 'capture');
@@ -30,7 +31,8 @@ function options(argv) {
     else if (key === '--build-root') result.buildDirectory = value;
     else if (key === '--out') result.output = value;
     else if (key === '--job') result.job = value;
-    else throw new Error(`Unknown capture build option: ${key}`);
+    else if (key === '--python') result.python = value;
+    else if (!windowsToolchain.selectionOption(result, key, value)) throw new Error(`Unknown capture build option: ${key}`);
   }
   for (const [name, value] of Object.entries(result))
     assert.ok(value && path.isAbsolute(value), `Set an absolute ${name} input directory.`);
@@ -39,6 +41,9 @@ function options(argv) {
 
 function build(config) {
   assert.equal(process.platform, 'win32'); assert.equal(process.arch, 'x64');
+  const toolchain = windowsToolchain.resolveWindowsToolchain(config);
+  const env = windowsToolchain.msvcEnvironment(toolchain);
+  console.log(JSON.stringify({ windowsToolchain: windowsToolchain.summary(toolchain) }));
   const stock = fs.realpathSync(config.stock), dependencies = fs.realpathSync(config.dependencies);
   const sourceFiles = regularFiles(source).map(relative => ({ path: relative, ...fingerprint(path.join(source, relative)) }));
   for (const file of inputs.files) verify(path.join(vendor, file.path), file);
@@ -47,34 +52,17 @@ function build(config) {
   assert.equal(additionalInputs.obsRevision, inputs.revision);
   assert.equal(additionalInputs.archiveSha256, runtimeInputs.archive.sha256);
   for (const file of additionalInputs.dependencies) verify(path.join(dependencies, file.path), file);
-  const installer = path.join(process.env['ProgramFiles(x86)'], 'Microsoft Visual Studio', 'Installer');
-  const visualStudio = execute(path.join(installer, 'vswhere.exe'),
-    ['-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-      '-property', 'installationPath'], { capture: true });
-  assert.ok(path.isAbsolute(visualStudio), 'Visual Studio 2022 C++ tools are required.');
-  const version = fs.readFileSync(path.join(visualStudio, 'VC', 'Auxiliary', 'Build',
-    'Microsoft.VCToolsVersion.default.txt'), 'utf8').trim();
-  assert.match(version, /^14\.\d+\.\d+$/u);
-  const compiler = path.join(visualStudio, 'VC', 'Tools', 'MSVC', version, 'bin', 'Hostx64', 'x64');
-  const crt = redistributableCrt(visualStudio);
-  const vcvars = path.join(visualStudio, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
+  const compiler = toolchain.compilerDirectory;
+  const crt = toolchain.crt;
   const job = config.job ?? path.join(root, 'build', 'tools', 'monky_msvc_job.exe');
   assert.ok(fs.existsSync(job), 'Build the RTC toolchain before the capture host.');
   const buildDirectory = config.buildDirectory ?? path.join(root, 'build', 'capture-production');
   fs.mkdirSync(buildDirectory, { recursive: true });
   const lock = path.join(buildDirectory, 'capture.lock'), handle = fs.openSync(lock, 'wx');
   try {
-    const env = { ...process.env, VSCMD_SKIP_SENDTELEMETRY: '1', MSBUILDDISABLENODEREUSE: '1' };
-    for (const key of Object.keys(env))
-      if (/^(CL|_CL_|LINK|CFLAGS|CXXFLAGS|LDFLAGS|CPATH|CPLUS_INCLUDE_PATH|C_INCLUDE_PATH|LIBRARY_PATH|NODE_OPTIONS|NODE_PATH)$/iu.test(key))
-        delete env[key];
-    const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'Path';
-    env[pathKey] = `${installer};${env[pathKey] ?? ''}`;
     const commands = [];
-    const run = (name, operation) => {
-      const output = execute(process.env.ComSpec, ['/d', '/s', '/c',
-        `"call ${quote(vcvars)} >nul && ${operation}"`],
-      { cwd: buildDirectory, env, capture: true, windowsVerbatimArguments: true });
+    const run = (name, executable, args) => {
+      const output = execute(executable, args, { cwd: buildDirectory, env, capture: true });
       write(path.join(buildDirectory, `${name}.log`), output + '\n');
       commands.push(name);
       return output;
@@ -82,7 +70,7 @@ function build(config) {
     const compile = (name, args) => {
       const response = path.join(buildDirectory, `${name}.rsp`);
       write(response, args.join(' ') + '\n');
-      const output = run(name, `${quote(job)} ${quote(compiler)} ${quote(path.join(compiler, 'cl.exe'))} @${quote(response)}`);
+      const output = run(name, job, [compiler, path.join(compiler, 'cl.exe'), `@${response}`]);
       const cleanup = JSON.parse(output.match(/^MONKY_MSVC_CLEANUP (.+)$/mu)?.[1] ?? 'null');
       assert.equal(cleanup?.msbuildExitCode, 0); assert.equal(cleanup?.remainingOwnedHelpers, 0);
     };
@@ -115,14 +103,15 @@ function build(config) {
       const relative = path.join('bin', '64bit', `${name}.dll`);
       select(relative);
       const exports = execute(path.join(compiler, 'dumpbin.exe'),
-        ['/nologo', '/exports', path.join(stock, relative)], { capture: true });
+        ['/nologo', '/exports', path.join(stock, relative)], { env, capture: true });
       const names = [...exports.matchAll(/^\s+\d+\s+[a-f0-9]+\s+[a-f0-9]+\s+([a-z_][a-z0-9_]*)(?:[ \t]+= [^\r\n]*)?[ \t]*\r?$/gmi)]
         .map(match => match[1]);
       assert.ok(names.length > 50 && new Set(names).size === names.length);
       assert.equal(names.length, Number(exports.match(/(\d+) number of names/u)?.[1]));
       const definition = path.join(generated, `${name}.def`), library = path.join(generated, `${name}.lib`);
       write(definition, `LIBRARY ${name}.dll\nEXPORTS\n${names.map(value => `  ${value}`).join('\n')}\n`);
-      run(`imports-${name}`, `lib /nologo /machine:x64 /def:${quote(definition)} /out:${quote(library)}`);
+      run(`imports-${name}`, path.join(compiler, 'lib.exe'),
+        ['/nologo', '/machine:x64', `/def:${definition}`, `/out:${library}`]);
       importLibraries.push(library);
     }
     const objects = path.join(buildDirectory, 'module-objects');
@@ -153,7 +142,7 @@ function build(config) {
       ...importLibraries.map(quote),
       quote(path.join(dependencies, 'lib', 'jansson.lib')),
       'user32.lib', 'gdi32.lib', 'shell32.lib', 'advapi32.lib', 'kernel32.lib']);
-    const moduleExports = execute(path.join(compiler, 'dumpbin.exe'), ['/nologo', '/exports', module], { capture: true });
+    const moduleExports = execute(path.join(compiler, 'dumpbin.exe'), ['/nologo', '/exports', module], { env, capture: true });
     for (const name of ['monky_configure_capture_startup', 'monky_bind_game_target', 'monky_bind_monitor_target',
       'obs_module_load', 'obs_module_unload', 'obs_module_ver'])
       assert.ok(new RegExp(`\\b${name}\\b`, 'u').test(moduleExports), `Missing capture module export: ${name}`);
@@ -164,7 +153,7 @@ function build(config) {
     const inspect = filename => {
       if (inspected.has(filename)) return;
       inspected.add(filename);
-      const output = execute(path.join(compiler, 'dumpbin.exe'), ['/nologo', '/dependents', filename], { capture: true });
+      const output = execute(path.join(compiler, 'dumpbin.exe'), ['/nologo', '/dependents', filename], { env, capture: true });
       for (const [, name] of output.matchAll(/^[ \t]+([\w.-]+\.dll)[ \t]*\r?$/gmi)) {
         const relative = dlls.get(name.toLowerCase());
         if (relative) { select(relative); inspect(path.join(stock, relative)); }
@@ -216,9 +205,9 @@ function build(config) {
         `/Fe${quote(output)}`, '/link', '/INCREMENTAL:NO', 'bcrypt.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib', 'ole32.lib']);
     }
     inspect(executable);
-    const contracts = JSON.parse(execute(tests, [], { capture: true }));
+    const contracts = JSON.parse(execute(tests, [], { env, capture: true }));
     assert.ok(contracts.deviceFree && contracts.checks >= 60 && contracts.headerBytes === 96);
-    const platformProbe = JSON.parse(execute(tests, ['--platform-probe'], { capture: true }));
+    const platformProbe = JSON.parse(execute(tests, ['--platform-probe'], { env, capture: true }));
     assert.equal(platformProbe.deviceFree, true); assert.equal(platformProbe.synthetic, true);
     assert.equal(platformProbe.messages.length, 24);
     const protocol = require('../runtime/captureProtocol.cjs');
@@ -227,7 +216,7 @@ function build(config) {
       if (index % 4) protocol.validateProgress(platformProbe.messages[index - 1], message);
     }
     contracts.crossLanguagePlatformMessages = platformProbe.messages.length;
-    const encoderProbe = JSON.parse(execute(tests, ['--encoder-probe-contract'], { capture: true }));
+    const encoderProbe = JSON.parse(execute(tests, ['--encoder-probe-contract'], { env, capture: true }));
     assert.equal(encoderProbe.deviceFree, true); assert.equal(encoderProbe.synthetic, true);
     assert.equal(encoderProbe.messages.length, 8);
     for (const [index, message] of encoderProbe.messages.entries()) {

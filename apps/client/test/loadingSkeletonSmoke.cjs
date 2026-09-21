@@ -36,6 +36,7 @@ if (!process.versions.electron) {
   });
 } else {
   const { app, BrowserWindow } = require('electron');
+  app.disableHardwareAcceleration();
   app.setPath('userData', process.env.MONKY_LOADING_PROFILE);
   app.setPath('sessionData', process.env.MONKY_LOADING_PROFILE);
   app.on('window-all-closed', () => {});
@@ -159,17 +160,24 @@ async function runLoadingSmoke(language) {
     availability.resolve(true);
     await flush();
     check(enumerations === 1, 'enumeration starts only after capture support is confirmed');
-    document.querySelector('#share-tab-game').click();
+    document.querySelector('#share-tab-screen').click();
+    document.querySelector('#share-tab-window').click();
+    check(document.querySelector('#share-window-methods').hidden && document.querySelector('#share-method-game').disabled,
+      'methods require a loaded, explicitly selected window');
     pending();
     enumeration.resolve([source(`native-monitor:${'1'.repeat(64)}`), source('window:2', 'window')]);
     await opening;
     check(panel().getAttribute('aria-busy') === 'false', 'loaded sources are no longer busy');
     check(!panel().querySelector('.skeleton'), 'loaded data replaces placeholders');
-    check(document.querySelector('#share-tab-game').classList.contains('active'), 'method chosen during enumeration is preserved');
+    check(document.querySelector('#share-tab-window').classList.contains('active'), 'source type chosen during enumeration is preserved');
     check(panel().querySelector('[data-source-id="window:2"]'), 'the selected tab receives its sources');
-    check(panel().textContent.includes(t('screenShare.gameCompatibility')), 'Game Capture explains that these are candidate application windows.');
     panel().querySelector('.source-item').click();
     check(!document.querySelector('#btn-share').disabled, 'selection enables sharing after loading');
+    check(document.querySelector('#share-method-window').getAttribute('aria-pressed') === 'true',
+      'new window selections default to WGC instead of inheriting a hook');
+    document.querySelector('#share-method-game').click();
+    check(picker.selectedSourceId === 'window:2' && document.querySelector('#share-game-tip').textContent.includes(t('screenShare.gameCompatibility')),
+      'the explicit hook method retains the same candidate window and explains compatibility');
     document.querySelector('#share-tab-window').click();
     picker.close();
     check(closed === 1 && !panel(), 'close retires the picker');

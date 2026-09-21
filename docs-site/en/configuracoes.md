@@ -460,12 +460,21 @@ codec, it becomes mandatory for your screen in P2P and SFU, including when
 replacing a screen or changing voice modes. If unavailable, the client explains
 why rather than transmitting with another codec.
 
-On Windows, Monky also captures the screen through the **Windows Graphics
-Capture** API, which composites on the GPU and stops delivering frames when
-nothing on screen changes. It needs Windows 10 1809 or newer and does not work
-inside Remote Desktop sessions — in those cases Monky falls back to the old
-method on its own. To force the old method, start the app with
-`MONKY_DISABLE_WGC=1`.
+The picker separates **Screens** and **Windows**. Each window appears only
+once in the window list; there is no list of detected games. After selecting a
+window, the method cards offer **Window Capture (WGC)** by default and
+**Game Capture (hook)** as an explicit choice. Changing the method keeps the
+same window and its audio choice. Selecting another window resets the method
+to WGC rather than carrying over permission to hook the previous window.
+
+Choosing the Game Capture card does not start a probe or inject a hook:
+you must confirm with **Share**, **Switch Source** or **Add screen**. Only
+methods advertised by the backend are available; compatibility with the
+selected window still needs to be checked. On failure, Monky does not
+automatically change the window, method or capture path. Keep anti-cheat,
+Trusted Mode and other protections enabled. To try WGC on the same window,
+select its card and confirm again. Refreshing the list requires a new
+selection; a window that disappears is never replaced by another one.
 
 One last tip that holds for any capture software: sharing **the game window**
 usually costs less than sharing the whole monitor, and playing in *borderless

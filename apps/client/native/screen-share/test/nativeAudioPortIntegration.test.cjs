@@ -1,6 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const test = require('node:test');
 const { EventEmitter } = require('node:events');
 const { MessageChannel } = require('node:worker_threads');
@@ -46,7 +49,7 @@ function fixture(t, options = {}) {
   };
   Object.assign(contents, { mainFrame: frame, isDestroyed: () => destroyed });
   const rendererOptions = {
-    workletUrl: 'nativePcmPlayout.worklet.js', now: () => 100, timeoutMs: options.timeoutMs ?? 250,
+    workletUrl: 'nativePcmPlayout.worklet.js', now: options.now ?? (() => 100), timeoutMs: options.timeoutMs ?? 250,
     setTimer(callback, ms) { const id = nextTimer++; timers.set(id, { callback, ms }); return id; },
     clearTimer: id => timers.delete(id),
     createContext() {
@@ -71,24 +74,53 @@ function fixture(t, options = {}) {
           if (options.closeGate) await options.closeGate.promise;
           this.state = 'closed';
         },
-        getOutputTimestamp: () => ({ contextTime: options.physicalTime ?? 1, performanceTime: 100 }),
+        getOutputTimestamp: options.getOutputTimestamp
+          ?? (() => ({ contextTime: options.physicalTime ?? 1, performanceTime: 100 })),
       };
       contexts.push(context);
       return context;
     },
-    createWorklet(context) {
+    createWorklet(context, nodeOptions) {
       calls.push('worklet');
       const posted = [];
+      let processor;
       const node = {
         context, posted,
         port: {
           onmessage: null,
-          postMessage: (message, transfers = []) => posted.push(structuredClone(message, { transfer: transfers })),
+          postMessage(message, transfers = []) {
+            const copied = structuredClone(message, { transfer: transfers });
+            posted.push(copied);
+            if (processor) queueMicrotask(() => processor.port.onmessage({ data: copied }));
+          },
           close: () => calls.push('worklet-port-close'),
         },
         connect: () => calls.push('connect'),
         disconnect: () => calls.push('disconnect'),
       };
+      if (options.actualWorklet) {
+        let Processor;
+        const scope = vm.createContext({
+          Float32Array, ArrayBuffer, Number, Error, sampleRate: context.sampleRate, currentFrame: 0,
+          AudioWorkletProcessor: class {
+            constructor() {
+              this.port = { postMessage: message => {
+                const copied = structuredClone(message);
+                queueMicrotask(() => node.port.onmessage?.({ data: copied }));
+              } };
+            }
+          },
+          registerProcessor(name, type) { assert.equal(name, 'native-pcm-playout'); Processor = type; },
+        });
+        vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'runtime', 'nativePcmPlayout.worklet.js'), 'utf8'), scope);
+        processor = new Processor(nodeOptions);
+        node.processor = processor;
+        node.render = contextFrame => {
+          scope.currentFrame = contextFrame;
+          const channels = [new Float32Array(128), new Float32Array(128)];
+          return { alive: processor.process([], [channels]), channels };
+        };
+      }
       nodes.push(node);
       return node;
     },
@@ -551,6 +583,90 @@ test('composed global stop retires native output and real Renderer context witho
   assert.equal(f.calls.filter(value => value === 'native-stop:1').length, 1);
   assert.equal(f.calls.includes('native-engine-close'), false);
   assert.equal(await f.owner.stop(1), false);
+});
+
+test('actual worklet clock recovery keeps the same calibrated output owner and bounded credits across the real port', async t => {
+  let now = 100, physicalFrame = 0;
+  const f = fixture(t, { withOwner: true, actualWorklet: true, now: () => now,
+    getOutputTimestamp: () => ({ contextTime: physicalFrame / 48000, performanceTime: now }) });
+  await f.owner.start('chosen-output');
+  const node = f.nodes[0];
+  const render = (contextFrame, actualFrame = contextFrame) => {
+    now += 128 / 48;
+    physicalFrame = Math.max(0, actualFrame - 128);
+    const result = node.render(contextFrame);
+    assert.equal(result.alive, true);
+    return result.channels;
+  };
+  render(0);
+  await until(() => f.credits.length === 1);
+  for (let sequence = 0; sequence < 2; sequence++) {
+    assert.equal(f.owner.handleNativeEvent({ type: 'audio.playout', target: 0, data: pcm(1, sequence) }), true);
+  }
+  await until(() => node.processor.queue.snapshot().queuedFrames === 960);
+  for (const frame of [128, 256, 384]) render(frame);
+  await until(() => f.feedback.some(value => value.available));
+  assert.equal(f.feedback.at(-1).clockEpoch, 1);
+  const repeated = render(384, 512);
+  assert.equal(repeated.every(channel => channel.every(sample => sample === 0)), true);
+  await until(() => f.feedback.at(-1).available === false && f.credits.length === 3);
+  assert.deepEqual(f.feedback.at(-1), { epoch: 1, available: false });
+  assert.equal(f.owner.getStats().ready, true);
+  assert.equal(f.owner.getStats().activeEpoch, 1);
+  assert.equal(f.owner.getStats().outstandingCreditFrames, 960);
+  const invalidated = f.receiver.getStats().sessions[0].sink;
+  assert.equal(invalidated.playout.contextFrame, 384);
+  assert.equal(invalidated.playout.clockEpoch, 2);
+  assert.equal(invalidated.playout.repeatedContextFrames, 128);
+  assert.equal(invalidated.playout.discardedFrames, 576);
+  assert.equal(invalidated.lastUnderrun.state, 'buffering');
+  assert.equal(invalidated.outputClock.lastUnavailableReason, 'buffering');
+  for (let sequence = 2; sequence < 4; sequence++) {
+    assert.equal(f.owner.handleNativeEvent({ type: 'audio.playout', target: 0, data: pcm(1, sequence) }), true);
+  }
+  await until(() => node.processor.queue.snapshot().queuedFrames === 960);
+  for (const frame of [640, 768, 896]) {
+    assert.equal(render(frame).every(channel => channel.every(sample => sample === .25)), true);
+  }
+  await until(() => f.feedback.at(-1).available === true);
+  assert.equal(f.feedback.at(-1).epoch, 1);
+  assert.equal(f.feedback.at(-1).clockEpoch, 2);
+  assert.equal(f.feedback.at(-1).calibrationId, 1);
+  assert.equal(f.feedback.at(-1).estimatedPlayoutFrame, 1088);
+  assert.equal(f.feedback.at(-1).confirmedPcmEnd, 1920);
+  assert.equal(f.owner.getStats().nextPlayoutFrame, 1920);
+  assert.equal(f.owner.getStats().nextSequence, 4);
+  assert.equal(f.contextCount(), 1);
+  assert.equal(f.calls.filter(value => value === 'configure').length, 1);
+  assert.equal(f.calls.some(value => value.startsWith('native-stop')), false);
+  assert.equal(f.timers.size, 1, 'Recovery must not add a PCM timer or replace calibration ownership.');
+  assert.deepEqual(f.errors, []);
+  const playout = f.receiver.getStats().sessions[0].sink.playout;
+  assert.equal(playout.contextFrame, 896);
+  assert.equal(playout.contextDiscontinuities, 1);
+  assert.equal(playout.discardedFrames, 576);
+  assert.equal(playout.acceptedFrames, playout.renderedFrames + playout.queuedFrames + playout.discardedFrames);
+  await f.owner.stop(1);
+  assert.equal(f.owner.getStats().rendererRetired, true);
+  assert.equal(f.owner.getStats().nativeRetired, true);
+  assert.equal(f.contexts[0].state, 'closed');
+  assert.equal(f.calls.filter(value => value === 'native-stop:1').length, 1);
+  assert.equal(f.calls.includes('native-engine-close'), false);
+});
+
+test('a genuinely backward actual worklet clock still reports its error and retires the same output owner', async t => {
+  const f = fixture(t, { withOwner: true, actualWorklet: true });
+  await f.owner.start('chosen-output');
+  assert.equal(f.nodes[0].render(1000).alive, true);
+  await until(() => f.credits.length === 1);
+  assert.equal(f.nodes[0].render(872).alive, false);
+  await until(() => f.owner.getStats().stopped);
+  assert.ok(f.errors.some(error => error.code === 'ERR_NATIVE_AUDIO_CLOCK'));
+  assert.equal(f.owner.getStats().nativeRetired, true);
+  assert.equal(f.owner.getStats().rendererRetired, true);
+  assert.equal(f.contexts[0].state, 'closed');
+  assert.equal(f.calls.filter(value => value === 'native-stop:1').length, 1);
+  assert.equal(f.calls.includes('native-engine-close'), false);
 });
 
 test('native invalidation withdraws readiness synchronously but still waits for actual Renderer closure', async t => {

@@ -16,7 +16,8 @@ class NativePcmPlayoutQueue {
     this.ring = new Float32Array(capacityFrames * this.channels);
     this.clockEpoch = 0;
     this.stats = { acceptedFrames: 0, renderedFrames: 0, silenceFrames: 0,
-      underruns: 0, stalePackets: 0, discardedFrames: 0, contextDiscontinuities: 0, skippedContextFrames: 0 };
+      underruns: 0, stalePackets: 0, discardedFrames: 0,
+      contextDiscontinuities: 0, skippedContextFrames: 0, repeatedContextFrames: 0 };
     this.beginEpoch(epoch);
   }
 
@@ -31,7 +32,9 @@ class NativePcmPlayoutQueue {
     this.nextSequence = null;
     this.nextWriteFrame = null;
     this.nextReadFrame = null;
+    this.lastContextFrame = null;
     this.lastContextEnd = null;
+    this.contextStalled = false;
     this.grantSequence = 0;
     this.ring.fill(0);
   }
@@ -131,30 +134,36 @@ class NativePcmPlayoutQueue {
     const frames = output[0].length;
     output[0].fill(0);
     output[1].fill(0);
-    if (this.lastContextEnd !== null && contextFrame < this.lastContextEnd) {
+    const repeated = contextFrame === this.lastContextFrame;
+    const gap = this.lastContextEnd !== null && contextFrame > this.lastContextEnd;
+    if (this.lastContextEnd !== null && contextFrame < this.lastContextEnd && !repeated) {
       this.reject('ERR_NATIVE_AUDIO_CLOCK',
         `AudioContext sample clock regressed: expected ${this.lastContextEnd}, observed ${contextFrame}.`);
     }
     let underrun = false;
-    if (this.lastContextEnd !== null && contextFrame > this.lastContextEnd
-      && this.state !== 'stopped' && this.state !== 'failed') {
-      // A skipped render interval invalidates the output anchor, not the capture
-      // epoch. Retire unplayed PCM without rewriting positions or outstanding credits.
-      this.stats.contextDiscontinuities++;
-      this.stats.skippedContextFrames += contextFrame - this.lastContextEnd;
-      this.stats.discardedFrames += this.available;
-      this.stats.underruns++;
-      this.clockEpoch++;
-      this.state = 'buffering';
-      this.available = 0;
-      this.readOffset = this.writeOffset;
-      this.nextReadFrame = this.nextWriteFrame;
-      this.ring.fill(0);
-      underrun = true;
+    if ((repeated || gap) && this.state !== 'stopped' && this.state !== 'failed') {
+      if (repeated) this.stats.repeatedContextFrames += frames;
+      if (gap) this.stats.skippedContextFrames += contextFrame - this.lastContextEnd;
+      // Chromium can skip its try-locked currentFrame update while the graph advances.
+      // Withdraw the anchor once; keep in-flight credits and buffer until a real advance.
+      if (!this.contextStalled) {
+        this.stats.contextDiscontinuities++;
+        this.stats.discardedFrames += this.available;
+        this.stats.underruns++;
+        this.clockEpoch++;
+        this.state = 'buffering';
+        this.available = 0;
+        this.readOffset = this.writeOffset;
+        this.nextReadFrame = this.nextWriteFrame;
+        this.ring.fill(0);
+        underrun = true;
+      }
     }
+    this.lastContextFrame = contextFrame;
     this.lastContextEnd = contextFrame + frames;
+    this.contextStalled = repeated;
     let firstPlayoutFrame = null, mediaFrames = 0;
-    if (this.state === 'buffering' && this.available >= this.targetFrames) this.state = 'running';
+    if (this.state === 'buffering' && !repeated && this.available >= this.targetFrames) this.state = 'running';
     if (this.state === 'running') {
       if (this.available < frames) {
         this.state = 'buffering';

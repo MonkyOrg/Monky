@@ -9,7 +9,7 @@ assert.ok(profile && path.isAbsolute(profile) && typeof process.send === 'functi
 app.setPath('userData', profile); app.setPath('sessionData', profile);
 app.setName('MonkyOwnedAvSource');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-let window;
+let window, duplicate;
 app.on('window-all-closed', () => {});
 process.on('disconnect', () => app.exit(0));
 
@@ -54,7 +54,8 @@ app.whenReady().then(async () => {
 process.on('message', message => {
   const run = async () => {
     assert.equal(typeof message.id, 'string');
-    assert.ok(['tone-start', 'tone-stop', 'minimize-source', 'restore-source', 'close-source'].includes(message.command));
+    assert.ok(['tone-start', 'tone-stop', 'minimize-source', 'restore-source', 'duplicate-title',
+      'close-duplicate', 'close-source'].includes(message.command));
     assert.ok(window && !window.isDestroyed());
     if (message.command === 'tone-start') await window.webContents.executeJavaScript('ownedAvTone.start()');
     else if (message.command === 'minimize-source') {
@@ -63,10 +64,24 @@ process.on('message', message => {
     } else if (message.command === 'restore-source') {
       window.restore();
       assert.equal(window.isMinimized(), false);
+    } else if (message.command === 'duplicate-title') {
+      assert.ok(!duplicate || duplicate.isDestroyed());
+      duplicate = new BrowserWindow({ show: false, title: window.getTitle(),
+        webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
+      assert.equal(duplicate.getTitle(), window.getTitle());
+      assert.notEqual(duplicate.getNativeWindowHandle().readBigUInt64LE(), window.getNativeWindowHandle().readBigUInt64LE());
+    } else if (message.command === 'close-duplicate') {
+      assert.ok(duplicate && !duplicate.isDestroyed());
+      duplicate.destroy();
+      duplicate = null;
     }
     else {
       await window.webContents.executeJavaScript('ownedAvTone.stop()');
-      if (message.command === 'close-source') window.destroy();
+      if (message.command === 'close-source') {
+        duplicate?.destroy();
+        duplicate = null;
+        window.destroy();
+      }
     }
     process.send({ type: 'result', id: message.id, ok: true });
   };

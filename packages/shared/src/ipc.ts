@@ -62,6 +62,7 @@ export interface DesktopSource {
   id: string;
   name: string;
   type: 'screen' | 'window';
+  displayNumber?: number;
   thumbnailDataUrl: string;
   appIconDataUrl: string | null;
 }

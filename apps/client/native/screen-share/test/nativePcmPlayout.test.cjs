@@ -209,13 +209,152 @@ test('the worklet rejects shared PCM even when its realm does not expose SharedA
   assert.equal(messages.at(-1).code, 'ERR_NATIVE_AUDIO_PACKET');
 });
 
-test('a regressing AudioContext cannot reuse an output anchor', () => {
+test('a skipped Chromium worklet clock update invalidates its anchor without retiring the output', () => {
+  const { context, processor, messages } = workletFixture();
+  let nativeFrame = 874240;
+  context.currentFrame = nativeFrame;
+  const observedFrames = [];
+  const render = (updateGlobalScope = true) => {
+    const channels = output();
+    observedFrames.push(context.currentFrame);
+    const alive = processor.process([], [channels]);
+    // Chromium advances the graph even when its global-scope graph try-lock fails.
+    nativeFrame += channels[0].length;
+    if (updateGlobalScope) context.currentFrame = nativeFrame;
+    return { alive, channels };
+  };
+  render();
+  processor.port.onmessage({ data: { type: 'pcm', packet: packet(1) } });
+  processor.port.onmessage({ data: { type: 'pcm', packet: packet(2) } });
+  render();
+  render(false);
+  const repeated = render();
+  assert.equal(repeated.alive, true, JSON.stringify(messages.filter(message => message.type === 'error')));
+  assert.deepEqual(observedFrames, [874240, 874368, 874496, 874496]);
+  assert.equal(repeated.channels.every(channel => channel.every(sample => sample === 0)), true);
+  const invalidation = messages.findLast(message => message.type === 'feedback');
+  assert.equal(invalidation.contextFrame, 874496, 'Do not substitute the expected 874624 for the real observation.');
+  assert.equal(invalidation.state, 'buffering');
+  assert.equal(invalidation.firstPlayoutFrame, null);
+  assert.equal(invalidation.mediaFrames, 0);
+  assert.equal(invalidation.underrun, true);
+  assert.equal(invalidation.epoch, 1);
+  assert.equal(invalidation.clockEpoch, 2);
+  assert.equal(invalidation.playout.discardedFrames, 704);
+  assert.equal(invalidation.playout.repeatedContextFrames, 128);
+  assert.equal(invalidation.playout.outstandingFrames, 960);
+  assert.deepEqual(messages.filter(message => message.type === 'credits').map(({ epoch, grantSequence, frames }) =>
+    ({ epoch, grantSequence, frames })), [
+    { epoch: 1, grantSequence: 1, frames: 960 },
+    { epoch: 1, grantSequence: 2, frames: 480 },
+    { epoch: 1, grantSequence: 3, frames: 480 },
+  ]);
+  processor.port.onmessage({ data: { type: 'pcm', packet: packet(3) } });
+  processor.port.onmessage({ data: { type: 'pcm', packet: packet(4) } });
+  const resumed = render();
+  assert.equal(resumed.alive, true);
+  assert.ok(Math.abs(resumed.channels[0][0] - 960 / 10000) < 1e-7);
+  assert.equal(processor.queue.snapshot().clockEpoch, 2);
+  assert.equal(processor.queue.snapshot().contextDiscontinuities, 1);
+  assert.equal(processor.queue.snapshot().discardedFrames, 704);
+  const stats = processor.queue.snapshot();
+  assert.equal(stats.acceptedFrames, stats.renderedFrames + stats.queuedFrames + stats.discardedFrames);
+  assert.equal(messages.some(message => message.type === 'error'), false);
+});
+
+test('a genuinely backward AudioContext cannot reuse an output anchor', () => {
   const queue = new NativePcmPlayoutQueue({ epoch: 1 });
   queue.reserveCredits();
   queue.enqueue(packet(1));
   queue.render(output(), 1000);
-  assert.throws(() => queue.render(output(), 1000), /clock regressed/u);
+  assert.throws(() => queue.render(output(), 872), /clock regressed/u);
   assert.equal(queue.snapshot().state, 'failed');
+});
+
+for (const quantumFrames of [64, 128, 256]) {
+  test(`a frozen ${quantumFrames}-frame clock buffers bounded in-flight PCM until a real advance`, () => {
+    const queue = new NativePcmPlayoutQueue({ epoch: 1 });
+    queue.reserveCredits();
+    queue.enqueue(packet(1));
+    queue.enqueue(packet(2));
+    queue.render(output(quantumFrames), 1000);
+    assert.equal(queue.reserveCredits().frames, 480);
+    const stalled = queue.render(output(quantumFrames), 1000);
+    assert.equal(stalled.clockEpoch, 2);
+    assert.equal(stalled.underrun, true);
+    assert.equal(stalled.outstandingFrames, 480);
+    assert.equal(queue.reserveCredits().frames, 480);
+    queue.enqueue(packet(3));
+    queue.enqueue(packet(4));
+    for (let index = 0; index < 8; index++) {
+      const channels = output(quantumFrames);
+      const repeated = queue.render(channels, 1000);
+      assert.equal(repeated.state, 'buffering');
+      assert.equal(repeated.clockEpoch, 2);
+      assert.equal(repeated.firstPlayoutFrame, null);
+      assert.equal(repeated.underrun, false, 'The same invalid anchor must not be invalidated repeatedly.');
+      assert.equal(channels.every(channel => channel.every(sample => sample === 0)), true);
+      assert.equal(queue.reserveCredits(), null);
+      assert.equal(queue.snapshot().queuedFrames, 960);
+      assert.equal(queue.snapshot().outstandingFrames, 0);
+      assert.equal(queue.snapshot().discardedFrames, 960 - quantumFrames);
+    }
+    const resumed = queue.render(output(quantumFrames), 1000 + 10 * quantumFrames);
+    assert.equal(resumed.firstPlayoutFrame, 960);
+    assert.equal(resumed.contextFrame, 1000 + 10 * quantumFrames);
+    assert.equal(resumed.clockEpoch, 2);
+    assert.equal(resumed.epoch, 1);
+    assert.equal(queue.snapshot().repeatedContextFrames, 9 * quantumFrames);
+    assert.equal(queue.snapshot().skippedContextFrames, 9 * quantumFrames);
+    assert.equal(queue.snapshot().contextDiscontinuities, 1);
+    assert.equal(queue.snapshot().underruns, 1);
+    const stats = queue.snapshot();
+    assert.equal(stats.acceptedFrames, stats.renderedFrames + stats.queuedFrames + stats.discardedFrames);
+  });
+}
+
+test('a progressing but overlapping clock is still invalid, including after a frozen observation', () => {
+  for (const frozen of [false, true]) {
+    for (const contextFrame of [999, 1001, 1127]) {
+      const queue = new NativePcmPlayoutQueue({ epoch: 1 });
+      queue.reserveCredits();
+      queue.enqueue(packet(1));
+      queue.enqueue(packet(2));
+      queue.render(output(), 1000);
+      if (frozen) queue.render(output(), 1000);
+      const channels = output();
+      assert.throws(() => queue.render(channels, contextFrame), { code: 'ERR_NATIVE_AUDIO_CLOCK' });
+      assert.equal(queue.snapshot().state, 'failed');
+      assert.equal(channels.every(channel => channel.every(sample => sample === 0)), true);
+      assert.equal(queue.reserveCredits(), null);
+    }
+  }
+});
+
+test('an output reset revokes frozen-epoch credit without rewriting replacement PCM or inheriting its stall', () => {
+  const queue = new NativePcmPlayoutQueue({ epoch: 1 });
+  queue.reserveCredits();
+  queue.enqueue(packet(1));
+  queue.enqueue(packet(2));
+  queue.render(output(), 1000);
+  queue.reserveCredits();
+  queue.render(output(), 1000);
+  queue.reset(2);
+  assert.equal(queue.snapshot().outstandingFrames, 0);
+  assert.equal(queue.enqueue(packet(3)), false);
+  queue.reserveCredits();
+  queue.enqueue(packet(10, 9000, 2));
+  queue.enqueue(packet(11, 9480, 2));
+  const resumed = queue.render(output(), 1000);
+  assert.equal(resumed.firstPlayoutFrame, 9000);
+  assert.equal(resumed.clockEpoch, 3);
+  assert.equal(resumed.epoch, 2);
+  assert.equal(resumed.underrun, false);
+  queue.stop();
+  assert.equal(queue.reserveCredits(), null);
+  assert.equal(queue.snapshot().outstandingFrames, 0);
+  assert.equal(queue.snapshot().queuedFrames, 0);
+  assert.equal(queue.snapshot().state, 'stopped');
 });
 
 test('a forward graph gap discards only unplayed PCM and preserves real packet positions and credit ownership', () => {
