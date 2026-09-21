@@ -364,7 +364,7 @@ export function setupIpcHandlers(
     const hwnd = nativeWindowIdFromSourceId(sourceId);
     if (hwnd === null || !Number.isSafeInteger(hwnd) || hwnd <= 0) throw new Error('Invalid native screen window.');
     const window = listNativeWindows().find(candidate => candidate.hwnd === hwnd);
-    if (!window || isGhostWindow(window) || window.isIconic || !window.isVisible
+    if (!window || isGhostWindow(window) || !window.isVisible
       || !Number.isSafeInteger(window.processId) || window.processId <= 0)
       throw new Error('The selected screen-sharing window is unavailable.');
     return { hwnd, expectedProcessId: window.processId };

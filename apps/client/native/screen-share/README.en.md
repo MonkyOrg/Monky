@@ -8,9 +8,11 @@ sender**. On Windows, the receiver uses Media Foundation and SharedTexture.
 Voice and cameras retain their own paths.
 
 The qualified sending path is **Windows x64, a Windows Graphics Capture window,
-and AMD/AMF H.264**. Monitors, other encoders and other systems retain the
-Chromium path, identified in the picker. A Chromium receiver only accepts an
-H.264 profile supported by its decoding capabilities.
+and AMD/AMF H.264**. Monitors, other codecs and other systems are temporarily
+unavailable in the interface, marked **Coming soon**. Alternative paths remain
+in the code, but capture does not automatically fall back to Chromium.
+Automatic selects H.264. Chromium reception remains available for H.264
+profiles supported by the receiving device.
 
 The image is **stretched to the requested resolution**, without introducing
 bars to preserve its original aspect ratio. No native transmission pipeline
@@ -18,6 +20,17 @@ exists before someone watches. Ending the last subscription releases the
 actual pipeline. Different quality profiles may require additional encoders
 and upload bandwidth; selecting 120 FPS does not guarantee 120 distinct images
 per second or remove capture, GPU, presentation or network limits.
+
+The local preview decodes the same H.264 frames from a rendition that someone
+is actually watching, without a second capture or encoder. It follows that
+rendition and returns to standby when the last viewer stops. Its bounded
+queue never backpressures remote transmission. This local decode is only for
+display: transport still has no intermediate decode/re-encode step.
+
+Minimizing or hiding the window pauses capture without ending the share.
+Restoring it allows the picture to resume. Closing the window withdraws its
+announcement even without viewers; the monitor checks window and process
+identity, not just the title.
 
 ## Building from a checkout
 
@@ -121,7 +134,10 @@ synthetic windows; they require qualified hardware and a new artifact directory
 provided through `--artifacts=<absolute_path>`.
 
 Application scenarios cover P2P/SFU, Chromium reception, audio, quality,
-Watch/Stop, fullscreen, overlay, server navigation and connection loss.
+local preview, Watch/Stop, fullscreen, overlay, server navigation and connection
+loss. `--window-lifecycle` adds minimize/restore coverage;
+`--idle-source-close` checks closing an unwatched source.
+A synthetic window does not qualify a game's exclusive fullscreen behavior.
 Windows loopback does not replace two-computer QA, physical macOS or external
 network testing.
 To verify an already packaged module, `nativeCaptureSmoke.cjs` also accepts

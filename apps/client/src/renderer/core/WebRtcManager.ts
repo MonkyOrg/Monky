@@ -393,9 +393,16 @@ export class WebRtcManager {
     void this.nativeScreens.retry(sessionId, shareId).catch(error => this.nativeScreens.report(error));
   }
 
+  public getLocalScreenPreviewState(shareId: string): 'waiting' | 'playing' | 'unavailable' {
+    return this.nativeScreens.getLocalPreviewState(shareId);
+  }
+
   public async startNativeScreenShare(
     desktopSourceId: string, audio: boolean, thumbnail: string, isWanted: () => boolean,
   ): Promise<MediaStream> {
+    if (this.voiceReconnectSuspended) throw new Error(t('screenCodec.reconnecting'));
+    if (settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264')
+      throw new Error(t('screenShare.codecsSoon'));
     const profile = videoService.getProfile();
     const video = nativeScreenProfile(profile);
     const capabilities = await this.nativeScreens.capabilities();
@@ -409,6 +416,13 @@ export class WebRtcManager {
       });
       if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');
       videoService.registerNativeScreenShare(stream, { source, desktopSourceId, thumbnail, audioBitrateKbps: profile.audioBitrateKbps });
+      try {
+        await this.nativeScreens.attachLocalPreview(stream.id);
+        if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') throw error;
+        this.nativeScreens.report(error);
+      }
       return stream;
     } catch (error) {
       try { await this.nativeScreens.removeSource(stream.id); }

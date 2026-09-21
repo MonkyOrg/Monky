@@ -140,7 +140,7 @@ function validateMessage(message, expected) {
     assert.equal(message.hookedKey, null);
   } else if (message.type === 'ready' || message.type === 'stats') {
     integer(message.sequence, 1);
-    assert.equal(observation.sourceAttached, true);
+    if (message.type === 'ready') assert.equal(observation.sourceAttached, true);
     assert.deepEqual(message.hookedKey, message.sourceKey, 'The backend attached to another OBS window key.');
     integer(observation.sourceWidth, 1, 32768);
     integer(observation.outputPackets, 1);

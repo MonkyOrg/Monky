@@ -26,6 +26,8 @@ const incompatibleViewer = process.argv.includes('--incompatible-viewer');
 const overlayEnabled = process.argv.includes('--overlay');
 const sessionNavigation = process.argv.includes('--session-navigation');
 const serverLoss = process.argv.includes('--server-loss');
+const windowLifecycle = process.argv.includes('--window-lifecycle');
+const idleSourceClose = process.argv.includes('--idle-source-close');
 assert.ok(!unsupportedBrowserCodec || (browserReceiver && mode === 'p2p'), 'The unsupported-codec case requires a browser P2P receiver.');
 assert.ok(!incompatibleViewer || (!browserReceiver && mode === 'p2p'), 'Mixed compatibility requires a native primary P2P receiver.');
 const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbols='))?.slice('--debug-symbols='.length);
@@ -168,6 +170,9 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       if (!(button instanceof HTMLButtonElement)) throw new Error('The real Share Screen control is missing.');
       button.click();
       await wait(() => document.querySelector('#share-tab-window'), 'The real screen picker did not open.');
+      const monitorTab = document.querySelector('#share-tab-screen');
+      if (!monitorTab?.disabled || !monitorTab.textContent.includes('Coming soon'))
+        throw new Error('The monitor alternative must remain disabled and labeled.');
       document.querySelector('#share-tab-window').click();
       const card = () => [...document.querySelectorAll('.source-item')].find(item => item.dataset.sourceId === desktopSourceId);
       await wait(card, 'The real picker did not enumerate the owned synthetic window.');
@@ -242,6 +247,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         mainCall: webRtcManager['nativeScreens']['call']?.config.callId ?? null,
         visibleSession: sessionManager.getActive()?.key ?? null, voiceSession: voiceStore.voiceSessionKey,
         localNativeSources: videoService.getNativeScreenCaptures().length,
+        previewState: document.querySelector('[data-preview-state]')?.dataset.previewState ?? null,
         browserWatches: [...(webRtcManager['nativeScreens']['call']?.presentations.values() ?? [])]
           .filter(entry => entry.browser && !entry.stopping).length,
         screenOutputContext: webRtcManager['mediaRouter']['audioContexts'].get('screen')?.state ?? null,
@@ -479,6 +485,21 @@ async function run() {
   report.idleDiagnostics = await publisher.cdp.evaluate('nativeAppSmoke.diagnostics()');
   assert.equal(report.idleDiagnostics.viewers, 0);
   assert.deepEqual(report.idleDiagnostics.endpoints, []);
+  const sourceCommand = async command => {
+    const id = randomUUID(), response = once(source, 'message');
+    source.send({ type: 'source-command', id, command });
+    const [result] = await within(response, 10000, `Owned source command timed out: ${command}`);
+    assert.equal(result.id, id); assert.equal(result.ok, true, result.error);
+  };
+  if (idleSourceClose) {
+    phase('closing-without-ever-capturing');
+    await sourceCommand('close-source');
+    await until(async () => !(await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).sources.length
+      && (await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers.length === 0,
+    'Closing an unwatched window retained its announcement.');
+    report.idleSourceRetired = true;
+    return;
+  }
   if (audioEnabled) {
     source.send({ type: 'source-command', id: randomUUID(), command: 'tone-start' });
     const [tone] = await within(once(source, 'message'), 10000, 'Owned tone did not start.');
@@ -504,6 +525,27 @@ async function run() {
     assert.deepEqual(value.errors, []);
     return value.video?.width === 1920 && value.video.height === 1080 && value.video.frames >= 30;
   }, 'Native frames did not reach the normal Monky stage.', 45000);
+  await until(async () => {
+    const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+    return state.previewState === 'playing' && state.video?.width === 1920 && state.video.frames >= 15;
+  }, 'The publisher did not display its actual libobs preview.');
+  report.localPreview = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+  if (windowLifecycle) {
+    phase('minimizing-and-restoring-the-selected-window');
+    const pipelineId = (await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers[0].pipelines[0].pipelineId;
+    for (let iteration = 0; iteration < 2; iteration++) {
+      await sourceCommand('minimize-source');
+      await delay(iteration === 0 ? 11000 : 400);
+      const paused = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
+      assert.equal(paused.publishers[0].pipelines[0].pipelineId, pipelineId);
+      assert.deepEqual((await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).errors, []);
+      const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+      await sourceCommand('restore-source');
+      await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).video?.frames >= before.video.frames + 20,
+        'The original subscription did not resume after restoring the window.');
+    }
+    report.windowLifecyclePreserved = true;
+  }
   const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
   await delay(3000);
   const after = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
@@ -639,6 +681,10 @@ async function run() {
     return value.video?.width === 852 && value.video.height === 480 && value.video.frames >= 15;
   }, 'The normal quality control did not change actual decoded dimensions.');
   report.reduced = await viewer.cdp.evaluate('nativeAppSmoke.stats()');
+  await until(async () => {
+    const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+    return state.previewState === 'playing' && state.video?.width === 852 && state.video.height === 480;
+  }, 'The local preview did not follow the actual active rendition.');
   if (browserReceiver) {
     report.browserReduced = await viewer.cdp.evaluate('nativeAppSmoke.browserStats()');
     report.reducedPublisher = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
@@ -670,6 +716,8 @@ async function run() {
     'The normal Stop control retained a capture/encoder.');
   assert.equal((await viewer.cdp.evaluate('nativeAppSmoke.stats()')).subscriptions.length, 0);
   assert.equal((await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).browserWatches, 0);
+  await until(async () => (await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).previewState === 'waiting',
+    'The local preview did not return to demand-zero standby.');
   if (browserReceiver) {
     const retired = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
     assert.equal(retired.screenOutputContext, null);

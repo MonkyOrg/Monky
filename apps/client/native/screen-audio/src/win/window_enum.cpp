@@ -14,6 +14,7 @@
 #include <dwmapi.h>
 #include <vector>
 #include <string>
+#include <cmath>
 
 namespace {
 
@@ -58,6 +59,48 @@ BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lParam) {
 }
 
 }  // namespace
+
+Napi::Value platform_get_window_state(const Napi::CallbackInfo& info) {
+  const auto env = info.Env();
+  if (info.Length() != 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "A positive safe-integer HWND is required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto value = info[0].As<Napi::Number>().DoubleValue();
+  if (!std::isfinite(value) || value < 1 || value > 9007199254740991.0 || std::floor(value) != value) {
+    Napi::TypeError::New(env, "A positive safe-integer HWND is required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(value));
+  DWORD pid = 0;
+  if (!IsWindow(hwnd) || !GetWindowThreadProcessId(hwnd, &pid)) return env.Null();
+  const auto process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  if (!process) {
+    const auto error = GetLastError();
+    if (!IsWindow(hwnd) || error == ERROR_INVALID_PARAMETER) return env.Null();
+    Napi::Error::New(env, "Cannot inspect selected window process: " + std::to_string(error)).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  FILETIME creation{}, exit{}, kernel{}, user{};
+  const auto alive = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+  const auto observed = GetProcessTimes(process, &creation, &exit, &kernel, &user);
+  const auto error = observed ? ERROR_SUCCESS : GetLastError();
+  CloseHandle(process);
+  DWORD current = 0;
+  if (!alive || !IsWindow(hwnd) || !GetWindowThreadProcessId(hwnd, &current) || current != pid) return env.Null();
+  if (!observed) {
+    Napi::Error::New(env, "Cannot inspect selected process creation time: " + std::to_string(error)).ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const auto born = (static_cast<uint64_t>(creation.dwHighDateTime) << 32) | creation.dwLowDateTime;
+  auto result = Napi::Object::New(env);
+  result.Set("processId", pid);
+  result.Set("processCreationTime100ns", std::to_string(born));
+  result.Set("isVisible", IsWindowVisible(hwnd) != 0);
+  result.Set("isIconic", IsIconic(hwnd) != 0);
+  result.Set("isTopLevel", GetAncestor(hwnd, GA_ROOT) == hwnd);
+  return result;
+}
 
 Napi::Value platform_list_windows(Napi::Env env) {
   std::vector<HWND> handles;

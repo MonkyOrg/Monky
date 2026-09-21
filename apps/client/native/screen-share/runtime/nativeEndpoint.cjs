@@ -68,6 +68,8 @@ class NativeScreenEndpoint {
     this.audioMuted = audio?.muted ?? true;
     this.audioVolume = audio?.volume ?? 1;
     this.target = target ? Object.freeze({ ...target }) : null;
+    this.isSourcePaused = options.isSourcePaused ?? (() => false);
+    this.onPreview = options.onPreview ?? null;
     this.pending = new Set();
     this.connections = new Map();
     this.peerReadiness = new Map();
@@ -303,11 +305,24 @@ class NativeScreenEndpoint {
     this.directoryCreated = true;
     this.runId = runId;
     this.abort.signal.throwIfAborted();
+    while (this.isSourcePaused()) {
+      await require('node:timers/promises').setTimeout(100, undefined, { signal: this.abort.signal });
+      this.abort.signal.throwIfAborted();
+    }
     const { width, height, fps, maxBitrateKbps } = this.profile;
     this.host = new CaptureBridge({
       host: this.runtime.host, runtime: this.runtime.obs, runId, runDirectory: this.runDirectory,
       video: { width, height, fps, bitrateKbps: Math.min(5000, maxBitrateKbps) },
-      onError: error => this.report(error), onPacket: frame => this.flow.packet(frame), onNotice() {},
+      isSourcePaused: this.isSourcePaused,
+      onError: error => this.report(error), onPacket: frame => {
+        this.flow.setCapturePaused(this.isSourcePaused());
+        const result = this.flow.packet(frame);
+        if (result !== false && this.flow.inFlight.has(frame.frameId)) {
+          try { this.onPreview?.(frame); }
+          catch (error) { this.onDiagnostic(error); }
+        }
+        return result;
+      }, onNotice() {},
     });
     await this.host.prepare(this.target, this.abort.signal);
     this.abort.signal.throwIfAborted();

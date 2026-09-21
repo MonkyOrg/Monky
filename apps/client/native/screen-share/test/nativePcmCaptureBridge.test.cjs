@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { NativePcmCaptureBridge } = require('../runtime/nativePcmCaptureBridge.cjs');
+const { NativePcmCaptureBridge, MAX_PENDING_PACKETS } = require('../runtime/nativePcmCaptureBridge.cjs');
 const { NativeRtcCommands } = require('../runtime/nativeRtcCommands.cjs');
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -359,18 +359,40 @@ test('a wrong retirement identity remains owned through source-close ACK and a f
   assert.equal(f.bridge.getStats().outstanding, 0);
 });
 
-test('eight-packet pressure is bounded and stops capture without discarding existing native obligations', async () => {
-  const f = fixture({ holdInputs: true });
+test('a complete WASAPI callback burst waits for eight native credits without dropping packets or inventing epochs', async () => {
+  const f = fixture({ holdInputs: true, timeoutMs: 2000 });
   await f.start();
   await f.activate();
-  for (let index = 1; index < 9; index++) await f.packet();
+  for (let index = 1; index < MAX_PENDING_PACKETS; index++) await f.packet();
   assert.equal(f.submissions.length, 8);
-  assert.equal(f.bridge.getStats().maximumOutstanding, 8);
-  assert.equal(f.bridge.getStats().outstanding, 8);
-  assert.match(f.errors[0].message, /eight-packet bound/u);
+  assert.equal(f.bridge.getStats().maximumOutstanding, MAX_PENDING_PACKETS);
+  assert.equal(f.bridge.getStats().queued, 32);
+  assert.equal(f.captureStops(), 0);
+  for (let index = 0; index < MAX_PENDING_PACKETS; index++) {
+    f.retire(index);
+    await tick();
+    assert.ok(f.submissions.length - index - 1 <= 8);
+  }
+  assert.deepEqual(f.submissions.map(entry => entry.packet.sequence),
+    Array.from({ length: MAX_PENDING_PACKETS }, (_, index) => index));
+  assert.equal(f.commandsSeen.filter(command => command.operation === 'source.beginAudioEpoch').length, 1);
+  assert.equal(f.bridge.getStats().outstanding, 0);
+  assert.deepEqual(f.errors, []);
+  await f.bridge.stop();
+});
+
+test('sustained PCM overload still fails explicitly while preserving all native processing obligations', async () => {
+  const f = fixture({ holdInputs: true, timeoutMs: 2000 });
+  await f.start();
+  await f.activate();
+  for (let index = 1; index <= MAX_PENDING_PACKETS; index++) await f.packet();
+  assert.equal(f.submissions.length, 8);
+  assert.equal(f.bridge.getStats().maximumOutstanding, MAX_PENDING_PACKETS);
+  assert.match(f.errors[0].message, /bounded capture burst/u);
   assert.equal(f.captureStops(), 1);
   for (let index = 0; index < 8; index++) f.retire(index);
   await f.bridge.stop();
+  assert.equal(f.bridge.getStats().outstanding, 0);
 });
 
 test('aborting startup preserves the caller reason and cannot create a source from late capture readiness', async () => {

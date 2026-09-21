@@ -30,6 +30,7 @@ const audio = { sinkId: 'selected-output', muted: false, volume: 1 };
 function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32' } = {}) {
   const handlers = new Map(), sent = [], endpoints = [], selections = [], errors = [], captures = [], directories = [];
   let target = { hwnd: 12345, expectedProcessId: 56789 }, frameDestroyed = false, contentDestroyed = false;
+  let windowOpen = true, windowPaused = false, creationTime = '123456789';
   const frame = { url: 'file:///C:/monky-test/index.html', detached: false, isDestroyed: () => frameDestroyed, postMessage() {} };
   const contents = new EventEmitter();
   Object.assign(contents, { mainFrame: frame, isDestroyed: () => contentDestroyed, getURL: () => contents.mainFrame.url });
@@ -67,6 +68,11 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32' } =
   }
   const captureModule = {
     isPacketCaptureSupported: () => true,
+    getWindowState: hwnd => {
+      assert.equal(hwnd, 12345);
+      return windowOpen ? { processId: target.expectedProcessId, processCreationTime100ns: creationTime,
+        isIconic: windowPaused, isVisible: !windowPaused, isTopLevel: true } : null;
+    },
     createPacketCapture() { captures.push(true); assert.fail('IPC/source admission cannot itself capture audio.'); },
   };
   const module = { exports: {} };
@@ -126,6 +132,9 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32' } =
   return { service, config, command, invoke, source, join, addSource, participants, watch, accepted,
     frame, contents, event, endpoints, sent, errors, selections, captures, directories,
     replaceTarget: value => { target = value; },
+    closeWindow: () => { windowOpen = false; },
+    pauseWindow: value => { windowPaused = value; },
+    replaceWindowProcess: () => { creationTime = '987654321'; },
     destroyFrame: () => { frameDestroyed = true; contentDestroyed = true; contents.emit('render-process-gone'); },
   };
 }
@@ -156,7 +165,7 @@ test('announcing a validated window with audio creates neither an encoder nor a 
   const result = await f.addSource();
   assert.equal(result.kind, 'source');
   assert.equal(result.source.audio, true);
-  assert.deepEqual(f.selections, ['window:12345:0', 'window:12345:0']);
+  assert.deepEqual(f.selections, ['window:12345:0']);
   assert.equal(f.endpoints.length, 0);
   assert.equal(f.captures.length, 0);
   const stats = await f.command({ action: 'stats' });
@@ -177,6 +186,33 @@ test('retiring a missing or already retired call is idempotent without accepting
   assert.deepEqual(await f.command({ action: 'leave' }), { kind: 'ok' });
   assert.deepEqual(await f.command({ action: 'leave-local' }), { kind: 'ok' });
   await assert.rejects(f.command({ action: 'stats' }), { name: 'AbortError' });
+});
+
+test('closing the selected window retires its announcement with zero viewers and no capture', async t => {
+  const f = fixture(t);
+  await f.join();
+  const { source } = await f.addSource();
+  f.closeWindow();
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
+  assert.ok(f.sent.some(event => event.type === 'state' && event.state === 'closed'
+    && event.sourceInstanceId === source.instanceId));
+  assert.equal(f.endpoints.length + f.captures.length, 0);
+});
+
+test('minimized and hidden windows retain their identity but a reused process does not', async t => {
+  const f = fixture(t);
+  await f.join();
+  await f.addSource();
+  f.pauseWindow(true);
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
+  assert.equal(f.errors.length, 0);
+  f.pauseWindow(false);
+  f.replaceWindowProcess();
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
+  assert.equal(f.endpoints.length + f.captures.length, 0);
 });
 
 test('native diagnostics are source-instance scoped and do not start capture when nobody is watching', async t => {
@@ -221,7 +257,7 @@ test('leaving during source preparation cannot attach capture to a subsequent ca
 test('window owner changes during asynchronous preparation fail before publication', async t => {
   const directory = deferred(), f = fixture(t, { directory });
   await f.join();
-  const adding = f.addSource(), rejected = assert.rejects(adding, /window changed/);
+  const adding = f.addSource(), rejected = assert.rejects(adding, /closed or replaced/);
   await tick();
   f.replaceTarget({ hwnd: 12345, expectedProcessId: 56790 });
   directory.resolve(); await rejected;
@@ -309,6 +345,25 @@ test('a viewer-only codec failure closes that subscription without reporting a s
   assert.ok(f.sent.some(value => value.type === 'signal' && value.signal.action === 'closed'
     && value.signal.targetSessionId === 'viewer' && value.signal.reason === 'unsupported'));
   assert.ok(f.errors.some(values => values[0].includes('Screen viewer failed')), 'The failed peer must still be diagnosed.');
+});
+
+test('source retirement refuses a late preview before any new MessagePort can be created', async t => {
+  const f = fixture(t), gate = deferred();
+  await f.join(); await f.participants();
+  const { source } = await f.addSource();
+  await f.command({ action: 'signal', signal: {
+    fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+    subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+  } });
+  const endpoint = f.endpoints[0];
+  endpoint.close = async () => { await gate.promise; endpoint.closed = true; };
+  const removing = f.command({ action: 'source-remove', shareId: source.shareId });
+  try {
+    await assert.rejects(f.command({ action: 'preview-start', shareId: source.shareId,
+      sourceInstanceId: source.instanceId, presentationId: randomUUID() }), { name: 'AbortError' });
+  } finally { gate.resolve(); await removing; }
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
 });
 
 test('mute and volume changed before Accepted are applied before the receiver can admit any audio', async t => {

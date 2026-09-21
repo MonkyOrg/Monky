@@ -173,11 +173,13 @@ struct Target {
     Require(IsWindow(window) && GetWindowThreadProcessId(window, &current) != 0 && current == pid &&
         WaitForSingleObject(process.Get(), 0) == WAIT_TIMEOUT && ProcessCreation(process.Get()) == creation,
         "Selected HWND/PID/creation time is no longer live", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
-    Require(IsWindowVisible(window) && !IsIconic(window) && GetAncestor(window, GA_ROOT) == window,
-        "Selected window is hidden, minimized or not top-level", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
+    Require(GetAncestor(window, GA_ROOT) == window,
+        "Selected window is no longer top-level", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
     Require(WindowTitle(window) == title && WindowClass(window) == className && ExecutableBasename(process.Get()) == executable,
         "Selected source tuple changed; reselection is required", "ERR_SCREEN_CAPTURE_SOURCE_LOST");
   }
+
+  bool Paused() const { return !IsWindowVisible(window) || IsIconic(window); }
 
   struct Enumeration {
     const Target* target = nullptr;
@@ -812,7 +814,7 @@ class Host {
       const auto start = phase == Phase::Preparing ? processStarted_ :
           phase == Phase::Stopping ? stopStarted_.load() : captureStarted_.load();
       const auto limit = phase == Phase::Preparing ? kPrepareTimeoutMs :
-          phase == Phase::Starting ? kFirstAuTimeoutMs :
+          phase == Phase::Starting && !startupPaused_.load() ? kFirstAuTimeoutMs :
           phase == Phase::Stopping ? kRetirementTimeoutMs : UINT64_MAX;
       const bool deadline = limit != UINT64_MAX && now >= start && now - start >= limit + kWatchdogGraceMs;
       const auto progress = progress_.load();
@@ -836,7 +838,12 @@ class Host {
     CheckFailure();
     CheckParent();
     target_.Verify();
-    const auto deadline = ExpiredDeadline(life_.phase, GetTickCount64(), processStarted_,
+    const auto now = GetTickCount64();
+    const bool paused = target_.Paused();
+    life_.ObserveStartupAvailability(now, paused);
+    captureStarted_.store(life_.captureStartedMs);
+    startupPaused_.store(paused);
+    const auto deadline = ExpiredDeadline(life_.phase, now, processStarted_,
         life_.captureStartedMs, life_.stopStartedMs);
     if (deadline != Deadline::None) {
       const auto message = deadline == Deadline::Preparation ? "Preparation exceeded15s" : deadline == Deadline::FirstAu ?
@@ -949,6 +956,7 @@ class Host {
         "\"actualBackendHwnd\":null,\"hardwareQualified\":false}");
   }
   void CheckStockFinder() {
+    if (target_.Paused()) return;
     const auto finder = arguments_.method == Method::Wgc ? api().ms_find_window_top_level : api().ms_find_window;
     const auto chosen = finder(abi::WindowSearch::IncludeMinimized, abi::WindowPriority::Title,
         target_.key.className.c_str(), target_.key.title.c_str(), target_.key.executable.c_str());
@@ -1323,6 +1331,11 @@ class Host {
   }
   void ObserveSource() {
     target_.Verify();
+    if (target_.Paused()) {
+      observation_.sourceAttached = false;
+      CheckFailure();
+      return;
+    }
     const auto now = GetTickCount64();
     if (now - lastUniqueCheck_ >= 100) { target_.VerifyUnique(); CheckStockFinder(); lastUniqueCheck_ = now; }
     abi::CallData data{};
@@ -1352,12 +1365,12 @@ class Host {
     if (observed) {
       hooked_ = *observed;
       ValidateHookEvidence(target_.key, *observed);
-      UpdateSourceDimensions(observation_, life_.phase, width, height);
+      if (width && height) UpdateSourceDimensions(observation_, life_.phase, width, height);
     }
-    Require(attached || !everAttached_, "Previously attached source was lost; no reacquisition or fallback is allowed",
-        "ERR_SCREEN_CAPTURE_SOURCE_LOST");
-    observation_.sourceAttached = attached;
-    everAttached_ = everAttached_ || attached;
+    // WGC can temporarily detach or report zero dimensions across minimize,
+    // resize and exclusive-fullscreen transitions. HWND/PID/creation and the
+    // unique stock selection above still identify the only permitted source.
+    observation_.sourceAttached = attached && width > 0 && height > 0;
     target_.Verify();
     CheckFailure();
   }
@@ -1473,6 +1486,7 @@ class Host {
   std::size_t logUsed_ = 0, emergencyWritten_ = 0;
   std::atomic<bool> failed_{false}, emergencyFailure_{false}, strictEncoderWarnings_{false};
   std::atomic<bool> outputDestroyed_{true}, watchdogQuit_{false};
+  std::atomic<bool> startupPaused_{false};
   std::atomic<unsigned> callbacks_{0};
   std::array<BarrierState, 4> barriers_{};
   std::size_t barrierCount_ = 0;
@@ -1483,7 +1497,7 @@ class Host {
   const std::uint64_t processStarted_;
   std::uint64_t lastUniqueCheck_ = 0;
   bool eof_ = false, obsStarted_ = false, videoStarted_ = false, comInitialized_ = false;
-  bool amdDevice_ = false, everAttached_ = false;
+  bool amdDevice_ = false;
 };
 }  // namespace
 

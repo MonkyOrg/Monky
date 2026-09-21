@@ -29,14 +29,19 @@ const profile = (width = 1280, height = 720, fps = 60) => ({
 const cancelled = () => new DOMException('Modeled operation was cancelled.', 'AbortError');
 
 function fixture(t, { iceServers = [] } = {}) {
-  const commands = [], replies = [], events = [], errors = [], captures = new Map(), participants = new Map();
+  const commands = [], replies = [], events = [], errors = [], captures = new Map(), participants = new Map(), captureStreams = new Map();
   const mainListeners = new Set(), presentationListeners = new Set(), networkListeners = new Set();
   const calls = new Set(), sources = new Map(), sourceIntents = new Map(), watches = new Map();
   const elements = new Map(), attached = new Map(), retired = [], stopped = [], requests = [], replyGates = new Map();
   let commandHook = async () => {}, attachHook = async () => {}, current = true, connectionId = 'connection-one';
   let status = 'CONNECTED', watching = false, quality = 'source', muted = false, deafened = false, volume = 100, announces = 0;
   const remote = { shareId: 'remote-screen', instanceId: randomUUID(), video, audio: true };
-  class Stream {}
+  class Stream {
+    tracks = [];
+    getVideoTracks() { return [...this.tracks]; }
+    addTrack(track) { if (!this.tracks.includes(track)) this.tracks.push(track); }
+    removeTrack(track) { this.tracks = this.tracks.filter(value => value !== track); }
+  }
   class Video {
     srcObject = null;
     setAttribute() {}
@@ -96,6 +101,7 @@ function fixture(t, { iceServers = [] } = {}) {
       element.srcObject = new Stream();
       attached.set(value.presentationId, element);
     },
+    async attachNativeScreenPreview(value) { return api.attachNativeScreenPresentation(value); },
     async stopNativeScreenPresentation(id) {
       stopped.push(id);
       const element = attached.get(id);
@@ -139,6 +145,7 @@ function fixture(t, { iceServers = [] } = {}) {
     '../VideoService': { videoService: {
       getNativeScreenCapture: id => captures.get(id) ?? null,
       getNativeScreenCaptures: () => [...captures.values()],
+      getScreenStream: id => captureStreams.get(id) ?? null,
       updateNativeScreenCapture: capture => {
         assert.ok(captures.has(capture.source.shareId));
         captures.set(capture.source.shareId, capture);
@@ -163,6 +170,7 @@ function fixture(t, { iceServers = [] } = {}) {
   const local = async () => {
     const source = await controller.addSource(input);
     captures.set(source.shareId, { ...input, source });
+    captureStreams.set(source.shareId, new Stream());
     return source;
   };
   const emitForCall = value => emit({ callId: commands.findLast(command => command.action === 'join').callId, ...value });

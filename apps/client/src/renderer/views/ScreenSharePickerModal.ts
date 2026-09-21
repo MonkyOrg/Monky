@@ -23,7 +23,7 @@ type SourceLoadState =
 export class ScreenSharePickerModal {
   private modalEl: HTMLElement | null = null;
   private selectedSourceId: string | null = null;
-  private activeTab: 'screen' | 'window' = 'screen';
+  private activeTab: 'screen' | 'window' = 'window';
   private isStarting = false;
   private sourceState: SourceLoadState = { status: 'loading' };
   private sourceRequest = 0;
@@ -40,6 +40,16 @@ export class ScreenSharePickerModal {
       && nativeScreenProfile(videoService.getProfile()) !== null;
   }
 
+  private captureUnavailableMessage(audio: boolean): string {
+    if (this.activeTab === 'screen') return t('screenShare.monitorsSoon');
+    if (!this.nativeCapabilities?.capture) return t(this.nativeCapabilities?.reason === 'runtime'
+      ? 'screenShare.nativeUnavailable' : 'screenShare.platformSoon');
+    if (audio && !this.nativeCapabilities.captureAudio) return t('screenShare.nativeAudioUnavailable');
+    if (settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264')
+      return t('screenShare.codecsSoon');
+    return t('screenShare.nativeProfileChangeBlocked');
+  }
+
   private updateCaptureInfo(): void {
     const info = this.modalEl?.querySelector<HTMLElement>('#share-capture-info');
     if (!info) return;
@@ -48,8 +58,10 @@ export class ScreenSharePickerModal {
     const profile = native ? nativeScreenProfile(videoService.getProfile()) : null;
     info.textContent = profile ? t('screenShare.nativeBackend', {
       width: profile.width, height: profile.height, fps: profile.fps, bitrate: profile.maxBitrateKbps,
-    }) : t('screenShare.browserBackend');
-    info.dataset.backend = native ? 'native' : 'browser';
+    }) : this.captureUnavailableMessage(audio);
+    info.dataset.backend = native ? 'native' : 'unavailable';
+    this.modalEl?.querySelectorAll<HTMLButtonElement>('#btn-share, #btn-share-add')
+      .forEach(button => { button.disabled = this.isStarting || !this.selectedSourceId || !native; });
   }
 
   /** ScreenCaptureKit can only capture the whole system audio (#298). */
@@ -99,9 +111,9 @@ export class ScreenSharePickerModal {
         ` : ''}
 
         <div class="nav-tabs" style="margin-bottom: 12px;">
-          <button type="button" id="share-tab-screen" class="tab-button ${this.activeTab === 'screen' ? 'active' : ''}">
+          <button type="button" id="share-tab-screen" class="tab-button" disabled title="${escapeHtml(t('screenShare.monitorsSoon'))}">
             <span class="material-symbols-outlined md-16" style="margin-right: 4px; vertical-align: middle;">desktop_windows</span>
-            ${t('screenShare.screensTab')}
+            ${t('screenShare.screensTab')} · ${t('screenShare.comingSoon')}
           </button>
           <button type="button" id="share-tab-window" class="tab-button ${this.activeTab === 'window' ? 'active' : ''}">
             <span class="material-symbols-outlined md-16" style="margin-right: 4px; vertical-align: middle;">web_asset</span>
@@ -152,19 +164,19 @@ export class ScreenSharePickerModal {
     this.sourceState = { status: 'loading' };
     this.renderSources();
     try {
-      // Permission still precedes enumeration, but no longer hides the picker.
-      if (window.api?.ensureScreenPermission && !(await window.api.ensureScreenPermission())) {
-        if (isCurrent()) this.close();
-        return;
-      }
-      if (!isCurrent()) return;
-      if (!window.api?.getDesktopSources) throw new Error('Desktop source enumeration is unavailable');
-      const [sources, capabilities] = await Promise.all([
-        window.api.getDesktopSources(),
-        typeof window.api.nativeScreenCommand === 'function' ? webRtcManager.getNativeScreenCapabilities() : Promise.resolve(null),
-      ]);
+      const capabilities = typeof window.api?.nativeScreenCommand === 'function'
+        ? await webRtcManager.getNativeScreenCapabilities() : null;
       if (!isCurrent()) return;
       this.nativeCapabilities = capabilities;
+      if (!capabilities?.capture) {
+        this.sourceState = { status: 'ready', sources: [] };
+        this.renderSources();
+        this.updateCaptureInfo();
+        return;
+      }
+      if (!window.api?.getDesktopSources) throw new Error('Desktop source enumeration is unavailable');
+      const sources = await window.api.getDesktopSources();
+      if (!isCurrent()) return;
       this.sourceState = { status: 'ready', sources };
       if (!sources.some(source => source.type === 'screen') && sources.some(source => source.type === 'window')) {
         this.selectTab('window');
@@ -204,7 +216,7 @@ export class ScreenSharePickerModal {
     if (available.length === 0) {
       panel.innerHTML = `
         <div style="padding: 24px; text-align: center; color: var(--text-muted);">
-          ${this.activeTab === 'screen'
+          ${!this.nativeCapabilities?.capture ? escapeHtml(this.captureUnavailableMessage(false)) : this.activeTab === 'screen'
             ? t('screenShare.noScreens')
             : t('screenShare.noWindows')}
         </div>
@@ -249,7 +261,6 @@ export class ScreenSharePickerModal {
   private renderGameTipHtml(): string {
     const tips: string[] = [];
     if (this.activeTab === 'screen') tips.push(t('screenShare.gameTipWindow'));
-    if (settingsStore.qualityPreset !== 'GAMING') tips.push(t('screenShare.gameTipCodec'));
     if (tips.length === 0) return '';
 
     return `
@@ -293,12 +304,16 @@ export class ScreenSharePickerModal {
   }
 
   private selectTab(tab: 'screen' | 'window'): void {
+    if (tab === 'screen') {
+      console.warn('[ScreenShare] Monitor capture is disabled until its libobs backend is available.');
+      return;
+    }
     this.activeTab = tab;
     this.selectedSourceId = null;
     this.modalEl?.querySelectorAll<HTMLButtonElement>('#btn-share, #btn-share-add')
       .forEach(button => { button.disabled = true; });
-    this.modalEl?.querySelector('#share-tab-screen')?.classList.toggle('active', tab === 'screen');
-    this.modalEl?.querySelector('#share-tab-window')?.classList.toggle('active', tab === 'window');
+    this.modalEl?.querySelector('#share-tab-screen')?.classList.remove('active');
+    this.modalEl?.querySelector('#share-tab-window')?.classList.add('active');
     const audioText = this.modalEl?.querySelector('#share-audio-text');
     if (audioText) audioText.textContent = this.audioToggleLabel(tab);
     this.renderSources();
@@ -382,7 +397,7 @@ export class ScreenSharePickerModal {
       }
       assertCurrent();
       const native = this.usesNativeCapture(sourceId, shareAudio);
-      if (!native) webRtcManager.assertScreenShareSupported();
+      if (!native) throw new Error(this.captureUnavailableMessage(shareAudio));
       // Acquire the new capture BEFORE tearing anything down: if the user
       // cancels the OS picker or the source vanished, the current share must
       // survive untouched instead of leaving local and server state disagreeing.

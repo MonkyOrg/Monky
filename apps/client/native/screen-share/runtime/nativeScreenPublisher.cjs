@@ -17,11 +17,13 @@ const failureReason = error => error?.code === 'ERR_SCREEN_CAPACITY' ? 'capacity
   : String(error?.code).includes('CAPTURE') ? 'capture-failed' : 'connection-failed';
 
 class NativeScreenPublisher {
-  constructor({ sessionId, channelId, mode, source, iceServers, createEndpoint, send, onError, onState }) {
+  constructor({ sessionId, channelId, mode, source, iceServers, createEndpoint, send, onError, onState, onPreview = null }) {
     messageReferenceSchema.parse(sessionId); messageReferenceSchema.parse(channelId);
     assert.ok(['p2p', 'sfu'].includes(mode));
     for (const observer of [createEndpoint, send, onError, onState]) assert.equal(typeof observer, 'function');
     Object.assign(this, { sessionId, channelId, mode, createEndpoint, send, onError, onState });
+    this.onPreview = onPreview;
+    this.previewPipeline = null;
     this.source = Object.freeze(nativeScreenSourceSchema.parse(source));
     this.iceServers = structuredClone(iceServers);
     this.viewers = new Map();
@@ -88,6 +90,11 @@ class NativeScreenPublisher {
           queueMicrotask(() => this.track(this.failedPipeline(pipeline, error, context)));
         },
         onState: state => this.onState({ shareId: this.source.shareId, pipelineId: pipeline.id, quality: pipeline.quality, state }),
+        onPreview: frame => {
+          if (!this.previewPipeline || this.previewPipeline.closing) this.previewPipeline = pipeline;
+          if (this.previewPipeline === pipeline && !pipeline.closing && pipeline.viewers.size > 0)
+            this.onPreview?.({ frame, pipelineId: pipeline.id, video: getScreenShareProfile(this.source.video, pipeline.quality) });
+        },
       });
       assert.ok(pipeline.endpoint && typeof pipeline.endpoint.ready?.then === 'function');
       return this.reserveViewer(pipeline, viewer);
@@ -205,6 +212,10 @@ class NativeScreenPublisher {
         // A failure cause can coexist with verified closure; never reuse an unretired engine.
         if (pipeline.endpoint.snapshot().closed && this.pipelines.get(pipeline.key) === pipeline)
           this.pipelines.delete(pipeline.key);
+        if (this.previewPipeline === pipeline) {
+          this.previewPipeline = null;
+          this.onPreview?.(null);
+        }
       }
       assert.equal(pipeline.endpoint.snapshot().closed, true);
     })();

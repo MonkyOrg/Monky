@@ -49,6 +49,22 @@ test('live feedback crosses a writable stream with matched bounded acknowledgeme
   await f.close(); assert.deepEqual(f.errors, []);
 });
 
+test('first-frame readiness excludes minimized time but still times out an available source', async () => {
+  const f = fixture();
+  let paused = true;
+  f.bridge.isSourcePaused = () => paused;
+  f.bridge.deadlines.start = 50;
+  let ready;
+  const response = new Promise(resolve => { ready = resolve; });
+  const observed = f.bridge.observeRequest(response, 'start');
+  await new Promise(resolve => setTimeout(resolve, 130));
+  paused = false;
+  ready({ actualFrame: true });
+  assert.deepEqual(await observed, { actualFrame: true });
+  await assert.rejects(f.bridge.observeRequest(new Promise(() => {}), 'start'), /while the selected window was available/);
+  await f.close();
+});
+
 test('stop rejects pending feedback but accepts its already-in-flight acknowledgement until actual child close', async () => {
   const f = fixture();
   const waiting = assert.rejects(f.bridge.requestKeyFrame(), { name: 'AbortError' });

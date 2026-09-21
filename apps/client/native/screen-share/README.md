@@ -8,9 +8,11 @@ o vídeo no transmissor**. No Windows, o receptor usa Media Foundation e
 SharedTexture. Voz e câmera continuam usando seus caminhos próprios.
 
 O caminho de transmissão qualificado é **Windows x64, janela via Windows
-Graphics Capture e AMD/AMF H.264**. Monitores, outros encoders e outros sistemas
-mantêm o caminho Chromium, identificado no seletor. Um receptor Chromium só
-aceita um perfil H.264 que sua capacidade de decodificação permita.
+Graphics Capture e AMD/AMF H.264**. Monitores, outros codecs e outros sistemas
+ficam temporariamente indisponíveis na interface, com o aviso **Em breve**.
+Os caminhos alternativos permanecem no código, mas não há fallback automático
+de captura para Chromium. Automático seleciona H.264. A recepção Chromium
+continua disponível para perfis H.264 que o dispositivo consiga decodificar.
 
 A imagem é **esticada para a resolução solicitada**, sem criar barras para
 preservar a proporção original. Antes de alguém assistir não há pipeline de
@@ -18,6 +20,17 @@ transmissão nativa. A última assinatura encerrada libera o pipeline real.
 Perfis diferentes podem exigir encoders e upload adicionais; selecionar
 120 FPS não garante 120 imagens distintas por segundo nem elimina limites de
 captura, GPU, apresentação ou rede.
+
+A prévia local decodifica os mesmos frames H.264 de um perfil realmente
+assistido, sem segunda captura ou encoder. Ela acompanha esse perfil e volta
+à espera quando o último espectador para. A fila da prévia é limitada e não
+bloqueia o envio remoto. Esse decode local é só para exibição: o transporte
+continua sem decode/recodificação intermediários.
+
+Minimizar ou ocultar a janela pausa a captura, sem encerrar o compartilhamento.
+Restaurá-la permite retomar a imagem. Fechar a janela encerra o anúncio mesmo
+sem espectadores; o monitor verifica a identidade da janela e do processo,
+não apenas o título.
 
 ## Build a partir de um checkout
 
@@ -122,7 +135,10 @@ sintéticas próprias; exigem o hardware qualificado e um diretório novo de
 artefatos via `--artifacts=<caminho_absoluto>`.
 
 Os ensaios do aplicativo cobrem P2P/SFU, receptor Chromium, áudio, qualidade,
-Assistir/Parar, fullscreen, overlay, troca de servidor e queda de conexão.
+prévia local, Assistir/Parar, fullscreen, overlay, troca de servidor e queda
+de conexão. `--window-lifecycle` acrescenta minimizar/restaurar;
+`--idle-source-close` verifica fechar uma fonte sem espectadores.
+Uma janela sintética não qualifica tela cheia exclusiva de um jogo.
 Loopback Windows não substitui QA em duas máquinas, macOS físico ou rede externa.
 Para verificar o módulo já empacotado, `nativeCaptureSmoke.cjs` também aceita
 `--module=<caminho_absoluto_do_modulo>`; ele carrega o runtime e os binários

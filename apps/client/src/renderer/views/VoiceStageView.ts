@@ -1030,6 +1030,17 @@ export class VoiceStageView {
     for (const card of this.container.querySelectorAll<HTMLElement>('[data-kind="screen"][data-session-id]')) {
       const sessionId = card.dataset.sessionId;
       const shareId = card.dataset.tileKey?.split(':screen:')[1];
+      if (sessionId && shareId && serverStore.isMySession(sessionId) && videoService.getNativeScreenCapture(shareId)) {
+        const state = webRtcManager.getLocalScreenPreviewState(shareId);
+        card.dataset.previewState = state;
+        const placeholder = card.querySelector<HTMLElement>('.stage-native-thumbnail');
+        if (placeholder) {
+          placeholder.hidden = state === 'playing';
+          const label = placeholder.querySelector('span');
+          if (label) label.textContent = t(state === 'unavailable' ? 'stage.nativePreviewUnavailable' : 'stage.nativeThumbnail');
+        }
+        continue;
+      }
       if (!sessionId || !shareId || !this.isWatchingScreen(sessionId, shareId)) continue;
       if (!webRtcManager.getNativeScreenSource(sessionId, shareId)) continue;
       const video = card.querySelector<HTMLVideoElement>('video.stage-video-element');
@@ -1282,10 +1293,11 @@ export class VoiceStageView {
 
     return `
       ${isVideoTile ? `
+        <video id="${videoId}" data-video-tile-key="${escapeHtml(tile.key)}" class="stage-video-element ${isScreenTile ? 'screen-share' : ''}${isLocked ? ' screen-locked' : ''}" autoplay playsinline muted></video>
         ${localNative ? `<div class="stage-native-thumbnail">
           ${localNative.thumbnail ? `<img src="${escapeHtml(localNative.thumbnail)}" alt="">` : ''}
           <span>${t('stage.nativeThumbnail')}</span>
-        </div>` : `<video id="${videoId}" data-video-tile-key="${escapeHtml(tile.key)}" class="stage-video-element ${isScreenTile ? 'screen-share' : ''}${isLocked ? ' screen-locked' : ''}" autoplay playsinline muted></video>`}
+        </div>` : ''}
         ${!isLocked && !localNative ? `
           <div class="stage-loading-overlay${isMini ? ' stage-loading-overlay--mini' : ''}" id="loading-${videoId}">
             <div class="reconnect-spinner"></div>
@@ -1328,9 +1340,9 @@ export class VoiceStageView {
                 <span class="material-symbols-outlined md-18">content_copy</span>
               </button>
             ` : ''}
-            ${!localNative ? `<button class="stage-fullscreen-btn" data-fullscreen-target="${videoId}" title="${t('stage.fullscreen')}" aria-label="${t('stage.fullscreen')}">
+            <button class="stage-fullscreen-btn" data-fullscreen-target="${videoId}" title="${t('stage.fullscreen')}" aria-label="${t('stage.fullscreen')}">
               <span class="material-symbols-outlined md-18">fullscreen</span>
-            </button>` : ''}
+            </button>
           </div>
         `}
       ` : `

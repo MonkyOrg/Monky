@@ -61,9 +61,9 @@ export class QualityTab {
         </label>
         <select id="select-video-codec">
           <option value="auto" ${settingsStore.preferredVideoCodec === 'auto' ? 'selected' : ''}>${t('settings.codecAuto')}</option>
-          <option value="av1" ${settingsStore.preferredVideoCodec === 'av1' ? 'selected' : ''}>${t('settings.codecAv1')}</option>
-          <option value="vp9" ${settingsStore.preferredVideoCodec === 'vp9' ? 'selected' : ''}>${t('settings.codecVp9')}</option>
-          <option value="vp8" ${settingsStore.preferredVideoCodec === 'vp8' ? 'selected' : ''}>${t('settings.codecVp8')}</option>
+          <option value="av1" disabled ${settingsStore.preferredVideoCodec === 'av1' ? 'selected' : ''}>${t('settings.codecAv1')} · ${t('screenShare.comingSoon')}</option>
+          <option value="vp9" disabled ${settingsStore.preferredVideoCodec === 'vp9' ? 'selected' : ''}>${t('settings.codecVp9')} · ${t('screenShare.comingSoon')}</option>
+          <option value="vp8" disabled ${settingsStore.preferredVideoCodec === 'vp8' ? 'selected' : ''}>${t('settings.codecVp8')} · ${t('screenShare.comingSoon')}</option>
           <option value="h264" ${settingsStore.preferredVideoCodec === 'h264' ? 'selected' : ''}>${t('settings.codecH264')}</option>
         </select>
         <small style="display: block; margin-top: 6px; color: var(--text-muted); font-size: 11px;">
@@ -305,10 +305,11 @@ export class QualityTab {
 
     const selectCodec = container.querySelector<HTMLSelectElement>('#select-video-codec');
     selectCodec?.addEventListener('change', () => {
-      const val = (['auto', 'av1', 'vp9', 'vp8', 'h264'] as const).find(choice => choice === selectCodec.value);
+      const val = (['auto', 'h264'] as const).find(choice => choice === selectCodec.value);
       if (!val) {
         console.warn('[QualityTab] Invalid video codec:', selectCodec.value);
         selectCodec.value = settingsStore.preferredVideoCodec;
+        this.settingsError(new Error(t('screenShare.codecsSoon')));
         return;
       }
       const profile = settingsStore.qualityPreset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[settingsStore.qualityPreset];

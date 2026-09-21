@@ -67,6 +67,11 @@ interface Source {
   descriptor: NativeScreenSource | null;
   removing: boolean;
   retirement?: Promise<void>;
+  previewState?: 'waiting' | 'playing' | 'unavailable';
+  preview?: {
+    presentationId: string; video: HTMLVideoElement; stream: MediaStream | null;
+    attachment: Promise<void>; retirement?: Promise<void>;
+  };
 }
 
 interface Call {
@@ -179,6 +184,13 @@ export class NativeScreenController {
         if (event.callId === config.callId) void this.handleMainEvent(call, event).catch(error => this.report(error));
       }));
       call.unbind.push(api.onNativeScreenPresentationError(event => {
+        for (const entry of call.sources.values()) {
+          if (entry.preview && event.presentationId === entry.preview.presentationId) {
+            entry.previewState = 'unavailable';
+            this.report(new Error(event.message));
+            void this.releaseLocalPreview(call, entry).catch(error => this.report(error));
+          }
+        }
         for (const entry of call.presentations.values()) {
           if (!entry.browser && !entry.stopping && (!event.presentationId || entry.presentationId === event.presentationId)) {
             entry.state = { state: 'unavailable', reason: 'connection-failed' };
@@ -279,7 +291,11 @@ export class NativeScreenController {
         if (event.type === 'presentation-stop') {
           const entry = [...call.presentations.values()].find(item => item.presentationId === event.presentationId);
           if (entry) await this.releasePresentation(call, entry);
-          else await call.api.stopNativeScreenPresentation(event.presentationId);
+          else {
+            const source = [...call.sources.values()].find(item => item.preview?.presentationId === event.presentationId);
+            if (source) await this.releaseLocalPreview(call, source);
+            else await call.api.stopNativeScreenPresentation(event.presentationId);
+          }
         } else {
           if (!this.networkCurrent(call)) throw new Error('The original signaling connection is unavailable.');
           if (event.type === 'signal') {
@@ -303,12 +319,16 @@ export class NativeScreenController {
       const entry = call.sources.get(event.shareId), source = entry?.descriptor;
       if (!source || entry.removing || source.instanceId !== event.sourceInstanceId) return;
       if (event.type === 'state' && event.state === 'closed') {
+        await this.releaseLocalPreview(call, entry);
         call.sources.delete(event.shareId);
         emitOutsideRouting(() => appEvents.emit('local.screen_ended_externally', event.shareId));
+      } else if (event.type === 'preview-state') {
+        entry.previewState = event.state;
+        this.changed();
       } else if (event.type === 'error') {
         emitOutsideRouting(() => appEvents.emit('native_screen.source_failed', { reason: event.reason, shareId: event.shareId }));
       }
-    } else if (event.shareId) {
+    } else if (event.shareId && event.type !== 'preview-state') {
       const entry = call.presentations.get(keyOf(event.publisherSessionId, event.shareId));
       if (!entry || entry.stopping || entry.presentationId !== event.presentationId
         || entry.source.instanceId !== event.sourceInstanceId) return;
@@ -320,6 +340,64 @@ export class NativeScreenController {
 
   public async addSource(input: SourceInput): Promise<NativeScreenSource> {
     return this.addCallSource(await this.ensureCall(), input);
+  }
+
+  public getLocalPreviewState(shareId: string): 'waiting' | 'playing' | 'unavailable' {
+    return this.call?.sources.get(shareId)?.previewState ?? 'waiting';
+  }
+
+  public async attachLocalPreview(shareId: string): Promise<MediaStream> {
+    const call = await this.ensureCall();
+    const entry = call.sources.get(shareId);
+    if (!entry?.descriptor || entry.removing || entry.preview) throw cancelled();
+    const video = document.createElement('video');
+    video.id = crypto.randomUUID();
+    video.className = 'native-screen-presentation-owner';
+    video.setAttribute('aria-hidden', 'true');
+    document.body.append(video);
+    const presentationId = crypto.randomUUID();
+    const preview: NonNullable<Source['preview']> = { presentationId, video, stream: null,
+      attachment: Promise.resolve().then(() => call.api.attachNativeScreenPreview({ presentationId, elementId: video.id })) };
+    entry.preview = preview;
+    entry.previewState = 'waiting';
+    try {
+      await preview.attachment;
+      this.current(call);
+      if (entry.removing || call.sources.get(shareId) !== entry) throw cancelled();
+      if (!(video.srcObject instanceof MediaStream)) throw new Error('The local preview did not expose its owned stream.');
+      preview.stream = video.srcObject;
+      await this.ok(call, { action: 'preview-start', callId: call.config.callId, shareId,
+        sourceInstanceId: entry.descriptor.instanceId, presentationId });
+      this.current(call);
+      if (entry.removing || call.sources.get(shareId) !== entry) throw cancelled();
+      const captureStream = videoService.getScreenStream(shareId);
+      if (!captureStream) throw cancelled();
+      for (const track of captureStream.getVideoTracks()) {
+        if (track.readyState === 'ended') captureStream.removeTrack(track);
+      }
+      for (const track of preview.stream.getVideoTracks()) captureStream.addTrack(track);
+      return preview.stream;
+    } catch (error) {
+      entry.previewState = 'unavailable';
+      await this.releaseLocalPreview(call, entry);
+      throw error;
+    } finally { this.changed(); }
+  }
+
+  private releaseLocalPreview(call: Call, entry: Source): Promise<void> {
+    const preview = entry.preview;
+    if (!preview) return Promise.resolve();
+    if (preview.retirement) return preview.retirement;
+    const work = (async () => {
+      await Promise.allSettled([preview.attachment]);
+      if (preview.stream) await this.retireStream(preview.stream);
+      await call.api.stopNativeScreenPresentation(preview.presentationId);
+      preview.video.remove();
+      preview.stream = null;
+    })();
+    preview.retirement = work;
+    void work.catch(() => { if (preview.retirement === work) preview.retirement = undefined; });
+    return work;
   }
 
   private addCallSource(call: Call, input: SourceInput): Promise<NativeScreenSource> {
@@ -356,7 +434,8 @@ export class NativeScreenController {
     if (!entry) return Promise.resolve();
     if (entry.retirement) return entry.retirement;
     entry.removing = true;
-    const work = this.ok(call, { action: 'source-remove', callId: call.config.callId, shareId }).then(() => {
+    const work = this.ok(call, { action: 'source-remove', callId: call.config.callId, shareId }).then(async () => {
+      await this.releaseLocalPreview(call, entry);
       if (call.sources.get(shareId) === entry) call.sources.delete(shareId);
     });
     entry.retirement = work;
@@ -386,6 +465,8 @@ export class NativeScreenController {
         this.current(call);
         if (videoService.getNativeScreenCapture(shareId) !== capture) { await this.removeCallSource(call, shareId); return; }
         videoService.updateNativeScreenCapture({ ...capture, source, audioBitrateKbps: nextAudioBitrate });
+        try { await this.attachLocalPreview(shareId); }
+        catch (error) { this.report(error); }
         call.context.announceSources();
       };
       let removed = false;
@@ -757,6 +838,7 @@ export class NativeScreenController {
       await Promise.allSettled([call.ready, ...call.watchTasks.values(), ...call.sourceTasks.values(),
         ...[...call.sources.values()].map(source => source.ready)]);
       await Promise.all([...call.presentations.values()].map(entry => this.releasePresentation(call, entry)));
+      await Promise.all([...call.sources.values()].map(entry => this.releaseLocalPreview(call, entry)));
       for (const unbind of call.unbind.splice(0)) unbind();
       this.retiring.delete(call);
       this.changed();

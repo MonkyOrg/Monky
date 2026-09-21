@@ -59,6 +59,12 @@ function restoreWindow(hwnd) {
   return binding.restoreWindow(hwnd);
 }
 
+function getWindowState(hwnd) {
+  if (!binding || typeof binding.getWindowState !== 'function')
+    throw new Error('Native window lifecycle inspection is unavailable. Rebuild the native audio module.');
+  return binding.getWindowState(hwnd);
+}
+
 function getKeyboardLayout(previousId = '', characters = '') {
   if (!binding || typeof binding.getKeyboardLayout !== 'function') return null;
   return binding.getKeyboardLayout(previousId, characters);
@@ -66,5 +72,5 @@ function getKeyboardLayout(previousId = '', characters = '') {
 
 module.exports = {
   isSupported, isPacketCaptureSupported, start, stop, getLastError, getStatus, createPacketCapture,
-  listWindowOwners, listWindows, restoreWindow, getKeyboardLayout,
+  listWindowOwners, listWindows, restoreWindow, getWindowState, getKeyboardLayout,
 };

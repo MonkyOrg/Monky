@@ -5952,6 +5952,10 @@ input:focus, textarea:focus, select:focus {
   background: var(--bg-primary);
 }
 
+.stage-native-thumbnail[hidden] {
+  display: none;
+}
+
 .stage-native-thumbnail img {
   position: absolute;
   width: 100%;

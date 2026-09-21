@@ -618,7 +618,12 @@ export type NativeScreenAudioPortMessage =
 // These channels transfer one private MessagePort, not a renderer-facing invoke API.
 export interface IpcPortEvents {
   'native-screen:audio-output-port': NativeScreenAudioPortInfo;
+  'native-screen:preview-port': import('./nativeScreenIpc.js').NativeScreenPreviewInfo;
 }
+
+export const NATIVE_SCREEN_PREVIEW_IPC = {
+  port: 'native-screen:preview-port',
+} as const satisfies Record<string, keyof IpcPortEvents>;
 
 export const NATIVE_SCREEN_AUDIO_IPC = {
   outputPort: 'native-screen:audio-output-port',

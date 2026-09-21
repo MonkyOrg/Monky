@@ -212,7 +212,7 @@ class ObsHostBridge {
       this.pending.set(sequence, { resolve, reject });
       this.requests.set(sequence, { verb, received: false });
     });
-    const observed = this.deadline(promise, this.deadlines[verb], `OBS host ${verb} acknowledgement timed out.`);
+    const observed = this.observeRequest(promise, verb);
     try {
       this.child.stdin.write(this.protocol.command(sequence, verb), error => { if (error && !this.exit) this.fail(error); });
     } catch (error) { this.fail(error); }
@@ -223,6 +223,10 @@ class ObsHostBridge {
     }
     catch (error) { throw this.fail(error); }
     finally { this.pending.delete(sequence); }
+  }
+
+  observeRequest(promise, verb) {
+    return this.deadline(promise, this.deadlines[verb], `OBS host ${verb} acknowledgement timed out.`);
   }
 
   async start(source, signal) {

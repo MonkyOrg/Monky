@@ -83,6 +83,7 @@ export interface ElectronApi {
   nativeScreenReply: (reply: NativeScreenReply) => Promise<void>;
   onNativeScreenEvent: (callback: (event: NativeScreenEvent) => void) => () => void;
   attachNativeScreenPresentation: (input: NativeScreenPresentation) => Promise<void>;
+  attachNativeScreenPreview: (input: NativeScreenPresentation) => Promise<void>;
   stopNativeScreenPresentation: (presentationId: string) => Promise<void>;
   sampleNativeScreenPresentation: (presentationId: string) => Promise<NativeScreenPresentationSample | null>;
   onNativeScreenPresentationError: (callback: (value: { presentationId: string | null; message: string }) => void) => () => void;
@@ -249,7 +250,7 @@ function presentationController(): NativeScreenPresentationController {
       try { callback({ presentationId, message: error.message }); }
       catch (observerError) { console.error('[NativeScreen] Presentation error observer failed:', observerError); }
     }
-  });
+  }, ipcRenderer);
   return nativePresentation;
 }
 window.addEventListener('beforeunload', () => {
@@ -271,6 +272,7 @@ const api: ElectronApi = {
     return () => ipcRenderer.removeListener(NATIVE_SCREEN_EVENT, listener);
   },
   attachNativeScreenPresentation: input => presentationController().attach(input),
+  attachNativeScreenPreview: input => presentationController().attachPreview(input),
   stopNativeScreenPresentation: presentationId => presentationController().stop(presentationId),
   sampleNativeScreenPresentation: presentationId => presentationController().sample(presentationId),
   onNativeScreenPresentationError: callback => {

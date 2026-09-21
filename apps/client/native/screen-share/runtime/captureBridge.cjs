@@ -42,8 +42,34 @@ class CaptureBridge extends ObsHostBridge {
       },
     });
     owner = this; this.onPacket = onPacket; this.onNotice = onNotice;
+    this.isSourcePaused = options.isSourcePaused ?? null;
+    assert.ok(this.isSourcePaused === null || typeof this.isSourcePaused === 'function');
     this.liveSequence = 0; this.liveRequests = new Map(); this.liveEof = false;
     this.liveFrames = new protocol.LiveFrames(message => this.receiveLive(message), video.fps);
+  }
+
+  observeRequest(promise, verb) {
+    if (verb !== 'start' || !this.isSourcePaused) return super.observeRequest(promise, verb);
+    return new Promise((resolve, reject) => {
+      let timer, settled = false, activeMs = 0, last = this.now(), wasPaused = true;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true; clearTimeout(timer); callback(value);
+      };
+      const sample = () => {
+        if (settled) return;
+        try {
+          const now = this.now(), paused = this.isSourcePaused();
+          if (!paused && !wasPaused) activeMs += now - last;
+          last = now; wasPaused = paused;
+          if (activeMs >= this.deadlines.start)
+            throw new Error('OBS host start acknowledgement timed out while the selected window was available.');
+          timer = setTimeout(sample, 50);
+        } catch (error) { finish(reject, error); }
+      };
+      void promise.then(value => finish(resolve, value), error => finish(reject, error));
+      sample();
+    });
   }
 
   attachLive(child) {

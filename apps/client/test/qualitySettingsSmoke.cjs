@@ -58,6 +58,14 @@ async function runQualitySettingsSmoke() {
       await settled(() => !!root.querySelector('[data-section-target="video-telemetry"]'), `${locale}/telemetry navigation`);
       const quality = root.querySelector('#tab-panel-quality');
       const voice = root.querySelector('#tab-panel-voice_video');
+      for (const codec of ['av1', 'vp9', 'vp8']) {
+        const option = quality.querySelector(`#select-video-codec option[value="${codec}"]`);
+        check(option.disabled && option.textContent.includes(language.t('screenShare.comingSoon')),
+          'Alternative screen codecs must remain visible, disabled and localized as coming soon.');
+      }
+      for (const codec of ['auto', 'h264'])
+        check(!quality.querySelector(`#select-video-codec option[value="${codec}"]`).disabled,
+          'The libobs H.264 choices must remain enabled.');
       check(quality.querySelectorAll('#checkbox-screen-telemetry').length === 1 &&
         !voice.querySelector('#checkbox-screen-telemetry, #select-screen-telemetry-position, #select-screen-telemetry-mode'),
       'Telemetry controls must exist once, only under Quality.');
@@ -178,7 +186,7 @@ async function runQualitySettingsSmoke() {
         check(settingsStore.preferredVideoCodec === previousCodec && codec.value === previousCodec,
           'An incompatible native codec change must restore the selection before persistence.');
         check(localStorage.getItem('monky_settings') === previousSettings, 'Rejected native settings must not be saved.');
-        await dismiss('screenShare.nativeCodecChangeBlocked');
+        await dismiss('screenShare.codecsSoon');
         const frameRate = quality.querySelector('#custom-screenFps');
         frameRate.value = '144';
         frameRate.dispatchEvent(new Event('change', { bubbles: true }));

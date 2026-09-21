@@ -13,12 +13,14 @@ class LiveSenderFlow {
       initialBitrateKbps <= 20000 && initialBitrateKbps % 50 === 0);
     Object.assign(this, { engine, sourceId, onError, now });
     this.demand = false; this.connected = false; this.needsIdr = true; this.paused = false;
+    this.capturePaused = false;
     this.currentKbps = initialBitrateKbps; this.desiredKbps = initialBitrateKbps; this.lastUpdateAt = -Infinity;
     this.applyingKbps = null;
     this.feedbackSequence = 0; this.waitingSince = null; this.peakRtcArrivalFps = null;
     this.counts = { observed: 0, admitted: 0, notWatched: 0, pausedPackets: 0, awaitingIdr: 0,
       bitrateSettingsUpdates: 0, keyframeRequests: 0, actualIdrsAdmitted: 0, cancelledFeedbackRequests: 0,
-      nativeCopiesReleased: 0, inputBackpressure: 0, nativeRecoveryRequests: 0, nativeRecoveryRejections: 0 };
+      nativeCopiesReleased: 0, inputBackpressure: 0, nativeRecoveryRequests: 0, nativeRecoveryRejections: 0,
+      sourcePausedPackets: 0 };
     this.inFlight = new Set();
     this.errors = [];
   }
@@ -39,6 +41,11 @@ class LiveSenderFlow {
     assert.equal(typeof value, 'boolean');
     if (this.connected !== value) { this.needsIdr = true; this.waitingSince = null; }
     this.connected = value;
+  }
+  setCapturePaused(value) {
+    assert.equal(typeof value, 'boolean');
+    if (this.capturePaused !== value) { this.needsIdr = true; this.waitingSince = null; }
+    this.capturePaused = value;
   }
   feedback(event) {
     if (this.closing) return;
@@ -138,6 +145,9 @@ class LiveSenderFlow {
       this.counts.observed++; this.counts.notWatched++; this.needsIdr = true; this.waitingSince = null; return;
     }
     assert.deepEqual(this.errors, [], 'Live source admission follows an earlier failure.');
+    if (this.capturePaused) {
+      this.counts.observed++; this.counts.sourcePausedPackets++; this.needsIdr = true; this.waitingSince = null; return;
+    }
     if (this.paused) {
       this.counts.observed++; this.counts.pausedPackets++; this.needsIdr = true; this.waitingSince = null; return;
     }
@@ -190,7 +200,7 @@ class LiveSenderFlow {
     if (failures.length) throw new AggregateError(failures, 'Live feedback did not retire cleanly.');
   }
   snapshot() {
-    return { ...this.counts, demand: this.demand, connected: this.connected, paused: this.paused,
+    return { ...this.counts, demand: this.demand, connected: this.connected, paused: this.paused, capturePaused: this.capturePaused,
       awaitingRealIdr: this.needsIdr, currentSettingsKbps: this.currentKbps, desiredSettingsKbps: this.desiredKbps,
       bitratePolicy: { targetHeadroomPercent: 10, minimumIncreasePercent: 10 },
       feedback: this.lastFeedback ?? null, errors: [...this.errors], queuedJavaScriptFrames: 0,

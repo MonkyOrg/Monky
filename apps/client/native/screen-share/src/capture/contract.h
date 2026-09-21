@@ -349,6 +349,8 @@ class Lifecycle {
   Phase phase = Phase::Preparing;
   std::uint64_t lastSequence = 0, startSequence = 0, stopSequence = 0;
   std::uint64_t captureStartedMs = 0, stopStartedMs = 0;
+  std::uint64_t startupObservedMs = 0;
+  bool startupPaused = false;
   bool failed = false;
 
   bool Prepared() {
@@ -363,13 +365,20 @@ class Lifecycle {
     Require(phase != Phase::Stopping && phase != Phase::Stopped, "Command follows STOP");
     if (command.verb == Verb::Start) {
       Require(phase == Phase::Prepared && startSequence == 0, "START requires PREPARED and is accepted once");
-      phase = Phase::Starting; startSequence = command.sequence; captureStartedMs = now;
+      phase = Phase::Starting; startSequence = command.sequence; captureStartedMs = now; startupObservedMs = now;
     } else if (command.verb == Verb::Stats) {
       Require(phase == Phase::Prepared || phase == Phase::Running, "STATS requires PREPARED or READY");
     } else {
       phase = Phase::Stopping; stopSequence = command.sequence; stopStartedMs = now;
     }
     lastSequence = command.sequence;
+  }
+  void ObserveStartupAvailability(std::uint64_t now, bool paused) {
+    if (phase != Phase::Starting) return;
+    Require(now >= startupObservedMs, "Startup availability clock regressed", "ERR_SCREEN_CAPTURE_CLOCK");
+    if (paused || startupPaused) captureStartedMs += now - startupObservedMs;
+    startupObservedMs = now;
+    startupPaused = paused;
   }
   bool Ready(bool attached, bool actualAccessUnit) {
     if (phase == Phase::Stopping) return false;

@@ -72,6 +72,8 @@ export interface NativeScreenEndpointOptions {
   audio?: NativeScreenAudioOptions;
   target?: { hwnd: number; expectedProcessId: number };
   captureDirectory?: string;
+  isSourcePaused?: () => boolean;
+  onPreview?: (frame: NativeScreenPreviewFrame) => void;
   destination?: { frame: WebFrameMain; presentationId: string };
   send?: (remoteSessionId: string, control: NativeScreenP2pControl) => Promise<void>;
   rpc?: (type: MessageType, payload: Readonly<Record<string, unknown>>) => Promise<unknown>;
@@ -126,7 +128,8 @@ export class NativeScreenEndpoint {
   close(): Promise<NativeScreenEndpointSnapshot>;
 }
 
-type PublisherEndpointOptions = Pick<NativeScreenEndpointOptions, 'source' | 'quality' | 'pipelineId' | 'send' | 'onError' | 'onState'>;
+export interface NativeScreenPreviewFrame { data: Uint8Array; timestampUs: number; keyframe: boolean }
+type PublisherEndpointOptions = Pick<NativeScreenEndpointOptions, 'source' | 'quality' | 'pipelineId' | 'send' | 'onError' | 'onState' | 'onPreview'>;
 type SubscriptionEndpointOptions = PublisherEndpointOptions & { presentationId: string };
 export interface NativeScreenPublisherOptions {
   sessionId: string;
@@ -138,6 +141,7 @@ export interface NativeScreenPublisherOptions {
   send: (signal: import('@monky/shared').NativeScreenSignalPayload) => Promise<void>;
   onError: (error: Error, context?: unknown) => void;
   onState: (state: { shareId: string; pipelineId: string; quality: ScreenShareQuality; state: unknown }) => void;
+  onPreview?: (packet: { frame: NativeScreenPreviewFrame; pipelineId: string; video: NativeScreenVideoProfile } | null) => void;
 }
 export interface NativeScreenPublisherSnapshot {
   source: NativeScreenSource;
@@ -198,6 +202,7 @@ export class NativeScreenSubscription {
 
 export interface NativeScreenPresentationController {
   attach(input: import('@monky/shared').NativeScreenPresentation): Promise<void>;
+  attachPreview(input: import('@monky/shared').NativeScreenPresentation): Promise<void>;
   stop(presentationId: string): Promise<void>;
   sample(presentationId: string): Promise<import('@monky/shared').NativeScreenPresentationSample | null>;
   close(): Promise<void>;
@@ -205,7 +210,20 @@ export interface NativeScreenPresentationController {
 export function createNativeScreenPresentation(
   textures: typeof import('electron').sharedTexture, document: Document,
   onError: (presentationId: string | null, error: Error) => void,
+  ipcRenderer?: IpcRenderer,
 ): NativeScreenPresentationController;
+
+export class NativeScreenPreviewBridge {
+  constructor(options: {
+    frame: WebFrameMain; info: import('@monky/shared').NativeScreenPreviewInfo;
+    createMessageChannel: () => MessageChannelMain;
+    onState: (state: 'waiting' | 'playing' | 'unavailable') => void; onError: (error: Error) => void;
+  });
+  readonly info: import('@monky/shared').NativeScreenPreviewInfo;
+  offer(frame: NativeScreenPreviewFrame, pipelineId: string, video: NativeScreenVideoProfile): void;
+  reset(): void;
+  close(): void;
+}
 
 export function registerNativeAudioPortReceiver(
   ipcRenderer: IpcRenderer, protocol: typeof import('@monky/shared'),

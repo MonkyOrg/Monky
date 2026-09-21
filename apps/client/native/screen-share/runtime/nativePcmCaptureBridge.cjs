@@ -4,6 +4,10 @@ const { boundedCleanup } = require('./frameSink.cjs');
 const { NativeRtcCommands, isNativeRtcCommandsForEngine, assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 const { NativePcmCaptureHub } = require('./nativePcmCaptureHub.cjs');
 
+const MAX_NATIVE_PACKETS = 8;
+// WASAPI can deliver its entire 32-packet callback queue in one event-loop turn.
+const MAX_PENDING_PACKETS = MAX_NATIVE_PACKETS + 32;
+
 const unsigned = value => Number.isSafeInteger(value) && value >= 0;
 const positive = value => unsigned(value) && value > 0;
 const text = value => typeof value === 'string' && Buffer.byteLength(value, 'utf8') > 0
@@ -213,7 +217,8 @@ class NativePcmCaptureBridge {
     }
     this.lastSequence = packet.sequence;
     if (this.stopping || !this.enabling || this.sourceId === null) { this.dropped++; return; }
-    if (this.packets.size >= 8) throw new Error('Native PCM processing exceeded its eight-packet bound.');
+    if (this.packets.size >= MAX_PENDING_PACKETS)
+      throw new Error('Native PCM admission exceeded its bounded capture burst and processing capacity.');
     const retired = deferred();
     const record = {
       key: `${packet.epoch}\0${packet.sequence}`, packet, sourceId: this.sourceId,
@@ -235,6 +240,12 @@ class NativePcmCaptureBridge {
 
   async submit(record) {
     if (this.stopping) { this.retire(record); return; }
+    const processing = [...this.packets.values()].filter(value => value.submitted);
+    if (processing.length >= MAX_NATIVE_PACKETS) {
+      await boundedCleanup(Promise.race(processing.map(value => value.retired)),
+        'Native PCM processing did not return its admission credit.', this.timeoutMs);
+      if (this.stopping) { this.retire(record); return; }
+    }
     if (this.epoch !== record.epoch) {
       // Reset only at an actual capture epoch, after prior native processing is accounted for.
       const previous = [...this.packets.values()].filter(value => value.submitted && value.epoch !== record.epoch);
@@ -261,10 +272,10 @@ class NativePcmCaptureBridge {
     }
     record.submitted = true;
     this.submitted++;
-    let processing;
+    let completed;
     try {
-      processing = this.engine.submitAudioPacket(record.sourceId, record.packet);
-      if (typeof processing?.then !== 'function') throw new Error('Native PCM input did not return a processing Promise.');
+      completed = this.engine.submitAudioPacket(record.sourceId, record.packet);
+      if (typeof completed?.then !== 'function') throw new Error('Native PCM input did not return a processing Promise.');
     } catch (error) {
       this.rejectInput(record, error);
       return;
@@ -272,7 +283,7 @@ class NativePcmCaptureBridge {
       // Audio extension1 copies PCM synchronously. Retain processing identity, not a JS-memory loan.
       record.packet = null;
     }
-    void processing.then(result => {
+    void completed.then(result => {
       if (result?.ok !== true || !this.matches(record, result)) {
         this.report(new Error('Native PCM retirement has no matching processing identity.'));
         return;
@@ -377,4 +388,4 @@ class NativePcmCaptureBridge {
   }
 }
 
-module.exports = { NativePcmCaptureBridge };
+module.exports = { NativePcmCaptureBridge, MAX_NATIVE_PACKETS, MAX_PENDING_PACKETS };

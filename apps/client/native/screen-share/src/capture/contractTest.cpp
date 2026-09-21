@@ -128,6 +128,18 @@ int main(int argc, char** argv) {
     check(ExpiredDeadline(Phase::Running, 28800000, 0, 100, 0) == Deadline::None);
     check(ExpiredDeadline(Phase::Starting, 10100, 0, 100, 0) == Deadline::FirstAu);
     check(ExpiredDeadline(Phase::Stopping, 10100, 0, 0, 100) == Deadline::Retirement);
+    Lifecycle startup;
+    startup.Prepared();
+    startup.Accept({1, Verb::Start}, 100);
+    startup.ObserveStartupAvailability(200, false);
+    startup.ObserveStartupAvailability(300, true);
+    startup.ObserveStartupAvailability(30300, true);
+    check(ExpiredDeadline(startup.phase, 30300, 0, startup.captureStartedMs, 0) == Deadline::None);
+    startup.ObserveStartupAvailability(30400, false);
+    check(ExpiredDeadline(startup.phase, 30400, 0, startup.captureStartedMs, 0) == Deadline::None);
+    startup.ObserveStartupAvailability(40400, false);
+    check(ExpiredDeadline(startup.phase, 40400, 0, startup.captureStartedMs, 0) == Deadline::FirstAu);
+    rejects([&] { startup.ObserveStartupAvailability(1, true); });
     check(static_cast<int>(abi::Bounds::Stretch) == 1);
     check(sizeof(PacketStatistics) < 256);
     for (const auto video : {VideoConfiguration{1920, 1080, 120, 5000}, {1920, 1080, 60, 5000},

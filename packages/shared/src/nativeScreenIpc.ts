@@ -92,6 +92,9 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
   }).strict(),
   callScope.extend({ action: z.literal('source-remove'), shareId: screenShareIdSchema }).strict(),
   callScope.extend({
+    action: z.literal('preview-start'), shareId: screenShareIdSchema, sourceInstanceId: uuid, presentationId: uuid,
+  }).strict(),
+  callScope.extend({
     action: z.literal('watch'), publisherSessionId: reference, shareId: screenShareIdSchema,
     quality: screenShareQualitySchema, presentationId: uuid, audio: nativeScreenAudioPreferencesSchema,
   }).strict(),
@@ -178,6 +181,10 @@ export const nativeScreenEventSchema = z.discriminatedUnion('type', [
   request.extend({ type: z.literal('rpc'), method: nativeScreenRpcMethodSchema, payload: z.record(json).refine(isBoundedJson) }).strict(),
   request.extend({ type: z.literal('presentation-stop'), presentationId: uuid }).strict(),
   callScope.extend({
+    type: z.literal('preview-state'), publisherSessionId: reference, shareId: screenShareIdSchema,
+    sourceInstanceId: uuid, state: z.enum(['waiting', 'playing', 'unavailable']),
+  }).strict(),
+  callScope.extend({
     type: z.literal('state'), publisherSessionId: reference, shareId: screenShareIdSchema,
     sourceInstanceId: uuid,
     presentationId: uuid.optional(), state: z.enum(['connecting', 'playing', 'closed', 'unavailable']),
@@ -205,3 +212,18 @@ export interface NativeScreenPresentationSample {
   presentedFrames: number | null;
   playbackStarted: boolean;
 }
+
+export const nativeScreenPreviewInfoSchema = callScope.extend({
+  shareId: screenShareIdSchema, sourceInstanceId: uuid, presentationId: uuid,
+}).strict();
+export type NativeScreenPreviewInfo = z.infer<typeof nativeScreenPreviewInfoSchema>;
+export const nativeScreenPreviewPacketSchema = z.object({
+  type: z.literal('packet'), sequence: z.number().int().positive().safe(),
+  pipelineId: uuid, video: nativeScreenVideoProfileSchema,
+  timestampUs: z.number().int().positive().safe(), keyframe: z.boolean(),
+  data: z.instanceof(Uint8Array).refine(value => value.byteLength > 0 && value.byteLength <= 4 * 1024 * 1024
+    && value.buffer instanceof ArrayBuffer),
+}).strict();
+export const nativeScreenPreviewReceiptSchema = z.object({
+  sequence: z.number().int().positive().safe(), rendered: z.boolean(), needsKeyframe: z.boolean(),
+}).strict();

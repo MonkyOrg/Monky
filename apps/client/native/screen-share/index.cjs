@@ -7,8 +7,9 @@ const { NativeScreenSubscription } = require('./runtime/nativeScreenSubscription
 const { createNativeScreenPresentation } = require('./runtime/nativePresentationRenderer.cjs');
 const { NativePcmCaptureHub } = require('./runtime/nativePcmCaptureHub.cjs');
 const { registerNativeAudioPortReceiver } = require('./runtime/nativeAudioPortRenderer.cjs');
+const { NativeScreenPreviewBridge } = require('./runtime/nativeScreenPreviewBridge.cjs');
 
 module.exports = {
   loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription,
-  createNativeScreenPresentation, NativePcmCaptureHub, registerNativeAudioPortReceiver,
+  createNativeScreenPresentation, NativePcmCaptureHub, registerNativeAudioPortReceiver, NativeScreenPreviewBridge,
 };

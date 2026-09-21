@@ -168,6 +168,17 @@ export interface NativeWindowInfo {
  */
 export function listWindows(): NativeWindowInfo[];
 
+export interface NativeWindowState {
+  processId: number;
+  processCreationTime100ns: string;
+  isVisible: boolean;
+  isIconic: boolean;
+  isTopLevel: boolean;
+}
+
+/** Inspects the exact HWND even while hidden/minimized. Null means it is gone; inspection failures throw. */
+export function getWindowState(hwnd: number): NativeWindowState | null;
+
 /**
  * Restores (un-minimizes) and foregrounds a window by handle so a capture can
  * start on it — the WGC capturer cannot start on a minimized window (#560).

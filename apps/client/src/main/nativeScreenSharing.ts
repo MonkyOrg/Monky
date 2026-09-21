@@ -12,6 +12,7 @@ import {
 } from '@monky/shared';
 import {
   loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub,
+  NativeScreenPreviewBridge,
   type NativeScreenRuntime, type NativeScreenAudioOptions,
 } from '@monky/screen-share';
 import * as screenAudio from '@monky/screen-audio';
@@ -20,7 +21,11 @@ type RendererRequest = Extract<NativeScreenEvent, { requestId: string }>;
 type RequestInput = Omit<Extract<RendererRequest, { type: 'signal' }>, 'requestId' | 'callId'>
   | Omit<Extract<RendererRequest, { type: 'rpc' }>, 'requestId' | 'callId'>
   | Omit<Extract<RendererRequest, { type: 'presentation-stop' }>, 'requestId' | 'callId'>;
-type SourceRecord = { source: NativeScreenSource; publisher: NativeScreenPublisher; captureHub: NativePcmCaptureHub | null };
+type SourceRecord = {
+  source: NativeScreenSource; publisher: NativeScreenPublisher; captureHub: NativePcmCaptureHub | null;
+  monitor: NodeJS.Timeout | null;
+  preview: NativeScreenPreviewBridge | null;
+};
 type SubscriptionRecord = { source: NativeScreenSource; publisherSessionId: string; subscription: NativeScreenSubscription };
 type WatchIntent = { presentationId: string; audio: NativeScreenAudioPreferences };
 type CallRecord = {
@@ -240,6 +245,21 @@ class NativeScreenSharingService {
       case 'source-remove':
         await this.removeSource(call, command.shareId);
         break;
+      case 'preview-start': {
+        const entry = call.sources.get(command.shareId);
+        if (!entry || entry.publisher.snapshot().stopping || entry.source.instanceId !== command.sourceInstanceId) throw cancelled();
+        if (entry.preview) throw new Error('This source already owns a local preview.');
+        const info = { callId: call.config.callId, shareId: command.shareId,
+          sourceInstanceId: command.sourceInstanceId, presentationId: command.presentationId };
+        entry.preview = new NativeScreenPreviewBridge({
+          frame: call.frame, info, createMessageChannel: () => new MessageChannelMain(),
+          onState: state => this.emit(call, { type: 'preview-state', callId: call.config.callId,
+            publisherSessionId: call.config.sessionId, shareId: entry.source.shareId,
+            sourceInstanceId: entry.source.instanceId, state }),
+          onError: error => console.warn('[NativeScreen] Local preview failed without changing the broadcast:', error),
+        });
+        break;
+      }
       case 'watch':
         try { return await this.watch(call, command); }
         catch (error) {
@@ -315,11 +335,22 @@ class NativeScreenSharingService {
       if (!capabilities.capture) throw new Error(`Native screen capture is unavailable: ${capabilities.reason}.`);
       if (command.audio && !capabilities.captureAudio) throw new Error('Timestamped application audio capture is unavailable.');
       const target = this.resolveSource(command.desktopSourceId);
+      const identity = screenAudio.getWindowState(target.hwnd);
+      let paused = false;
+      const windowState = (): screenAudio.NativeWindowState => {
+        const state = screenAudio.getWindowState(target.hwnd);
+        if (!identity || !state?.isTopLevel || state.processId !== target.expectedProcessId
+          || state.processCreationTime100ns !== identity.processCreationTime100ns)
+          throw Object.assign(new Error('The selected screen-sharing window was closed or replaced.'),
+            { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST' });
+        paused = state.isIconic || !state.isVisible;
+        return state;
+      };
+      windowState();
       const captureDirectory = path.join(app.getPath('userData'), 'native-screen-capture');
       await mkdir(captureDirectory, { recursive: true });
       assertCurrent();
-      if (!isDeepStrictEqual(this.resolveSource(command.desktopSourceId), target))
-        throw new Error('The selected screen window changed during source preparation.');
+      windowState();
       const source: NativeScreenSource = {
         shareId: command.shareId, instanceId: randomUUID(), video: command.video, audio: command.audio,
       };
@@ -338,13 +369,17 @@ class NativeScreenSharingService {
         { includeWindowId: target.hwnd, expectedProcessId: target.expectedProcessId }, onError) : null;
       const publisher = new NativeScreenPublisher({
         ...call.config, source, send: signal => this.send(call, signal), onError, onState() {},
+        onPreview: packet => {
+          if (packet) entry.preview?.offer(packet.frame, packet.pipelineId, packet.video);
+          else entry.preview?.reset();
+        },
         createEndpoint: options => {
           this.current(call);
-          if (!isDeepStrictEqual(this.resolveSource(command.desktopSourceId), target))
-            throw new Error('The shared window no longer belongs to the selected process.');
+          windowState();
           return new NativeScreenEndpoint({
             ...options, runtime: this.nativeRuntime(), textures: sharedTexture, role: 'publish', ...call.config,
             publisherSessionId: call.config.sessionId, target, captureDirectory,
+            isSourcePaused: () => paused,
             ...(captureHub ? { audio: {
               ...this.audioOptions(call, { sinkId: '', muted: true, volume: 0 }),
               captureModule: screenAudio, captureHub, maxBitrateBps: command.audioBitrateKbps * 1000,
@@ -354,7 +389,21 @@ class NativeScreenSharingService {
           });
         },
       });
-      call.sources.set(source.shareId, { source, publisher, captureHub });
+      const entry: SourceRecord = { source, publisher, captureHub, monitor: null, preview: null };
+      call.sources.set(source.shareId, entry);
+      // An announcement owns its window even when there is no capture pipeline.
+      entry.monitor = setInterval(() => {
+        try { windowState(); }
+        catch (error) {
+          if (entry.monitor) clearInterval(entry.monitor);
+          entry.monitor = null;
+          if (failureReason(error) !== 'source-unavailable')
+            this.error(call, error, call.config.sessionId, source.shareId, undefined, source.instanceId);
+          void this.removeSource(call, source.shareId).catch(cleanupError =>
+            this.error(call, cleanupError, call.config.sessionId, source.shareId, undefined, source.instanceId));
+        }
+      }, 250);
+      entry.monitor.unref();
       return { kind: 'source', source };
     } finally {
       if (call.sourceSelections.get(command.shareId) === selection) call.sourceSelections.delete(command.shareId);
@@ -365,13 +414,22 @@ class NativeScreenSharingService {
     call.sourceSelections.delete(shareId);
     const entry = call.sources.get(shareId);
     if (!entry) return;
+    if (entry.monitor) clearInterval(entry.monitor);
+    entry.monitor = null;
     const errors: unknown[] = [];
-    try { await entry.publisher.close(); }
-    catch (error) { errors.push(error); }
+    const preview = entry.preview;
+    preview?.close();
+    const retired = await Promise.allSettled([
+      entry.publisher.close(),
+      preview && this.hasFrame(call)
+        ? this.request(call, { type: 'presentation-stop', presentationId: preview.info.presentationId }) : Promise.resolve(),
+    ]);
+    for (const result of retired) if (result.status === 'rejected') errors.push(result.reason);
+    if (retired[1].status === 'fulfilled') entry.preview = null;
     if (entry.publisher.snapshot().closed) {
       try { await entry.captureHub?.close(); }
       catch (error) { errors.push(error); }
-      if ((!entry.captureHub || entry.captureHub.getStats().closed) && call.sources.get(shareId) === entry) {
+      if (!entry.preview && (!entry.captureHub || entry.captureHub.getStats().closed) && call.sources.get(shareId) === entry) {
         call.sources.delete(shareId);
         this.emit(call, { type: 'state', callId: call.config.callId, publisherSessionId: call.config.sessionId,
           shareId, sourceInstanceId: entry.source.instanceId, state: 'closed' });

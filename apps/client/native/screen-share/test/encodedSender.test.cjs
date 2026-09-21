@@ -42,6 +42,28 @@ test('no watcher means no native submission; initial/resumed admission waits for
   await m.flow.close(); assert.deepEqual(m.errors, []);
 });
 
+test('a minimized source discards paused AUs and resumes only on an unchanged real IDR', async () => {
+  const m = model();
+  m.flow.setConnected(true); m.flow.setDemand(true);
+  m.flow.packet(m.frame(1, true));
+  m.flow.setCapturePaused(true);
+  m.tick(22000);
+  m.flow.packet(m.frame(2, true));
+  assert.equal(m.submitted.length, 1);
+  assert.equal(m.flow.snapshot().sourcePausedPackets, 1);
+  m.flow.setCapturePaused(false);
+  m.flow.packet(m.frame(3));
+  assert.equal(m.submitted.length, 1);
+  const resumed = m.frame(4, true);
+  m.flow.packet(resumed);
+  assert.equal(m.submitted.length, 2);
+  assert.equal(m.submitted[1].data, resumed.data);
+  assert.equal(m.submitted[1].timestampUs, resumed.timestampUs);
+  assert.equal(m.flow.snapshot().capturePaused, false);
+  await m.flow.close();
+  assert.deepEqual(m.errors, []);
+});
+
 test('real feedback reserves headroom and rounds down to AMF steps without claiming hardware application', async () => {
   const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
   m.feedback(1, 1234567);

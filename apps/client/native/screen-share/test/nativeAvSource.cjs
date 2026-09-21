@@ -54,9 +54,16 @@ app.whenReady().then(async () => {
 process.on('message', message => {
   const run = async () => {
     assert.equal(typeof message.id, 'string');
-    assert.ok(['tone-start', 'tone-stop', 'close-source'].includes(message.command));
+    assert.ok(['tone-start', 'tone-stop', 'minimize-source', 'restore-source', 'close-source'].includes(message.command));
     assert.ok(window && !window.isDestroyed());
     if (message.command === 'tone-start') await window.webContents.executeJavaScript('ownedAvTone.start()');
+    else if (message.command === 'minimize-source') {
+      window.minimize();
+      assert.equal(window.isMinimized(), true);
+    } else if (message.command === 'restore-source') {
+      window.restore();
+      assert.equal(window.isMinimized(), false);
+    }
     else {
       await window.webContents.executeJavaScript('ownedAvTone.stop()');
       if (message.command === 'close-source') window.destroy();

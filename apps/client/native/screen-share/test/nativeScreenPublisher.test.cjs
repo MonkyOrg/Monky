@@ -13,12 +13,13 @@ const deferred = () => {
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function fixture({ readiness, mode = 'p2p', closeGate } = {}) {
-  const endpoints = [], sent = [], errors = [];
+  const endpoints = [], sent = [], errors = [], previews = [];
   const source = { shareId: 'owned-screen', instanceId: randomUUID(), audio: false,
     video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } };
   const publisher = new NativeScreenPublisher({
     sessionId: 'publisher', channelId: 'room', mode, source, iceServers: [],
     send: async value => { sent.push(value); }, onError: error => errors.push(error), onState() {},
+    onPreview: value => previews.push(value),
     createEndpoint(options) {
       const endpoint = {
         options, ready: readiness?.promise ?? Promise.resolve(), demand: 0, closed: false, peers: new Set(), controls: [],
@@ -49,8 +50,31 @@ function fixture({ readiness, mode = 'p2p', closeGate } = {}) {
     const { quality: _quality, backend: _backend, ...scope } = request;
     return { ...scope, action: 'stop' };
   };
-  return { publisher, endpoints, sent, errors, watch, stop, source };
+  return { publisher, endpoints, sent, errors, previews, watch, stop, source };
 }
+
+test('local preview reuses only a demanded rendition and cannot create an extra endpoint', async () => {
+  const f = fixture(), first = f.watch('first'), second = f.watch('second', '480p30');
+  assert.deepEqual(f.previews, []);
+  assert.equal(f.endpoints.length, 0);
+  await f.publisher.receive(first);
+  await f.publisher.receive(second);
+  const frame = { data: Buffer.from([1, 2, 3]), timestampUs: 1000, keyframe: true };
+  f.endpoints[0].options.onPreview(frame);
+  f.endpoints[1].options.onPreview(frame);
+  assert.equal(f.previews.length, 1);
+  assert.equal(f.previews[0].frame, frame);
+  assert.equal(f.previews[0].video.width, 1920);
+  await f.publisher.receive(f.stop(first));
+  assert.equal(f.previews.at(-1), null);
+  f.endpoints[1].options.onPreview(frame);
+  assert.equal(f.previews.at(-1).video.width, 852);
+  await f.publisher.receive(f.stop(second));
+  assert.equal(f.previews.at(-1), null);
+  assert.equal(f.endpoints.length, 2);
+  assert.equal(f.publisher.snapshot().pipelines.length, 0);
+  await f.publisher.close();
+});
 
 test('announcing a source is inert; viewers of one profile share one real endpoint', async () => {
   const { publisher, endpoints, watch, stop } = fixture();
