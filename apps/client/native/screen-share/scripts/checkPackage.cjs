@@ -11,6 +11,8 @@ function verifySourceInputs() {
   const bin = path.join(root, 'bin', 'win32-x64');
   const rtc = JSON.parse(fs.readFileSync(path.join(bin, 'rtc-build.json'), 'utf8'));
   const capture = JSON.parse(fs.readFileSync(path.join(bin, 'capture-build.json'), 'utf8'));
+  assert.equal(capture.schemaVersion, 3, 'Rebuild capture for the source-bound hardware backend.');
+  verify(path.join(root, 'scripts', 'captureSourceBindings.cjs'), capture.sourceBindingRecipe);
   for (const [directory, records] of [
     [path.join(root, 'src', 'rtc'), rtc.sourceFiles],
     [path.join(root, 'src', 'capture'), capture.sourceFiles],

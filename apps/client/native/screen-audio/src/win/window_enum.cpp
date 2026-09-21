@@ -15,6 +15,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <set>
 
 namespace {
 
@@ -50,6 +51,18 @@ std::wstring GetProcessImagePath(DWORD pid) {
   }
   CloseHandle(h);
   return result;
+}
+
+std::string GetProcessCreation(DWORD pid) {
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  if (!process) return {};
+  FILETIME creation{}, exit{}, kernel{}, user{};
+  const bool observed = WaitForSingleObject(process, 0) == WAIT_TIMEOUT &&
+      GetProcessTimes(process, &creation, &exit, &kernel, &user);
+  CloseHandle(process);
+  if (!observed) return {};
+  const auto born = (static_cast<uint64_t>(creation.dwHighDateTime) << 32) | creation.dwLowDateTime;
+  return born ? std::to_string(born) : std::string{};
 }
 
 BOOL CALLBACK EnumProc(HWND hwnd, LPARAM lParam) {
@@ -149,11 +162,15 @@ Napi::Value platform_list_windows(Napi::Env env) {
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     std::wstring procPath = GetProcessImagePath(pid);
+    const auto creation = GetProcessCreation(pid);
+    DWORD observedPid = 0;
+    if (!IsWindow(hwnd) || !GetWindowThreadProcessId(hwnd, &observedPid) || observedPid != pid) continue;
 
     Napi::Object obj = Napi::Object::New(env);
     obj.Set("hwnd", Napi::Number::New(env, static_cast<double>(reinterpret_cast<uintptr_t>(hwnd))));
     obj.Set("title", Napi::String::New(env, WideToUtf8(title)));
     obj.Set("processId", Napi::Number::New(env, static_cast<double>(pid)));
+    obj.Set("processCreationTime100ns", creation.empty() ? env.Null() : Napi::String::New(env, creation));
     obj.Set("processPath", Napi::String::New(env, WideToUtf8(procPath)));
     obj.Set("isIconic", Napi::Boolean::New(env, iconic));
     obj.Set("isVisible", Napi::Boolean::New(env, true));
@@ -170,6 +187,111 @@ Napi::Value platform_list_windows(Napi::Env env) {
   }
 
   return arr;
+}
+
+namespace {
+struct MonitorRecord {
+  std::wstring deviceId, deviceName, name;
+  RECT bounds{};
+  bool primary = false;
+};
+
+struct MonitorEnumeration {
+  std::vector<MonitorRecord> records;
+  bool failed = false;
+};
+
+BOOL CALLBACK EnumMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM parameter) noexcept {
+  auto& enumeration = *reinterpret_cast<MonitorEnumeration*>(parameter);
+  try {
+    if (enumeration.records.size() >= 64) {
+      enumeration.failed = true;
+      return FALSE;
+    }
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    DISPLAY_DEVICEW device{};
+    device.cb = sizeof(device);
+    if (!GetMonitorInfoW(monitor, &info) ||
+        !EnumDisplayDevicesW(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME) ||
+        !device.DeviceID[0]) {
+      enumeration.failed = true;
+      return FALSE;
+    }
+    const auto width = info.rcMonitor.right - info.rcMonitor.left;
+    const auto height = info.rcMonitor.bottom - info.rcMonitor.top;
+    if (width < 1 || width > 32768 || height < 1 || height > 32768) {
+      enumeration.failed = true;
+      return FALSE;
+    }
+    enumeration.records.push_back({device.DeviceID, info.szDevice, device.DeviceString,
+        info.rcMonitor, (info.dwFlags & MONITORINFOF_PRIMARY) != 0});
+    return TRUE;
+  } catch (...) {
+    enumeration.failed = true;
+    return FALSE;
+  }
+}
+
+Napi::Object MonitorObject(Napi::Env env, const MonitorRecord& monitor) {
+  auto bounds = Napi::Object::New(env);
+  bounds.Set("x", monitor.bounds.left);
+  bounds.Set("y", monitor.bounds.top);
+  bounds.Set("width", monitor.bounds.right - monitor.bounds.left);
+  bounds.Set("height", monitor.bounds.bottom - monitor.bounds.top);
+  auto result = Napi::Object::New(env);
+  result.Set("deviceId", WideToUtf8(monitor.deviceId));
+  result.Set("deviceName", WideToUtf8(monitor.deviceName));
+  result.Set("name", WideToUtf8(monitor.name));
+  result.Set("bounds", bounds);
+  result.Set("isPrimary", monitor.primary);
+  return result;
+}
+
+bool ReadMonitors(Napi::Env env, MonitorEnumeration& enumeration) {
+  // Win32 metadata only: this does not create a graphics device or acquire pixels.
+  const auto previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  if (!previous) {
+    Napi::Error::New(env, "Cannot obtain physical monitor coordinates").ThrowAsJavaScriptException();
+    return false;
+  }
+  const auto ok = EnumDisplayMonitors(nullptr, nullptr, EnumMonitor, reinterpret_cast<LPARAM>(&enumeration));
+  SetThreadDpiAwarenessContext(previous);
+  std::set<std::wstring> ids;
+  for (const auto& monitor : enumeration.records)
+    if (!ids.insert(monitor.deviceId).second) enumeration.failed = true;
+  if (!ok || enumeration.failed) {
+    Napi::Error::New(env, "Cannot enumerate unambiguous monitor device identities").ThrowAsJavaScriptException();
+    return false;
+  }
+  return true;
+}
+}  // namespace
+
+Napi::Value platform_list_monitors(const Napi::CallbackInfo& info) {
+  MonitorEnumeration enumeration;
+  if (!ReadMonitors(info.Env(), enumeration)) return info.Env().Undefined();
+  auto result = Napi::Array::New(info.Env(), enumeration.records.size());
+  for (uint32_t index = 0; index < enumeration.records.size(); ++index)
+    result.Set(index, MonitorObject(info.Env(), enumeration.records[index]));
+  return result;
+}
+
+Napi::Value platform_get_monitor_state(const Napi::CallbackInfo& info) {
+  if (info.Length() != 1 || !info[0].IsString()) {
+    Napi::TypeError::New(info.Env(), "A monitor device interface identity is required").ThrowAsJavaScriptException();
+    return info.Env().Undefined();
+  }
+  const auto id = info[0].As<Napi::String>().Utf8Value();
+  if (id.empty() || id.size() >= 128 || id.find('\0') != std::string::npos || id.rfind("\\\\?\\DISPLAY#", 0) != 0) {
+    Napi::TypeError::New(info.Env(), "Invalid monitor device interface identity").ThrowAsJavaScriptException();
+    return info.Env().Undefined();
+  }
+  MonitorEnumeration enumeration;
+  if (!ReadMonitors(info.Env(), enumeration)) return info.Env().Undefined();
+  for (const auto& monitor : enumeration.records)
+    if (WideToUtf8(monitor.deviceId) == id) return MonitorObject(info.Env(), monitor);
+  return info.Env().Null();
 }
 
 // Restaura (desminimiza) e traz uma janela para o primeiro plano pelo handle, para

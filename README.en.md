@@ -95,18 +95,29 @@ Bugs start in [Discussions › Bug Reports](https://github.com/MonkyOrg/Monky/di
 
 ## 💻 For developers
 
-Requirements: Node.js 22+ (the version CI uses) and npm. On Windows, the native screen-audio module needs Python 3.11 and Visual Studio Build Tools (MSVC).
+Requirements: Node.js 22+ (the version CI uses) and npm. On Windows, native modules need Python 3.11 x64 and Visual Studio 2022 C++ tools (MSVC). For screen capture, also check ATL/MFC and the Windows SDK version in the guide below.
 
 ```bash
-npm install
+npm ci
 npm run build
 npm start
 npm test
 ```
 
-To share windows through the native libobs/AMF path on Windows, also prepare
-the runtime following the [module guide](apps/client/native/screen-share/README.en.md).
-This preparation is required before packaging the Windows application.
+For native **window, monitor or Game Capture** on Windows x64, follow the
+[module guide](apps/client/native/screen-share/README.en.md): rebuilding addons
+for the pinned Electron, preparing libobs/WebRTC and meeting Python 3.11/MSVC/SDK
+prerequisites are separate steps. Video uses H.264 through AMD AMF or NVIDIA
+NVENC; AV1 is unavailable. The selected source is probed after confirmation,
+with no automatic Chromium/software fallback and no compatibility guarantee
+based on GPU brand. `npm ci` and `npm run build` alone do not prepare this runtime.
+Explicitly rebuilding `screen-audio` with the local `node-gyp` after `npm ci`
+is also mandatory in an existing checkout; `prepare:native-screen` builds
+`screen-share` RTC/capture, not `screen_audio.node`.
+
+Preparation is required before Windows packaging. When redistributing, include
+licenses, the same-tag code and the native source archive with its JSON manifest
+as described in the guide; do not copy just the executable or mix OBS runtimes.
 
 Architecture details live in [Architecture](https://monkyorg.github.io/Monky/en/arquitetura), the contribution flow in [CONTRIBUTING.en.md](CONTRIBUTING.en.md) and the server commands in the [Monky CLI manual](https://monkyorg.github.io/Monky/en/cli). The project's original specification — with MVP and roadmap — is kept in [docs/especificacao-tecnica.md](docs/especificacao-tecnica.md).
 

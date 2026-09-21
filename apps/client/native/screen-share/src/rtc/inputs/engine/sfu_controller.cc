@@ -1118,10 +1118,11 @@ class NativeSfuController final : public SfuController {
       cancellation->Check();
       transport.pending_producer_id.clear();
       native_started = true;
-      const auto codec_options = audio::OpusCodecOptions();
+      const auto codec_options = producer->audio_source
+          ? audio::OpusCodecOptions() : SfuVideoCodecOptions(encodings.front());
       producer->native.reset(transport.send->Produce(
           producer.get(), producer->track.get(), &encodings,
-          producer->audio_source ? &codec_options : nullptr, nullptr, app_data));
+          &codec_options, nullptr, app_data));
       if (!producer->native) throw Error("ERR_RTC_PRODUCER", "SFU returned no producer");
       ++transport.creations;
       producer->server_id = producer->native->GetId();

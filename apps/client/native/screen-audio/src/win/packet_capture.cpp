@@ -1,5 +1,6 @@
 #include "wasapi_capture.h"
 #include <napi.h>
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <limits>
@@ -54,6 +55,8 @@ napi_value FormatValue(napi_env env, const Format& f) {
   return value;
 }
 
+struct DeliveryCredit;
+
 struct State {
   explicit State(napi_env env) : env(env), lease(CaptureOwner::packet),
       sessionId(std::to_string(nextSession.fetch_add(1))) {}
@@ -63,6 +66,8 @@ struct State {
   std::atomic<bool> stop{false};
   std::atomic<uint64_t> packets{0}, frames{0}, delivered{0}, overflows{0};
   PacketBudget budget;
+  // JS-thread-only admission receipts. They do not own native RTC processing.
+  std::vector<std::shared_ptr<DeliveryCredit>> deliveryCredits;
   std::atomic<size_t> pendingEvents{0};
   uint32_t excludedPid = 0;
   uint32_t expectedPid = 0;
@@ -91,9 +96,69 @@ struct State {
     std::lock_guard<std::mutex> lock(mutex);
     if (errorCode.empty()) { errorCode = code; errorMessage = message; }
     stop.store(true);
+    budget.Wake();
   }
 };
 using Shared = std::shared_ptr<State>;
+
+struct DeliveryCredit {
+  std::weak_ptr<State> owner;
+  napi_ref promise = nullptr;
+  bool held = true;
+};
+
+void ReleaseCredit(std::shared_ptr<DeliveryCredit> credit) noexcept {
+  if (!credit->held) return;
+  credit->held = false;
+  if (auto state = credit->owner.lock()) {
+    if (credit->promise) {
+      napi_delete_reference(state->env, credit->promise);
+      credit->promise = nullptr;
+    }
+    state->budget.Release();
+    auto& credits = state->deliveryCredits;
+    credits.erase(std::remove(credits.begin(), credits.end(), credit), credits.end());
+  }
+}
+
+struct CreditCallback {
+  std::shared_ptr<DeliveryCredit> credit;
+  bool rejected;
+};
+
+napi_value AcknowledgeDelivery(napi_env env, napi_callback_info info) noexcept {
+  void* data = nullptr;
+  if (napi_get_cb_info(env, info, nullptr, nullptr, nullptr, &data) != napi_ok) return nullptr;
+  auto& callback = *static_cast<CreditCallback*>(data);
+  if (auto state = callback.credit->owner.lock()) {
+    if (callback.credit->held && callback.rejected && !state->stop.load())
+      state->Fail("ERR_AUDIO_CALLBACK", "The packet capture admission acknowledgement rejected");
+  }
+  ReleaseCredit(callback.credit);
+  napi_value undefined = nullptr;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
+
+napi_value CreditHandler(napi_env env, const std::shared_ptr<DeliveryCredit>& credit, bool rejected) {
+  auto data = std::make_unique<CreditCallback>(CreditCallback{credit, rejected});
+  napi_value callback;
+  NapiCheck(napi_create_function(env, "acknowledgeAudioAdmission", NAPI_AUTO_LENGTH,
+      AcknowledgeDelivery, data.get(), &callback));
+  NapiCheck(napi_add_finalizer(env, callback, data.get(), [](napi_env, void* data, void*) {
+    delete static_cast<CreditCallback*>(data);
+  }, nullptr, nullptr));
+  data.release();
+  return callback;
+}
+
+void AwaitAdmission(napi_env env, napi_value promise, const std::shared_ptr<DeliveryCredit>& credit) {
+  NapiCheck(napi_create_reference(env, promise, 1, &credit->promise));
+  napi_value then, ignored;
+  NapiCheck(napi_get_named_property(env, promise, "then", &then));
+  napi_value callbacks[] = {CreditHandler(env, credit, false), CreditHandler(env, credit, true)};
+  NapiCheck(napi_call_function(env, promise, then, 2, callbacks, &ignored));
+}
 
 void ReleaseProducer(State& state, napi_threadsafe_function_release_mode mode = napi_tsfn_release) noexcept {
   std::lock_guard<std::mutex> lock(state.tsfnMutex);
@@ -130,20 +195,25 @@ napi_value Snapshot(State& state) {
 }
 
 // Callback exceptions stop capture explicitly; never escape through a C ABI.
-void Call(State& state, napi_value callback, napi_value event) {
-  napi_value ignored;
-  const auto status = napi_call_function(state.env, Null(state.env), callback, 1, &event, &ignored);
+napi_value Call(State& state, napi_value callback, napi_value event) {
+  napi_value result = nullptr;
+  const auto status = napi_call_function(state.env, Null(state.env), callback, 1, &event, &result);
   if (status == napi_pending_exception) {
+    napi_value ignored;
     napi_get_and_clear_last_exception(state.env, &ignored);
     state.Fail("ERR_AUDIO_CALLBACK", "The packet capture event callback threw");
   } else if (status != napi_ok) {
     state.Fail("ERR_AUDIO_CALLBACK", "Cannot invoke the packet capture event callback");
   }
+  return status == napi_ok ? result : nullptr;
 }
 
 void Finish(State& state) noexcept {
   if (state.finished || !state.workDone || !state.deliveryFinalized || state.pendingEvents.load()) return;
   state.finished = true;
+  // Callback promises only reserve admission space; capture shutdown cannot
+  // wait for RTC processing, which is retired separately by each subscriber.
+  while (!state.deliveryCredits.empty()) ReleaseCredit(state.deliveryCredits.back());
   // Both the MTA work and the TSFN queue are gone before exclusivity is released.
   state.lease.Release();
   if (!state.envClosing) {
@@ -228,13 +298,14 @@ struct Event {
 void Deliver(napi_env env, napi_value callback, void*, void* data) noexcept {
   std::unique_ptr<Event> event(static_cast<Event*>(data));
   auto& state = *event->owner;
-  if (!event->ready) state.budget.Release();
+  bool admissionPending = false;
   state.pendingEvents.fetch_sub(1);
 #ifdef MONKY_PACKET_CAPTURE_TEST
   if (!env) packet_capture_test::Observe("envNullDisposals");
   if (state.deliveryFinalized) packet_capture_test::Observe("deliveriesAfterFinalizer");
 #endif
   if (!env || !callback || state.envClosing) {
+    if (!event->ready) state.budget.Release();
     const auto owner = event->owner;
     event.reset();
     Finish(*owner);
@@ -271,12 +342,30 @@ void Deliver(napi_env env, napi_value callback, void*, void* data) noexcept {
       Set(env, value, "pcm", buffer);
       state.delivered.fetch_add(1);
     }
-    Call(state, callback, value);
+    const auto result = Call(state, callback, value);
+    if (!event->ready && result) {
+      bool isPromise = false;
+      NapiCheck(napi_is_promise(env, result, &isPromise));
+      if (isPromise) {
+        auto credit = std::make_shared<DeliveryCredit>();
+        credit->owner = event->owner;
+        state.deliveryCredits.push_back(credit);
+        admissionPending = true;
+        try { AwaitAdmission(env, result, credit); }
+        catch (...) { ReleaseCredit(credit); throw; }
+      }
+    }
   } catch (const std::exception& error) {
     state.Fail("ERR_AUDIO_DELIVERY", error.what());
   } catch (...) {
     state.Fail("ERR_AUDIO_DELIVERY", "Cannot deliver PCM packet");
   }
+  bool exceptionPending = false;
+  if (napi_is_exception_pending(env, &exceptionPending) == napi_ok && exceptionPending) {
+    napi_value ignored;
+    napi_get_and_clear_last_exception(env, &ignored);
+  }
+  if (!event->ready && !admissionPending) state.budget.Release();
 }
 
 bool Queue(State& state, std::unique_ptr<Event> event) {
@@ -284,9 +373,13 @@ bool Queue(State& state, std::unique_ptr<Event> event) {
 #ifdef MONKY_PACKET_CAPTURE_TEST
   packet_capture_test::BeforeQueue(packet);
 #endif
-  if (packet && !state.budget.Acquire()) {
+  // A refilled TSFN can dispatch more than its capacity in one turn. Wait for
+  // actual admission outside tsfnMutex so Stop/cleanup can always revoke it.
+  if (packet && !state.budget.Acquire() && !state.budget.WaitForSlot(state.stop)) {
+    if (state.stop.load()) return false;
     state.overflows.fetch_add(1);
-    throw Failure("ERR_AUDIO_OVERFLOW", "Bounded PCM delivery queue overflowed; capture terminated");
+    throw Failure("ERR_AUDIO_OVERFLOW",
+        "Bounded PCM delivery queue overflowed; capture admission timed out");
   }
   napi_status result = napi_ok;
   bool revoked = false;
@@ -404,6 +497,7 @@ void Cleanup(napi_async_cleanup_hook_handle, void* data) noexcept {
   auto& state = *static_cast<State*>(data);
   state.envClosing = true;
   state.stop.store(true);
+  state.budget.Wake();
 #ifdef MONKY_PACKET_CAPTURE_TEST
   packet_capture_test::Observe("cleanupStarts");
 #endif
@@ -414,6 +508,7 @@ void Cleanup(napi_async_cleanup_hook_handle, void* data) noexcept {
 void FinalizeSession(napi_env, void* data, void*) noexcept {
   std::unique_ptr<Shared> shared(static_cast<Shared*>(data));
   (*shared)->stop.store(true);
+  (*shared)->budget.Wake();
 }
 
 Shared Unwrap(napi_env env, napi_callback_info info, napi_value& self) {
@@ -429,6 +524,7 @@ napi_value Stop(napi_env env, napi_callback_info info) {
     napi_value self;
     auto state = Unwrap(env, info, self);
     state->stop.store(true);
+    state->budget.Wake();
     napi_value promise;
     NapiCheck(napi_get_named_property(env, self, "closed", &promise));
     return promise;

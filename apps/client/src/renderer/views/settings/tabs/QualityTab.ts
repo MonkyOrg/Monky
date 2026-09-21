@@ -18,12 +18,21 @@ import {
 } from '../qualityOptions';
 
 export class QualityTab {
+  private eventController: AbortController | null = null;
+  private customProfileController: AbortController | null = null;
+
+  private codecSelection(): string {
+    const codec = settingsStore.preferredVideoCodec;
+    return codec === 'auto' || codec === 'h264' || codec === 'av1' ? codec : '';
+  }
+
   private settingsError(error: unknown): void {
     console.warn('[QualityTab] Could not apply screen sharing settings:', error);
     void showAlert({ variant: 'danger', message: error instanceof Error ? error.message : t('screenShare.nativeProfileChangeBlocked') });
   }
 
   public renderHtml(): string {
+    const unavailableCodec = settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264';
     return `
       <!-- Quality Preset -->
       <div class="form-group">
@@ -59,16 +68,30 @@ export class QualityTab {
           ${t('settings.videoCodecSection')}
           <span class="material-symbols-outlined md-16" style="color: var(--text-muted); cursor: help;" title="${t('settings.videoCodecHelp')}">help</span>
         </label>
-        <select id="select-video-codec">
+        <select id="select-video-codec" aria-describedby="screen-codec-description screen-codec-preference-notice">
+          ${this.codecSelection() === '' ? `<option value="" disabled selected>${escapeHtml(t('settings.codecSelectAvailable'))}</option>` : ''}
           <option value="auto" ${settingsStore.preferredVideoCodec === 'auto' ? 'selected' : ''}>${t('settings.codecAuto')}</option>
-          <option value="av1" disabled ${settingsStore.preferredVideoCodec === 'av1' ? 'selected' : ''}>${t('settings.codecAv1')} · ${t('screenShare.comingSoon')}</option>
-          <option value="vp9" disabled ${settingsStore.preferredVideoCodec === 'vp9' ? 'selected' : ''}>${t('settings.codecVp9')} · ${t('screenShare.comingSoon')}</option>
-          <option value="vp8" disabled ${settingsStore.preferredVideoCodec === 'vp8' ? 'selected' : ''}>${t('settings.codecVp8')} · ${t('screenShare.comingSoon')}</option>
           <option value="h264" ${settingsStore.preferredVideoCodec === 'h264' ? 'selected' : ''}>${t('settings.codecH264')}</option>
+          <option value="av1" disabled ${settingsStore.preferredVideoCodec === 'av1' ? 'selected' : ''}>${t('settings.codecAv1')} · ${t('screenShare.comingSoon')}</option>
         </select>
-        <small style="display: block; margin-top: 6px; color: var(--text-muted); font-size: 11px;">
+        <small id="screen-codec-description" style="display: block; margin-top: 6px; color: var(--text-muted); font-size: 11px;">
           ${t('settings.videoCodecDesc')}
         </small>
+        <p id="screen-codec-preference-notice" role="status" ${unavailableCodec ? '' : 'hidden'}>${unavailableCodec
+          ? escapeHtml(t('settings.codecPreferenceUnavailable', { codec: settingsStore.preferredVideoCodec.toUpperCase() })) : ''}</p>
+      </div>
+
+      <div data-settings-section="screen-preview" data-settings-label="${escapeHtml(t('settings.screenPreviewSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <div>
+            <label for="checkbox-screen-preview-focus" style="cursor: pointer;">${t('settings.screenPreviewPauseLabel')}</label>
+            <small id="screen-preview-focus-description" style="display: block; color: var(--text-muted);">${t('settings.screenPreviewPauseDesc')}</small>
+          </div>
+          <label class="toggle-switch" aria-label="${escapeHtml(t('settings.screenPreviewPauseLabel'))}">
+            <input id="checkbox-screen-preview-focus" type="checkbox" aria-describedby="screen-preview-focus-description" ${settingsStore.screenSharePreviewPauseWhenUnfocused ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
       </div>
 
       <div data-settings-section="video-telemetry" data-settings-label="${escapeHtml(t('settings.telemetrySection'))}" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
@@ -253,16 +276,24 @@ export class QualityTab {
   }
 
   public attachEvents(container: HTMLElement): void {
+    this.cleanup();
+    this.eventController = new AbortController();
+    const options = { signal: this.eventController.signal };
     const selectPreset = container.querySelector<HTMLSelectElement>('#select-preset');
     const presetDetails = container.querySelector<HTMLElement>('#preset-details');
+    const checkboxPreviewFocus = container.querySelector<HTMLInputElement>('#checkbox-screen-preview-focus');
     const checkboxScreenTelemetry = container.querySelector<HTMLInputElement>('#checkbox-screen-telemetry');
     const selectScreenTelemetryPos = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-position');
     const selectScreenTelemetryMode = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-mode');
 
+    checkboxPreviewFocus?.addEventListener('change', () => {
+      settingsStore.screenSharePreviewPauseWhenUnfocused = checkboxPreviewFocus.checked;
+      settingsStore.save();
+    }, options);
     checkboxScreenTelemetry?.addEventListener('change', () => {
       settingsStore.screenShareTelemetryEnabled = checkboxScreenTelemetry.checked;
       settingsStore.save();
-    });
+    }, options);
     selectScreenTelemetryPos?.addEventListener('change', () => {
       const position = selectScreenTelemetryPos.value;
       if (position === 'top-right' || position === 'top-left' || position === 'bottom-right' || position === 'bottom-left') {
@@ -271,7 +302,7 @@ export class QualityTab {
       } else {
         console.warn('[QualityTab] Invalid telemetry position:', position);
       }
-    });
+    }, options);
     selectScreenTelemetryMode?.addEventListener('change', () => {
       const mode = selectScreenTelemetryMode.value;
       if (mode === 'simple' || mode === 'complete') {
@@ -280,7 +311,7 @@ export class QualityTab {
       } else {
         console.warn('[QualityTab] Invalid telemetry mode:', mode);
       }
-    });
+    }, options);
 
     selectPreset?.addEventListener('change', () => {
       const choices: QualityPresetType[] = ['ECONOMIC', 'NORMAL', 'HIGH', 'GAMING', 'ULTRA', 'CUSTOM'];
@@ -295,30 +326,37 @@ export class QualityTab {
       settingsStore.qualityPreset = val;
       settingsStore.save();
       webRtcManager.setQualityPreset(val);
+      this.customProfileController?.abort();
+      this.customProfileController = null;
       if (presetDetails) {
         presetDetails.innerHTML = this.getPresetDetailsHtml(val);
         if (val === 'CUSTOM') {
           this.attachCustomProfileListeners(container);
         }
       }
-    });
+    }, options);
 
     const selectCodec = container.querySelector<HTMLSelectElement>('#select-video-codec');
     selectCodec?.addEventListener('change', () => {
       const val = (['auto', 'h264'] as const).find(choice => choice === selectCodec.value);
       if (!val) {
         console.warn('[QualityTab] Invalid video codec:', selectCodec.value);
-        selectCodec.value = settingsStore.preferredVideoCodec;
+        selectCodec.value = this.codecSelection();
         this.settingsError(new Error(t('screenShare.codecsSoon')));
         return;
       }
       const profile = settingsStore.qualityPreset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[settingsStore.qualityPreset];
       try { webRtcManager.assertScreenSharingSettings(profile, val); }
-      catch (error) { selectCodec.value = settingsStore.preferredVideoCodec; this.settingsError(error); return; }
+      catch (error) { selectCodec.value = this.codecSelection(); this.settingsError(error); return; }
       settingsStore.preferredVideoCodec = val;
       settingsStore.save();
-      void webRtcManager.reapplyCodecPreferences().catch(error => this.settingsError(error));
-    });
+      selectCodec.querySelector('option[value=""]')?.remove();
+      const notice = container.querySelector<HTMLElement>('#screen-codec-preference-notice');
+      if (notice) { notice.hidden = true; notice.textContent = ''; }
+      void webRtcManager.reapplyCodecPreferences().catch(error => {
+        if (!options.signal.aborted) this.settingsError(error);
+      });
+    }, options);
 
     if (settingsStore.qualityPreset === 'CUSTOM') {
       this.attachCustomProfileListeners(container);
@@ -326,6 +364,9 @@ export class QualityTab {
   }
 
   private attachCustomProfileListeners(container: HTMLElement): void {
+    this.customProfileController?.abort();
+    this.customProfileController = new AbortController();
+    const options = { signal: this.customProfileController.signal };
     let previousProfile = { ...settingsStore.customProfile };
     const apply = () => {
       try { webRtcManager.assertScreenSharingSettings(settingsStore.customProfile); }
@@ -357,7 +398,7 @@ export class QualityTab {
         if (isNaN(val) || val <= 0) return;
         setValue(key, val);
         apply();
-      });
+      }, options);
     };
 
     // The dropdown of common values. Picking "custom" only reveals the box —
@@ -377,7 +418,7 @@ export class QualityTab {
         if (isNaN(val) || val <= 0) return;
         setValue(key, val);
         apply();
-      });
+      }, options);
     };
 
     const bindResolution = (kind: 'camera' | 'screen') => {
@@ -398,7 +439,7 @@ export class QualityTab {
         setValue(widthKey, width);
         setValue(heightKey, height);
         apply();
-      });
+      }, options);
 
       aspectSelect?.addEventListener('change', () => {
         const group = aspectRatioGroup(aspectSelect.value);
@@ -414,7 +455,7 @@ export class QualityTab {
         setValue(widthKey, target.width);
         setValue(heightKey, target.height);
         apply();
-      });
+      }, options);
     };
 
     bindSelect('audioBitrate', 'audioBitrateKbps');
@@ -433,5 +474,12 @@ export class QualityTab {
     bindInput('screenHeight', 'screenHeight');
     bindResolution('camera');
     bindResolution('screen');
+  }
+
+  public cleanup(): void {
+    this.eventController?.abort();
+    this.eventController = null;
+    this.customProfileController?.abort();
+    this.customProfileController = null;
   }
 }

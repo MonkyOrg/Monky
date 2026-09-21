@@ -1,5 +1,5 @@
 {
   "group": "novidades",
-  "pt-BR": "Compartilhamento nativo de janelas no Windows com AMD/AMF, perfil personalizado até Full HD a 120 FPS e imagem esticada sem barras. A qualidade escolhida pelo espectador muda o envio real; sem espectadores, o pipeline nativo é encerrado.",
-  "en": "Native window sharing on Windows with AMD/AMF, a custom profile up to Full HD at 120 FPS, and stretched video without bars. Viewer quality changes the actual transmitted media; with no viewers, the native pipeline shuts down."
+  "pt-BR": "Compartilhe telas, janelas e jogos no Windows com H.264 por AMD/AMF ou NVIDIA/NVENC, até Full HD a 120 FPS. A prévia funciona sem espectadores e pode pausar fora de foco. Só recebe a transmissão quem escolhe assistir, com qualidade por espectador.",
+  "en": "Share displays, windows and games on Windows with H.264 through AMD/AMF or NVIDIA/NVENC, up to Full HD at 120 FPS. Preview works without viewers and can pause when unfocused. Only people who choose to watch receive the stream, with per-viewer quality."
 }

@@ -3,14 +3,18 @@ import { performance } from 'node:perf_hooks';
 import {
   MessageType, botVoiceJoinedSchema, botVoiceLeftSchema, botVoiceSignalSchema, botVoiceTransportSchema,
   voiceRestrictionsUpdatedSchema,
-  type BotVoiceAuth, type BotVoiceJoinOptions, type VoiceStateUpdatePayload,
+  botVoiceParticipantSchema, botVoiceProducerSchema, botVoiceProducersSchema, botVoiceConsumerSchema, isReceivingBotVoice,
+  type BotVoiceAuth, type BotVoiceJoinOptions, type VoiceStateUpdatePayload, type BotVoiceParticipant, type BotVoiceProducer,
 } from '@monky/shared';
 import type { OpusPeer } from './OpusPeer';
+import type { SfuOpusReceiver } from './SfuOpusReceiver';
+import type { RtpPacket } from 'werift';
+import { VoiceAudioReceiver, type BotVoiceAudioReceiver } from './VoiceAudioReceiver';
 
 export const SPEAKING_HANGOVER_MS = 250;
 
 interface VoiceMessage { type: string; payload?: unknown; requestId?: string }
-interface Participant { sessionId: string; isBot: boolean }
+interface Participant { sessionId: string; userId: string; isBot: boolean; muted: boolean }
 interface PendingRequest {
   expected: MessageType;
   resolve: (payload: unknown) => void;
@@ -43,17 +47,30 @@ export class BotVoiceConnection {
   private count = 0;
   private earlySignals: VoiceMessage[] = [];
   private Peer?: typeof OpusPeer;
+  private receiveRequested = false;
+  private receiving = false;
+  private receiveEpoch = 0;
+  private ownState?: BotVoiceParticipant['voiceState'];
+  private audioReceiver?: VoiceAudioReceiver;
+  private receiveTasks: Promise<void> = Promise.resolve();
+  private queuedReception = 0;
+  private sfuReceive?: { transportId: string; peer: SfuOpusReceiver; epoch: number; consumed: Set<string> };
+  private readonly producers = new Map<string, BotVoiceProducer>();
 
   constructor(
     readonly channelId: string,
     private readonly auth: BotVoiceAuth,
     private readonly callbacks: VoiceCallbacks,
+    private publishAudio = true,
   ) {}
 
   get humanParticipantCount(): number { return this.count; }
   get isClosed(): boolean { return this.closed; }
+  get isReceivingAudio(): boolean { return !this.closed && this.receiving; }
+  get receivesAudio(): boolean { return this.receiveRequested; }
 
   async join(options: BotVoiceJoinOptions = {}): Promise<void> {
+    this.receiveRequested = options.receiveAudio === true;
     try {
       this.Peer = (await import('./OpusPeer')).OpusPeer;
       if (this.closed) throw new Error('Voice join cancelled.');
@@ -66,16 +83,23 @@ export class BotVoiceConnection {
         throw new Error('Invalid voice admission acknowledgement.');
       }
       this.admitted = true;
-      this.muted = !!(joined.voiceState.serverMuted || joined.voiceState.serverDeafened);
+      if (this.receiveRequested && (!joined.voiceState.receivesVoice || joined.voiceState.botVoicePermissions?.receive === false)) {
+        throw new Error('Server did not authorize microphone reception.');
+      }
+      this.publishAudio = this.publishAudio && joined.voiceState.botVoicePermissions?.publish !== false;
+      this.ownState = joined.voiceState;
+      this.muted = voiceIsMuted(joined.voiceState);
+      this.receiving = this.receiveRequested && isReceivingBotVoice(this.ownState);
       // The response snapshot supersedes broadcasts received during admission.
       this.participants.clear();
       for (const participant of joined.participants) {
-        this.participants.set(participant.voiceState.sessionId, {
-          sessionId: participant.voiceState.sessionId, isBot: participant.user.isBot === true,
-        });
+        this.rememberParticipant(participant);
       }
       this.updateParticipants();
-      if (this.auth.server.voiceMode === 'sfu') await this.joinSfu();
+      if (this.auth.server.voiceMode === 'sfu') {
+        if (this.publishAudio) await this.joinSfu();
+        if (this.receiving) await this.startSfuReception(this.receiveEpoch);
+      }
       else {
         for (const participant of this.participants.values()) this.ensurePeer(participant.sessionId, true);
         for (const signal of this.earlySignals.splice(0)) this.handle(signal);
@@ -97,6 +121,180 @@ export class BotVoiceConnection {
       await this.stop('join_failed', true);
       throw error;
     }
+  }
+
+  receiveAudio({ signal }: { signal?: AbortSignal } = {}): BotVoiceAudioReceiver {
+    if (this.closed || !this.admitted) throw new Error('Voice connection is not active.');
+    if (!this.receiveRequested) throw new Error('Join with receiveAudio: true and an approved receive_voice capability first.');
+    if (signal?.aborted) throw new Error('Voice reception was cancelled.');
+    if (this.audioReceiver) throw new Error('Only one audio receiver may own this voice connection at a time.');
+    const receiver = new VoiceAudioReceiver(async () => {
+      try { if (!this.closed && this.audioReceiver === receiver) await this.setDeafened(true); }
+      finally { if (this.audioReceiver === receiver) this.audioReceiver = undefined; }
+    }, (error) => this.callbacks.error(error), signal);
+    this.audioReceiver = receiver;
+    return receiver;
+  }
+
+  async setMuted(muted: boolean): Promise<void> {
+    await this.updateOwnVoiceState({ isMuted: muted });
+  }
+
+  async setDeafened(deafened: boolean): Promise<void> {
+    if (deafened && this.ownState) this.applyOwnState({ ...this.ownState, isDeafened: true });
+    await this.updateOwnVoiceState({ isDeafened: deafened });
+  }
+
+  private async updateOwnVoiceState(update: VoiceStateUpdatePayload): Promise<void> {
+    if (this.closed || !this.admitted) throw new Error('Voice connection is not active.');
+    if (update.isMuted === true) { this.muted = true; this.stopSpeaking(); }
+    try {
+      const response = await this.request(MessageType.VOICE_STATE_UPDATE, update, MessageType.VOICE_STATE_CHANGED);
+      const state = botVoiceParticipantSchema.shape.voiceState.parse(record(response)?.voiceState);
+      if (state.sessionId !== this.auth.currentUser.sessionId || state.channelId !== this.channelId) {
+        throw new Error('Invalid voice state acknowledgement.');
+      }
+      this.applyOwnState(state);
+      await this.receiveTasks;
+    } catch (error) {
+      this.fail(toError(error));
+      throw error;
+    }
+  }
+
+  private rememberParticipant(participant: BotVoiceParticipant): void {
+    this.participants.set(participant.voiceState.sessionId, {
+      sessionId: participant.voiceState.sessionId, userId: participant.user.id,
+      isBot: participant.user.isBot === true, muted: voiceIsMuted(participant.voiceState),
+    });
+  }
+
+  private receivePacket(sessionId: string, packet: RtpPacket): void {
+    const participant = this.participants.get(sessionId);
+    if (!this.isReceivingAudio || !participant || participant.isBot || participant.muted ||
+        sessionId === this.auth.currentUser.sessionId || packet.payload.length === 0 || packet.payload.length > 65535) return;
+    this.audioReceiver?.push({
+      channelId: this.channelId, sessionId, userId: participant.userId,
+      codec: 'opus', clockRate: 48000, channels: 2, opus: Uint8Array.from(packet.payload),
+      sequenceNumber: packet.header.sequenceNumber, timestamp: packet.header.timestamp, ssrc: packet.header.ssrc,
+      receivedAt: performance.now(),
+    });
+  }
+
+  private applyOwnState(state: BotVoiceParticipant['voiceState']): void {
+    this.ownState = state;
+    this.muted = voiceIsMuted(state);
+    if (this.muted) this.stopSpeaking();
+    const receiving = this.receiveRequested && isReceivingBotVoice(state);
+    if (receiving === this.receiving) return;
+    this.receiving = receiving;
+    const epoch = ++this.receiveEpoch;
+    this.audioReceiver?.clear();
+    if (this.auth.server.voiceMode === 'sfu') {
+      const previous = this.sfuReceive;
+      this.sfuReceive = undefined;
+      this.producers.clear();
+      if (previous) this.retireReceiver(previous.peer);
+      if (receiving) this.queueReception(() => this.startSfuReception(epoch), epoch);
+    } else {
+      for (const [sessionId, peer] of this.peers) {
+        void peer.setReceiving(receiving).catch((error: unknown) => this.failPeer(sessionId, peer, toError(error)));
+      }
+    }
+  }
+
+  private queueReception(operation: () => Promise<void>, epoch = this.receiveEpoch): void {
+    if (this.queuedReception >= 128) {
+      this.fail(new Error('Voice reception update queue exceeded.'));
+      return;
+    }
+    this.queuedReception++;
+    this.receiveTasks = this.receiveTasks.then(async () => {
+      if (!this.closed && this.receiving && epoch === this.receiveEpoch) await operation();
+    }).catch((error: unknown) => {
+      if (!this.closed && this.receiving && epoch === this.receiveEpoch && !(error instanceof VoiceSourceClosedError)) {
+        this.fail(toError(error));
+      }
+    }).finally(() => { this.queuedReception--; });
+  }
+
+  private async startSfuReception(epoch: number): Promise<void> {
+    const current = () => !this.closed && this.receiving && epoch === this.receiveEpoch;
+    try {
+      const response = await this.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
+        { channelId: this.channelId, direction: 'recv' }, MessageType.SFU_WEBRTC_TRANSPORT_CREATED);
+      if (!current()) return;
+      const { transportOptions } = botVoiceTransportSchema.parse(response);
+      const { SfuOpusReceiver, voiceRtpCapabilities } = await import('./SfuOpusReceiver');
+      if (!current()) return;
+      const peer = new SfuOpusReceiver(transportOptions, (sessionId, packet) => {
+        if (current() && this.sfuReceive?.peer === peer) this.receivePacket(sessionId, packet);
+      }, (error) => { if (current() && this.sfuReceive?.peer === peer) this.fail(error); });
+      const receiving = { transportId: transportOptions.id, peer, epoch, consumed: new Set<string>() };
+      this.sfuReceive = receiving;
+      const dtlsParameters = await peer.prepare();
+      if (!current()) return;
+      await this.request(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
+        channelId: this.channelId, transportId: transportOptions.id, dtlsParameters,
+      }, MessageType.SFU_WEBRTC_TRANSPORT_CONNECTED);
+      if (!current()) return;
+      await peer.ready;
+      const list = await this.request(MessageType.SFU_GET_PRODUCERS, { channelId: this.channelId }, MessageType.SFU_PRODUCERS_LIST);
+      if (!current()) return;
+      const snapshot = botVoiceProducersSchema.parse(list);
+      if (snapshot.channelId !== this.channelId) throw new Error('Invalid voice producer snapshot.');
+      this.participants.clear();
+      for (const participant of snapshot.participants) this.rememberParticipant(participant);
+      this.updateParticipants();
+      for (const producer of snapshot.producers) this.producers.set(producer.producerId, producer);
+      for (const producer of this.producers.values()) {
+        if (!current()) return;
+        try { await this.consumeSfu(producer, receiving, voiceRtpCapabilities); }
+        catch (error) { if (!(error instanceof VoiceSourceClosedError)) throw error; }
+      }
+    } catch (error) {
+      if (current()) throw error;
+    }
+  }
+
+  private async consumeSfu(
+    producer: BotVoiceProducer, receiving: NonNullable<BotVoiceConnection['sfuReceive']>,
+    capabilities?: typeof import('./SfuOpusReceiver')['voiceRtpCapabilities'],
+  ): Promise<void> {
+    const current = () => !this.closed && this.receiving && this.sfuReceive === receiving &&
+      this.producers.get(producer.producerId) === producer &&
+      this.participants.get(producer.producerSessionId)?.isBot === false;
+    if (!current() || receiving.consumed.has(producer.producerId)) return;
+    if (receiving.peer.needsRestart) {
+      const epoch = ++this.receiveEpoch;
+      this.sfuReceive = undefined;
+      this.producers.clear();
+      this.audioReceiver?.clear();
+      this.retireReceiver(receiving.peer);
+      try { await this.startSfuReception(epoch); }
+      catch (error) {
+        if (!this.closed && this.receiving && epoch === this.receiveEpoch) this.fail(toError(error));
+        throw error;
+      }
+      return;
+    }
+    const rtpCapabilities = capabilities ?? (await import('./SfuOpusReceiver')).voiceRtpCapabilities;
+    if (!current()) return;
+    const response = await this.request(MessageType.SFU_CONSUME, {
+      channelId: this.channelId, transportId: receiving.transportId, producerId: producer.producerId, rtpCapabilities,
+    }, MessageType.SFU_CONSUMED);
+    if (!current()) return;
+    const consumer = botVoiceConsumerSchema.parse(response);
+    if (consumer.channelId !== this.channelId || consumer.producerId !== producer.producerId ||
+        consumer.producerSessionId !== producer.producerSessionId) throw new Error('Invalid microphone consumer identity.');
+    receiving.consumed.add(producer.producerId);
+    await receiving.peer.add(consumer);
+  }
+
+  private retireReceiver(peer: SfuOpusReceiver): void {
+    const closing = peer.close().catch((error: unknown) => this.callbacks.error(toError(error)));
+    this.retiring.add(closing);
+    void closing.then(() => { this.retiring.delete(closing); });
   }
 
   private async joinSfu(): Promise<void> {
@@ -134,7 +332,9 @@ export class BotVoiceConnection {
         type: MessageType.RTC_SIGNAL,
         payload: { ...signal, subscriptionId, fromSessionId: this.auth.currentUser.sessionId, targetSessionId: sessionId },
       });
-    });
+    }, { publish: this.publishAudio, receive: this.receiving, packet: (packet) => {
+      if (this.peers.get(sessionId) === peer) this.receivePacket(sessionId, packet);
+    } });
     this.peers.set(sessionId, peer);
     // Admission's joining participant offers; existing members wait for it.
     // Session IDs still determine politeness when offers genuinely collide.
@@ -164,6 +364,11 @@ export class BotVoiceConnection {
 
   handle(message: VoiceMessage): boolean {
     const pending = message.requestId ? this.pending.get(message.requestId) : undefined;
+    if (pending?.expected === MessageType.SFU_CONSUMED && message.type === MessageType.SFU_PRODUCER_CLOSED) {
+      clearTimeout(pending.timer);
+      this.pending.delete(message.requestId!);
+      pending.reject(new VoiceSourceClosedError());
+    }
     if (pending && (message.type === pending.expected || message.type === MessageType.SERVER_ERROR)) {
       clearTimeout(pending.timer);
       this.pending.delete(message.requestId!);
@@ -187,7 +392,7 @@ export class BotVoiceConnection {
           return true;
         }
         const joined = botVoiceJoinedSchema.parse(message.payload);
-        this.participants.set(joined.sessionId, { sessionId: joined.sessionId, isBot: joined.user.isBot === true });
+        this.rememberParticipant(joined);
         if (this.admitted && this.auth.server.voiceMode === 'p2p') this.ensurePeer(joined.sessionId);
         this.updateParticipants();
         return true;
@@ -199,6 +404,17 @@ export class BotVoiceConnection {
           void this.stop('removed', false).catch((error: unknown) => this.callbacks.error(toError(error)));
         } else {
           this.participants.delete(left.sessionId);
+          this.audioReceiver?.clear(left.sessionId);
+          for (const [id, producer] of this.producers) {
+            if (producer.producerSessionId === left.sessionId) {
+              this.producers.delete(id);
+              this.sfuReceive?.consumed.delete(id);
+            }
+          }
+          if (this.sfuReceive) {
+            const receiver = this.sfuReceive;
+            this.queueReception(() => receiver.peer.removeSession(left.sessionId));
+          }
           const peer = this.peers.get(left.sessionId);
           this.peers.delete(left.sessionId);
           if (peer) this.retirePeer(peer);
@@ -229,16 +445,50 @@ export class BotVoiceConnection {
       if (message.type === MessageType.VOICE_RESTRICTIONS_UPDATED) {
         const restrictions = voiceRestrictionsUpdatedSchema.parse(message.payload);
         if (restrictions.userId === this.auth.currentUser.id) {
-          this.muted = restrictions.serverMuted || restrictions.serverDeafened;
-          if (this.muted) this.stopSpeaking();
+          if (this.ownState) this.applyOwnState({ ...this.ownState, ...restrictions });
+        }
+        for (const participant of this.participants.values()) {
+          if (participant.userId === restrictions.userId && (restrictions.serverMuted || restrictions.serverDeafened)) {
+            participant.muted = true;
+            this.audioReceiver?.clear(participant.sessionId);
+          }
         }
         return true;
       }
       if (message.type === MessageType.VOICE_STATE_CHANGED) {
-        const state = record(record(message.payload)?.voiceState);
-        if (state && state.sessionId === this.auth.currentUser.sessionId) {
-          this.muted = state.serverMuted === true || state.serverDeafened === true;
-          if (this.muted) this.stopSpeaking();
+        const parsed = botVoiceParticipantSchema.shape.voiceState.safeParse(record(message.payload)?.voiceState);
+        if (parsed.success && parsed.data.channelId === this.channelId) {
+          const state = parsed.data;
+          if (state.sessionId === this.auth.currentUser.sessionId) this.applyOwnState(state);
+          const participant = this.participants.get(state.sessionId);
+          if (participant) {
+            participant.muted = voiceIsMuted(state);
+            if (participant.muted) this.audioReceiver?.clear(state.sessionId);
+          }
+        }
+        return true;
+      }
+      if (message.type === MessageType.SFU_NEW_PRODUCER && this.auth.server.voiceMode === 'sfu' && this.receiving) {
+        const parsed = botVoiceProducerSchema.safeParse(message.payload);
+        if (parsed.success && parsed.data.channelId === this.channelId && !this.producers.has(parsed.data.producerId)) {
+          if (this.producers.size >= 1000) throw new Error('Voice producer limit exceeded.');
+          const producer = parsed.data;
+          this.producers.set(producer.producerId, producer);
+          this.queueReception(async () => {
+            if (this.sfuReceive) await this.consumeSfu(producer, this.sfuReceive);
+          });
+        }
+        return true;
+      }
+      if (message.type === MessageType.SFU_PRODUCER_CLOSED) {
+        const payload = record(message.payload);
+        if (payload?.channelId === this.channelId && typeof payload.producerId === 'string') {
+          const producerId = payload.producerId;
+          const producer = this.producers.get(producerId);
+          this.producers.delete(producerId);
+          this.sfuReceive?.consumed.delete(producerId);
+          if (producer) this.audioReceiver?.clear(producer.producerSessionId);
+          if (producer) this.queueReception(async () => { await this.sfuReceive?.peer.remove(producerId); });
         }
         return true;
       }
@@ -284,6 +534,7 @@ export class BotVoiceConnection {
 
   async writeOpus(frame: Uint8Array): Promise<void> {
     if (this.closed || !this.admitted) throw new Error('Voice connection is not active.');
+    if (!this.publishAudio) throw new Error('This voice connection is receive-only; publish_voice is not granted.');
     if (this.writing) throw new Error('Await writeOpus before writing the next frame.');
     validateOpus(frame);
     // Moderation suppresses transmission, not the application's playback clock.
@@ -382,13 +633,20 @@ export class BotVoiceConnection {
   private fail(error: Error): void {
     if (this.closed) return;
     this.callbacks.error(error);
-    void this.stop('transport_failed', true).catch((failure: unknown) => this.callbacks.error(toError(failure)));
+    void this.stop('transport_failed', true, error).catch((failure: unknown) => this.callbacks.error(toError(failure)));
   }
 
-  private stop(reason: string, notify: boolean): Promise<void> {
+  private stop(reason: string, notify: boolean, failure?: Error): Promise<void> {
     if (this.closing) return this.closing;
     const wasSpeaking = this.speaking;
     this.closed = true;
+    this.receiving = false;
+    this.receiveEpoch++;
+    this.audioReceiver?.finish(failure);
+    this.audioReceiver = undefined;
+    this.producers.clear();
+    if (this.sfuReceive) this.retireReceiver(this.sfuReceive.peer);
+    this.sfuReceive = undefined;
     this.stopSpeaking();
     if (notify && wasSpeaking && this.admitted) this.publishSpeaking(false);
     this.earlySignals = [];
@@ -419,6 +677,12 @@ function record(value: unknown): Record<string, unknown> | undefined {
     ? value as Record<string, unknown> : undefined;
 }
 function toError(error: unknown): Error { return error instanceof Error ? error : new Error(String(error)); }
+class VoiceSourceClosedError extends Error {
+  constructor() { super('Microphone producer closed during subscription.'); }
+}
+function voiceIsMuted(state: BotVoiceParticipant['voiceState']): boolean {
+  return !!(state.isMuted || state.isDeafened || state.serverMuted || state.serverDeafened);
+}
 
 export function validateOpus(frame: Uint8Array): void {
   if (!(frame instanceof Uint8Array) || frame.length < 1 || frame.length > 1275) {

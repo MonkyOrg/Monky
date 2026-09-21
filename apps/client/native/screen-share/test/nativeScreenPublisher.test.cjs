@@ -23,9 +23,10 @@ function fixture({ readiness, mode = 'p2p', closeGate } = {}) {
     createEndpoint(options) {
       const endpoint = {
         options, ready: readiness?.promise ?? Promise.resolve(), demand: 0, closed: false, peers: new Set(), controls: [],
-        async setDemand(count) {
+        async setDemand(count, preview = false) {
           this.demand = count;
-          if (count === 0) { if (closeGate) await closeGate.promise; this.closed = true; this.peers.clear(); }
+          this.preview = preview;
+          if (count === 0 && !preview) { if (closeGate) await closeGate.promise; this.closed = true; this.peers.clear(); }
         },
         async connectPeer(id, configuration) {
           assert.equal(this.closed, false);
@@ -53,12 +54,14 @@ function fixture({ readiness, mode = 'p2p', closeGate } = {}) {
   return { publisher, endpoints, sent, errors, previews, watch, stop, source };
 }
 
-test('local preview reuses only a demanded rendition and cannot create an extra endpoint', async () => {
+test('local preview uses an existing watched rendition and returns to local-only capture after the last viewer', async () => {
   const f = fixture(), first = f.watch('first'), second = f.watch('second', '480p30');
   assert.deepEqual(f.previews, []);
   assert.equal(f.endpoints.length, 0);
   await f.publisher.receive(first);
   await f.publisher.receive(second);
+  await f.publisher.setPreviewEnabled(true);
+  f.previews.length = 0;
   const frame = { data: Buffer.from([1, 2, 3]), timestampUs: 1000, keyframe: true };
   f.endpoints[0].options.onPreview(frame);
   f.endpoints[1].options.onPreview(frame);
@@ -71,8 +74,71 @@ test('local preview reuses only a demanded rendition and cannot create an extra 
   assert.equal(f.previews.at(-1).video.width, 852);
   await f.publisher.receive(f.stop(second));
   assert.equal(f.previews.at(-1), null);
-  assert.equal(f.endpoints.length, 2);
+  assert.equal(f.endpoints.length, 3);
+  assert.equal(f.endpoints[2].demand, 0);
+  assert.equal(f.endpoints[2].preview, true);
+  assert.equal(f.endpoints[2].options.quality, 'source');
+  await f.publisher.setPreviewEnabled(false);
   assert.equal(f.publisher.snapshot().pipelines.length, 0);
+  await f.publisher.close();
+});
+
+for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: local preview has no viewer, signaling or peer and stops when its own demand ends`, async () => {
+    const f = fixture({ mode });
+    await f.publisher.setPreviewEnabled(true);
+    assert.equal(f.endpoints.length, 1);
+    assert.equal(f.endpoints[0].demand, 0);
+    assert.equal(f.endpoints[0].preview, true);
+    assert.equal(f.endpoints[0].peers.size, 0);
+    assert.deepEqual(f.sent, []);
+    assert.equal(f.publisher.snapshot().viewers, 0);
+    f.endpoints[0].options.onPreview({ data: Buffer.from([1]), timestampUs: 1000, keyframe: true });
+    assert.equal(f.previews.at(-1).video.fps, 120);
+    await f.publisher.setPreviewEnabled(false);
+    assert.equal(f.endpoints[0].closed, true);
+    assert.equal(f.publisher.snapshot().pipelines.length, 0);
+    assert.deepEqual(f.sent, []);
+    await f.publisher.close();
+  });
+}
+
+test('pausing local preview never stops an existing spectator or creates another encoder', async () => {
+  const f = fixture();
+  await f.publisher.setPreviewEnabled(true);
+  const watched = f.watch('viewer');
+  await f.publisher.receive(watched);
+  assert.equal(f.endpoints.length, 1);
+  await f.publisher.setPreviewEnabled(false);
+  assert.equal(f.endpoints[0].closed, false);
+  assert.equal(f.endpoints[0].demand, 1);
+  assert.equal(f.endpoints[0].preview, false);
+  assert.deepEqual([...f.endpoints[0].peers], ['viewer']);
+  const before = f.previews.length;
+  f.endpoints[0].options.onPreview({ data: Buffer.from([1]), timestampUs: 1000, keyframe: true });
+  assert.equal(f.previews.length, before);
+  await f.publisher.receive(f.stop(watched));
+  assert.equal(f.endpoints[0].closed, true);
+  await f.publisher.close();
+});
+
+test('a different first viewer profile retires local-only capture before starting the selected rendition', async () => {
+  const f = fixture(), closing = deferred();
+  await f.publisher.setPreviewEnabled(true);
+  const original = f.endpoints[0];
+  original.setDemand = async function(count, preview) {
+    this.demand = count; this.preview = preview;
+    if (count === 0 && !preview) { await closing.promise; this.closed = true; }
+  };
+  const opening = f.publisher.receive(f.watch('viewer', '480p30'));
+  await tick();
+  assert.equal(f.endpoints.length, 1, 'The old capture must retire before a different profile is created.');
+  closing.resolve();
+  await opening;
+  assert.equal(original.closed, true);
+  assert.equal(f.endpoints.length, 2);
+  assert.equal(f.endpoints[1].options.quality, '480p30');
+  assert.equal(f.endpoints[1].preview, true);
   await f.publisher.close();
 });
 

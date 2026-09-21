@@ -89,16 +89,16 @@ if (!process.versions.electron) {
     await wait();
     assert(await evaluate(`(() => {
       const select = document.querySelector('#select-video-codec');
-      return select.value === 'av1' && select.dataset.inputs === '1' && select.dataset.changes === '1' && document.activeElement === select;
+      return select.value === 'h264' && select.dataset.inputs === '1' && select.dataset.changes === '1' && document.activeElement === select;
     })()`), 'Trusted pointer commits exactly once and keeps focus on original select');
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
-    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' });
-    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' });
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Home' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Home' });
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
     await wait();
-    assert(await evaluate(`document.querySelector('#select-video-codec').value === 'h264' && !document.querySelector('.monky-select-popup')`), 'Trusted keyboard selects without native picker');
+    assert(await evaluate(`document.querySelector('#select-video-codec').value === 'auto' && !document.querySelector('.monky-select-popup')`), 'Trusted keyboard selects without native picker');
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
     await wait();
@@ -371,6 +371,7 @@ async function runDropdownSmoke() {
     check(!hiddenKey.defaultPrevented && !popup() && hiddenModel.hidden, 'Hidden native device models are never enhanced or exposed');
     service.dispose();
   } finally {
+    quality.cleanup();
     service.dispose();
     settings.save = originals.save;
     settings.qualityPreset = originals.preset;

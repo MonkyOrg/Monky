@@ -935,20 +935,34 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     const originalSend = client.send;
     const originalCapture = navigator.mediaDevices.getUserMedia;
     const originalDisplay = navigator.mediaDevices.getDisplayMedia;
+    const originalNativeStart = globalRtc.startNativeScreenShare;
+    const originalCodec = settings.preferredVideoCodec;
+    const originalVideoPreset = videoService.currentPreset;
     const captureWith = handler => {
       navigator.mediaDevices.getUserMedia = handler;
       navigator.mediaDevices.getDisplayMedia = handler;
     };
     const pendingCaptures = [];
     const states = [];
+    let acquireNative;
+    let selection = 0;
+    let browserAcquisitions = 0;
+    const nativeSelections = [];
     const mount = () => {
+      picker.close();
       const modal = document.createElement('div');
       modal.innerHTML = '<button id="btn-share">Share</button><button id="btn-share-add">Add</button>'
         + '<button id="btn-cancel">Cancel</button><button id="modal-close">Close</button>'
-        + '<input type="hidden" id="chk-share-audio">';
+        + '<input type="hidden" id="chk-share-audio"><p id="share-capture-info"></p>';
       document.body.appendChild(modal);
       picker.modalEl = modal;
-      picker.selectedSourceId = 'screen:fixture';
+      picker.activeTab = 'screen';
+      picker.selectedSourceId = `native-monitor:${String(++selection).padStart(64, '0')}`;
+      picker.nativeCapabilities = { capture: true, captureAudio: true, receive: true,
+        captureKinds: ['monitor'], backend: 'libobs-amf', reason: null };
+      picker.sourceState = { status: 'ready', sources: [
+        { id: picker.selectedSourceId, type: 'screen', name: 'Owned fixture display', thumbnailDataUrl: '', appIconDataUrl: null },
+      ] };
       return modal;
     };
     const old = source();
@@ -958,19 +972,36 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     });
     voice.addScreenShare(old.stream.id);
     client.send = (type, payload) => { if (type === MessageType.VOICE_STATE_UPDATE) states.push(payload); };
+    settings.preferredVideoCodec = 'h264';
+    videoService.setQualityPreset('NORMAL');
+    captureWith(async () => { browserAcquisitions++; throw new Error('The picker must not fall back to Chromium capture.'); });
+    globalRtc.startNativeScreenShare = async (desktopSourceId, audio, thumbnail, isWanted, captureKind) => {
+      nativeSelections.push({ desktopSourceId, isWanted, captureKind });
+      check(captureKind === 'monitor' && desktopSourceId === picker.selectedSourceId,
+        'The picker forwards exactly the selected native source and method');
+      const stream = await acquireNative();
+      // Deliberately return even an obsolete descriptor to exercise the
+      // picker's cleanup independently of the native controller's own guard.
+      videoService.registerNativeScreenShare(stream, {
+        desktopSourceId, captureKind, thumbnail, audioBitrateKbps: 128,
+        source: { shareId: stream.id, instanceId: crypto.randomUUID(), audio,
+          video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 6000 } },
+      });
+      return stream;
+    };
     try {
       let acquisitions = 0;
-      captureWith(async () => {
+      acquireNative = async () => {
         acquisitions++;
         throw new DOMException('Picker cancelled', 'AbortError');
-      });
+      };
       mount();
       await picker.startSharing('replace');
       check(acquisitions === 1 && old.stream.getVideoTracks()[0].readyState === 'live'
-        && voice.screenShareIds.includes(old.stream.id) && states.length === 0,
+        && voice.screenShareIds.includes(old.stream.id) && states.length === 0 && browserAcquisitions === 0,
       'Cancelling acquisition preserves the existing share and never requests fallback capture');
 
-      captureWith(() => new Promise(resolve => { pendingCaptures.push(resolve); }));
+      acquireNative = () => new Promise(resolve => { pendingCaptures.push(resolve); });
       mount();
       const abandoned = picker.startSharing('replace');
       await until(() => pendingCaptures.length === 1, 'Old picker waits for acquisition');
@@ -978,30 +1009,35 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
       const currentModal = mount();
       const current = picker.startSharing('add');
       await until(() => pendingCaptures.length === 2, 'A new picker may start after cancelling the old one');
-      const late = source();
-      pendingCaptures.shift()(late.stream);
+      const late = new MediaStream();
+      pendingCaptures.shift()(late);
       await abandoned;
-      check(late.stream.getVideoTracks()[0].readyState === 'ended' && picker.modalEl === currentModal && picker.isStarting,
+      check(!videoService.getScreenStream(late.id) && !videoService.getNativeScreenCapture(late.id)
+        && !nativeSelections[1].isWanted() && nativeSelections[2].isWanted()
+        && picker.modalEl === currentModal && picker.isStarting,
         'A stale picker cannot clear the loading state or close its successor');
-      const added = source();
-      pendingCaptures.shift()(added.stream);
+      const added = new MediaStream();
+      pendingCaptures.shift()(added);
       await current;
-      check(voice.screenShareIds.includes(old.stream.id) && voice.screenShareIds.includes(added.stream.id)
-        && globalRtc.localScreenShares.has(added.stream.id) && !picker.modalEl,
+      check(voice.screenShareIds.includes(old.stream.id) && voice.screenShareIds.includes(added.id)
+        && videoService.getNativeScreenCapture(added.id)?.captureKind === 'monitor'
+        && !globalRtc.localScreenShares.has(added.id) && !picker.modalEl,
       'The current picker publishes the added share through the common control flow');
 
-      const replacement = source();
-      captureWith(async () => replacement.stream);
+      const replacement = new MediaStream();
+      acquireNative = async () => replacement;
       states.length = 0;
       mount();
       await picker.startSharing('replace');
-      check(old.stream.getVideoTracks()[0].readyState === 'ended' && added.stream.getVideoTracks()[0].readyState === 'ended'
-        && replacement.stream.getVideoTracks()[0].readyState === 'live'
-        && voice.screenShareIds.length === 1 && voice.screenShareIds[0] === replacement.stream.id,
+      check(old.stream.getVideoTracks()[0].readyState === 'ended' && !videoService.getScreenStream(added.id)
+        && !videoService.getNativeScreenCapture(added.id) && videoService.getScreenStream(replacement.id) === replacement
+        && videoService.getNativeScreenCapture(replacement.id)?.captureKind === 'monitor'
+        && voice.screenShareIds.length === 1 && voice.screenShareIds[0] === replacement.id,
       'Replacing from the picker retires all old shares but preserves the newly acquired source');
       check(states.length === 1 && states[0].isScreenSharing === true
-        && states[0].screenShareIds[0] === replacement.stream.id,
+        && states[0].screenShareIds[0] === replacement.id && states[0].nativeScreenShares[0].shareId === replacement.id,
       'Replacement publishes one final screen state instead of an intermediate sharing=false');
+      check(browserAcquisitions === 0, 'Native picker scenarios never request the disabled Chromium path');
 
       acquisitions = 0;
       captureWith(async () => {
@@ -1013,9 +1049,12 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
         'Denied capture never starts a second capture request');
     } finally {
       picker.close();
-      for (const resolve of pendingCaptures) resolve(source().stream);
+      for (const resolve of pendingCaptures) resolve(new MediaStream());
       navigator.mediaDevices.getUserMedia = originalCapture;
       navigator.mediaDevices.getDisplayMedia = originalDisplay;
+      globalRtc.startNativeScreenShare = originalNativeStart;
+      settings.preferredVideoCodec = originalCodec;
+      videoService.setQualityPreset(originalVideoPreset);
       client.send = originalSend;
       videoService.stopScreenShare();
       globalRtc.clearLocalScreenTracks();

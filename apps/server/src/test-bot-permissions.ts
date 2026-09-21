@@ -50,7 +50,7 @@ test('manual and legacy bots receive no grant until a human manager reviews an e
   const bot = await f.connectBot();
   await bot.peer.error(MessageType.COMMAND_REGISTER, { commands: [] }, ProtocolErrorCode.BOT_CAPABILITIES_INVALID);
   await bot.peer.error(MessageType.COMMAND_REGISTER,
-    { commands: [], requestedCapabilities: ['receive_voice'] }, ProtocolErrorCode.BOT_CAPABILITIES_INVALID);
+    { commands: [], requestedCapabilities: ['receive_screen'] }, ProtocolErrorCode.BOT_CAPABILITIES_INVALID);
   const declaration = { requestedCapabilities: [...BOT_CAPABILITIES], commands: [{ name: 'ping', description: 'Ping' }] };
   assert.equal((await bot.peer.request(MessageType.COMMAND_REGISTER, declaration)).type, MessageType.COMMAND_REGISTERED);
   assert.equal(f.botPermissions.get(f.botId)?.reviewRequired, true);
@@ -60,7 +60,7 @@ test('manual and legacy bots receive no grant until a human manager reviews an e
     { botId: f.botId, commandName: 'ping', channelId: f.textId }, ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
   for (const type of [
     MessageType.CHAT_SEND, MessageType.CHAT_LOAD_HISTORY, MessageType.CHAT_REACTION_ADD,
-    MessageType.VOICE_JOIN, MessageType.RTC_SIGNAL, MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
+    MessageType.VOICE_JOIN, MessageType.SFU_CONSUME, MessageType.SFU_CREATE_WEBRTC_TRANSPORT,
     MessageType.SFU_PRODUCE, MessageType.BOT_LOCAL_SOURCE_REQUEST, MessageType.BOT_LOCAL_TASK_REQUEST,
     MessageType.BOT_LOCAL_TASK_CONTROL, MessageType.BOT_LOCAL_TASK_EVENT, MessageType.BOT_LOCAL_MEDIA_SIGNAL,
     MessageType.SELECTOR_CREATE, MessageType.SELECTOR_LIST, MessageType.SELECTOR_UPDATE, MessageType.SELECTOR_FINALIZE,
@@ -68,7 +68,7 @@ test('manual and legacy bots receive no grant until a human manager reviews an e
     MessageType.COMMAND_PROMPT, MessageType.COMMAND_RESPONSE, MessageType.COMMAND_SOUND_DOWNLOAD,
     MessageType.COMMAND_AUTOCOMPLETE_RESULT, MessageType.COMMAND_AUDIO_PREVIEW_RESULT,
   ]) await bot.peer.error(type, {}, ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
-  for (const type of [MessageType.SFU_CONSUME, MessageType.SOUNDBOARD_PLAY, MessageType.BOT_CREATE,
+  for (const type of [MessageType.SOUNDBOARD_PLAY, MessageType.BOT_CREATE,
     MessageType.BOT_INSTALL, MessageType.BOT_PERMISSIONS_UPDATE, MessageType.CHAT_REQUEST_UPLOAD_TOKEN]) {
     await bot.peer.error(type, {}, ProtocolErrorCode.PERMISSION_DENIED);
   }
@@ -263,9 +263,24 @@ test('voice grants permit only publishing and revocation tears down the active r
   await f.approve(['publish_voice']);
   bot = await f.connectBot();
   await f.caller.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
-  assert.equal((await bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId })).type, MessageType.VOICE_USER_JOINED);
+  const joined = await bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  assert.equal(joined.type, MessageType.VOICE_USER_JOINED);
+  const permissions = { publish: true, receive: false, publishRequested: true, receiveRequested: false };
+  assert.deepEqual(record(joined.payload.voiceState).botVoicePermissions, permissions);
   const botSession = text(record(bot.auth.payload.currentUser).sessionId);
   const callerSession = text(record(f.caller.auth.payload.currentUser).sessionId);
+  for (const [type, key, flag] of [
+    [MessageType.ADMIN_MUTE_USER, 'muted', 'serverMuted'],
+    [MessageType.ADMIN_DEAFEN_USER, 'deafened', 'serverDeafened'],
+  ] as const) {
+    for (const enabled of [true, false]) {
+      await f.owner.peer.request(type, { targetUserId: f.botId, [key]: enabled });
+      const state = f.signalingService.getVoiceState(botSession);
+      assert.equal(state?.[flag], enabled);
+      assert.deepEqual(state?.botVoicePermissions, permissions);
+      assert.deepEqual(f.botPermissions.get(f.botId)?.granted, ['publish_voice']);
+    }
+  }
   const signal = (from: string, target: string, direction: string) => ({
     fromSessionId: from, targetSessionId: target, signalType: 'offer', subscriptionId: 'peer-epoch',
     sdp: { type: 'offer', sdp: `v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=${direction}\r\n` },
@@ -278,6 +293,213 @@ test('voice grants permit only publishing and revocation tears down the active r
   await f.approve([]);
   await f.caller.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT && message.payload.sessionId === botSession, before);
   assert.equal(f.signalingService.getVoiceState(botSession), undefined);
+});
+
+test('listening-only bots do not report unrequested publication as a denial', async (t) => {
+  const f = await fixture(t);
+  let bot = await f.connectBot();
+  await bot.peer.request(MessageType.COMMAND_REGISTER, { requestedCapabilities: ['receive_voice'], commands: [] });
+  await f.approve(['receive_voice']);
+  bot = await f.connectBot();
+  await f.caller.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  const joined = await bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId, receiveAudio: true });
+  assert.equal(joined.type, MessageType.VOICE_USER_JOINED);
+  const permissions = { publish: false, receive: true, publishRequested: false, receiveRequested: true };
+  assert.deepEqual(record(joined.payload.voiceState).botVoicePermissions, permissions);
+  const announced = await f.caller.peer.wait(message =>
+    message.type === MessageType.VOICE_USER_JOINED && message.payload.sessionId === joined.payload.sessionId);
+  assert.deepEqual(record(announced.payload.voiceState).botVoicePermissions, permissions);
+});
+
+test('listening requires its own grant and opt-in, exposes authoritative directions and follows deafen', async (t) => {
+  const f = await fixture(t);
+  let bot = await f.connectBot();
+  await bot.peer.request(MessageType.COMMAND_REGISTER, { requestedCapabilities: ['publish_voice', 'receive_voice'], commands: [] });
+  await f.approve(['publish_voice']);
+  bot = await f.connectBot();
+  await bot.peer.error(MessageType.VOICE_JOIN, { channelId: f.voiceId, receiveAudio: true }, ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
+  const publishing = await bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  assert.equal(record(publishing.payload.voiceState).receivesVoice, false);
+  assert.deepEqual(record(publishing.payload.voiceState).botVoicePermissions,
+    { publish: true, receive: false, publishRequested: true, receiveRequested: true });
+  await f.approve(['receive_voice']);
+  bot = await f.connectBot();
+  await f.caller.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  const joined = await bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId, receiveAudio: true });
+  assert.equal(joined.type, MessageType.VOICE_USER_JOINED, JSON.stringify(joined.payload));
+  assert.equal(record(joined.payload.voiceState).receivesVoice, true);
+  assert.deepEqual(record(joined.payload.voiceState).botVoicePermissions,
+    { publish: false, receive: true, publishRequested: true, receiveRequested: true });
+  const botSession = text(record(bot.auth.payload.currentUser).sessionId);
+  const callerSession = text(record(f.caller.auth.payload.currentUser).sessionId);
+  const signal = (direction: string) => ({
+    fromSessionId: botSession, targetSessionId: callerSession, signalType: 'offer',
+    subscriptionId: 'bot-listen-session',
+    sdp: { type: 'offer', sdp: `v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=${direction}\r\n` },
+  });
+  await bot.peer.error(MessageType.RTC_SIGNAL, signal('sendrecv'), ProtocolErrorCode.PERMISSION_DENIED);
+  const since = f.caller.peer.messages.length;
+  bot.peer.send(MessageType.RTC_SIGNAL, signal('recvonly'));
+  await f.caller.peer.wait(message => message.type === MessageType.RTC_SIGNAL, since);
+  const forgedPermissions = { publish: true, receive: true, publishRequested: true, receiveRequested: true };
+  await bot.peer.error(MessageType.VOICE_STATE_UPDATE, { receivesVoice: true, botVoicePermissions: forgedPermissions },
+    ProtocolErrorCode.PERMISSION_DENIED);
+  const forged = await f.caller.peer.request(MessageType.VOICE_STATE_UPDATE,
+    { receivesVoice: true, botVoicePermissions: forgedPermissions });
+  assert.equal(record(forged.payload.voiceState).receivesVoice, undefined);
+  assert.equal(record(forged.payload.voiceState).botVoicePermissions, undefined);
+  const deafened = await bot.peer.request(MessageType.VOICE_STATE_UPDATE, { isDeafened: true });
+  assert.equal(record(deafened.payload.voiceState).isDeafened, true);
+  await bot.peer.error(MessageType.RTC_SIGNAL, signal('recvonly'), ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.request(MessageType.VOICE_STATE_UPDATE, { isDeafened: false });
+  await f.owner.peer.request(MessageType.ADMIN_DEAFEN_USER, { targetUserId: f.botId, deafened: true });
+  await bot.peer.error(MessageType.RTC_SIGNAL, signal('recvonly'), ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.request(MessageType.VOICE_STATE_UPDATE, { isDeafened: false });
+  assert.equal(f.signalingService.getVoiceState(botSession)?.serverDeafened, true);
+  await f.owner.peer.request(MessageType.ADMIN_DEAFEN_USER, { targetUserId: f.botId, deafened: false });
+  const restored = f.caller.peer.messages.length;
+  bot.peer.send(MessageType.RTC_SIGNAL, signal('recvonly'));
+  await f.caller.peer.wait(message => message.type === MessageType.RTC_SIGNAL, restored);
+  await f.approve([]);
+  await f.caller.peer.wait(message => message.type === MessageType.VOICE_USER_LEFT && message.payload.sessionId === botSession, restored);
+  assert.equal(f.signalingService.getVoiceState(botSession), undefined);
+});
+
+test('SFU receiving bots may consume only same-room human microphones on their own receive transport', { timeout: 30000 }, async (t) => {
+  const f = await fixture(t);
+  await f.serverRepo.updateServer({ voiceMode: 'sfu' });
+  let bot = await f.connectBot();
+  await bot.peer.request(MessageType.COMMAND_REGISTER, { requestedCapabilities: ['publish_voice', 'receive_voice'], commands: [] });
+  await f.approve(['publish_voice', 'receive_voice']);
+  bot = await f.connectBot();
+  await bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  await bot.peer.error(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'recv' }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.request(MessageType.VOICE_LEAVE, { channelId: f.voiceId });
+  await bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId, receiveAudio: true });
+  await f.caller.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  const humanTransport = await f.caller.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'send' });
+  const humanTransportId = text(record(humanTransport.payload.transportOptions).id);
+  const screenTransport = await f.caller.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, {
+    channelId: f.voiceId, direction: 'send', purpose: 'screen',
+  });
+  const screenTransportId = text(record(screenTransport.payload.transportOptions).id);
+  const sent = await bot.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'send' });
+  const sendId = text(record(sent.payload.transportOptions).id);
+  const received = await bot.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'recv' });
+  const recvId = text(record(received.payload.transportOptions).id);
+  const rtpParameters = (ssrc: number) => ({
+    codecs: [{ mimeType: 'audio/opus', payloadType: 111, clockRate: 48000, channels: 2, parameters: {}, rtcpFeedback: [] }],
+    encodings: [{ ssrc }], rtcp: { cname: 'synthetic' },
+  });
+  const produce = async (mediaType: 'mic' | 'screen_audio', ssrc: number) => {
+    const message = await f.caller.peer.request(MessageType.SFU_PRODUCE, {
+      channelId: f.voiceId, transportId: mediaType === 'mic' ? humanTransportId : screenTransportId,
+      kind: 'audio', rtpParameters: rtpParameters(ssrc),
+      appData: mediaType === 'mic' ? { mediaType } : { mediaType, shareId: 'owned-screen' },
+    });
+    assert.equal(message.type, MessageType.SFU_PRODUCED, JSON.stringify(message.payload));
+    return text(message.payload.id);
+  };
+  const mic = await produce('mic', 1111);
+  const screen = await produce('screen_audio', 2222);
+  const botAudio = await bot.peer.request(MessageType.SFU_PRODUCE, {
+    channelId: f.voiceId, transportId: sendId, kind: 'audio', rtpParameters: rtpParameters(3333), appData: { mediaType: 'mic' },
+  });
+  assert.equal(botAudio.type, MessageType.SFU_PRODUCED, 'Creating a receiver preserves the bot send transport');
+  const list = await bot.peer.request(MessageType.SFU_GET_PRODUCERS, { channelId: f.voiceId });
+  assert.deepEqual(records(list.payload.producers).map(producer => producer.producerId), [mic]);
+  const consume = {
+    channelId: f.voiceId, transportId: recvId, producerId: mic,
+    rtpCapabilities: { codecs: [{ kind: 'audio', mimeType: 'audio/opus', preferredPayloadType: 111,
+      clockRate: 48000, channels: 2, parameters: {}, rtcpFeedback: [] }], headerExtensions: [] },
+  };
+  for (const producerId of [screen, text(botAudio.payload.id), 'unknown-producer']) {
+    await bot.peer.error(MessageType.SFU_CONSUME, { ...consume, producerId }, ProtocolErrorCode.PERMISSION_DENIED);
+  }
+  for (const transportId of [humanTransportId, sendId]) {
+    await bot.peer.error(MessageType.SFU_CONSUME, { ...consume, transportId }, ProtocolErrorCode.PERMISSION_DENIED);
+  }
+  await bot.peer.error(MessageType.SFU_CONSUME, { ...consume, channelId: f.textId }, ProtocolErrorCode.BAD_REQUEST);
+  const consumed = await bot.peer.request(MessageType.SFU_CONSUME, consume);
+  assert.equal(consumed.type, MessageType.SFU_CONSUMED, JSON.stringify(consumed.payload));
+  assert.equal(consumed.payload.producerId, mic);
+  assert.equal(consumed.payload.producerSessionId, record(f.caller.auth.payload.currentUser).sessionId);
+  const microphone = f.wsServer['sfuManager']['producers'].get(mic);
+  assert.ok(microphone);
+  assert.equal(microphone.producer.paused, false);
+  await f.caller.peer.request(MessageType.VOICE_STATE_UPDATE, { isMuted: true });
+  assert.equal(microphone.producer.paused, true, 'A muted microphone must be blocked before packets reach the bot');
+  await bot.peer.request(MessageType.SFU_CONSUMER_SET_PAUSED, {
+    channelId: f.voiceId, consumerId: text(consumed.payload.id), paused: false,
+  });
+  assert.equal(microphone.producer.paused, true, 'A consumer cannot bypass the source mute');
+  await f.caller.peer.request(MessageType.VOICE_STATE_UPDATE, { isMuted: false });
+  assert.equal(microphone.producer.paused, false);
+  const callerId = text(record(f.caller.auth.payload.currentUser).id);
+  await f.owner.peer.request(MessageType.ADMIN_MUTE_USER, { targetUserId: callerId, muted: true });
+  assert.equal(microphone.producer.paused, true);
+  await f.caller.peer.request(MessageType.VOICE_STATE_UPDATE, { isMuted: false });
+  assert.equal(microphone.producer.paused, true, 'Personal unmute cannot override administrative mute');
+  await f.owner.peer.request(MessageType.ADMIN_MUTE_USER, { targetUserId: callerId, muted: false });
+  assert.equal(microphone.producer.paused, false);
+  await bot.peer.request(MessageType.VOICE_STATE_UPDATE, { isDeafened: true });
+  assert.equal(f.wsServer['sfuManager']['transports'].has(recvId), false);
+  assert.equal(f.wsServer['sfuManager']['transports'].has(sendId), true);
+  assert.equal(f.wsServer['sfuManager']['consumers'].has(text(consumed.payload.id)), false);
+  await bot.peer.error(MessageType.SFU_CONSUME, consume, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.request(MessageType.VOICE_STATE_UPDATE, { isDeafened: false });
+  const resumed = await bot.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'recv' });
+  const resumedId = text(record(resumed.payload.transportOptions).id);
+  await f.owner.peer.request(MessageType.ADMIN_DEAFEN_USER, { targetUserId: f.botId, deafened: true });
+  assert.equal(f.wsServer['sfuManager']['transports'].has(resumedId), false);
+  await f.approve(['publish_voice']);
+  assert.equal(f.wsServer['sfuManager']['transports'].has(sendId), false);
+});
+
+test('late SFU receive allocation cannot replace reception restored after deafen', { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  await f.serverRepo.updateServer({ voiceMode: 'sfu' });
+  let bot = await f.connectBot();
+  await bot.peer.request(MessageType.COMMAND_REGISTER, { requestedCapabilities: ['receive_voice'], commands: [] });
+  await f.approve(['receive_voice']);
+  bot = await f.connectBot();
+  await bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId, receiveAudio: true });
+  const sfu = f.wsServer['sfuManager'];
+  const allocate = sfu.createWebRtcTransport.bind(sfu);
+  let announce!: (id: string) => void;
+  let release!: () => void;
+  const allocated = new Promise<string>(resolve => { announce = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let first = true;
+  t.mock.method(sfu, 'createWebRtcTransport', async (...args: Parameters<typeof allocate>) => {
+    const transport = await allocate(...args);
+    if (first) {
+      first = false;
+      announce(transport.id);
+      await gate;
+    }
+    return transport;
+  });
+  const pending = bot.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'recv' });
+  try {
+    const oldId = await allocated;
+    await f.owner.peer.request(MessageType.ADMIN_DEAFEN_USER, { targetUserId: f.botId, deafened: true });
+    assert.equal(sfu['transports'].has(oldId), false);
+    await f.owner.peer.request(MessageType.ADMIN_DEAFEN_USER, { targetUserId: f.botId, deafened: false });
+    const replacing = bot.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'recv' });
+    release();
+    const [obsolete, replacement] = await Promise.all([pending, replacing]);
+    const replacementId = text(record(replacement.payload.transportOptions).id);
+    assert.equal(obsolete.type, MessageType.SERVER_ERROR);
+    assert.equal(obsolete.payload.code, ProtocolErrorCode.BAD_REQUEST);
+    assert.deepEqual([...sfu['transports'].keys()], [replacementId]);
+    assert.equal(sfu['transports'].get(replacementId)?.transport.closed, false);
+    await bot.peer.request(MessageType.VOICE_LEAVE, { channelId: f.voiceId });
+    assert.equal(sfu['transports'].size, 0);
+  } finally {
+    release();
+    await pending;
+  }
 });
 
 test('revoking interactive capabilities closes durable selectors and voice miniapps without reviving stale controls', async (t) => {
@@ -471,7 +693,9 @@ test('the bot dispatcher is closed by default and separates publication, privacy
   assert.deepEqual(botMessageCapabilities(MessageType.CHAT_SEND, { replyToMessageId: 'message' }), ['send_messages', 'read_messages']);
   assert.deepEqual(botMessageCapabilities(MessageType.BOT_LOCAL_TASK_REQUEST, {}), ['local_execution']);
   assert.deepEqual(botMessageCapabilities(MessageType.COMMAND_SOUND_DOWNLOAD, {}), ['commands', 'sound_download']);
-  assert.equal(botMessageCapabilities(MessageType.SFU_CONSUME, {}), undefined);
+  assert.deepEqual(botMessageCapabilities(MessageType.SFU_CONSUME, {}), ['receive_voice']);
+  assert.deepEqual(botMessageCapabilities(MessageType.VOICE_JOIN, { receiveAudio: true }), ['receive_voice']);
+  assert.deepEqual(botMessageCapabilities(MessageType.VOICE_JOIN, {}), ['publish_voice']);
   assert.equal(botMessageCapabilities(MessageType.BOT_LOCAL_TASK_ACCEPT, {}), undefined);
   assert.equal(botMessageCapabilities(MessageType.ROLE_ASSIGN, {}), undefined);
 });

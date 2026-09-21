@@ -30,7 +30,9 @@ test('text-only BotClient does not load the WebRTC transport dependency', () => 
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
-async function fixture(t, withHuman = false) {
+async function fixture(t, withHuman = false, {
+  requestedCapabilities = ['commands', 'publish_voice'], grantedCapabilities = requestedCapabilities,
+} = {}) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await once(server, 'listening');
   let socket;
@@ -56,9 +58,14 @@ async function fixture(t, withHuman = false) {
       } else if (msg.type === MessageType.VOICE_JOIN) {
         joins++;
         joinPayloads.push(msg.payload);
+        const joined = { ...self, voiceState: { ...self.voiceState, receivesVoice: msg.payload.receiveAudio === true,
+          botVoicePermissions: {
+            publish: grantedCapabilities.includes('publish_voice'), receive: grantedCapabilities.includes('receive_voice'),
+            publishRequested: requestedCapabilities.includes('publish_voice'), receiveRequested: requestedCapabilities.includes('receive_voice'),
+          } } };
         send(MessageType.VOICE_USER_JOINED, {
-          channelId: 'voice', sessionId: self.voiceState.sessionId, ...self,
-          participants: withHuman ? [self, human] : [self],
+          channelId: 'voice', sessionId: self.voiceState.sessionId, ...joined,
+          participants: withHuman ? [joined, human] : [joined],
         }, msg.requestId);
       } else if (msg.type === MessageType.VOICE_LEAVE) {
         send(MessageType.VOICE_USER_LEFT, { channelId: 'voice', sessionId: self.voiceState.sessionId }, msg.requestId);
@@ -78,7 +85,7 @@ async function fixture(t, withHuman = false) {
     });
   });
   function send(type, payload, requestId) { socket.send(JSON.stringify({ type, payload, requestId })); }
-  const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities: ['commands', 'publish_voice'], token: 'token', serverUrl: `ws://127.0.0.1:${server.address().port}`, autoReconnect: false });
+  const bot = new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities, token: 'token', serverUrl: `ws://127.0.0.1:${server.address().port}`, autoReconnect: false });
   bot.on('error', (error) => errors.push(error));
   const connected = once(bot, 'connected');
   bot.connect({ serverId: 'server' });
@@ -97,6 +104,7 @@ test('invocation voice join options travel only with their admission request', a
   const f = await fixture(t);
   await assert.rejects(f.bot.joinVoice('server', 'voice', { invocationId: '' }), /Invalid voice join options/);
   await assert.rejects(f.bot.joinVoice('server', 'voice', { sessionId: 'forged' }), /Invalid voice join options/);
+  await assert.rejects(f.bot.joinVoice('server', 'voice', { receiveAudio: true }), /Declare receive_voice/);
   await f.bot.joinVoice('server', 'voice', { invocationId: 'command-invocation' });
   assert.equal(f.joinPayloads[0].invocationId, 'command-invocation');
   assert.equal(f.joinPayloads[0].isMuted, false);
@@ -108,6 +116,28 @@ test('invocation voice join options travel only with their admission request', a
   assert.deepEqual(f.errors, []);
 });
 
+test('concurrent receive joins share admission and honor its authoritative publication grant', async t => {
+  const f = await fixture(t, false, {
+    requestedCapabilities: ['commands', 'publish_voice', 'receive_voice'],
+    grantedCapabilities: ['commands', 'receive_voice'],
+  });
+  const first = f.bot.joinVoice('server', 'voice', { receiveAudio: true });
+  const second = f.bot.joinVoice('server', 'voice', { receiveAudio: true });
+  assert.equal(first, second);
+  const voice = await first;
+  assert.equal(f.joins(), 1);
+  assert.equal(voice.isReceivingAudio, true);
+  await assert.rejects(voice.writeOpus(SILENCE), /receive-only/);
+  await assert.rejects(f.bot.joinVoice('server', 'voice'), /reception/);
+  const receiver = voice.receiveAudio();
+  const pending = receiver.next();
+  const disconnected = once(f.bot, 'voiceDisconnected');
+  f.disconnect();
+  await disconnected;
+  assert.equal((await pending).done, true);
+  assert.equal(voice.isReceivingAudio, false);
+  assert.deepEqual(f.errors, []);
+});
 test('BotClient joins once, preserves transport on roster changes, sends real Opus and leaves cleanly', { timeout: 30000 }, async (t) => {
   const f = await fixture(t, true);
   const first = f.bot.joinVoice('server', 'voice');

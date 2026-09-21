@@ -309,11 +309,12 @@ test('create wizard connects initial features, pins a vendored SDK and generates
   const f = fixture(t);
   tty(t, true);
   const target = path.join(f.root, 'generated-bot');
-  t.mock.method(bundle, 'bundleDependencies', (_root, stage) => {
-    fs.mkdirSync(path.join(stage, 'node_modules', '@monky', 'bot-sdk'), { recursive: true });
+  t.mock.method(bundle, 'bundlePackage', (_root, stage) => {
+    fs.writeFileSync(path.join(stage, 'package.json'), '{"name":"@monky/bot-sdk","version":"1.0.0"}');
   });
-  t.mock.method(toolingProcess, 'runNpm', args => {
+  t.mock.method(toolingProcess, 'runNpm', (args, options) => {
     assert.equal(args[0], 'pack');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(options.cwd, 'package.json'))).name, '@monky/bot-sdk');
     const vendor = args[args.indexOf('--pack-destination') + 1];
     fs.writeFileSync(path.join(vendor, 'monky-bot-sdk-fixture.tgz'), 'package fixture; real packaging is covered separately');
     return '';

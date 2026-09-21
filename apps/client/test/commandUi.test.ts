@@ -754,6 +754,25 @@ test('preview volume scope belongs to the command, independently of fields and o
   }
 });
 
+test('command preparation shows a visible localized status without inventing progress or asking for consent again', (context) => {
+  const previousLanguage = getLanguage();
+  context.after(() => setLanguage(previousLanguage));
+  const store = createChatStore();
+  store.selectCommand('channel', command);
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  for (const language of ['pt-BR', 'en'] as const) {
+    setLanguage(language);
+    const html = renderCompactCommand(draft, 'channel', [], true, true, undefined, language, true);
+    assert.match(html, /class="bot-status bot-command-preparation" role="status">/);
+    assert.ok(html.includes(`<span>${t('localExecution.preparing')}</span>`));
+    assert.match(html, /bot-loading-spinner/);
+    assert.doesNotMatch(html, /<progress/);
+    assert.doesNotMatch(renderCompactCommand(draft, 'channel', [], true, true, undefined, language),
+      /bot-command-preparation|bot-loading-spinner/);
+  }
+});
+
 test('download confirmation phase shows pending copy without transfer progress', () => {
   const html = renderBotInvocation({
     invocationId: 'download-confirming', channelId: 'channel', botId: 'music-bot', commandName: 'play',

@@ -1,9 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -15,6 +18,7 @@ namespace screen_audio {
 constexpr uint64_t kSafeInteger = 9007199254740991ULL;
 constexpr size_t kMaxPacketBytes = 1024 * 1024;
 constexpr size_t kMaxQueuedPackets = 32;
+constexpr uint32_t kPacketAdmissionTimeoutMs = 500;
 constexpr uint32_t kDiscontinuity = 1, kSilent = 2, kTimestampError = 4;
 
 struct Failure : std::runtime_error {
@@ -188,7 +192,8 @@ class Timeline {
   bool seen_ = false, valid_ = false;
 };
 
-// Data slots are independent of ready/error/closed control delivery.
+// Data slots cover both queued callbacks and asynchronous consumer admission.
+// Ready/error/closed delivery never depends on a data slot.
 class PacketBudget {
  public:
   bool Acquire() {
@@ -198,10 +203,30 @@ class PacketBudget {
     }
     return false;
   }
-  void Release() { queued_.fetch_sub(1); }
+  bool WaitForSlot(const std::atomic<bool>& stop) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    bool acquired = false;
+    available_.wait_for(lock, std::chrono::milliseconds(kPacketAdmissionTimeoutMs),
+        [&] { return stop.load() || (acquired = Acquire()); });
+    return acquired;
+  }
+  void Release() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      queued_.fetch_sub(1);
+    }
+    available_.notify_one();
+  }
+  void Wake() {
+    // Synchronize with the wait predicate so stop cannot lose its wakeup.
+    { std::lock_guard<std::mutex> lock(mutex_); }
+    available_.notify_all();
+  }
   size_t queued() const { return queued_.load(); }
  private:
   std::atomic<size_t> queued_{0};
+  std::mutex mutex_;
+  std::condition_variable available_;
 };
 
 }  // namespace screen_audio

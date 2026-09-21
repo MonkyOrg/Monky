@@ -204,7 +204,27 @@ test('dependency bundling preserves per-requester versions, installed optional m
   const from = (name) => createRequire(path.join(f.output, 'node_modules', name, 'package.json'));
   assert.equal(from('first')('./index.js'), '1.0.0');
   assert.equal(from('second')('./index.js'), '2.0.0');
-  assert.equal(createRequire(path.join(f.output, 'node_modules', 'alpha', 'node_modules', 'beta', 'package.json'))('alpha'), '1.0.0');
+  assert.equal(createRequire(from('alpha').resolve('beta/package.json'))('alpha'), '1.0.0');
+});
+
+test('hoisted dependency registries keep one module identity regardless of consumer order', (t) => {
+  for (const names of [['first', 'second', 'registry'], ['registry', 'second', 'first']]) {
+    const f = fixture(t);
+    json(path.join(f.source, 'package.json'), { dependencies: Object.fromEntries(names.map(name => [name, '*'])) });
+    moduleAt(path.join(f.source, 'node_modules', 'registry'), 'registry', '1.0.0', {},
+      'module.exports = { entries: new WeakMap() };');
+    for (const name of ['first', 'second']) {
+      moduleAt(path.join(f.source, 'node_modules', name), name, '1.0.0',
+        { dependencies: { registry: '*' } }, 'module.exports = require("registry");');
+    }
+    assert.equal(bundleDependencies(f.source, f.output).packageCount, 3);
+    const installed = createRequire(path.join(f.output, 'package.json'));
+    assert.strictEqual(installed('first'), installed('second'));
+    assert.strictEqual(installed('first'), installed('registry'));
+    const key = {};
+    installed('first').entries.set(key, 'registered once');
+    assert.equal(installed('second').entries.get(key), 'registered once');
+  }
 });
 
 test('workspace dependencies resolve from their real workspace, not a different caller copy', (t) => {
@@ -216,7 +236,7 @@ test('workspace dependencies resolve from their real workspace, not a different 
   fs.writeFileSync(path.join(sdk, 'dist', 'index.js'), 'module.exports = require("leaf");');
   moduleAt(path.join(workspace, 'node_modules', 'leaf'), 'leaf', '2.0.0');
   moduleAt(path.join(f.source, 'node_modules', 'leaf'), 'leaf', '9.0.0');
-  json(path.join(f.source, 'package.json'), { dependencies: { '@monky/bot-sdk': '*' } });
+  json(path.join(f.source, 'package.json'), { dependencies: { '@monky/bot-sdk': '*', leaf: '*' } });
   fs.mkdirSync(path.join(f.source, 'node_modules', '@monky'), { recursive: true });
   fs.symlinkSync(sdk, path.join(f.source, 'node_modules', '@monky', 'bot-sdk'), process.platform === 'win32' ? 'junction' : 'dir');
   for (const name of ['LICENSE', 'LICENSE-MIT'])
@@ -227,6 +247,7 @@ test('workspace dependencies resolve from their real workspace, not a different 
   for (const name of ['LICENSE', 'LICENSE-MIT'])
     assert.deepEqual(fs.readFileSync(path.join(f.output, 'node_modules', '@monky', 'bot-sdk', name)),
       fs.readFileSync(path.join(workspace, name)));
+  assert.equal(createRequire(path.join(f.output, 'package.json'))('leaf'), '9.0.0');
 });
 
 test('installed Monky dependencies retain GPL and historical MIT notices when bundled into a bot', (t) => {
@@ -246,6 +267,48 @@ test('installed Monky dependencies retain GPL and historical MIT notices when bu
     /Missing Monky LICENSE-MIT notice/);
 });
 
+test('linked workspace consumers preserve their shared registry, including a direct project dependency', (t) => {
+  for (const direct of [false, true]) {
+    const f = fixture(t);
+    const workspace = path.join(f.root, 'workspace');
+    const registry = path.join(workspace, 'node_modules', 'registry');
+    moduleAt(registry, 'registry', '1.0.0', {}, 'module.exports = {};');
+    const dependencies = { first: '*', second: '*', ...(direct ? { registry: '*' } : {}) };
+    json(path.join(f.source, 'package.json'), { dependencies });
+    fs.mkdirSync(path.join(f.source, 'node_modules'));
+    for (const name of ['first', 'second']) {
+      const directory = path.join(workspace, 'packages', name);
+      moduleAt(directory, name, '1.0.0', { files: ['index.js'], dependencies: { registry: '*' } },
+        'module.exports = require("registry");');
+      fs.symlinkSync(directory, path.join(f.source, 'node_modules', name), process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    if (direct) fs.symlinkSync(registry, path.join(f.source, 'node_modules', 'registry'), process.platform === 'win32' ? 'junction' : 'dir');
+    assert.equal(bundleDependencies(f.source, f.output).packageCount, 3);
+    const installed = createRequire(path.join(f.output, 'package.json'));
+    assert.strictEqual(installed('first'), installed('second'));
+    if (direct) assert.strictEqual(installed('first'), installed('registry'));
+  }
+});
+
+test('explicit root dependencies use their source with an absent, matching or different installed copy', (t) => {
+  for (const installed of ['absent', 'matching', 'different']) {
+    const f = fixture(t);
+    json(path.join(f.source, 'package.json'), {});
+    const override = path.join(f.root, 'local-leaf');
+    moduleAt(override, 'leaf', '2.0.0', { files: ['index.js'] });
+    const alias = path.join(f.source, 'node_modules', 'leaf');
+    if (installed === 'matching') {
+      fs.mkdirSync(path.dirname(alias), { recursive: true });
+      fs.symlinkSync(override, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    } else if (installed === 'different') {
+      moduleAt(alias, 'leaf', '9.0.0');
+    }
+    const result = bundleDependencies(f.source, f.output, new Map([['leaf', override]]));
+    assert.deepEqual(result, { dependencies: { leaf: '2.0.0' }, packageCount: 1 });
+    assert.equal(createRequire(path.join(f.output, 'package.json'))('leaf'), '2.0.0');
+  }
+});
+
 test('voice dependencies preserve npm polyfills and declaration-only packages', (t) => {
   const f = fixture(t);
   json(path.join(f.source, 'package.json'), { dependencies: { voice: '*' } });
@@ -260,7 +323,7 @@ test('voice dependencies preserve npm polyfills and declaration-only packages', 
   assert.equal(bundleDependencies(f.source, f.output).packageCount, 3);
   const fromVoice = createRequire(path.join(f.output, 'node_modules', 'voice', 'package.json'));
   assert.equal(fromVoice('./index.js'), '6.0.3');
-  assert.ok(fs.existsSync(path.join(f.output, 'node_modules', 'voice', 'node_modules', '@types', 'media', 'index.d.ts')));
+  assert.ok(fs.existsSync(path.join(path.dirname(fromVoice.resolve('@types/media/package.json')), 'index.d.ts')));
 });
 
 test('source-local module aliases survive bundling without copying private runtime data', (t) => {
@@ -299,7 +362,6 @@ test('the real SDK voice dependency tree survives packaging and offline installa
         require('node:assert/strict').deepEqual(actual, expected);
       }
     }
-    const { RTCPeerConnection } = fromSdk('werift');
     const { BotClient } = fromSdk('./dist/index.js');
     if (typeof BotClient.prototype.joinVoice !== 'function') throw new Error('Missing voice API');
     const fromShared = require('node:module').createRequire(fromSdk.resolve('@monky/shared'));
@@ -309,11 +371,15 @@ test('the real SDK voice dependency tree survives packaging and offline installa
     const invite = { v: 1, host: '[2001:db8::7]', port: 3000, name: 'Packaged invitation', password: 'fixture-only-'.repeat(30) };
     const result = parseServerInviteLink(createServerInviteLink(invite));
     if (!result.ok || JSON.stringify(result.invite) !== JSON.stringify(invite)) throw new Error('Packaged invitation codec lost data');
-    const peer = new RTCPeerConnection({ iceServers: [] });
-    peer.close().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: install, env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', timeout: 15000 });
   if (loaded.error) throw loaded.error;
   assert.equal(loaded.status, 0, loaded.stderr);
+  const voice = spawnSync(process.execPath, [
+    '--no-global-search-paths', path.resolve(__dirname, '../../../scripts/fixtures/packaged-sdk-voice.cjs'),
+    packagedSdk, packageRoot,
+  ], { cwd: install, env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', timeout: 40000 });
+  if (voice.error) throw voice.error;
+  assert.equal(voice.status, 0, voice.stderr);
   const cli = spawnSync(process.execPath, ['--no-global-search-paths', path.join(packageRoot, 'monky-cli.cjs'), '--version'], {
     cwd: install, env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', timeout: 15000,
   });

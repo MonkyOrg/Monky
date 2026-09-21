@@ -21,11 +21,21 @@ export function botMessageCapabilities(type: MessageType, payload: unknown): Bot
     case MessageType.CHAT_REACTION_REMOVE:
       return ['send_messages'];
     case MessageType.VOICE_JOIN:
+      return typeof payload === 'object' && payload !== null && 'receiveAudio' in payload && payload.receiveAudio === true
+        ? ['receive_voice'] : ['publish_voice'];
     case MessageType.VOICE_STATE_UPDATE:
     case MessageType.RTC_SIGNAL:
     case MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES:
-    case MessageType.SFU_CREATE_WEBRTC_TRANSPORT:
     case MessageType.SFU_CONNECT_WEBRTC_TRANSPORT:
+      // The handler checks the admitted channel, direction and transport owner.
+      return [];
+    case MessageType.SFU_CREATE_WEBRTC_TRANSPORT:
+      return typeof payload === 'object' && payload !== null && 'direction' in payload && payload.direction === 'recv'
+        ? ['receive_voice'] : ['publish_voice'];
+    case MessageType.SFU_CONSUME:
+    case MessageType.SFU_GET_PRODUCERS:
+    case MessageType.SFU_CONSUMER_SET_PAUSED:
+      return ['receive_voice'];
     case MessageType.SFU_PRODUCE:
     case MessageType.SFU_PRODUCER_CLOSED:
       return ['publish_voice'];

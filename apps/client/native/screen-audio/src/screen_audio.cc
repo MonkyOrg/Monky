@@ -17,6 +17,8 @@ const char* platform_get_last_error();
 int platform_get_status();
 Napi::Value platform_list_windows(Napi::Env env);
 Napi::Value platform_get_window_state(const Napi::CallbackInfo& info);
+Napi::Value platform_list_monitors(const Napi::CallbackInfo& info);
+Napi::Value platform_get_monitor_state(const Napi::CallbackInfo& info);
 bool platform_restore_window(int64_t hwnd);
 Napi::Value GetKeyboardLayoutSnapshot(const Napi::CallbackInfo& info);
 #elif defined(__MACOS__)
@@ -206,6 +208,8 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("restoreWindow", Napi::Function::New(env, RestoreWindow));
 #if defined(_WIN32)
   exports.Set("getWindowState", Napi::Function::New(env, platform_get_window_state));
+  exports.Set("listMonitors", Napi::Function::New(env, platform_list_monitors));
+  exports.Set("getMonitorState", Napi::Function::New(env, platform_get_monitor_state));
   exports.Set("getKeyboardLayout", Napi::Function::New(env, GetKeyboardLayoutSnapshot));
   exports.Set("createPacketCapture", Napi::Function::New(env, screen_audio::CreatePacketCapture));
 #endif

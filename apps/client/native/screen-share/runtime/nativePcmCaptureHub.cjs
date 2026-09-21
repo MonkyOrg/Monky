@@ -52,9 +52,24 @@ class NativePcmCaptureHub {
       assert.equal(owner.readyEvent, null, 'The native PCM capture emitted duplicate readiness.');
       owner.readyEvent = event;
     } else assert.ok(['packet', 'error', 'closed'].includes(event?.type), 'Unknown native PCM capture event.');
+    const admissions = [];
     for (const subscription of owner.members) {
-      if (!subscription.stopping) subscription.onEvent(event);
+      if (subscription.stopping) continue;
+      const admitted = subscription.onEvent(event);
+      if (admitted && typeof admitted.then === 'function') {
+        // Detachment cancels only this subscriber's delivery credit, never its
+        // separate native processing obligations or another subscriber's wait.
+        const delivery = deferred();
+        subscription.admissions.add(delivery);
+        void Promise.resolve(admitted).then(() => {
+          if (subscription.admissions.delete(delivery)) delivery.resolve();
+        }, error => {
+          if (subscription.admissions.delete(delivery)) delivery.reject(error);
+        });
+        admissions.push(delivery.promise);
+      }
     }
+    if (admissions.length) return Promise.all(admissions).then(() => {});
   }
 
   #open() {
@@ -62,7 +77,12 @@ class NativePcmCaptureHub {
     this.#current = owner;
     try {
       owner.handle = this.#module.createPacketCapture({ ...this.#selection }, event => {
-        try { this.#event(owner, event); }
+        try {
+          return this.#event(owner, event)?.catch(error => {
+            this.#report(error);
+            void this.#stopOwner(owner).catch(cleanupError => this.#report(cleanupError));
+          });
+        }
         catch (error) {
           this.#report(error);
           void this.#stopOwner(owner).catch(cleanupError => this.#report(cleanupError));
@@ -103,7 +123,10 @@ class NativePcmCaptureHub {
     assert.equal(isDeepStrictEqual(this.#selection, selection), true, 'A PCM subscriber cannot replace the selected process.');
     assert.equal(typeof onEvent, 'function');
     assert.ok(this.#subscriptions.size < 4, 'A PCM source supports at most four simultaneous video renditions.');
-    const subscription = { owner: null, onEvent, stopping: false, retirement: null, detached: deferred() };
+    const subscription = {
+      owner: null, onEvent, stopping: false, retirement: null,
+      detached: deferred(), admissions: new Set(),
+    };
     this.#subscriptions.add(subscription);
     const ready = (async () => {
       const previous = this.#current;
@@ -124,6 +147,8 @@ class NativePcmCaptureHub {
         // cancel the actual capture rather than wait for readiness first.
         const owner = subscription.owner;
         owner?.members.delete(subscription);
+        for (const delivery of subscription.admissions) delivery.resolve();
+        subscription.admissions.clear();
         if (owner && owner.members.size === 0) await this.#stopOwner(owner);
         this.#subscriptions.delete(subscription);
         subscription.detached.resolve();

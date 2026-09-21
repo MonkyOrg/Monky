@@ -5,7 +5,8 @@ const { NativeRtcCommands, isNativeRtcCommandsForEngine, assertNativeRtcEngineCl
 const { NativePcmCaptureHub } = require('./nativePcmCaptureHub.cjs');
 
 const MAX_NATIVE_PACKETS = 8;
-// WASAPI can deliver its entire 32-packet callback queue in one event-loop turn.
+// Capture retains each of its 32 delivery credits until every subscriber has
+// admitted the packet. Queue occupancy alone cannot bound a TSFN callback burst.
 const MAX_PENDING_PACKETS = MAX_NATIVE_PACKETS + 32;
 
 const unsigned = value => Number.isSafeInteger(value) && value >= 0;
@@ -121,12 +122,8 @@ class NativePcmCaptureBridge {
       });
       if (!NativePcmCaptureHub.matches(this.captureHub, this.captureModule, options))
         throw new Error('The native PCM subscriber does not belong to this capture selection and module.');
-      this.capture = this.captureHub.subscribe({ ...options }, event => {
-        queueMicrotask(() => {
-          try { this.onCaptureEvent(event); }
-          catch (error) { this.report(error); }
-        });
-      });
+      this.capture = this.captureHub.subscribe({ ...options }, event =>
+        Promise.resolve().then(() => this.onCaptureEvent(event)).catch(error => this.report(error)));
       if (this.capture?.kind !== 'native-pcm-subscription' || typeof this.capture.detach !== 'function'
         || typeof this.capture.getStats !== 'function' || typeof this.capture.ready?.then !== 'function'
         || typeof this.capture.detached?.then !== 'function') {
@@ -152,7 +149,7 @@ class NativePcmCaptureBridge {
   }
 
   onCaptureEvent(event) {
-    if (event?.type === 'packet') { this.onPacket(event); return; }
+    if (event?.type === 'packet') return this.onPacket(event);
     if (event?.type === 'error') throw event.error;
     if (event?.type === 'closed') {
       if (!this.stopping) throw new Error('Native PCM capture closed unexpectedly.');
@@ -236,6 +233,9 @@ class NativePcmCaptureBridge {
       }
       this.report(error);
     });
+    // This acknowledges admission/copy only. The distinct native processing
+    // receipt remains owned in this.packets until it has actually retired.
+    return this.packetTail;
   }
 
   async submit(record) {

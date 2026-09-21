@@ -12,6 +12,7 @@ const repository = path.resolve(root, '..', '..', '..', '..');
 const cache = path.join(repository, '.native-screen');
 const obs = require('../src/vendor/obs/sources.json');
 const runtime = require('../src/vendor/obs/runtime-inputs.json');
+const captureAdditions = require('../src/capture/runtime-additions.json');
 const recipesRevision = '21e25b2b508598ce8239de9ecd68400e45559399';
 const recipeFiles = [
   'deps.ffmpeg/10-zlib.ps1', 'deps.ffmpeg/20-opus.ps1', 'deps.ffmpeg/30-libogg.ps1',
@@ -190,8 +191,9 @@ async function fetchObs({ sources = true } = {}) {
   fs.mkdirSync(cache, { recursive: true });
   const stock = await extract(runtime.archive, path.join(cache, 'obs-runtime'));
   const dependencies = await extract(obs.dependencies, path.join(cache, 'obs-dependencies'));
-  for (const file of runtime.files) verify(path.join(stock, file.path), file);
-  for (const file of obs.dependencies.files) verify(path.join(dependencies, file.path), file);
+  assert.equal(captureAdditions.archiveSha256, runtime.archive.sha256);
+  for (const file of [...runtime.files, ...captureAdditions.files]) verify(path.join(stock, file.path), file);
+  for (const file of [...obs.dependencies.files, ...captureAdditions.dependencies]) verify(path.join(dependencies, file.path), file);
   if (!sources) return { stock, dependencies };
   const studio = checkout('https://github.com/obsproject/obs-studio.git', obs.revision,
     path.join(cache, 'obs-studio'), { submodules: false });

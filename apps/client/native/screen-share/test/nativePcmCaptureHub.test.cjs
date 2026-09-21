@@ -89,6 +89,47 @@ test('last detach waits for the actual capture closed promise, not the stop meth
   await f.hub.close();
 });
 
+test('packet delivery waits for every subscriber admission, not just callback invocation', async () => {
+  const f = fixture(), a = deferred(), b = deferred();
+  const first = f.hub.subscribe(f.selection, event => event.type === 'packet' ? a.promise : undefined);
+  const second = f.hub.subscribe(f.selection, event => event.type === 'packet' ? b.promise : undefined);
+  await Promise.all([first.ready, second.ready]);
+  const admission = f.captures[0].onEvent({ type: 'packet', sequence: 1 });
+  assert.equal(typeof admission?.then, 'function');
+  let admitted = false;
+  void admission.then(() => { admitted = true; });
+  a.resolve();
+  await tick();
+  assert.equal(admitted, false);
+  b.resolve();
+  await admission;
+  assert.equal(admitted, true);
+  await f.hub.close();
+  assert.deepEqual(f.errors, []);
+});
+
+test('detaching one rendition releases only its delivery wait while the other keeps its credit', async () => {
+  const f = fixture(), a = deferred(), b = deferred();
+  const first = f.hub.subscribe(f.selection, event => event.type === 'packet' ? a.promise : undefined);
+  const second = f.hub.subscribe(f.selection, event => event.type === 'packet' ? b.promise : undefined);
+  await Promise.all([first.ready, second.ready]);
+  const admission = f.captures[0].onEvent({ type: 'packet', sequence: 1 });
+  assert.equal(typeof admission?.then, 'function');
+  let admitted = false;
+  void admission.then(() => { admitted = true; });
+  await first.detach();
+  await tick();
+  assert.equal(admitted, false);
+  assert.equal(f.captures[0].stops, 0);
+  b.resolve();
+  await admission;
+  assert.equal(first.getStats().captureClosed, false);
+  a.resolve();
+  await second.detach();
+  await f.hub.close();
+  assert.deepEqual(f.errors, []);
+});
+
 test('a new rendition waits for the last capture retirement before creating a new capture', async () => {
   const stopGate = deferred();
   const f = fixture({ stopGate });

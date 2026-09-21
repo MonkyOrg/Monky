@@ -24,6 +24,7 @@ Ao criar ou editar um canal de texto, o switch **Permitir comandos de bots** vem
 | `read_messages` | Mensagens, histórico e reações nos canais acessíveis; também necessário para citar outra mensagem |
 | `send_messages` | Mensagens, respostas, reações e resultados públicos de comandos |
 | `publish_voice` | Publicação de áudio em salas permitidas, sem receber mídia dos participantes |
+| `receive_voice` | Recepção dos microfones humanos da sala autorizada, somente com opt-in na conexão de voz |
 | `local_execution` | Solicitação de tarefas e preparação de ferramentas no cliente; pode receber mídia produzida pela tarefa autorizada |
 | `sound_download` | Solicitação de salvar áudio no Soundboard de quem chamou, sem acesso geral a arquivos |
 | `selectors` | Controles públicos persistentes de escolha e suas respostas; publicar também exige `send_messages` |
@@ -31,7 +32,11 @@ Ao criar ou editar um canal de texto, o switch **Permitir comandos de bots** vem
 
 Registrar comandos exige `commands`; comandos com `downloadsSound` também declaram `sound_download`, e aqueles com `localCapabilities` declaram `local_execution`. Respostas públicas exigem `send_messages`; a resposta privada padrão exige apenas `commands`. As permissões dos cargos, dos canais e de quem iniciou a ação continuam valendo.
 
-**Recepção de voz não está disponível.** Pedidos como `receive_voice` são rejeitados. O servidor recusa consumo SFU por bots e negociações P2P que receberiam microfone, câmera ou compartilhamento; clientes não publicam essas trilhas para bots. Áudio de tarefas locais consentidas é uma rota separada, não escuta dos canais.
+**Recepção é uma autorização independente.** Declarar `receive_voice` não concede acesso: a revisão começa com a nova capacidade desligada. Mesmo depois de aprovada, o bot precisa entrar com `receiveAudio: true`. Sem esse opt-in, a conexão continua sem receber voz. É possível aprovar apenas recepção, apenas publicação ou ambas. O servidor limita a recepção aos microfones humanos da mesma sala; não inclui outros bots, câmera, compartilhamento de tela, Soundboard ou prévias privadas. Áudio de tarefas locais consentidas é uma rota separada.
+
+Enquanto a recepção está ativa, a lista de participantes mostra **Ouvindo vozes**. O símbolo de proibição aparece quando o bot solicitou publicação ou recepção e essa permissão não foi concedida; capacidades não solicitadas não aparecem como negadas. Mute/deafen administrativo também mostra o bloqueio, independentemente das permissões concedidas, sem revogá-las. Deafen pessoal/administrativo do bot interrompe a recepção e descarta buffers; mute controla sua transmissão. Mutar a reprodução de um bot somente no seu dispositivo não revoga a escuta. A aplicação e o SDK respeitam o mute dos microfones de origem; no SFU, o servidor também pausa esses produtores, impedindo que um consumidor contorne o bloqueio.
+
+O SDK não grava, transcreve nem envia áudio a serviços de IA. Quem opera o bot deve informar o uso e a retenção implementados e cumprir os consentimentos e as regras de privacidade aplicáveis. Veja [formato, exemplo e encerramento](/bots-voz#receber-microfones) antes de habilitar a capacidade.
 
 **Consentimento no computador é separado.** Permitir `local_execution` ou `sound_download` no servidor não instala ferramentas nem autoriza o dispositivo. A pessoa ainda controla os pedidos locais e pode recusá-los/revogá-los nas configurações de ferramentas locais. Preferências pessoais, idioma do bot e confirmação de nomes de arquivos não viram permissões administrativas.
 

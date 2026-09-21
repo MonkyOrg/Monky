@@ -66,6 +66,62 @@ function observation(video, type, sequence) {
   };
 }
 
+test('cancelling before PREPARED still verifies the requested terminal response and exact native retirement', async () => {
+  for (const corrupt of [null, 'runId', 'sequence', 'encoderReleased']) {
+    const video = profiles[0], errors = [], controller = new AbortController();
+    const child = Object.assign(new EventEmitter(), { pid: 42, stdout: new PassThrough(), stderr: new PassThrough() });
+    const media = new PassThrough(), feedback = new PassThrough();
+    child.stdin = new Writable({
+      write(bytes, _encoding, done) {
+        const [sequence, verb] = bytes.toString().trim().split(' ');
+        assert.equal(verb, 'stop');
+        const terminal = observation(video, 'prepared', Number(sequence));
+        terminal.type = 'stopped'; terminal.observation.state = 'stopped'; terminal.retirement = { ...retirement };
+        if (corrupt === 'runId') terminal.runId = 'b'.repeat(32);
+        if (corrupt === 'sequence') terminal.sequence++;
+        if (corrupt === 'encoderReleased') terminal.retirement.encoderReleased = false;
+        child.stdout.end(JSON.stringify(terminal) + '\n');
+        media.end(notice(2, closed(0), 3));
+        child.stderr.end();
+        setImmediate(() => { child.emit('exit', 0, null); child.emit('close', 0, null); });
+        done();
+      },
+    });
+    child.stdio = [child.stdin, child.stdout, child.stderr, media, feedback];
+    const directory = path.join(__dirname, 'capture-runtime-fixture');
+    const bridge = new CaptureBridge({
+      host: { kind: 'verified-native-screen-capture-host', executable: path.join(directory, 'host.exe'), sha256: 'a'.repeat(64) },
+      runtime: { kind: 'verified-stock-obs-runtime', version: '32.1.1', stockDirectory: directory, binaryDirectory: directory },
+      runId, runDirectory: path.join(directory, `monky-screen-capture-${runId}`), video,
+      onError: error => errors.push(error), onPacket() { assert.fail('Preparation cannot capture media.'); }, onNotice() {},
+    }, {
+      spawnProcess() {
+        queueMicrotask(() => media.write(notice(1, { kind: 'hello', runId, processId: 42, protocol: 1,
+          transmitterReencode: false, timestampSemantics: 'obs-system-pts' })));
+        return child;
+      },
+    });
+    try {
+      const preparing = assert.rejects(bridge.prepare(source, controller.signal), { name: 'AbortError' });
+      controller.abort(new DOMException('Owner stopped before preparation.', 'AbortError'));
+      await preparing;
+      if (corrupt) await assert.rejects(bridge.stop(), /retirement/);
+      else await bridge.stop();
+      const snapshot = bridge.snapshot();
+      assert.equal(snapshot.events.prepared, 0);
+      assert.equal(snapshot.events.ready, 0);
+      assert.equal(snapshot.live.packets, 0);
+      assert.equal(snapshot.nativeClosed, corrupt === null);
+      assert.equal(snapshot.forcedTermination, false);
+      assert.deepEqual(snapshot.exit, { code: 0, signal: null });
+      assert.equal(errors[0].name, 'AbortError');
+    } finally {
+      bridge.detach();
+      for (const stream of child.stdio) stream.destroy();
+    }
+  }
+});
+
 test('all capture profiles validate their actual geometry, frame clock and stretch without recording', () => {
   for (const video of profiles) {
     let previous;

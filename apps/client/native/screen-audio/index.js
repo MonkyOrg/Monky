@@ -65,6 +65,18 @@ function getWindowState(hwnd) {
   return binding.getWindowState(hwnd);
 }
 
+function listMonitors() {
+  if (!binding || typeof binding.listMonitors !== 'function')
+    throw new Error('Native monitor enumeration is unavailable. Rebuild the native audio module.');
+  return binding.listMonitors();
+}
+
+function getMonitorState(deviceId) {
+  if (!binding || typeof binding.getMonitorState !== 'function')
+    throw new Error('Native monitor lifecycle inspection is unavailable. Rebuild the native audio module.');
+  return binding.getMonitorState(deviceId);
+}
+
 function getKeyboardLayout(previousId = '', characters = '') {
   if (!binding || typeof binding.getKeyboardLayout !== 'function') return null;
   return binding.getKeyboardLayout(previousId, characters);
@@ -72,5 +84,5 @@ function getKeyboardLayout(previousId = '', characters = '') {
 
 module.exports = {
   isSupported, isPacketCaptureSupported, start, stop, getLastError, getStatus, createPacketCapture,
-  listWindowOwners, listWindows, restoreWindow, getWindowState, getKeyboardLayout,
+  listWindowOwners, listWindows, restoreWindow, getWindowState, getKeyboardLayout, listMonitors, getMonitorState,
 };

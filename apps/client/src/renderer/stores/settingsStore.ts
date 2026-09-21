@@ -104,6 +104,7 @@ export class SettingsStore {
   public stickersFolderPath: string = '';
   public screenAudioVolumes: Record<string, number> = {}; // per-connection screen audio volume (#75), keyed by sessionId (#363)
   public screenShareTelemetryEnabled: boolean = false;
+  public screenSharePreviewPauseWhenUnfocused: boolean = true;
   public screenShareTelemetryPosition: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' = 'top-right';
   public screenShareTelemetryMode: 'simple' | 'complete' = 'simple';
   public customSounds: Partial<Record<string, string>> = {}; // key → file path
@@ -208,6 +209,11 @@ export class SettingsStore {
         if (typeof this.screenShareTelemetryEnabled !== 'boolean') {
           this.screenShareTelemetryEnabled = false;
         }
+        if (parsed.screenSharePreviewPauseWhenUnfocused !== undefined
+          && typeof parsed.screenSharePreviewPauseWhenUnfocused !== 'boolean') {
+          console.warn('[Settings] Invalid screen preview focus preference; enabling background pause.');
+        }
+        this.screenSharePreviewPauseWhenUnfocused = parsed.screenSharePreviewPauseWhenUnfocused !== false;
         if (!['top-left', 'top-right', 'bottom-left', 'bottom-right'].includes(this.screenShareTelemetryPosition)) {
           this.screenShareTelemetryPosition = 'top-right';
         }
@@ -601,6 +607,7 @@ export class SettingsStore {
         stickersFolderPath: this.stickersFolderPath,
         screenAudioVolumes: this.screenAudioVolumes,
         screenShareTelemetryEnabled: this.screenShareTelemetryEnabled,
+        screenSharePreviewPauseWhenUnfocused: this.screenSharePreviewPauseWhenUnfocused,
         screenShareTelemetryPosition: this.screenShareTelemetryPosition,
         screenShareTelemetryMode: this.screenShareTelemetryMode,
         customProfile: this.customProfile,

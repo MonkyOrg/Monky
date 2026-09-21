@@ -3585,7 +3585,8 @@ input:focus, textarea:focus, select:focus {
   padding: 0;
   justify-content: center;
 }
-.bot-compact-command-form > .bot-error {
+.bot-compact-command-form > .bot-error,
+.bot-compact-command-form > .bot-command-preparation {
   margin: 4px 10px 8px;
 }
 .bot-parameter-menu {
@@ -6996,6 +6997,15 @@ button[data-loading="1"]::after {
   gap: 8px;
 }
 
+.bot-voice-listening {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--warning);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .bot-loading-spinner {
   display: inline-block;
   flex-shrink: 0;
@@ -7787,6 +7797,79 @@ button[data-loading="1"]::after {
 }
 
 /* Screen Sharing Source Selector */
+.screen-share-picker-card {
+  width: min(680px, calc(100vw - 48px));
+  max-width: 680px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.screen-share-picker-card > * {
+  flex-shrink: 0;
+}
+
+.screen-share-picker-card .modal-footer {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.screen-share-picker-card #share-audio-label {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.screen-share-picker-card #share-capture-info {
+  margin: 0;
+}
+
+.screen-share-picker-card .toggle-switch input:focus-visible + .toggle-slider,
+#checkbox-screen-preview-focus:focus-visible + .toggle-slider {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 3px;
+}
+
+.share-source-tabs {
+  margin-bottom: 12px;
+}
+
+.share-source-tabs .tab-button {
+  padding: 10px 6px;
+}
+
+.share-source-tabs .material-symbols-outlined {
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.share-source-tabs .tab-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.share-source-tabs .tab-button:focus-visible,
+.screen-sources-grid .source-item:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.share-tab-status {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.share-tab-status[hidden] {
+  display: none;
+}
+
+.share-method-reasons {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+
 .screen-sources-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

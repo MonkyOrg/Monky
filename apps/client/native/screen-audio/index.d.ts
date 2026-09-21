@@ -64,6 +64,7 @@ export interface PacketCaptureSnapshot {
   capturedPackets: number;
   capturedFrames: number;
   deliveredPackets: number;
+  /** Queued callbacks plus packets awaiting asynchronous consumer admission. */
   queuedPackets: number;
   overflowCount: number;
   maxQueuedPackets: number;
@@ -103,7 +104,7 @@ export type PacketCaptureEvent =
 export interface PacketCaptureSession {
   /** Resolves only after actual WASAPI Start; rejects on startup failure/cancellation. */
   readonly ready: Promise<PacketCaptureSnapshot>;
-  /** Resolves after native acquisition cleanup and all queued callbacks have drained. */
+  /** Resolves after native acquisition/TSFN drain; cancels admission waits, not RTC processing. */
   readonly closed: Promise<PacketCaptureSnapshot>;
   /** Idempotent, nonblocking; same promise as closed. Does not stop a legacy session. */
   stop(): Promise<PacketCaptureSnapshot>;
@@ -114,13 +115,18 @@ export interface PacketCaptureSession {
 /**
  * Explicit opt-in, exclusive with start(). Windows only; never invokes the
  * legacy resampler, microphone processing, platform ADM or output playback.
- * At most 32 queued PCM packets of at most 1 MiB each; overflow terminates with
- * ERR_AUDIO_OVERFLOW. Invalid options throw; startup/runtime failures emit
+ * At most 32 PCM delivery/admission credits of at most 1 MiB each. A packet
+ * callback may return a Promise<void> to retain its credit until admission/copy,
+ * not native processing retirement. Synchronous return releases it immediately;
+ * rejected acknowledgement fails with ERR_AUDIO_CALLBACK. Only packet events
+ * use these acknowledgements; ready/error/closed delivery remains independent.
+ * A full budget waits up to 500 ms, cancellable by Stop/cleanup, before failing
+ * with ERR_AUDIO_OVERFLOW. Invalid options throw; startup/runtime failures emit
  * error then closed (startup also rejects ready). Call stop() or await closed.
  */
 export function createPacketCapture(
   options: PacketCaptureOptions,
-  onEvent: (event: PacketCaptureEvent) => void
+  onEvent: (event: PacketCaptureEvent) => void | Promise<void>
 ): PacketCaptureSession;
 
 export interface WindowOwner {
@@ -144,6 +150,8 @@ export interface NativeWindowInfo {
   hwnd: number;
   title: string;
   processId: number;
+  /** Exact Win32 creation FILETIME, or null when process identity cannot be inspected. */
+  processCreationTime100ns: string | null;
   /** Absolute path to the owning process image, for icon extraction. */
   processPath: string;
   /** Whether the window is currently minimized. */
@@ -160,6 +168,21 @@ export interface NativeWindowInfo {
   width: number;
   height: number;
 }
+
+export interface NativeMonitorInfo {
+  /** Win32 monitor device interface path (not an ordinal or Electron display ID). */
+  deviceId: string;
+  deviceName: string;
+  name: string;
+  /** Physical desktop pixels, including negative coordinates for secondary displays. */
+  bounds: { x: number; y: number; width: number; height: number };
+  isPrimary: boolean;
+}
+
+/** Metadata-only Windows enumeration. Throws if native identity inspection is unavailable. */
+export function listMonitors(): NativeMonitorInfo[];
+/** Returns null after disconnect. Changes of bounds/deviceName require explicit reselection. */
+export function getMonitorState(deviceId: string): NativeMonitorInfo | null;
 
 /**
  * Lists top-level windows with their raw Win32 attributes. Only implemented on

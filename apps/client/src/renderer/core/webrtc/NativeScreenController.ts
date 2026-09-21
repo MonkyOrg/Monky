@@ -4,7 +4,7 @@ import {
   type NativeScreenCall, type NativeScreenCapabilities, type NativeScreenCommand, type NativeScreenCommandResult,
   type NativeScreenEvent, type NativeScreenFailure, type NativeScreenSource, type NativeScreenVideoProfile,
   type NativeScreenRpcMethod, type NativeScreenSignalPayload, type QualityProfile, type ScreenShareQuality,
-  type NativeScreenEndpointDiagnostics,
+  type NativeScreenEndpointDiagnostics, type NativeScreenPreviewState,
 } from '@monky/shared';
 import type { ElectronApi } from '../../../preload/preload';
 import type { NetworkClient } from '../NetworkClient';
@@ -67,7 +67,7 @@ interface Source {
   descriptor: NativeScreenSource | null;
   removing: boolean;
   retirement?: Promise<void>;
-  previewState?: 'waiting' | 'playing' | 'unavailable';
+  previewState?: NativeScreenPreviewState;
   preview?: {
     presentationId: string; video: HTMLVideoElement; stream: MediaStream | null;
     attachment: Promise<void>; retirement?: Promise<void>;
@@ -88,6 +88,8 @@ interface Call {
   ready: Promise<void>;
   roster: string;
   rosterTask: Promise<void>;
+  previewPreference?: boolean;
+  previewPreferenceTask?: Promise<void>;
   stopping: boolean;
   retirement?: Promise<void>;
 }
@@ -208,10 +210,15 @@ export class NativeScreenController {
         }
       }));
       call.joining = this.ok(call, { ...config, action: 'join' });
-      call.ready = call.joining.then(() => {
+      call.ready = call.joining.then(async () => {
         this.current(call);
+        await this.syncPreviewPreference(call);
         return this.updateRoster(call);
       });
+      call.unbind.push(appEvents.on('settings.updated', () => {
+        if (call.stopping || !call.context.isCurrent()) return;
+        void call.ready.then(() => this.syncPreviewPreference(call)).catch(error => this.report(error));
+      }));
     }
     const call = this.call;
     try {
@@ -342,8 +349,26 @@ export class NativeScreenController {
     return this.addCallSource(await this.ensureCall(), input);
   }
 
-  public getLocalPreviewState(shareId: string): 'waiting' | 'playing' | 'unavailable' {
+  public getLocalPreviewState(shareId: string): NativeScreenPreviewState {
     return this.call?.sources.get(shareId)?.previewState ?? 'waiting';
+  }
+
+  private syncPreviewPreference(call: Call): Promise<void> {
+    this.current(call);
+    const pauseWhenUnfocused = settingsStore.screenSharePreviewPauseWhenUnfocused;
+    if (call.previewPreference === pauseWhenUnfocused) return call.previewPreferenceTask ?? Promise.resolve();
+    call.previewPreference = pauseWhenUnfocused;
+    const work = this.ok(call, { action: 'preview-preferences', callId: call.config.callId, pauseWhenUnfocused });
+    call.previewPreferenceTask = work;
+    void work.then(() => {
+      if (call.previewPreferenceTask === work) call.previewPreferenceTask = undefined;
+    }, () => {
+      if (call.previewPreferenceTask === work) {
+        call.previewPreferenceTask = undefined;
+        call.previewPreference = undefined;
+      }
+    });
+    return work;
   }
 
   public async attachLocalPreview(shareId: string): Promise<MediaStream> {
@@ -409,6 +434,7 @@ export class NativeScreenController {
       ready: call.api.nativeScreenCommand({
         action: 'source-add', callId: call.config.callId, shareId: input.shareId,
         desktopSourceId: input.desktopSourceId, video: input.video, audio: input.audio, audioBitrateKbps: input.audioBitrateKbps,
+        ...(input.captureKind ? { captureKind: input.captureKind } : {}),
       }).then(result => {
         this.current(call);
         if (call.sources.get(input.shareId) !== entry || entry.removing) throw cancelled();
@@ -748,7 +774,7 @@ export class NativeScreenController {
       action: 'diagnostics', callId: call.config.callId, publisherSessionId: sessionId, shareId,
       sourceInstanceId: source.instanceId, ...(remote ? { presentationId: remote.presentationId } : {}),
     });
-    if (!current()) return null;
+    if (!current() || result.kind === 'diagnostics-retired') return null;
     if (result.kind !== 'diagnostics' || result.sourceInstanceId !== source.instanceId
       || result.presentationId !== (remote?.presentationId ?? null))
       throw new Error('Native diagnostics do not belong to the current screen owner.');

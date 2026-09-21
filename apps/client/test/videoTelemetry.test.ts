@@ -75,17 +75,22 @@ test('multiple destinations show a FPS range and explicitly total only bitrate',
   assert.match(formatVideoTelemetry(value, 'simple'), /RTP FPS: 30-60/);
 });
 
-test('idle native sharing identifies demand zero without reporting a fake local capture or bitrate', () => {
+test('unwatched native sharing reports no sending without assuming the local preview is stopped', () => {
   const value = snapshot();
   value.capture = null;
-  value.playback = null;
   value.nativeScreen = { receiver: null, waitingForViewers: true, decoders: [] };
-  setLanguage('en');
-  assert.match(formatVideoTelemetry(value, 'simple'), /Waiting for viewers — capture and sending stopped/);
-  assert.match(formatVideoTelemetry(value, 'complete'), /RTP FPS: --/);
-  assert.doesNotMatch(formatVideoTelemetry(value, 'complete'), /Capture \(configuration\):/);
-  setLanguage('pt-BR');
-  assert.match(formatVideoTelemetry(value, 'simple'), /Aguardando espectadores — captura e envio parados/);
+  for (const playback of [value.playback, null]) {
+    value.playback = playback;
+    setLanguage('en');
+    assert.match(formatVideoTelemetry(value, 'simple'), /Waiting for viewers — no media being sent/);
+    const complete = formatVideoTelemetry(value, 'complete');
+    assert.match(complete, /RTP FPS: --/);
+    assert.match(complete, /Bitrate: -- kbps/);
+    assert.match(complete, playback ? /Player FPS: 30/ : /Player FPS: --/);
+    assert.doesNotMatch(complete, /Capture \(configuration\):/);
+    setLanguage('pt-BR');
+    assert.match(formatVideoTelemetry(value, 'simple'), /Aguardando espectadores — sem envio de mídia/);
+  }
 });
 
 test('native worker cadence remains distinct from RTP and presentation cadence in the selected language', () => {

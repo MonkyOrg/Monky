@@ -181,6 +181,31 @@ async function p2pFixture(t: TestContext, options: { manager?: WebRtcManager; sc
   return { manager, client, participants, peers, screens, microphone, camera, audio, sent, watch };
 }
 
+test('a bot authorized to receive microphones is never offered camera or screen media', async t => {
+  const f = await p2pFixture(t);
+  const sessionId = 'bot:listener';
+  f.participants.addUser({
+    id: 'bot-listener', sessionId, clientId: sessionId, nickname: 'Listener',
+    status: 'ONLINE', joinedAt: 1, isBot: true,
+  });
+  f.participants.updateVoiceState({
+    sessionId, userId: 'bot-listener', channelId: 'room', receivesVoice: true,
+    isMuted: true, isDeafened: false, serverMuted: false, serverDeafened: false,
+    isSpeaking: false, isCameraOn: false, isScreenSharing: false, isSharingScreenAudio: false,
+  });
+  await f.manager.connectToPeer(sessionId, false);
+  const peer = f.manager['peers'].get(sessionId)!;
+  assert.equal(peer.botPeer, true);
+  assert.equal(peer.receiveOnly, false);
+  assert.equal(peer.audioSender, undefined, 'an answerer attaches the authorized microphone after the offer');
+  assert.equal(peer.videoSender, undefined);
+  assert.equal(peer.screenAudioSender, undefined);
+  assert.equal(peer.screenVideoSenders.size, 0);
+  const sent = f.sent.length;
+  f.manager['announceScreenSources'](peer);
+  assert.equal(f.sent.length, sent, 'microphone consent does not authorize screen descriptions');
+});
+
 test('screen P2P discovery attaches no screen payload source before Watch; microphone/camera stay attached', async t => {
   const f = await p2pFixture(t);
   for (const peer of f.peers) {

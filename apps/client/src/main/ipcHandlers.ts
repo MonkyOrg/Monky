@@ -16,6 +16,8 @@ import { AudioPreviews } from './audioPreviews';
 import { createLocalExecutionService } from './localExecution/createService';
 import { setupLocalExecutionIpc, type LocalExecutionIpc } from './localExecution/ipc';
 import { setupNativeScreenSharingIpc } from './nativeScreenSharing';
+import { NativeDesktopSources, nativeWindowIdFromSourceId, isGhostWindow } from './nativeWindows';
+import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
@@ -121,23 +123,6 @@ interface NativeWindowOwner {
   appName: string;
 }
 
-interface NativeWindowInfo {
-  hwnd: number;
-  title: string;
-  processId: number;
-  processPath: string;
-  isIconic: boolean;
-  isVisible: boolean;
-  isCloaked: boolean;
-  isToolWindow: boolean;
-  isLayered: boolean;
-  isTransparent: boolean;
-  isNoActivate: boolean;
-  isAppWindow: boolean;
-  width: number;
-  height: number;
-}
-
 // Screen audio native module (compiled only on CI — graceful fallback)
 let screenAudio: {
   isSupported: () => boolean;
@@ -147,6 +132,9 @@ let screenAudio: {
   getStatus: () => number;
   listWindowOwners?: () => NativeWindowOwner[];
   listWindows?: () => NativeWindowInfo[];
+  getWindowState?: (hwnd: number) => NativeWindowState | null;
+  listMonitors?: () => NativeMonitorInfo[];
+  getMonitorState?: (deviceId: string) => NativeMonitorInfo | null;
   restoreWindow?: (hwnd: number) => boolean;
 } | null = null;
 try {
@@ -159,14 +147,6 @@ try {
 // Icones de app nao mudam enquanto o app roda, e ler o bundle do disco a cada
 // abertura do seletor de tela seria desperdicio.
 const appIconCache = new Map<string, string | null>();
-
-/** Extrai o id nativo de `window:<id nativo>:<id do webContents>`. */
-function nativeWindowIdFromSourceId(sourceId: string): number | null {
-  const parts = sourceId.split(':');
-  if (parts[0] !== 'window') return null;
-  const nativeId = Number(parts[1]);
-  return Number.isFinite(nativeId) ? nativeId : null;
-}
 
 /**
  * No macOS o Electron devolve `appIcon` vazio para janelas, mesmo com
@@ -220,21 +200,6 @@ function listNativeWindows(): NativeWindowInfo[] {
     console.warn('[ScreenShare:Main] Falha ao enumerar janelas nativas:', (e as Error).message);
     return [];
   }
-}
-
-/**
- * O capturador WGC do Electron 34 parou de filtrar janelas de overlay/ferramenta,
- * entao elas vazam para o seletor como se fossem janelas reais (Medal Overlay,
- * helpers do Raycast, Radmin VPN na bandeja...). O discriminador abaixo foi
- * validado contra janelas reais: nenhuma janela legitima dispara qualquer uma das
- * combinacoes, enquanto todo overlay dispara pelo menos uma (#560).
- */
-function isGhostWindow(w: NativeWindowInfo): boolean {
-  if (w.isCloaked) return true;
-  if (w.isToolWindow) return true;
-  if (w.isLayered && w.isTransparent) return true;
-  if (w.isLayered && w.isNoActivate) return true;
-  return false;
 }
 
 /**
@@ -360,15 +325,22 @@ export function setupIpcHandlers(
   const audioPreviews = new AudioPreviews();
   const localExecution = setupLocalExecutionIpc(mainWindow, (notifications) =>
     createLocalExecutionService(mainWindow, app.getPath('userData'), notifications));
-  const nativeScreenSharing = setupNativeScreenSharingIpc(mainWindow, (sourceId) => {
-    const hwnd = nativeWindowIdFromSourceId(sourceId);
-    if (hwnd === null || !Number.isSafeInteger(hwnd) || hwnd <= 0) throw new Error('Invalid native screen window.');
-    const window = listNativeWindows().find(candidate => candidate.hwnd === hwnd);
-    if (!window || isGhostWindow(window) || !window.isVisible
-      || !Number.isSafeInteger(window.processId) || window.processId <= 0)
-      throw new Error('The selected screen-sharing window is unavailable.');
-    return { hwnd, expectedProcessId: window.processId };
+  const nativeSources = new NativeDesktopSources({
+    windows: listNativeWindows,
+    windowState(hwnd) {
+      if (!screenAudio?.getWindowState) throw new Error('Native window identity inspection is unavailable.');
+      return screenAudio.getWindowState(hwnd);
+    },
+    monitors() {
+      if (!screenAudio?.listMonitors) throw new Error('Native monitor enumeration is unavailable.');
+      return screenAudio.listMonitors();
+    },
+    monitorState(deviceId) {
+      if (!screenAudio?.getMonitorState) throw new Error('Native monitor identity inspection is unavailable.');
+      return screenAudio.getMonitorState(deviceId);
+    },
   });
+  const nativeScreenSharing = setupNativeScreenSharingIpc(mainWindow, (sourceId, kind) => nativeSources.resolve(sourceId, kind));
   const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
     event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
@@ -612,38 +584,53 @@ export function setupIpcHandlers(
   });
 
   ipcMain.handle('screen-share:get-sources', async () => {
+    const nativeWindowSources = process.platform === 'win32' ? nativeSources.listWindows() : [];
+    const nativeWindows = nativeWindowSources.map(source => source.window);
+    const nativeIdsByHwnd = new Map(nativeWindowSources.map(source => [source.window.hwnd, source.id]));
     const sources = await desktopCapturer.getSources({
       types: ['screen', 'window'],
       thumbnailSize: { width: 320, height: 180 },
       fetchWindowIcons: true,
     });
 
-    const nativeWindows = listNativeWindows();
     const nativeByHwnd = new Map<number, NativeWindowInfo>();
     for (const w of nativeWindows) nativeByHwnd.set(w.hwnd, w);
 
     const macIcons = await resolveMacAppIcons(sources.map((s) => s.id));
 
     // 1) Remove os overlays/tool windows que o capturador WGC passou a vazar. Sem
-    //    dados nativos (outra plataforma ou janela que fechou no meio) mantemos a
-    //    fonte para nao esconder algo legitimo por engano.
+    //    No Windows, so oferecemos identidades nativas verificaveis; em outras
+    //    plataformas preservamos os IDs do Electron.
     const realSources = sources.filter((s) => {
-      if (!s.id.startsWith('window:')) return true;
+      if (!s.id.startsWith('window:')) return process.platform !== 'win32';
       const hwnd = nativeWindowIdFromSourceId(s.id);
       const info = hwnd === null ? undefined : nativeByHwnd.get(hwnd);
-      return info ? !isGhostWindow(info) : true;
+      return process.platform !== 'win32' || !!info;
     });
 
     const result: DesktopSource[] = realSources.map((s) => {
       const electronIcon = s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null;
+      const hwnd = nativeWindowIdFromSourceId(s.id);
+      const nativeId = hwnd === null ? undefined : nativeIdsByHwnd.get(hwnd);
+      if (process.platform === 'win32' && !nativeId) throw new Error('Native window selection lost its enumerated identity.');
       return {
-        id: s.id,
+        id: nativeId ?? s.id,
         name: s.name,
         type: s.id.startsWith('screen:') ? 'screen' : 'window',
         thumbnailDataUrl: s.thumbnail.toDataURL(),
         appIconDataUrl: electronIcon ?? macIcons.get(s.id) ?? null,
       };
     });
+
+    if (process.platform === 'win32') {
+      try {
+        for (const { id, monitor } of nativeSources.listMonitors()) result.push({
+          id, name: monitor.name, type: 'screen', thumbnailDataUrl: '', appIconDataUrl: null,
+        });
+      } catch (error) {
+        console.warn('[ScreenShare:Main] Native monitor identity enumeration failed:', error);
+      }
+    }
 
     // 2) Reexibe janelas minimizadas que o WGC omite — tipicamente um jogo em tela
     //    cheia que minimizou quando o usuario deu alt-tab para abrir este seletor
@@ -665,8 +652,10 @@ export function setupIpcHandlers(
     );
     const extraIcons = await resolveWindowsAppIcons(minimizedExtras.map((w) => w.processPath));
     for (const w of minimizedExtras) {
+      const nativeId = nativeIdsByHwnd.get(w.hwnd);
+      if (!nativeId) throw new Error('Minimized window selection lost its enumerated identity.');
       result.push({
-        id: `window:${w.hwnd}:0`,
+        id: nativeId,
         name: w.title,
         type: 'window',
         thumbnailDataUrl: '',

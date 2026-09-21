@@ -307,6 +307,35 @@ test('a new real capture epoch waits for the preceding native processing receipt
   await f.bridge.stop();
 });
 
+test('capture admission credit waits for a native slot but does not pretend the next packet retired', async () => {
+  const f = fixture({ holdInputs: true, timeoutMs: 2000 });
+  await f.start();
+  await f.activate();
+  for (let index = 1; index < 8; index++) await f.packet();
+  const packet = {
+    type: 'packet', sessionId: 'capture-session', format, epoch: 'capture-session:1',
+    pcm: Buffer.alloc(441 * 2 * 4), frames: 441, sequence: 8, frameIndex: 8 * 441,
+    devicePosition: 8 * 441, qpcTimestampUs: 8080000,
+    flags: { raw: 0, silent: false, dataDiscontinuity: false, timestampError: false },
+  };
+  const admission = f.emit(packet);
+  assert.equal(typeof admission?.then, 'function');
+  let admitted = false;
+  void admission.then(() => { admitted = true; });
+  await tick();
+  assert.equal(admitted, false);
+  assert.equal(f.submissions.length, 8);
+  f.retire(0);
+  await admission;
+  assert.equal(f.submissions.length, 9);
+  assert.equal(f.submissions.at(-1).packet, packet);
+  assert.equal(f.bridge.getStats().retired, 1);
+  assert.equal(f.bridge.getStats().outstanding, 8, 'Admission is not native processing retirement.');
+  for (let index = 1; index < 9; index++) f.retire(index);
+  await f.bridge.stop();
+  assert.deepEqual(f.errors, []);
+});
+
 test('duplicate capture sequence does not replace the original pending processing record', async () => {
   const f = fixture({ holdInputs: true });
   await f.start();

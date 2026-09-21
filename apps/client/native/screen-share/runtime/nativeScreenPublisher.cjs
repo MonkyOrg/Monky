@@ -23,7 +23,9 @@ class NativeScreenPublisher {
     for (const observer of [createEndpoint, send, onError, onState]) assert.equal(typeof observer, 'function');
     Object.assign(this, { sessionId, channelId, mode, createEndpoint, send, onError, onState });
     this.onPreview = onPreview;
+    this.previewEnabled = false;
     this.previewPipeline = null;
+    this.previewWork = null;
     this.source = Object.freeze(nativeScreenSourceSchema.parse(source));
     this.iceServers = structuredClone(iceServers);
     this.viewers = new Map();
@@ -64,21 +66,28 @@ class NativeScreenPublisher {
     await this.send(this.envelope(viewer, data));
   }
 
-  async pipelineFor(viewer) {
-    const key = screenShareProfileKey(getScreenShareProfile(this.source.video, viewer.quality));
+  async pipelineFor(viewer, quality = viewer.quality) {
+    const current = () => viewer ? this.current(viewer) : !this.closed && this.previewEnabled;
+    if (!current()) throw cancelled();
+    const key = screenShareProfileKey(getScreenShareProfile(this.source.video, quality));
+    const local = this.previewPipeline;
+    if (viewer && local && local.key !== key && local.viewers.size === 0) {
+      await this.retirePipeline(local);
+      if (!current()) throw cancelled();
+    }
     const previous = this.pipelines.get(key);
     if (previous?.closing) {
       await previous.closing;
-      if (!this.current(viewer)) throw cancelled();
-      return this.pipelineFor(viewer);
+      if (!current()) throw cancelled();
+      return this.pipelineFor(viewer, quality);
     }
-    if (previous) return this.reserveViewer(previous, viewer);
+    if (previous) return viewer ? this.reserveViewer(previous, viewer) : previous;
     assert.ok(this.pipelines.size < 4, 'A screen cannot have more than four distinct video profiles.');
-    const pipeline = { key, id: randomUUID(), quality: viewer.quality, viewers: new Map(), endpoint: null, closing: null };
+    const pipeline = { key, id: randomUUID(), quality, viewers: new Map(), endpoint: null, closing: null };
     this.pipelines.set(key, pipeline);
     try {
       pipeline.endpoint = this.createEndpoint({
-        source: this.source, quality: viewer.quality, pipelineId: pipeline.id,
+        source: this.source, quality, pipelineId: pipeline.id,
         send: async (remoteSessionId, control) => {
           const recipient = pipeline.viewers.get(remoteSessionId);
           // Teardown can emit late metadata, but a retired subscription cannot authorize it.
@@ -91,17 +100,56 @@ class NativeScreenPublisher {
         },
         onState: state => this.onState({ shareId: this.source.shareId, pipelineId: pipeline.id, quality: pipeline.quality, state }),
         onPreview: frame => {
-          if (!this.previewPipeline || this.previewPipeline.closing) this.previewPipeline = pipeline;
-          if (this.previewPipeline === pipeline && !pipeline.closing && pipeline.viewers.size > 0)
+          if (this.previewEnabled && this.previewPipeline === pipeline && !pipeline.closing)
             this.onPreview?.({ frame, pipelineId: pipeline.id, video: getScreenShareProfile(this.source.video, pipeline.quality) });
         },
       });
       assert.ok(pipeline.endpoint && typeof pipeline.endpoint.ready?.then === 'function');
-      return this.reserveViewer(pipeline, viewer);
+      return viewer ? this.reserveViewer(pipeline, viewer) : pipeline;
     } catch (error) {
       if (pipeline.endpoint) await this.retirePipeline(pipeline);
       else this.pipelines.delete(key);
       throw error;
+    }
+  }
+
+  setPreviewEnabled(enabled) {
+    assert.equal(typeof enabled, 'boolean');
+    if (this.closed) return Promise.reject(cancelled());
+    this.previewEnabled = enabled;
+    return this.updatePreview();
+  }
+
+  updatePreview() {
+    if (this.previewWork) return this.previewWork.then(() => this.updatePreview());
+    const work = this.track(this.reconcilePreview());
+    this.previewWork = work;
+    const clear = () => { if (this.previewWork === work) this.previewWork = null; };
+    void work.then(clear, clear);
+    return work;
+  }
+
+  async reconcilePreview() {
+    if (this.closed) return;
+    const remote = [...this.pipelines.values()].filter(value => !value.closing && value.viewers.size > 0);
+    let selected = this.previewEnabled
+      ? remote.find(value => value === this.previewPipeline) ?? remote[0] : null;
+    if (this.previewEnabled && !selected && this.viewers.size === 0) {
+      selected = await this.pipelineFor(null, 'source');
+      if (this.closed) return;
+      // A Watch can reserve a different profile while the local endpoint is being prepared.
+      selected = [...this.pipelines.values()].find(value => !value.closing && value.viewers.size > 0) ?? selected;
+    }
+    if (!this.previewEnabled) selected = null;
+    if (this.previewPipeline !== selected) {
+      this.previewPipeline = selected ?? null;
+      this.onPreview?.(null);
+    }
+    for (const pipeline of [...this.pipelines.values()]) {
+      if (pipeline.closing || this.closed) continue;
+      if (pipeline.viewers.size === 0 && pipeline !== this.previewPipeline) await this.retirePipeline(pipeline);
+      else await pipeline.endpoint.setDemand(pipeline.viewers.size,
+        this.previewEnabled && pipeline === this.previewPipeline);
     }
   }
 
@@ -142,12 +190,14 @@ class NativeScreenPublisher {
       if (!this.current(viewer)) throw cancelled();
       const pipeline = await this.pipelineFor(viewer);
       if (!this.current(viewer)) throw cancelled();
+      if (this.previewEnabled) await this.updatePreview();
+      if (!this.current(viewer)) throw cancelled();
       await pipeline.endpoint.ready;
       if (!this.current(viewer)) throw cancelled();
       viewer.accepted = true;
       await this.signal(viewer, { action: 'accepted', quality: viewer.quality, backend: viewer.backend, generation: viewer.generation });
       if (!this.current(viewer)) throw cancelled();
-      await pipeline.endpoint.setDemand(pipeline.viewers.size);
+      await pipeline.endpoint.setDemand(pipeline.viewers.size, this.previewEnabled && this.previewPipeline === pipeline);
       if (!this.current(viewer)) throw cancelled();
       if (this.mode === 'p2p') await pipeline.endpoint.connectPeer(viewer.sessionId, {
         connectionId: viewer.subscriptionId, generation: viewer.generation, iceServers: this.iceServers,
@@ -197,9 +247,13 @@ class NativeScreenPublisher {
     if (pipeline?.viewers.get(viewer.sessionId) === viewer) pipeline.viewers.delete(viewer.sessionId);
     viewer.retirement = (async () => {
       if (!pipeline) return;
-      if (pipeline.viewers.size === 0) return this.retirePipeline(pipeline);
-      if (this.mode === 'p2p') await pipeline.endpoint.closePeer(viewer.sessionId);
-      if (!pipeline.closing) await pipeline.endpoint.setDemand(pipeline.viewers.size);
+      if (pipeline.viewers.size === 0) await this.retirePipeline(pipeline);
+      else {
+        if (this.mode === 'p2p') await pipeline.endpoint.closePeer(viewer.sessionId);
+        if (!pipeline.closing) await pipeline.endpoint.setDemand(pipeline.viewers.size,
+          this.previewEnabled && this.previewPipeline === pipeline);
+      }
+      if (!this.closed && this.previewEnabled) await this.updatePreview();
     })();
     return viewer.retirement;
   }
@@ -207,7 +261,7 @@ class NativeScreenPublisher {
   retirePipeline(pipeline) {
     if (pipeline.closing) return pipeline.closing;
     pipeline.closing = (async () => {
-      try { await pipeline.endpoint.setDemand(0); }
+      try { await pipeline.endpoint.setDemand(0, false); }
       finally {
         // A failure cause can coexist with verified closure; never reuse an unretired engine.
         if (pipeline.endpoint.snapshot().closed && this.pipelines.get(pipeline.key) === pipeline)
@@ -255,8 +309,10 @@ class NativeScreenPublisher {
     const viewers = [...this.viewers.values()];
     const notifications = viewers.map(viewer => this.signal(viewer, { action: 'closed', reason }));
     this.closed = true;
+    this.previewEnabled = false;
     this.closing = (async () => {
-      const results = await Promise.allSettled([...notifications, ...viewers.map(viewer => this.retireViewer(viewer))]);
+      const results = await Promise.allSettled([...notifications, ...viewers.map(viewer => this.retireViewer(viewer)),
+        ...[...this.pipelines.values()].map(pipeline => this.retirePipeline(pipeline))]);
       await Promise.allSettled([...this.pending]);
       const remaining = await Promise.allSettled([...this.pipelines.values()].map(pipeline => this.retirePipeline(pipeline)));
       const errors = [...results, ...remaining].filter(result => result.status === 'rejected').map(result => result.reason);
@@ -274,7 +330,7 @@ class NativeScreenPublisher {
 
   snapshot() {
     return {
-      source: this.source, stopping: this.closed,
+      source: this.source, stopping: this.closed, previewEnabled: this.previewEnabled,
       closed: this.closed && this.pipelines.size === 0 && this.pending.size === 0, viewers: this.viewers.size,
       pipelines: [...this.pipelines.values()].map(pipeline => ({
         pipelineId: pipeline.id, quality: pipeline.quality, viewers: pipeline.viewers.size,

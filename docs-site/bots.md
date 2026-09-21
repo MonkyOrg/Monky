@@ -125,6 +125,11 @@ pedem que o Monky prepare ferramentas locais. O pedido explica o motivo,
 as ferramentas e o espaço necessário; você pode negar, permitir até
 desconectar ou manter a autorização até revogá-la.
 
+Ao selecionar o comando, **Verificando permissões e ferramentas locais...**
+indica a preparação antes de liberar os campos, mesmo com autorização já
+concedida. Você pode cancelar fechando o comando; uma falha aparece no lugar
+do carregamento.
+
 Em **Configurações → Ferramentas de bots**, consulte ferramentas, espaço,
 cache, permissões e tarefas. Remover uma ferramenta ou revogar acesso
 interrompe o trabalho afetado. As instalações são gerenciadas pelo Monky,
@@ -151,9 +156,26 @@ card ficam no **palco de voz**, não como um site externo que se abre sozinho.
 visualização. **Encerrar miniapp**, disponível para quem o criou ou para um
 administrador autorizado, encerra aquela instância para todos.
 
-O SDK atual permite que bots **publiquem áudio**, mas não recebam o microfone,
-a câmera ou o compartilhamento dos participantes. Não existe um switch para
-dar permissão de escuta.
+## Bots que recebem voz
+
+Um bot só pode receber microfones se solicitar a capacidade **Ouvir microfones nas salas de voz**
+e um administrador aprová-la em **Configurações do bot → Permissões no
+servidor**. Publicar áudio é uma permissão independente: bots de música
+não começam a ouvir automaticamente.
+
+A lista de participantes mostra **Ouvindo vozes** enquanto a recepção
+autorizada está ativa. O microfone e os fones usam o símbolo administrativo
+de proibição quando falta, respectivamente, permissão para transmitir ou
+ouvir. Ter permissão sem ativar a recepção não mostra o aviso de escuta.
+
+Deafen do bot interrompe a recepção; silenciar o próprio microfone impede
+que ele seja recebido. **Mutar o bot só para você** muda apenas sua
+reprodução local, não a autorização de escuta do bot. Câmera, tela,
+Soundboard e prévias privadas não fazem parte dessa API.
+
+O SDK não grava nem transcreve conversas. O operador do bot é responsável
+por informar qualquer processamento, envio externo ou retenção que ele
+implementar. Consulte o [guia de voz](/bots-voz) antes de conceder acesso.
 
 ## Monky Bot (bot oficial)
 

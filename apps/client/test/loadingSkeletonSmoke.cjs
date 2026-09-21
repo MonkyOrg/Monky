@@ -109,16 +109,23 @@ async function runLoadingSmoke(language) {
     return { promise, resolve, reject };
   };
   const flush = async () => { for (let index = 0; index < 20; index++) await Promise.resolve(); };
-  const [{ setLanguage, t }, { ScreenSharePickerModal }, { appEvents }] = await Promise.all([
+  const [{ setLanguage, t }, { ScreenSharePickerModal }, { appEvents }, { webRtcManager }] = await Promise.all([
     import('/i18n/index.ts'), import('/views/ScreenSharePickerModal.ts'), import('/core/EventBus.ts'),
+    import('/core/WebRtcManager.ts'),
   ]);
   setLanguage(language);
-  let permission = deferred();
+  let availability = deferred();
   let enumeration = deferred();
   let enumerations = 0;
+  const originalCapabilities = webRtcManager.getNativeScreenCapabilities;
+  webRtcManager.getNativeScreenCapabilities = async () => {
+    const capture = await availability.promise;
+    return { capture, captureAudio: capture, receive: true, captureKinds: capture ? ['window', 'monitor', 'game'] : [],
+      backend: capture ? 'libobs-amf' : null, reason: capture ? null : 'platform' };
+  };
   window.api = {
     platform: 'win32',
-    ensureScreenPermission: () => permission.promise,
+    nativeScreenCommand: async () => { throw new Error('The loading fixture must not start native capture.'); },
     getDesktopSources: () => { enumerations++; return enumeration.promise; },
   };
   const source = (id, type = 'screen') => ({
@@ -131,7 +138,7 @@ async function runLoadingSmoke(language) {
   const offClose = appEvents.on('modal.screenshare_picker_closed', () => closed++);
   const panel = () => document.querySelector('#share-sources-panel');
   const pending = () => {
-    check(!!panel(), 'the picker must be in the DOM before permission or enumeration resolves');
+    check(!!panel(), 'the picker must be in the DOM before capabilities or enumeration resolve');
     check(panel().getAttribute('aria-busy') === 'true', 'pending sources are announced as busy');
     check(panel().querySelector('[role="status"]').getAttribute('aria-label') === t('common.loading'), 'localized loading announcement');
     check(panel().querySelectorAll('.loading-skeleton-card').length === 2, 'source-shaped skeleton cards');
@@ -144,34 +151,38 @@ async function runLoadingSmoke(language) {
   try {
     let opening = picker.open();
     pending();
-    check(opened === 1 && enumerations === 0, 'opened event is emitted before the permission response');
+    check(opened === 1 && enumerations === 0, 'opened event is emitted before the capability response');
     document.querySelector('#share-tab-window').click();
     pending();
     await new Promise(requestAnimationFrame);
     check(panel().querySelector('.loading-skeleton-thumbnail').getBoundingClientRect().height === 110, 'skeleton has a painted thumbnail-sized layout');
-    permission.resolve(true);
+    availability.resolve(true);
     await flush();
-    check(enumerations === 1, 'enumeration starts only after permission');
-    enumeration.resolve([source('screen:1'), source('window:2', 'window')]);
+    check(enumerations === 1, 'enumeration starts only after capture support is confirmed');
+    document.querySelector('#share-tab-game').click();
+    pending();
+    enumeration.resolve([source(`native-monitor:${'1'.repeat(64)}`), source('window:2', 'window')]);
     await opening;
     check(panel().getAttribute('aria-busy') === 'false', 'loaded sources are no longer busy');
     check(!panel().querySelector('.skeleton'), 'loaded data replaces placeholders');
-    check(document.querySelector('#share-tab-window').classList.contains('active'), 'tab choice made while loading is preserved');
+    check(document.querySelector('#share-tab-game').classList.contains('active'), 'method chosen during enumeration is preserved');
     check(panel().querySelector('[data-source-id="window:2"]'), 'the selected tab receives its sources');
+    check(panel().textContent.includes(t('screenShare.gameCompatibility')), 'Game Capture explains that these are candidate application windows.');
     panel().querySelector('.source-item').click();
     check(!document.querySelector('#btn-share').disabled, 'selection enables sharing after loading');
+    document.querySelector('#share-tab-window').click();
     picker.close();
     check(closed === 1 && !panel(), 'close retires the picker');
     check(!('sources' in picker.sourceState), 'closing releases the source thumbnails instead of retaining them in the singleton');
 
-    permission = deferred();
+    availability = deferred();
     opening = picker.open();
     document.querySelector('#btn-cancel').click();
-    permission.resolve(true);
+    availability.resolve(true);
     await opening;
-    check(!panel() && enumerations === 1, 'cancel during permission never starts enumeration or reopens');
+    check(!panel() && enumerations === 1, 'cancel during capabilities never starts enumeration or reopens');
 
-    permission = { promise: Promise.resolve(true) };
+    availability = { promise: Promise.resolve(true) };
     enumeration = deferred();
     const oldEnumeration = enumeration;
     const oldOpening = picker.open();
@@ -219,11 +230,16 @@ async function runLoadingSmoke(language) {
     check(!panel() && !document.querySelector('.loading-error'), 'late errors do not resurrect a closed picker');
 
     const previousEnumerations = enumerations;
-    permission = { promise: Promise.resolve(false) };
+    availability = { promise: Promise.resolve(false) };
     await picker.open();
-    check(!panel() && enumerations === previousEnumerations, 'denied permission closes without enumeration');
+    check(panel() && enumerations === previousEnumerations && !panel().querySelector('.source-item'),
+      'Unsupported capture never enumerates or offers a source.');
+    check([...document.querySelectorAll('.share-source-tabs [role="tab"]')].every(tab => tab.disabled) &&
+      document.querySelector('#share-method-reasons').textContent.includes(t('screenShare.platformSoon')),
+    'Unavailable methods must remain disabled with a localized reason.');
+    picker.close();
 
-    permission = { promise: Promise.resolve(true) };
+    availability = { promise: Promise.resolve(true) };
     enumeration = { promise: Promise.resolve([]) };
     await picker.open();
     check(!panel().querySelector('.skeleton') && !panel().querySelector('[role="alert"]'), 'a successful empty result is not an error or perpetual loading');
@@ -246,6 +262,7 @@ async function runLoadingSmoke(language) {
     picker.close();
     offOpen();
     offClose();
+    webRtcManager.getNativeScreenCapabilities = originalCapabilities;
   }
   check(!panel(), 'all picker instances and placeholders are removed');
 

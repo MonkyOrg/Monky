@@ -195,7 +195,11 @@ EncoderSetup MakeEncoderSetup(const webrtc::VideoCodec& codec,
   if ((start && start < 64000) || (maximum && maximum < 64000) || start > negotiated_maximum ||
       maximum > negotiated_maximum || (maximum && (start > maximum || minimum > maximum)) ||
       minimum > negotiated_maximum || codec.H264().keyFrameInterval < 0) {
-    throw AdapterError("ERR_RTC_ENCODER_BITRATE", "Unsupported initial H264 bitrate/interval");
+    const auto message = "Unsupported initial H264 bitrate/interval: start=" + std::to_string(start) +
+        ", min=" + std::to_string(minimum) + ", max=" + std::to_string(maximum) +
+        ", negotiatedMax=" + std::to_string(negotiated_maximum) +
+        ", keyframeInterval=" + std::to_string(codec.H264().keyFrameInterval);
+    throw AdapterError("ERR_RTC_ENCODER_BITRATE", message.c_str());
   }
   EncoderSetup result;
   // Reserve the explicitly configured rate range before setting the live rate.

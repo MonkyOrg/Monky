@@ -94,6 +94,21 @@ test('preview packet credits never block the publisher and recover only at a rea
   assert.equal(f.port.listenerCount('message'), 0);
 });
 
+test('pausing preview resets the decoder and a late receipt cannot restore the playing state', () => {
+  const f = bridgeFixture(), pipelineId = randomUUID();
+  f.bridge.offer(packet(), pipelineId, video);
+  f.bridge.reset('paused');
+  assert.deepEqual(f.port.messages.at(-1), { type: 'reset' });
+  f.port.receive({ sequence: 1, rendered: true, needsKeyframe: false });
+  assert.deepEqual(f.states, ['paused']);
+  f.bridge.offer({ ...packet(), keyframe: false }, pipelineId, video);
+  assert.equal(f.bridge.pending.size, 0);
+  f.bridge.offer(packet(), pipelineId, video);
+  f.port.receive({ sequence: 2, rendered: true, needsKeyframe: false });
+  assert.deepEqual(f.states, ['paused', 'playing']);
+  f.bridge.close();
+});
+
 test('preview enforces its byte bound and rejects replayed or forged receipts', () => {
   for (const receipt of [1, 1234]) {
     const f = bridgeFixture(), pipelineId = randomUUID();

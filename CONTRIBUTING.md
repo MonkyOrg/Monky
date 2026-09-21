@@ -94,24 +94,38 @@ primeiro* — num bug a pergunta é apenas *isso está quebrado?*.
 
 ### Rodando o projeto
 
-Requisitos: **Node.js 22+** e as ferramentas de build nativas da sua plataforma
-(o módulo de captura de áudio de tela é C++: MSVC no Windows, Xcode Command Line
-Tools no macOS).
+Requisitos: **Node.js 22+**, npm e as ferramentas de build nativas da sua
+plataforma (os módulos nativos usam C++: Python 3.11 x64 e MSVC do Visual Studio
+2022 no Windows, Xcode Command Line Tools no macOS).
 
 ```bash
 git clone https://github.com/MonkyOrg/Monky.git
 cd Monky
-npm install
+npm ci
 npm run build
 npm start
 ```
 
-O compartilhamento nativo de janela no Windows tem uma preparação adicional,
-com libobs/AMF e WebRTC fixados. Consulte o [guia do módulo](apps/client/native/screen-share/README.md)
-antes de testar ou empacotar esse caminho. `npm run build` sozinho não baixa o SDK
-nativo; outras plataformas e fontes continuam usando o caminho Chromium.
-Para redistribuir um build, inclua as licenças e as fontes correspondentes
-descritas no guia. `npm run package` usa electron-builder e gera
+O compartilhamento nativo no Windows x64 implementa janela/monitor por WGC e
+Game Capture explícito, com H.264 por AMD AMF ou NVIDIA NVENC e WebRTC fixado.
+Consulte o [guia do módulo](apps/client/native/screen-share/README.md) para
+ATL/MFC/Windows SDK, recompilar os addons para o Electron correto e executar
+`prepare:native-screen` antes de testar ou empacotar. `npm ci` e
+`npm run build` sozinhos não preparam o SDK/runtime. O Main verifica a fonte
+somente após confirmação; hardware desconhecido aparece com probe pendente,
+não qualificado. Não há fallback automático de captura para Chromium/software,
+AV1 ou outra fonte; o limite atual de adapter 0 também vale para NVENC.
+Após `npm ci`, siga o rebuild explícito de `screen-audio` com o `node-gyp`
+local e o Electron instalado descrito no guia. `prepare:native-screen` não
+gera esse addon; um `screen_audio.node` antigo não contém necessariamente
+as novas funções de monitor/identidade ou os ACKs de PCM.
+
+Para redistribuir um build, inclua as licenças, o código da mesma tag e
+`monky-native-sources-<versao>.tar.xz` com seu manifesto JSON, gerados por
+`npm run pack:native-sources -- --version=<versao>` após o preparo completo.
+O guia detalha o conteúdo OBS/NVENC/hooks, a reconstrução e o requisito de
+`publicationReady: true`; não substitua os helpers fixados por downloads
+autônomos de compatibilidade. `npm run package` usa electron-builder e gera
 `release\win-unpacked\Monky.exe` e `release\Monky-Windows.zip`.
 
 Durante o desenvolvimento, em dois terminais:
@@ -149,6 +163,7 @@ instalação continuam inalterados. Nada é copiado do perfil instalado.
 | `connected` (padrão) | Identidade nova, autenticação como primeiro administrador, canais e mensagem de exemplo | A funcionalidade que será exercitada no chat |
 | `server-settings` | O mesmo, com Geral nas configurações reais aberto | Alterar/aplicar configurações |
 | `voice` | Usuário mutado, dispositivos sintéticos e segundo participante SDK por P2P real | Teste de voz; a fixture é identificada e não simula música de produção |
+| `voice-receive` | Fixture SDK com permissão somente para ouvir, usuário mutado e indicadores reais na sala | `/qa-listen` alterna a escuta; desmutar envia áudio sintético, sem captura física nem gravação |
 | `home` | Identidade nova e introdução concluída; Home sem servidores salvos | Navegação/adição na Home e entrada no servidor |
 | `login` | Home com endereço local, apelido e senha de teste preenchidos | Enviar o formulário e autenticar |
 | `bot-install` | Servidor conectado e URL do bot preenchida nas configurações | Instalar/vincular o bot |
@@ -158,6 +173,7 @@ instalação continuam inalterados. Nada é copiado do perfil instalado.
 ```powershell
 npm run qa -- server-settings
 npm run qa -- voice
+npm run qa -- voice-receive
 npm run qa -- bot-install --bot=fixture
 npm run qa -- tool-consent --bot=fixture
 npm run qa -- music --bot-root="C:\Projetos\MonkyBot"
@@ -175,11 +191,16 @@ O módulo compilado `dist\commands\index.js` do MonkyBot precisa exportar
 `BotClient`: QA não inventa a declaração de produção. Nos cenários preparados,
 o owner realiza o preview real e aprova as capacidades declaradas via instalação
 autorizada. A fixture solicita apenas comandos e execução local, mais publicação
-de voz em `voice`. `bot-install` deixa instalação e revisão pendentes; permissão
+de voz em `voice` ou recepção em `voice-receive`. Neste último, o bot conta pacotes
+sem guardar seu conteúdo e não mostra proibição de transmitir, pois não solicita
+essa capacidade. Mute/deafen administrativo ainda exibe o respectivo bloqueio.
+`/qa-local-consent` também permite exercitar a preparação de comandos
+sem conceder consentimento local automaticamente. `bot-install` deixa instalação
+e revisão pendentes; permissão
 do servidor nunca substitui o consentimento local de `tool-consent`/`music`.
 
 Para testar a admissão do bot na chamada, use `connected --bot-root=...`, não
-`voice`/`music`: esses dois cenários já colocam o bot na voz.
+`voice`/`voice-receive`/`music`: esses cenários já colocam o bot na voz.
 
 Aguarde **QA_READY**, não apenas a abertura da janela. O launcher confere que a
 janela está visível no modo interativo e oculta em `--smoke`. Servidor, autenticação,

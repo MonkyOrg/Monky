@@ -5,6 +5,7 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { randomUUID } = require('node:crypto');
+const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -15,6 +16,20 @@ const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 const load = vm.runInThisContext(`(function(exports, require, window, document, MediaStream) { ${compiled}\n})`, { filename });
+const managerFilename = path.resolve(__dirname, '..', 'src', 'renderer', 'core', 'WebRtcManager.ts');
+const managerSource = ts.createSourceFile(managerFilename, fs.readFileSync(managerFilename, 'utf8'), ts.ScriptTarget.ES2022, true);
+const managerClass = managerSource.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'WebRtcManager');
+const startMethod = managerClass?.members.find(node => ts.isMethodDeclaration(node)
+  && node.name.getText(managerSource) === 'startNativeScreenShare');
+assert.ok(startMethod, 'The real native source-start method must remain covered.');
+// Exercise the production method without constructing unrelated device/transport owners.
+const startCompiled = ts.transpileModule(`class SourceStartCore { ${startMethod.getText(managerSource)} }
+exports.SourceStartCore = SourceStartCore;`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText;
+const loadStart = vm.runInThisContext(
+  `(function(exports, videoService, settingsStore, nativeScreenProfile, t, MediaStream) { ${startCompiled}\n})`,
+  { filename: managerFilename });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function deferred() {
   let resolve, reject;
@@ -28,12 +43,16 @@ const profile = (width = 1280, height = 720, fps = 60) => ({
 });
 const cancelled = () => new DOMException('Modeled operation was cancelled.', 'AbortError');
 
-function fixture(t, { iceServers = [] } = {}) {
+function fixture(t, { iceServers = [], capabilities = {
+  capture: true, captureAudio: true, receive: true, backend: 'libobs-amf', reason: null,
+} } = {}) {
+  const appBus = new EventEmitter();
   const commands = [], replies = [], events = [], errors = [], captures = new Map(), participants = new Map(), captureStreams = new Map();
   const mainListeners = new Set(), presentationListeners = new Set(), networkListeners = new Set();
   const calls = new Set(), sources = new Map(), sourceIntents = new Map(), watches = new Map();
   const elements = new Map(), attached = new Map(), retired = [], stopped = [], requests = [], replyGates = new Map();
   let commandHook = async () => {}, attachHook = async () => {}, current = true, connectionId = 'connection-one';
+  let diagnosticsRetired = false;
   let status = 'CONNECTED', watching = false, quality = 'source', muted = false, deafened = false, volume = 100, announces = 0;
   const remote = { shareId: 'remote-screen', instanceId: randomUUID(), video, audio: true };
   class Stream {
@@ -68,8 +87,7 @@ function fixture(t, { iceServers = [] } = {}) {
       }
       await commandHook(command);
       switch (command.action) {
-        case 'capabilities': return { kind: 'capabilities',
-          capabilities: { capture: true, captureAudio: true, receive: true, backend: 'libobs-amf', reason: null } };
+        case 'capabilities': return { kind: 'capabilities', capabilities };
         case 'join': calls.add(command.callId); return { kind: 'ok' };
         case 'source-add': {
           if (!calls.has(command.callId) || sourceIntents.get(key) !== intent) throw cancelled();
@@ -83,6 +101,7 @@ function fixture(t, { iceServers = [] } = {}) {
             sourceInstanceId: remote.instanceId, presentationId: command.presentationId, state: 'playing' });
           return { kind: 'subscription', subscriptionId: randomUUID(), presentationId: command.presentationId };
         case 'diagnostics':
+          if (diagnosticsRetired) return { kind: 'diagnostics-retired' };
           return { kind: 'diagnostics', sourceInstanceId: command.sourceInstanceId,
             presentationId: command.presentationId ?? null, viewers: command.presentationId ? null : 0, endpoints: [] };
         default: return { kind: 'ok' };
@@ -134,8 +153,12 @@ function fixture(t, { iceServers = [] } = {}) {
     './BrowserScreenSubscription': { BrowserScreenSubscription: class {
       constructor() { throw new Error('Native controller scenarios must not create a browser receiver.'); }
     } },
-    '../EventBus': { appEvents: { emit: (...value) => {
+    '../EventBus': { appEvents: { on: (event, listener) => {
+      appBus.on(event, listener);
+      return () => appBus.removeListener(event, listener);
+    }, emit: (...value) => {
       events.push(value);
+      appBus.emit(...value);
       if (value[0] === 'local.screen_ended_externally') captures.delete(value[1]);
     } } },
     '../sessionRouting': { emitOutsideRouting: run => run() },
@@ -151,7 +174,9 @@ function fixture(t, { iceServers = [] } = {}) {
         captures.set(capture.source.shareId, capture);
       },
     } },
-    '../../stores/settingsStore': { settingsStore: { getScreenAudioVolume: () => volume } },
+    '../../stores/settingsStore': { settingsStore: {
+      getScreenAudioVolume: () => volume, screenSharePreviewPauseWhenUnfocused: true,
+    } },
     '../../stores/voiceStore': { voiceStore: {
       getScreenWatchers: () => watching ? [['publisher', [remote.shareId]]] : [],
       isWatchingScreen: (sessionId, shareId) => watching && sessionId === 'publisher' && shareId === remote.shareId,
@@ -167,9 +192,9 @@ function fixture(t, { iceServers = [] } = {}) {
   const controller = new exports.NativeScreenController(() => visibleContext, async stream => { retired.push(stream); });
   const attachRemote = () => participants.set('publisher', { user: { sessionId: 'publisher', clientId: 'remote-client' },
     voiceState: { channelId: 'room', nativeScreenShares: [remote] }, remoteScreenStreams: new Map() });
-  const local = async () => {
-    const source = await controller.addSource(input);
-    captures.set(source.shareId, { ...input, source });
+  const local = async (selection = input) => {
+    const source = await controller.addSource(selection);
+    captures.set(source.shareId, { ...selection, source });
     captureStreams.set(source.shareId, new Stream());
     return source;
   };
@@ -180,10 +205,17 @@ function fixture(t, { iceServers = [] } = {}) {
     assert.equal(calls.size, 0);
     assert.equal(mainListeners.size + networkListeners.size + presentationListeners.size, 0);
     assert.equal(elements.size + attached.size, 0);
+    assert.equal(appBus.listenerCount('settings.updated'), 0);
   });
-  return { controller, local, captures, sources, commands, events, errors, replies, requests, watches, elements, stopped, retired,
+  return { controller, local, captures, sources, commands, events, errors, replies, requests, watches, elements, stopped, retired, Stream,
+    registerCapture: (stream, capture) => { captures.set(stream.id, capture); captureStreams.set(stream.id, stream); },
     mainListeners, networkListeners, context, remote, nativeScreenProfile: exports.nativeScreenProfile,
     emit: emitForCall, announceCount: () => announces,
+    retireDiagnostics: () => { diagnosticsRetired = true; },
+    previewPreference: value => {
+      dependencies['../../stores/settingsStore'].settingsStore.screenSharePreviewPauseWhenUnfocused = value;
+      appBus.emit('settings.updated');
+    },
     hook: callback => { commandHook = callback; }, attachHook: callback => { attachHook = callback; },
     quality: value => { quality = value; }, watching: value => { attachRemote(); watching = value; },
     audio: value => { ({ muted = muted, deafened = deafened, volume = volume } = value); },
@@ -203,11 +235,72 @@ function fixture(t, { iceServers = [] } = {}) {
   };
 }
 
+for (const scenario of [
+  { name: 'probe permission without kinds', capture: false, requiresSelectionProbe: true, kind: 'window', allowed: false },
+  { name: 'explicit empty kinds', capture: false, requiresSelectionProbe: true, kinds: [], kind: 'window', allowed: false },
+  { name: 'verified capture with explicit empty kinds', capture: true, kinds: [], kind: 'window', allowed: false },
+  { name: 'declared window preparation', capture: false, requiresSelectionProbe: true, kinds: ['window'], kind: 'window', allowed: true },
+  { name: 'declared monitor preparation', capture: false, requiresSelectionProbe: true, kinds: ['monitor'], kind: 'monitor', allowed: true },
+  { name: 'declared Game preparation', capture: false, requiresSelectionProbe: true, kinds: ['game'], kind: 'game', allowed: true },
+  { name: 'a different advertised kind', capture: false, requiresSelectionProbe: true, kinds: ['monitor'], kind: 'window', allowed: false },
+  { name: 'verified legacy window', capture: true, kind: 'window', allowed: true },
+  { name: 'legacy capabilities never imply Game', capture: true, kind: 'game', allowed: false },
+  { name: 'kinds without capture or preparation permission', capture: false, kinds: ['window'], kind: 'window', allowed: false },
+]) {
+  test(`source-start core: ${scenario.name}`, async t => {
+    const capabilities = { capture: scenario.capture, captureAudio: true, receive: true, backend: null, reason: null,
+      ...(scenario.requiresSelectionProbe ? { requiresSelectionProbe: true } : {}),
+      ...(scenario.kinds ? { captureKinds: scenario.kinds } : {}) };
+    const f = fixture(t, { capabilities }), exports = {};
+    let streams = 0;
+    loadStart(exports, { getProfile: () => profile(), registerNativeScreenShare: f.registerCapture },
+      { preferredVideoCodec: 'auto' }, f.nativeScreenProfile, key => key, class extends f.Stream {
+        id = randomUUID();
+        constructor() { super(); streams++; }
+      });
+    const owner = { nativeScreens: f.controller, voiceReconnectSuspended: false };
+    const id = scenario.kind === 'monitor' ? `native-monitor:${'a'.repeat(64)}` : `window:123:${'b'.repeat(64)}`;
+    const starting = exports.SourceStartCore.prototype.startNativeScreenShare.call(owner, id, false, '', () => true, scenario.kind);
+    if (!scenario.allowed) {
+      await assert.rejects(starting, /screenShare.nativeUnavailable/);
+      assert.equal(streams, 0);
+      assert.equal(f.commands.some(command => command.action === 'source-add' || command.action === 'join'), false);
+      assert.equal(f.captures.size, 0);
+      return;
+    }
+    const stream = await starting;
+    assert.equal(streams, 1);
+    const command = f.commands.find(command => command.action === 'source-add');
+    assert.equal(command.captureKind, scenario.kind);
+    assert.equal(command.desktopSourceId, id);
+    assert.equal(f.captures.get(stream.id).desktopSourceId, id);
+    assert.deepEqual(f.errors, []);
+  });
+}
+
 test('native profile alignment is explicit and unsupported ceilings are not silently clamped', t => {
   const f = fixture(t);
   assert.equal(f.nativeScreenProfile(profile(854, 480)).width, 852);
   assert.equal(f.nativeScreenProfile(profile(2560, 1440)), null);
   assert.equal(f.nativeScreenProfile(profile(1920, 1080, 121)), null);
+});
+
+test('preview preference is synchronized on join and changes without creating a remote Watch', async t => {
+  const f = fixture(t);
+  const source = await f.local();
+  const preferences = () => f.commands.filter(command => command.action === 'preview-preferences');
+  assert.equal(preferences().at(-1).pauseWhenUnfocused, true);
+  f.previewPreference(false);
+  await tick();
+  assert.equal(preferences().at(-1).pauseWhenUnfocused, false);
+  const count = preferences().length;
+  f.previewPreference(false);
+  await tick();
+  assert.equal(preferences().length, count);
+  f.emit({ type: 'preview-state', publisherSessionId: 'self', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, state: 'paused' });
+  assert.equal(f.controller.getLocalPreviewState(source.shareId), 'paused');
+  assert.equal(f.commands.some(command => command.action === 'watch'), false);
 });
 
 test('all configured STUN/TURN URLs and credentials survive the bounded IPC grouping', async t => {
@@ -306,6 +399,14 @@ test('native diagnostics use the captured source owner and discard observations 
   assert.equal(await pending, null);
 });
 
+test('retired diagnostic ownership returns unavailable metrics instead of a stream error or zero-valued sample', async t => {
+  const f = fixture(t), source = await f.local();
+  f.retireDiagnostics();
+  assert.equal(await f.controller.diagnostics('self', source.shareId), null);
+  assert.equal(f.errors.length, 0);
+  assert.equal(f.sources.size, 1, 'Telemetry cancellation must not retire the broadcast.');
+});
+
 test('active native settings reject incompatible codecs and profiles before changing a source', async t => {
   const f = fixture(t);
   assert.equal(f.controller.settingsIssue(profile(3840, 2160, 144), 'vp9'), null, 'Inactive/browser sharing keeps its existing settings range.');
@@ -337,6 +438,29 @@ test('failed quality admission restores the last profile under a new source inst
   assert.equal(f.announceCount(), 1);
   assert.equal(f.events.filter(([type]) => type === 'local.screen_ended_externally').length, 0);
 });
+
+for (const captureKind of ['window', 'monitor', 'game']) {
+  test(`${captureKind}: quality restoration preserves the exact selected ID and explicit capture kind`, async t => {
+    const f = fixture(t);
+    const selection = { ...input, captureKind,
+      desktopSourceId: captureKind === 'monitor' ? `native-monitor:${'a'.repeat(64)}` : input.desktopSourceId };
+    const old = await f.local(selection);
+    f.hook(async command => {
+      if (command.action === 'source-add' && command.video.width === 1280)
+        throw new Error('modeled selected profile failure');
+    });
+    await assert.rejects(f.controller.applyQuality(profile()), /modeled selected profile failure/);
+    const additions = f.commands.filter(command => command.action === 'source-add');
+    assert.equal(additions.length, 3);
+    assert.ok(additions.every(command => command.captureKind === captureKind
+      && command.desktopSourceId === selection.desktopSourceId));
+    const restored = f.captures.get(old.shareId);
+    assert.equal(restored.captureKind, captureKind);
+    assert.equal(restored.desktopSourceId, selection.desktopSourceId);
+    assert.notEqual(restored.source.instanceId, old.instanceId);
+    assert.equal(f.events.some(([type]) => type === 'local.screen_ended_externally'), false);
+  });
+}
 
 test('a failed replacement and rollback withdraw the retired source instead of announcing a stale descriptor', async t => {
   const f = fixture(t), old = await f.local();

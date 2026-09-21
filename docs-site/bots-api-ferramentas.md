@@ -49,6 +49,7 @@ export const BOT_CAPABILITIES = [
     'read_messages',
     'send_messages',
     'publish_voice',
+    'receive_voice',
     'local_execution',
     'sound_download',
     'selectors',
@@ -636,7 +637,7 @@ export enum MessageType {
 [Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/shared/src/constants.ts#L1)
 
 ```ts
-export const PROTOCOL_VERSION = 21;
+export const PROTOCOL_VERSION = 22;
 ```
 
 ## `ProtocolErrorCode` {#protocolerrorcode}
@@ -698,7 +699,7 @@ export enum ProtocolErrorCode {
 
 ## `runBotCli` {#runbotcli}
 
-[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/index.ts#L109)
+[Origem e validação](https://github.com/MonkyOrg/Monky/blob/main/packages/bot-sdk/src/cli/index.ts#L111)
 
 ```ts
 export function runBotCli(packageRoot: string, args?: string[]): Promise<void>;

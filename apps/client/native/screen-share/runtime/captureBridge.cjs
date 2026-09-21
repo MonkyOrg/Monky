@@ -13,16 +13,18 @@ class CaptureBridge extends ObsHostBridge {
     assert.ok(path.isAbsolute(runDirectory));
     assert.equal(path.basename(runDirectory), `monky-screen-capture-${runId}`);
     const video = Object.freeze({ ...protocol.validateVideo(options.video) });
+    const encoder = protocol.validateEncoder(options.encoder ?? 'auto');
     assert.equal(typeof onPacket, 'function'); assert.equal(typeof onNotice, 'function');
     let owner;
     super({
       ...options,
-      protocol: { ...protocol, maxLineBytes: protocol.MAX_LINE_BYTES,
-        validateMessage: (message, expected) => protocol.validateMessage(message, { ...expected, video }),
+      protocol: { ...protocol, maxLineBytes: protocol.MAX_LINE_BYTES, allowUnpreparedStop: true,
+        validateMessage: (message, expected) => protocol.validateMessage(message, { ...expected, video, encoder }),
         errorDetails: message => message.error },
       argumentsForSource: (source, id) => [
         `--runtime=${runtime.stockDirectory}`, `--run-directory=${runDirectory}`, `--run-id=${id}`,
-        `--hwnd=${source.hwnd}`, `--pid=${source.expectedProcessId}`, `--width=${video.width}`,
+        ...protocol.argumentsForTarget(source), ...(source.kind || encoder !== 'auto' ? [`--encoder=${encoder}`] : []),
+        `--width=${video.width}`,
         `--height=${video.height}`, `--fps=${video.fps}`, `--bitrate=${video.bitrateKbps}`,
       ],
       validateRetirement: bridge => {
@@ -63,7 +65,10 @@ class CaptureBridge extends ObsHostBridge {
           if (!paused && !wasPaused) activeMs += now - last;
           last = now; wasPaused = paused;
           if (activeMs >= this.deadlines.start)
-            throw new Error('OBS host start acknowledgement timed out while the selected window was available.');
+            throw Object.assign(new Error(this.source?.kind === 'game'
+              ? 'Game Capture produced no frames. Keep game protections/Trusted Mode enabled and explicitly select the same window in WGC instead.'
+              : 'OBS host start acknowledgement timed out while the selected window was available.'),
+            { code: this.source?.kind === 'game' ? 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE' : 'ERR_SCREEN_CAPTURE_FIRST_AU_TIMEOUT' });
           timer = setTimeout(sample, 50);
         } catch (error) { finish(reject, error); }
       };
@@ -162,6 +167,14 @@ class CaptureBridge extends ObsHostBridge {
   setBitrate(bitrateKbps) { return this.feedback('bitrate', bitrateKbps); }
   requestKeyFrame() { return this.feedback('idr', 0); }
 
+  // Preparation proves the pinned probe/texture configuration, not successful
+  // transmission. Only READY proves an initialized hardware session produced H264.
+  getCapabilities() {
+    if (!this.prepared?.capability) return null;
+    return Object.freeze({ ...this.prepared.capability,
+      hardwareSessionConfirmed: this.events.ready === 1, hardwareQualified: false });
+  }
+
   resumePackets() {
     if (!this.packetBackpressured) return;
     if (this.liveFrames.drain()) {
@@ -202,6 +215,7 @@ class CaptureBridge extends ObsHostBridge {
   snapshot() {
     const snapshot = super.snapshot();
     return { ...snapshot,
+      capability: this.getCapabilities(),
       cancelled: this.cancelled === true, live: { hello: this.liveHello ?? null, packets: this.liveFrames.packets,
       lastPacket: this.liveFrames.lastFrame ?? null, closed: this.liveFrames.closed ?? null,
       eof: this.liveEof, pendingFeedback: this.liveRequests.size, feedbackCommands: this.liveSequence,
@@ -210,4 +224,72 @@ class CaptureBridge extends ObsHostBridge {
   }
 }
 
-module.exports = { CaptureBridge };
+function validateProbeRetirement(bridge) {
+  assert.equal(bridge.closed, true);
+  assert.notEqual(bridge.forcedTermination, true, 'Forced termination is not verified encoder-probe retirement.');
+  assert.deepEqual(bridge.exit, { code: bridge.failure ? 1 : 0, signal: null });
+  assert.deepEqual(bridge.processExit, bridge.exit);
+  assert.deepEqual(bridge.eof, { stdout: true, stderr: true });
+  const terminal = bridge.stopped ?? bridge.failure;
+  assert.ok(terminal, 'Encoder probe ended without terminal retirement evidence.');
+  for (const field of protocol.RETIREMENT_FIELDS) assert.equal(terminal.retirement[field], true);
+  assert.equal(terminal.sourceCaptured, false); assert.equal(terminal.outputPackets, 0);
+}
+
+// Initializes, but never starts, a hardware encoder. The caller owns the same
+// private nonce-bound run directory as CaptureBridge, including its cleanup.
+async function probeCaptureCapabilities(options, signal, dependencies = {}) {
+  protocol.exact(options, ['host', 'runtime', 'runId', 'runDirectory', 'video',
+    ...(Object.hasOwn(options, 'encoder') ? ['encoder'] : [])], 'source-free encoder probe options');
+  const { host, runtime, runId, runDirectory } = options;
+  assert.equal(host?.kind, 'verified-native-screen-capture-host');
+  assert.ok(path.isAbsolute(runDirectory) && path.isAbsolute(runtime?.stockDirectory));
+  assert.equal(path.basename(runDirectory), `monky-screen-capture-${runId}`);
+  const video = Object.freeze({ ...protocol.validateVideo(options.video) });
+  const encoder = protocol.validateEncoder(options.encoder ?? 'auto');
+  let failure;
+  const bridge = new ObsHostBridge({
+    host, runtime, runId, onError: error => { failure ??= error; },
+    protocol: {
+      maxLineBytes: protocol.MAX_LINE_BYTES, allowUnpreparedStop: true,
+      validateSource: source => { assert.equal(source, null, 'Encoder probing cannot select a source.'); },
+      cloneSource: () => null,
+      validateMessage: (message, expected) => protocol.validateEncoderProbeMessage(message, { ...expected, video, encoder }),
+      validateProgress: protocol.validateEncoderProbeProgress,
+      errorDetails: message => message.error,
+      command: (sequence, verb) => {
+        assert.equal(verb, 'stop', 'Encoder probing cannot issue a capture command.');
+        return protocol.command(sequence, verb);
+      },
+    },
+    argumentsForSource: () => [
+      `--runtime=${runtime.stockDirectory}`, `--run-directory=${runDirectory}`, `--run-id=${runId}`,
+      '--probe=encoder', `--encoder=${encoder}`, `--width=${video.width}`, `--height=${video.height}`,
+      `--fps=${video.fps}`, `--bitrate=${video.bitrateKbps}`,
+    ],
+    validateRetirement: validateProbeRetirement,
+  }, { ...dependencies, deadlines: { stop: 20000, ...dependencies.deadlines } });
+  let prepared, preparationError;
+  try { prepared = await bridge.prepare(null, signal); }
+  catch (error) { preparationError = error instanceof Error ? error : new Error(String(error)); }
+  try { await bridge.stop(); }
+  catch (stopError) {
+    if (bridge.spawnFailed) throw preparationError ?? failure ?? stopError;
+    try { validateProbeRetirement(bridge); }
+    catch (retirementError) {
+      throw new AggregateError([preparationError ?? failure ?? stopError, retirementError],
+        'Encoder probe failure and native retirement could not both be accounted for.');
+    }
+    throw preparationError ?? failure ?? stopError;
+  }
+  if (preparationError) throw preparationError;
+  if (failure) throw failure;
+  assert.equal(prepared?.encoderInitialized, true);
+  return Object.freeze({
+    ...prepared.capability, encoderInitialized: true, hardwareSessionConfirmed: false,
+    hardwareQualified: false, sourceCaptured: false,
+    captureKinds: Object.freeze([...prepared.captureKinds]), video,
+  });
+}
+
+module.exports = { CaptureBridge, probeCaptureCapabilities };

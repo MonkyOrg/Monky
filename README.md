@@ -95,18 +95,30 @@ Bugs começam em [Discussions › Bug Reports](https://github.com/MonkyOrg/Monky
 
 ## 💻 Para desenvolvedores
 
-Requisitos: Node.js 22+ (versão usada pelo CI) e npm. No Windows, o módulo nativo de áudio de tela precisa de Python 3.11 e Build Tools do Visual Studio (MSVC).
+Requisitos: Node.js 22+ (versão usada pelo CI) e npm. No Windows, os módulos nativos precisam de Python 3.11 x64 e ferramentas C++ do Visual Studio 2022 (MSVC). Para captura de tela, confira também ATL/MFC e a versão do Windows SDK no guia abaixo.
 
 ```bash
-npm install
+npm ci
 npm run build
 npm start
 npm test
 ```
 
-Para transmitir janelas pelo caminho nativo libobs/AMF no Windows, prepare
-também o runtime conforme o [guia do módulo](apps/client/native/screen-share/README.md).
-Essa preparação é obrigatória antes de empacotar o aplicativo Windows.
+Para captura nativa de **janela, monitor ou Game Capture** no Windows x64,
+siga o [guia do módulo](apps/client/native/screen-share/README.md): recompilação
+dos addons para o Electron fixado, preparo libobs/WebRTC e pré-requisitos
+Python 3.11/MSVC/SDK são etapas distintas. O vídeo é H.264 por AMD AMF ou
+NVIDIA NVENC; AV1 está indisponível. A fonte escolhida passa por um probe após
+confirmação, sem fallback automático para Chromium/software e sem garantia
+de compatibilidade pela marca da GPU. `npm ci` e `npm run build` sozinhos não
+preparam esse runtime.
+O rebuild explícito de `screen-audio` com o `node-gyp` local, após `npm ci`,
+também é obrigatório em um checkout existente; `prepare:native-screen`
+compila RTC/captura de `screen-share`, não o `screen_audio.node`.
+
+O preparo é obrigatório antes de empacotar no Windows. Ao redistribuir, inclua
+as licenças, o código da mesma tag e o arquivo de fontes nativas com manifesto
+JSON descritos no guia; não copie apenas o executável ou misture runtimes OBS.
 
 Detalhes de arquitetura estão em [Arquitetura](https://monkyorg.github.io/Monky/arquitetura), o fluxo de contribuição em [CONTRIBUTING.md](CONTRIBUTING.md) e os comandos do servidor no [manual do Monky CLI](https://monkyorg.github.io/Monky/cli). A especificação original do projeto — com MVP e roadmap — ficou registrada em [docs/especificacao-tecnica.md](docs/especificacao-tecnica.md).
 

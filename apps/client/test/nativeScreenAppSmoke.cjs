@@ -33,6 +33,7 @@ assert.ok(!incompatibleViewer || (!browserReceiver && mode === 'p2p'), 'Mixed co
 const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbols='))?.slice('--debug-symbols='.length);
 const report = { mode, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss,
   normalMain: true, normalPreload: true, ownedSyntheticSource: true,
+  qaFocusHooks: 'owned parent IPC only; normal Main and preload checks unchanged',
   capabilityOverride: browserReceiver ? 'viewer.receive=false (real Chromium receiver, not a macOS hardware test)' : null,
   recordedMedia: false, phases: [] };
 const clients = [], roots = [], failures = [];
@@ -70,6 +71,179 @@ async function startLoopbackServer(instance, port) {
   instance.lanBroadcaster.start = async () => {};
   await instance.start();
   assert.equal(instance.httpServer.address().address, '127.0.0.1');
+}
+
+function mainFixture({ clientRoot, origin, ownerPid }) {
+  const assert = require('node:assert/strict');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { app, BrowserWindow } = require('electron');
+  assert.equal(process.ppid, ownerPid);
+  assert.equal(process.connected, true);
+  const envelope = JSON.parse(fs.readFileSync(process.env.MONKY_QA_CONFIG, 'utf8'));
+  assert.equal(envelope.ownerPid, ownerPid);
+  assert.equal(envelope.config.scenario, 'home');
+  const metadata = require(path.join(clientRoot, 'package.json'));
+  // The real Main still owns profile, launcher-envelope and renderer-frame validation.
+  app.setAppPath(clientRoot);
+  app.setName(metadata.productName ?? metadata.name);
+  app.setVersion(metadata.version);
+  const message = input => {
+    if (!input || input.runId !== envelope.config.runId || !['qa-focus', 'qa-blur', 'qa-focus-state'].includes(input.type)) return;
+    try {
+      assert.equal(typeof input.id, 'string');
+      assert.equal(input.value, undefined);
+      assert.equal(process.connected, true);
+      assert.equal(process.ppid, ownerPid);
+      const windows = BrowserWindow.getAllWindows().filter(candidate => !candidate.isDestroyed());
+      const window = windows.find(candidate => candidate.webContents.getURL().startsWith(`${origin}/`)
+        && new URL(candidate.webContents.getURL()).searchParams.get('overlay') !== '1');
+      assert.ok(window, 'The owned normal Main window is unavailable.');
+      if (input.type === 'qa-focus') {
+        if (window.isMinimized()) window.restore();
+        window.show();
+        window.focus();
+      } else if (input.type === 'qa-blur') {
+        for (const owned of windows) {
+          if (owned.isDestroyed()) continue;
+          const visible = owned.isVisible();
+          // Windows can retain active state after blur() rejects a foreground transfer.
+          // A real hide followed by inactive show preserves a visible, unfocused surface.
+          owned.hide();
+          if (visible) owned.showInactive();
+        }
+      }
+      const focused = BrowserWindow.getFocusedWindow();
+      const focusedWindowIds = windows.filter(owned => !owned.isDestroyed() && owned.isFocused()).map(owned => owned.id);
+      process.send({ type: 'qa-response', id: input.id, value: {
+        mainFocused: window.isFocused(), anyFocused: (!!focused && !focused.isDestroyed()) || focusedWindowIds.length > 0,
+        mainWindowId: window.id, focusedWindowId: focused?.id ?? null, focusedWindowIds,
+      } });
+    } catch (error) {
+      process.send({ type: 'qa-response', id: input.id, error: error.stack ?? String(error) });
+    }
+  };
+  process.on('message', message);
+  app.once('will-quit', () => process.removeListener('message', message));
+  require(path.join(clientRoot, metadata.main));
+}
+
+async function focusOwned(client) {
+  await client.child.call('qa-focus');
+  await until(async () => (await client.child.call('qa-focus-state')).mainFocused
+    && await client.cdp.evaluate('document.hasFocus()'), `The owned ${client.label} window did not acquire real focus.`);
+}
+
+async function blurPublisher(publisher, viewer) {
+  const transfer = { at: new Date().toISOString(), confirmed: false, last: null };
+  (report.focusTransfers ??= []).push(transfer);
+  await publisher.child.call('qa-blur');
+  await viewer.child.call('qa-focus');
+  await until(async () => {
+    const [publisherWindow, viewerWindow, publisherDocument, viewerDocument] = await Promise.all([
+      publisher.child.call('qa-focus-state'), viewer.child.call('qa-focus-state'),
+      publisher.cdp.evaluate('document.hasFocus()'), viewer.cdp.evaluate('document.hasFocus()'),
+    ]);
+    transfer.last = { publisherWindow, viewerWindow, publisherDocument, viewerDocument };
+    return !publisherWindow.anyFocused && !publisherDocument
+      && viewerWindow.mainFocused && viewerWindow.anyFocused && viewerDocument;
+  }, 'Windows refused the owned inactive-window transition: the viewer must be focused and no publisher window may remain focused.');
+  transfer.confirmed = true;
+}
+
+async function collectEvidence(name, publisher, viewer) {
+  const evidence = { at: new Date().toISOString(), collectionErrors: [] };
+  report[name] = evidence;
+  const reads = {
+    publisherState: () => publisher.cdp.evaluate('nativeAppSmoke.snapshot()'),
+    publisherStats: () => publisher.cdp.evaluate('nativeAppSmoke.stats()'),
+    publisherFocus: () => publisher.child.call('qa-focus-state'),
+    receiverState: () => viewer.cdp.evaluate('nativeAppSmoke.snapshot()'),
+    receiverStats: () => viewer.cdp.evaluate('nativeAppSmoke.stats()'),
+    senderDiagnostics: () => publisher.cdp.evaluate('nativeAppSmoke.diagnostics()'),
+    receiverDiagnostics: () => viewer.cdp.evaluate('nativeAppSmoke.diagnostics()'),
+    senderTelemetry: () => publisher.cdp.evaluate('nativeAppSmoke.telemetry()'),
+    receiverTelemetry: () => viewer.cdp.evaluate('nativeAppSmoke.telemetry()'),
+    browserStats: () => viewer.cdp.evaluate('nativeAppSmoke.browserStats()'),
+  };
+  const entries = Object.entries(reads);
+  const outcomes = await Promise.allSettled(entries.map(async ([key, read]) => { evidence[key] = await read(); }));
+  const errors = [];
+  for (const [index, outcome] of outcomes.entries()) {
+    if (outcome.status === 'rejected') {
+      errors.push(outcome.reason);
+      evidence.collectionErrors.push({ field: entries[index][0], error: outcome.reason.stack ?? String(outcome.reason) });
+    }
+  }
+  evidence.sfuScreenProducers = mode === 'sfu'
+    ? server.sfuManager.getProducersInChannel(publisher.identity.channelId).filter(producer =>
+      producer.producerSessionId === publisher.identity.sessionId
+      && ['screen_video', 'screen_audio'].includes(producer.appData.mediaType)) : [];
+  evidence.publisherFlows = evidence.publisherStats?.publishers.flatMap(owner => owner.pipelines.map(pipeline => ({
+    pipelineId: pipeline.pipelineId, flow: pipeline.endpoint.flow,
+  }))) ?? null;
+  await fs.writeFile(path.join(artifacts, `${name}.json`), JSON.stringify(evidence, null, 2) + '\n', { flag: 'wx' });
+  if (errors.length) throw new AggregateError(errors, `Could not collect ${name} before its assertions.`);
+  return evidence;
+}
+
+function assertAnnouncedWithoutRemoteMedia(evidence, published) {
+  const { publisherStats, publisherState, receiverStats, receiverState } = evidence;
+  assert.equal(publisherStats.publishers.length, 1);
+  assert.deepEqual(publisherStats.publishers[0].source, published.source);
+  assert.equal(publisherStats.publishers[0].viewers, 0);
+  assert.equal(publisherState.localNativeSources, 1);
+  assert.deepEqual(receiverState.sources, [published.source], 'Local preview changed or removed the announced source.');
+  assert.equal(receiverState.video, null, 'An unwatched spectator received video frames.');
+  if (receiverStats === null) assert.equal(receiverState.mainCall, null);
+  else {
+    assert.equal(receiverStats.kind, 'stats');
+    assert.deepEqual(receiverStats.subscriptions, []);
+    assert.deepEqual(receiverStats.publishers, []);
+  }
+  assert.equal(receiverState.browserWatches, 0);
+  assert.equal(receiverState.screenOutputContext, null);
+  assert.deepEqual(evidence.browserStats, []);
+  assert.deepEqual(evidence.sfuScreenProducers, [], 'Local preview retained an SFU screen producer.');
+  assert.deepEqual(publisherState.errors, []);
+  assert.deepEqual(receiverState.errors, []);
+}
+
+function assertLocalOnlyPreview(evidence, published) {
+  assertAnnouncedWithoutRemoteMedia(evidence, published);
+  const owner = evidence.publisherStats.publishers[0];
+  assert.equal(owner.previewEnabled, true);
+  assert.equal(owner.pipelines.length, 1);
+  assert.equal(owner.pipelines[0].viewers, 0);
+  const endpoint = owner.pipelines[0].endpoint;
+  assert.equal(endpoint.captureState, 'running');
+  assert.equal(endpoint.demand, 0);
+  assert.equal(endpoint.previewDemand, true);
+  assert.equal(endpoint.flow.demand, false);
+  assert.equal(endpoint.flow.connected, false);
+  assert.equal(endpoint.flow.admitted, 0, 'Local-only preview admitted an encoded frame to RTC.');
+  assert.equal(endpoint.flow.retainedNativeCopies, 0);
+  assert.ok(endpoint.flow.notWatched > 0, 'Local-only preview never observed actual capture packets.');
+  assert.equal(endpoint.routes.peers, 0);
+  assert.equal(endpoint.routes.consumers, 0);
+  assert.equal(endpoint.audioInput, null, 'Local-only preview started PCM capture.');
+  assert.deepEqual(endpoint.errors, []);
+  assert.equal(evidence.publisherState.previewState, 'playing');
+  assert.equal(evidence.senderDiagnostics.viewers, 0);
+  assert.equal(evidence.senderDiagnostics.endpoints.length, 1);
+  assert.ok(evidence.senderDiagnostics.endpoints.every(value => value.readErrors === 0 && value.rtp.length === 0),
+    'Local-only preview has an RTP publication or unreadable diagnostics.');
+}
+
+function assertPausedPreview(evidence, published) {
+  assertAnnouncedWithoutRemoteMedia(evidence, published);
+  assert.equal(evidence.publisherFocus.anyFocused, false);
+  assert.equal(evidence.publisherState.focused, false);
+  assert.equal(evidence.publisherState.previewPauseWhenUnfocused, true);
+  assert.equal(evidence.publisherState.previewState, 'paused');
+  assert.equal(evidence.publisherStats.publishers[0].previewEnabled, false);
+  assert.deepEqual(evidence.publisherStats.publishers[0].pipelines, []);
+  assert.deepEqual(evidence.senderDiagnostics.endpoints, []);
 }
 
 async function connectCdp(port, expectedOrigin, runId, diagnostics, overlayParent = null) {
@@ -156,7 +330,7 @@ async function previewPixels(client, state, name) {
       return { width: bitmap.width, height: bitmap.height, bright, red: red / count, green: green / count, blue: blue / count };
     } finally { bitmap.close(); }
   })(${JSON.stringify(png)})`);
-  if (state === 'waiting') {
+  if (state === 'waiting' || state === 'paused') {
     assert.equal(sample.placeholderVisible, true, 'The empty video covers the standby preview message.');
     assert.ok(pixels.bright >= 20, `The standby preview message is painted black or covered: ${JSON.stringify(pixels)}`);
   } else assert.ok(pixels.red > 150 && pixels.blue > 150 && pixels.green < 100,
@@ -181,6 +355,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   settingsStore.preferredVideoCodec = 'h264';
   settingsStore.screenShareTelemetryEnabled = true;
   settingsStore.screenShareTelemetryMode = 'complete';
+  const initialPreviewPauseWhenUnfocused = settingsStore.screenSharePreviewPauseWhenUnfocused;
   settingsStore.save();
   webRtcManager.setQualityPreset('CUSTOM');
   videoService.setQualityPreset('CUSTOM');
@@ -202,8 +377,17 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
     .find(value => value.user.sessionId !== auth.currentUser.sessionId && value.voiceState.nativeScreenShares?.length);
   const watchedVideo = () => [...document.querySelectorAll('video.stage-video-element')]
     .find(video => video.srcObject instanceof MediaStream && video.srcObject.getVideoTracks().length);
+  const ownedWindowSource = (sources, hwnd) => {
+    if (!Array.isArray(sources) || !Number.isSafeInteger(hwnd) || hwnd <= 0)
+      throw new Error('An owned child HWND and real DesktopSources are required.');
+    const prefix = `window:${hwnd}:`;
+    const matches = sources.filter(source => source.type === 'window' && typeof source.id === 'string'
+      && source.id.startsWith(prefix) && source.id.length > prefix.length);
+    if (matches.length !== 1) throw new Error('The owned HWND has no unique enumerated source identity.');
+    return matches[0];
+  };
   window.nativeAppSmoke = {
-    async share(desktopSourceId) {
+    async share(ownedHwnd) {
       const wait = async (condition, message) => {
         const deadline = performance.now() + 20000;
         while (!condition()) {
@@ -215,10 +399,19 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       if (!(button instanceof HTMLButtonElement)) throw new Error('The real Share Screen control is missing.');
       button.click();
       await wait(() => document.querySelector('#share-tab-window'), 'The real screen picker did not open.');
-      const monitorTab = document.querySelector('#share-tab-screen');
-      if (!monitorTab?.disabled || !monitorTab.textContent.includes('Coming soon'))
-        throw new Error('The monitor alternative must remain disabled and labeled.');
+      await wait(() => document.querySelector('#share-sources-panel')?.getAttribute('aria-busy') === 'false',
+        'The native source capabilities did not settle.');
+      const capabilities = await webRtcManager.getNativeScreenCapabilities();
+      const kinds = capabilities.captureKinds ?? (capabilities.capture ? ['window'] : []);
+      for (const [tab, kind] of [['screen', 'monitor'], ['window', 'window'], ['game', 'game']]) {
+        const control = document.querySelector(`#share-tab-${tab}`);
+        const supported = (capabilities.capture || capabilities.requiresSelectionProbe === true) && kinds.includes(kind);
+        if (!(control instanceof HTMLButtonElement) || control.disabled === supported ||
+          control.getAttribute('role') !== 'tab' || (!supported && !control.title))
+          throw new Error('Capture methods must reflect actual native capabilities with an explicit unavailable reason.');
+      }
       document.querySelector('#share-tab-window').click();
+      const { id: desktopSourceId } = ownedWindowSource(await window.api.getDesktopSources(), ownedHwnd);
       const card = () => [...document.querySelectorAll('.source-item')].find(item => item.dataset.sourceId === desktopSourceId);
       await wait(card, 'The real picker did not enumerate the owned synthetic window.');
       card().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
@@ -228,13 +421,16 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       if (audioToggle.checked !== audioEnabled) audioToggle.closest('.toggle-switch').querySelector('.toggle-slider').click();
       if (audioToggle.checked !== audioEnabled) throw new Error('The audio switch did not select the requested state.');
       const backend = document.querySelector('#share-capture-info')?.dataset.backend;
-      if (backend !== 'native') throw new Error('The real picker did not qualify the native backend.');
+      const expectedBackend = capabilities.requiresSelectionProbe ? 'probe-pending' : capabilities.capture ? 'native' : 'unavailable';
+      if (backend !== expectedBackend || backend === 'unavailable')
+        throw new Error('The picker must distinguish verified capture from an explicit selection awaiting its native probe.');
       const confirm = document.querySelector('#btn-share');
       if (!(confirm instanceof HTMLButtonElement) || confirm.disabled) throw new Error('The real share confirmation is unavailable.');
       confirm.click();
       const capture = () => videoService.getNativeScreenCaptures().find(value => value.desktopSourceId === desktopSourceId);
       await wait(() => !document.querySelector('#share-sources-panel') && capture(), 'Picker confirmation did not announce its native source.');
-      return { source: capture().source, self: auth.currentUser.sessionId, picker: { backend, audio: audioEnabled, keyboardSelection: true } };
+      return { source: capture().source, self: auth.currentUser.sessionId, desktopSourceId,
+        picker: { backend, audio: audioEnabled, keyboardSelection: true, ownedHwnd } };
     },
     watch() {
       const button = document.querySelector('.stage-watch-btn');
@@ -293,6 +489,8 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         visibleSession: sessionManager.getActive()?.key ?? null, voiceSession: voiceStore.voiceSessionKey,
         localNativeSources: videoService.getNativeScreenCaptures().length,
         previewState: document.querySelector('[data-preview-state]')?.dataset.previewState ?? null,
+        focused: document.hasFocus(),
+        previewPauseWhenUnfocused: settingsStore.screenSharePreviewPauseWhenUnfocused,
         browserWatches: [...(webRtcManager['nativeScreens']['call']?.presentations.values() ?? [])]
           .filter(entry => entry.browser && !entry.stopping).length,
         screenOutputContext: webRtcManager['mediaRouter']['audioContexts'].get('screen')?.state ?? null,
@@ -328,6 +526,13 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       return previous;
     },
+    setPreviewPauseWhenUnfocused(value) {
+      if (typeof value !== 'boolean') throw new Error('Preview focus preference must be boolean.');
+      const previous = settingsStore.screenSharePreviewPauseWhenUnfocused;
+      settingsStore.screenSharePreviewPauseWhenUnfocused = value;
+      settingsStore.save();
+      return previous;
+    },
     async pixels() {
       const video = watchedVideo();
       if (!video?.videoWidth || !video.videoHeight) throw new Error('No actual received video is available to sample.');
@@ -351,7 +556,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         .find(element => element.dataset.tileKey?.endsWith(':screen:' + capture.source.shareId));
       if (!card || card.dataset.previewState !== state) throw new Error('The local preview is not in its expected state.');
       let area, placeholderVisible = null;
-      if (state === 'waiting') {
+      if (state === 'waiting' || state === 'paused') {
         const placeholder = card.querySelector('.stage-native-thumbnail');
         if (placeholder.hidden) throw new Error('The standby message is hidden.');
         area = placeholder.querySelector('span').getBoundingClientRect();
@@ -439,10 +644,13 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       await stopLocalScreenShares(screenAudioService);
       await webRtcManager['nativeScreens'].close();
       leaveCurrentCall();
+      settingsStore.screenSharePreviewPauseWhenUnfocused = initialPreviewPauseWhenUnfocused;
+      settingsStore.save();
     },
   };
   return { sessionId: auth.currentUser.sessionId, channelId: channel.id,
     capabilities: await webRtcManager.getNativeScreenCapabilities(), profile: videoService.getProfile(),
+    previewPauseWhenUnfocused: initialPreviewPauseWhenUnfocused,
     browserVideoCapabilities: browserReceiver ? RTCRtpReceiver.getCapabilities('video') : null };
 }
 
@@ -464,6 +672,7 @@ async function run() {
   const [sourceReady] = await within(once(source, 'message'), 20000, 'Owned source readiness timed out.');
   assert.equal(sourceReady.type, 'ready');
   assert.equal(sourceReady.pid, source.pid);
+  assert.ok(Number.isSafeInteger(sourceReady.hwnd) && sourceReady.hwnd > 0, 'The source child did not prove its own HWND.');
   report.sourcePid = source.pid;
 
   phase('starting-real-server');
@@ -496,6 +705,9 @@ async function run() {
   const origin = `http://127.0.0.1:${vite.httpServer.address().port}`;
   const { isolatedEnvironment } = await import(pathToFileURL(path.join(repo, 'scripts', 'qa.js')));
   const { startOwnedProcess } = await import(pathToFileURL(path.join(repo, 'scripts', 'qa', 'process.js')));
+  const mainFixtureFile = path.join(artifacts, 'main-fixture.cjs');
+  await fs.writeFile(mainFixtureFile, `(${mainFixture.toString()})(${JSON.stringify({ clientRoot, origin, ownerPid: process.pid })});\n`,
+    { flag: 'wx' });
   const allowed = path.join(repo, '.qa', 'runs');
   await fs.mkdir(allowed, { recursive: true });
   for (const label of ['publisher', 'viewer', ...(incompatibleViewer ? ['incompatible'] : [])]) {
@@ -509,7 +721,7 @@ async function run() {
     const configFile = path.join(root, 'launch.json');
     await fs.writeFile(configFile, JSON.stringify({ ownerPid: process.pid, config }), { flag: 'wx' });
     const debugPort = await freePort();
-    const child = startOwnedProcess(require('electron'), [clientRoot, `--user-data-dir=${profile}`,
+    const child = startOwnedProcess(require('electron'), [mainFixtureFile, `--user-data-dir=${profile}`,
       `--remote-debugging-port=${debugPort}`, '--remote-debugging-address=127.0.0.1', '--allow-loopback-in-peer-connection'], {
       cwd: clientRoot, runId, label: `Native Monky ${label}`, timeoutMs: 60000,
       env: isolatedEnvironment(profile, { MONKY_QA_CONFIG: configFile, VITE_DEV_SERVER_URL: origin }),
@@ -552,26 +764,73 @@ async function run() {
     debuggerExited = once(debuggerProcess, 'exit').then(async () => { await log.close(); });
     await until(() => output.includes('OWNED_SCREEN_DEBUGGER_READY'), 'Debugger did not attach to the owned publisher.', 15000);
   }
-  phase('announcing-without-capture');
-  report.published = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(`window:${sourceReady.hwnd}:0`)})`);
-  await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).watchButton, 'Normal Watch control did not appear.');
-  report.idle = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
-  assert.equal(report.idle.publishers.length, 1);
-  assert.equal(report.idle.publishers[0].pipelines.length, 0, 'Announcement started native media before Watch.');
-  await until(async () => (await publisher.cdp.evaluate('nativeAppSmoke.telemetry()'))
-    .some(value => !value.hidden && value.text.includes('Waiting for viewers')), 'Idle native telemetry did not report demand zero.');
-  report.idleDiagnostics = await publisher.cdp.evaluate('nativeAppSmoke.diagnostics()');
-  assert.equal(report.idleDiagnostics.viewers, 0);
-  assert.deepEqual(report.idleDiagnostics.endpoints, []);
-  report.idlePreviewPixels = await previewPixels(publisher, 'waiting', 'preview-standby');
   const sourceCommand = async command => {
     const id = randomUUID(), response = once(source, 'message');
     source.send({ type: 'source-command', id, command });
     const [result] = await within(response, 10000, `Owned source command timed out: ${command}`);
     assert.equal(result.id, id); assert.equal(result.ok, true, result.error);
   };
+  const waitForLocalPreview = () => until(async () => {
+    const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+    assert.deepEqual(state.errors, []);
+    return state.previewState === 'playing' && state.video?.width === 1920
+      && state.video.height === 1080 && state.video.frames >= 15;
+  }, 'The owned local preview did not display actual source frames without remote demand.');
+  const waitForPausedPreview = () => until(async () => {
+    const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+    const stats = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
+    return state.previewState === 'paused' && stats.publishers.length === 1 && stats.publishers[0].pipelines.length === 0;
+  }, 'Blur with the default preference did not retire all unwatched capture/decoder pipelines.');
+
+  phase('previewing-an-owned-source-before-watch');
+  assert.equal(publisher.identity.previewPauseWhenUnfocused, true, 'A fresh profile must pause local preview on blur by default.');
+  await focusOwned(publisher);
+  report.published = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(sourceReady.hwnd)})`);
+  await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).watchButton, 'Normal Watch control did not appear.');
+  await waitForLocalPreview();
+  const initial = await collectEvidence('initialLocalPreview', publisher, viewer);
+  assert.equal(initial.publisherFocus.mainFocused, true);
+  assert.equal(initial.publisherState.focused, true);
+  assert.deepEqual(initial.receiverState.watchStates, []);
+  assertLocalOnlyPreview(initial, report.published);
+  report.idle = initial.publisherStats;
+  report.idleDiagnostics = initial.senderDiagnostics;
+  report.idlePreviewPixels = await previewPixels(publisher, 'playing', 'preview-local-unwatched');
+
+  phase('pausing-unwatched-preview-on-real-blur');
+  await blurPublisher(publisher, viewer);
+  await waitForPausedPreview();
+  assertPausedPreview(await collectEvidence('defaultBlurPreview', publisher, viewer), report.published);
+  report.defaultBlurPixels = await previewPixels(publisher, 'paused', 'preview-blurred');
+
+  phase('keeping-unfocused-preview-with-preference-disabled');
+  await publisher.cdp.evaluate('nativeAppSmoke.setPreviewPauseWhenUnfocused(false)');
+  await waitForLocalPreview();
+  const background = await collectEvidence('backgroundLocalPreview', publisher, viewer);
+  assert.equal(background.publisherFocus.anyFocused, false);
+  assert.equal(background.publisherState.focused, false);
+  assert.equal(background.publisherState.previewPauseWhenUnfocused, false);
+  assertLocalOnlyPreview(background, report.published);
+  report.backgroundPreviewPixels = await previewPixels(publisher, 'playing', 'preview-background');
+
+  phase('restoring-default-focus-policy');
+  await publisher.cdp.evaluate('nativeAppSmoke.setPreviewPauseWhenUnfocused(true)');
+  await waitForPausedPreview();
+  assertPausedPreview(await collectEvidence('restoredDefaultPreview', publisher, viewer), report.published);
+  await focusOwned(publisher);
+  await waitForLocalPreview();
+  const refocused = await collectEvidence('refocusedLocalPreview', publisher, viewer);
+  assert.equal(refocused.publisherFocus.mainFocused, true);
+  assert.equal(refocused.publisherState.previewPauseWhenUnfocused, true);
+  assertLocalOnlyPreview(refocused, report.published);
+  report.refocusedPreviewPixels = await previewPixels(publisher, 'playing', 'preview-refocused');
+
+  // Cadence/pixel measurements must not depend on which owned window has foreground focus.
+  await publisher.cdp.evaluate('nativeAppSmoke.setPreviewPauseWhenUnfocused(false)');
+  await blurPublisher(publisher, viewer);
+  await waitForLocalPreview();
   if (idleSourceClose) {
-    phase('closing-without-ever-capturing');
+    phase('closing-a-local-only-source-without-ever-watching');
     await sourceCommand('close-source');
     await until(async () => !(await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).sources.length
       && (await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers.length === 0,
@@ -579,11 +838,7 @@ async function run() {
     report.idleSourceRetired = true;
     return;
   }
-  if (audioEnabled) {
-    source.send({ type: 'source-command', id: randomUUID(), command: 'tone-start' });
-    const [tone] = await within(once(source, 'message'), 10000, 'Owned tone did not start.');
-    assert.equal(tone.ok, true);
-  }
+  if (audioEnabled) await sourceCommand('tone-start');
 
   phase('watching-through-normal-ui');
   await viewer.cdp.evaluate('nativeAppSmoke.watch()');
@@ -592,10 +847,21 @@ async function run() {
     await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).watchStates
       .some(state => state.state === 'unavailable' && state.reason === 'unsupported'),
     'An insufficient H.264 receive level did not produce an explicit unsupported error.');
-    await until(async () => (await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers[0].pipelines.length === 0,
-      'Rejected browser negotiation retained a native pipeline.');
+    await until(async () => {
+      const stats = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
+      return stats.publishers[0].viewers === 0 && stats.publishers[0].pipelines.length === 1
+        && stats.publishers[0].pipelines[0].endpoint.audioInput === null;
+    }, 'Rejected browser negotiation did not retire its remote publication/PCM and return to local-only preview.');
+    await waitForLocalPreview();
+    const rejected = await collectEvidence('unsupportedBrowserLocalPreview', publisher, viewer);
+    assertLocalOnlyPreview(rejected, report.published);
     assert.equal((await publisher.child.call('qa-ping')).alive, true, 'Rejected codec crashed the publisher.');
     assert.equal((await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).browserWatches, 0);
+    report.unsupportedPreviewPixels = await previewPixels(publisher, 'playing', 'preview-after-unsupported-browser');
+    await blurPublisher(publisher, viewer);
+    await publisher.cdp.evaluate('nativeAppSmoke.setPreviewPauseWhenUnfocused(true)');
+    await waitForPausedPreview();
+    assertPausedPreview(await collectEvidence('unsupportedBrowserBlurred', publisher, viewer), report.published);
     report.unsupportedCodecRejectedAndRetired = true;
     return;
   }
@@ -609,6 +875,32 @@ async function run() {
     return state.previewState === 'playing' && state.video?.width === 1920 && state.video.frames >= 15;
   }, 'The publisher did not display its actual libobs preview.');
   report.localPreview = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+  phase('pausing-local-preview-without-interrupting-a-spectator');
+  const watchedPipeline = (await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers[0].pipelines[0];
+  await blurPublisher(publisher, viewer);
+  await publisher.cdp.evaluate('nativeAppSmoke.setPreviewPauseWhenUnfocused(true)');
+  await until(async () => (await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).previewState === 'paused',
+    'Local preview did not pause while the publisher was blurred with a real spectator.');
+  const spectatorBeforeBlur = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+  await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).video?.frames >= spectatorBeforeBlur.video.frames + 30,
+    'Pausing only local preview stopped the remote spectator.');
+  const watchedBlur = await collectEvidence('watchedPublisherBlur', publisher, viewer);
+  assert.equal(watchedBlur.publisherFocus.anyFocused, false);
+  assert.equal(watchedBlur.publisherState.previewState, 'paused');
+  assert.equal(watchedBlur.publisherStats.publishers[0].pipelines.length, 1);
+  const retainedDuringBlur = watchedBlur.publisherStats.publishers[0].pipelines[0];
+  assert.equal(retainedDuringBlur.pipelineId, watchedPipeline.pipelineId);
+  assert.equal(retainedDuringBlur.endpoint.capturePid, watchedPipeline.endpoint.capturePid);
+  assert.equal(retainedDuringBlur.viewers, 1);
+  assert.equal(retainedDuringBlur.endpoint.demand, 1);
+  assert.equal(retainedDuringBlur.endpoint.previewDemand, false);
+  assert.equal(watchedBlur.receiverState.watchStates[0].state, 'playing');
+  assert.deepEqual(watchedBlur.publisherState.errors, []);
+  report.watchedBlurPixels = await previewPixels(publisher, 'paused', 'preview-paused-with-spectator');
+  await publisher.cdp.evaluate('nativeAppSmoke.setPreviewPauseWhenUnfocused(false)');
+  await waitForLocalPreview();
+  assert.equal((await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers[0].pipelines[0].pipelineId,
+    watchedPipeline.pipelineId, 'Resuming local preview replaced the spectator pipeline.');
   if (windowLifecycle) {
     phase('minimizing-and-restoring-the-selected-window');
     const pipelineId = (await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers[0].pipelines[0].pipelineId;
@@ -629,9 +921,15 @@ async function run() {
   await delay(3000);
   const after = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
   report.stage = { ...after, fps: (after.video.frames - before.video.frames) * 1000 / (after.video.at - before.video.at) };
+  report.stageBefore = before;
+  const sourceRate = await collectEvidence('sourceRateBeforeAssertion', publisher, viewer);
+  report.publishing = sourceRate.publisherStats;
+  report.receiving = sourceRate.receiverStats;
+  report.senderDiagnostics = sourceRate.senderDiagnostics;
+  report.receiverDiagnostics = sourceRate.receiverDiagnostics;
+  assert.equal(sourceRate.publisherState.previewPauseWhenUnfocused, false);
   assert.ok(report.stage.fps >= 100, `Normal-app presentation reached ${report.stage.fps.toFixed(2)} FPS.`);
   report.localCompositorPixels = await previewPixels(publisher, 'playing', 'preview-playing');
-  report.receiving = await viewer.cdp.evaluate('nativeAppSmoke.stats()');
   const observedTelemetry = async (client, width, height) => {
     let telemetry;
     await until(async () => {
@@ -645,8 +943,6 @@ async function run() {
   };
   report.senderTelemetry = await observedTelemetry(publisher, 1920, 1080);
   report.receiverTelemetry = await observedTelemetry(viewer, 1920, 1080);
-  report.senderDiagnostics = await publisher.cdp.evaluate('nativeAppSmoke.diagnostics()');
-  report.receiverDiagnostics = await viewer.cdp.evaluate('nativeAppSmoke.diagnostics()');
   for (const diagnostics of [report.senderDiagnostics, report.receiverDiagnostics])
     if (diagnostics.backend === 'native') assert.ok(diagnostics.endpoints.every(endpoint => endpoint.readErrors === 0));
   report.stretchedPixels = await viewer.cdp.evaluate('nativeAppSmoke.pixels()');
@@ -680,14 +976,17 @@ async function run() {
     }, 'The incompatible viewer retained or retired a shared pipeline.');
     await delay(1500);
     const after = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
-    const retained = (await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers[0].pipelines[0];
+    const fps = (after.video.frames - before.video.frames) * 1000 / (after.video.at - before.video.at);
+    report.incompatibleViewerIsolation = { fps, before, after,
+      incompatible: await incompatible.cdp.evaluate('nativeAppSmoke.snapshot()') };
+    const isolated = await collectEvidence('incompatibleRateBeforeAssertion', publisher, viewer);
+    const retained = isolated.publisherStats.publishers[0].pipelines[0];
     assert.equal(retained.pipelineId, pipeline.pipelineId);
     assert.equal(retained.endpoint.capturePid, pipeline.endpoint.capturePid, 'An incompatible viewer restarted the shared capture.');
     assert.equal(after.watchStates[0].state, 'playing');
-    const fps = (after.video.frames - before.video.frames) * 1000 / (after.video.at - before.video.at);
     assert.ok(fps >= 100, `A rejected viewer interrupted compatible playback (${fps.toFixed(2)} FPS).`);
-    assert.deepEqual((await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).errors, [], 'A viewer-only rejection was reported as a source failure.');
-    report.incompatibleViewerIsolation = { fps, pipelinePreserved: true, capturePreserved: true };
+    assert.deepEqual(isolated.publisherState.errors, [], 'A viewer-only rejection was reported as a source failure.');
+    Object.assign(report.incompatibleViewerIsolation, { pipelinePreserved: true, capturePreserved: true });
   }
   if (audioEnabled) {
     if (browserReceiver) {
@@ -767,20 +1066,25 @@ async function run() {
     const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
     return state.previewState === 'playing' && state.video?.width === 852 && state.video.height === 480;
   }, 'The local preview did not follow the actual active rendition.');
-  if (browserReceiver) {
-    report.browserReduced = await viewer.cdp.evaluate('nativeAppSmoke.browserStats()');
-    report.reducedPublisher = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
-    assert.equal(report.reducedPublisher.publishers[0].pipelines[0].endpoint.profile.fps, 30);
-  } else assert.equal(report.reduced.subscriptions[0].endpoint.profile.fps, 30);
   const reducedBefore = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
   await delay(2500);
   const reducedAfter = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+  report.reducedSnapshots = { before: reducedBefore, after: reducedAfter };
   report.reducedFps = (reducedAfter.video.frames - reducedBefore.video.frames) * 1000 / (reducedAfter.video.at - reducedBefore.video.at);
+  const reducedRate = await collectEvidence('reducedRateBeforeAssertion', publisher, viewer);
+  report.reduced = reducedRate.receiverStats;
+  report.reducedPublisher = reducedRate.publisherStats;
+  report.reducedSenderDiagnostics = reducedRate.senderDiagnostics;
+  report.reducedReceiverDiagnostics = reducedRate.receiverDiagnostics;
+  assert.equal(reducedRate.publisherState.previewPauseWhenUnfocused, false);
+  if (browserReceiver) {
+    report.browserReduced = reducedRate.browserStats;
+    assert.equal(report.reducedPublisher.publishers[0].pipelines[0].endpoint.profile.fps, 30);
+  } else assert.equal(report.reduced.subscriptions[0].endpoint.profile.fps, 30);
   assert.ok(report.reducedFps >= 25 && report.reducedFps <= 35, 'Quality did not change actual presentation cadence.');
   assert.equal(reducedAfter.fullscreen, true, 'A quality change destroyed the fullscreen card.');
   report.reducedSenderTelemetry = await observedTelemetry(publisher, 852, 480);
   report.reducedReceiverTelemetry = await observedTelemetry(viewer, 852, 480);
-  report.reducedSenderDiagnostics = await publisher.cdp.evaluate('nativeAppSmoke.diagnostics()');
   report.reducedStretchedPixels = await viewer.cdp.evaluate('nativeAppSmoke.pixels()');
   assertStretch(report.reducedStretchedPixels);
   report.reducedLocalPixels = await previewPixels(publisher, 'playing', 'preview-reduced');
@@ -795,13 +1099,22 @@ async function run() {
 
   phase('stopping-through-normal-ui');
   await viewer.cdp.evaluate('nativeAppSmoke.stopWatching()');
-  await until(async () => (await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers[0].pipelines.length === 0,
-    'The normal Stop control retained a capture/encoder.');
+  await until(async () => {
+    const stats = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
+    return stats.publishers[0].viewers === 0 && stats.publishers[0].pipelines.length === 1
+      && stats.publishers[0].pipelines[0].endpoint.audioInput === null;
+  }, 'The last Stop did not retire remote publication/PCM and return to local-only preview.');
+  await waitForLocalPreview();
+  await until(async () => {
+    const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+    return state.video === null && state.browserWatches === 0;
+  }, 'Stop retained the receiver video or browser watch.');
+  const localAfterStop = await collectEvidence('lastStopLocalPreview', publisher, viewer);
+  assert.equal(localAfterStop.publisherState.previewPauseWhenUnfocused, false);
+  assertLocalOnlyPreview(localAfterStop, report.published);
   assert.equal((await viewer.cdp.evaluate('nativeAppSmoke.stats()')).subscriptions.length, 0);
   assert.equal((await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).browserWatches, 0);
-  await until(async () => (await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).previewState === 'waiting',
-    'The local preview did not return to demand-zero standby.');
-  report.stoppedPreviewPixels = await previewPixels(publisher, 'waiting', 'preview-stopped');
+  report.stoppedPreviewPixels = await previewPixels(publisher, 'playing', 'preview-local-after-stop');
   if (browserReceiver) {
     const retired = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
     assert.equal(retired.screenOutputContext, null);
@@ -812,10 +1125,23 @@ async function run() {
       && (await viewer.overlayCdp.evaluate(overlaySnapshot)).length === 0, 'The overlay retained a stopped native screen.');
     report.overlayRetiredWhileOpen = true;
   }
+  phase('retiring-unwatched-preview-with-default-blur-policy');
+  await blurPublisher(publisher, viewer);
+  await publisher.cdp.evaluate('nativeAppSmoke.setPreviewPauseWhenUnfocused(true)');
+  await waitForPausedPreview();
+  assertPausedPreview(await collectEvidence('lastStopBlurredPreview', publisher, viewer), report.published);
+  report.stoppedBlurredPixels = await previewPixels(publisher, 'paused', 'preview-paused-after-stop');
   phase('rewatching');
   await viewer.cdp.evaluate('nativeAppSmoke.watch()');
   await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).video?.frames >= 15,
     'A second normal Watch did not resume playback.');
+  const rewatched = await collectEvidence('rewatchedWithLocalPreviewPaused', publisher, viewer);
+  assert.equal(rewatched.publisherState.previewPauseWhenUnfocused, true);
+  assert.equal(rewatched.publisherState.previewState, 'paused');
+  assert.equal(rewatched.publisherFocus.anyFocused, false);
+  assert.equal(rewatched.publisherStats.publishers[0].pipelines.length, 1);
+  assert.equal(rewatched.publisherStats.publishers[0].pipelines[0].viewers, 1);
+  assert.equal(rewatched.publisherStats.publishers[0].pipelines[0].endpoint.previewDemand, false);
   if (overlayEnabled) {
     await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).overlay.carryingScreen
       && (await viewer.overlayCdp.evaluate(overlaySnapshot)).some(video => video.state === 'live'),

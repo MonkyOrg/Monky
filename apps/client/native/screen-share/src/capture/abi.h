@@ -117,6 +117,7 @@ struct OutputInfo {
 
 constexpr std::uint32_t kVideoEncoded = 1u | 4u;
 constexpr std::uint32_t kPassTexture = 2u;
+constexpr std::uint32_t kDynamicBitrate = 4u;
 constexpr std::uint32_t kMainCanvas = 1u;
 constexpr int kLogError = 100;
 constexpr int kLogWarning = 200;
@@ -165,6 +166,7 @@ struct Api {
   std::uint32_t(__cdecl* obs_source_get_height)(Source*) = nullptr;
   ProcHandler*(__cdecl* obs_source_get_proc_handler)(const Source*) = nullptr;
   Properties*(__cdecl* obs_get_source_properties)(const char*) = nullptr;
+  const char*(__cdecl* obs_source_get_display_name)(const char*) = nullptr;
   Scene*(__cdecl* obs_scene_from_source)(const Source*) = nullptr;
   Source*(__cdecl* obs_scene_get_source)(const Scene*) = nullptr;
   SceneItem*(__cdecl* obs_scene_add)(Scene*, Source*) = nullptr;
@@ -207,9 +209,11 @@ struct Api {
   void(__cdecl* obs_encoder_release)(Encoder*) = nullptr;
   void(__cdecl* obs_encoder_set_video)(Encoder*, Video*) = nullptr;
   Video*(__cdecl* obs_encoder_video)(const Encoder*) = nullptr;
+  bool(__cdecl* obs_encoder_active)(const Encoder*) = nullptr;
   bool(__cdecl* obs_encoder_get_extra_data)(const Encoder*, std::uint8_t**, std::size_t*) = nullptr;
   Data*(__cdecl* obs_encoder_get_settings)(const Encoder*) = nullptr;
   const char*(__cdecl* obs_encoder_get_id)(const Encoder*) = nullptr;
+  const char*(__cdecl* obs_encoder_get_last_error)(Encoder*) = nullptr;
   void(__cdecl* obs_register_output_s)(const OutputInfo*, std::size_t) = nullptr;
   Output*(__cdecl* obs_output_create)(const char*, const char*, Data*, Data*) = nullptr;
   void(__cdecl* obs_output_release)(Output*) = nullptr;

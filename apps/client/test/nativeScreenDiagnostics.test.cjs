@@ -65,6 +65,22 @@ test('native stats preserve unavailable fields and reject malformed counts witho
   assert.throws(() => rtpReports({ guessedFrameRate: 120 }), /bounded stats array/);
 });
 
+test('codec IDs containing negotiated bitrate parameters preserve their RTP references without relaxing identity bounds', () => {
+  const codecId = 'RTCCodec_video_H264_packetization-mode=1;profile-level-id=4d0033;level-asymmetry-allowed=1;'
+    + 'x-google-start-bitrate=5000;x-google-max-bitrate=20000';
+  assert.ok(codecId.length > 128);
+  const rows = rtpReports(rtc(1000000, 120, 500000).map(row =>
+    row.type === 'codec' ? { ...row, id: codecId } : { ...row, codecId }));
+  assert.equal(rows[0].id, codecId);
+  assert.equal(rows[1].codecId, codecId);
+  const sampler = new VideoDiagnosticsSampler();
+  assert.equal(sampler.sampleOutbound({}, reportMap(rows), { encodings: [] }, 'actual-source')[0].codec, 'H264');
+  for (const id of ['', 'x'.repeat(2049), '\u00e1'.repeat(1025), 'codec\0forged'])
+    assert.throws(() => rtpReports([{ ...rows[0], id }]));
+  const { nativeScreenCallSchema } = require('@monky/shared');
+  assert.equal(nativeScreenCallSchema.shape.sessionId.safeParse('x'.repeat(129)).success, false);
+});
+
 test('native decoder observations keep each worker clock and lifetime counter rather than getter time', () => {
   const workers = decoderObservations({ decoders: [{
     sessionId: 7, diagnostics: { clock: 'process-steady-clock', counterScope: 'decoder-worker-lifetime',

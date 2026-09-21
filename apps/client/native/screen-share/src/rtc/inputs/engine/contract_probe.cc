@@ -218,6 +218,23 @@ int main() {
         (void)rtc::peer_detail::VideoPlayoutDelayMs({{"minimumDelayMs", 200u}, {"actualDelayMeasured", true}});
       }, MONKY_ENGINE_UNSUPPORTED);
     });
+    group("sfuVideoStartupBitrate", [] {
+      for (const auto [maximum, start] : std::vector<std::pair<unsigned, unsigned>>{
+          {20000000u, 5000u}, {1500000u, 1500u}, {64000u, 64u}}) {
+        const auto encoding = rtc::peer_detail::Encoding(
+            {{"maxBitrateBps", maximum}, {"maxFramerate", 120}}, false);
+        const auto options = rtc::peer_detail::SfuVideoCodecOptions(encoding);
+        Check(options == Json{{"videoGoogleStartBitrate", start},
+                              {"videoGoogleMaxBitrate", maximum / 1000}},
+              "SFU startup must follow its source ceiling without a forced minimum or the300kbps default");
+      }
+      Reject([] { (void)rtc::peer_detail::SfuVideoCodecOptions({}); }, MONKY_ENGINE_INVALID);
+      for (const auto invalid : {-1, 0, 63999}) {
+        webrtc::RtpEncodingParameters encoding;
+        encoding.max_bitrate_bps = invalid;
+        Reject([&] { (void)rtc::peer_detail::SfuVideoCodecOptions(encoding); }, MONKY_ENGINE_INVALID);
+      }
+    });
     group("inputLeases", [] { monky::native_rtc::node::RunInputLeaseChecks(Check); });
     group("nodeEventQueue", [] { monky::native_rtc::node::RunEventQueueChecks(Check); });
     group("audioFoundations", [] { rtc::audio::RunAudioFoundationChecks(Check); });

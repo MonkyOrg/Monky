@@ -11,6 +11,86 @@ type PacketCaptureSelection = Pick<import('@monky/screen-audio').PacketCaptureOp
 
 export type { NativeScreenAudioPreferences } from '@monky/shared';
 
+export type NativeScreenCaptureEncoder = 'auto' | 'h264_texture_amf' | 'obs_nvenc_h264_tex';
+export type NativeScreenCaptureTarget =
+  | { kind: 'window' | 'game'; hwnd: number; expectedProcessId: number; expectedProcessCreationTime100ns: string }
+  | { kind: 'monitor'; deviceId: string; deviceName: string; bounds: { x: number; y: number; width: number; height: number } };
+
+export type LegacyNativeWindowCaptureTarget = { kind?: never; hwnd: number; expectedProcessId: number };
+
+/** Validates exact keys and returns the same input; cloning/freezing belongs to capture preparation. */
+export function validateCaptureTarget<T extends NativeScreenCaptureTarget | LegacyNativeWindowCaptureTarget>(target: T): T;
+export function validateCaptureTarget(target: unknown): NativeScreenCaptureTarget | LegacyNativeWindowCaptureTarget;
+
+export interface NativeScreenCaptureCapability {
+  readonly encoderId: Exclude<NativeScreenCaptureEncoder, 'auto'>;
+  readonly codec: 'h264';
+  readonly adapterIndex: 0;
+  readonly adapterLuid: string;
+  readonly vendorId: number;
+  readonly deviceId: number;
+  readonly probe: 'obs-amf-test' | 'nvenc-d3d11-session';
+  readonly probeVerified: true;
+  readonly textureInput: true;
+  readonly dynamicBitrate: true;
+  readonly hardwareSessionConfirmed: boolean;
+  readonly hardwareQualified: false;
+}
+
+export interface NativeScreenCaptureSnapshot {
+  readonly nativeClosed: boolean;
+  readonly forcedTermination: boolean;
+}
+
+export interface NativeScreenCaptureProbeOptions {
+  host: NativeScreenRuntime['host'];
+  runtime: NativeScreenRuntime['obs'];
+  runId: string;
+  runDirectory: string;
+  video: { width: number; height: number; fps: number; bitrateKbps: number };
+  encoder?: NativeScreenCaptureEncoder;
+}
+
+export interface NativeScreenCaptureProbeResult extends NativeScreenCaptureCapability {
+  readonly encoderInitialized: true;
+  readonly hardwareSessionConfirmed: false;
+  readonly sourceCaptured: false;
+  readonly captureKinds: readonly ['window', 'monitor', 'game'];
+  readonly video: Readonly<NativeScreenCaptureProbeOptions['video']>;
+}
+
+/**
+ * Performs real source-free hardware initialization, not a static capability lookup.
+ * Resolves only after native retirement and child exit; does not prove source/game compatibility
+ * or encoded frames. The caller owns cleanup of the private nonce-bound run directory.
+ */
+export function probeCaptureCapabilities(
+  options: NativeScreenCaptureProbeOptions, signal?: AbortSignal,
+): Promise<NativeScreenCaptureProbeResult>;
+
+export class CaptureBridge {
+  constructor(options: NativeScreenCaptureProbeOptions & {
+    isSourcePaused?: () => boolean;
+    onError: (error: Error) => void;
+    onPacket: (frame: NativeScreenPreviewFrame) => undefined | false;
+    onNotice: (notice: unknown) => undefined;
+  });
+  readonly child?: import('node:child_process').ChildProcess;
+  /** Probes the explicitly selected target/settings, without source pixels or a production encoder. */
+  prepare(target: NativeScreenCaptureTarget | LegacyNativeWindowCaptureTarget, signal?: AbortSignal): Promise<unknown>;
+  start(target: NativeScreenCaptureTarget | LegacyNativeWindowCaptureTarget, signal?: AbortSignal): Promise<unknown>;
+  getCapabilities(): NativeScreenCaptureCapability | null;
+  setBitrate(bitrateKbps: number): Promise<{
+    kind: 'bitrate-settings'; sequence: number; bitrateKbps: number; settingsAccepted: true;
+    hardwareApplicationConfirmed: false; fpsApplied: null;
+  }>;
+  requestKeyFrame(): Promise<{
+    kind: 'idr-request'; sequence: number; keyframeConfirmed: false; mode: 'next-real-idr'; maximumWaitMs: 1500;
+  }>;
+  snapshot(): NativeScreenCaptureSnapshot;
+  stop(): Promise<NativeScreenCaptureSnapshot>;
+}
+
 export interface NativeScreenAudioOptions extends NativeScreenAudioPreferences {
   output: {
     webContents: WebContents;
@@ -47,6 +127,12 @@ export class NativePcmCaptureHub {
 }
 
 export interface NativeScreenRuntime {
+  readonly capture: {
+    readonly captureKinds: readonly import('@monky/shared').NativeScreenCaptureKind[];
+    readonly encoders: readonly Exclude<NativeScreenCaptureEncoder, 'auto'>[];
+    readonly requiresHardwareProbe: true;
+    readonly hardwareQualified: false;
+  };
   readonly rtc: {
     capabilities(): Readonly<Record<string, unknown>>;
     createEngine(options: Readonly<Record<string, unknown>>, onEvent: (event: unknown) => void): unknown;
@@ -70,7 +156,8 @@ export interface NativeScreenEndpointOptions {
   source: NativeScreenSource;
   quality: ScreenShareQuality;
   audio?: NativeScreenAudioOptions;
-  target?: { hwnd: number; expectedProcessId: number };
+  target?: NativeScreenCaptureTarget | LegacyNativeWindowCaptureTarget;
+  captureEncoder?: NativeScreenCaptureEncoder;
   captureDirectory?: string;
   isSourcePaused?: () => boolean;
   onPreview?: (frame: NativeScreenPreviewFrame) => void;
@@ -94,6 +181,7 @@ export interface NativeScreenEndpointSnapshot {
   profile: Readonly<NativeScreenVideoProfile>;
   captureState: 'waiting' | 'starting' | 'running' | 'stopping' | 'closed';
   demand: number;
+  previewDemand: boolean;
   closing: boolean;
   nativeClosed: boolean;
   closed: boolean;
@@ -108,10 +196,11 @@ export interface NativeScreenEndpointSnapshot {
 }
 
 export function loadRuntime(directory?: string): NativeScreenRuntime;
+export function loadCaptureRuntime(directory?: string): Pick<NativeScreenRuntime, 'host' | 'obs' | 'capture'>;
 export class NativeScreenEndpoint {
   constructor(options: NativeScreenEndpointOptions);
   readonly ready: Promise<void>;
-  setDemand(count: number): Promise<void>;
+  setDemand(count: number, preview?: boolean): Promise<void>;
   connectPeer(remoteSessionId: string, configuration: {
     connectionId: string; generation: number;
     iceServers: readonly { urls: string[]; username?: string; credential?: string }[];
@@ -145,6 +234,7 @@ export interface NativeScreenPublisherOptions {
 }
 export interface NativeScreenPublisherSnapshot {
   source: NativeScreenSource;
+  previewEnabled: boolean;
   stopping: boolean;
   closed: boolean;
   viewers: number;
@@ -154,6 +244,7 @@ export interface NativeScreenPublisherSnapshot {
 }
 export class NativeScreenPublisher {
   constructor(options: NativeScreenPublisherOptions);
+  setPreviewEnabled(enabled: boolean): Promise<void>;
   receive(signal: import('@monky/shared').NativeScreenSignalPayload): Promise<void>;
   setParticipants(sessionIds: readonly string[]): Promise<void>;
   close(reason?: import('@monky/shared').NativeScreenFailure): Promise<void>;
@@ -217,11 +308,12 @@ export class NativeScreenPreviewBridge {
   constructor(options: {
     frame: WebFrameMain; info: import('@monky/shared').NativeScreenPreviewInfo;
     createMessageChannel: () => MessageChannelMain;
-    onState: (state: 'waiting' | 'playing' | 'unavailable') => void; onError: (error: Error) => void;
+    onState: (state: import('@monky/shared').NativeScreenPreviewState) => void; onError: (error: Error) => void;
   });
   readonly info: import('@monky/shared').NativeScreenPreviewInfo;
+  readonly closed: boolean;
   offer(frame: NativeScreenPreviewFrame, pipelineId: string, video: NativeScreenVideoProfile): void;
-  reset(): void;
+  reset(state?: 'waiting' | 'paused'): void;
   close(): void;
 }
 

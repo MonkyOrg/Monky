@@ -730,7 +730,8 @@ export class SfuManager {
     transportId: string,
     kind: 'audio' | 'video',
     rtpParameters: mediasoup.types.RtpParameters,
-    appData: Record<string, any> = {}
+    appData: Record<string, unknown> = {},
+    paused = false
   ): Promise<{ id: string }> {
     const record = this.transports.get(transportId);
     if (!record) {
@@ -753,6 +754,7 @@ export class SfuManager {
       kind,
       rtpParameters,
       appData,
+      paused,
     });
     if (this.transports.get(transportId) !== record || record.transport.closed) {
       producer.close();
@@ -923,6 +925,24 @@ export class SfuManager {
     const record = this.producers.get(producerId);
     return !!record && record.sessionId === sessionId && record.channelId === channelId
       && (!purpose || this.ownsTransport(sessionId, channelId, record.transportId, 'send', purpose));
+  }
+
+  public ownsConsumer(sessionId: string, channelId: string, consumerId: string): boolean {
+    const record = this.consumers.get(consumerId);
+    return !!record && !record.consumer.closed && record.sessionId === sessionId && record.channelId === channelId;
+  }
+
+  public async setMicrophonesMuted(sessionId: string, muted: boolean): Promise<void> {
+    await Promise.all([...this.producers.values()].filter((record) =>
+      record.sessionId === sessionId && record.kind === 'audio' && record.appData.mediaType === 'mic'
+    ).map(async (record) => {
+      try {
+        if (muted) await record.producer.pause();
+        else await record.producer.resume();
+      } catch (error) {
+        if (!record.producer.closed && this.producers.get(record.producer.id) === record) throw error;
+      }
+    }));
   }
 
   public closeConsumer(sessionId: string, channelId: string, consumerId: string): boolean {

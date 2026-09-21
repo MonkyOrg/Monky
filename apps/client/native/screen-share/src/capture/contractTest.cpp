@@ -1,5 +1,6 @@
 #include <Windows.h>
 #include "liveNative.h"
+#include "platformContract.h"
 #include <iostream>
 
 using namespace monky::screen_capture;
@@ -48,6 +49,74 @@ static std::vector<std::uint8_t> ParameterSets(const VideoConfiguration& video) 
 
 int main(int argc, char** argv) {
   try {
+    if (argc == 2 && std::string_view(argv[1]) == "--encoder-probe-contract") {
+      std::cout << "{\"deviceFree\":true,\"synthetic\":true,\"messages\":[";
+      bool first = true;
+      for (const auto encoder : {EncoderKind::Amf, EncoderKind::Nvenc}) {
+        Arguments arguments;
+        arguments.encoderProbe = true; arguments.encoder = encoder;
+        arguments.runId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        arguments.video = {1280, 720, 60, 5000};
+        Common common{arguments.runId, 42, 0, 0, 0, 1000, 10000000};
+        EncoderCapability capability{encoder, 0, encoder == EncoderKind::Nvenc ? 0x10deu : 0x1002u, 123, 456, true};
+        const Retirement retired{true, true, true, true, true};
+        const NativeFailure failure{"ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION", "Synthetic encoder refusal"};
+        if (!first) std::cout << ',';
+        first = false;
+        std::cout << SerializeEncoderProbeEvent(arguments, common, capability, "prepared", 0, true, true) << ',';
+        ++common.qpc;
+        std::cout << SerializeEncoderProbeEvent(arguments, common, capability, "stopped", 1, true, true, &retired) << ',';
+        capability.verified = false;
+        std::cout << SerializeEncoderProbeEvent(arguments, common, capability, "error", 0, false, false, &retired, &failure) << ','
+                  << SerializeEncoderProbeEvent(arguments, common, capability, "stopped", 1, false, false, &retired);
+      }
+      std::cout << "]}\n";
+      return 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--platform-probe") {
+      std::cout << "{\"deviceFree\":true,\"synthetic\":true,\"messages\":[";
+      bool first = true;
+      for (const auto kind : {CaptureKind::Window, CaptureKind::Monitor, CaptureKind::Game}) {
+        for (const auto encoder : {EncoderKind::Amf, EncoderKind::Nvenc}) {
+          Arguments arguments;
+          arguments.kind = kind; arguments.encoder = encoder;
+          arguments.method = kind == CaptureKind::Game ? Method::GameHook : Method::Wgc;
+          arguments.video = {1280, 720, 60, 5000};
+          arguments.monitor = {L"\\\\?\\DISPLAY#TEST#{1234}", L"\\\\.\\DISPLAY2", -1920, 0, 1920, 1080};
+          Common common{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 42, kind == CaptureKind::Monitor ? 0u : 10u,
+              kind == CaptureKind::Monitor ? 0u : 19u, kind == CaptureKind::Monitor ? 0u : 123456789u, 1000, 10000000};
+          const EncoderCapability capability{encoder, 0, encoder == EncoderKind::Nvenc ? 0x10deu : 0x1002u, 123, 456, true};
+          const SourceKey key{"Owned fixture", "MonkyCaptureFixture", "fixture.exe"};
+          Observation observation;
+          std::optional<SourceKey> hooked;
+          const Retirement retired{true, true, true, true, true};
+          for (unsigned step = 0; step < 4; ++step) {
+            if (step == 1) {
+              common.qpc = 1002;
+              observation.state = ObservationState::Running; observation.sourceAttached = true;
+              observation.sourceWidth = kind == CaptureKind::Monitor ? 1920 : 800;
+              observation.sourceHeight = kind == CaptureKind::Monitor ? 1080 : 600;
+              observation.outputPackets = 1; observation.outputBytes = 512; observation.keyframes = 1;
+              observation.firstPts = 0; observation.lastPts = 0; observation.lastDts = 0;
+              observation.timebaseNumerator = 1; observation.timebaseDenominator = 60;
+              observation.firstPacketQpc = 1001; observation.obsTotalFrames = 1;
+              if (kind != CaptureKind::Monitor) hooked = key;
+            } else if (step >= 2) {
+              common.qpc = 1002 + step;
+              observation.sourceAttached = false;
+              if (step == 3) observation.state = ObservationState::Stopped;
+            }
+            const auto type = step == 0 ? "prepared" : step == 1 ? "ready" : step == 2 ? "stats" : "stopped";
+            if (!first) std::cout << ',';
+            first = false;
+            std::cout << SerializePlatformEvent(arguments, common, capability, type, step, observation,
+                key, hooked, step == 3 ? &retired : nullptr);
+          }
+        }
+      }
+      std::cout << "]}\n";
+      return 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--fault-probe") {
       FaultDiagnostics diagnostics;
       Require(HandledFaultProbe(), "The diagnostic observer swallowed a synthetic exception");
@@ -150,6 +219,19 @@ int main(int argc, char** argv) {
       statistics.SetPrefix(prefix);
       const std::array<std::uint8_t, 5> idr{0, 0, 1, 0x65, 0xb8};
       const std::array<std::uint8_t, 5> delta{0, 0, 1, 0x41, 0xb8};
+      const auto complete = CompleteH264Keyframe(idr, prefix, video);
+      const auto independent = InspectAnnexB(complete, video);
+      check(independent.sps && independent.pps && independent.idr && independent.accessUnit);
+      check(complete.size() == prefix.size() + idr.size() &&
+          std::equal(prefix.begin(), prefix.end(), complete.begin()) &&
+          std::equal(idr.begin(), idr.end(), complete.begin() + prefix.size()));
+      check(CompleteH264Keyframe(idr, prefix, video) == complete);
+      rejects([&] { CompleteH264Keyframe(delta, prefix, video); });
+      rejects([&] { CompleteH264Keyframe(idr, idr, video); });
+      rejects([&] { CompleteH264Keyframe(idr, complete, video); });
+      auto oversized = std::vector<std::uint8_t>(idr.begin(), idr.end());
+      oversized.resize(kMaxPacketBytes, 0x80);
+      rejects([&] { CompleteH264Keyframe(oversized, prefix, video); });
       statistics.Add({idr, 0, -1, 1, video.fps, true, 1000});
       for (std::int64_t frame = 1; frame < 100000; ++frame)
         statistics.Add({delta, frame, frame - 1, 1, video.fps, false, 1000 + static_cast<std::uint64_t>(frame)});
@@ -163,6 +245,7 @@ int main(int argc, char** argv) {
       if (video.width != 1920) {
         PacketStatistics wrongDimensions({1920, 1080, video.fps, 5000});
         rejects([&] { wrongDimensions.SetPrefix(prefix); });
+        rejects([&] { CompleteH264Keyframe(idr, prefix, {1920, 1080, video.fps, 5000}); });
       }
     }
     for (const auto invalidVideo : {VideoConfiguration{1919, 1080, 120, 5000}, {1920, 1081, 120, 5000},
@@ -174,6 +257,95 @@ int main(int argc, char** argv) {
     for (unsigned index = 0; index < 2048; ++index) budget.Add(1024);
     check(budget.Bytes() == 2097152);
     rejects([&] { budget.Add(kMaxOutputLine + 1); });
+    const std::vector<std::wstring_view> windowArguments{
+      L"--runtime=C:\\obs", L"--run-directory=C:\\qa\\monky-screen-capture-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      L"--run-id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", L"--hwnd=19", L"--pid=10",
+      L"--width=1920", L"--height=1080", L"--fps=60", L"--bitrate=5000"};
+    check(ParseArguments(windowArguments).encoder == EncoderKind::Auto);
+    const std::vector<std::wstring_view> probeArguments{
+      windowArguments[0], windowArguments[1], windowArguments[2], L"--probe=encoder", L"--encoder=auto",
+      L"--width=1920", L"--height=1080", L"--fps=60", L"--bitrate=5000"};
+    const auto probe = ParseArguments(probeArguments);
+    check(probe.encoderProbe && probe.hwnd == 0 && probe.processId == 0 && probe.expectedCreation == 0 &&
+          probe.monitor.deviceId.empty() && probe.encoder == EncoderKind::Auto);
+    ValidateCommandMode(probe, {1, Verb::Stop}); check(true);
+    rejects([&] { ValidateCommandMode(probe, {1, Verb::Start}); });
+    rejects([&] { ValidateCommandMode(probe, {1, Verb::Stats}); });
+    for (const auto sourceOption : {L"--hwnd=19", L"--pid=10", L"--kind=window", L"--kind=monitor", L"--kind=game",
+         L"--process-created=123", L"--monitor-id=\\\\?\\DISPLAY#TEST#{1234}", L"--monitor-name=\\\\.\\DISPLAY2",
+         L"--monitor-x=0", L"--monitor-y=0", L"--monitor-width=1920", L"--monitor-height=1080"}) {
+      auto mixed = probeArguments; mixed.push_back(sourceOption);
+      rejects([&] { ParseArguments(mixed); });
+    }
+    auto invalidProbe = probeArguments;
+    invalidProbe[3] = L"--probe=window"; rejects([&] { ParseArguments(invalidProbe); });
+    invalidProbe = probeArguments; invalidProbe.push_back(L"--probe=encoder");
+    rejects([&] { ParseArguments(invalidProbe); });
+    ValidateEncoderProbeIsolation(false, false, false, false, false, false, 0); check(true);
+    for (unsigned present = 0; present < 7; ++present)
+      rejects([&] { ValidateEncoderProbeIsolation(present == 0, present == 1, present == 2, present == 3,
+        present == 4, present == 5, present == 6 ? 1 : 0); });
+    auto gameArguments = windowArguments;
+    gameArguments.insert(gameArguments.end(), {L"--kind=game", L"--process-created=123456789",
+      L"--encoder=obs_nvenc_h264_tex"});
+    const auto game = ParseArguments(gameArguments);
+    check(game.kind == CaptureKind::Game && game.method == Method::GameHook &&
+        game.encoder == EncoderKind::Nvenc && game.expectedCreation == 123456789);
+    gameArguments.back() = L"--encoder=x264";
+    rejects([&] { ParseArguments(gameArguments); });
+    gameArguments.pop_back();
+    rejects([&] { ParseArguments(gameArguments); });
+    std::vector<std::wstring_view> monitorArguments{
+      windowArguments[0], windowArguments[1], windowArguments[2],
+      L"--kind=monitor", L"--monitor-id=\\\\?\\DISPLAY#TEST#{1234}", L"--monitor-name=\\\\.\\DISPLAY2",
+      L"--monitor-x=-1920", L"--monitor-y=0", L"--monitor-width=1920", L"--monitor-height=1080",
+      L"--encoder=auto", L"--width=1920", L"--height=1080", L"--fps=60", L"--bitrate=5000"};
+    const auto monitor = ParseArguments(monitorArguments);
+    check(monitor.kind == CaptureKind::Monitor && monitor.monitor.x == -1920 && monitor.hwnd == 0);
+    monitorArguments[6] = L"--monitor-x=-0";
+    rejects([&] { ParseArguments(monitorArguments); });
+    monitorArguments[6] = L"--hwnd=123";
+    rejects([&] { ParseArguments(monitorArguments); });
+    monitorArguments[6] = L"--monitor-x=-1920";
+    monitorArguments[4] = L"--monitor-id=0";
+    rejects([&] { ParseArguments(monitorArguments); });
+    ValidateNvencProbeEvidence(true, true, true, true, true, 1920, 1080, {1920, 1080, 120, 5000}); check(true);
+    for (unsigned missing = 0; missing < 7; ++missing)
+      rejects([&] { ValidateNvencProbeEvidence(missing != 0, missing != 1, missing != 2, missing != 3,
+        missing != 4, missing == 5 ? 1280 : 1920, missing == 6 ? 720 : 1080, {1920, 1080, 120, 5000}); });
+    rejects([&] { ValidateEncoderAdmission(true, true, true, true, false, false, EncoderKind::Nvenc, false); });
+    ValidateEncoderAdmission(true, true, true, true, false, false, EncoderKind::Nvenc, true); check(true);
+    check(ConfigurationJson(Method::GameHook, game.video, EncoderKind::Nvenc).find("\"rateControl\":\"CBR\"") != std::string::npos);
+    check(ConfigurationJson(Method::Wgc, game.video).find("\"rateControl\":\"VBR_LAT\"") != std::string::npos);
+    EncoderCapability capability{EncoderKind::Nvenc, 0, 0x10de, 123, 456, true};
+    check(CapabilityJson(capability).find("nvenc-d3d11-session") != std::string::npos);
+    capability.vendorId = 0x1002;
+    rejects([&] { CapabilityJson(capability); });
+    capability.vendorId = 0x10de;
+    Common monitorCommon{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 42, 0, 0, 0, 1000, 10000000};
+    Observation prepared;
+    const auto preparedMonitor = SerializePlatformEvent(monitor, monitorCommon, capability, "prepared", 0, prepared, {}, {});
+    check(preparedMonitor.find("\"schemaVersion\":2") != std::string::npos &&
+          preparedMonitor.find("\"sourceKey\":null") != std::string::npos &&
+          preparedMonitor.find("\"kind\":\"monitor\"") != std::string::npos);
+    const auto preparedProbe = SerializeEncoderProbeEvent(probe, monitorCommon, capability, "prepared", 0, true, true);
+    check(preparedProbe.find("\"encoderInitialized\":true") != std::string::npos &&
+          preparedProbe.find("\"sourceCaptured\":false") != std::string::npos &&
+          preparedProbe.find("\"target\"") == std::string::npos && preparedProbe.find("\"hwnd\"") == std::string::npos);
+    rejects([&] { SerializeEncoderProbeEvent(probe, monitorCommon, capability, "prepared", 0, true, false); });
+    rejects([&] { SerializeEncoderProbeEvent(probe, monitorCommon, capability, "prepared", 0, false, true); });
+    rejects([&] { SerializeEncoderProbeEvent(probe, monitorCommon, capability, "ready", 1, true, true); });
+    rejects([&] { TargetJson(probe, monitorCommon); });
+    rejects([&] { SerializePlatformEvent(probe, monitorCommon, capability, "prepared", 0, prepared, {}, {}); });
+    auto selectedProbe = probe; selectedProbe.hwnd = 19;
+    rejects([&] { SerializeEncoderProbeEvent(selectedProbe, monitorCommon, capability, "prepared", 0, true, true); });
+    Retirement probeRetired{true, true, true, true, true};
+    check(SerializeEncoderProbeEvent(probe, monitorCommon, capability, "stopped", 1, true, true, &probeRetired)
+        .find("\"obsShutdownReturned\":true") != std::string::npos);
+    probeRetired.encoderReleased = false;
+    rejects([&] { SerializeEncoderProbeEvent(probe, monitorCommon, capability, "stopped", 1, true, true, &probeRetired); });
+    check(StockProbePath(L"C:\\qa\\monky-screen-capture.exe", L"obs-nvenc-test.exe") == L"C:\\qa\\obs-nvenc-test.exe");
+    rejects([&] { StockProbePath(L"C:\\qa\\monky-screen-capture.exe", L"arbitrary.exe"); });
     std::cout << "{\"checks\":" << checks << ",\"deviceFree\":true,\"headerBytes\":96}\n";
     return 0;
   } catch (const std::exception& error) {

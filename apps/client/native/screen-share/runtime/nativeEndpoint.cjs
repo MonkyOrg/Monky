@@ -9,6 +9,7 @@ const {
   nativeScreenRenditionSchema, nativeScreenEndpointDiagnosticsSchema, screenShareProfileKey,
 } = require('@monky/shared');
 const { CaptureBridge } = require('./captureBridge.cjs');
+const { cloneSource, validateEncoder } = require('./captureProtocol.cjs');
 const { LiveSenderFlow } = require('./encodedSender.cjs');
 const { NativeRtcCommands, assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 const { NativeP2pBroker } = require('./nativeP2pBroker.cjs');
@@ -58,8 +59,8 @@ class NativeScreenEndpoint {
     if (mode === 'p2p') assert.equal(typeof send, 'function');
     else assert.equal(typeof rpc, 'function');
     if (role === 'publish') {
-      assert.ok(Number.isSafeInteger(target?.hwnd) && target.hwnd > 0);
-      assert.ok(Number.isInteger(target.expectedProcessId) && target.expectedProcessId > 0 && target.expectedProcessId <= 0xffffffff);
+      cloneSource(target);
+      validateEncoder(options.captureEncoder ?? 'auto');
       assert.ok(path.isAbsolute(captureDirectory));
     } else assert.ok(destination && typeof destination.frame?.isDestroyed === 'function');
     Object.assign(this, { runtime, role, mode, sessionId, publisherSessionId, channelId, pipelineId, source, profile,
@@ -67,7 +68,8 @@ class NativeScreenEndpoint {
     this.audio = audio;
     this.audioMuted = audio?.muted ?? true;
     this.audioVolume = audio?.volume ?? 1;
-    this.target = target ? Object.freeze({ ...target }) : null;
+    this.target = target ? cloneSource(target) : null;
+    this.captureEncoder = options.captureEncoder ?? 'auto';
     this.isSourcePaused = options.isSourcePaused ?? (() => false);
     this.onPreview = options.onPreview ?? null;
     this.pending = new Set();
@@ -80,6 +82,7 @@ class NativeScreenEndpoint {
     this.reported = new WeakSet();
     this.early = [];
     this.demand = 0;
+    this.previewDemand = false;
     this.closing = false;
     this.nativeClosed = false;
     this.closed = false;
@@ -206,12 +209,11 @@ class NativeScreenEndpoint {
         onError: error => this.report(error),
       });
       this.abort.signal.throwIfAborted();
-      const source = {
+      this.sourceDescription = {
         sourceId: this.sourceId, shareId: this.source.shareId, syncGroup: this.source.instanceId,
         maxFramerate: fps, maxBitrateBps: maxBitrateKbps * 1000,
         ...(this.mode === 'sfu' ? { nativeScreen: this.rendition } : {}),
       };
-      this.publication = await this.transport.addSource(source, this.abort.signal);
     }
     this.refreshCapture();
   }
@@ -219,9 +221,9 @@ class NativeScreenEndpoint {
   async startAudioSource() {
     this.pcm = new NativePcmCaptureBridge(this.engine, this.commands, this.audio.captureModule,
       error => this.report(error), { captureHub: this.audio.captureHub ?? null });
-    const captured = await this.pcm.start({
-      includeWindowId: this.target.hwnd, expectedProcessId: this.target.expectedProcessId,
-    }, this.source.instanceId, this.abort.signal);
+    const selection = this.target.kind === 'monitor' ? { excludePid: process.pid }
+      : { includeWindowId: this.target.hwnd, expectedProcessId: this.target.expectedProcessId };
+    const captured = await this.pcm.start(selection, this.source.instanceId, this.abort.signal);
     this.abort.signal.throwIfAborted();
     // A quiet application can legitimately have no packet yet. Publish its
     // disabled source and let the first real capture packet establish its epoch.
@@ -259,7 +261,8 @@ class NativeScreenEndpoint {
   connected() {
     if (this.mode === 'sfu') {
       const transport = this.broker.transports.get('send');
-      return this.sfuStates.get(transport?.nativeId) === 'connected';
+      const state = this.sfuStates.get(transport?.nativeId);
+      return state === 'connected' || state === 'completed';
     }
     return [...this.connections.keys()].some(id => this.broker.getPeer(id)?.nativeState.connectionState === 'connected');
   }
@@ -269,19 +272,33 @@ class NativeScreenEndpoint {
     this.flow.setDemand(!this.closing && this.demand > 0
       && (this.mode === 'sfu' ? this.sfuPublicationRequested === true : this.broker.sourceDemand(this.sourceId) > 0));
     this.flow.setConnected(!this.closing && this.connected());
-    if (this.flow.demand && this.flow.connected && !this.captureWork) {
+    if (!this.closing && (this.previewDemand || (this.flow.demand && this.flow.connected)) && !this.captureWork) {
       this.captureWork = this.startCapture();
       this.track(this.captureWork);
     }
   }
 
-  async setDemand(count) {
+  async setDemand(count, preview = this.previewDemand) {
     assert.equal(this.role, 'publish');
     assert.ok(Number.isSafeInteger(count) && count >= 0 && count <= 64);
+    assert.equal(typeof preview, 'boolean');
+    assert.ok(count > 0 || !preview || !this.publicationWork,
+      'A network publication must retire before a local-only preview replaces it.');
     this.demand = count;
+    this.previewDemand = preview;
     this.refreshCapture();
-    if (count === 0) { await this.close(); return; }
+    if (count === 0 && !preview) { await this.close(); return; }
     await this.ready;
+    this.abort.signal.throwIfAborted();
+    if (count === 0) { this.refreshCapture(); return; }
+    if (!this.publicationWork) {
+      this.publicationWork = this.track((async () => {
+        this.publication = await this.transport.addSource(this.sourceDescription, this.abort.signal);
+        this.abort.signal.throwIfAborted();
+        await this.commands.request('source.setEnabled', this.sourceId, { enabled: true });
+      })());
+    }
+    await this.publicationWork;
     this.abort.signal.throwIfAborted();
     if (this.audio) {
       if (!this.audioStartWork) this.audioStartWork = this.track(this.startAudioSource());
@@ -312,12 +329,13 @@ class NativeScreenEndpoint {
     const { width, height, fps, maxBitrateKbps } = this.profile;
     this.host = new CaptureBridge({
       host: this.runtime.host, runtime: this.runtime.obs, runId, runDirectory: this.runDirectory,
+      encoder: this.captureEncoder,
       video: { width, height, fps, bitrateKbps: Math.min(5000, maxBitrateKbps) },
       isSourcePaused: this.isSourcePaused,
       onError: error => this.report(error), onPacket: frame => {
         this.flow.setCapturePaused(this.isSourcePaused());
         const result = this.flow.packet(frame);
-        if (result !== false && this.flow.inFlight.has(frame.frameId)) {
+        if (this.previewDemand && result !== false && !this.isSourcePaused()) {
           try { this.onPreview?.(frame); }
           catch (error) { this.onDiagnostic(error); }
         }
@@ -327,8 +345,6 @@ class NativeScreenEndpoint {
     await this.host.prepare(this.target, this.abort.signal);
     this.abort.signal.throwIfAborted();
     this.flow.bind(this.host);
-    await this.commands.request('source.setEnabled', this.sourceId, { enabled: true });
-    this.abort.signal.throwIfAborted();
     await this.host.start(this.target);
     this.captureState = 'running';
     this.observe({ type: 'capture', state: this.captureState });
@@ -506,7 +522,7 @@ class NativeScreenEndpoint {
   snapshot() {
     return {
       role: this.role, mode: this.mode, pipelineId: this.pipelineId, profile: this.profile,
-      captureState: this.captureState, demand: this.demand, closing: this.closing,
+      captureState: this.captureState, demand: this.demand, previewDemand: this.previewDemand, closing: this.closing,
       nativeClosed: this.nativeClosed, closed: this.closed, capturePid: this.host?.child?.pid ?? null,
       flow: this.flow?.snapshot() ?? null, captureRetirement: this.host?.snapshot() ?? null,
       presentation: this.presentation?.getStats() ?? null, routes: this.routes?.snapshot() ?? null,
@@ -519,6 +535,7 @@ class NativeScreenEndpoint {
     if (this.closeWork) return this.closeWork;
     this.closing = true;
     this.demand = 0;
+    this.previewDemand = false;
     this.captureState = 'stopping';
     this.presentation?.stopAccepting();
     this.refreshCapture();

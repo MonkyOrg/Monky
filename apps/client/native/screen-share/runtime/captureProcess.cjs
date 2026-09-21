@@ -124,7 +124,8 @@ class ObsHostBridge {
       if (!this.stopping && !this.firstError) this.resolvePrepared(this.prepared);
       return;
     }
-    assert.ok(this.prepared, 'OBS host emitted a capture response before preparation.');
+    assert.ok(this.prepared || (message.type === 'stopped' && this.stopping && this.protocol.allowUnpreparedStop === true),
+      'OBS host emitted a capture response before preparation.');
     const request = this.requests.get(message.sequence);
     assert.ok(request && !request.received, 'Unsolicited or duplicate OBS host response.');
     assert.equal(message.type, { start: 'ready', stats: 'stats', stop: 'stopped' }[request.verb]);
@@ -148,7 +149,7 @@ class ObsHostBridge {
     assert.equal(this.stopping, undefined);
     this.protocol.validateSource(source);
     signal?.throwIfAborted();
-    this.source = Object.freeze({ hwnd: source.hwnd, expectedProcessId: source.expectedProcessId });
+    this.source = this.protocol.cloneSource ? this.protocol.cloneSource(source) : Object.freeze({ ...source });
     this.prepareStarted = true;
     this.signal = signal;
     this.abort = () => {
@@ -231,7 +232,7 @@ class ObsHostBridge {
 
   async start(source, signal) {
     this.protocol.validateSource(source);
-    assert.deepEqual({ hwnd: source.hwnd, expectedProcessId: source.expectedProcessId }, this.source);
+    assert.deepEqual(source, this.source);
     assert.ok(this.prepared && !this.started && !this.stopping, 'OBS capture requires one prepared, unstarted host.');
     signal?.throwIfAborted();
     this.started = true;

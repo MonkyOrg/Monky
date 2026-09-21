@@ -68,10 +68,11 @@ class NativeScreenPreviewBridge {
     } catch (error) { this.fail(error); }
   }
 
-  reset() {
+  reset(state = 'waiting') {
+    assert.ok(state === 'waiting' || state === 'paused');
     if (this.closed) return;
     this.pipelineId = null; this.needsKeyframe = true;
-    try { this.port.postMessage({ type: 'reset' }); this.setState('waiting'); }
+    try { this.port.postMessage({ type: 'reset' }); this.setState(state); }
     catch (error) { this.fail(error); }
   }
 

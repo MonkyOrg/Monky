@@ -316,6 +316,7 @@ export class SettingsModal {
     this.accountTab.cleanup();
     this.aboutTab.cleanup();
     this.localToolsTab.cleanup();
+    this.qualityTab.cleanup();
     if (this.modalEl) {
       const handler = (this.modalEl as any)._escHandler;
       if (handler) window.removeEventListener('keydown', handler);

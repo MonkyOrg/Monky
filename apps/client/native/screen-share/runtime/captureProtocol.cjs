@@ -9,6 +9,10 @@ const CONFIGURATION = Object.freeze({
   rateControl: 'VBR_LAT', codec: 'h264', encoderId: 'h264_texture_amf', profile: 'main',
   bFrames: 0, keyframeIntervalSeconds: 1,
 });
+const ENCODERS = Object.freeze({
+  h264_texture_amf: Object.freeze({ rateControl: 'VBR_LAT', vendorId: 0x1002, probe: 'obs-amf-test' }),
+  obs_nvenc_h264_tex: Object.freeze({ rateControl: 'CBR', vendorId: 0x10de, probe: 'nvenc-d3d11-session' }),
+});
 const commonKeys = ['schemaVersion', 'type', 'runId', 'sequence', 'helperProcessId', 'hwnd', 'processId',
   'processCreationTime100ns', 'qpc', 'qpcFrequency', 'configuration', 'observation', 'sourceKey', 'hookedKey'];
 const observationKeys = ['state', 'sourceAttached', 'sourceWidth', 'sourceHeight', 'outputPackets',
@@ -26,10 +30,52 @@ function integer(value, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
 }
 
 function validateSource(source) {
-  exact(source, ['hwnd', 'expectedProcessId'], 'selected capture source');
+  if (source?.kind === 'monitor') {
+    exact(source, ['kind', 'deviceId', 'deviceName', 'bounds'], 'selected monitor');
+    assert.match(source.deviceId, /^\\\\\?\\DISPLAY#[\x20-\x7e]+$/u);
+    assert.ok(Buffer.byteLength(source.deviceId) < 128);
+    assert.match(source.deviceName, /^\\\\\.\\DISPLAY[1-9]\d*$/u);
+    assert.ok(source.deviceName.length < 32);
+    exact(source.bounds, ['x', 'y', 'width', 'height'], 'physical monitor bounds');
+    integer(source.bounds.x, -0x80000000, 0x7fffffff);
+    integer(source.bounds.y, -0x80000000, 0x7fffffff);
+    integer(source.bounds.width, 1, 32768); integer(source.bounds.height, 1, 32768);
+    integer(source.bounds.x + source.bounds.width, -0x80000000, 0x7fffffff);
+    integer(source.bounds.y + source.bounds.height, -0x80000000, 0x7fffffff);
+    return source;
+  }
+  if (source?.kind !== undefined) {
+    assert.ok(source.kind === 'window' || source.kind === 'game', 'Unknown native capture kind.');
+    exact(source, ['kind', 'hwnd', 'expectedProcessId', 'expectedProcessCreationTime100ns'], 'selected capture source');
+    assert.ok(decimal(source.expectedProcessCreationTime100ns) > 0n);
+  } else exact(source, ['hwnd', 'expectedProcessId'], 'legacy selected window');
   integer(source.hwnd, 1);
   integer(source.expectedProcessId, 1, 0xffffffff);
   return source;
+}
+
+function cloneSource(source) {
+  validateSource(source);
+  const copy = structuredClone(source);
+  if (copy.bounds) Object.freeze(copy.bounds);
+  return Object.freeze(copy);
+}
+
+function validateEncoder(encoder) {
+  assert.ok(typeof encoder === 'string' && (encoder === 'auto' || Object.hasOwn(ENCODERS, encoder)),
+    'Unsupported H264 hardware encoder.');
+  return encoder;
+}
+
+function argumentsForTarget(source) {
+  validateSource(source);
+  if (source.kind === 'monitor') return [
+    '--kind=monitor', `--monitor-id=${source.deviceId}`, `--monitor-name=${source.deviceName}`,
+    `--monitor-x=${source.bounds.x}`, `--monitor-y=${source.bounds.y}`,
+    `--monitor-width=${source.bounds.width}`, `--monitor-height=${source.bounds.height}`,
+  ];
+  return [`--hwnd=${source.hwnd}`, `--pid=${source.expectedProcessId}`,
+    ...(source.kind ? [`--kind=${source.kind}`, `--process-created=${source.expectedProcessCreationTime100ns}`] : [])];
 }
 
 function validateVideo(video) {
@@ -40,10 +86,28 @@ function validateVideo(video) {
   return video;
 }
 
-function configuration(video) {
+function configuration(video, encoder = 'h264_texture_amf', kind = 'window') {
   validateVideo(video);
-  return { ...CONFIGURATION, width: video.width, height: video.height,
+  assert.ok(typeof encoder === 'string' && Object.hasOwn(ENCODERS, encoder));
+  assert.ok(['window', 'monitor', 'game'].includes(kind));
+  return { ...CONFIGURATION, encoderId: encoder, rateControl: ENCODERS[encoder].rateControl,
+    method: kind === 'game' ? 'game-hook' : 'wgc', width: video.width, height: video.height,
     fpsNumerator: video.fps, initialBitrateKbps: video.bitrateKbps };
+}
+
+function validateCapability(value, encoder) {
+  exact(value, ['encoderId', 'codec', 'adapterIndex', 'adapterLuid', 'vendorId', 'deviceId',
+    'probe', 'probeVerified', 'textureInput', 'dynamicBitrate'], 'verified hardware capability');
+  assert.equal(value.encoderId, encoder);
+  assert.equal(value.codec, 'h264');
+  assert.equal(value.adapterIndex, 0, 'Pinned Windows texture encoders require the exact adapter 0.');
+  integer(value.deviceId, 0, 0xffffffff);
+  decimal(value.adapterLuid);
+  assert.equal(value.vendorId, ENCODERS[encoder].vendorId);
+  assert.equal(value.probe, ENCODERS[encoder].probe);
+  assert.equal(value.probeVerified, true); assert.equal(value.textureInput, true);
+  assert.equal(value.dynamicBitrate, true);
+  return value;
 }
 
 function command(sequence, verb) {
@@ -80,30 +144,64 @@ function validateFailure(value) {
 function validateMessage(message, expected) {
   assert.ok(['prepared', 'ready', 'stats', 'stopped', 'error'].includes(message?.type), 'Unknown capture message.');
   const extra = message.type === 'stopped' ? ['retirement'] : message.type === 'error' ? ['error', 'retirement'] : [];
-  exact(message, [...commonKeys, ...extra], 'capture message');
-  assert.equal(message.schemaVersion, 1);
+  const extended = message.schemaVersion === 2;
+  exact(message, [...commonKeys, ...extra, ...(extended ? ['target', 'capability'] : [])], 'capture message');
+  assert.ok(extended || message.schemaVersion === 1);
+  const kind = extended ? message.target?.kind : 'window';
+  assert.ok(['window', 'monitor', 'game'].includes(kind));
+  if (extended) validateSource(message.target);
   assert.match(message.runId, /^[a-f0-9]{32}$/);
   integer(message.sequence);
   integer(message.helperProcessId, 1, 0xffffffff);
-  integer(message.hwnd, 1);
-  integer(message.processId, 1, 0xffffffff);
-  assert.ok(decimal(message.processCreationTime100ns) > 0n);
+  if (kind === 'monitor') {
+    assert.equal(message.hwnd, 0); assert.equal(message.processId, 0);
+    assert.equal(message.processCreationTime100ns, '0');
+  } else {
+    integer(message.hwnd, 1);
+    integer(message.processId, 1, 0xffffffff);
+    assert.ok(decimal(message.processCreationTime100ns) > 0n);
+    if (extended) {
+      assert.equal(message.target.hwnd, message.hwnd);
+      assert.equal(message.target.expectedProcessId, message.processId);
+      assert.equal(message.target.expectedProcessCreationTime100ns, message.processCreationTime100ns);
+    }
+  }
   const qpc = decimal(message.qpc);
   assert.ok(qpc > 0n && decimal(message.qpcFrequency) > 0n);
   if (expected) {
     validateSource(expected.source);
     assert.equal(message.runId, expected.runId);
     assert.equal(message.helperProcessId, expected.helperProcessId);
-    assert.equal(message.hwnd, expected.source.hwnd);
-    assert.equal(message.processId, expected.source.expectedProcessId);
-    assert.deepEqual(message.configuration, configuration(expected.video));
+    assert.equal(kind, expected.source.kind ?? 'window');
+    if (kind === 'monitor') assert.deepEqual(message.target, expected.source);
+    else {
+      assert.equal(message.hwnd, expected.source.hwnd);
+      assert.equal(message.processId, expected.source.expectedProcessId);
+      if (expected.source.kind) {
+        assert.equal(extended, true);
+        assert.deepEqual(message.target, expected.source);
+      }
+    }
+    const encoder = validateEncoder(expected.encoder ?? 'auto');
+    if (encoder !== 'auto') assert.equal(message.configuration.encoderId, encoder);
+    assert.deepEqual(message.configuration, configuration(expected.video, message.configuration.encoderId, kind));
   }
   const selected = message.configuration;
   assert.deepEqual(selected, configuration({
     width: selected?.width, height: selected?.height, fps: selected?.fpsNumerator, bitrateKbps: selected?.initialBitrateKbps,
-  }));
-  windowKey(message.sourceKey);
-  if (message.hookedKey !== null) windowKey(message.hookedKey);
+  }, selected?.encoderId, kind));
+  if (!extended) assert.equal(selected.encoderId, CONFIGURATION.encoderId, 'Legacy protocol cannot claim NVENC support.');
+  if (extended) {
+    if (message.capability === null) assert.ok(message.type === 'error' || message.type === 'stopped');
+    else validateCapability(message.capability, selected.encoderId);
+  }
+  if (kind === 'monitor') {
+    assert.equal(message.sourceKey, null);
+    assert.equal(message.hookedKey, null);
+  } else {
+    windowKey(message.sourceKey);
+    if (message.hookedKey !== null) windowKey(message.hookedKey);
+  }
   const observation = message.observation;
   exact(observation, observationKeys, 'capture observation');
   assert.equal(observation.state, { prepared: 'prepared', ready: 'running', stats: 'running',
@@ -112,6 +210,10 @@ function validateMessage(message, expected) {
   for (const name of ['sourceWidth', 'sourceHeight'])
     if (observation[name] !== null) integer(observation[name], 1, 32768);
   assert.equal(observation.sourceWidth === null, observation.sourceHeight === null);
+  if (kind === 'monitor' && observation.sourceWidth !== null) {
+    assert.equal(observation.sourceWidth, message.target.bounds.width);
+    assert.equal(observation.sourceHeight, message.target.bounds.height);
+  }
   for (const name of ['sourceFrames', 'sourceFrameTimestamp', 'sourceContinuity'])
     assert.equal(observation[name], null, 'Stock output ticks are not distinct captured frames.');
   integer(observation.outputPackets);
@@ -166,6 +268,11 @@ function validateProgress(previous, next) {
     assert.equal(next[name], previous[name], `Native identity changed: ${name}`);
   assert.deepEqual(next.configuration, previous.configuration);
   assert.deepEqual(next.sourceKey, previous.sourceKey);
+  assert.equal(next.schemaVersion, previous.schemaVersion);
+  if (previous.schemaVersion === 2) {
+    assert.deepEqual(next.target, previous.target);
+    assert.deepEqual(next.capability, previous.capability);
+  }
   assert.ok(decimal(next.qpc) >= decimal(previous.qpc), 'Native QPC regressed.');
   const before = previous.observation, after = next.observation;
   for (const name of ['outputPackets', 'outputBytes', 'keyframes', 'obsTotalFrames', 'obsLaggedFrames'])
@@ -183,7 +290,62 @@ function validateProgress(previous, next) {
   return next;
 }
 
+function validateEncoderProbeMessage(message, expected) {
+  assert.ok(['prepared', 'stopped', 'error'].includes(message?.type), 'Unknown encoder probe message.');
+  const extra = message.type === 'stopped' ? ['retirement'] : message.type === 'error' ? ['error', 'retirement'] : [];
+  exact(message, ['schemaVersion', 'kind', 'type', 'runId', 'sequence', 'helperProcessId', 'qpc', 'qpcFrequency',
+    'video', 'captureKinds', 'capability', 'encoderInitialized', 'sourceCaptured', 'outputPackets', ...extra],
+  'source-free encoder probe');
+  assert.equal(message.schemaVersion, 1); assert.equal(message.kind, 'encoder-probe');
+  assert.match(message.runId, /^[a-f0-9]{32}$/u);
+  integer(message.sequence, 0, 1); integer(message.helperProcessId, 1, 0xffffffff);
+  assert.ok(decimal(message.qpc) > 0n && decimal(message.qpcFrequency) > 0n);
+  validateVideo(message.video);
+  assert.equal(message.sourceCaptured, false); assert.equal(message.outputPackets, 0);
+  assert.equal(typeof message.encoderInitialized, 'boolean');
+  assert.ok(Array.isArray(message.captureKinds));
+  if (message.captureKinds.length) assert.deepEqual(message.captureKinds, ['window', 'monitor', 'game']);
+  if (message.capability !== null) validateCapability(message.capability, message.capability.encoderId);
+  if (message.encoderInitialized) {
+    assert.ok(message.capability);
+    assert.deepEqual(message.captureKinds, ['window', 'monitor', 'game']);
+  }
+  if (expected) {
+    assert.equal(expected.source, null, 'Encoder probing cannot select a source.');
+    assert.equal(message.runId, expected.runId);
+    assert.equal(message.helperProcessId, expected.helperProcessId);
+    assert.deepEqual(message.video, expected.video);
+    const encoder = validateEncoder(expected.encoder ?? 'auto');
+    if (encoder !== 'auto' && message.capability) assert.equal(message.capability.encoderId, encoder);
+  }
+  if (message.type === 'prepared') {
+    assert.equal(message.sequence, 0);
+    assert.equal(message.encoderInitialized, true, 'Registration/vendor evidence is not encoder initialization.');
+  } else {
+    exact(message.retirement, RETIREMENT_FIELDS, 'encoder probe retirement');
+    for (const field of RETIREMENT_FIELDS) {
+      assert.equal(typeof message.retirement[field], 'boolean');
+      if (message.type === 'stopped') assert.equal(message.retirement[field], true);
+    }
+    if (message.type === 'stopped') assert.equal(message.sequence, 1);
+    else validateFailure(message.error);
+  }
+  return message;
+}
+
+function validateEncoderProbeProgress(previous, next) {
+  assert.equal(previous.type, 'prepared', 'An encoder probe cannot emit after retirement/failure.');
+  assert.ok(next.type === 'stopped' || next.type === 'error', 'An encoder probe cannot capture or prepare twice.');
+  for (const name of ['schemaVersion', 'kind', 'runId', 'helperProcessId', 'qpcFrequency',
+    'video', 'captureKinds', 'capability', 'encoderInitialized', 'sourceCaptured', 'outputPackets'])
+    assert.deepEqual(next[name], previous[name], `Encoder probe evidence changed: ${name}`);
+  assert.ok(decimal(next.qpc) >= decimal(previous.qpc), 'Encoder probe QPC regressed.');
+  return next;
+}
+
 module.exports = {
-  CONFIGURATION, MAX_LINE_BYTES, MAX_PACKET_BYTES, RETIREMENT_FIELDS,
+  CONFIGURATION, ENCODERS, MAX_LINE_BYTES, MAX_PACKET_BYTES, RETIREMENT_FIELDS,
+  cloneSource, validateEncoder, validateCapability, argumentsForTarget,
   exact, integer, decimal, configuration, validateMessage, validateProgress, validateSource, validateVideo, validateFailure, command,
+  validateEncoderProbeMessage, validateEncoderProbeProgress,
 };

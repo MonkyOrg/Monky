@@ -75,6 +75,8 @@ export const nativeScreenParticipantSchema = z.object({
   sessionId: reference, nativeScreenShares: nativeScreenSourcesSchema,
 }).strict();
 export type NativeScreenParticipant = z.infer<typeof nativeScreenParticipantSchema>;
+export const nativeScreenCaptureKindSchema = z.enum(['window', 'monitor', 'game']);
+export type NativeScreenCaptureKind = z.infer<typeof nativeScreenCaptureKindSchema>;
 
 export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('capabilities') }).strict(),
@@ -87,12 +89,16 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
   }).strict(),
   callScope.extend({
     action: z.literal('source-add'), shareId: screenShareIdSchema,
-    desktopSourceId: z.string().regex(/^window:[1-9][0-9]{0,15}:[0-9]{1,10}$/),
+    desktopSourceId: z.string().regex(/^(?:window:[1-9][0-9]{0,15}:(?:[0-9]{1,10}|[a-f0-9]{64})|screen:[0-9]{1,16}:[0-9]{1,10}|native-monitor:[a-f0-9]{64})$/),
+    captureKind: nativeScreenCaptureKindSchema.optional(),
     video: nativeScreenVideoProfileSchema, audio: z.boolean(), audioBitrateKbps: nativeScreenAudioBitrateSchema,
   }).strict(),
   callScope.extend({ action: z.literal('source-remove'), shareId: screenShareIdSchema }).strict(),
   callScope.extend({
     action: z.literal('preview-start'), shareId: screenShareIdSchema, sourceInstanceId: uuid, presentationId: uuid,
+  }).strict(),
+  callScope.extend({
+    action: z.literal('preview-preferences'), pauseWhenUnfocused: z.boolean(),
   }).strict(),
   callScope.extend({
     action: z.literal('watch'), publisherSessionId: reference, shareId: screenShareIdSchema,
@@ -120,23 +126,30 @@ export interface NativeScreenCapabilities {
   capture: boolean;
   captureAudio: boolean;
   receive: boolean;
-  backend: 'libobs-amf' | null;
+  /** Allows explicit source selection, not capture: Main must probe that selection before announcing it. */
+  requiresSelectionProbe?: boolean;
+  /** Selectable implementations; file presence alone does not establish hardware availability. */
+  captureKinds?: readonly NativeScreenCaptureKind[];
+  backend: 'libobs-amf' | 'libobs-nvenc' | null;
   reason: 'platform' | 'runtime' | 'encoder' | null;
 }
 
 const metric = z.number().finite().nonnegative();
 const counter = metric.int().max(Number.MAX_SAFE_INTEGER);
 const statsText = z.string().max(2048);
+// WebRTC codec report IDs can include the negotiated FMTP parameters.
+const statsReference = statsText.min(1).refine(value => !value.includes('\0')
+  && new TextEncoder().encode(value).byteLength <= 2048);
 export const nativeScreenRtpReportTypeSchema = z.enum([
   'outbound-rtp', 'inbound-rtp', 'codec', 'media-source', 'transport', 'candidate-pair',
 ]);
 // Only fields consumed by video diagnostics cross IPC; addresses and credentials do not.
 export const nativeScreenRtpReportSchema = z.object({
-  id: reference, type: nativeScreenRtpReportTypeSchema, timestamp: metric,
+  id: statsReference, type: nativeScreenRtpReportTypeSchema, timestamp: metric,
   kind: z.enum(['audio', 'video']).optional(), mediaType: z.enum(['audio', 'video']).optional(),
   active: z.boolean().optional(), powerEfficientEncoder: z.boolean().optional(),
-  codecId: reference.optional(), mediaSourceId: reference.optional(), transportId: reference.optional(),
-  selectedCandidatePairId: reference.optional(), trackIdentifier: reference.optional(), rid: reference.optional(),
+  codecId: statsReference.optional(), mediaSourceId: statsReference.optional(), transportId: statsReference.optional(),
+  selectedCandidatePairId: statsReference.optional(), trackIdentifier: reference.optional(), rid: reference.optional(),
   mimeType: statsText.optional(), sdpFmtpLine: statsText.optional(), encoderImplementation: statsText.optional(),
   decoderImplementation: statsText.optional(), qualityLimitationReason: z.enum(['none', 'cpu', 'bandwidth', 'other']).optional(),
   frameWidth: counter.optional(), frameHeight: counter.optional(), width: counter.optional(), height: counter.optional(),
@@ -167,8 +180,10 @@ export type NativeScreenEndpointDiagnostics = z.infer<typeof nativeScreenEndpoin
 
 export type NativeScreenCommandResult =
   | { kind: 'ok' }
+  | { kind: 'diagnostics-retired' }
   | { kind: 'retired-with-errors'; remoteAcknowledged: boolean; error: string }
   | { kind: 'capabilities'; capabilities: NativeScreenCapabilities }
+  /** Armed source metadata, not evidence of active capture or native READY. */
   | { kind: 'source'; source: NativeScreenSource }
   | { kind: 'subscription'; subscriptionId: string; presentationId: string }
   | { kind: 'diagnostics'; sourceInstanceId: string; presentationId: string | null; viewers: number | null;
@@ -176,13 +191,15 @@ export type NativeScreenCommandResult =
   | { kind: 'stats'; publishers: readonly unknown[]; subscriptions: readonly unknown[] };
 
 const request = callScope.extend({ requestId: uuid });
+export const nativeScreenPreviewStateSchema = z.enum(['waiting', 'playing', 'paused', 'unavailable']);
+export type NativeScreenPreviewState = z.infer<typeof nativeScreenPreviewStateSchema>;
 export const nativeScreenEventSchema = z.discriminatedUnion('type', [
   request.extend({ type: z.literal('signal'), signal: nativeScreenSignalSchema }).strict(),
   request.extend({ type: z.literal('rpc'), method: nativeScreenRpcMethodSchema, payload: z.record(json).refine(isBoundedJson) }).strict(),
   request.extend({ type: z.literal('presentation-stop'), presentationId: uuid }).strict(),
   callScope.extend({
     type: z.literal('preview-state'), publisherSessionId: reference, shareId: screenShareIdSchema,
-    sourceInstanceId: uuid, state: z.enum(['waiting', 'playing', 'unavailable']),
+    sourceInstanceId: uuid, state: nativeScreenPreviewStateSchema,
   }).strict(),
   callScope.extend({
     type: z.literal('state'), publisherSessionId: reference, shareId: screenShareIdSchema,

@@ -119,6 +119,16 @@ inline webrtc::RtpEncodingParameters Encoding(const Json& data, bool enabled) {
   return result;
 }
 
+inline Json SfuVideoCodecOptions(const webrtc::RtpEncodingParameters& encoding) {
+  if (!encoding.max_bitrate_bps || *encoding.max_bitrate_bps < 64000 ||
+      *encoding.max_bitrate_bps > static_cast<int>(screen_video::H264LevelMaxBitrate(52)))
+    Invalid("SFU video requires its validated bitrate ceiling");
+  const auto maximum_kbps = *encoding.max_bitrate_bps / 1000;
+  // Match the native P2P startup estimate without forcing a congestion-control floor.
+  return {{"videoGoogleStartBitrate", (std::min)(5000, maximum_kbps)},
+          {"videoGoogleMaxBitrate", maximum_kbps}};
+}
+
 inline void CheckIceUrl(const std::string& url) {
   if (url.empty() || url.size() > 2048 ||
       std::any_of(url.begin(), url.end(), [](unsigned char c) { return c <= 32 || c >= 127; }) ||

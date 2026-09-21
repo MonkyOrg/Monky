@@ -48,7 +48,7 @@ console.assert(QUALITY_PRESETS.GAMING.name === 'Gaming Mode', 'Preset Gaming Mod
 console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version
-if (PROTOCOL_VERSION !== 22) throw new Error('Versão do protocolo deve ser 22');
+if (PROTOCOL_VERSION !== 23) throw new Error('Versão do protocolo deve ser 23');
 console.assert(LIMITS.SFU_DEFAULT_MIN_PORT === 40000, 'Porta mínima padrão SFU');
 console.assert(LIMITS.SFU_DEFAULT_MAX_PORT === 49151, 'Porta máxima padrão SFU');
 console.assert(

@@ -70,7 +70,7 @@ function build(config) {
   const key = digest(fs.realpathSync(root).toLowerCase()).slice(0, 6);
   const inputs = ownedDirectory(path.join(sdk, 'out', `ms${key}i`));
   const output = ownedDirectory(path.join(sdk, 'out', `ms${key}`));
-  const localBuild = ownedDirectory(path.join(root, 'build'));
+  const localBuild = ownedDirectory(path.join(root, 'build', 'rtc-production'));
   const lock = path.join(localBuild, 'rtc.lock');
   const lockHandle = fs.openSync(lock, 'wx');
   try {
@@ -182,7 +182,7 @@ function build(config) {
     const report = { schemaVersion: 1, webrtcRevision: revision, sourceFiles, binaries, capabilities, contracts };
     write(path.join(bin, 'rtc-build.json'), JSON.stringify(report, null, 2) + '\n');
     require(path.resolve(root, '..', '..', '..', '..', 'scripts', 'legal.cjs')).copyMonkyLicenses(root);
-    write(path.join(localBuild, 'tools', 'monky_msvc_job.exe'), fs.readFileSync(path.join(output, 'monky_msvc_job.exe')));
+    write(path.join(root, 'build', 'tools', 'monky_msvc_job.exe'), fs.readFileSync(path.join(output, 'monky_msvc_job.exe')));
     console.log(JSON.stringify({ nativeRtcBuilt: true, contractChecks: contracts.checks, binaries }));
     return report;
   } finally {

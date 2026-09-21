@@ -96,7 +96,7 @@ function makeBot(t, server, options = {}) {
 }
 
 test('bot capabilities require an explicit supported declaration without inferred access', async (t) => {
-  for (const requestedCapabilities of [undefined, ['receive_voice'], ['commands', 'commands']]) {
+  for (const requestedCapabilities of [undefined, ['receive_camera'], ['commands', 'commands']]) {
     assert.throws(() => new BotClient({ publicKey: 'a'.repeat(64), requestedCapabilities }));
   }
   const server = await makeServer(t);
@@ -109,6 +109,8 @@ test('bot capabilities require an explicit supported declaration without inferre
   assert.throws(() => bot.command({ name: 'local', description: 'Missing local grant declaration',
     localCapabilities: ['media.search'], handler() {} }), /requestedCapabilities/);
   const passive = makeBot(t, server, { requestedCapabilities: [] }).bot;
+  const voiceListener = makeBot(t, server, { requestedCapabilities: ['receive_voice'] }).bot;
+  assert.deepEqual(voiceListener.options.requestedCapabilities, ['receive_voice']);
   assert.throws(() => passive.command({ name: 'ping', description: 'Undeclared commands', handler() {} }), /requestedCapabilities/);
   const listener = await bot.serve({ name: 'Declared bot', host: '127.0.0.1', port: 0 });
   const manifest = await (await fetch(`http://127.0.0.1:${listener.address().port}/manifest`)).json();
@@ -2009,7 +2011,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 22);
+  assert.equal(PROTOCOL_VERSION, 23);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

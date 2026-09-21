@@ -1,4 +1,4 @@
-import { QUALITY_PRESETS, QualityProfile, QualityPresetType, type NativeScreenSource } from '@monky/shared';
+import { QUALITY_PRESETS, QualityProfile, QualityPresetType, type NativeScreenSource, type NativeScreenCaptureKind } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { settingsStore } from '../stores/settingsStore';
 import { clientLog } from './ClientLogService';
@@ -27,6 +27,7 @@ export interface CameraPreviewLease {
 export interface NativeScreenCapture {
   readonly source: NativeScreenSource;
   readonly desktopSourceId: string;
+  readonly captureKind?: NativeScreenCaptureKind;
   readonly thumbnail: string;
   readonly audioBitrateKbps: number;
 }

@@ -46,7 +46,7 @@ function main() {
     }
   }
   const require = createRequire(import.meta.url);
-  const { bundleDependencies } = require(path.join(sdkDist, 'tooling', 'bundle.js'));
+  const { bundlePackage } = require(path.join(sdkDist, 'tooling', 'bundle.js'));
   const { runNpm } = require(path.join(sdkDist, 'tooling', 'process.js'));
   const { isBotVersion } = require(path.join(sdkDist, 'tooling', 'config.js'));
   if (!isBotVersion(version)) throw new Error('The SDK version must be valid SemVer.');
@@ -55,12 +55,9 @@ function main() {
   fs.rmSync(staging, { recursive: true, force: true });
   fs.mkdirSync(staging, { recursive: true });
 
-  // Copy bot-sdk dist.
-  fs.cpSync(sdkDist, path.join(staging, 'dist'), { recursive: true });
-  copyMonkyLicenses(staging);
-
-  const { dependencies, packageCount } = bundleDependencies(SDK_DIR, staging,
+  const { dependencies, packageCount } = bundlePackage(SDK_DIR, staging,
     new Map([['@monky/shared', SHARED_DIR]]));
+  copyMonkyLicenses(staging);
 
   // Build the publishable package.json.
   const publishPkg = {

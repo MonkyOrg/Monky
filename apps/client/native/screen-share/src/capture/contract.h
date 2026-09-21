@@ -30,6 +30,7 @@ constexpr std::uint64_t kRetirementTimeoutMs = 10000;
 constexpr std::uint64_t kWatchdogGraceMs = 250;
 constexpr std::uint64_t kMainStallTimeoutMs = 15000;
 constexpr char kEncoderId[] = "h264_texture_amf";
+constexpr char kNvencEncoderId[] = "obs_nvenc_h264_tex";
 constexpr char kMainCanvasUuid[] = "6c69626f-6273-4c00-9d88-c5136d61696e";
 constexpr std::uint32_t kObsApiVersion = (32u << 24) | (1u << 16) | 1u;
 constexpr char kObsCommit[] = "7272af1375b38bc3cf4e0f98a5d999e8b76e9309";
@@ -58,18 +59,19 @@ inline void ValidateVideoConfiguration(const VideoConfiguration& video) {
       "Unsupported native capture resolution, framerate or bitrate", "ERR_SCREEN_CAPTURE_VIDEO");
 }
 
-inline bool ExactVideoConfiguration(const abi::VideoInfo& video, const VideoConfiguration& expected) {
+inline bool ExactVideoConfiguration(const abi::VideoInfo& video, const VideoConfiguration& expected,
+                                    std::uint32_t adapterIndex = 0) {
   return video.fps_num == expected.fps && video.fps_den == 1 &&
       video.base_width == expected.width && video.base_height == expected.height &&
       video.output_width == expected.width && video.output_height == expected.height &&
-      video.output_format == abi::VideoFormat::Nv12 && video.adapter == 0 && video.gpu_conversion &&
+      video.output_format == abi::VideoFormat::Nv12 && video.adapter == adapterIndex && video.gpu_conversion &&
       video.colorspace == abi::ColorSpace::Bt709 && video.range == abi::Range::Partial &&
       video.scale_type == abi::Scale::Bicubic;
 }
 
 inline void ValidateMainCanvasVideo(bool isMain, bool sameCoreVideo, const abi::VideoInfo& video,
-                                    const VideoConfiguration& expected) {
-  Require(isMain && sameCoreVideo && ExactVideoConfiguration(video, expected),
+                                    const VideoConfiguration& expected, std::uint32_t adapterIndex = 0) {
+  Require(isMain && sameCoreVideo && ExactVideoConfiguration(video, expected, adapterIndex),
           "Explicit main canvas does not match the admitted core video pipeline", "ERR_SCREEN_CAPTURE_CANVAS");
 }
 
@@ -133,26 +135,68 @@ inline bool SafeAbsolutePath(std::wstring_view value) {
   return true;
 }
 
-inline std::wstring StockAmfProbePath(std::wstring_view hostExecutable) {
+inline std::wstring StockProbePath(std::wstring_view hostExecutable, std::wstring_view basename) {
   Require(SafeAbsolutePath(hostExecutable), "Host image must have an ordinary absolute Windows path",
           "ERR_SCREEN_CAPTURE_RUNTIME_PATH");
   const auto separator = hostExecutable.find_last_of(L'\\');
   Require(hostExecutable.substr(separator + 1) == L"monky-screen-capture.exe",
           "Unexpected host image basename for stock AMF probe resolution", "ERR_SCREEN_CAPTURE_RUNTIME_PATH");
-  auto result = std::wstring(hostExecutable.substr(0, separator + 1)) + L"obs-amf-test.exe";
+  Require(basename == L"obs-amf-test.exe" || basename == L"obs-nvenc-test.exe",
+          "Only pinned hardware probe basenames are admitted", "ERR_SCREEN_CAPTURE_RUNTIME_PATH");
+  auto result = std::wstring(hostExecutable.substr(0, separator + 1)) + std::wstring(basename);
   Require(SafeAbsolutePath(result), "Adjacent AMF probe path exceeds the admitted Windows path bounds",
           "ERR_SCREEN_CAPTURE_RUNTIME_PATH");
   return result;
 }
+inline std::wstring StockAmfProbePath(std::wstring_view hostExecutable) {
+  return StockProbePath(hostExecutable, L"obs-amf-test.exe");
+}
 
-enum class Method { Wgc };
-inline const char* MethodName(Method) { return "wgc"; }
+enum class Method { Wgc, GameHook };
+inline const char* MethodName(Method method) { return method == Method::Wgc ? "wgc" : "game-hook"; }
+enum class CaptureKind { Window, Monitor, Game };
+inline const char* KindName(CaptureKind kind) {
+  return kind == CaptureKind::Monitor ? "monitor" : kind == CaptureKind::Game ? "game" : "window";
+}
+enum class EncoderKind { Auto, Amf, Nvenc };
+inline const char* EncoderId(EncoderKind kind) { return kind == EncoderKind::Nvenc ? kNvencEncoderId : kEncoderId; }
+inline const char* EncoderRateControl(EncoderKind kind) { return kind == EncoderKind::Nvenc ? "CBR" : "VBR_LAT"; }
+inline const char* SourceId(CaptureKind kind) {
+  return kind == CaptureKind::Monitor ? "monitor_capture" : kind == CaptureKind::Game ? "game_capture" : "window_capture";
+}
+
+struct MonitorIdentity {
+  std::wstring deviceId, deviceName;
+  std::int32_t x = 0, y = 0;
+  std::uint32_t width = 0, height = 0;
+};
+
+inline void ValidateMonitorIdentity(const MonitorIdentity& monitor) {
+  Require(monitor.deviceId.starts_with(L"\\\\?\\DISPLAY#") && monitor.deviceId.size() < 128 &&
+          monitor.deviceId.size() > 12 && monitor.deviceName.starts_with(L"\\\\.\\DISPLAY") &&
+          monitor.deviceName.size() > 11 && monitor.deviceName.size() < 32 &&
+          monitor.width > 0 && monitor.width <= 32768 && monitor.height > 0 && monitor.height <= 32768 &&
+          static_cast<std::int64_t>(monitor.x) + monitor.width <= INT32_MAX &&
+          static_cast<std::int64_t>(monitor.y) + monitor.height <= INT32_MAX,
+          "An exact monitor device interface, name and physical bounds are required", "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
+  for (const auto character : monitor.deviceId)
+    Require(character >= 0x20 && character < 0x7f, "Monitor interface identity must be bounded ASCII",
+            "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
+  for (const auto character : monitor.deviceName.substr(11))
+    Require(character >= L'0' && character <= L'9', "Invalid display device name", "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
+  Require(monitor.deviceName[11] != L'0', "Invalid display device name", "ERR_SCREEN_CAPTURE_MONITOR_IDENTITY");
+}
 
 struct Arguments {
   std::wstring runtime, runDirectory;
   std::string runId;
   std::uint64_t hwnd = 0;
   std::uint32_t processId = 0;
+  std::uint64_t expectedCreation = 0;
+  CaptureKind kind = CaptureKind::Window;
+  EncoderKind encoder = EncoderKind::Auto;
+  bool encoderProbe = false;
+  MonitorIdentity monitor;
   Method method = Method::Wgc;
   VideoConfiguration video;
 };
@@ -177,7 +221,8 @@ inline void ValidatePathEvidence(const PathEvidence& value) {
 }
 
 inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
-  Require(input.size() == 9, "Expected capture identity and explicit video configuration", "ERR_SCREEN_CAPTURE_ARGUMENT");
+  Require(input.size() >= 9 && input.size() <= 15, "Expected capture identity and explicit video configuration",
+          "ERR_SCREEN_CAPTURE_ARGUMENT");
   Arguments value;
   unsigned seen = 0;
   for (const auto argument : input) {
@@ -206,14 +251,58 @@ inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
         bit = 128; value.video.fps = static_cast<std::uint32_t>(Decimal(text, 120));
       } else if (name == L"--bitrate") {
         bit = 256; value.video.bitrateKbps = static_cast<std::uint32_t>(Decimal(text, 20000));
+      } else if (name == L"--kind") {
+        bit = 512;
+        Require(text == L"window" || text == L"monitor" || text == L"game", "Unknown capture kind");
+        value.kind = text == L"monitor" ? CaptureKind::Monitor : text == L"game" ? CaptureKind::Game : CaptureKind::Window;
+        value.method = value.kind == CaptureKind::Game ? Method::GameHook : Method::Wgc;
+      } else if (name == L"--process-created") {
+        bit = 1024; value.expectedCreation = Decimal(text, UINT64_MAX);
+        Require(value.expectedCreation > 0, "Expected process creation time is zero");
+      } else if (name == L"--encoder") {
+        bit = 2048;
+        Require(text == L"auto" || text == L"h264_texture_amf" || text == L"obs_nvenc_h264_tex",
+                "Only admitted hardware H264 encoders may be requested", "ERR_SCREEN_CAPTURE_ENCODER_UNAVAILABLE");
+        value.encoder = text == L"auto" ? EncoderKind::Auto : text == L"h264_texture_amf" ? EncoderKind::Amf : EncoderKind::Nvenc;
+      } else if (name == L"--monitor-id") { bit = 4096; value.monitor.deviceId = text;
+      } else if (name == L"--monitor-name") { bit = 8192; value.monitor.deviceName = text;
+      } else if (name == L"--monitor-x" || name == L"--monitor-y") {
+        bit = name == L"--monitor-x" ? 16384 : 32768;
+        const bool negative = text.starts_with(L"-");
+        const auto magnitude = Decimal(negative ? text.substr(1) : text, negative ? 2147483648ULL : 2147483647ULL);
+        Require(!negative || magnitude != 0, "Coordinates must be canonical decimal integers");
+        const auto coordinate = static_cast<std::int32_t>(negative ? -static_cast<std::int64_t>(magnitude) :
+                                                                   static_cast<std::int64_t>(magnitude));
+        (name == L"--monitor-x" ? value.monitor.x : value.monitor.y) = coordinate;
+      } else if (name == L"--monitor-width") {
+        bit = 65536; value.monitor.width = static_cast<std::uint32_t>(Decimal(text, 32768));
+      } else if (name == L"--monitor-height") {
+        bit = 131072; value.monitor.height = static_cast<std::uint32_t>(Decimal(text, 32768));
+      } else if (name == L"--probe") {
+        bit = 262144;
+        Require(text == L"encoder", "Only the source-free encoder probe is supported", "ERR_SCREEN_CAPTURE_ARGUMENT");
+        value.encoderProbe = true;
       } else throw ContractError("ERR_SCREEN_CAPTURE_ARGUMENT", "Unknown native host option");
     }
     Require((seen & bit) == 0, "Duplicate native host option", "ERR_SCREEN_CAPTURE_ARGUMENT");
     seen |= bit;
   }
   ValidateVideoConfiguration(value.video);
-  Require(seen == 511 && ValidRunId(value.runId) && value.hwnd > 0 && value.processId > 0,
-          "Incomplete native host identity or method", "ERR_SCREEN_CAPTURE_ARGUMENT");
+  if (value.encoderProbe) {
+    Require(seen == ((511u & ~24u) | 2048u | 262144u),
+            "Encoder probing must not select a window, monitor or game", "ERR_SCREEN_CAPTURE_ARGUMENT");
+  } else if (value.kind == CaptureKind::Monitor) {
+    Require(seen == ((511u & ~24u) | 512u | 2048u | 258048u),
+            "Incomplete or mixed monitor target arguments", "ERR_SCREEN_CAPTURE_ARGUMENT");
+    ValidateMonitorIdentity(value.monitor);
+  } else {
+    Require((seen == 511 || seen == (511u | 2048u) || seen == (511u | 512u | 1024u | 2048u)) &&
+            value.hwnd > 0 && value.processId > 0,
+            "Incomplete or mixed window target identity", "ERR_SCREEN_CAPTURE_ARGUMENT");
+    Require(value.kind != CaptureKind::Game || value.expectedCreation > 0,
+            "Game Capture requires explicit process creation identity", "ERR_SCREEN_CAPTURE_ARGUMENT");
+  }
+  Require(ValidRunId(value.runId), "Incomplete run identity", "ERR_SCREEN_CAPTURE_ARGUMENT");
   Require(SafeAbsolutePath(value.runtime), "Runtime must have an ordinary absolute path", "ERR_SCREEN_CAPTURE_RUNTIME_PATH");
   ValidateRunPath(value);
   return value;
@@ -221,6 +310,11 @@ inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
 
 enum class Verb { Start, Stats, Stop };
 struct Command { std::uint64_t sequence; Verb verb; };
+
+inline void ValidateCommandMode(const Arguments& arguments, const Command& command) {
+  Require(!arguments.encoderProbe || command.verb == Verb::Stop,
+          "A source-free encoder probe accepts only STOP, never capture commands", "ERR_SCREEN_CAPTURE_PROTOCOL");
+}
 
 inline Command ParseCommand(std::string_view line) {
   Require(!line.empty() && line.size() + 1 <= kMaxCommandLine, "Empty or overlong command");
@@ -262,7 +356,8 @@ enum class NativeStage {
   Admission, RuntimeVerification, StaInitialization, CoreLoad, CoreStartup, CoreDataPath, VideoReset, VideoVerification,
   WinCaptureImage, WinCaptureOpen, WinCaptureIdentity, WinCaptureInit,
   FfmpegImage, FfmpegOpen, FfmpegIdentity, FfmpegInit, ModulesPostLoad, SourceSettings, EncoderSettings, OutputRegistration,
-  Prepared, SourceStart, EncoderStart, Capture, Retirement, OutputStop, SourceRelease,
+  NvencImage, NvencOpen, NvencIdentity, NvencInit,
+  EncoderProbe, Prepared, SourceStart, EncoderStart, Capture, Retirement, OutputStop, SourceRelease,
   EncoderRelease, ObsShutdown, ComShutdown, Terminal
 };
 
@@ -284,10 +379,15 @@ inline const char* NativeStageName(NativeStage stage) {
     case NativeStage::FfmpegOpen: return "prepare.obs-ffmpeg.obs-open-module";
     case NativeStage::FfmpegIdentity: return "prepare.obs-ffmpeg.module-identity";
     case NativeStage::FfmpegInit: return "prepare.obs-ffmpeg.obs-init-module";
+    case NativeStage::NvencImage: return "prepare.obs-nvenc.image-load";
+    case NativeStage::NvencOpen: return "prepare.obs-nvenc.obs-open-module";
+    case NativeStage::NvencIdentity: return "prepare.obs-nvenc.module-identity";
+    case NativeStage::NvencInit: return "prepare.obs-nvenc.obs-init-module";
     case NativeStage::ModulesPostLoad: return "prepare.obs-post-load-modules";
     case NativeStage::SourceSettings: return "prepare.source-settings";
     case NativeStage::EncoderSettings: return "prepare.encoder-settings";
     case NativeStage::OutputRegistration: return "prepare.output-registration";
+    case NativeStage::EncoderProbe: return "prepare.encoder-probe";
     case NativeStage::Prepared: return "prepare.prepared-envelope";
     case NativeStage::SourceStart: return "start.source";
     case NativeStage::EncoderStart: return "start.encoder-output";
@@ -426,10 +526,12 @@ inline void ValidateHookEvidence(const SourceKey& selected, const SourceKey& obs
           "ERR_SCREEN_CAPTURE_HOOK_IDENTITY");
 }
 
-inline void ValidateEncoderAdmission(bool registeredH264, bool passTexture, bool amdDevice, bool nv12Textures,
-                                     bool initializationError, bool rejectedSetting) {
-  Require(registeredH264 && passTexture && amdDevice && nv12Textures,
-          "Pinned AMD AMF H264 texture encoder or AMD NV12 device is unavailable", "ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE");
+inline void ValidateEncoderAdmission(bool registeredH264, bool passTexture, bool matchingDevice, bool nv12Textures,
+                                     bool initializationError, bool rejectedSetting,
+                                     EncoderKind encoder = EncoderKind::Amf, bool verifiedProbe = true) {
+  Require(encoder != EncoderKind::Auto && registeredH264 && passTexture && matchingDevice && nv12Textures && verifiedProbe,
+          "Pinned hardware H264 texture encoder, verified capability probe or matching NV12 device is unavailable",
+          encoder == EncoderKind::Nvenc ? "ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE" : "ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE");
   Require(!initializationError && !rejectedSetting,
           "Stock encoder initialization error, reroute or rejected setting invalidates capture",
           "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
@@ -547,6 +649,21 @@ inline AnnexBInfo InspectAnnexB(std::span<const std::uint8_t> bytes, const Video
   return result;
 }
 
+inline std::vector<std::uint8_t> CompleteH264Keyframe(std::span<const std::uint8_t> accessUnit,
+    std::span<const std::uint8_t> parameterSets, const VideoConfiguration& video) {
+  const auto picture = InspectAnnexB(accessUnit, video);
+  const auto parameters = InspectAnnexB(parameterSets, video);
+  Require(picture.accessUnit && picture.idr && parameters.sps && parameters.pps && !parameters.accessUnit,
+          "An independently decodable keyframe requires its encoder's SPS/PPS and a real IDR", "ERR_SCREEN_CAPTURE_H264");
+  Require(parameterSets.size() <= kMaxPacketBytes - accessUnit.size(),
+          "H264 keyframe and parameter sets exceed the packet bound", "ERR_SCREEN_CAPTURE_BUFFER_LIMIT");
+  std::vector<std::uint8_t> result;
+  result.reserve(parameterSets.size() + accessUnit.size());
+  result.insert(result.end(), parameterSets.begin(), parameterSets.end());
+  result.insert(result.end(), accessUnit.begin(), accessUnit.end());
+  return result;
+}
+
 struct PacketInput {
   std::span<const std::uint8_t> bytes;
   std::int64_t pts = 0, dts = 0;
@@ -660,7 +777,7 @@ struct ModuleIdentity {
 
 inline ModuleIdentity ExpectedModuleIdentity(std::string_view name, std::string_view windowsBinaryPath,
                                              std::string_view windowsDataPath, std::string_view windowsConfigRoot) {
-  Require(name == "win-capture" || name == "obs-ffmpeg", "Only the two required official modules are admitted",
+  Require(name == "win-capture" || name == "obs-ffmpeg" || name == "obs-nvenc", "Only required pinned modules are admitted",
           "ERR_SCREEN_CAPTURE_MODULE_PATH");
   ModuleIdentity value{ObsApiPath(windowsBinaryPath), ObsApiPath(windowsDataPath), std::string(name) + ".dll",
                        std::string(name), ObsApiPath(windowsConfigRoot)};
@@ -813,21 +930,25 @@ inline std::string KeyJson(const SourceKey& key) {
       ",\"executable\":" + JsonString(key.executable) + "}";
 }
 
-inline std::string ConfigurationJson(Method method, const VideoConfiguration& video) {
+inline std::string ConfigurationJson(Method method, const VideoConfiguration& video,
+                                     EncoderKind encoder = EncoderKind::Amf) {
   ValidateVideoConfiguration(video);
   return "{\"obsVersion\":\"32.1.1\",\"method\":" + JsonString(MethodName(method)) +
       ",\"width\":" + std::to_string(video.width) + ",\"height\":" + std::to_string(video.height) +
       ",\"fpsNumerator\":" + std::to_string(video.fps) + ",\"fpsDenominator\":1,"
       "\"initialBitrateKbps\":" + std::to_string(video.bitrateKbps) +
-      ",\"scaleMode\":\"stretch\",\"rateControl\":\"VBR_LAT\",\"codec\":\"h264\",\"encoderId\":\"h264_texture_amf\","
-      "\"profile\":\"main\",\"bFrames\":0,\"keyframeIntervalSeconds\":1}";
+      ",\"scaleMode\":\"stretch\",\"rateControl\":" + JsonString(EncoderRateControl(encoder)) +
+      ",\"codec\":\"h264\",\"encoderId\":" + JsonString(EncoderId(encoder)) +
+      ",\"profile\":\"main\",\"bFrames\":0,\"keyframeIntervalSeconds\":1}";
 }
 
-inline std::string CommonJson(const Common& common, std::string_view type, std::uint64_t sequence) {
-  Require(ValidRunId(common.runId) && common.helperProcessId > 0 && common.processId > 0 &&
-          common.hwnd > 0 && common.hwnd <= kMaxSafeInteger && common.processCreationTime100ns > 0 &&
+inline std::string CommonJson(const Common& common, std::string_view type, std::uint64_t sequence,
+                             bool monitor = false, bool extended = false) {
+  Require(ValidRunId(common.runId) && common.helperProcessId > 0 &&
+          (monitor ? common.hwnd == 0 && common.processId == 0 && common.processCreationTime100ns == 0 :
+          common.processId > 0 && common.hwnd > 0 && common.hwnd <= kMaxSafeInteger && common.processCreationTime100ns > 0) &&
           common.qpc > 0 && common.qpcFrequency > 0 && sequence <= kMaxCommands, "Incomplete JSONL common identity");
-  return "{\"schemaVersion\":1,\"type\":" + JsonString(type) + ",\"runId\":" + JsonString(common.runId) +
+  return std::string("{\"schemaVersion\":") + (extended ? "2" : "1") + ",\"type\":" + JsonString(type) + ",\"runId\":" + JsonString(common.runId) +
       ",\"sequence\":" + std::to_string(sequence) + ",\"helperProcessId\":" + std::to_string(common.helperProcessId) +
       ",\"hwnd\":" + std::to_string(common.hwnd) + ",\"processId\":" + std::to_string(common.processId) +
       ",\"processCreationTime100ns\":" + JsonString(std::to_string(common.processCreationTime100ns)) +
@@ -855,8 +976,8 @@ inline std::string ObservationJson(const Observation& value, std::uint64_t qpc) 
       value.state == ObservationState::Running ? "running" : value.state == ObservationState::Stopped ? "stopped" : "failed";
   if (value.state == ObservationState::Prepared) Require(!value.sourceAttached && !value.sourceWidth && !packets &&
       value.bufferedBytes == 0, "PREPARED cannot contain capture or active encoder evidence");
-  if (value.state == ObservationState::Running) Require(value.sourceAttached && value.sourceWidth && packets,
-      "Running must have attachment and actual output, not just a configured framerate");
+  if (value.state == ObservationState::Running) Require(value.sourceWidth && packets,
+      "Running must have observed dimensions and actual output, not just a configured framerate");
   if (value.state == ObservationState::Stopped) Require(!value.sourceAttached, "Stopped source remains attached");
   return "{\"state\":" + JsonString(state) + ",\"sourceAttached\":" + Boolean(value.sourceAttached) +
       ",\"sourceWidth\":" + OptionalNumber(value.sourceWidth) + ",\"sourceHeight\":" + OptionalNumber(value.sourceHeight) +
