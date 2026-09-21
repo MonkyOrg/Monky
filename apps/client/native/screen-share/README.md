@@ -138,6 +138,9 @@ Os ensaios do aplicativo cobrem P2P/SFU, receptor Chromium, áudio, qualidade,
 prévia local, Assistir/Parar, fullscreen, overlay, troca de servidor e queda
 de conexão. `--window-lifecycle` acrescenta minimizar/restaurar;
 `--idle-source-close` verifica fechar uma fonte sem espectadores.
+Os ensaios verificam os pixels da prévia local decodificada e da interface
+composta, incluindo o aviso de espera antes e depois de assistir. Resolução
+e contagem de frames, sozinhas, não comprovam que a imagem está visível.
 Uma janela sintética não qualifica tela cheia exclusiva de um jogo.
 Loopback Windows não substitui QA em duas máquinas, macOS físico ou rede externa.
 Para verificar o módulo já empacotado, `nativeCaptureSmoke.cjs` também aceita

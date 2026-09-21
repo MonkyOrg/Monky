@@ -116,7 +116,52 @@ async function connectCdp(port, expectedOrigin, runId, diagnostics, overlayParen
   assert.equal(config.runId, runId, 'Never drive an unrelated DevTools target.');
   if (overlayParent) assert.equal(await evaluate('window.api.getDevelopmentQaConfig()'), null,
     'The real overlay must not acquire the Main document QA authority.');
-  return { evaluate, close: () => socket.close() };
+  return {
+    evaluate, close: () => socket.close(),
+    async capture(clip) {
+      const result = await call('Page.captureScreenshot', {
+        format: 'png', fromSurface: true, captureBeyondViewport: false, clip: { ...clip, scale: 1 },
+      });
+      assert.equal(typeof result.data, 'string');
+      return result.data;
+    },
+  };
+}
+
+async function previewPixels(client, state, name) {
+  // Telemetry text must not count as proof that the standby message was painted.
+  const telemetryEnabled = await client.cdp.evaluate('nativeAppSmoke.setTelemetryEnabled(false)');
+  let sample, png;
+  try {
+    sample = await client.cdp.evaluate(`nativeAppSmoke.previewClip(${JSON.stringify(state)})`);
+    png = await client.cdp.capture(sample.clip);
+  } finally {
+    await client.cdp.evaluate(`nativeAppSmoke.setTelemetryEnabled(${JSON.stringify(telemetryEnabled)})`);
+  }
+  await fs.writeFile(path.join(artifacts, `${name}.png`), Buffer.from(png, 'base64'), { flag: 'wx' });
+  const pixels = await client.cdp.evaluate(`(async data => {
+    const bytes = Uint8Array.from(atob(data), value => value.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+    try {
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(bitmap, 0, 0);
+      const pixels = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+      let bright = 0, red = 0, green = 0, blue = 0;
+      for (let index = 0; index < pixels.length; index += 4) {
+        red += pixels[index]; green += pixels[index + 1]; blue += pixels[index + 2];
+        if (pixels[index] > 160 && pixels[index + 1] > 160 && pixels[index + 2] > 160) bright++;
+      }
+      const count = pixels.length / 4;
+      return { width: bitmap.width, height: bitmap.height, bright, red: red / count, green: green / count, blue: blue / count };
+    } finally { bitmap.close(); }
+  })(${JSON.stringify(png)})`);
+  if (state === 'waiting') {
+    assert.equal(sample.placeholderVisible, true, 'The empty video covers the standby preview message.');
+    assert.ok(pixels.bright >= 20, `The standby preview message is painted black or covered: ${JSON.stringify(pixels)}`);
+  } else assert.ok(pixels.red > 150 && pixels.blue > 150 && pixels.green < 100,
+    `The actual local preview surface does not display its source pixels: ${JSON.stringify(pixels)}`);
+  return pixels;
 }
 
 async function setupRenderer({ port, password, nickname, browserReceiver, audioEnabled }) {
@@ -276,6 +321,13 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       return [...document.querySelectorAll('.stage-diagnostics-btn')].filter(button => button.dataset.diagnosticsKey?.includes(':screen:'))
         .map(button => ({ key: button.dataset.diagnosticsKey, text: button.title, hidden: button.hidden }));
     },
+    async setTelemetryEnabled(enabled) {
+      const previous = settingsStore.screenShareTelemetryEnabled;
+      settingsStore.screenShareTelemetryEnabled = enabled;
+      settingsStore.save();
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return previous;
+    },
     async pixels() {
       const video = watchedVideo();
       if (!video?.videoWidth || !video.videoHeight) throw new Error('No actual received video is available to sample.');
@@ -292,6 +344,32 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         return { width, height, left: point(.02, .5), right: point(.98, .5),
           top: point(.5, .04), bottom: point(.5, .96), center: point(.5, .5) };
       } finally { frame.close(); }
+    },
+    previewClip(state) {
+      const capture = videoService.getNativeScreenCaptures()[0];
+      const card = capture && [...document.querySelectorAll('[data-kind="screen"]')]
+        .find(element => element.dataset.tileKey?.endsWith(':screen:' + capture.source.shareId));
+      if (!card || card.dataset.previewState !== state) throw new Error('The local preview is not in its expected state.');
+      let area, placeholderVisible = null;
+      if (state === 'waiting') {
+        const placeholder = card.querySelector('.stage-native-thumbnail');
+        if (placeholder.hidden) throw new Error('The standby message is hidden.');
+        area = placeholder.querySelector('span').getBoundingClientRect();
+        placeholderVisible = placeholder.contains(document.elementFromPoint(area.x + area.width / 2, area.y + area.height / 2));
+      } else {
+        const video = card.querySelector('video.stage-video-element');
+        if (!video?.videoWidth || !video.videoHeight) throw new Error('The local preview has no decoded image.');
+        const bounds = video.getBoundingClientRect();
+        const scale = Math.min(bounds.width / video.videoWidth, bounds.height / video.videoHeight);
+        const width = video.videoWidth * scale, height = video.videoHeight * scale;
+        area = { x: bounds.x + (bounds.width - width) / 2 + width * .02 - 2,
+          y: bounds.y + (bounds.height - height) / 2 + height * .5 - 2, width: 4, height: 4 };
+      }
+      const clip = { x: Math.ceil(area.x), y: Math.ceil(area.y), width: Math.floor(area.width), height: Math.floor(area.height) };
+      if (clip.x < 0 || clip.y < 0 || clip.width < 1 || clip.height < 1
+        || clip.x + clip.width > innerWidth || clip.y + clip.height > innerHeight)
+        throw new Error('Preview sample lies outside the owned viewport.');
+      return { clip, placeholderVisible };
     },
     async diagnostics() {
       const local = videoService.getNativeScreenCaptures()[0], remote = sharing();
@@ -485,6 +563,7 @@ async function run() {
   report.idleDiagnostics = await publisher.cdp.evaluate('nativeAppSmoke.diagnostics()');
   assert.equal(report.idleDiagnostics.viewers, 0);
   assert.deepEqual(report.idleDiagnostics.endpoints, []);
+  report.idlePreviewPixels = await previewPixels(publisher, 'waiting', 'preview-standby');
   const sourceCommand = async command => {
     const id = randomUUID(), response = once(source, 'message');
     source.send({ type: 'source-command', id, command });
@@ -551,6 +630,7 @@ async function run() {
   const after = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
   report.stage = { ...after, fps: (after.video.frames - before.video.frames) * 1000 / (after.video.at - before.video.at) };
   assert.ok(report.stage.fps >= 100, `Normal-app presentation reached ${report.stage.fps.toFixed(2)} FPS.`);
+  report.localCompositorPixels = await previewPixels(publisher, 'playing', 'preview-playing');
   report.receiving = await viewer.cdp.evaluate('nativeAppSmoke.stats()');
   const observedTelemetry = async (client, width, height) => {
     let telemetry;
@@ -578,6 +658,8 @@ async function run() {
     assert.ok(pixels.center.slice(0, 3).every(channel => channel > 180));
   };
   assertStretch(report.stretchedPixels);
+  report.localDecodedPixels = await publisher.cdp.evaluate('nativeAppSmoke.pixels()');
+  assertStretch(report.localDecodedPixels);
   if (!browserReceiver) {
     assert.match(report.receiverTelemetry.text, /Native decoder FPS \(MF\): [1-9][0-9]*/);
     assert.ok(report.receiverDiagnostics.endpoints.some(endpoint => endpoint.decoders.length));
@@ -701,6 +783,7 @@ async function run() {
   report.reducedSenderDiagnostics = await publisher.cdp.evaluate('nativeAppSmoke.diagnostics()');
   report.reducedStretchedPixels = await viewer.cdp.evaluate('nativeAppSmoke.pixels()');
   assertStretch(report.reducedStretchedPixels);
+  report.reducedLocalPixels = await previewPixels(publisher, 'playing', 'preview-reduced');
   const reducedBitrate = Number(report.reducedSenderTelemetry.text.match(/\bBitrate: ([0-9]+) kbps/)[1]);
   assert.ok(reducedBitrate <= 1875, `480p RTP exceeded its 1500 Kbps ceiling plus packet/burst allowance: ${reducedBitrate} Kbps.`);
   if (overlayEnabled) {
@@ -718,6 +801,7 @@ async function run() {
   assert.equal((await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).browserWatches, 0);
   await until(async () => (await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).previewState === 'waiting',
     'The local preview did not return to demand-zero standby.');
+  report.stoppedPreviewPixels = await previewPixels(publisher, 'waiting', 'preview-stopped');
   if (browserReceiver) {
     const retired = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
     assert.equal(retired.screenOutputContext, null);

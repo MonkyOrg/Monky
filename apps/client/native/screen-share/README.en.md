@@ -137,6 +137,9 @@ Application scenarios cover P2P/SFU, Chromium reception, audio, quality,
 local preview, Watch/Stop, fullscreen, overlay, server navigation and connection
 loss. `--window-lifecycle` adds minimize/restore coverage;
 `--idle-source-close` checks closing an unwatched source.
+The scenarios check pixels from both the decoded local preview and the
+composited interface, including the standby message before and after watching.
+Resolution and frame counts alone do not prove that the image is visible.
 A synthetic window does not qualify a game's exclusive fullscreen behavior.
 Windows loopback does not replace two-computer QA, physical macOS or external
 network testing.

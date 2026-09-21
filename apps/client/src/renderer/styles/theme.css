@@ -5947,6 +5947,7 @@ input:focus, textarea:focus, select:focus {
 .stage-native-thumbnail {
   position: absolute;
   inset: 0;
+  z-index: 2;
   display: grid;
   place-items: center;
   background: var(--bg-primary);
