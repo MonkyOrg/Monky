@@ -192,8 +192,8 @@ test('source specializations preserve pinned vendors and bind before stock Game 
   const vendor = path.join(__dirname, '..', 'src', 'vendor', 'obs');
   const manifest = require('../src/vendor/obs/sources.json');
   for (const [name, specialize] of [['game-capture', bindGameSource], ['duplicator-monitor-capture', bindMonitorSource]]) {
-    const relative = path.join('plugins', 'win-capture', `${name}.c`), filename = path.join(vendor, relative);
-    const pin = manifest.files.find(value => value.path === relative);
+    const parts = ['plugins', 'win-capture', `${name}.c`], filename = path.join(vendor, ...parts);
+    const pin = manifest.files.find(value => value.path === path.win32.join(...parts));
     assert.ok(pin);
     assert.deepEqual(fingerprint(filename), { bytes: pin.bytes, sha256: pin.sha256 });
     const original = fs.readFileSync(filename, 'utf8'), bound = specialize(original);
