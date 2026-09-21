@@ -216,6 +216,16 @@ function build(config) {
       if (index % 4) protocol.validateProgress(platformProbe.messages[index - 1], message);
     }
     contracts.crossLanguagePlatformMessages = platformProbe.messages.length;
+    const admissionProbe = JSON.parse(execute(tests, ['--admission-probe'], { env, capture: true }));
+    assert.equal(admissionProbe.deviceFree, true); assert.equal(admissionProbe.synthetic, true);
+    assert.equal(admissionProbe.messages.length, 4);
+    for (const message of admissionProbe.messages) {
+      protocol.validateMessage(message, {
+        source: message.target, video: message.video, encoder: message.encoder,
+        runId: message.runId, helperProcessId: message.helperProcessId,
+      });
+    }
+    contracts.crossLanguageAdmissionMessages = admissionProbe.messages.length;
     const encoderProbe = JSON.parse(execute(tests, ['--encoder-probe-contract'], { env, capture: true }));
     assert.equal(encoderProbe.deviceFree, true); assert.equal(encoderProbe.synthetic, true);
     assert.equal(encoderProbe.messages.length, 8);
