@@ -239,10 +239,32 @@ test('workspace dependencies resolve from their real workspace, not a different 
   json(path.join(f.source, 'package.json'), { dependencies: { '@monky/bot-sdk': '*', leaf: '*' } });
   fs.mkdirSync(path.join(f.source, 'node_modules', '@monky'), { recursive: true });
   fs.symlinkSync(sdk, path.join(f.source, 'node_modules', '@monky', 'bot-sdk'), process.platform === 'win32' ? 'junction' : 'dir');
+  for (const name of ['LICENSE', 'LICENSE-MIT'])
+    fs.writeFileSync(path.join(workspace, name), `Workspace ${name} fixture.\n`);
   bundleDependencies(f.source, f.output);
   const installed = createRequire(path.join(f.output, 'node_modules', '@monky', 'bot-sdk', 'package.json'));
   assert.equal(installed('./dist/index.js'), '2.0.0');
+  for (const name of ['LICENSE', 'LICENSE-MIT'])
+    assert.deepEqual(fs.readFileSync(path.join(f.output, 'node_modules', '@monky', 'bot-sdk', name)),
+      fs.readFileSync(path.join(workspace, name)));
   assert.equal(createRequire(path.join(f.output, 'package.json'))('leaf'), '9.0.0');
+});
+
+test('installed Monky dependencies retain GPL and historical MIT notices when bundled into a bot', (t) => {
+  const f = fixture(t);
+  botAt(f.source);
+  const sdk = path.join(f.source, 'node_modules', '@monky', 'bot-sdk');
+  for (const name of ['LICENSE', 'LICENSE-MIT'])
+    fs.writeFileSync(path.join(sdk, name), `Installed ${name} fixture.\n`);
+  bundleDependencies(f.source, f.output);
+  for (const name of ['LICENSE', 'LICENSE-MIT'])
+    assert.deepEqual(fs.readFileSync(path.join(f.output, 'node_modules', '@monky', 'bot-sdk', name)),
+      fs.readFileSync(path.join(sdk, name)));
+  const manifest = JSON.parse(fs.readFileSync(path.join(sdk, 'package.json'), 'utf8'));
+  json(path.join(sdk, 'package.json'), { ...manifest, license: 'GPL-3.0-or-later' });
+  fs.unlinkSync(path.join(sdk, 'LICENSE-MIT'));
+  assert.throws(() => bundleDependencies(f.source, path.join(f.root, 'missing-notice')),
+    /Missing Monky LICENSE-MIT notice/);
 });
 
 test('linked workspace consumers preserve their shared registry, including a direct project dependency', (t) => {
@@ -332,6 +354,14 @@ test('the real SDK voice dependency tree survives packaging and offline installa
   const packagedSdk = path.join(packageRoot, 'node_modules', '@monky', 'bot-sdk', 'package.json');
   const loaded = spawnSync(process.execPath, ['--no-global-search-paths', '-e', `
     const fromSdk = require('node:module').createRequire(${JSON.stringify(packagedSdk)});
+    for (const name of ['@monky/bot-sdk', '@monky/shared']) {
+      const root = require('node:path').dirname(fromSdk.resolve(name + '/package.json'));
+      for (const notice of ['LICENSE', 'LICENSE-MIT']) {
+        const expected = require('node:fs').readFileSync(require('node:path').join(${JSON.stringify(path.resolve(__dirname, '..', '..', '..'))}, notice));
+        const actual = require('node:fs').readFileSync(require('node:path').join(root, notice));
+        require('node:assert/strict').deepEqual(actual, expected);
+      }
+    }
     const { BotClient } = fromSdk('./dist/index.js');
     if (typeof BotClient.prototype.joinVoice !== 'function') throw new Error('Missing voice API');
     const fromShared = require('node:module').createRequire(fromSdk.resolve('@monky/shared'));

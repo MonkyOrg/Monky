@@ -113,20 +113,35 @@ jobs:
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vsversion: '2022'
+          toolset: '14.44'
+          sdk: '10.0.26100.0'
 
       - name: Install dependencies
         run: npm ci
 
-      # Upgrade node-gyp so @electron/rebuild can find VS 2022
-      - name: Install node-gyp globally (Windows)
+      - name: Use lockfile node-gyp (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          npm install -g node-gyp@latest
-          echo "NODE_GYP_PATH=$(npm prefix -g)/node_modules/node-gyp/bin/node-gyp.js" >> $GITHUB_ENV
+          $NodeGyp = node -p "require.resolve('node-gyp/bin/node-gyp.js')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "NODE_GYP_PATH=$NodeGyp" >> $env:GITHUB_ENV
 
       - name: Build workspaces
         run: npm run build
+
+      - name: Build native screen runtime and corresponding sources (Windows)
+        if: runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
+        shell: pwsh
+        run: |
+          $env:PYTHON = (Get-Command python).Source
+          "PYTHON=$env:PYTHON" >> $env:GITHUB_ENV
+          $Git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+          npm run prepare:native-screen -- --python="$env:PYTHON" --git="$Git" --jobs=4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run pack:native-sources -- --version=${{ needs.version.outputs.version }}
 
       - name: Set build version
         shell: bash
@@ -183,6 +198,8 @@ jobs:
             release/*.exe
             release/*.dmg
             release/*.zip
+            release/monky-native-sources-*.tar.xz
+            release/monky-native-sources-*.json
             release/*.blockmap
             release/latest*.yml
 
@@ -328,13 +345,24 @@ jobs:
       - name: List artifacts
         run: ls -R artifacts
 
+      - name: Verify corresponding sources before publishing binaries
+        id: native_sources
+        run: |
+          if [ -f apps/client/native/screen-share/scripts/packSources.cjs ]; then
+            node scripts/check-native-source-release.js artifacts \
+              "${{ needs.version.outputs.version }}" "${{ steps.changelog.outputs.commit }}"
+            echo "required=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "required=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Generate checksums and sign artifacts
         run: |
           cd artifacts
-          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.tgz' -o -name 'monky-compatibility-*.json' \) \
+          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.tgz' -o -name '*.tar.xz' -o -name 'monky-native-sources-*.json' -o -name 'monky-compatibility-*.json' \) \
             -exec sha256sum {} + | sort > checksums-sha256.txt
           echo "=== Checksums ==="
           cat checksums-sha256.txt
@@ -374,6 +402,8 @@ jobs:
               npm install https://github.com/MonkyOrg/Monky/releases/download/v${{ needs.version.outputs.version }}/monky-bot-sdk-${{ needs.version.outputs.version }}.tgz
               ```
 
+            ${{ steps.native_sources.outputs.required == 'true' && format('**Fontes correspondentes (GPL)**: código Monky da mesma tag e `monky-native-sources-{0}.tar.xz`, acompanhado do manifesto JSON. O arquivo inclui fontes nativas, bibliotecas OBS/FFmpeg, receitas e patches; os checksums abaixo também cobrem esses arquivos.', needs.version.outputs.version) || '' }}
+
             ### Verificação de autenticidade
             Todos os artefatos são assinados com [Sigstore Cosign](https://docs.sigstore.dev/) (keyless, via OIDC do GitHub Actions).
 
@@ -391,7 +421,7 @@ jobs:
             ```
 
             ${{ steps.changelog.outputs.notes }}
-          draft: false
+          draft: true
           prerelease: ${{ needs.version.outputs.prerelease }}
           fail_on_unmatched_files: false
 
@@ -408,7 +438,7 @@ jobs:
         run: |
           cd artifacts
           shopt -s nullglob
-          FILES=( *.exe *.dmg *.zip *.tgz *.blockmap latest*.yml monky-compatibility-*.json checksums-sha256.txt* )
+          FILES=( *.exe *.dmg *.zip *.tgz *.tar.xz *.blockmap latest*.yml monky-native-sources-*.json monky-compatibility-*.json checksums-sha256.txt* )
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "No artifacts to upload." >&2
             exit 1
@@ -437,3 +467,9 @@ jobs:
             exit 1
           fi
           echo "All ${#FILES[@]} assets published."
+
+      - name: Publish the verified release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.version.outputs.version }}
+        run: gh release edit "$TAG" --draft=false

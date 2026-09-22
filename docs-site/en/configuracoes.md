@@ -11,7 +11,7 @@ preferences. To change something shared with participants, use
 | Soundboard / Stickers | Local folders and library controls |
 | Keybinds | Key combinations for quick actions |
 | Notifications and Sounds | Personal sounds and notices |
-| Quality | Transmission profiles, resolution, FPS, bitrate and codec |
+| Quality & sharing | Voice, camera and screen profiles, codec, local preview and telemetry |
 | Bot tools | Local installations, permissions, cache and tasks |
 | Logs | Local events and client diagnostics |
 | About and Updates | Version, updates, window behavior and community |
@@ -30,6 +30,91 @@ password. Select what to include/restore; this data can also accompany an
 identity export. Saved servers can include passwords and are not written
 in plain text in this backup. Without the chosen password, the file cannot
 be recovered.
+
+### Quality, bitrate and telemetry
+
+Under **Quality & sharing**, presets, codec and custom values are grouped with
+**Video telemetry**. **Voice and Video** contains devices, audio processing
+and previews. To show FPS, resolution and bitrate over camera/screen video,
+use **Quality & sharing → Video telemetry**: the switch, position and mode are saved
+and applied without restarting the stream.
+
+In the **Custom** profile, hover or use `Tab` to reach the question icon next to
+each **Bitrate**. The tooltip explains the effect and cost: higher bitrate can
+preserve detail; lower bitrate saves bandwidth but may reduce fidelity or produce
+video blocks. It does not increase resolution or FPS by itself.
+
+As a starting point for **one outgoing video copy**, use measured upload,
+not the advertised download speed:
+
+| Upload | Initial bitrate ceiling |
+| --- | --- |
+| 5 Mbps | 2000 kbps |
+| 10 Mbps | 5000 kbps |
+| 20 Mbps | 10000 kbps |
+| 50 Mbps or more | 20000 kbps |
+
+Leave at least **30% headroom** and subtract other traffic, including audio,
+camera and simultaneous screen shares. In P2P, each recipient gets a copy;
+in SFU, count the outgoing stream to the server. These are starting points,
+not quality guarantees: codec, content, resolution and FPS also affect bandwidth
+needs. For voice, start at 24–32 kbps per copy; 48–64 kbps provides higher
+fidelity. With 1 Mbps upload, 64 kbps uses 6.4% per copy before other costs.
+
+### Watching shared screens
+
+In the voice channel, click **Watch broadcast** on the screen you want to open.
+The announcement that someone is sharing does not start receiving its video
+and audio on its own. **Stop watching** stops delivery of that screen only to
+you, without turning off your microphone, camera or the stream for other
+viewers. This applies to both P2P and SFU.
+
+Shared audio belongs to the publisher: if you are watching two of their screens,
+stopping one keeps the audio needed by the other. Stopping the last one also
+ends that audio reception. Muting is a separate playback preference; it does
+not replace **Stop watching** when you want to save bandwidth.
+
+Changing pages, using a pop-out window or enabling the overlay does not change
+the screens you chose to watch in the call. Leaving the call or ending the
+source clears that choice; a new broadcast must be selected again. A transport
+reconnection preserves the choice while the same source remains valid.
+
+On the native path, the last viewer to stop also closes that profile's capture,
+encoder and sending pipeline, including the upload to the SFU.
+The source announcement remains available to watch again. The Chromium path
+preserves capture/preview and may continue uploading to the SFU.
+Signaling, connection control, voice and camera can still use the network.
+
+### Native sharing and viewer quality
+
+The picker shows the capture methods and H.264 encoder available in this
+device's native backend. Unavailable options are disabled with a reason;
+the GPU brand does not guarantee support. There is no automatic switch to
+Chromium or another source. The automatic **Game Capture** to **Normal**
+attempt, when needed, uses only the same window and displays a notice.
+
+For up to **1920×1080 at 120 FPS**, select **Custom** under **Quality & sharing**;
+existing presets were not automatically changed to 120 FPS. In the picker,
+**Keep aspect ratio** fits the image into the selected dimensions, adding
+borders when needed without distortion. Off retains the current stretch-to-fill
+behavior. The switch starts off for each new screen share and is not a global
+preference.
+
+A new screen share's preview enters focus as soon as its tile is available.
+You can unfocus it: quality changes, reconnections and capture-method retries
+do not refocus it. The preview and each viewer show a **Normal** or **Game**
+badge for the confirmed mode of that stream, including in thumbnails.
+Until an image confirms the mode, the badge stays hidden; selecting Game
+Capture alone does not establish that Game is in use.
+
+When watching a native screen, **Received quality** requests a real sender
+profile: **Source maximum** or profiles capped at **1080p/60**,
+**720p/60** and **480p/30**. All respect the publisher's configured limit;
+equivalent choices are not repeated. The 480p ceiling uses 852×480 for encoder
+compatibility. This changes transmitted media, not just the player's size.
+Different profiles can require additional encoders and upload bandwidth.
+Configured resolution, FPS and bitrate are limits, not performance guarantees.
+Update both client and server together to use this behavior.
 
 ### Appear offline
 
@@ -346,10 +431,11 @@ Older shortcuts remain readable; re-record an unrecognized combination from
 another layout. Global capture may require input/accessibility permissions.
 Push-to-Talk keeps its separately configured keyboard key or mouse button.
 
-## Quality
+## Quality & sharing {#quality}
 
 The profile controls what **you transmit**; it does not increase someone
-else's camera or screen resolution.
+else's camera or screen resolution. This tab also groups codec, local sharing
+preview and telemetry; profiles still include voice and camera settings.
 
 ### Quality profiles
 
@@ -372,26 +458,60 @@ resolution closest to the one you were already using.
 
 ### Sharing your screen while gaming
 
-Encoding video consumes resources. Acceleration depends on the codec, hardware,
-driver and support available to the app. H.264 has broad hardware support;
-AV1 and VP9 may use the CPU when no compatible encoder is available.
-Choosing a codec does not by itself guarantee GPU encoding.
+Encoding video consumes resources. Acceleration depends on the hardware, driver
+and support confirmed by the backend. For screen sharing, **Automatic** uses
+**H.264 / AVC** today; **AV1** remains disabled as **Coming soon**.
+Hardware encoder selection is separate from the codec. If support is
+unavailable, the client explains why instead of silently changing codecs.
 
-That is why, on the **Gaming** profile, the **Automatic** codec puts H.264
-first. If you use another profile and the game stutters while sharing, pick
-**H.264 / AVC** under *Preferred Video Codec*.
+The picker separates **Screens** and **Windows**. Each window appears only
+once in the window list; there is no list of detected games. After selecting a
+window, the method cards offer **Normal** by default and
+**Game Capture** as an explicit choice. Changing the method keeps the
+same window and its audio choice. Selecting another window resets the method
+to Normal rather than carrying over the previous window's Game Capture choice.
 
-**Automatic** negotiates a compatible codec. When you explicitly select a
-codec, it becomes mandatory for your screen in P2P and SFU, including when
-replacing a screen or changing voice modes. If unavailable, the client explains
-why rather than transmitting with another codec.
+Choosing the Game Capture card does not start capture or test the application:
+you must confirm with **Share**, **Switch Source** or **Add screen**. Only
+methods advertised by the backend are available; compatibility with the
+selected window still needs to be checked. If Game Capture becomes
+unavailable, Monky closes that attempt and notifies you that it is trying
+**Normal for the same window**. The notice stays visible for 8 seconds to give
+you time to read it and reports an attempt, not an already
+confirmed image. It never chooses another monitor or window, uses Chromium,
+or disables anti-cheat, Trusted Mode or other protections. If Normal also
+fails, the error remains visible; there is no switch to another source.
 
-On Windows, Monky also captures the screen through the **Windows Graphics
-Capture** API, which composites on the GPU and stops delivering frames when
-nothing on screen changes. It needs Windows 10 1809 or newer and does not work
-inside Remote Desktop sessions — in those cases Monky falls back to the old
-method on its own. To force the old method, start the app with
-`MONKY_DISABLE_WGC=1`.
+For games, try **Game Capture** first, following the
+[OBS recommendation](https://obsproject.com/kb/game-capture-source).
+It is not intended for every window; games such as CS2 may prevent this method.
+**Normal** mode may require the game to run in
+windowed or borderless fullscreen mode, without changing protections.
+This also follows the
+[official OBS guidance](https://obsproject.com/kb/game-capture-troubleshooting);
+the window name or title is not used to promise game detection or compatibility.
+
+Under **Windows**, **Does my game work with Game Capture?** opens a local guide
+searchable by title or alias, such as CS2, GTA SA and LoL. Its 14 references to
+OBS limitations and guidance are grouped into **Use Normal** (the recommended
+alternative for those cases) and **Needs attention** (specific precautions).
+This is not a complete compatibility list or a guarantee for Monky.
+An absent game means only **no catalogued information**, not incompatibility;
+try Game Capture first.
+The guide does not access the network, test games, start capture or change
+your selection; its official-source link opens the browser only when activated.
+
+The guidance covers DirectX 12 in Fortnite, separate League of Legends client
+and match windows, and permission or multi-GPU limitations. The match window
+must be selected explicitly. There is no automatic GPU selection or permission
+elevation, and no recommendation to disable protections.
+
+Opened a game or another window after the picker? Use **Refresh**. There is
+no background polling. If the source remains available, its tab, selected
+ID, method, quality, audio and **Keep aspect ratio** choice are preserved.
+A source that disappears loses selection and is never replaced automatically.
+Confirmation is disabled while refreshing; failures remain visible and can
+be retried in the same modal.
 
 One last tip that holds for any capture software: sharing **the game window**
 usually costs less than sharing the whole monitor, and playing in *borderless

@@ -174,18 +174,53 @@ async function runElectron() {
       const value = await run(b, `window.activity.remote(${JSON.stringify(remoteId)})`);
       return { ...value, ok: value.rms > 0.01 && value.ring };
     }, 'Undeafen restores the current activity');
-    phase = 'leave and rejoin';
+    phase = 'leave and rejoin with a delayed local acknowledgement';
+    await run(a, 'window.activity.holdLeaveEcho()');
     await run(a, 'window.activity.leave()');
     await until(async () => {
       const value = await run(b, `window.activity.remote(${JSON.stringify(remoteId)})`);
       return { ...value, ok: !value.ring && !value.hasPipeline && !value.hasVad };
     }, 'Leaving removes both playback meter and sampling timer');
+    await until(async () => {
+      const value = await run(a, 'window.activity.snapshot()');
+      return { ...value, ok: value.leaveEchoHeld };
+    }, 'The real server must acknowledge the old leave before its delayed delivery');
     await run(a, 'window.activity.join()');
     await until(async () => {
       const value = await run(b, `window.activity.remote(${JSON.stringify(remoteId)})`);
       return { ...value, ok: value.rms > 0.01 && value.ring && value.hasPipeline && value.hasVad };
     }, 'Rejoining meters the new receiver lifetime');
-    console.log(`VOICE ACTIVITY ${config.mode}: real audio, speech/silence, local mute/deafen and rejoin passed`);
+    phase = 'old leave acknowledgement after completed admission';
+    await run(a, 'window.activity.holdLeaveEcho(false)');
+    await run(a, 'window.activity.leave()');
+    await until(async () => {
+      const value = await run(a, 'window.activity.snapshot()');
+      return { ...value, ok: value.leaveEchoHeld };
+    }, 'Hold the next real leave acknowledgement until the replacement call connects');
+    await run(a, 'window.activity.join()');
+    await until(async () => {
+      const value = await run(a, 'window.activity.snapshot()');
+      return { ...value, ok: value.inRoom && !value.connecting && !value.reconnecting };
+    }, 'Replacement admission completes before the old acknowledgement');
+    await run(a, 'window.activity.releaseLeaveEcho()');
+    const admitted = await run(a, 'window.activity.snapshot()');
+    assert.ok(admitted.inRoom && admitted.participants.some(p => p.sessionId === remoteId && p.voiceState),
+      'The delayed echo must preserve current local membership');
+    await until(async () => {
+      const value = await run(b, `window.activity.remote(${JSON.stringify(remoteId)})`);
+      return { ...value, ok: value.rms > 0.01 && value.ring && value.hasPipeline && value.hasVad };
+    }, 'A post-admission acknowledgement must not retire the replacement receiver');
+    phase = 'authoritative administrative removal';
+    await run(a, 'window.activity.kickSelf()');
+    await until(async () => {
+      const value = await run(a, 'window.activity.snapshot()');
+      return { ...value, ok: !value.inRoom && !value.microphoneOpen };
+    }, 'An administrative removal still ends the current call and microphone');
+    await until(async () => {
+      const value = await run(b, `window.activity.remote(${JSON.stringify(remoteId)})`);
+      return { ...value, ok: !value.hasPipeline && !value.hasVad && !value.ring };
+    }, 'Administrative removal still retires remote media and metering');
+    console.log(`VOICE ACTIVITY ${config.mode}: real audio, speech/silence, local mute/deafen, delayed leave echoes and administrative removal passed`);
   } catch (error) {
     exitCode = 1;
     console.error(`VOICE ACTIVITY ${config.mode} failed during ${phase}:`, error);
@@ -256,6 +291,33 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
   await connection.openServerSession(address.hostname, Number(address.port), { clientId: crypto.randomUUID(), publicKey }, `Participant ${label}`);
   const session = sessionManager.getActive();
   rtc.rtcConfig = { iceServers: [] };
+  const receive = session.client.handleIncomingMessage;
+  const send = session.client.send;
+  let holdLeaveEcho = false;
+  let releaseLeaveOnJoin = true;
+  let heldLeaveEcho = null;
+  const releaseLeaveEcho = () => {
+    if (!heldLeaveEcho) throw new Error('No real leave acknowledgement is pending');
+    const message = heldLeaveEcho;
+    heldLeaveEcho = null;
+    holdLeaveEcho = false;
+    receive.call(session.client, message);
+  };
+  session.client.handleIncomingMessage = function(message) {
+    if (holdLeaveEcho && message.type === MessageType.VOICE_USER_LEFT
+        && message.payload.sessionId === session.serverStore.currentUser.sessionId) {
+      if (heldLeaveEcho || !message.requestId) throw new Error('Expected one correlated local leave acknowledgement');
+      heldLeaveEcho = message;
+      return;
+    }
+    return receive.call(this, message);
+  };
+  session.client.send = function(type, payload, requestId) {
+    send.call(this, type, payload, requestId);
+    if (type === MessageType.VOICE_JOIN && heldLeaveEcho && releaseLeaveOnJoin) {
+      queueMicrotask(releaseLeaveEcho);
+    }
+  };
   let probe;
   const clearProbe = () => {
     if (!probe) return;
@@ -266,7 +328,7 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
     probe = null;
   };
   const snapshot = () => ({
-    errors, sessionId: session.serverStore.currentUser.sessionId,
+    errors, sessionId: session.serverStore.currentUser.sessionId, leaveEchoHeld: !!heldLeaveEcho,
     inRoom: !!voice.currentVoiceChannelId, connecting: voice.isConnecting, reconnecting: voice.isReconnecting,
     microphoneOpen: voice.microphoneOpen, localSpeaking: voice.isSpeaking,
     active: sessionManager.getActiveKey(), call: voice.voiceSessionKey,
@@ -283,6 +345,15 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
       channel.click();
     },
     snapshot,
+    holdLeaveEcho: (releaseOnJoin = true) => {
+      if (holdLeaveEcho) throw new Error('A leave acknowledgement is already being held');
+      holdLeaveEcho = true;
+      releaseLeaveOnJoin = releaseOnJoin;
+    },
+    releaseLeaveEcho,
+    kickSelf: () => session.client.sendRequest(MessageType.ADMIN_KICK_VOICE, {
+      targetSessionId: session.serverStore.currentUser.sessionId,
+    }),
     tone: on => { gain.gain.value = on ? 0.15 : 0; },
     leave: () => connection.leaveCurrentCall(),
     localVolume: (sessionId, value) => rtc.mediaRouter.setPeerVolume(sessionId, value),
@@ -319,6 +390,8 @@ async function prepareRenderer(url, label, MessageType, publicKey) {
     },
     async cleanup() {
       clearProbe();
+      session.client.handleIncomingMessage = receive;
+      session.client.send = send;
       await connection.leaveCurrentCall();
       audioProcessor.stopMicrophone();
       oscillator.stop();

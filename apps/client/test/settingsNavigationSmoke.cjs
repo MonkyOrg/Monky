@@ -4,19 +4,24 @@ const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const clientRoot = path.resolve(__dirname, '..');
 const releaseNotesOnly = process.argv.includes('--release-notes');
+const qualitySettingsOnly = process.argv.includes('--quality-settings');
+const screenStageOnly = process.argv.includes('--screen-stage');
+if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly].filter(Boolean).length > 1)
+  throw new Error('Choose one targeted UI smoke.');
 
 if (!process.versions.electron) {
   const profile = path.join(clientRoot, 'dist-test', `settings-navigation-profile-${process.pid}`);
   fs.mkdirSync(profile, { recursive: true });
   const env = { ...process.env, MONKY_SETTINGS_NAV_PROFILE: profile };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require('electron'), [__filename, ...(releaseNotesOnly ? ['--release-notes'] : [])], { cwd: clientRoot, env, stdio: 'inherit' });
+  const child = spawn(require('electron'), [__filename, ...process.argv.slice(2)], { cwd: clientRoot, env, stdio: 'inherit' });
   const cleanup = () => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   child.once('error', error => { console.error(error); cleanup(); process.exitCode = 1; });
   child.once('exit', code => { cleanup(); process.exitCode = code ?? 1; });
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_SETTINGS_NAV_PROFILE);
+  if (qualitySettingsOnly || screenStageOnly) app.disableHardwareAcceleration();
   // Hosted Windows sessions can disable Chromium's scroll animator independently of matchMedia.
   app.commandLine.appendSwitch('enable-smooth-scrolling');
   app.on('window-all-closed', () => {});
@@ -61,9 +66,35 @@ if (!process.versions.electron) {
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     timeout = setTimeout(() => { console.error('Settings navigation smoke timed out'); void finish(1); }, 90_000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__settings_navigation__`);
-    window.focus();
-    window.webContents.focus();
+    if (!qualitySettingsOnly && !screenStageOnly) {
+      window.focus();
+      window.webContents.focus();
+    }
     const evaluate = code => window.webContents.executeJavaScript(code, true);
+    if (screenStageOnly) {
+      const { runScreenStageSmoke } = require('./screenStageSmoke.cjs');
+      const { appEventHandlerSource } = require('./fixtures/screenSharingUiModel.cjs');
+      const fallbackHandler = appEventHandlerSource('native_screen.capture_fallback');
+      let checks = 0;
+      for (const [width, height] of [[1100, 850], [640, 440]]) {
+        window.setContentSize(width, height);
+        checks += await evaluate(`(${runScreenStageSmoke.toString()})(${JSON.stringify(fallbackHandler)})`);
+      }
+      console.log(`Screen stage: ${checks} checks passed, software rendering only, no media capture`);
+      await finish(0);
+      return;
+    }
+    if (qualitySettingsOnly) {
+      const { runQualitySettingsSmoke } = require('./qualitySettingsSmoke.cjs');
+      let checks = 0;
+      for (const [width, height] of [[1100, 850], [640, 440]]) {
+        window.setContentSize(width, height);
+        checks += await evaluate(`(${runQualitySettingsSmoke.toString()})()`);
+      }
+      console.log(`Quality settings: ${checks} checks passed, software rendering only, no media capture`);
+      await finish(0);
+      return;
+    }
     if (releaseNotesOnly) {
       const repository = path.resolve(clientRoot, '..', '..');
       const { buildReleaseNotes } = await import(pathToFileURL(path.join(repository, 'scripts', 'generate-changelog.js')).href);
@@ -273,6 +304,55 @@ async function runReleaseNotesSmoke(generatedBody, fragments) {
     delete window.releaseNotesFixture;
   };
   try {
+    for (const locale of ['pt-BR', 'en']) {
+      language.setLanguage(locale);
+      mountAbout();
+      const section = root.querySelector('[data-settings-section="license"]');
+      check(section && section.dataset.settingsLabel === language.t('settings.licenseSection') &&
+        section.textContent.includes(language.t('settings.licenseDescription')),
+      'The license section and no-warranty/redistribution notice follow the selected app language');
+      const details = section.querySelector('details'), fullLicense = details.querySelector('pre');
+      check(fullLicense.textContent.includes('GNU GENERAL PUBLIC LICENSE') &&
+        fullLicense.textContent.includes('17. Interpretation of Sections 15 and 16.') &&
+        fullLicense.textContent.length > 30_000 && fullLicense.tabIndex === 0 &&
+        fullLicense.getAttribute('aria-label') === language.t('settings.licenseSection'),
+      'The complete GPL is available offline, escaped as text and keyboard-focusable');
+      details.querySelector('summary').click();
+      check(details.open && !requests.length, 'License disclosure opens without fetching release notes or network content');
+      details.querySelector('summary').click();
+      check(!details.open, 'The native accessible license disclosure closes again');
+      const sourceButton = section.querySelector('#btn-source-code');
+      check(sourceButton.textContent === language.t('settings.sourceCode'), 'Source link text is localized');
+      about.attachEvents(root);
+      about.attachEvents(root);
+      const before = opened.length;
+      sourceButton.click();
+      await wait();
+      check(opened.length === before + 1 && opened.at(-1) === 'https://github.com/MonkyOrg/Monky',
+        'Rebinding adds only one source-code navigation handler');
+      about.cleanup();
+      sourceButton.click();
+      await wait();
+      check(opened.length === before + 1, 'Closing About removes the source-code listener');
+    }
+    language.setLanguage('pt-BR');
+    mountAbout();
+    const sourceButton = root.querySelector('#btn-source-code');
+    const linkError = root.querySelector('#license-link-error');
+    window.api.openExternal = async () => ({ success: false });
+    sourceButton.click();
+    await wait();
+    check(!linkError.hidden && linkError.getAttribute('role') === 'alert' &&
+      linkError.textContent === language.t('settings.sourceCodeOpenFailed'),
+    'Source navigation failure is visible and localized, without a silent browser fallback');
+    const delayedSource = deferred();
+    window.api.openExternal = () => delayedSource.promise;
+    sourceButton.click();
+    about.cleanup();
+    delayedSource.reject(new Error('Late source navigation failure'));
+    await wait();
+    check(linkError.hidden, 'A late navigation failure cannot modify an About binding after cleanup');
+    window.api.openExternal = async url => { opened.push(url); return { success: true }; };
     let button = mountAbout();
     check(button.tagName === 'BUTTON' && button.type === 'button' && button.disabled && button.textContent === '…',
       'About/Updates version is a non-submitting button, disabled until loaded');

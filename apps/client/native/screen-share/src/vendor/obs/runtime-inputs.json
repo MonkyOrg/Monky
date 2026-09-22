@@ -1,0 +1,1035 @@
+{
+  "version": "32.1.1",
+  "archive": {
+    "url": "https://github.com/obsproject/obs-studio/releases/download/32.1.1/OBS-Studio-32.1.1-Windows-x64.zip",
+    "bytes": 184849320,
+    "sha256": "a4cc40a06d5a5dc158c792631b596a04b02d8fe99644a0f0bc3b12199dbce011"
+  },
+  "files": [
+    {
+      "path": "bin\\64bit\\Qt6Core.dll",
+      "bytes": 6079360,
+      "sha256": "9f850a87bed12a62dafb3ad837eb61079c81cae3e4530f667679414cb9d2f7bd"
+    },
+    {
+      "path": "bin\\64bit\\Qt6Gui.dll",
+      "bytes": 7997824,
+      "sha256": "65db7bf5688d47b11f70fd927fc04852ca6db1a1f40cd367efd970c997b2224d"
+    },
+    {
+      "path": "bin\\64bit\\Qt6Network.dll",
+      "bytes": 1738624,
+      "sha256": "41a964c710ff710a0257800598f64c96d5c0547c22fb8c600864825bfe30fc33"
+    },
+    {
+      "path": "bin\\64bit\\Qt6Svg.dll",
+      "bytes": 519040,
+      "sha256": "b6ab980e3fef618ee44ae7604530b64920eeb7683d5e008ae57c94c4ecff5714"
+    },
+    {
+      "path": "bin\\64bit\\Qt6Widgets.dll",
+      "bytes": 6464384,
+      "sha256": "1cf25d66dc32deeeb2d801e34d9d1320e09712bd1dd6ff5ca4f198a03e9f3f18"
+    },
+    {
+      "path": "bin\\64bit\\Qt6Xml.dll",
+      "bytes": 150912,
+      "sha256": "142378bc2812718f55283dd2817045626aebbcb828d1de1a461a6bc08698652a"
+    },
+    {
+      "path": "bin\\64bit\\avcodec-61.dll",
+      "bytes": 37861248,
+      "sha256": "fa26d83d428e6d54b63063dd87457a6325999db0ec96c485893ed2e67ec9924f"
+    },
+    {
+      "path": "bin\\64bit\\avdevice-61.dll",
+      "bytes": 83840,
+      "sha256": "e2c2c8ba1ccefb2c049b87338743055a5a154dcfd73c663533c1fe9cd02696fb"
+    },
+    {
+      "path": "bin\\64bit\\avfilter-10.dll",
+      "bytes": 4071808,
+      "sha256": "1e4d052a149c34f2f3669b12fcf428df18fc3f0cd41e509f9085acb799c59ac1"
+    },
+    {
+      "path": "bin\\64bit\\avformat-61.dll",
+      "bytes": 2379648,
+      "sha256": "fbdb503ab5ec037d7df3418c8fad2c1cc6d1e60f4f25a8315a5b9b1870830aff"
+    },
+    {
+      "path": "bin\\64bit\\avutil-59.dll",
+      "bytes": 910720,
+      "sha256": "42538af0207d32e105544751cf1145784ad540a871cc88c7dd2f31d2e850d322"
+    },
+    {
+      "path": "bin\\64bit\\datachannel.dll",
+      "bytes": 2184576,
+      "sha256": "fab6be28221b31b65650deb3e2b994711916b85a5c89d3582f10b742665b7652"
+    },
+    {
+      "path": "bin\\64bit\\libcurl.dll",
+      "bytes": 619392,
+      "sha256": "d487631e3f89195409ce1daaaa1561088f4d2ec8c8fbad0d0d5a8c0be1849709"
+    },
+    {
+      "path": "bin\\64bit\\libobs-d3d11.dll",
+      "bytes": 196880,
+      "sha256": "28e7de46ca479b2fdc2ca15acae7033cff90026a66c24f9a1a54c1db48930182"
+    },
+    {
+      "path": "bin\\64bit\\libobs-opengl.dll",
+      "bytes": 248592,
+      "sha256": "fbe7925cf943b4951885dde49826ac3aa03a68a3fc6684734eec5f2ccecb470f"
+    },
+    {
+      "path": "bin\\64bit\\libobs-winrt.dll",
+      "bytes": 82704,
+      "sha256": "6fb53d5554beb1e8b88302d38ecbfd47ec3cbfa53657ae867d2edf1060117f97"
+    },
+    {
+      "path": "bin\\64bit\\librist.dll",
+      "bytes": 220032,
+      "sha256": "a56a24a3e34df6f7585a88e2f89d2988ccadc61c54f55278ead969422bdbb700"
+    },
+    {
+      "path": "bin\\64bit\\libx264-164.dll",
+      "bytes": 2233216,
+      "sha256": "2f686b9665783c682e377abce820efc76080a224fe0c85761e7f2ac5a516431d"
+    },
+    {
+      "path": "bin\\64bit\\lua51.dll",
+      "bytes": 604544,
+      "sha256": "182dcd9bf0e5d35e870227a1a1a1e760cac9dd1f6a257b2e6cb60bed1b619df5"
+    },
+    {
+      "path": "bin\\64bit\\obs-amf-test.exe",
+      "bytes": 27408,
+      "sha256": "20cfcee892de291cd23dcd7532e210c2d095657a11d0a33435fd01e84831f9db"
+    },
+    {
+      "path": "bin\\64bit\\obs-ffmpeg-mux.exe",
+      "bytes": 35088,
+      "sha256": "d869d4c23aa02ecfeb9a94d80a1ac97b44464310425aecabd819541c9ca7baf1"
+    },
+    {
+      "path": "bin\\64bit\\obs-frontend-api.dll",
+      "bytes": 40720,
+      "sha256": "b80f1d5424790f968a7ec791be1069873b5ed332946013bd7c37758e02b469b3"
+    },
+    {
+      "path": "bin\\64bit\\obs-nvenc-test.exe",
+      "bytes": 93968,
+      "sha256": "e53d12cf791373ea55b70656e832d80e326348c5cca63b7796eef6bf6d7d8dbf"
+    },
+    {
+      "path": "bin\\64bit\\obs-qsv-test.exe",
+      "bytes": 298256,
+      "sha256": "a5d79316161d99a94501b670ecf2ddd8dcc32cbad6767bea5b4af4d5551dd0a9"
+    },
+    {
+      "path": "bin\\64bit\\obs-scripting.dll",
+      "bytes": 132880,
+      "sha256": "4e8a7c02088273e7f2e174db409e3cc99d82062dca6b13a60c91082dc8fd2a3c"
+    },
+    {
+      "path": "bin\\64bit\\obs.dll",
+      "bytes": 1176336,
+      "sha256": "632ff9eb4988a4736c0d5d9b7840af75e13d8f22e3664def55c794746771f013"
+    },
+    {
+      "path": "bin\\64bit\\obs64.exe",
+      "bytes": 5405968,
+      "sha256": "d71dbed6e15c4497c212c7162a0c6a6346aff52f17cabe61ce2de5ed2877dfb1"
+    },
+    {
+      "path": "bin\\64bit\\srt.dll",
+      "bytes": 746368,
+      "sha256": "d5af1e01f548d95edf685cd5bf059fe7dc9741523bf1f7cd8defbedbdb7eacfa"
+    },
+    {
+      "path": "bin\\64bit\\swresample-5.dll",
+      "bytes": 132992,
+      "sha256": "15923fc8fb32ea2f8f5454000bdeb7cbabcfe4c4f491ffe65570f116d32f8edf"
+    },
+    {
+      "path": "bin\\64bit\\swscale-8.dll",
+      "bytes": 631168,
+      "sha256": "a29c105a5c09c0fe59c7b76087acd7b09b6177f912914d548c2b3edbf3a254b4"
+    },
+    {
+      "path": "bin\\64bit\\w32-pthreads.dll",
+      "bytes": 64272,
+      "sha256": "f4aa2bae540094dfd7c5134725cf5fba989c59aea55668c37e641d102c4b8677"
+    },
+    {
+      "path": "bin\\64bit\\zlib.dll",
+      "bytes": 93568,
+      "sha256": "258363896e6b48b2d6c54eec3be59e5334f125d3965d54e82cb71fc1ec59b6b8"
+    },
+    {
+      "path": "data\\libobs\\area.effect",
+      "bytes": 5897,
+      "sha256": "3bf632f2ab2056ccaf74c1f56a34cadd5b29812cdb7cf967bf3e53757540caa8"
+    },
+    {
+      "path": "data\\libobs\\bicubic_scale.effect",
+      "bytes": 5955,
+      "sha256": "a962b315cd03c3149dedbfd128f5563cb6df669dde198a7632de76c86e93c055"
+    },
+    {
+      "path": "data\\libobs\\bilinear_lowres_scale.effect",
+      "bytes": 2835,
+      "sha256": "eebfd026de29e8ecf62d90ae9646ecdd55ff2731cbcc366b47b5353c85965fa0"
+    },
+    {
+      "path": "data\\libobs\\color.effect",
+      "bytes": 5595,
+      "sha256": "5fe89af99f707429bae0985b65b93473547513edc5f83c43738ca09ce3d0eebe"
+    },
+    {
+      "path": "data\\libobs\\default.effect",
+      "bytes": 5897,
+      "sha256": "707ef4c3b382bf55a250bcdf5b3a3a6e02979bd6e39b7f6db9dd85fd06cb0caf"
+    },
+    {
+      "path": "data\\libobs\\default_rect.effect",
+      "bytes": 1571,
+      "sha256": "45325b60c89c13faefd0533f34eea048ad7efb07c68ec5104f6b1f2ea44b615b"
+    },
+    {
+      "path": "data\\libobs\\deinterlace_base.effect",
+      "bytes": 9046,
+      "sha256": "9c1735216bc3268791f711f821c935a8de3fdea0559d4031658050f6ee38221f"
+    },
+    {
+      "path": "data\\libobs\\deinterlace_blend.effect",
+      "bytes": 1059,
+      "sha256": "7cdd736089d0034b62facfe17ec71df6c347aedd729e75c80f3842d50facab9c"
+    },
+    {
+      "path": "data\\libobs\\deinterlace_blend_2x.effect",
+      "bytes": 1071,
+      "sha256": "a3d8c06245411e3e7a9f1bf0e185848de8a542a16e42b7eecbf6ccdc4986445a"
+    },
+    {
+      "path": "data\\libobs\\deinterlace_discard.effect",
+      "bytes": 1067,
+      "sha256": "e3f8e4f257cb18815f4e25493d3e385c2a7cb3d940556dd9c5d662561f7d08e9"
+    },
+    {
+      "path": "data\\libobs\\deinterlace_discard_2x.effect",
+      "bytes": 1079,
+      "sha256": "a67fa144b413473506c05ea923adf62216d0ca9bcf2457861ed6987a58de8283"
+    },
+    {
+      "path": "data\\libobs\\deinterlace_linear.effect",
+      "bytes": 1063,
+      "sha256": "555e40cb29f9dc7cab478d55a1717468835dfdea7236d297f829c50ad366bd8d"
+    },
+    {
+      "path": "data\\libobs\\deinterlace_linear_2x.effect",
+      "bytes": 1075,
+      "sha256": "3f8565706207a1bb0ca672444dc47525c6b7adc55c5a90a0bcb4044322d56a10"
+    },
+    {
+      "path": "data\\libobs\\deinterlace_yadif.effect",
+      "bytes": 1079,
+      "sha256": "e627a3007da2a896efdc38d6fa7be98a49446cc6b109d6ae0bb0f8f8a55e280d"
+    },
+    {
+      "path": "data\\libobs\\deinterlace_yadif_2x.effect",
+      "bytes": 1091,
+      "sha256": "ab376f38a814ed99c92133aabf430d9d7b52675bc5439813007a7c2aeac960ac"
+    },
+    {
+      "path": "data\\libobs\\format_conversion.effect",
+      "bytes": 46562,
+      "sha256": "a11dd9a6d6924bffe8eaaf52b31354f5714418332a046c8a1a922bc6ba5d5a07"
+    },
+    {
+      "path": "data\\libobs\\lanczos_scale.effect",
+      "bytes": 8309,
+      "sha256": "1219f404147de1e0d97e489f7e05477b9ce08e0705b53dbbc3def036face9ec9"
+    },
+    {
+      "path": "data\\libobs\\opaque.effect",
+      "bytes": 3162,
+      "sha256": "ca56afb3ef6d174df1d5c7286eb5ceb98063d792b377285b6be0d9421c312bf8"
+    },
+    {
+      "path": "data\\libobs\\premultiplied_alpha.effect",
+      "bytes": 695,
+      "sha256": "3e299b84421f31b1e088e1bdc2325a69917a85bf3eb3d8d0d8ec7fae93ec5600"
+    },
+    {
+      "path": "data\\libobs\\repeat.effect",
+      "bytes": 661,
+      "sha256": "cf0a3d164891bc27dd525c3d1530721697892cadd8773d7067dfcc40b1f53194"
+    },
+    {
+      "path": "data\\libobs\\solid.effect",
+      "bytes": 1608,
+      "sha256": "8785767ddd87a2be6f7f29fb7c3c2fd71816b0cd120ce2535ceb0c3e575a49ab"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\af-ZA.ini",
+      "bytes": 4326,
+      "sha256": "ec60a1bf522704445175a4f862a9cbd987bc7686a31fc03b8bd7a213afc9250c"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ar-SA.ini",
+      "bytes": 8804,
+      "sha256": "6f947c9e6f8315451dbd46e0b02f7921411961c0a4c5d8adc9d4203b7fd59c57"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\az-AZ.ini",
+      "bytes": 7490,
+      "sha256": "dd428f7c0f2f969a790bc6283252667abb928d5b414ee8a9a1bd6e89d7dbcb37"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ba-RU.ini",
+      "bytes": 425,
+      "sha256": "e28b38cf5bb0f3bf9075c19a18806f2cb477d357c5824ed9df26e1d8580c4ac4"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\be-BY.ini",
+      "bytes": 10322,
+      "sha256": "025f76a441c0f0e4910b163e46322e864215153e2e771696ad67a4d015a01ef8"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\bg-BG.ini",
+      "bytes": 6362,
+      "sha256": "6216634c494fa4e26b7a2476a28385ae9ff05e51b270d7e3a87c6ca3c7284a39"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\bn-BD.ini",
+      "bytes": 5834,
+      "sha256": "fa0ead36fd78589757b9ff13e2109fe3ad376d8fe4cefc07b3969a141cc55392"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ca-ES.ini",
+      "bytes": 7495,
+      "sha256": "67240abe2517419289a5044902958f577704b9f4b1e0dc5db6423a8c0895f221"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\cs-CZ.ini",
+      "bytes": 7184,
+      "sha256": "60d452aa48b2824f37e52c221c892b882d12b54b629dd011ca3700153d638252"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\da-DK.ini",
+      "bytes": 6161,
+      "sha256": "6b30eb7bdc051dc9264f1f55fda8daea0b2576f9207e0c9a768f7f3a62f83ef8"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\de-DE.ini",
+      "bytes": 7345,
+      "sha256": "6a412c9fa565833f340db2b7ec47616f85b3002e8648568ee0990c125b445150"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\el-GR.ini",
+      "bytes": 9988,
+      "sha256": "f5908a5da2b0f2c6c040ac58e0a143a62da519f6e4ce47b569df6a0494bebab6"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\en-GB.ini",
+      "bytes": 1808,
+      "sha256": "6fc90c58c196cfbdc025f39191b4ddf549997870e3e58935384eec160b168efc"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\en-US.ini",
+      "bytes": 6839,
+      "sha256": "ed08724fcfc19baa74aea8db3a3093877355d737822809acc3dfa68316a543ff"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\es-ES.ini",
+      "bytes": 7247,
+      "sha256": "2db30b9140900cb79344bb7806fd31ab6168ebe24c60dd732383f279f33269bc"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\et-EE.ini",
+      "bytes": 6825,
+      "sha256": "642fc824ecde928b98db1a9743f42e5524679793acdba39f229f702a7bec09d0"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\eu-ES.ini",
+      "bytes": 6440,
+      "sha256": "24cb33dc39dfa63aa786ae2ad9042a9759516b27f409a089394383b02c606794"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\fa-IR.ini",
+      "bytes": 9672,
+      "sha256": "ac3f31c0f7776861a4f69345890e3a0645cf1052479310e2d97f9e7ca7481f27"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\fi-FI.ini",
+      "bytes": 6916,
+      "sha256": "ff2c5d1c91e3dd64de82a907e49dfae63c04301e3cca156972556ad0e7600a58"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\fil-PH.ini",
+      "bytes": 5299,
+      "sha256": "72b40d09db47451da2b7088e4b95577d0df0c5a9fb6b5a78e860aaccd908a801"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\fr-FR.ini",
+      "bytes": 7497,
+      "sha256": "8e36fbdc04446c9337589e784b2f13a58454deb19078b92dd2c059924c95594c"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\gd-GB.ini",
+      "bytes": 3544,
+      "sha256": "cd55e8331423fab2606910670e91517d6b25112b34fbb835bbf987d878d313d2"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\gl-ES.ini",
+      "bytes": 7260,
+      "sha256": "30afe9eacabfe7fbec276ab6f5f312a7034895d5eb957033f152d1f733dbe8df"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\he-IL.ini",
+      "bytes": 8642,
+      "sha256": "1eaeb30d46fe93e71e56d97d6cf8894160aad3bbdf3799adeeba54b1267f366e"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\hi-IN.ini",
+      "bytes": 12759,
+      "sha256": "3c64661c8f8e5a125343a50e66766e42c0dd2277bcd29a708ccae63a8f327e02"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\hr-HR.ini",
+      "bytes": 6968,
+      "sha256": "0cf8c991e5e860533b7696400fe6aed566866bea4e00e31f6fa3f47745a9b55e"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\hu-HU.ini",
+      "bytes": 7756,
+      "sha256": "09e6b363dbbcf6f0aa65b4f060f19973a9c4cbaecbb1daf94499051e93aa7d5b"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\hy-AM.ini",
+      "bytes": 9522,
+      "sha256": "436053fbc307cd1ab6a1ceef395b63caafedf63ea48b88d861afab98f5308e04"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\id-ID.ini",
+      "bytes": 6652,
+      "sha256": "323f99100523ed55ce389f53ae84f2810abeee3953dd5d8b5857dad119de363f"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\is-IS.ini",
+      "bytes": 54,
+      "sha256": "c32c4a06a71b10c5d6b46b6bbdf072f32e33b82c2a260e5486c1019d4a79ae00"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\it-IT.ini",
+      "bytes": 7270,
+      "sha256": "34aa277f2c3fd7e7556bac44262789d5d32f7f00c63f1b5b8fb55ae7f0a6e97f"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ja-JP.ini",
+      "bytes": 8065,
+      "sha256": "8923843ae0261ca93dfebf4907226f27b16d75d907c0db5b5cfdffa19f7339cf"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ka-GE.ini",
+      "bytes": 14251,
+      "sha256": "49cd63a85bf033bf3fcd877a459981e4383309c6acdbee1ae3057fb73dd32688"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\kaa.ini",
+      "bytes": 1701,
+      "sha256": "41f4aa5bbbf0264b2c97bb7c55908916772e416bcb9847ab3173fc2eff265acf"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\kab-KAB.ini",
+      "bytes": 1169,
+      "sha256": "6b8e6d4db55c5174b3263ae749190af1214231e9ea8bcc637c402198a3a1928b"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\kmr-TR.ini",
+      "bytes": 6453,
+      "sha256": "648f381601dd0243284c6d486bbcb31e88783a93a2a198c979ae1a744cfced84"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ko-KR.ini",
+      "bytes": 7380,
+      "sha256": "79adf86b1bd6b1c80037daa6c4e330a0bf646e011b63de1858eb69a60a035ee6"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\lo-LA.ini",
+      "bytes": 12230,
+      "sha256": "13564f3184c1f370208822b369d2e7cf8832d35f0317ec825d01e9fed72b3e51"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ms-MY.ini",
+      "bytes": 6709,
+      "sha256": "0c443212ed1096844ab73b0f8bc699a713acb4270cca41df05c04327f9456c62"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\nb-NO.ini",
+      "bytes": 3836,
+      "sha256": "53e257acb7bb16330eb33c1a2c6b22cc9721be965d9504f8b9a8c71ebbe4a8e6"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\nl-NL.ini",
+      "bytes": 6598,
+      "sha256": "6d99e37eb0482e2497d26a7316cbb1edc8503d16805cc93ae07796df1a4ccba2"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\nn-NO.ini",
+      "bytes": 592,
+      "sha256": "6f7207c9735023947c2dd04f84efde2feea055f3ae28b48d5884a9a6c7042f9e"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\oc-FR.ini",
+      "bytes": 18,
+      "sha256": "54550f5495ca78de8ab1b4d32ddec042077823cb5654808e9f9f003857125450"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\pl-PL.ini",
+      "bytes": 7297,
+      "sha256": "08a2e4283c567b395ff5f836e7664d9deb33007a8f106eb0daa383973c448215"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\pt-BR.ini",
+      "bytes": 7238,
+      "sha256": "228104fae47a21794f751762af1f654e3090abb3699751880c5128f4cf3ba5f5"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\pt-PT.ini",
+      "bytes": 7412,
+      "sha256": "06acb0f3f56f89694c15c2cea438cc8901aa057e72a035ee51285bea712d2e76"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ro-RO.ini",
+      "bytes": 6814,
+      "sha256": "50d90ec3840bfaa51369ba48785a4c3952da2fba97481a32ee4cbe894622b5ee"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ru-RU.ini",
+      "bytes": 11303,
+      "sha256": "29ca2ec91908d26171d8dc37dd03a1bafdb5cb041d7bcd52784483c1810a7bbf"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\si-LK.ini",
+      "bytes": 4320,
+      "sha256": "407dea08df8d43251291d285d98a3914b9be5b8d548efba8e03e214f9da73a98"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\sk-SK.ini",
+      "bytes": 6860,
+      "sha256": "5f8433c9749371e2b9d559a25c5345dd48917efb1c4d913839d01aed5133064b"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\sl-SI.ini",
+      "bytes": 6661,
+      "sha256": "f66f42d32baa5ee103c8ded8cbbfdf93de80b70c84b06a579320463edbb20764"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\sr-CS.ini",
+      "bytes": 2445,
+      "sha256": "8f37aa5bb42d0d337a45a9a2aa112e8a320c19f24428becfec4f51b4e26c628b"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\sr-SP.ini",
+      "bytes": 10009,
+      "sha256": "f56c7eb6814575f83c0e814dd425bade5f7946806ad2d675da97ab5ee52e94d2"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\sv-SE.ini",
+      "bytes": 7254,
+      "sha256": "f7cfc931cfb7ad76f381b4b17d15124a6b9215d1df62c915435e8166e0ee6c98"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\szl-PL.ini",
+      "bytes": 578,
+      "sha256": "1b5b1bde2190ac1beb26fb664e3fccd4ae3db8252b54d5a93b292cee1a329f12"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ta-IN.ini",
+      "bytes": 1078,
+      "sha256": "84817719bc0d3df005dc8f39788e0d3cf77d579e0daad51d837367650c381983"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\th-TH.ini",
+      "bytes": 12034,
+      "sha256": "680a2883ca79195909f6cc7599aa4d83cdf1fbd5ab1d3fbdaa2a9440a5827a77"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\tl-PH.ini",
+      "bytes": 1901,
+      "sha256": "1838b324003d823f4e036611c13edb4b2a60c1bbcfb32de5003dc89cbde88f6d"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\tr-TR.ini",
+      "bytes": 7154,
+      "sha256": "2b03188ea65456ffc1a2fba361372501fb3c03093fe2eb85a8e51c35ad490d6a"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\tt-RU.ini",
+      "bytes": 1167,
+      "sha256": "ea2407a205e3505cc8bd35e6c4bb72b7708e4450e38b619a2ed8c6de52fa8f43"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ug-CN.ini",
+      "bytes": 10200,
+      "sha256": "0993b14c58499a4237321bd258c7a1efcd3271918d08102ea168bac207afcd32"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\uk-UA.ini",
+      "bytes": 10637,
+      "sha256": "c1930e0454017a6dc4db7a6e6925d96846d05f3baaaa1194f8b29b2ec4f9f53b"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\ur-PK.ini",
+      "bytes": 20,
+      "sha256": "5d30a5871e9d802a11becf6da25c3c84ac71b1395e864c43bf23aa343ba5920b"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\vi-VN.ini",
+      "bytes": 8067,
+      "sha256": "88aab96f22919e2207d24b23049658fad1168d974483706e533b64bdb58c8bd3"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\zh-CN.ini",
+      "bytes": 6230,
+      "sha256": "99f1b2baf8cd25a45b4178f02aa7af440abe6d34bdef59c3344750cadbdf37b2"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-ffmpeg\\locale\\zh-TW.ini",
+      "bytes": 6206,
+      "sha256": "b43096e63e68376eab8ef583df69a726227e4016c80dd9e655a606e99c725e4f"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\compatibility.json",
+      "bytes": 27075,
+      "sha256": "07a7d259d149c11219c1cb77ca293de495d32d6fac0f8e9cfb13ae29ff8d5db2"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\get-graphics-offsets32.exe",
+      "bytes": 124176,
+      "sha256": "54e7a876221e2f0823fec71497dbf243c285576ea4f88cd67c706348995943b0"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\get-graphics-offsets32.pdb",
+      "bytes": 536576,
+      "sha256": "7d519a900dee34b85bfcae4a91b53833414de10b11bcf54e6fc086672b21a249"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\get-graphics-offsets64.exe",
+      "bytes": 150800,
+      "sha256": "9f53513188d545ddfdfec6c280380be896e44e4a44958e6b7bacb84c57746f54"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\get-graphics-offsets64.pdb",
+      "bytes": 462848,
+      "sha256": "2c16906deae58316b48427f0483d363fe213f290b192b0a00888c1d272d5ad31"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\graphics-hook32.dll",
+      "bytes": 248680,
+      "sha256": "5bea21ab3a4df3fa35af3b203eb59feafc4a193a4ba121ea0f8d42833e6cf104"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\graphics-hook32.pdb",
+      "bytes": 692224,
+      "sha256": "040956be6ed60562ec1a94ade7771959d927b8e9fa539af7521f70d0d0947619"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\graphics-hook64.dll",
+      "bytes": 303464,
+      "sha256": "f89ade59480de0d55fcc100495d78e8e491bed469fab4dbd3d430837b58b27a5"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\graphics-hook64.pdb",
+      "bytes": 610304,
+      "sha256": "f970c02703ad83a3f283bf171ea4b2f51292958eb0878063af6aaa985fdcd65e"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\inject-helper32.exe",
+      "bytes": 99600,
+      "sha256": "a934b45107523915a7080a1726d3bbc4c259667563c0265c4ccfb11924779367"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\inject-helper32.pdb",
+      "bytes": 495616,
+      "sha256": "9704edb74ea4c611183f1d05f5f926c0ab279249419b148ea03346d2de66cf0a"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\inject-helper64.exe",
+      "bytes": 124688,
+      "sha256": "b5c975e1025d225955efc1e4f28445d8caf8a6527df47fdc28d358aff0227ad6"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\inject-helper64.pdb",
+      "bytes": 430080,
+      "sha256": "11bc300b2a64a33e712788c6569a5dff044bba276bf592376cf84f6ce7fbc87d"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\af-ZA.ini",
+      "bytes": 1399,
+      "sha256": "6cc568ecba39d22772241a73511458a3242e1269313007728b5dea96460a3683"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ar-SA.ini",
+      "bytes": 4826,
+      "sha256": "648ca065d8b6cd6e90ddea8e8fb4d09ee8c53ac17165e77b7a17268de212471f"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\az-AZ.ini",
+      "bytes": 4074,
+      "sha256": "dae6722b82f4762171e57cbdbaa6f09c3bcfa03309dfa86721c59e4518ef9089"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ba-RU.ini",
+      "bytes": 45,
+      "sha256": "7a2d99cd5e8ebe14b44b5686d082fb4367508e120f7594812a7abaa1c85ca031"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\be-BY.ini",
+      "bytes": 5433,
+      "sha256": "e86f60891bf96ada7ea70483923ce98cbdc4bedbd0dd61dab5d17c9eeca2c2b9"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\bg-BG.ini",
+      "bytes": 2460,
+      "sha256": "6f789cf8da12c712ab7ca564209454f3a12e3bdf72c5e76f86d51cd445c8a10a"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\bn-BD.ini",
+      "bytes": 3127,
+      "sha256": "642c3665be04c5d8f39c129d8097cc090c480fa5c2b5f79340bc49d3da60eb9c"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ca-ES.ini",
+      "bytes": 4002,
+      "sha256": "56ca607f3b1405aa5485be1e58aa97fb9eb2054d721dea7d67b6e9c3c4c0a530"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\cs-CZ.ini",
+      "bytes": 3699,
+      "sha256": "3784678cc0b41320aba07190f814fc8176fb4ed27f77127734c98691c4fc7066"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\da-DK.ini",
+      "bytes": 3502,
+      "sha256": "8f3eef5174b70274e0327a0b59ab6b5ee4d00c789eddebb9efd428af41bf8f08"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\de-DE.ini",
+      "bytes": 3866,
+      "sha256": "34ca67e0564fd6fa71b074c351adc26900d209255c70cc9753565fe05b46d54b"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\el-GR.ini",
+      "bytes": 5256,
+      "sha256": "ba38c4e9084887116ceb53782b1f27faac2c8aff63348f4c629b2ee4a1d5e634"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\en-GB.ini",
+      "bytes": 347,
+      "sha256": "80789bc1d55ef83e17d52d661cc5c9bbf6336105ede44229d1354e0698a347ab"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\en-US.ini",
+      "bytes": 3627,
+      "sha256": "a4adf55f3115083e9eade4c9c41e95e31f3512c1ee6be050cf955770e35b38f6"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\es-ES.ini",
+      "bytes": 4010,
+      "sha256": "ce279c7fb909069e7b0138e530272fe35711704e00a824b80231d083e5e57d3d"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\et-EE.ini",
+      "bytes": 3708,
+      "sha256": "4cc97901a65b79878c1c90561b97377fec9038a076d7068a995d7cbb01451932"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\eu-ES.ini",
+      "bytes": 1905,
+      "sha256": "d25319a8ed408e0e2d90b7d056a84c7e0332a3a6033a7185905b9615be1243f0"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\fa-IR.ini",
+      "bytes": 5081,
+      "sha256": "beffd3d3a51bfe7e1fab946c2d25186d933d9032246719ac7f7315e02c18e166"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\fi-FI.ini",
+      "bytes": 3765,
+      "sha256": "77117444310c2183923dc6c16d96fc5311d3fff42eb769d8c70e7c1dc80d6b77"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\fil-PH.ini",
+      "bytes": 2481,
+      "sha256": "023a2a09f6f29a756e6e2df432293675324634f21dae28ce625bc52dfb666e4b"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\fr-FR.ini",
+      "bytes": 4074,
+      "sha256": "c39cdb1006277977e49b9668876ed971ee92ec11a2b315ec64e2bb7f972cde84"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\gd-GB.ini",
+      "bytes": 1913,
+      "sha256": "8dc00f707a15d08460d6aa81ed8e4fbaf3060b6dcf3cd92a4073b41ca96b2dd0"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\gl-ES.ini",
+      "bytes": 3957,
+      "sha256": "781d4a54efff67b08e9a3166799f7ecade75e4fa774846c77a101714c644eadb"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\he-IL.ini",
+      "bytes": 4412,
+      "sha256": "4931ed59a5577fc2a02ce1f1775ce1f5cef883a40e3f4a4e1bda22a062d311aa"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\hi-IN.ini",
+      "bytes": 7151,
+      "sha256": "850a875b86351846f77fd238313444002efd33f4f6edc3e9a047390ecc6c608b"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\hr-HR.ini",
+      "bytes": 3755,
+      "sha256": "5ee02587de98c878b600043c5110d2890f6c8d8416e7a151cfbd33ca07d5459a"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\hu-HU.ini",
+      "bytes": 4134,
+      "sha256": "2132363894355e08a2c4496ca65fc361d6f785500a93be68c39ab0e491c3037d"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\hy-AM.ini",
+      "bytes": 3557,
+      "sha256": "16782aa71b6000ca26e8f852dd4cd6c9d8b3afa1bbddce57eaf6b06cbfb88c06"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\id-ID.ini",
+      "bytes": 3777,
+      "sha256": "c954fd1150f5e08573614ef3ac37dd6c1e1bddd1963cf106ffc9b932c1c2966d"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\is-IS.ini",
+      "bytes": 382,
+      "sha256": "7e1983e0fd68795603bd3b3b57cffc867453abb22337c699a54e7db875aea74a"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\it-IT.ini",
+      "bytes": 4093,
+      "sha256": "475a729fbc7bc1e648d14bc16096e4c9d8cb7fe92560c84e27fd1c6d2d8f6e08"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ja-JP.ini",
+      "bytes": 4852,
+      "sha256": "f206f8c123effc747c3358e70437cca7f3be4a2b7e7982185453a0227e37b9b4"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ka-GE.ini",
+      "bytes": 7349,
+      "sha256": "d0527b1a9d6b8af1a34aef243d244b29097b19bb4a366d4abed2c86628ff02e7"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\kaa.ini",
+      "bytes": 785,
+      "sha256": "fbc4e67fee68821006ba40794ac7b55d4d15feb9d15a8f72531954fcc0e65892"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\kab-KAB.ini",
+      "bytes": 1269,
+      "sha256": "510c13f301b2b8507602ad91d5aedbc75c69b50fbe22a8f6fa92ebe2e50bd7a5"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\kmr-TR.ini",
+      "bytes": 2670,
+      "sha256": "a8d4112b0df55a4634e89d3a021c3e8bee5cc8ec00b79d9e6cc188abc9c3f5b3"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ko-KR.ini",
+      "bytes": 4021,
+      "sha256": "714df59afe9d5ec3b6d44166b72d10000eec62a8773dad7a48bb8d2d8b58a14b"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\lo-LA.ini",
+      "bytes": 6259,
+      "sha256": "c2b82703eb8fd172a8b298cce8fcc79b42f9ecd5b1be326cef911872fbe9d966"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\lt-LT.ini",
+      "bytes": 1858,
+      "sha256": "c4513e8faab32085b1f54755167e25517b5924d4952c40bf6f53905755f69d91"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\mn-MN.ini",
+      "bytes": 1446,
+      "sha256": "301ee8f67d4e80e3e8a8567a0d20bc91228f2abbbf712b8d15ad1ee9b75c8ea2"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ms-MY.ini",
+      "bytes": 3752,
+      "sha256": "f1a30cf3a2dec562a93cbc5d59e55e72fe478fc49189c242d33d248a698c6b7e"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\nb-NO.ini",
+      "bytes": 1744,
+      "sha256": "0a43ac432071b3111d13902a8652e43aade37e0438011ede1809b4821c09b6d2"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\nl-NL.ini",
+      "bytes": 3693,
+      "sha256": "4af73db4d4536f0813b7f0b5a1f23e8f12452d6528a779dfa98d2c2f64138168"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\nn-NO.ini",
+      "bytes": 106,
+      "sha256": "458dd069b8f4e165ea992525bae0ebf2051ec45458d7f3d45b255e7b6b8361e0"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\pl-PL.ini",
+      "bytes": 4096,
+      "sha256": "7c6b56997c997e4a5d2e865219878a9be445436d6a048c6817a7fd4c7903d6d7"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\pt-BR.ini",
+      "bytes": 3994,
+      "sha256": "129128fbe9edef57ad3af010a9d3640dd163be28c64cda6498b85b94393406cc"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\pt-PT.ini",
+      "bytes": 4026,
+      "sha256": "9c62f24d0a8d6d6d0f38130a18423b6c2235861c1a2c4952979ef0f57506c5ac"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ro-RO.ini",
+      "bytes": 2545,
+      "sha256": "e8c761ca317850441c2d943b7c399dfc7aa02614a2363ea98961201b7b77e22e"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ru-RU.ini",
+      "bytes": 5542,
+      "sha256": "da717a128616a72f395b51836030fe2bbbb80e9caa82bfcada3b391857ab0f4e"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\si-LK.ini",
+      "bytes": 1725,
+      "sha256": "0102101cebddc24d468ebeccd96e922983079998de129c36cd53ba799a375ff0"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\sk-SK.ini",
+      "bytes": 3868,
+      "sha256": "462def8c27acc11c105cfa79b30621b538c0b00e1ee6fb0d112f3343099f0711"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\sl-SI.ini",
+      "bytes": 3496,
+      "sha256": "0bebd9d9f7122b89d0e5eddf4b57bf08010e1e4a8a6e6941a057c45b405cdcb7"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\sq-AL.ini",
+      "bytes": 850,
+      "sha256": "726a560975c020873ec3b85763406fb91e00fbc2e95377bceafde8ee472b8b37"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\sr-CS.ini",
+      "bytes": 1446,
+      "sha256": "955e837d4958b4f6e7cc182617909b82ccd7e308be96a0cebb4baab7aeefcd69"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\sr-SP.ini",
+      "bytes": 5377,
+      "sha256": "65a4c361fc4a31b2d694ad61226e742a072baaf74d2d7914ad5fa50d7b9a2288"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\sv-SE.ini",
+      "bytes": 3647,
+      "sha256": "29e6a9e99089b8b82189781ab3ab85695c86452e99fc11edcb31f280b7b8ba95"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ta-IN.ini",
+      "bytes": 1147,
+      "sha256": "dc7fc7d8b0ca585811aa1fa4fc4b3ade4dd68b46269225ec04e89fd128afe4a5"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\th-TH.ini",
+      "bytes": 6590,
+      "sha256": "6313fa65f3b7fea1c7b37a4eb8ff44c9738dce6348c1034ca1c949043b2d2fe9"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\tl-PH.ini",
+      "bytes": 1888,
+      "sha256": "2d0e1185b99bd6bf342901e7be0620a8157d06c626dece760eff0a1f40d8cdb7"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\tr-TR.ini",
+      "bytes": 3763,
+      "sha256": "ec00c4cc3e6a90ff15c993eeff21acf90266dedac01fad982b0557b48b41965a"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\tt-RU.ini",
+      "bytes": 688,
+      "sha256": "b51c9908d733caf6d6b2ae2585e2df5e86c459e4253ad00c7fc06437fa9e0c58"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\ug-CN.ini",
+      "bytes": 5914,
+      "sha256": "61d788c8dcc1cb08f0f14e73c581f868bb3e89c89cd161d5a687f6e0841ec17b"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\uk-UA.ini",
+      "bytes": 5763,
+      "sha256": "4b88d03613e06ce630efd4b9d706c21f5320e51da5a042fddfc444ffcc2d1942"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\vi-VN.ini",
+      "bytes": 4105,
+      "sha256": "73a08f0f8d9c2873c74d54c432707b592d36d050906653aa3d45669498fe31b1"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\zh-CN.ini",
+      "bytes": 3389,
+      "sha256": "45c72767a532ff8d9fe4e8472fd1ad4e9f5935c93620d263df3b88f783bab6cb"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\locale\\zh-TW.ini",
+      "bytes": 3570,
+      "sha256": "f7b80fd345bbb8d80bf58fb6a13a53498230752b9f9b16cad774d2e47bc4bc8a"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\obs-vulkan32.json",
+      "bytes": 514,
+      "sha256": "c16e0707ae66ad71e8a0720aeb6e6997a1017f19762333452aef692115a9ab41"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\obs-vulkan64.json",
+      "bytes": 514,
+      "sha256": "7b6b0813fb58b276847a8583eb5c3f94aee7d7ad0ae3a1ef6133d5d8771f20f4"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\package.json",
+      "bytes": 250,
+      "sha256": "93ed571ba713e382f3e325d67bf2fdb2b7445b22ba5074ba347203176b7e3215"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\schema\\compatibility-schema-v1.json",
+      "bytes": 4051,
+      "sha256": "96ad2925c75be1d114d0dedcfacc005a936dedf1ad8b5e91946d21b58c018df4"
+    },
+    {
+      "path": "data\\obs-plugins\\win-capture\\schema\\package-schema.json",
+      "bytes": 1576,
+      "sha256": "524437addbda00d3a64413b639847211054905a959786a4a5609fcbbb1f101f5"
+    },
+    {
+      "path": "obs-plugins\\64bit\\obs-ffmpeg.dll",
+      "bytes": 274192,
+      "sha256": "a20c44d3f2a9f5544bee3c5d407daa814c0a808db784617dfc99b9878eddbeb7"
+    },
+    {
+      "path": "obs-plugins\\64bit\\win-capture.dll",
+      "bytes": 141072,
+      "sha256": "e525e9a31e042f81678f27b482fe6d407c73701536d94cf6b5d655b800ce67c7"
+    }
+  ]
+}

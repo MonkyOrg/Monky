@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "name": "monky-screen-share-native-sources",
+  "scope": "source-dependencies",
+  "repositories": {
+    "depot_tools": {
+      "url": "https://chromium.googlesource.com/chromium/tools/depot_tools.git",
+      "commit": "d85491b0a1dcb82dd8e124a876ecd7e3d50dc5e8",
+      "directory": "depot_tools",
+      "reference": "Frozen source acquisition tools; automatic updates are disabled",
+      "license": {
+        "expectedSpdx": "BSD-3-Clause",
+        "file": "LICENSE",
+        "verification": "inspect the actual pinned checkout; transitive tools have separate licenses"
+      }
+    },
+    "webrtc": {
+      "url": "https://webrtc.googlesource.com/src.git",
+      "commit": "36ea4535a500ac137dbf1f577ce40dc1aaa774ef",
+      "directory": "webrtc\\src",
+      "reference": "M140 / refs/branch-heads/7339",
+      "license": {
+        "expectedSpdx": "BSD-3-Clause",
+        "file": "LICENSE",
+        "verification": "inspect pinned LICENSE and all applicable third_party notices before distribution"
+      }
+    },
+    "libmediasoupclient": {
+      "url": "https://github.com/versatica/libmediasoupclient.git",
+      "commit": "c2bf26f046d176b205134a9803b18ac3fdcbb97e",
+      "directory": "libmediasoupclient",
+      "reference": "Source of the patched libmediasoupclient compiled in the native media DLL",
+      "lastNumericTag": {
+        "name": "3.5.0",
+        "commit": "e345bc4720b8d7cf679e95bde93913969c9cd01d"
+      },
+      "license": {
+        "expectedSpdx": "ISC",
+        "file": "LICENSE",
+        "verification": "inspect the actual pinned checkout"
+      }
+    },
+    "libsdptransform": {
+      "url": "https://github.com/ibc/libsdptransform.git",
+      "commit": "e33aba7005c563286b19a8c90b9520a4384cc259",
+      "directory": "libsdptransform",
+      "reference": "1.2.10",
+      "license": {
+        "expectedSpdx": "MIT",
+        "file": "LICENSE",
+        "verification": "preserve the pinned upstream license with modified sources and binaries"
+      }
+    }
+  },
+  "bootstrap": {
+    "solutionName": "src",
+    "managed": false,
+    "depotToolsUpdate": "0",
+    "depotToolsWinToolchain": "0",
+    "runHooks": false,
+    "note": "Explicit fetch performs pinned Git acquisition and gclient sync --no-history --nohooks --noprehooks. DEPS Git/CIPD/GCS downloads are possible; hooks, GN, CMake and builds are not run.",
+    "pythonEntryPoint": "depot_tools\\gclient.py",
+    "pythonEnvironment": "helpers use isolated host Python; gclient requires an explicitly provisioned private CPython 3.11 x64 venv, never global site-packages",
+    "gclientRuntime": {
+      "python": [3, 11],
+      "pointerBits": 64,
+      "includeSystemSitePackages": false,
+      "requirements": [
+        { "distribution": "httplib2", "version": "0.13.1", "module": "httplib2", "imports": ["httplib2.socks"] },
+        { "distribution": "six", "version": "1.10.0", "module": "six", "imports": ["six.moves.http_client"] }
+      ],
+      "source": "https://chromium.googlesource.com/chromium/tools/depot_tools/+/d85491b0a1dcb82dd8e124a876ecd7e3d50dc5e8/.vpython3",
+      "scope": "selected external imports for gclient config/sync; not the full presubmit/test-tool wheel set"
+    },
+    "dependencyEntriesSource": "https://chromium.googlesource.com/chromium/tools/depot_tools/+/d85491b0a1dcb82dd8e124a876ecd7e3d50dc5e8/gclient.py",
+    "dependencyEntriesFormat": "Git: path -> URL; CIPD: path:package -> service/package@version; GCS: path:object -> gs://bucket/object"
+  },
+  "baseline": {
+    "platform": "win32",
+    "architecture": "x64",
+    "nodeMinimumMajor": 20,
+    "pythonMinimum": [3, 8],
+    "gitMinimum": [2, 31],
+    "visualStudioMajor": 17,
+    "visualStudioReference": "17.13.4",
+    "msvcToolset": "v143",
+    "msvcToolsMinimum": [14, 30],
+    "msvcToolsMaximumExclusive": [14, 45],
+    "msvcVersionEvidence": "VS2022 uses MSVC Build Tools 14.30 through 14.44; 17.13.4 is the pinned upstream reference, not an exact installed patch requirement. VS2026/MSVC 14.5x and preview toolsets are not admitted.",
+    "visualStudioComponents": [
+      "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+      "Microsoft.VisualStudio.Component.VC.ATL",
+      "Microsoft.VisualStudio.Component.VC.ATLMFC"
+    ],
+    "sdkDirectoryVersion": "10.0.26100.0",
+    "sdkMinimumServicingVersion": "10.0.26100.3323",
+    "sdkVersionEvidence": "rc.exe must match the SDK directory family and minimum servicing; shared Debuggers\\x64 DLLs need only meet the minimum version, including newer families",
+    "clang": {
+      "revision": "llvmorg-21-init-16348-gbd809ffb",
+      "subRevision": 14,
+      "packagePin": "llvmorg-21-init-16348-gbd809ffb-14"
+    },
+    "libcxx": {
+      "namespace": "std::__Cr",
+      "abiVersion": 2
+    }
+  },
+  "limitations": [
+    "This command acquires and inspects source dependencies only. It does not compile binaries or qualify capture hardware.",
+    "The separate buildRtc.cjs compiles the media core and adapters together with Chromium clang-cl/libc++, behind a versioned C/POD ABI to the MSVC Node-API addon.",
+    "Keep the pinned SDK overlays, compiler, CRT and generated headers coherent when updating WebRTC.",
+    "Git pins do not by themselves audit every DEPS/CIPD package, third-party license, host interpreter or final binary. Actual Git dependency revisions are recorded after a successful fresh sync.",
+    "Offline non-Git checks reconcile declared identities and populated install directories, CIPD control-directory presence and GCS registry membership. They do not audit individual package contents or resolve CIPD tags to immutable instance IDs.",
+    "Preserve WebRTC, libmediasoupclient, libsdptransform, JSON and all transitive licenses and corresponding sources when distributing binaries. H264 patents require separate consideration.",
+    "No verified time or disk-space estimate is available for this Windows build. Command deadlines are safety limits, not duration estimates."
+  ],
+  "sources": [
+    "https://mediasoup.org/documentation/v3/libmediasoupclient/installation/",
+    "https://webrtc.googlesource.com/src/+/36ea4535a500ac137dbf1f577ce40dc1aaa774ef",
+    "https://github.com/versatica/libmediasoupclient/blob/c2bf26f046d176b205134a9803b18ac3fdcbb97e/CMakeLists.txt",
+    "https://chromium.googlesource.com/chromium/tools/depot_tools/+/d85491b0a1dcb82dd8e124a876ecd7e3d50dc5e8/gclient.py",
+    "https://chromium.googlesource.com/chromium/src/+/2fda948e24735acc22b12d891af252ac7299d010/docs/windows_build_instructions.md",
+    "https://chromium.googlesource.com/chromium/src/build/+/66d076c7ab192991f67891b062b35404f3cb0739/vs_toolchain.py",
+    "https://learn.microsoft.com/en-us/cpp/overview/compiler-versions?view=msvc-170",
+    "https://chromium.googlesource.com/chromium/src/buildtools/+/0c4bbb0f8a874de0a2a15d196031c7303d04fbb3/third_party/libc++/__config_site"
+  ]
+}

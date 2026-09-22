@@ -11,6 +11,7 @@ import {
   ChatMessage,
   chatReactionEventSchema,
   MessageType,
+  type NativeScreenEvent,
   MemberKickedPayload,
   Permission,
   ProtocolErrorCode,
@@ -54,8 +55,10 @@ import { ConnectionView } from './views/ConnectionView';
 import { joinInviteModal } from './views/JoinInviteModal';
 import { MainView } from './views/MainView';
 import { screenAudioService } from './core/ScreenAudioService';
+import { stopLocalScreenShares } from './core/screenShareControls';
 import { screenSharePickerModal } from './views/ScreenSharePickerModal';
 import { showAlert } from './views/Dialog';
+import { showInfoToast } from './views/CopyToast';
 import { showIdentityImportDialog } from './views/IdentityDialogs';
 import { getLanguage, initI18n, t } from './i18n';
 import { translateProtocolError } from './i18n/protocolErrors';
@@ -104,13 +107,11 @@ class App {
       webRtcManager.suspendForVoiceReconnect();
       audioProcessor.stopMicrophone();
       videoService.stopCamera();
-      const stopScreenAudio = screenAudioService.stop();
-      videoService.stopScreenShare();
+      const stoppedScreens = stopLocalScreenShares(screenAudioService, { teardown: true });
       voiceStore.setCameraOn(false);
-      voiceStore.setScreenSharing(false);
       voiceStore.setSpeaking(false);
       voiceStore.setReconnecting(true);
-      await stopScreenAudio;
+      await stoppedScreens;
     },
     rejoin: (call, transitionId, isCurrent) =>
       rejoinCallOnSession(call.sessionKey, call.channelId, { transitionId, isCurrent }),
@@ -212,7 +213,7 @@ class App {
     webRtcManager.setQualityPreset(settingsStore.qualityPreset);
 
     // Initialize overlay bridge service (#169)
-    overlayBridgeService.init();
+    overlayBridgeService.init((sessionId, shareId) => webRtcManager.getScreenCaptureMode(sessionId, shareId));
 
     // Render connection view initially
     this.connectionView?.render();
@@ -889,6 +890,7 @@ class App {
       participantManager.updateVoiceState(payload.voiceState);
 
       // If we are also in this voice channel and not the joining session, connect P2P Mesh
+      if (this.eventOwnsCall()) webRtcManager.reconcileScreenSources();
       if (
         this.eventOwnsCall() &&
         voiceStore.currentVoiceChannelId === payload.channelId &&
@@ -905,6 +907,14 @@ class App {
     appEvents.on(`message.${MessageType.VOICE_USER_LEFT}`, (payload: VoiceUserLeftPayload) => {
       const isMySession = serverStore.isMySession(payload.sessionId);
       const origin = currentEventOrigin();
+      // A delayed acknowledgement belongs to the local leave, never a newer admission.
+      if (isMySession && networkClient.isLocalVoiceLeaveAcknowledgement(payload)) {
+        if (participantManager.get(payload.sessionId)?.voiceState?.channelId === payload.channelId
+          && !(this.eventOwnsCall() && voiceStore.currentVoiceChannelId === payload.channelId)) {
+          participantManager.removeVoiceState(payload.sessionId);
+        }
+        return;
+      }
       if (isMySession && origin) {
         const transition = this.voiceModeReconnect.departed(origin, payload);
         if (transition) {
@@ -950,6 +960,7 @@ class App {
       }
 
       participantManager.updateVoiceState(payload.voiceState);
+      if (this.eventOwnsCall()) webRtcManager.reconcileScreenSources();
       if (isRemoteUser && isSameVoiceChannel && (
         previousVoiceState?.receivesVoice !== payload.voiceState.receivesVoice ||
         previousVoiceState?.isDeafened !== payload.voiceState.isDeafened ||
@@ -971,8 +982,9 @@ class App {
       if (!serverStore.isMySession(payload.targetSessionId) || !this.eventOwnsCall()) return;
       audioProcessor.stopMicrophone();
       videoService.stopCamera();
-      videoService.stopScreenShare();
-      webRtcManager.clearLocalScreenTracks();
+      void stopLocalScreenShares(screenAudioService, { teardown: true }).catch((error: unknown) => {
+        clientLog.error('SCREEN_SHARE', 'Failed to stop screen sharing after voice kick', { error: String(error) });
+      });
       webRtcManager.closeAllPeers();
       // Being kicked is still leaving the call, so it gets the same cue as
       // leaving on your own (#533) — read before reset(), which clears the
@@ -1010,13 +1022,12 @@ class App {
       screenSharePickerModal.open();
     });
 
-    // Screen-share start/stop sound cue (covers all paths: picker, quick-stop,
-    // switching to camera, and the OS "stop sharing" button).
+    // Screen-share start/stop sound cue (picker, quick-stop and source-ended).
     appEvents.on('local.screen_started', () => {
       soundEffects.play('screen_share_start');
     });
     appEvents.on('screen.codec_failed', (payload: { error: string; notify: boolean; stopAudio: boolean }) => {
-      if (payload.stopAudio) {
+      if (payload.stopAudio || videoService.getScreenShareCount() === 0) {
         void screenAudioService.stop().catch((error: unknown) => {
           clientLog.error('SCREEN_SHARE', 'Failed to stop audio of a rejected screen', {
             error: error instanceof Error ? error.message : String(error),
@@ -1032,22 +1043,27 @@ class App {
     });
     appEvents.on('local.screen_stopped', () => {
       soundEffects.play('screen_share_stop');
-      // Auto-stop screen audio only when the last share is gone (#253).
-      if (videoService.getScreenShareCount() === 0 && screenAudioService.getIsCapturing()) {
-        screenAudioService.stop();
-      }
+    });
+    const unbindCaptureFallback = appEvents.on('native_screen.capture_fallback', (_payload: { shareId: string }) => {
+      showInfoToast(t('screenShare.gameFallback'), 8000);
+    });
+    window.addEventListener('pagehide', unbindCaptureFallback, { once: true });
+    appEvents.on('native_screen.source_failed', (payload: Pick<Extract<NativeScreenEvent, { type: 'error' }>, 'reason' | 'code'>) => {
+      void showAlert({
+        title: t('screenShare.errorTitle'),
+        message: payload.code === 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE'
+          ? t('screenShare.gameCaptureUnavailable') : t(`screenShare.nativeFailure.${payload.reason}`),
+        variant: 'danger',
+      });
     });
 
     // The shared window/app was closed (or the OS "stop sharing" button was
     // used): finish tearing down that one screen share so peers stop seeing a
     // frozen frame and the local controls return to the idle state (#159, #253).
-    appEvents.on('local.screen_ended_externally', async (shareId: string) => {
-      if (!voiceStore.screenShareIds.includes(shareId)) return;
-      await webRtcManager.removeLocalScreenTrack(shareId);
-      voiceStore.removeScreenShare(shareId);
-      callClient().send(MessageType.VOICE_STATE_UPDATE, {
-        screenShareIds: voiceStore.screenShareIds,
-        isScreenSharing: voiceStore.isScreenSharing,
+    appEvents.on('local.screen_ended_externally', (shareId: string) => {
+      if (!voiceStore.screenShareIds.includes(shareId) && !videoService.getScreenStream(shareId)) return;
+      void stopLocalScreenShares(screenAudioService, { shareIds: [shareId] }).catch((error: unknown) => {
+        clientLog.error('SCREEN_SHARE', 'Failed to stop an ended screen share', { shareId, error: String(error) });
       });
     });
 

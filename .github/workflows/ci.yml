@@ -188,6 +188,7 @@ jobs:
           check_pair "CONTRIBUTING.md" "CONTRIBUTING.en.md"
           check_pair "apps/light/README.md" "apps/light/README.en.md"
           check_pair "apps/light/QA.md" "apps/light/QA.en.md"
+          check_pair "apps/client/native/screen-share/README.md" "apps/client/native/screen-share/README.en.md"
 
           # O site de docs (VitePress) tem PT na raiz de docs-site/ e EN em
           # docs-site/en/. Cada pagina precisa manter o par no mesmo PR.
@@ -254,20 +255,38 @@ jobs:
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vsversion: '2022'
+          toolset: '14.44'
+          sdk: '10.0.26100.0'
 
       - name: Install dependencies
         run: npm ci
 
-      # Upgrade node-gyp so @electron/rebuild can find VS 2022
-      - name: Install node-gyp globally (Windows)
+      - name: Use lockfile node-gyp (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          npm install -g node-gyp@latest
-          echo "NODE_GYP_PATH=$(npm prefix -g)/node_modules/node-gyp/bin/node-gyp.js" >> $GITHUB_ENV
+          $NodeGyp = node -p "require.resolve('node-gyp/bin/node-gyp.js')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "NODE_GYP_PATH=$NodeGyp" >> $env:GITHUB_ENV
 
       - name: Build workspaces
         run: npm run build
+
+      - name: Build native screen runtime and corresponding-source inputs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PYTHON = (Get-Command python).Source
+          "PYTHON=$env:PYTHON" >> $env:GITHUB_ENV
+          $Git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+          npm run prepare:native-screen -- --python="$env:PYTHON" --git="$Git" --jobs=4
+
+      - name: Exercise native screen contracts and legal metadata
+        run: |
+          npm run test:native-screen --workspace=apps/client
+          npm run test:legal
 
       - name: Install FFmpeg for generated voice fixtures
         shell: bash
@@ -311,6 +330,8 @@ jobs:
           node apps/client/test/microphoneTestSmoke.cjs
           node apps/client/test/settingsNavigationSmoke.cjs
           node apps/client/test/settingsNavigationSmoke.cjs --release-notes
+          node apps/client/test/settingsNavigationSmoke.cjs --quality-settings
+          node apps/client/test/settingsNavigationSmoke.cjs --screen-stage
           npm run test:settings:ui --workspace=apps/client
           npm run test:camera --workspace=apps/client
           node apps/client/test/footerControlsSmoke.cjs

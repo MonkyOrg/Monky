@@ -21,6 +21,7 @@
     "start": "npm run start --workspace=apps/client",
     "qa": "npm run build && node scripts/qa.js",
     "test:qa": "node --test scripts/test-qa.js",
+    "test:legal": "node --test scripts/test-legal.js scripts/test-native-source-release.js",
     "app": "npm run start --workspace=apps/client",
     "package": "npm run build && node scripts/package.js",
     "dist": "npm run build && node scripts/package.js",
@@ -29,8 +30,10 @@
     "build": "npm run build --workspace=packages/shared && npm run build --workspace=packages/bot-sdk && npm run build --workspace=apps/server && npm run build --workspace=apps/client",
     "build:server": "npm run build --workspace=packages/shared && npm run build --workspace=apps/server",
     "build:light": "npm run build --workspace=packages/shared && node scripts/build-light.js",
+    "prepare:native-screen": "node apps/client/native/screen-share/scripts/prepare.cjs",
+    "pack:native-sources": "node apps/client/native/screen-share/scripts/packSources.cjs",
     "pack:cli": "npm run build && node scripts/pack-cli.js",
-    "test": "node scripts/test-versioning.js && node scripts/test-changelog.js && npm run test:light:scripts && npm run test --workspaces && npm run test:local-execution:integration --workspace=apps/server",
+    "test": "node scripts/test-versioning.js && node scripts/test-changelog.js && npm run test:legal && npm run test:light:scripts && npm run test --workspaces && npm run test:local-execution:integration --workspace=apps/server",
     "test:light:scripts": "npm run build --workspace=packages/shared && node --test scripts/test-light-contracts.js scripts/test-light-build.js",
     "test:light:identity": "npm run build:light -- --target monky-light-identity-test && node --test apps/light/test/identity_key_interop.test.cjs",
     "test:light:native": "npm run build:light && node --test --test-concurrency=1 apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs",
@@ -52,7 +55,7 @@
     "chat"
   ],
   "author": "",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "devDependencies": {
     "mermaid": "^11.17.2",
     "rimraf": "^6.0.1",

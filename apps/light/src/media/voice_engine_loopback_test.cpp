@@ -42,6 +42,13 @@ struct Bridge {
     callbacks.notify = [this](std::string type, nlohmann::json payload) {
       if (type != monky::protocol::message::RTC_SIGNAL)
         return;
+      const auto signal = payload.at("signalType").get<std::string>();
+      if (signal == "offer" || signal == "answer") {
+        const auto epoch = payload.at("subscriptionId").get<std::string>();
+        Require(epoch.size() == 36 &&
+                    epoch.find_first_not_of("0123456789abcdef-") == std::string::npos,
+                "SDP is missing its per-connection subscription identifier");
+      }
       std::lock_guard lock(mutex);
       auto found =
           engines.find(payload.at("targetSessionId").get<std::string>());

@@ -361,6 +361,7 @@ async function runCameraPublicationSmoke(filter) {
     if (gate) await gate.promise;
     return entry.stream;
   };
+  const remoteSubscriptionId = crypto.randomUUID();
   const transport = {
     getStatus: () => 'CONNECTED',
     send(type, payload) {
@@ -375,6 +376,7 @@ async function runCameraPublicationSmoke(filter) {
           await route.remote.setLocalDescription(await route.remote.createAnswer());
           await rtc.handleIncomingSignal({
             fromSessionId: payload.targetSessionId, signalType: 'answer',
+            subscriptionId: remoteSubscriptionId,
             sdp: route.remote.localDescription.toJSON(),
           });
         } else if (payload.signalType === 'answer') {
@@ -415,6 +417,8 @@ async function runCameraPublicationSmoke(filter) {
       peerSessionId: id, pc: connection, audioSender,
       remoteStream: new MediaStream(), remoteScreenStreams: new Map(),
       screenVideoSenders: new Map([['fixture-screen', screenSender]]),
+      screenSubscriptionId: crypto.randomUUID(), remoteSubscriptionId,
+      screenWatchState: new Map([['fixture-screen', { watching: true, revision: 1 }]]),
       candidateQueue: [], isPolite: true, makingOffer: false,
       iceRestartAttempts: 0, reconnectAttempts: 0, isRecovering: false,
     };
@@ -455,6 +459,12 @@ async function runCameraPublicationSmoke(filter) {
     return { element, dispose, playback };
   };
   const loopback = session => {
+    participants.addUser({
+      id: `fixture-${session.peerSessionId}`, sessionId: session.peerSessionId,
+      nickname: 'Loopback camera fixture', status: 'CONNECTED',
+    });
+    participants.updateVoiceState({ sessionId: session.peerSessionId, channelId: voice.currentVoiceChannelId });
+    session.remoteSubscriptionId = remoteSubscriptionId;
     const remote = pc();
     const route = { remote, candidates: [], videos: new Map() };
     routes.set(session.peerSessionId, route);
@@ -710,8 +720,7 @@ async function runCameraPublicationSmoke(filter) {
         await bounded(signalQueue, 'signaling teardown');
         rtc.closeAllPeers();
         rtc.localCameraTrack = rtc.localAudioTrack = null;
-        rtc.localScreenTracks.clear();
-        rtc.localScreenStreams.clear();
+        rtc.clearLocalScreenTracks();
         for (const connection of resources.pcs) connection.close();
         routes.clear();
         participants.clear();
@@ -986,7 +995,9 @@ async function runCameraPublicationSmoke(filter) {
         let decoded;
         if (transportMode === 'p2p') {
           peer = makePeer('fixture-fps-peer', 'recvonly');
-          rtc.localScreenTracks.set('fixture-screen', peer.screen);
+          rtc.localScreenShares.set('fixture-screen', {
+            track: peer.screen, stream: new MediaStream([peer.screen]), pending: false,
+          });
           route = loopback(peer.session);
         } else {
           const engine = rtc.sfuEngine;
@@ -1250,6 +1261,7 @@ async function runCameraPublicationSmoke(filter) {
       await incoming.setLocalDescription(await incoming.createOffer());
       await rtc.handleIncomingSignal({
         fromSessionId: 'incoming-peer', signalType: 'offer', sdp: incoming.localDescription.toJSON(),
+        subscriptionId: remoteSubscriptionId,
       });
       await bounded(signalQueue, 'incoming peer answer');
       check(rtc.peers.get('incoming-peer')?.videoSender?.track === processed.getVideoTracks()[0],
@@ -1622,9 +1634,14 @@ async function runCameraPublicationSmoke(filter) {
       await bounded(closing.entered.promise, 'closing overlay has an in-flight native assignment');
       bridge.updateVideoSender(0, skipped);
       const oldConnection = bridge.localPeerConnection;
+      const oldDummy = bridge.dummyTrack;
       await bridge.close();
+      check(oldDummy.readyState === 'ended' && bridge.dummyTrack === null && newest.readyState === 'live',
+        'Closing the overlay stops its generated placeholder, not the shared source track');
       await bridge.open();
       bridge.isWebRtcReady = true;
+      check(bridge.dummyTrack !== oldDummy && bridge.dummyTrack.readyState === 'live',
+        'Reopening the overlay owns a fresh live placeholder');
       const reopenedSender = bridge.videoSenders[0];
       bridge.updateVideoSender(0, newest);
       await until(() => reopenedSender.track === newest, 'reopened overlay receives current source');

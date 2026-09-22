@@ -144,11 +144,18 @@ async function dispatchClick(window, point, clickCount = 1) {
 }
 
 async function runSystemClipboardSmoke(sourceWindow) {
-  const { BrowserWindow, clipboard } = require('electron');
+  const { BrowserWindow, clipboard, nativeImage } = require('electron');
   const evaluate = code => sourceWindow.webContents.executeJavaScript(code, true);
   const fixture = code => evaluate(`window.messageClipboardFixture.${code}`);
   const modifier = process.platform === 'darwin' ? 4 : 2;
   const normalize = text => text.replace(/\r\n?/g, '\n');
+  const clipboardFormats = async () => (await clipboard.read()).flatMap(item => item.types);
+  const clipboardImage = async () => {
+    const item = (await clipboard.read()).find(value => value.types.includes('image/png'));
+    if (!item) return null;
+    const png = await item.getType('image/png');
+    return nativeImage.createFromBuffer(Buffer.from(await png.arrayBuffer()));
+  };
   let checks = 0;
   let fixtureInstalled = false;
   const check = (value, message) => {
@@ -220,7 +227,7 @@ async function runSystemClipboardSmoke(sourceWindow) {
     const expected = await fixture('state()');
     await fixture('focusRow("rich")');
     await copy();
-    await until(() => [expected.source, expected.expectedPlain].includes(normalize(clipboard.readText())),
+    await until(async () => [expected.source, expected.expectedPlain].includes(normalize(await clipboard.readText())),
       'owned formatted clipboard write');
     const rich = await paste('rich');
     check(rich.bold && rich.italic && rich.link === 'https://example.invalid/docs?a=1&b=2' && rich.types.includes('text/html'),
@@ -228,19 +235,19 @@ async function runSystemClipboardSmoke(sourceWindow) {
     const text = await paste('plain');
     check(normalize(text.text) === expected.source,
       `Formatted native copy preserves Markdown for external text destinations: ${JSON.stringify(text.text)}`);
-    check(normalize(clipboard.readText()) === expected.source && clipboard.availableFormats().includes('text/html'),
+    check(normalize(await clipboard.readText()) === expected.source && (await clipboardFormats()).includes('text/html'),
       'The real OS clipboard carries both Markdown text and semantic HTML');
 
     sourceWindow.webContents.focus();
     await dispatchKey(sourceWindow, 'C', 'KeyC', 67, modifier | 8);
     await fixture('settle()');
-    check(normalize(clipboard.readText()) === expected.source && clipboard.availableFormats().includes('text/html'),
+    check(normalize(await clipboard.readText()) === expected.source && (await clipboardFormats()).includes('text/html'),
       'The removed plain-copy shortcut leaves the current formatted system clipboard unchanged');
     await copyPlain();
-    await until(() => normalize(clipboard.readText()) === expected.expectedPlain, 'plain-copy menu button write');
-    // macOS ReadHTML can return plain text; the advertised MIME types identify actual rich content.
-    check(!clipboard.availableFormats().some(type => ['text/html', 'text/rtf'].includes(type)),
-      `Plain copy replaces the previous rich formats: ${JSON.stringify(clipboard.availableFormats())}`);
+    await until(async () => normalize(await clipboard.readText()) === expected.expectedPlain, 'plain-copy menu button write');
+    const plainFormats = await clipboardFormats();
+    check(!plainFormats.some(type => ['text/html', 'text/rtf'].includes(type)),
+      `Plain copy replaces the previous rich formats: ${JSON.stringify(plainFormats)}`);
     const plain = await paste('plain');
     check(normalize(plain.text) === expected.expectedPlain && !plain.types.includes('text/html'),
       'The plain-copy menu button followed by external Ctrl+V pastes visible text without Markdown markers or HTML');
@@ -254,7 +261,7 @@ async function runSystemClipboardSmoke(sourceWindow) {
     const selected = (await fixture('state()')).selection;
     check(selected === 'bold' || selected === 'bold ', 'Native mouse selection remains local to the chosen word');
     await copy();
-    await until(() => clipboard.readText() === `**bold**${selected.slice(4)}`, 'formatted selection write');
+    await until(async () => await clipboard.readText() === `**bold**${selected.slice(4)}`, 'formatted selection write');
     const fragment = await paste('plain');
     check(fragment.text === `**bold**${selected.slice(4)}`,
       'Formatted external copying preserves only the native selected fragment and its Markdown emphasis');
@@ -262,19 +269,20 @@ async function runSystemClipboardSmoke(sourceWindow) {
     check(richFragment.bold && richFragment.text.trim() === 'bold',
       'The same partial selection stays formatted in the independent rich editor');
     await copyPlain();
-    await until(() => clipboard.readText() === selected, 'plain selection write');
+    await until(async () => await clipboard.readText() === selected, 'plain selection write');
     const plainFragment = await paste('plain');
-    check(plainFragment.text === selected && !clipboard.availableFormats().includes('text/html'),
+    check(plainFragment.text === selected && !(await clipboardFormats()).includes('text/html'),
       'Plain external copying preserves the exact native selection without copying the whole message');
     check((await fixture('state()')).input === 'Untouched draft', 'External copying never mutates the existing composer draft');
     await fixture('prepareImages("en")');
     await click('[data-message-id="photo"] .chat-attachment-copy');
-    await until(() => {
-      const image = clipboard.readImage();
+    await until(async () => {
+      const image = await clipboardImage();
+      if (!image) return false;
       const size = image.getSize();
       return !image.isEmpty() && size.width === 2 && size.height === 1;
     }, 'real image clipboard write');
-    check(clipboard.readImage().getSize().width === 2, 'Image copying preserves the original bitmap dimensions in the OS clipboard');
+    check((await clipboardImage())?.getSize().width === 2, 'Image copying preserves the original bitmap dimensions in the OS clipboard');
     const pastedImage = await paste('rich');
     check(pastedImage.types.includes('Files'), 'An independent editor receives an actual image file on native paste');
     await until(() => destination('document.querySelector("#rich img")?.naturalWidth === 2'),

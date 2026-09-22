@@ -5,6 +5,7 @@
 #include <api/make_ref_counted.h>
 #include <media/engine/adm_helpers.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -300,7 +301,7 @@ void CheckDuplexAndStop() {
               device->StartRecording() == -1, "Termination releases the borrowed transport");
 }
 
-void CheckRealtimeCadence() {
+void CheckRealtimeCadence(std::chrono::milliseconds stall = 0ms) {
   const std::chrono::steady_clock::time_point epoch{};
   auto clock = AdvanceFixtureAudioDeadline(epoch, epoch + 1ms);
   Require(clock.next == epoch + 10ms && clock.discarded_frames == 0,
@@ -324,24 +325,40 @@ void CheckRealtimeCadence() {
   Transport transport;
   auto device = FixtureAudioDevice::Create();
   Prepare(*device, transport);
+  if (stall > 0ms) transport.Block(Transport::Direction::recording);
   const auto started = std::chrono::steady_clock::now();
   Require(device->StartRecording() == 0 && device->StartPlayout() == 0,
           "Start realtime synthetic PCM");
+  if (stall > 0ms) {
+    const bool entered = transport.WaitBlocked();
+    if (entered) std::this_thread::sleep_for(stall);
+    transport.Release();
+    Require(entered, "Inject a bounded stall in the real synthetic audio worker");
+  }
   const bool reached = transport.WaitFor(200, 200);
+  Require(device->Terminate() == 0, "Release synthetic timing and device worker");
   const auto elapsed = std::chrono::steady_clock::now() - started;
   const auto observed = transport.Snapshot();
-  Require(device->Terminate() == 0, "Release synthetic timing and device worker");
-  if (!reached || elapsed < 1750ms || elapsed > 2600ms) {
-    const auto timing = device->Snapshot();
+  const auto timing = device->Snapshot();
+  // The device clock also advances through frames discarded during scheduler stalls.
+  const auto scheduled = kFixtureAudioPeriod *
+      (std::max(timing.recording_callbacks, timing.playout_callbacks) +
+       timing.discarded_clock_frames);
+  const bool paced = elapsed + 250ms >= scheduled && elapsed <= scheduled + 600ms;
+  if (!reached || !paced) {
     std::cerr << "Synthetic cadence: " << observed.recording << " capture / "
               << observed.playout << " playout callbacks in "
               << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+              << " ms; scheduled=" << scheduled.count()
               << " ms; waiting=" << timing.waiting_ms << " ms; processing="
               << timing.processing_ms << " ms; discarded="
               << timing.discarded_clock_frames << " frames\n";
   }
-  Require(reached && elapsed >= 1750ms && elapsed <= 2600ms,
+  Require(reached && paced,
           "Synthetic PCM must maintain its realtime 10 ms device clock");
+  Require(stall == 0ms ||
+              kFixtureAudioPeriod * timing.discarded_clock_frames >= stall - kFixtureAudioPeriod,
+          "A forced stall must discard expired device frames, not slow the clock");
 }
 
 void CheckCallbackRemovalAndReplacement() {
@@ -523,6 +540,7 @@ int main() {
     CheckNativeInitialization();
     CheckDuplexAndStop();
     CheckRealtimeCadence();
+    CheckRealtimeCadence(std::chrono::milliseconds(700));
     CheckCallbackRemovalAndReplacement();
     CheckInflightStopAndTerminate(false);
     CheckInflightStopAndTerminate(true);

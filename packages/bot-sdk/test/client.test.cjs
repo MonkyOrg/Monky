@@ -2011,7 +2011,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 22);
+  assert.equal(PROTOCOL_VERSION, 24);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

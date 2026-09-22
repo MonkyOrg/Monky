@@ -17,11 +17,12 @@ if (!process.versions.electron) {
   app.setPath('userData', process.env.MONKY_SCREEN_CODEC_PROFILE);
   app.commandLine.appendSwitch('allow-loopback-in-peer-connection');
   app.on('window-all-closed', () => {});
-  let vite, window, worker, router, vp8Router, timeout;
-  const transports = new Map(), producers = new Map();
+  let vite, window, worker, sfuManager, router, vp8Router, legacyRouter, timeout;
+  const transports = new Map(), producers = new Map(), consumers = new Map();
   const finish = async code => {
     clearTimeout(timeout);
     if (window && !window.isDestroyed()) window.destroy();
+    sfuManager?.close();
     worker?.close();
     if (vite) await vite.close();
     app.exit(code);
@@ -30,12 +31,12 @@ if (!process.versions.electron) {
     const [{ createServer }, mediasoup, { MessageType }] = await Promise.all([
       import('vite'), import('mediasoup'), import('@monky/shared'),
     ]);
+    const { SfuManager } = require(path.join(clientRoot, '..', 'server', 'dist', 'infrastructure', 'sfu', 'SfuManager.js'));
+    sfuManager = new SfuManager({ listenIp: '127.0.0.1', announcedIp: '127.0.0.1' });
+    router = await sfuManager.getOrCreateRouter('room');
     worker = await mediasoup.createWorker({ logLevel: 'error' });
-    router = await worker.createRouter({ mediaCodecs: [
+    legacyRouter = await worker.createRouter({ mediaCodecs: [
       { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 },
-      { kind: 'video', mimeType: 'video/AV1', clockRate: 90000 },
-      { kind: 'video', mimeType: 'video/VP9', clockRate: 90000, parameters: { 'profile-id': 0 } },
-      { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 },
       { kind: 'video', mimeType: 'video/H264', clockRate: 90000,
         parameters: { 'packetization-mode': 1, 'profile-level-id': '42e01f', 'level-asymmetry-allowed': 1 } },
     ] });
@@ -44,7 +45,8 @@ if (!process.versions.electron) {
       { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 },
     ] });
     async function sfuRequest(type, payload) {
-      const currentRouter = payload.channelId === 'vp8-room' ? vp8Router : router;
+      const currentRouter = payload.channelId === 'vp8-room' ? vp8Router
+        : payload.channelId === 'legacy-room' ? legacyRouter : router;
       switch (type) {
         case MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES:
           return { channelId: payload.channelId, rtpCapabilities: currentRouter.rtpCapabilities };
@@ -54,7 +56,7 @@ if (!process.versions.electron) {
             enableUdp: true, enableTcp: false,
           });
           transports.set(transport.id, transport);
-          return { channelId: 'room', transportOptions: {
+          return { channelId: payload.channelId, transportOptions: {
             id: transport.id, iceParameters: transport.iceParameters,
             iceCandidates: transport.iceCandidates, dtlsParameters: transport.dtlsParameters,
           } };
@@ -63,7 +65,7 @@ if (!process.versions.electron) {
           await transports.get(payload.transportId).connect({ dtlsParameters: payload.dtlsParameters });
           return {};
         case MessageType.SFU_GET_PRODUCERS:
-          return { channelId: 'room', participants: [], producers: [] };
+          return { channelId: payload.channelId, participants: [], producers: [] };
         case MessageType.SFU_PRODUCE: {
           const producer = await transports.get(payload.transportId).produce({
             kind: payload.kind, rtpParameters: payload.rtpParameters, appData: payload.appData,
@@ -71,6 +73,31 @@ if (!process.versions.electron) {
           producers.set(producer.id, producer);
           return { id: producer.id };
         }
+        case MessageType.SFU_CONSUME: {
+          const mediaType = producers.get(payload.producerId).appData.mediaType;
+          const consumer = await transports.get(payload.transportId).consume({
+            producerId: payload.producerId, rtpCapabilities: payload.rtpCapabilities,
+            paused: mediaType === 'screen_video' || mediaType === 'screen_audio',
+          });
+          consumers.set(consumer.id, consumer);
+          return {
+            channelId: payload.channelId, id: consumer.id, producerId: consumer.producerId,
+            kind: consumer.kind, rtpParameters: consumer.rtpParameters,
+            producerSessionId: 'self', appData: producers.get(payload.producerId).appData,
+          };
+        }
+        case MessageType.SFU_CONSUMER_SET_PAUSED: {
+          const consumer = consumers.get(payload.consumerId);
+          if (consumer && !consumer.closed) {
+            if (payload.paused) await consumer.pause();
+            else await consumer.resume();
+          }
+          return {};
+        }
+        case MessageType.SFU_CONSUMER_CLOSED:
+          consumers.get(payload.consumerId)?.close();
+          consumers.delete(payload.consumerId);
+          return {};
         case MessageType.SFU_PRODUCER_CLOSED:
           producers.get(payload.producerId)?.close();
           producers.delete(payload.producerId);
@@ -129,18 +156,19 @@ if (!process.versions.electron) {
     timeout = setTimeout(() => { console.error('Screen codec smoke timed out'); void finish(1); }, 120000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__screen_codec__`);
     const result = await window.webContents.executeJavaScript(
-      `(${runScreenCodecSmoke.toString()})(${JSON.stringify(MessageType)}, ${process.argv.includes('--admission-only')}, ${process.argv.includes('--codecs-only')})`, true);
+      `(${runScreenCodecSmoke.toString()})(${JSON.stringify(MessageType)}, ${process.argv.includes('--admission-only')}, ${process.argv.includes('--codecs-only')}, ${process.argv.includes('--h264-profiles-only')})`, true);
     console.log(`Screen codecs: ${result.checks} checks passed; actual output: ${result.outputs.join(', ')}`);
     await finish(0);
   }).catch(async error => { console.error(error); await finish(1); });
 }
 
-async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
+async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profilesOnly) {
   const [{ WebRtcManager }, { SfuClientEngine }, { NetworkClient }, codecs, { settingsStore: settings },
-    { voiceStore: voice }, { videoService }, { appEvents }] = await Promise.all([
+    { voiceStore: voice }, { videoService }, { appEvents }, { VideoDiagnosticsSampler }] = await Promise.all([
     import('/core/WebRtcManager.ts'), import('/core/webrtc/SfuClientEngine.ts'), import('/core/NetworkClient.ts'),
     import('/core/webrtc/codecPreferences.ts'), import('/stores/settingsStore.ts'),
     import('/stores/voiceStore.ts'), import('/core/VideoService.ts'), import('/core/EventBus.ts'),
+    import('/core/webrtc/videoDiagnostics.ts'),
   ]);
   let checks = 0;
   const outputs = [];
@@ -182,9 +210,9 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
   settings.qualityPreset = 'NORMAL';
   voice.setChannel('room');
   const sources = [];
-  function source() {
+  function source(width = 160, height = 90) {
     const canvas = document.createElement('canvas');
-    canvas.width = 160; canvas.height = 90;
+    canvas.width = width; canvas.height = height;
     const context = canvas.getContext('2d');
     let frame = 0;
     const draw = () => {
@@ -199,18 +227,27 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
     sources.push(entry);
     return entry;
   }
-  async function actualCodec(sender, label, expected = required) {
+  async function actualCodec(sender, label, expected = required, expectedProfile) {
     const first = new Map();
+    const sampler = new VideoDiagnosticsSampler();
     const sample = await until(async () => {
       const report = await sender.getStats();
+      const diagnostics = sampler.sampleOutbound(sender, report, sender.getParameters(), sender.track?.id);
       for (const stat of report.values()) {
-        if (stat.type !== 'outbound-rtp' || stat.kind !== 'video' || !stat.codecId || !(stat.framesEncoded > 0)) continue;
+        if (stat.type !== 'outbound-rtp' || stat.kind !== 'video' || stat.active === false
+          || !stat.codecId || !(stat.framesEncoded > 0)) continue;
         const codec = report.get(stat.codecId);
         if (!codec || /\/(rtx|red|ulpfec)$/i.test(codec.mimeType)) continue;
         const previous = first.get(stat.id);
-        first.set(stat.id, { frames: stat.framesEncoded, bytes: stat.bytesSent });
-        if (previous && stat.framesEncoded > previous.frames && stat.bytesSent > previous.bytes) {
-          return { codec: codec.mimeType.toLowerCase(), frames: stat.framesEncoded };
+        first.set(stat.id, {
+          frames: stat.framesEncoded, bytes: stat.bytesSent, codecId: stat.codecId, sourceId: stat.mediaSourceId,
+        });
+        if (previous && previous.codecId === stat.codecId && previous.sourceId === stat.mediaSourceId
+          && stat.framesEncoded > previous.frames && stat.bytesSent > previous.bytes) {
+          return {
+            codec: codec.mimeType.toLowerCase(), fmtp: codec.sdpFmtpLine, frames: stat.framesEncoded,
+            diagnostics: diagnostics.find(sample => sample.id === stat.id),
+          };
         }
       }
       return false;
@@ -234,9 +271,43 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
       }));
     }
     check(!expected || sample.codec === expected, `${label}: encoded ${sample.codec}, expected ${expected}`);
+    if (expectedProfile) {
+      check(profileOf(sample.fmtp) === expectedProfile,
+        `${label}: encoded profile ${profileOf(sample.fmtp)}, expected ${expectedProfile}`);
+    }
+    check(sample.diagnostics?.codec?.toLowerCase() === sample.codec.split('/')[1]
+      && sample.diagnostics.fps > 0 && sample.diagnostics.bitrateKbps > 0,
+    `${label}: passive diagnostics read the actual codec and positive interval FPS/bitrate: ${JSON.stringify(sample.diagnostics)}`);
     outputs.push(`${label}=${sample.codec}`);
     console.log(`CODEC TEST ${label}: ${sample.codec}, ${sample.frames} encoded frames`);
     return sample.codec;
+  }
+  async function qualityCaps(sender, label) {
+    const preset = rtc.currentPreset;
+    const profile = settings.customProfile;
+    const previous = sender.getParameters().encodings.map(encoding => ({
+      active: encoding.active, codec: encoding.codec,
+    }));
+    try {
+      settings.customProfile = { ...profile, screenFps: 120, screenBitrateKbps: 20000 };
+      for (const [name, bitrate, fps, degradation] of [
+        ['NORMAL', 2000000, 30, 'maintain-resolution'],
+        ['GAMING', 6000000, 60, 'maintain-framerate'],
+        ['CUSTOM', 20000000, 120, 'maintain-resolution'],
+      ]) {
+        rtc.currentPreset = name;
+        await rtc.applyBitrateConstraints();
+        const parameters = sender.getParameters();
+        check(parameters.encodings[0].maxBitrate === bitrate && parameters.encodings[0].maxFramerate === fps
+          && parameters.degradationPreference === degradation, `${label}: ${name} uses the common quality caps`);
+        check(JSON.stringify(parameters.encodings.map(encoding => ({ active: encoding.active, codec: encoding.codec })))
+          === JSON.stringify(previous), `${label}: quality never changes codec selection or active state`);
+      }
+    } finally {
+      rtc.currentPreset = preset;
+      settings.customProfile = profile;
+      await rtc.applyBitrateConstraints();
+    }
   }
   const rtc = new WebRtcManager();
   const failShare = rtc.failLocalScreenShare.bind(rtc);
@@ -255,10 +326,33 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
   rtc.rtcConfig = { iceServers: [], iceCandidatePoolSize: 0 };
   rtc.setCurrentSessionId('self');
   let remote, signalQueue = Promise.resolve();
+  let remoteEpoch, watchRevision = 0;
+  // This codec fixture deliberately watches every published source; production
+  // peers remain unsubscribed until the UI asks for one.
+  rtc.isPeerInOurCall = () => true;
+  const receivePeerSignal = rtc.handleIncomingSignal.bind(rtc);
+  rtc.handleIncomingSignal = async payload => {
+    const description = payload.signalType === 'offer' || payload.signalType === 'answer';
+    await receivePeerSignal({
+      ...payload, ...(description ? { subscriptionId: payload.subscriptionId ?? remoteEpoch } : {}),
+    });
+    if (!description) return;
+    const peer = rtc.peers.get('peer');
+    if (!peer) return;
+    for (const shareId of rtc.localScreenShares.keys()) {
+      await receivePeerSignal({
+        fromSessionId: 'peer', targetSessionId: 'self', signalType: 'screen-watch',
+        streamId: shareId, subscriptionId: peer.screenSubscriptionId,
+        watcherSubscriptionId: remoteEpoch, subscriptionRevision: ++watchRevision, watching: true,
+      });
+    }
+  };
   let beforeAnswer = async () => {};
   const signalErrors = [];
   const sentDescriptions = [];
   function setupPeer() {
+    remoteEpoch = crypto.randomUUID();
+    watchRevision = 0;
     remote = new RTCPeerConnection({ iceServers: [] });
     remote.ontrack = event => {
       const video = document.createElement('video');
@@ -319,6 +413,11 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
       await testForegroundAdmission();
       return { checks, outputs };
     }
+    if (selected === 'h264') await testH264Profiles();
+    if (profilesOnly) {
+      check(selected === 'h264', 'H.264 must be available for the profile scenarios');
+      return { checks, outputs };
+    }
     if (selected === 'h264') {
       const oldSender = new RTCPeerConnection({ iceServers: [] });
       const oldReceiver = new RTCPeerConnection({ iceServers: [] });
@@ -349,12 +448,26 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
     const first = source();
     await rtc.addLocalScreenTrack(first.stream);
     await actualCodec(rtc.getScreenSendersForShare(first.stream.id)[0], 'P2P initial');
+    const receiverSampler = new VideoDiagnosticsSampler();
+    const receivedDiagnostics = await until(async () => {
+      for (const receiver of remote.getReceivers()) {
+        if (receiver.track.kind !== 'video') continue;
+        const samples = receiverSampler.sampleInbound(receiver, await receiver.getStats(), receiver.track.id);
+        const received = samples.find(sample => sample.fps > 0 && sample.bitrateKbps > 0);
+        if (received) return received;
+      }
+      return null;
+    }, 'Remote diagnostics receive and decode real loopback video');
+    check(receivedDiagnostics.codec?.toLowerCase() === selected && receivedDiagnostics.width === 160
+      && receivedDiagnostics.height === 90 && receivedDiagnostics.encodeTimeMs === null,
+    'Receiving diagnostics report the remote video, not local encoder settings');
     settings.preferredVideoCodec = 'av1';
     await rtc.reapplyCodecPreferences();
     await actualCodec(rtc.getScreenSendersForShare(first.stream.id)[0], 'P2P live AV1', 'video/av1');
     settings.preferredVideoCodec = selected;
     await rtc.reapplyCodecPreferences();
     await actualCodec(rtc.getScreenSendersForShare(first.stream.id)[0], 'P2P live explicit');
+    await qualityCaps(rtc.getScreenSendersForShare(first.stream.id)[0], 'P2P');
     for (const preferred of ['vp8', 'vp9', 'auto', selected]) {
       settings.preferredVideoCodec = preferred;
       await rtc.reapplyCodecPreferences();
@@ -399,7 +512,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
       const latestChange = rtc.reapplyCodecPreferences();
       releaseAnswer();
       await Promise.all([firstChange, latestChange]);
-      check(first.stream.getVideoTracks()[0].readyState === 'live' && rtc.localScreenTracks.has(first.stream.id),
+      check(first.stream.getVideoTracks()[0].readyState === 'live' && rtc.localScreenShares.has(first.stream.id),
         'A superseded compatible answer cannot terminate the screen capture');
       await actualCodec(rtc.getScreenSendersForShare(first.stream.id)[0], 'P2P rapid latest selection');
     } finally {
@@ -535,11 +648,83 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
     check(await sfu.join('room'), 'Real SFU joins using only ephemeral loopback transports');
     store.serverDetails.voiceMode = 'sfu';
     const screen = source();
-    await rtc.addLocalScreenTrack(screen.stream);
+    const p2pCapabilities = RTCRtpSender.getCapabilities;
+    try {
+      RTCRtpSender.getCapabilities = kind => kind === 'video'
+        ? { codecs: [], headerExtensions: [] } : p2pCapabilities.call(RTCRtpSender, kind);
+      rtc.assertScreenShareSupported();
+      await rtc.addLocalScreenTrack(screen.stream);
+      check(true, 'SFU preflight/publication use the loaded device capabilities, not P2P capabilities');
+    } finally {
+      RTCRtpSender.getCapabilities = p2pCapabilities;
+    }
     let producer = sfu.producers.get(`screen_video:${screen.stream.id}`);
     await actualCodec(producer.rtpSender, 'SFU initial');
+    await qualityCaps(producer.rtpSender, 'SFU');
+    await testSfuAudioStartDuringRestore(screen.stream.id);
+    producer = sfu.producers.get(`screen_video:${screen.stream.id}`);
     const inbound = await request('fixture.stats', { producerId: producer.id });
     check(inbound.stats.some(stat => stat.type === 'inbound-rtp' && stat.byteCount > 0), 'SFU received real encoded RTP bytes');
+    const startingScreen = source();
+    const sendRequest = client.sendRequest;
+    let releaseProduce;
+    let produceHeld = false;
+    const produceGate = new Promise(resolve => { releaseProduce = resolve; });
+    client.sendRequest = async (type, payload) => {
+      const response = await sendRequest.call(client, type, payload);
+      if (type === MessageType.SFU_PRODUCE && payload.appData?.shareId === startingScreen.stream.id && !produceHeld) {
+        produceHeld = true;
+        await produceGate;
+      }
+      return response;
+    };
+    try {
+      settings.preferredVideoCodec = 'av1';
+      const starting = rtc.addLocalScreenTrack(startingScreen.stream);
+      await until(() => produceHeld, 'SFU start waits for a real pending producer');
+      settings.preferredVideoCodec = selected;
+      const changing = rtc.reapplyCodecPreferences();
+      releaseProduce();
+      await Promise.all([starting, changing]);
+      check(startingScreen.stream.getVideoTracks()[0].readyState === 'live',
+        'A codec change during SFU startup preserves the captured source');
+      await actualCodec(rtc.getScreenSendersForShare(startingScreen.stream.id)[0], 'SFU startup latest selection');
+      await rtc.removeLocalScreenTrack(startingScreen.stream.id);
+      startingScreen.stop();
+    } finally {
+      releaseProduce();
+      client.sendRequest = sendRequest;
+      settings.preferredVideoCodec = selected;
+    }
+    const finalizingScreen = source();
+    const applyQuality = rtc.applyBitrateConstraints;
+    let releaseQuality;
+    let qualityHeld = false;
+    const qualityGate = new Promise(resolve => { releaseQuality = resolve; });
+    rtc.applyBitrateConstraints = async () => {
+      await applyQuality.call(rtc);
+      if (rtc.localScreenShares.get(finalizingScreen.stream.id)?.pending && !qualityHeld) {
+        qualityHeld = true;
+        await qualityGate;
+      }
+    };
+    try {
+      settings.preferredVideoCodec = 'av1';
+      const starting = rtc.addLocalScreenTrack(finalizingScreen.stream);
+      await until(() => qualityHeld, 'SFU startup reaches its final quality update');
+      settings.preferredVideoCodec = selected;
+      await rtc.reapplyCodecPreferences();
+      releaseQuality();
+      await starting;
+      await actualCodec(rtc.getScreenSendersForShare(finalizingScreen.stream.id)[0], 'SFU startup quality-phase latest selection');
+      await rtc.removeLocalScreenTrack(finalizingScreen.stream.id);
+      finalizingScreen.stop();
+    } finally {
+      releaseQuality();
+      rtc.applyBitrateConstraints = applyQuality;
+      settings.preferredVideoCodec = selected;
+    }
+    producer = sfu.producers.get(`screen_video:${screen.stream.id}`);
     settings.preferredVideoCodec = 'av1';
     await rtc.reapplyCodecPreferences();
     await actualCodec(rtc.getScreenSendersForShare(screen.stream.id)[0], 'SFU live AV1', 'video/av1');
@@ -569,16 +754,32 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
     const camera = await sfu.produceCamera(incompatibleSfu.stream.getVideoTracks()[0]);
     await actualCodec(camera.rtpSender, 'SFU camera fallback', 'video/vp8');
     incompatibleSfu.stop();
-    rtc.suspendForVoiceReconnect();
+    const screenAudioContext = new AudioContext();
+    const audioTrack = screenAudioContext.createMediaStreamDestination().stream.getAudioTracks()[0];
+    sources.push({ stop() { audioTrack.stop(); if (screenAudioContext.state !== 'closed') void screenAudioContext.close(); } });
+    await rtc.setLocalScreenAudioTrack(audioTrack);
+    const audioStream = rtc.screenAudioStream;
+    check(audioStream?.getAudioTracks()[0] === audioTrack, 'SFU records the same transport-independent audio source');
+    await rtc.removeLocalScreenTrack(screen.stream.id);
+    rtc.suspendForVoiceReconnect(true);
+    check(rtc.screenAudioStream === audioStream && audioTrack.readyState === 'live',
+      'A transport-only rebuild preserves the complete audio source, not just its track');
     settings.preferredVideoCodec = selected;
     store.serverDetails.voiceMode = 'p2p';
     rtc.resumeAfterVoiceReconnect();
     setupPeer();
     await rtc.connectToPeer('peer', true);
     await signalQueue;
+    check(rtc.peers.get('peer').screenAudioSender?.track === null && audioTrack.readyState === 'live',
+      'P2P preserves the source but never publishes screen audio without a watched screen');
     const afterMode = source();
     await rtc.addLocalScreenTrack(afterMode.stream);
     await actualCodec(rtc.getScreenSendersForShare(afterMode.stream.id)[0], 'SFU-to-P2P');
+    check(rtc.peers.get('peer').screenAudioSender?.track === audioTrack,
+      'Explicit Watch republishes the same audio source after a transport-only rebuild');
+    await rtc.setLocalScreenAudioTrack(null);
+    audioTrack.stop();
+    await screenAudioContext.close();
     await rtc.removeLocalScreenTrack(afterMode.stream.id);
     afterMode.stop();
     await signalQueue;
@@ -647,7 +848,10 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
       RTCRtpSender.getCapabilities = kind => ({ codecs: original.call(RTCRtpSender, kind).codecs.filter(codec => codec.mimeType.toLowerCase() !== 'video/h264'), headerExtensions: [] });
       navigator.mediaDevices.getDisplayMedia = async () => { captures++; return source().stream; };
       settings.preferredVideoCodec = 'h264';
-      const error = await expectFailure(() => videoService.startScreenShare(), 'Unsupported H.264 fails clearly');
+      const error = await expectFailure(async () => {
+        rtc.assertScreenShareSupported();
+        await videoService.startScreenShare();
+      }, 'Unsupported H.264 fails clearly before capture');
       check(error instanceof codecs.ScreenCodecError && captures === 0, 'Unsupported explicit codec never opens capture or silently substitutes AV1');
     } finally {
       RTCRtpSender.getCapabilities = original;
@@ -691,6 +895,8 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
     }
     rtc.closeAllPeers(); remote.close();
     if (!codecsOnly) {
+      await testScreenSharePickerLifecycle();
+      await testScreenAudioLifecycle();
       await testRejoinAdmission();
       await testForegroundAdmission();
     }
@@ -714,6 +920,360 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
     for (const item of sources) item.stop();
     voice.reset();
     appEvents.clear();
+  }
+
+  function profileOf(fmtp = '') {
+    return /(?:^|;)\s*profile-level-id=([0-9a-f]{6})(?:;|$)/i.exec(fmtp)?.[1].toLowerCase();
+  }
+
+  async function testScreenSharePickerLifecycle() {
+    const [{ ScreenSharePickerModal }, { webRtcManager: globalRtc }, { callClient }] = await Promise.all([
+      import('/views/ScreenSharePickerModal.ts'), import('/core/WebRtcManager.ts'), import('/core/serverConnection.ts'),
+    ]);
+    const picker = new ScreenSharePickerModal();
+    const client = callClient();
+    const originalSend = client.send;
+    const originalCapture = navigator.mediaDevices.getUserMedia;
+    const originalDisplay = navigator.mediaDevices.getDisplayMedia;
+    const originalNativeStart = globalRtc.startNativeScreenShare;
+    const originalCodec = settings.preferredVideoCodec;
+    const originalVideoPreset = videoService.currentPreset;
+    const captureWith = handler => {
+      navigator.mediaDevices.getUserMedia = handler;
+      navigator.mediaDevices.getDisplayMedia = handler;
+    };
+    const pendingCaptures = [];
+    const states = [];
+    let acquireNative;
+    let selection = 0;
+    let browserAcquisitions = 0;
+    const nativeSelections = [];
+    const mount = () => {
+      picker.close();
+      const modal = document.createElement('div');
+      modal.innerHTML = '<button id="btn-share">Share</button><button id="btn-share-add">Add</button>'
+        + '<button id="btn-cancel">Cancel</button><button id="modal-close">Close</button>'
+        + '<input type="hidden" id="chk-share-audio"><p id="share-capture-info"></p>';
+      document.body.appendChild(modal);
+      picker.modalEl = modal;
+      picker.activeTab = 'screen';
+      picker.selectedSourceId = `native-monitor:${String(++selection).padStart(64, '0')}`;
+      picker.nativeCapabilities = { capture: true, captureAudio: true, receive: true,
+        captureKinds: ['monitor'], backend: 'libobs-amf', reason: null };
+      picker.sourceState = { status: 'ready', sources: [
+        { id: picker.selectedSourceId, type: 'screen', name: 'Owned fixture display', thumbnailDataUrl: '', appIconDataUrl: null },
+      ] };
+      return modal;
+    };
+    const old = source();
+    videoService.screenStreams.set(old.stream.id, old.stream);
+    globalRtc.localScreenShares.set(old.stream.id, {
+      stream: old.stream, track: old.stream.getVideoTracks()[0], pending: false,
+    });
+    voice.addScreenShare(old.stream.id);
+    client.send = (type, payload) => { if (type === MessageType.VOICE_STATE_UPDATE) states.push(payload); };
+    settings.preferredVideoCodec = 'h264';
+    videoService.setQualityPreset('NORMAL');
+    captureWith(async () => { browserAcquisitions++; throw new Error('The picker must not fall back to Chromium capture.'); });
+    globalRtc.startNativeScreenShare = async (desktopSourceId, audio, thumbnail, isWanted, captureKind) => {
+      nativeSelections.push({ desktopSourceId, isWanted, captureKind });
+      check(captureKind === 'monitor' && desktopSourceId === picker.selectedSourceId,
+        'The picker forwards exactly the selected native source and method');
+      const stream = await acquireNative();
+      // Deliberately return even an obsolete descriptor to exercise the
+      // picker's cleanup independently of the native controller's own guard.
+      videoService.registerNativeScreenShare(stream, {
+        desktopSourceId, captureKind, thumbnail, audioBitrateKbps: 128,
+        source: { shareId: stream.id, instanceId: crypto.randomUUID(), audio,
+          video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 6000 } },
+      });
+      return stream;
+    };
+    try {
+      let acquisitions = 0;
+      acquireNative = async () => {
+        acquisitions++;
+        throw new DOMException('Picker cancelled', 'AbortError');
+      };
+      mount();
+      await picker.startSharing('replace');
+      check(acquisitions === 1 && old.stream.getVideoTracks()[0].readyState === 'live'
+        && voice.screenShareIds.includes(old.stream.id) && states.length === 0 && browserAcquisitions === 0,
+      'Cancelling acquisition preserves the existing share and never requests fallback capture');
+
+      acquireNative = () => new Promise(resolve => { pendingCaptures.push(resolve); });
+      mount();
+      const abandoned = picker.startSharing('replace');
+      await until(() => pendingCaptures.length === 1, 'Old picker waits for acquisition');
+      picker.close();
+      const currentModal = mount();
+      const current = picker.startSharing('add');
+      await until(() => pendingCaptures.length === 2, 'A new picker may start after cancelling the old one');
+      const late = new MediaStream();
+      pendingCaptures.shift()(late);
+      await abandoned;
+      check(!videoService.getScreenStream(late.id) && !videoService.getNativeScreenCapture(late.id)
+        && !nativeSelections[1].isWanted() && nativeSelections[2].isWanted()
+        && picker.modalEl === currentModal && picker.isStarting,
+        'A stale picker cannot clear the loading state or close its successor');
+      const added = new MediaStream();
+      pendingCaptures.shift()(added);
+      await current;
+      check(voice.screenShareIds.includes(old.stream.id) && voice.screenShareIds.includes(added.id)
+        && videoService.getNativeScreenCapture(added.id)?.captureKind === 'monitor'
+        && !globalRtc.localScreenShares.has(added.id) && !picker.modalEl,
+      'The current picker publishes the added share through the common control flow');
+
+      const replacement = new MediaStream();
+      acquireNative = async () => replacement;
+      states.length = 0;
+      mount();
+      await picker.startSharing('replace');
+      check(old.stream.getVideoTracks()[0].readyState === 'ended' && !videoService.getScreenStream(added.id)
+        && !videoService.getNativeScreenCapture(added.id) && videoService.getScreenStream(replacement.id) === replacement
+        && videoService.getNativeScreenCapture(replacement.id)?.captureKind === 'monitor'
+        && voice.screenShareIds.length === 1 && voice.screenShareIds[0] === replacement.id,
+      'Replacing from the picker retires all old shares but preserves the newly acquired source');
+      check(states.length === 1 && states[0].isScreenSharing === true
+        && states[0].screenShareIds[0] === replacement.id && states[0].nativeScreenShares[0].shareId === replacement.id,
+      'Replacement publishes one final screen state instead of an intermediate sharing=false');
+      check(browserAcquisitions === 0, 'Native picker scenarios never request the disabled Chromium path');
+
+      acquisitions = 0;
+      captureWith(async () => {
+        acquisitions++;
+        throw new DOMException('Permission denied', 'NotAllowedError');
+      });
+      const denied = await expectFailure(() => videoService.startScreenShare('screen:fixture'), 'Permission rejection is surfaced');
+      check(denied.name === 'NotAllowedError' && acquisitions === 1,
+        'Denied capture never starts a second capture request');
+    } finally {
+      picker.close();
+      for (const resolve of pendingCaptures) resolve(new MediaStream());
+      navigator.mediaDevices.getUserMedia = originalCapture;
+      navigator.mediaDevices.getDisplayMedia = originalDisplay;
+      globalRtc.startNativeScreenShare = originalNativeStart;
+      settings.preferredVideoCodec = originalCodec;
+      videoService.setQualityPreset(originalVideoPreset);
+      client.send = originalSend;
+      videoService.stopScreenShare();
+      globalRtc.clearLocalScreenTracks();
+      voice.setScreenSharing(false);
+    }
+  }
+
+  async function testSfuAudioStartDuringRestore(shareId) {
+    const context = new AudioContext();
+    const track = context.createMediaStreamDestination().stream.getAudioTracks()[0];
+    const sendRequest = client.sendRequest;
+    const restore = rtc.restoreSfuScreenShares;
+    let releaseVideo, releaseAudio;
+    const videoGate = new Promise(resolve => { releaseVideo = resolve; });
+    const audioGate = new Promise(resolve => { releaseAudio = resolve; });
+    let videoHeld = false, audioHeld = false, restored = false, audioProducers = 0;
+    client.sendRequest = async (type, payload) => {
+      const response = await sendRequest.call(client, type, payload);
+      if (type === MessageType.SFU_PRODUCE && payload.appData?.shareId === shareId && !videoHeld) {
+        videoHeld = true;
+        await videoGate;
+      }
+      if (type === MessageType.SFU_PRODUCE && payload.appData?.mediaType === 'screen_audio') {
+        audioProducers++;
+        audioHeld = true;
+        await audioGate;
+      }
+      return response;
+    };
+    rtc.restoreSfuScreenShares = async isCurrent => {
+      await restore.call(rtc, isCurrent);
+      restored = true;
+    };
+    try {
+      const joining = rtc.performSfuJoin();
+      await until(() => videoHeld, 'SFU rejoin reaches screen restoration');
+      const starting = rtc.setLocalScreenAudioTrack(track);
+      releaseVideo();
+      await until(() => restored && audioHeld, 'Audio start overlaps the rejoin audio-restoration step');
+      releaseAudio();
+      await Promise.all([joining, starting]);
+      check(audioProducers === 1 && rtc.localScreenAudioTrack === track && track.readyState === 'live',
+        'SFU restoration coalesces the pending audio start rather than cancelling its source');
+    } finally {
+      releaseVideo(); releaseAudio();
+      client.sendRequest = sendRequest;
+      rtc.restoreSfuScreenShares = restore;
+      await rtc.setLocalScreenAudioTrack(null);
+      track.stop();
+      await context.close();
+    }
+  }
+
+  async function testScreenAudioLifecycle() {
+    const [{ screenAudioService }, { webRtcManager: globalRtc }, { callClient }] = await Promise.all([
+      import('/core/ScreenAudioService.ts'), import('/core/WebRtcManager.ts'), import('/core/serverConnection.ts'),
+    ]);
+    const client = callClient();
+    const originalApi = window.api;
+    const originalPublish = globalRtc.setLocalScreenAudioTrack;
+    const originalSend = client.send;
+    const originalChannel = voice.currentVoiceChannelId;
+    let starts = 0;
+    const off = appEvents.on('local.screen_audio_started', () => { starts++; });
+    try {
+      for (const phase of ['setup', 'native', 'publish', 'channel']) {
+        const service = new screenAudioService.constructor();
+        let release;
+        const gate = new Promise(resolve => { release = resolve; });
+        let held = false;
+        let captureStops = 0;
+        let listeners = 0;
+        let capturedContext;
+        let capturedTrack;
+        const states = [];
+        const hold = async () => { held = true; await gate; };
+        window.api = {
+          screenAudioSupported: async () => true,
+          onScreenAudioFrame: () => { listeners++; return () => { listeners--; }; },
+          onScreenAudioError: () => { listeners++; return () => { listeners--; }; },
+          screenAudioStart: async () => { if (phase === 'native') await hold(); return { success: true }; },
+          screenAudioStop: async () => { captureStops++; return { success: true }; },
+        };
+        const setup = service.setupPipeline.bind(service);
+        service.setupPipeline = async () => {
+          await setup();
+          capturedContext = service.audioContext;
+          capturedTrack = service.outputTrack;
+          if (phase === 'setup') await hold();
+        };
+        globalRtc.setLocalScreenAudioTrack = async track => {
+          if (track && (phase === 'publish' || phase === 'channel')) await hold();
+        };
+        client.send = (type, payload) => { if (type === MessageType.VOICE_STATE_UPDATE) states.push(payload); };
+        try {
+          const starting = service.start('fixture');
+          await until(() => held, `Screen audio reaches its deferred ${phase} phase`);
+          if (phase === 'channel') {
+            voice.setChannel('other-room');
+            release();
+            check(await starting === null, 'A new call invalidates the old audio start');
+          } else {
+            const stopping = service.stop();
+            release();
+            check(await starting === null, `Stop cancels screen audio during ${phase}`);
+            await stopping;
+          }
+          await until(() => capturedContext.state === 'closed', 'Cancelled audio context closes');
+          check(capturedTrack.readyState === 'ended' && !service.getIsCapturing()
+            && !service.getOutputTrack() && listeners === 0, `${phase}: tracks, listeners and pipeline are released`);
+          check(captureStops === (phase === 'setup' ? 0 : 1), `${phase}: native capture stops exactly once if started`);
+          check(!states.some(state => state.isSharingScreenAudio === true), `${phase}: no late sharing=true announcement`);
+          if (phase === 'channel') check(states.length === 0, 'Old capture never changes the new call state');
+        } finally {
+          release();
+          await service.stop();
+          voice.setChannel(originalChannel);
+        }
+      }
+      check(starts === 0, 'Cancelled screen audio never emits a started event');
+      const tone = new screenAudioService.constructor();
+      globalRtc.setLocalScreenAudioTrack = async () => {};
+      const track = await tone.startTestTone();
+      const context = tone.audioContext;
+      try {
+        check(track?.readyState === 'live' && tone.getIsTestTone() && starts === 1,
+          'Test tone uses the same publication lifecycle with a real AudioWorklet');
+      } finally {
+        await tone.stop();
+      }
+      await until(() => context.state === 'closed', 'Test-tone context closes');
+      check(track.readyState === 'ended' && !tone.getIsCapturing(), 'Test-tone resources are retired too');
+    } finally {
+      off();
+      globalRtc.setLocalScreenAudioTrack = originalPublish;
+      client.send = originalSend;
+      if (originalApi) window.api = originalApi;
+      else delete window.api;
+      voice.setChannel(originalChannel);
+    }
+  }
+
+  async function testH264Profiles() {
+    const nativeProfile = capabilities.find(codec => codec.mimeType.toLowerCase() === 'video/h264'
+      && /(?:^|;)\s*packetization-mode=1(?:;|$)/.test(codec.sdpFmtpLine ?? '')
+      && ['42001f', '42e01f'].includes(profileOf(codec.sdpFmtpLine)));
+    check(!!nativeProfile, 'Runtime exposes a sendable Baseline or Constrained Baseline profile');
+    const expectedProfile = profileOf(nativeProfile.sdpFmtpLine);
+    const viewerClient = new NetworkClient();
+    viewerClient.sendRequest = request;
+    viewerClient.send = (type, payload) => { void request(type, payload).catch(error => signalErrors.push(error.message)); };
+    const videos = [];
+    const viewer = new SfuClientEngine(() => viewerClient, () => 'viewer', {
+      onHealthChanged() {}, onRoster() {}, onConsumerClosed() {}, onConnected() {},
+      isScreenWatched: () => true,
+      onConnectionFailed(reason) { signalErrors.push(reason); },
+      onConsumerTrack({ track }) {
+        const video = document.createElement('video');
+        video.autoplay = video.muted = true;
+        video.srcObject = new MediaStream([track]);
+        document.body.append(video);
+        videos.push(video);
+      },
+    });
+    const shared = source(640, 360);
+    try {
+      check(await sfu.join('room'), 'Profile scenarios use the production SFU router');
+      const sendProfiles = sfu.device.sendRtpCapabilities.codecs
+        .filter(codec => codec.mimeType.toLowerCase() === 'video/h264');
+      check(sendProfiles[0].parameters['profile-level-id'] === expectedProfile,
+        'SFU preserves native profile order rather than forcing the router first profile');
+      const { rtpCapabilities } = await request(MessageType.SFU_GET_ROUTER_RTP_CAPABILITIES, { channelId: 'room' });
+      const legacyDevice = new sfu.device.constructor();
+      await legacyDevice.load({ routerRtpCapabilities: rtpCapabilities });
+      const legacyFirst = legacyDevice.sendRtpCapabilities.codecs.find(codec => codec.mimeType.toLowerCase() === 'video/h264');
+      check(legacyFirst.parameters['profile-level-id'] === '42e01f',
+        'An older client that uses router order keeps Constrained Baseline');
+      check(await viewer.join('room'), 'A separate receiving client joins the real SFU fixture');
+      check(JSON.stringify(viewer.device.rtpCapabilities) === JSON.stringify(legacyDevice.rtpCapabilities),
+        'Legacy and updated clients negotiate the same receiving capabilities');
+      let producer = await sfu.produceScreenVideo(shared.stream.getVideoTracks()[0], shared.stream.id);
+      await actualCodec(producer.rtpSender, 'SFU native H264 profile', 'video/h264', expectedProfile);
+      await viewer.consumeRemoteProducer({
+        channelId: 'room', producerId: producer.id, producerSessionId: 'self', kind: 'video',
+        appData: { mediaType: 'screen_video', shareId: shared.stream.id },
+      });
+      const receiver = viewer.getConsumerReceiver('self', 'screen_video');
+      check(!!receiver, 'The SFU receiver is created for the selected H264 profile');
+      await until(async () => {
+        const stats = await receiver.getStats();
+        return [...stats.values()].some(stat => stat.type === 'inbound-rtp' && stat.framesDecoded > 0
+          && profileOf(stats.get(stat.codecId)?.sdpFmtpLine) === expectedProfile);
+      }, 'The selected H264 profile must arrive and decode through the SFU');
+      check(true, 'The receiving client decodes actual SFU video with the negotiated profile');
+      sfu.closeProducer(`screen_video:${shared.stream.id}`);
+
+      // Model a negotiated send set without Baseline; do not invent a codec
+      // absent from that set just because another machine could accelerate it.
+      sfu.device.sendRtpCapabilities.codecs = sfu.device.sendRtpCapabilities.codecs
+        .filter(codec => codec.mimeType.toLowerCase() !== 'video/h264'
+          || codec.parameters['profile-level-id'] === '42e01f');
+      producer = await sfu.produceScreenVideo(shared.stream.getVideoTracks()[0], shared.stream.id);
+      await actualCodec(producer.rtpSender, 'SFU constrained-only send set', 'video/h264', '42e01f');
+      sfu.closeProducer(`screen_video:${shared.stream.id}`);
+      check(shared.stream.getVideoTracks()[0].readyState === 'live', 'Changing producers preserves the capture track');
+      check(await sfu.join('legacy-room'), 'The updated client still joins a legacy Constrained-only server');
+      producer = await sfu.produceScreenVideo(shared.stream.getVideoTracks()[0], shared.stream.id);
+      await actualCodec(producer.rtpSender, 'SFU legacy router', 'video/h264', '42e01f');
+    } finally {
+      sfu.leave();
+      viewer.leave();
+      viewerClient.dispose();
+      shared.stop();
+      for (const video of videos) {
+        video.pause();
+        video.srcObject = null;
+        video.remove();
+      }
+    }
   }
 
   async function testRejoinAdmission() {
@@ -935,7 +1495,9 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly) {
 
       const screen = source();
       videoService.screenStreams.set(screen.stream.id, screen.stream);
-      globalRtc.localScreenTracks.set(screen.stream.id, screen.stream.getVideoTracks()[0]);
+      globalRtc.localScreenShares.set(screen.stream.id, {
+        stream: screen.stream, track: screen.stream.getVideoTracks()[0], pending: false,
+      });
       voice.addScreenShare(screen.stream.id);
       const beforeMove = views.length;
       const moving = view.rejoinVoiceChannel('moved-room');

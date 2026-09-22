@@ -16,6 +16,7 @@ import { DatabaseConnection } from './infrastructure/database/DatabaseConnection
 import { SqliteVoiceRestrictionRepository } from './infrastructure/database/SqliteVoiceRestrictionRepository';
 import { SfuManager, SfuProducerClosedError } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import './test-screen-subscriptions';
 
 function memoryRestrictions(): IVoiceRestrictionRepository {
   const saved = new Map<string, VoiceRestrictions>();
@@ -459,8 +460,8 @@ test('SFU health is derived from both server ICE/DTLS transports, not signaling 
   } as MediasoupTypes.WebRtcTransport);
   const send = transport('send');
   const recv = transport('recv');
-  sfu['transports'].set('send', { transport: send, sessionId: 'peer', channelId: 'room', direction: 'send' });
-  sfu['transports'].set('recv', { transport: recv, sessionId: 'peer', channelId: 'room', direction: 'recv' });
+  sfu['transports'].set('send', { transport: send, sessionId: 'peer', channelId: 'room', direction: 'send', purpose: 'call' });
+  sfu['transports'].set('recv', { transport: recv, sessionId: 'peer', channelId: 'room', direction: 'recv', purpose: 'call' });
   const state = (target: MediasoupTypes.WebRtcTransport, ice: string, dtls: string, closed = false) => {
     Object.defineProperties(target, {
       iceState: { configurable: true, value: ice }, dtlsState: { configurable: true, value: dtls },
@@ -489,10 +490,13 @@ test('real missing-producer consume path replies before the delayed close broadc
   const server = Object.create(WebSocketServer.prototype) as WebSocketServer;
   const sfu = new SfuManager();
   server['sfuManager'] = sfu;
+  server['signalingService'] = signaling();
+  await server['signalingService'].joinVoiceChannel('self', 'self', 'room');
   const transport = { id: 'recv', closed: false, close() {} } as MediasoupTypes.WebRtcTransport;
-  sfu['transports'].set('recv', { transport, sessionId: 'self', channelId: 'room', direction: 'recv' });
+  sfu['transports'].set('recv', { transport, sessionId: 'self', channelId: 'room', direction: 'recv', purpose: 'call' });
   sfu['producers'].set('producer', {
     producer: { id: 'producer', close() {} } as MediasoupTypes.Producer,
+    transportId: 'send-peer',
     sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'camera' },
   });
   const session: Parameters<WebSocketServer['handleSfuConsume']>[0] = {
@@ -509,7 +513,7 @@ test('real missing-producer consume path replies before the delayed close broadc
     await pendingPermission;
     broadcasts.push(message);
   };
-  server['handleSfuProducerClosed'](session, { channelId: 'room', producerId: 'producer' });
+  server['handleSfuProducerClosed']({ ...session, sessionId: 'peer' }, { channelId: 'room', producerId: 'producer' });
   await server['handleSfuConsume'](session, {
     channelId: 'room', transportId: 'recv', producerId: 'producer', rtpCapabilities: {},
   }, 'consume-request');
@@ -535,9 +539,10 @@ test('producer disappearance during worker consume is obsolete work, but transpo
         throw error;
       },
     };
-    sfu['transports'].set('recv', { transport: transport as MediasoupTypes.WebRtcTransport, sessionId: 'self', channelId: 'room', direction: 'recv' });
+    sfu['transports'].set('recv', { transport: transport as MediasoupTypes.WebRtcTransport, sessionId: 'self', channelId: 'room', direction: 'recv', purpose: 'call' });
     sfu['producers'].set('producer', {
       producer: { id: 'producer', closed: false, close() {} } as MediasoupTypes.Producer,
+      transportId: 'send-peer',
       sessionId: 'peer', channelId: 'room', kind: 'video', appData: { mediaType: 'screen_video' },
     });
 
@@ -566,18 +571,20 @@ test('SFU pause and resume tolerate retired consumers but propagate failures of 
         id: 'consumer', closed: false, close() {}, pause: changeState, resume: changeState,
       };
       sfu['consumers'].set('consumer', {
-        consumer: consumer as MediasoupTypes.Consumer, sessionId: 'self', channelId: 'room', producerId: 'producer',
+        consumer: consumer as MediasoupTypes.Consumer, transportId: 'recv',
+        sessionId: 'self', channelId: 'room', producerId: 'producer',
       });
       sfu['producers'].set('producer', {
         producer: { id: 'producer', closed: false, close() {} } as MediasoupTypes.Producer,
+        transportId: 'send-peer',
         sessionId: 'peer', channelId: 'room', kind: 'audio', appData: { mediaType: 'mic' },
       });
       if (disappearance === 'before') sfu.closeProducer('producer');
       try {
         if (disappearance === 'none') {
-          await assert.rejects(sfu.setConsumerPaused('consumer', paused), actual => actual === error);
+          await assert.rejects(sfu.setConsumerPaused('self', 'room', 'consumer', paused), actual => actual === error);
         } else {
-          await sfu.setConsumerPaused('consumer', paused);
+          await sfu.setConsumerPaused('self', 'room', 'consumer', paused);
         }
         assert.equal(calls, disappearance === 'before' ? 0 : 1);
       } finally {
@@ -621,16 +628,18 @@ test('SFU allocations completing after a human reconnect are reaped without touc
         if (allocation === 'transport' || allocation === 'initialization') {
           sfu['transports'].set(entry.id, {
             transport: entry as MediasoupTypes.WebRtcTransport,
-            sessionId: 'self', channelId: 'room', direction: 'send',
+            sessionId: 'self', channelId: 'room', direction: 'send', purpose: 'call',
           });
         } else if (allocation === 'producer') {
           sfu['producers'].set(entry.id, {
             producer: entry as MediasoupTypes.Producer,
+            transportId: 'old-transport',
             sessionId: 'self', channelId: 'room', kind: 'audio', appData: { mediaType: 'mic' },
           });
         } else {
           sfu['consumers'].set(entry.id, {
             consumer: entry as MediasoupTypes.Consumer,
+            transportId: 'old-transport',
             sessionId: 'self', channelId: 'room', producerId: 'peer-producer',
           });
         }

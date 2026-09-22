@@ -7,7 +7,7 @@
     <a href="https://github.com/MonkyOrg/Monky/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/MonkyOrg/Monky?label=download&color=5865f2"></a>
     <a href="https://monkyorg.github.io/Monky/"><img alt="Documentação" src="https://img.shields.io/badge/docs-monkyorg.github.io-blue"></a>
     <a href="https://buymeacoffee.com/monkyorg"><img alt="Buy Me A Coffee" src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Apoiar-yellow.svg"></a>
-    <a href="LICENSE"><img alt="Licença MIT" src="https://img.shields.io/badge/licen%C3%A7a-MIT-green"></a>
+    <a href="LICENSE"><img alt="Licença GPL-3.0-or-later" src="https://img.shields.io/badge/licen%C3%A7a-GPL--3.0--or--later-green"></a>
     <a href="https://github.com/MonkyOrg/Monky/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/MonkyOrg/Monky/actions/workflows/ci.yml/badge.svg"></a>
     <a href="https://github.com/MonkyOrg/Monky/discussions/categories/ideas"><img alt="Ideias" src="https://img.shields.io/badge/ideias-vote%20aqui-orange"></a>
   </p>
@@ -95,14 +95,37 @@ Bugs começam em [Discussions › Bug Reports](https://github.com/MonkyOrg/Monky
 
 ## 💻 Para desenvolvedores
 
-Requisitos: Node.js 22+ (versão usada pelo CI) e npm. No Windows, o módulo nativo de áudio de tela precisa de Python 3.11 e Build Tools do Visual Studio (MSVC).
+Requisitos: Node.js 22+ (versão usada pelo CI) e npm. No Windows, os módulos nativos precisam de Python 3.11 x64 e ferramentas C++ do Visual Studio **2022 (17.x)**. O preparo de captura seleciona v143/MSVC 14.30–14.44, mesmo com VS mais novo instalado; VS2026 não substitui esse pré-requisito. Confira também ATL/MFC e o SDK 10.0.26100.0 com servicing mínimo 10.0.26100.3323 no guia abaixo.
 
 ```bash
-npm install
+npm ci
 npm run build
 npm start
 npm test
 ```
+
+O seletor de compartilhamento tem duas abas: **Telas** e **Janelas**.
+Após selecionar uma janela, escolha **Captura de janela (WGC)** (padrão)
+ou **Captura de jogo (hook)** e confirme. São métodos da mesma janela,
+não listas separadas nem detecção automática de jogos.
+
+Para captura nativa de **janela, monitor ou Game Capture** no Windows x64,
+siga o [guia do módulo](apps/client/native/screen-share/README.md): recompilação
+dos addons para o Electron fixado, preparo libobs/WebRTC e pré-requisitos
+Python 3.11/MSVC/SDK são etapas distintas. O vídeo é H.264 por AMD AMF ou
+NVIDIA NVENC; AV1 está indisponível. A fonte escolhida passa por um probe após
+confirmação, sem fallback automático para Chromium/software e sem garantia
+de compatibilidade pela marca da GPU. `npm ci` e `npm run build` sozinhos não
+preparam esse runtime.
+No primeiro preparo, ou se mudarem as fontes de `screen-audio` ou o Electron,
+siga `buildScreenAudio.cjs` no guia: ele usa o `node-gyp` local e o mesmo
+seletor VS2022/MSVC/SDK, depois de `prepare:native-screen`. Esse preparo compila
+RTC/captura de `screen-share`, não o `screen_audio.node`. Um addon já compatível
+não precisa ser reconstruído por uma atualização somente de scripts/TypeScript.
+
+O preparo é obrigatório antes de empacotar no Windows. Ao redistribuir, inclua
+as licenças, o código da mesma tag e o arquivo de fontes nativas com manifesto
+JSON descritos no guia; não copie apenas o executável ou misture runtimes OBS.
 
 Detalhes de arquitetura estão em [Arquitetura](https://monkyorg.github.io/Monky/arquitetura), o fluxo de contribuição em [CONTRIBUTING.md](CONTRIBUTING.md) e os comandos do servidor no [manual do Monky CLI](https://monkyorg.github.io/Monky/cli). A especificação original do projeto — com MVP e roadmap — ficou registrada em [docs/especificacao-tecnica.md](docs/especificacao-tecnica.md).
 
@@ -114,4 +137,9 @@ Se você gosta do Monky e quer apoiar o desenvolvimento contínuo, pague um caf�
 
 ## 📄 Licença
 
-[MIT](LICENSE) — use, modifique e hospede à vontade.
+[GNU GPL versão 3 ou posterior](LICENSE) — software livre, sem garantia.
+Você pode usar, modificar e redistribuir o Monky sob esses termos; ao distribuir
+binários, disponibilize também o código-fonte correspondente e os avisos de licença.
+Copyright (c) 2026 Monky Contributors. O aviso [MIT original](LICENSE-MIT) permanece
+preservado para o código anteriormente publicado sob essa licença. Dependências
+de terceiros mantêm seus próprios avisos e licenças.

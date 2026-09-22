@@ -1,0 +1,24 @@
+{
+  "obsVersion": "32.1.1",
+  "obsRevision": "7272af1375b38bc3cf4e0f98a5d999e8b76e9309",
+  "archiveSha256": "a4cc40a06d5a5dc158c792631b596a04b02d8fe99644a0f0bc3b12199dbce011",
+  "files": [
+    {
+      "path": "obs-plugins\\64bit\\obs-nvenc.dll",
+      "bytes": 76048,
+      "sha256": "51bab18d74c0699201ada48db0df5ed6a0d51090612e0e5ebd847678cd608886"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-nvenc\\locale\\en-US.ini",
+      "bytes": 4084,
+      "sha256": "187cbbd4b771b11b17b870b2d9eb77cc1b577aa7e6e3c3a39098cf88ffb96cf6"
+    }
+  ],
+  "dependencies": [
+    {
+      "path": "include\\ffnvcodec\\nvEncodeAPI.h",
+      "bytes": 302543,
+      "sha256": "9425f03bc0357c9dcd3bdc6fcbce5c3401899a843b5ac6f9a8faa5cf561c9327"
+    }
+  ]
+}

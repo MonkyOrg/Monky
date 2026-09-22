@@ -326,10 +326,11 @@ export class BotVoiceConnection {
     if (this.peers.size >= 1000) throw new Error('Voice peer limit exceeded.');
     const Peer = this.Peer;
     if (!Peer) throw new Error('Voice transport has not been loaded.');
+    const subscriptionId = randomUUID();
     const peer = new Peer(this.auth.iceServers, (error) => this.failPeer(sessionId, peer, error), (signal) => {
       if (!this.closed && !peer.isClosed && this.peers.get(sessionId) === peer) this.callbacks.send({
         type: MessageType.RTC_SIGNAL,
-        payload: { ...signal, fromSessionId: this.auth.currentUser.sessionId, targetSessionId: sessionId },
+        payload: { ...signal, subscriptionId, fromSessionId: this.auth.currentUser.sessionId, targetSessionId: sessionId },
       });
     }, { publish: this.publishAudio, receive: this.receiving, packet: (packet) => {
       if (this.peers.get(sessionId) === peer) this.receivePacket(sessionId, packet);

@@ -9,6 +9,8 @@ import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadRes
 import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
 import type { ServerInviteResult } from './serverInvites.js';
+import type { NativeScreenCommand, NativeScreenCommandResult, NativeScreenEvent, NativeScreenReply } from './nativeScreenIpc.js';
+import type { NativeScreenCaptureMode } from './screenSharing.js';
 import type {
   LocalExecutionMutationResult,
   LocalExecutionSnapshot,
@@ -61,6 +63,7 @@ export interface DesktopSource {
   id: string;
   name: string;
   type: 'screen' | 'window';
+  displayNumber?: number;
   thumbnailDataUrl: string;
   appIconDataUrl: string | null;
 }
@@ -462,6 +465,7 @@ export interface OverlayParticipantState {
   isLocal: boolean;
   videoSlotIndex?: number;
   screenSlotIndexes?: Record<string, number>;
+  screenCaptureModes?: Record<string, NativeScreenCaptureMode>;
 }
 
 export interface OverlaySyncState {
@@ -477,10 +481,169 @@ export interface OverlaySignalPayload {
   signal: string; // JSON com Offer/Answer/Candidate
 }
 
+export interface NativeScreenAudioOutputConfig {
+  epoch: number;
+  sinkId: string;
+  sampleRate: 48000;
+  channels: 2;
+}
+
+export interface NativeScreenAudioClockProbeRequest {
+  epoch: number;
+  probeId: number;
+}
+
+export interface NativeScreenAudioClockProbe extends NativeScreenAudioClockProbeRequest {
+  rtcBeforeUs: number;
+  rtcAfterUs: number;
+}
+
+export interface NativeScreenAudioCalibrationRequest extends NativeScreenAudioClockProbeRequest {
+  rendererBeforeUs: number;
+  rendererAfterUs: number;
+}
+
+export interface NativeScreenAudioCalibration {
+  epoch: number;
+  calibrationId: number;
+  offsetUs: number;
+  uncertaintyUs: number;
+}
+
+export type NativeScreenAudioFeedback =
+  | { epoch: number; available: false }
+  | {
+    epoch: number;
+    available: true;
+    clockEpoch: number;
+    calibrationId: number;
+    atPerformanceTimeUs: number;
+    estimatedPlayoutFrame: number;
+    confirmedPcmEnd: number;
+    feedbackAgeUs: number;
+    outputClockAgeUs: number;
+  };
+
+export interface NativeScreenAudioCredits {
+  epoch: number;
+  grantSequence: number;
+  frames: 480 | 960;
+}
+
+export interface NativeScreenAudioPcmPacket {
+  epoch: number;
+  sequence: number;
+  firstPlayoutFrame: number;
+  frames: 480;
+  sampleRate: 48000;
+  channels: 2;
+  samples: Float32Array;
+}
+
+export interface NativeScreenAudioError {
+  code: string;
+  message: string;
+}
+
+export interface NativeScreenAudioRpc {
+  configure: {
+    request: NativeScreenAudioOutputConfig;
+    result: Omit<NativeScreenAudioOutputConfig, 'sinkId'>;
+  };
+  probe: {
+    request: NativeScreenAudioClockProbeRequest;
+    result: NativeScreenAudioClockProbe;
+  };
+  calibrate: {
+    request: NativeScreenAudioCalibrationRequest;
+    result: NativeScreenAudioCalibration;
+  };
+  stop: {
+    request: { epoch: number };
+    result: { epoch: number; stopped: true };
+  };
+}
+
+export interface NativeScreenAudioPortEvents {
+  ready: NativeScreenAudioOutputConfig;
+  disposed: NativeScreenAudioRpc['stop']['result'];
+  pcm: NativeScreenAudioPcmPacket;
+  credits: NativeScreenAudioCredits;
+  feedback: NativeScreenAudioFeedback;
+  error: NativeScreenAudioError;
+}
+
+export interface NativeScreenAudioPortScope {
+  portId: string;
+  epoch: number;
+}
+
+export interface NativeScreenAudioPortInfo {
+  version: 1;
+  sessionId: string;
+  portId: string;
+  output: NativeScreenAudioOutputConfig;
+}
+
+export type NativeScreenAudioRequest = {
+  [Method in keyof NativeScreenAudioRpc]: {
+    type: 'request';
+    id: number;
+    method: Method;
+    data: NativeScreenAudioRpc[Method]['request'];
+  };
+}[keyof NativeScreenAudioRpc] & NativeScreenAudioPortScope;
+
+export type NativeScreenAudioResponse = {
+  [Method in keyof NativeScreenAudioRpc]: {
+    type: 'response';
+    id: number;
+    method: Method;
+  } & (
+    | { ok: true; data: NativeScreenAudioRpc[Method]['result'] }
+    | { ok: false; error: NativeScreenAudioError }
+  );
+}[keyof NativeScreenAudioRpc] & NativeScreenAudioPortScope;
+
+export type NativeScreenAudioPortEvent = {
+  [Event in keyof NativeScreenAudioPortEvents]: {
+    type: 'event';
+    event: Event;
+    data: NativeScreenAudioPortEvents[Event];
+  };
+}[keyof NativeScreenAudioPortEvents] & NativeScreenAudioPortScope;
+
+export type NativeScreenAudioPortMessage =
+  | NativeScreenAudioRequest
+  | NativeScreenAudioResponse
+  | NativeScreenAudioPortEvent;
+
+// These channels transfer one private MessagePort, not a renderer-facing invoke API.
+export interface IpcPortEvents {
+  'native-screen:audio-output-port': NativeScreenAudioPortInfo;
+  'native-screen:preview-port': import('./nativeScreenIpc.js').NativeScreenPreviewInfo;
+}
+
+export const NATIVE_SCREEN_PREVIEW_IPC = {
+  port: 'native-screen:preview-port',
+} as const satisfies Record<string, keyof IpcPortEvents>;
+
+export const NATIVE_SCREEN_AUDIO_IPC = {
+  outputPort: 'native-screen:audio-output-port',
+} as const satisfies Record<string, keyof IpcPortEvents>;
+
+export const NATIVE_SCREEN_IPC = {
+  invoke: 'native-screen:invoke',
+  reply: 'native-screen:reply',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEvents;
+
 /**
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
  */
 export interface IpcInvokeChannels {
+  'native-screen:invoke': { args: [command: NativeScreenCommand]; returnType: NativeScreenCommandResult };
+  'native-screen:reply': { args: [reply: NativeScreenReply]; returnType: void };
   'server-invite:take': { args: []; returnType: ServerInviteResult | null };
   'development-qa:config': { args: []; returnType: DevelopmentQaConfig | null };
   'development-qa:report': { args: [report: DevelopmentQaReport]; returnType: boolean };
@@ -640,6 +803,7 @@ export interface IpcInvokeChannels {
  * Mapeamento de Eventos Unidirecionais (Main -> Renderer via webContents.send)
  */
 export interface IpcEvents {
+  'native-screen:event': [event: NativeScreenEvent];
   'server-invite:available': [];
   // Pedido de despedida antes do processo morrer: o renderer sai das chamadas e
   // avisa os servidores enquanto ainda esta vivo (#458)

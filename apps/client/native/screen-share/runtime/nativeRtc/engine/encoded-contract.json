@@ -1,0 +1,30 @@
+{
+  "abiVersion": 2,
+  "contractRevision": 7,
+  "stage": "native-screen-runtime",
+  "commands": {
+    "source.createEncodedVideo": "target=0; {width:even[2,1920],height:even[2,1080],fps:integer[1,120],syncGroup,enabled?:false} -> {sourceId}; requires engine videoInput:'encoded-h264'. Each independently encoded rendition owns its engine and external video source. RTC cannot rescale or increase the source framerate; no GPU/raw input import or transmitter codec instantiation.",
+    "peer.configureBitrate": "target=peerId; {startBitrateBps,maxBitrateBps},150000<=start<=max<=20000000. Public PeerConnection.SetBitrate only once before publication; no forced minimum or periodic estimator resets. Returns configured values plus minimumBitrateForced:false and bandwidthMeasured:false. This is a startup estimate, not proof of available bandwidth; congestion control remains responsible for later allocation.",
+    "peer.configureVideoPlayout": "target=peerId; {minimumDelayMs:integer[0,1000]}, only once before any receivers exist. Applies the public SetJitterBufferMinimumDelay API to video receivers; audio is unchanged. Returns {minimumDelayMs,actualDelayMeasured:false}; a request is not an end-to-end latency measurement."
+  },
+  "node": {
+    "options": "Revision6 options plus videoInput:'nv12'|'encoded-h264' (default nv12). Encoded source and engine modes must match.",
+    "submitEncodedFrame": "engine.submitEncodedFrame(sourceId,{frameId,data:Buffer,keyframe,timestampUs,durationUs,ntpTimeMs,pts,dts,timebaseNumerator,timebaseDenominator}) -> {sourceId,frameId,inputBytes,copied:true,networkDeliveryConfirmed:false}; synchronous bounded native copy, not a JS-memory loan, retirement Promise or network delivery proof. PTS/DTS are original canonical signed int64 decimal strings."
+  },
+  "events": {
+    "source.encodedFrameReleased": "target=sourceId; {sourceId,frameId,acceptedCodecCallbacks,explicitlyNotSent,cancelled,unconsumed,pausedConsumerPresent,nativeCopyRetired:true,networkDeliveryConfirmed:false}; final native compressed copy retirement, not remote delivery.",
+    "source.encodedFeedback": "target=sourceId; sequence increases at actual event delivery. kind:'rate'|'encoder-closed' exposes requestedBitrateBps, selected bitrateBps, requestedFps, fpsApplied:null, paused and20Mbps ceiling. kind:'keyframe' requests next-real-idr within1500ms. kind:'recovery' carries frameId,generation,reason:'rtc-unconsumed'|'input-expired'|'publication-expired'|'codec-expired',mode:'next-real-idr',maximumWaitMs:1500 and keyframeConfirmed:false; it invalidates dependent queued pictures without fabricating ownership retirement or bypassing congestion control."
+  },
+  "input": {
+    "codec": "Annex B H264 Main, negotiated maximum level5.1, exact source dimensions, BT.709 limited, L1T1; no B slices. A smaller rendition may carry a lower valid H264 level. Current in-band SPS/PPS are retained transactionally and completed on IDR; no stale extra-data reinsertion. Source stats expose the actual SPS profileLevelId only after observing it.",
+    "timestamps": "timestampUs is the genuine original presentation time in system-QPC microseconds, mapped by the existing paired capture clock. Frame IDs, timestamps and original PTS/DTS each increase strictly. Independent DTS offset is valid with I/P pictures; neither timestamp is synthesized from packet index or rewritten to equal the other. ntpTimeMs=-1 when unavailable.",
+    "bounds": "4MiB per AU,16 retained native copies/8MiB total, maximum input age500ms including the codec boundary. Only one RTC frame-buffer dispatch is outstanding; its retirement detects unconsumed pictures and fences their dependency generation before dispatching another. Expired AUs are never forwarded. Input rejected for IDR recovery throws ERR_RTC_ENCODED_RECOVERY with BUSY(status8), without admitting a copy; other errors remain failures. Recovery preserves the1500ms deadline across repeated failed IDRs and completes only when a current IDR is actually accepted by the codec callback. Closed, disabled, paused or no-consumer sources reject admission explicitly.",
+    "feedback": "A shared encoder uses the lowest positive requested bitrate across active consumers, capped at20Mbps. All-zero feedback pauses admission; resume waits for a real IDR. requestedFps is the finite uint32-domain RTC arrival-rate estimate, which can exceed the120fps media configuration during bursts; it never retimes media or claims applied FPS. Encoded-only factories keep the350ms congestion window and30Kbps pushback floor, but lower producer bitrate instead of raw-frame dropping. Overshoot adjustment, pacing and congestion control remain active; NV12 factories retain their defaults.",
+    "ownership": "Source shutdown fences publication and joins its worker only after every native encoded buffer has retired. GPU receiver leases retain the existing external-reference/fence proof; encoded bytes never replace those obligations."
+  },
+  "proofLimits": [
+    "Compiled capabilities and CPU contracts do not qualify hardware execution, frame uniqueness, internet performance or physical presentation.",
+    "Encoded output callbacks and packet counts do not prove equal numbers of distinct captured images.",
+    "No transmitter decoding, raw conversion, scaling or second encoder is permitted."
+  ]
+}

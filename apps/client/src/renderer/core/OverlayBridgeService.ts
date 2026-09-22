@@ -2,6 +2,7 @@ import type {
   OverlayConfig,
   OverlayParticipantState,
   OverlaySyncState,
+  NativeScreenCaptureMode,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { sessionManager } from './SessionManager';
@@ -26,6 +27,7 @@ export class OverlayBridgeService {
   private localPeerConnection: RTCPeerConnection | null = null;
   private videoSenders: RTCRtpSender[] = [];
   private pendingVideoUpdates = new WeakMap<RTCRtpSender, { track: MediaStreamTrack; task: Promise<void> }>();
+  private retiredVideoTracks = new WeakSet<MediaStreamTrack>();
   private cameraSubscriptions: Array<() => void> = [];
   private dummyTrack: MediaStreamTrack | null = null;
   private unbindListeners: Array<() => void> = [];
@@ -35,8 +37,10 @@ export class OverlayBridgeService {
   private isWindowFocused = true;
   private wasAutoOpened = false;
   private userManuallyClosed = false;
+  private captureModeFor: ((sessionId: string, shareId: string) => NativeScreenCaptureMode | null) | null = null;
 
-  public init(): void {
+  public init(captureModeFor: (sessionId: string, shareId: string) => NativeScreenCaptureMode | null): void {
+    this.captureModeFor = captureModeFor;
     if (!window.api?.onOverlayStateChanged) return;
 
     this.unbindListeners.push(
@@ -126,6 +130,8 @@ export class OverlayBridgeService {
     appEvents.on('voice.state_updated', triggerSync);
     appEvents.on('voice.speaking_changed', triggerSync);
     appEvents.on('participants.updated', triggerSync);
+    this.unbindListeners.push(appEvents.on('native_screen.updated', triggerSync));
+    this.unbindListeners.push(appEvents.on('voice.screen_watch_changed', triggerSync));
     appEvents.on('participants.speaking_changed', triggerSync);
     appEvents.on('settings.updated', triggerSync);
     appEvents.on('overlay_settings.updated', () => {
@@ -240,7 +246,7 @@ export class OverlayBridgeService {
     const apply = async () => {
       if (!this.isWebRtcReady || this.localPeerConnection !== connection || this.videoSenders[index] !== sender
         || this.pendingVideoUpdates.get(sender) !== update) return;
-      await sender.replaceTrack(track.readyState === 'live' ? track : this.getOrCreateDummyTrack());
+      await sender.replaceTrack(track.readyState === 'live' && !this.retiredVideoTracks.has(track) ? track : this.getOrCreateDummyTrack());
     };
     const task = (pending?.task ?? Promise.resolve()).then(apply, apply);
     const update = { track, task };
@@ -252,6 +258,18 @@ export class OverlayBridgeService {
       clear();
       if (this.localPeerConnection === connection) console.error(`[OverlayBridge] Could not replace video slot ${index}:`, error);
     });
+  }
+
+  public async retireScreenStream(stream: MediaStream): Promise<void> {
+    const tracks = new Set<MediaStreamTrack>(stream.getVideoTracks());
+    for (const track of tracks) this.retiredVideoTracks.add(track);
+    const connection = this.localPeerConnection;
+    await Promise.all(this.videoSenders.map(async sender => {
+      const pending = this.pendingVideoUpdates.get(sender);
+      if (pending && tracks.has(pending.track)) await pending.task;
+      if (this.localPeerConnection === connection && sender.track && tracks.has(sender.track))
+        await sender.replaceTrack(this.getOrCreateDummyTrack());
+    }));
   }
 
   private getOrCreateDummyTrack(): MediaStreamTrack {
@@ -357,6 +375,8 @@ export class OverlayBridgeService {
     this.isWebRtcReady = false;
     this.videoSenders = [];
     this.pendingVideoUpdates = new WeakMap();
+    this.dummyTrack?.stop();
+    this.dummyTrack = null;
   }
 
   public syncState(): void {
@@ -427,6 +447,7 @@ export class OverlayBridgeService {
 
       let videoSlotIndex: number | undefined;
       const screenSlotIndexes: Record<string, number> = {};
+      const screenCaptureModes: Record<string, NativeScreenCaptureMode> = {};
 
       // No modo minimalista, vídeo é desnecessário
       if (!config.minimalistMode) {
@@ -445,6 +466,7 @@ export class OverlayBridgeService {
         // Atribuir slot para Compartilhamento de Telas (se habilitado)
         if (config.mode === 'cameras-and-screens') {
           for (const shareId of shareIds) {
+            if (!isLocal && !voiceStore.isWatchingScreen(sidOf(p), shareId)) continue;
             if (nextSlotIndex < MAX_VIDEO_SLOTS) {
               const stream = isLocal
                 ? videoService.getScreenStream(shareId)
@@ -454,6 +476,10 @@ export class OverlayBridgeService {
               const videoTrack = stream?.getVideoTracks()[0] || null;
               if (videoTrack && videoTrack.readyState === 'live') {
                 screenSlotIndexes[shareId] = nextSlotIndex;
+                const native = isLocal ? !!videoService.getNativeScreenCapture(shareId)
+                  : p.voiceState?.nativeScreenShares?.some(source => source.shareId === shareId) === true;
+                const captureMode = native ? this.captureModeFor?.(sidOf(p), shareId) : 'normal';
+                if (captureMode) screenCaptureModes[shareId] = captureMode;
 
                 this.updateVideoSender(nextSlotIndex, videoTrack);
                 nextSlotIndex++;
@@ -478,6 +504,7 @@ export class OverlayBridgeService {
         isLocal,
         videoSlotIndex,
         screenSlotIndexes,
+        screenCaptureModes,
       };
     });
 

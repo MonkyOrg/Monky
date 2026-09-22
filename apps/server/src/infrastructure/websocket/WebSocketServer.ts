@@ -92,11 +92,13 @@ import {
   SfuCreateWebRtcTransportPayload,
   SfuWebRtcTransportCreatedPayload,
   SfuConnectWebRtcTransportPayload,
+  SfuCloseWebRtcTransportPayload,
   SfuProducePayload,
   SfuProducedPayload,
   SfuConsumePayload,
   SfuConsumedPayload,
   SfuProducerClosedPayload,
+  SfuProducerSetPausedPayload,
   SfuConsumerClosedPayload,
   SfuConsumerSetPausedPayload,
   SfuNewProducerPayload,
@@ -122,6 +124,20 @@ import {
   botPermissionsGetSchema,
   botPermissionsUpdateSchema,
   type BotCapability,
+  messageReferenceSchema,
+  rtcSignalSchema,
+  nativeScreenSignalSchema,
+  nativeScreenSourcesSchema,
+  getScreenShareQualities,
+  screenShareProfileKey,
+  sfuCreateWebRtcTransportSchema,
+  sfuCloseWebRtcTransportSchema,
+  sfuProducerClosedSchema,
+  sfuProducerSetPausedSchema,
+  sfuConsumerClosedSchema,
+  sfuConsumerSetPausedSchema,
+  sfuConsumeSchema,
+  sfuMediaAppDataSchema,
   isBotVoiceSignalAllowed,
   isReceivingBotVoice,
   botVoiceStateUpdateSchema,
@@ -785,6 +801,10 @@ export class WebSocketServer {
         this.handleRtcSignal(session, payload as WebRtcSignalPayload, requestId);
         break;
 
+      case MessageType.NATIVE_SCREEN_SIGNAL:
+        this.handleNativeScreenSignal(session, payload, requestId);
+        break;
+
       case MessageType.RTC_DIAGNOSTICS_REPORT:
         this.handleRtcDiagnosticsReport(session, payload as RtcDiagnosticsReportPayload);
         break;
@@ -816,7 +836,17 @@ export class WebSocketServer {
 
       case MessageType.SFU_PRODUCER_CLOSED:
         if (!(await this.requireSfuMode(session, requestId))) return;
-        this.handleSfuProducerClosed(session, payload as SfuProducerClosedPayload);
+        this.handleSfuProducerClosed(session, payload, requestId);
+        break;
+
+      case MessageType.SFU_PRODUCER_SET_PAUSED:
+        if (!(await this.requireSfuMode(session, requestId))) return;
+        await this.handleSfuProducerSetPaused(session, payload, requestId);
+        break;
+
+      case MessageType.SFU_CLOSE_WEBRTC_TRANSPORT:
+        if (!(await this.requireSfuMode(session, requestId))) return;
+        this.handleSfuCloseWebRtcTransport(session, payload, requestId);
         break;
 
       case MessageType.SFU_GET_PRODUCERS:
@@ -826,7 +856,12 @@ export class WebSocketServer {
 
       case MessageType.SFU_CONSUMER_SET_PAUSED:
         if (!(await this.requireSfuMode(session, requestId))) return;
-        await this.handleSfuConsumerSetPaused(session, payload as SfuConsumerSetPausedPayload);
+        await this.handleSfuConsumerSetPaused(session, payload, requestId);
+        break;
+
+      case MessageType.SFU_CONSUMER_CLOSED:
+        if (!(await this.requireSfuMode(session, requestId))) return;
+        this.handleSfuConsumerClosed(session, payload, requestId);
         break;
 
       case MessageType.SOUNDBOARD_PLAY:
@@ -3058,6 +3093,17 @@ export class WebSocketServer {
       return;
     }
     const effectivePayload: VoiceStateUpdatePayload = { ...payload };
+    if (payload?.nativeScreenShares !== undefined) {
+      const parsed = nativeScreenSourcesSchema.safeParse(payload.nativeScreenShares);
+      const shareIds = payload.isScreenSharing === false ? [] : (payload.screenShareIds ?? current?.screenShareIds ?? []);
+      if (!parsed.success || !Array.isArray(shareIds)
+        || parsed.data.some(source => !shareIds.includes(source.shareId))
+        || (session.isBot && parsed.data.length > 0)) {
+        this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Descritores de transmissão inválidos.', requestId);
+        return;
+      }
+      effectivePayload.nativeScreenShares = parsed.data;
+    }
     if (current?.serverMuted || (session.isBot && !this.isCurrentBotOperation(session, 'publish_voice'))) {
       effectivePayload.isSpeaking = false;
     }
@@ -3095,19 +3141,56 @@ export class WebSocketServer {
     }
   }
 
+  private handleNativeScreenSignal(session: ClientSession, value: unknown, requestId?: string): void {
+    if (!session.user || !session.sessionId) return;
+    const parsed = nativeScreenSignalSchema.safeParse(
+      value && typeof value === 'object' ? { ...value, fromSessionId: session.sessionId } : value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Controle de transmissão inválido.', requestId);
+      return;
+    }
+    const target = this.findSessionById(parsed.data.targetSessionId);
+    const canForward = target && !target.isBot && target.ws.readyState === WebSocket.OPEN;
+    if (session.isBot || (!canForward && parsed.data.action !== 'stop')) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'O participante não pode receber esta transmissão.', requestId);
+      return;
+    }
+    const authorized = this.signalingService.authorizeNativeScreenSignal(parsed.data);
+    if (!authorized.success) {
+      this.sendError(session.ws, authorized.code, authorized.message, requestId);
+      return;
+    }
+    if (authorized.forward !== false) {
+      if (!canForward) {
+        this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'O participante não pode receber esta transmissão.', requestId);
+        return;
+      }
+      this.send(target.ws, { type: MessageType.NATIVE_SCREEN_SIGNAL, requestId, payload: parsed.data });
+    }
+    this.send(session.ws, {
+      type: MessageType.NATIVE_SCREEN_SIGNAL_ACK, requestId,
+      payload: { subscriptionId: parsed.data.subscriptionId, accepted: true },
+    });
+  }
+
   private handleRtcSignal(
     session: ClientSession,
-    payload: WebRtcSignalPayload,
+    value: unknown,
     requestId?: string
   ): void {
     if (!session.user || !session.sessionId) return;
+    const parsed = rtcSignalSchema.safeParse(
+      value && typeof value === 'object' ? { ...value, fromSessionId: session.sessionId } : value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Sinal de mídia inválido.', requestId);
+      return;
+    }
+    const payload = parsed.data;
     if (session.isBot && !botVoiceSignalSchema.safeParse(payload).success) {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid or oversized voice signal.', requestId);
       return;
     }
 
-    // Enforce that fromSessionId matches the authenticated connection
-    payload.fromSessionId = session.sessionId;
     const target = this.findSessionById(payload.targetSessionId);
     if (session.isBot || target?.isBot) {
       const bot = session.isBot ? session : target;
@@ -3125,6 +3208,11 @@ export class WebSocketServer {
 
     if (!this.signalingService.validateSignalRouting(payload)) {
       Logger.warn('WEBRTC', `Invalid signal routing attempt from ${session.sessionId} to ${payload.targetSessionId}`);
+      return;
+    }
+    if (payload.signalType === 'screen-watch' && payload.watching
+      && !this.signalingService.getVoiceState(payload.targetSessionId)?.screenShareIds?.includes(payload.streamId)) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Transmissão não está disponível.', requestId);
       return;
     }
 
@@ -3197,6 +3285,16 @@ export class WebSocketServer {
     return true;
   }
 
+  private requireSfuVoiceSession(session: ClientSession, channelId: unknown, requestId?: string): boolean {
+    if (!session.user || !session.sessionId) return false;
+    if (!messageReferenceSchema.safeParse(channelId).success
+      || this.signalingService.getVoiceState(session.sessionId)?.channelId !== channelId) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Entre neste canal de voz antes de solicitar mídia.', requestId);
+      return false;
+    }
+    return true;
+  }
+
   private async handleSfuGetRouterRtpCapabilities(
     session: ClientSession,
     payload: SfuGetRouterRtpCapabilitiesPayload,
@@ -3204,6 +3302,7 @@ export class WebSocketServer {
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
     if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId))) return;
+    if (!this.requireSfuVoiceSession(session, payload?.channelId, requestId)) return;
     try {
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) requested router capabilities for channel ${payload.channelId}`);
       if (!this.sfuManager.isReady()) {
@@ -3230,36 +3329,46 @@ export class WebSocketServer {
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
-    if (session.isBot && payload.direction !== 'send' && payload.direction !== 'recv') {
-      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Invalid bot voice transport direction.', requestId);
+    const parsed = sfuCreateWebRtcTransportSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Direção ou finalidade de transporte inválida.', requestId);
       return;
     }
-    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, undefined, payload.direction))) return;
-    const receiveEpoch = session.isBot && payload.direction === 'recv'
+    const { channelId, direction, purpose, screenSessionId } = parsed.data;
+    if (session.isBot && purpose !== 'call') {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Bot voice supports call transports only.', requestId);
+      return;
+    }
+    if (session.isBot && !(await this.authorizeBotVoiceMedia(session, parsed.data, requestId, undefined, direction))) return;
+    if (!this.requireSfuVoiceSession(session, channelId, requestId)) return;
+    const receiveEpoch = session.isBot && direction === 'recv'
       ? (session.botVoiceReceiveEpoch = (session.botVoiceReceiveEpoch ?? 0) + 1) : undefined;
     try {
       if (!this.sfuManager.isReady()) {
         await this.sfuManager.init();
+        if (!this.requireSfuVoiceSession(session, channelId, requestId)) return;
       }
       if (!this.isCurrentSession(session)) return;
       if (receiveEpoch !== undefined && receiveEpoch !== session.botVoiceReceiveEpoch) {
         this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Voice reception changed during transport preparation.', requestId);
         return;
       }
-      console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) creating ${payload.direction} transport for channel ${payload.channelId}`);
+      console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) creating ${purpose}/${direction} transport for channel ${channelId}`);
       // A client asking for a transport it already has is rejoining after a
       // failure. Its previous one is never coming back, and nothing else would
       // ever close it, so it goes now — along with the producers other clients
       // would otherwise keep trying to consume.
       const { closedProducerIds } = this.sfuManager.closeTransportsFor(
         session.sessionId,
-        payload.channelId,
-        payload.direction
+        channelId,
+        direction,
+        purpose,
+        screenSessionId
       );
       for (const producerId of closedProducerIds) {
         this.broadcast({
           type: MessageType.SFU_PRODUCER_CLOSED,
-          payload: { channelId: payload.channelId, producerId } satisfies SfuProducerClosedPayload,
+          payload: { channelId, producerId } satisfies SfuProducerClosedPayload,
         });
       }
       // Whatever this session still holds in another channel is over too. The
@@ -3270,7 +3379,7 @@ export class WebSocketServer {
       // transport for another channel arriving here is always the older one.
       const abandoned = this.sfuManager.closeSessionExcept(
         session.sessionId,
-        payload.channelId
+        channelId
       );
       for (const { channelId, producerId } of abandoned.closedProducerIds) {
         this.broadcast({
@@ -3280,14 +3389,16 @@ export class WebSocketServer {
       }
       const transportOptions = await this.sfuManager.createWebRtcTransport(
         session.sessionId,
-        payload.channelId,
-        payload.direction,
-        session.requestHost
+        channelId,
+        direction,
+        session.requestHost,
+        purpose,
+        screenSessionId
       );
       if (!this.isCurrentSession(session) ||
-          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId ||
+          this.signalingService.getVoiceState(session.sessionId)?.channelId !== channelId ||
           (receiveEpoch !== undefined && receiveEpoch !== session.botVoiceReceiveEpoch) ||
-          (session.isBot && payload.direction === 'recv' && !this.isCurrentBotVoiceReceiver(session, payload.channelId))) {
+          (session.isBot && direction === 'recv' && !this.isCurrentBotVoiceReceiver(session, channelId))) {
         // A reconnected device keeps its logical session ID. Reap only this
         // late allocation, never the replacement connection's media.
         this.sfuManager.discardPendingTransport(transportOptions.id);
@@ -3299,16 +3410,18 @@ export class WebSocketServer {
       if (session.isBot) {
         session.botVoiceTransports ??= new Map();
         for (const [id, transport] of session.botVoiceTransports) {
-          if (transport.direction === payload.direction) session.botVoiceTransports.delete(id);
+          if (transport.direction === direction) session.botVoiceTransports.delete(id);
         }
-        session.botVoiceTransports.set(transportOptions.id, { channelId: payload.channelId, direction: payload.direction });
+        session.botVoiceTransports.set(transportOptions.id, { channelId, direction });
       }
       this.send(session.ws, {
         type: MessageType.SFU_WEBRTC_TRANSPORT_CREATED,
         requestId,
         payload: {
-          channelId: payload.channelId,
-          direction: payload.direction,
+          channelId,
+          direction,
+          purpose,
+          ...(screenSessionId ? { screenSessionId } : {}),
           transportOptions,
         } satisfies SfuWebRtcTransportCreatedPayload,
       });
@@ -3325,6 +3438,11 @@ export class WebSocketServer {
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
     if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId))) return;
+    if (!this.requireSfuVoiceSession(session, payload?.channelId, requestId)) return;
+    if (!this.sfuManager.ownsTransport(session.sessionId, payload.channelId, payload.transportId)) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Transporte não pertence a esta sessão.', requestId);
+      return;
+    }
     try {
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) connecting transport ${payload.transportId}`);
       await this.sfuManager.connectWebRtcTransport(payload.transportId, payload.dtlsParameters);
@@ -3347,31 +3465,53 @@ export class WebSocketServer {
     payload: SfuProducePayload,
     requestId?: string
   ): Promise<void> {
-    if (!session.user || !session.sessionId) return;
+    const sessionId = session.sessionId;
+    if (!session.user || !sessionId) return;
     if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId, 'send'))) return;
+    if (!this.requireSfuVoiceSession(session, payload?.channelId, requestId)) return;
     const voiceRestrictions = session.isBot ? this.signalingService.getVoiceRestrictions(session.user.id) : undefined;
     if (session.isBot && (payload.kind !== 'audio' || payload.appData?.mediaType !== 'mic' ||
         voiceRestrictions?.serverMuted || voiceRestrictions?.serverDeafened)) {
       this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Bot microphone is not permitted.', requestId);
       return;
     }
+    const appData = sfuMediaAppDataSchema.safeParse(payload.appData);
+    if (!appData.success || payload.kind !== (
+      appData.data.mediaType === 'mic' || appData.data.mediaType === 'screen_audio' ? 'audio' : 'video')) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Tipo ou origem da mídia inválidos.', requestId);
+      return;
+    }
+    const nativeScreen = 'nativeScreen' in appData.data ? appData.data.nativeScreen : undefined;
+    const shareId = 'shareId' in appData.data ? appData.data.shareId : undefined;
+    const sourceIsCurrent = () => {
+      if (!nativeScreen) return true;
+      const source = this.signalingService.getVoiceState(sessionId)
+        ?.nativeScreenShares?.find(value => value.shareId === shareId && value.instanceId === nativeScreen.sourceInstanceId);
+      return !!source && (payload.kind !== 'audio' || source.audio)
+        && getScreenShareQualities(source.video).some(value =>
+          screenShareProfileKey(value.profile) === screenShareProfileKey(nativeScreen.video));
+    };
+    if (!sourceIsCurrent()) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'O perfil não pertence à transmissão anunciada.', requestId);
+      return;
+    }
     try {
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) producing ${payload.kind} (${payload.appData?.mediaType}) in channel ${payload.channelId}`);
       const { id } = await this.sfuManager.produce(
-        session.sessionId,
+        sessionId,
         payload.channelId,
         payload.transportId,
         payload.kind,
         payload.rtpParameters,
-        payload.appData || {},
-        payload.kind === 'audio' && payload.appData?.mediaType === 'mic'
+        appData.data,
+        appData.data.mediaType === 'mic'
       );
       if (!this.isCurrentSession(session) ||
-          this.signalingService.getVoiceState(session.sessionId)?.channelId !== payload.channelId) {
+          this.signalingService.getVoiceState(sessionId)?.channelId !== payload.channelId || !sourceIsCurrent()) {
         this.sfuManager.closeProducer(id);
         return;
       }
-      await this.syncSfuMicrophoneMute(session.sessionId);
+      if (appData.data.mediaType === 'mic') await this.syncSfuMicrophoneMute(sessionId);
 
       this.send(session.ws, {
         type: MessageType.SFU_PRODUCED,
@@ -3386,9 +3526,9 @@ export class WebSocketServer {
       const newProducerPayload: SfuNewProducerPayload = {
         channelId: payload.channelId,
         producerId: id,
-        producerSessionId: session.sessionId,
+        producerSessionId: sessionId,
         kind: payload.kind,
-        appData: payload.appData || {},
+        appData: appData.data,
       };
 
       const participants = this.signalingService.getParticipantsInChannel(payload.channelId);
@@ -3414,10 +3554,16 @@ export class WebSocketServer {
 
   private async handleSfuConsume(
     session: ClientSession,
-    payload: SfuConsumePayload,
+    value: unknown,
     requestId?: string
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    const parsed = sfuConsumeSchema.safeParse(value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido de consumo de mídia inválido.', requestId);
+      return;
+    }
+    const payload = parsed.data;
     if (session.isBot) {
       if (!(await this.authorizeBotVoiceMedia(session, payload, requestId, payload.transportId, 'recv'))) return;
       const producer = this.sfuManager.getProducersInChannel(payload.channelId)
@@ -3428,6 +3574,7 @@ export class WebSocketServer {
         return;
       }
     }
+    if (!this.requireSfuVoiceSession(session, payload.channelId, requestId)) return;
     try {
       console.log(`[SFU Server:WS] User ${session.user.nickname} (${session.sessionId}) consuming producer ${payload.producerId}`);
       const consumed = await this.sfuManager.consume(
@@ -3480,21 +3627,94 @@ export class WebSocketServer {
 
   private handleSfuProducerClosed(
     session: ClientSession,
-    payload: SfuProducerClosedPayload
+    value: unknown,
+    requestId?: string,
   ): void {
     if (!session.user || !session.sessionId) return;
-    if (session.isBot && !this.sfuManager.getProducersInChannel(payload.channelId).some(
-      (producer) => producer.producerId === payload.producerId && producer.producerSessionId === session.sessionId
-    )) {
-      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Producer does not belong to this bot.');
+    const parsed = sfuProducerClosedSchema.safeParse(value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido de encerramento de mídia inválido.', requestId);
       return;
     }
-    console.log(`[SFU Server:WS] User ${session.user.nickname} closed producer ${payload.producerId}`);
-    this.sfuManager.closeProducer(payload.producerId);
-    void this.broadcastToChannel(payload.channelId, {
+    const payload = parsed.data;
+    let closed: { closedProducerIds: string[] } | null;
+    try {
+      closed = this.sfuManager.closeProducerForSession(session.sessionId, payload.channelId, payload.producerId);
+    } catch (error) {
+      console.error('[SFU Server:WS] Producer close failed:', error);
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, 'Não foi possível encerrar o produtor de mídia.', requestId);
+      return;
+    }
+    if (!closed) {
+      if (requestId) this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Produtor não pertence a esta sessão.', requestId);
+      return;
+    }
+    if (requestId) this.send(session.ws, { type: MessageType.SFU_PRODUCER_CLOSED, requestId, payload });
+    for (const producerId of closed.closedProducerIds) {
+      console.log(`[SFU Server:WS] User ${session.user.nickname} closed producer ${producerId}`);
+      this.notifySfuProducerClosed(payload.channelId, producerId);
+    }
+  }
+
+  private notifySfuProducerClosed(channelId: string, producerId: string): void {
+    void this.broadcastToChannel(channelId, {
       type: MessageType.SFU_PRODUCER_CLOSED,
-      payload,
+      payload: { channelId, producerId } satisfies SfuProducerClosedPayload,
+    }).catch(error => { console.error('[SFU Server:WS] Producer close notification failed:', error); });
+  }
+
+  private handleSfuCloseWebRtcTransport(session: ClientSession, value: unknown, requestId?: string): void {
+    if (!session.user || !session.sessionId) return;
+    const parsed = sfuCloseWebRtcTransportSchema.safeParse(value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido de encerramento de transporte inválido.', requestId);
+      return;
+    }
+    const payload = parsed.data;
+    let closed: { closedProducerIds: string[] } | null;
+    try {
+      closed = this.sfuManager.closeTransport(session.sessionId, payload.channelId, payload.transportId, payload.purpose);
+    } catch (error) {
+      console.error('[SFU Server:WS] Screen transport close failed:', error);
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, 'Não foi possível encerrar o transporte de tela.', requestId);
+      return;
+    }
+    if (!closed) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Transporte de tela não pertence a esta sessão.', requestId);
+      return;
+    }
+    this.send(session.ws, {
+      type: MessageType.SFU_WEBRTC_TRANSPORT_CLOSED, requestId,
+      payload: payload satisfies SfuCloseWebRtcTransportPayload,
     });
+    for (const producerId of closed.closedProducerIds) this.notifySfuProducerClosed(payload.channelId, producerId);
+  }
+
+  private async handleSfuProducerSetPaused(session: ClientSession, value: unknown, requestId?: string): Promise<void> {
+    if (!session.user || !session.sessionId) return;
+    const parsed = sfuProducerSetPausedSchema.safeParse(value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Controle de produção de mídia inválido.', requestId);
+      return;
+    }
+    const payload = parsed.data;
+    if (!this.requireSfuVoiceSession(session, payload.channelId, requestId)) return;
+    if (!this.sfuManager.ownsProducer(session.sessionId, payload.channelId, payload.producerId, payload.purpose)) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Produtor de tela não pertence a esta sessão.', requestId);
+      return;
+    }
+    try {
+      await this.sfuManager.setProducerPaused(session.sessionId, payload.channelId, payload.producerId, payload.paused);
+      if (requestId) this.send(session.ws, {
+        type: MessageType.SFU_PRODUCER_SET_PAUSED, requestId,
+        payload: payload satisfies SfuProducerSetPausedPayload,
+      });
+    } catch (error) {
+      console.error('[SFU Server:WS] Producer pause/resume failed:', error);
+      this.sendError(session.ws, error instanceof SfuProducerClosedError
+        ? ProtocolErrorCode.BAD_REQUEST : ProtocolErrorCode.INTERNAL_ERROR,
+      'Não foi possível alterar o produtor de tela.', requestId);
+    }
   }
 
   private async handleSfuGetProducers(
@@ -3504,6 +3724,7 @@ export class WebSocketServer {
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
     if (session.isBot && !(await this.authorizeBotVoiceMedia(session, payload, requestId, undefined, 'recv'))) return;
+    if (!this.requireSfuVoiceSession(session, payload?.channelId, requestId)) return;
     try {
       const channelProducers = this.sfuManager.getProducersInChannel(payload.channelId).filter((producer) =>
         !session.isBot || (producer.kind === 'audio' && producer.appData.mediaType === 'mic' &&
@@ -3534,17 +3755,57 @@ export class WebSocketServer {
 
   private async handleSfuConsumerSetPaused(
     session: ClientSession,
-    payload: SfuConsumerSetPausedPayload
+    value: unknown,
+    requestId?: string,
   ): Promise<void> {
     if (!session.user || !session.sessionId) return;
+    const parsed = sfuConsumerSetPausedSchema.safeParse(value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Controle de consumo de mídia inválido.', requestId);
+      return;
+    }
+    const payload = parsed.data;
+    if (!this.requireSfuVoiceSession(session, payload.channelId, requestId)) return;
     if (session.isBot) {
-      if (!(await this.authorizeBotVoiceMedia(session, payload, undefined, undefined, 'recv'))) return;
+      if (!(await this.authorizeBotVoiceMedia(session, payload, requestId, undefined, 'recv'))) return;
       if (!this.sfuManager.ownsConsumer(session.sessionId, payload.channelId, payload.consumerId)) {
-        this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Consumer does not belong to this bot.');
+        this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Consumer does not belong to this bot.', requestId);
         return;
       }
     }
-    await this.sfuManager.setConsumerPaused(payload.consumerId, payload.paused);
+    let updated: boolean;
+    try {
+      updated = await this.sfuManager.setConsumerPaused(session.sessionId, payload.channelId, payload.consumerId, payload.paused);
+    } catch (error) {
+      console.error('[SFU Server:WS] Consumer pause/resume failed:', error);
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, 'Não foi possível alterar o consumo de mídia.', requestId);
+      return;
+    }
+    if (requestId) {
+      if (!updated) this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Consumer não pertence a esta sessão ou foi encerrado.', requestId);
+      else this.send(session.ws, { type: MessageType.SFU_CONSUMER_SET_PAUSED, requestId, payload });
+    }
+  }
+
+  private handleSfuConsumerClosed(session: ClientSession, value: unknown, requestId?: string): void {
+    if (!session.user || !session.sessionId) return;
+    const parsed = sfuConsumerClosedSchema.safeParse(value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Pedido de encerramento de mídia inválido.', requestId);
+      return;
+    }
+    let closed: boolean;
+    try {
+      closed = this.sfuManager.closeConsumer(session.sessionId, parsed.data.channelId, parsed.data.consumerId);
+    } catch (error) {
+      console.error('[SFU Server:WS] Consumer close failed:', error);
+      this.sendError(session.ws, ProtocolErrorCode.INTERNAL_ERROR, 'Não foi possível encerrar o consumo de mídia.', requestId);
+      return;
+    }
+    if (requestId) {
+      if (!closed) this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Consumer não pertence a esta sessão ou foi encerrado.', requestId);
+      else this.send(session.ws, { type: MessageType.SFU_CONSUMER_CLOSED, requestId, payload: parsed.data });
+    }
   }
 
   private handleRtcDiagnosticsReport(

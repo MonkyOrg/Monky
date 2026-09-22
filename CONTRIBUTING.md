@@ -5,7 +5,7 @@
 Obrigado pelo interesse! Este documento explica como propor ideias, votar no que
 vem primeiro e — se você quiser codar — como abrir um PR que entra sem atrito.
 
-O Monky é MIT e o desenvolvimento acontece todo em público, nas
+O Monky é GPL-3.0-or-later e o desenvolvimento acontece todo em público, nas
 [Issues](https://github.com/MonkyOrg/Monky/issues).
 
 ---
@@ -94,17 +94,48 @@ primeiro* — num bug a pergunta é apenas *isso está quebrado?*.
 
 ### Rodando o projeto
 
-Requisitos: **Node.js 22+** e as ferramentas de build nativas da sua plataforma
-(o módulo de captura de áudio de tela é C++: MSVC no Windows, Xcode Command Line
-Tools no macOS).
+Requisitos: **Node.js 22+**, npm e as ferramentas de build nativas da sua
+plataforma (os módulos nativos usam C++: Python 3.11 x64 e Visual Studio
+**2022 (17.x)** no Windows, Xcode Command Line Tools no macOS). O preparo de
+captura usa um seletor compartilhado de v143/MSVC 14.30–14.44, ATL/MFC e SDK
+10.0.26100.0 com servicing mínimo 10.0.26100.3323; não escolhe VS2026/latest.
 
 ```bash
 git clone https://github.com/MonkyOrg/Monky.git
 cd Monky
-npm install
+npm ci
 npm run build
 npm start
 ```
+
+Na UI, use as duas abas **Telas** e **Janelas**. Selecione uma janela antes de
+escolher **Captura de janela (WGC)** (padrão) ou **Captura de jogo (hook)**.
+Não há aba Jogos nem detecção automática de jogos; selecionar fonte ou método
+não executa probe/hook antes de confirmar o compartilhamento.
+
+O compartilhamento nativo no Windows x64 implementa janela/monitor por WGC e
+Game Capture explícito, com H.264 por AMD AMF ou NVIDIA NVENC e WebRTC fixado.
+Consulte o [guia do módulo](apps/client/native/screen-share/README.md) para
+ATL/MFC/Windows SDK, recompilar os addons para o Electron correto e executar
+`prepare:native-screen` antes de testar ou empacotar. `npm ci` e
+`npm run build` sozinhos não preparam o SDK/runtime. O Main verifica a fonte
+somente após confirmação; hardware desconhecido aparece com probe pendente,
+não qualificado. Não há fallback automático de captura para Chromium/software,
+AV1 ou outra fonte; o limite atual de adapter 0 também vale para NVENC.
+No primeiro preparo, ou se mudarem as fontes do addon ou o Electron, siga
+`buildScreenAudio.cjs` no guia, depois de `prepare:native-screen`: ele usa
+`node-gyp` local, o Electron instalado e a mesma seleção VS2022/MSVC/SDK.
+O preparo de `screen-share` não gera esse addon; um `screen_audio.node` antigo
+pode não ter as funções de monitor/identidade ou ACKs PCM. Se já está compatível,
+uma atualização somente de scripts/TypeScript não exige recompilá-lo novamente.
+
+Para redistribuir um build, inclua as licenças, o código da mesma tag e
+`monky-native-sources-<versao>.tar.xz` com seu manifesto JSON, gerados por
+`npm run pack:native-sources -- --version=<versao>` após o preparo completo.
+O guia detalha o conteúdo OBS/NVENC/hooks, a reconstrução e o requisito de
+`publicationReady: true`; não substitua os helpers fixados por downloads
+autônomos de compatibilidade. `npm run package` usa electron-builder e gera
+`release\win-unpacked\Monky.exe` e `release\Monky-Windows.zip`.
 
 Durante o desenvolvimento, em dois terminais:
 
@@ -375,4 +406,5 @@ abstrato.
 ## 📜 Licença
 
 Ao contribuir, você concorda que sua contribuição será licenciada sob a
-[licença MIT](LICENSE) do projeto.
+[GNU GPL versão 3 ou posterior](LICENSE) do projeto. Preserve os avisos de
+copyright e as licenças de terceiros; a integração com libobs não os substitui.

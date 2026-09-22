@@ -473,10 +473,16 @@ export class OverlayStageView {
   }
 
   private getBadgesHtml(tile: OverlayTile): string {
+    const selected = tile.shareId ? tile.p.screenCaptureModes?.[tile.shareId] : undefined;
+    const mode = selected === 'normal' || selected === 'game' ? selected : undefined;
+    if (selected !== undefined && mode === undefined) console.warn('[OverlayStage] Invalid screen capture mode.');
+    const label = mode ? escapeHtml(t(mode === 'game' ? 'screenShare.gameCapture' : 'screenShare.windowCapture')) : '';
     return `
       ${renderAudioMuteIndicators(tile.p, { size: 12 })}
       ${tile.kind === 'camera' ? '<span class="material-symbols-outlined md-12" style="color: var(--primary);">videocam</span>' : ''}
-      ${tile.kind === 'screen' ? '<span class="material-symbols-outlined md-12" style="color: var(--success);">screen_share</span>' : ''}
+      ${tile.kind === 'screen' ? `<span class="material-symbols-outlined md-12" style="color: var(--success);"
+        ${mode ? `data-capture-mode="${mode}" role="img" aria-label="${label}" title="${label}"` : 'aria-hidden="true"'}
+        >${mode === 'game' ? 'sports_esports' : 'screen_share'}</span>` : ''}
     `;
   }
 

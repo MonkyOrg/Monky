@@ -113,13 +113,19 @@ function copyPackage(source: string, destination: string, pkg: Record<string, un
   } else {
     copyRuntimePath(source, '.', destination);
   }
-  for (const file of ['LICENSE', 'LICENSE.md', 'LICENSE.txt', 'README.md']) {
+  for (const file of ['LICENSE', 'LICENSE-MIT', 'LICENSE.md', 'LICENSE.txt', 'README.md']) {
     if (fs.existsSync(path.join(source, file))) copyRuntimePath(source, file, destination);
   }
-  if (knownWorkspace && !fs.existsSync(path.join(destination, 'LICENSE'))) {
-    const repositoryLicense = path.resolve(source, '..', '..', 'LICENSE');
-    if (fs.existsSync(repositoryLicense) && fs.statSync(repositoryLicense).isFile()) {
-      fs.copyFileSync(repositoryLicense, path.join(destination, 'LICENSE'));
+  if (knownWorkspace) {
+    for (const name of ['LICENSE', 'LICENSE-MIT']) {
+      if (fs.existsSync(path.join(destination, name))) continue;
+      const repositoryLicense = path.resolve(source, '..', '..', name);
+      if (fs.existsSync(repositoryLicense) && fs.statSync(repositoryLicense).isFile()) {
+        fs.copyFileSync(repositoryLicense, path.join(destination, name));
+      }
+      if (pkg.license === 'GPL-3.0-or-later' && !fs.existsSync(path.join(destination, name))) {
+        throw new Error(`Missing Monky ${name} notice at ${source}.`);
+      }
     }
   }
 }

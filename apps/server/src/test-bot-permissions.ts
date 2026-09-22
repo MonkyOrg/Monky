@@ -282,7 +282,7 @@ test('voice grants permit only publishing and revocation tears down the active r
     }
   }
   const signal = (from: string, target: string, direction: string) => ({
-    fromSessionId: from, targetSessionId: target, signalType: 'offer',
+    fromSessionId: from, targetSessionId: target, signalType: 'offer', subscriptionId: 'peer-epoch',
     sdp: { type: 'offer', sdp: `v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=${direction}\r\n` },
   });
   await bot.peer.error(MessageType.RTC_SIGNAL, signal(botSession, callerSession, 'recvonly'), ProtocolErrorCode.PERMISSION_DENIED);
@@ -334,6 +334,7 @@ test('listening requires its own grant and opt-in, exposes authoritative directi
   const callerSession = text(record(f.caller.auth.payload.currentUser).sessionId);
   const signal = (direction: string) => ({
     fromSessionId: botSession, targetSessionId: callerSession, signalType: 'offer',
+    subscriptionId: 'bot-listen-session',
     sdp: { type: 'offer', sdp: `v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=${direction}\r\n` },
   });
   await bot.peer.error(MessageType.RTC_SIGNAL, signal('sendrecv'), ProtocolErrorCode.PERMISSION_DENIED);
@@ -378,6 +379,10 @@ test('SFU receiving bots may consume only same-room human microphones on their o
   await f.caller.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
   const humanTransport = await f.caller.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'send' });
   const humanTransportId = text(record(humanTransport.payload.transportOptions).id);
+  const screenTransport = await f.caller.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, {
+    channelId: f.voiceId, direction: 'send', purpose: 'screen',
+  });
+  const screenTransportId = text(record(screenTransport.payload.transportOptions).id);
   const sent = await bot.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'send' });
   const sendId = text(record(sent.payload.transportOptions).id);
   const received = await bot.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'recv' });
@@ -386,15 +391,17 @@ test('SFU receiving bots may consume only same-room human microphones on their o
     codecs: [{ mimeType: 'audio/opus', payloadType: 111, clockRate: 48000, channels: 2, parameters: {}, rtcpFeedback: [] }],
     encodings: [{ ssrc }], rtcp: { cname: 'synthetic' },
   });
-  const produce = async (mediaType: string, ssrc: number) => {
+  const produce = async (mediaType: 'mic' | 'screen_audio', ssrc: number) => {
     const message = await f.caller.peer.request(MessageType.SFU_PRODUCE, {
-      channelId: f.voiceId, transportId: humanTransportId, kind: 'audio', rtpParameters: rtpParameters(ssrc), appData: { mediaType },
+      channelId: f.voiceId, transportId: mediaType === 'mic' ? humanTransportId : screenTransportId,
+      kind: 'audio', rtpParameters: rtpParameters(ssrc),
+      appData: mediaType === 'mic' ? { mediaType } : { mediaType, shareId: 'owned-screen' },
     });
     assert.equal(message.type, MessageType.SFU_PRODUCED, JSON.stringify(message.payload));
     return text(message.payload.id);
   };
   const mic = await produce('mic', 1111);
-  const screen = await produce('screen-audio', 2222);
+  const screen = await produce('screen_audio', 2222);
   const botAudio = await bot.peer.request(MessageType.SFU_PRODUCE, {
     channelId: f.voiceId, transportId: sendId, kind: 'audio', rtpParameters: rtpParameters(3333), appData: { mediaType: 'mic' },
   });
@@ -422,7 +429,9 @@ test('SFU receiving bots may consume only same-room human microphones on their o
   assert.equal(microphone.producer.paused, false);
   await f.caller.peer.request(MessageType.VOICE_STATE_UPDATE, { isMuted: true });
   assert.equal(microphone.producer.paused, true, 'A muted microphone must be blocked before packets reach the bot');
-  await f.wsServer['sfuManager'].setConsumerPaused(text(consumed.payload.id), false);
+  await bot.peer.request(MessageType.SFU_CONSUMER_SET_PAUSED, {
+    channelId: f.voiceId, consumerId: text(consumed.payload.id), paused: false,
+  });
   assert.equal(microphone.producer.paused, true, 'A consumer cannot bypass the source mute');
   await f.caller.peer.request(MessageType.VOICE_STATE_UPDATE, { isMuted: false });
   assert.equal(microphone.producer.paused, false);

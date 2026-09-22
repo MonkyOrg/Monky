@@ -13,7 +13,30 @@
         [
           "OS=='win'",
           {
-            "sources": ["src/win/wasapi_loopback.cpp", "src/win/window_enum.cpp", "src/win/keyboard_layout.cpp"],
+            "configurations": {
+              "Release": {
+                "msbuild_toolset": "v143",
+                "msvs_settings": {
+                  "VCCLCompilerTool": { "RuntimeLibrary": 2, "RuntimeTypeInfo": "true" }
+                }
+              },
+              "Debug": {
+                "msbuild_toolset": "v143",
+                "msvs_settings": {
+                  "VCCLCompilerTool": { "RuntimeTypeInfo": "true" }
+                }
+              }
+            },
+            "sources": [
+              "src/win/wasapi_loopback.cpp",
+              "src/win/wasapi_capture.cpp",
+              "src/win/wasapi_format.cpp",
+              "src/win/packet_capture.cpp",
+              "src/win/window_enum.cpp",
+              "src/win/keyboard_layout.cpp"
+            ],
+            "defines!": ["_HAS_EXCEPTIONS=0"],
+            "defines": ["NAPI_VERSION=8", "_HAS_EXCEPTIONS=1", "WIN32_LEAN_AND_MEAN", "NOMINMAX"],
             "libraries": [
               "-lMmdevapi",
               "-lOle32",
@@ -25,6 +48,7 @@
             "msvs_settings": {
               "VCCLCompilerTool": {
                 "ExceptionHandling": 1,
+                "RuntimeTypeInfo": "true",
                 "AdditionalOptions": ["/std:c++17"]
               }
             }

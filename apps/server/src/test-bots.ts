@@ -522,7 +522,10 @@ test('bot SFU metadata is truthful and media requires admitted, owned voice tran
   await bot.peer.error(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
     channelId: voiceId, transportId: 'foreign-transport', dtlsParameters: {},
   }, ProtocolErrorCode.PERMISSION_DENIED);
-  await bot.peer.error(MessageType.SFU_CONSUME, { channelId: voiceId }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.error(MessageType.SFU_CONSUME, { channelId: voiceId }, ProtocolErrorCode.BAD_REQUEST);
+  await bot.peer.error(MessageType.SFU_CONSUME, {
+    channelId: voiceId, transportId: 'foreign-transport', producerId: 'foreign-producer', rtpCapabilities: {},
+  }, ProtocolErrorCode.PERMISSION_DENIED);
   await bot.peer.error(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: voiceId, direction: 'recv' }, ProtocolErrorCode.PERMISSION_DENIED);
 });
 

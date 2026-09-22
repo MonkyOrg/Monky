@@ -5935,6 +5935,95 @@ input:focus, textarea:focus, select:focus {
   background-color: #000000;
 }
 
+.native-screen-presentation-owner {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.stage-native-thumbnail {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  background: var(--bg-primary);
+}
+
+.stage-native-thumbnail[hidden] {
+  display: none;
+}
+
+.stage-native-thumbnail img {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  opacity: 0.4;
+}
+
+.stage-native-thumbnail span {
+  position: relative;
+  max-width: 85%;
+  padding: 12px;
+  text-align: center;
+  color: var(--text-primary);
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: var(--radius-md);
+}
+
+.stage-capture-mode-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 4;
+  max-width: calc(100% - 20px);
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.72);
+  color: #ffffff;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.stage-mini-card .stage-capture-mode-badge {
+  top: 4px;
+  left: 4px;
+  max-width: calc(100% - 8px);
+  padding: 2px 5px;
+  font-size: 10px;
+}
+
+.stage-capture-mode-badge[hidden] {
+  display: none;
+}
+
+.stage-capture-mode-badge:not([hidden]) ~ .telemetry-overlay.position-top-left {
+  top: 40px;
+}
+
+.stage-native-error {
+  position: absolute;
+  inset: 0 0 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+  text-align: center;
+  background: var(--bg-primary);
+  z-index: 3;
+}
+
 /* #150 — remote screen share gated behind an explicit "Assistir transmissão".
    The preview is shown blurred and silent until the viewer opts in. */
 .stage-video-element.screen-locked {
@@ -6097,7 +6186,9 @@ input:focus, textarea:focus, select:focus {
 .telemetry-overlay {
   position: absolute;
   z-index: 4;
-  max-width: min(220px, calc(100% - 24px));
+  max-width: min(310px, calc(100% - 24px));
+  max-height: calc(100% - 72px);
+  overflow: hidden;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
   background-color: rgba(0, 0, 0, 0.62);
@@ -6170,13 +6261,15 @@ input:focus, textarea:focus, select:focus {
 }
 
 /* Vertical volume popup — appears on hover over the volume button */
-.stage-volume-wrapper {
+.stage-volume-wrapper,
+.stage-quality-wrapper {
   position: relative;
   display: flex;
   align-items: center;
 }
 
-.stage-volume-btn {
+.stage-volume-btn,
+.stage-quality-button {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6191,8 +6284,49 @@ input:focus, textarea:focus, select:focus {
   backdrop-filter: blur(4px);
 }
 
-.stage-volume-btn:hover {
+.stage-volume-btn:hover,
+.stage-quality-button:hover {
   background-color: rgba(0, 0, 0, 0.85);
+}
+
+.stage-quality-menu:not([hidden]) {
+  display: grid;
+  gap: 4px;
+}
+
+.stage-quality-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  width: max-content;
+  max-width: min(320px, 80vw);
+  padding: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+  z-index: 10;
+}
+
+.stage-quality-menu button {
+  display: grid;
+  gap: 4px;
+  padding: 8px 12px;
+  text-align: left;
+  font: inherit;
+  color: var(--text-primary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  cursor: pointer;
+}
+
+.stage-quality-menu button[aria-pressed="true"] {
+  border-color: var(--accent-primary);
+}
+
+.stage-quality-menu button:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 1px;
 }
 
 .stage-volume-popup {
@@ -6243,7 +6377,8 @@ input:focus, textarea:focus, select:focus {
   accent-color: var(--accent-primary);
 }
 
-.stage-fullscreen-btn {
+.stage-fullscreen-btn,
+.stage-diagnostics-btn {
   position: relative;
   bottom: auto;
   right: auto;
@@ -6268,7 +6403,8 @@ input:focus, textarea:focus, select:focus {
   opacity: 1;
 }
 
-.stage-fullscreen-btn:hover {
+.stage-fullscreen-btn:hover,
+.stage-diagnostics-btn:hover {
   background-color: rgba(0, 0, 0, 0.85);
 }
 
@@ -6630,6 +6766,43 @@ button[data-loading="1"]::after {
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.2;
+}
+
+.quality-label-with-help {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.quality-label-with-help label {
+  margin: 0;
+  color: inherit;
+  font: inherit;
+}
+
+.quality-bitrate-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: help;
+}
+
+.quality-bitrate-help:hover,
+.quality-bitrate-help:focus-visible {
+  color: var(--accent-primary);
+}
+
+.quality-bitrate-help:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
 }
 
 .quality-custom-control {
@@ -7658,6 +7831,287 @@ button[data-loading="1"]::after {
 }
 
 /* Screen Sharing Source Selector */
+.screen-share-picker-card {
+  width: min(680px, calc(100vw - 48px));
+  max-width: 680px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.screen-share-picker-card > * {
+  flex-shrink: 0;
+}
+
+.screen-share-picker-card .modal-footer {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.screen-share-picker-card #share-audio-label {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.screen-share-picker-card #share-capture-info {
+  margin: 0;
+}
+
+.screen-share-picker-card .toggle-switch input:focus-visible + .toggle-slider,
+#checkbox-screen-preview-focus:focus-visible + .toggle-slider {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 3px;
+}
+
+.share-source-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.share-source-tabs {
+  flex: 1 1 220px;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.share-refresh-button {
+  flex-shrink: 0;
+}
+
+.share-aspect-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.share-aspect-option > div {
+  min-width: 0;
+}
+
+.share-aspect-option small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.share-source-tabs .tab-button {
+  padding: 10px 6px;
+}
+
+.share-source-tabs .material-symbols-outlined {
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.share-source-tabs .tab-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.share-source-tabs .tab-button:focus-visible,
+.share-refresh-button:focus-visible,
+.screen-sources-grid .source-item:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.share-tab-status {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.share-tab-status[hidden] {
+  display: none;
+}
+
+.share-method-reasons {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+
+.share-window-methods {
+  display: grid;
+  gap: 12px;
+}
+
+.share-window-methods[hidden],
+.share-window-methods #share-game-tip[hidden],
+.screen-share-picker-card #share-capture-info[hidden],
+.share-method-status[hidden] {
+  display: none;
+}
+
+.share-method-label {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.share-capture-methods .input-mode-card {
+  min-width: 0;
+}
+
+.share-capture-methods .input-mode-card:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.share-capture-methods .input-mode-card-description,
+.share-method-status {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.share-method-status {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.share-window-methods .share-game-tip {
+  margin: 0;
+}
+
+.game-capture-guide-trigger {
+  align-self: flex-start;
+  gap: 6px;
+  padding: 4px 0;
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+  white-space: normal;
+}
+
+.game-capture-guide-trigger[hidden],
+.game-capture-guide-error[hidden] {
+  display: none;
+}
+
+.game-capture-guide-card {
+  width: min(680px, calc(100vw - 48px));
+  max-width: 680px;
+  max-height: calc(100vh - 48px);
+  padding: 20px;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.game-capture-guide-card > :not(.game-capture-guide-body) {
+  flex-shrink: 0;
+}
+
+.game-capture-guide-card h2,
+.game-capture-guide-card h3,
+.game-capture-guide-card p {
+  margin: 0;
+}
+
+.game-capture-guide-card .modal-close-btn {
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+
+.game-capture-guide-note,
+.game-capture-guide-list p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.game-capture-guide-search-field {
+  display: grid;
+  gap: 6px;
+}
+
+.game-capture-guide-search-field label {
+  font-size: 13px;
+}
+
+.game-capture-guide-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  gap: 12px;
+}
+
+.game-capture-guide-body section + section {
+  margin-top: 16px;
+}
+
+.game-capture-guide-body h3 {
+  font-size: 14px;
+}
+
+.game-capture-guide-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.game-capture-guide-list li {
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.game-capture-guide-list strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.game-capture-guide-empty {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.game-capture-guide-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.game-capture-guide-card .modal-footer {
+  margin: 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.game-capture-guide-card .modal-footer a {
+  color: var(--accent-primary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.game-capture-guide-trigger:focus-visible,
+.game-capture-guide-card a:focus-visible,
+.game-capture-guide-card .modal-close-btn:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 3px;
+}
+
+@media (max-width: 540px) {
+  .share-capture-methods {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .screen-sources-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
