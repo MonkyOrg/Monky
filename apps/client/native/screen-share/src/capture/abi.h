@@ -38,7 +38,7 @@ enum class VideoFormat : int { Nv12 = 2 };
 enum class ColorSpace : int { Bt709 = 2 };
 enum class Range : int { Partial = 1 };
 enum class Scale : int { Bicubic = 2 };
-enum class Bounds : int { Stretch = 1 };
+enum class Bounds : int { Stretch = 1, ScaleInner = 2 };
 enum class EncoderType : int { Audio = 0, Video = 1 };
 enum class PropertyType : int { Boolean = 1, Integer = 2, Text = 4, List = 6 };
 enum class ComboFormat : int { Integer = 1, String = 3 };

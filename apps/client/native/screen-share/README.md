@@ -10,17 +10,23 @@ câmera continuam usando seus caminhos próprios.
 
 O backend de captura implementado é **Windows x64**. H.264 e Automático usam
 H.264; **AV1 está indisponível**, indicado como Em breve. Não há fallback
-automático para captura Chromium, encoder de software, outra fonte ou outro
-método. A recepção Chromium continua disponível para perfis H.264 que o
+automático para captura Chromium, encoder de software ou outra fonte.
+Se Captura de jogo não conseguir iniciar, há uma tentativa em **Normal** para
+a mesma janela, após comprovar o encerramento da tentativa anterior.
+A recepção Chromium continua disponível para perfis H.264 que o
 dispositivo receptor consiga decodificar; isso não comprova capacidade de envio.
 
 ## Fontes e verificação de disponibilidade
 
 O seletor tem duas abas: **Telas** e **Janelas**. Após selecionar uma janela,
-os cards oferecem **Captura de janela (WGC)** (padrão) e **Captura de jogo (hook)**
+os cards oferecem **Normal** (padrão, WGC internamente) e **Captura de jogo**
 para essa mesma fonte. Não há aba Jogos nem detecção automática de jogos.
-Trocar o método preserva o ID da janela; escolher outra janela volta ao WGC.
+Trocar o método preserva o ID da janela; escolher outra janela volta a Normal.
 A seleção não executa probe/hook antes da confirmação explícita.
+Use **Atualizar** se abrir um aplicativo depois do seletor. A lista não fica
+consultando janelas/miniaturas continuamente enquanto você joga. Uma fonte que
+desapareceu perde a seleção; uma atualização que falha não autoriza compartilhar
+uma lista desatualizada.
 
 | Método nativo | Fonte libobs | Identidade preservada | Áudio opcional |
 |---|---|---|---|
@@ -69,9 +75,14 @@ e limite de sessões do encoder podem impedir o preparo ou a captura.
 ## Vídeo, áudio e demanda de prévia
 
 O vídeo usa NV12, perfil H.264 Main, zero B-frames e GOP de um segundo, com
-limites de 1920x1080, 120 FPS e 20000 kbps. A imagem é **esticada para a resolução
-solicitada**, sem criar barras para preservar a proporção original. Perfis
-diferentes podem exigir encoders e upload adicionais. Esses valores são
+limites de 1920x1080, 120 FPS e 20000 kbps. O switch **Manter proporção** no
+seletor vale somente para o compartilhamento que está sendo criado. Desligado
+(padrão), estica a imagem para a resolução solicitada. Ligado, mantém a imagem
+inteira centralizada e acrescenta barras pretas quando as proporções diferem,
+sem cortar ou deformar a fonte. A escolha vale para a prévia e todos os perfis
+de espectadores, inclusive depois de trocar a qualidade; não altera a resolução
+ou o FPS configurados e não é uma preferência global. Perfis diferentes podem
+exigir encoders e upload adicionais. Esses valores são
 limites de configuração, não garantia de FPS, bitrate entregue ou desempenho.
 O feedback de bitrate confirma configurações, não a aplicação medida no
 hardware (`hardwareApplicationConfirmed: false`, `fpsApplied: null`).
@@ -82,6 +93,11 @@ um pipeline local no perfil da fonte, sem publicar mídia na rede. Quando há
 espectadores, ela reutiliza um perfil assistido e decodifica seus mesmos
 frames H.264, sem segunda captura/encoder apenas para exibição. A fila da
 prévia é limitada e não bloqueia o envio remoto.
+Um novo compartilhamento abre sua prévia no modo foco; atualizações de
+qualidade ou recuperação não desfazem a escolha posterior de sair do foco.
+O indicador **Normal / Captura de jogo** só aparece depois de observar frames,
+e acompanha o pipeline efetivo da prévia ou do espectador, não apenas a opção
+solicitada. A sinalização desse estado exige cliente e servidor no protocolo 24.
 
 A opção **Pausar prévia quando o Monky estiver fora de foco**, ativa por padrão,
 controla somente a prévia local; perder foco não interrompe espectadores.
@@ -114,7 +130,7 @@ Retrocesso real ou sobreposição parcial continua sendo erro explícito.
 
 ## Dependências OBS e Captura de Jogo
 
-`scripts\buildCapture.cjs` gera `bin\win32-x64\capture-build.json` no **schema 3**.
+`scripts\buildCapture.cjs` gera `bin\win32-x64\capture-build.json` no **schema 4**.
 Ele mantém OBS **32.1.1**, revisão
 `7272af1375b38bc3cf4e0f98a5d999e8b76e9309`, com arquivos verificados por SHA-256.
 Além de libobs/D3D11/WinRT, `obs-ffmpeg` e do módulo `win-capture` especializado,
@@ -134,13 +150,36 @@ compatibilidade, instalação global de hooks ou registro global de camada
 Vulkan. Isso é diferente dos hooks de **build do `gclient`**, que continuam
 desativados.
 
+Os dados imutáveis de `win-capture` são copiados, com verificação de cada
+SHA-256, para `native-screen-capture\hooks-<hash>\data\obs-plugins\win-capture`
+dentro do perfil selecionado. A chave deriva do conjunto completo de arquivos
+fixados. Cada arquivo é publicado atomicamente, sem sobrescrever uma cópia
+existente, que também precisa passar pelas verificações de caminho, tamanho e
+hash. Configurações e ownership continuam privados por execução.
+Uma DLL injetada pode permanecer mapeada no jogo após encerrar a transmissão:
+por isso esse cache não é apagado no Stop, na pausa da prévia ou na troca de
+qualidade. O encerramento ainda exige liberar a captura, o encoder, o transporte
+e o processo auxiliar; não mata o jogo nem força o descarregamento de sua DLL.
+Um runtime antigo deve ser recompilado para usar esse armazenamento e os dois
+modos de proporção.
+
 Mantém-se a configuração normal OBS `anti_cheat_hook=true`; ela não autoriza
 desativar anti-cheat, Trusted Mode ou alterar argumentos de lançamento.
-Jogos protegidos, inclusive CS2 nas configurações protegidas, podem recusar
-Captura de Jogo. Nesse caso, mantenha as proteções e, se desejar tentar WGC,
-na aba **Janelas** escolha manualmente **Captura de janela (WGC)** para a
-mesma janela e confirme. Não há promessa de compatibilidade com o jogo nem
-troca automática de método/fonte.
+Captura de Jogo exige renderização compatível com o hook: não é um método
+universal para qualquer aplicativo enumerado. O [guia oficial do
+OBS](https://obsproject.com/kb/game-capture-troubleshooting) lista CS2 entre os
+jogos com problemas conhecidos e orienta modo janela/sem bordas com captura de
+janela. Não se pode deduzir qual proteção está ativa apenas pela falta de frames.
+Uma falha de inicialização da fonte Game ou ausência de frames antes do prazo
+inicia o fallback para **Normal**, com aviso discreto traduzido, sem desativar
+proteções. O host anterior precisa confirmar seu encerramento; HWND, PID e
+instante de criação são revalidados antes da única tentativa alternativa.
+O transporte, espectadores, áudio, proporção e perfil permanecem os mesmos.
+Perda da janela, cancelamento, erro do encoder ou falha após emitir vídeo não
+autorizam trocar de método. Se Normal também falhar, o erro é explícito.
+Para esses jogos, Normal pode exigir modo janela/sem bordas; não há garantia
+de compatibilidade. O guia pesquisável no seletor resume limitações publicadas
+pelo OBS, não uma lista completa de jogos homologados no Monky.
 
 ## Build a partir de um checkout
 

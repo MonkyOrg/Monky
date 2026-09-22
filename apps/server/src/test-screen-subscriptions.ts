@@ -814,13 +814,20 @@ for (const backend of ['native', 'browser'] as const) test(`${backend} screen si
   assert.equal((await send(viewer, control))?.type, MessageType.SERVER_ERROR, 'Watch alone does not admit native control');
   const accepted = { ...scope, fromSessionId: 'publisher', targetSessionId: 'viewer-a',
     action: 'accepted', quality: '720p60', backend, generation: 1 };
+  const captureMode = { ...scope, fromSessionId: 'publisher', targetSessionId: 'viewer-a',
+    action: 'capture-mode', generation: 1, capture: { mode: 'normal', ready: true } };
+  assert.equal((await send(publisher, captureMode))?.type, MessageType.SERVER_ERROR, 'Mode cannot precede acceptance');
   assert.equal((await send(publisher, { ...accepted, quality: 'source' }))?.type, MessageType.SERVER_ERROR);
   assert.equal((await send(publisher, accepted))?.socket, viewer.ws);
+  assert.equal((await send(publisher, captureMode))?.socket, viewer.ws);
+  assert.equal((await send(publisher, { ...captureMode, generation: 2 }))?.type, MessageType.SERVER_ERROR);
+  assert.equal((await send(viewer, captureMode))?.type, MessageType.SERVER_ERROR, 'Only the publisher owns the capture method');
   assert.equal((await send(viewer, control))?.socket, publisher.ws);
   if (control.action === 'control')
     assert.equal((await send(viewer, { ...control, control: { ...control.control, generation: 2 } }))?.type, MessageType.SERVER_ERROR);
   assert.equal((await send(other, control))?.type, MessageType.SERVER_ERROR);
   assert.equal((await send(viewer, { ...scope, action: 'stop' }))?.socket, publisher.ws);
+  assert.equal((await send(publisher, captureMode))?.type, MessageType.SERVER_ERROR, 'Mode cannot revive a stopped Watch');
   assert.equal((await send(viewer, control))?.type, MessageType.SERVER_ERROR, 'late control cannot revive a stopped Watch');
   const beforeDuplicateStop = f.sent.length;
   await send(viewer, { ...scope, action: 'stop' });

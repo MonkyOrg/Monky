@@ -4,9 +4,10 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { fixture, deferred, flush, MONITOR_SOURCE_ID } = require('./fixtures/screenSharingUiModel.cjs');
 
-const key = (element, value) => {
+const key = (element, value, modifiers = {}) => {
   const event = new Event('keydown', { bubbles: true, cancelable: true });
   Object.defineProperty(event, 'key', { value });
+  for (const [name, value] of Object.entries(modifiers)) Object.defineProperty(event, name, { value });
   element.dispatchEvent(event);
   return event;
 };
@@ -72,12 +73,21 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(control(f, 'share-game-tip').hidden, false);
     assert.ok(control(f, 'share-game-tip').textContent.includes(f.i18n.t('screenShare.gameCompatibility')));
     assert.ok(control(f, 'share-game-tip').textContent.includes(f.i18n.t('screenShare.gameWindowAlternative')));
+    assert.equal(control(f, 'btn-share').getAttribute('aria-describedby'), 'share-game-tip');
+    assert.ok(control(f, 'share-game-tip').textContent.includes('CS2'));
+    assert.ok(control(f, 'share-game-tip').textContent.includes('Normal'));
+    assert.doesNotMatch(control(f, 'share-game-tip').textContent, /WGC|hook/i);
+    assert.equal(f.i18n.t('screenShare.windowCapture'), 'Normal');
+    assert.match(control(f, 'share-game-tip').textContent, language === 'en' ? /same window/ : /mesma janela/);
+    assert.ok(control(f, 'share-game-tip').textContent.includes('Trusted Mode'));
+    assert.ok(control(f, 'share-game-tip').textContent.includes(language === 'en' ? 'borderless' : 'sem bordas'));
     assert.equal(f.picker.selectedSourceId, selected);
     assert.deepEqual(f.document.querySelectorAll('.source-item'), cards, 'Changing method must neither duplicate nor recreate the window list');
     for (const [pressed, expected] of [['Home', 'window'], ['End', 'game'], ['ArrowDown', 'window'], ['ArrowUp', 'game']]) {
       key(control(f, `share-method-${f.picker.windowCaptureMethod}`), pressed);
       assert.equal(f.picker.windowCaptureMethod, expected);
       assert.equal(f.picker.selectedSourceId, selected);
+      assert.equal(control(f, 'btn-share').getAttribute('aria-describedby'), expected === 'game' ? 'share-game-tip' : null);
     }
     assert.equal(f.document.querySelector('input[type="radio"]'), null);
     assert.ok(f.document.querySelectorAll('input[type="checkbox"]').every(input => input.closest('.toggle-switch')));
@@ -155,24 +165,22 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(reopened.querySelector('#checkbox-screen-preview-focus').checked, false);
   });
 
-  test(`explicit selection probing is clearly pending and never runs on open or card selection (${language})`, async t => {
+  test(`pending verification stays internal without provisional badges or premature probing (${language})`, async t => {
     const f = fixture(language);
     t.after(() => f.close());
     Object.assign(f.capabilities, { capture: false, backend: null, requiresSelectionProbe: true });
     await f.picker.open();
     for (const tab of f.document.querySelectorAll('[role="tab"]')) {
       assert.equal(tab.disabled, false);
-      assert.equal(tab.title, f.i18n.t('screenShare.probePending'));
-      assert.equal(tab.getAttribute('aria-describedby'), tab.getAttribute('aria-selected') === 'true' ? 'share-capture-info' : null);
-      assert.equal(tab.querySelector('.share-tab-status').hidden, false);
-      assert.equal(tab.querySelector('.share-tab-status').textContent, f.i18n.t('screenShare.probePending'));
+      assert.equal(tab.title, '');
+      assert.equal(tab.getAttribute('aria-describedby'), null);
+      assert.equal(tab.querySelector('.share-tab-status').hidden, true);
+      assert.equal(tab.querySelector('.share-tab-status').textContent, '');
     }
-    const profile = f.load('core/VideoService').videoService.getProfile();
     const info = control(f, 'share-capture-info');
     assert.equal(info.dataset.backend, 'probe-pending');
-    assert.equal(info.textContent, f.i18n.t('screenShare.nativeProbePending', {
-      width: profile.screenWidth, height: profile.screenHeight, fps: profile.screenFps, bitrate: profile.screenBitrateKbps,
-    }));
+    assert.equal(info.hidden, true);
+    assert.equal(info.textContent, '');
     assert.equal(control(f, 'btn-share').disabled, true, 'A pending probe still needs an explicit source');
     f.document.querySelector('.source-item').click();
     assert.equal(control(f, 'btn-share').disabled, false, 'Confirmation may prepare exactly the selected source');
@@ -180,14 +188,32 @@ for (const language of ['pt-BR', 'en']) {
     for (const method of ['window', 'game']) {
       const button = control(f, `share-method-${method}`);
       assert.equal(button.disabled, false);
-      assert.equal(button.title, f.i18n.t('screenShare.probePending'));
-      assert.equal(control(f, `share-method-${method}-status`).textContent, f.i18n.t('screenShare.probePending'));
+      assert.equal(button.title, '');
+      assert.equal(button.getAttribute('aria-describedby'), `share-method-${method}-description`);
+      assert.equal(control(f, `share-method-${method}-status`).hidden, true);
+      assert.equal(control(f, `share-method-${method}-status`).textContent, '');
     }
     control(f, 'share-method-game').click();
     assert.equal(f.picker.selectedSourceId, f.sources[1].id);
     assert.equal(f.traces.length, 0, 'Enumeration/card selection must not prepare a window, probe, capture or publish');
     assert.equal(f.capabilities.capture, false);
     assert.equal(f.capabilities.backend, null);
+    f.capabilities.captureKinds = ['window'];
+    f.picker.updateCaptureInfo();
+    assert.equal(control(f, 'share-tab-screen').disabled, true);
+    assert.equal(control(f, 'share-tab-screen').querySelector('.share-tab-status').hidden, false);
+    assert.equal(control(f, 'share-method-game').disabled, true);
+    assert.equal(control(f, 'share-method-game-status').hidden, false);
+    assert.equal(control(f, 'btn-share').disabled, true);
+    assert.equal(info.hidden, false, 'An actual blocker must replace the hidden provisional info');
+    assert.equal(info.textContent, f.i18n.t('screenShare.captureMethodUnavailable', { method: f.i18n.t('screenShare.gameCapture') }));
+    f.capabilities.captureKinds = ['window', 'monitor', 'game'];
+    f.picker.updateCaptureInfo();
+    assert.equal(info.hidden, true);
+    assert.equal(info.textContent, '');
+    assert.equal(control(f, 'share-method-game-status').hidden, true);
+    assert.equal(control(f, 'btn-share').disabled, false);
+    assert.equal(f.capabilities.capture, false, 'Restoring an eligible method must not manufacture verified capture');
   });
 
   test(`preview section navigation targets the real section and cleans up (${language})`, t => {
@@ -217,6 +243,68 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(navigation.revealSection('screen-preview'), false);
   });
 }
+
+for (const language of ['pt-BR', 'en']) {
+  test(`terminal Game Capture failures use the structured code for localized Normal guidance (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    const message = 'Raw native CS2 diagnostic must stay in logs, not identify a game or select an error message';
+    f.notifyNativeFailure({ reason: 'capture-failed', code: 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE', message });
+    assert.equal(f.alerts.length, 1);
+    assert.equal(f.alerts[0].title, f.i18n.t('screenShare.errorTitle'));
+    assert.equal(f.alerts[0].message, f.i18n.t('screenShare.gameCaptureUnavailable'));
+    assert.equal(f.alerts[0].variant, 'danger');
+    assert.ok(f.alerts[0].message.includes('CS2'));
+    assert.ok(f.alerts[0].message.includes('Normal'));
+    assert.doesNotMatch(f.alerts[0].message, /WGC|hook/i);
+    assert.ok(f.alerts[0].message.includes('Trusted Mode'));
+    assert.ok(f.alerts[0].message.includes(language === 'en' ? 'borderless' : 'sem bordas'));
+    assert.equal(f.alerts[0].message.includes(message), false);
+    f.notifyNativeFailure({ reason: 'capture-failed', message });
+    assert.equal(f.alerts[1].message, f.i18n.t('screenShare.nativeFailure.capture-failed'),
+      'Without the code, neither native English nor a game name may manufacture a Game Capture diagnosis');
+    f.notifyNativeFailure({ reason: 'unsupported' });
+    assert.equal(f.alerts[2].message, f.i18n.t('screenShare.nativeFailure.unsupported'));
+    assert.equal(f.traces.length, 0, 'The terminal alert must not start Normal, retry Game Capture or change the selected source');
+  });
+
+  test(`fallback reports an attempt through an informational toast, never a success or terminal modal (${language})`, t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    f.notifyCaptureFallback({ shareId: '<img src=x onerror=bad()>' });
+    assert.equal(f.alerts.length, 0);
+    assert.equal(f.traces.length, 1);
+    assert.deepEqual(f.traces[0], ['info-toast', f.i18n.t('screenShare.gameFallback'), 8000]);
+    assert.match(f.traces[0][1], language === 'en' ? /Trying Normal.*same window/ : /Tentando.*Normal.*mesma janela/);
+    assert.doesNotMatch(f.traces[0][1], /<img|WGC|hook/i);
+    f.notifyNativeFailure({ reason: 'capture-failed' });
+    assert.equal(f.alerts.length, 1, 'A later terminal Normal failure must still be visible');
+    assert.equal(f.alerts[0].message, f.i18n.t('screenShare.nativeFailure.capture-failed'));
+  });
+}
+
+test('fallback toast lasts eight seconds without extending the default information and copy notices', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(), clears = [];
+  t.after(() => { for (const clear of clears) clear(); f.close(); });
+  const { showInfoToast, showCopyToast } = f.load('views/CopyToast');
+  clears.push(showInfoToast(f.i18n.t('screenShare.gameFallback'), 8000));
+  const fallback = f.document.querySelector('.chat-copy-toast');
+  t.mock.timers.tick(3200);
+  assert.equal(fallback.isConnected, true, 'The fallback notice must outlast its previous timeout');
+  t.mock.timers.tick(4799);
+  assert.equal(fallback.isConnected, true, 'The fallback notice must remain until eight seconds');
+  t.mock.timers.tick(1);
+  assert.equal(fallback.isConnected, false);
+  for (const [show, durationMs] of [[showInfoToast, 3200], [showCopyToast, 1600]]) {
+    clears.push(show('Unchanged default'));
+    const notice = f.document.querySelector('.chat-copy-toast');
+    t.mock.timers.tick(durationMs - 1);
+    assert.equal(notice.isConnected, true);
+    t.mock.timers.tick(1);
+    assert.equal(notice.isConnected, false);
+  }
+});
 
 test('legacy capability fixtures enable only windows; explicit empty/unsupported kinds never enable capture', async t => {
   const f = fixture();
@@ -321,9 +409,10 @@ for (const [tab, kind, sourceId] of [
       control(f, 'share-method-game').click();
     }
     assert.equal(control(f, 'share-capture-info').dataset.backend, 'probe-pending');
+    assert.equal(control(f, 'share-capture-info').hidden, true);
     assert.equal(nativeStarts(f).length, 0);
     await f.picker.startSharing('replace');
-    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, '', kind]]);
+    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, '', kind, false]]);
     const restores = f.traces.filter(value => value[0] === 'prepare-window');
     assert.deepEqual(restores, kind === 'monitor' ? [] : [['prepare-window', sourceId]]);
     assert.equal(f.capabilities.capture, false, 'The UI must not upgrade Main capabilities by itself');
@@ -387,8 +476,9 @@ for (const [tab, kind, sourceId] of [
     key(card, 'Enter');
     if (kind === 'game') control(f, 'share-method-game').click();
     assert.equal(control(f, 'btn-share-add').disabled, false);
+    assert.equal(control(f, 'btn-share-add').getAttribute('aria-describedby'), kind === 'game' ? 'share-game-tip' : null);
     await f.picker.startSharing('add');
-    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, 'data:image/png;base64,selected', kind]]);
+    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, 'data:image/png;base64,selected', kind, false]]);
     assert.equal(f.traces.filter(value => value[0] === 'prepare-window').length, kind === 'monitor' ? 0 : 1);
     assert.equal(f.voiceStore.screenShareIds.length, 2);
     assert.ok(f.voiceStore.screenShareIds.includes(previous.id));
@@ -401,7 +491,7 @@ for (const [tab, kind, sourceId] of [
   });
 }
 
-test('failed Game Capture preserves existing shares and never tries a different source, method or Chromium', async t => {
+test('terminal Game Capture rejection preserves existing shares without a second renderer capture attempt', async t => {
   const f = fixture();
   t.after(() => f.close());
   const previous = f.createStream('window:303:0');
@@ -479,7 +569,7 @@ test('source refresh removes a disappeared game window without selecting a displ
   assert.equal(nativeStarts(f).length, 0);
 });
 
-test('game-only capability offers no guessed WGC fallback; an available alternative keeps the exact same window', async t => {
+test('game-only capability does not enable a guessed Normal card; an available alternative keeps the exact same window', async t => {
   const f = fixture();
   t.after(() => f.close());
   f.capabilities.captureKinds = ['game'];
@@ -496,7 +586,7 @@ test('game-only capability offers no guessed WGC fallback; an available alternat
   assert.equal(f.picker.selectedSourceId, 'window:101:0');
   control(f, 'share-method-window').click();
   assert.equal(f.picker.windowCaptureMethod, 'window');
-  assert.equal(f.picker.selectedSourceId, 'window:101:0', 'The manual WGC alternative must not reselect another window');
+  assert.equal(f.picker.selectedSourceId, 'window:101:0', 'The manual Normal alternative must not reselect another window');
   assert.equal(nativeStarts(f).length, 0);
 });
 
@@ -540,7 +630,7 @@ test('Game Capture requires explicit confirmation and is never inherited by a di
   assert.equal(f.traces.length, 0);
   control(f, 'btn-share').click();
   await flush();
-  assert.deepEqual(nativeStarts(f), [['native-start', 'window:202:0', true, '', 'game']]);
+  assert.deepEqual(nativeStarts(f), [['native-start', 'window:202:0', true, '', 'game', false]]);
 });
 
 test('changing method cannot retain a window removed from the current source set or switch to another one', async t => {
@@ -581,9 +671,10 @@ test('app audio follows the same window across methods, while screen/app choices
   assert.equal(audio.checked, false);
   chooseWindowMethod(f, 'game');
   await f.picker.loadSources(f.picker.modalEl);
-  assert.equal(f.picker.selectedSourceId, null, 'A refresh still needs explicit source selection');
+  assert.equal(f.picker.selectedSourceId, 'window:101:0', 'Refresh preserves the same available source');
+  assert.equal(f.picker.windowCaptureMethod, 'game');
   assert.equal(audio.checked, false);
-  f.document.querySelector('.source-item').click();
+  f.document.querySelector('[data-source-id="window:202:0"]').click();
   assert.equal(f.picker.windowCaptureMethod, 'window');
   audio.checked = true;
   change(audio);
@@ -596,6 +687,179 @@ test('app audio follows the same window across methods, while screen/app choices
   assert.equal(audio.checked, false);
   assert.equal(f.traces.length, 0);
 });
+
+for (const language of ['pt-BR', 'en']) {
+  test(`explicit refresh discovers new windows and preserves only the same valid selection (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    await f.picker.open();
+    chooseWindowMethod(f, 'game');
+    f.settingsStore.qualityPreset = 'CUSTOM';
+    f.settingsStore.preferredVideoCodec = 'h264';
+    const profile = { ...f.settingsStore.customProfile };
+    const audio = control(f, 'chk-share-audio');
+    audio.checked = false;
+    change(audio);
+    const aspect = control(f, 'chk-preserve-aspect-ratio');
+    assert.equal(aspect.checked, false);
+    assert.equal(aspect.getAttribute('role'), 'switch');
+    assert.equal(aspect.getAttribute('aria-labelledby'), 'share-aspect-label');
+    assert.equal(aspect.getAttribute('aria-describedby'), 'share-aspect-description');
+    assert.ok(aspect.closest('.toggle-switch'));
+    aspect.checked = true;
+    const refresh = control(f, 'btn-refresh-sources');
+    assert.equal(refresh.tagName, 'BUTTON');
+    assert.equal(refresh.type, 'button');
+    assert.equal(refresh.getAttribute('aria-label'), f.i18n.t('screenShare.refreshSourcesLabel'));
+    assert.equal(refresh.getAttribute('aria-controls'), 'share-sources-panel');
+    assert.ok(refresh.textContent.includes(f.i18n.t('screenShare.refreshSources')));
+    assert.equal(refresh.disabled, false);
+    refresh.focus();
+    assert.equal(f.document.activeElement, refresh);
+    const gate = deferred();
+    const selected = f.picker.selectedSourceId;
+    const window = f.source('window:303:0', 'window', 'Opened after the picker');
+    f.controls.sources = () => gate.promise;
+    refresh.click();
+    refresh.click();
+    refresh.dispatchEvent(new Event('click', { bubbles: true }));
+    await flush();
+    assert.equal(f.enumerations, 2, 'Repeated refresh clicks cannot overlap enumeration');
+    assert.equal(refresh.disabled, true);
+    assert.equal(refresh.dataset.loading, '1');
+    assert.equal(refresh.getAttribute('aria-busy'), 'true');
+    assert.equal(control(f, 'btn-share').disabled, true);
+    assert.equal(control(f, 'btn-cancel').disabled, false);
+    assert.equal(f.picker.selectedSourceId, selected, 'Loading does not discard a selection before checking it');
+    gate.resolve([...f.sources, window]);
+    await flush();
+    assert.equal(refresh.disabled, false);
+    assert.equal(refresh.getAttribute('aria-busy'), 'false');
+    assert.ok(f.document.querySelector(`[data-source-id="${window.id}"]`));
+    assert.equal(f.picker.activeTab, 'window');
+    assert.equal(f.picker.selectedSourceId, selected);
+    assert.equal(f.picker.windowCaptureMethod, 'game');
+    assert.equal(control(f, 'share-method-game').getAttribute('aria-pressed'), 'true');
+    assert.equal(f.document.querySelector(`[data-source-id="${selected}"]`).getAttribute('aria-pressed'), 'true');
+    assert.equal(control(f, 'chk-preserve-aspect-ratio'), aspect);
+    assert.equal(aspect.checked, true);
+    assert.equal(audio.checked, false);
+    assert.equal(f.settingsStore.qualityPreset, 'CUSTOM');
+    assert.deepEqual(f.settingsStore.customProfile, profile);
+    assert.equal(f.settingsStore.preferredVideoCodec, 'h264');
+    const replacement = f.source('window:404:0', 'window', f.sources[1].name);
+    f.controls.sources = async () => [f.sources[0], f.sources[2], window, replacement];
+    refresh.click();
+    await flush();
+    assert.equal(f.picker.selectedSourceId, null, 'The same title cannot replace the selected opaque ID');
+    assert.equal(control(f, 'btn-share').disabled, true);
+    assert.equal(control(f, 'share-window-methods').hidden, true);
+    assert.ok(f.document.querySelectorAll('.source-item').every(card => card.getAttribute('aria-pressed') === 'false'));
+    assert.equal(aspect.checked, true);
+    assert.equal(audio.checked, false);
+    assert.equal(f.saves, 0);
+    assert.equal(f.traces.length, 0, 'Refreshing sources must not prepare or capture a window');
+  });
+}
+
+test('refresh errors and overlapping generations keep choices but never enable stale source confirmation', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  await f.picker.open();
+  chooseWindowMethod(f, 'game');
+  control(f, 'chk-preserve-aspect-ratio').checked = true;
+  const selected = f.picker.selectedSourceId;
+  const first = deferred(), latest = deferred();
+  f.controls.sources = () => first.promise;
+  const oldRequest = f.picker.loadSources(f.picker.modalEl);
+  await flush();
+  f.controls.sources = () => latest.promise;
+  const currentRequest = f.picker.loadSources(f.picker.modalEl);
+  await flush();
+  first.resolve([f.source('window:999:0', 'window')]);
+  await oldRequest;
+  assert.equal(control(f, 'share-sources-panel').getAttribute('aria-busy'), 'true');
+  assert.equal(control(f, 'btn-refresh-sources').disabled, true);
+  assert.equal(f.document.querySelector('[data-source-id="window:999:0"]'), null);
+  latest.reject(new Error('Expected refresh failure'));
+  await currentRequest;
+  assert.ok(control(f, 'share-sources-panel').querySelector('[role="alert"]'));
+  assert.equal(control(f, 'btn-refresh-sources').disabled, false);
+  assert.equal(control(f, 'btn-share').disabled, true);
+  assert.equal(f.picker.selectedSourceId, selected);
+  assert.equal(f.picker.windowCaptureMethod, 'game');
+  assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, true);
+  assert.ok(f.warnings.some(value => value[0] === '[ScreenShare] Could not load capture sources'));
+  f.controls.sources = async () => f.sources;
+  control(f, 'share-sources-panel').querySelector('[data-loading-retry]').click();
+  await flush();
+  assert.equal(f.picker.selectedSourceId, selected);
+  assert.equal(f.picker.windowCaptureMethod, 'game');
+  assert.equal(control(f, 'btn-share').disabled, false);
+  assert.equal(f.traces.length, 0);
+});
+
+test('closing a refreshing picker retires its listeners and rejects detached refresh attempts', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  await f.picker.open();
+  chooseWindowMethod(f, 'game');
+  const oldRoot = f.picker.modalEl, refresh = control(f, 'btn-refresh-sources');
+  const pending = deferred();
+  f.controls.sources = () => pending.promise;
+  refresh.click();
+  await flush();
+  control(f, 'btn-cancel').click();
+  assert.equal(f.picker.modalEl, null);
+  assert.ok([...refresh.listeners.values()].every(listeners => listeners.size === 0));
+  f.controls.sources = async () => f.sources;
+  await f.picker.open();
+  const currentRoot = f.picker.modalEl, count = f.enumerations;
+  refresh.dispatchEvent(new Event('click', { bubbles: true }));
+  await f.picker.loadSources(oldRoot);
+  pending.reject(new Error('Expected abandoned refresh'));
+  await flush();
+  assert.equal(f.picker.modalEl, currentRoot);
+  assert.equal(f.enumerations, count);
+  assert.equal(f.picker.selectedSourceId, null);
+  assert.equal(f.picker.windowCaptureMethod, 'window');
+  assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, false);
+  assert.equal(f.document.querySelector('[role="alert"]'), null);
+  assert.equal(f.alerts.length, 0);
+});
+
+for (const kind of ['window', 'game', 'monitor']) {
+  for (const preserveAspectRatio of [false, true]) {
+    test(`${kind} sends per-share preserveAspectRatio=${preserveAspectRatio} and a new picker defaults to stretch`, async t => {
+      const f = fixture();
+      t.after(() => f.close());
+      await f.picker.open();
+      const sourceId = kind === 'monitor' ? MONITOR_SOURCE_ID : 'window:101:0';
+      if (kind === 'monitor') {
+        control(f, 'share-tab-screen').click();
+        f.document.querySelector(`[data-source-id="${sourceId}"]`).click();
+      } else chooseWindowMethod(f, kind);
+      const aspect = control(f, 'chk-preserve-aspect-ratio');
+      assert.equal(aspect.checked, false);
+      aspect.checked = preserveAspectRatio;
+      const pending = deferred();
+      f.controls.sources = () => pending.promise;
+      control(f, 'btn-refresh-sources').click();
+      await flush();
+      pending.resolve(f.sources);
+      await flush();
+      assert.equal(f.picker.selectedSourceId, sourceId);
+      assert.equal(aspect.checked, preserveAspectRatio);
+      await f.picker.startSharing('replace');
+      assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, '', kind, preserveAspectRatio]]);
+      assert.equal(f.saves, 0, 'Aspect ratio is not a global preference');
+      f.controls.sources = async () => f.sources;
+      await f.picker.open();
+      assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, false);
+      assert.equal(Object.hasOwn(f.settingsStore, 'preserveAspectRatio'), false);
+    });
+  }
+}
 
 for (const language of ['pt-BR', 'en']) {
   test(`monitor cards localize displayNumber without changing opaque IDs or metadata (${language})`, async t => {
@@ -632,7 +896,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(f.traces.length, 0, 'UI enumeration must not create capture thumbnails or probe hardware');
     key(cards[0], ' ');
     await f.picker.startSharing('replace');
-    assert.deepEqual(nativeStarts(f), [['native-start', sources[0].id, true, sources[0].thumbnailDataUrl, 'monitor']]);
+    assert.deepEqual(nativeStarts(f), [['native-start', sources[0].id, true, sources[0].thumbnailDataUrl, 'monitor', false]]);
   });
 
   test(`unnumbered monitors and application windows retain escaped source names (${language})`, async t => {
@@ -692,6 +956,7 @@ test('audio availability and reservation cannot silently capture another mix or 
 test('async capture locks the selected method; cancelling retires a late result without touching a newer picker', async t => {
   const f = fixture();
   t.after(() => f.close());
+  Object.assign(f.capabilities, { capture: false, backend: null, requiresSelectionProbe: true });
   const gate = deferred();
   let wanted;
   f.controls.start = request => { wanted = request.isWanted; return gate.promise; };
@@ -703,7 +968,11 @@ test('async capture locks the selected method; cancelling retires a late result 
   const pending = f.picker.startSharing('replace');
   await flush();
   assert.equal(f.picker.isStarting, true);
+  assert.equal(control(f, 'btn-share').dataset.loading, '1', 'Actual capture preparation still has a loading indicator');
+  assert.equal(control(f, 'share-capture-info').hidden, true);
   assert.equal(control(f, 'chk-share-audio').disabled, true);
+  assert.equal(control(f, 'chk-preserve-aspect-ratio').disabled, true);
+  assert.equal(control(f, 'btn-refresh-sources').disabled, true);
   assert.ok(f.document.querySelectorAll('[role="tab"]').every(tab => tab.disabled));
   assert.ok(f.document.querySelectorAll('.share-capture-methods button').every(button => button.disabled));
   f.picker.selectTab('screen');
@@ -866,13 +1135,235 @@ test('a late codec error cannot open a dialog after quality settings cleanup', a
   assert.equal(f.alerts.length, 0);
 });
 
+test('the local OBS guide contains only the 14 sourced limitations, searchable by aliases without compatibility verdicts', t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const { GAME_CAPTURE_GUIDANCE: entries, GAME_CAPTURE_GUIDE_SOURCE, searchGameCaptureGuidance: search } = f.load('views/GameCaptureGuideModal');
+  assert.equal(GAME_CAPTURE_GUIDE_SOURCE, 'https://obsproject.com/kb/game-capture-troubleshooting');
+  assert.equal(entries.length, 14);
+  assert.equal(new Set(entries.map(entry => entry.id)).size, 14);
+  assert.deepEqual([...entries].filter(entry => entry.advice === 'normal').map(entry => entry.id).sort(),
+    ['cs2', 'destiny2', 'gta-san-andreas', 'roblox', 'samp']);
+  assert.deepEqual([...entries].filter(entry => entry.advice === 'permissions').map(entry => entry.id).sort(),
+    ['call-of-duty', 'genshin-impact', 'honkai-star-rail', 'valorant', 'zenless-zone-zero']);
+  assert.deepEqual([...entries].filter(entry => entry.advice === 'multiGpu').map(entry => entry.id).sort(),
+    ['minecraft-java', 'osu']);
+  assert.equal(entries.find(entry => entry.id === 'fortnite').advice, 'dx12');
+  assert.equal(entries.find(entry => entry.id === 'league-of-legends').advice, 'separateWindow');
+  assert.ok(entries.every(entry => !Object.hasOwn(entry, 'compatible') && !Object.hasOwn(entry, 'executable')));
+  for (const [query, expected] of [
+    ['CS2', 'cs2'], ['cs 2', 'cs2'], ['counter strike', 'cs2'], ['Counter-Strike 2', 'cs2'],
+    ['GTA San Andreas', 'gta-san-andreas'], ['GTA SA', 'gta-san-andreas'],
+    ['SA-MP', 'samp'], ['samp', 'samp'], ['LoL', 'league-of-legends'],
+    ['Minecraft Java', 'minecraft-java'], ['Mínecraft: JÁVA Edition', 'minecraft-java'],
+    ['  OSU!  ', 'osu'], ['Valorant', 'valorant'], ['honkai star rail', 'honkai-star-rail'],
+  ]) assert.deepEqual([...search(query)].map(entry => entry.id), [expected], query);
+  assert.deepEqual([...search('San Andreas')].map(entry => entry.id), ['gta-san-andreas', 'samp']);
+  assert.equal(search(' \t ').length, 14);
+  for (const query of ['TLOU2', 'The Last of Us Part II', 'Minecraft Bedrock', 'CSGO', 'GTA V', '!!!', '不存在']) {
+    assert.equal(search(query).length, 0, `${query} has no catalogued information, not an incompatibility verdict`);
+  }
+});
+
+for (const language of ['pt-BR', 'en']) {
+  test(`the guide is an independent searchable modal that restores focus and selection without starting capture (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    Object.assign(f.capabilities, { capture: false, backend: null, requiresSelectionProbe: true });
+    f.sources[1].name = 'Counter-Strike 2';
+    await f.picker.open();
+    const opener = control(f, 'btn-game-capture-guide');
+    const picker = f.picker.modalEl;
+    assert.equal(opener.getAttribute('aria-haspopup'), 'dialog');
+    assert.equal(opener.getAttribute('aria-expanded'), 'false');
+    assert.ok(opener.textContent.includes(f.i18n.t('screenShare.gameGuideButton')));
+    opener.click();
+    assert.ok(f.document.querySelector('#game-capture-guide'), 'The guide is available before selecting a source');
+    control(f, 'game-capture-guide-close').click();
+    assert.equal(f.document.activeElement, opener);
+    chooseWindowMethod(f, 'game');
+    const selectedCard = f.document.querySelector('[data-source-id="window:101:0"]');
+    control(f, 'chk-share-audio').checked = false;
+    change(control(f, 'chk-share-audio'));
+    control(f, 'chk-preserve-aspect-ratio').checked = true;
+    const quality = JSON.stringify([f.settingsStore.qualityPreset, f.settingsStore.customProfile, f.settingsStore.preferredVideoCodec]);
+    const enumerations = f.enumerations;
+    opener.click();
+    const guide = control(f, 'game-capture-guide').closest('.modal-backdrop');
+    const search = control(f, 'game-capture-guide-search');
+    const close = control(f, 'game-capture-guide-close');
+    const first = guide.querySelector('[data-game-guide-close]');
+    assert.equal(f.document.querySelectorAll('.modal-backdrop').length, 2);
+    assert.equal(control(f, 'game-capture-guide').getAttribute('role'), 'dialog');
+    assert.equal(control(f, 'game-capture-guide').getAttribute('aria-describedby'), 'game-capture-guide-intro');
+    const intro = control(f, 'game-capture-guide-intro').textContent;
+    assert.equal(intro, f.i18n.t('screenShare.gameGuideIntro'));
+    assert.match(intro, language === 'pt-BR' ? /^Para jogos, prefira Captura de jogo\./ : /^For games, try Game Capture first\./);
+    assert.ok(intro.includes('OBS'), 'Known limitations must be attributed to OBS rather than Monky game certification');
+    for (const key of ['screenShare.gameGuideUseNormal', 'screenShare.gameGuideAttention']) {
+      assert.ok(intro.includes(f.i18n.t(key)), 'The recommendation must explain both exception groups shown in the guide');
+    }
+    assert.equal(picker.inert, true);
+    assert.equal(opener.getAttribute('aria-expanded'), 'true');
+    assert.equal(f.document.activeElement, search);
+    assert.equal(guide.querySelectorAll('[data-game-guide-entry]').length, 14);
+    assert.equal(guide.querySelectorAll('[data-game-guide-group="normal"] [data-game-guide-entry]').length, 5);
+    assert.equal(guide.querySelectorAll('[data-game-guide-group="attention"] [data-game-guide-entry]').length, 9);
+    await f.picker.startSharing('replace');
+    assert.equal(nativeStarts(f).length, 0, 'The parent cannot confirm capture while the guide is open');
+    search.value = 'gta sa';
+    search.dispatchEvent(new Event('input'));
+    assert.equal(guide.querySelector('[data-game-guide-entry]').dataset.gameGuideEntry, 'gta-san-andreas');
+    assert.equal(control(f, 'game-capture-guide-count').textContent, f.i18n.t('screenShare.gameGuideResultsCount', { count: 1 }));
+    search.value = 'TLOU2 <img src=x onerror=bad()>';
+    search.dispatchEvent(new Event('input'));
+    assert.equal(guide.querySelectorAll('[data-game-guide-entry]').length, 0);
+    const noResults = guide.querySelector('.game-capture-guide-empty').textContent;
+    assert.equal(noResults, f.i18n.t('screenShare.gameGuideNoResults'));
+    assert.match(noResults, language === 'pt-BR' ? /Tente Captura de jogo primeiro/ : /Try Game Capture first/);
+    assert.equal(guide.querySelector('img'), null);
+    assert.equal(f.document.activeElement, search);
+    key(search, 'Enter');
+    assert.equal(nativeStarts(f).length, 0, 'Searching or pressing Enter must not confirm the underlying picker');
+    close.focus();
+    assert.equal(key(close, 'Tab').defaultPrevented, true);
+    assert.equal(f.document.activeElement, first);
+    assert.equal(key(first, 'Tab', { shiftKey: true }).defaultPrevented, true);
+    assert.equal(f.document.activeElement, close);
+    search.focus();
+    assert.equal(key(search, 'Escape').defaultPrevented, true);
+    assert.equal(f.picker.modalEl, picker);
+    assert.equal(picker.inert, false);
+    assert.equal(opener.getAttribute('aria-expanded'), 'false');
+    assert.equal(opener.getAttribute('aria-controls'), null);
+    assert.equal(f.document.activeElement, opener);
+    assert.equal(f.picker.selectedSourceId, 'window:101:0');
+    assert.equal(f.picker.windowCaptureMethod, 'game', 'Advisory entries are not a whitelist and cannot change the chosen method');
+    assert.equal(f.document.querySelector('[data-source-id="window:101:0"]'), selectedCard);
+    assert.equal(control(f, 'chk-share-audio').checked, false);
+    assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, true);
+    assert.equal(JSON.stringify([f.settingsStore.qualityPreset, f.settingsStore.customProfile, f.settingsStore.preferredVideoCodec]), quality);
+    assert.equal(f.enumerations, enumerations);
+    assert.equal(f.traces.length, 0, 'No probe, capture, external navigation or transport work runs while browsing');
+    assert.equal(f.capabilities.capture, false);
+    assert.ok([...guide.listeners.values(), ...search.listeners.values(), ...close.listeners.values()].every(listeners => listeners.size === 0));
+    opener.click();
+    const nextGuide = control(f, 'game-capture-guide');
+    assert.equal(control(f, 'game-capture-guide-search').value, '');
+    search.value = 'CS2';
+    search.dispatchEvent(new Event('input'));
+    close.click();
+    assert.equal(nextGuide.querySelectorAll('[data-game-guide-entry]').length, 14, 'Detached controls cannot search or close a new guide');
+    f.picker.close();
+    assert.equal(nextGuide.isConnected, false);
+    assert.equal(f.document.querySelectorAll('.modal-backdrop').length, 0, 'Closing the picker must dispose its child guide');
+    opener.click();
+    assert.equal(f.document.querySelector('#game-capture-guide'), null, 'A detached opener cannot reopen a guide');
+  });
+}
+
+test('the guide uses only the fixed official link through the existing bridge and exposes failures without stale updates', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  await f.picker.open();
+  const opener = control(f, 'btn-game-capture-guide');
+  opener.click();
+  const source = control(f, 'game-capture-guide-source');
+  const url = 'https://obsproject.com/kb/game-capture-troubleshooting';
+  assert.equal(source.getAttribute('href'), url);
+  assert.ok(source.textContent.includes('obsproject.com'));
+  source.setAttribute('href', 'javascript:bad()');
+  const click = new Event('click', { bubbles: true, cancelable: true });
+  source.dispatchEvent(click);
+  await flush();
+  assert.equal(click.defaultPrevented, true);
+  assert.deepEqual(f.traces, [['open-external', url]], 'Navigation must use the trusted constant, not altered DOM data');
+  f.controls.openExternal = async () => ({ success: false });
+  source.click();
+  await flush();
+  const failure = control(f, 'game-capture-guide-link-error');
+  assert.equal(failure.hidden, false);
+  assert.equal(failure.getAttribute('role'), 'alert');
+  assert.equal(failure.textContent, f.i18n.t('screenShare.gameGuideSourceError'));
+  assert.equal(f.warnings.length, 1);
+  const gate = deferred();
+  f.controls.openExternal = () => gate.promise;
+  source.click();
+  const calls = f.traces.length;
+  assert.equal(source.getAttribute('aria-busy'), 'true');
+  source.click();
+  assert.equal(f.traces.length, calls, 'Repeated activation must not duplicate an in-flight external opening');
+  control(f, 'game-capture-guide-close').click();
+  opener.click();
+  gate.reject(new Error('Expected delayed navigation failure'));
+  await flush();
+  assert.equal(control(f, 'game-capture-guide-link-error').hidden, true, 'A closed guide must not report a stale error in its replacement');
+  assert.equal(control(f, 'game-capture-guide-source').getAttribute('aria-busy'), null);
+  delete f.api.openExternal;
+  control(f, 'game-capture-guide-source').click();
+  await flush();
+  assert.equal(control(f, 'game-capture-guide-link-error').hidden, false, 'A missing safe bridge is an explicit error, not window.open fallback');
+  assert.equal(f.traces.length, calls);
+  assert.equal(nativeStarts(f).length, 0);
+});
+
+test('the guide remains device-free during enumeration without selecting an unsupported tab or source', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const gate = deferred();
+  f.controls.capabilities = () => gate.promise;
+  const opening = f.picker.open();
+  control(f, 'btn-game-capture-guide').click();
+  assert.equal(f.document.querySelectorAll('[data-game-guide-entry]').length, 14);
+  Object.assign(f.capabilities, { captureKinds: ['monitor'] });
+  gate.resolve(f.capabilities);
+  await opening;
+  assert.equal(f.picker.activeTab, 'window');
+  assert.equal(control(f, 'share-tab-window').disabled, true);
+  assert.equal(control(f, 'share-tab-screen').disabled, false);
+  control(f, 'game-capture-guide-close').click();
+  assert.equal(f.document.activeElement, control(f, 'btn-game-capture-guide'));
+  control(f, 'share-tab-screen').click();
+  assert.equal(control(f, 'btn-game-capture-guide').hidden, true);
+  control(f, 'btn-game-capture-guide').click();
+  assert.equal(f.document.querySelector('#game-capture-guide'), null, 'An inactive source tab cannot reopen its hidden guide');
+  assert.equal(f.picker.selectedSourceId, null);
+  assert.equal(control(f, 'btn-share').disabled, true);
+  assert.equal(f.traces.length, 0);
+});
+
+test('a source removed by an in-flight refresh stays unselected when its guide closes', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  await f.picker.open();
+  chooseWindowMethod(f, 'game');
+  control(f, 'chk-preserve-aspect-ratio').checked = true;
+  const gate = deferred();
+  f.controls.sources = () => gate.promise;
+  control(f, 'btn-refresh-sources').focus();
+  const refreshing = f.picker.loadSources(f.picker.modalEl);
+  control(f, 'btn-game-capture-guide').click();
+  const search = control(f, 'game-capture-guide-search');
+  gate.resolve(f.sources.filter(source => source.id !== 'window:101:0'));
+  await refreshing;
+  assert.equal(f.document.activeElement, search, 'Completing the parent refresh cannot steal focus from the guide');
+  assert.equal(f.picker.selectedSourceId, null);
+  assert.equal(control(f, 'btn-share').disabled, true);
+  control(f, 'game-capture-guide-close').click();
+  assert.equal(f.picker.selectedSourceId, null, 'Closing help cannot resurrect or replace a vanished source');
+  assert.equal(control(f, 'btn-share').disabled, true);
+  assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, true);
+  assert.equal(f.document.activeElement, control(f, 'btn-game-capture-guide'));
+  assert.equal(f.traces.length, 0);
+});
+
 test('new capture/codec/preview copy has matching translations and placeholders', t => {
   const f = fixture();
   t.after(() => f.close());
   const en = f.load('i18n/locales/en').en;
   const pt = f.load('i18n/locales/pt-BR').ptBR;
   const relevant = key => key.startsWith('screenShare.') || key.startsWith('settings.codec')
-    || key.startsWith('settings.screenPreview') || key.startsWith('settings.videoCodec');
+    || key.startsWith('settings.screenPreview') || key.startsWith('settings.videoCodec') || key.startsWith('stage.captureMode');
   assert.deepEqual(Object.keys(en).filter(relevant).sort(), Object.keys(pt).filter(relevant).sort());
   for (const key of Object.keys(en).filter(relevant)) {
     assert.deepEqual((en[key].match(/\{\w+\}/g) ?? []).sort(), (pt[key].match(/\{\w+\}/g) ?? []).sort(), key);
@@ -883,4 +1374,11 @@ test('new capture/codec/preview copy has matching translations and placeholders'
   assert.ok(!pt['screenShare.platformSoon'].includes('AMD'));
   assert.ok(!en['settings.videoCodecDesc'].includes('VP9'));
   assert.ok(!pt['settings.videoCodecDesc'].includes('VP9'));
+  for (const locale of [en, pt]) {
+    for (const key of Object.keys(locale).filter(key => key.startsWith('screenShare.'))) {
+      assert.doesNotMatch(locale[key], /\bWGC\b|\bhook\b/i, key);
+    }
+    assert.equal(Object.hasOwn(locale, 'stage.captureModePending'), false);
+    assert.equal(Object.hasOwn(locale, 'stage.captureModeUnconfirmed'), false);
+  }
 });

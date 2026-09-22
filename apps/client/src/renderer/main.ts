@@ -11,6 +11,7 @@ import {
   ChatMessage,
   chatReactionEventSchema,
   MessageType,
+  type NativeScreenEvent,
   MemberKickedPayload,
   Permission,
   ProtocolErrorCode,
@@ -57,6 +58,7 @@ import { screenAudioService } from './core/ScreenAudioService';
 import { stopLocalScreenShares } from './core/screenShareControls';
 import { screenSharePickerModal } from './views/ScreenSharePickerModal';
 import { showAlert } from './views/Dialog';
+import { showInfoToast } from './views/CopyToast';
 import { showIdentityImportDialog } from './views/IdentityDialogs';
 import { getLanguage, initI18n, t } from './i18n';
 import { translateProtocolError } from './i18n/protocolErrors';
@@ -211,7 +213,7 @@ class App {
     webRtcManager.setQualityPreset(settingsStore.qualityPreset);
 
     // Initialize overlay bridge service (#169)
-    overlayBridgeService.init();
+    overlayBridgeService.init((sessionId, shareId) => webRtcManager.getScreenCaptureMode(sessionId, shareId));
 
     // Render connection view initially
     this.connectionView?.render();
@@ -1042,10 +1044,15 @@ class App {
     appEvents.on('local.screen_stopped', () => {
       soundEffects.play('screen_share_stop');
     });
-    appEvents.on('native_screen.source_failed', (payload: { reason: import('@monky/shared').NativeScreenFailure }) => {
+    const unbindCaptureFallback = appEvents.on('native_screen.capture_fallback', (_payload: { shareId: string }) => {
+      showInfoToast(t('screenShare.gameFallback'), 8000);
+    });
+    window.addEventListener('pagehide', unbindCaptureFallback, { once: true });
+    appEvents.on('native_screen.source_failed', (payload: Pick<Extract<NativeScreenEvent, { type: 'error' }>, 'reason' | 'code'>) => {
       void showAlert({
         title: t('screenShare.errorTitle'),
-        message: t(`screenShare.nativeFailure.${payload.reason}`),
+        message: payload.code === 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE'
+          ? t('screenShare.gameCaptureUnavailable') : t(`screenShare.nativeFailure.${payload.reason}`),
         variant: 'danger',
       });
     });

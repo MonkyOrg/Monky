@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { MessageType } from './protocol.js';
 import {
-  nativeScreenFailureSchema, nativeScreenRenditionSchema, nativeScreenSignalSchema,
+  nativeScreenFailureSchema, nativeScreenRenditionSchema, nativeScreenSignalSchema, nativeScreenCaptureModeSchema,
   nativeScreenSourcesSchema, nativeScreenVideoProfileSchema, screenShareIdSchema, screenShareQualitySchema,
   type NativeScreenSource,
 } from './screenSharing.js';
@@ -91,6 +91,7 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('source-add'), shareId: screenShareIdSchema,
     desktopSourceId: z.string().regex(/^(?:window:[1-9][0-9]{0,15}:(?:[0-9]{1,10}|[a-f0-9]{64})|screen:[0-9]{1,16}:[0-9]{1,10}|native-monitor:[a-f0-9]{64})$/),
     captureKind: nativeScreenCaptureKindSchema.optional(),
+    preserveAspectRatio: z.boolean().optional(),
     video: nativeScreenVideoProfileSchema, audio: z.boolean(), audioBitrateKbps: nativeScreenAudioBitrateSchema,
   }).strict(),
   callScope.extend({ action: z.literal('source-remove'), shareId: screenShareIdSchema }).strict(),
@@ -202,6 +203,13 @@ export const nativeScreenEventSchema = z.discriminatedUnion('type', [
     sourceInstanceId: uuid, state: nativeScreenPreviewStateSchema,
   }).strict(),
   callScope.extend({
+    type: z.literal('capture-fallback'), publisherSessionId: reference, shareId: screenShareIdSchema, sourceInstanceId: uuid,
+  }).strict(),
+  callScope.extend({
+    type: z.literal('capture-mode'), publisherSessionId: reference, shareId: screenShareIdSchema,
+    sourceInstanceId: uuid, presentationId: uuid, mode: nativeScreenCaptureModeSchema,
+  }).strict(),
+  callScope.extend({
     type: z.literal('state'), publisherSessionId: reference, shareId: screenShareIdSchema,
     sourceInstanceId: uuid,
     presentationId: uuid.optional(), state: z.enum(['connecting', 'playing', 'closed', 'unavailable']),
@@ -211,6 +219,7 @@ export const nativeScreenEventSchema = z.discriminatedUnion('type', [
     type: z.literal('error'), publisherSessionId: reference, shareId: screenShareIdSchema.optional(),
     sourceInstanceId: uuid.optional(),
     presentationId: uuid.optional(), reason: nativeScreenFailureSchema, message: z.string().min(1).max(4096),
+    code: z.literal('ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE').optional(),
   }).strict(),
 ]);
 export type NativeScreenEvent = z.infer<typeof nativeScreenEventSchema>;

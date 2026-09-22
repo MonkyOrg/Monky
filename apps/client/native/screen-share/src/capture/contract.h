@@ -46,11 +46,17 @@ inline void Require(bool condition, const char* message, const char* code = "ERR
   if (!condition) throw ContractError(code, message);
 }
 
+enum class ScaleMode { Stretch, Fit };
+inline const char* ScaleModeName(ScaleMode mode) { return mode == ScaleMode::Fit ? "fit" : "stretch"; }
+
 struct VideoConfiguration {
   std::uint32_t width = 1920, height = 1080, fps = 120, bitrateKbps = 5000;
+  ScaleMode scaleMode = ScaleMode::Stretch;
 };
 
 inline void ValidateVideoConfiguration(const VideoConfiguration& video) {
+  Require(video.scaleMode == ScaleMode::Stretch || video.scaleMode == ScaleMode::Fit,
+          "Unsupported capture scaling mode", "ERR_SCREEN_CAPTURE_VIDEO");
   // obs_reset_video aligns output width to four pixels; reject implicit resizing.
   Require(video.width >= 4 && video.width <= 1920 && video.width % 4 == 0 &&
       video.height >= 2 && video.height <= 1080 && video.height % 2 == 0 &&
@@ -221,7 +227,7 @@ inline void ValidatePathEvidence(const PathEvidence& value) {
 }
 
 inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
-  Require(input.size() >= 9 && input.size() <= 15, "Expected capture identity and explicit video configuration",
+  Require(input.size() >= 9 && input.size() <= 16, "Expected capture identity and explicit video configuration",
           "ERR_SCREEN_CAPTURE_ARGUMENT");
   Arguments value;
   unsigned seen = 0;
@@ -282,21 +288,27 @@ inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
         bit = 262144;
         Require(text == L"encoder", "Only the source-free encoder probe is supported", "ERR_SCREEN_CAPTURE_ARGUMENT");
         value.encoderProbe = true;
+      } else if (name == L"--scale-mode") {
+        bit = 524288;
+        Require(text == L"stretch" || text == L"fit", "Unsupported capture scaling mode", "ERR_SCREEN_CAPTURE_VIDEO");
+        value.video.scaleMode = text == L"fit" ? ScaleMode::Fit : ScaleMode::Stretch;
       } else throw ContractError("ERR_SCREEN_CAPTURE_ARGUMENT", "Unknown native host option");
     }
     Require((seen & bit) == 0, "Duplicate native host option", "ERR_SCREEN_CAPTURE_ARGUMENT");
     seen |= bit;
   }
   ValidateVideoConfiguration(value.video);
+  const auto targetOptions = seen & ~524288u;
   if (value.encoderProbe) {
-    Require(seen == ((511u & ~24u) | 2048u | 262144u),
+    Require(targetOptions == ((511u & ~24u) | 2048u | 262144u),
             "Encoder probing must not select a window, monitor or game", "ERR_SCREEN_CAPTURE_ARGUMENT");
   } else if (value.kind == CaptureKind::Monitor) {
-    Require(seen == ((511u & ~24u) | 512u | 2048u | 258048u),
+    Require(targetOptions == ((511u & ~24u) | 512u | 2048u | 258048u),
             "Incomplete or mixed monitor target arguments", "ERR_SCREEN_CAPTURE_ARGUMENT");
     ValidateMonitorIdentity(value.monitor);
   } else {
-    Require((seen == 511 || seen == (511u | 2048u) || seen == (511u | 512u | 1024u | 2048u)) &&
+    Require((targetOptions == 511 || targetOptions == (511u | 2048u) ||
+            targetOptions == (511u | 512u | 1024u | 2048u)) &&
             value.hwnd > 0 && value.processId > 0,
             "Incomplete or mixed window target identity", "ERR_SCREEN_CAPTURE_ARGUMENT");
     Require(value.kind != CaptureKind::Game || value.expectedCreation > 0,
@@ -775,8 +787,23 @@ struct ModuleIdentity {
   std::string binaryPath, dataPath, fileName, moduleName, configPath;
 };
 
+inline std::string CaptureDataCacheName(std::string_view digest) {
+  Require(digest.size() == 64 && std::all_of(digest.begin(), digest.end(), [](char value) {
+    return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+  }), "Capture data cache requires the complete pinned-set SHA256", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
+  return "hooks-" + std::string(digest.substr(0, 32));
+}
+
+inline std::wstring CaptureDataCacheDirectory(std::wstring_view runDirectory, std::string_view digest) {
+  Require(SafeAbsolutePath(runDirectory), "Capture cache requires an admitted run path", "ERR_SCREEN_CAPTURE_MODULE_PATH");
+  const auto separator = runDirectory.rfind(L'\\');
+  const auto name = CaptureDataCacheName(digest);
+  return std::wstring(runDirectory.substr(0, separator + 1)) + std::wstring(name.begin(), name.end());
+}
+
 inline ModuleIdentity ExpectedModuleIdentity(std::string_view name, std::string_view windowsBinaryPath,
-                                             std::string_view windowsDataPath, std::string_view windowsConfigRoot) {
+                                             std::string_view windowsDataPath, std::string_view windowsConfigRoot,
+                                             std::string_view captureDataDigest = {}) {
   Require(name == "win-capture" || name == "obs-ffmpeg" || name == "obs-nvenc", "Only required pinned modules are admitted",
           "ERR_SCREEN_CAPTURE_MODULE_PATH");
   ModuleIdentity value{ObsApiPath(windowsBinaryPath), ObsApiPath(windowsDataPath), std::string(name) + ".dll",
@@ -784,9 +811,14 @@ inline ModuleIdentity ExpectedModuleIdentity(std::string_view name, std::string_
   Require(value.binaryPath.ends_with("/obs-plugins/64bit/" + value.fileName) &&
           value.dataPath.ends_with("/data/obs-plugins/" + value.moduleName) && value.configPath.ends_with("/config"),
           "Required DLL filename, module data and private config root do not match", "ERR_SCREEN_CAPTURE_MODULE_PATH");
-  Require(value.dataPath == value.configPath.substr(0, value.configPath.size() - 7) +
-          "/data/obs-plugins/" + value.moduleName,
-          "Module data and config must share the same private run root", "ERR_SCREEN_CAPTURE_MODULE_PATH");
+  auto dataRoot = value.configPath.substr(0, value.configPath.size() - 7);
+  if (!captureDataDigest.empty()) {
+    Require(name == "win-capture", "Only pinned win-capture data can outlive the capture run",
+            "ERR_SCREEN_CAPTURE_MODULE_PATH");
+    dataRoot = dataRoot.substr(0, dataRoot.rfind('/') + 1) + CaptureDataCacheName(captureDataDigest);
+  }
+  Require(value.dataPath == dataRoot + "/data/obs-plugins/" + value.moduleName,
+          "Module data escaped its private run or pinned capture cache", "ERR_SCREEN_CAPTURE_MODULE_PATH");
   value.configPath += "/" + value.moduleName + "/";
   return value;
 }
@@ -937,7 +969,8 @@ inline std::string ConfigurationJson(Method method, const VideoConfiguration& vi
       ",\"width\":" + std::to_string(video.width) + ",\"height\":" + std::to_string(video.height) +
       ",\"fpsNumerator\":" + std::to_string(video.fps) + ",\"fpsDenominator\":1,"
       "\"initialBitrateKbps\":" + std::to_string(video.bitrateKbps) +
-      ",\"scaleMode\":\"stretch\",\"rateControl\":" + JsonString(EncoderRateControl(encoder)) +
+      ",\"scaleMode\":" + JsonString(ScaleModeName(video.scaleMode)) +
+      ",\"rateControl\":" + JsonString(EncoderRateControl(encoder)) +
       ",\"codec\":\"h264\",\"encoderId\":" + JsonString(EncoderId(encoder)) +
       ",\"profile\":\"main\",\"bFrames\":0,\"keyframeIntervalSeconds\":1}";
 }

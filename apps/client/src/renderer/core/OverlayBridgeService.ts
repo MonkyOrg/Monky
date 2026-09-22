@@ -2,6 +2,7 @@ import type {
   OverlayConfig,
   OverlayParticipantState,
   OverlaySyncState,
+  NativeScreenCaptureMode,
 } from '@monky/shared';
 import { appEvents } from './EventBus';
 import { sessionManager } from './SessionManager';
@@ -36,8 +37,10 @@ export class OverlayBridgeService {
   private isWindowFocused = true;
   private wasAutoOpened = false;
   private userManuallyClosed = false;
+  private captureModeFor: ((sessionId: string, shareId: string) => NativeScreenCaptureMode | null) | null = null;
 
-  public init(): void {
+  public init(captureModeFor: (sessionId: string, shareId: string) => NativeScreenCaptureMode | null): void {
+    this.captureModeFor = captureModeFor;
     if (!window.api?.onOverlayStateChanged) return;
 
     this.unbindListeners.push(
@@ -444,6 +447,7 @@ export class OverlayBridgeService {
 
       let videoSlotIndex: number | undefined;
       const screenSlotIndexes: Record<string, number> = {};
+      const screenCaptureModes: Record<string, NativeScreenCaptureMode> = {};
 
       // No modo minimalista, vídeo é desnecessário
       if (!config.minimalistMode) {
@@ -472,6 +476,10 @@ export class OverlayBridgeService {
               const videoTrack = stream?.getVideoTracks()[0] || null;
               if (videoTrack && videoTrack.readyState === 'live') {
                 screenSlotIndexes[shareId] = nextSlotIndex;
+                const native = isLocal ? !!videoService.getNativeScreenCapture(shareId)
+                  : p.voiceState?.nativeScreenShares?.some(source => source.shareId === shareId) === true;
+                const captureMode = native ? this.captureModeFor?.(sidOf(p), shareId) : 'normal';
+                if (captureMode) screenCaptureModes[shareId] = captureMode;
 
                 this.updateVideoSender(nextSlotIndex, videoTrack);
                 nextSlotIndex++;
@@ -496,6 +504,7 @@ export class OverlayBridgeService {
         isLocal,
         videoSlotIndex,
         screenSlotIndexes,
+        screenCaptureModes,
       };
     });
 

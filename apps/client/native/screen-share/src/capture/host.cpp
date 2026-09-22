@@ -414,6 +414,16 @@ class Sha256 {
   BCRYPT_ALG_HANDLE algorithm_ = nullptr;
 };
 
+void EnsureDataParents(const std::wstring& directory, std::wstring_view relative) {
+  for (std::size_t i = 0; i < relative.size(); ++i) {
+    if (relative[i] != L'\\') continue;
+    const auto path = directory + L"\\" + std::wstring(relative.substr(0, i));
+    if (!CreateDirectoryW(path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+      CheckWin(FALSE, "ERR_SCREEN_CAPTURE_RUN_DIRECTORY", "Cannot create private data parent");
+    CheckComponents(path, true);
+  }
+}
+
 class OwnedRun {
  public:
   OwnedRun(const Arguments& arguments, DWORD parentPid) : directory(arguments.runDirectory), runId(arguments.runId) {
@@ -471,17 +481,7 @@ class OwnedRun {
   }
 
   void EnsureParents(std::wstring_view relative) const {
-    for (std::size_t i = 0; i < relative.size(); ++i) {
-      if (relative[i] != L'\\') continue;
-      const auto path = directory + L"\\" + std::wstring(relative.substr(0, i));
-      const auto attributes = GetFileAttributesW(path.c_str());
-      if (attributes == INVALID_FILE_ATTRIBUTES) {
-        Require(GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND,
-            "Cannot inspect private data parent", "ERR_SCREEN_CAPTURE_RUN_DIRECTORY");
-        CheckWin(CreateDirectoryW(path.c_str(), nullptr), "ERR_SCREEN_CAPTURE_RUN_DIRECTORY", "Cannot create private data parent");
-      }
-      CheckComponents(path, true);
-    }
+    EnsureDataParents(directory, relative);
   }
 
   std::wstring directory;
@@ -507,10 +507,47 @@ struct Libraries {
   // process exit. obs_shutdown alone is not evidence of driver/hook GPU drain.
   std::vector<HMODULE> images;
   std::vector<Handle> inputs;
+  std::wstring captureDataDirectory;
   DLL_DIRECTORY_COOKIE cookie = nullptr;
+
+  Handle OpenPinned(const std::wstring& path, const RuntimePin& pin, const Sha256& hash) {
+    auto file = OpenRegular(path);
+    Require(hash.File(file.Get(), pin.bytes) == pin.sha256,
+        "Capture data SHA256 differs from its compiled pin", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
+    return file;
+  }
+
+  Handle CacheCaptureData(const std::wstring& source, const RuntimePin& pin, const Sha256& hash, const OwnedRun& run) {
+    EnsureDataParents(captureDataDirectory, pin.relative);
+    const auto destination = captureDataDirectory + L"\\" + pin.relative;
+    if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) return OpenPinned(destination, pin, hash);
+    Require(GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND,
+        "Cannot inspect pinned capture data cache", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
+    const auto staging = run.directory + L"\\hook-data-copy";
+    CheckWin(CopyFileW(source.c_str(), staging.c_str(), TRUE), "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY",
+        "Cannot exclusively stage pinned capture data");
+    { const auto verified = OpenPinned(staging, pin, hash); }
+    if (!MoveFileExW(staging.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+      // Another helper may have published the same pin. Never replace an image
+      // that a game can still have mapped after the original helper exits.
+      auto published = OpenPinned(destination, pin, hash);
+      CheckWin(DeleteFileW(staging.c_str()), "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY", "Cannot retire owned cache staging file");
+      return published;
+    }
+    return OpenPinned(destination, pin, hash);
+  }
 
   void VerifyAndCopy(const Arguments& arguments, const OwnedRun& run) {
     CheckComponents(arguments.runtime, true);
+    captureDataDirectory = CaptureDataCacheDirectory(run.directory, kCaptureDataDigest);
+    if (!CreateDirectoryW(captureDataDirectory.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+      CheckWin(FALSE, "ERR_SCREEN_CAPTURE_RUN_DIRECTORY", "Cannot create pinned capture data cache");
+    CheckComponents(captureDataDirectory, true);
+    Handle cache(CreateFileW(captureDataDirectory.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    Require(static_cast<bool>(cache), "Cannot bind pinned capture data cache", "ERR_SCREEN_CAPTURE_RUN_DIRECTORY");
+    CheckRealPath(cache.Get(), captureDataDirectory);
+    inputs.push_back(std::move(cache));
     Sha256 hash;
     for (const auto& pin : kRuntimeFiles) {
       const auto source = arguments.runtime + L"\\" + pin.relative;
@@ -525,7 +562,9 @@ struct Libraries {
             "Adjacent stock hardware probe differs from the compiled runtime pin", "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY");
         inputs.push_back(std::move(probe));
       }
-      if (relative.starts_with(L"data\\")) {
+      if (relative.starts_with(L"data\\obs-plugins\\win-capture\\")) {
+        inputs.push_back(CacheCaptureData(source, pin, hash, run));
+      } else if (relative.starts_with(L"data\\")) {
         run.EnsureParents(relative);
         const auto destination = run.directory + L"\\" + pin.relative;
         CheckWin(CopyFileW(source.c_str(), destination.c_str(), TRUE), "ERR_SCREEN_CAPTURE_RUNTIME_INTEGRITY",
@@ -1337,11 +1376,12 @@ class Host {
     const auto* data = captureModule ? L"data\\obs-plugins\\win-capture" :
         nvenc ? L"data\\obs-plugins\\obs-nvenc" : L"data\\obs-plugins\\obs-ffmpeg";
     const auto binaryPath = captureModule ? CaptureModulePath() : arguments_.runtime + L"\\" + binary;
-    const auto dataPath = run_->directory + L"\\" + data;
+    const auto dataPath = (captureModule ? libraries_.captureDataDirectory : run_->directory) + L"\\" + data;
     const auto configRoot = run_->directory + L"\\config";
     Require(SafeAbsolutePath(binaryPath) && SafeAbsolutePath(dataPath) && SafeAbsolutePath(configRoot),
         "Module API paths must retain admitted Windows filesystem identities", "ERR_SCREEN_CAPTURE_MODULE_PATH");
-    const auto expected = ExpectedModuleIdentity(name, Utf8(binaryPath), Utf8(dataPath), Utf8(configRoot));
+    const auto expected = ExpectedModuleIdentity(name, Utf8(binaryPath), Utf8(dataPath), Utf8(configRoot),
+        captureModule ? kCaptureDataDigest : "");
     BeginStage(captureModule ? NativeStage::WinCaptureImage : nvenc ? NativeStage::NvencImage : NativeStage::FfmpegImage);
     if (captureModule) LoadCaptureModule(binaryPath);
     else libraries_.LoadImage(arguments_, binary);
@@ -1511,7 +1551,8 @@ class Host {
         "Private scene item does not reference the selected source", "ERR_SCREEN_CAPTURE_SOURCE_INITIALIZATION");
     const abi::Vec2 bounds{static_cast<float>(arguments_.video.width), static_cast<float>(arguments_.video.height)};
     const abi::Vec2 center{bounds.x / 2.0f, bounds.y / 2.0f};
-    api().obs_sceneitem_set_bounds_type(item, abi::Bounds::Stretch);
+    api().obs_sceneitem_set_bounds_type(item,
+        arguments_.video.scaleMode == ScaleMode::Fit ? abi::Bounds::ScaleInner : abi::Bounds::Stretch);
     api().obs_sceneitem_set_bounds_alignment(item, 0);
     api().obs_sceneitem_set_bounds(item, &bounds);
     api().obs_sceneitem_set_alignment(item, 0);

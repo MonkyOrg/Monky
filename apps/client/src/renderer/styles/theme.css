@@ -5976,6 +5976,40 @@ input:focus, textarea:focus, select:focus {
   border-radius: var(--radius-md);
 }
 
+.stage-capture-mode-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 4;
+  max-width: calc(100% - 20px);
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.72);
+  color: #ffffff;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.stage-mini-card .stage-capture-mode-badge {
+  top: 4px;
+  left: 4px;
+  max-width: calc(100% - 8px);
+  padding: 2px 5px;
+  font-size: 10px;
+}
+
+.stage-capture-mode-badge[hidden] {
+  display: none;
+}
+
+.stage-capture-mode-badge:not([hidden]) ~ .telemetry-overlay.position-top-left {
+  top: 40px;
+}
+
 .stage-native-error {
   position: absolute;
   inset: 0 0 48px;
@@ -7828,8 +7862,40 @@ button[data-loading="1"]::after {
   outline-offset: 3px;
 }
 
-.share-source-tabs {
+.share-source-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
   margin-bottom: 12px;
+}
+
+.share-source-tabs {
+  flex: 1 1 220px;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.share-refresh-button {
+  flex-shrink: 0;
+}
+
+.share-aspect-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.share-aspect-option > div {
+  min-width: 0;
+}
+
+.share-aspect-option small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .share-source-tabs .tab-button {
@@ -7847,6 +7913,7 @@ button[data-loading="1"]::after {
 }
 
 .share-source-tabs .tab-button:focus-visible,
+.share-refresh-button:focus-visible,
 .screen-sources-grid .source-item:focus-visible {
   outline: 2px solid var(--accent-primary);
   outline-offset: 2px;
@@ -7877,6 +7944,7 @@ button[data-loading="1"]::after {
 
 .share-window-methods[hidden],
 .share-window-methods #share-game-tip[hidden],
+.screen-share-picker-card #share-capture-info[hidden],
 .share-method-status[hidden] {
   display: none;
 }
@@ -7913,6 +7981,129 @@ button[data-loading="1"]::after {
 
 .share-window-methods .share-game-tip {
   margin: 0;
+}
+
+.game-capture-guide-trigger {
+  align-self: flex-start;
+  gap: 6px;
+  padding: 4px 0;
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+  white-space: normal;
+}
+
+.game-capture-guide-trigger[hidden],
+.game-capture-guide-error[hidden] {
+  display: none;
+}
+
+.game-capture-guide-card {
+  width: min(680px, calc(100vw - 48px));
+  max-width: 680px;
+  max-height: calc(100vh - 48px);
+  padding: 20px;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.game-capture-guide-card > :not(.game-capture-guide-body) {
+  flex-shrink: 0;
+}
+
+.game-capture-guide-card h2,
+.game-capture-guide-card h3,
+.game-capture-guide-card p {
+  margin: 0;
+}
+
+.game-capture-guide-card .modal-close-btn {
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+
+.game-capture-guide-note,
+.game-capture-guide-list p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.game-capture-guide-search-field {
+  display: grid;
+  gap: 6px;
+}
+
+.game-capture-guide-search-field label {
+  font-size: 13px;
+}
+
+.game-capture-guide-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  gap: 12px;
+}
+
+.game-capture-guide-body section + section {
+  margin-top: 16px;
+}
+
+.game-capture-guide-body h3 {
+  font-size: 14px;
+}
+
+.game-capture-guide-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.game-capture-guide-list li {
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.game-capture-guide-list strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.game-capture-guide-empty {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.game-capture-guide-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.game-capture-guide-card .modal-footer {
+  margin: 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.game-capture-guide-card .modal-footer a {
+  color: var(--accent-primary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.game-capture-guide-trigger:focus-visible,
+.game-capture-guide-card a:focus-visible,
+.game-capture-guide-card .modal-close-btn:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 3px;
 }
 
 @media (max-width: 540px) {

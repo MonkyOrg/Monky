@@ -27,11 +27,11 @@ function capability(encoder) {
     probe: protocol.ENCODERS[encoder].probe, probeVerified: true, textureInput: true, dynamicBitrate: true };
 }
 
-function message(encoder, type = 'prepared', initialized = true) {
+function message(encoder, type = 'prepared', initialized = true, selectedVideo = video) {
   return {
     schemaVersion: 1, kind: 'encoder-probe', type, runId, sequence: type === 'stopped' ? 1 : 0,
     helperProcessId: 42, qpc: type === 'prepared' ? '1000' : '1001', qpcFrequency: '10000000',
-    video: { ...video }, captureKinds: initialized ? ['window', 'monitor', 'game'] : [],
+    video: { ...selectedVideo }, captureKinds: initialized ? ['window', 'monitor', 'game'] : [],
     capability: initialized ? capability(encoder) : null, encoderInitialized: initialized,
     sourceCaptured: false, outputPackets: 0,
     ...(type === 'prepared' ? {} : { retirement: { ...retirement } }),
@@ -41,6 +41,7 @@ function message(encoder, type = 'prepared', initialized = true) {
 
 function fixture(settings = {}) {
   const encoder = settings.encoder ?? 'obs_nvenc_h264_tex';
+  const selectedVideo = settings.scaleMode ? { ...video, scaleMode: settings.scaleMode } : video;
   const child = new EventEmitter(), commands = [], kills = [], seen = [];
   let closed = false, spawned = false, preparedSent = false, errorSent = false, finishQueued = false;
   child.pid = 42; child.stdout = new PassThrough(); child.stderr = new PassThrough();
@@ -62,7 +63,7 @@ function fixture(settings = {}) {
       if (settings.hangOnStop) return;
       queueMicrotask(() => {
         if (!errorSent) {
-          const stopped = message(encoder, 'stopped', preparedSent);
+          const stopped = message(encoder, 'stopped', preparedSent, selectedVideo);
           settings.corruptStopped?.(stopped);
           send(stopped);
         }
@@ -79,7 +80,8 @@ function fixture(settings = {}) {
       assert.equal(executable, options.host.executable);
       assert.deepEqual(spawnOptions.stdio, ['pipe', 'pipe', 'pipe']);
       assert.equal(spawnOptions.windowsHide, true);
-      assert.equal(args.length, 9); assert.ok(args.includes('--probe=encoder'));
+      assert.equal(args.length, 10); assert.ok(args.includes('--probe=encoder'));
+      assert.ok(args.includes(`--scale-mode=${settings.scaleMode ?? 'stretch'}`));
       assert.equal(args.some(value => /^--(?:hwnd|pid|kind|process-created|monitor-)/u.test(value)), false);
       settings.checkArguments?.(args);
       queueMicrotask(() => {
@@ -87,9 +89,9 @@ function fixture(settings = {}) {
         if (settings.neverPrepare) return;
         if (settings.nativeError) {
           errorSent = true;
-          send(message(encoder, 'error', false));
+          send(message(encoder, 'error', false, selectedVideo));
         } else {
-          const prepared = message(encoder);
+          const prepared = message(encoder, 'prepared', true, selectedVideo);
           settings.corruptPrepared?.(prepared);
           preparedSent = true; send(prepared);
         }
@@ -111,12 +113,13 @@ function fixture(settings = {}) {
 }
 
 test('source-free probe proves encoder initialization and returns only after clean retirement and process exit', async () => {
-  for (const encoder of Object.keys(protocol.ENCODERS)) {
-    const f = fixture({ encoder, holdExit: true,
+  for (const [encoder, scaleMode] of Object.keys(protocol.ENCODERS).flatMap(encoder => [[encoder, undefined], [encoder, 'fit']])) {
+    const selectedVideo = scaleMode ? { ...video, scaleMode } : video;
+    const f = fixture({ encoder, scaleMode, holdExit: true,
       checkArguments: args => assert.ok(args.includes(`--encoder=${encoder}`)) });
     try {
       let resolved = false;
-      const pending = probeCaptureCapabilities({ ...options, encoder }, undefined, f.dependencies)
+      const pending = probeCaptureCapabilities({ ...options, encoder, video: selectedVideo }, undefined, f.dependencies)
         .then(result => { resolved = true; return result; });
       await new Promise(resolve => setImmediate(resolve));
       assert.deepEqual(f.commands, ['1 stop\n']);
@@ -126,7 +129,8 @@ test('source-free probe proves encoder initialization and returns only after cle
       assert.equal(f.closed, true);
       assert.deepEqual(result, {
         ...capability(encoder), encoderInitialized: true, hardwareSessionConfirmed: false,
-        hardwareQualified: false, sourceCaptured: false, captureKinds: ['window', 'monitor', 'game'], video,
+        hardwareQualified: false, sourceCaptured: false, captureKinds: ['window', 'monitor', 'game'],
+        video: { ...video, scaleMode: scaleMode ?? 'stretch' },
       });
       assert.equal(Object.isFrozen(result), true);
       assert.equal(Object.isFrozen(result.captureKinds), true);

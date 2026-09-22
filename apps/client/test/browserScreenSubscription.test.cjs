@@ -24,7 +24,7 @@ const answer = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 98', 'a=rtpmap:98 H264/90000
   'm=audio 9 UDP/TLS/RTP/SAVPF 111', 'a=rtpmap:111 opus/48000/2', 'a=fmtp:111 minptime=10;useinbandfec=1', ''].join('\r\n');
 
 function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = true, capabilityGate, transportGate } = {}) {
-  const sent = [], rpc = [], peers = [], transports = [], tracks = [], admitted = [], states = [], errors = [], probes = [];
+  const sent = [], rpc = [], peers = [], transports = [], tracks = [], admitted = [], states = [], errors = [], probes = [], modes = [];
   const availableProducers = new Map();
   let closeFailures = 0;
   class Track {
@@ -140,6 +140,7 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
       }
     },
     onTrack: track => admitted.push(track),
+    onCaptureMode: mode => modes.push(mode),
     onUnavailable: reason => states.push(reason),
     onError: error => errors.push(error),
   });
@@ -172,10 +173,32 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
     await sub.receive(control({ type: 'offer', turn: number, sdp: 'modeled offer' }));
     await sub.receive(control({ type: leader ? 'turn-applied' : 'turn-done', turn: number }));
   }
-  return { sub, source, call, sent, rpc, peers, transports, tracks, admitted, states, errors, probes,
+  return { sub, source, call, sent, rpc, peers, transports, tracks, admitted, states, errors, probes, modes,
     signal, control, accepted, publication, producer, turn, load,
     closeFailures: count => { closeFailures = count; },
     open: async () => { await sub.start(); await sub.receive(accepted); } };
+}
+
+for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: browser spectators receive the confirmed mode without renegotiating their media`, async t => {
+    const f = fixture(t, { mode });
+    await f.sub.start();
+    const status = f.signal({ action: 'capture-mode', generation: 1, capture: { mode: 'normal', ready: true } });
+    await assert.rejects(f.sub.receive(status), /another browser/);
+    await f.sub.receive(f.accepted);
+    const before = f.peers.length + f.transports.length;
+    await assert.rejects(f.sub.receive({ ...status, generation: 2 }), /another browser/);
+    await f.sub.receive({ ...status, subscriptionId: randomUUID() });
+    await f.sub.receive({ ...status, capture: { mode: 'game', ready: false } });
+    assert.deepEqual(f.modes, []);
+    await f.sub.receive(status);
+    assert.deepEqual(f.modes, ['normal']);
+    assert.equal(f.peers.length + f.transports.length, before);
+    f.sub.playing();
+    await f.sub.close(true);
+    await f.sub.receive({ ...status, capture: { mode: 'game', ready: true } });
+    assert.deepEqual(f.modes, ['normal']);
+  });
 }
 
 test('browser Watch qualifies actual WebRTC Main5.1 decoding before asking for any media', async t => {

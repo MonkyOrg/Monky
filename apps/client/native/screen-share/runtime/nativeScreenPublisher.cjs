@@ -5,7 +5,7 @@ const { assertNativeScreenEndpointLocallyClosed } = require('./nativeEndpoint.cj
 const { randomUUID } = require('node:crypto');
 const {
   getScreenShareProfile, messageReferenceSchema, nativeScreenSignalSchema, nativeScreenSourceSchema,
-  screenShareProfileKey,
+  screenShareProfileKey, nativeScreenCaptureStatusSchema,
 } = require('@monky/shared');
 
 // Each A/V peer needs a peer and two publications, in addition to shared sources.
@@ -83,7 +83,7 @@ class NativeScreenPublisher {
     }
     if (previous) return viewer ? this.reserveViewer(previous, viewer) : previous;
     assert.ok(this.pipelines.size < 4, 'A screen cannot have more than four distinct video profiles.');
-    const pipeline = { key, id: randomUUID(), quality, viewers: new Map(), endpoint: null, closing: null };
+    const pipeline = { key, id: randomUUID(), quality, viewers: new Map(), endpoint: null, closing: null, capture: null };
     this.pipelines.set(key, pipeline);
     try {
       pipeline.endpoint = this.createEndpoint({
@@ -98,10 +98,23 @@ class NativeScreenPublisher {
           if (pipeline.closing) { this.observe(error, { pipelineId: pipeline.id, ...context }); return; }
           queueMicrotask(() => this.track(this.failedPipeline(pipeline, error, context)));
         },
-        onState: state => this.onState({ shareId: this.source.shareId, pipelineId: pipeline.id, quality: pipeline.quality, state }),
+        onState: state => {
+          if (this.closed || pipeline.closing) return;
+          if (state.type === 'capture-mode') {
+            pipeline.capture = Object.freeze(nativeScreenCaptureStatusSchema.parse(state.capture));
+            for (const viewer of pipeline.viewers.values()) {
+              this.track(this.sendCaptureMode(viewer).catch(error => {
+                if (error.name !== 'AbortError') this.observe(error, { remoteSessionId: viewer.sessionId,
+                  connectionId: viewer.subscriptionId, generation: viewer.generation });
+              }));
+            }
+          }
+          this.onState({ shareId: this.source.shareId, pipelineId: pipeline.id, quality: pipeline.quality, state });
+        },
         onPreview: frame => {
           if (this.previewEnabled && this.previewPipeline === pipeline && !pipeline.closing)
-            this.onPreview?.({ frame, pipelineId: pipeline.id, video: getScreenShareProfile(this.source.video, pipeline.quality) });
+            this.onPreview?.({ frame, pipelineId: pipeline.id, video: getScreenShareProfile(this.source.video, pipeline.quality),
+              captureMode: pipeline.capture?.ready ? pipeline.capture.mode : null });
         },
       });
       assert.ok(pipeline.endpoint && typeof pipeline.endpoint.ready?.then === 'function');
@@ -162,6 +175,13 @@ class NativeScreenPublisher {
     return pipeline;
   }
 
+  async sendCaptureMode(viewer) {
+    const capture = viewer.pipeline?.capture;
+    if (!viewer.modeReady || !capture || viewer.capture === capture) return;
+    viewer.capture = capture;
+    await this.signal(viewer, { action: 'capture-mode', generation: viewer.generation, capture });
+  }
+
   watch(value) {
     const request = nativeScreenSignalSchema.parse(value);
     assert.equal(request.action, 'watch');
@@ -177,7 +197,7 @@ class NativeScreenPublisher {
     const viewer = {
       sessionId: request.fromSessionId, subscriptionId: request.subscriptionId,
       quality: request.quality, backend: request.backend, generation: this.generation,
-      pipeline: null, retiring: false, accepted: false, setup: null, retirement: null,
+      pipeline: null, retiring: false, accepted: false, modeReady: false, capture: null, setup: null, retirement: null,
     };
     this.viewers.set(viewer.sessionId, viewer);
     viewer.setup = this.track(this.prepare(viewer, previous));
@@ -196,6 +216,9 @@ class NativeScreenPublisher {
       if (!this.current(viewer)) throw cancelled();
       viewer.accepted = true;
       await this.signal(viewer, { action: 'accepted', quality: viewer.quality, backend: viewer.backend, generation: viewer.generation });
+      if (!this.current(viewer)) throw cancelled();
+      viewer.modeReady = true;
+      await this.sendCaptureMode(viewer);
       if (!this.current(viewer)) throw cancelled();
       await pipeline.endpoint.setDemand(pipeline.viewers.size, this.previewEnabled && this.previewPipeline === pipeline);
       if (!this.current(viewer)) throw cancelled();

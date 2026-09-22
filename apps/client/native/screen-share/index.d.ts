@@ -47,7 +47,7 @@ export interface NativeScreenCaptureProbeOptions {
   runtime: NativeScreenRuntime['obs'];
   runId: string;
   runDirectory: string;
-  video: { width: number; height: number; fps: number; bitrateKbps: number };
+  video: { width: number; height: number; fps: number; bitrateKbps: number; scaleMode?: 'stretch' | 'fit' };
   encoder?: NativeScreenCaptureEncoder;
 }
 
@@ -144,6 +144,13 @@ export interface NativeScreenRuntime {
   };
 }
 
+export type NativeScreenEndpointState =
+  | { type: 'peer'; state: unknown }
+  | { type: 'transport'; state: string }
+  | { type: 'capture'; state: string }
+  | { type: 'capture-mode'; capture: import('@monky/shared').NativeScreenCaptureStatus }
+  | { type: 'capture-fallback' | 'frame' | 'closed' };
+
 export interface NativeScreenEndpointOptions {
   runtime: NativeScreenRuntime;
   textures: typeof import('electron').sharedTexture;
@@ -158,19 +165,16 @@ export interface NativeScreenEndpointOptions {
   audio?: NativeScreenAudioOptions;
   target?: NativeScreenCaptureTarget | LegacyNativeWindowCaptureTarget;
   captureEncoder?: NativeScreenCaptureEncoder;
+  preserveAspectRatio?: boolean;
   captureDirectory?: string;
   isSourcePaused?: () => boolean;
+  assertSourceCurrent?: () => void;
   onPreview?: (frame: NativeScreenPreviewFrame) => void;
   destination?: { frame: WebFrameMain; presentationId: string };
   send?: (remoteSessionId: string, control: NativeScreenP2pControl) => Promise<void>;
   rpc?: (type: MessageType, payload: Readonly<Record<string, unknown>>) => Promise<unknown>;
   onError: (error: Error, context?: unknown) => void;
-  onState: (state:
-    | { type: 'peer'; state: unknown }
-    | { type: 'transport'; state: string }
-    | { type: 'capture'; state: string }
-    | { type: 'frame' | 'closed' }
-  ) => void;
+  onState: (state: NativeScreenEndpointState) => void;
   onDiagnostic: (error: Error) => void;
 }
 
@@ -180,6 +184,7 @@ export interface NativeScreenEndpointSnapshot {
   pipelineId: string;
   profile: Readonly<NativeScreenVideoProfile>;
   captureState: 'waiting' | 'starting' | 'running' | 'stopping' | 'closed';
+  captureMode: import('@monky/shared').NativeScreenCaptureMode | null;
   demand: number;
   previewDemand: boolean;
   closing: boolean;
@@ -188,6 +193,7 @@ export interface NativeScreenEndpointSnapshot {
   capturePid: number | null;
   flow: Readonly<Record<string, unknown>> | null;
   captureRetirement: Readonly<Record<string, unknown>> | null;
+  gameCaptureRetirement: Readonly<Record<string, unknown>> | null;
   presentation: Readonly<Record<string, unknown>> | null;
   routes: Readonly<Record<string, unknown>> | null;
   audioInput: Readonly<Record<string, unknown>> | null;
@@ -229,8 +235,9 @@ export interface NativeScreenPublisherOptions {
   createEndpoint: (options: PublisherEndpointOptions) => NativeScreenEndpoint;
   send: (signal: import('@monky/shared').NativeScreenSignalPayload) => Promise<void>;
   onError: (error: Error, context?: unknown) => void;
-  onState: (state: { shareId: string; pipelineId: string; quality: ScreenShareQuality; state: unknown }) => void;
-  onPreview?: (packet: { frame: NativeScreenPreviewFrame; pipelineId: string; video: NativeScreenVideoProfile } | null) => void;
+  onState: (state: { shareId: string; pipelineId: string; quality: ScreenShareQuality; state: NativeScreenEndpointState }) => void;
+  onPreview?: (packet: { frame: NativeScreenPreviewFrame; pipelineId: string; video: NativeScreenVideoProfile;
+    captureMode: import('@monky/shared').NativeScreenCaptureMode | null } | null) => void;
 }
 export interface NativeScreenPublisherSnapshot {
   source: NativeScreenSource;
@@ -269,8 +276,9 @@ export interface NativeScreenSubscriptionOptions {
   onError: (error: Error) => void;
   onState: (state: {
     subscriptionId: string; presentationId: string; quality: ScreenShareQuality;
+  } & ({
     type: 'connecting' | 'playing' | 'unavailable' | 'closed'; reason?: import('@monky/shared').NativeScreenFailure;
-  }) => void;
+  } | { type: 'capture-mode'; mode: import('@monky/shared').NativeScreenCaptureMode })) => void;
 }
 export class NativeScreenSubscription {
   constructor(options: NativeScreenSubscriptionOptions);

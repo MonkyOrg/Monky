@@ -307,6 +307,10 @@ export class SignalingService {
       current.generation = signal.generation;
       return { success: true };
     }
+    if (signal.action === 'capture-mode') {
+      return signal.generation === current.generation
+        ? { success: true } : reject('O modo de captura não pertence à assinatura confirmada.');
+    }
     if (signal.control.generation !== current.generation) {
       return reject('O controle nativo não pertence à assinatura confirmada.');
     }

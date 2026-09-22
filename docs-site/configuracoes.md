@@ -11,7 +11,7 @@ participantes, use [Configurações do Servidor](/administrar-servidor).
 | Soundboard / Figurinhas | Pastas locais e controles dessas bibliotecas |
 | Atalhos | Combinações para ações rápidas |
 | Notificações e Sons | Sons e avisos pessoais |
-| Qualidade | Perfis de transmissão, resolução, FPS, bitrate e codec |
+| Qualidade e compartilhamento | Perfis de voz, câmera e tela, codec, prévia local e telemetria |
 | Ferramentas de bots | Instalações locais, permissões, cache e tarefas |
 | Logs | Eventos locais e diagnóstico do cliente |
 | Sobre e Updates | Versão, atualização, comportamento da janela e comunidade |
@@ -33,10 +33,10 @@ Sem a senha escolhida, não há recuperação do arquivo.
 
 ### Qualidade, bitrate e telemetria
 
-Em **Qualidade**, os presets, codec e valores personalizados ficam junto de
+Em **Qualidade e compartilhamento**, os presets, codec e valores personalizados ficam junto de
 **Telemetria de vídeo**. **Voz e Vídeo** concentra dispositivos, processamento
 de áudio e prévias. Para ver FPS, resolução e bitrate sobre câmera/tela, use
-**Qualidade → Telemetria de vídeo**: o switch, a posição e o modo ficam salvos
+**Qualidade e compartilhamento → Telemetria de vídeo**: o switch, a posição e o modo ficam salvos
 e são aplicados sem reiniciar a transmissão.
 
 No perfil **Personalizado**, passe o mouse ou navegue com `Tab` até a
@@ -88,14 +88,25 @@ Sinalização, controle da conexão, voz e câmera podem continuar usando a rede
 
 ### Compartilhamento nativo e qualidade do espectador
 
-O seletor identifica o caminho disponível. A transmissão nativa qualificada
-usa **Windows x64, captura de janela e AMD/AMF H.264**; monitores, outros encoders
-e outras plataformas mantêm o caminho Chromium. Indisponibilidade nativa não
-é escondida como uma troca silenciosa de backend.
+O seletor mostra os métodos e o codificador H.264 disponíveis no backend
+nativo deste dispositivo. Opções indisponíveis ficam desabilitadas com o
+motivo; a marca da GPU não garante suporte. Não há troca automática para
+Chromium ou para outra fonte. A tentativa automática de **Captura de jogo**
+para **Normal**, quando necessária, usa somente a mesma janela e gera um aviso.
 
-Para até **1920×1080 a 120 FPS**, use **Personalizado** em Qualidade; os presets
-existentes não foram convertidos automaticamente para 120 FPS. A imagem nativa
-é esticada para o tamanho escolhido, sem adicionar barras para preservar 4:3.
+Para até **1920×1080 a 120 FPS**, use **Personalizado** em **Qualidade e
+compartilhamento**; os presets existentes não foram convertidos automaticamente
+para 120 FPS. No seletor, **Manter proporção** encaixa a imagem no tamanho
+escolhido, adicionando bordas quando necessário, sem distorcer. Desligado,
+mantém o comportamento atual de esticar para preencher. O switch começa
+desligado em cada novo compartilhamento e não é uma preferência global.
+
+A prévia de um novo compartilhamento entra em foco assim que seu tile fica
+disponível. Você pode desfocá-la: mudanças de qualidade, reconexões e tentativas
+de outro método não voltam a focá-la. A prévia e cada espectador mostram um
+indicador **Normal** ou **Jogo** conforme o modo confirmado para aquele fluxo,
+inclusive nas miniaturas. Enquanto não houver confirmação por imagem, o
+indicador fica oculto; escolher Captura de jogo não basta para exibir Jogo.
 
 Ao assistir a uma tela nativa, **Qualidade recebida** solicita um perfil real
 ao transmissor: **Máxima da fonte** ou perfis com tetos de **1080p/60**,
@@ -430,10 +441,11 @@ for reconhecida, grave-a novamente. Permissões de entrada/acessibilidade podem
 ser necessárias para a captura global. O Push-to-Talk mantém sua tecla ou botão
 do mouse configurado separadamente.
 
-## Qualidade
+## Qualidade e compartilhamento {#qualidade}
 
 O perfil controla o que **você transmite**; não aumenta a resolução da câmera
-ou da tela de outra pessoa.
+ou da tela de outra pessoa. A mesma aba reúne codec, prévia local do
+compartilhamento e telemetria; os perfis continuam incluindo voz e câmera.
 
 ### Perfis de qualidade
 
@@ -456,35 +468,61 @@ próxima da que você já usava.
 
 ### Compartilhando a tela enquanto joga
 
-Codificar vídeo consome recursos. A aceleração depende do codec, da placa,
-do driver e do suporte disponível no aplicativo. H.264 tem suporte de hardware
-amplo; AV1 e VP9 podem usar a CPU quando não existe um encoder compatível.
-Não presuma que escolher um codec garante uso de GPU.
-
-Por isso, no perfil **Gaming** o codec **Automático** coloca o H.264 na frente.
-Se você usa outro perfil e sente o jogo travando ao compartilhar, escolha
-**H.264 / AVC** em *Codec de Vídeo Preferido*.
-
-**Automático** negocia um codec compatível. Ao escolher explicitamente um
-codec, ele passa a ser obrigatório para sua tela em P2P e SFU, inclusive ao
-trocar de tela ou de modo de voz. Se não puder ser usado, o cliente informa
-o motivo e não transmite usando outro codec.
+Codificar vídeo consome recursos. A aceleração depende da placa, do driver e
+do suporte confirmado pelo backend. Para compartilhar a tela, **Automático**
+usa **H.264 / AVC** hoje; **AV1** continua desabilitado como **Em breve**.
+A escolha do codificador de hardware é separada do codec. Se não houver
+suporte, o cliente informa o motivo em vez de trocar silenciosamente de codec.
 
 O seletor separa **Telas** e **Janelas**. Cada janela aparece uma única vez
 na lista de janelas; não existe uma lista de jogos detectados. Depois de
-selecionar uma janela, os cards de método oferecem **Captura de janela (WGC)**
-como padrão e **Captura de jogo (hook)** como escolha explícita. Trocar o método
+selecionar uma janela, os cards de método oferecem **Normal**
+como padrão e **Captura de jogo** como escolha explícita. Trocar o método
 mantém a mesma janela e sua escolha de áudio. Selecionar outra janela volta ao
-padrão WGC, sem levar junto uma autorização de hook da janela anterior.
+padrão Normal, sem levar junto a escolha de Captura de jogo da janela anterior.
 
-Escolher o card de Captura de jogo não inicia um probe nem injeta um hook:
+Escolher o card de Captura de jogo não inicia a captura nem testa o aplicativo:
 é preciso confirmar em **Compartilhar**, **Trocar Fonte** ou **Adicionar tela**.
 Só ficam disponíveis os métodos informados pelo backend; compatibilidade com
-a janela escolhida ainda precisa ser verificada. Se houver falha, o Monky não
-troca automaticamente de janela, método ou caminho de captura. Mantenha
-anti-cheat, Trusted Mode e outras proteções ativados. Para tentar WGC na mesma
-janela, selecione seu card e confirme novamente. Atualizar a lista exige uma
-nova seleção; uma janela que desapareceu nunca é substituída por outra.
+a janela escolhida ainda precisa ser verificada. Se a Captura de jogo ficar
+indisponível, o Monky encerra essa tentativa e avisa que está tentando **Normal
+para a mesma janela**. O aviso fica visível por 8 segundos para permitir a leitura
+e indica uma tentativa, não uma imagem já
+confirmada. Não escolhe outro monitor ou janela, não usa Chromium e não
+desativa anti-cheat, Trusted Mode ou outras proteções. Se Normal também
+falhar, o erro continua visível; não há troca para outra fonte.
+
+Para jogos, prefira **Captura de jogo** como primeira opção, seguindo a
+[recomendação do OBS](https://obsproject.com/kb/game-capture-source).
+Ela não é destinada a toda janela; jogos como CS2 podem impedir esse método.
+O modo **Normal** pode exigir que o jogo esteja
+em modo janela ou tela cheia sem bordas, sem alterar as proteções.
+Essa é também a orientação do
+[guia oficial do OBS](https://obsproject.com/kb/game-capture-troubleshooting);
+o nome ou título da janela não é usado para prometer detecção ou compatibilidade.
+
+Na aba **Janelas**, **Meu jogo funciona com Captura de jogo?** abre um guia local
+com busca por título ou sigla, como CS2, GTA SA e LoL. São 14 referências a
+limitações e orientações do OBS, agrupadas em **Use Normal** (alternativa
+recomendada para esses casos) e **Requer atenção** (cuidados específicos).
+Não é uma lista completa de jogos compatíveis nem uma garantia para o Monky.
+Um jogo ausente significa apenas **sem informação catalogada**, não incompatível;
+comece por Captura de jogo.
+O guia não consulta a rede, testa jogos, inicia captura ou altera sua seleção;
+o link da fonte oficial só abre o navegador quando você o aciona.
+
+As orientações incluem DirectX 12 no Fortnite, janelas separadas para o
+cliente e a partida do League of Legends e limitações de permissões ou de
+múltiplas GPUs. A janela da partida deve ser escolhida explicitamente.
+Não há seleção automática de outra GPU, elevação automática de permissões
+nem recomendação para desativar proteções.
+
+Abriu o jogo ou outra janela depois do seletor? Use **Atualizar**. Não há
+atualização periódica em segundo plano. Se a fonte continuar disponível, a
+aba, o ID selecionado, o método, a qualidade, o áudio e **Manter proporção**
+são preservados. Uma fonte que desapareceu perde a seleção, sem ser
+substituída por outra. Durante a atualização não é possível confirmar;
+falhas ficam visíveis e permitem tentar novamente no mesmo modal.
 
 Uma última dica que vale para qualquer programa de captura: compartilhar **a
 janela do jogo** costuma custar menos que compartilhar o monitor inteiro, e

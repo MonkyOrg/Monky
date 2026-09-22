@@ -28,6 +28,6 @@ export function showCopyToast(message: string): () => void {
   return showToast(message, 'check_circle', 1600);
 }
 
-export function showInfoToast(message: string): () => void {
-  return showToast(message, 'info', 3200);
+export function showInfoToast(message: string, durationMs = 3200): () => void {
+  return showToast(message, 'info', durationMs);
 }

@@ -10,6 +10,7 @@ import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } fr
 import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
 import type { ServerInviteResult } from './serverInvites.js';
 import type { NativeScreenCommand, NativeScreenCommandResult, NativeScreenEvent, NativeScreenReply } from './nativeScreenIpc.js';
+import type { NativeScreenCaptureMode } from './screenSharing.js';
 import type {
   LocalExecutionMutationResult,
   LocalExecutionSnapshot,
@@ -464,6 +465,7 @@ export interface OverlayParticipantState {
   isLocal: boolean;
   videoSlotIndex?: number;
   screenSlotIndexes?: Record<string, number>;
+  screenCaptureModes?: Record<string, NativeScreenCaptureMode>;
 }
 
 export interface OverlaySyncState {

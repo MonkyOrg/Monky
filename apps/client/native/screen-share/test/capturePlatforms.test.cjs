@@ -31,7 +31,7 @@ function capability(encoder) {
     probe: protocol.ENCODERS[encoder].probe, probeVerified: true, textureInput: true, dynamicBitrate: true };
 }
 
-function message(target, encoder, type = 'prepared') {
+function message(target, encoder, type = 'prepared', selectedVideo = video) {
   const started = type === 'ready' || type === 'stats';
   return {
     schemaVersion: 2, type, runId, sequence: type === 'prepared' ? 0 : type === 'ready' ? 1 : 2,
@@ -40,7 +40,7 @@ function message(target, encoder, type = 'prepared') {
     processCreationTime100ns: target.kind === 'monitor' ? '0' : target.expectedProcessCreationTime100ns,
     qpc: started ? '1002' : '1000', qpcFrequency: '10000000',
     target: structuredClone(target), capability: capability(encoder),
-    configuration: protocol.configuration(video, encoder, target.kind),
+    configuration: protocol.configuration(selectedVideo, encoder, target.kind),
     sourceKey: target.kind === 'monitor' ? null : key,
     hookedKey: started && target.kind !== 'monitor' ? key : null,
     observation: {
@@ -129,6 +129,27 @@ test('H264 encoder schemas cannot be relabelled or enabled from a vendor label w
   assert.equal(protocol.validateEncoder('auto'), 'auto');
 });
 
+test('capture scaling is explicit, defaults to stretch and cannot silently change after admission', () => {
+  assert.deepEqual(protocol.normalizedVideo(video), { ...video, scaleMode: 'stretch' });
+  for (const target of [windowTarget, monitorTarget, gameTarget]) {
+    for (const scaleMode of ['stretch', 'fit']) {
+      const selectedVideo = { ...video, scaleMode };
+      const prepared = message(target, 'h264_texture_amf', 'prepared', selectedVideo);
+      const ready = message(target, 'h264_texture_amf', 'ready', selectedVideo);
+      const expected = { source: target, video: selectedVideo, runId, helperProcessId: 42 };
+      protocol.validateMessage(prepared, expected); protocol.validateMessage(ready, expected);
+      protocol.validateProgress(prepared, ready);
+      ready.configuration.scaleMode = scaleMode === 'fit' ? 'stretch' : 'fit';
+      assert.throws(() => protocol.validateMessage(ready, expected));
+      assert.throws(() => protocol.validateProgress(prepared, ready));
+      delete prepared.configuration.scaleMode;
+      assert.throws(() => protocol.validateMessage(prepared, expected));
+    }
+  }
+  for (const scaleMode of [undefined, null, '', 'crop', 'Fit', true, 1, {}])
+    assert.throws(() => protocol.validateVideo({ ...video, scaleMode }));
+});
+
 test('minimized games and temporarily unavailable monitor frames remain distinct from source disappearance', () => {
   for (const target of [gameTarget, monitorTarget]) {
     const ready = message(target, 'obs_nvenc_h264_tex', 'ready');
@@ -146,6 +167,7 @@ test('minimized games and temporarily unavailable monitor frames remain distinct
 
 test('bridge preserves discriminated targets and only reports hardware-session confirmation after real readiness', async () => {
   for (const target of [windowTarget, monitorTarget, gameTarget]) {
+    const selectedVideo = { ...video, scaleMode: target.kind === 'game' ? 'fit' : 'stretch' };
     const child = new EventEmitter();
     child.pid = 42; child.stdout = new PassThrough(); child.stderr = new PassThrough();
     child.stdin = new Writable({ write(_bytes, _encoding, done) { done(); } });
@@ -155,13 +177,14 @@ test('bridge preserves discriminated targets and only reports hardware-session c
     const bridge = new CaptureBridge({
       host: { kind: 'verified-native-screen-capture-host', executable: path.join(directory, 'host.exe'), sha256: 'a'.repeat(64) },
       runtime: { kind: 'verified-stock-obs-runtime', version: '32.1.1', stockDirectory: directory, binaryDirectory: directory },
-      runId, runDirectory: path.join(directory, `monky-screen-capture-${runId}`), video, encoder: 'obs_nvenc_h264_tex',
+      runId, runDirectory: path.join(directory, `monky-screen-capture-${runId}`), video: selectedVideo, encoder: 'obs_nvenc_h264_tex',
       onError: error => errors.push(error), onPacket() {}, onNotice() {},
     }, {
       spawnProcess(_executable, args) {
         for (const argument of protocol.argumentsForTarget(target)) assert.ok(args.includes(argument));
         assert.ok(args.includes('--encoder=obs_nvenc_h264_tex'));
-        queueMicrotask(() => child.stdout.write(JSON.stringify(message(target, 'obs_nvenc_h264_tex')) + '\n'));
+        assert.ok(args.includes(`--scale-mode=${selectedVideo.scaleMode}`));
+        queueMicrotask(() => child.stdout.write(JSON.stringify(message(target, 'obs_nvenc_h264_tex', 'prepared', selectedVideo)) + '\n'));
         return child;
       },
     });
@@ -176,7 +199,7 @@ test('bridge preserves discriminated targets and only reports hardware-session c
       await assert.rejects(bridge.start(foreign));
       assert.equal(bridge.started, false);
       const start = bridge.start(target);
-      child.stdout.write(JSON.stringify(message(target, 'obs_nvenc_h264_tex', 'ready')) + '\n');
+      child.stdout.write(JSON.stringify(message(target, 'obs_nvenc_h264_tex', 'ready', selectedVideo)) + '\n');
       await start;
       assert.equal(bridge.getCapabilities().hardwareSessionConfirmed, true);
       assert.equal(bridge.getCapabilities().hardwareQualified, false);

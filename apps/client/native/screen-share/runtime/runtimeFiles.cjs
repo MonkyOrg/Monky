@@ -25,7 +25,7 @@ function loadCaptureRuntime(directory = path.resolve(__dirname, '..', 'bin', 'wi
   assert.equal(process.platform, 'win32', 'Native screen capture requires Windows.');
   assert.equal(process.arch, 'x64', 'Native screen capture requires x64.');
   const capture = JSON.parse(fs.readFileSync(path.join(directory, 'capture-build.json'), 'utf8'));
-  assert.equal(capture.schemaVersion, 3, 'Rebuild the source-bound native capture runtime.');
+  assert.equal(capture.schemaVersion, 4, 'Rebuild native capture for scaling and pinned hook storage.');
   assert.equal(capture.obsVersion, '32.1.1');
   assert.equal(capture.obsRevision, '7272af1375b38bc3cf4e0f98a5d999e8b76e9309');
   assert.equal(capture.host.path, 'monky-screen-capture.exe');
@@ -56,7 +56,8 @@ function loadCaptureRuntime(directory = path.resolve(__dirname, '..', 'bin', 'wi
     captureKinds: ['window', 'monitor', 'game'], encoders: ['h264_texture_amf', 'obs_nvenc_h264_tex'],
     encoderProbe: 'source-free-hardware-initialization',
     gameCaptureStartup: 'explicit-game-target-only', compatibilityUpdater: false,
-    globalVulkanHook: false, hardwareQualified: false, scaleMode: 'stretch',
+    globalVulkanHook: false, hardwareQualified: false, scaleModes: ['stretch', 'fit'],
+    captureDataStorage: 'pinned-profile-cache',
   });
   return Object.freeze({
     host: Object.freeze({ kind: 'verified-native-screen-capture-host', executable, sha256: capture.host.sha256 }),

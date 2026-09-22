@@ -95,3 +95,18 @@ test('carrier actions are scoped to the publisher, source instance and subscript
     action: 'accepted', backend: 'native', quality: 'source', generation: 1,
   }).success, true);
 });
+
+test('capture status is publisher-owned, bounded and explicitly distinguishes preparation from frames', () => {
+  const status = { ...signal, fromSessionId: 'publisher', targetSessionId: 'viewer',
+    action: 'capture-mode', generation: 1, capture: { mode: 'normal', ready: true } };
+  assert.equal(nativeScreenSignalSchema.safeParse(status).success, true);
+  assert.equal(nativeScreenSignalSchema.safeParse({ ...status, capture: { mode: 'game', ready: false } }).success, true);
+  for (const value of [
+    { ...status, fromSessionId: 'viewer', targetSessionId: 'publisher' },
+    { ...status, generation: 0 }, { ...status, generation: 1.5 },
+    { ...status, capture: { mode: 'wgc', ready: true } },
+    { ...status, capture: { mode: 'normal' } },
+    { ...status, capture: { mode: 'normal', ready: 'true' } },
+    { ...status, capture: { mode: 'normal', ready: true, hwnd: 123 } },
+  ]) assert.equal(nativeScreenSignalSchema.safeParse(value).success, false);
+});

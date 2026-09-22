@@ -79,18 +79,25 @@ function argumentsForTarget(source) {
 }
 
 function validateVideo(video) {
-  exact(video, ['width', 'height', 'fps', 'bitrateKbps'], 'capture video configuration');
+  exact(video, ['width', 'height', 'fps', 'bitrateKbps',
+    ...(Object.hasOwn(video ?? {}, 'scaleMode') ? ['scaleMode'] : [])], 'capture video configuration');
+  if (Object.hasOwn(video, 'scaleMode')) assert.ok(['stretch', 'fit'].includes(video.scaleMode), 'Invalid capture scaling mode.');
   integer(video.width, 4, 1920); integer(video.height, 2, 1080); integer(video.fps, 1, 120);
   integer(video.bitrateKbps, 50, 20000);
   assert.ok(video.width % 4 === 0 && video.height % 2 === 0 && video.bitrateKbps % 50 === 0);
   return video;
 }
 
+function normalizedVideo(video) {
+  validateVideo(video);
+  return { ...video, scaleMode: video.scaleMode ?? 'stretch' };
+}
+
 function configuration(video, encoder = 'h264_texture_amf', kind = 'window') {
   validateVideo(video);
   assert.ok(typeof encoder === 'string' && Object.hasOwn(ENCODERS, encoder));
   assert.ok(['window', 'monitor', 'game'].includes(kind));
-  return { ...CONFIGURATION, encoderId: encoder, rateControl: ENCODERS[encoder].rateControl,
+  return { ...CONFIGURATION, scaleMode: video.scaleMode ?? 'stretch', encoderId: encoder, rateControl: ENCODERS[encoder].rateControl,
     method: kind === 'game' ? 'game-hook' : 'wgc', width: video.width, height: video.height,
     fpsNumerator: video.fps, initialBitrateKbps: video.bitrateKbps };
 }
@@ -163,7 +170,7 @@ function validateAdmissionFailure(message, expected) {
     assert.equal(message.runId, expected.runId);
     assert.equal(message.helperProcessId, expected.helperProcessId);
     assert.deepEqual(message.target, expected.source);
-    assert.deepEqual(message.video, expected.video);
+    assert.deepEqual(normalizedVideo(message.video), normalizedVideo(expected.video));
     assert.equal(message.encoder, expected.encoder ?? 'auto');
   }
   return message;
@@ -218,6 +225,7 @@ function validateMessage(message, expected) {
   const selected = message.configuration;
   assert.deepEqual(selected, configuration({
     width: selected?.width, height: selected?.height, fps: selected?.fpsNumerator, bitrateKbps: selected?.initialBitrateKbps,
+    scaleMode: selected?.scaleMode,
   }, selected?.encoderId, kind));
   if (!extended) assert.equal(selected.encoderId, CONFIGURATION.encoderId, 'Legacy protocol cannot claim NVENC support.');
   if (extended) {
@@ -345,7 +353,7 @@ function validateEncoderProbeMessage(message, expected) {
     assert.equal(expected.source, null, 'Encoder probing cannot select a source.');
     assert.equal(message.runId, expected.runId);
     assert.equal(message.helperProcessId, expected.helperProcessId);
-    assert.deepEqual(message.video, expected.video);
+    assert.deepEqual(normalizedVideo(message.video), normalizedVideo(expected.video));
     const encoder = validateEncoder(expected.encoder ?? 'auto');
     if (encoder !== 'auto' && message.capability) assert.equal(message.capability.encoderId, encoder);
   }
@@ -377,6 +385,6 @@ function validateEncoderProbeProgress(previous, next) {
 module.exports = {
   CONFIGURATION, ENCODERS, MAX_LINE_BYTES, MAX_PACKET_BYTES, RETIREMENT_FIELDS,
   cloneSource, validateEncoder, validateCapability, argumentsForTarget,
-  exact, integer, decimal, configuration, validateMessage, validateProgress, validateSource, validateVideo, validateFailure, command,
+  exact, integer, decimal, configuration, validateMessage, validateProgress, validateSource, validateVideo, normalizedVideo, validateFailure, command,
   validateEncoderProbeMessage, validateEncoderProbeProgress,
 };

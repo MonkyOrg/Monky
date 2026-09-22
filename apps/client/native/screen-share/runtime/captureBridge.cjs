@@ -12,7 +12,7 @@ class CaptureBridge extends ObsHostBridge {
     assert.equal(host?.kind, 'verified-native-screen-capture-host');
     assert.ok(path.isAbsolute(runDirectory));
     assert.equal(path.basename(runDirectory), `monky-screen-capture-${runId}`);
-    const video = Object.freeze({ ...protocol.validateVideo(options.video) });
+    const video = Object.freeze(protocol.normalizedVideo(options.video));
     const encoder = protocol.validateEncoder(options.encoder ?? 'auto');
     assert.equal(typeof onPacket, 'function'); assert.equal(typeof onNotice, 'function');
     let owner;
@@ -26,6 +26,7 @@ class CaptureBridge extends ObsHostBridge {
         ...protocol.argumentsForTarget(source), ...(source.kind || encoder !== 'auto' ? [`--encoder=${encoder}`] : []),
         `--width=${video.width}`,
         `--height=${video.height}`, `--fps=${video.fps}`, `--bitrate=${video.bitrateKbps}`,
+        `--scale-mode=${video.scaleMode}`,
       ],
       validateRetirement: bridge => {
         const terminal = bridge.stopped ?? bridge.failure;
@@ -245,7 +246,7 @@ async function probeCaptureCapabilities(options, signal, dependencies = {}) {
   assert.equal(host?.kind, 'verified-native-screen-capture-host');
   assert.ok(path.isAbsolute(runDirectory) && path.isAbsolute(runtime?.stockDirectory));
   assert.equal(path.basename(runDirectory), `monky-screen-capture-${runId}`);
-  const video = Object.freeze({ ...protocol.validateVideo(options.video) });
+  const video = Object.freeze(protocol.normalizedVideo(options.video));
   const encoder = protocol.validateEncoder(options.encoder ?? 'auto');
   let failure;
   const bridge = new ObsHostBridge({
@@ -266,6 +267,7 @@ async function probeCaptureCapabilities(options, signal, dependencies = {}) {
       `--runtime=${runtime.stockDirectory}`, `--run-directory=${runDirectory}`, `--run-id=${runId}`,
       '--probe=encoder', `--encoder=${encoder}`, `--width=${video.width}`, `--height=${video.height}`,
       `--fps=${video.fps}`, `--bitrate=${video.bitrateKbps}`,
+      `--scale-mode=${video.scaleMode}`,
     ],
     validateRetirement: validateProbeRetirement,
   }, { ...dependencies, deadlines: { stop: 20000, ...dependencies.deadlines } });

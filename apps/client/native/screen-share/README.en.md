@@ -10,17 +10,22 @@ Voice and cameras retain their own paths.
 
 The implemented capture backend is **Windows x64**. H.264 and Automatic use
 H.264; **AV1 is unavailable**, marked Coming soon. There is no automatic
-fallback to Chromium capture, a software encoder, another source or another
-method. Chromium reception remains available for H.264 profiles the receiving
+fallback to Chromium capture, a software encoder or another source.
+If Game Capture cannot start, one **Normal** attempt uses the same window,
+only after proving the previous attempt has retired.
+Chromium reception remains available for H.264 profiles the receiving
 device can decode; this does not prove sending capability.
 
 ## Sources and availability checks
 
 The picker has two tabs: **Screens** and **Windows**. After selecting a window,
-the cards offer **Window Capture (WGC)** (default) and **Game Capture (hook)**
+the cards offer **Normal** (default, internally WGC) and **Game Capture**
 for that same source. There is no Games tab or automatic game detection.
-Changing methods preserves the window ID; choosing another window resets to WGC.
+Changing methods preserves the window ID; choosing another window resets to Normal.
 Selection does not run a probe/hook before explicit confirmation.
+Use **Refresh** if you open an application after opening the picker. It does
+not continuously poll windows/thumbnails while you play. A disappeared source
+loses its selection; a failed refresh does not authorize sharing a stale list.
 
 | Native method | libobs source | Preserved identity | Optional audio |
 |---|---|---|---|
@@ -69,8 +74,13 @@ can prevent preparation or capture.
 ## Video, audio and preview demand
 
 Video uses NV12, H.264 Main profile, zero B-frames and a one-second GOP, with
-limits of 1920x1080, 120 FPS and 20000 kbps. The image is **stretched to the
-requested resolution**, without bars to preserve its original aspect ratio.
+limits of 1920x1080, 120 FPS and 20000 kbps. The **Keep aspect ratio** switch
+in the picker applies only to the share being created. Off (default), it
+stretches the image to the requested resolution. On, it centers the entire
+image and adds black bars when aspect ratios differ, without cropping or
+distorting the source. The choice applies to preview and every viewer profile,
+including after a quality change; it does not change the configured resolution
+or FPS and is not a global preference.
 Different profiles may require additional encoders and upload bandwidth.
 These are configuration limits, not guaranteed FPS, delivered bitrate or
 performance. Bitrate feedback confirms settings, not measured hardware
@@ -82,6 +92,11 @@ the source profile, without publishing network media. When viewers exist,
 it reuses a watched profile and decodes its same H.264 frames, without a
 second capture/encoder just for display. The bounded preview queue never
 backpressures remote transmission.
+A new share opens its preview in focus mode; quality updates and recovery do
+not override a later choice to leave focus. The **Normal / Game Capture**
+indicator only appears after frames are observed and follows the preview's
+or viewer's actual pipeline, not merely the requested method. Signaling this
+state requires both client and server to use protocol 24.
 
 **Pause preview when Monky is not focused**, enabled by default, controls
 only local preview; losing focus does not interrupt viewers. Turning it off
@@ -114,7 +129,7 @@ overlapping clock remains an explicit error.
 
 ## OBS dependencies and Game Capture
 
-`scripts\buildCapture.cjs` generates **schema 3**
+`scripts\buildCapture.cjs` generates **schema 4**
 `bin\win32-x64\capture-build.json`. It keeps OBS **32.1.1**, revision
 `7272af1375b38bc3cf4e0f98a5d999e8b76e9309`, with SHA-256-verified files.
 Alongside libobs/D3D11/WinRT, `obs-ffmpeg` and the specialized `win-capture`
@@ -134,13 +149,35 @@ updater/download, global hook installation or global Vulkan layer
 registration. These hooks are distinct from **`gclient` build hooks**, which
 remain disabled.
 
+Immutable `win-capture` data is copied, with each SHA-256 verified, to
+`native-screen-capture\hooks-<hash>\data\obs-plugins\win-capture` inside the
+selected profile. The key derives from the complete pinned file set. Each
+file is published atomically without replacing an existing copy, which must
+also pass path, size and hash verification. Configuration and ownership
+remain private to each run.
+An injected DLL can remain mapped in the game after sharing ends: this cache
+is therefore not deleted on Stop, preview pause or quality changes. Retirement
+still requires capture, encoder, transport and helper process closure; it
+neither kills the game nor forces its DLL to unload.
+An older runtime must be rebuilt to use this storage and both scaling modes.
+
 The normal OBS setting `anti_cheat_hook=true` is retained; it is not permission
-to disable anti-cheat, Trusted Mode or change launch arguments. Protected
-games, including CS2 with its protected settings, may refuse Game Capture.
-Keep protections enabled and, if you want to try WGC, manually choose
-**Window Capture (WGC)** for the same window in the **Windows** tab and
-confirm. Game compatibility is not promised and the method/source never
-switches automatically.
+to disable anti-cheat, Trusted Mode or change launch arguments. Game Capture
+requires rendering compatible with the hook: it is not a universal method for
+every enumerated application. The [official OBS
+guide](https://obsproject.com/kb/game-capture-troubleshooting) lists CS2 among
+games with known issues and recommends windowed/borderless mode with Window
+Capture. Missing frames alone do not establish which protection is active.
+A Game source initialization failure or first-frame deadline starts a
+fallback to **Normal**, with a small localized notification, without disabling
+protections. The previous host must prove retirement; HWND, PID and process
+creation time are revalidated before the single alternative attempt.
+Transport, viewers, audio, aspect ratio and profile stay unchanged.
+Window loss, cancellation, encoder failure or a failure after emitting video
+do not authorize a method switch. If Normal also fails, the error is explicit.
+For these games, Normal may require windowed/borderless mode; compatibility
+is not guaranteed. The picker's searchable guide summarizes OBS-documented
+limitations, not a complete list of games certified for Monky.
 
 ## Building from a checkout
 

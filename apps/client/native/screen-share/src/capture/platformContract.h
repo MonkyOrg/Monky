@@ -78,7 +78,8 @@ inline std::string SerializeAdmissionFailure(const Arguments& arguments, const C
       ",\"qpcFrequency\":" + JsonString(std::to_string(common.qpcFrequency)) +
       ",\"target\":" + target +
       ",\"video\":{\"width\":" + std::to_string(video.width) + ",\"height\":" + std::to_string(video.height) +
-      ",\"fps\":" + std::to_string(video.fps) + ",\"bitrateKbps\":" + std::to_string(video.bitrateKbps) + "}" +
+      ",\"fps\":" + std::to_string(video.fps) + ",\"bitrateKbps\":" + std::to_string(video.bitrateKbps) +
+      ",\"scaleMode\":" + JsonString(ScaleModeName(video.scaleMode)) + "}" +
       ",\"encoder\":" + JsonString(arguments.encoder == EncoderKind::Auto ? "auto" : EncoderId(arguments.encoder)) +
       ",\"captureStarted\":false,\"observation\":{\"outputPackets\":0}" +
       ",\"error\":{\"code\":" + JsonString(failure.code) + ",\"message\":" + JsonString(failure.message) + "}" +
@@ -160,7 +161,8 @@ inline std::string SerializeEncoderProbeEvent(const Arguments& arguments, const 
       ",\"qpc\":" + JsonString(std::to_string(common.qpc)) +
       ",\"qpcFrequency\":" + JsonString(std::to_string(common.qpcFrequency)) +
       ",\"video\":{\"width\":" + std::to_string(video.width) + ",\"height\":" + std::to_string(video.height) +
-      ",\"fps\":" + std::to_string(video.fps) + ",\"bitrateKbps\":" + std::to_string(video.bitrateKbps) + "}" +
+      ",\"fps\":" + std::to_string(video.fps) + ",\"bitrateKbps\":" + std::to_string(video.bitrateKbps) +
+      ",\"scaleMode\":" + JsonString(ScaleModeName(video.scaleMode)) + "}" +
       ",\"captureKinds\":" + (sourcePlatformVerified ? "[\"window\",\"monitor\",\"game\"]" : "[]") +
       ",\"capability\":" + CapabilityJson(capability) +
       ",\"encoderInitialized\":" + Boolean(encoderInitialized) + ",\"sourceCaptured\":false,\"outputPackets\":0";

@@ -6,6 +6,7 @@ const { randomUUID } = require('node:crypto');
 const {
   getScreenShareProfile, messageReferenceSchema, nativeScreenRenditionSchema, nativeScreenSignalSchema,
   nativeScreenSourceSchema, screenShareProfileKey, screenShareQualitySchema,
+  NATIVE_SCREEN_GAME_STARTUP_TIMEOUT_MS,
 } = require('@monky/shared');
 const { within } = require('./nativeDeadline.cjs');
 
@@ -37,6 +38,7 @@ class NativeScreenSubscription {
     this.generation = null;
     this.opening = null;
     this.consuming = null;
+    this.gameStartupWait = false;
   }
 
   envelope(data) {
@@ -81,7 +83,7 @@ class NativeScreenSubscription {
     assert.equal(message.channelId, this.channelId);
     assert.equal(message.shareId, this.source.shareId);
     assert.equal(message.sourceInstanceId, this.source.instanceId);
-    assert.ok(['accepted', 'control', 'closed'].includes(message.action));
+    assert.ok(['accepted', 'capture-mode', 'control', 'closed'].includes(message.action));
     if (this.stopping || message.subscriptionId !== this.subscriptionId) return;
     assert.equal(this.started, true);
     if (message.action === 'closed') {
@@ -96,6 +98,18 @@ class NativeScreenSubscription {
       this.opening = this.open();
       void this.opening.catch(error => this.fail(error));
       return this.opening;
+    }
+    if (message.action === 'capture-mode') {
+      assert.equal(message.generation, this.generation);
+      if (message.capture.ready) this.observe({ type: 'capture-mode', mode: message.capture.mode });
+      else if (message.capture.mode === 'game' && !this.playing && !this.gameStartupWait) {
+        this.gameStartupWait = true;
+        clearTimeout(this.timer);
+        this.timer = setTimeout(() => this.fail(new Error('Game Capture and its Normal fallback did not produce a frame.')),
+          NATIVE_SCREEN_GAME_STARTUP_TIMEOUT_MS);
+        this.timer.unref?.();
+      }
+      return;
     }
     assert.equal(this.mode, 'p2p');
     assert.equal(message.control.generation, this.generation);

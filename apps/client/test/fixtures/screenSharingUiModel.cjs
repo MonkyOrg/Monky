@@ -13,6 +13,34 @@ const MONITOR_SOURCE_ID = `native-monitor:${'1'.repeat(64)}`;
 
 const renderer = path.resolve(__dirname, '..', '..', 'src', 'renderer');
 const compiled = new Map();
+function appEventHandlerSource(eventName) {
+  const filename = path.join(renderer, 'main.ts');
+  const cacheKey = `${filename}:${eventName}`;
+  if (!compiled.has(cacheKey)) {
+    const source = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.ES2022, true);
+    const handlers = [];
+    const visit = node => {
+      if (ts.isCallExpression(node) && node.expression.getText(source) === 'appEvents.on'
+        && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === eventName) {
+        handlers.push(node.arguments[1]);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    assert.equal(handlers.length, 1, `Exercise the actual unique ${eventName} UI handler without bootstrapping the app`);
+    compiled.set(cacheKey, ts.transpileModule(`exports.notify = ${handlers[0].getText(source)};`, {
+      fileName: filename, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+    }).outputText);
+  }
+  return compiled.get(cacheKey);
+}
+
+function appEventHandler(eventName, globals) {
+  const exports = {};
+  vm.runInNewContext(appEventHandlerSource(eventName), { exports, ...globals }, { filename: path.join(renderer, 'main.ts') });
+  return exports.notify;
+}
+
 const decode = text => text.replace(/&(?:amp|lt|gt|quot|#039);/g, entity => ({
   '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#039;': "'",
 })[entity]);
@@ -63,6 +91,8 @@ class ModelElement {
   set disabled(value) { if (value) this.setAttribute('disabled', ''); else this.removeAttribute('disabled'); }
   get hidden() { return this.hasAttribute('hidden'); }
   set hidden(value) { if (value) this.setAttribute('hidden', ''); else this.removeAttribute('hidden'); }
+  get inert() { return this.hasAttribute('inert'); }
+  set inert(value) { if (value) this.setAttribute('inert', ''); else this.removeAttribute('inert'); }
   get tabIndex() { return Number(this.getAttribute('tabindex') ?? 0); }
   set tabIndex(value) { this.setAttribute('tabindex', String(value)); }
   get title() { return this.getAttribute('title') ?? ''; }
@@ -193,8 +223,8 @@ class ModelElement {
     }
     return !event.defaultPrevented;
   }
-  click() { if (!this.disabled) this.dispatchEvent(new Event('click', { bubbles: true, cancelable: true })); }
-  focus() { if (!this.disabled) this.ownerDocument.activeElement = this; }
+  click() { if (!this.disabled && !this.closest('[inert]')) this.dispatchEvent(new Event('click', { bubbles: true, cancelable: true })); }
+  focus() { if (!this.disabled && !this.closest('[inert]')) this.ownerDocument.activeElement = this; }
   checkVisibility() { return !this.hidden && this.style.display !== 'none' && (!this.parentElement || this.parentElement.checkVisibility()); }
   getBoundingClientRect() { return { top: this.top, left: 0, width: 600, height: 50, right: 600, bottom: this.top + 50 }; }
   scrollTo({ top }) { this.scrollTop = top; }
@@ -215,6 +245,7 @@ function fixture(language = 'en') {
     capabilities: async () => capabilities, sources: async () => sources,
     current: true, confirm: true, capturingAudio: false, settingsError: null,
     start: null, reapply: async () => {},
+    openExternal: async () => ({ success: true }),
   };
   let saves = 0, enumerations = 0, cancelled = 0, sequence = 0;
   const settingsStore = {
@@ -252,9 +283,9 @@ function fixture(language = 'en') {
   };
   const webRtcManager = {
     getNativeScreenCapabilities: () => controls.capabilities(),
-    async startNativeScreenShare(id, audio, thumbnail, isWanted, kind) {
-      traces.push(['native-start', id, audio, thumbnail, kind]);
-      return controls.start ? controls.start({ id, audio, thumbnail, isWanted, kind }) : createStream(id);
+    async startNativeScreenShare(id, audio, thumbnail, isWanted, kind, preserveAspectRatio) {
+      traces.push(['native-start', id, audio, thumbnail, kind, preserveAspectRatio]);
+      return controls.start ? controls.start({ id, audio, thumbnail, isWanted, kind, preserveAspectRatio }) : createStream(id);
     },
     assertScreenSharingSettings(profile, codec) {
       traces.push(['assert-settings', profile, codec]);
@@ -286,6 +317,7 @@ function fixture(language = 'en') {
     platform: 'win32', nativeScreenCommand: async () => { throw new Error('Model must not perform native IPC'); },
     getDesktopSources: () => { enumerations++; return controls.sources(); },
     prepareScreenShareWindow: async id => { traces.push(['prepare-window', id]); return false; },
+    openExternal: url => { traces.push(['open-external', url]); return controls.openExternal(url); },
   };
   const stubs = {
     'core/EventBus': { appEvents: { emit: (...value) => events.push(value) } },
@@ -311,7 +343,7 @@ function fixture(language = 'en') {
     'utils/scroll': { scrollWithin: (body, target, offset) => { body.scrollTop = target.top - offset; return body.scrollTop; } },
   };
   const allowed = new Set([
-    'views/ScreenSharePickerModal', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',
+    'views/ScreenSharePickerModal', 'views/GameCaptureGuideModal', 'views/CopyToast', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
     'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton',
   ]);
@@ -326,7 +358,7 @@ function fixture(language = 'en') {
     const module = { exports: {} };
     modules.set(name, module.exports);
     vm.runInNewContext(compiled.get(filename), {
-      module, exports: module.exports, document, window: { api, matchMedia: () => mediaQuery },
+      module, exports: module.exports, document, window: { api, matchMedia: () => mediaQuery, setTimeout, clearTimeout },
       localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
       navigator: { language, languages: [language] },
       Element: ModelElement, HTMLElement: ModelElement, HTMLButtonElement: ModelElement, HTMLInputElement: ModelElement,
@@ -359,10 +391,15 @@ function fixture(language = 'en') {
   };
   return {
     picker, quality, SettingsSectionNavigation, i18n, load, mountQuality, document, api, controls, sources, source,
+    notifyNativeFailure: appEventHandler('native_screen.source_failed', { t: i18n.t, showAlert: stubs['views/Dialog'].showAlert }),
+    notifyCaptureFallback: appEventHandler('native_screen.capture_fallback', {
+      t: i18n.t, showInfoToast: (message, durationMs) => traces.push(['info-toast', message, durationMs]),
+      showAlert: stubs['views/Dialog'].showAlert,
+    }),
     settingsStore, voiceStore, streams, captures, capabilities, createStream, traces, alerts, warnings, events, observers, mediaQuery,
     get saves() { return saves; }, get enumerations() { return enumerations; }, get cancelled() { return cancelled; },
     close() { picker.close(); quality.cleanup(); document.body.replaceChildren(); },
   };
 }
 
-module.exports = { fixture, deferred, flush, MONITOR_SOURCE_ID };
+module.exports = { fixture, deferred, flush, MONITOR_SOURCE_ID, appEventHandlerSource };

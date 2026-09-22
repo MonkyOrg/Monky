@@ -91,6 +91,8 @@ export class VoiceStageView {
   private focusedTileKeys: string[] = [];
   private focusEpoch = 0;
   private focusError: HTMLElement | null = null;
+  private readonly seenScreenStarts = new WeakSet<MediaStream>();
+  private readonly pendingScreenFocus = new Map<string, { tileKey: string; isCurrent: () => boolean }>();
   /** Zoom/pan state of the focused screen share, reset when focus changes (#271). */
   private focusZoom = { scale: 1, x: 0, y: 0 };
   private focusZoomTileKey: string | null = null;
@@ -131,6 +133,7 @@ export class VoiceStageView {
       return;
     }
     this.focusEpoch++;
+    this.pendingScreenFocus.clear();
     this.clearFocusError();
     this.closeBotScreens();
     if (channelId !== this.currentChannelId) this.stopTelemetryMonitor();
@@ -317,6 +320,7 @@ export class VoiceStageView {
     this.unbindListeners();
 
     if (!this.currentChannelId || !serverStore.serverDetails) {
+      this.pendingScreenFocus.clear();
       this.closeBotScreens();
       this.container.innerHTML = `
         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 12px;">
@@ -613,10 +617,63 @@ export class VoiceStageView {
     this.focusError = null;
   }
 
+  private queueScreenStartFocus({ shareId, stream }: { shareId: string; stream: MediaStream }): void {
+    if (!SAFE_SHARE_ID.test(shareId) || this.seenScreenStarts.has(stream)) return;
+    this.seenScreenStarts.add(stream);
+    const channelId = this.currentChannelId;
+    const displayedServer = getActiveServerStore();
+    const sessionId = displayedServer.currentUser?.sessionId || displayedServer.currentUser?.id;
+    const voiceSessionKey = voiceStore.voiceSessionKey;
+    if (!channelId || !sessionId || channelId !== voiceStore.currentVoiceChannelId || !isViewingCallServer()) return;
+    this.pendingScreenFocus.set(shareId, {
+      tileKey: `${sessionId}:screen:${shareId}`,
+      isCurrent: () => this.currentChannelId === channelId && voiceStore.currentVoiceChannelId === channelId
+        && voiceStore.voiceSessionKey === voiceSessionKey && getActiveServerStore() === displayedServer
+        && (displayedServer.currentUser?.sessionId || displayedServer.currentUser?.id) === sessionId
+        && videoService.getScreenStream(shareId) === stream,
+    });
+    this.focusStartedScreens();
+  }
+
+  private focusStartedScreens(tiles?: StageTile[]): boolean {
+    for (const [shareId, intent] of this.pendingScreenFocus) {
+      if (!intent.isCurrent()) this.pendingScreenFocus.delete(shareId);
+    }
+    if (!this.pendingScreenFocus.size || !this.currentChannelId) return false;
+    const availableTiles = tiles ?? this.buildStageTiles(
+      participantManager.getInVoiceChannel(this.currentChannelId),
+      serverStore.currentUser?.sessionId || serverStore.currentUser?.id,
+    );
+    const ready = [...this.pendingScreenFocus].filter(([, intent]) =>
+      availableTiles.some(tile => tile.key === intent.tileKey));
+    if (!ready.length) return false;
+    const keys = [...new Set([...this.focusedTileKeys, ...ready.map(([, intent]) => intent.tileKey)])]
+      .filter(key => availableTiles.some(tile => tile.key === key)).slice(-MAX_FOCUSED_TILES);
+    const consume = () => {
+      for (const [shareId, intent] of ready) {
+        if (this.pendingScreenFocus.get(shareId) === intent) this.pendingScreenFocus.delete(shareId);
+      }
+    };
+    // Capture starts before the roster changes. Consume its intent only when the
+    // tile exists, and keep it cancellable while native fullscreen is exiting.
+    this.setFocusedTiles(keys, {
+      screenStart: true,
+      isCurrent: () => ready.every(([shareId, intent]) => this.pendingScreenFocus.get(shareId) === intent
+        && intent.isCurrent() && voiceStore.screenShareIds.includes(shareId)),
+      beforeRender: consume,
+      onFailure: consume,
+    });
+    return true;
+  }
+
   private setFocusedTiles(
     tileKeys: string[],
-    hooks?: { beforeRender?: () => void; afterRender?: () => void },
+    hooks?: {
+      beforeRender?: () => void; afterRender?: () => void; onFailure?: () => void;
+      isCurrent?: () => boolean; screenStart?: boolean;
+    },
   ): void {
+    if (!hooks?.screenStart) this.pendingScreenFocus.clear();
     const root = this.container.querySelector('.voice-stage-container');
     if (!root) return;
     const epoch = ++this.focusEpoch;
@@ -627,7 +684,8 @@ export class VoiceStageView {
     const current = () => epoch === this.focusEpoch && this.currentChannelId === channelId
       && getActiveServerStore() === displayedServer && displayedServer.currentUser?.sessionId === sessionId
       && voiceStore.voiceSessionKey === voiceSessionKey
-      && root.isConnected && this.container.querySelector('.voice-stage-container') === root;
+      && root.isConnected && this.container.querySelector('.voice-stage-container') === root
+      && hooks?.isCurrent?.() !== false;
     const commit = () => {
       if (!current()) return;
       this.clearFocusError();
@@ -636,9 +694,10 @@ export class VoiceStageView {
       this.renderParticipants();
       hooks?.afterRender?.();
     };
-    const leavingFocus = this.focusedTileKeys.some((key) => !tileKeys.includes(key));
+    const changingLayout = tileKeys.length !== this.focusedTileKeys.length
+      || this.focusedTileKeys.some((key, index) => tileKeys[index] !== key);
     const fullscreen = document.fullscreenElement;
-    if (!leavingFocus || !fullscreen ||
+    if (!changingLayout || !fullscreen ||
         (!this.container.contains(fullscreen) && !fullscreen.contains(root))) {
       commit();
       return;
@@ -662,6 +721,7 @@ export class VoiceStageView {
       this.focusError.setAttribute('role', 'alert');
       this.focusError.textContent = t('stage.fullscreenExitError');
       (this.container.contains(fullscreen) ? fullscreen : root).append(this.focusError);
+      hooks?.onFailure?.();
     });
   }
 
@@ -708,13 +768,13 @@ export class VoiceStageView {
 
   public renderParticipants(): void {
     this.refreshBotScreens();
-    this.unbindTelemetryControls();
     const area = this.container.querySelector<HTMLElement>('#stage-participants-area');
     if (!area || !this.currentChannelId) return;
-    this.releaseStageVideos(area);
 
     const participants = participantManager.getInVoiceChannel(this.currentChannelId);
     if (participants.length === 0) {
+      this.unbindTelemetryControls();
+      this.releaseStageVideos(area);
       area.innerHTML = `
         <div style="flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-muted);">
           Aguardando outros amigos entrarem na chamada...
@@ -728,6 +788,9 @@ export class VoiceStageView {
     // A participant sharing camera + screens contributes one tile per source
     // (#26, #253); focus, speaking and DOM keys are keyed per tile.
     const tiles = this.buildStageTiles(participants, currentSessionId);
+    if (this.focusStartedScreens(tiles)) return;
+    this.unbindTelemetryControls();
+    this.releaseStageVideos(area);
 
     // Drop focus entries whose tile disappeared (share ended, peer left).
     this.focusedTileKeys = this.focusedTileKeys.filter((key) =>
@@ -1030,6 +1093,23 @@ export class VoiceStageView {
     for (const card of this.container.querySelectorAll<HTMLElement>('[data-kind="screen"][data-session-id]')) {
       const sessionId = card.dataset.sessionId;
       const shareId = card.dataset.tileKey?.split(':screen:')[1];
+      if (!sessionId || !shareId) continue;
+      const badge = card.querySelector<HTMLElement>('.stage-capture-mode-badge');
+      if (badge) {
+        const native = badge.dataset.nativeScreen === 'true'
+          || (serverStore.isMySession(sessionId) ? videoService.getNativeScreenCapture(shareId)
+            : webRtcManager.getNativeScreenSource(sessionId, shareId)) !== null;
+        if (native) badge.dataset.nativeScreen = 'true';
+        const mode = native ? webRtcManager.getScreenCaptureMode(sessionId, shareId) : 'normal';
+        badge.hidden = mode === null;
+        const text = mode === null ? '' : t(mode === 'game' ? 'stage.captureModeGame' : 'stage.captureModeNormal');
+        const label = mode === null ? '' : t('stage.captureModeLabel', { mode: text });
+        if (mode === null) badge.removeAttribute('data-capture-mode');
+        else if (badge.dataset.captureMode !== mode) badge.dataset.captureMode = mode;
+        if (badge.textContent !== text) badge.textContent = text;
+        if (badge.getAttribute('aria-label') !== label) badge.setAttribute('aria-label', label);
+        if (badge.title !== label) badge.title = label;
+      }
       if (sessionId && shareId && serverStore.isMySession(sessionId) && videoService.getNativeScreenCapture(shareId)) {
         const state = webRtcManager.getLocalScreenPreviewState(shareId);
         card.dataset.previewState = state;
@@ -1295,6 +1375,8 @@ export class VoiceStageView {
     return `
       ${isVideoTile ? `
         <video id="${videoId}" data-video-tile-key="${escapeHtml(tile.key)}" class="stage-video-element ${isScreenTile ? 'screen-share' : ''}${isLocked ? ' screen-locked' : ''}" autoplay playsinline muted></video>
+        ${isScreenTile ? `<span class="stage-capture-mode-badge" data-native-screen="${!!(localNative || remoteNative)}"
+          role="status" aria-live="polite" aria-atomic="true" hidden></span>` : ''}
         ${localNative ? `<div class="stage-native-thumbnail">
           ${localNative.thumbnail ? `<img src="${escapeHtml(localNative.thumbnail)}" alt="">` : ''}
           <span>${t('stage.nativeThumbnail')}</span>
@@ -1887,6 +1969,10 @@ export class VoiceStageView {
   }
 
   private attachEvents(): void {
+    for (const shareId of voiceStore.screenShareIds) {
+      const stream = videoService.getScreenStream(shareId);
+      if (stream) this.seenScreenStarts.add(stream);
+    }
     this.unbindEvents.push(bindStageControlsMotion(this.container));
     const btnMic = document.getElementById('stage-btn-mic');
     const btnDeafen = document.getElementById('stage-btn-deafen');
@@ -1960,6 +2046,7 @@ export class VoiceStageView {
       this.applyTelemetryOverlayState();
       this.syncTelemetryMonitor();
       this.refreshLocalCameraVideo();
+      this.focusStartedScreens();
     });
 
     const u3 = appEvents.on('participants.speaking_changed', (data: { sessionId: string; speaking: boolean }) => {
@@ -2012,6 +2099,7 @@ export class VoiceStageView {
     });
     const u18 = appEvents.on('voice.channel_changed', () => {
       this.focusEpoch++;
+      this.pendingScreenFocus.clear();
       this.clearFocusError();
       this.renderParticipants();
     });
@@ -2020,7 +2108,9 @@ export class VoiceStageView {
     const u21 = appEvents.on('server.roles_updated', () => this.renderParticipants());
     const u22 = appEvents.on('voice.screen_watch_changed', () => this.renderParticipants());
     const u23 = appEvents.on('native_screen.updated', () => this.refreshNativeScreenState());
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23);
+    const u24 = appEvents.on('local.screen_started', (start: { shareId: string; stream: MediaStream }) => this.queueScreenStartFocus(start));
+    const u25 = appEvents.on('local.screen_stopped', (shareId: string) => this.pendingScreenFocus.delete(shareId));
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21, u22, u23, u24, u25);
     const area = this.container.querySelector('#stage-content-area');
     const position = () => {
       this.positionBotScreens();
@@ -2063,6 +2153,7 @@ export class VoiceStageView {
   public destroy(): void {
     this.releaseStageVideos(this.container);
     this.focusEpoch++;
+    this.pendingScreenFocus.clear();
     this.clearFocusError();
     this.stopPingMonitor();
     this.stopTelemetryMonitor();

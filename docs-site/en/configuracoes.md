@@ -11,7 +11,7 @@ preferences. To change something shared with participants, use
 | Soundboard / Stickers | Local folders and library controls |
 | Keybinds | Key combinations for quick actions |
 | Notifications and Sounds | Personal sounds and notices |
-| Quality | Transmission profiles, resolution, FPS, bitrate and codec |
+| Quality & sharing | Voice, camera and screen profiles, codec, local preview and telemetry |
 | Bot tools | Local installations, permissions, cache and tasks |
 | Logs | Local events and client diagnostics |
 | About and Updates | Version, updates, window behavior and community |
@@ -33,10 +33,10 @@ be recovered.
 
 ### Quality, bitrate and telemetry
 
-Under **Quality**, presets, codec and custom values are grouped with
+Under **Quality & sharing**, presets, codec and custom values are grouped with
 **Video telemetry**. **Voice and Video** contains devices, audio processing
 and previews. To show FPS, resolution and bitrate over camera/screen video,
-use **Quality → Video telemetry**: the switch, position and mode are saved
+use **Quality & sharing → Video telemetry**: the switch, position and mode are saved
 and applied without restarting the stream.
 
 In the **Custom** profile, hover or use `Tab` to reach the question icon next to
@@ -87,14 +87,25 @@ Signaling, connection control, voice and camera can still use the network.
 
 ### Native sharing and viewer quality
 
-The picker identifies the available path. Qualified native publishing uses
-**Windows x64, window capture and AMD/AMF H.264**; monitors, other encoders and
-other platforms retain the Chromium path. Native unavailability is not hidden
-behind a silent backend switch.
+The picker shows the capture methods and H.264 encoder available in this
+device's native backend. Unavailable options are disabled with a reason;
+the GPU brand does not guarantee support. There is no automatic switch to
+Chromium or another source. The automatic **Game Capture** to **Normal**
+attempt, when needed, uses only the same window and displays a notice.
 
-For up to **1920×1080 at 120 FPS**, select **Custom** under Quality; existing
-presets were not automatically changed to 120 FPS. Native video is stretched
-to the selected dimensions, without adding bars to preserve a 4:3 aspect ratio.
+For up to **1920×1080 at 120 FPS**, select **Custom** under **Quality & sharing**;
+existing presets were not automatically changed to 120 FPS. In the picker,
+**Keep aspect ratio** fits the image into the selected dimensions, adding
+borders when needed without distortion. Off retains the current stretch-to-fill
+behavior. The switch starts off for each new screen share and is not a global
+preference.
+
+A new screen share's preview enters focus as soon as its tile is available.
+You can unfocus it: quality changes, reconnections and capture-method retries
+do not refocus it. The preview and each viewer show a **Normal** or **Game**
+badge for the confirmed mode of that stream, including in thumbnails.
+Until an image confirms the mode, the badge stays hidden; selecting Game
+Capture alone does not establish that Game is in use.
 
 When watching a native screen, **Received quality** requests a real sender
 profile: **Source maximum** or profiles capped at **1080p/60**,
@@ -420,10 +431,11 @@ Older shortcuts remain readable; re-record an unrecognized combination from
 another layout. Global capture may require input/accessibility permissions.
 Push-to-Talk keeps its separately configured keyboard key or mouse button.
 
-## Quality
+## Quality & sharing {#quality}
 
 The profile controls what **you transmit**; it does not increase someone
-else's camera or screen resolution.
+else's camera or screen resolution. This tab also groups codec, local sharing
+preview and telemetry; profiles still include voice and camera settings.
 
 ### Quality profiles
 
@@ -446,35 +458,60 @@ resolution closest to the one you were already using.
 
 ### Sharing your screen while gaming
 
-Encoding video consumes resources. Acceleration depends on the codec, hardware,
-driver and support available to the app. H.264 has broad hardware support;
-AV1 and VP9 may use the CPU when no compatible encoder is available.
-Choosing a codec does not by itself guarantee GPU encoding.
-
-That is why, on the **Gaming** profile, the **Automatic** codec puts H.264
-first. If you use another profile and the game stutters while sharing, pick
-**H.264 / AVC** under *Preferred Video Codec*.
-
-**Automatic** negotiates a compatible codec. When you explicitly select a
-codec, it becomes mandatory for your screen in P2P and SFU, including when
-replacing a screen or changing voice modes. If unavailable, the client explains
-why rather than transmitting with another codec.
+Encoding video consumes resources. Acceleration depends on the hardware, driver
+and support confirmed by the backend. For screen sharing, **Automatic** uses
+**H.264 / AVC** today; **AV1** remains disabled as **Coming soon**.
+Hardware encoder selection is separate from the codec. If support is
+unavailable, the client explains why instead of silently changing codecs.
 
 The picker separates **Screens** and **Windows**. Each window appears only
 once in the window list; there is no list of detected games. After selecting a
-window, the method cards offer **Window Capture (WGC)** by default and
-**Game Capture (hook)** as an explicit choice. Changing the method keeps the
+window, the method cards offer **Normal** by default and
+**Game Capture** as an explicit choice. Changing the method keeps the
 same window and its audio choice. Selecting another window resets the method
-to WGC rather than carrying over permission to hook the previous window.
+to Normal rather than carrying over the previous window's Game Capture choice.
 
-Choosing the Game Capture card does not start a probe or inject a hook:
+Choosing the Game Capture card does not start capture or test the application:
 you must confirm with **Share**, **Switch Source** or **Add screen**. Only
 methods advertised by the backend are available; compatibility with the
-selected window still needs to be checked. On failure, Monky does not
-automatically change the window, method or capture path. Keep anti-cheat,
-Trusted Mode and other protections enabled. To try WGC on the same window,
-select its card and confirm again. Refreshing the list requires a new
-selection; a window that disappears is never replaced by another one.
+selected window still needs to be checked. If Game Capture becomes
+unavailable, Monky closes that attempt and notifies you that it is trying
+**Normal for the same window**. The notice stays visible for 8 seconds to give
+you time to read it and reports an attempt, not an already
+confirmed image. It never chooses another monitor or window, uses Chromium,
+or disables anti-cheat, Trusted Mode or other protections. If Normal also
+fails, the error remains visible; there is no switch to another source.
+
+For games, try **Game Capture** first, following the
+[OBS recommendation](https://obsproject.com/kb/game-capture-source).
+It is not intended for every window; games such as CS2 may prevent this method.
+**Normal** mode may require the game to run in
+windowed or borderless fullscreen mode, without changing protections.
+This also follows the
+[official OBS guidance](https://obsproject.com/kb/game-capture-troubleshooting);
+the window name or title is not used to promise game detection or compatibility.
+
+Under **Windows**, **Does my game work with Game Capture?** opens a local guide
+searchable by title or alias, such as CS2, GTA SA and LoL. Its 14 references to
+OBS limitations and guidance are grouped into **Use Normal** (the recommended
+alternative for those cases) and **Needs attention** (specific precautions).
+This is not a complete compatibility list or a guarantee for Monky.
+An absent game means only **no catalogued information**, not incompatibility;
+try Game Capture first.
+The guide does not access the network, test games, start capture or change
+your selection; its official-source link opens the browser only when activated.
+
+The guidance covers DirectX 12 in Fortnite, separate League of Legends client
+and match windows, and permission or multi-GPU limitations. The match window
+must be selected explicitly. There is no automatic GPU selection or permission
+elevation, and no recommendation to disable protections.
+
+Opened a game or another window after the picker? Use **Refresh**. There is
+no background polling. If the source remains available, its tab, selected
+ID, method, quality, audio and **Keep aspect ratio** choice are preserved.
+A source that disappears loses selection and is never replaced automatically.
+Confirmation is disabled while refreshing; failures remain visible and can
+be retried in the same modal.
 
 One last tip that holds for any capture software: sharing **the game window**
 usually costs less than sharing the whole monitor, and playing in *borderless

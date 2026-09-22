@@ -12,6 +12,7 @@ import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkele
 import { showAlert, showConfirm } from './Dialog';
 import { t } from '../i18n';
 import { nativeScreenProfile } from '../core/webrtc/NativeScreenController';
+import { GameCaptureGuideModal } from './GameCaptureGuideModal';
 
 type SourceLoadState =
   | { status: 'loading' }
@@ -41,6 +42,7 @@ export class ScreenSharePickerModal {
   private sourceRequest = 0;
   private nativeCapabilities: NativeScreenCapabilities | null = null;
   private eventController: AbortController | null = null;
+  private readonly gameGuide = new GameCaptureGuideModal();
 
   private hasScreenAudio(): boolean {
     return voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
@@ -105,24 +107,43 @@ export class ScreenSharePickerModal {
 
   private updateCaptureInfo(): void {
     const source = this.selectedSource();
-    if (!source) this.selectedSourceId = null;
+    if (!source && this.sourceState.status === 'ready') this.selectedSourceId = null;
+    const refreshing = this.sourceState.status === 'loading';
+    const refresh = this.modalEl?.querySelector<HTMLButtonElement>('#btn-refresh-sources') ?? null;
+    setButtonLoading(refresh, refreshing);
+    if (refresh) {
+      refresh.disabled = this.isStarting || refreshing;
+      refresh.setAttribute('aria-busy', String(refreshing));
+    }
     this.updateTabs();
     this.updateCaptureMethods(source);
+    const guide = this.modalEl?.querySelector<HTMLButtonElement>('#btn-game-capture-guide');
+    if (guide) {
+      guide.hidden = this.activeTab !== 'window';
+      guide.disabled = this.isStarting;
+    }
     const info = this.modalEl?.querySelector<HTMLElement>('#share-capture-info');
     if (!info) return;
     const audioInput = this.modalEl?.querySelector<HTMLInputElement>('#chk-share-audio');
     const audio = audioInput?.checked ?? false;
     if (audioInput) audioInput.disabled = this.isStarting || this.hasScreenAudio();
+    const aspectInput = this.modalEl?.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio');
+    if (aspectInput) aspectInput.disabled = this.isStarting;
     const audioText = this.modalEl?.querySelector('#share-audio-text');
     if (audioText) audioText.textContent = this.audioToggleLabel(this.activeTab);
     const native = this.usesNativeCapture(source?.id ?? (this.activeTab === 'screen' ? 'native-monitor:' : 'window:'), audio);
     const profile = native ? nativeScreenProfile(videoService.getProfile()) : null;
-    info.textContent = profile ? t(this.selectionProbePending ? 'screenShare.nativeProbePending' : 'screenShare.nativeBackend', {
+    info.hidden = profile !== null && this.selectionProbePending;
+    info.textContent = info.hidden ? '' : profile ? t('screenShare.nativeBackend', {
       width: profile.width, height: profile.height, fps: profile.fps, bitrate: profile.maxBitrateKbps,
     }) : this.captureUnavailableMessage(audio);
     info.dataset.backend = native ? (this.selectionProbePending ? 'probe-pending' : 'native') : 'unavailable';
     this.modalEl?.querySelectorAll<HTMLButtonElement>('#btn-share, #btn-share-add')
-      .forEach(button => { button.disabled = this.isStarting || !source || !native; });
+      .forEach(button => {
+        button.disabled = this.isStarting || !source || !native;
+        if (source && this.captureKind() === 'game') button.setAttribute('aria-describedby', 'share-game-tip');
+        else button.removeAttribute('aria-describedby');
+      });
     this.modalEl?.querySelectorAll<HTMLElement>('.source-item').forEach(item => {
       const selected = item.dataset.sourceId === this.selectedSourceId;
       item.classList.toggle('selected', selected);
@@ -140,21 +161,19 @@ export class ScreenSharePickerModal {
       const button = this.modalEl?.querySelector<HTMLButtonElement>(`#share-tab-${tab.id}`);
       if (!button) continue;
       const supported = this.supportsTab(tab.id);
-      const probePending = supported && this.selectionProbePending;
       const selected = this.activeTab === tab.id;
       button.disabled = this.isStarting || !supported;
       button.classList.toggle('active', selected);
       button.setAttribute('aria-selected', String(selected));
       button.tabIndex = !button.disabled && tab.id === focusTab?.id ? 0 : -1;
       const reason = supported ? '' : this.captureUnavailableMessage(false, tab.id === 'screen' ? 'monitor' : 'window');
-      button.title = probePending ? t('screenShare.probePending') : reason;
-      if (probePending && selected) button.setAttribute('aria-describedby', 'share-capture-info');
-      else if (supported) button.removeAttribute('aria-describedby');
+      button.title = reason;
+      if (supported) button.removeAttribute('aria-describedby');
       else button.setAttribute('aria-describedby', 'share-method-reasons');
       const status = button.querySelector<HTMLElement>('.share-tab-status');
       if (status) {
-        status.hidden = supported && !probePending;
-        status.textContent = probePending ? t('screenShare.probePending')
+        status.hidden = supported;
+        status.textContent = supported ? ''
           : !this.nativeCapabilities && this.sourceState.status === 'loading' ? t('common.loading') : t('screenShare.unavailable');
       }
       if (reason) reasons.add(reason);
@@ -183,8 +202,7 @@ export class ScreenSharePickerModal {
       button.disabled = !visible || this.isStarting || !supported;
       button.setAttribute('aria-pressed', String(this.windowCaptureMethod === method.id));
       button.tabIndex = !button.disabled && method.id === focusMethod?.id ? 0 : -1;
-      const reason = supported ? (this.selectionProbePending ? t('screenShare.probePending') : '')
-        : this.captureUnavailableMessage(false, method.id);
+      const reason = supported ? '' : this.captureUnavailableMessage(false, method.id);
       button.title = reason;
       button.setAttribute('aria-describedby', `share-method-${method.id}-description${reason ? ` share-method-${method.id}-status` : ''}`);
       const status = button.querySelector<HTMLElement>('.share-method-status');
@@ -249,19 +267,31 @@ export class ScreenSharePickerModal {
           </div>
         ` : ''}
 
-        <div class="nav-tabs share-source-tabs" role="tablist" aria-label="${escapeHtml(t('screenShare.sourceTypes'))}">
-          ${SOURCE_TABS.map(tab => `
-            <button type="button" id="share-tab-${tab.id}" class="tab-button ${this.activeTab === tab.id ? 'active' : ''}"
-              role="tab" aria-selected="${this.activeTab === tab.id}" aria-controls="share-sources-panel" tabindex="-1" disabled>
-              <span class="material-symbols-outlined md-16" aria-hidden="true">${tab.icon}</span>
-              ${escapeHtml(t(tab.label))}
-              <span class="share-tab-status">${escapeHtml(t('common.loading'))}</span>
-            </button>
-          `).join('')}
+        <div class="share-source-toolbar">
+          <div class="nav-tabs share-source-tabs" role="tablist" aria-label="${escapeHtml(t('screenShare.sourceTypes'))}">
+            ${SOURCE_TABS.map(tab => `
+              <button type="button" id="share-tab-${tab.id}" class="tab-button ${this.activeTab === tab.id ? 'active' : ''}"
+                role="tab" aria-selected="${this.activeTab === tab.id}" aria-controls="share-sources-panel" tabindex="-1" disabled>
+                <span class="material-symbols-outlined md-16" aria-hidden="true">${tab.icon}</span>
+                ${escapeHtml(t(tab.label))}
+                <span class="share-tab-status">${escapeHtml(t('common.loading'))}</span>
+              </button>
+            `).join('')}
+          </div>
+          <button type="button" id="btn-refresh-sources" class="btn btn-secondary share-refresh-button"
+            aria-label="${escapeHtml(t('screenShare.refreshSourcesLabel'))}" aria-controls="share-sources-panel" disabled>
+            <span class="material-symbols-outlined md-18" aria-hidden="true">refresh</span>
+            ${escapeHtml(t('screenShare.refreshSources'))}
+          </button>
         </div>
         <p id="share-method-reasons" class="share-method-reasons" role="status"></p>
 
         <div id="share-sources-panel" role="tabpanel" aria-labelledby="share-tab-${this.activeTab}" aria-busy="true" tabindex="0"></div>
+        <button type="button" id="btn-game-capture-guide" class="btn game-capture-guide-trigger"
+          aria-haspopup="dialog" aria-expanded="false" ${this.activeTab === 'window' ? '' : 'hidden'}>
+          <span class="material-symbols-outlined md-16" aria-hidden="true">help_outline</span>
+          ${escapeHtml(t('screenShare.gameGuideButton'))}
+        </button>
         <section id="share-window-methods" class="share-window-methods" hidden>
           <p id="share-method-label" class="share-method-label"></p>
           <div class="input-mode-cards share-capture-methods" role="group" aria-labelledby="share-method-label">
@@ -279,7 +309,18 @@ export class ScreenSharePickerModal {
           </div>
           <p id="share-game-tip" class="share-game-tip" hidden></p>
         </section>
-        <p id="share-capture-info" class="share-game-tip" role="status"></p>
+        <div class="share-aspect-option">
+          <div>
+            <label id="share-aspect-label" for="chk-preserve-aspect-ratio">${escapeHtml(t('screenShare.preserveAspectRatio'))}</label>
+            <small id="share-aspect-description">${escapeHtml(t('screenShare.preserveAspectRatioDescription'))}</small>
+          </div>
+          <label class="toggle-switch">
+            <input id="chk-preserve-aspect-ratio" type="checkbox" role="switch"
+              aria-labelledby="share-aspect-label" aria-describedby="share-aspect-description">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <p id="share-capture-info" class="share-game-tip" role="status" hidden></p>
 
         <div class="modal-footer">
           <div id="share-audio-label" style="display: flex; align-items: center; gap: 8px; margin-right: auto; font-size: 0.85rem; color: var(--text-secondary); ${audioAlreadyCaptured ? 'opacity: 0.5;' : ''}">
@@ -317,10 +358,12 @@ export class ScreenSharePickerModal {
   }
 
   private async loadSources(modal: HTMLElement): Promise<void> {
+    if (this.modalEl !== modal || this.isStarting) return;
     const request = ++this.sourceRequest;
     const isCurrent = (): boolean => this.modalEl === modal && this.sourceRequest === request;
+    const refresh = modal.querySelector<HTMLButtonElement>('#btn-refresh-sources');
+    const restoreRefreshFocus = document.activeElement === refresh;
     this.sourceState = { status: 'loading' };
-    this.selectedSourceId = null;
     this.nativeCapabilities = null;
     this.renderSources();
     this.updateCaptureInfo();
@@ -348,6 +391,8 @@ export class ScreenSharePickerModal {
       this.sourceState = { status: 'error' };
       this.renderSources();
       this.updateCaptureInfo();
+    } finally {
+      if (isCurrent() && restoreRefreshFocus && document.activeElement === document.body) refresh?.focus();
     }
   }
 
@@ -449,6 +494,13 @@ export class ScreenSharePickerModal {
     }, options);
     modal.querySelector('#btn-share')?.addEventListener('click', () => { void this.startSharing('replace'); }, options);
     modal.querySelector('#btn-share-add')?.addEventListener('click', () => { void this.startSharing('add'); }, options);
+    modal.querySelector('#btn-refresh-sources')?.addEventListener('click', () => {
+      if (!this.isStarting && this.sourceState.status !== 'loading') void this.loadSources(modal);
+    }, options);
+    const guide = modal.querySelector<HTMLButtonElement>('#btn-game-capture-guide');
+    guide?.addEventListener('click', () => {
+      if (!this.isStarting && this.activeTab === 'window') this.gameGuide.open(guide, modal);
+    }, options);
     for (const tab of SOURCE_TABS) {
       const button = modal.querySelector<HTMLButtonElement>(`#share-tab-${tab.id}`);
       button?.addEventListener('click', () => this.selectTab(tab.id), options);
@@ -519,7 +571,7 @@ export class ScreenSharePickerModal {
    * existing ones, up to VoiceStore.MAX_SCREEN_SHARES (#253).
    */
   private async startSharing(mode: 'add' | 'replace'): Promise<void> {
-    if (this.isStarting || !this.modalEl) return;
+    if (this.isStarting || !this.modalEl || this.gameGuide.isOpen()) return;
     if (mode === 'add' && !voiceStore.canAddScreenShare()) {
       await showAlert({
         title: t('screenShare.limitTitle'),
@@ -535,6 +587,7 @@ export class ScreenSharePickerModal {
     const tab = this.activeTab;
     const captureKind = this.captureKind(tab);
     const shareAudio = modal.querySelector<HTMLInputElement>('#chk-share-audio')?.checked ?? false;
+    const preserveAspectRatio = modal.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio')?.checked ?? false;
     const call = captureScreenShareCall();
     let stream: MediaStream | null = null;
     let published = false;
@@ -586,7 +639,7 @@ export class ScreenSharePickerModal {
         stream = await webRtcManager.startNativeScreenShare(sourceId, shareAudio, source.thumbnailDataUrl,
           () => this.modalEl === modal && call.isCurrent() && this.activeTab === tab
             && this.selectedSourceId === sourceId && this.captureKind() === captureKind,
-          captureKind);
+          captureKind, preserveAspectRatio);
       } else stream = await videoService.startScreenShare(sourceId);
       assertCurrent();
       if (!native) webRtcManager.assertScreenShareSupported();
@@ -658,6 +711,7 @@ export class ScreenSharePickerModal {
 
 
   public close(): void {
+    this.gameGuide.close(false);
     this.sourceRequest++;
     this.eventController?.abort();
     this.eventController = null;

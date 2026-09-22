@@ -27,6 +27,9 @@ const { rtpReports, decoderObservations } = require('./nativeVideoDiagnostics.cj
 
 const cancelled = () => new DOMException('The native screen endpoint was retired.', 'AbortError');
 const endpointOwners = new WeakMap();
+const gameStartupFailures = new Set([
+  'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE', 'ERR_SCREEN_CAPTURE_SOURCE', 'ERR_SCREEN_CAPTURE_SOURCE_INITIALIZATION',
+]);
 
 class NativeScreenEndpoint {
   constructor(options) {
@@ -61,6 +64,7 @@ class NativeScreenEndpoint {
     if (role === 'publish') {
       cloneSource(target);
       validateEncoder(options.captureEncoder ?? 'auto');
+      if (options.preserveAspectRatio !== undefined) assert.equal(typeof options.preserveAspectRatio, 'boolean');
       assert.ok(path.isAbsolute(captureDirectory));
     } else assert.ok(destination && typeof destination.frame?.isDestroyed === 'function');
     Object.assign(this, { runtime, role, mode, sessionId, publisherSessionId, channelId, pipelineId, source, profile,
@@ -70,7 +74,9 @@ class NativeScreenEndpoint {
     this.audioVolume = audio?.volume ?? 1;
     this.target = target ? cloneSource(target) : null;
     this.captureEncoder = options.captureEncoder ?? 'auto';
+    this.preserveAspectRatio = options.preserveAspectRatio ?? false;
     this.isSourcePaused = options.isSourcePaused ?? (() => false);
+    this.assertSourceCurrent = options.assertSourceCurrent ?? (() => {});
     this.onPreview = options.onPreview ?? null;
     this.pending = new Set();
     this.connections = new Map();
@@ -88,6 +94,7 @@ class NativeScreenEndpoint {
     this.closed = false;
     this.abort = new AbortController();
     this.captureState = 'waiting';
+    this.captureMode = null;
     this.engine = runtime.rtc.createEngine({
       maxResources: 64, maxDecodedFrames: 16, maximumH264Level: 51, requireAudio: source.audio,
       videoInput: role === 'publish' ? 'encoded-h264' : 'nv12',
@@ -316,8 +323,50 @@ class NativeScreenEndpoint {
   async startCapture() {
     this.captureState = 'starting';
     this.observe({ type: 'capture', state: this.captureState });
+    try {
+      await this.startCaptureAttempt(this.target);
+    } catch (error) {
+      if (!this.canRetryGameCapture(error, this.target)) throw error;
+      this.onDiagnostic(error);
+      this.recoveringHost = this.host;
+      this.assertSourceCurrent();
+      await this.stopCaptureHost(this.host);
+      assert.equal(this.host.snapshot().nativeClosed, true, 'Game Capture must retire before switching to Normal.');
+      assert.equal(this.host.liveFrames.packets, 0, 'A running capture cannot restart its encoded timeline in place.');
+      assert.equal(this.flow.inFlight.size, 0);
+      this.gameCaptureRetirement = this.host.snapshot();
+      await this.removeOwnedDirectory();
+      this.abort.signal.throwIfAborted();
+      this.assertSourceCurrent();
+      this.observe({ type: 'capture-fallback' });
+      await this.startCaptureAttempt(cloneSource({ ...this.target, kind: 'window' }));
+    }
+    this.abort.signal.throwIfAborted();
+    this.captureState = 'running';
+    this.observe({ type: 'capture', state: this.captureState });
+  }
+
+  canRetryGameCapture(error, target) {
+    return target.kind === 'game' && !this.abort.signal.aborted && gameStartupFailures.has(error.code)
+      && this.captureMode === null && this.host?.liveFrames.packets === 0;
+  }
+
+  async stopCaptureHost(host) {
+    try { await host?.stop(); }
+    catch (error) {
+      if (host !== this.recoveringHost || !gameStartupFailures.has(error.code) || !host.snapshot().nativeClosed) throw error;
+    }
+  }
+
+  async startCaptureAttempt(target) {
+    this.abort.signal.throwIfAborted();
+    this.assertSourceCurrent();
+    const mode = target.kind === 'game' ? 'game' : 'normal';
+    this.observe({ type: 'capture-mode', capture: { mode, ready: false } });
     const runId = randomBytes(16).toString('hex');
     this.runDirectory = path.join(this.captureDirectory, `monky-screen-capture-${runId}`);
+    this.directoryCreated = false;
+    this.directoryRemoved = false;
     await fs.mkdir(this.runDirectory);
     this.directoryCreated = true;
     this.runId = runId;
@@ -330,9 +379,16 @@ class NativeScreenEndpoint {
     this.host = new CaptureBridge({
       host: this.runtime.host, runtime: this.runtime.obs, runId, runDirectory: this.runDirectory,
       encoder: this.captureEncoder,
-      video: { width, height, fps, bitrateKbps: Math.min(5000, maxBitrateKbps) },
+      video: { width, height, fps, bitrateKbps: Math.min(5000, maxBitrateKbps),
+        scaleMode: this.preserveAspectRatio ? 'fit' : 'stretch' },
       isSourcePaused: this.isSourcePaused,
-      onError: error => this.report(error), onPacket: frame => {
+      onError: error => {
+        if (!this.canRetryGameCapture(error, target)) this.report(error);
+      }, onPacket: frame => {
+        if (this.captureMode === null) {
+          this.captureMode = mode;
+          this.observe({ type: 'capture-mode', capture: { mode, ready: true } });
+        }
         this.flow.setCapturePaused(this.isSourcePaused());
         const result = this.flow.packet(frame);
         if (this.previewDemand && result !== false && !this.isSourcePaused()) {
@@ -342,12 +398,13 @@ class NativeScreenEndpoint {
         return result;
       }, onNotice() {},
     });
-    await this.host.prepare(this.target, this.abort.signal);
+    await this.host.prepare(target, this.abort.signal);
+    this.abort.signal.throwIfAborted();
+    // Feedback can arrive before capture. Bind only the host that produced its
+    // first AU, so a rejected Game Capture attempt owns no feedback or RTC copy.
+    await this.host.start(target);
     this.abort.signal.throwIfAborted();
     this.flow.bind(this.host);
-    await this.host.start(this.target);
-    this.captureState = 'running';
-    this.observe({ type: 'capture', state: this.captureState });
   }
 
   async connectPeer(remoteSessionId, configuration) {
@@ -522,9 +579,11 @@ class NativeScreenEndpoint {
   snapshot() {
     return {
       role: this.role, mode: this.mode, pipelineId: this.pipelineId, profile: this.profile,
-      captureState: this.captureState, demand: this.demand, previewDemand: this.previewDemand, closing: this.closing,
+      captureState: this.captureState, captureMode: this.captureMode,
+      demand: this.demand, previewDemand: this.previewDemand, closing: this.closing,
       nativeClosed: this.nativeClosed, closed: this.closed, capturePid: this.host?.child?.pid ?? null,
       flow: this.flow?.snapshot() ?? null, captureRetirement: this.host?.snapshot() ?? null,
+      gameCaptureRetirement: this.gameCaptureRetirement ?? null,
       presentation: this.presentation?.getStats() ?? null, routes: this.routes?.snapshot() ?? null,
       audioInput: this.pcm?.getStats() ?? null, audioOutput: this.audioOutput?.owner.getStats() ?? null,
       errors: this.errors.map(error => ({ code: error.code ?? null, message: error.message })),
@@ -556,7 +615,7 @@ class NativeScreenEndpoint {
       catch (error) { if (error.name !== 'AbortError') errors.push(error); }
     };
     await Promise.all([
-      collect(this.flow?.close()), collect(this.host?.stop()),
+      collect(this.flow?.close()), collect(this.stopCaptureHost(this.host)),
       collect(this.transport ? within(this.transport.close(), 15000, 'Native screen transport retirement timed out.') : undefined),
       collect(this.audioOutput?.owner.stop()),
     ]);
@@ -576,7 +635,7 @@ class NativeScreenEndpoint {
     await collect(within(Promise.allSettled([...this.pending]), 15000,
       'Native screen operations retained ownership after engine closure.').then(() => { operationsRetired = true; }));
     if (this.host) {
-      await collect(this.host.stop());
+      await collect(this.stopCaptureHost(this.host));
       assert.equal(this.host.snapshot().nativeClosed, true, 'The native capture host did not prove retirement.');
     }
     assert.equal(this.flow?.inFlight.size ?? 0, 0, 'Encoded native copies survived engine closure.');

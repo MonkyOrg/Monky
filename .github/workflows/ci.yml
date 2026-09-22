@@ -330,6 +330,8 @@ jobs:
           node apps/client/test/microphoneTestSmoke.cjs
           node apps/client/test/settingsNavigationSmoke.cjs
           node apps/client/test/settingsNavigationSmoke.cjs --release-notes
+          node apps/client/test/settingsNavigationSmoke.cjs --quality-settings
+          node apps/client/test/settingsNavigationSmoke.cjs --screen-stage
           npm run test:settings:ui --workspace=apps/client
           npm run test:camera --workspace=apps/client
           node apps/client/test/footerControlsSmoke.cjs

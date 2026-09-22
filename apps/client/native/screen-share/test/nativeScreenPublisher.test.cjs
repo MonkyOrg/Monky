@@ -84,6 +84,54 @@ test('local preview uses an existing watched rendition and returns to local-only
 });
 
 for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: capture badges follow the actual subscribed rendition and local preview, not the requested method`, async () => {
+    const f = fixture({ mode });
+    await f.publisher.receive(f.watch('game-viewer'));
+    await f.publisher.receive({ ...f.watch('normal-viewer', '480p30'), backend: 'browser' });
+    await f.publisher.setPreviewEnabled(true);
+    f.endpoints[0].options.onState({ type: 'capture-mode', capture: { mode: 'game', ready: true } });
+    f.endpoints[1].options.onState({ type: 'capture-mode', capture: { mode: 'normal', ready: false } });
+    f.endpoints[1].options.onState({ type: 'capture-mode', capture: { mode: 'normal', ready: true } });
+    await tick();
+    const notices = f.sent.filter(value => value.action === 'capture-mode');
+    assert.deepEqual(notices.map(value => [value.targetSessionId, value.capture.mode, value.capture.ready]), [
+      ['game-viewer', 'game', true], ['normal-viewer', 'normal', false], ['normal-viewer', 'normal', true],
+    ]);
+    for (const notice of notices) {
+      assert.equal(notice.generation, f.sent.find(value => value.action === 'accepted'
+        && value.targetSessionId === notice.targetSessionId).generation);
+    }
+    f.endpoints[0].options.onPreview({ data: Buffer.from([1]), timestampUs: 1000, keyframe: true });
+    assert.equal(f.previews.at(-1).captureMode, 'game');
+    await f.publisher.receive(f.watch('later-viewer', '480p30'));
+    const later = f.sent.findLast(value => value.action === 'capture-mode');
+    assert.equal(later.targetSessionId, 'later-viewer');
+    assert.deepEqual(later.capture, { mode: 'normal', ready: true });
+    assert.equal(f.endpoints.length, 2);
+    await f.publisher.close();
+    const sent = f.sent.length;
+    f.endpoints[0].options.onState({ type: 'capture-mode', capture: { mode: 'normal', ready: true } });
+    assert.equal(f.sent.length, sent);
+    assert.deepEqual(f.errors, []);
+  });
+}
+
+test('a capture status produced while Accepted is pending waits for its acknowledgement before being sent', async () => {
+  const f = fixture(), gate = deferred();
+  const send = f.publisher.send;
+  f.publisher.send = async value => { await send(value); if (value.action === 'accepted') await gate.promise; };
+  const opening = f.publisher.receive(f.watch('viewer'));
+  await tick();
+  f.endpoints[0].options.onState({ type: 'capture-mode', capture: { mode: 'normal', ready: true } });
+  await tick();
+  assert.equal(f.sent.filter(value => value.action === 'capture-mode').length, 0);
+  gate.resolve();
+  await opening;
+  assert.deepEqual(f.sent.map(value => value.action), ['accepted', 'capture-mode']);
+  await f.publisher.close();
+});
+
+for (const mode of ['p2p', 'sfu']) {
   test(`${mode}: local preview has no viewer, signaling or peer and stops when its own demand ends`, async () => {
     const f = fixture({ mode });
     await f.publisher.setPreviewEnabled(true);

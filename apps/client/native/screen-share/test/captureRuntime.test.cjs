@@ -226,7 +226,7 @@ test('all capture profiles validate their actual geometry, frame clock and stret
     failure.retirement.encoderReleased = 'true';
     assert.throws(() => protocol.validateMessage(failure));
     for (const corrupt of [
-      copy => { copy.configuration.scaleMode = 'fit'; },
+      copy => { copy.configuration.scaleMode = 'crop'; },
       copy => { copy.configuration.width++; },
       copy => { copy.configuration.fpsNumerator = 121; },
       copy => { copy.observation.timebaseDenominator++; },
@@ -314,7 +314,8 @@ test('capture runs past 1 MiB and 256 commands without retaining completed reque
     onError: error => errors.push(error), onPacket() {}, onNotice() {},
   }, {
     spawnProcess(_executable, args) {
-      assert.equal(args.length, 9); assert.ok(args.includes('--width=1920') && args.includes('--fps=120'));
+      assert.equal(args.length, 10); assert.ok(args.includes('--width=1920') && args.includes('--fps=120'));
+      assert.ok(args.includes('--scale-mode=stretch'));
       queueMicrotask(() => {
         media.write(notice(1, { kind: 'hello', runId, processId: 42, protocol: 1,
           transmitterReencode: false, timestampSemantics: 'obs-system-pts' }));

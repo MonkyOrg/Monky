@@ -9,6 +9,7 @@ import {
   type NativeScreenCall, type NativeScreenCapabilities, type NativeScreenCommand, type NativeScreenCommandResult,
   type NativeScreenEvent, type NativeScreenFailure, type NativeScreenParticipant, type NativeScreenSignalPayload,
   type NativeScreenSource, type NativeScreenAudioPreferences, type NativeScreenCaptureKind, type NativeScreenVideoProfile,
+  type NativeScreenCaptureMode,
 } from '@monky/shared';
 import {
   loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub,
@@ -26,6 +27,7 @@ type SourceRecord = {
   source: NativeScreenSource; publisher: NativeScreenPublisher; captureHub: NativePcmCaptureHub | null;
   monitor: NodeJS.Timeout | null;
   preview: NativeScreenPreviewBridge | null;
+  previewMode: NativeScreenCaptureMode | null;
 };
 type SubscriptionRecord = { source: NativeScreenSource; publisherSessionId: string; subscription: NativeScreenSubscription };
 type WatchIntent = { presentationId: string; audio: NativeScreenAudioPreferences };
@@ -51,19 +53,23 @@ export interface NativeScreenSharingIpc { dispose(): Promise<void> }
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const key = (publisher: string, share: string): string => `${publisher}\0${share}`;
 const cancelled = (): DOMException => new DOMException('Native screen call is no longer current.', 'AbortError');
-function errorMessage(error: unknown): string {
+function errorDetails(error: unknown): { message: string; code?: 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE' } {
   const pending: unknown[] = [error], seen = new Set<unknown>(), messages = new Set<string>();
+  let code: 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE' | undefined;
   while (pending.length && seen.size < 12) {
     const current = pending.shift();
     if (seen.has(current)) continue;
     seen.add(current);
+    if (record(current) && current.code === 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE') code = current.code;
     messages.add(current instanceof Error ? current.message : String(current));
     if (current instanceof AggregateError) {
       const nested: readonly unknown[] = current.errors;
       pending.push(...nested.slice(0, 8));
-    } else if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
+    }
+    if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
   }
-  return [...messages].join(' / ').slice(0, 4096) || 'Native screen operation failed.';
+  return { message: [...messages].join(' / ').slice(0, 4096) || 'Native screen operation failed.',
+    ...(code ? { code } : {}) };
 }
 function failureReason(error: unknown): NativeScreenFailure {
   const code = record(error) && typeof error.code === 'string' ? error.code : '';
@@ -93,7 +99,7 @@ class SelectedCaptureProbe {
   }
 
   async prepare(target: NativeScreenCaptureTarget, video: NativeScreenVideoProfile,
-    signal: AbortSignal): Promise<NativeScreenCaptureCapability> {
+    signal: AbortSignal, preserveAspectRatio = false): Promise<NativeScreenCaptureCapability> {
     let capability: NativeScreenCaptureCapability;
     try {
       signal.throwIfAborted();
@@ -103,7 +109,8 @@ class SelectedCaptureProbe {
       const { width, height, fps, maxBitrateKbps } = video;
       this.bridge = new CaptureBridge({
         host: this.runtime.host, runtime: this.runtime.obs, runId: this.runId, runDirectory: this.directory,
-        encoder: 'auto', video: { width, height, fps, bitrateKbps: maxBitrateKbps },
+        encoder: 'auto', video: { width, height, fps, bitrateKbps: maxBitrateKbps,
+          scaleMode: preserveAspectRatio ? 'fit' : 'stretch' },
         onError: error => console.warn('[NativeScreen] Selected-source probe failed:', error),
         onPacket: () => { throw new Error('A source-selection probe must not capture pixels.'); }, onNotice() {},
       });
@@ -202,10 +209,11 @@ class NativeScreenSharingService {
     presentationId?: string, sourceInstanceId?: string): void {
     if (call.stopping && error instanceof Error && error.name === 'AbortError') return;
     console.error('[NativeScreen]', error);
+    const details = errorDetails(error);
     this.emit(call, { type: 'error', callId: call.config.callId, publisherSessionId,
       ...(shareId ? { shareId } : {}), ...(presentationId ? { presentationId } : {}),
       ...(sourceInstanceId ? { sourceInstanceId } : {}),
-      reason: failureReason(error), message: errorMessage(error) });
+      reason: details.code ? 'capture-failed' : failureReason(error), ...details });
   }
 
   private request(call: CallRecord, input: RequestInput): Promise<unknown> {
@@ -328,7 +336,7 @@ class NativeScreenSharingService {
       catch (error) {
         if (this.calls.has(call.config.callId)) throw error;
         console.warn('[NativeScreen] Media retired with cleanup errors:', error);
-        return { kind: 'retired-with-errors', remoteAcknowledged: !call.remoteUnavailable, error: errorMessage(error) };
+        return { kind: 'retired-with-errors', remoteAcknowledged: !call.remoteUnavailable, error: errorDetails(error).message };
       }
       return { kind: 'ok' };
     }
@@ -353,6 +361,7 @@ class NativeScreenSharingService {
         if (entry.preview) throw new Error('This source already owns a local preview.');
         const info = { callId: call.config.callId, shareId: command.shareId,
           sourceInstanceId: command.sourceInstanceId, presentationId: command.presentationId };
+        entry.previewMode = null;
         entry.preview = new NativeScreenPreviewBridge({
           frame: call.frame, info, createMessageChannel: () => new MessageChannelMain(),
           onState: state => this.emit(call, { type: 'preview-state', callId: call.config.callId,
@@ -505,7 +514,7 @@ class NativeScreenSharingService {
       assertCurrent();
       sourceState();
       selection.probe = new SelectedCaptureProbe(this.nativeRuntime(), captureDirectory);
-      const proof = await selection.probe.prepare(target, command.video, selection.abort.signal);
+      const proof = await selection.probe.prepare(target, command.video, selection.abort.signal, command.preserveAspectRatio);
       assertCurrent();
       sourceState();
       this.availability = Promise.resolve({ ...capabilities, capture: true,
@@ -527,11 +536,28 @@ class NativeScreenSharingService {
       const audioSelection = target.kind === 'monitor' ? { excludePid: process.pid }
         : { includeWindowId: target.hwnd, expectedProcessId: target.expectedProcessId };
       const captureHub = command.audio ? new NativePcmCaptureHub(screenAudio, audioSelection, onError) : null;
+      let captureTarget = target;
       const publisher = new NativeScreenPublisher({
-        ...call.config, source, send: signal => this.send(call, signal), onError, onState() {},
+        ...call.config, source, send: signal => this.send(call, signal), onError,
+        onState: ({ state }) => {
+          if (state.type !== 'capture-fallback' || captureTarget.kind !== 'game') return;
+          this.current(call);
+          sourceState();
+          captureTarget = { ...captureTarget, kind: 'window' };
+          this.emit(call, { type: 'capture-fallback', callId: call.config.callId,
+            publisherSessionId: call.config.sessionId, shareId: source.shareId, sourceInstanceId: source.instanceId });
+        },
         onPreview: packet => {
           const enabled = this.previewAllowed(call, entry);
-          if (packet && enabled) entry.preview?.offer(packet.frame, packet.pipelineId, packet.video);
+          if (packet && enabled && entry.preview) {
+            if (packet.captureMode && packet.captureMode !== entry.previewMode) {
+              entry.previewMode = packet.captureMode;
+              this.emit(call, { type: 'capture-mode', callId: call.config.callId,
+                publisherSessionId: call.config.sessionId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+                presentationId: entry.preview.info.presentationId, mode: packet.captureMode });
+            }
+            entry.preview.offer(packet.frame, packet.pipelineId, packet.video);
+          }
           else if (!packet) entry.preview?.reset(enabled ? 'waiting' : 'paused');
         },
         createEndpoint: options => {
@@ -539,8 +565,14 @@ class NativeScreenSharingService {
           sourceState();
           return new NativeScreenEndpoint({
             ...options, runtime: this.nativeRuntime(), textures: sharedTexture, role: 'publish', ...call.config,
-            publisherSessionId: call.config.sessionId, target, captureDirectory, captureEncoder: proof.encoderId,
+            publisherSessionId: call.config.sessionId, target: captureTarget, captureDirectory, captureEncoder: proof.encoderId,
+            preserveAspectRatio: command.preserveAspectRatio ?? false,
             isSourcePaused: () => paused,
+            assertSourceCurrent: () => {
+              this.current(call);
+              if (call.sources.get(source.shareId)?.source !== source) throw cancelled();
+              sourceState();
+            },
             ...(captureHub ? { audio: {
               ...this.audioOptions(call, { sinkId: '', muted: true, volume: 0 }),
               captureModule: screenAudio, captureHub, maxBitrateBps: command.audioBitrateKbps * 1000,
@@ -550,7 +582,7 @@ class NativeScreenSharingService {
           });
         },
       });
-      const entry: SourceRecord = { source, publisher, captureHub, monitor: null, preview: null };
+      const entry: SourceRecord = { source, publisher, captureHub, monitor: null, preview: null, previewMode: null };
       call.sources.set(source.shareId, entry);
       // An announcement owns its exact target even without a capture pipeline.
       entry.monitor = setInterval(() => {
@@ -635,6 +667,12 @@ class NativeScreenSharingService {
       presentationId: command.presentationId, send: signal => this.send(call, signal),
       onError: error => this.error(call, error, command.publisherSessionId, source.shareId, command.presentationId, source.instanceId),
       onState: state => {
+        if (state.type === 'capture-mode') {
+          this.emit(call, { type: 'capture-mode', callId: call.config.callId,
+            publisherSessionId: command.publisherSessionId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+            presentationId: state.presentationId, mode: state.mode });
+          return;
+        }
         if (state.type === 'closed' && call.subscriptions.get(subscriptionKey)?.subscription === subscription)
           call.subscriptions.delete(subscriptionKey);
         if (state.type === 'closed' && call.watchVersions.get(subscriptionKey) === intent) call.watchVersions.delete(subscriptionKey);
@@ -805,7 +843,7 @@ export function setupNativeScreenSharingIpc(
     }
     try { return await action(); }
     catch (error) {
-      const message = errorMessage(error);
+      const message = errorDetails(error).message;
       console.error('[NativeScreen] IPC operation failed:', message, error);
       if (error instanceof AggregateError) throw new Error(message, { cause: error });
       throw error;

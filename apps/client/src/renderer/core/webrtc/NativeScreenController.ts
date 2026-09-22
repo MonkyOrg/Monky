@@ -4,7 +4,7 @@ import {
   type NativeScreenCall, type NativeScreenCapabilities, type NativeScreenCommand, type NativeScreenCommandResult,
   type NativeScreenEvent, type NativeScreenFailure, type NativeScreenSource, type NativeScreenVideoProfile,
   type NativeScreenRpcMethod, type NativeScreenSignalPayload, type QualityProfile, type ScreenShareQuality,
-  type NativeScreenEndpointDiagnostics, type NativeScreenPreviewState,
+  type NativeScreenEndpointDiagnostics, type NativeScreenPreviewState, type NativeScreenCaptureMode,
 } from '@monky/shared';
 import type { ElectronApi } from '../../../preload/preload';
 import type { NetworkClient } from '../NetworkClient';
@@ -57,6 +57,7 @@ interface Presentation {
   stoppingTask?: Promise<void>;
   browser?: BrowserScreenSubscription;
   audioTrack?: MediaStreamTrack;
+  captureMode?: NativeScreenCaptureMode;
 }
 
 type SourceInput = Omit<NativeScreenCapture, 'source'> & {
@@ -68,6 +69,8 @@ interface Source {
   removing: boolean;
   retirement?: Promise<void>;
   previewState?: NativeScreenPreviewState;
+  captureMode?: NativeScreenCaptureMode;
+  fallbackNotified?: boolean;
   preview?: {
     presentationId: string; video: HTMLVideoElement; stream: MediaStream | null;
     attachment: Promise<void>; retirement?: Promise<void>;
@@ -332,14 +335,27 @@ export class NativeScreenController {
       } else if (event.type === 'preview-state') {
         entry.previewState = event.state;
         this.changed();
+      } else if (event.type === 'capture-mode') {
+        if (entry.preview?.presentationId !== event.presentationId) return;
+        entry.captureMode = event.mode;
+        this.changed();
+      } else if (event.type === 'capture-fallback') {
+        const capture = videoService.getNativeScreenCapture(event.shareId);
+        if (!capture || capture.source.instanceId !== source.instanceId || entry.fallbackNotified) return;
+        entry.fallbackNotified = true;
+        videoService.updateNativeScreenCapture({ ...capture, captureKind: 'window' });
+        emitOutsideRouting(() => appEvents.emit('native_screen.capture_fallback', { shareId: event.shareId }));
       } else if (event.type === 'error') {
-        emitOutsideRouting(() => appEvents.emit('native_screen.source_failed', { reason: event.reason, shareId: event.shareId }));
+        emitOutsideRouting(() => appEvents.emit('native_screen.source_failed', {
+          reason: event.reason, shareId: event.shareId, ...(event.code ? { code: event.code } : {}),
+        }));
       }
-    } else if (event.shareId && event.type !== 'preview-state') {
+    } else if (event.shareId && event.type !== 'preview-state' && event.type !== 'capture-fallback') {
       const entry = call.presentations.get(keyOf(event.publisherSessionId, event.shareId));
       if (!entry || entry.stopping || entry.presentationId !== event.presentationId
         || entry.source.instanceId !== event.sourceInstanceId) return;
-      entry.state = event.type === 'state' && (event.state === 'playing' || event.state === 'connecting')
+      if (event.type === 'capture-mode') entry.captureMode = event.mode;
+      else entry.state = event.type === 'state' && (event.state === 'playing' || event.state === 'connecting')
         ? { state: event.state } : { state: 'unavailable', reason: event.reason ?? 'connection-failed' };
       this.changed();
     }
@@ -434,6 +450,7 @@ export class NativeScreenController {
       ready: call.api.nativeScreenCommand({
         action: 'source-add', callId: call.config.callId, shareId: input.shareId,
         desktopSourceId: input.desktopSourceId, video: input.video, audio: input.audio, audioBitrateKbps: input.audioBitrateKbps,
+        preserveAspectRatio: input.preserveAspectRatio ?? false,
         ...(input.captureKind ? { captureKind: input.captureKind } : {}),
       }).then(result => {
         this.current(call);
@@ -711,6 +728,12 @@ export class NativeScreenController {
         this.changed();
         void this.stopPresentation(call, entry).catch(error => this.report(error));
       },
+      onCaptureMode: mode => {
+        if (entry.stopping || call.stopping || !call.context.isCurrent()
+          || call.presentations.get(keyOf(entry.publisherSessionId, entry.source.shareId)) !== entry) return;
+        entry.captureMode = mode;
+        this.changed();
+      },
       onError: error => this.report(error),
     });
   }
@@ -752,6 +775,17 @@ export class NativeScreenController {
 
   public getWatchState(sessionId: string, shareId: string): NativeScreenWatchState | null {
     return this.call?.presentations.get(keyOf(sessionId, shareId))?.state ?? null;
+  }
+
+  public getCaptureMode(sessionId: string, shareId: string): NativeScreenCaptureMode | null {
+    const call = this.call;
+    if (!call || call.stopping || !call.context.isCurrent()) return null;
+    if (sessionId === call.config.sessionId) {
+      const source = call.sources.get(shareId);
+      return source && !source.removing && source.previewState === 'playing' ? source.captureMode ?? null : null;
+    }
+    const entry = call.presentations.get(keyOf(sessionId, shareId));
+    return entry && !entry.stopping && entry.state.state !== 'unavailable' ? entry.captureMode ?? null : null;
   }
 
   public async diagnostics(sessionId: string, shareId: string): Promise<ScreenVideoDiagnostics | null> {

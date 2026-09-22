@@ -5,7 +5,9 @@ const { pathToFileURL } = require('node:url');
 const clientRoot = path.resolve(__dirname, '..');
 const releaseNotesOnly = process.argv.includes('--release-notes');
 const qualitySettingsOnly = process.argv.includes('--quality-settings');
-if (releaseNotesOnly && qualitySettingsOnly) throw new Error('Choose one targeted settings smoke.');
+const screenStageOnly = process.argv.includes('--screen-stage');
+if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly].filter(Boolean).length > 1)
+  throw new Error('Choose one targeted UI smoke.');
 
 if (!process.versions.electron) {
   const profile = path.join(clientRoot, 'dist-test', `settings-navigation-profile-${process.pid}`);
@@ -19,7 +21,7 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_SETTINGS_NAV_PROFILE);
-  if (qualitySettingsOnly) app.disableHardwareAcceleration();
+  if (qualitySettingsOnly || screenStageOnly) app.disableHardwareAcceleration();
   // Hosted Windows sessions can disable Chromium's scroll animator independently of matchMedia.
   app.commandLine.appendSwitch('enable-smooth-scrolling');
   app.on('window-all-closed', () => {});
@@ -64,11 +66,24 @@ if (!process.versions.electron) {
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     timeout = setTimeout(() => { console.error('Settings navigation smoke timed out'); void finish(1); }, 90_000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__settings_navigation__`);
-    if (!qualitySettingsOnly) {
+    if (!qualitySettingsOnly && !screenStageOnly) {
       window.focus();
       window.webContents.focus();
     }
     const evaluate = code => window.webContents.executeJavaScript(code, true);
+    if (screenStageOnly) {
+      const { runScreenStageSmoke } = require('./screenStageSmoke.cjs');
+      const { appEventHandlerSource } = require('./fixtures/screenSharingUiModel.cjs');
+      const fallbackHandler = appEventHandlerSource('native_screen.capture_fallback');
+      let checks = 0;
+      for (const [width, height] of [[1100, 850], [640, 440]]) {
+        window.setContentSize(width, height);
+        checks += await evaluate(`(${runScreenStageSmoke.toString()})(${JSON.stringify(fallbackHandler)})`);
+      }
+      console.log(`Screen stage: ${checks} checks passed, software rendering only, no media capture`);
+      await finish(0);
+      return;
+    }
     if (qualitySettingsOnly) {
       const { runQualitySettingsSmoke } = require('./qualitySettingsSmoke.cjs');
       let checks = 0;

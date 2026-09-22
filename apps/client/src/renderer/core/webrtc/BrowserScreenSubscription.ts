@@ -1,6 +1,7 @@
 import {
   getScreenShareProfile, nativeScreenSignalSchema, screenShareProfileKey, type NativeScreenCall, type NativeScreenFailure,
   type NativeScreenProducer, type NativeScreenSignalPayload, type NativeScreenSource, type ScreenShareQuality,
+  type NativeScreenCaptureMode, NATIVE_SCREEN_GAME_STARTUP_TIMEOUT_MS,
 } from '@monky/shared';
 import { BrowserScreenP2p } from './BrowserScreenP2p';
 import { BrowserScreenSfu, type BrowserScreenRpc } from './BrowserScreenSfu';
@@ -15,6 +16,7 @@ export interface BrowserScreenSubscriptionOptions {
   send: (signal: NativeScreenSignalPayload) => Promise<void>;
   rpc: BrowserScreenRpc;
   onTrack: (track: MediaStreamTrack, receiver?: RTCRtpReceiver) => void;
+  onCaptureMode: (mode: NativeScreenCaptureMode) => void;
   onUnavailable: (reason: NativeScreenFailure) => void;
   onError: (error: unknown) => void;
 }
@@ -35,6 +37,8 @@ export class BrowserScreenSubscription {
   private opening: Promise<void> | null = null;
   private closing: Promise<void> | null = null;
   private cancelDiscovery: (() => void) | null = null;
+  private gameStartupWait = false;
+  private isPlaying = false;
 
   constructor(private readonly options: BrowserScreenSubscriptionOptions) { this.muted = options.muted; }
 
@@ -78,6 +82,7 @@ export class BrowserScreenSubscription {
   }
 
   public playing(): void {
+    this.isPlaying = true;
     if (this.startupTimer) clearTimeout(this.startupTimer);
     this.startupTimer = null;
   }
@@ -122,6 +127,17 @@ export class BrowserScreenSubscription {
           await sfu.start();
         })();
         return this.opening;
+      }
+      return;
+    }
+    if (signal.action === 'capture-mode') {
+      if (signal.generation !== this.generation) throw new Error('Capture mode belongs to another browser screen subscription.');
+      if (signal.capture.ready) this.options.onCaptureMode(signal.capture.mode);
+      else if (signal.capture.mode === 'game' && !this.isPlaying && !this.gameStartupWait) {
+        this.gameStartupWait = true;
+        if (this.startupTimer) clearTimeout(this.startupTimer);
+        this.startupTimer = setTimeout(() => this.fail(new Error('Game Capture and its Normal fallback did not produce a frame.')),
+          NATIVE_SCREEN_GAME_STARTUP_TIMEOUT_MS);
       }
       return;
     }

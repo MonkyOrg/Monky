@@ -224,6 +224,8 @@ test('native IPC rejects other WebContents, subframes, unknown payload fields an
   await f.join();
   await assert.rejects(f.addSource('bad-window', { target: { hwnd: 1, expectedProcessId: 2 } }));
   await assert.rejects(f.addSource('monitor', { desktopSourceId: 'screen:0:0' }));
+  for (const preserveAspectRatio of [null, 0, 'true', {}])
+    await assert.rejects(f.addSource('bad-scaling', { preserveAspectRatio }));
   assert.equal(f.endpoints.length, 0);
   assert.equal(f.selections.length, 0);
 });
@@ -259,6 +261,7 @@ test('announcing a validated window with audio creates neither an encoder nor a 
   assert.deepEqual(f.probes[0].target, { kind: 'window', hwnd: 12345, expectedProcessId: 56789,
     expectedProcessCreationTime100ns: '123456789' });
   assert.equal(f.probes[0].options.video.bitrateKbps, video.maxBitrateKbps);
+  assert.equal(f.probes[0].options.video.scaleMode, 'stretch');
   assert.equal(f.removedDirectories.length, 1);
   const stats = await f.command({ action: 'stats' });
   assert.equal(stats.publishers.length, 1);
@@ -283,6 +286,7 @@ for (const encoder of ['h264_texture_amf', 'obs_nvenc_h264_tex']) {
       subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
     } });
     assert.equal(f.endpoints[0].options.captureEncoder, encoder);
+    assert.equal(f.endpoints[0].options.preserveAspectRatio, false);
     assert.equal(f.probes[0].closed, true);
   });
 }
@@ -292,13 +296,17 @@ for (const captureKind of ['window', 'monitor', 'game']) {
     const f = fixture(t);
     await f.join();
     const { source } = await f.addSource('selected', {
-      captureKind, desktopSourceId: captureKind === 'monitor' ? monitorId : `window:12345:${'b'.repeat(64)}`,
+      captureKind, preserveAspectRatio: true,
+      desktopSourceId: captureKind === 'monitor' ? monitorId : `window:12345:${'b'.repeat(64)}`,
     });
     assert.equal(f.probes[0].target.kind, captureKind);
+    assert.equal(f.probes[0].options.video.scaleMode, 'fit');
+    assert.equal(Object.hasOwn(source, 'preserveAspectRatio'), false, 'Scaling is local publisher policy, not a wire field.');
     await f.command({ action: 'preview-start', shareId: source.shareId,
       sourceInstanceId: source.instanceId, presentationId: randomUUID() });
     assert.equal(f.endpoints.length, 1);
     const endpoint = f.endpoints[0];
+    assert.equal(endpoint.options.preserveAspectRatio, true);
     assert.equal(endpoint.previewDemand, true); assert.equal(endpoint.demand, 0);
     assert.deepEqual(endpoint.options.target, f.probes[0].target);
     assert.equal(endpoint.options.audio.captureModule.createPacketCapture, f.captureModule.createPacketCapture);
@@ -374,6 +382,28 @@ test('IPC error serialization keeps the actual nested cleanup failure instead of
     assert.equal(error.cause, failure);
     return true;
   });
+});
+
+test('nested Game Capture failures preserve an actionable IPC code without changing the public reason', async t => {
+  const f = fixture(t);
+  await f.join();
+  const { source } = await f.addSource('game', { captureKind: 'game' });
+  await f.command({ action: 'preview-start', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+  const gameFailure = Object.assign(new Error('Selected game supplied no frames.'),
+    { code: 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE' });
+  const failure = new AggregateError([new Error('Retirement detail')],
+    'Capture failed', { cause: new Error('Wrapper', { cause: gameFailure }) });
+  gameFailure.cause = failure;
+  f.endpoints[0].options.onError(failure);
+  await tick(); await tick();
+  const event = f.sent.find(value => value.type === 'error' && value.shareId === source.shareId);
+  assert.ok(event);
+  assert.equal(event.code, 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE');
+  assert.equal(event.reason, 'capture-failed');
+  assert.match(event.message, /Selected game supplied no frames/);
+  assert.ok(event.message.length <= 4096);
+  assert.equal(shared.nativeScreenEventSchema.safeParse({ ...event, code: 'UNKNOWN' }).success, false);
 });
 
 test('preparation failure before process creation still awaits the original bridge stop', async t => {
@@ -643,6 +673,40 @@ test('focused local preview starts without spectators, pauses on blur and honors
   await f.focus(true);
   assert.equal(f.endpoints.length, 3);
   assert.equal(f.endpoints[2].previewDemand, true);
+});
+
+test('Game fallback emits one local notice, preserves its announcement/audio hub and starts future profiles in Normal', async t => {
+  const f = fixture(t);
+  await f.join(); await f.participants();
+  const { source } = await f.addSource('game-fallback', { captureKind: 'game', preserveAspectRatio: true });
+  const presentationId = randomUUID();
+  await f.command({ action: 'preview-start', shareId: source.shareId, sourceInstanceId: source.instanceId, presentationId });
+  const endpoint = f.endpoints[0];
+  const original = endpoint.options.target;
+  endpoint.options.onState({ type: 'capture-fallback' });
+  endpoint.options.onState({ type: 'capture-fallback' });
+  assert.equal(f.sent.filter(event => event.type === 'capture-fallback').length, 1);
+  assert.equal(f.sent.some(event => event.type === 'error'), false);
+  assert.equal((await f.command({ action: 'stats' })).publishers[0].source.instanceId, source.instanceId);
+  assert.equal(f.sent.some(event => event.type === 'capture-mode'), false, 'A fallback attempt has not confirmed Normal yet.');
+  endpoint.options.onState({ type: 'capture-mode', capture: { mode: 'normal', ready: true } });
+  for (let index = 0; index < 3; index++)
+    endpoint.options.onPreview({ data: new Uint8Array([1]), timestampUs: 1000 + index, keyframe: true });
+  assert.deepEqual(f.sent.filter(event => event.type === 'capture-mode'), [{
+    type: 'capture-mode', callId: f.config.callId, publisherSessionId: 'publisher',
+    shareId: source.shareId, sourceInstanceId: source.instanceId, presentationId, mode: 'normal',
+  }]);
+  await f.command({ action: 'signal', signal: {
+    fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+    subscriptionId: randomUUID(), action: 'watch', quality: '480p30', backend: 'native',
+  } });
+  const next = f.endpoints[1];
+  assert.deepEqual(next.options.target, { ...original, kind: 'window' });
+  assert.equal(next.options.preserveAspectRatio, true);
+  assert.equal(next.options.audio.captureHub, endpoint.options.audio.captureHub);
+  f.replaceWindowProcess();
+  assert.throws(next.options.assertSourceCurrent, { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST' });
 });
 
 test('losing application focus pauses only the local preview while an opted-in spectator continues', async t => {

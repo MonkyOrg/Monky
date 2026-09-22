@@ -8,13 +8,14 @@ const { NativeScreenSubscription } = require('../runtime/nativeScreenSubscriptio
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function fixture(mode = 'p2p', { audio = false } = {}) {
-  const sent = [], errors = [], phases = [], endpoints = [];
+  const sent = [], errors = [], phases = [], endpoints = [], states = [];
   const source = { shareId: 'owned-screen', instanceId: randomUUID(), audio,
     video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } };
   const subscription = new NativeScreenSubscription({
     sessionId: 'viewer', publisherSessionId: 'publisher', channelId: 'room', mode,
     source, quality: '720p60', iceServers: [],
-    send: async value => { sent.push(value); }, onError: error => errors.push(error), onState: state => phases.push(state.type),
+    send: async value => { sent.push(value); }, onError: error => errors.push(error),
+    onState: state => { phases.push(state.type); states.push(state); },
     retirePresentation: async () => { phases.push('presentation-retired'); },
     createEndpoint(options) {
       const endpoint = {
@@ -40,8 +41,46 @@ function fixture(mode = 'p2p', { audio = false } = {}) {
     appData: { mediaType: 'screen_video', shareId: source.shareId,
       nativeScreen: { sourceInstanceId: source.instanceId, pipelineId: randomUUID(), video: getScreenShareProfile(source.video, quality) } },
   });
-  return { subscription, endpoints, sent, errors, phases, accepted, producer };
+  return { subscription, endpoints, sent, errors, phases, states, accepted, producer };
 }
+
+for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: capture mode only confirms real frames of the current accepted subscription`, async () => {
+    const f = fixture(mode);
+    const { quality: _quality, backend: _backend, ...scope } = f.accepted();
+    const status = { ...scope, action: 'capture-mode', capture: { mode: 'normal', ready: true } };
+    await f.subscription.start();
+    await assert.rejects(f.subscription.receive(status));
+    await f.subscription.receive(f.accepted());
+    await assert.rejects(f.subscription.receive({ ...status, generation: 10 }));
+    await f.subscription.receive({ ...status, subscriptionId: randomUUID() });
+    await f.subscription.receive({ ...status, capture: { mode: 'game', ready: false } });
+    assert.equal(f.states.some(state => state.type === 'capture-mode'), false);
+    await f.subscription.receive(status);
+    assert.equal(f.states.at(-1).mode, 'normal');
+    f.endpoints[0].options.onState({ type: 'frame' });
+    await f.subscription.close();
+    const count = f.states.length;
+    await f.subscription.receive({ ...status, capture: { mode: 'game', ready: true } });
+    assert.equal(f.states.length, count);
+  });
+}
+
+test('one Game startup may cover a bounded Normal retry but repeated status cannot renew the frame deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  await f.subscription.start();
+  await f.subscription.receive(f.accepted());
+  const { quality: _quality, backend: _backend, ...scope } = f.accepted();
+  const status = { ...scope, action: 'capture-mode', capture: { mode: 'game', ready: false } };
+  await f.subscription.receive(status);
+  t.mock.timers.tick(30000);
+  assert.deepEqual(f.errors, []);
+  await f.subscription.receive(status);
+  t.mock.timers.tick(45000);
+  assert.equal(f.errors.length, 1);
+  await f.subscription.close();
+});
 
 test('receiver creates no engine before Watch has been accepted', async () => {
   const f = fixture();

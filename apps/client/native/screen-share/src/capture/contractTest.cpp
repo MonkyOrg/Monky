@@ -58,6 +58,7 @@ int main(int argc, char** argv) {
         arguments.hwnd = variant == 3 ? 0 : 19;
         arguments.processId = variant == 3 ? 0 : 10;
         arguments.expectedCreation = variant == 0 || variant == 3 ? 0 : 123456789;
+        arguments.video.scaleMode = variant % 2 ? ScaleMode::Fit : ScaleMode::Stretch;
         arguments.monitor = {L"\\\\?\\DISPLAY#TEST#{1234}", L"\\\\.\\DISPLAY2", -1920, 0, 1920, 1080};
         Common common{arguments.runId, 42, arguments.processId, arguments.hwnd, arguments.expectedCreation, 1000, 10000000};
         Observation observation;
@@ -77,7 +78,7 @@ int main(int argc, char** argv) {
         Arguments arguments;
         arguments.encoderProbe = true; arguments.encoder = encoder;
         arguments.runId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        arguments.video = {1280, 720, 60, 5000};
+        arguments.video = {1280, 720, 60, 5000, encoder == EncoderKind::Nvenc ? ScaleMode::Fit : ScaleMode::Stretch};
         Common common{arguments.runId, 42, 0, 0, 0, 1000, 10000000};
         EncoderCapability capability{encoder, 0, encoder == EncoderKind::Nvenc ? 0x10deu : 0x1002u, 123, 456, true};
         const Retirement retired{true, true, true, true, true};
@@ -97,12 +98,13 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--platform-probe") {
       std::cout << "{\"deviceFree\":true,\"synthetic\":true,\"messages\":[";
       bool first = true;
+      for (const auto scaleMode : {ScaleMode::Stretch, ScaleMode::Fit})
       for (const auto kind : {CaptureKind::Window, CaptureKind::Monitor, CaptureKind::Game}) {
         for (const auto encoder : {EncoderKind::Amf, EncoderKind::Nvenc}) {
           Arguments arguments;
           arguments.kind = kind; arguments.encoder = encoder;
           arguments.method = kind == CaptureKind::Game ? Method::GameHook : Method::Wgc;
-          arguments.video = {1280, 720, 60, 5000};
+          arguments.video = {1280, 720, 60, 5000, scaleMode};
           arguments.monitor = {L"\\\\?\\DISPLAY#TEST#{1234}", L"\\\\.\\DISPLAY2", -1920, 0, 1920, 1080};
           Common common{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 42, kind == CaptureKind::Monitor ? 0u : 10u,
               kind == CaptureKind::Monitor ? 0u : 19u, kind == CaptureKind::Monitor ? 0u : 123456789u, 1000, 10000000};
@@ -134,7 +136,7 @@ int main(int argc, char** argv) {
                 key, hooked, step == 3 ? &retired : nullptr);
           }
         }
-      }
+        }
       std::cout << "]}\n";
       return 0;
     }
@@ -231,6 +233,31 @@ int main(int argc, char** argv) {
     check(ExpiredDeadline(startup.phase, 40400, 0, startup.captureStartedMs, 0) == Deadline::FirstAu);
     rejects([&] { startup.ObserveStartupAvailability(1, true); });
     check(static_cast<int>(abi::Bounds::Stretch) == 1);
+    check(static_cast<int>(abi::Bounds::ScaleInner) == 2);
+    check(ScaleModeName(VideoConfiguration{}.scaleMode) == std::string_view("stretch"));
+    const VideoConfiguration fitVideo{1280, 720, 60, 5000, ScaleMode::Fit};
+    ValidateVideoConfiguration(fitVideo);
+    check(ConfigurationJson(Method::Wgc, fitVideo).find("\"scaleMode\":\"fit\"") != std::string::npos);
+    auto invalidScale = fitVideo; invalidScale.scaleMode = static_cast<ScaleMode>(-1);
+    rejects([&] { ValidateVideoConfiguration(invalidScale); });
+    const std::string cacheDigest(64, 'b');
+    const std::wstring runDirectory = L"C:\\qa\\monky-screen-capture-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const std::wstring cacheDirectory = L"C:\\qa\\hooks-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    check(CaptureDataCacheDirectory(runDirectory, cacheDigest) == cacheDirectory);
+    for (const auto& badDigest : {std::string{}, std::string(63, 'b'), std::string(64, 'G'), std::string(64, '/')})
+      rejects([&] { CaptureDataCacheName(badDigest); });
+    rejects([&] { CaptureDataCacheDirectory(L"relative\\run", cacheDigest); });
+    const std::string binary = "C:\\runtime\\obs-plugins\\64bit\\win-capture.dll";
+    const std::string config = "C:\\qa\\monky-screen-capture-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\config";
+    const std::string cachedData = "C:\\qa\\hooks-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\data\\obs-plugins\\win-capture";
+    const auto cachedModule = ExpectedModuleIdentity("win-capture", binary, cachedData, config, cacheDigest);
+    check(cachedModule.dataPath == ObsApiPath(cachedData) &&
+          cachedModule.configPath == ObsApiPath(config) + "/win-capture/");
+    rejects([&] { ExpectedModuleIdentity("win-capture", binary, cachedData, config); });
+    rejects([&] { ExpectedModuleIdentity("win-capture", binary, cachedData, config, std::string(64, 'c')); });
+    rejects([&] { ExpectedModuleIdentity("win-capture", binary, "D:" + cachedData.substr(2), config, cacheDigest); });
+    rejects([&] { ExpectedModuleIdentity("obs-ffmpeg", "C:\\runtime\\obs-plugins\\64bit\\obs-ffmpeg.dll",
+        "C:\\qa\\hooks-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\data\\obs-plugins\\obs-ffmpeg", config, cacheDigest); });
     check(sizeof(PacketStatistics) < 256);
     for (const auto video : {VideoConfiguration{1920, 1080, 120, 5000}, {1920, 1080, 60, 5000},
                             {1280, 720, 60, 3000}, {852, 480, 30, 1500}}) {
@@ -283,10 +310,26 @@ int main(int argc, char** argv) {
       L"--run-id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", L"--hwnd=19", L"--pid=10",
       L"--width=1920", L"--height=1080", L"--fps=60", L"--bitrate=5000"};
     check(ParseArguments(windowArguments).encoder == EncoderKind::Auto);
+    const auto checkScaleArguments = [&](const std::vector<std::wstring_view>& options) {
+      check(ParseArguments(options).video.scaleMode == ScaleMode::Stretch);
+      for (const auto mode : {L"--scale-mode=stretch", L"--scale-mode=fit"}) {
+        auto selected = options; selected.push_back(mode);
+        check(ParseArguments(selected).video.scaleMode ==
+            (std::wstring_view(mode).ends_with(L"=fit") ? ScaleMode::Fit : ScaleMode::Stretch));
+        selected.push_back(mode);
+        rejects([&] { ParseArguments(selected); });
+      }
+      for (const auto mode : {L"--scale-mode=crop", L"--scale-mode=", L"--scale-mode=Fit"}) {
+        auto badOptions = options; badOptions.push_back(mode);
+        rejects([&] { ParseArguments(badOptions); });
+      }
+    };
+    checkScaleArguments(windowArguments);
     const std::vector<std::wstring_view> probeArguments{
       windowArguments[0], windowArguments[1], windowArguments[2], L"--probe=encoder", L"--encoder=auto",
       L"--width=1920", L"--height=1080", L"--fps=60", L"--bitrate=5000"};
     const auto probe = ParseArguments(probeArguments);
+    checkScaleArguments(probeArguments);
     check(probe.encoderProbe && probe.hwnd == 0 && probe.processId == 0 && probe.expectedCreation == 0 &&
           probe.monitor.deviceId.empty() && probe.encoder == EncoderKind::Auto);
     ValidateCommandMode(probe, {1, Verb::Stop}); check(true);
@@ -310,6 +353,7 @@ int main(int argc, char** argv) {
     gameArguments.insert(gameArguments.end(), {L"--kind=game", L"--process-created=123456789",
       L"--encoder=obs_nvenc_h264_tex"});
     const auto game = ParseArguments(gameArguments);
+    checkScaleArguments(gameArguments);
     check(game.kind == CaptureKind::Game && game.method == Method::GameHook &&
         game.encoder == EncoderKind::Nvenc && game.expectedCreation == 123456789);
     gameArguments.back() = L"--encoder=x264";
@@ -322,6 +366,7 @@ int main(int argc, char** argv) {
       L"--monitor-x=-1920", L"--monitor-y=0", L"--monitor-width=1920", L"--monitor-height=1080",
       L"--encoder=auto", L"--width=1920", L"--height=1080", L"--fps=60", L"--bitrate=5000"};
     const auto monitor = ParseArguments(monitorArguments);
+    checkScaleArguments(monitorArguments);
     check(monitor.kind == CaptureKind::Monitor && monitor.monitor.x == -1920 && monitor.hwnd == 0);
     monitorArguments[6] = L"--monitor-x=-0";
     rejects([&] { ParseArguments(monitorArguments); });

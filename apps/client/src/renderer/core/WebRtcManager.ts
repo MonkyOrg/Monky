@@ -11,6 +11,7 @@ import {
   type NativeScreenSource,
   type NativeScreenPreviewState,
   type NativeScreenCaptureKind,
+  type NativeScreenCaptureMode,
   type VoiceStateUpdatePayload,
   isReceivingBotVoice,
 } from '@monky/shared';
@@ -402,9 +403,14 @@ export class WebRtcManager {
     return this.nativeScreens.getLocalPreviewState(shareId);
   }
 
+  public getScreenCaptureMode(sessionId: string, shareId: string): NativeScreenCaptureMode | null {
+    return this.nativeScreens.getCaptureMode(sessionId, shareId);
+  }
+
   public async startNativeScreenShare(
     desktopSourceId: string, audio: boolean, thumbnail: string, isWanted: () => boolean,
     captureKind: NativeScreenCaptureKind = 'window',
+    preserveAspectRatio = false,
   ): Promise<MediaStream> {
     if (this.voiceReconnectSuspended) throw new Error(t('screenCodec.reconnecting'));
     if (settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264')
@@ -420,10 +426,13 @@ export class WebRtcManager {
     const stream = new MediaStream();
     try {
       const source = await this.nativeScreens.addSource({
-        shareId: stream.id, desktopSourceId, captureKind, video, audio, thumbnail, audioBitrateKbps: profile.audioBitrateKbps,
+        shareId: stream.id, desktopSourceId, captureKind, preserveAspectRatio, video, audio, thumbnail,
+        audioBitrateKbps: profile.audioBitrateKbps,
       });
       if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');
-      videoService.registerNativeScreenShare(stream, { source, desktopSourceId, captureKind, thumbnail, audioBitrateKbps: profile.audioBitrateKbps });
+      videoService.registerNativeScreenShare(stream, {
+        source, desktopSourceId, captureKind, preserveAspectRatio, thumbnail, audioBitrateKbps: profile.audioBitrateKbps,
+      });
       try {
         await this.nativeScreens.attachLocalPreview(stream.id);
         if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');

@@ -273,10 +273,55 @@ for (const scenario of [
     const command = f.commands.find(command => command.action === 'source-add');
     assert.equal(command.captureKind, scenario.kind);
     assert.equal(command.desktopSourceId, id);
+    assert.equal(command.preserveAspectRatio, false, 'Legacy callers explicitly retain stretch');
     assert.equal(f.captures.get(stream.id).desktopSourceId, id);
+    assert.equal(f.captures.get(stream.id).preserveAspectRatio, false);
     assert.deepEqual(f.errors, []);
   });
 }
+
+for (const captureKind of ['window', 'monitor', 'game']) {
+  for (const preserveAspectRatio of [false, true]) {
+    test(`source-start core forwards ${captureKind} preserveAspectRatio=${preserveAspectRatio} only to the publisher`, async t => {
+      const f = fixture(t, { capabilities: {
+        capture: false, requiresSelectionProbe: true, captureKinds: [captureKind],
+        captureAudio: true, receive: true, backend: null, reason: null,
+      } }), exports = {};
+      loadStart(exports, { getProfile: () => profile(), registerNativeScreenShare: f.registerCapture },
+        { preferredVideoCodec: 'h264' }, f.nativeScreenProfile, key => key, class extends f.Stream {
+          id = randomUUID();
+        });
+      const owner = { nativeScreens: f.controller, voiceReconnectSuspended: false };
+      const id = captureKind === 'monitor' ? `native-monitor:${'b'.repeat(64)}` : `window:123:${'c'.repeat(64)}`;
+      const stream = await exports.SourceStartCore.prototype.startNativeScreenShare.call(
+        owner, id, false, '', () => true, captureKind, preserveAspectRatio);
+      const command = f.commands.find(command => command.action === 'source-add');
+      assert.equal(command.preserveAspectRatio, preserveAspectRatio);
+      assert.equal(command.captureKind, captureKind);
+      assert.equal(command.desktopSourceId, id);
+      const capture = f.captures.get(stream.id);
+      assert.equal(capture.preserveAspectRatio, preserveAspectRatio);
+      assert.equal(Object.hasOwn(capture.source, 'preserveAspectRatio'), false, 'The public descriptor does not carry publisher settings');
+      assert.deepEqual(f.errors, []);
+    });
+  }
+}
+
+test('independent aspect-ratio choices survive quality replacement and reconnect without becoming a global preference', async t => {
+  const f = fixture(t);
+  await f.local({ ...input, shareId: 'fit-screen', preserveAspectRatio: true });
+  await f.local({ ...input, shareId: 'stretch-screen', preserveAspectRatio: false });
+  await f.controller.applyQuality(profile());
+  await f.controller.close();
+  await f.controller.sync();
+  for (const [shareId, preserveAspectRatio] of [['fit-screen', true], ['stretch-screen', false]]) {
+    const additions = f.commands.filter(command => command.action === 'source-add' && command.shareId === shareId);
+    assert.equal(additions.length, 3);
+    assert.ok(additions.every(command => command.preserveAspectRatio === preserveAspectRatio));
+    assert.equal(f.captures.get(shareId).preserveAspectRatio, preserveAspectRatio);
+    assert.equal(Object.hasOwn(f.captures.get(shareId).source, 'preserveAspectRatio'), false);
+  }
+});
 
 test('native profile alignment is explicit and unsupported ceilings are not silently clamped', t => {
   const f = fixture(t);
@@ -301,6 +346,97 @@ test('preview preference is synchronized on join and changes without creating a 
     sourceInstanceId: source.instanceId, state: 'paused' });
   assert.equal(f.controller.getLocalPreviewState(source.shareId), 'paused');
   assert.equal(f.commands.some(command => command.action === 'watch'), false);
+});
+
+test('fallback notifies once and keeps Normal for quality/reconnect without replacing the current source or options', async t => {
+  const f = fixture(t);
+  const source = await f.local({ ...input, captureKind: 'game', preserveAspectRatio: true });
+  const before = f.commands.length;
+  const event = { type: 'capture-fallback', publisherSessionId: 'self', shareId: source.shareId, sourceInstanceId: source.instanceId };
+  f.emit({ ...event, sourceInstanceId: randomUUID() });
+  f.emit({ ...event, publisherSessionId: 'other' });
+  assert.equal(f.events.some(([type]) => type === 'native_screen.capture_fallback'), false);
+  f.emit(event);
+  f.emit(event);
+  assert.deepEqual(f.events.filter(([type]) => type === 'native_screen.capture_fallback'),
+    [['native_screen.capture_fallback', { shareId: source.shareId }]]);
+  assert.equal(f.commands.length, before, 'Fallback does not remove/recreate the source or subscriptions.');
+  const capture = f.captures.get(source.shareId);
+  assert.equal(capture.source, source);
+  assert.equal(capture.captureKind, 'window');
+  assert.equal(capture.desktopSourceId, input.desktopSourceId);
+  assert.equal(capture.preserveAspectRatio, true);
+  assert.equal(capture.audioBitrateKbps, input.audioBitrateKbps);
+  assert.equal(f.controller.getCaptureMode('self', source.shareId), null, 'Retrying Normal is not proof of frames.');
+  await f.controller.applyQuality(profile());
+  const replacement = f.commands.findLast(command => command.action === 'source-add');
+  assert.equal(replacement.captureKind, 'window');
+  assert.equal(replacement.preserveAspectRatio, true);
+});
+
+test('capture badge updates are presentation/source scoped for local preview and native spectators', async t => {
+  const f = fixture(t);
+  const source = await f.local();
+  await f.controller.attachLocalPreview(source.shareId);
+  const preview = f.commands.findLast(command => command.action === 'preview-start');
+  const local = { type: 'capture-mode', publisherSessionId: 'self', shareId: source.shareId, sourceInstanceId: source.instanceId,
+    presentationId: preview.presentationId, mode: 'game' };
+  f.emit({ ...local, presentationId: randomUUID() });
+  assert.equal(f.controller.getCaptureMode('self', source.shareId), null);
+  f.emit(local);
+  assert.equal(f.controller.getCaptureMode('self', source.shareId), null, 'A waiting preview must not advertise a retired pipeline.');
+  f.emit({ type: 'preview-state', publisherSessionId: 'self', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, state: 'playing' });
+  assert.equal(f.controller.getCaptureMode('self', source.shareId), 'game');
+  f.watching(true);
+  await f.controller.sync();
+  const watch = f.commands.findLast(command => command.action === 'watch');
+  const remote = { ...local, publisherSessionId: 'publisher', shareId: f.remote.shareId, sourceInstanceId: f.remote.instanceId,
+    presentationId: watch.presentationId, mode: 'normal' };
+  f.emit({ ...remote, sourceInstanceId: randomUUID() });
+  f.emit({ ...remote, presentationId: randomUUID() });
+  assert.equal(f.controller.getCaptureMode('publisher', f.remote.shareId), null);
+  f.emit(remote);
+  assert.equal(f.controller.getCaptureMode('publisher', f.remote.shareId), 'normal');
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+  assert.equal(f.controller.getCaptureMode('self', source.shareId), 'game', 'Different renditions may use different methods.');
+  f.emit({ type: 'preview-state', publisherSessionId: 'self', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, state: 'paused' });
+  assert.equal(f.controller.getCaptureMode('self', source.shareId), null, 'A paused preview has no current capture rendition.');
+  f.emit({ type: 'state', publisherSessionId: 'publisher', shareId: f.remote.shareId,
+    sourceInstanceId: f.remote.instanceId, presentationId: watch.presentationId, state: 'closed' });
+  f.emit(remote);
+  assert.equal(f.controller.getCaptureMode('publisher', f.remote.shareId), null, 'Late mode metadata cannot revive a closed presentation.');
+  f.watching(false);
+  await f.controller.sync();
+  f.emit(remote);
+  assert.equal(f.controller.getCaptureMode('publisher', f.remote.shareId), null);
+});
+
+test('active local Game Capture errors preserve the typed code, public reason and raw diagnostics without fallback', async t => {
+  const f = fixture(t);
+  const source = await f.local({ ...input, captureKind: 'game' });
+  const message = 'Raw native Game Capture diagnostic';
+  const failure = { type: 'error', publisherSessionId: 'self', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, reason: 'capture-failed',
+    code: 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE', message };
+  const before = f.commands.length;
+  f.emit(failure);
+  await tick();
+  const notices = () => f.events.filter(([type]) => type === 'native_screen.source_failed');
+  assert.deepEqual(notices(), [['native_screen.source_failed', {
+    reason: 'capture-failed', shareId: source.shareId, code: 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE',
+  }]]);
+  assert.ok(f.errors.some(value => value[2]?.error === message), 'Keep the native detail in diagnostics');
+  assert.equal(f.commands.length, before, 'Error presentation must not retry, change method or source');
+  f.emit({ ...failure, sourceInstanceId: randomUUID() });
+  f.emit({ ...failure, publisherSessionId: 'another-publisher' });
+  await tick();
+  assert.equal(notices().length, 1, 'Stale or foreign errors must not reach the local sharing alert');
+  const { code, ...generic } = failure;
+  f.emit(generic);
+  await tick();
+  assert.deepEqual(notices()[1], ['native_screen.source_failed', { reason: 'capture-failed', shareId: source.shareId }]);
 });
 
 test('all configured STUN/TURN URLs and credentials survive the bounded IPC grouping', async t => {
@@ -440,26 +576,29 @@ test('failed quality admission restores the last profile under a new source inst
 });
 
 for (const captureKind of ['window', 'monitor', 'game']) {
-  test(`${captureKind}: quality restoration preserves the exact selected ID and explicit capture kind`, async t => {
-    const f = fixture(t);
-    const selection = { ...input, captureKind,
-      desktopSourceId: captureKind === 'monitor' ? `native-monitor:${'a'.repeat(64)}` : input.desktopSourceId };
-    const old = await f.local(selection);
-    f.hook(async command => {
-      if (command.action === 'source-add' && command.video.width === 1280)
-        throw new Error('modeled selected profile failure');
+  for (const preserveAspectRatio of [false, true]) {
+    test(`${captureKind}: quality restoration preserves the exact ID, kind and aspect ratio ${preserveAspectRatio}`, async t => {
+      const f = fixture(t);
+      const selection = { ...input, captureKind, preserveAspectRatio,
+        desktopSourceId: captureKind === 'monitor' ? `native-monitor:${'a'.repeat(64)}` : input.desktopSourceId };
+      const old = await f.local(selection);
+      f.hook(async command => {
+        if (command.action === 'source-add' && command.video.width === 1280)
+          throw new Error('modeled selected profile failure');
+      });
+      await assert.rejects(f.controller.applyQuality(profile()), /modeled selected profile failure/);
+      const additions = f.commands.filter(command => command.action === 'source-add');
+      assert.equal(additions.length, 3);
+      assert.ok(additions.every(command => command.captureKind === captureKind && command.preserveAspectRatio === preserveAspectRatio
+        && command.desktopSourceId === selection.desktopSourceId));
+      const restored = f.captures.get(old.shareId);
+      assert.equal(restored.captureKind, captureKind);
+      assert.equal(restored.preserveAspectRatio, preserveAspectRatio);
+      assert.equal(restored.desktopSourceId, selection.desktopSourceId);
+      assert.notEqual(restored.source.instanceId, old.instanceId);
+      assert.equal(f.events.some(([type]) => type === 'local.screen_ended_externally'), false);
     });
-    await assert.rejects(f.controller.applyQuality(profile()), /modeled selected profile failure/);
-    const additions = f.commands.filter(command => command.action === 'source-add');
-    assert.equal(additions.length, 3);
-    assert.ok(additions.every(command => command.captureKind === captureKind
-      && command.desktopSourceId === selection.desktopSourceId));
-    const restored = f.captures.get(old.shareId);
-    assert.equal(restored.captureKind, captureKind);
-    assert.equal(restored.desktopSourceId, selection.desktopSourceId);
-    assert.notEqual(restored.source.instanceId, old.instanceId);
-    assert.equal(f.events.some(([type]) => type === 'local.screen_ended_externally'), false);
-  });
+  }
 }
 
 test('a failed replacement and rollback withdraw the retired source instead of announcing a stale descriptor', async t => {

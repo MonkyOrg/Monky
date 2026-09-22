@@ -9,6 +9,15 @@ export const screenShareIdSchema = z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/);
 export const screenShareQualitySchema = z.enum(['source', '1080p60', '720p60', '480p30']);
 export type ScreenShareQuality = z.infer<typeof screenShareQualitySchema>;
 
+export const nativeScreenCaptureModeSchema = z.enum(['normal', 'game']);
+export type NativeScreenCaptureMode = z.infer<typeof nativeScreenCaptureModeSchema>;
+export const nativeScreenCaptureStatusSchema = z.object({
+  mode: nativeScreenCaptureModeSchema, ready: z.boolean(),
+}).strict();
+export type NativeScreenCaptureStatus = z.infer<typeof nativeScreenCaptureStatusSchema>;
+// One Game Capture attempt, verified teardown and one Normal attempt, not an unlimited retry.
+export const NATIVE_SCREEN_GAME_STARTUP_TIMEOUT_MS = 75000;
+
 export const nativeScreenVideoProfileSchema = z.object({
   // libobs aligns output width to four pixels before encoding; reject silent truncation.
   width: z.number().int().min(4).max(1920).multipleOf(4),
@@ -153,6 +162,9 @@ export const nativeScreenSignalSchema = z.discriminatedUnion('action', [
     action: z.literal('accepted'), quality: screenShareQualitySchema, backend: z.enum(['native', 'browser']),
     generation: positive,
   }).strict(),
+  signalEnvelope.extend({
+    action: z.literal('capture-mode'), generation: positive, capture: nativeScreenCaptureStatusSchema,
+  }).strict(),
   signalEnvelope.extend({ action: z.literal('control'), control: nativeScreenP2pControlSchema }).strict(),
   signalEnvelope.extend({ action: z.literal('stop') }).strict(),
   signalEnvelope.extend({ action: z.literal('closed'), reason: nativeScreenFailureSchema }).strict(),
@@ -163,7 +175,7 @@ export const nativeScreenSignalSchema = z.discriminatedUnion('action', [
   }
   const fromPublisher = value.fromSessionId === value.publisherSessionId;
   if ((['watch', 'stop'].includes(value.action) && fromPublisher)
-    || (['accepted', 'closed'].includes(value.action) && !fromPublisher)) {
+    || (['accepted', 'capture-mode', 'closed'].includes(value.action) && !fromPublisher)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Screen subscription action has the wrong owner.' });
   }
   if (value.action === 'control') {

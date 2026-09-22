@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { root, execute, write, fingerprint, verify, regularFiles } = require('./buildTools.cjs');
@@ -191,9 +192,13 @@ function build(config) {
     assert.ok(runtime.every(file => !/Qt6|obs-vulkan|obs64\.exe/iu.test(file.path)),
       'GUI and global Vulkan installer files do not belong in the explicit capture runtime.');
     const modulePin = fingerprint(module);
+    const captureDataDigest = createHash('sha256').update(runtime
+      .filter(file => file.path.startsWith('data\\obs-plugins\\win-capture\\'))
+      .map(file => `${file.path}\0${file.bytes}\0${file.sha256}`).sort().join('\n')).digest('hex');
     write(path.join(generated, 'runtime-pins.h'),
       '#pragma once\n#include <cstdint>\nnamespace monky::screen_capture {\n' +
       'struct RuntimePin { const wchar_t* relative; std::uint64_t bytes; const char* sha256; };\n' +
+      `inline constexpr char kCaptureDataDigest[] = "${captureDataDigest}";\n` +
       `inline constexpr RuntimePin kCaptureModule{L"obs-plugins\\\\64bit\\\\win-capture.dll", ${modulePin.bytes}ULL, "${modulePin.sha256}"};\n` +
       'inline constexpr RuntimePin kRuntimeFiles[] = {\n' +
       runtime.map(file => `  {L${JSON.stringify(file.path)}, ${file.bytes}ULL, "${file.sha256}"},`).join('\n') + '\n};\n}\n');
@@ -210,7 +215,7 @@ function build(config) {
     assert.ok(contracts.deviceFree && contracts.checks >= 60 && contracts.headerBytes === 96);
     const platformProbe = JSON.parse(execute(tests, ['--platform-probe'], { env, capture: true }));
     assert.equal(platformProbe.deviceFree, true); assert.equal(platformProbe.synthetic, true);
-    assert.equal(platformProbe.messages.length, 24);
+    assert.equal(platformProbe.messages.length, 48);
     const protocol = require('../runtime/captureProtocol.cjs');
     for (const [index, message] of platformProbe.messages.entries()) {
       protocol.validateMessage(message);
@@ -253,7 +258,7 @@ function build(config) {
       }
     }
     const report = {
-      schemaVersion: 3, obsVersion: inputs.version, obsRevision: inputs.revision, runtime,
+      schemaVersion: 4, obsVersion: inputs.version, obsRevision: inputs.revision, runtime,
       sourceFiles,
       sourceBindingRecipe: fingerprint(path.join(__dirname, 'captureSourceBindings.cjs')),
       crt: { version: crt.version, files: redistributables },
@@ -264,7 +269,8 @@ function build(config) {
         captureKinds: ['window', 'monitor', 'game'], encoders: ['h264_texture_amf', 'obs_nvenc_h264_tex'],
         encoderProbe: 'source-free-hardware-initialization',
         gameCaptureStartup: 'explicit-game-target-only', compatibilityUpdater: false,
-        globalVulkanHook: false, hardwareQualified: false, scaleMode: 'stretch',
+        globalVulkanHook: false, hardwareQualified: false, scaleModes: ['stretch', 'fit'],
+        captureDataStorage: 'pinned-profile-cache',
       },
     };
     write(path.join(bin, 'capture-build.json'), JSON.stringify(report, null, 2) + '\n');

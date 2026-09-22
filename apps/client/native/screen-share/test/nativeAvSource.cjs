@@ -8,6 +8,8 @@ const profile = process.argv.find(value => value.startsWith('--profile='))?.slic
 assert.ok(profile && path.isAbsolute(profile) && typeof process.send === 'function');
 app.setPath('userData', profile); app.setPath('sessionData', profile);
 app.setName('MonkyOwnedAvSource');
+const softwareRendering = process.argv.includes('--software-rendering');
+if (softwareRendering) app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 let window, duplicate;
 app.on('window-all-closed', () => {});
@@ -48,7 +50,7 @@ app.whenReady().then(async () => {
       await this.context?.close(); this.context = null;
     }
   }; true`);
-  process.send({ type: 'ready', pid: process.pid, hwnd: Number(window.getNativeWindowHandle().readBigUInt64LE()) });
+  process.send({ type: 'ready', pid: process.pid, hwnd: Number(window.getNativeWindowHandle().readBigUInt64LE()), softwareRendering });
 }).catch(error => { console.error(error); app.exit(1); });
 
 process.on('message', message => {
