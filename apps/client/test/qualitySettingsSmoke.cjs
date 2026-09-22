@@ -14,6 +14,23 @@ async function runQualitySettingsSmoke() {
     const tip = document.querySelector('.monky-tooltip');
     throw new Error(`Quality settings did not settle: ${description}; focused=${document.hasFocus()}; active=${document.activeElement?.id || document.activeElement?.tagName}; tooltipHidden=${tip?.hidden}`);
   };
+  const settleHelpLayout = async button => {
+    await document.fonts.ready;
+    let previous, stableFrames = 0;
+    for (let frame = 0; frame < 120; frame++) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const position = [];
+      for (let element = button; element; element = element.parentElement) {
+        const rect = element.getBoundingClientRect();
+        position.push(rect.x, rect.y, rect.width, rect.height, element.scrollTop, element.scrollLeft);
+      }
+      const current = JSON.stringify(position);
+      stableFrames = current === previous ? stableFrames + 1 : 0;
+      if (stableFrames === 3) return;
+      previous = current;
+    }
+    throw new Error(`Bitrate help layout did not settle: ${button.dataset.bitrateHelp}`);
+  };
   let mediaRequests = 0;
   const media = navigator.mediaDevices;
   const originalUserMedia = media.getUserMedia;
@@ -121,7 +138,7 @@ async function runQualitySettingsSmoke() {
       const custom = JSON.stringify(settingsStore.customProfile);
       for (const button of helps) {
         button.scrollIntoView({ block: 'center', behavior: 'instant' });
-        await wait();
+        await settleHelpLayout(button);
         check(button.type === 'button' && !button.closest('label') &&
           button.querySelector('[aria-hidden="true"]')?.textContent === 'help',
         'Help must be a labeled, non-submitting keyboard button outside the field label.');
@@ -135,7 +152,7 @@ async function runQualitySettingsSmoke() {
         check(bounds.width >= 20 && bounds.height >= 20 && bounds.right <= caption.right + 1,
           'The question icon must fit its aligned label column.');
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
-        button.focus();
+        button.focus({ preventScroll: true });
         if (!document.hasFocus()) button.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
         const tip = document.querySelector('.monky-tooltip');
         await settled(() => !tip.hidden && tip.textContent === button.dataset.tooltip, `${locale}/${button.dataset.bitrateHelp}/keyboard help`);
@@ -162,6 +179,8 @@ async function runQualitySettingsSmoke() {
         button.blur();
         if (!document.hasFocus()) button.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
         await settled(() => tip.hidden, `${locale}/${button.dataset.bitrateHelp}/blur`);
+        // Scroll events dismiss tooltips; deliver pending layout/scroll before entering again.
+        await settleHelpLayout(button);
         button.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' }));
         await settled(() => !tip.hidden, `${locale}/${button.dataset.bitrateHelp}/hover`);
         check(tip.textContent === button.dataset.tooltip, 'Mouse hover must show the same help as keyboard focus.');
