@@ -57,7 +57,7 @@ const captureFailure = (code = 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE') => Object.
 
 async function captureFixture(t, { failures = [captureFailure()], packetBeforeFailure = false, retirementGate,
   retirementFails = false, expectCloseFailure = false } = {}) {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'monky-game-fallback-'));
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'monky-game-fallback-')));
   const hosts = [], bitrates = [];
   let allowRetirement = !retirementFails;
   const f = fixture({
@@ -125,6 +125,23 @@ const targets = [
   { kind: 'monitor', deviceId: String.raw`\\?\DISPLAY#SELECTED#ONE`, deviceName: String.raw`\\.\DISPLAY2`,
     bounds: { x: -1920, y: 0, width: 1920, height: 1080 } },
 ];
+
+test('capture fixtures canonicalize inherited temporary-directory aliases', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'monky-game-temp-alias-')));
+  t.after(() => fs.rm(root, { recursive: true }));
+  const actual = path.join(root, 'actual'), alias = path.join(root, 'alias');
+  await fs.mkdir(actual);
+  await fs.symlink(actual, alias, 'junction');
+  await t.test('fallback and retirement use the owned physical directory', async child => {
+    child.mock.method(os, 'tmpdir', () => alias);
+    const f = await captureFixture(child);
+    assert.equal(f.endpoint.captureDirectory, await fs.realpath(f.endpoint.captureDirectory));
+    await f.start();
+    assert.deepEqual(f.hosts.map(host => host.source.kind), ['game', 'window']);
+    assert.equal(f.states.filter(state => state.type === 'capture-fallback').length, 1);
+    assert.deepEqual(f.errors, []);
+  });
+});
 
 test('rejected Game Capture retires before one same-window Normal retry without replacing the engine or profile', async t => {
   const f = await captureFixture(t);
