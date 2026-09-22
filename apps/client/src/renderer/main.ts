@@ -905,6 +905,14 @@ class App {
     appEvents.on(`message.${MessageType.VOICE_USER_LEFT}`, (payload: VoiceUserLeftPayload) => {
       const isMySession = serverStore.isMySession(payload.sessionId);
       const origin = currentEventOrigin();
+      // A delayed acknowledgement belongs to the local leave, never a newer admission.
+      if (isMySession && networkClient.isLocalVoiceLeaveAcknowledgement(payload)) {
+        if (participantManager.get(payload.sessionId)?.voiceState?.channelId === payload.channelId
+          && !(this.eventOwnsCall() && voiceStore.currentVoiceChannelId === payload.channelId)) {
+          participantManager.removeVoiceState(payload.sessionId);
+        }
+        return;
+      }
       if (isMySession && origin) {
         const transition = this.voiceModeReconnect.departed(origin, payload);
         if (transition) {

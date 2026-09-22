@@ -100,6 +100,55 @@ test('initial connection failure rejects without creating an automatic reconnect
   assert.equal(f.sockets.length, 1);
 });
 
+test('only the original client recognizes correlated local voice leave acknowledgements', async context => {
+  const f = fixture(context);
+  await f.connected();
+  const payload = { channelId: 'room', userId: 'self', sessionId: 'self:device' };
+  const received: unknown[] = [];
+  const failures: unknown[] = [];
+  const other = new NetworkClient();
+  const offLeft = appEvents.on(`message.${MessageType.VOICE_USER_LEFT}`, value => received.push(value));
+  const offError = appEvents.on(`message.${MessageType.SERVER_ERROR}`, value => failures.push(value));
+  context.after(() => { offLeft(); offError(); other.dispose(); });
+  f.client.send(MessageType.VOICE_LEAVE, { channelId: 'room' });
+  const requestId = f.lastSocket().sent.at(-1)?.requestId;
+  assert.ok(requestId);
+  f.client.send(MessageType.VOICE_JOIN, { channelId: 'room' });
+  f.lastSocket().receive({ type: MessageType.VOICE_USER_LEFT, requestId, payload });
+  const acknowledgement = received.at(-1);
+  assert.equal(f.client.isLocalVoiceLeaveAcknowledgement(acknowledgement), true);
+  assert.equal(other.isLocalVoiceLeaveAcknowledgement(acknowledgement), false);
+  assert.equal(f.client.isLocalVoiceLeaveAcknowledgement(payload), false);
+  assert.equal(f.client.isLocalVoiceLeaveAcknowledgement(structuredClone(acknowledgement)), false);
+  for (const message of [
+    { type: MessageType.VOICE_USER_LEFT, payload },
+    { type: MessageType.VOICE_USER_LEFT, requestId: 'unsolicited-removal', payload },
+    { type: MessageType.VOICE_USER_LEFT, requestId, payload: { ...payload, channelId: 'other-room' } },
+  ]) {
+    f.lastSocket().receive(message);
+    assert.equal(f.client.isLocalVoiceLeaveAcknowledgement(received.at(-1)), false);
+  }
+  f.lastSocket().receive({ type: MessageType.VOICE_USER_LEFT, requestId, payload });
+  assert.equal(f.client.isLocalVoiceLeaveAcknowledgement(received.at(-1)), true, 'a duplicate echo still belongs to the old leave');
+  f.lastSocket().receive({ type: MessageType.SERVER_ERROR, requestId, payload: { message: 'Leave rejected' } });
+  assert.equal(failures.length, 1, 'recognizing acknowledgements must not suppress server errors');
+  f.lastSocket().drop();
+  assert.equal(f.client.isLocalVoiceLeaveAcknowledgement(acknowledgement), false, 'socket retirement clears acknowledgement ownership');
+});
+
+test('voice leave correlation retains a bounded set of sent requests', async context => {
+  const f = fixture(context);
+  await f.connected();
+  for (let index = 0; index < 300; index++) {
+    f.client.send(MessageType.VOICE_LEAVE, { channelId: 'room' }, `leave-${index}`);
+  }
+  assert.equal(f.client['localVoiceLeaves'].size, 256);
+  assert.equal(f.client['localVoiceLeaves'].has('leave-0'), false);
+  assert.equal(f.client['localVoiceLeaves'].get('leave-299'), 'room');
+  f.client.disconnect();
+  assert.equal(f.client['localVoiceLeaves'].size, 0);
+});
+
 test('failed TCP and authentication attempts keep retrying until the server recovers', async context => {
   const f = fixture(context);
   await f.connected();

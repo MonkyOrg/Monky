@@ -90,6 +90,8 @@ export class NetworkClient {
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private pendingRequests: Map<string, PendingRequest> = new Map();
   private retiredRequests = new Set<string>();
+  private localVoiceLeaves = new Map<string, string>();
+  private localVoiceLeaveReplies = new WeakSet<object>();
   private pendingAuth: PendingAuthRequest | null = null;
   private pendingConnect: { reject: (reason: Error) => void } | null = null;
   private currentServerUrl: string = '';
@@ -172,6 +174,10 @@ export class NetworkClient {
   public onEvent(listener: (event: string, data: unknown, requestId?: string) => void): () => void {
     this.eventListeners.add(listener);
     return () => this.eventListeners.delete(listener);
+  }
+
+  public isLocalVoiceLeaveAcknowledgement(payload: unknown): boolean {
+    return payload !== null && typeof payload === 'object' && this.localVoiceLeaveReplies.has(payload);
   }
 
   public cancelRequest(requestId: string): boolean {
@@ -399,6 +405,8 @@ export class NetworkClient {
       pending.reject(new Error(t('network.connectionClosed')));
     }
     this.pendingRequests.clear();
+    this.localVoiceLeaves.clear();
+    this.localVoiceLeaveReplies = new WeakSet<object>();
   }
 
   /** Drops every handler of a socket and closes it, so it can no longer affect state. */
@@ -427,13 +435,23 @@ export class NetworkClient {
       return;
     }
 
+    const id = requestId || uuidv4();
     const message: ProtocolMessage = {
       type,
-      requestId: requestId || uuidv4(),
+      requestId: id,
       payload,
     };
 
     this.ws.send(JSON.stringify(message));
+    const leave: unknown = payload;
+    if (type === MessageType.VOICE_LEAVE && leave !== null && typeof leave === 'object'
+      && 'channelId' in leave && typeof leave.channelId === 'string') {
+      this.localVoiceLeaves.set(id, leave.channelId);
+      if (this.localVoiceLeaves.size > 256) {
+        const first = this.localVoiceLeaves.keys().next().value;
+        if (first !== undefined) this.localVoiceLeaves.delete(first);
+      }
+    }
   }
 
   public sendRequest<T = any>(type: MessageType, payload: any, customRequestId?: string, timeoutMs: number = 8000): Promise<T> {
@@ -467,6 +485,12 @@ export class NetworkClient {
     const { type, requestId, payload } = message;
     const localEvent = LOCAL_EXECUTION_EVENTS.has(type);
     if (requestId && this.retiredRequests.has(requestId) && !localEvent) return;
+    const leave: unknown = payload;
+    if (type === MessageType.VOICE_USER_LEFT && requestId && leave !== null && typeof leave === 'object'
+      && 'channelId' in leave && typeof leave.channelId === 'string'
+      && this.localVoiceLeaves.get(requestId) === leave.channelId) {
+      this.localVoiceLeaveReplies.add(leave);
+    }
 
     if (type === MessageType.PONG) {
       this.lastPongAt = Date.now();
