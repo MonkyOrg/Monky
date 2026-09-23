@@ -1,4 +1,5 @@
 import { t } from '../i18n';
+import { playChatMedia, routeChatMedia } from '../core/ChatMediaOutput';
 
 export function formatMediaTime(totalSeconds: number): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
@@ -23,6 +24,9 @@ export function initializeCustomVideoPlayers(root: ParentNode): void {
     video.removeAttribute('controls');
     video.playsInline = true;
     video.volume = video.volume || 0.8;
+    void routeChatMedia(video).catch((error: unknown) => {
+      console.warn('[VideoPlayer] Could not select the configured media output:', error);
+    });
 
     const bigPlay = document.createElement('button');
     bigPlay.type = 'button';
@@ -143,7 +147,7 @@ export function initializeCustomVideoPlayers(root: ParentNode): void {
       try {
         if (video.paused || video.ended) {
           if (video.ended) video.currentTime = 0;
-          await video.play();
+          await playChatMedia(video);
         } else {
           video.pause();
         }

@@ -1,9 +1,13 @@
 import { escapeHtml } from '../utils/html';
-import { LIMITS, MessageType } from '@monky/shared';
-import { connectionStore, type CreatedServer } from '../stores/connectionStore';
-import { serverStore } from '../stores/serverStore';
-import { networkClient } from '../core/NetworkClient';
-import { openServerSession } from '../core/serverConnection';
+import { LIMITS, MAX_SERVER_INVITE_LENGTH, parseServerInviteLink } from '@monky/shared';
+import { connectionStore, type CreatedServer, type SavedServer } from '../stores/connectionStore';
+import { favoritesStore, savedServerFavoriteKey } from '../stores/favoritesStore';
+import {
+  assertServerBrowseAvailable, captureServerBrowseIntent, getServerSessionForAddress, openServerSession, updateSessionAvatar,
+} from '../core/serverConnection';
+import { ensureHostedServerStarted, findOwnedServer } from '../core/hostedServerStart';
+import { clientLog } from '../core/ClientLogService';
+import { appEvents } from '../core/EventBus';
 import { getAvatarUrl } from '../utils/avatar';
 import { settingsModal } from './SettingsModal';
 import { settingsStore } from '../stores/settingsStore';
@@ -13,7 +17,14 @@ import { pickAndCropImage } from './ImageCropModal';
 import { showIdentityImportDialog } from './IdentityDialogs';
 import { serverMonitorModal } from './ServerMonitorModal';
 import { confirmStopHostedServer } from '../utils/hostedServer';
+import { checkServerOnline } from '../utils/serverStatus';
+import { sortFavoritesFirst, type FavoriteOrderEntry } from '../utils/favoriteOrder';
+import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
+import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
+import { renderServerAutoEntryToggle } from './ServerAutoEntryControls';
+import { parseHomeVoicePreview } from '../utils/voicePreview';
 import { onboardingWizard } from './OnboardingWizard';
+import { joinInviteModal } from './JoinInviteModal';
 import logoUrl from '../assets/Logo.png';
 import { getLanguage, t } from '../i18n';
 import {
@@ -41,15 +52,31 @@ export class ConnectionView {
   private readonly discoveredServers: Map<string, DiscoveredServer> = new Map();
   private onboardingAutoOpened: boolean = false;
   private contentResizeObserver: ResizeObserver | null = null;
+  private savedFavoritesOnly = false;
+  private connectionPending = false;
+  private autoEntrySelected = false;
+  private autoEntryPersistedKey: string | null = null;
+  private readonly savedFavoriteMotion = new FavoriteListMotion();
+  private readonly unbind: Array<() => void> = [];
+  private readonly previewControllers = new Set<AbortController>();
+  private previewGeneration = 0;
+  private startupNotices: string[] = [];
 
   constructor(container: HTMLElement) {
     this.container = container;
     connectionStore.loadUserProfile();
     connectionStore.loadSavedServers();
     connectionStore.loadCreatedServers();
+    this.syncAutoEntryPreference();
+    const startupServer = connectionStore.savedServers.find(server => settingsStore.isServerAutoEntryEnabled(server));
+    if (startupServer) {
+      this.selectedSavedHost = startupServer.host;
+      this.selectedSavedPort = startupServer.port;
+    }
     this.selectedAvatarBase64 = connectionStore.savedAvatarBase64 || '';
     this.setupLanDiscoveryListeners();
     this.setupHostedServerListener();
+    this.unbind.push(appEvents.on('settings.updated', () => this.syncAutoEntryPreference()));
     void this.syncHostedServerStatus();
   }
 
@@ -60,14 +87,15 @@ export class ConnectionView {
    * user came back (#333).
    */
   private setupHostedServerListener(): void {
-    window.api?.onHostServerStatusChanged?.((status) => {
+    const off = window.api?.onHostServerStatusChanged?.((status) => {
       this.applyHostedServerStatus(status);
       // Repainting while the main screen is up would drop the user back on the
       // connection screen mid-session.
-      if (!serverStore.serverDetails) {
+      if (this.container.querySelector('.connection-layout') && !this.connectionPending) {
         this.render();
       }
     });
+    if (off) this.unbind.push(off);
   }
 
   private applyHostedServerStatus(status: { isRunning: boolean; port: number | null; serverId: string | null }): void {
@@ -84,7 +112,10 @@ export class ConnectionView {
     try {
       const status = await window.api.hostServerStatus();
       this.applyHostedServerStatus(status);
-    } catch {
+    } catch (error: unknown) {
+      clientLog.warn('SERVER_HOST', 'Could not refresh hosted server status', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       this.isHostedServerRunning = false;
       this.runningCreatedServerId = null;
       this.runningHostedPort = null;
@@ -130,7 +161,7 @@ export class ConnectionView {
       wasRunning !== this.isHostedServerRunning ||
       previousId !== this.runningCreatedServerId ||
       previousPort !== this.runningHostedPort;
-    if (changed && !serverStore.serverDetails) {
+    if (changed && this.container.querySelector('.connection-layout') && !this.connectionPending) {
       this.render();
     }
   }
@@ -226,9 +257,18 @@ export class ConnectionView {
     `;
   }
 
-  public render(): void {
+  public render(container = this.container): void {
+    this.suspend();
+    this.container = container;
+    try {
+      settingsStore.retainAutoEntryServers(connectionStore.savedServers);
+    } catch (error: unknown) {
+      clientLog.warn('STORE', 'Could not clean stale automatic-entry preferences', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     const savedNick = connectionStore.savedNickname || '';
-    const savedServers = connectionStore.savedServers || [];
+    const savedServers = sortFavoritesFirst(connectionStore.savedServers || [], server => this.savedServerOrder(server), getLanguage());
     const createdServers = connectionStore.createdServers || [];
     // Keep the password field in sync with the currently selected saved server (#308)
     const selectedSaved = savedServers.find(
@@ -263,6 +303,9 @@ export class ConnectionView {
           </div>
 
           <div id="error-banner" class="error-banner"></div>
+          <div id="auto-entry-notices" class="server-auto-entry-description" role="status">
+            ${this.startupNotices.map(message => `<p>${escapeHtml(message)}</p>`).join('')}
+          </div>
 
           <!-- Avatar Picker -->
           <div class="avatar-picker" style="margin-bottom: 14px; gap: 12px;">
@@ -278,6 +321,15 @@ export class ConnectionView {
 
           <!-- Tab 1: Join Server -->
           <form id="form-join" style="display: ${this.activeTab === 'join' ? 'block' : 'none'};">
+            <div class="form-group">
+              <label for="join-invite">${t('invite.pasteLabel')}</label>
+              <div style="display: flex; gap: 8px;">
+                <input id="join-invite" type="text" maxlength="${MAX_SERVER_INVITE_LENGTH}" autocomplete="off" spellcheck="false"
+                  placeholder="${t('invite.pastePlaceholder')}" style="flex: 1; min-width: 0;">
+                <button id="btn-review-invite" type="button" class="btn btn-secondary">${t('invite.reviewButton')}</button>
+              </div>
+              <small>${t('invite.pasteHint')}</small>
+            </div>
             <div id="lan-discovery-section">
               ${this.getDiscoveredServersSectionHtml()}
             </div>
@@ -302,8 +354,8 @@ export class ConnectionView {
                 : ''
             }
 
-            ${savedServers.length > 0 ? `
-              <div class="saved-servers-container">
+            ${savedServers.length > 0 || this.savedFavoritesOnly ? `
+              <div id="home-saved-servers" class="saved-servers-container">
                 <div style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
                   <span style="display: flex; align-items: center; gap: 4px;">
                     <span class="material-symbols-outlined md-14" style="color: var(--accent-primary);">bookmark</span>
@@ -311,6 +363,7 @@ export class ConnectionView {
                   </span>
                   <span style="font-size: 10px; font-weight: normal; color: var(--text-muted);">${t('connection.clickToSelect')}</span>
                 </div>
+                <div style="margin-bottom: 8px;">${renderFavoritesFilter('home-saved-filter', this.savedFavoritesOnly)}</div>
                 <div class="saved-servers-list">
                   ${savedServers.map((s) => {
                     const isSelected = this.selectedSavedHost === s.host && this.selectedSavedPort === s.port;
@@ -325,7 +378,9 @@ export class ConnectionView {
                           <span style="font-size: 11px; color: var(--text-muted); margin-left: 22px;">${escapeHtml(s.host)}:${s.port}</span>
                           <div class="saved-server-preview" data-host="${escapeHtml(s.host)}" data-port="${s.port}" style="margin-left: 22px; margin-top: 4px;"></div>
                         </div>
-                        <div style="display: flex; gap: 6px; align-items: center;">
+                        <div class="saved-server-actions">
+                          <div class="saved-server-buttons">
+                          ${renderFavoriteToggle(savedServerFavoriteKey(s), s.name || s.host, favoritesStore.isServerFavorite(s))}
                           <button type="button" class="btn btn-secondary btn-select-saved" data-host="${escapeHtml(s.host)}" data-port="${s.port}" data-password="${escapeHtml(s.password || '')}" style="padding: 2px 8px; font-size: 11px; height: 24px;">
                             ${isSelected ? `✓ ${t('connection.selected')}` : t('connection.use')}
                           </button>
@@ -335,10 +390,16 @@ export class ConnectionView {
                           <button type="button" class="btn-delete-saved-srv" data-host="${escapeHtml(s.host)}" data-port="${s.port}" title="${t('connection.removeFromSaved')}">
                             <span class="material-symbols-outlined md-16">close</span>
                           </button>
+                          </div>
                         </div>
                       </div>
                     `;
                   }).join('')}
+                </div>
+                <div id="home-favorites-empty" class="favorites-empty" role="status" style="display: none;">
+                  <strong>${t('favorites.emptyServersTitle')}</strong>
+                  <span>${t('favorites.emptyServersDescription')}</span>
+                  <button type="button" id="home-favorites-show-all" class="btn btn-secondary">${t('favorites.showAll')}</button>
                 </div>
               </div>
             ` : ''}
@@ -364,10 +425,13 @@ export class ConnectionView {
               <input id="join-password" type="password" placeholder="••••••••" value="${escapeHtml(selectedSaved?.password || '')}">
             </div>
 
-            <button type="submit" id="btn-submit-join" class="btn btn-primary" style="width: 100%; margin-top: 8px;">
-              <span class="material-symbols-outlined md-18" style="margin-right: 6px;">login</span>
-              ${t('connection.tabJoin')}
-            </button>
+            <div class="connection-submit-row">
+              ${renderServerAutoEntryToggle(this.autoEntrySelected)}
+              <button type="submit" id="btn-submit-join" class="btn btn-primary">
+                <span class="material-symbols-outlined md-18" style="margin-right: 6px;">login</span>
+                ${t('connection.tabJoin')}
+              </button>
+            </div>
           </form>
 
           <!-- Tab 2: Meus Servidores -->
@@ -484,8 +548,52 @@ export class ConnectionView {
     `;
 
     this.attachEvents();
+    this.setConnectionPending(this.connectionPending);
     this.observeContentHeight();
     void this.refreshHostedServerStatus();
+  }
+
+  public reportStartupNotice(message: string): void {
+    if (!this.startupNotices.includes(message)) this.startupNotices.push(message);
+    const notice = this.container.querySelector('#auto-entry-notices');
+    if (notice) notice.innerHTML = this.startupNotices.map(item => `<p>${escapeHtml(item)}</p>`).join('');
+  }
+
+  private syncAutoEntryPreference(): void {
+    const key = settingsStore.autoEntryServerKeys[0] ?? null;
+    // Unrelated settings changes must not erase an unsaved choice in the form.
+    if (key === this.autoEntryPersistedKey) return;
+    this.autoEntryPersistedKey = key;
+    this.autoEntrySelected = key !== null;
+    const input = this.container.querySelector<HTMLInputElement>('#join-auto-entry');
+    if (input) input.checked = this.autoEntrySelected;
+  }
+
+  private showAutoEntrySaveError(error: unknown): void {
+    clientLog.warn('STORE', 'Could not save automatic server entry', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    if (this.container.querySelector('.connection-layout')) {
+      this.showError(t('autoEntry.saveFailed'));
+    } else {
+      void showAlert({ title: t('autoEntry.section'), message: t('autoEntry.saveFailed'), variant: 'danger' });
+    }
+  }
+
+  public suspend(): void {
+    this.previewGeneration++;
+    for (const controller of this.previewControllers) controller.abort();
+    this.previewControllers.clear();
+    this.contentResizeObserver?.disconnect();
+    this.savedFavoriteMotion.cancel();
+  }
+
+  public dispose(): void {
+    this.suspend();
+    for (const off of this.unbind.splice(0)) off();
+    for (const off of this.unbindLanListeners.splice(0)) off();
+    if (this.lanScanTimeout) clearTimeout(this.lanScanTimeout);
+    this.lanScanTimeout = null;
   }
 
   /**
@@ -495,6 +603,7 @@ export class ConnectionView {
    * changes. The main process caps the result at the display's work area.
    */
   private observeContentHeight(): void {
+    if (this.container.closest('.main-layout')) return;
     const layout = this.container.querySelector('.connection-layout') as HTMLElement | null;
     const card = layout?.querySelector('.connection-card') as HTMLElement | null;
     if (!layout || !card || typeof ResizeObserver === 'undefined') return;
@@ -518,87 +627,131 @@ export class ConnectionView {
   }
 
   private async startHostedServer(server: CreatedServer, nickname: string): Promise<void> {
-    connectionStore.saveUserProfile(nickname, this.selectedAvatarBase64);
+    if (this.connectionPending) return;
+    this.setConnectionPending(true);
+    const avatar = this.selectedAvatarBase64;
+    const isCurrent = captureServerBrowseIntent();
+    try {
+      assertServerBrowseAvailable('127.0.0.1', server.port);
+      connectionStore.saveUserProfile(nickname, avatar);
+      await ensureHostedServerStarted(server);
+      await this.syncHostedServerStatus();
+      if (!isCurrent()) return;
 
-    await this.syncHostedServerStatus();
-    // Only a *different* server needs to be swapped out. Restarting the one
-    // already serving this entry would drop everyone connected to it (#333).
-    const alreadyServingThis = this.isCreatedServerRunning(server);
-    if (this.isHostedServerRunning && !alreadyServingThis && window.api?.hostServerStop) {
-      const confirmed = await showConfirm({
-        title: t('connection.serverAlreadyRunningTitle'),
-        message: t('connection.serverAlreadyRunningMessage'),
-        confirmLabel: t('connection.switchServer'),
-        cancelLabel: t('common.cancel'),
-        variant: 'warning',
-      });
-      if (!confirmed) return;
+      const identity = connectionStore.hasIdentity && connectionStore.clientId && connectionStore.publicKey
+        ? { clientId: connectionStore.clientId, publicKey: connectionStore.publicKey }
+        : await window.api.getIdentity();
+      if (!isCurrent()) return;
+      connectionStore.setIdentity(identity);
+      const result = await openServerSession('127.0.0.1', server.port, identity, nickname, server.password);
 
-      // The server being replaced may still have people on it (#334).
-      if (!(await confirmStopHostedServer())) return;
-
-      const stopRes = await window.api.hostServerStop();
-      if (!stopRes.success) {
-        throw new Error(t('connection.stopCurrentServerError'));
-      }
-
-      this.isHostedServerRunning = false;
-      this.runningCreatedServerId = null;
-      this.runningHostedPort = null;
-    }
-
-    if (window.api?.hostServerStart) {
-      const hostRes = await window.api.hostServerStart({
+      connectionStore.addSavedServer({
+        host: '127.0.0.1',
         port: server.port,
-        serverName: server.name,
+        name: result.server.name,
+        serverId: result.server.id,
         password: server.password,
-        initialTextChannel: server.textChannel,
-        initialVoiceChannel: server.voiceChannel,
-        serverId: server.id,
-        maxUsers: server.maxUsers,
-        voiceMode: server.voiceMode,
+        lastConnected: Date.now(),
       });
-
-      if (!hostRes.success) {
-        throw new Error(hostRes.error || t('connection.startServerError'));
-      }
+      await window.api?.maximize?.();
+      await updateSessionAvatar('127.0.0.1', server.port, avatar);
+    } finally {
+      this.setConnectionPending(false);
     }
+  }
 
-    const startedAt = Date.now();
-    const updatedServer: CreatedServer = {
-      ...server,
-      lastStarted: startedAt,
-    };
-    connectionStore.saveCreatedServer(updatedServer);
-    this.isHostedServerRunning = true;
-    this.runningCreatedServerId = updatedServer.id;
-    this.runningHostedPort = updatedServer.port;
+  private setConnectionPending(pending: boolean): void {
+    this.connectionPending = pending;
+    this.container.querySelectorAll<HTMLButtonElement>('#btn-submit-join, #btn-submit-host, .btn-start-created-server')
+      .forEach(button => { button.disabled = pending; });
+    const autoEntry = this.container.querySelector<HTMLInputElement>('#join-auto-entry');
+    if (autoEntry) autoEntry.disabled = pending;
+  }
 
-    const identity = connectionStore.hasIdentity && connectionStore.clientId && connectionStore.publicKey
-      ? { clientId: connectionStore.clientId, publicKey: connectionStore.publicKey }
-      : await window.api.getIdentity();
-    connectionStore.setIdentity(identity);
-
-    await openServerSession('127.0.0.1', updatedServer.port, identity, nickname, updatedServer.password);
-
-    if (this.selectedAvatarBase64) {
-      try {
-        await networkClient.sendRequest(MessageType.USER_UPDATE_AVATAR, {
-          avatarBase64: this.selectedAvatarBase64,
-          mimeType: 'image/png',
-        });
-      } catch (err) {}
-    }
-
-    connectionStore.addSavedServer({
-      host: '127.0.0.1',
-      port: updatedServer.port,
-      name: updatedServer.name,
-      password: updatedServer.password,
-      lastConnected: startedAt,
+  private attachSavedFavoriteEvents(): void {
+    const section = this.container.querySelector('#home-saved-servers');
+    if (!section) return;
+    section.querySelectorAll<HTMLButtonElement>('[data-favorites-filter]').forEach(button => {
+      button.addEventListener('click', () => {
+        this.savedFavoritesOnly = button.dataset.favoritesFilter === 'favorites';
+        this.updateSavedFavoriteControls('filter');
+      });
     });
+    section.querySelector('#home-favorites-show-all')?.addEventListener('click', () => {
+      this.savedFavoritesOnly = false;
+      this.updateSavedFavoriteControls('filter');
+      section.querySelector<HTMLButtonElement>('#home-saved-filter-all')?.focus();
+    });
+    section.querySelectorAll<HTMLButtonElement>('.favorite-toggle').forEach(button => {
+      button.addEventListener('click', async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const server = connectionStore.savedServers.find(item => savedServerFavoriteKey(item) === button.dataset.favoriteKey);
+        if (!server) return;
+        try {
+          favoritesStore.toggleServer(server);
+          this.updateSavedFavoriteControls('reorder');
+        } catch (error: unknown) {
+          clientLog.warn('STORE', 'Could not save the server favorite', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          await showAlert({ title: t('common.error'), message: t('favorites.saveFailed'), variant: 'danger' });
+        }
+      });
+    });
+    this.updateSavedFavoriteControls();
+  }
 
-    await window.api?.maximize?.();
+  private updateSavedFavoriteControls(animate: FavoriteMotionKind | false = false): void {
+    const section = this.container.querySelector<HTMLElement>('#home-saved-servers');
+    const list = section?.querySelector<HTMLElement>('.saved-servers-list');
+    if (!section || !list) return;
+    this.savedFavoriteMotion.update(section, '.saved-server-item', () => {
+      updateFavoritesFilter(section, this.savedFavoritesOnly);
+      const focused = document.activeElement;
+      const scrollTop = list.scrollTop;
+      const visibleButtons: HTMLButtonElement[] = [];
+      let hiddenFocus = false;
+      const rows = Array.from(list.querySelectorAll<HTMLElement>('.saved-server-item')).flatMap(item => {
+        const server = connectionStore.savedServers.find(entry => entry.host === item.dataset.host
+          && entry.port === Number(item.dataset.port));
+        return server ? [{ item, server }] : [];
+      });
+      sortFavoritesFirst(rows, row => this.savedServerOrder(row.server), getLanguage()).forEach(({ item, server }, index) => {
+        if (list.children[index] !== item) list.insertBefore(item, list.children[index] ?? null);
+        const favorite = favoritesStore.isServerFavorite(server);
+        const visible = !this.savedFavoritesOnly || favorite;
+        item.style.display = visible ? '' : 'none';
+        if (!visible && focused && item.contains(focused)) hiddenFocus = true;
+        const button = item.querySelector<HTMLButtonElement>('.favorite-toggle');
+        if (button) {
+          const label = t(favorite ? 'favorites.remove' : 'favorites.add', { name: server.name || server.host });
+          button.setAttribute('aria-pressed', String(favorite));
+          button.setAttribute('aria-label', label);
+          button.title = label;
+          if (visible) visibleButtons.push(button);
+        }
+      });
+      list.scrollTop = scrollTop;
+      const empty = section.querySelector<HTMLElement>('#home-favorites-empty');
+      if (empty) empty.style.display = this.savedFavoritesOnly && visibleButtons.length === 0 ? '' : 'none';
+      if (hiddenFocus) {
+        const next = visibleButtons[0] ?? section.querySelector<HTMLButtonElement>('#home-saved-filter-favorites');
+        next?.focus({ preventScroll: true });
+        next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      } else if (focused instanceof HTMLElement && list.contains(focused)) {
+        if (document.activeElement !== focused) focused.focus({ preventScroll: true });
+        focused.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      }
+    }, animate);
+  }
+
+  private savedServerOrder(server: SavedServer): FavoriteOrderEntry {
+    return {
+      favorite: favoritesStore.isServerFavorite(server),
+      name: server.name || t('connection.serverFallbackName'),
+      identity: savedServerFavoriteKey(server),
+    };
   }
 
   private async stopHostedServer(): Promise<void> {
@@ -675,32 +828,39 @@ export class ConnectionView {
   }
 
   private async loadServerPreviews(): Promise<void> {
+    const generation = this.previewGeneration;
     const nodes = Array.from(
       this.container.querySelectorAll('.saved-server-preview')
     ) as HTMLElement[];
 
     for (const node of nodes) {
+      if (generation !== this.previewGeneration || !node.isConnected) return;
       const host = node.getAttribute('data-host');
       const port = node.getAttribute('data-port');
       if (!host || !port) continue;
 
+      const controller = new AbortController();
+      this.previewControllers.add(controller);
+      const timeout = setTimeout(() => controller.abort(), 2500);
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 2500);
         const res = await fetch(`http://${host}:${port}/preview`, {
           signal: controller.signal,
         });
-        clearTimeout(timeout);
+        if (generation !== this.previewGeneration || !node.isConnected) return;
         if (!res.ok) {
           this.setServerStatusDot(host, port, 'offline');
           continue;
         }
         this.setServerStatusDot(host, port, 'online');
-        const info = await res.json();
+        const info: unknown = await res.json();
+        if (generation !== this.previewGeneration || !node.isConnected) return;
         this.renderServerPreview(node, host, port, info);
       } catch {
         // Server offline/unreachable — mark the indicator and leave the preview empty.
-        this.setServerStatusDot(host, port, 'offline');
+        if (generation === this.previewGeneration && node.isConnected) this.setServerStatusDot(host, port, 'offline');
+      } finally {
+        clearTimeout(timeout);
+        this.previewControllers.delete(controller);
       }
     }
   }
@@ -718,38 +878,34 @@ export class ConnectionView {
     node: HTMLElement,
     host: string,
     port: string,
-    info: {
-      userCount?: number;
-      memberCount?: number;
-      maxUsers?: number;
-      users?: Array<{ nickname?: string; avatarUrl?: string }>;
-    }
+    info: unknown
   ): void {
-    const users = Array.isArray(info.users) ? info.users.slice(0, 5) : [];
-    const count = typeof info.userCount === 'number' ? info.userCount : users.length;
+    const preview = parseHomeVoicePreview(info);
     // The cap counts registered members, not who happens to be online, so the
     // two numbers are shown separately instead of as one misleading "3/20" (#403).
-    const max = typeof info.maxUsers === 'number' && info.maxUsers > 0 ? info.maxUsers : null;
-    const members = typeof info.memberCount === 'number' ? info.memberCount : null;
+    const max = preview.maxUsers !== null && preview.maxUsers > 0 ? preview.maxUsers : null;
+    const members = preview.memberCount;
     const membersLabel =
       max !== null && members !== null
         ? ` • ${t('connection.membersOfLimit', { count: members, max })}`
         : '';
 
-    const avatars = users
+    const avatars = preview.users
       .map((u) => {
         const raw = u.avatarUrl && u.avatarUrl.startsWith('/avatars/')
           ? `http://${host}:${port}${u.avatarUrl}`
           : u.avatarUrl || getAvatarUrl(null);
         const title = escapeHtml(u.nickname || t('connection.unknownUser'));
-        return `<img class="preview-avatar" src="${raw}" title="${title}" data-fallback="avatar">`;
+        return `<img class="preview-avatar" src="${escapeHtml(raw)}" title="${title}" alt="${title}" data-fallback="avatar">`;
       })
       .join('');
 
     node.innerHTML = `
       <div class="server-preview-row">
         <div class="preview-avatars">${avatars}</div>
-        <span class="preview-count">${count} ${t('connection.online')}${membersLabel}</span>
+        <span class="preview-count">${escapeHtml(preview.count === null
+          ? t('connection.voicePreviewUnavailable')
+          : t('connection.voiceUsersCount', { count: preview.count }))}${membersLabel}</span>
       </div>
     `;
   }
@@ -875,55 +1031,108 @@ export class ConnectionView {
   }
 
   private async submitJoinForm(): Promise<void> {
+    if (this.connectionPending) return;
     this.hideError();
+    const invitation = this.container.querySelector<HTMLInputElement>('#join-invite')?.value.trim();
+    if (invitation) {
+      await this.reviewInviteLink(invitation);
+      return;
+    }
 
     const nickname = (document.getElementById('join-nickname') as HTMLInputElement).value.trim();
     const host = (document.getElementById('join-host') as HTMLInputElement).value.trim();
     const port = parseInt((document.getElementById('join-port') as HTMLInputElement).value, 10);
     const password = (document.getElementById('join-password') as HTMLInputElement).value;
+    const rememberAtStartup = this.autoEntrySelected;
 
-    connectionStore.saveUserProfile(nickname, this.selectedAvatarBase64);
+    const avatar = this.selectedAvatarBase64;
+    connectionStore.saveUserProfile(nickname, avatar);
 
     const btn = document.getElementById('btn-submit-join') as HTMLButtonElement;
-    btn.disabled = true;
-    btn.innerText = 'Conectando...';
+    this.setConnectionPending(true);
+    const isCurrent = captureServerBrowseIntent();
+    btn.innerText = t('main.connectingTo', { name: host });
 
     try {
+      assertServerBrowseAvailable(host, port);
+      const owned = findOwnedServer(host, port);
+      const connected = getServerSessionForAddress(host, port)?.client.getStatus() === 'CONNECTED';
+      if (owned && !connected && !(await checkServerOnline(host, port))) {
+        if (!isCurrent()) return;
+        const confirmed = await showConfirm({
+          title: t('main.serverOfflineStartTitle'),
+          message: t('main.serverOfflineStartMessage', { name: owned.name }),
+          confirmLabel: t('main.serverOfflineStartConfirm'),
+          variant: 'warning',
+        });
+        if (!confirmed || !isCurrent()) return;
+        await ensureHostedServerStarted(owned);
+        if (!isCurrent()) return;
+      }
       const identity = connectionStore.hasIdentity && connectionStore.clientId && connectionStore.publicKey
         ? { clientId: connectionStore.clientId, publicKey: connectionStore.publicKey }
         : await window.api.getIdentity();
+      if (!isCurrent()) return;
       connectionStore.setIdentity(identity);
 
       const res = await openServerSession(host, port, identity, nickname, password);
 
-      if (this.selectedAvatarBase64) {
-        try {
-          await networkClient.sendRequest(MessageType.USER_UPDATE_AVATAR, {
-            avatarBase64: this.selectedAvatarBase64,
-            mimeType: 'image/png',
-          });
-        } catch {}
-      }
-
-      connectionStore.addSavedServer({
+      const savedServer: SavedServer = {
         host,
         port,
         name: res.server.name,
+        serverId: res.server.id,
         password: password || undefined,
         lastConnected: Date.now(),
-      });
+      };
+      connectionStore.addSavedServer(savedServer);
+      this.selectedSavedHost = host;
+      this.selectedSavedPort = port;
+      if (rememberAtStartup) {
+        try {
+          settingsStore.setServerAutoEntry(savedServer, true);
+        } catch (error: unknown) {
+          this.showAutoEntrySaveError(error);
+        }
+      }
 
-      await window.api?.stopLanDiscovery?.();
       await window.api?.maximize?.();
-    } catch (err: any) {
-      this.showError(err.message || t('connection.connectError'));
+      await updateSessionAvatar(host, port, avatar);
+      await window.api?.stopLanDiscovery?.();
+    } catch (err: unknown) {
+      this.showError(err instanceof Error && err.message ? err.message : t('connection.connectError'));
     } finally {
-      btn.disabled = false;
+      this.setConnectionPending(false);
       btn.innerHTML = `<span class="material-symbols-outlined md-18" style="margin-right: 6px;">login</span> ${t('connection.tabJoin')}`;
     }
   }
 
+  private async reviewInviteLink(value: string): Promise<void> {
+    const parsed = parseServerInviteLink(value);
+    if (!parsed.ok) {
+      clientLog.warn('CONNECTION', 'Invalid pasted server invitation');
+      this.showError(t('invite.invalidLink'));
+      this.container.querySelector<HTMLInputElement>('#join-invite')?.focus();
+      return;
+    }
+    this.hideError();
+    try {
+      await joinInviteModal.open(parsed.invite);
+    } catch (error: unknown) {
+      clientLog.warn('CONNECTION', 'Could not open the invitation confirmation');
+      this.showError(t('invite.readFailed'));
+    }
+  }
+
   private attachEvents(): void {
+    const invitation = this.container.querySelector<HTMLInputElement>('#join-invite');
+    const reviewInvite = () => { if (invitation) void this.reviewInviteLink(invitation.value); };
+    this.container.querySelector('#btn-review-invite')?.addEventListener('click', reviewInvite);
+    invitation?.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' || event.isComposing) return;
+      event.preventDefault();
+      reviewInvite();
+    });
     const tabJoin = document.getElementById('tab-join');
     const tabHost = document.getElementById('tab-host');
     const formJoin = document.getElementById('form-join') as HTMLFormElement;
@@ -939,6 +1148,19 @@ export class ConnectionView {
     const monitorCreatedButtons = this.container.querySelectorAll('.btn-monitor-created-server');
     const removeCreatedButtons = this.container.querySelectorAll('.btn-remove-created-server');
     const importIdentityButton = document.getElementById('btn-import-existing-identity');
+    const autoEntry = this.container.querySelector<HTMLInputElement>('#join-auto-entry');
+
+    autoEntry?.addEventListener('change', () => {
+      const previous = this.autoEntrySelected;
+      this.autoEntrySelected = autoEntry.checked;
+      try {
+        if (!autoEntry.checked) settingsStore.clearServerAutoEntry();
+      } catch (error: unknown) {
+        this.autoEntrySelected = previous;
+        autoEntry.checked = previous;
+        this.showAutoEntrySaveError(error);
+      }
+    });
 
     // Sync and save nickname as user types
     const handleNickChange = (val: string) => {
@@ -1033,6 +1255,7 @@ export class ConnectionView {
     startCreatedButtons.forEach((btn) => {
       btn.addEventListener('click', async (e) => {
         e.preventDefault();
+        if (this.connectionPending) return;
         this.hideError();
 
         const serverId = btn.getAttribute('data-created-server-id');
@@ -1049,14 +1272,14 @@ export class ConnectionView {
         const button = btn as HTMLButtonElement;
         const originalHtml = button.innerHTML;
         button.disabled = true;
-        button.textContent = 'Iniciando...';
+        button.textContent = t('connection.startingServer');
 
         try {
           await this.startHostedServer(server, nickname);
           await window.api?.stopLanDiscovery?.();
-        } catch (err: any) {
-          this.render();
-          this.showError(err.message || t('connection.startSavedServerError'));
+        } catch (err: unknown) {
+          if (this.container.querySelector('.connection-layout')) this.render();
+          this.showError(err instanceof Error && err.message ? err.message : t('connection.startSavedServerError'));
           return;
         } finally {
           if (button.isConnected) {
@@ -1094,7 +1317,7 @@ export class ConnectionView {
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        void serverMonitorModal.open();
+        void serverMonitorModal.openLocal();
       });
     });
 
@@ -1117,10 +1340,12 @@ export class ConnectionView {
     });
 
     // Handle clicking a saved server card
-    const savedServerItems = this.container.querySelectorAll('.saved-server-item');
+    this.attachSavedFavoriteEvents();
+    const savedServerItems = this.container.querySelectorAll('#home-saved-servers .saved-server-item');
     savedServerItems.forEach((item) => {
       item.addEventListener('click', (e) => {
-        if ((e.target as HTMLElement).closest('.btn-delete-saved-srv') || (e.target as HTMLElement).closest('.btn-edit-saved-srv')) return;
+        if (e.target instanceof Element
+          && e.target.closest('.favorite-toggle, .btn-delete-saved-srv, .btn-edit-saved-srv')) return;
 
         const host = item.getAttribute('data-host');
         const port = parseInt(item.getAttribute('data-port') || '3000', 10);
@@ -1131,7 +1356,7 @@ export class ConnectionView {
           this.selectedSavedPort = port;
           if (joinHostInput) joinHostInput.value = host;
           if (joinPortInput) joinPortInput.value = port.toString();
-          if (joinPassInput && pass) joinPassInput.value = pass;
+          if (joinPassInput) joinPassInput.value = pass;
 
           savedServerItems.forEach((el) => el.classList.remove('selected'));
           item.classList.add('selected');
@@ -1215,6 +1440,7 @@ export class ConnectionView {
 
     formHost?.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (this.connectionPending) return;
       this.hideError();
 
       const nickname = (document.getElementById('host-nickname') as HTMLInputElement).value.trim();
@@ -1265,9 +1491,9 @@ export class ConnectionView {
 
         await this.startHostedServer(createdServer, nickname);
         await window.api?.stopLanDiscovery?.();
-      } catch (err: any) {
-        this.render();
-        this.showError(err.message || t('connection.createServerError'));
+      } catch (err: unknown) {
+        if (this.container.querySelector('.connection-layout')) this.render();
+        this.showError(err instanceof Error && err.message ? err.message : t('connection.createServerError'));
       } finally {
         if (btn.isConnected) {
           btn.disabled = false;
@@ -1282,6 +1508,8 @@ export class ConnectionView {
     if (el) {
       el.innerText = msg;
       el.style.display = 'block';
+    } else {
+      void showAlert({ title: t('common.error'), message: msg, variant: 'danger' });
     }
   }
 

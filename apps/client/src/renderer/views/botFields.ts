@@ -2,11 +2,14 @@ import { LIMITS, type BotFormValues, type UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { type BotInputField } from '../utils/botInputs';
 import { t } from '../i18n';
+import { choicesHaveAudio, renderAudioPreviewVolume, renderSelectionChoiceList } from '../utils/selectionChoices';
 
 export interface BotFieldContext {
   prefix: string;
   disabled: boolean;
   members?: Pick<UserSummary, 'id' | 'nickname'>[];
+  volumeScope?: string;
+  persistentSelection?: boolean;
 }
 
 function listRows(field: BotInputField, value: BotFormValues[string] | undefined): string[] {
@@ -50,10 +53,25 @@ export function renderBotField(field: BotInputField, values: BotFormValues, cont
       </label>
       <span class="bot-switch-value">${state}</span>
     </div>`;
+  } else if (field.type === 'select' && choicesHaveAudio(field.choices)) {
+    control = `<div class="bot-field-choice-list" id="${id}" data-bot-choice-list="${name}" tabindex="-1" aria-label="${escapeHtml(field.label)}">
+      ${renderSelectionChoiceList({
+        choices: field.choices,
+        selectedValue: typeof value === 'string' ? value : undefined,
+        activeIndex: typeof value === 'string' ? undefined : 0,
+        label: field.label,
+        header: t('botChat.parameterChoices', { name: field.label }),
+        idPrefix: `${id}-choice`,
+        keyPrefix: `${context.prefix}:${field.name}`,
+        volumeScope: context.volumeScope ?? context.prefix,
+        showVolume: false,
+        optionAttributes: (choice) => `data-bot-select-value="${escapeHtml(choice.value)}" data-bot-select-submit="${field.presentation === 'buttons' ? 'true' : 'false'}"`,
+      })}
+    </div>`;
   } else if (field.type === 'select' && field.presentation === 'buttons') {
     control = `<div class="bot-choice-buttons" id="${id}" role="group" aria-label="${escapeHtml(field.label)}">
       ${field.choices.map((choice) => `<button type="button" class="btn btn-secondary"
-        data-bot-select-value="${escapeHtml(choice.value)}" ${disabled}>${escapeHtml(choice.label)}</button>`).join('')}
+        data-bot-select-value="${escapeHtml(choice.value)}" ${disabled}${context.persistentSelection ? ` aria-pressed="${choice.value === value}"` : ''}>${escapeHtml(choice.label)}</button>`).join('')}
     </div>`;
   } else if (field.type === 'select' || field.type === 'user') {
     const choices = field.type === 'select'
@@ -105,7 +123,9 @@ ${escapeHtml(text)}</textarea>`
 }
 
 export function renderBotFields(fields: BotInputField[], values: BotFormValues, context: BotFieldContext): string {
-  return `<div class="bot-fields">${fields.map((field) => renderBotField(field, values, context)).join('')}</div>`;
+  const hasAudio = fields.some((field) => field.type === 'select' && choicesHaveAudio(field.choices));
+  return `<div class="bot-fields">${hasAudio ? renderAudioPreviewVolume(context.volumeScope ?? context.prefix) : ''}
+    ${fields.map((field) => renderBotField(field, values, context)).join('')}</div>`;
 }
 
 export function readBotFieldChange(

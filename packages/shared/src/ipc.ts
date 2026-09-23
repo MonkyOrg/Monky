@@ -4,11 +4,66 @@
  */
 
 import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
+import type { DevelopmentQaConfig, DevelopmentQaReport } from './developmentQa.js';
+import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
+import type { CommandAudioPreviewFailureReason, CommandAudioPreviewMimeType } from './botInteractions.js';
+import type { ReleaseCompatibilityResult } from './releaseCompatibility.js';
+import type { ServerInviteResult } from './serverInvites.js';
+import type { NativeScreenCommand, NativeScreenCommandResult, NativeScreenEvent, NativeScreenReply } from './nativeScreenIpc.js';
+import type { NativeScreenCaptureMode } from './screenSharing.js';
+import type {
+  LocalExecutionMutationResult,
+  LocalExecutionSnapshot,
+  LocalPermissionChange,
+  LocalToolId,
+  LocalPreparationInput,
+  LocalPreparationResult,
+  LocalTaskStartInput,
+  LocalTaskStartResult,
+  LocalFrameReadInput,
+  LocalFrameReadResult,
+  LocalFrameProgress,
+  LocalRequestCancellation,
+  LocalTaskPause,
+  LocalConnectionState,
+  LocalTaskFailureEvent,
+} from './localExecution.js';
+
+export interface RendererBootstrapFailure {
+  phase: 'constructor' | 'initialization';
+  errorName: string;
+  /** Only sanitized app source locations survive validation in Main. */
+  stack?: string;
+}
+
+export const DEVELOPMENT_QA_IPC = {
+  config: 'development-qa:config',
+  report: 'development-qa:report',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const SERVER_INVITE_IPC = {
+  take: 'server-invite:take',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const SERVER_INVITE_AVAILABLE = 'server-invite:available' satisfies keyof IpcEvents;
+
+export type CrashRecoveryActionResult =
+  | { ok: true; copied?: boolean }
+  | { ok: false; reason: 'unavailable' | 'open-failed' | 'copy-failed' | 'restart-failed'; copied?: boolean };
+
+export const CRASH_RECOVERY_IPC = {
+  bootstrapFailed: 'crash-recovery:bootstrap-failed',
+  ready: 'crash-recovery:ready',
+  report: 'crash-recovery:report',
+  copy: 'crash-recovery:copy',
+  reopen: 'crash-recovery:reopen',
+  close: 'crash-recovery:close',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export interface DesktopSource {
   id: string;
   name: string;
   type: 'screen' | 'window';
+  displayNumber?: number;
   thumbnailDataUrl: string;
   appIconDataUrl: string | null;
 }
@@ -35,6 +90,114 @@ export interface SoundboardSoundData {
   dataUrl: string;
   sizeBytes: number;
 }
+
+export interface SoundboardDownloadKey {
+  connectionId: string;
+  invocationId: string;
+  downloadId: string;
+}
+
+export interface SoundboardDownloadAuthorization {
+  connectionId: string;
+  invocationId: string;
+  configuredFolder: string;
+  expiresAt: number;
+}
+
+export type SoundboardDownloadAvailability = 'ready' | 'no_folder' | 'confirmation_required' | 'unavailable';
+
+export type SoundboardDownloadPermit =
+  | { status: 'authorized'; token: string }
+  | { status: 'failed'; reason: 'no_folder' | 'invalid_request' | 'write_failed' };
+
+export interface SoundboardDownloadInput extends SoundboardDownloadKey, SoundDownloadRequest {
+  token: string;
+  expiresAt: number;
+}
+
+export interface SoundboardDownloadProgress extends SoundboardDownloadKey {
+  receivedBytes: number;
+  totalBytes?: number;
+}
+
+export type SoundboardDownloadCancellation = Omit<SoundboardDownloadKey, 'downloadId'> & { downloadId?: string };
+
+export const SOUND_DOWNLOAD_IPC = {
+  defaultFolder: 'soundboard:default-folder',
+  availability: 'soundboard:download-availability',
+  confirmFolder: 'soundboard:confirm-download-folder',
+  authorize: 'soundboard:authorize-download',
+  download: 'soundboard:download-sound',
+  cancel: 'soundboard:cancel-download',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const SOUND_DOWNLOAD_PROGRESS = 'soundboard:download-progress' satisfies keyof IpcEvents;
+
+export type AudioPreviewInput = {
+  requestId: string;
+  fileName?: string;
+} & (
+  | { url: string; audioBase64?: never; mimeType?: never }
+  | { audioBase64: string; mimeType: CommandAudioPreviewMimeType; url?: never }
+);
+
+export interface AudioPreviewCancellation {
+  requestId: string;
+}
+
+export type AudioPreviewFailureReason = SoundDownloadFailureReason | CommandAudioPreviewFailureReason;
+
+export type AudioPreviewResult =
+  | { status: 'ready'; data: Uint8Array; mimeType: string }
+  | { status: 'cancelled' }
+  | { status: 'failed'; reason: AudioPreviewFailureReason };
+
+export const AUDIO_PREVIEW_IPC = {
+  load: 'audio-preview:load',
+  cancel: 'audio-preview:cancel',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const LOCAL_EXECUTION_IPC = {
+  getState: 'local-execution:get-state',
+  setPermission: 'local-execution:set-permission',
+  removeTool: 'local-execution:remove-tool',
+  clearCache: 'local-execution:clear-cache',
+  cancelTask: 'local-execution:cancel-task',
+  prepare: 'local-execution:prepare',
+  startTask: 'local-execution:start-task',
+  readFrames: 'local-execution:read-frames',
+  acknowledgeFrames: 'local-execution:acknowledge-frames',
+  cancelRequest: 'local-execution:cancel-request',
+  setPaused: 'local-execution:set-paused',
+  setConnection: 'local-execution:set-connection',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
+export const LOCAL_EXECUTION_CHANGED = 'local-execution:changed' satisfies keyof IpcEvents;
+export const LOCAL_EXECUTION_TASK_FAILED = 'local-execution:task-failed' satisfies keyof IpcEvents;
+
+export type LocalPreparationDialogAction = 'deny' | 'connection' | 'always' | 'confirm' | 'retry' | 'cancel' | 'close';
+
+export interface LocalPreparationDialogState {
+  phase: 'consent' | 'installing' | 'cancelling' | 'failed' | 'complete';
+  title: string;
+  status: string;
+  detail: string;
+  storage: string;
+  progress: number | null;
+  tools: Array<{
+    id: LocalToolId;
+    status: string;
+    size: string;
+    ready: boolean;
+    active: boolean;
+  }>;
+}
+
+export const LOCAL_PREPARATION_DIALOG_IPC = {
+  state: 'local-preparation-dialog:state',
+  action: 'local-preparation-dialog:action',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const LOCAL_PREPARATION_DIALOG_CHANGED = 'local-preparation-dialog:changed' satisfies keyof IpcEvents;
 
 /** One custom sticker image found in the user's stickers folder (#356). */
 export interface StickerEntry {
@@ -145,7 +308,17 @@ export interface UpdateCheckResult {
   available?: boolean;
   version?: string;
   error?: string;
+  compatibility?: ReleaseCompatibilityResult;
 }
+
+export const UPDATER_IPC = {
+  setChannel: 'updater:set-channel',
+  check: 'updater:check',
+  download: 'updater:download',
+  install: 'updater:install',
+  outcome: 'updater:outcome',
+  releaseNotes: 'updater:release-notes',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export interface UpdateSimpleResult {
   ok: boolean;
@@ -285,11 +458,14 @@ export interface OverlayParticipantState {
   isSpeaking: boolean;
   isMuted: boolean;
   isDeafened: boolean;
+  serverMuted?: boolean;
+  serverDeafened?: boolean;
   isCameraOn: boolean;
   screenShareIds: string[];
   isLocal: boolean;
   videoSlotIndex?: number;
   screenSlotIndexes?: Record<string, number>;
+  screenCaptureModes?: Record<string, NativeScreenCaptureMode>;
 }
 
 export interface OverlaySyncState {
@@ -305,10 +481,179 @@ export interface OverlaySignalPayload {
   signal: string; // JSON com Offer/Answer/Candidate
 }
 
+export interface NativeScreenAudioOutputConfig {
+  epoch: number;
+  sinkId: string;
+  sampleRate: 48000;
+  channels: 2;
+}
+
+export interface NativeScreenAudioClockProbeRequest {
+  epoch: number;
+  probeId: number;
+}
+
+export interface NativeScreenAudioClockProbe extends NativeScreenAudioClockProbeRequest {
+  rtcBeforeUs: number;
+  rtcAfterUs: number;
+}
+
+export interface NativeScreenAudioCalibrationRequest extends NativeScreenAudioClockProbeRequest {
+  rendererBeforeUs: number;
+  rendererAfterUs: number;
+}
+
+export interface NativeScreenAudioCalibration {
+  epoch: number;
+  calibrationId: number;
+  offsetUs: number;
+  uncertaintyUs: number;
+}
+
+export type NativeScreenAudioFeedback =
+  | { epoch: number; available: false }
+  | {
+    epoch: number;
+    available: true;
+    clockEpoch: number;
+    calibrationId: number;
+    atPerformanceTimeUs: number;
+    estimatedPlayoutFrame: number;
+    confirmedPcmEnd: number;
+    feedbackAgeUs: number;
+    outputClockAgeUs: number;
+  };
+
+export interface NativeScreenAudioCredits {
+  epoch: number;
+  grantSequence: number;
+  frames: 480 | 960;
+}
+
+export interface NativeScreenAudioPcmPacket {
+  epoch: number;
+  sequence: number;
+  firstPlayoutFrame: number;
+  frames: 480;
+  sampleRate: 48000;
+  channels: 2;
+  samples: Float32Array;
+}
+
+export interface NativeScreenAudioError {
+  code: string;
+  message: string;
+}
+
+export interface NativeScreenAudioRpc {
+  configure: {
+    request: NativeScreenAudioOutputConfig;
+    result: Omit<NativeScreenAudioOutputConfig, 'sinkId'>;
+  };
+  probe: {
+    request: NativeScreenAudioClockProbeRequest;
+    result: NativeScreenAudioClockProbe;
+  };
+  calibrate: {
+    request: NativeScreenAudioCalibrationRequest;
+    result: NativeScreenAudioCalibration;
+  };
+  stop: {
+    request: { epoch: number };
+    result: { epoch: number; stopped: true };
+  };
+}
+
+export interface NativeScreenAudioPortEvents {
+  ready: NativeScreenAudioOutputConfig;
+  disposed: NativeScreenAudioRpc['stop']['result'];
+  pcm: NativeScreenAudioPcmPacket;
+  credits: NativeScreenAudioCredits;
+  feedback: NativeScreenAudioFeedback;
+  error: NativeScreenAudioError;
+}
+
+export interface NativeScreenAudioPortScope {
+  portId: string;
+  epoch: number;
+}
+
+export interface NativeScreenAudioPortInfo {
+  version: 1;
+  sessionId: string;
+  portId: string;
+  output: NativeScreenAudioOutputConfig;
+}
+
+export type NativeScreenAudioRequest = {
+  [Method in keyof NativeScreenAudioRpc]: {
+    type: 'request';
+    id: number;
+    method: Method;
+    data: NativeScreenAudioRpc[Method]['request'];
+  };
+}[keyof NativeScreenAudioRpc] & NativeScreenAudioPortScope;
+
+export type NativeScreenAudioResponse = {
+  [Method in keyof NativeScreenAudioRpc]: {
+    type: 'response';
+    id: number;
+    method: Method;
+  } & (
+    | { ok: true; data: NativeScreenAudioRpc[Method]['result'] }
+    | { ok: false; error: NativeScreenAudioError }
+  );
+}[keyof NativeScreenAudioRpc] & NativeScreenAudioPortScope;
+
+export type NativeScreenAudioPortEvent = {
+  [Event in keyof NativeScreenAudioPortEvents]: {
+    type: 'event';
+    event: Event;
+    data: NativeScreenAudioPortEvents[Event];
+  };
+}[keyof NativeScreenAudioPortEvents] & NativeScreenAudioPortScope;
+
+export type NativeScreenAudioPortMessage =
+  | NativeScreenAudioRequest
+  | NativeScreenAudioResponse
+  | NativeScreenAudioPortEvent;
+
+// These channels transfer one private MessagePort, not a renderer-facing invoke API.
+export interface IpcPortEvents {
+  'native-screen:audio-output-port': NativeScreenAudioPortInfo;
+  'native-screen:preview-port': import('./nativeScreenIpc.js').NativeScreenPreviewInfo;
+}
+
+export const NATIVE_SCREEN_PREVIEW_IPC = {
+  port: 'native-screen:preview-port',
+} as const satisfies Record<string, keyof IpcPortEvents>;
+
+export const NATIVE_SCREEN_AUDIO_IPC = {
+  outputPort: 'native-screen:audio-output-port',
+} as const satisfies Record<string, keyof IpcPortEvents>;
+
+export const NATIVE_SCREEN_IPC = {
+  invoke: 'native-screen:invoke',
+  reply: 'native-screen:reply',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEvents;
+
 /**
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
  */
 export interface IpcInvokeChannels {
+  'native-screen:invoke': { args: [command: NativeScreenCommand]; returnType: NativeScreenCommandResult };
+  'native-screen:reply': { args: [reply: NativeScreenReply]; returnType: void };
+  'server-invite:take': { args: []; returnType: ServerInviteResult | null };
+  'development-qa:config': { args: []; returnType: DevelopmentQaConfig | null };
+  'development-qa:report': { args: [report: DevelopmentQaReport]; returnType: boolean };
+  // Local fatal-failure recovery, not a client/server protocol change (#454).
+  'crash-recovery:bootstrap-failed': { args: [failure: RendererBootstrapFailure]; returnType: boolean };
+  'crash-recovery:ready': { args: []; returnType: boolean };
+  'crash-recovery:report': { args: []; returnType: CrashRecoveryActionResult };
+  'crash-recovery:copy': { args: []; returnType: CrashRecoveryActionResult };
+  'crash-recovery:reopen': { args: []; returnType: CrashRecoveryActionResult };
+  'crash-recovery:close': { args: []; returnType: boolean };
   // Janela
   'window:minimize': { args: []; returnType: void };
   'window:maximize': { args: []; returnType: void };
@@ -378,9 +723,32 @@ export interface IpcInvokeChannels {
   'dialog:select-stickers-folder': { args: []; returnType: string | null };
 
   // Soundboard
+  'soundboard:default-folder': { args: []; returnType: string | null };
   'soundboard:list-sounds': { args: [folderPath: string]; returnType: SoundboardSoundEntry[] };
   'soundboard:read-sound': { args: [filePath: string]; returnType: SoundboardSoundData | null };
+  'soundboard:download-availability': { args: [configuredFolder: string]; returnType: SoundboardDownloadAvailability };
+  'soundboard:confirm-download-folder': { args: [configuredFolder: string]; returnType: boolean };
+  'soundboard:authorize-download': { args: [input: SoundboardDownloadAuthorization]; returnType: SoundboardDownloadPermit };
+  'soundboard:download-sound': { args: [input: SoundboardDownloadInput]; returnType: SoundDownloadResult };
+  'soundboard:cancel-download': { args: [key: SoundboardDownloadCancellation]; returnType: boolean };
+  'audio-preview:load': { args: [input: AudioPreviewInput]; returnType: AudioPreviewResult };
+  'audio-preview:cancel': { args: [input: AudioPreviewCancellation]; returnType: boolean };
   'soundboard:register-shortcuts': { args: [shortcuts: SoundboardShortcutBinding[]]; returnType: boolean };
+
+  'local-execution:get-state': { args: []; returnType: LocalExecutionSnapshot };
+  'local-execution:set-permission': { args: [input: LocalPermissionChange]; returnType: LocalExecutionMutationResult };
+  'local-execution:remove-tool': { args: [tool: LocalToolId]; returnType: LocalExecutionMutationResult };
+  'local-execution:clear-cache': { args: []; returnType: LocalExecutionMutationResult };
+  'local-execution:cancel-task': { args: [taskId: string]; returnType: LocalExecutionMutationResult };
+  'local-execution:prepare': { args: [input: LocalPreparationInput]; returnType: LocalPreparationResult };
+  'local-execution:start-task': { args: [input: LocalTaskStartInput]; returnType: LocalTaskStartResult };
+  'local-execution:read-frames': { args: [input: LocalFrameReadInput]; returnType: LocalFrameReadResult };
+  'local-execution:acknowledge-frames': { args: [input: LocalFrameProgress]; returnType: LocalExecutionMutationResult };
+  'local-execution:cancel-request': { args: [input: LocalRequestCancellation]; returnType: LocalExecutionMutationResult };
+  'local-execution:set-paused': { args: [input: LocalTaskPause]; returnType: LocalExecutionMutationResult };
+  'local-execution:set-connection': { args: [input: LocalConnectionState]; returnType: LocalExecutionMutationResult };
+  'local-preparation-dialog:state': { args: []; returnType: LocalPreparationDialogState };
+  'local-preparation-dialog:action': { args: [action: LocalPreparationDialogAction]; returnType: void };
 
   // Figurinhas do chat (#356)
   'stickers:list': { args: [folderPath: string]; returnType: StickerEntry[] };
@@ -417,7 +785,7 @@ export interface IpcInvokeChannels {
   // Atualizador
   'updater:set-channel': { args: [allowBeta: boolean]; returnType: UpdateSimpleResult };
   'updater:check': { args: []; returnType: UpdateCheckResult };
-  'updater:download': { args: [allowBeta: boolean]; returnType: UpdateSimpleResult };
+  'updater:download': { args: [expectedVersion?: string]; returnType: UpdateSimpleResult };
   'updater:install': { args: []; returnType: UpdateSimpleResult };
   'updater:outcome': { args: []; returnType: UpdateOutcome | null };
   'updater:release-notes': { args: [tag?: string]; returnType: ReleaseNotesResult };
@@ -435,12 +803,18 @@ export interface IpcInvokeChannels {
  * Mapeamento de Eventos Unidirecionais (Main -> Renderer via webContents.send)
  */
 export interface IpcEvents {
+  'native-screen:event': [event: NativeScreenEvent];
+  'server-invite:available': [];
   // Pedido de despedida antes do processo morrer: o renderer sai das chamadas e
   // avisa os servidores enquanto ainda esta vivo (#458)
   'app:before-quit': [];
   'lan:found': [server: DiscoveredLanServer];
   'lan:lost': [server: DiscoveredLanServer];
   'soundboard:shortcut-triggered': [soundName: string];
+  'soundboard:download-progress': [progress: SoundboardDownloadProgress];
+  'local-execution:changed': [snapshot: LocalExecutionSnapshot];
+  'local-execution:task-failed': [failure: LocalTaskFailureEvent];
+  'local-preparation-dialog:changed': [state: LocalPreparationDialogState];
   'shortcut:action-triggered': [action: string];
   'ptt:state-changed': [active: boolean];
   'ptt:captured': [binding: PttKeyBinding];

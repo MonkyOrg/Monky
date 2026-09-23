@@ -1,0 +1,81 @@
+#ifndef MSC_DEVICE_HPP
+#define MSC_DEVICE_HPP
+
+#include "Transport.hpp"
+#include <json.hpp>
+#include <map>
+#include <string>
+
+namespace mediasoupclient
+{
+	class Device
+	{
+	public:
+		Device()  = default;
+		~Device() = default;
+
+		bool IsLoaded() const;
+		const nlohmann::json& GetRtpCapabilities() const;
+		[[deprecated("Use Load(routerRtpCapabilities, peerConnectionOptions, preferLocalCodecsOrder)")]]
+		void Load(
+		  nlohmann::json routerRtpCapabilities,
+		  const PeerConnection::Options* peerConnectionOptions = nullptr);
+		void Load(
+		  nlohmann::json routerRtpCapabilities,
+		  const PeerConnection::Options* peerConnectionOptions,
+		  bool preferLocalCodecsOrder);
+		bool CanProduce(const std::string& kind);
+		SendTransport* CreateSendTransport(
+		  SendTransport::Listener* listener,
+		  const std::string& id,
+		  const nlohmann::json& iceParameters,
+		  const nlohmann::json& iceCandidates,
+		  const nlohmann::json& dtlsParameters,
+		  const nlohmann::json& sctpParameters,
+		  const PeerConnection::Options* peerConnectionOptions = nullptr,
+		  const nlohmann::json& appData                        = nlohmann::json::object()) const;
+		SendTransport* CreateSendTransport(
+		  SendTransport::Listener* listener,
+		  const std::string& id,
+		  const nlohmann::json& iceParameters,
+		  const nlohmann::json& iceCandidates,
+		  const nlohmann::json& dtlsParameters,
+		  const PeerConnection::Options* peerConnectionOptions = nullptr,
+		  const nlohmann::json& appData                        = nlohmann::json::object()) const;
+		RecvTransport* CreateRecvTransport(
+		  RecvTransport::Listener* listener,
+		  const std::string& id,
+		  const nlohmann::json& iceParameters,
+		  const nlohmann::json& iceCandidates,
+		  const nlohmann::json& dtlsParameters,
+		  const nlohmann::json& sctpParameters,
+		  const PeerConnection::Options* peerConnectionOptions = nullptr,
+		  const nlohmann::json& appData                        = nlohmann::json::object()) const;
+		RecvTransport* CreateRecvTransport(
+		  RecvTransport::Listener* listener,
+		  const std::string& id,
+		  const nlohmann::json& iceParameters,
+		  const nlohmann::json& iceCandidates,
+		  const nlohmann::json& dtlsParameters,
+		  const PeerConnection::Options* peerConnectionOptions = nullptr,
+		  const nlohmann::json& appData                        = nlohmann::json::object()) const;
+
+	private:
+		// Loaded flag.
+		bool loaded{ false };
+		// Extended RTP capabilities.
+		std::function<nlohmann::json(nlohmann::json&)> getSendExtendedRtpCapabilities;
+		// Local RTP capabilities for receiving media.
+		nlohmann::json recvRtpCapabilities;
+		// Whether we can produce audio/video based on computed extended RTP capabilities.
+		// clang-format off
+		std::map<std::string, bool> canProduceByKind =
+		{
+			{ "audio", false },
+			{ "video", false }
+		};
+		// clang-format on
+	};
+} // namespace mediasoupclient
+
+#endif

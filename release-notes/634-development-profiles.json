@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "A versão de desenvolvimento usa um perfil separado por checkout e pode rodar ao lado do Monky instalado sem compartilhar identidade, configurações, cache ou servidores. Perfis explícitos continuam disponíveis para testar vários participantes.",
+  "en": "Development builds use a separate profile per checkout and can run beside installed Monky without sharing identity, settings, cache or servers. Explicit profiles remain available for testing multiple participants."
+}

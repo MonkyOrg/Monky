@@ -5,7 +5,7 @@
 Obrigado pelo interesse! Este documento explica como propor ideias, votar no que
 vem primeiro e — se você quiser codar — como abrir um PR que entra sem atrito.
 
-O Monky é MIT e o desenvolvimento acontece todo em público, nas
+O Monky é GPL-3.0-or-later e o desenvolvimento acontece todo em público, nas
 [Issues](https://github.com/MonkyOrg/Monky/issues).
 
 ---
@@ -94,17 +94,48 @@ primeiro* — num bug a pergunta é apenas *isso está quebrado?*.
 
 ### Rodando o projeto
 
-Requisitos: **Node.js 22+** e as ferramentas de build nativas da sua plataforma
-(o módulo de captura de áudio de tela é C++: MSVC no Windows, Xcode Command Line
-Tools no macOS).
+Requisitos: **Node.js 22+**, npm e as ferramentas de build nativas da sua
+plataforma (os módulos nativos usam C++: Python 3.11 x64 e Visual Studio
+**2022 (17.x)** no Windows, Xcode Command Line Tools no macOS). O preparo de
+captura usa um seletor compartilhado de v143/MSVC 14.30–14.44, ATL/MFC e SDK
+10.0.26100.0 com servicing mínimo 10.0.26100.3323; não escolhe VS2026/latest.
 
 ```bash
 git clone https://github.com/MonkyOrg/Monky.git
 cd Monky
-npm install
+npm ci
 npm run build
 npm start
 ```
+
+Na UI, use as duas abas **Telas** e **Janelas**. Selecione uma janela antes de
+escolher **Captura de janela (WGC)** (padrão) ou **Captura de jogo (hook)**.
+Não há aba Jogos nem detecção automática de jogos; selecionar fonte ou método
+não executa probe/hook antes de confirmar o compartilhamento.
+
+O compartilhamento nativo no Windows x64 implementa janela/monitor por WGC e
+Game Capture explícito, com H.264 por AMD AMF ou NVIDIA NVENC e WebRTC fixado.
+Consulte o [guia do módulo](apps/client/native/screen-share/README.md) para
+ATL/MFC/Windows SDK, recompilar os addons para o Electron correto e executar
+`prepare:native-screen` antes de testar ou empacotar. `npm ci` e
+`npm run build` sozinhos não preparam o SDK/runtime. O Main verifica a fonte
+somente após confirmação; hardware desconhecido aparece com probe pendente,
+não qualificado. Não há fallback automático de captura para Chromium/software,
+AV1 ou outra fonte; o limite atual de adapter 0 também vale para NVENC.
+No primeiro preparo, ou se mudarem as fontes do addon ou o Electron, siga
+`buildScreenAudio.cjs` no guia, depois de `prepare:native-screen`: ele usa
+`node-gyp` local, o Electron instalado e a mesma seleção VS2022/MSVC/SDK.
+O preparo de `screen-share` não gera esse addon; um `screen_audio.node` antigo
+pode não ter as funções de monitor/identidade ou ACKs PCM. Se já está compatível,
+uma atualização somente de scripts/TypeScript não exige recompilá-lo novamente.
+
+Para redistribuir um build, inclua as licenças, o código da mesma tag e
+`monky-native-sources-<versao>.tar.xz` com seu manifesto JSON, gerados por
+`npm run pack:native-sources -- --version=<versao>` após o preparo completo.
+O guia detalha o conteúdo OBS/NVENC/hooks, a reconstrução e o requisito de
+`publicationReady: true`; não substitua os helpers fixados por downloads
+autônomos de compatibilidade. `npm run package` usa electron-builder e gera
+`release\win-unpacked\Monky.exe` e `release\Monky-Windows.zip`.
 
 Durante o desenvolvimento, em dois terminais:
 
@@ -129,6 +160,82 @@ npm run pack:cli     # gera o tarball que vai para a release
 Para experimentar o CLI sem mexer nos seus servidores reais, aponte a variável
 `MONKY_HOME` para uma pasta descartável — é lá que fica o registro de servidores
 da máquina.
+
+### QA preparado, sem pular o alvo do teste
+
+Use `npm run qa -- <cenário>` para compilar esta branch e abrir **o aplicativo real**
+com servidor, perfil, identidade e dados descartáveis próprios. `npm start` e a
+instalação continuam inalterados. Nada é copiado do perfil instalado.
+
+| Cenário | O que já fica preparado | O que não é pulado |
+|---|---|---|
+| `connected` (padrão) | Identidade nova, autenticação como primeiro administrador, canais e mensagem de exemplo | A funcionalidade que será exercitada no chat |
+| `server-settings` | O mesmo, com Geral nas configurações reais aberto | Alterar/aplicar configurações |
+| `voice` | Usuário mutado, dispositivos sintéticos e segundo participante SDK por P2P real | Teste de voz; a fixture é identificada e não simula música de produção |
+| `voice-receive` | Fixture SDK com permissão somente para ouvir, usuário mutado e indicadores reais na sala | `/qa-listen` alterna a escuta; desmutar envia áudio sintético, sem captura física nem gravação |
+| `home` | Identidade nova e introdução concluída; Home sem servidores salvos | Navegação/adição na Home e entrada no servidor |
+| `login` | Home com endereço local, apelido e senha de teste preenchidos | Enviar o formulário e autenticar |
+| `bot-install` | Servidor conectado e URL do bot preenchida nas configurações | Instalar/vincular o bot |
+| `tool-consent` | Bot instalado, catálogo registrado e comando local preenchido | Escolher o comando, consentir e preparar ferramentas |
+| `music` | MonkyBot de produção, voz e preparação local real | Consentimento humano obrigatório; só fica pronto após autorização e ferramentas verificadas. A música não é executada automaticamente |
+
+```powershell
+npm run qa -- server-settings
+npm run qa -- voice
+npm run qa -- voice-receive
+npm run qa -- bot-install --bot=fixture
+npm run qa -- tool-consent --bot=fixture
+npm run qa -- music --bot-root="C:\Projetos\MonkyBot"
+npm run qa -- connected --smoke
+```
+
+`--bot=fixture` é uma fixture SDK claramente identificada, nunca substituição do
+MonkyBot. `--bot-root` usa os comandos compilados reais de um checkout explícito
+de `@monky/bot`, com protocolo compatível; compile esse checkout antes, sem copiar
+suas chaves, registros ou consentimentos. O launcher não instala dependências nem
+mascara bot, manifest ou ferramenta ausentes.
+
+O módulo compilado `dist\commands\index.js` do MonkyBot precisa exportar
+`registerAllCommands` e a mesma `requestedCapabilities` usada por seu próprio
+`BotClient`: QA não inventa a declaração de produção. Nos cenários preparados,
+o owner realiza o preview real e aprova as capacidades declaradas via instalação
+autorizada. A fixture solicita apenas comandos e execução local, mais publicação
+de voz em `voice` ou recepção em `voice-receive`. Neste último, o bot conta pacotes
+sem guardar seu conteúdo e não mostra proibição de transmitir, pois não solicita
+essa capacidade. Mute/deafen administrativo ainda exibe o respectivo bloqueio.
+`/qa-local-consent` também permite exercitar a preparação de comandos
+sem conceder consentimento local automaticamente. `bot-install` deixa instalação
+e revisão pendentes; permissão
+do servidor nunca substitui o consentimento local de `tool-consent`/`music`.
+
+Para testar a admissão do bot na chamada, use `connected --bot-root=...`, não
+`voice`/`voice-receive`/`music`: esses cenários já colocam o bot na voz.
+
+Aguarde **QA_READY**, não apenas a abertura da janela. O launcher confere que a
+janela está visível no modo interativo e oculta em `--smoke`. Servidor, autenticação,
+mensagem persistida, catálogo e peer de voz são conferidos conforme o cenário.
+Os serviços usam loopback, não anunciam na LAN, e os dados ficam exclusivamente
+em `.qa\runs\<cenário>-<id>`, apagados ao encerrar. Fechar a janela ou usar `Ctrl+C`
+encerra os processos próprios; falhas de inicialização também fazem essa limpeza.
+
+`--smoke` verifica a prontidão com janela oculta e encerra tudo. Música de produção
+não pode aprovar consentimento sem pessoa: nesse modo ela falha claramente se a
+preparação depender de autorização. Após um build, `npm run test:qa` cobre o
+launcher e os cenários reais; `node scripts\qa.js connected --smoke` reutiliza
+esse build sem recompilar.
+
+No CI do macOS, os testes reais usam um Keychain temporário desbloqueado, com
+restauração ao final. A identidade continua passando pelo `safeStorage` do
+aplicativo; a preparação não desliga a criptografia para evitar prompts.
+O processo Electron preserva `HOME` no macOS para acessar esse serviço do sistema.
+Perfil, identidade, cache e `MONKY_HOME` continuam nos caminhos explícitos de QA;
+os workers de servidor/bot mantêm também `HOME` isolado.
+
+Esse modo desliga atualizações automáticas, descoberta LAN e atalhos globais e
+usa captura sintética. **Não o use para testar essas etapas, identidade,
+onboarding ou hardware real**: use `npm start` com outro `--user-data-dir` isolado
+e realize explicitamente a etapa sob teste. O cenário `voice` não substitui QA
+com duas máquinas para problemas de rede, dispositivos ou SFU.
 
 ### Antes de começar a codar
 
@@ -199,6 +306,42 @@ Se a sua mudança quebra a compatibilidade entre cliente e servidor, ela
 **precisa** sair como major. Marcar uma breaking change como `feat:` publica uma
 minor, e quem atualizar só um dos lados fica sem conseguir conectar.
 
+### Notas da versão: dois públicos, dois textos
+
+O **changelog técnico do GitHub** continua vindo dos commits: mantenha os
+detalhes, as referências `#123:` no corpo e as informações de compatibilidade.
+O **resumo mostrado no app** vem de arquivos separados, escritos para quem usa
+o Monky, não para quem desenvolve.
+
+Para uma mudança visível no app, adicione um arquivo novo em
+`release-notes/`, como `release-notes/617-copy-version.json`:
+
+```json
+{
+  "group": "novidades",
+  "pt-BR": "Quer compartilhar sua versão do Monky? Clique nela para copiar. Sem decorar os números!",
+  "en": "Need to share your Monky version? Click it to copy. No need to memorize the numbers!"
+}
+```
+
+- Use `novidades`, `correcoes` ou `outros`; grupos vazios não aparecem.
+- Escreva nos **dois idiomas**, com até 280 caracteres por texto. Conte o que a
+  pessoa pode fazer ou o incômodo que deixou de existir. Seja breve, natural e
+  levemente divertido, sem inventar benefícios.
+- Não inclua números de issues, links, código ou instruções de implementação.
+  Mudanças apenas internas podem ficar só no changelog técnico.
+- Mantenha os arquivos publicados: **não os renomeie nem reaproveite** para uma
+  mudança nova. O gerador lê os arquivos adicionados entre a tag anterior e o
+  `HEAD`; promover uma beta usa a tag estável anterior e reúne as notas das betas.
+  Arquivos ainda não commitados não entram na geração de uma release.
+
+`node scripts/test-changelog.js` valida o formato e os arquivos de notas.
+`scripts/generate-changelog.js` publica as traduções em um bloco de dados oculto
+na descrição da release, separado do `Changelog` técnico. O cliente continua
+buscando a tag instalada pela API do GitHub, sem serviço de tradução.
+Releases antigas exibem uma contagem de mudanças identificada como resumo e
+um botão para os detalhes no GitHub; não tentamos traduzir commits automaticamente.
+
 ### O que o CI verifica
 
 Todo PR roda o workflow de **CI**. Além do build, ele tem verificações que barram
@@ -263,4 +406,5 @@ abstrato.
 ## 📜 Licença
 
 Ao contribuir, você concorda que sua contribuição será licenciada sob a
-[licença MIT](LICENSE) do projeto.
+[GNU GPL versão 3 ou posterior](LICENSE) do projeto. Preserve os avisos de
+copyright e as licenças de terceiros; a integração com libobs não os substitui.

@@ -113,20 +113,44 @@ jobs:
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vsversion: '2022'
+          toolset: '14.44'
+          sdk: '10.0.26100.0'
 
       - name: Install dependencies
         run: npm ci
 
-      # Upgrade node-gyp so @electron/rebuild can find VS 2022
-      - name: Install node-gyp globally (Windows)
+      - name: Use lockfile node-gyp (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          npm install -g node-gyp@latest
-          echo "NODE_GYP_PATH=$(npm prefix -g)/node_modules/node-gyp/bin/node-gyp.js" >> $GITHUB_ENV
+          $NodeGyp = node -p "require.resolve('node-gyp/bin/node-gyp.js')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "NODE_GYP_PATH=$NodeGyp" >> $env:GITHUB_ENV
 
       - name: Build workspaces
         run: npm run build
+
+      # Separate from PR-produced caches; each used archive is rehashed against
+      # its immutable pin by fetchObs before extraction. No native outputs.
+      - name: Cache verified native screen archives (Windows)
+        if: runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
+        uses: actions/cache@v4
+        with:
+          path: .native-screen\downloads
+          key: native-screen-archives-v1-release-windows-x64-${{ hashFiles('apps/client/native/screen-share/scripts/fetchObs.cjs', 'apps/client/native/screen-share/scripts/buildTools.cjs', 'apps/client/native/screen-share/src/vendor/obs/sources.json', 'apps/client/native/screen-share/src/vendor/obs/runtime-inputs.json', 'apps/client/native/screen-share/src/capture/runtime-additions.json') }}
+
+      - name: Build native screen runtime and corresponding sources (Windows)
+        if: runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
+        shell: pwsh
+        run: |
+          $env:PYTHON = (Get-Command python).Source
+          "PYTHON=$env:PYTHON" >> $env:GITHUB_ENV
+          $Git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+          npm run prepare:native-screen -- --python="$env:PYTHON" --git="$Git" --jobs=4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run pack:native-sources -- --version=${{ needs.version.outputs.version }}
 
       - name: Set build version
         shell: bash
@@ -183,6 +207,8 @@ jobs:
             release/*.exe
             release/*.dmg
             release/*.zip
+            release/monky-native-sources-*.tar.xz
+            release/monky-native-sources-*.json
             release/*.blockmap
             release/latest*.yml
 
@@ -215,6 +241,10 @@ jobs:
       - name: Build bot-sdk
         run: npm run build --workspace=packages/bot-sdk
 
+      - name: Prepare the SFU worker for SDK voice tests
+        if: hashFiles('packages/bot-sdk/test/voice-transport.test.js') != ''
+        run: npm rebuild mediasoup
+
       - name: Test bot-sdk interactions
         if: hashFiles('packages/bot-sdk/test/client.test.cjs') != ''
         run: npm run test --workspace=packages/bot-sdk
@@ -240,7 +270,9 @@ jobs:
           name: dist-cli
           if-no-files-found: error
           retention-days: 7
-          path: release/monky-cli-*.tgz
+          path: |
+            release/monky-cli-*.tgz
+            release/monky-compatibility-*.json
 
       - name: Pack bot-sdk
         id: pack-sdk
@@ -291,21 +323,27 @@ jobs:
           PREV_TAG="${{ needs.version.outputs.prev_tag }}"
           echo "Previous tag: ${PREV_TAG:-<none>}"
 
-          # scripts/generate-changelog.js turns the commit range into the
-          # friendly, grouped notes (Novidades / Correções / Outros) shown both
-          # on the release and inside the client (#547). It reads the curated
-          # "#NNN:" lines from commit bodies, falls back to bullets then the
-          # subject, and appends the comparison link.
+          # Technical notes keep commit details, issue references and comparison.
+          # Bilingual release-notes/*.json fragments added in the same range
+          # form a separate hidden payload, used only by the client (#616).
+          # The generator includes the Changelog heading after that payload,
+          # keeping older clients from rendering the JSON.
           NOTES=$(node scripts/generate-changelog.js \
             --prev "$PREV_TAG" \
             --version "${{ needs.version.outputs.version }}" \
             --repo "$GITHUB_REPOSITORY")
+
+          # Promoting a beta from before #616 checks out the old generator.
+          if ! grep -q '^### Changelog$' <<< "$NOTES"; then
+            NOTES=$(printf '### Changelog\n%s' "$NOTES")
+          fi
 
           {
             echo "notes<<CHANGELOG_EOF"
             echo "$NOTES"
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -316,13 +354,24 @@ jobs:
       - name: List artifacts
         run: ls -R artifacts
 
+      - name: Verify corresponding sources before publishing binaries
+        id: native_sources
+        run: |
+          if [ -f apps/client/native/screen-share/scripts/packSources.cjs ]; then
+            node scripts/check-native-source-release.js artifacts \
+              "${{ needs.version.outputs.version }}" "${{ steps.changelog.outputs.commit }}"
+            echo "required=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "required=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Generate checksums and sign artifacts
         run: |
           cd artifacts
-          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.tgz' \) \
+          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.tgz' -o -name '*.tar.xz' -o -name 'monky-native-sources-*.json' -o -name 'monky-compatibility-*.json' \) \
             -exec sha256sum {} + | sort > checksums-sha256.txt
           echo "=== Checksums ==="
           cat checksums-sha256.txt
@@ -334,6 +383,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ steps.changelog.outputs.commit }}
           name: ${{ needs.version.outputs.channel == 'beta' && format('Monky v{0} (Beta)', needs.version.outputs.version) || format('Monky v{0}', needs.version.outputs.version) }}
           body: |
             ${{ needs.version.outputs.channel == 'beta' && '> ⚠️ **Versão beta** — em validação. Só recebe automaticamente quem ativou "Receber versões beta" nas Configurações. Após validada, é promovida a estável.' || 'Release estável do Monky.' }}
@@ -361,6 +411,8 @@ jobs:
               npm install https://github.com/MonkyOrg/Monky/releases/download/v${{ needs.version.outputs.version }}/monky-bot-sdk-${{ needs.version.outputs.version }}.tgz
               ```
 
+            ${{ steps.native_sources.outputs.required == 'true' && format('**Fontes correspondentes (GPL)**: código Monky da mesma tag e `monky-native-sources-{0}.tar.xz`, acompanhado do manifesto JSON. O arquivo inclui fontes nativas, bibliotecas OBS/FFmpeg, receitas e patches; os checksums abaixo também cobrem esses arquivos.', needs.version.outputs.version) || '' }}
+
             ### Verificação de autenticidade
             Todos os artefatos são assinados com [Sigstore Cosign](https://docs.sigstore.dev/) (keyless, via OIDC do GitHub Actions).
 
@@ -377,9 +429,8 @@ jobs:
               checksums-sha256.txt
             ```
 
-            ### Changelog
             ${{ steps.changelog.outputs.notes }}
-          draft: false
+          draft: true
           prerelease: ${{ needs.version.outputs.prerelease }}
           fail_on_unmatched_files: false
 
@@ -396,7 +447,7 @@ jobs:
         run: |
           cd artifacts
           shopt -s nullglob
-          FILES=( *.exe *.dmg *.zip *.tgz *.blockmap latest*.yml checksums-sha256.txt* )
+          FILES=( *.exe *.dmg *.zip *.tgz *.tar.xz *.blockmap latest*.yml monky-native-sources-*.json monky-compatibility-*.json checksums-sha256.txt* )
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "No artifacts to upload." >&2
             exit 1
@@ -425,3 +476,9 @@ jobs:
             exit 1
           fi
           echo "All ${#FILES[@]} assets published."
+
+      - name: Publish the verified release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.version.outputs.version }}
+        run: gh release edit "$TAG" --draft=false

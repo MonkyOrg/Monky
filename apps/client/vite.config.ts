@@ -4,6 +4,13 @@ import path from 'path';
 export default defineConfig({
   root: path.resolve(__dirname, 'src/renderer'),
   base: './',
+  worker: {
+    format: 'es',
+  },
+  optimizeDeps: {
+    // Lazy optimization would reload the renderer during a live call.
+    exclude: ['@mediapipe/tasks-vision'],
+  },
   build: {
     outDir: path.resolve(__dirname, 'dist'),
     emptyOutDir: true,

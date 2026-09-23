@@ -3,7 +3,8 @@ import {
   MessageType, Permission, ProtocolErrorCode, canAccessChannel, hasPermission,
   botSelectorCreateSchema, botSelectorFinalizeSchema, botSelectorIdSchema,
   botSelectorListSchema, botSelectorRespondSchema, botSelectorUpdateSchema,
-  type BotSelector, type BotSelectorPublic, type ChatMessage, type ProtocolMessage,
+  resolveBotSettingsValues,
+  type BotSelector, type BotSelectorPublic, type BotSelectorRespondedPayload, type ChatMessage, type ProtocolMessage,
   type UserSummary,
 } from '@monky/shared';
 import type { BotInteractionSession, SelectorInvocationAuthorization } from './BotInteractionHandler';
@@ -11,13 +12,17 @@ import type { BotSelectorService } from '../../application/services/BotSelectorS
 import type { ChannelService } from '../../application/services/ChannelService';
 import type { UserService } from '../../application/services/UserService';
 import { Logger } from '../logger/Logger';
+import { BotSettingsError, BotSettingsService } from '../../application/services/BotSettingsService';
 
 interface SelectorTransport {
+  allowsBot?(botId: string): boolean;
   sessions(): Iterable<BotInteractionSession>;
   isCurrent(session: BotInteractionSession): boolean;
+  accessVersion(): number;
   send(session: BotInteractionSession, message: ProtocolMessage): void;
   authorizeInvocation(session: BotInteractionSession, invocationId: string, channelId: string): Promise<SelectorInvocationAuthorization | undefined>;
-  publish(bot: UserSummary, channelId: string, content: string, messageId: string, canSend: () => boolean, accessUserId: string): Promise<ChatMessage>;
+  publish(bot: UserSummary, channelId: string, content: string, messageId: string, canSend: () => boolean, accessUserId: string,
+    localizations?: import('@monky/shared').BotMessageLocalizations): Promise<ChatMessage>;
   broadcastMessage(message: ChatMessage): Promise<void>;
 }
 
@@ -34,7 +39,8 @@ export class BotSelectorHandler {
     private selectors: BotSelectorService,
     private channels: ChannelService,
     private users: UserService,
-    private transport: SelectorTransport
+    private transport: SelectorTransport,
+    private settings?: BotSettingsService
   ) {
     this.timer = setInterval(() => {
       void this.enqueue(async () => {
@@ -111,12 +117,57 @@ export class BotSelectorHandler {
           selector = this.selectors.markPublished(selector.id, session.botId!);
         } else if (type === MessageType.SELECTOR_RESPOND) {
           if (session.isBot) throw new SelectorAccessError('Only human members may respond.', ProtocolErrorCode.PERMISSION_DENIED);
-          const input = botSelectorRespondSchema.parse(payload);
+          const parsed = botSelectorRespondSchema.safeParse(payload);
+          if (!parsed.success) {
+            if (parsed.error.issues.some((issue) => issue.path[0] === 'userSettings')) {
+              throw new BotSettingsError(ProtocolErrorCode.BOT_SETTINGS_INVALID, 'Invalid individual preferences.');
+            }
+            throw parsed.error;
+          }
+          const input = parsed.data;
           const existing = this.selectors.get(input.id);
           if (!existing) throw new Error('Selector not found.');
-          await this.requireAccess(session, existing.channelId, true);
-          if (!this.transport.isCurrent(session)) return;
+          if (this.transport.allowsBot?.(existing.botId) === false) {
+            throw new SelectorAccessError('Bot selector permission was revoked.', ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
+          }
+          let owner: BotInteractionSession | undefined;
+          while (true) {
+            const accessVersion = this.transport.accessVersion();
+            owner = undefined;
+            await this.requireAccess(session, existing.channelId, true);
+            for (const candidate of this.transport.sessions()) {
+              if (candidate.isBot && candidate.botId === existing.botId && this.transport.isCurrent(candidate)) {
+                try {
+                  await this.requireOwnerAccess(candidate, existing);
+                  owner = candidate;
+                } catch (error) {
+                  if (!(error instanceof SelectorAccessError)) throw error;
+                }
+                break;
+              }
+            }
+            if (!this.transport.isCurrent(session)) return;
+            if (accessVersion !== this.transport.accessVersion() || (owner && !this.transport.isCurrent(owner))) continue;
+            break;
+          }
+          if (this.transport.allowsBot?.(existing.botId) === false) {
+            throw new SelectorAccessError('Bot selector permission was revoked.', ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
+          }
+          if (!this.settings && !resolveBotSettingsValues(undefined, input.userSettings).success) {
+            throw new BotSettingsError(ProtocolErrorCode.BOT_SETTINGS_INVALID, 'This bot declares no individual preferences.');
+          }
+          const settings = this.settings?.context(existing.botId, input.userSettings);
+          if (settings && owner && !owner.botSettingsReady) {
+            throw new BotSettingsError(ProtocolErrorCode.BOT_COMMAND_BUSY, 'The bot is registering its settings. Retry this response shortly.');
+          }
           selector = this.selectors.respond(input.id, session.user.id, input.value);
+          if (owner && this.transport.isCurrent(owner) && existing.responses[session.user.id] !== input.value) {
+            const response: BotSelectorRespondedPayload = {
+              id: selector.id, channelId: selector.channelId, userId: session.user.id, value: input.value,
+              ...(settings ? { settings } : {}),
+            };
+            this.send(owner, MessageType.SELECTOR_RESPONDED, response);
+          }
         } else {
           this.requireBot(session);
           const input = botSelectorIdSchema.parse(
@@ -139,7 +190,7 @@ export class BotSelectorHandler {
             if (existing.resultMessageId) selector = existing;
             else {
               const messageId = createHash('sha256').update(`selector-result:${existing.id}`).digest('hex');
-              const message = await this.publish(session, existing, final.content, messageId, false);
+              const message = await this.publish(session, existing, final.content, messageId, false, undefined, final.localizations);
               selector = this.selectors.markFinalized(existing.id, session.botId!, message.id);
               await this.transport.broadcastMessage(message);
             }
@@ -153,7 +204,8 @@ export class BotSelectorHandler {
         const message = error instanceof Error ? error.message : 'Selector operation failed.';
         Logger.warn('BOT', `Public selector operation ${type} failed: ${message}`);
         this.send(session, MessageType.SERVER_ERROR,
-          { code: error instanceof SelectorAccessError ? error.code : ProtocolErrorCode.BOT_INTERACTION_INVALID, message }, requestId);
+          { code: error instanceof SelectorAccessError || error instanceof BotSettingsError
+            ? error.code : ProtocolErrorCode.BOT_INTERACTION_INVALID, message }, requestId);
       }
     });
   }
@@ -161,6 +213,14 @@ export class BotSelectorHandler {
   close(): void {
     this.closed = true;
     clearInterval(this.timer);
+  }
+
+  revokeBot(botId: string): Promise<void> {
+    return this.enqueue(async () => {
+      for (const selector of this.selectors.list(botId)) {
+        if (selector.closedAt === null) await this.notify(this.selectors.close(selector.id, botId));
+      }
+    });
   }
 
   private enqueue(work: () => Promise<void>): Promise<void> {
@@ -188,7 +248,7 @@ export class BotSelectorHandler {
     const [channel, context] = await Promise.all([
       this.channels.getChannelSummary(channelId), this.channels.getAccessContext(userId),
     ]);
-    if (!channel || channel.type !== 'TEXT' || !hasPermission(context.permissions, Permission.READ_MESSAGES) ||
+    if (!channel || channel.type !== 'TEXT' || (human && !hasPermission(context.permissions, Permission.READ_MESSAGES)) ||
         !canAccessChannel(channel, context.permissions, context.roleIds)) {
       throw new SelectorAccessError('Channel is unavailable.', ProtocolErrorCode.CHANNEL_NOT_FOUND);
     }
@@ -216,13 +276,14 @@ export class BotSelectorHandler {
 
   private async publish(
     session: BotInteractionSession, selector: BotSelector, content: string, messageId: string,
-    requireEnabled: boolean, invocation?: SelectorInvocationAuthorization
+    requireEnabled: boolean, invocation?: SelectorInvocationAuthorization,
+    localizations?: import('@monky/shared').BotMessageLocalizations
   ): Promise<ChatMessage> {
     const principal = await this.requireOwnerAccess(session, selector, requireEnabled);
     if (!session.user) throw new SelectorAccessError('Authentication is required.', ProtocolErrorCode.UNAUTHORIZED);
     const canSend = () => this.transport.isCurrent(session) && (invocation?.isCurrent() ?? true);
     if (!canSend()) throw new SelectorAccessError('The requesting session or invocation has ended.', ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
-    return this.transport.publish(session.user, selector.channelId, content, messageId, canSend, principal);
+    return this.transport.publish(session.user, selector.channelId, content, messageId, canSend, principal, localizations);
   }
 
   private async publicSnapshot(selector: BotSelector, session: BotInteractionSession): Promise<BotSelectorPublic> {
@@ -239,7 +300,7 @@ export class BotSelectorHandler {
     }
     return {
       ...publicFields, counts, responseCount: Object.keys(responses).length, ownResponse,
-      canRespond: permitted && selector.closedAt === null &&
+      canRespond: permitted && this.transport.allowsBot?.(selector.botId) !== false && selector.closedAt === null &&
         (selector.expiresAt === undefined || selector.expiresAt > Date.now()) &&
         (selector.responder === 'any' || invokerId === session.user!.id) &&
         (selector.allowChange || ownResponse === undefined),

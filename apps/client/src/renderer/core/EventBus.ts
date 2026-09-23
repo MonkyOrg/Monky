@@ -28,13 +28,15 @@ export class EventBus {
   public emit<T = any>(event: string, data?: T): void {
     const set = this.listeners.get(event);
     if (set) {
-      set.forEach((cb) => {
+      // Rebinding a view during dispatch must not replay the same event forever.
+      for (const cb of [...set]) {
+        if (!set.has(cb)) continue;
         try {
           cb(data);
         } catch (err) {
           console.error(`Error in event handler for "${event}":`, err);
         }
-      });
+      }
     }
   }
 

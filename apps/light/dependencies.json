@@ -1,0 +1,53 @@
+{
+  "qualification": "development-only",
+  "buildTools": {
+    "ciCmake": "3.31.10",
+    "ciXcode": "16.4"
+  },
+  "webrtc": {
+    "distribution": "crow-misia/libwebrtc-bin",
+    "version": "140.7339.2.0",
+    "revision": "36ea4535a500ac137dbf1f577ce40dc1aaa774ef",
+    "boringsslRevision": "ddb2ca4b48fca9a1c468d83dc513b837331843ac",
+    "fieldTrials": {
+      "url": "https://webrtc.googlesource.com/src/+/36ea4535a500ac137dbf1f577ce40dc1aaa774ef/api/field_trials.cc?format=TEXT",
+      "sha256": "3b99bc36b5f6a84be1c911fcbdf66cde6e0f682a98c0fb69d18465cde16af52b",
+      "decodedSha256": "b5f82993430c8a1365e5416036b8a2f5dfaa6bf2709e2e2764812927fe358b3c",
+      "gitBlob": "fc896e1258acdfa2a98fe9aa5c3c872a41b67750"
+    },
+    "targets": {
+      "windows-x64": {
+        "url": "https://github.com/crow-misia/libwebrtc-bin/releases/download/140.7339.2.0/libwebrtc-win-x64.7z",
+        "sha256": "10b95069dc22cf6a60e9818cbcbb6a1d5698473e9ac4ce679e1258b97be58910",
+        "libraryDirectory": "release",
+        "libraryName": "webrtc.lib"
+      },
+      "macos-x64": {
+        "url": "https://github.com/crow-misia/libwebrtc-bin/releases/download/140.7339.2.0/libwebrtc-macos-x64.tar.xz",
+        "sha256": "f218885efef4a706decc0802cb2890fa0949fcb953b1208f8341108ef59869eb",
+        "libraryDirectory": "lib",
+        "libraryName": "libwebrtc.a"
+      },
+      "macos-arm64": {
+        "url": "https://github.com/crow-misia/libwebrtc-bin/releases/download/140.7339.2.0/libwebrtc-macos-arm64.tar.xz",
+        "sha256": "3654707b3a2fb24261fec1996276753984db50ffdfdc75b97fb0b167116a6ae5",
+        "libraryDirectory": "lib",
+        "libraryName": "libwebrtc.a"
+      }
+    }
+  },
+  "libmediasoupclient": {
+    "repository": "https://github.com/versatica/libmediasoupclient.git",
+    "version": "3.5.0",
+    "revision": "e345bc4720b8d7cf679e95bde93913969c9cd01d",
+    "optionalSdpFields": {
+      "sourceSha256": "99de97439cae43af42f665871d8778f39c8f31954cc6a55b8f4972269530e8ca",
+      "patchedSha256": "893e61b8dc0c1d69deab83d523bb4b6adbea1f8a53160eb56d652b851a501f4a"
+    }
+  },
+  "libsdptransform": {
+    "repository": "https://github.com/ibc/libsdptransform.git",
+    "version": "1.2.10",
+    "revision": "e33aba7005c563286b19a8c90b9520a4384cc259"
+  }
+}

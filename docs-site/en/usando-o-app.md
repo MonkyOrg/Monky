@@ -1,5 +1,11 @@
 # Using the App
 
+After connecting, the left sidebar organizes servers and channels, the center
+shows chat or the voice stage, and the right side lists members. Connecting
+to a server and joining a call are separate actions.
+
+<AppScreenshot src="/screenshots/conversa-en.png" alt="A demo conversation with servers and channels on the left, messages in the center and members on the right." caption="Windows client capture using demo data. The names, conversation and bot were created for this guide." />
+
 ## Voice
 
 Click a **voice channel** to join the call. Whoever speaks gets a green ring around the avatar. The bottom bar has microphone, headphones/deafen and disconnect. The panel shows average ping and lets you leave only the call.
@@ -10,7 +16,14 @@ The call follows you: switching servers in the left column keeps it running, and
 
 ## Camera and screen
 
-On the media bar: **Camera**, **Share Screen** and **Soundboard**. Screen sharing lets you choose a whole screen or a specific window, with screen audio sent to participants.
+On the media bar: **Camera**, **Share Screen** and **Soundboard**. Choose a screen
+or a specific window; screen-audio availability depends on the platform and
+source. Check what will be captured before starting.
+
+Under **Settings → Voice and Video → Camera**, preview blur, color or image
+virtual backgrounds and physical-screen chroma key. Effects run locally and
+also apply to the call. Closing the preview does not stop a camera in use;
+see limitations and precautions in [settings](/en/configuracoes).
 
 Whoever broadcasts shows a **LIVE** badge. Click the card to spotlight it or use fullscreen.
 
@@ -22,6 +35,18 @@ A message you started but haven't sent stays with the channel you were typing in
 
 Hover over a message (or reach its buttons with `Tab`) to reveal a floating toolbar with **Emoji**, **Reply**, **Copy message** and **More options**. The three-dot menu displays full action names; **Edit message** is only available to the author when the server permits editing, and **Delete message** to the author or moderators. Navigate menus with arrow keys and close them with `Escape`.
 
+`Ctrl+C` copies selected text with its displayed formatting, including Markdown rendering. On macOS, use `Cmd` instead of `Ctrl`. Without a selection, the shortcut acts only on the focused message, never the entire conversation. **Copy message** in the toolbar uses formatting; under **More options → Copy message**, choose **With formatting** or **Without formatting**. Plain copying is available only in this submenu, without a dedicated shortcut. Those buttons also respect a selection within the message. Use `→` or `Enter` to open the submenu, `←` or `Escape` to go back, and `Tab` to leave.
+
+Formatted copying provides HTML for rich-text applications and Markdown for text destinations: for example, bold text may paste as `**text**` when the destination does not accept HTML. **Without formatting** provides only visible text, without Markdown markers or HTML. Pasting a formatted copy into Monky keeps the markup editable; external HTML is never inserted into the interface. Editing fields keep their native shortcuts. Attachment-only messages copy file names, without transferring attachments.
+
+To copy the **image**, rather than its file name or address, use **Copy image**
+in the attachment controls or its right-click menu. Sticker menus also offer
+this action. In the expanded viewer, use the copy button or `Ctrl+C`
+(`Cmd+C` on macOS), with no text selected. The destination receives a PNG image
+at its original size; animated images are copied as a static frame.
+Copying supports up to 50 MB and 64 megapixels and reports unavailable images
+or clipboard access instead of substituting a link.
+
 **Reply** keeps a reference to the original message with its author and preview. Replies support text, attachments, code and stickers; public bot messages can also receive replies. Cancel with the `×` in the composer or `Escape`. The reference stays with the channel draft. Clicking the preview jumps to the original, loading a history window if needed; **Back to latest messages** returns to recent conversation. Previews reflect edits and show **Message deleted** when the original is deleted, without retaining its content. Private bot messages cannot be referenced.
 
 ## Mentions
@@ -30,7 +55,16 @@ Typing `@` in the message box opens the member list: pick someone to insert `@ni
 
 The first entry on the list is `@everyone` (or `@todos` — both tokens work in any language), which notifies everybody who can see that channel. Private channels stay private: people without access are not notified.
 
-Server admins can turn this off under **Server settings → General → Allow everyone mention**, or through the CLI with the `allowEveryoneMention` key. It is on by default.
+Server admins can turn this off under **Server settings → Notifications →
+Allow everyone mention**, or through the CLI with `allowEveryoneMention`.
+It is on by default.
+
+## Bots and miniapps
+
+Type `/` in a text channel to discover available commands. Bots can reply
+privately, publish polls or open miniapps in the voice stage.
+[Use bots](/en/bots) explains permissions, preferences and consent without
+requiring programming.
 
 ## Code blocks
 
@@ -60,4 +94,9 @@ The folder stays on your machine: the image is uploaded to the server when you u
 
 ## Soundboard
 
-Under **Settings › Soundboard**, choose a folder containing `.mp3`, `.wav` or `.ogg`. In the call, play sounds from the soundboard button. Volume and local mute live in the same settings. The host can disable the soundboard for the whole server and, under **Server Settings › Roles**, grant the **Use soundboard** permission only to the desired roles.
+Monky prepares a local soundboard folder automatically. Under **Settings › Soundboard**, check its path or choose another folder containing `.mp3`, `.wav` or `.ogg`; existing folder selections are preserved. In the call, play sounds from the soundboard button. Volume and local mute live in the same settings. The host can disable the soundboard for the whole server and, under **Server Settings › Roles**, grant the **Use soundboard** permission only to the desired roles.
+
+Use stars and the **All/Favorites** filter together with search to find sounds,
+with favorites first and alphabetical order within each group, without changing
+the shortcuts assigned to sounds. Starring does not play the sound.
+The same ordering applies to Home's saved-server list.

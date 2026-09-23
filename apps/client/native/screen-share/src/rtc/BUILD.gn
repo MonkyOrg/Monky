@@ -1,0 +1,283 @@
+import("//build/config/c++/c++.gni")
+import("//webrtc.gni")
+
+assert(is_win && target_cpu == "x64" && is_clang && use_custom_libcxx)
+assert(!is_component_build && !is_debug)
+
+config("monky_screen_options") {
+  include_dirs = [
+    "inputs/abi",
+    "inputs/adapters",
+    "inputs/engine",
+    "inputs/native_core",
+    "inputs/libmediasoupclient/include",
+    "inputs/libsdptransform/include",
+  ]
+  defines = [
+    "WEBRTC_WIN",
+    "NOMINMAX",
+    "WIN32_LEAN_AND_MEAN",
+  ]
+}
+
+rtc_library("monky_sdptransform") {
+  sources = [
+    "inputs/libsdptransform/src/grammar.cpp",
+    "inputs/libsdptransform/src/parser.cpp",
+    "inputs/libsdptransform/src/writer.cpp",
+  ]
+  suppressed_configs = [
+    "//build/config/compiler:no_exceptions",
+    "//build/config/compiler:no_rtti",
+  ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    "//build/config/compiler:rtti",
+    ":monky_screen_options",
+  ]
+  public_configs = [ ":monky_screen_options" ]
+}
+
+rtc_library("monky_mediasoupclient") {
+  sources = [
+    "inputs/libmediasoupclient/src/Consumer.cpp",
+    "inputs/libmediasoupclient/src/DataConsumer.cpp",
+    "inputs/libmediasoupclient/src/DataProducer.cpp",
+    "inputs/libmediasoupclient/src/Device.cpp",
+    "inputs/libmediasoupclient/src/Handler.cpp",
+    "inputs/libmediasoupclient/src/Logger.cpp",
+    "inputs/libmediasoupclient/src/Producer.cpp",
+    "inputs/libmediasoupclient/src/Transport.cpp",
+    "inputs/libmediasoupclient/src/mediasoupclient.cpp",
+    "inputs/libmediasoupclient/src/ortc.cpp",
+    "inputs/libmediasoupclient/src/scalabilityMode.cpp",
+    "inputs/libmediasoupclient/src/sdp/MediaSection.cpp",
+    "inputs/libmediasoupclient/src/sdp/RemoteSdp.cpp",
+    "inputs/libmediasoupclient/src/sdp/Utils.cpp",
+  ]
+  suppressed_configs = [
+    "//build/config/compiler:no_exceptions",
+    "//build/config/compiler:no_rtti",
+  ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    "//build/config/compiler:rtti",
+    ":monky_screen_options",
+  ]
+  public_configs = [ ":monky_screen_options" ]
+  deps = [
+    ":monky_sdptransform",
+    "//api:create_peerconnection_factory",
+    "//api:libjingle_peerconnection_api",
+    "//api/video_codecs:video_codecs_api",
+    "//media:rtc_media_base",
+  ]
+}
+
+rtc_library("monky_qualified_mf_core") {
+  sources = [
+    "inputs/native_core/decoded_frame.cc",
+    "inputs/native_core/h264_bitstream.cc",
+    "inputs/native_core/mf_h264_decoder.cc",
+    "inputs/native_core/mf_h264_encoder.cc",
+  ]
+  suppressed_configs = [
+    "//build/config/compiler:no_exceptions",
+    "//build/config/compiler:no_rtti",
+  ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    "//build/config/compiler:rtti",
+    ":monky_screen_options",
+  ]
+  public_configs = [ ":monky_screen_options" ]
+  libs = [
+    "d3d11.lib",
+    "dxgi.lib",
+    "dxguid.lib",
+    "d3dcompiler.lib",
+    "mfplat.lib",
+    "mfuuid.lib",
+    "strmiids.lib",
+    "windowsapp.lib",
+    "runtimeobject.lib",
+    "ole32.lib",
+    "oleaut32.lib",
+    "user32.lib",
+    "uuid.lib",
+    "delayimp.lib",
+  ]
+}
+
+rtc_library("monky_mf_rtc_adapters") {
+  sources = [
+    "inputs/adapters/mf_rtc_common.cc",
+    "inputs/adapters/mf_rtc_policy.cc",
+    "inputs/adapters/mf_rtc_encoder.cc",
+    "inputs/adapters/mf_rtc_decoder.cc",
+  ]
+  suppressed_configs = [
+    "//build/config/compiler:no_exceptions",
+    "//build/config/compiler:no_rtti",
+  ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    "//build/config/compiler:rtti",
+    ":monky_screen_options",
+  ]
+  public_configs = [ ":monky_screen_options" ]
+  deps = [
+    ":monky_qualified_mf_core",
+    "//api:make_ref_counted",
+    "//api:rtp_packet_info",
+    "//api:scoped_refptr",
+    "//api/environment:environment",
+    "//api/environment:environment_factory",
+    "//api/video:video_frame",
+    "//api/video_codecs:video_codecs_api",
+    "//modules/video_coding:video_codec_interface",
+  ]
+}
+
+rtc_shared_library("monky_screen_rtc") {
+  output_name = "monky_screen_rtc"
+  sources = [
+    "inputs/abi/rtc_link_probe.cc",
+    "inputs/abi/adapter_policy_probe.cc",
+    "inputs/engine/engine.cc",
+  ]
+  defines = [ "MONKY_RTC_BUILDING_DLL" ]
+  suppressed_configs = [
+    "//build/config/compiler:no_exceptions",
+    "//build/config/compiler:no_rtti",
+  ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    "//build/config/compiler:rtti",
+    ":monky_screen_options",
+  ]
+  ldflags = [
+    "/DELAYLOAD:mfplat.dll",
+    "/threads:4",
+  ]
+  deps = [
+    ":monky_mediasoupclient",
+    ":monky_mf_rtc_adapters",
+    ":monky_rtc_engine_core",
+    ":monky_qualified_mf_core",
+    ":monky_sdptransform",
+    "//api:create_peerconnection_factory",
+    "//api:libjingle_peerconnection_api",
+    "//rtc_base:ssl",
+  ]
+}
+
+rtc_library("monky_rtc_engine_core") {
+  sources = [
+    "inputs/engine/capture_clock.cc",
+    "inputs/engine/audio/pcm_normalizer.cc",
+    "inputs/engine/audio/pcm_track_source.cc",
+    "inputs/engine/audio/capture_timestamp.cc",
+    "inputs/engine/audio/credit_audio_device.cc",
+    "inputs/engine/audio/output_clock.cc",
+    "inputs/engine/audio/runtime.cc",
+    "inputs/engine/gpu_source.cc",
+    "inputs/engine/encoded_video.cc",
+    "inputs/engine/presentation/exporter.cc",
+    "inputs/engine/peer_controller.cc",
+    "inputs/engine/sfu_controller.cc",
+    "inputs/engine/transport_parameters.cc",
+  ]
+  suppressed_configs = [
+    "//build/config/compiler:no_exceptions",
+    "//build/config/compiler:no_rtti",
+  ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    "//build/config/compiler:rtti",
+    ":monky_screen_options",
+  ]
+  public_configs = [ ":monky_screen_options" ]
+  deps = [
+    ":monky_mediasoupclient",
+    ":monky_mf_rtc_adapters",
+    "//api:field_trials",
+    "//api:libjingle_peerconnection_api",
+    "//api:make_ref_counted",
+    "//api:rtc_stats_api",
+    "//api/audio:create_audio_device_module",
+    "//api/audio_codecs:audio_codecs_api",
+    "//api/audio_codecs/opus:audio_decoder_opus",
+    "//api/audio_codecs/opus:audio_encoder_opus",
+    "//api/environment:environment_factory",
+    "//api/video:video_frame",
+    "//api/video:video_rtp_headers",
+    "//common_audio",
+    "//media:video_broadcaster",
+    "//modules/video_coding:video_codec_interface",
+    "//pc:session_description",
+    "//pc:video_track_source",
+    "//rtc_base:logging",
+    "//rtc_base:timestamp_aligner",
+    "//rtc_base:threading",
+    "//stats:rtc_stats",
+  ]
+}
+
+group("all") {
+  deps = [
+    ":monky_screen_rtc",
+    ":monky_msvc_job",
+    ":monky_rtc_engine_contract_probe",
+  ]
+}
+
+rtc_executable("monky_rtc_engine_contract_probe") {
+  sources = [
+    "inputs/engine/contract_probe.cc",
+    "inputs/abi/adapter_policy_probe.cc",
+  ]
+  suppressed_configs = [
+    "//build/config/compiler:no_exceptions",
+    "//build/config/compiler:no_rtti",
+  ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    "//build/config/compiler:rtti",
+    ":monky_screen_options",
+  ]
+  deps = [
+    ":monky_rtc_engine_core",
+    "//api:field_trials_view",
+    "//api:rtc_stats_api",
+    "//api/task_queue:task_queue",
+    "//api/video:video_frame",
+    "//call:video_receive_stream_api",
+    "//modules/video_coding:video_codec_interface",
+    "//modules/video_coding:video_coding",
+    "//modules/video_coding/timing:timing_module",
+    "//rtc_base:logging",
+    "//stats:rtc_stats",
+    "//system_wrappers:system_wrappers",
+    "//video:video",
+    "//video:video_stream_buffer_controller",
+  ]
+  ldflags = [
+    "/DELAYLOAD:mfplat.dll",
+    "/threads:4",
+  ]
+}
+
+rtc_executable("monky_msvc_job") {
+  sources = [ "inputs/build/msvc_job.cc" ]
+  deps = []
+  suppressed_configs = [
+    "//build/config/compiler:no_exceptions",
+    "//build/config/compiler:no_rtti",
+  ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    "//build/config/compiler:rtti",
+  ]
+  ldflags = [ "/threads:4" ]
+}

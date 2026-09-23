@@ -6,8 +6,18 @@ import https from 'https';
 import net from 'net';
 import path from 'path';
 import { LanDiscovery } from './lanDiscovery';
-import { globalInputHook } from './globalInputHook';
-import { SHORTCUT_IPC } from '@monky/shared';
+import { globalInputHook } from './globalInputHookProcess';
+import {
+  AUDIO_PREVIEW_IPC, LIMITS, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS,
+  type AudioPreviewResult, type SoundDownloadResult, type SoundboardDownloadPermit, type SoundboardDownloadAvailability,
+} from '@monky/shared';
+import { SoundboardDownloads } from './soundboardDownload';
+import { AudioPreviews } from './audioPreviews';
+import { createLocalExecutionService } from './localExecution/createService';
+import { setupLocalExecutionIpc, type LocalExecutionIpc } from './localExecution/ipc';
+import { setupNativeScreenSharingIpc } from './nativeScreenSharing';
+import { NativeDesktopSources, nativeWindowIdFromSourceId, nativeMonitorDesktopSources, isGhostWindow } from './nativeWindows';
+import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
 import { HostServerOptions, ServerManager } from './serverManager';
@@ -116,23 +126,6 @@ interface NativeWindowOwner {
   appName: string;
 }
 
-interface NativeWindowInfo {
-  hwnd: number;
-  title: string;
-  processId: number;
-  processPath: string;
-  isIconic: boolean;
-  isVisible: boolean;
-  isCloaked: boolean;
-  isToolWindow: boolean;
-  isLayered: boolean;
-  isTransparent: boolean;
-  isNoActivate: boolean;
-  isAppWindow: boolean;
-  width: number;
-  height: number;
-}
-
 // Screen audio native module (compiled only on CI — graceful fallback)
 let screenAudio: {
   isSupported: () => boolean;
@@ -142,6 +135,9 @@ let screenAudio: {
   getStatus: () => number;
   listWindowOwners?: () => NativeWindowOwner[];
   listWindows?: () => NativeWindowInfo[];
+  getWindowState?: (hwnd: number) => NativeWindowState | null;
+  listMonitors?: () => NativeMonitorInfo[];
+  getMonitorState?: (deviceId: string) => NativeMonitorInfo | null;
   restoreWindow?: (hwnd: number) => boolean;
 } | null = null;
 try {
@@ -154,14 +150,6 @@ try {
 // Icones de app nao mudam enquanto o app roda, e ler o bundle do disco a cada
 // abertura do seletor de tela seria desperdicio.
 const appIconCache = new Map<string, string | null>();
-
-/** Extrai o id nativo de `window:<id nativo>:<id do webContents>`. */
-function nativeWindowIdFromSourceId(sourceId: string): number | null {
-  const parts = sourceId.split(':');
-  if (parts[0] !== 'window') return null;
-  const nativeId = Number(parts[1]);
-  return Number.isFinite(nativeId) ? nativeId : null;
-}
 
 /**
  * No macOS o Electron devolve `appIcon` vazio para janelas, mesmo com
@@ -215,21 +203,6 @@ function listNativeWindows(): NativeWindowInfo[] {
     console.warn('[ScreenShare:Main] Falha ao enumerar janelas nativas:', (e as Error).message);
     return [];
   }
-}
-
-/**
- * O capturador WGC do Electron 34 parou de filtrar janelas de overlay/ferramenta,
- * entao elas vazam para o seletor como se fossem janelas reais (Medal Overlay,
- * helpers do Raycast, Radmin VPN na bandeja...). O discriminador abaixo foi
- * validado contra janelas reais: nenhuma janela legitima dispara qualquer uma das
- * combinacoes, enquanto todo overlay dispara pelo menos uma (#560).
- */
-function isGhostWindow(w: NativeWindowInfo): boolean {
-  if (w.isCloaked) return true;
-  if (w.isToolWindow) return true;
-  if (w.isLayered && w.isTransparent) return true;
-  if (w.isLayered && w.isNoActivate) return true;
-  return false;
 }
 
 /**
@@ -347,10 +320,94 @@ export function setupIpcHandlers(
   serverManager: ServerManager,
   trayManager?: TrayManager,
   options?: SetupIpcOptions
-): void {
+): LocalExecutionIpc {
   const lanDiscovery = new LanDiscovery(mainWindow);
   globalInputHook.init(mainWindow);
   const overlayManager = options?.overlayManager || new OverlayManager(mainWindow);
+  const soundDownloads = new SoundboardDownloads(path.join(app.getPath('userData'), 'soundboard-folder.json'));
+  const audioPreviews = new AudioPreviews();
+  const localExecution = setupLocalExecutionIpc(mainWindow, (notifications) =>
+    createLocalExecutionService(mainWindow, app.getPath('userData'), notifications));
+  const nativeSources = new NativeDesktopSources({
+    windows: listNativeWindows,
+    windowState(hwnd) {
+      if (!screenAudio?.getWindowState) throw new Error('Native window identity inspection is unavailable.');
+      return screenAudio.getWindowState(hwnd);
+    },
+    monitors() {
+      if (!screenAudio?.listMonitors) throw new Error('Native monitor enumeration is unavailable.');
+      return screenAudio.listMonitors();
+    },
+    monitorState(deviceId) {
+      if (!screenAudio?.getMonitorState) throw new Error('Native monitor identity inspection is unavailable.');
+      return screenAudio.getMonitorState(deviceId);
+    },
+  });
+  const nativeScreenSharing = setupNativeScreenSharingIpc(
+    mainWindow, (sourceId, kind) => nativeSources.resolve(sourceId, kind), options?.clientLogger,
+  );
+  const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
+    event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
+    if (!ownsSoundDownload(event)) throw new Error(mt('error.defaultSoundboardFolder'));
+    try {
+      return await soundDownloads.getDefaultFolder();
+    } catch (error: unknown) {
+      console.warn('[Soundboard] Could not initialize the default sound folder:', error);
+      throw new Error(mt('error.defaultSoundboardFolder'));
+    }
+  });
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.availability, async (event, folder: unknown): Promise<SoundboardDownloadAvailability> =>
+    ownsSoundDownload(event) ? soundDownloads.availability(folder) : 'unavailable');
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.confirmFolder, async (event, folder: unknown): Promise<boolean> => {
+    if (!ownsSoundDownload(event)) return false;
+    try {
+      return await soundDownloads.confirmConfiguredFolder(folder, async (canonical) => {
+        if (mainWindow.isDestroyed() || !ownsSoundDownload(event)) return false;
+        const result = await dialog.showMessageBox(mainWindow, {
+          type: 'question',
+          title: mt('dialog.confirmSoundboardFolderTitle'),
+          message: mt('dialog.confirmSoundboardFolderMessage'),
+          detail: mt('dialog.confirmSoundboardFolderDetail', { folder: canonical }),
+          buttons: [mt('dialog.allowSoundboardDownloads'), mt('dialog.cancelSoundboardFolder')],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        });
+        return result.response === 0 && !mainWindow.isDestroyed() && ownsSoundDownload(event);
+      });
+    } catch (error: unknown) {
+      console.warn('[Soundboard] Could not authorize downloads in the configured folder:', error);
+      throw new Error(mt('error.confirmSoundboardFolder'));
+    }
+  });
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.authorize, async (event, input: unknown): Promise<SoundboardDownloadPermit> =>
+    ownsSoundDownload(event) ? soundDownloads.authorize(event.sender.id, input) : { status: 'failed', reason: 'invalid_request' });
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.download, async (event, input: unknown): Promise<SoundDownloadResult> => {
+    if (!ownsSoundDownload(event)) return { status: 'failed', reason: 'invalid_request' };
+    try {
+      return await soundDownloads.download(event.sender.id, input, (progress) => {
+        if (!event.sender.isDestroyed()) event.sender.send(SOUND_DOWNLOAD_PROGRESS, progress);
+      });
+    } catch (error) {
+      console.warn('[Soundboard] Could not clean up the local download:', error);
+      return { status: 'failed', reason: 'write_failed' };
+    }
+  });
+  ipcMain.handle(SOUND_DOWNLOAD_IPC.cancel, (event, key: unknown) =>
+    ownsSoundDownload(event) && soundDownloads.cancel(event.sender.id, key));
+  ipcMain.handle(AUDIO_PREVIEW_IPC.load, async (event, input: unknown): Promise<AudioPreviewResult> =>
+    ownsSoundDownload(event) ? audioPreviews.load(event.sender.id, input) : { status: 'failed', reason: 'invalid_request' });
+  ipcMain.handle(AUDIO_PREVIEW_IPC.cancel, (event, input: unknown) =>
+    ownsSoundDownload(event) && audioPreviews.cancel(event.sender.id, input));
+  const soundDownloadOwner = mainWindow.webContents.id;
+  const stopSoundDownloads = () => {
+    soundDownloads.cancelOwner(soundDownloadOwner);
+    audioPreviews.cancelOwner(soundDownloadOwner);
+  };
+  mainWindow.webContents.on('did-start-loading', stopSoundDownloads);
+  mainWindow.webContents.on('render-process-gone', stopSoundDownloads);
+  mainWindow.webContents.once('destroyed', stopSoundDownloads);
 
   // Overlay (#169)
   ipcMain.handle('overlay:open', (_event, config: OverlayConfig) => {
@@ -532,38 +589,53 @@ export function setupIpcHandlers(
   });
 
   ipcMain.handle('screen-share:get-sources', async () => {
+    const nativeWindowSources = process.platform === 'win32' ? nativeSources.listWindows() : [];
+    const nativeWindows = nativeWindowSources.map(source => source.window);
+    const nativeIdsByHwnd = new Map(nativeWindowSources.map(source => [source.window.hwnd, source.id]));
     const sources = await desktopCapturer.getSources({
       types: ['screen', 'window'],
       thumbnailSize: { width: 320, height: 180 },
       fetchWindowIcons: true,
     });
 
-    const nativeWindows = listNativeWindows();
     const nativeByHwnd = new Map<number, NativeWindowInfo>();
     for (const w of nativeWindows) nativeByHwnd.set(w.hwnd, w);
 
     const macIcons = await resolveMacAppIcons(sources.map((s) => s.id));
 
     // 1) Remove os overlays/tool windows que o capturador WGC passou a vazar. Sem
-    //    dados nativos (outra plataforma ou janela que fechou no meio) mantemos a
-    //    fonte para nao esconder algo legitimo por engano.
+    //    No Windows, so oferecemos identidades nativas verificaveis; em outras
+    //    plataformas preservamos os IDs do Electron.
     const realSources = sources.filter((s) => {
-      if (!s.id.startsWith('window:')) return true;
+      if (!s.id.startsWith('window:')) return process.platform !== 'win32';
       const hwnd = nativeWindowIdFromSourceId(s.id);
       const info = hwnd === null ? undefined : nativeByHwnd.get(hwnd);
-      return info ? !isGhostWindow(info) : true;
+      return process.platform !== 'win32' || !!info;
     });
 
     const result: DesktopSource[] = realSources.map((s) => {
       const electronIcon = s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null;
+      const hwnd = nativeWindowIdFromSourceId(s.id);
+      const nativeId = hwnd === null ? undefined : nativeIdsByHwnd.get(hwnd);
+      if (process.platform === 'win32' && !nativeId) throw new Error('Native window selection lost its enumerated identity.');
       return {
-        id: s.id,
+        id: nativeId ?? s.id,
         name: s.name,
         type: s.id.startsWith('screen:') ? 'screen' : 'window',
         thumbnailDataUrl: s.thumbnail.toDataURL(),
         appIconDataUrl: electronIcon ?? macIcons.get(s.id) ?? null,
       };
     });
+
+    if (process.platform === 'win32') {
+      try {
+        result.push(...nativeMonitorDesktopSources(nativeSources.listMonitors(), sources, screen.getAllDisplays(),
+          bounds => screen.screenToDipRect(null, bounds),
+          message => console.warn('[ScreenShare:Main]', message)));
+      } catch (error) {
+        console.warn('[ScreenShare:Main] Native monitor identity enumeration failed:', error);
+      }
+    }
 
     // 2) Reexibe janelas minimizadas que o WGC omite — tipicamente um jogo em tela
     //    cheia que minimizou quando o usuario deu alt-tab para abrir este seletor
@@ -585,8 +657,10 @@ export function setupIpcHandlers(
     );
     const extraIcons = await resolveWindowsAppIcons(minimizedExtras.map((w) => w.processPath));
     for (const w of minimizedExtras) {
+      const nativeId = nativeIdsByHwnd.get(w.hwnd);
+      if (!nativeId) throw new Error('Minimized window selection lost its enumerated identity.');
       result.push({
-        id: `window:${w.hwnd}:0`,
+        id: nativeId,
         name: w.title,
         type: 'window',
         thumbnailDataUrl: '',
@@ -659,7 +733,8 @@ export function setupIpcHandlers(
   });
 
   // Soundboard Folder Selection
-  ipcMain.handle('dialog:select-soundboard-folder', async () => {
+  ipcMain.handle('dialog:select-soundboard-folder', async (event) => {
+    if (!ownsSoundDownload(event)) throw new Error(mt('error.confirmSoundboardFolder'));
     const result = await dialog.showOpenDialog(mainWindow, {
       title: mt('dialog.selectSoundboardFolder'),
       properties: ['openDirectory'],
@@ -668,7 +743,12 @@ export function setupIpcHandlers(
     if (result.canceled || result.filePaths.length === 0) {
       return null;
     }
-    return result.filePaths[0];
+    try {
+      return await soundDownloads.confirmFolder(result.filePaths[0]);
+    } catch (error) {
+      console.warn('[Soundboard] Could not persist the confirmed folder:', error);
+      throw new Error(mt('error.confirmSoundboardFolder'));
+    }
   });
 
   // Soundboard List Sounds
@@ -724,15 +804,16 @@ export function setupIpcHandlers(
       if (!stat || !stat.isFile()) {
         return null;
       }
-      if (stat.size > 3 * 1024 * 1024) {
+      if (stat.size > LIMITS.MAX_SOUNDBOARD_FILE_SIZE) {
         throw new Error(mt('error.audioFileTooLarge'));
       }
       const buffer = await fs.promises.readFile(filePath);
       const ext = path.extname(filePath).toLowerCase();
-      let mime = 'audio/mp3';
+      let mime = 'audio/mpeg';
       if (ext === '.wav') mime = 'audio/wav';
       else if (ext === '.ogg') mime = 'audio/ogg';
-      else if (ext === '.m4a' || ext === '.aac') mime = 'audio/mp4';
+      else if (ext === '.m4a') mime = 'audio/mp4';
+      else if (ext === '.aac') mime = 'audio/aac';
       else if (ext === '.webm') mime = 'audio/webm';
 
       return {
@@ -1257,8 +1338,23 @@ export function setupIpcHandlers(
   }
 
   mainWindow.on('closed', () => {
+    stopSoundDownloads();
+    for (const channel of Object.values(SOUND_DOWNLOAD_IPC)) ipcMain.removeHandler(channel);
+    for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);
     clearAudioBufferAccumulator();
+    // Recovery keeps Main alive after the renderer is retired (#454).
+    try { screenAudio?.stop(); } catch (error: unknown) {
+      console.error('[ScreenAudio:Main] Could not stop capture after window destruction', error);
+    }
     void lanDiscovery.stop();
     globalInputHook.destroy();
   });
+  return {
+    service: localExecution.service,
+    async dispose() {
+      const results = await Promise.allSettled([nativeScreenSharing.dispose(), localExecution.dispose()]);
+      const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (errors.length) throw new AggregateError(errors, 'Application resource shutdown failed.');
+    },
+  };
 }

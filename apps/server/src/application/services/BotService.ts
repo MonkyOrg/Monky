@@ -4,15 +4,24 @@ import {
   LIMITS,
   ProtocolErrorCode,
   BotInfo,
+  PROTOCOL_VERSION,
   UserSummary,
-  botCreateSchema,
+  botIdentitySchema,
   botManifestSchema,
   botProfileUpdateSchema,
+  botCapabilitiesSchema,
+  unreviewedBotPermissions,
+  type BotCapability,
+  type BotInstallPreview,
+  type BotManifest,
+  type BotIdentity,
+  type BotCompatibilitySummary,
 } from '@monky/shared';
 import { BotRecord } from '../../domain/entities';
 import { IBotRepository, IServerRepository } from '../../domain/repositories';
 import { AvatarStorageService } from '../../infrastructure/security/AvatarStorageService';
 import { Logger } from '../../infrastructure/logger/Logger';
+import { BotPermissionService } from './BotPermissionService';
 
 type BotFailure = {
   success: false;
@@ -32,12 +41,14 @@ type BotCreateResult = { success: true; bot: BotInfo; token: string } | BotFailu
  */
 export class BotService {
   private mutations: Promise<void> = Promise.resolve();
+  private previews = new Map<string, BotInstallPreview & { owner: string; url: string; digest: string }>();
 
   constructor(
     private botRepo: IBotRepository,
     private serverRepo: IServerRepository,
     private avatarStorage: AvatarStorageService,
-    private getOnlineBotsMap: () => Map<string, UserSummary>
+    private getOnlineBotsMap: () => Map<string, UserSummary>,
+    readonly permissions?: BotPermissionService,
   ) {}
 
   /** SHA-256 hex hash of the raw token string. */
@@ -45,16 +56,12 @@ export class BotService {
     return createHash('sha256').update(token, 'utf8').digest('hex');
   }
 
-  async create(
-    name: string,
-    createdByUserId: string,
-    avatarBase64?: string
-  ): Promise<BotCreateResult> {
-    return this.mutate(() => this.createBot(name, createdByUserId, avatarBase64));
+  async create(createdByUserId: string, isAuthorized = () => true): Promise<BotCreateResult> {
+    return this.mutate(() => this.createBot(createdByUserId, undefined, isAuthorized));
   }
 
-  private async createBot(name: string, createdByUserId: string, avatarBase64?: string): Promise<BotCreateResult> {
-    const parsed = botCreateSchema.safeParse({ name, avatarBase64 });
+  private async createBot(createdByUserId: string, identity?: BotIdentity, isAuthorized = () => true): Promise<BotCreateResult> {
+    const parsed = botIdentitySchema.safeParse(identity ?? { name: 'Bot' });
     if (!parsed.success) {
       return {
         success: false,
@@ -67,6 +74,7 @@ export class BotService {
     const server = await this.serverRepo.getServer();
     const maxBots = server?.maxBots ?? LIMITS.MAX_BOTS_DEFAULT;
     const count = await this.botRepo.count();
+    if (!isAuthorized()) return this.permissionChanged();
     if (count >= maxBots) {
       return {
         success: false,
@@ -86,10 +94,15 @@ export class BotService {
       if (!avatar.success) return avatar;
       avatarPath = avatar.filename;
     }
+    if (!isAuthorized()) {
+      if (avatarPath) this.avatarStorage.deleteAvatar(avatarPath);
+      return this.permissionChanged();
+    }
 
     const record: BotRecord = {
       id,
       name: parsed.data.name,
+      profilePending: identity === undefined,
       tokenHash,
       avatarPath,
       boundPublicKey: null,
@@ -103,7 +116,9 @@ export class BotService {
       Logger.error('BOT', 'Failed to create bot.', error);
       return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar o bot.' };
     }
-    Logger.info('BOT', `Bot "${record.name}" (${id}) created by user ${createdByUserId}.`);
+    Logger.info('BOT', record.profilePending
+      ? `Bot link (${id}) reserved by user ${createdByUserId}; waiting for the bot identity.`
+      : `Bot "${record.name}" (${id}) linked by user ${createdByUserId}.`);
 
     return {
       success: true,
@@ -115,6 +130,48 @@ export class BotService {
   async list(): Promise<BotInfo[]> {
     const records = await this.botRepo.listAll();
     return records.map((r) => this.toBotInfo(r));
+  }
+
+  async getCompatibility(): Promise<BotCompatibilitySummary> {
+    const bots = await this.botRepo.listAll();
+    return {
+      protocolVersion: PROTOCOL_VERSION,
+      incompatibleBots: bots.filter((bot) =>
+        bot.lastProtocolVersion != null && bot.lastProtocolVersion !== PROTOCOL_VERSION).length,
+      uncheckedBots: bots.filter((bot) =>
+        bot.boundPublicKey !== null && bot.lastProtocolVersion == null).length,
+    };
+  }
+
+  async recordCompatibleConnection(botId: string): Promise<boolean> {
+    return this.mutate(async () => {
+      const record = await this.botRepo.findById(botId);
+      if (!record) return false;
+      if (record.lastProtocolVersion !== PROTOCOL_VERSION) {
+        await this.botRepo.update(botId, { lastProtocolVersion: PROTOCOL_VERSION });
+      }
+      return true;
+    });
+  }
+
+  async recordRejectedProtocol(rawToken: string, publicKey: string, protocolVersion: unknown): Promise<boolean> {
+    if (typeof protocolVersion !== 'number' || !Number.isSafeInteger(protocolVersion) ||
+        protocolVersion <= 0 || protocolVersion === PROTOCOL_VERSION) return false;
+    return this.mutate(async () => {
+      const record = await this.botRepo.findByTokenHash(BotService.hashToken(rawToken));
+      // Never claim an unbound link or let an obsolete duplicate override a live, compatible bot.
+      if (!record || !record.boundPublicKey || record.boundPublicKey !== publicKey ||
+          this.getOnlineBotsMap().has(record.id)) return false;
+      if (record.lastProtocolVersion !== protocolVersion) {
+        await this.botRepo.update(record.id, { lastProtocolVersion: protocolVersion });
+      }
+      return true;
+    });
+  }
+
+  async getInfo(botId: string): Promise<BotInfo | null> {
+    const record = await this.botRepo.findById(botId);
+    return record ? this.toBotInfo(record) : null;
   }
 
   async updateProfile(botId: string, profile: unknown): Promise<BotProfileResult> {
@@ -138,7 +195,10 @@ export class BotService {
       }
 
       const updates: Partial<BotRecord> = {};
-      if (parsed.data.name !== undefined) updates.name = parsed.data.name;
+      if (parsed.data.name !== undefined) {
+        updates.name = parsed.data.name;
+        updates.profilePending = false;
+      }
       const avatarBase64 = parsed.data.avatarBase64;
       if (avatarBase64 === null) {
         updates.avatarPath = null;
@@ -199,21 +259,7 @@ export class BotService {
     });
   }
 
-  /**
-   * Installs a bot from a remote manifest URL (#578).
-   *
-   * 1. Fetches the manifest from the bot's HTTP endpoint.
-   * 2. Creates the bot record with the metadata from the manifest.
-   * 3. POSTs the generated token to the bot's `registrationUrl`.
-   * 4. The bot responds with its public key, which is immediately TOFU-bound.
-   */
-  async installFromManifest(
-    manifestUrl: string,
-    createdByUserId: string,
-    serverName: string,
-    serverWsUrl?: string
-  ): Promise<BotProfileResult> {
-    // 1. Fetch manifest.
+  private async fetchManifest(manifestUrl: string): Promise<{ success: true; manifest: BotManifest } | BotFailure> {
     let rawManifest: unknown;
     try {
       const res = await fetch(manifestUrl, { signal: AbortSignal.timeout(10_000) });
@@ -227,13 +273,109 @@ export class BotService {
 
     const parsed = botManifestSchema.safeParse(rawManifest);
     if (!parsed.success) {
-      return { success: false, errorCode: ProtocolErrorCode.BOT_INVALID_PROFILE, errorMessage: 'O bot respondeu, mas o manifest é inválido. Verifique o nome, a imagem e a URL de registro.' };
+      return {
+        success: false,
+        errorCode: parsed.error.issues.some((issue) => issue.path[0] === 'requestedCapabilities')
+          ? ProtocolErrorCode.BOT_CAPABILITIES_INVALID : ProtocolErrorCode.BOT_INVALID_PROFILE,
+        errorMessage: 'Manifest inválido. Atualize o SDK e declare apenas as capacidades suportadas; recepção de voz não está disponível.',
+      };
     }
-    const manifest = parsed.data;
+    return { success: true, manifest: parsed.data };
+  }
 
-    // 2. Create the bot (reuse the existing create flow).
-    const createResult = await this.create(manifest.name, createdByUserId, manifest.icon);
+  private validateRegistrationAddress(serverWsUrl: string | undefined, botUrls: string[]): BotFailure | null {
+    const invalid: BotFailure = {
+      success: false, errorCode: ProtocolErrorCode.BAD_REQUEST,
+      errorMessage: 'Não foi possível determinar o endereço do servidor para o bot. Reconecte usando a URL completa do servidor.',
+    };
+    if (!serverWsUrl) return invalid;
+    try {
+      const server = new URL(serverWsUrl);
+      if (!['ws:', 'wss:'].includes(server.protocol) || server.username || server.password || server.hash ||
+          ['0.0.0.0', '[::]'].includes(server.hostname) || server.port === '0') return invalid;
+      const isLoopback = (url: URL): boolean => {
+        const host = url.hostname.toLowerCase().replace(/\.$/, '');
+        return host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' ||
+          /^127\.\d+\.\d+\.\d+$/.test(host) || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(host);
+      };
+      if (isLoopback(server) && botUrls.some(url => !isLoopback(new URL(url)))) {
+        return {
+          success: false, errorCode: ProtocolErrorCode.BAD_REQUEST,
+          errorMessage: 'Um bot remoto não pode usar localhost para acessar este servidor. Reconecte pelo IP ou domínio acessível ao bot e tente novamente.',
+        };
+      }
+      return null;
+    } catch {
+      return invalid;
+    }
+  }
+
+  async previewInstallation(
+    manifestUrl: string, owner: string, serverWsUrl?: string,
+  ): Promise<{ success: true; preview: BotInstallPreview } | BotFailure> {
+    const now = Date.now();
+    for (const [id, preview] of this.previews) if (preview.expiresAt <= now) this.previews.delete(id);
+    if (this.previews.size >= 256 || [...this.previews.values()].filter((preview) => preview.owner === owner).length >= 8) {
+      return { success: false, errorCode: ProtocolErrorCode.RATE_LIMITED, errorMessage: 'Aguarde a expiração das revisões anteriores antes de tentar novamente.' };
+    }
+    const result = await this.fetchManifest(manifestUrl);
+    if (!result.success) return result;
+    const invalidAddress = this.validateRegistrationAddress(serverWsUrl, [manifestUrl, result.manifest.registrationUrl]);
+    if (invalidAddress) return invalidAddress;
+    const preview: BotInstallPreview = { previewId: uuidv4(), manifest: result.manifest, expiresAt: Date.now() + 5 * 60_000 };
+    this.previews.set(preview.previewId, {
+      ...preview, owner, url: manifestUrl, digest: this.manifestDigest(result.manifest),
+    });
+    return { success: true, preview };
+  }
+
+  async installFromPreview(
+    previewId: string, grants: BotCapability[], owner: string, createdByUserId: string,
+    serverName: string, serverWsUrl?: string, isAuthorized = () => true,
+  ): Promise<BotProfileResult> {
+    const preview = this.previews.get(previewId);
+    if (!preview || preview.owner !== owner || preview.expiresAt <= Date.now()) {
+      return { success: false, errorCode: ProtocolErrorCode.BOT_MANIFEST_CHANGED, errorMessage: 'Esta revisão expirou ou pertence a outra sessão. Revise o bot novamente.' };
+    }
+    this.previews.delete(previewId);
+    const approved = botCapabilitiesSchema.safeParse(grants);
+    if (!approved.success || approved.data.some((capability) => !preview.manifest.requestedCapabilities.includes(capability))) {
+      return { success: false, errorCode: ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED, errorMessage: 'Só é possível aprovar capacidades solicitadas pelo bot.' };
+    }
+    const permissionService = this.permissions;
+    if (!permissionService) return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'O armazenamento de permissões está indisponível.' };
+    const refreshedManifest = await this.fetchManifest(preview.url);
+    if (!refreshedManifest.success) return refreshedManifest;
+    if (preview.expiresAt <= Date.now() || this.manifestDigest(refreshedManifest.manifest) !== preview.digest) {
+      return { success: false, errorCode: ProtocolErrorCode.BOT_MANIFEST_CHANGED, errorMessage: 'O manifest mudou. Revise a identidade e as capacidades novamente antes de instalar.' };
+    }
+    if (!isAuthorized()) return this.permissionChanged();
+    const manifest = preview.manifest;
+    const invalidAddress = this.validateRegistrationAddress(serverWsUrl, [preview.url, manifest.registrationUrl]);
+    if (invalidAddress) return invalidAddress;
+
+    // Only metadata supplied by the bot can initialize a linked identity.
+    const createResult = await this.mutate(async () => {
+      const created = await this.createBot(createdByUserId, {
+        name: manifest.name,
+        ...(manifest.icon !== undefined ? { avatarBase64: manifest.icon } : {}),
+      }, isAuthorized);
+      if (!created.success) return created;
+      try {
+        const { permissions } = permissionService.declare(created.bot.id, manifest.requestedCapabilities);
+        // Registration may authenticate before its HTTP response. Keep that
+        // provisional connection powerless until the reviewed install finishes.
+        return { ...created, permissionRevision: permissions.revision };
+      } catch (error) {
+        const record = await this.botRepo.findById(created.bot.id);
+        await this.botRepo.delete(created.bot.id);
+        if (record?.avatarPath) this.avatarStorage.deleteAvatar(record.avatarPath);
+        Logger.error('BOT', 'Failed to persist bot permission declaration.', error);
+        return { success: false, errorCode: ProtocolErrorCode.INTERNAL_ERROR, errorMessage: 'Não foi possível salvar as permissões do bot.' } satisfies BotFailure;
+      }
+    });
     if (!createResult.success) return createResult;
+    if (!isAuthorized()) return this.rollbackInstallation(createResult.bot.id, this.permissionChanged().errorMessage, ProtocolErrorCode.PERMISSION_DENIED);
 
     // 3. POST the token to the bot's registration endpoint.
     let publicKey: string | null = null;
@@ -269,6 +411,7 @@ export class BotService {
     if (!publicKey) {
       return this.rollbackInstallation(createResult.bot.id, registrationError);
     }
+    if (!isAuthorized()) return this.rollbackInstallation(createResult.bot.id, this.permissionChanged().errorMessage, ProtocolErrorCode.PERMISSION_DENIED);
 
     // 4. Bind the confirmed key (or verify the binding established by the SDK).
     if (!await this.validateToken(createResult.token, publicKey)) {
@@ -277,18 +420,44 @@ export class BotService {
 
     // Refresh the bot info (bound status may have changed).
     const refreshed = await this.botRepo.findById(createResult.bot.id);
-    const botInfo = refreshed ? this.toBotInfo(refreshed) : createResult.bot;
+    if (!refreshed || !isAuthorized()) return this.rollbackInstallation(
+      createResult.bot.id, this.permissionChanged().errorMessage, ProtocolErrorCode.PERMISSION_DENIED,
+    );
+    const current = permissionService.get(refreshed.id);
+    if (current?.revision !== createResult.permissionRevision) {
+      return this.rollbackInstallation(refreshed.id, 'As capacidades do bot mudaram durante o registro. Revise o bot novamente.',
+        ProtocolErrorCode.BOT_MANIFEST_CHANGED);
+    }
+    try {
+      permissionService.approve(createdByUserId, {
+        botId: refreshed.id, expectedRevision: createResult.permissionRevision, granted: approved.data,
+      });
+    } catch (error) {
+      Logger.error('BOT', 'Failed to approve the reviewed bot installation.', error);
+      return this.rollbackInstallation(refreshed.id, 'Não foi possível concluir a revisão das permissões do bot.');
+    }
+    const botInfo = this.toBotInfo(refreshed);
 
     Logger.info('BOT', `Bot "${manifest.name}" installed from manifest by user ${createdByUserId}.`);
     return { success: true, bot: botInfo };
   }
 
-  private async rollbackInstallation(botId: string, errorMessage: string): Promise<BotFailure> {
+  private manifestDigest(manifest: BotManifest): string {
+    return createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
+  }
+
+  private permissionChanged(): BotFailure {
+    return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'A sessão ou a permissão de administrar bots mudou. Tente novamente.' };
+  }
+
+  private async rollbackInstallation(
+    botId: string, errorMessage: string, errorCode: ProtocolErrorCode = ProtocolErrorCode.BAD_REQUEST,
+  ): Promise<BotFailure> {
     if (await this.botRepo.findById(botId)) {
       const revoked = await this.revoke(botId);
       if (!revoked.success) return revoked;
     }
-    return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage, revokedBotId: botId };
+    return { success: false, errorCode, errorMessage, revokedBotId: botId };
   }
 
   public async findById(botId: string): Promise<BotRecord | null> {
@@ -305,6 +474,10 @@ export class BotService {
       createdByUserId: record.createdByUserId,
       bound: record.boundPublicKey !== null,
       online: onlineBots.has(record.id),
+      profilePending: record.profilePending,
+      lastProtocolVersion: record.lastProtocolVersion ?? null,
+      requiredProtocolVersion: PROTOCOL_VERSION,
+      permissions: this.permissions?.get(record.id) ?? unreviewedBotPermissions(),
     };
   }
 

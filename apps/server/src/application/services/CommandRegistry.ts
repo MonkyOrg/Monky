@@ -1,4 +1,4 @@
-import { SlashCommand, commandRegisterSchema } from '@monky/shared';
+import { SlashCommand, commandLocalMetadataSchema, commandDefinitionsSchema } from '@monky/shared';
 import { Logger } from '../../infrastructure/logger/Logger';
 
 /**
@@ -21,19 +21,24 @@ export class CommandRegistry {
     botId: string,
     botName: string,
     raw: unknown,
-    botAvatarUrl?: string | null
+    botAvatarUrl?: string | null,
+    botPublicKey?: string,
   ): number {
     // Validate the whole replacement before touching the existing set. Silently
     // sanitizing names can collapse different commands into the same key.
-    const { commands } = commandRegisterSchema.parse({ commands: raw });
+    const commands = commandDefinitionsSchema.parse(raw);
+    const metadata = commands.map((command) => commandLocalMetadataSchema.parse({
+      localCapabilities: command.localCapabilities, ...(botPublicKey ? { botPublicKey } : {}),
+    }));
     this.clearBot(botId);
 
-    for (const cmd of commands) {
+    for (const [index, cmd] of commands.entries()) {
       const command: SlashCommand = {
         ...cmd,
         botId,
         botName,
         botAvatarUrl,
+        ...metadata[index],
       };
       this.commands.set(`${botId}:${cmd.name}`, command);
     }

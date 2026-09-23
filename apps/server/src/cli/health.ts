@@ -1,4 +1,5 @@
 import net from 'net';
+import path from 'path';
 import { LIMITS } from '@monky/shared';
 import { t } from './i18n/index';
 import type { Pm2Process } from './pm2';
@@ -57,6 +58,8 @@ export interface HealthInput {
   portState: PortState;
   /** Node version the CLI itself is running under. */
   cliNodeVersion: string;
+  /** Executable selected by the CLI, not PM2's cached registration. */
+  expectedScript?: string;
   /** Injectable for tests; defaults to now. */
   now?: number;
 }
@@ -70,6 +73,16 @@ export interface HealthInput {
  * after `monky start` would report a healthy server as broken.
  */
 export const STARTUP_GRACE_MS = 15_000;
+
+function hasScriptMismatch(entry: Pm2Process | null, expectedScript?: string): boolean {
+  const script = entry?.pm2_env?.pm_exec_path;
+  if (!expectedScript || typeof script !== 'string' || !script) return false;
+  const actual = path.resolve(script);
+  const expected = path.resolve(expectedScript);
+  return process.platform === 'win32'
+    ? actual.toLowerCase() !== expected.toLowerCase()
+    : actual !== expected;
+}
 
 /**
  * Turns the raw facts about a server into the problems worth reporting.
@@ -91,6 +104,14 @@ export function evaluateServerHealth(input: HealthInput): HealthProblem[] {
   if (status !== 'online') return [];
 
   const problems: HealthProblem[] = [];
+
+  const script = entry.pm2_env?.pm_exec_path;
+  if (script && input.expectedScript && hasScriptMismatch(entry, input.expectedScript)) {
+    problems.push({
+      message: t('health.scriptMismatch', { script, expected: input.expectedScript }),
+      hint: t('health.scriptMismatchHint'),
+    });
+  }
 
   const processNodeVersion = entry.pm2_env?.node_version;
   const processMajor = majorOf(processNodeVersion);
@@ -154,11 +175,12 @@ export function evaluateServerHealth(input: HealthInput): HealthProblem[] {
  */
 export async function diagnoseServerHealth(
   entry: Pm2Process | null,
-  port: number
+  port: number,
+  expectedScript?: string
 ): Promise<HealthProblem[]> {
   if (!entry || entry.pm2_env?.status !== 'online') return [];
   const portState = await probeLocalPort(port);
-  return evaluateServerHealth({ entry, portState, cliNodeVersion: process.versions.node });
+  return evaluateServerHealth({ entry, portState, cliNodeVersion: process.versions.node, expectedScript });
 }
 
 /**
@@ -192,9 +214,9 @@ export function resolveInterpreter(): string | null {
  * Whether PM2's registration for a process is broken in a way that restarting
  * cannot fix, so it has to be deleted and recreated.
  *
- * Only one situation qualifies: PM2 reporting a process as `online` that it
- * never got a pid for, which is what a failed spawn looks like from the
- * outside (#522). Restarting asks the same broken configuration to try again.
+ * An online process without a pid never spawned (#522). A differing script
+ * also needs recreation: startOrRestart updates `script` in current_conf but
+ * keeps executing the old pm_exec_path when an installation moves.
  *
  * A differing `exec_interpreter` deliberately does *not* qualify. It is
  * tempting, since `pm2 update` restores the old value from its dump — which is
@@ -206,10 +228,10 @@ export function resolveInterpreter(): string | null {
  * the process from the list entirely if the following start fails — taking
  * `monky logs` with it.
  */
-export function needsProcessRecreate(entry: Pm2Process | null): boolean {
+export function needsProcessRecreate(entry: Pm2Process | null, expectedScript?: string): boolean {
   if (!entry) return false;
 
   // PM2 claims the process is running but never got a pid for it, so the spawn
   // itself failed. Restarting asks the same broken configuration to try again.
-  return entry.pm2_env?.status === 'online' && !entry.pid;
+  return hasScriptMismatch(entry, expectedScript) || (entry.pm2_env?.status === 'online' && !entry.pid);
 }

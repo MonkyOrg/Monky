@@ -1,4 +1,6 @@
 import { t } from '../i18n';
+import { escapeHtml } from '../utils/html';
+import { renderLoadingError } from '../utils/loadingSkeleton';
 
 /** Side of the square crop preview, in CSS pixels. */
 const VIEWPORT_PX = 320;
@@ -13,12 +15,23 @@ interface CropState {
   y: number;
 }
 
-function loadImage(dataUrl: string): Promise<HTMLImageElement> {
+function loadImage(dataUrl: string, signal: AbortSignal): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('Could not load the selected image.'));
-    image.src = dataUrl;
+    const cleanup = () => {
+      image.onload = image.onerror = null;
+      signal.removeEventListener('abort', abort);
+    };
+    const abort = () => {
+      cleanup();
+      image.removeAttribute('src');
+      reject(new DOMException('Image loading cancelled', 'AbortError'));
+    };
+    image.onload = () => { cleanup(); resolve(image); };
+    image.onerror = () => { cleanup(); reject(new Error('Could not load the selected image.')); };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    else image.src = dataUrl;
   });
 }
 
@@ -27,20 +40,11 @@ function loadImage(dataUrl: string): Promise<HTMLImageElement> {
  * or server picture. Resolves with a `${OUTPUT_PX}x${OUTPUT_PX}` PNG data URL,
  * or `null` when the user cancels (#255).
  */
-export async function openImageCropper(dataUrl: string): Promise<string | null> {
-  let image: HTMLImageElement;
-  try {
-    image = await loadImage(dataUrl);
-  } catch {
-    return dataUrl;
-  }
-
+export function openImageCropper(dataUrl: string): Promise<string | null> {
   return new Promise((resolve) => {
-    // Scale at which the image just covers the square, so there are never gaps.
-    const baseScale = Math.max(
-      VIEWPORT_PX / image.naturalWidth,
-      VIEWPORT_PX / image.naturalHeight
-    );
+    let image: HTMLImageElement | null = null;
+    let baseScale = 1;
+    const loading = new AbortController();
     const state: CropState = { zoom: 1, x: 0, y: 0 };
 
     const backdrop = document.createElement('div');
@@ -51,18 +55,19 @@ export async function openImageCropper(dataUrl: string): Promise<string | null> 
           <div class="modal-title">${t('crop.title')}</div>
         </div>
         <div class="crop-hint">${t('crop.hint')}</div>
-        <div class="crop-viewport" style="width: ${VIEWPORT_PX}px; height: ${VIEWPORT_PX}px;">
+        <div class="crop-viewport" aria-busy="true" style="width: ${VIEWPORT_PX}px; height: ${VIEWPORT_PX}px;">
           <img class="crop-image" alt="" draggable="false">
           <div class="crop-mask"></div>
+          <div class="crop-loading skeleton" role="status" aria-label="${escapeHtml(t('common.loading'))}"></div>
         </div>
         <div class="crop-zoom-row">
           <span class="material-symbols-outlined md-18">zoom_out</span>
-          <input class="crop-zoom-slider" type="range" min="1" max="${MAX_ZOOM}" step="0.01" value="1">
+          <input class="crop-zoom-slider" type="range" min="1" max="${MAX_ZOOM}" step="0.01" value="1" disabled>
           <span class="material-symbols-outlined md-18">zoom_in</span>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-action="cancel">${t('common.cancel')}</button>
-          <button type="button" class="btn btn-primary" data-action="confirm">${t('crop.confirm')}</button>
+          <button type="button" class="btn btn-primary" data-action="confirm" disabled>${t('crop.confirm')}</button>
         </div>
       </div>
     `;
@@ -70,10 +75,11 @@ export async function openImageCropper(dataUrl: string): Promise<string | null> 
     const imageEl = backdrop.querySelector('.crop-image') as HTMLImageElement;
     const viewport = backdrop.querySelector('.crop-viewport') as HTMLElement;
     const slider = backdrop.querySelector('.crop-zoom-slider') as HTMLInputElement;
-    imageEl.src = dataUrl;
+    const placeholder = backdrop.querySelector<HTMLElement>('.crop-loading')!;
+    const confirm = backdrop.querySelector<HTMLButtonElement>('[data-action="confirm"]')!;
 
-    const displayedWidth = () => image.naturalWidth * baseScale * state.zoom;
-    const displayedHeight = () => image.naturalHeight * baseScale * state.zoom;
+    const displayedWidth = () => (image?.naturalWidth ?? 0) * baseScale * state.zoom;
+    const displayedHeight = () => (image?.naturalHeight ?? 0) * baseScale * state.zoom;
 
     const clamp = () => {
       const minX = VIEWPORT_PX - displayedWidth();
@@ -90,6 +96,7 @@ export async function openImageCropper(dataUrl: string): Promise<string | null> 
     };
 
     const setZoom = (nextZoom: number, anchorX: number, anchorY: number) => {
+      if (!image) return;
       const previous = state.zoom;
       const zoom = Math.min(MAX_ZOOM, Math.max(1, nextZoom));
       if (zoom === previous) return;
@@ -101,15 +108,14 @@ export async function openImageCropper(dataUrl: string): Promise<string | null> 
       apply();
     };
 
-    // Start centered on the image.
-    state.x = (VIEWPORT_PX - displayedWidth()) / 2;
-    state.y = (VIEWPORT_PX - displayedHeight()) / 2;
-    apply();
-
     let settled = false;
     const settle = (result: string | null) => {
       if (settled) return;
       settled = true;
+      loading.abort();
+      image?.removeAttribute('src');
+      imageEl.removeAttribute('src');
+      image = null;
       document.removeEventListener('keydown', onKeyDown, true);
       backdrop.remove();
       resolve(result);
@@ -125,6 +131,7 @@ export async function openImageCropper(dataUrl: string): Promise<string | null> 
     };
 
     const exportCrop = () => {
+      if (!image) return;
       const canvas = document.createElement('canvas');
       canvas.width = OUTPUT_PX;
       canvas.height = OUTPUT_PX;
@@ -170,7 +177,7 @@ export async function openImageCropper(dataUrl: string): Promise<string | null> 
     let originY = 0;
 
     viewport.addEventListener('pointerdown', (e: PointerEvent) => {
-      if (e.button !== 0) return;
+      if (e.button !== 0 || !image) return;
       dragging = true;
       startX = e.clientX;
       startY = e.clientY;
@@ -197,6 +204,7 @@ export async function openImageCropper(dataUrl: string): Promise<string | null> 
     viewport.addEventListener('pointercancel', endDrag);
 
     viewport.addEventListener('dblclick', () => {
+      if (!image) return;
       state.zoom = 1;
       slider.value = '1';
       state.x = (VIEWPORT_PX - displayedWidth()) / 2;
@@ -212,6 +220,38 @@ export async function openImageCropper(dataUrl: string): Promise<string | null> 
     document.addEventListener('keydown', onKeyDown, true);
 
     document.body.appendChild(backdrop);
+    const prepare = async (): Promise<void> => {
+      placeholder.classList.add('skeleton');
+      placeholder.innerHTML = '';
+      placeholder.setAttribute('role', 'status');
+      placeholder.setAttribute('aria-label', t('common.loading'));
+      viewport.setAttribute('aria-busy', 'true');
+      try {
+        const loaded = await loadImage(dataUrl, loading.signal);
+        if (settled) return;
+        if (loaded.naturalWidth <= 0 || loaded.naturalHeight <= 0) throw new Error('Invalid image dimensions');
+        image = loaded;
+        // Cover the square without gaps, then center the decoded image.
+        baseScale = Math.max(VIEWPORT_PX / image.naturalWidth, VIEWPORT_PX / image.naturalHeight);
+        imageEl.src = dataUrl;
+        state.x = (VIEWPORT_PX - displayedWidth()) / 2;
+        state.y = (VIEWPORT_PX - displayedHeight()) / 2;
+        apply();
+        placeholder.hidden = true;
+        slider.disabled = confirm.disabled = false;
+      } catch (error: unknown) {
+        if (settled) return;
+        console.warn('[ImageCrop] Could not prepare the selected image', error);
+        placeholder.classList.remove('skeleton');
+        placeholder.setAttribute('role', 'presentation');
+        placeholder.removeAttribute('aria-label');
+        placeholder.innerHTML = renderLoadingError(t('crop.loadFailed'));
+        placeholder.querySelector('[data-loading-retry]')?.addEventListener('click', () => { void prepare(); });
+      } finally {
+        if (!settled) viewport.setAttribute('aria-busy', 'false');
+      }
+    };
+    void prepare();
   });
 }
 

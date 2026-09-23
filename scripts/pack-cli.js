@@ -18,6 +18,8 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
+import { license, copyMonkyLicenses } from './legal.cjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER_DIR = path.join(ROOT, 'apps', 'server');
@@ -46,6 +48,7 @@ export function buildSharedPackageJson(sharedPkg) {
   return {
     name: sharedPkg.name,
     version: sharedPkg.version,
+    license,
     main: sharedPkg.main,
     types: sharedPkg.types,
   };
@@ -64,7 +67,7 @@ export function buildCliPackageJson(serverPkg, sharedPkg, version) {
     name: serverPkg.name,
     version,
     description: 'Monky CLI — self-hosted voice, video and chat server',
-    license: 'MIT',
+    license,
     repository: { type: 'git', url: 'https://github.com/MonkyOrg/Monky.git' },
     homepage: 'https://github.com/MonkyOrg/Monky#readme',
     main: serverPkg.main,
@@ -91,12 +94,15 @@ function main() {
       throw new Error(`Missing build output: ${dir}. Run "npm run build" first.`);
     }
   }
+  const require = createRequire(import.meta.url);
+  const { PROTOCOL_VERSION } = require(path.join(sharedDist, 'constants.js'));
 
   const staging = path.join(ROOT, 'release', 'cli-pack');
   fs.rmSync(staging, { recursive: true, force: true });
   fs.mkdirSync(staging, { recursive: true });
 
   fs.cpSync(serverDist, path.join(staging, 'dist'), { recursive: true });
+  copyMonkyLicenses(staging);
 
   // tsc leaves the .sql files behind, and DatabaseConnection looks for them
   // next to the compiled output first.
@@ -110,6 +116,7 @@ function main() {
 
   const bundledShared = path.join(staging, 'node_modules', '@monky', 'shared');
   fs.mkdirSync(bundledShared, { recursive: true });
+  copyMonkyLicenses(bundledShared);
   fs.cpSync(sharedDist, path.join(bundledShared, 'dist'), { recursive: true });
   fs.writeFileSync(
     path.join(bundledShared, 'package.json'),
@@ -147,9 +154,17 @@ function main() {
   fs.rmSync(finalPath, { force: true });
   fs.copyFileSync(path.join(staging, packed), finalPath);
   fs.rmSync(path.join(staging, packed), { force: true });
+  const compatibilityPath = path.join(args.out, `monky-compatibility-${version}.json`);
+  fs.writeFileSync(compatibilityPath, JSON.stringify({
+    schemaVersion: 1,
+    version,
+    protocolVersion: PROTOCOL_VERSION,
+    botSdkVersion: version,
+  }, null, 2) + '\n');
 
   console.log(`[pack-cli] ${migrations.length} migration(s) bundled`);
   console.log(`[pack-cli] ${finalPath}`);
+  console.log(`[pack-cli] ${compatibilityPath}`);
   return finalPath;
 }
 

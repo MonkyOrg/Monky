@@ -1,26 +1,32 @@
+import { BUG_REPORT_URL } from '@monky/shared';
 import { settingsStore } from '../../../stores/settingsStore';
 import { updateService } from '../../../core/UpdateService';
 import { changelogModal } from '../../ChangelogModal';
 import { t } from '../../../i18n';
+import { escapeHtml } from '../../../utils/html';
+import { bindVersionCopyButton, renderVersionCopyButton, setVersionCopyButton } from '../../VersionCopyButton';
+import licenseText from '../../../../../../../LICENSE?raw';
 
 const IDEAS_URL = 'https://github.com/MonkyOrg/Monky/discussions/categories/ideas';
 const NEW_IDEA_URL = 'https://github.com/MonkyOrg/Monky/discussions/new?category=ideas';
-const NEW_BUG_URL = 'https://github.com/MonkyOrg/Monky/discussions/new?category=bug-reports';
 const DONATE_URL = 'https://buymeacoffee.com/monkyorg';
 
 export class AboutTab {
+  private unbindVersionCopy: (() => void) | null = null;
+  private unbindSourceLink: (() => void) | null = null;
+
   public renderHtml(): string {
     return `
       <!-- Updates -->
       <div class="form-group" style="margin-bottom: 16px;">
-        <label style="display: flex; align-items: center; gap: 6px;">
+        <label data-settings-section="updates" data-settings-label="${escapeHtml(t('settings.updatesSection'))}" style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">system_update</span>
           ${t('settings.updatesSection')}
         </label>
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <div style="flex: 1;">
             <div style="font-size: 12px; color: var(--text-secondary);">
-              ${t('settings.currentVersion')} <span id="settings-app-version" style="font-family: var(--font-mono);">…</span>
+              ${t('settings.currentVersion')} ${renderVersionCopyButton('settings-app-version')}
             </div>
             <div id="settings-update-status" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;"></div>
           </div>
@@ -52,7 +58,7 @@ export class AboutTab {
         </div>
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
           <div>
-            <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-auto-start">
+            <label data-settings-section="auto-start" data-settings-label="${escapeHtml(t('settings.autoStart'))}" style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-auto-start">
               <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">power_settings_new</span>
               ${t('settings.autoStart')}
             </label>
@@ -60,11 +66,13 @@ export class AboutTab {
               ${t('settings.autoStartDesc')}
             </div>
           </div>
-          <label class="toggle-switch" aria-label="${t('settings.autoStart')}">
-            <input id="checkbox-auto-start" type="checkbox">
+          <span id="auto-start-loading" class="skeleton loading-skeleton-switch" role="status" aria-label="${escapeHtml(t('common.loading'))}"></span>
+          <label id="auto-start-control" class="toggle-switch" aria-label="${t('settings.autoStart')}" hidden>
+            <input id="checkbox-auto-start" type="checkbox" disabled>
             <span class="toggle-slider"></span>
           </label>
         </div>
+        <p id="auto-start-load-error" class="audio-device-status" role="status" hidden></p>
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
           <div>
             <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px; cursor: pointer; font-weight: 600;" for="checkbox-minimize-to-tray">
@@ -97,8 +105,20 @@ export class AboutTab {
         </div>
       </div>
 
+      <div data-settings-section="license" data-settings-label="${escapeHtml(t('settings.licenseSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
+        <label>${t('settings.licenseSection')}</label>
+        <p style="font-size: 12px; color: var(--text-secondary);">Copyright (c) 2026 Monky Contributors</p>
+        <p style="font-size: 12px; color: var(--text-secondary);">${t('settings.licenseDescription')}</p>
+        <details>
+          <summary style="cursor: pointer;">GNU GPL-3.0-or-later</summary>
+          <pre tabindex="0" aria-label="${escapeHtml(t('settings.licenseSection'))}" style="max-height: 220px; overflow: auto; white-space: pre-wrap; font-size: 11px;">${escapeHtml(licenseText)}</pre>
+        </details>
+        <button id="btn-source-code" class="btn btn-secondary" style="font-size: 12px; margin-top: 8px;">${t('settings.sourceCode')}</button>
+        <p id="license-link-error" class="audio-device-status" role="alert" hidden></p>
+      </div>
+
       <!-- Community -->
-      <div class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
+      <div data-settings-section="community" data-settings-label="${escapeHtml(t('settings.communitySection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px;">
         <label style="display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">forum</span>
           ${t('settings.communitySection')}
@@ -129,16 +149,29 @@ export class AboutTab {
   }
 
   public async loadAppVersion(container: HTMLElement): Promise<void> {
+    const verEl = container.querySelector<HTMLButtonElement>('#settings-app-version');
+    if (!verEl) return;
     try {
-      const verEl = container.querySelector<HTMLElement>('#settings-app-version');
-      if (verEl && window.api?.getAppVersion) {
-        const v = await window.api.getAppVersion();
-        verEl.textContent = `v${v}`;
-      }
-    } catch {}
+      if (!window.api?.getAppVersion) throw new Error('App version bridge unavailable');
+      const version = await window.api.getAppVersion();
+      if (!version.trim()) throw new Error('Empty app version');
+      if (container.isConnected) setVersionCopyButton(verEl, `v${version}`);
+    } catch (error) {
+      console.warn('[AboutTab] Could not load app version', error);
+      if (!container.isConnected) return;
+      verEl.classList.remove('skeleton', 'loading-skeleton-value');
+      verEl.setAttribute('aria-busy', 'false');
+      verEl.disabled = true;
+      verEl.textContent = t('versionCopy.unavailable');
+      verEl.title = t('versionCopy.loadFailed');
+      verEl.setAttribute('aria-label', verEl.title);
+    }
   }
 
   public attachEvents(container: HTMLElement): void {
+    this.cleanup();
+    const versionButton = container.querySelector<HTMLButtonElement>('#settings-app-version');
+    if (versionButton) this.unbindVersionCopy = bindVersionCopyButton(versionButton);
     const btnCheckUpdates = container.querySelector<HTMLButtonElement>('#btn-check-updates');
     const btnViewChangelog = container.querySelector<HTMLButtonElement>('#btn-view-changelog');
     const updateStatus = container.querySelector<HTMLElement>('#settings-update-status');
@@ -150,6 +183,30 @@ export class AboutTab {
     const btnSuggest = container.querySelector<HTMLButtonElement>('#btn-suggest-idea');
     const btnVote = container.querySelector<HTMLButtonElement>('#btn-vote-ideas');
     const btnReport = container.querySelector<HTMLButtonElement>('#btn-report-bug');
+    const sourceButton = container.querySelector<HTMLButtonElement>('#btn-source-code');
+    if (sourceButton) {
+      let active = true;
+      const openSource = async () => {
+        const failure = container.querySelector<HTMLElement>('#license-link-error');
+        if (failure) failure.hidden = true;
+        try {
+          if (!window.api?.openExternal) throw new Error('External navigation bridge unavailable');
+          const result = await window.api.openExternal('https://github.com/MonkyOrg/Monky');
+          if (!result.success) throw new Error('Source code link was not opened');
+        } catch (error: unknown) {
+          console.warn('[AboutTab] Could not open source code', error);
+          if (active && failure && container.isConnected) {
+            failure.textContent = t('settings.sourceCodeOpenFailed');
+            failure.hidden = false;
+          }
+        }
+      };
+      sourceButton.addEventListener('click', openSource);
+      this.unbindSourceLink = () => {
+        active = false;
+        sourceButton.removeEventListener('click', openSource);
+      };
+    }
 
     btnCheckUpdates?.addEventListener('click', async () => {
       if (updateStatus) updateStatus.textContent = t('settings.checking');
@@ -178,10 +235,29 @@ export class AboutTab {
       }
     });
 
-    if (window.api?.getAutoStart && checkboxAutoStart) {
-      window.api.getAutoStart().then((enabled) => {
-        checkboxAutoStart.checked = enabled;
-      }).catch(() => {});
+    if (checkboxAutoStart) {
+      const loading = container.querySelector<HTMLElement>('#auto-start-loading');
+      const control = container.querySelector<HTMLElement>('#auto-start-control');
+      const failure = container.querySelector<HTMLElement>('#auto-start-load-error');
+      const loadAutoStart = async (): Promise<void> => {
+        try {
+          if (!window.api?.getAutoStart) throw new Error('Auto-start preference bridge unavailable');
+          const enabled = await window.api.getAutoStart();
+          if (!container.isConnected) return;
+          checkboxAutoStart.checked = enabled;
+          checkboxAutoStart.disabled = false;
+        } catch (error: unknown) {
+          if (!container.isConnected) return;
+          console.warn('[AboutTab] Could not load the auto-start preference', error);
+          if (failure) { failure.textContent = t('settings.autoStartLoadFailed'); failure.hidden = false; }
+        } finally {
+          if (container.isConnected) {
+            if (loading) loading.hidden = true;
+            if (control) control.hidden = false;
+          }
+        }
+      };
+      void loadAutoStart();
 
       checkboxAutoStart.addEventListener('change', () => {
         window.api?.setAutoStart?.(checkboxAutoStart.checked);
@@ -222,6 +298,13 @@ export class AboutTab {
     btnSupport?.addEventListener('click', () => openLink(DONATE_URL));
     btnSuggest?.addEventListener('click', () => openLink(NEW_IDEA_URL));
     btnVote?.addEventListener('click', () => openLink(IDEAS_URL));
-    btnReport?.addEventListener('click', () => openLink(NEW_BUG_URL));
+    btnReport?.addEventListener('click', () => openLink(BUG_REPORT_URL));
+  }
+
+  public cleanup(): void {
+    this.unbindSourceLink?.();
+    this.unbindSourceLink = null;
+    this.unbindVersionCopy?.();
+    this.unbindVersionCopy = null;
   }
 }

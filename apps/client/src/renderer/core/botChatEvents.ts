@@ -7,18 +7,38 @@ import {
   type CommandPromptReceivedPayload,
   type CommandSubmitPayload,
   type CommandFinishedPayload,
+  type CommandSoundDownloadReceivedPayload,
+  type CommandSoundDownloadCancelPayload,
+  type BotSettingsListResponse,
 } from '@monky/shared';
 import { appEvents, type EventBus } from './EventBus';
 import { chatStore } from '../stores/chatStore';
 import { serverStore } from '../stores/serverStore';
 import { botCommandMessage } from '../utils/botInputs';
+import { getActiveNetworkClient, type ConnectionStatus } from './NetworkClient';
+import { localSoundDownloads } from './LocalSoundDownloadService';
 
 /** SessionManager routes these synchronous mutations to the originating stores. */
 export function bindBotChatEvents(events: EventBus = appEvents): () => void {
   const unbind = [
+    events.on(`message.${MessageType.COMMAND_SOUND_DOWNLOAD}`, (payload: CommandSoundDownloadReceivedPayload) => {
+      localSoundDownloads.receive(getActiveNetworkClient(), payload);
+    }),
+    events.on(`message.${MessageType.COMMAND_SOUND_DOWNLOAD_CANCEL}`, (payload: CommandSoundDownloadCancelPayload) => {
+      localSoundDownloads.cancelRequest(getActiveNetworkClient(), payload);
+    }),
+    events.on('network.status', (status: ConnectionStatus) => {
+      if (status !== 'CONNECTED') {
+        localSoundDownloads.disconnect(getActiveNetworkClient());
+        chatStore.setCommandBots(null);
+      }
+    }),
     events.on(`message.${MessageType.COMMANDS_LIST_RESPONSE}`, (payload: CommandsListResponsePayload) => {
       serverStore.setSlashCommands(payload.commands ?? []);
       chatStore.setCommands(payload.commands ?? []);
+    }),
+    events.on(`message.${MessageType.BOT_SETTINGS_LIST_RESPONSE}`, (payload: BotSettingsListResponse) => {
+      chatStore.setCommandBots(payload.bots);
     }),
     events.on(`message.${MessageType.COMMAND_RESPONSE}`, (payload: BotCommandMessagePayload) => {
       chatStore.addMessage(botCommandMessage(payload));
@@ -37,6 +57,7 @@ export function bindBotChatEvents(events: EventBus = appEvents): () => void {
     }),
     events.on(`message.${MessageType.BOT_REVOKED}`, (payload: BotRevokedPayload) => {
       chatStore.finishBotInvocations(payload.botId);
+      chatStore.removeCommandBot(payload.botId);
       serverStore.removeMember(payload.botId);
     }),
   ];

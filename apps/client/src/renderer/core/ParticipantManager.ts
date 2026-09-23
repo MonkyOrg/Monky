@@ -146,7 +146,7 @@ export class ParticipantManager {
     const participant = this.participants.get(voiceState.sessionId);
     if (participant) {
       participant.voiceState = voiceState;
-      participant.isSpeaking = voiceState.isSpeaking;
+      this.setSpeaking(voiceState.sessionId, voiceState.isSpeaking);
       this.scheduleUpdate();
     }
   }
@@ -188,26 +188,34 @@ export class ParticipantManager {
     }
   }
 
-  public setRemoteScreenStream(sessionId: string, shareId: string, stream: MediaStream): void {
+  public setRemoteScreenStream(sessionId: string, shareId: string, stream: MediaStream, options: { notify?: boolean } = {}): void {
     const participant = this.participants.get(sessionId);
     if (participant) {
       participant.remoteScreenStreams.set(shareId, stream);
+      if (options.notify !== false) this.scheduleUpdate();
+    }
+  }
+
+  public removeRemoteScreenStream(sessionId: string, shareId: string, options: { notify?: boolean } = {}): void {
+    const participant = this.participants.get(sessionId);
+    if (participant && participant.remoteScreenStreams.delete(shareId) && options.notify !== false) {
       this.scheduleUpdate();
     }
   }
 
-  public removeRemoteScreenStream(sessionId: string, shareId: string): void {
+  public setSpeaking(
+    sessionId: string,
+    speaking: boolean,
+    audioState?: Pick<VoiceParticipantState, 'isMuted' | 'isDeafened' | 'serverMuted' | 'serverDeafened'>
+  ): void {
     const participant = this.participants.get(sessionId);
-    if (participant && participant.remoteScreenStreams.delete(shareId)) {
-      this.scheduleUpdate();
-    }
-  }
-
-  public setSpeaking(sessionId: string, speaking: boolean): void {
-    const participant = this.participants.get(sessionId);
-    if (participant && participant.isSpeaking !== speaking) {
-      participant.isSpeaking = speaking;
-      this.bus.emit('participants.speaking_changed', { sessionId, speaking });
+    if (!participant) return;
+    const state = audioState ?? participant.voiceState;
+    const audible = speaking && !!participant.voiceState && !!state && !state.isMuted && !state.isDeafened
+      && !state.serverMuted && !state.serverDeafened;
+    if (participant.isSpeaking !== audible) {
+      participant.isSpeaking = audible;
+      this.bus.emit('participants.speaking_changed', { sessionId, speaking: audible });
     }
   }
 

@@ -1,59 +1,52 @@
 # Troubleshooting
 
+First identify the failing stage: **server connection**, **call media** or
+**a bot action**. An accessible chat port does not prove that voice and video
+are passing; TURN does not fix the login address.
+
 | Symptom | What usually fixes it |
 |---|---|
-| macOS says the app "is damaged and can't be opened" | It's the Gatekeeper quarantine (app not notarized yet). Run in Terminal: `xattr -dr com.apple.quarantine /Applications/Monky.app`. See [Download](/en/download#macos-the-application-is-damaged-and-can-t-be-opened) |
-| I can't connect to my friend's server | Double-check IP and port; ask them to confirm the server is started; check firewall and port forwarding; on CGNAT, use a VPN or [TURN](/en/turn) |
+| macOS says the app "is damaged and can't be opened" | Check the source and checksum before changing quarantine. See [Download](/en/download#macos-the-application-is-damaged-and-can-t-be-opened) |
+| I can't connect to my friend's server | Check the process, address, TCP port and firewall. Behind CGNAT, use a VPN reachable by participants or publicly reachable hosting. TURN only helps media after connecting |
 | Nickname already in use | Nicknames are unique per server — pick another |
-| I joined, but nobody hears me | Check microphone under Settings › Devices, watch the VAD meter, lower sensitivity and confirm the mic is not muted |
+| I joined, but nobody hears me | Check Settings › Voice and Video, the meter, detection threshold, PTT, personal mute and any administrative restriction |
+| I hear someone, but their avatar does not indicate speech | Update the client. The indicator follows each microphone's decoded audio in P2P and SFU, even when RTP statistics report zero audio level. It is hidden while you are deafened; screen audio must not trigger it |
 | Everyone sounds choppy | Use the Economy profile, ask broadcasters to do the same and prefer cable over Wi-Fi |
-| Shared screen has no sound | Share a whole screen and check the source app volume |
+| Shared screen has no sound | Check whether the source/platform supports screen audio, the selected option and sender/receiver volumes |
 | Nothing under Servers on the Network | Discovery only works on the same LAN; click Scan again and check UDP `41234` in the firewall |
 | One participant is silent only for me | Right-click them and set individual volume back to 100% |
 | I can only fail to talk to **one** specific person (everyone else works) | A red `link_off` icon shows next to them. You are both likely behind CGNAT with no direct route. The host can enable the [TURN relay](/en/turn); otherwise both of you need a VPN. This only happens in P2P Mesh mode |
 | In **SFU mode**, nobody hears anybody and the call never connects | The `40000-49151` range must be open in **both UDP and TCP** on the firewall and the router. Signalling uses a different port, so the server looks fine while no media gets through. See [Opening the SFU mode ports](/en/hospedar-em-vps#opening-the-sfu-mode-ports) |
-| In **SFU mode**, the call drops and the app keeps saying it is reconnecting | The SFU process crashed or never started on the server. The app rebuilds the session on its own once it is back; whoever hosts should check `monky status` and `monky logs` |
-| Avast (or another antivirus) flags the installer/updater | False positive — see [Antivirus: Avast and similar](#antivirus-avast-and-similar) |
-| The **TURN relay** switch is greyed out and will not budge | The host cannot run the relay. The notice under the switch says why: the server is not on Linux, the server predates the feature (update the server), or the server lacks the privileges to install coturn (run `sudo bash scripts/install-turn.sh` once) |
+| In **SFU mode**, the call drops and the app keeps saying it is reconnecting | Either the process or the media path may have failed. Creating transports and producers through signaling does not prove ICE/DTLS connectivity. Check the advertised addresses and ports in the logs, the VM firewall and the provider's rules; successfully binding a local port does not prove external reachability |
+| Avast (or another antivirus) flags the installer/updater | Check the detection, source and integrity; do not assume a false positive. See [Antivirus: Avast and similar](#antivirus-avast-and-similar) |
+| The **TURN relay** switch is greyed out and will not budge | Read the displayed reason: unsupported platform, SFU mode, an old version or missing privileges to install coturn. For the last case, follow [manual installation](/en/turn#manual-coturn-installation) without disrupting other services on the host |
 | TURN is enabled but nobody connects via relay | Ports may be closed. See the [full port guide](/en/turn#required-ports). Run `monky status` — it should show `✔ accessible` |
 | On macOS, screen sharing keeps asking for permission even though it is already allowed | The permission is stuck on the previous version — see [macOS: screen permission stops working after an update](#macos-screen-permission-stops-working-after-an-update) |
+| Bot online, but no commands | Check approved capabilities, your role and the channel switch. See [Bot troubleshooting](/en/bots#when-something-goes-wrong) |
 
 ## Antivirus: Avast and similar
 
-Monky is **not code-signed yet**. Without that signature, reputation-based
-antivirus products — Avast in particular — flag the installer, the app and the
-updater as suspicious. It is a **false positive**: the code is open source and
-releases are built automatically by GitHub Actions straight from this
-repository.
+Without a recognized distribution signature, reputation-based antivirus tools
+can flag the app or updater. This can be a false positive, but open source
+and automated builds do not prove that any file on your computer is safe.
+[Verify the release](/en/verificar-releases) and inspect the detection's exact
+name and path.
 
 ### Monky folders to allow
 
-Add these three folders to your antivirus exclusions:
-
-| Folder | What it holds |
-|---|---|
-| `%LOCALAPPDATA%\Programs\Monky` | The installed application |
-| `%LOCALAPPDATA%\@monkyclient-updater` | Update download cache |
-| `%APPDATA%\@monky` | Your local data (identity, preferences) |
-
-In Avast: **Menu › Settings › General › Exceptions › Add exception**.
-
-::: tip
-Paste the path with the variables (`%LOCALAPPDATA%`) straight into the field —
-Windows expands them for you. `%APPDATA%` maps to `AppData\Roaming`.
-:::
+Do not preemptively exclude entire folders. In the antivirus history, identify
+the blocked file, compare it with the official artifact and consult the
+vendor's guidance. If you confirm a false positive, prefer the narrowest
+exception for that detection. Do not disable real-time protection or exclude
+your personal data directory.
 
 ### The "Old uninstaller" warning during updates
 
-While updating, Avast may flag a file named `old-uninstaller.exe` under
-`%LOCALAPPDATA%\Temp\...`. This is expected: the installer **cannot delete an
-uninstaller that is currently running**, so it copies the previous uninstaller
-into the Windows temp folder and runs the copy from there. That behaviour comes
-from NSIS/electron-builder and the path is hardcoded in the tooling — **it
-cannot be pointed at a Monky folder**.
-
-The recommended approach is to allow **only that specific detection** when it
-shows up, instead of allowing the whole folder.
+The NSIS installer can run a temporary copy of the previous uninstaller
+under `%LOCALAPPDATA%\Temp\...`. That explains a name such as
+`old-uninstaller.exe`, but its name alone does not prove legitimacy. Verify
+the update's origin and the detection before allowing any file; do not
+exclude the whole folder.
 
 ::: danger Warning
 `%LOCALAPPDATA%\Temp` is **not a Monky folder**. It is the temporary folder
@@ -113,8 +106,9 @@ already wired to use one as soon as it is available.
 ## I can't connect with a specific person (CGNAT)
 
 If you can talk to most people but **one specific person** can't connect (you
-see a red `link_off` icon), the problem is almost certainly **CGNAT** — both
-of you are behind symmetric NAT and STUN can't punch through.
+see a red `link_off` icon), **CGNAT/restrictive NAT** is one possible cause.
+Blocked UDP, a firewall, VPN or an invalid ICE route can also prevent the
+connection. The icon identifies the failing pair, not the network type.
 
 ### Option 1: TURN relay (recommended if the server is Linux)
 
@@ -134,15 +128,16 @@ WireGuard). The VPN creates a virtual network that bypasses CGNAT.
 ### Option 3: SFU mode (if the host is willing to carry the media)
 
 In [SFU mode](/en/criar-seu-servidor#voice-media-modes-p2p-mesh-vs-sfu) nobody
-connects to anybody: each person only talks to the server, so there is no pair
-for CGNAT to break. It settles the problem for good, but it moves the cost — all
-media now flows through the host, which needs the bandwidth and the
-`40000-49151` ports open.
+connects directly to the other participants: each person talks to the server.
+This removes dependence on that direct peer-to-peer path, but still requires
+a reachable host, correct announced IP and open `40000-49151` ports.
+Media flows through the host, which needs the corresponding bandwidth.
 
 ### How to know if you're behind CGNAT?
 
-- Visit [ifconfig.me](https://ifconfig.me) and compare with your router's IP
-  (in `192.168.x.x` or `10.x.x.x`). If the public IP **does not appear** on
-  your router's WAN interface, you're behind CGNAT.
+- Compare the public IP from [ifconfig.me](https://ifconfig.me) with the
+  router's **WAN** address, not its local administration-page address.
+  A difference suggests additional NAT, which may be CGNAT or another
+  router; confirm with the ISP. VPNs and proxies can also affect the comparison.
 - Mobile data (4G/5G) is almost always CGNAT.
 - Many residential ISPs use CGNAT.

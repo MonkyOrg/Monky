@@ -1,5 +1,11 @@
 # Usando o App
 
+Depois de conectar, a lateral esquerda organiza servidores e canais; o centro
+mostra a conversa ou o palco de voz; a lista à direita reúne os membros.
+Conectar ao servidor e entrar em uma chamada são ações separadas.
+
+<AppScreenshot src="/screenshots/conversa-pt.png" alt="Conversa demonstrativa com servidores e canais à esquerda, mensagens ao centro e membros à direita." caption="Captura do cliente para Windows com dados demonstrativos. Nomes, conversas e bot foram criados para este guia." />
+
 ## Voz
 
 Clique em um **canal de voz** para entrar na chamada. Quem fala ganha um anel verde no avatar. A barra inferior tem microfone, fone/ensurdecer e desconectar. O painel mostra ping médio e permite sair só da chamada.
@@ -10,7 +16,14 @@ A chamada acompanha você: se trocar de servidor na coluna da esquerda, ela cont
 
 ## Câmera e tela
 
-Na barra de mídia: **Câmera**, **Compartilhar Tela** e **Soundboard**. O compartilhamento permite escolher uma tela inteira ou uma janela específica, com áudio de tela para os participantes.
+Na barra de mídia: **Câmera**, **Compartilhar Tela** e **Soundboard**. Escolha
+uma tela ou janela específica; a disponibilidade de áudio de compartilhamento
+depende da plataforma e da fonte. Confira o que será capturado antes de iniciar.
+
+Em **Configurações → Voz e Vídeo → Câmera**, compare desfoque, fundo virtual
+de cor ou imagem e chroma key de tela física na prévia. Os efeitos são locais
+e valem também para a chamada. Fechar a prévia não desliga uma câmera em uso;
+veja limites e cuidados nas [configurações](/configuracoes).
 
 Quem transmite aparece com selo **LIVE**. Clique no card para destacar ou use tela cheia.
 
@@ -22,6 +35,18 @@ Uma mensagem começada e não enviada fica guardada no canal onde você estava d
 
 Ao passar o mouse sobre uma mensagem (ou chegar aos botões com `Tab`), uma barra flutuante oferece **Emoji**, **Responder**, **Copiar mensagem** e **Mais opções**. O menu de três pontos mostra os nomes completos; **Editar mensagem** aparece apenas para o autor, se o servidor permitir, e **Apagar mensagem** para o autor ou moderadores. Use as setas para navegar no menu e `Escape` para fechá-lo.
 
+`Ctrl+C` copia o texto selecionado com a formatação exibida, inclusive a produzida por Markdown. No macOS, use `Cmd` no lugar de `Ctrl`. Sem seleção, o atalho atua somente sobre a mensagem que está com foco, não sobre a conversa inteira. **Copiar mensagem** na barra usa formatação; em **Mais opções → Copiar mensagem**, escolha **Com formatação** ou **Sem formatação**. A cópia sem formatação está disponível apenas nesse submenu, sem atalho próprio. Uma seleção dentro da mensagem é respeitada também por esses botões. Use `→` ou `Enter` para abrir o submenu, `←` ou `Escape` para voltar, e `Tab` para sair.
+
+A cópia formatada oferece HTML para aplicativos de texto rico e Markdown para destinos textuais: por exemplo, um negrito pode ser colado como `**texto**` quando o destino não aceita HTML. **Sem formatação** oferece somente o texto visível, sem marcações Markdown nem HTML. Ao colar uma cópia formatada no Monky, a marcação continua editável; HTML externo não é inserido na interface. Os atalhos dos campos de edição continuam nativos. Mensagens só com anexos copiam os nomes dos arquivos, sem transferir os anexos.
+
+Para copiar a **imagem**, e não o nome ou endereço do arquivo, use **Copiar imagem**
+nos controles do anexo ou no menu do botão direito. Isso também funciona no menu
+das figurinhas. Na visualização ampliada, use o botão de copiar ou `Ctrl+C`
+(`Cmd+C` no macOS), sem texto selecionado. O destino recebe uma imagem PNG no
+tamanho original; imagens animadas são copiadas como um quadro estático.
+A cópia aceita até 50 MB e 64 megapixels e avisa se a imagem ou o clipboard
+estiverem indisponíveis, sem substituir a imagem por um link.
+
 **Responder** mantém uma referência à mensagem original, com autor e prévia. A resposta pode incluir texto, anexos, código ou figurinha; mensagens públicas de bots também podem receber respostas. Cancele pelo `×` no campo de composição ou com `Escape`. A referência acompanha o rascunho do canal. Clicar na prévia leva à mensagem original, carregando uma janela do histórico se necessário; **Voltar às mensagens recentes** retorna ao fim da conversa. A prévia acompanha edições e mostra **Mensagem apagada** se o original for excluído, sem preservar seu conteúdo. Mensagens privadas de bots não podem ser usadas como referência.
 
 ## Menções
@@ -30,7 +55,16 @@ Digitar `@` no campo de mensagem abre a lista de membros: escolha alguém para i
 
 O primeiro item da lista é o `@todos` (ou `@everyone` — os dois tokens funcionam em qualquer idioma), que notifica todo mundo que enxerga aquele canal. Canais privados continuam privados: quem não tem acesso não é notificado.
 
-Quem administra o servidor pode desligar isso em **Configurações do servidor → Geral → Permitir menção a todos**, ou pela CLI com a chave `allowEveryoneMention`. O padrão é ligado.
+Quem administra o servidor pode desligar isso em **Configurações do servidor →
+Notificações → Permitir menção a todos**, ou pelo CLI com a chave
+`allowEveryoneMention`. O padrão é ligado.
+
+## Bots e miniapps
+
+Digite `/` em um canal de texto para descobrir os comandos disponíveis.
+Bots podem responder em privado, publicar votações ou abrir miniapps no
+palco de voz. O [guia de uso de bots](/bots) explica permissões, preferências
+e consentimento sem exigir programação.
 
 ## Blocos de código
 
@@ -60,4 +94,9 @@ A pasta fica só na sua máquina: a imagem é enviada ao servidor quando você u
 
 ## Soundboard
 
-Em **Configurações › Soundboard**, escolha uma pasta com `.mp3`, `.wav` ou `.ogg`. Na chamada, toque pelo botão de soundboard. Volume e mudo local ficam nas mesmas configurações. O anfitrião pode desativar o soundboard do servidor inteiro e, em **Configurações do Servidor › Cargos**, liberar a permissão **Usar soundboard** apenas para os cargos desejados.
+O Monky prepara uma pasta local de soundboard automaticamente. Em **Configurações › Soundboard**, confira o caminho ou escolha outra pasta com `.mp3`, `.wav` ou `.ogg`; pastas já escolhidas são preservadas. Na chamada, toque pelo botão de soundboard. Volume e mudo local ficam nas mesmas configurações. O anfitrião pode desativar o soundboard do servidor inteiro e, em **Configurações do Servidor › Cargos**, liberar a permissão **Usar soundboard** apenas para os cargos desejados.
+
+Use as estrelas e o filtro **Todos/Favoritos** para localizar sons junto com
+a busca. Os favoritos vêm primeiro, e cada grupo fica em ordem alfabética,
+sem mudar os atalhos associados aos sons. Marcar a estrela não toca o som.
+A mesma ordenação existe na lista de servidores salvos da Home.

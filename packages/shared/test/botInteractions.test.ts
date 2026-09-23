@@ -2,14 +2,38 @@ import assert from 'node:assert/strict';
 import { botSelectorCreateSchema, botSelectorPublicSchema, botSelectorSchema } from '../src/botSelectors.js';
 import {
   botFormSchema,
+  botCreateSchema,
+  botIdentitySchema,
   botManifestSchema,
   commandDefinitionSchema,
   commandInvokeSchema,
   botProfileUpdateSchema,
   commandRegisterSchema,
   commandSubmitSchema,
+  commandAutocompleteSchema,
+  commandAutocompleteExecutionSchema,
+  commandAutocompletePageSchema,
+  commandAutocompleteResultSchema,
+  commandAutocompleteCancelSchema,
+  commandAudioPreviewSchema,
+  commandAudioPreviewExecutionSchema,
+  commandAudioPreviewResultSchema,
+  commandAudioPreviewCancelSchema,
+  commandRequestIdSchema,
+  commandSoundDownloadSchema,
+  commandSoundDownloadReceivedSchema,
+  commandSoundDownloadResultSchema,
+  audioPreviewSourceSchema,
+  soundDownloadRequestSchema,
+  soundDownloadResultSchema,
+  LIMITS,
   validateBotFormValues,
   validateCommandOptions,
+  botLocaleSchema,
+  localizeCommand,
+  getCommandPresentation,
+  normalizeBotLocale,
+  resolveBotLocale,
 } from '../src/index.js';
 
 const fields = botFormSchema.parse({
@@ -23,8 +47,12 @@ const fields = botFormSchema.parse({
   ],
 });
 
+const preview = { url: 'https://cdn.example.test/audio.mp3', fileName: 'audio.mp3', durationMs: 1500 };
+
 const selector = {
-  id: 'selector', channelId: 'channel', title: 'Pick one', choices: [{ label: 'A', value: 'a' }],
+  id: 'selector', channelId: 'channel', title: 'Pick one', choices: [{
+    label: 'A', value: 'a', description: 'Audio-enabled option', audio: preview,
+  }],
   presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 10,
 };
 assert.equal(botSelectorCreateSchema.safeParse(selector).success, true);
@@ -42,11 +70,181 @@ assert.equal(botSelectorSchema.safeParse(snapshot).success, true);
 assert.equal(botSelectorPublicSchema.safeParse({
   ...snapshot, responses: undefined, counts: { a: 1 }, responseCount: 1, canRespond: true,
 }).success, false, 'Public payloads must not carry private response maps.');
+const { responses: _responses, ...publicSelector } = snapshot;
+assert.deepEqual(botSelectorPublicSchema.parse({
+  ...publicSelector, counts: { a: 1 }, responseCount: 1, canRespond: true,
+}).choices[0].audio, preview);
 
 assert.equal(commandDefinitionSchema.safeParse({ name: '8ball', description: 'Question' }).success, true);
+assert.equal(normalizeBotLocale('en-US'), 'en');
+assert.equal(normalizeBotLocale('EN_us'), 'en');
+assert.equal(normalizeBotLocale('pt-BR'), 'pt-BR');
+for (const locale of ['en', 'EN_us.UTF-8', 'en-GB', 'en_US@euro']) assert.equal(normalizeBotLocale(locale), 'en');
+for (const locale of ['pt', 'pt_BR.UTF-8', 'PT-br', 'pt-PT']) assert.equal(normalizeBotLocale(locale), 'pt-BR');
+for (const locale of ['', 'english', 'fr-FR', 'en-', '1', 'pt-BR invalid']) assert.equal(normalizeBotLocale(locale), undefined);
+assert.equal(normalizeBotLocale('es'), undefined);
+assert.equal(normalizeBotLocale(null), undefined);
+assert.equal(resolveBotLocale('en', ['pt-BR'], 'pt-BR'), 'pt-BR');
+assert.equal(resolveBotLocale('es', ['en'], 'pt-BR'), 'en');
+assert.equal(botLocaleSchema.parse('en-US'), 'en');
+const localizedCommand = commandDefinitionSchema.parse({
+  name: 'play', description: 'Play a track',
+  options: [{
+    name: 'mode', label: 'Mode', description: 'Playback order', type: 'string',
+    choices: [{ label: 'Shuffle', value: 'shuffle', audio: preview }],
+  }],
+  localizations: {
+    'pt-BR': {
+      name: 'tocar', aliases: ['reproduzir', 'play'],
+      description: 'Reproduzir uma faixa',
+      options: { mode: {
+        label: 'Modo', description: 'Ordem de reprodução', placeholder: 'Escolha o modo',
+        choices: { shuffle: { label: 'Aleatório', description: 'Misturar as faixas' } },
+      } },
+    },
+  },
+});
+const portugueseCommand = localizeCommand(localizedCommand, 'pt-BR');
+assert.equal(portugueseCommand.name, 'play');
+assert.equal(portugueseCommand.description, 'Reproduzir uma faixa');
+assert.equal(portugueseCommand.options?.[0].name, 'mode');
+assert.equal(portugueseCommand.options?.[0].label, 'Modo');
+assert.equal(portugueseCommand.options?.[0].choices?.[0].label, 'Aleatório');
+assert.equal(portugueseCommand.options?.[0].choices?.[0].value, 'shuffle');
+assert.deepEqual(portugueseCommand.options?.[0].choices?.[0].audio, preview);
+assert.equal(localizedCommand.options?.[0].choices?.[0].label, 'Shuffle');
+assert.equal(localizeCommand(localizedCommand, 'en-US'), localizedCommand);
+assert.deepEqual(getCommandPresentation(localizedCommand, 'pt-BR'), {
+  canonicalName: 'play', displayName: 'tocar', inputNames: ['play', 'tocar', 'reproduzir'],
+});
+assert.deepEqual(getCommandPresentation(portugueseCommand, 'pt-BR'), getCommandPresentation(localizedCommand, 'pt-BR'));
+assert.deepEqual(getCommandPresentation(localizedCommand, 'en-US'), {
+  canonicalName: 'play', displayName: 'play', inputNames: ['play'],
+});
+assert.deepEqual(getCommandPresentation({ name: '8ball' }, 'en'), {
+  canonicalName: '8ball', displayName: '8ball', inputNames: ['8ball'],
+});
+assert.deepEqual(getCommandPresentation({
+  name: 'help', localizations: { en: { aliases: ['commands'] } },
+}, 'en'), { canonicalName: 'help', displayName: 'help', inputNames: ['help', 'commands'] });
+for (const localizations of [
+  { en: { name: 'Translated-name' } },
+  { en: { aliases: ['bad alias'] } },
+  { 'en-US': { description: 'Noncanonical locale key' } },
+  { en: { options: { unknown: { label: 'Unknown' } } } },
+  { en: { options: { mode: { name: 'translated-option' } } } },
+  { en: { options: { mode: { choices: { invented: { label: 'Invented' } } } } } },
+]) {
+  assert.equal(commandDefinitionSchema.safeParse({ ...localizedCommand, localizations }).success, false);
+}
+for (const name of ['', 'x'.repeat(33), '-name', '_name', 'Uppercase', 'espaço', 'two words', '/name', '<script>']) {
+  for (const localized of [{ name }, { aliases: [name] }]) {
+    assert.equal(commandDefinitionSchema.safeParse({
+      name: 'valid', description: 'Valid', localizations: { en: localized },
+    }).success, false, `Invalid localized input must be rejected: ${name}`);
+  }
+}
+for (const aliases of [Array.from({ length: 9 }, (_, index) => `alias-${index}`), ['same', 'same']]) {
+  assert.equal(commandDefinitionSchema.safeParse({
+    name: 'valid', description: 'Valid', localizations: { en: { aliases } },
+  }).success, false);
+}
+assert.equal(commandDefinitionSchema.safeParse({
+  name: 'valid', description: 'Valid', localizations: {
+    en: { name: '8ball', aliases: Array.from({ length: 8 }, (_, index) => `${index}${'x'.repeat(31)}`) },
+  },
+}).success, true);
+for (const localizations of [
+  { 'pt-BR': { name: 'stop' } },
+  { 'pt-BR': { aliases: ['stop'] } },
+  { en: { name: 'stop' } },
+  { en: { aliases: ['stop'] } },
+  { 'pt-BR': { aliases: ['parar'] } },
+  { 'pt-BR': { name: 'parar' } },
+  { en: { aliases: ['halt'] } },
+]) {
+  const commands = [
+    { name: 'play', description: 'Play', localizations },
+    { name: 'stop', description: 'Stop', localizations: { 'pt-BR': { name: 'parar' }, en: { aliases: ['halt'] } } },
+  ];
+  assert.equal(commandRegisterSchema.safeParse({ requestedCapabilities: ['commands'], commands }).success, false, 'Canonical names and localized aliases share one namespace per bot/locale');
+  assert.equal(commandRegisterSchema.safeParse({ requestedCapabilities: ['commands'], commands: commands.slice().reverse() }).success, false, 'Collision validation must be registration-order independent');
+}
+assert.equal(commandRegisterSchema.safeParse({ requestedCapabilities: ['commands'], commands: [
+  { name: 'first', description: 'First', localizations: { 'pt-BR': { aliases: ['shared'] } } },
+  { name: 'second', description: 'Second', localizations: { en: { aliases: ['shared'] } } },
+] }).success, true, 'Aliases from different active locales do not collide');
+assert.equal(commandInvokeSchema.parse({ commandName: 'play', botId: 'bot', channelId: 'chat', locale: 'en-US' }).locale, 'en');
+for (const voiceRequirement of ['joined', 'same-bot-channel'] as const) {
+  const command = { name: 'voice', description: 'Voice command', voiceRequirement };
+  assert.deepEqual(commandDefinitionSchema.parse(command), command);
+  assert.deepEqual(commandRegisterSchema.parse({ requestedCapabilities: ['commands'], commands: [command] }).commands[0], command);
+}
+for (const voiceRequirement of ['any', '', true, null]) {
+  assert.equal(commandDefinitionSchema.safeParse({ name: 'voice', description: 'Voice', voiceRequirement }).success, false);
+}
+assert.deepEqual(audioPreviewSourceSchema.parse(preview), preview);
+const lazyAudio = { resourceId: 'provider-clip', fileName: 'preview.ogg', durationMs: 10_000 };
+assert.deepEqual(audioPreviewSourceSchema.parse(lazyAudio), lazyAudio);
+for (const invalid of [
+  { ...lazyAudio, url: preview.url }, { resourceId: '' }, { resourceId: ' padded ' },
+  { resourceId: 'x'.repeat(129) }, { ...lazyAudio, durationMs: 10_001 }, { ...lazyAudio, fileName: '..\\clip.ogg' },
+]) assert.equal(audioPreviewSourceSchema.safeParse(invalid).success, false);
+const lazyRequest = {
+  botId: 'bot', channelId: 'chat', commandName: 'play', optionName: 'track',
+  autocompleteRequestId: 'current-search', resourceId: 'opaque-server-token',
+};
+assert.deepEqual(commandAudioPreviewSchema.parse(lazyRequest), lazyRequest);
+for (const invalid of [
+  { ...lazyRequest, invokerId: 'forged' }, { ...lazyRequest, url: preview.url },
+  { ...lazyRequest, autocompleteRequestId: undefined }, { ...lazyRequest, optionName: 'constructor' },
+]) assert.equal(commandAudioPreviewSchema.safeParse(invalid).success, false);
+const executionCaller = {
+  botId: 'bot', channelId: 'chat', invokerId: 'caller', invokerSessionId: 'caller-device',
+  invokerNickname: 'Caller', invokerVoiceChannelId: null,
+};
+const lazyExecution = { ...executionCaller, commandName: 'play', optionName: 'track', resourceId: 'provider-clip', locale: 'en' };
+assert.deepEqual(commandAudioPreviewExecutionSchema.parse(lazyExecution), lazyExecution);
+assert.equal(commandAudioPreviewExecutionSchema.safeParse({ ...lazyExecution, serverId: 'forged' }).success, false);
+assert.deepEqual(commandAudioPreviewCancelSchema.parse({ requestId: 'preview-request' }), { requestId: 'preview-request' });
+assert.equal(commandAudioPreviewCancelSchema.safeParse({ requestId: 'preview-request', userId: 'forged' }).success, false);
+const lazyResult = { status: 'ok', mimeType: 'audio/ogg', audioBase64: Buffer.from([0, 1, 2]).toString('base64') };
+assert.deepEqual(commandAudioPreviewResultSchema.parse(lazyResult), lazyResult);
+assert.equal(commandAudioPreviewResultSchema.safeParse({
+  ...lazyResult, audioBase64: Buffer.alloc(LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES).toString('base64'),
+}).success, true);
+for (const audioBase64 of [
+  '', 'https://audio.example/clip.ogg', '!!!!', 'AAAA====', 'AA=A', 'AB==', 'AAB=',
+  Buffer.alloc(LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES + 1).toString('base64'),
+]) assert.equal(commandAudioPreviewResultSchema.safeParse({ ...lazyResult, audioBase64 }).success, false);
+assert.equal(commandAudioPreviewResultSchema.safeParse({ ...lazyResult, mimeType: 'text/html' }).success, false);
+assert.equal(commandAudioPreviewResultSchema.safeParse({ ...lazyResult, fileName: 'injected.ogg' }).success, false);
+assert.deepEqual(commandAudioPreviewResultSchema.parse({ status: 'failed', reason: 'handler_failed' }),
+  { status: 'failed', reason: 'handler_failed' });
+for (const badAudio of [
+  { ...preview, url: 'http://cdn.example.test/audio.mp3' },
+  { ...preview, url: 'https://user@cdn.example.test/audio.mp3' },
+  { ...preview, url: 'https://cdn.example.test:8443/audio.mp3' },
+  { ...preview, url: 'https://cdn.example.test/audio.mp3#fragment' },
+  { ...preview, url: `https://cdn.example.test/${'x'.repeat(2049)}.mp3` },
+  { ...preview, fileName: '../audio.mp3' },
+  { ...preview, fileName: 'audio.exe' },
+  { ...preview, durationMs: 0 },
+  { ...preview, durationMs: 60 * 60 * 1000 + 1 },
+]) {
+  assert.equal(audioPreviewSourceSchema.safeParse(badAudio).success, false);
+}
 assert.equal(commandRegisterSchema.safeParse({
+  requestedCapabilities: ['commands'],
   commands: [{ name: 'ping', description: 'Ping' }, { name: 'ping', description: 'Other' }],
 }).success, false);
+assert.deepEqual(commandDefinitionSchema.parse({
+  name: 'sound', description: 'Sound',
+  options: [{
+    name: 'choice', description: 'Choice', type: 'string',
+    choices: [{ label: 'Effect', value: 'effect', description: 'Short effect', audio: preview }],
+  }],
+}).options?.[0].choices?.[0].audio, preview);
 assert.equal(commandDefinitionSchema.safeParse({
   name: 'poll', description: 'Poll',
   options: [{ name: 'constructor', description: 'Unsafe name', type: 'string' }],
@@ -118,20 +316,32 @@ assert.equal(botFormSchema.safeParse({
 assert.equal(commandSubmitSchema.safeParse({
   invocationId: 'inv', interactionId: 'form', values: JSON.parse('{"constructor": "evil"}'),
 }).success, false);
-assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'not a URL' }).success, false);
-assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'file:///tmp/bot' }).success, false);
+assert.equal(botManifestSchema.safeParse({ requestedCapabilities: [], name: 'Bot', registrationUrl: 'not a URL' }).success, false);
+assert.equal(botManifestSchema.safeParse({ requestedCapabilities: [], name: 'Bot', registrationUrl: 'file:///invalid/bot' }).success, false);
 assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'http://user:pass@host/register' }).success, false);
-assert.equal(botManifestSchema.safeParse({ name: 'Bot', registrationUrl: 'http://localhost:7780/register' }).success, true);
+assert.equal(botManifestSchema.safeParse({ requestedCapabilities: [], name: 'Bot', registrationUrl: 'http://localhost:7780/register' }).success, true);
 assert.equal(botProfileUpdateSchema.safeParse({ avatarBase64: null }).success, true);
+assert.deepEqual(botCreateSchema.parse({}), {});
+for (const input of [null, { name: 'Client name' }, { avatarBase64: 'AAAA' }, { profilePending: false }]) {
+  assert.equal(botCreateSchema.safeParse(input).success, false);
+}
+assert.deepEqual(botIdentitySchema.parse({ name: ' Bot identity ', avatarBase64: 'AAAA' }), {
+  name: 'Bot identity', avatarBase64: 'AAAA',
+});
+assert.equal(botIdentitySchema.safeParse({ name: 'x' }).success, false);
+assert.equal(botProfileUpdateSchema.safeParse({ name: 'Bot', profilePending: false }).success, false);
 
 for (const presentation of ['dropdown', 'buttons']) {
   const selector = botFormSchema.parse({
     title: 'Choose',
     fields: [{
       name: 'choice', label: 'Choice', type: 'select', required: true, presentation,
-      choices: [{ label: 'First', value: 'first' }, { label: 'Second', value: 'second' }],
+      choices: [{ label: 'First', value: 'first', description: 'Preview', audio: preview }, { label: 'Second', value: 'second' }],
     }],
   });
+  const firstField = selector.fields[0];
+  assert.equal(firstField.type, 'select');
+  assert.deepEqual(firstField.choices[0].audio, preview);
   assert.deepEqual(validateBotFormValues(selector, { choice: 'second' }), {
     success: true, values: { choice: 'second' },
   });
@@ -146,3 +356,136 @@ assert.equal(botFormSchema.safeParse({
 }).success, false);
 
 console.log('Bot interaction schemas and typed options passed.');
+
+const autocompleteCommand = {
+  name: 'search', description: 'Search audio', downloadsSound: true,
+  options: [{ name: 'sound', description: 'Sound', type: 'string', autocomplete: true, required: true }],
+};
+assert.equal(commandDefinitionSchema.safeParse(autocompleteCommand).success, true);
+for (const option of [
+  { name: 'sound', description: 'Sound', type: 'integer', autocomplete: true },
+  { name: 'sound', description: 'Sound', type: 'string', autocomplete: true, choices: [{ label: 'One', value: 'one' }] },
+]) {
+  assert.equal(commandDefinitionSchema.safeParse({ ...autocompleteCommand, options: [option] }).success, false);
+}
+assert.deepEqual(validateCommandOptions(options, { sides: 20, enabled: false }, { partial: true }), {
+  success: true, values: { sides: 20, enabled: false },
+});
+assert.equal(validateCommandOptions(options, { sides: '20' }, { partial: true }).success, false);
+assert.equal(validateCommandOptions(options, { sides: 101 }, { partial: true }).success, false);
+assert.equal(validateCommandOptions(options, { unknown: true }, { partial: true }).success, false);
+assert.equal(validateCommandOptions(options, {}).success, false, 'Partial validation must remain opt-in.');
+
+const autocomplete = {
+  botId: 'bot', commandName: 'search', channelId: 'chat', optionName: 'sound',
+  query: 'hello', options: { enabled: false, sides: 0 }, locale: 'en',
+};
+assert.equal(commandAutocompleteSchema.safeParse(autocomplete).success, true);
+assert.deepEqual(commandAutocompleteSchema.parse(autocomplete), autocomplete, 'Legacy payloads must not gain paging fields');
+for (const page of [0, 1, 1000, Number.MAX_SAFE_INTEGER]) {
+  assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, page }).success, true);
+}
+for (const page of [-1, 0.5, '1', null, Number.MAX_SAFE_INTEGER + 1]) {
+  assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, page }).success, false);
+}
+for (const cursor of ['', 'x'.repeat(LIMITS.MAX_BOT_AUTOCOMPLETE_CURSOR_LENGTH + 1), 1, null]) {
+  assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, page: 1, cursor }).success, false);
+}
+const pagedExecution = {
+  ...executionCaller, commandName: 'search', optionName: 'sound', query: 'hello', options: {}, locale: 'en',
+  page: 4, cursor: 'source-page:2:offset:20',
+};
+assert.deepEqual(commandAutocompleteExecutionSchema.parse(pagedExecution), pagedExecution);
+assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, query: 'x'.repeat(201) }).success, false);
+assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, invocationId: 'forged' }).success, false);
+assert.equal(commandAutocompleteSchema.safeParse({ ...autocomplete, options: JSON.parse('{"__proto__": true}') }).success, false);
+assert.equal(commandAutocompleteExecutionSchema.safeParse({
+  ...executionCaller, commandName: 'search', optionName: 'sound', query: '', options: {}, locale: 'pt-BR',
+}).success, true);
+assert.equal(commandRequestIdSchema.safeParse('').success, false);
+assert.equal(commandRequestIdSchema.safeParse('x'.repeat(129)).success, false);
+assert.equal(commandAutocompleteCancelSchema.safeParse({ requestId: 'query', userId: 'forged' }).success, false);
+const longChoice = { label: 'Long identifier', value: `/instant/${'a'.repeat(503)}`, description: 'Description' };
+const autocompletePage = { choices: [longChoice], hasMore: true, nextCursor: 'next-batch' };
+assert.deepEqual(commandAutocompletePageSchema.parse(autocompletePage), autocompletePage);
+assert.deepEqual(commandAutocompleteResultSchema.parse({ status: 'ok', ...autocompletePage }), {
+  status: 'ok', ...autocompletePage,
+});
+assert.deepEqual(commandAutocompletePageSchema.parse({ choices: [longChoice] }), { choices: [longChoice] });
+for (const invalid of [
+  { ...autocompletePage, hasMore: false }, { ...autocompletePage, hasMore: undefined },
+  { ...autocompletePage, hasMore: 'true' }, { ...autocompletePage, nextCursor: '' },
+  { ...autocompletePage, nextCursor: 'x'.repeat(LIMITS.MAX_BOT_AUTOCOMPLETE_CURSOR_LENGTH + 1) },
+  { ...autocompletePage, ignored: true },
+  { ...autocompletePage, choices: Array.from({ length: 21 }, (_, index) => ({ label: 'Sound', value: String(index) })) },
+]) {
+  assert.equal(commandAutocompletePageSchema.safeParse(invalid).success, false);
+  assert.equal(commandAutocompleteResultSchema.safeParse({ status: 'ok', ...invalid }).success, false);
+}
+assert.deepEqual(commandAutocompleteResultSchema.parse({ status: 'ok', choices: [], hasMore: false }), {
+  status: 'ok', choices: [], hasMore: false,
+});
+assert.equal(commandAutocompleteResultSchema.safeParse({ status: 'ok', choices: [longChoice] }).success, true);
+const previewAutocompleteResult = commandAutocompleteResultSchema.parse({
+  status: 'ok',
+  choices: [{ ...longChoice, audio: preview }],
+});
+assert.equal(previewAutocompleteResult.status, 'ok');
+assert.deepEqual(previewAutocompleteResult.choices[0].audio, preview);
+assert.equal(commandAutocompleteResultSchema.safeParse({ status: 'ok', choices: [] }).success, true);
+assert.equal(commandAutocompleteResultSchema.safeParse({ status: 'ok', choices: [longChoice, longChoice] }).success, false);
+assert.equal(commandAutocompleteResultSchema.safeParse({
+  status: 'ok', choices: Array.from({ length: 21 }, (_, i) => ({ label: `Choice ${i}`, value: `${i}` })),
+}).success, false);
+assert.equal(commandAutocompleteResultSchema.safeParse({
+  status: 'ok', choices: [{ label: 'Too long', value: 'x'.repeat(LIMITS.MAX_MESSAGE_LENGTH + 1) }],
+}).success, false);
+assert.equal(commandAutocompleteResultSchema.safeParse({
+  status: 'ok', choices: [{ label: 'Empty value', value: '  ' }],
+}).success, false);
+assert.equal(commandAutocompleteResultSchema.safeParse({ status: 'failed', reason: 'timeout' }).success, true);
+assert.equal(commandAutocompleteResultSchema.safeParse({ status: 'failed', reason: 'internal detail' }).success, false);
+assert.equal(commandInvokeSchema.safeParse({
+  commandName: 'search', botId: 'bot', channelId: 'chat', allowSoundDownload: true,
+}).success, true);
+assert.equal(commandInvokeSchema.safeParse({
+  commandName: 'search', botId: 'bot', channelId: 'chat', allowSoundDownload: 'true',
+}).success, false);
+
+const sound = { url: 'https://example.com/sound.mp3', fileName: 'sound.mp3', title: 'Sound' };
+assert.equal(LIMITS.MAX_SOUNDBOARD_FILE_SIZE, 3 * 1024 * 1024);
+assert.equal(soundDownloadRequestSchema.safeParse(sound).success, true);
+for (const fileName of ['../escape.mp3', '..\\escape.mp3', 'C:\\escape.mp3', 'CON.mp3', 'CON .mp3', 'COM¹.mp3', 'LPT².mp3', '.hidden.mp3', 'sound.mp3 ', 'sound.mp3:stream', 'sound.exe']) {
+  assert.equal(soundDownloadRequestSchema.safeParse({ ...sound, fileName }).success, false, fileName);
+}
+for (const url of ['http://example.com/sound.mp3', 'file:///sound.mp3', 'https://user:password@example.com/sound.mp3', 'https://example.com/sound.mp3#fragment']) {
+  assert.equal(soundDownloadRequestSchema.safeParse({ ...sound, url }).success, false);
+}
+assert.equal(commandSoundDownloadSchema.safeParse({ ...sound, invocationId: 'invocation' }).success, true);
+for (const extra of [{ userId: 'victim' }, { channelId: 'other-channel' }, { downloadId: 'forged' }, { folderPath: 'C:\\Other' }]) {
+  assert.equal(commandSoundDownloadSchema.safeParse({ ...sound, invocationId: 'invocation', ...extra }).success, false);
+}
+const receivedSound = {
+  ...sound, invocationId: 'invocation', downloadId: 'download', channelId: 'chat',
+  botId: 'bot', botName: 'Bot', commandName: 'search', invokerId: 'caller', invokerNickname: 'Caller',
+  createdAt: 1, expiresAt: 2,
+};
+assert.equal(commandSoundDownloadReceivedSchema.safeParse(receivedSound).success, true);
+assert.equal(commandSoundDownloadReceivedSchema.safeParse({ ...receivedSound, expiresAt: 0 }).success, false);
+for (const result of [
+  { status: 'downloaded' }, { status: 'exists' }, { status: 'cancelled' },
+  { status: 'failed', reason: 'too_large' }, { status: 'failed', reason: 'no_folder' },
+]) {
+  assert.equal(soundDownloadResultSchema.safeParse(result).success, true);
+  assert.equal(commandSoundDownloadResultSchema.safeParse({
+    invocationId: 'invocation', downloadId: 'download', result,
+  }).success, true);
+}
+for (const result of [
+  { status: 'downloaded', filePath: 'C:\\Private\\sound.mp3' },
+  { status: 'downloaded', bytes: 1000 },
+  { status: 'failed', reason: 'raw local error' },
+  { status: 'failed' }, { status: 'cancelled', reason: 'unknown' },
+]) assert.equal(soundDownloadResultSchema.safeParse(result).success, false);
+
+console.log('Autocomplete and local sound download contracts passed.');

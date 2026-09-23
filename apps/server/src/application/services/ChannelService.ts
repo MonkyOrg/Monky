@@ -13,6 +13,7 @@ import {
 import { ChannelRecord } from '../../domain/entities';
 import { IChannelRepository, IRoleRepository, IServerRepository } from '../../domain/repositories';
 import { PermissionService } from './PermissionService';
+import { BotPermissionService } from './BotPermissionService';
 
 /** Everything needed to decide what a member may see, resolved once per call. */
 export interface ChannelAccessContext {
@@ -25,7 +26,8 @@ export class ChannelService {
     private channelRepo: IChannelRepository,
     private serverRepo: IServerRepository,
     private roleRepo: IRoleRepository,
-    private permissionService: PermissionService
+    private permissionService: PermissionService,
+    private botPermissions: BotPermissionService,
   ) {}
 
   private toSummary(record: ChannelRecord): ChannelSummary {
@@ -54,7 +56,13 @@ export class ChannelService {
     return roleIds.filter((id) => known.has(id));
   }
 
+  public getRoleAccessVersion(): number | null {
+    return this.permissionService.getRoleAccessVersion();
+  }
+
   public async getAccessContext(userId: string): Promise<ChannelAccessContext> {
+    const botPermissions = this.botPermissions.getChannelPermissions(userId);
+    if (botPermissions !== undefined) return { permissions: botPermissions, roleIds: [] };
     const [permissions, roles] = await Promise.all([
       this.permissionService.getUserPermissions(userId),
       this.roleRepo.listRolesForUser(userId),

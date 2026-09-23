@@ -2,16 +2,16 @@
  * Builds a self-contained tarball of @monky/bot-sdk so it can be installed
  * straight from a GitHub release, without cloning the monorepo.
  *
- * Like the CLI pack script, this bundles @monky/shared inside
- * node_modules/ so npm uses the bundled copy instead of looking for it in
- * the registry.
+ * Includes the installed production dependency tree, including @monky/shared.
+ * Bundling shared alone makes npm assume its missing dependencies are bundled.
  *
  * Usage: node scripts/pack-bot-sdk.js [version] [--out <dir>]
  */
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'node:module';
+import { license, copyMonkyLicenses } from './legal.cjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SDK_DIR = path.join(ROOT, 'packages', 'bot-sdk');
@@ -36,7 +36,6 @@ function parseArgs(argv) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const sdkPkg = readJson(path.join(SDK_DIR, 'package.json'));
-  const sharedPkg = readJson(path.join(SHARED_DIR, 'package.json'));
   const version = args.version || process.env.MONKY_VERSION || sdkPkg.version;
 
   const sdkDist = path.join(SDK_DIR, 'dist');
@@ -46,46 +45,34 @@ function main() {
       throw new Error(`Missing build output: ${dir}. Run "npm run build" first.`);
     }
   }
+  const require = createRequire(import.meta.url);
+  const { bundlePackage } = require(path.join(sdkDist, 'tooling', 'bundle.js'));
+  const { runNpm } = require(path.join(sdkDist, 'tooling', 'process.js'));
+  const { isBotVersion } = require(path.join(sdkDist, 'tooling', 'config.js'));
+  if (!isBotVersion(version)) throw new Error('The SDK version must be valid SemVer.');
 
   const staging = path.join(ROOT, 'release', 'bot-sdk-pack');
   fs.rmSync(staging, { recursive: true, force: true });
   fs.mkdirSync(staging, { recursive: true });
 
-  // Copy bot-sdk dist.
-  fs.cpSync(sdkDist, path.join(staging, 'dist'), { recursive: true });
-
-  // Bundle @monky/shared.
-  const bundledShared = path.join(staging, 'node_modules', '@monky', 'shared');
-  fs.mkdirSync(bundledShared, { recursive: true });
-  fs.cpSync(sharedDist, path.join(bundledShared, 'dist'), { recursive: true });
-  fs.writeFileSync(
-    path.join(bundledShared, 'package.json'),
-    JSON.stringify({
-      name: sharedPkg.name,
-      version: sharedPkg.version,
-      main: sharedPkg.main,
-      types: sharedPkg.types,
-      dependencies: sharedPkg.dependencies,
-    }, null, 2) + '\n'
-  );
+  const { dependencies, packageCount } = bundlePackage(SDK_DIR, staging,
+    new Map([['@monky/shared', SHARED_DIR]]));
+  copyMonkyLicenses(staging);
 
   // Build the publishable package.json.
   const publishPkg = {
     name: sdkPkg.name,
     version,
     description: sdkPkg.description,
-    license: 'MIT',
+    license,
     repository: { type: 'git', url: 'https://github.com/MonkyOrg/Monky.git' },
     homepage: 'https://github.com/MonkyOrg/Monky/tree/main/packages/bot-sdk',
     main: sdkPkg.main,
     types: sdkPkg.types,
+    bin: sdkPkg.bin,
     engines: { node: '>=18' },
-    dependencies: {
-      ...sharedPkg.dependencies,
-      ...sdkPkg.dependencies,
-      '@monky/shared': sharedPkg.version,
-    },
-    bundleDependencies: ['@monky/shared'],
+    dependencies,
+    bundleDependencies: Object.keys(dependencies),
   };
 
   fs.writeFileSync(
@@ -93,14 +80,17 @@ function main() {
     JSON.stringify(publishPkg, null, 2) + '\n'
   );
 
-  // README from the bots docs page.
-  const readme = path.join(ROOT, 'docs-site', 'bots.md');
-  if (fs.existsSync(readme)) {
-    fs.copyFileSync(readme, path.join(staging, 'README.md'));
+  for (const [source, destination] of [
+    ['bots-desenvolvimento.md', 'README.md'],
+    [path.join('en', 'bots-desenvolvimento.md'), 'README.en.md'],
+  ]) {
+    const contents = fs.readFileSync(path.join(ROOT, 'docs-site', source), 'utf8')
+      .replace(/\]\(\/(?!\/)/g, '](https://monkyorg.github.io/Monky/');
+    fs.writeFileSync(path.join(staging, destination), contents);
   }
 
   fs.mkdirSync(args.out, { recursive: true });
-  const packed = execSync('npm pack', { cwd: staging, encoding: 'utf8' })
+  const packed = runNpm(['pack', '--ignore-scripts', '--silent'], { cwd: staging })
     .trim()
     .split('\n')
     .pop()
@@ -113,6 +103,7 @@ function main() {
   fs.rmSync(path.join(staging, packed), { force: true });
 
   console.log(`[pack-bot-sdk] ${finalPath}`);
+  console.log(`[pack-bot-sdk] ${packageCount} bundled production packages`);
   return finalPath;
 }
 

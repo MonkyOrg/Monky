@@ -2,6 +2,9 @@
 
 Ferramenta de linha de comando para criar e administrar servidores Monky.
 
+Este é o **CLI do servidor**, não o CLI gerado para um bot. Para empacotar
+e operar seu próprio bot, consulte [Distribuição de bots](/bots-distribuicao).
+
 ```
 monky <comando> [subcomando] [opções]
 ```
@@ -81,12 +84,64 @@ informe `--data` explicitamente:
 monky --data /srv/monky-amigos restart
 ```
 
+## Idioma do CLI
+
+O primeiro comando executado em um terminal interativo pergunta **English (US)** ou
+**Português (Brasil)** e salva a escolha em `~/.monky/cli-config.json`.
+`monky`, `--help` e `--version` não fazem essa pergunta nem salvam preferências.
+Comandos em scripts ou com entrada/saída redirecionada também não perguntam
+nem alteram o idioma salvo.
+
+Para trocar depois, abra `monky config` e escolha **Idioma / Language**, ou use:
+
+```bash
+monky config language pt-BR
+monky config language en-US
+```
+
+Essa configuração funciona sem criar ou escolher um servidor. O menu seguinte
+já usa o novo idioma; identidade, banco e configuração do servidor não mudam.
+`monky config language` sem código abre a escolha em um terminal; em scripts,
+apenas consulta. O atalho `monky --lang pt-BR|en-US` continua disponível.
+
+`en-US` é normalizado para `en`; variantes de inglês e português, incluindo
+`pt_BR.UTF-8`, usam os catálogos `en` e `pt-BR`. Um código não suportado,
+`--lang` sem valor ou uma configuração inválida gera erro, sem substituir a
+preferência por um padrão silencioso.
+
+A prioridade é: **`--lang` → `MONKY_LANG` → preferência salva → locale do
+terminal → inglês**. Para detectar o locale, o CLI consulta `LC_ALL`,
+`LC_MESSAGES`, `LANG` e `LANGUAGE`, nessa ordem. `MONKY_LANG` permite que um
+app ou script passe o idioma escolhido sem ler nem alterar a preferência do
+CLI; o CLI não lê perfis do Electron.
+
+`--lang` junto de um comando interativo salva a escolha. Junto de ajuda,
+versão ou comandos não interativos, vale somente para aquela execução.
+O uso isolado `monky --lang <código>` é uma edição explícita e salva mesmo
+em scripts.
+
+**Isolamento para QA:** `MONKY_HOME` troca tanto o diretório do registro de
+servidores quanto o da preferência de idioma. No PowerShell, por exemplo:
+
+```powershell
+$env:MONKY_HOME = Join-Path $PWD '.monky-qa'
+monky --lang pt-BR
+monky --help
+```
+
+Nesse caso, a preferência fica em `.monky-qa\cli-config.json`; `--data`
+continua escolhendo os dados de um servidor, não o idioma. Nomes de comandos,
+chaves como `maxUsers` e `voiceMode`, permissões como `MANAGE_ROLES` e
+valores como `true`, `false`, `p2p` e `sfu` não são traduzidos.
+
 ## Opções globais
 
 | Opção | Descrição |
 |---|---|
 | `--data <pasta>` | Pasta de dados do servidor alvo. Obrigatório quando há vários servidores e o terminal não é interativo. |
 | `--help`, `-h` | Exibe a ajuda. |
+| `--version`, `-v` | Exibe a versão instalada. |
+| `--lang <código>` | Seleciona `en`/`en-US` ou `pt-BR`; usado sozinho, salva a preferência. |
 
 ## Estrutura da pasta de dados
 
@@ -107,7 +162,7 @@ monky --data /srv/monky-amigos restart
 
 ---
 
-# Referência de comandos
+## Referência de comandos
 
 ## `monky create`
 
@@ -118,19 +173,21 @@ Substitui o antigo `monky bootstrap`, que continua funcionando como apelido.
 monky create [opções]
 ```
 
-O comando é interativo e pergunta, nesta ordem:
+Após a escolha inicial de idioma, quando necessária, o comando pergunta:
 
 1. **Onde guardar os dados** — sugere `./data`, mas você pode informar qualquer
    caminho. Se já houver um servidor na pasta escolhida, ele pede outra.
 2. **Código de identidade do dono** (`MONKY-ID:...`) — exporte pelo app Monky em
-   *Configurações → Identidade → Exportar*.
+   *Configurações → Meu Perfil → Identidade*. Trate o backup e a senha como
+   credenciais: use-os somente em uma máquina de administração confiável.
 3. **Senha da identidade** — a que você definiu ao exportar.
-4. **Nickname do dono**
-5. **Nome do servidor**
-6. **Porta do servidor** (padrão: `3000`)
-7. **Senha do servidor** — deixe vazio para um servidor aberto.
-8. **Limite de membros** — pergunta se você quer um teto de cadastros. O padrão
+4. **Nome do servidor**
+5. **Porta do servidor** (padrão: `3000`)
+6. **Senha do servidor** — deixe vazio para um servidor aberto.
+7. **Limite de membros** — pergunta se você quer um teto de cadastros. O padrão
    é não ter limite.
+8. **Modo de voz/vídeo** — `p2p` ou `sfu`. No modo SFU, verifica portas e
+   dependências e pergunta o upload disponível para estimar a capacidade.
 
 Ao final, exibe um resumo, pede confirmação e oferece iniciar o servidor.
 
@@ -177,7 +234,7 @@ monky list
 ```
 NOME       STATUS   PORTA  PASTA DE DADOS
 Amigos     online   3000   /srv/monky-amigos
-Trabalho   stopped  3100   /srv/monky-trabalho
+Trabalho   parado   3100   /srv/monky-trabalho
 ```
 
 ---
@@ -259,6 +316,17 @@ antes de reiniciar.
 `--fresh` funciona igual ao do `monky start`: descarta o registro do processo no
 PM2 antes de subir de novo.
 
+Se o PM2 ainda executar um arquivo de outra instalação do CLI, `start` e
+`restart` recriam automaticamente apenas o registro daquele servidor. Regravar
+o `ecosystem.config.cjs` não basta nesse caso: o PM2 pode conservar o caminho
+executado anterior. O diretório de dados e os logs são preservados; uma mudança
+apenas no interpretador Node continua usando o reinício normal.
+
+As leituras do banco feitas por `start`, `restart` e `status` (incluindo
+`--watch`) não gravam dados nem aplicam migrações. As migrações ficam a cargo
+do servidor ao iniciar, depois que a instância anterior encerra, para que seu
+snapshot em memória não sobrescreva um schema atualizado pelo CLI.
+
 ---
 
 ## `monky status`
@@ -273,16 +341,16 @@ Com um único servidor (ou com `--data`), mostra o detalhe:
 
 ```
 Estado do servidor: Amigos
-status: online
-dataDir: /srv/monky-amigos
-porta: 3000
-processo PM2: monky-server-a1b2c3d4
-pid: 21877
-uptime: 2026-08-27T18:02:11.000Z
-restarts: 0
-memória: 88 MB
-cpu: 0%
-node: 24.20.0
+Estado: online
+Pasta de dados: /srv/monky-amigos
+porta 3000
+Processo PM2: monky-server-a1b2c3d4
+PID: 21877
+Iniciado em: 2026-08-27T18:02:11.000Z
+Reinícios: 0
+Memória: 88 MB
+CPU: 0%
+Node.js: 24.20.0
 ```
 
 O `status` não repete apenas o que o PM2 diz: a porta é sondada de verdade. O
@@ -300,6 +368,18 @@ Diagnóstico
 
 Com vários servidores e sem `--data`, imprime a mesma tabela do `monky list` —
 uma consulta não tem efeito colateral, então não faz sentido perguntar.
+
+O status detalhado de um servidor em execução também informa se há bots com
+protocolo incompatível ou ainda não verificado. Esses avisos aparecem após
+`monky start` e `monky restart` e orientam a atualizar ou conferir o SDK dos
+bots. Se o servidor ainda estiver iniciando ou `/preview` não responder, o CLI
+informa que não conseguiu consultar a compatibilidade; consulte novamente com
+`monky status --data <pasta>`.
+
+O `monky list` e a tabela de vários servidores mantêm esses avisos junto ao
+servidor correspondente. No `monky status --watch`, o aviso é atualizado a cada
+ciclo e desaparece quando os bots voltam a conectar com um SDK compatível.
+Servidores parados não são consultados nem aparecem como incompatíveis.
 
 ---
 
@@ -353,6 +433,14 @@ monky restart --fresh
 Isso descarta o processo no PM2 e o registra de novo. Os arquivos em
 `~/.pm2/logs` são preservados.
 :::
+
+Se o CLI atualizado mostrar a versão nova, mas as conexões ainda indicarem um
+protocolo antigo, confira `monky status --data <pasta>`. O diagnóstico compara
+o arquivo realmente executado pelo PM2 com o arquivo da instalação atual do
+CLI e mostra ambos quando diferem. Em versões sem essa recuperação automática,
+`monky restart --fresh --data <pasta>` recria somente o registro selecionado,
+sem apagar o banco. Execute com o mesmo usuário que gerencia aquela instância;
+se a divergência persistir, confira qual processo atende à porta do servidor.
 
 Módulos nativos são um problema **à parte**: `better-sqlite3` e o worker do
 mediasoup são compilados contra o ABI do Node (20 = 115, 22 = 127, 24 = 137).
@@ -445,10 +533,13 @@ do servidor não pode ser removido de um membro.
 
 ## `monky config`
 
-Exibe ou altera a configuração do servidor.
+Em um terminal, abre as configurações do CLI, incluindo idioma e acesso à
+configuração do servidor. Sem TTY ou em CI, mantém a consulta direta do servidor.
 
 ```bash
-monky config                        # exibe tudo
+monky config                        # menu de configurações em um terminal
+monky config show                   # exibe diretamente os dados do servidor
+monky config language en-US         # idioma do CLI, mesmo sem servidor
 monky config set                    # escolhe a chave interativamente
 monky config set <chave> [valor]    # altera direto
 ```
@@ -477,7 +568,7 @@ Alterar `voiceMode` aplica dinamicamente e notifica todos os clientes conectados
 ### Exemplos
 
 ```bash
-monky config
+monky config show
 monky config set name "Servidor dos Amigos"
 monky config set voiceMode sfu      # ativa modo SFU com estimativa de capacidade
 monky config set password           # digitada de forma oculta
@@ -581,6 +672,13 @@ O comando baixa e instala o novo pacote com `npm install -g` a partir dos
 artefatos da release no GitHub.
 
 Ao final, o servidor é reiniciado (com confirmação, exceto com `--yes`).
+
+Antes de desconectar os participantes para esse reinício, o servidor informa
+que está em atualização. Os clientes mostram um aviso próprio no idioma
+selecionado e orientam a reconectar em alguns segundos. Isso exige um processo
+do servidor que já ofereça esse aviso; um processo antigo, ainda em execução
+durante a primeira atualização, pode enviar apenas o aviso genérico de encerramento.
+Recusar o reinício não desconecta participantes nem envia um aviso de atualização.
 
 ### Exemplos
 

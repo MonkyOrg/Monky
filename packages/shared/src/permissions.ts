@@ -14,6 +14,8 @@ export enum Permission {
   USE_SOUNDBOARD = 1 << 12,
   MANAGE_BOTS = 1 << 13,
   USE_BOT_COMMANDS = 1 << 14,
+  CONFIGURE_BOTS = 1 << 15,
+  VIEW_SERVER_MONITOR = 1 << 16,
 }
 
 export const DEFAULT_PERMISSIONS =

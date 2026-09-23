@@ -49,22 +49,20 @@ export class RegistrationStore {
       const parsed = registrationSchema.parse(registration);
       const next = new Map(this.records);
       next.set(parsed.serverId, parsed);
-      if (next.size > MAX_REGISTRATIONS) throw new Error('The bot registration limit has been reached.');
-      if (this.filename) {
-        const contents = JSON.stringify({
-          version: 1, publicKey: this.publicKey, registrations: [...next.values()],
-        }) + '\n';
-        if (Buffer.byteLength(contents) > MAX_FILE_BYTES) throw new Error('The bot registration file limit has been reached.');
-        await fs.mkdir(path.dirname(this.filename), { recursive: true, mode: 0o700 });
-        const temporary = `${this.filename}.${randomUUID()}.tmp`;
-        try {
-          await fs.writeFile(temporary, contents, { flag: 'wx', mode: 0o600 });
-          await fs.rename(temporary, this.filename);
-        } finally {
-          await fs.rm(temporary, { force: true });
-        }
-      }
-      this.records = next;
+      await this.persist(next);
+    });
+    this.writes = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  remove(registration: Pick<BotRegistration, 'serverId' | 'serverUrl' | 'token'>): Promise<void> {
+    const result = this.writes.then(async () => {
+      await this.load();
+      const current = this.records.get(registration.serverId);
+      if (!current || current.token !== registration.token || current.serverUrl !== registration.serverUrl) return;
+      const next = new Map(this.records);
+      next.delete(registration.serverId);
+      await this.persist(next);
     });
     this.writes = result.then(() => undefined, () => undefined);
     return result;
@@ -72,6 +70,25 @@ export class RegistrationStore {
 
   flush(): Promise<void> {
     return this.writes;
+  }
+
+  private async persist(next: Map<string, BotRegistration>): Promise<void> {
+    if (next.size > MAX_REGISTRATIONS) throw new Error('The bot registration limit has been reached.');
+    if (this.filename) {
+      const contents = JSON.stringify({
+        version: 1, publicKey: this.publicKey, registrations: [...next.values()],
+      }) + '\n';
+      if (Buffer.byteLength(contents) > MAX_FILE_BYTES) throw new Error('The bot registration file limit has been reached.');
+      await fs.mkdir(path.dirname(this.filename), { recursive: true, mode: 0o700 });
+      const temporary = `${this.filename}.${randomUUID()}.tmp`;
+      try {
+        await fs.writeFile(temporary, contents, { flag: 'wx', mode: 0o600 });
+        await fs.rename(temporary, this.filename);
+      } finally {
+        await fs.rm(temporary, { force: true });
+      }
+    }
+    this.records = next;
   }
 
   private async read(): Promise<void> {

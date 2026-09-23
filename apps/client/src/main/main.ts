@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
 import path from 'path';
 import { setupIpcHandlers } from './ipcHandlers';
 import { setupUpdater } from './updater';
@@ -15,10 +15,49 @@ import { updateLog } from './updateLog';
 import { ServerManager } from './serverManager';
 import { TrayManager } from './trayManager';
 import { ClientLogger } from './clientLogger';
+import { bindRendererDiagnostics } from './rendererDiagnostics';
 import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
+import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
+import { resolveDevelopmentProfile } from './developmentProfile';
+import { bindDevelopmentQa, loadDevelopmentQa } from './developmentQa';
+import { CrashRecovery } from './crashRecovery';
+import type { LocalExecutionIpc } from './localExecution/ipc';
+import { initializeMainLanguage, mt } from './i18n';
+import { SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
+import { ServerInviteInbox } from './serverInvites';
 
 import fs from 'fs';
+
+const developmentQa = loadDevelopmentQa({
+  packaged: app.isPackaged,
+  appPath: app.getAppPath(),
+  profile: app.commandLine.getSwitchValue('user-data-dir'),
+  configFile: process.env.MONKY_QA_CONFIG,
+  parentPid: process.ppid,
+  supervised: typeof process.send === 'function',
+});
+if (developmentQa) {
+  // Prepared QA never opens physical capture devices, including after unmute.
+  app.commandLine.appendSwitch('use-fake-device-for-media-stream');
+  app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+  if (developmentQa.smoke) app.commandLine.appendSwitch('mute-audio');
+}
+
+const developmentProfile = resolveDevelopmentProfile({
+  isPackaged: app.isPackaged,
+  appPath: app.getAppPath(),
+  appDataPath: app.getPath('appData'),
+  explicitUserData: app.commandLine.getSwitchValue('user-data-dir'),
+});
+if (developmentProfile) {
+  // Select the profile before creating services, Chromium sessions or the lock.
+  fs.mkdirSync(developmentProfile.userData, { recursive: true });
+  fs.mkdirSync(developmentProfile.sessionData, { recursive: true });
+  app.setPath('userData', developmentProfile.userData);
+  app.setPath('sessionData', developmentProfile.sessionData);
+  process.env.MONKY_HOME = developmentProfile.cliHome;
+}
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
@@ -46,14 +85,51 @@ if (process.platform === 'win32' && process.env.MONKY_DISABLE_WGC !== '1') {
 }
 
 let mainWindow: BrowserWindow | null = null;
+const serverInviteInbox = new ServerInviteInbox();
 let overlayManager: OverlayManager | null = null;
 let trayManager: TrayManager | null = null;
 const serverManager = new ServerManager();
 let clientLogger: ClientLogger | null = null;
+let crashRecovery: CrashRecovery | null = null;
 let isShuttingDown = false;
 let isQuitting = false;
 /** Whether the renderer has already been asked to leave the call (#458). */
 let leaveAnnounced = false;
+let localExecution: LocalExecutionIpc | null = null;
+let localExecutionStopping = false;
+let localExecutionStopped = false;
+
+function notifyServerInvite(): void {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(SERVER_INVITE_AVAILABLE);
+  }
+}
+
+const onOpenInviteUrl = (event: Electron.Event, url: string): void => {
+  if (!serverInviteInbox.receive(url)) return;
+  event.preventDefault();
+  notifyServerInvite();
+  if (mainWindow && !mainWindow.isDestroyed() && !isInstallSplashActive()) {
+    if (!mainWindow.isVisible()) mainWindow.show();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+};
+app.on('open-url', onOpenInviteUrl);
+serverInviteInbox.receiveArguments(process.argv);
+ipcMain.handle(SERVER_INVITE_IPC.take, (event: Electron.IpcMainInvokeEvent, ...args: unknown[]): ServerInviteResult | null => {
+  const window = mainWindow;
+  if (!window || window.isDestroyed() || event.sender !== window.webContents
+    || event.senderFrame !== window.webContents.mainFrame || args.length !== 0) {
+    console.warn('[Invites] Rejected an invitation read outside the main application frame.');
+    throw new Error(mt('error.serverInviteUnavailable'));
+  }
+  return serverInviteInbox.take();
+});
+app.once('will-quit', () => {
+  ipcMain.removeHandler(SERVER_INVITE_IPC.take);
+  app.removeListener('open-url', onOpenInviteUrl);
+});
 
 /**
  * How long the quit waits for the renderer to say goodbye to the servers.
@@ -127,14 +203,16 @@ function openExternalIfWebUrl(url: string): void {
 
 function bindMainWindowNavigationGuards(): void {
   if (!mainWindow) return;
+  bindBotScreenIsolation(mainWindow.webContents);
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    openExternalIfWebUrl(url);
+  mainWindow.webContents.setWindowOpenHandler(({ url, referrer }) => {
+    if (!isBotScreenUrl(referrer.url)) openExternalIfWebUrl(url);
     return { action: 'deny' };
   });
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!mainWindow) return;
+    if (isBotScreenFrame(event.initiator)) { event.preventDefault(); return; }
     if (url === mainWindow.webContents.getURL()) return;
     event.preventDefault();
     openExternalIfWebUrl(url);
@@ -150,6 +228,58 @@ function shutdownServer(): void {
 function quitApplication(): void {
   isQuitting = true;
   app.quit();
+}
+
+function getCrashRecovery(): CrashRecovery {
+  if (!crashRecovery) {
+    crashRecovery = new CrashRecovery({
+      logger: () => clientLogger,
+      isQuitting: () => isQuitting,
+      quit: quitApplication,
+      onRecovery: () => {
+        leaveAnnounced = true;
+        for (const cleanup of [
+          () => overlayManager?.close(),
+          () => { trayManager?.destroy(); trayManager = null; },
+          () => dismissInstallSplash(),
+        ]) {
+          try { cleanup(); } catch (error: unknown) {
+            console.error('[CrashRecovery] Auxiliary-window cleanup failed', error);
+          }
+        }
+      },
+    });
+  }
+  return crashRecovery;
+}
+
+function stopLocalExecutionThenQuit(): void {
+  if (!localExecution || localExecutionStopping) return;
+  localExecutionStopping = true;
+  void localExecution.dispose().then(() => {
+    localExecutionStopping = false;
+    localExecutionStopped = true;
+    app.quit();
+  }, (error: unknown) => {
+    console.error('[LocalExecution] Could not finish local task shutdown:', error);
+    localExecutionStopping = false;
+    isQuitting = false;
+    leaveAnnounced = false;
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+    void dialog.showMessageBox({
+      type: 'error',
+      title: mt('localExecution.shutdownFailedTitle'),
+      message: mt('localExecution.shutdownFailedMessage'),
+      buttons: [mt('localExecution.retryShutdown'), mt('localExecution.keepOpen')],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    }).then(({ response }) => {
+      if (response === 0) quitApplication();
+    }).catch((dialogError: unknown) => {
+      console.error('[LocalExecution] Could not display the shutdown error:', dialogError);
+    });
+  });
 }
 
 function createWindow(deferShow = false): void {
@@ -178,23 +308,38 @@ function createWindow(deferShow = false): void {
     // Right after an update install the window is held back (show: false) and
     // only revealed once it has painted, so the "finishing" splash hands off to
     // a fully-drawn UI with no dark gap in between (#498).
-    show: !deferShow,
+    show: !deferShow && !developmentQa?.smoke,
     // Windows/Linux: fully frameless (custom title bar in the renderer).
     // macOS: keep the native traffic-light buttons but hide the title bar.
     frame: isMac,
     titleBarStyle: isMac ? 'hidden' : 'default',
     trafficLightPosition: isMac ? { x: 14, y: 12 } : undefined,
-    title: 'Monky',
+    title: developmentProfile ? 'Monky Dev' : 'Monky',
     icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
       sandbox: false, // needed for custom desktopCapturer / preload access
       webSecurity: true,
       backgroundThrottling: false, // Keep audio and WebRTC processing smoothly when minimized/hidden
+      offscreen: developmentQa?.smoke === true,
+      additionalArguments: developmentQa ? ['--monky-prepared-qa'] : [],
     },
   });
+
+  getCrashRecovery().watch(mainWindow);
+  const disposeQa = bindDevelopmentQa(mainWindow, developmentQa, quitApplication);
+  mainWindow.once('closed', disposeQa);
+
+  if (developmentProfile) {
+    const window = mainWindow;
+    window.on('page-title-updated', (event) => {
+      event.preventDefault();
+      window.setTitle('Monky Dev');
+    });
+  }
 
   if (!trayManager) {
     trayManager = new TrayManager(mainWindow, quitApplication);
@@ -206,7 +351,7 @@ function createWindow(deferShow = false): void {
     overlayManager.setMainWindow(mainWindow);
   }
 
-  let minimizeToTray = true;
+  let minimizeToTray = !developmentQa;
 
   clientLogger = new ClientLogger();
   clientLogger.write({
@@ -215,14 +360,16 @@ function createWindow(deferShow = false): void {
     category: 'APP',
     message: `Application started — version ${app.getVersion()}, platform ${process.platform} ${process.arch}`,
   });
+  bindRendererDiagnostics(mainWindow.webContents, clientLogger);
 
-  setupIpcHandlers(mainWindow, serverManager, trayManager, {
+  localExecution = setupIpcHandlers(mainWindow, serverManager, trayManager, {
     setMinimizeToTray: (enabled: boolean) => {
       minimizeToTray = enabled;
     },
     clientLogger,
     overlayManager,
   });
+  localExecutionStopped = false;
   setupUpdater(mainWindow);
 
   // A launch straight after an update install keeps the "finishing" splash up
@@ -232,42 +379,56 @@ function createWindow(deferShow = false): void {
   // fallback timer guarantees a slow or missing signal never strands the window
   // behind it.
   if (deferShow) {
+    const window = mainWindow;
     let revealed = false;
     let onRendererReady: ((event: IpcMainEvent) => void) | null = null;
+    let revealTimer: ReturnType<typeof setTimeout> | null = null;
+    let dismissTimer: ReturnType<typeof setTimeout> | null = null;
+    const cleanupReveal = (): void => {
+      if (revealTimer) clearTimeout(revealTimer);
+      if (dismissTimer) clearTimeout(dismissTimer);
+      if (onRendererReady) ipcMain.removeListener('app:renderer-ready', onRendererReady);
+      revealTimer = null;
+      dismissTimer = null;
+      onRendererReady = null;
+    };
+    window.once('closed', cleanupReveal);
     const reveal = (reason: string): void => {
       if (revealed) return;
       revealed = true;
+      cleanupReveal();
       updateLog('reveal main window after update', { reason });
-      if (onRendererReady) {
-        ipcMain.removeListener('app:renderer-ready', onRendererReady);
-        onRendererReady = null;
+      if (!window.isDestroyed() && !window.isVisible()) {
+        window.show();
+        window.focus();
       }
-      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
-        mainWindow.show();
-        mainWindow.focus();
-      }
-      setTimeout(() => dismissInstallSplash(), 80);
+      dismissTimer = setTimeout(() => dismissInstallSplash(), 80);
     };
     // Primary trigger: the renderer signals once its real UI has painted. The
     // old `ready-to-show` trigger fired at the blank first paint (a dark
     // rectangle still loading the bundle), which is exactly why the splash
     // vanished seconds before Monky appeared (#498).
     onRendererReady = (event: IpcMainEvent): void => {
-      if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) {
+      if (!window.isDestroyed() && event.sender === window.webContents) {
         reveal('renderer-ready');
       }
     };
     ipcMain.on('app:renderer-ready', onRendererReady);
     // Fallback: never leave the window stranded behind the splash if the signal
     // never arrives (renderer crash, load failure, …).
-    setTimeout(() => reveal('timeout'), 20000);
+    revealTimer = setTimeout(() => reveal('timeout'), 20000);
   }
 
   // In dev, load Vite dev server if running, otherwise load dist/index.html
+  const onPageLoadFailed = (error: unknown): void => {
+    if (error && typeof error === 'object'
+      && (('code' in error && error.code === 'ERR_ABORTED') || ('errno' in error && error.errno === -3))) return;
+    getCrashRecovery().show({ kind: 'document-load' });
+  };
   if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+    void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL).catch(onPageLoadFailed);
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
+    void mainWindow.loadFile(path.join(__dirname, '../../dist/index.html')).catch(onPageLoadFailed);
   }
 
   // Atalho de desenvolvimento: F12 ou Ctrl+Shift+I para alternar DevTools
@@ -280,6 +441,11 @@ function createWindow(deferShow = false): void {
 
   // Minimize to tray on close instead of quitting the application (#149, #256)
   mainWindow.on('close', (event) => {
+    if (developmentQa && !isQuitting) {
+      event.preventDefault();
+      quitApplication();
+      return;
+    }
     if (!isQuitting) {
       if (minimizeToTray) {
         event.preventDefault();
@@ -311,17 +477,17 @@ function createWindow(deferShow = false): void {
 // otherwise Windows sees the live window as a different app and the pinned icon
 // stops matching it after every update (#323).
 if (process.platform === 'win32') {
-  app.setAppUserModelId('com.monky.app');
+  app.setAppUserModelId(developmentProfile?.appUserModelId ?? 'com.monky.app');
 }
 
-// Only allow a single running instance. If a second instance is launched,
-// focus the window of the instance that is already running instead of
-// opening a new one (option 1 from #154).
+// Keep one instance per profile; development never shares the installed profile.
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, commandLine) => {
+    if (serverInviteInbox.receiveArguments(commandLine)) notifyServerInvite();
+    if (crashRecovery?.focus()) return;
     if (mainWindow) {
       if (!mainWindow.isVisible()) mainWindow.show();
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -330,6 +496,8 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
+    initializeMainLanguage(app.getPath('userData'), app.getPreferredSystemLanguages());
+    getCrashRecovery();
     // TEST-ONLY (Bancada A): simulate the update install UX without a real
     // download or NSIS run. Gated entirely on MONKY_SIM_UPDATE, so a normal
     // launch never reaches it. `full` shows the installing splash then
@@ -378,15 +546,22 @@ if (!gotTheLock) {
     );
 
     // Allow media/DRM permissions required by embedded players.
-    session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    installBotScreenRequestGuard(session.defaultSession);
+    session.defaultSession.setPermissionCheckHandler((_contents, permission, origin, details) => {
       const allowed = ['media', 'mediaKeySystem', 'fullscreen', 'clipboard-read', 'clipboard-sanitized-write'];
-      callback(allowed.includes(permission));
+      return allowed.includes(permission) &&
+        !(isBotScreenUrl(details.requestingUrl ?? '') || (!details.isMainFrame && (!origin || origin === 'null')));
+    });
+    session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+      const allowed = ['media', 'mediaKeySystem', 'fullscreen', 'clipboard-read', 'clipboard-sanitized-write'];
+      callback(!isBotScreenUrl(details.requestingUrl) && allowed.includes(permission));
     });
 
     createWindow(isInstallSplashActive());
     bindMainWindowNavigationGuards();
 
     app.on('activate', () => {
+      if (crashRecovery?.focus()) return;
       if (BrowserWindow.getAllWindows().length === 0) {
         createWindow();
         bindMainWindowNavigationGuards();
@@ -396,10 +571,16 @@ if (!gotTheLock) {
         mainWindow.focus();
       }
     });
+  }).catch((error: unknown) => {
+    getCrashRecovery().show({
+      kind: 'main-bootstrap',
+      ...(error instanceof Error ? { error: { name: error.name, stack: error.stack } } : {}),
+    });
   });
 }
 
 app.on('window-all-closed', () => {
+  if (crashRecovery?.isActive() && !isQuitting) return;
   shutdownServer();
   if (process.platform !== 'darwin') {
     app.quit();
@@ -417,6 +598,13 @@ app.on('before-quit', (event) => {
     return;
   }
 
+  if (localExecution && !localExecutionStopped) {
+    event.preventDefault();
+    stopLocalExecutionThenQuit();
+    return;
+  }
+
+  crashRecovery?.dispose();
   clientLogger?.shutdown();
   shutdownServer();
   trayManager?.destroy();

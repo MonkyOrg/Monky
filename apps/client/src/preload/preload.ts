@@ -1,17 +1,43 @@
-import { contextBridge, ipcRenderer } from 'electron';
-import { SHORTCUT_IPC } from '@monky/shared';
+import { contextBridge, ipcRenderer, sharedTexture } from 'electron';
+import { readFileSync } from 'node:fs';
+import {
+  createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
+} from '@monky/screen-share';
+import * as nativeAudioProtocol from '@monky/shared';
+import { NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
+import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
   ActionShortcutBinding,
+  AudioPreviewCancellation,
+  AudioPreviewInput,
+  AudioPreviewResult,
   AppIdentityImportResult,
   AppIdentityResult,
   BackupCryptoResult,
   ClientLogConfig,
   ClientLogEntry,
   DesktopSource,
+  DevelopmentQaConfig,
+  DevelopmentQaReport,
   DiscoveredLanServer,
   HostServerOptions,
   ImageSelectionResult,
   LinkPreviewData,
+  LocalExecutionMutationResult,
+  LocalExecutionSnapshot,
+  LocalPermissionChange,
+  LocalToolId,
+  LocalPreparationInput,
+  LocalPreparationResult,
+  LocalTaskStartInput,
+  LocalTaskStartResult,
+  LocalFrameReadInput,
+  LocalFrameReadResult,
+  LocalFrameProgress,
+  LocalRequestCancellation,
+  LocalTaskPause,
+  LocalConnectionState,
+  LocalTaskFailureEvent,
   LogEntry,
   OverlayBounds,
   OverlayConfig,
@@ -21,10 +47,18 @@ import type {
   PttKeyBinding,
   ScreenAudioDiagnostics,
   ServerProbeResult,
+  ServerInviteResult,
   ServerStats,
   SoundboardShortcutBinding,
   SoundboardSoundData,
   SoundboardSoundEntry,
+  SoundboardDownloadAvailability,
+  SoundboardDownloadAuthorization,
+  SoundboardDownloadPermit,
+  SoundboardDownloadInput,
+  SoundboardDownloadCancellation,
+  SoundboardDownloadProgress,
+  SoundDownloadResult,
   StickerData,
   StickerEntry,
   StickerSaveResult,
@@ -32,12 +66,31 @@ import type {
   UpdateCheckResult,
   UpdateOutcome,
   ReleaseNotesResult,
+  RendererBootstrapFailure,
+  NativeScreenCommand,
+  NativeScreenCommandResult,
+  NativeScreenEvent,
+  NativeScreenReply,
+  NativeScreenPresentation,
+  NativeScreenPresentationSample,
   UpdateSimpleResult,
 } from '@monky/shared';
 
 export type { LinkPreviewData, OverlayBounds, OverlayConfig, OverlayMode, OverlayLayout, OverlayPosition, OverlayParticipantState, OverlaySyncState } from '@monky/shared';
 
 export interface ElectronApi {
+  nativeScreenCommand: (command: NativeScreenCommand) => Promise<NativeScreenCommandResult>;
+  nativeScreenReply: (reply: NativeScreenReply) => Promise<void>;
+  onNativeScreenEvent: (callback: (event: NativeScreenEvent) => void) => () => void;
+  attachNativeScreenPresentation: (input: NativeScreenPresentation) => Promise<void>;
+  attachNativeScreenPreview: (input: NativeScreenPresentation) => Promise<void>;
+  stopNativeScreenPresentation: (presentationId: string) => Promise<void>;
+  sampleNativeScreenPresentation: (presentationId: string) => Promise<NativeScreenPresentationSample | null>;
+  onNativeScreenPresentationError: (callback: (value: { presentationId: string | null; message: string }) => void) => () => void;
+  takeServerInvite: () => Promise<ServerInviteResult | null>;
+  onServerInviteAvailable: (callback: () => void) => () => void;
+  getDevelopmentQaConfig: () => Promise<DevelopmentQaConfig | null>;
+  reportDevelopmentQaState: (report: DevelopmentQaReport) => Promise<boolean>;
   startLanDiscovery: () => Promise<void>;
   stopLanDiscovery: () => Promise<void>;
   onLanDiscoveryFound: (cb: (server: DiscoveredLanServer) => void) => () => void;
@@ -70,8 +123,31 @@ export interface ElectronApi {
   selectImageDialog: () => Promise<ImageSelectionResult | null>;
   selectSoundFile: () => Promise<string | null>;
   selectSoundboardFolder: () => Promise<string | null>;
+  getDefaultSoundboardFolder: () => Promise<string | null>;
   listSoundboardSounds: (folderPath: string) => Promise<SoundboardSoundEntry[]>;
   readSoundboardSound: (filePath: string) => Promise<SoundboardSoundData | null>;
+  soundDownloadAvailability: (configuredFolder: string) => Promise<SoundboardDownloadAvailability>;
+  confirmSoundboardFolder: (configuredFolder: string) => Promise<boolean>;
+  authorizeSoundDownload: (input: SoundboardDownloadAuthorization) => Promise<SoundboardDownloadPermit>;
+  downloadSound: (input: SoundboardDownloadInput) => Promise<SoundDownloadResult>;
+  cancelSoundDownload: (key: SoundboardDownloadCancellation) => Promise<boolean>;
+  onSoundDownloadProgress: (cb: (progress: SoundboardDownloadProgress) => void) => () => void;
+  loadAudioPreview: (input: AudioPreviewInput) => Promise<AudioPreviewResult>;
+  cancelAudioPreview: (input: AudioPreviewCancellation) => Promise<boolean>;
+  getLocalExecutionState: () => Promise<LocalExecutionSnapshot>;
+  setLocalExecutionPermission: (input: LocalPermissionChange) => Promise<LocalExecutionMutationResult>;
+  removeLocalTool: (tool: LocalToolId) => Promise<LocalExecutionMutationResult>;
+  clearLocalExecutionCache: () => Promise<LocalExecutionMutationResult>;
+  cancelLocalExecutionTask: (taskId: string) => Promise<LocalExecutionMutationResult>;
+  onLocalExecutionChanged: (cb: (snapshot: LocalExecutionSnapshot) => void) => () => void;
+  prepareLocalExecution: (input: LocalPreparationInput) => Promise<LocalPreparationResult>;
+  startLocalExecutionTask: (input: LocalTaskStartInput) => Promise<LocalTaskStartResult>;
+  readLocalExecutionFrames: (input: LocalFrameReadInput) => Promise<LocalFrameReadResult>;
+  acknowledgeLocalExecutionFrames: (input: LocalFrameProgress) => Promise<LocalExecutionMutationResult>;
+  cancelLocalExecutionRequest: (input: LocalRequestCancellation) => Promise<LocalExecutionMutationResult>;
+  setLocalExecutionPaused: (input: LocalTaskPause) => Promise<LocalExecutionMutationResult>;
+  setLocalExecutionConnection: (input: LocalConnectionState) => Promise<LocalExecutionMutationResult>;
+  onLocalExecutionTaskFailed: (cb: (failure: LocalTaskFailureEvent) => void) => () => void;
   selectStickersFolder: () => Promise<string | null>;
   listStickers: (folderPath: string) => Promise<StickerEntry[]>;
   readSticker: (filePath: string) => Promise<StickerData | null>;
@@ -94,8 +170,9 @@ export interface ElectronApi {
   close: () => Promise<void>;
   getAppVersion: () => Promise<string>;
   signalRendererReady: () => void;
+  reportFatalBootstrap: (failure: RendererBootstrapFailure) => Promise<boolean>;
   checkForUpdates: () => Promise<UpdateCheckResult>;
-  downloadUpdate: () => Promise<UpdateSimpleResult>;
+  downloadUpdate: (expectedVersion?: string) => Promise<UpdateSimpleResult>;
   installUpdate: () => Promise<UpdateSimpleResult>;
   setUpdateChannel: (allowBeta: boolean) => Promise<UpdateSimpleResult>;
   getUpdateOutcome: () => Promise<UpdateOutcome | null>;
@@ -150,8 +227,61 @@ export interface ElectronApi {
   platform: string;
 }
 
+const preparedQa = process.argv.includes('--monky-prepared-qa');
+let nativePresentation: NativeScreenPresentationController | null = null;
+let nativeAudio: ReturnType<typeof registerNativeAudioPortReceiver> | null = null;
+let nativeAudioWorkletUrl: string | null = null;
+function prepareNativeAudio(): void {
+  if (nativeAudio) return;
+  const code = readFileSync(require.resolve('@monky/screen-share/runtime/nativePcmPlayout.worklet.js'), 'utf8');
+  const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+  try {
+    nativeAudio = registerNativeAudioPortReceiver(ipcRenderer, nativeAudioProtocol, {
+      workletUrl: url, onError: error => console.error('[NativeScreen] Audio output failed:', error),
+    });
+    nativeAudioWorkletUrl = url;
+  } catch (error) { URL.revokeObjectURL(url); throw error; }
+}
+const nativePresentationErrors = new Set<(value: { presentationId: string | null; message: string }) => void>();
+function presentationController(): NativeScreenPresentationController {
+  if (!nativePresentation) nativePresentation = createNativeScreenPresentation(sharedTexture, document, (presentationId, error) => {
+    console.error('[NativeScreen] Presentation failed:', error);
+    for (const callback of nativePresentationErrors) {
+      try { callback({ presentationId, message: error.message }); }
+      catch (observerError) { console.error('[NativeScreen] Presentation error observer failed:', observerError); }
+    }
+  }, ipcRenderer);
+  return nativePresentation;
+}
+window.addEventListener('beforeunload', () => {
+  void nativePresentation?.close().catch(error => console.error('[NativeScreen] Document presentation cleanup failed:', error));
+  void nativeAudio?.dispose().catch(error => console.error('[NativeScreen] Document audio cleanup failed:', error)).finally(() => {
+    if (nativeAudioWorkletUrl) URL.revokeObjectURL(nativeAudioWorkletUrl);
+  });
+  nativePresentationErrors.clear();
+});
 const api: ElectronApi = {
-  startLanDiscovery: () => ipcRenderer.invoke('lan:start'),
+  nativeScreenCommand: command => {
+    if (command?.action === 'watch') prepareNativeAudio();
+    return ipcRenderer.invoke(NATIVE_SCREEN_IPC.invoke, command);
+  },
+  nativeScreenReply: reply => ipcRenderer.invoke(NATIVE_SCREEN_IPC.reply, reply),
+  onNativeScreenEvent: callback => {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown): void => callback(nativeScreenEventSchema.parse(value));
+    ipcRenderer.on(NATIVE_SCREEN_EVENT, listener);
+    return () => ipcRenderer.removeListener(NATIVE_SCREEN_EVENT, listener);
+  },
+  attachNativeScreenPresentation: input => presentationController().attach(input),
+  attachNativeScreenPreview: input => presentationController().attachPreview(input),
+  stopNativeScreenPresentation: presentationId => presentationController().stop(presentationId),
+  sampleNativeScreenPresentation: presentationId => presentationController().sample(presentationId),
+  onNativeScreenPresentationError: callback => {
+    nativePresentationErrors.add(callback);
+    return () => { nativePresentationErrors.delete(callback); };
+  },
+  getDevelopmentQaConfig: () => preparedQa ? ipcRenderer.invoke(DEVELOPMENT_QA_IPC.config) : Promise.resolve(null),
+  reportDevelopmentQaState: (report) => ipcRenderer.invoke(DEVELOPMENT_QA_IPC.report, report),
+  startLanDiscovery: () => preparedQa ? Promise.resolve() : ipcRenderer.invoke('lan:start'),
   stopLanDiscovery: () => ipcRenderer.invoke('lan:stop'),
   onLanDiscoveryFound: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, server: DiscoveredLanServer) => cb(server);
@@ -176,6 +306,12 @@ const api: ElectronApi = {
   importIdentity: (exportedIdentity, password) => ipcRenderer.invoke('identity:import', exportedIdentity, password),
   saveBackupFile: (contents, suggestedName) => ipcRenderer.invoke('backup:save-file', contents, suggestedName),
   openBackupFile: () => ipcRenderer.invoke('backup:open-file'),
+  takeServerInvite: () => ipcRenderer.invoke(SERVER_INVITE_IPC.take),
+  onServerInviteAvailable: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on(SERVER_INVITE_AVAILABLE, listener);
+    return () => ipcRenderer.removeListener(SERVER_INVITE_AVAILABLE, listener);
+  },
   encryptBackup: (contents, password) => ipcRenderer.invoke('backup:encrypt', contents, password),
   decryptBackup: (payload, password) => ipcRenderer.invoke('backup:decrypt', payload, password),
   hostServerStart: (options) => ipcRenderer.invoke('server-host:start', options),
@@ -204,8 +340,43 @@ const api: ElectronApi = {
   selectImageDialog: () => ipcRenderer.invoke('dialog:select-image'),
   selectSoundFile: () => ipcRenderer.invoke('dialog:select-sound-file'),
   selectSoundboardFolder: () => ipcRenderer.invoke('dialog:select-soundboard-folder'),
+  getDefaultSoundboardFolder: () => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.defaultFolder),
   listSoundboardSounds: (folderPath) => ipcRenderer.invoke('soundboard:list-sounds', folderPath),
   readSoundboardSound: (filePath) => ipcRenderer.invoke('soundboard:read-sound', filePath),
+  soundDownloadAvailability: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.availability, folder),
+  confirmSoundboardFolder: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.confirmFolder, folder),
+  authorizeSoundDownload: (input) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.authorize, input),
+  downloadSound: (input) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.download, input),
+  cancelSoundDownload: (key) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.cancel, key),
+  loadAudioPreview: (input) => ipcRenderer.invoke(AUDIO_PREVIEW_IPC.load, input),
+  cancelAudioPreview: (input) => ipcRenderer.invoke(AUDIO_PREVIEW_IPC.cancel, input),
+  getLocalExecutionState: () => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.getState),
+  setLocalExecutionPermission: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.setPermission, input),
+  removeLocalTool: (tool) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.removeTool, tool),
+  clearLocalExecutionCache: () => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.clearCache),
+  cancelLocalExecutionTask: (taskId) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.cancelTask, taskId),
+  onLocalExecutionChanged: (cb) => {
+    const listener = (_event: Electron.IpcRendererEvent, snapshot: LocalExecutionSnapshot) => cb(snapshot);
+    ipcRenderer.on(LOCAL_EXECUTION_CHANGED, listener);
+    return () => ipcRenderer.removeListener(LOCAL_EXECUTION_CHANGED, listener);
+  },
+  prepareLocalExecution: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.prepare, input),
+  startLocalExecutionTask: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.startTask, input),
+  readLocalExecutionFrames: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.readFrames, input),
+  acknowledgeLocalExecutionFrames: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.acknowledgeFrames, input),
+  cancelLocalExecutionRequest: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.cancelRequest, input),
+  setLocalExecutionPaused: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.setPaused, input),
+  setLocalExecutionConnection: (input) => ipcRenderer.invoke(LOCAL_EXECUTION_IPC.setConnection, input),
+  onLocalExecutionTaskFailed: (cb) => {
+    const listener = (_event: Electron.IpcRendererEvent, failure: LocalTaskFailureEvent) => cb(failure);
+    ipcRenderer.on(LOCAL_EXECUTION_TASK_FAILED, listener);
+    return () => ipcRenderer.removeListener(LOCAL_EXECUTION_TASK_FAILED, listener);
+  },
+  onSoundDownloadProgress: (cb) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: SoundboardDownloadProgress) => cb(progress);
+    ipcRenderer.on(SOUND_DOWNLOAD_PROGRESS, listener);
+    return () => ipcRenderer.removeListener(SOUND_DOWNLOAD_PROGRESS, listener);
+  },
   selectStickersFolder: () => ipcRenderer.invoke('dialog:select-stickers-folder'),
   listStickers: (folderPath) => ipcRenderer.invoke('stickers:list', folderPath),
   readSticker: (filePath) => ipcRenderer.invoke('stickers:read', filePath),
@@ -251,13 +422,19 @@ const api: ElectronApi = {
   fitHomeWindowToContent: (contentHeight) => ipcRenderer.invoke('window:fit-home-content', contentHeight),
   close: () => ipcRenderer.invoke('window:close'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
-  signalRendererReady: () => ipcRenderer.send('app:renderer-ready'),
-  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
-  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
-  installUpdate: () => ipcRenderer.invoke('updater:install'),
-  setUpdateChannel: (allowBeta) => ipcRenderer.invoke('updater:set-channel', allowBeta),
-  getUpdateOutcome: () => ipcRenderer.invoke('updater:outcome'),
-  getReleaseNotes: (tag) => ipcRenderer.invoke('updater:release-notes', tag),
+  signalRendererReady: () => {
+    ipcRenderer.send('app:renderer-ready');
+    void ipcRenderer.invoke(CRASH_RECOVERY_IPC.ready).catch((error: unknown) => {
+      console.error('[Bootstrap] Could not acknowledge renderer readiness', error);
+    });
+  },
+  reportFatalBootstrap: (failure) => ipcRenderer.invoke(CRASH_RECOVERY_IPC.bootstrapFailed, failure),
+  checkForUpdates: () => ipcRenderer.invoke(UPDATER_IPC.check),
+  downloadUpdate: (expectedVersion) => ipcRenderer.invoke(UPDATER_IPC.download, expectedVersion),
+  installUpdate: () => ipcRenderer.invoke(UPDATER_IPC.install),
+  setUpdateChannel: (allowBeta) => ipcRenderer.invoke(UPDATER_IPC.setChannel, allowBeta),
+  getUpdateOutcome: () => ipcRenderer.invoke(UPDATER_IPC.outcome),
+  getReleaseNotes: (tag) => ipcRenderer.invoke(UPDATER_IPC.releaseNotes, tag),
   onUpdateProgress: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, percent: number) => cb(percent);
     ipcRenderer.on('updater:progress', listener);

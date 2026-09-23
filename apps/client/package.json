@@ -5,13 +5,38 @@
   "main": "dist-electron/main/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && tsc -p tsconfig.electron.json",
+    "build": "tsc && vite build && tsc -p tsconfig.electron.json && npm run build:dialog-preload",
+    "build:dialog-preload": "vite build --config vite.preload.config.ts",
     "start": "electron .",
-    "test": "tsc -p tsconfig.test.json && node dist-test/test/utils.test.js && node --test dist-test/test/botInteractions.test.js dist-test/test/commandUi.test.js dist-test/test/presence.test.js dist-test/test/voiceConnection.test.js dist-test/test/shortcuts.test.js",
-    "test:bots": "tsc -p tsconfig.test.json && node --test dist-test/test/botInteractions.test.js dist-test/test/commandUi.test.js",
-    "test:bots:ui": "node test/commandDomSmoke.cjs",
+    "test": "tsc -p tsconfig.test.json && node dist-test/test/utils.test.js && node --test dist-test/test/eventBus.test.js dist-test/test/botInteractions.test.js dist-test/test/botScreens.test.js dist-test/test/commandUi.test.js dist-test/test/commandAutocomplete.test.js dist-test/test/soundDownloads.test.js dist-test/test/soundDownloadConfirmation.test.js dist-test/test/presence.test.js dist-test/test/networkClient.test.js dist-test/test/voiceConnection.test.js dist-test/test/voiceModeReconnect.test.js dist-test/test/screenSharing.test.js dist-test/test/screenShareControls.test.js dist-test/test/screenSubscriptions.test.js dist-test/test/videoDiagnostics.test.js dist-test/test/videoTelemetry.test.js dist-test/test/shortcuts.test.js dist-test/test/releaseNotes.test.js dist-test/test/audioPreferences.test.js dist-test/test/serverSettings.test.js dist-test/test/favorites.test.js dist-test/test/cameraEffects.test.js dist-test/test/screenColorPicker.test.js dist-test/test/serverSettingsStore.test.js dist-test/test/hostedServerLifecycle.test.js dist-test/test/messageEditing.test.js dist-test/test/autoEntry.test.js dist-test/test/botLocalePreferencesStore.test.js dist-test/test/serverMonitor.test.js dist-test/test/localPermissions.test.js dist-test/test/localExecutionService.test.js dist-test/test/localTools.test.js dist-test/test/localExecutionRenderer.test.js dist-test/test/localExecutionTasks.test.js dist-test/test/localAudioSender.test.js dist-test/test/worker.test.js dist-test/test/workerClient.test.js dist-test/test/workerProtocol.test.js test/serverManagerLifecycle.test.cjs test/developmentProfile.test.cjs test/updaterCompatibility.test.cjs test/crashRecovery.test.cjs test/localExecutionIpc.test.cjs test/localToolsTab.test.cjs test/screenSharingUi.test.cjs test/soundboardLimiter.test.cjs",
+    "test:development": "node test/developmentProfileSmoke.cjs",
+    "test:native-screen": "node --test test/nativeScreenController.test.cjs test/nativeScreenIpc.test.cjs test/nativeScreenDiagnostics.test.cjs test/nativeWindows.test.cjs test/browserScreenSubscription.test.cjs test/remoteScreenAudioLifecycle.test.cjs native/screen-share/test/*.test.cjs",
+    "posttest": "npm run test:native-screen",
+    "test:updates": "node test/updateCompatibilitySmoke.cjs",
+    "test:editing": "tsc -p tsconfig.test.json && node --test dist-test/test/messageEditing.test.js && node test/messageEditingDomSmoke.cjs",
+    "test:clipboard": "node test/messageClipboardDomSmoke.cjs",
+    "test:settings:ui": "node --test --test-concurrency=1 test/serverSettingsDom.test.cjs test/navigationFavoritesSmoke.cjs test/serverManagerLifecycle.test.cjs test/homeAutoEntrySmoke.cjs test/serverMonitorDom.test.cjs test/localToolsDom.test.cjs",
+    "test:camera": "node test/cameraEffectsSmoke.cjs && node test/cameraEffectsSmoke.cjs --packaged && node test/cameraPublicationSmoke.cjs",
+    "test:colors": "tsc -p tsconfig.test.json && node --test dist-test/test/cameraEffects.test.js dist-test/test/screenColorPicker.test.js && node test/audioDeviceSmoke.cjs --color-native && node --test test/serverSettingsDom.test.cjs && node test/screenColorPickerSmoke.cjs",
+    "test:transport": "tsc -p tsconfig.test.json && node --test dist-test/test/networkClient.test.js dist-test/test/voiceConnection.test.js dist-test/test/voiceModeReconnect.test.js dist-test/test/screenSharing.test.js dist-test/test/screenShareControls.test.js dist-test/test/screenSubscriptions.test.js && node test/screenCodecSmoke.cjs && npm run test:voice-activity",
+    "test:quality": "node test/settingsNavigationSmoke.cjs --quality-settings",
+    "test:voice-activity": "node --test test/voiceActivitySmoke.cjs",
+    "test:bot-marketplace": "node --test test/botMarketplaceReinstallSmoke.cjs",
+    "test:recovery": "tsc -p tsconfig.test.json && node --test dist-test/test/networkClient.test.js dist-test/test/voiceConnection.test.js dist-test/test/voiceModeReconnect.test.js test/navigationFavoritesSmoke.cjs test/crashRecovery.test.cjs && node test/voiceRecoverySmoke.cjs && node test/crashRecoverySmoke.cjs",
+    "test:crashes": "node --test test/crashRecovery.test.cjs && node test/crashRecoverySmoke.cjs",
+    "test:loading": "node --test test/loadingSkeletonSmoke.cjs",
+    "test:invites": "tsc -p tsconfig.test.json && node --test dist-test/test/serverInvites.test.js test/navigationFavoritesSmoke.cjs test/serverInviteWebsiteSmoke.cjs",
+    "test:bots": "tsc -p tsconfig.test.json && node --test dist-test/test/botInteractions.test.js dist-test/test/botScreens.test.js dist-test/test/commandUi.test.js dist-test/test/commandAutocomplete.test.js dist-test/test/soundDownloads.test.js dist-test/test/soundDownloadConfirmation.test.js dist-test/test/localPermissions.test.js dist-test/test/localExecutionService.test.js dist-test/test/localTools.test.js dist-test/test/localExecutionRenderer.test.js dist-test/test/localExecutionTasks.test.js dist-test/test/localAudioSender.test.js dist-test/test/worker.test.js dist-test/test/workerClient.test.js dist-test/test/workerProtocol.test.js test/localExecutionIpc.test.cjs test/localToolsTab.test.cjs",
+    "test:screens": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && node --test dist-test/test/botScreens.test.js test/botScreenDom.test.cjs",
+    "test:bots:ui": "node test/commandDomSmoke.cjs && node --test test/localExecutionCommandDom.test.cjs",
+    "test:bots:voice": "tsc -p tsconfig.electron.json && node --test test/botVoiceRejoinSmoke.cjs",
+    "test:local-execution": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && npm run build:dialog-preload && node --test dist-test/test/localPermissions.test.js dist-test/test/localExecutionService.test.js dist-test/test/localTools.test.js dist-test/test/localExecutionRenderer.test.js dist-test/test/localExecutionTasks.test.js dist-test/test/localAudioSender.test.js dist-test/test/worker.test.js dist-test/test/workerClient.test.js dist-test/test/workerProtocol.test.js dist-test/test/localPreparationView.test.js test/localExecutionIpc.test.cjs test/localToolsTab.test.cjs test/localToolsDom.test.cjs test/localExecutionCommandDom.test.cjs test/localPreparationDialog.test.cjs",
+    "test:local-preparation": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && npm run build:dialog-preload && node --test dist-test/test/localPreparationView.test.js test/localPreparationDialog.test.cjs",
+    "test:local-execution:e2e": "node --test test/localExecutionE2eSmoke.cjs",
+    "test:shortcuts": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && node --test dist-test/test/shortcuts.test.js && node test/shortcutWorkerSmoke.cjs",
     "package": "electron-builder --win --dir",
-    "dist": "electron-builder --win"
+    "dist": "electron-builder --win",
+    "test:soundboard": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && node --test dist-test/test/audioPreferences.test.js dist-test/test/soundDownloads.test.js test/soundboardLimiter.test.cjs && node test/soundboardLimiterSmoke.cjs"
   },
   "description": "Monky — P2P Self-Hosted Voice, Video and Chat",
   "author": "Murilo",
@@ -22,7 +47,10 @@
   "dependencies": {
     "@fontsource/inter": "^5.3.0",
     "@fontsource/jetbrains-mono": "^5.3.0",
+    "@mediapipe/tasks-vision": "0.10.35",
+    "@monky/bot-sdk": "*",
     "@monky/screen-audio": "file:./native/screen-audio",
+    "@monky/screen-share": "file:./native/screen-share",
     "@monky/server": "*",
     "@monky/shared": "*",
     "@sapphi-red/web-noise-suppressor": "^0.4.0",
@@ -39,7 +67,7 @@
     "@types/node": "^22.13.4",
     "@types/qrcode": "^1.5.6",
     "@types/uuid": "^10.0.0",
-    "electron": "34.2.0",
+    "electron": "44.4.3",
     "electron-builder": "^25.1.8",
     "typescript": "^5.7.3",
     "vite": "^6.2.0"
@@ -47,8 +75,17 @@
   "build": {
     "appId": "com.monky.app",
     "productName": "Monky",
-    "electronVersion": "34.2.0",
+    "protocols": [
+      {
+        "name": "Monky",
+        "schemes": [
+          "monky"
+        ]
+      }
+    ],
+    "electronVersion": "44.4.3",
     "asar": false,
+    "afterPack": "./native/screen-share/scripts/checkPackage.cjs",
     "directories": {
       "output": "../../release",
       "buildResources": "build"
@@ -65,7 +102,15 @@
       "dist/**/*",
       "dist-electron/**/*",
       "build/**/*",
-      "package.json"
+      "package.json",
+      "!native/screen-share/{build,src,scripts,test}{,/**/*}",
+      "!node_modules/@monky/screen-share/{build,src,scripts,test}{,/**/*}",
+      "!apps/server/data{,/**/*}",
+      "!node_modules/@monky/server/data{,/**/*}"
+    ],
+    "extraFiles": [
+      { "from": "../../LICENSE", "to": "LICENSE" },
+      { "from": "../../LICENSE-MIT", "to": "LICENSE-MIT" }
     ],
     "win": {
       "icon": "build/icon.ico",
@@ -121,5 +166,6 @@
         }
       ]
     }
-  }
+  },
+  "license": "GPL-3.0-or-later"
 }

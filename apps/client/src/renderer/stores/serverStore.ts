@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, hasPermission } from '@monky/shared';
+import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, VoiceRestrictions, hasPermission } from '@monky/shared';
 import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
@@ -12,6 +12,7 @@ export class ServerStore {
   public bus: EventBus = appEvents;
   public serverDetails: ServerDetails | null = null;
   public currentUser: UserSummary | null = null;
+  public voiceRestrictions: VoiceRestrictions = { serverMuted: false, serverDeafened: false };
   public activeTextChannelId: string | null = null;
   public roles: Role[] = [];
   public userRoles: UserRoleSummary[] = [];
@@ -100,6 +101,15 @@ export class ServerStore {
   /** True when the id refers to this very connection, not just to this person (#309). */
   public isMySession(sessionId?: string): boolean {
     return !!sessionId && sessionId === this.currentUser?.sessionId;
+  }
+
+  /** All devices of this identity share the same server policy, even outside voice. */
+  public updateVoiceRestrictions(userId: string, restrictions: VoiceRestrictions): void {
+    if (!this.currentUser || userId !== this.currentUser.id) return;
+    const { serverMuted, serverDeafened } = restrictions;
+    if (this.voiceRestrictions.serverMuted === serverMuted && this.voiceRestrictions.serverDeafened === serverDeafened) return;
+    this.voiceRestrictions = { serverMuted, serverDeafened };
+    this.bus.emit('server.voice_restrictions_updated');
   }
 
   public setActiveTextChannel(channelId: string): void {
@@ -439,6 +449,7 @@ export class ServerStore {
     clientLog.info('SERVER_HOST', 'Server store cleared');
     this.serverDetails = null;
     this.currentUser = null;
+    this.voiceRestrictions = { serverMuted: false, serverDeafened: false };
     this.activeTextChannelId = null;
     this.roles = [];
     this.userRoles = [];
@@ -446,6 +457,7 @@ export class ServerStore {
     this.myPermissions = 0;
     this.knownMembers = new Map();
     this.slashCommands = [];
+    this.bus.emit('server.voice_restrictions_updated');
     this.bus.emit('server.updated');
   }
 }

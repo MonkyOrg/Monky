@@ -10,13 +10,15 @@ import {
   type BotInputResult,
   type ChatMessage,
   type CommandValues,
+  type CommandPresentation,
   type SlashCommand,
   type UserSummary,
 } from '@monky/shared';
-import { t, type TranslationKey } from '../i18n';
-
+import { getLanguage, t, type TranslationKey } from '../i18n';
+import type { AutocompleteInputs } from './commandAutocomplete';
+import { findCommandsByInputName, type CommandLocaleResolver } from './commandCatalog';
 export type BotInputField = BotFormField | {
-  type: 'user';
+  type: 'user' | 'autocomplete';
   name: string;
   label: string;
   description?: string;
@@ -26,12 +28,16 @@ export type BotInputField = BotFormField | {
 
 export function commandInputFields(command: SlashCommand): BotInputField[] {
   return (command.options ?? []).map((option): BotInputField => {
-    const base = { name: option.name, label: option.description, required: option.required };
+    const base = {
+      name: option.name, label: option.label ?? option.description,
+      ...(option.label ? { description: option.description } : {}), required: option.required,
+    };
     if (option.type === 'boolean') return { ...base, type: 'boolean' };
     if (option.type === 'integer') {
       return { ...base, type: 'integer', min: option.min, max: option.max, placeholder: option.placeholder };
     }
     if (option.type === 'user') return { ...base, type: 'user', placeholder: option.placeholder };
+    if (option.autocomplete) return { ...base, type: 'autocomplete', placeholder: option.placeholder };
     if (option.choices) return { ...base, type: 'select', choices: option.choices, placeholder: option.placeholder };
     return { ...base, type: 'text', placeholder: option.placeholder, multiline: true };
   });
@@ -80,8 +86,20 @@ export function convertBotInputValues(fields: BotInputField[], inputs: BotFormVa
 export function commandValuesFromInputs(
   command: SlashCommand,
   inputs: BotFormValues,
-  members: Pick<UserSummary, 'id'>[]
+  members: Pick<UserSummary, 'id'>[],
+  autocomplete: AutocompleteInputs = {},
+  visibleOptionalNames?: readonly string[]
 ): BotInputResult<CommandValues> {
+  for (const option of command.options ?? []) {
+    if (!option.autocomplete) continue;
+    const value = inputs[option.name];
+    const hasVisibleQuery = !!autocomplete[option.name]?.query.trim() &&
+      (option.required || visibleOptionalNames === undefined || visibleOptionalNames.includes(option.name));
+    if ((value !== undefined || option.required || hasVisibleQuery) && (!autocomplete[option.name]?.selected ||
+        autocomplete[option.name].selected?.value !== value)) {
+      return { success: false, field: option.name, reason: 'choice' };
+    }
+  }
   const result = validateCommandOptions(
     command.options ?? [],
     convertBotInputValues(commandInputFields(command), inputs)
@@ -92,8 +110,23 @@ export function commandValuesFromInputs(
     if (option.type === 'user' && value !== undefined && !members.some((member) => member.id === value)) {
       return { success: false, field: option.name, reason: 'choice' };
     }
+
   }
   return result;
+}
+
+export function autocompleteCommandOptions(
+  command: SlashCommand, optionName: string, values: BotFormValues,
+  members: Pick<UserSummary, 'id'>[], autocomplete: AutocompleteInputs
+): CommandValues {
+  const options: CommandValues = {};
+  for (const option of command.options ?? []) {
+    if (option.name === optionName || values[option.name] === undefined) continue;
+    const result = commandValuesFromInputs({ ...command, options: [{ ...option, required: false }] },
+      { [option.name]: values[option.name] }, members, autocomplete);
+    if (result.success) Object.assign(options, result.values);
+  }
+  return options;
 }
 
 export function formValuesFromInputs(form: BotForm, inputs: BotFormValues): BotInputResult<BotFormValues> {
@@ -106,10 +139,12 @@ export type TypedCommand =
   | { kind: 'ambiguous'; commands: SlashCommand[]; text: string }
   | { kind: 'command'; command: SlashCommand; text: string };
 
-export function parseTypedCommand(text: string, commands: SlashCommand[]): TypedCommand {
+export function parseTypedCommand(
+  text: string, commands: SlashCommand[], localeFor: CommandLocaleResolver = () => getLanguage(),
+): TypedCommand {
   const match = /^\/([a-z0-9_-]+)(?:\s+([\s\S]*))?$/i.exec(text.trimStart());
   if (!match) return { kind: 'chat' };
-  const matches = commands.filter((command) => command.name === match[1].toLowerCase());
+  const matches = findCommandsByInputName(commands, match[1], localeFor);
   if (matches.length === 0) return { kind: 'unavailable' };
   const input = match[2] ?? '';
   if (matches.length > 1) return { kind: 'ambiguous', commands: matches, text: input };
@@ -120,7 +155,7 @@ export function seedCommandInputs(command: SlashCommand, text = ''): BotFormValu
   const fields = commandInputFields(command);
   const values = initialBotInputValues(fields);
   const first = fields[0];
-  if (first && text.length > 0) {
+  if (first && first.type !== 'autocomplete' && text.length > 0) {
     // Free text belongs to the first named field, including every space/comma.
     values[first.name] = first.type === 'boolean' && /^(true|false)$/i.test(text.trim())
       ? text.trim().toLowerCase() === 'true'
@@ -160,6 +195,7 @@ export function botCommandMessage(payload: BotCommandMessagePayload): ChatMessag
     userNickname: payload.botName,
     userAvatarUrl: payload.botAvatarUrl,
     content: payload.content,
+    localizations: payload.localizations,
     createdAt: payload.createdAt,
     isBot: true,
     isEphemeral: payload.ephemeral,
@@ -173,6 +209,8 @@ export function botCommandMessage(payload: BotCommandMessagePayload): ChatMessag
   };
 }
 
-export function formatCommandContext(context: BotCommandContext): string {
-  return t('botChat.usedCommand', { nickname: context.invokerNickname, command: context.commandName });
+export function formatCommandContext(context: BotCommandContext, presentation?: CommandPresentation): string {
+  return t('botChat.usedCommand', {
+    nickname: context.invokerNickname, command: presentation?.displayName ?? context.commandName,
+  });
 }

@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Bots usam suas capacidades aprovadas e o acesso de quem chamou, sem depender de cargos para entrar na voz. Corrigido o novo vínculo por manifest após desvincular, preservando a identidade do bot e seus outros servidores.",
+  "en": "Bots use approved capabilities and the caller's access instead of relying on human roles to join voice. Fixed reinstalling a bot by manifest after unlinking, while preserving the bot's identity and other server registrations."
+}

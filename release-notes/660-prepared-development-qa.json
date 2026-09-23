@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "O desenvolvimento ganhou cenários explícitos de QA com perfil e servidor isolados, autenticação real e bots preparados quando necessários, preservando as etapas de login, instalação e consentimento que precisam ser testadas.",
+  "en": "Development now includes explicit QA scenarios with isolated profiles and servers, real authentication and prepared bots when needed, while preserving login, installation and consent steps that need testing."
+}

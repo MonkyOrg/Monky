@@ -1,14 +1,22 @@
 import type { ParticipantManager } from '../ParticipantManager';
 import type { PeerSession } from '../WebRtcManager';
 
+interface AudioLevelReceiver {
+  readonly track: Pick<MediaStreamTrack, 'readyState'>;
+  getStats(): Promise<RTCStatsReport>;
+}
+
 /**
- * RemoteVadMonitor monitors incoming RTP audio levels for remote peers via WebRTC getStats()
- * without fetching full stats reports, preventing garbage collection pressure (#411).
+ * Samples each decoded microphone without allocating per tick. Receiver stats
+ * remain a fallback when its playback graph is not available yet.
  */
 export class RemoteVadMonitor {
   private remoteAudioVads: Map<string, ReturnType<typeof setInterval>> = new Map();
 
-  constructor(private getVoiceParticipants: () => ParticipantManager) {}
+  constructor(
+    private getVoiceParticipants: () => ParticipantManager,
+    private getDecodedAudioLevel?: (peerSessionId: string) => number | null,
+  ) {}
 
   public setupRemoteVad(peerSessionId: string, getSession: () => PeerSession | undefined): void {
     this.setupRemoteReceiverVad(peerSessionId, () => {
@@ -22,50 +30,60 @@ export class RemoteVadMonitor {
 
   public setupRemoteReceiverVad(
     peerSessionId: string,
-    getReceiver: () => RTCRtpReceiver | null | undefined
+    getReceiver: () => AudioLevelReceiver | null | undefined
   ): void {
     this.cleanupRemoteVad(peerSessionId);
-    let isSpeaking = false;
+    const participants = this.getVoiceParticipants();
     let silenceCounter = 0;
+    let sampling = false;
+    const isCurrent = () => this.remoteAudioVads.get(peerSessionId) === interval
+      && this.getVoiceParticipants() === participants;
 
     const interval = setInterval(async () => {
+      if (sampling || !isCurrent()) return;
+      sampling = true;
       try {
         const audioReceiver = getReceiver();
-        if (!audioReceiver || audioReceiver.track?.readyState === 'ended') return;
-
-        const stats = await audioReceiver.getStats();
-        let audioLevel: number | undefined;
-        for (const report of stats.values()) {
-          if (report.type === 'inbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')) {
-            if (typeof report.audioLevel === 'number') {
-              audioLevel = report.audioLevel;
-              break;
+        if (!audioReceiver) return;
+        const receiverIsCurrent = () => isCurrent() && audioReceiver === getReceiver()
+          && audioReceiver.track.readyState !== 'ended';
+        if (!receiverIsCurrent()) return;
+        let audioLevel = this.getDecodedAudioLevel?.(peerSessionId) ?? undefined;
+        if (audioLevel === undefined) {
+          const stats = await audioReceiver.getStats();
+          if (!receiverIsCurrent()) return;
+          for (const report of stats.values()) {
+            if (report.type === 'inbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')) {
+              if (typeof report.audioLevel === 'number') {
+                audioLevel = report.audioLevel;
+                break;
+              }
             }
           }
         }
 
-        if (audioLevel !== undefined) {
+        const publishedSpeaking = participants.get(peerSessionId)?.voiceState?.isSpeaking === true;
+        if (audioLevel !== undefined || publishedSpeaking) {
           // WebRTC RFC 6464 audioLevel ranges from 0.0 to 1.0 (linear scale).
-          // Packets with active voice are typically above 0.01.
-          const isVoiceActive = audioLevel > 0.01;
+          // Missing/zero receiver telemetry must not erase published transmission.
+          const isVoiceActive = publishedSpeaking || (audioLevel ?? 0) > 0.01;
 
           if (isVoiceActive) {
             silenceCounter = 0;
-            if (!isSpeaking) {
-              isSpeaking = true;
-              this.getVoiceParticipants().setSpeaking(peerSessionId, true);
-            }
+            participants.setSpeaking(peerSessionId, true);
           } else {
             silenceCounter++;
-            // At 150ms interval, 3 consecutive silent reads ≈ 450ms — still
-            // responsive enough for a natural speaking-indicator transition.
-            if (silenceCounter > 3 && isSpeaking) {
-              isSpeaking = false;
-              this.getVoiceParticipants().setSpeaking(peerSessionId, false);
-            }
+            // Brief gaps between words should not make the indicator flicker.
+            if (silenceCounter > 3) participants.setSpeaking(peerSessionId, false);
           }
         }
-      } catch (e) {}
+      } catch (error: unknown) {
+        if (isCurrent() && getReceiver()?.track.readyState !== 'ended') {
+          console.warn('[WebRTC:VAD] Could not sample remote audio:', error);
+        }
+      } finally {
+        sampling = false;
+      }
     }, 150);
 
     this.remoteAudioVads.set(peerSessionId, interval);

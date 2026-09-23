@@ -1,5 +1,7 @@
 import { ChannelType, UserStatus, VoiceMode } from '@monky/shared';
 
+export type { VoiceRestrictions } from '@monky/shared';
+
 export interface ServerRecord {
   id: string;
   name: string;
@@ -61,6 +63,7 @@ export interface ChannelRecord {
 }
 
 export interface MessageRecord {
+  localizations?: import('@monky/shared').BotMessageLocalizations;
   replyToMessageId?: string;
   /** The owner backs the existing user FK; readers expose the bot's real ID. */
   botAuthor?: { id: string; name: string; avatarPath: string | null; ownerUserId: string };
@@ -132,6 +135,8 @@ export interface BotRecord {
   id: string;
   /** Human-readable name shown in the member list. */
   name: string;
+  /** True until a newly reserved manual link receives the bot's identity. */
+  profilePending: boolean;
   /** Token hash (bcrypt or sha256-hex); the plain token is never stored. */
   tokenHash: string;
   avatarPath: string | null;
@@ -140,4 +145,15 @@ export interface BotRecord {
   /** The user who created this bot. */
   createdByUserId: string;
   createdAt: number;
+  /** Last protocol presented by this bound bot; null for pre-migration links. */
+  lastProtocolVersion?: number | null;
+}
+
+export interface BotSettingsRecord {
+  botId: string;
+  definition: import('@monky/shared').BotSettingsDefinition;
+  serverOverrides: import('@monky/shared').BotFormValues;
+  schemaRevision: number;
+  revision: number;
+  downloadsSound: boolean;
 }

@@ -1,0 +1,66 @@
+.monky-tooltip {
+  position: fixed;
+  z-index: 2147483647;
+  width: max-content;
+  max-width: min(300px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 7px;
+  background: #111318;
+  color: #f2f3f5;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.38), 0 1px 3px rgba(0, 0, 0, 0.3);
+  font-family: var(--font-main, 'Inter', 'Segoe UI', sans-serif);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-align: center;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  user-select: none;
+  -webkit-app-region: no-drag;
+  animation: monky-tooltip-in 90ms ease-out;
+}
+
+.monky-tooltip[hidden] {
+  display: none !important;
+}
+
+.monky-tooltip__content {
+  display: block;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
+.monky-tooltip::after {
+  content: '';
+  position: absolute;
+  left: var(--tooltip-pointer-x);
+  width: 7px;
+  height: 7px;
+  background: #111318;
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.monky-tooltip[data-placement='top']::after {
+  bottom: -4px;
+  border-right: 1px solid rgba(255, 255, 255, 0.09);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.monky-tooltip[data-placement='bottom']::after {
+  top: -4px;
+  border-left: 1px solid rgba(255, 255, 255, 0.09);
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+@keyframes monky-tooltip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .monky-tooltip { animation: none; }
+}

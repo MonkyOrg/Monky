@@ -19,7 +19,7 @@ export async function destroyCommand(globalArgs: GlobalArgs): Promise<void> {
   // resolveTargetServer only returns directories that actually hold a Monky
   // database, which keeps this "rm -rf" from ever pointing at an arbitrary
   // folder someone typed by mistake.
-  const target = await resolveTargetServer(globalArgs, 'destruir');
+  const target = await resolveTargetServer(globalArgs, t('action.destroy'));
   const dataDir = target.dataDir;
 
   console.log(color(t('destroy.warning'), ANSI.red));

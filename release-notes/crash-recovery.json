@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Falhas fatais da interface agora mostram uma tela independente com diagnóstico técnico, acesso ao formulário habitual de bugs e a opção de reabrir o Monky. Nenhum relatório é publicado nem o aplicativo é reiniciado automaticamente.",
+  "en": "Fatal interface failures now show an independent screen with a technical diagnostic, access to the usual bug report form, and an option to reopen Monky. Reports are never published and the app is never restarted automatically."
+}

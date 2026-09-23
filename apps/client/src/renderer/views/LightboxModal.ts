@@ -1,6 +1,8 @@
 import { t } from '../i18n';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
 import { showAlert } from './Dialog';
+import { playChatMedia } from '../core/ChatMediaOutput';
+import { ImageClipboard } from '../utils/imageClipboard';
 
 /**
  * Handler de download que o lightbox espera. Fica aqui porque todo mundo que
@@ -54,6 +56,7 @@ export class LightboxModal {
     let currentLightboxVideo: HTMLVideoElement | null = null;
     let currentInlineVideo: HTMLVideoElement | null = null;
     let resumeInlineVideoOnClose = false;
+    const imageClipboard = new ImageClipboard();
 
     const overlay = document.createElement('div');
     overlay.className = 'attachment-lightbox';
@@ -68,6 +71,9 @@ export class LightboxModal {
           <div class="lightbox-meta-details"></div>
         </div>
         <div class="lightbox-actions">
+          <button type="button" class="lightbox-btn lightbox-copy" title="${t('chat.copyImage')}" aria-label="${t('chat.copyImage')}">
+            <span class="material-symbols-outlined">content_copy</span>
+          </button>
           <button type="button" class="lightbox-btn lightbox-download" title="${t('common.download')}">
             <span class="material-symbols-outlined">download</span>
           </button>
@@ -96,8 +102,9 @@ export class LightboxModal {
     const prevButton = overlay.querySelector('.lightbox-nav--prev') as HTMLButtonElement | null;
     const nextButton = overlay.querySelector('.lightbox-nav--next') as HTMLButtonElement | null;
     const downloadButton = overlay.querySelector('.lightbox-download') as HTMLButtonElement | null;
+    const copyButton = overlay.querySelector<HTMLButtonElement>('.lightbox-copy');
     const closeButton = overlay.querySelector('.lightbox-close') as HTMLButtonElement | null;
-    if (!stage || !frame || !counter || !caption || !metaDetails || !zoomIndicator || !prevButton || !nextButton || !downloadButton || !closeButton) {
+    if (!stage || !frame || !counter || !caption || !metaDetails || !zoomIndicator || !prevButton || !nextButton || !downloadButton || !copyButton || !closeButton) {
       return () => {};
     }
 
@@ -161,7 +168,9 @@ export class LightboxModal {
       }
       currentInlineVideo.pause();
       if (options?.resume && resumeInlineVideoOnClose) {
-        void currentInlineVideo.play().catch(() => undefined);
+        void playChatMedia(currentInlineVideo).catch((error: unknown) => {
+          console.warn('[Lightbox] Could not resume inline media:', error);
+        });
       }
       currentLightboxVideo = null;
       currentInlineVideo = null;
@@ -201,6 +210,7 @@ export class LightboxModal {
     };
 
     const renderCurrent = () => {
+      imageClipboard.cancel();
       syncCurrentVideoBackToInline();
       releaseDrag();
       resetZoom();
@@ -216,6 +226,7 @@ export class LightboxModal {
       prevButton.disabled = currentIndex === 0;
       nextButton.disabled = currentIndex === items.length - 1;
       zoomIndicator.hidden = item.kind !== 'image';
+      copyButton.hidden = item.kind !== 'image';
 
       if (item.kind === 'image') {
         const img = document.createElement('img');
@@ -297,7 +308,9 @@ export class LightboxModal {
             }
           }
           if (shouldResumePlayback) {
-            void video.play().catch(() => undefined);
+            void playChatMedia(video).catch((error: unknown) => {
+              console.warn('[Lightbox] Could not play media:', error);
+            });
           }
         };
         if (video.readyState >= 1) {
@@ -310,9 +323,14 @@ export class LightboxModal {
 
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      const isFormField = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA';
+      const isFormField = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
 
-      if (e.key === 'Escape') {
+      if (!isFormField && currentImage && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey
+        && e.key.toLowerCase() === 'c' && !window.getSelection()?.toString()) {
+        e.preventDefault();
+        e.stopPropagation();
+        void imageClipboard.copy(items[currentIndex].url);
+      } else if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
         close();
@@ -328,6 +346,7 @@ export class LightboxModal {
     };
 
     const close = () => {
+      imageClipboard.cancel();
       syncCurrentVideoBackToInline({ resume: true });
       releaseDrag();
       if (document.fullscreenElement && overlay.contains(document.fullscreenElement)) {
@@ -339,6 +358,12 @@ export class LightboxModal {
     };
 
     this.closeCurrent = close;
+    copyButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const current = items[currentIndex];
+      if (current.kind === 'image') void imageClipboard.copy(current.url);
+    });
     closeButton.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();

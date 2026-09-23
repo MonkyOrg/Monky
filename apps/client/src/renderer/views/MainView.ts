@@ -1,11 +1,12 @@
 import { MessageType, Permission, UserSummary, canAccessChannel } from '@monky/shared';
 import type { ChannelType } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
+import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { appEvents } from '../core/EventBus';
 import { networkClient } from '../core/NetworkClient';
 import { sessionManager } from '../core/SessionManager';
 import { isForegroundEvent } from '../core/sessionRouting';
-import { callClient } from '../core/serverConnection';
+import { callClient, isVoiceAdmissionPending, joinCallOnSession, leaveCurrentCall, rejoinCallOnSession, showHome } from '../core/serverConnection';
 import { participantManager } from '../core/ParticipantManager';
 import { serverStore } from '../stores/serverStore';
 import { voiceStore } from '../stores/voiceStore';
@@ -13,16 +14,25 @@ import { chatStore } from '../stores/chatStore';
 import { settingsStore, ChatSoundMode } from '../stores/settingsStore';
 import { connectionStore, SavedServer } from '../stores/connectionStore';
 import { audioProcessor } from '../core/AudioProcessor';
+import { selectNoiseSuppression } from '../core/AudioDeviceService';
 import { webRtcManager } from '../core/WebRtcManager';
-import { videoService } from '../core/VideoService';
 import { screenAudioService } from '../core/ScreenAudioService';
+import { stopLocalScreenShares } from '../core/screenShareControls';
 import { ChatView } from './ChatView';
+import type { ConnectionView } from './ConnectionView';
+import { bindPttIndicators, renderMicrophoneButton } from './PttIndicator';
+import { bindAudioDevicePopovers } from './AudioDevicePopover';
+import { bindFooterControlsMotion } from './FooterControlsMotion';
+import { renderAudioMuteIndicators, renderAudioStateIcon, updateAudioStateIcon } from './AudioStateIcon';
+import { getVoiceControlModeration, isViewingCallServer, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
 import { VoiceStageView } from './VoiceStageView';
 import { createChannelModal } from './CreateChannelModal';
 import { editChannelModal } from './EditChannelModal';
 import { settingsModal } from './SettingsModal';
+import { noiseSuppressionToggleTitle } from './settings/NoiseSuppressionControl';
 import { serverSettingsModal } from './ServerSettingsModal';
 import { serverMonitorModal } from './ServerMonitorModal';
+import '../styles/connectionTransition.css';
 import { inviteModal } from './InviteModal';
 import { contextMenu, ContextMenuItem } from './ContextMenu';
 import { showConfirm, showAlert } from './Dialog';
@@ -35,21 +45,13 @@ import { soundboardModal } from './SoundboardModal';
 import { soundEffects } from '../core/SoundEffects';
 import { getAvatarUrl, toAbsoluteServerIconUrl } from '../utils/avatar';
 import { peerFailureTooltip } from '../utils/peerFailureHint';
-import { participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
+import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../utils/voiceConnection';
 import { serverRailView } from './ServerRailView';
 import { soundboardPlayersBar } from './SoundboardPlayersBar';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
 import logoUrl from '../assets/Logo.png';
 import { t, tCount } from '../i18n';
-
-/**
- * Icons for the sidebar voice indicator (#553). Centralised so switching the
- * connected/reconnecting glyph is a one-line change. `rss_feed` reads as a
- * signal/connection ("tilted wifi"); `signal_wifi_bad` carries the failure
- * exclamation used while reconnecting.
- */
-const VOICE_ICON_CONNECTED = 'rss_feed';
-const VOICE_ICON_RECONNECTING = 'signal_wifi_bad';
+import { getBotVoiceContext } from '../utils/botVoice';
 
 export class MainView {
   private container: HTMLElement;
@@ -72,15 +74,20 @@ export class MainView {
     const changed = this.activeContentView !== view;
     this.activeContentView = view;
     if (changed) {
+      if (view === 'chat') this.voiceStageView?.destroy();
+      else this.chatView?.destroy();
       appEvents.emit('stage.visibility_changed', view === 'stage');
     }
   }
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, private readonly homeView?: ConnectionView) {
     this.container = container;
   }
 
-  public render(): void {
+  public render(preserveBotScreen = false): void {
+    const home = sessionManager.isHome();
+    const preserve = !home && preserveBotScreen && this.activeContentView === 'stage' && this.callIsHere() && this.voiceStageView?.hasOpenBotScreen();
+    this.homeView?.suspend();
     this.unbindListeners();
     this.stopSidebarPing();
 
@@ -94,9 +101,11 @@ export class MainView {
     const canManageServer = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES);
     const canManageBots = serverStore.hasPermission(Permission.MANAGE_BOTS);
+    const moderation = getVoiceControlModeration();
+    const enteringFromHome = this.container.querySelector('.connection-layout') !== null;
 
-    this.container.innerHTML = `
-      <div class="main-layout">
+    const markup = `
+      <div class="main-layout${home ? ' main-layout--home' : ''}">
         <!-- Server Rail: saved servers + home (#29) -->
         <div class="server-rail" id="server-rail"></div>
 
@@ -156,9 +165,14 @@ export class MainView {
             <div id="overlay-notice-slot"></div>
             <div id="voice-connection-row-slot"></div>
             <div class="user-media-bar" id="user-media-bar">
-              <button id="media-btn-camera" class="btn btn-icon media-bar-btn-lg ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${t('main.toggleCamera')}">
-                <span class="material-symbols-outlined md-18">${voiceStore.isCameraOn ? 'videocam_off' : 'videocam'}</span>
-              </button>
+              <div class="audio-control-group camera-control-group">
+                <button id="media-btn-camera" class="btn btn-icon media-bar-btn-lg ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}" title="${t('main.toggleCamera')}">
+                  <span class="material-symbols-outlined md-18">${voiceStore.isCameraOn ? 'videocam_off' : 'videocam'}</span>
+                </button>
+                <button type="button" class="audio-device-trigger" data-audio-device="camera" aria-label="${t('cameraEffects.quickOptions')}" title="${t('cameraEffects.quickOptions')}">
+                  <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
+                </button>
+              </div>
               <button id="media-btn-screen" class="btn btn-icon media-bar-btn-lg ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}" title="${t('main.shareScreen')}">
                 <span class="material-symbols-outlined md-18">${voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share'}</span>
               </button>
@@ -174,21 +188,30 @@ export class MainView {
                 </div>
                 <div class="user-info-text">
                   <span id="main-user-name" class="user-name-display">${escapeHtml(u.nickname)}</span>
+                  ${home ? `<span class="user-status-text" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</span>` : ''}
                   <span id="main-user-status-text" class="user-status-text">${settingsStore.appearOffline ? t('main.statusInvisible') : t('main.statusOnline')}</span>
                 </div>
               </div>
 
               <div class="user-quick-actions">
-                <button id="bar-btn-mic" class="btn btn-icon ${voiceStore.getEffectiveMuted() ? 'danger-active' : ''}" title="${voiceStore.getEffectiveMuted() ? t('main.unmute') : t('main.mute')}">
-                  <span class="material-symbols-outlined md-18">${voiceStore.getEffectiveMuted() ? 'mic_off' : 'mic'}</span>
-                </button>
-                <button id="bar-btn-deafen" class="btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}" title="${voiceStore.getEffectiveDeafened() ? t('main.undeafen') : t('main.deafen')}">
-                  <span class="material-symbols-outlined md-18">${voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones'}</span>
-                </button>
+                <div class="audio-control-group">
+                  ${renderMicrophoneButton()}
+                  <button type="button" class="audio-device-trigger" data-audio-device="input" aria-label="${t('settings.microphone')}" title="${t('settings.microphone')}">
+                    <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
+                  </button>
+                </div>
+                <div class="audio-control-group">
+                  <button id="bar-btn-deafen" class="btn btn-icon ${voiceStore.isDeafened ? 'danger-active' : ''}" aria-pressed="${voiceStore.isDeafened}" title="${escapeHtml([t(voiceStore.isDeafened ? 'main.undeafen' : 'main.deafen'), moderation.deafenReason].filter(Boolean).join('. '))}">
+                    ${renderAudioStateIcon(voiceStore.isDeafened ? 'headset_off' : 'headphones', moderation.serverDeafened)}
+                  </button>
+                  <button type="button" class="audio-device-trigger" data-audio-device="output" aria-label="${t('settings.outputDevice')}" title="${t('settings.outputDevice')}">
+                    <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
+                  </button>
+                </div>
                 <button id="bar-btn-settings" class="btn btn-icon" title="${t('connection.settingsTitle')}">
                   <span class="material-symbols-outlined md-18">settings</span>
                 </button>
-                <button id="bar-btn-disconnect" class="btn btn-icon" style="color: var(--danger);" title="${t('main.disconnectTitle')}">
+                <button id="bar-btn-disconnect" class="btn btn-icon" style="color: var(--danger);" title="${escapeHtml(t('main.disconnectFrom', { name: s.name }))}">
                   <span class="material-symbols-outlined md-18">logout</span>
                 </button>
               </div>
@@ -208,31 +231,42 @@ export class MainView {
         </div>
       </div>
     `;
+    const preserved = preserve && replaceAroundLiveChild(this.container, markup, '.main-layout', '#main-center-stage');
+    if (!preserved) this.container.innerHTML = markup;
 
-    this.renderChannels();
-    this.renderMembers();
+    if (!home) {
+      this.renderChannels();
+      this.renderMembers();
+    }
     serverRailView.render();
-    this.setupChannelsResizer();
+    if (!home) this.setupChannelsResizer();
     this.observeUserCardHeight();
 
     const centerStageEl = document.getElementById('main-center-stage')!;
     // Re-rendering happens on every server switch now (#400), so the previous
     // views must be torn down or their event listeners and ping timers would
     // pile up on each switch.
-    this.chatView?.destroy();
-    this.voiceStageView?.destroy();
-    this.chatView = new ChatView(centerStageEl);
-    this.voiceStageView = new VoiceStageView(centerStageEl);
+    if (preserved) this.voiceStageView?.render();
+    else {
+      this.chatView?.destroy();
+      this.voiceStageView?.destroy();
+      this.chatView = new ChatView(centerStageEl);
+      this.voiceStageView = new VoiceStageView(centerStageEl);
+    }
 
     // A re-render (e.g. after switching languages, #16) must not drop someone
     // who is watching the voice stage back into the text channel. The session
     // check keeps the stage hidden when the call belongs to another server the
     // user has walked away from (#400).
-    if (this.activeContentView === 'stage' && this.callIsHere()) {
-      this.voiceStageView.setChannel(voiceStore.currentVoiceChannelId);
+    if (home) {
+      if (!this.homeView) throw new Error('The Home view was not provided to the connected layout');
+      appEvents.emit('stage.visibility_changed', false);
+      this.homeView.render(centerStageEl);
+    } else if (this.activeContentView === 'stage' && this.callIsHere()) {
+      this.voiceStageView?.setChannel(voiceStore.currentVoiceChannelId);
     } else if (serverStore.activeTextChannelId) {
       this.setActiveContentView('chat');
-      this.chatView.setChannel(serverStore.activeTextChannelId);
+      this.chatView?.setChannel(serverStore.activeTextChannelId);
     }
 
     this.attachEvents();
@@ -245,6 +279,24 @@ export class MainView {
 
     const soundboardSlot = document.getElementById('soundboard-players-slot');
     if (soundboardSlot) soundboardPlayersBar.mount(soundboardSlot);
+    if (!home && enteringFromHome) this.animateServerEntry();
+  }
+
+  private animateServerEntry(): void {
+    const layout = this.container.querySelector<HTMLElement>('.main-layout');
+    if (!layout || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const stop = () => {
+      layout.removeEventListener('animationend', finish);
+      layout.removeEventListener('animationcancel', finish);
+      layout.classList.remove('main-layout--entering');
+    };
+    const finish = (event: AnimationEvent) => {
+      if (event.target === layout && event.animationName === 'monky-server-entry') stop();
+    };
+    layout.addEventListener('animationend', finish);
+    layout.addEventListener('animationcancel', finish);
+    layout.classList.add('main-layout--entering');
+    this.unbindEvents.push(stop);
   }
 
   /**
@@ -267,7 +319,8 @@ export class MainView {
     const slot = document.getElementById('voice-connection-row-slot');
     if (!slot) return;
 
-    const vc = serverStore.serverDetails?.channels.find((c) => c.id === voiceStore.currentVoiceChannelId);
+    const session = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
+    const vc = session?.serverStore.getChannel(voiceStore.currentVoiceChannelId ?? '');
     if (!voiceStore.currentVoiceChannelId || !vc) {
       slot.innerHTML = '';
       this.stopSidebarPing();
@@ -275,25 +328,35 @@ export class MainView {
     }
 
     const reconnecting = voiceStore.isReconnecting;
-    const serverName = serverStore.serverDetails?.name ?? '';
-    const signalIcon = reconnecting ? VOICE_ICON_RECONNECTING : VOICE_ICON_CONNECTED;
-    const statusText = reconnecting ? t('main.reconnecting') : t('main.voiceConnected');
+    const connecting = voiceStore.isConnecting;
+    const connectionClass = reconnecting ? 'reconnecting' : connecting ? 'connecting' : '';
+    const serverName = session?.serverStore.serverDetails?.name ?? '';
+    const { quality, icon } = voiceConnectionIndicator(null, reconnecting, connecting);
+    const statusText = reconnecting ? t('main.reconnecting') : connecting ? t('main.connecting') : t('main.voiceConnected');
+    const noiseMode = settingsStore.noiseSuppressionMode;
+    const noiseEnabled = noiseMode !== 'off';
+    const noiseTitle = escapeHtml(noiseSuppressionToggleTitle(noiseMode));
 
     slot.innerHTML = `
-      <div class="voice-connection-row ${reconnecting ? 'reconnecting' : ''}" id="voice-connection-row">
+      <div class="voice-connection-row ${connectionClass}" id="voice-connection-row">
         <div class="voice-conn-info">
-          <span class="material-symbols-outlined md-16 voice-conn-signal ${reconnecting ? 'reconnecting' : 'unknown'}"${reconnecting ? ` title="${t('main.reconnectingTitle')}"` : ''}>${signalIcon}</span>
+          <span class="material-symbols-outlined md-16 voice-conn-signal ${quality}" aria-hidden="true">${icon}</span>
           <div class="voice-conn-text">
-            <span class="voice-conn-status">${statusText}</span>
+            <span class="voice-conn-status" role="status">${statusText}</span>
             <span class="voice-conn-channel" id="sidebar-voice-channel">${escapeHtml(vc.name)}</span>
             ${serverName ? `<span class="voice-conn-server">${escapeHtml(serverName)}</span>` : ''}
           </div>
           <span class="voice-conn-ping" id="sidebar-voice-ping" title="${t('main.averagePing')}">-- ms</span>
         </div>
         <div class="voice-conn-actions">
-          <button id="sidebar-btn-rnnoise" class="btn btn-icon voice-conn-rnnoise ${settingsStore.noiseSuppressionEnabled ? 'rnnoise-active' : ''}" title="${settingsStore.noiseSuppressionEnabled ? t('main.rnnoiseOn') : t('main.rnnoiseOff')}">
-            <span class="material-symbols-outlined md-18">graphic_eq</span>
-          </button>
+          <div class="audio-control-group noise-control-group">
+            <button type="button" id="sidebar-btn-rnnoise" class="btn btn-icon voice-conn-rnnoise ${noiseEnabled ? 'rnnoise-active' : ''}" title="${noiseTitle}" aria-label="${noiseTitle}" aria-pressed="${noiseEnabled}">
+              <span class="material-symbols-outlined md-18">graphic_eq</span>
+            </button>
+            <button type="button" class="audio-device-trigger" data-audio-device="noise" aria-label="${t('audioNoise.quickOptions')}" title="${t('audioNoise.quickOptions')}">
+              <span class="material-symbols-outlined md-14" aria-hidden="true">keyboard_arrow_up</span>
+            </button>
+          </div>
           <button id="sidebar-btn-leave-voice" class="btn btn-icon voice-conn-leave" title="${t('main.leaveCall')}">
             <span class="material-symbols-outlined md-18">call_end</span>
           </button>
@@ -301,16 +364,18 @@ export class MainView {
       </div>
     `;
 
-    const btnRnnoise = document.getElementById('sidebar-btn-rnnoise');
+    const btnRnnoise = document.querySelector<HTMLButtonElement>('#sidebar-btn-rnnoise');
     btnRnnoise?.addEventListener('click', async () => {
-      const enabled = !settingsStore.noiseSuppressionEnabled;
-      settingsStore.noiseSuppressionEnabled = enabled;
-      settingsStore.save();
-      await audioProcessor.setNoiseSuppression(enabled);
-
-      if (btnRnnoise) {
-        btnRnnoise.className = `btn btn-icon voice-conn-rnnoise ${enabled ? 'rnnoise-active' : ''}`;
-        btnRnnoise.setAttribute('title', enabled ? t('main.rnnoiseOn') : t('main.rnnoiseOff'));
+      if (!btnRnnoise || btnRnnoise.disabled) return;
+      btnRnnoise.disabled = true;
+      try {
+        const currentMode = settingsStore.noiseSuppressionMode;
+        await selectNoiseSuppression(currentMode === 'off' ? settingsStore.lastNoiseSuppressionMode : 'off');
+      } catch (error: unknown) {
+        console.warn('[MainView] Could not change noise suppression:', error);
+        await showAlert({ title: t('common.error'), message: t('audioNoise.selectionFailed'), variant: 'danger' });
+      } finally {
+        btnRnnoise.disabled = false;
       }
     });
 
@@ -328,22 +393,27 @@ export class MainView {
       if (!pingEl) return;
       const isSfu = webRtcManager.isSfuMode();
       const channelId = voiceStore.currentVoiceChannelId;
-      const participants = participantManager.getInVoiceChannel(voiceStore.currentVoiceChannelId || '');
-      const avg = participants.length <= 1 && !isSfu ? 0 : await webRtcManager.getAverageP2pPing();
-      if (!pingEl.isConnected || channelId !== voiceStore.currentVoiceChannelId) return;
+      const sessionKey = voiceStore.voiceSessionKey;
+      const participants = (sessionKey ? sessionManager.get(sessionKey)?.participants.getInVoiceChannel(channelId ?? '') : undefined) ?? [];
+      const pending = voiceStore.isConnecting || voiceStore.isReconnecting;
+      const avg = pending ? null : participants.length <= 1 && !isSfu ? 0 : await webRtcManager.getAverageP2pPing();
+      if (!pingEl.isConnected || channelId !== voiceStore.currentVoiceChannelId || sessionKey !== voiceStore.voiceSessionKey) return;
       pingEl.textContent = avg !== null ? `${avg} ms` : '-- ms';
-      const { quality, icon } = voiceConnectionIndicator(avg, voiceStore.isReconnecting);
+      const { quality, icon } = voiceConnectionIndicator(avg, voiceStore.isReconnecting, voiceStore.isConnecting);
       const signal = document.querySelector<HTMLElement>('.voice-conn-signal');
       if (signal) {
         signal.textContent = icon;
         signal.className = `material-symbols-outlined md-16 voice-conn-signal ${quality}`;
       }
       const label = voiceStore.isReconnecting ? t('main.reconnecting')
+        : voiceStore.isConnecting ? t('main.connecting')
         : quality === 'good' ? t('stage.qualityExcellent')
         : quality === 'medium' ? t('stage.qualityGood')
         : quality === 'bad' ? t('stage.qualityPoor') : t('stage.pingCalculating');
       const info = document.querySelector<HTMLElement>('.voice-conn-info');
-      if (info) info.title = `${isSfu ? 'SFU' : 'P2P'} · ${pingEl.textContent} · ${label}`;
+      if (info) info.title = voiceStore.isReconnecting ? t('main.reconnectingTitle')
+        : voiceStore.isConnecting ? t('main.connectingTitle')
+        : `${isSfu ? 'SFU' : 'P2P'} · ${pingEl.textContent} · ${label}`;
     };
     update();
     this.sidebarPingInterval = window.setInterval(update, 2000);
@@ -356,19 +426,28 @@ export class MainView {
     }
   }
 
+  private updateParticipantSpeaking(sessionId?: string): void {
+    for (const row of this.container.querySelectorAll<HTMLElement>('.voice-participant-mini[data-session-id]')) {
+      const id = row.dataset.sessionId;
+      if (!id || (sessionId && id !== sessionId)) continue;
+      row.classList.toggle('speaking', isParticipantSpeaking(participantManager.get(id)));
+    }
+  }
+
   /**
    * Remote participants broadcasting their screen in the voice channel the
    * local user is currently connected to (#282).
    */
   private getRemoteScreenSharers(): Array<{ id: string; nickname: string }> {
     const channelId = voiceStore.currentVoiceChannelId;
-    if (!channelId) return [];
-    return participantManager
+    const session = voiceStore.voiceSessionKey ? sessionManager.get(voiceStore.voiceSessionKey) : undefined;
+    if (!channelId || !session) return [];
+    return session.participants
       .getInVoiceChannel(channelId)
-      .filter((p) => !serverStore.isMySession(p.user.sessionId) && (p.voiceState?.isScreenSharing ?? false))
+      .filter((p) => !session.serverStore.isMySession(p.user.sessionId) && (p.voiceState?.isScreenSharing ?? false))
       .map((p) => ({
         id: p.user.sessionId || p.user.id,
-        nickname: participantManager.displayName(p),
+        nickname: session.participants.displayName(p),
       }));
   }
 
@@ -384,11 +463,19 @@ export class MainView {
 
     const sharers = this.getRemoteScreenSharers();
     const isSelfSharing = voiceStore.isScreenSharing;
-    const signature = `${this.activeContentView}|${isSelfSharing}|${sharers.map((s) => `${s.id}:${s.nickname}`).join(',')}`;
+    const voice = getBotVoiceContext();
+    const screens = voice ? voice.session.botScreenStore.list(voice.channelId)
+      .filter((screen) => !this.voiceStageView?.isWatchingBotScreen(screen.id)
+        && !voice.session.botScreenStore.isInvitationDismissed(screen.id)) : [];
+    const loadFailed = voice?.session.botScreenStore.loadFailed ?? false;
+    const signature = JSON.stringify([
+      this.activeContentView, isSelfSharing, sharers, voice?.session.key, voice?.channelId,
+      screens.map((screen) => [screen.id, screen.instanceId, screen.title]), loadFailed,
+    ]);
     if (signature === this.screenShareNoticeSignature) return;
     this.screenShareNoticeSignature = signature;
 
-    if (this.activeContentView === 'stage' || (sharers.length === 0 && !isSelfSharing)) {
+    if ((this.activeContentView === 'stage' || (sharers.length === 0 && !isSelfSharing)) && screens.length === 0 && !loadFailed) {
       slot.innerHTML = '';
       return;
     }
@@ -396,7 +483,7 @@ export class MainView {
     const parts: string[] = [];
 
     // Local user sharing notice with stop button (#416)
-    if (isSelfSharing) {
+    if (isSelfSharing && this.activeContentView !== 'stage') {
       parts.push(`
         <div class="screenshare-notice screenshare-notice--self">
           <span class="material-symbols-outlined md-16 screenshare-notice-icon">screen_share</span>
@@ -407,7 +494,7 @@ export class MainView {
     }
 
     // Remote sharers notice
-    if (sharers.length > 0) {
+    if (sharers.length > 0 && this.activeContentView !== 'stage') {
       const names = sharers.map((s) => escapeHtml(s.nickname));
       let label: string;
       if (names.length === 1) {
@@ -431,19 +518,47 @@ export class MainView {
       `);
     }
 
+    for (const screen of screens) {
+      const label = escapeHtml(t('botScreen.invitation', { title: screen.title }));
+      parts.push(`
+        <div class="screenshare-notice bot-screen-invitation">
+          <span class="material-symbols-outlined md-16 screenshare-notice-icon" aria-hidden="true">apps</span>
+          <span class="screenshare-notice-text" title="${label}">${label}</span>
+          <button type="button" class="screenshare-notice-btn" data-watch-bot-screen="${escapeHtml(screen.id)}"
+            data-bot-screen-instance="${escapeHtml(screen.instanceId)}"
+            aria-label="${escapeHtml(t('botScreen.open', { title: screen.title }))}">${t('botScreen.watch')}</button>
+        </div>
+      `);
+    }
+    if (loadFailed) {
+      parts.push(`<div class="screenshare-notice bot-screen-invitation">
+        <span class="screenshare-notice-text" role="status">${t('botScreen.loadError')}</span>
+        <button type="button" class="screenshare-notice-btn" data-reload-bot-screens>${t('botScreen.retry')}</button>
+      </div>`);
+    }
     slot.innerHTML = parts.join('');
+    slot.querySelectorAll<HTMLButtonElement>('[data-watch-bot-screen]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const current = getBotVoiceContext();
+        if (!voice || current?.session !== voice.session || current.channelId !== voice.channelId) return;
+        const id = button.dataset.watchBotScreen;
+        const screen = id ? current.session.botScreenStore.get(id) : undefined;
+        if (!screen || screen.instanceId !== button.dataset.botScreenInstance) return;
+        this.openVoiceStage(undefined, screen.id);
+      });
+    });
+    slot.querySelector('[data-reload-bot-screens]')?.addEventListener('click', () => appEvents.emit('voice.bot_screens_reload'));
 
     // Stop self-sharing handler
     document.getElementById('screenshare-self-stop-btn')?.addEventListener('click', async () => {
-      videoService.stopScreenShare();
-      await webRtcManager.removeAllLocalScreenTracks();
-      voiceStore.setScreenSharing(false);
-      callClient().send(MessageType.VOICE_STATE_UPDATE, {
-        screenShareIds: [],
-        isScreenSharing: false,
-      });
-      if (screenAudioService.getIsCapturing()) {
-        await screenAudioService.stop();
+      try {
+        await stopLocalScreenShares(screenAudioService);
+      } catch (error) {
+        await showAlert({
+          title: t('screenShare.errorTitle'),
+          message: t('screenShare.errorMessage', { error: error instanceof Error ? error.message : String(error) }),
+          variant: 'danger',
+        });
       }
       this.updateScreenShareNotice();
     });
@@ -490,12 +605,16 @@ export class MainView {
    * Switches the center area to the voice stage, optionally opting into a
    * specific remote screen share on the way in (#282).
    */
-  private openVoiceStage(watchSessionId?: string): void {
+  private openVoiceStage(watchSessionId?: string, botScreenId?: string): void {
     const channelId = voiceStore.currentVoiceChannelId;
-    if (!channelId) return;
+    const sessionKey = voiceStore.voiceSessionKey;
+    if (!channelId || !sessionKey || !sessionManager.get(sessionKey)) return;
+    // A notice can belong to the background call, never to the current text tab.
+    if (sessionManager.isHome() || sessionManager.getActiveKey() !== sessionKey) sessionManager.activate(sessionKey);
     this.setActiveContentView('stage');
     this.voiceStageView?.setChannel(channelId);
     if (watchSessionId) this.voiceStageView?.watchScreenShare(watchSessionId);
+    if (botScreenId) this.voiceStageView?.watchBotScreen(botScreenId, true);
     this.renderChannels();
     this.updateScreenShareNotice();
   }
@@ -671,7 +790,7 @@ export class MainView {
     if (voiceListEl) {
       voiceListEl.innerHTML = voiceChannels.map((c) => {
         const inVoice = participantManager.getInVoiceChannel(c.id);
-        const isActive = c.id === voiceStore.currentVoiceChannelId;
+        const isActive = isViewingCallServer() && c.id === voiceStore.currentVoiceChannelId;
         const showRestrictedIcon = permissionsResolved && !canSpeakInVoiceChannels;
         const isRestricted = showRestrictedIcon && !isActive;
 
@@ -693,28 +812,25 @@ export class MainView {
                 ${inVoice.map((p) => {
                   const sessionId = p.user.sessionId || p.user.id;
                   const isLocal = serverStore.isMySession(p.user.sessionId);
-                  const isSpeaking = isLocal ? voiceStore.isSpeaking : p.isSpeaking;
-                  const isServerDeafened = isLocal ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
-                  const isServerMuted = isLocal ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
-                  const isSelfDeafened = isLocal ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
-                  const isSelfMuted = isLocal ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
-                  const isMicMuted = isSelfMuted || isServerMuted || isSelfDeafened || isServerDeafened;
+                  const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
+                  const isSpeaking = isParticipantSpeaking(p);
+                  const isServerDeafened = isLocalCall ? voiceStore.serverDeafened : (p.voiceState?.serverDeafened ?? false);
+                  const isServerMuted = isLocalCall ? voiceStore.serverMuted : (p.voiceState?.serverMuted ?? false);
+                  const isSelfDeafened = isLocalCall ? voiceStore.isDeafened : (p.voiceState?.isDeafened ?? false);
+                  const isSelfMuted = isLocalCall ? voiceStore.isMuted : (p.voiceState?.isMuted ?? false);
                   const avatar = getAvatarUrl(p.user.avatarUrl);
                   const displayName = participantManager.displayName(p);
                   const isSfu = serverStore.serverDetails?.voiceMode === 'sfu';
                   const { isPeerFailed, isConnecting, isRelayed } = participantConnectionIndicators(p, isSfu, isLocal);
 
                   return `
-                    <div id="voice-mini-user-${sessionId}" class="voice-participant-mini ${isSpeaking ? 'speaking' : ''}" data-session-id="${sessionId}" title="${escapeHtml(displayName)} (${t('main.rightClickVolumeShort')})">
+                    <div id="voice-mini-user-${sessionId}" class="voice-participant-mini ${isSpeaking ? 'speaking' : ''}" data-session-id="${sessionId}" title="${escapeHtml(displayName)} (${t(isLocal ? 'common.you' : 'main.rightClickVolumeShort')})">
                       <img class="voice-mini-avatar" src="${avatar}" data-fallback="avatar">
                       <span class="voice-mini-name">${escapeHtml(displayName)}</span>
                       ${isPeerFailed ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-failed" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('main.peerConnectionFailed')}">link_off</span>` : ''}
                       ${isConnecting ? `<span class="material-symbols-outlined md-14 voice-mini-icon peer-connecting" title="${t(isSfu ? 'main.sfuConnecting' : 'main.peerConnecting')}">sync</span>` : ''}
                       ${isRelayed ? `<span class="material-symbols-outlined md-14 voice-mini-icon relayed" title="${t('main.peerRelayed')}">swap_horiz</span>` : ''}
-                      ${isServerDeafened ? `<span class="material-symbols-outlined md-14 voice-mini-icon muted" title="${t('permissions.serverDeafened')}">hearing_disabled</span>` : ''}
-                      ${isServerMuted ? `<span class="material-symbols-outlined md-14 voice-mini-icon muted" title="${t('permissions.serverMuted')}">admin_panel_settings</span>` : ''}
-                      ${isMicMuted ? `<span class="material-symbols-outlined md-14 voice-mini-icon muted" title="${t('main.micMuted')}">mic_off</span>` : ''}
-                      ${isSelfDeafened ? `<span class="material-symbols-outlined md-14 voice-mini-icon muted" title="${t('main.audioMuted')}">headset_off</span>` : ''}
+                      ${renderAudioMuteIndicators({ ...p.voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened })}
                       ${p.voiceState?.isScreenSharing ? `<span class="material-symbols-outlined md-14 voice-mini-icon live" title="${t('main.sharingScreen')}">screen_share</span>` : ''}
                       ${p.voiceState?.isCameraOn ? `<span class="material-symbols-outlined md-14 voice-mini-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
                     </div>
@@ -825,8 +941,11 @@ export class MainView {
             iconEl.classList.add('channel-loading');
           }
           item.classList.add('joining');
+          const sessionKey = sessionManager.getActiveKey();
           try {
-            await this.handleJoinVoiceChannel(channelId);
+            if (!await this.handleJoinVoiceChannel(channelId)) return;
+            if (voiceStore.currentVoiceChannelId !== channelId || voiceStore.voiceSessionKey !== sessionKey
+              || sessionManager.getActiveKey() !== sessionKey) return;
             this.setActiveContentView('stage');
             this.voiceStageView?.setChannel(channelId);
             this.updateScreenShareNotice();
@@ -1091,104 +1210,44 @@ export class MainView {
     ]);
   }
 
-  private async handleJoinVoiceChannel(channelId: string, silent: boolean = false): Promise<void> {
-    if (voiceStore.currentVoiceChannelId === channelId) {
-      // Already in this channel, just switch view to stage
-      this.setActiveContentView('stage');
-      this.voiceStageView?.setChannel(channelId);
-      this.updateScreenShareNotice();
-      return;
+  private async handleJoinVoiceChannel(channelId: string, silent: boolean = false): Promise<boolean> {
+    const session = sessionManager.getActive();
+    if (!session) return false;
+    if (voiceStore.currentVoiceChannelId === channelId && voiceStore.voiceSessionKey === session.key) {
+      return !isVoiceAdmissionPending(session.key, channelId);
     }
 
-    if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SPEAK)) {
+    if (this.arePermissionsResolved() && !session.serverStore.hasPermission(Permission.SPEAK)) {
       if (!silent) this.showVoicePermissionDenied();
-      return;
+      return false;
     }
 
-    // If in another channel, close the current mesh locally; the server-side
-    // join handler updates the stored voice state to the new room directly.
-    if (voiceStore.currentVoiceChannelId) {
-      // Switching rooms ends any screen share (#565): it belongs to the room it
-      // started in and must not follow us into the next one.
-      await this.stopLocalScreenSharesForChannelChange();
-      webRtcManager.closeAllPeers();
-      // The call lives on a single server (#400). Joining voice somewhere else
-      // means leaving the previous one for real, otherwise the old server would
-      // keep us listed in a channel we can no longer hear.
-      const previousKey = voiceStore.voiceSessionKey;
-      if (previousKey && previousKey !== sessionManager.getActiveKey()) {
-        sessionManager.get(previousKey)?.client.send(MessageType.VOICE_LEAVE, {
-          channelId: voiceStore.currentVoiceChannelId,
-        });
-      }
-    }
-
-    // Start local mic
     try {
-      const stream = await audioProcessor.startMicrophone();
-      const audioTrack = stream.getAudioTracks()[0];
-      webRtcManager.setLocalAudioTrack(audioTrack);
-    } catch (err) {
-      console.warn('Microphone permission or hardware error:', err);
+      await joinCallOnSession(session.key, channelId);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return false;
+      await showAlert({
+        title: t('voiceJoin.failedTitle'),
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return false;
     }
-
-    voiceStore.setChannel(channelId, sessionManager.getActiveKey());
-    // The peer mesh keys off our session id on the server hosting the call, so
-    // it has to follow the call when it moves between servers (#400).
-    const mySessionId = serverStore.currentUser?.sessionId || serverStore.currentUser?.id;
-    if (mySessionId) webRtcManager.setCurrentSessionId(mySessionId);
-    if (!silent) soundEffects.play('join_voice');
-    networkClient.send(MessageType.VOICE_JOIN, {
-      channelId,
-      isMuted: voiceStore.isMuted,
-      isDeafened: voiceStore.isDeafened,
-    });
-
-    if (webRtcManager.isSfuMode()) {
-      await webRtcManager.initSfuForCurrentChannel();
-    } else {
-      // Connect to all peers already in this voice channel
-      const peersInChannel = participantManager.getInVoiceChannel(channelId);
-      for (const peer of peersInChannel) {
-        const peerSessionId = peer.user.sessionId || peer.user.id;
-        if (!serverStore.isMySession(peer.user.sessionId)) {
-          await webRtcManager.connectToPeer(peerSessionId, true);
-        }
-      }
-    }
+    if (voiceStore.voiceSessionKey !== session.key || voiceStore.currentVoiceChannelId !== channelId) return false;
+    if (!silent && !voiceStore.getEffectiveDeafened()) soundEffects.play('join_voice');
+    return true;
   }
 
   public async rejoinVoiceChannel(channelId: string): Promise<void> {
-    // Being moved to another room ends any screen share (#565); stop the local
-    // capture and producers before tearing the mesh down, otherwise the stale
-    // tracks would be re-announced into the destination on the next join.
-    await this.stopLocalScreenSharesForChannelChange();
-    // Close existing peer connections before moving (#248)
-    webRtcManager.closeAllPeers();
-    // Reset the stored voice channel so handleJoinVoiceChannel performs a full
-    // (re)join instead of early-returning, then reconnect the mesh.
-    voiceStore.setChannel(null);
+    const sessionKey = voiceStore.voiceSessionKey;
+    const session = sessionKey ? sessionManager.get(sessionKey) : undefined;
+    if (!session) return;
+    await rejoinCallOnSession(session.key, channelId);
+    if (sessionManager.getActive() !== session || voiceStore.voiceSessionKey !== session.key
+      || voiceStore.currentVoiceChannelId !== channelId) return;
     this.setActiveContentView('stage');
-    await this.handleJoinVoiceChannel(channelId, true);
     this.voiceStageView?.setChannel(channelId);
     this.renderChannels();
     this.updateScreenShareNotice();
-  }
-
-  /**
-   * Fully stops every local screen share because the participant's voice
-   * channel is changing (moved by an admin or switching rooms). Stops the OS
-   * capture (which plays the stop cue and auto-stops screen audio), removes the
-   * WebRTC producers/senders so nothing is re-announced into the new room, and
-   * clears the derived store flags. No-ops when nothing is being shared (#565).
-   */
-  private async stopLocalScreenSharesForChannelChange(): Promise<void> {
-    if (videoService.getScreenShareCount() === 0 && !voiceStore.isScreenSharing) {
-      return;
-    }
-    videoService.stopScreenShare();
-    await webRtcManager.removeAllLocalScreenTracks();
-    voiceStore.setScreenSharing(false);
   }
 
   private async handleDeleteChannel(channelId: string): Promise<void> {
@@ -1214,10 +1273,7 @@ export class MainView {
       voiceStore.currentVoiceChannelId === channelId &&
       voiceStore.voiceSessionKey === sessionManager.getActiveKey()
     ) {
-      networkClient.send(MessageType.VOICE_LEAVE, { channelId });
-      webRtcManager.closeAllPeers();
-      audioProcessor.stopMicrophone();
-      voiceStore.reset();
+      leaveCurrentCall();
       this.voiceStageView?.setChannel(null);
       this.setActiveContentView('chat');
     }
@@ -1234,6 +1290,7 @@ export class MainView {
     if (btnSettings) {
       (btnSettings as HTMLElement).style.display = (canManageServer || canManageRoles || canManageBots) ? '' : 'none';
     }
+    this.refreshServerMonitorVisibility();
   }
 
   private renderMembers(): void {
@@ -1262,6 +1319,7 @@ export class MainView {
 
     const renderMemberItem = (m: UserSummary, isOffline: boolean): string => {
       const isLocal = m.id === serverStore.currentUser?.id;
+      const isLocalCall = isLocal && isViewingCallServer() && !!voiceStore.currentVoiceChannelId;
       const vm = participantManager.getByUserId(m.id);
       const voiceState = vm?.voiceState;
       // If the member is in a private channel the local user cannot access,
@@ -1271,11 +1329,10 @@ export class MainView {
       const inVoice = !!voiceState && !inPrivateHiddenChannel;
       const isReconnecting = !effectiveOffline && participantManager.isUserReconnecting(m.id);
       const avatar = getAvatarUrl(m.avatarUrl);
-      const isServerDeafened = !effectiveOffline && (isLocal ? voiceStore.serverDeafened : (voiceState?.serverDeafened ?? false));
-      const isServerMuted = !effectiveOffline && (isLocal ? voiceStore.serverMuted : (voiceState?.serverMuted ?? false));
-      const isSelfDeafened = !effectiveOffline && (isLocal ? voiceStore.isDeafened : (voiceState?.isDeafened ?? false));
-      const isSelfMuted = !effectiveOffline && (isLocal ? voiceStore.isMuted : (voiceState?.isMuted ?? false));
-      const isMicMuted = inVoice && (isSelfMuted || isServerMuted || isSelfDeafened || isServerDeafened);
+      const isServerDeafened = !effectiveOffline && (isLocalCall ? voiceStore.serverDeafened : (voiceState?.serverDeafened ?? false));
+      const isServerMuted = !effectiveOffline && (isLocalCall ? voiceStore.serverMuted : (voiceState?.serverMuted ?? false));
+      const isSelfDeafened = !effectiveOffline && (isLocalCall ? voiceStore.isDeafened : (voiceState?.isDeafened ?? false));
+      const isSelfMuted = !effectiveOffline && (isLocalCall ? voiceStore.isMuted : (voiceState?.isMuted ?? false));
 
       const statusClass = m.invisible ? 'invisible' : (isReconnecting ? 'reconnecting' : (inVoice ? 'voice' : (effectiveOffline ? 'offline' : 'online')));
       const statusText = m.invisible ? t('main.statusInvisible') : isReconnecting
@@ -1297,10 +1354,7 @@ export class MainView {
               ${isReconnecting ? `<span class="member-reconnecting-badge" title="${t('main.reconnectingTitle')}"><span class="material-symbols-outlined md-14 spin">sync</span></span>` : ''}
               ${(!effectiveOffline && voiceState?.isScreenSharing) ? `<span class="member-live-badge" title="${t('main.sharingScreen')}">LIVE</span>` : ''}
               ${(!effectiveOffline && voiceState?.isCameraOn) ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.cameraOn')}">videocam</span>` : ''}
-              ${isServerDeafened ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('permissions.serverDeafened')}">hearing_disabled</span>` : ''}
-              ${isServerMuted ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('permissions.serverMuted')}">admin_panel_settings</span>` : ''}
-              ${isMicMuted ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.micMuted')}">mic_off</span>` : ''}
-              ${isSelfDeafened ? `<span class="material-symbols-outlined md-14 member-cam-icon" title="${t('main.audioMuted')}">headset_off</span>` : ''}
+              ${renderAudioMuteIndicators({ ...voiceState, isMuted: isSelfMuted, isDeafened: isSelfDeafened, serverMuted: isServerMuted, serverDeafened: isServerDeafened }, { showMicrophone: inVoice || isServerMuted })}
             </div>
             ${(() => {
               // With public badges off, a role tag is only rendered for members
@@ -1355,24 +1409,22 @@ export class MainView {
     }
   }
 
-  private async refreshServerMonitorVisibility(): Promise<void> {
-    const btn = document.getElementById('btn-server-monitor');
+  private refreshServerMonitorVisibility(): void {
+    const btn = this.container.querySelector<HTMLElement>('#btn-server-monitor');
     if (!btn) return;
-
-    // Only makes sense for the server this machine is hosting (#GUI retirement).
-    let isHosting = false;
-    try {
-      const status = await window.api?.hostServerStatus?.();
-      isHosting = Boolean(status?.isRunning);
-    } catch {
-      isHosting = false;
-    }
-    btn.style.display = isHosting ? '' : 'none';
+    const session = sessionManager.getActive();
+    const user = session?.serverStore.currentUser;
+    const allowed = session?.client.getStatus() === 'CONNECTED' && user && !user.isBot
+      && session.serverStore.hasPermission(Permission.VIEW_SERVER_MONITOR);
+    btn.style.display = allowed ? '' : 'none';
   }
 
   private attachEvents(): void {
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
+    this.unbindEvents.push(bindPttIndicators(this.container));
+    this.unbindEvents.push(bindAudioDevicePopovers(this.container));
+    this.unbindEvents.push(bindFooterControlsMotion(this.container));
 
     const btnAddText = document.getElementById('btn-add-text-channel');
     const btnAddVoice = document.getElementById('btn-add-voice-channel');
@@ -1389,9 +1441,23 @@ export class MainView {
     btnAddVoice?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => createChannelModal.open('VOICE')));
     btnInvite?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => inviteModal.open()); });
     btnServerSettings?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => serverSettingsModal.open()); });
-    btnServerMonitor?.addEventListener('click', (e) => { this.closeServerDropdown(); withButtonLoading(e.currentTarget as HTMLElement, () => serverMonitorModal.open()); });
-    void this.refreshServerMonitorVisibility();
+    btnServerMonitor?.addEventListener('click', (e) => {
+      this.closeServerDropdown();
+      const session = sessionManager.getActive();
+      withButtonLoading(e.currentTarget as HTMLElement, () => session
+        ? serverMonitorModal.openRemote(session)
+        : showAlert({ title: t('serverMonitor.title'), message: t('serverMonitor.disconnected'), variant: 'warning' }));
+    });
+    this.refreshServerMonitorVisibility();
     btnProfile?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => settingsModal.open()));
+    const openOwnUserMenu = (event: MouseEvent) => {
+      event.preventDefault();
+      if (serverStore.currentUser) {
+        userContextMenu.open(event.clientX, event.clientY, serverStore.currentUser);
+      }
+    };
+    btnProfile?.addEventListener('contextmenu', openOwnUserMenu);
+    this.unbindEvents.push(() => btnProfile?.removeEventListener('contextmenu', openOwnUserMenu));
     btnSettings?.addEventListener('click', (e) => withButtonLoading(e.currentTarget as HTMLElement, () => settingsModal.open()));
 
     const dropdownToggle = document.getElementById('server-dropdown-toggle');
@@ -1452,68 +1518,34 @@ export class MainView {
       soundboardModal.open();
     });
 
-    btnMic?.addEventListener('click', () => {
-      const newMuted = !voiceStore.isMuted;
-      voiceStore.setMuted(newMuted);
-      audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-      soundEffects.play(newMuted ? 'mic_mute' : 'mic_unmute');
-      // Unmuting the mic while deafened also undeafens the audio output (#62).
-      let undeafened = false;
-      if (!newMuted && voiceStore.isDeafened) {
-        voiceStore.setDeafened(false);
-        audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-        webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
-        undeafened = true;
-      }
-      callClient().send(MessageType.VOICE_STATE_UPDATE, {
-        isMuted: newMuted,
-        ...(undeafened ? { isDeafened: false } : {}),
-      });
-      if (btnMic) {
-        btnMic.className = `btn btn-icon ${newMuted ? 'danger-active' : ''}`;
-        btnMic.innerHTML = `<span class="material-symbols-outlined md-18">${newMuted ? 'mic_off' : 'mic'}</span>`;
-      }
-      if (undeafened && btnDeafen) {
-        btnDeafen.className = 'btn btn-icon';
-        btnDeafen.innerHTML = `<span class="material-symbols-outlined md-18">headphones</span>`;
-      }
-    });
-
-    btnDeafen?.addEventListener('click', () => {
-      const newDeafened = !voiceStore.isDeafened;
-      voiceStore.setDeafened(newDeafened);
-      audioProcessor.setDeafened(voiceStore.getEffectiveDeafened());
-      // Restore the mic track to its (possibly restored) pre-deafen state (#74).
-      audioProcessor.setMuted(voiceStore.getEffectiveMuted());
-      webRtcManager.setDeafened(voiceStore.getEffectiveDeafened());
-      soundEffects.play(newDeafened ? 'deafen' : 'undeafen');
-      callClient().send(MessageType.VOICE_STATE_UPDATE, { isDeafened: newDeafened, isMuted: voiceStore.isMuted });
-      if (btnDeafen) {
-        btnDeafen.className = `btn btn-icon ${newDeafened ? 'danger-active' : ''}`;
-        btnDeafen.innerHTML = `<span class="material-symbols-outlined md-18">${newDeafened ? 'headset_off' : 'headphones'}</span>`;
-      }
+    btnMic?.addEventListener('click', toggleMicrophoneMute);
+    btnDeafen?.addEventListener('click', toggleAudioDeafen);
+    this.unbindEvents.push(() => {
+      btnMic?.removeEventListener('click', toggleMicrophoneMute);
+      btnDeafen?.removeEventListener('click', toggleAudioDeafen);
     });
 
     btnDisconnect?.addEventListener('click', async () => {
+      const session = sessionManager.getActive();
+      if (!session) return;
       const confirmed = await showConfirm({
         title: t('main.disconnect'),
-        message: t('main.disconnectMessage'),
+        message: t('main.disconnectServerMessage', { name: session.serverStore.serverDetails?.name ?? session.host }),
         confirmLabel: t('main.disconnect'),
         variant: 'danger',
       });
-      if (confirmed) {
+      if (confirmed && sessionManager.get(session.key) === session) {
         // Captured before the socket closes: afterwards there is no way to tell
         // whether this user was hosting the server they just left (#334).
-        const leaveState = await captureHostedServerLeaveState();
+        const leaveState = await captureHostedServerLeaveState(session.client.getCurrentServerUrl());
         soundEffects.play('leave_voice');
         // Microphone and peer mesh are shared by every session (#400): tearing
         // them down while the call lives on another server would kill the audio
         // and still leave the user listed in that server's voice channel.
-        if (this.callIsHere()) {
-          audioProcessor.stopMicrophone();
-          webRtcManager.closeAllPeers();
-        }
-        networkClient.disconnect();
+        session.client.disconnect();
+        const next = sessionManager.getAll().find(candidate => candidate.client.getStatus() === 'CONNECTED');
+        if (next) sessionManager.activate(next.key);
+        else showHome();
         if (leaveState) await promptShutdownAfterLeave(leaveState);
       }
     });
@@ -1540,46 +1572,54 @@ export class MainView {
 
     let lastLocalMuted = voiceStore.isMuted;
     let lastLocalDeafened = voiceStore.isDeafened;
+    let lastServerMuted = voiceStore.serverMuted;
+    let lastServerDeafened = voiceStore.serverDeafened;
     let lastVoiceChannelId = voiceStore.currentVoiceChannelId;
+    const updateDeafenControl = () => {
+      const btnDeafenEl = document.getElementById('bar-btn-deafen');
+      if (btnDeafenEl) {
+        const moderation = getVoiceControlModeration();
+        btnDeafenEl.className = `btn btn-icon ${voiceStore.isDeafened ? 'danger-active' : ''}`;
+        btnDeafenEl.setAttribute('aria-pressed', String(voiceStore.isDeafened));
+        btnDeafenEl.title = [t(voiceStore.isDeafened ? 'main.undeafen' : 'main.deafen'), moderation.deafenReason].filter(Boolean).join('. ');
+        updateAudioStateIcon(btnDeafenEl, voiceStore.isDeafened ? 'headset_off' : 'headphones', moderation.serverDeafened);
+      }
+    };
     const u4 = appEvents.on('voice.state_updated', () => {
       const avatarEl = document.getElementById('main-user-avatar');
       if (avatarEl) {
         if (voiceStore.isSpeaking) avatarEl.classList.add('speaking');
         else avatarEl.classList.remove('speaking');
       }
-
-      const btnMicEl = document.getElementById('bar-btn-mic');
-      if (btnMicEl) {
-        btnMicEl.className = `btn btn-icon ${voiceStore.getEffectiveMuted() ? 'danger-active' : ''}`;
-        btnMicEl.title = voiceStore.getEffectiveMuted() ? t('main.unmute') : t('main.mute');
-        btnMicEl.innerHTML = `<span class="material-symbols-outlined md-18">${voiceStore.getEffectiveMuted() ? 'mic_off' : 'mic'}</span>`;
-      }
-
-      const btnDeafenEl = document.getElementById('bar-btn-deafen');
-      if (btnDeafenEl) {
-        btnDeafenEl.className = `btn btn-icon ${voiceStore.getEffectiveDeafened() ? 'danger-active' : ''}`;
-        btnDeafenEl.title = voiceStore.getEffectiveDeafened() ? t('main.undeafen') : t('main.deafen');
-        btnDeafenEl.innerHTML = `<span class="material-symbols-outlined md-18">${voiceStore.getEffectiveDeafened() ? 'headset_off' : 'headphones'}</span>`;
-      }
+      this.updateParticipantSpeaking();
+      updateDeafenControl();
 
       const mediaCamEl = document.getElementById('media-btn-camera');
       if (mediaCamEl) {
         mediaCamEl.className = `btn btn-icon media-bar-btn-lg ${voiceStore.isCameraOn ? 'broadcasting-pulse active' : ''}`;
-        mediaCamEl.innerHTML = `<span class="material-symbols-outlined md-18">${voiceStore.isCameraOn ? 'videocam_off' : 'videocam'}</span>`;
+        const icon = mediaCamEl.querySelector(':scope > .material-symbols-outlined');
+        const name = voiceStore.isCameraOn ? 'videocam_off' : 'videocam';
+        if (icon && icon.textContent !== name) icon.textContent = name;
       }
       const mediaScreenEl = document.getElementById('media-btn-screen');
       if (mediaScreenEl) {
         mediaScreenEl.className = `btn btn-icon media-bar-btn-lg ${voiceStore.isScreenSharing ? 'broadcasting-pulse active' : ''}`;
-        mediaScreenEl.innerHTML = `<span class="material-symbols-outlined md-18">${voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share'}</span>`;
+        const icon = mediaScreenEl.querySelector(':scope > .material-symbols-outlined');
+        const name = voiceStore.isScreenSharing ? 'stop_screen_share' : 'screen_share';
+        if (icon && icon.textContent !== name) icon.textContent = name;
       }
 
       // Keep the local user's mute/deafen icons in the channel sidebar in sync,
       // but only re-render when those actually change (not on every VAD/speaking
       // update, which also emits this event) (#58).
-      if (voiceStore.isMuted !== lastLocalMuted || voiceStore.isDeafened !== lastLocalDeafened) {
+      if (voiceStore.isMuted !== lastLocalMuted || voiceStore.isDeafened !== lastLocalDeafened
+        || voiceStore.serverMuted !== lastServerMuted || voiceStore.serverDeafened !== lastServerDeafened) {
         lastLocalMuted = voiceStore.isMuted;
         lastLocalDeafened = voiceStore.isDeafened;
+        lastServerMuted = voiceStore.serverMuted;
+        lastServerDeafened = voiceStore.serverDeafened;
         this.renderChannels();
+        this.renderMembers();
       }
 
       // Show/hide the sidebar voice-connection row when joining/leaving a call (#60).
@@ -1593,33 +1633,19 @@ export class MainView {
       }
     });
 
-    const u5 = appEvents.on('voice.speaking_changed', (speaking: boolean) => {
+    const u5 = appEvents.on('voice.speaking_changed', () => {
       const avatarEl = document.getElementById('main-user-avatar');
       if (avatarEl) {
-        if (speaking) avatarEl.classList.add('speaking');
-        else avatarEl.classList.remove('speaking');
+        avatarEl.classList.toggle('speaking', voiceStore.isSpeaking);
       }
-      if (serverStore.currentUser) {
-        const mySessionId = serverStore.currentUser.sessionId || serverStore.currentUser.id;
-        const miniEl = document.getElementById(`voice-mini-user-${mySessionId}`);
-        if (miniEl) {
-          if (speaking) miniEl.classList.add('speaking');
-          else miniEl.classList.remove('speaking');
-        }
-      }
+      this.updateParticipantSpeaking();
     });
 
     const u6 = appEvents.on('participants.speaking_changed', (data: { sessionId: string; speaking: boolean }) => {
-      const miniEl = document.getElementById(`voice-mini-user-${data.sessionId}`);
-      if (miniEl) {
-        if (data.speaking) miniEl.classList.add('speaking');
-        else miniEl.classList.remove('speaking');
-      }
+      this.updateParticipantSpeaking(data.sessionId);
     });
 
     const u7 = appEvents.on(`message.${MessageType.SERVER_SETTINGS_UPDATED}`, (payload: any) => {
-      serverStore.updateServerMeta(payload.name, payload.hasPassword, payload.allowSoundboard, payload.iconUrl, payload.attachmentStorage, payload.maxUsers, payload.turnEnabled, payload.allowEveryoneMention, payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone);
-      serverStore.setTurnAvailability(payload.turnAvailability);
       // The store above is the one of whichever server sent this. Everything
       // below writes to the screen and to the saved-server list, so it may only
       // run for the server actually being looked at (#400).
@@ -1661,22 +1687,13 @@ export class MainView {
       serverRailView.render();
     });
 
-    const u7d = appEvents.on('session.changed', (payload: { key: string | null }) => {
-      // A null key means every server is gone and the connection screen is
-      // taking over. The DOM check covers the mirror case: while the connection
-      // screen is up, activating a session (a connection starting) must not
-      // paint the server view over it. And a session with no details yet is one
-      // still connecting — rendering it would blank the screen and unbind every
-      // listener while the user waits (#400).
-      if (!payload?.key || !serverStore.serverDetails) return;
-      if (!document.getElementById('main-center-stage')) return;
-      this.render();
-    });
+    const u7d = appEvents.on('session.changed', () => this.refreshServerMonitorVisibility());
 
     const u8 = appEvents.on(`message.${MessageType.CHANNEL_DELETED}`, () => {
       // If the text channel currently shown was removed, fall back to the
       // remaining active channel so the chat view is never left orphaned.
       if (
+        isForegroundEvent() && !sessionManager.isHome() &&
         this.activeContentView === 'chat' &&
         serverStore.activeTextChannelId &&
         this.chatView
@@ -1701,9 +1718,13 @@ export class MainView {
     const u10 = appEvents.on('settings.updated', () => {
       const btnRnnoise = document.getElementById('sidebar-btn-rnnoise');
       if (btnRnnoise) {
-        const enabled = settingsStore.noiseSuppressionEnabled;
+        const mode = settingsStore.noiseSuppressionMode;
+        const enabled = mode !== 'off';
+        const title = noiseSuppressionToggleTitle(mode);
         btnRnnoise.className = `btn btn-icon voice-conn-rnnoise ${enabled ? 'rnnoise-active' : ''}`;
-        btnRnnoise.setAttribute('title', enabled ? t('main.rnnoiseOn') : t('main.rnnoiseOff'));
+        btnRnnoise.setAttribute('title', title);
+        btnRnnoise.setAttribute('aria-label', title);
+        btnRnnoise.setAttribute('aria-pressed', String(enabled));
       }
       // Update the user status indicator when appear-offline changes (#561).
       const dot = document.getElementById('main-user-status-dot');
@@ -1738,14 +1759,23 @@ export class MainView {
 
     // Repaint the sidebar voice row when the call flips in/out of reconnecting
     // so the icon, colour and status text track the live state (#553).
-    const u16 = appEvents.on('voice.reconnecting_changed', () => this.updateVoiceConnectionRow());
+    const u16 = appEvents.on('voice.connection_changed', () => this.updateVoiceConnectionRow());
+    const u17 = appEvents.on('server.voice_restrictions_updated', updateDeafenControl);
+    const u18 = appEvents.on('voice.bot_screens_updated', () => this.updateScreenShareNotice());
+    const u19 = appEvents.on('stage.bot_screens_changed', () => this.updateScreenShareNotice());
+    const u20 = appEvents.on('session.voice_context_updated', () => {
+      this.updateScreenShareNotice();
+      this.updateParticipantSpeaking();
+    });
+    const u21 = appEvents.on('network.status', () => this.refreshServerMonitorVisibility());
 
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6, u7, u7b, u7c, u7d, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21);
   }
 
   /** True when the given text channel is the one currently visible on screen (#14). */
   public isViewingTextChannel(channelId: string): boolean {
     return (
+      !sessionManager.isHome() &&
       this.activeContentView === 'chat' &&
       serverStore.activeTextChannelId === channelId
     );
@@ -1783,6 +1813,7 @@ export class MainView {
   }
 
   public destroy(): void {
+    this.homeView?.suspend();
     this.stopSidebarPing();
     this.clearTextChannelDragHover();
     this.unbindListeners();

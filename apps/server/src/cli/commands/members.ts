@@ -54,15 +54,15 @@ export async function listMembers(ctx: CliContext): Promise<void> {
     return;
   }
 
-  const idWidth = Math.max(2, ...users.map((user) => user.id.length));
-  const nickWidth = Math.max(8, ...users.map((user) => user.nickname.length));
-  const clientWidth = Math.max(8, ...users.map((user) => user.clientId.length));
+  const idWidth = Math.max(t('label.id').length, ...users.map((user) => user.id.length));
+  const nickWidth = Math.max(t('label.nickname').length, ...users.map((user) => user.nickname.length));
+  const clientWidth = Math.max(t('label.clientId').length, ...users.map((user) => user.clientId.length));
 
   console.log(
-    `${color(pad('ID', idWidth), ANSI.cyan)}  ${color(pad('Nickname', nickWidth), ANSI.cyan)}  ${color(
-      pad('Client ID', clientWidth),
+    `${color(pad(t('label.id'), idWidth), ANSI.cyan)}  ${color(pad(t('label.nickname'), nickWidth), ANSI.cyan)}  ${color(
+      pad(t('label.clientId'), clientWidth),
       ANSI.cyan
-    )}  ${color('Roles', ANSI.cyan)}`
+    )}  ${color(t('label.roles'), ANSI.cyan)}`
   );
 
   for (const user of users) {
@@ -80,14 +80,14 @@ export async function showMemberInfo(ctx: CliContext, query: string): Promise<vo
   const server = await ctx.serverRepo.getServer();
 
   console.log(color(t('members.info', { nickname: user.nickname }), ANSI.bold));
-  console.log(`id: ${user.id}`);
-  console.log(`clientId: ${user.clientId}`);
-  console.log(`publicKey: ${user.publicKey ?? '-'}`);
-  console.log(`avatarPath: ${user.avatarPath ?? '-'}`);
-  console.log(`createdAt: ${formatDate(user.createdAt)}`);
-  console.log(`lastSeenAt: ${formatDate(user.lastSeenAt)}`);
-  console.log(`owner: ${formatBool(server?.ownerUserId === user.id)}`);
-  console.log(`roles: ${roles.map((role) => role.name).join(', ') || '-'}`);
+  console.log(`${t('label.id')}: ${user.id}`);
+  console.log(`${t('label.clientId')}: ${user.clientId}`);
+  console.log(`${t('label.publicKey')}: ${user.publicKey ?? '-'}`);
+  console.log(`${t('label.avatarPath')}: ${user.avatarPath ?? '-'}`);
+  console.log(`${t('label.createdAt')}: ${formatDate(user.createdAt)}`);
+  console.log(`${t('label.lastSeenAt')}: ${formatDate(user.lastSeenAt)}`);
+  console.log(`${t('label.owner')}: ${formatBool(server?.ownerUserId === user.id)}`);
+  console.log(`${t('label.roles')}: ${roles.map((role) => role.name).join(', ') || '-'}`);
 }
 
 export async function selectUser(ctx: CliContext, question: string, query?: string): Promise<UserRecord> {

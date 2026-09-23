@@ -1,6 +1,9 @@
 import { MessageType } from '@monky/shared';
+import { BotScreenStore, setActiveBotScreenStore } from '../stores/botScreenStore';
 import { appEvents } from './EventBus';
 import { clientLog } from './ClientLogService';
+import { LocalExecutionController } from './LocalExecutionController';
+import { voiceStore } from '../stores/voiceStore';
 import {
   createNetworkClient,
   setActiveNetworkClient,
@@ -12,7 +15,7 @@ import {
   type ParticipantManager,
 } from './ParticipantManager';
 import { silentBus } from './activeProxy';
-import { setEventOrigin, setForegroundContext, setSessionEventRouter, isForegroundEvent, currentEventOrigin } from './sessionRouting';
+import { setEventOrigin, setForegroundContext, setSessionEventRouter, isForegroundEvent, currentEventOrigin, emitOutsideRouting } from './sessionRouting';
 import {
   createChatStore,
   setActiveChatStore,
@@ -23,6 +26,15 @@ import {
   setActiveServerStore,
   type ServerStore,
 } from '../stores/serverStore';
+
+const VOICE_CONTEXT_EVENTS = new Set([
+  'network.connected', 'network.status',
+  ...[
+    MessageType.VOICE_USER_JOINED, MessageType.VOICE_USER_LEFT, MessageType.VOICE_STATE_CHANGED,
+    MessageType.USER_JOINED, MessageType.USER_LEFT, MessageType.USER_UPDATED,
+    MessageType.ROLES_LIST, MessageType.CHANNEL_UPDATED, MessageType.CHANNEL_DELETED,
+  ].map((type) => `message.${type}`),
+]);
 
 /**
  * Everything that belongs to one server: its connection plus the state built
@@ -35,7 +47,9 @@ export interface ServerSession {
   client: NetworkClient;
   serverStore: ServerStore;
   chatStore: ChatStore;
+  botScreenStore: BotScreenStore;
   participants: ParticipantManager;
+  localExecution: LocalExecutionController;
   /** Credentials kept so the rail can show the session and reconnect it. */
   host: string;
   port: number;
@@ -60,12 +74,18 @@ export function sessionKeyFor(host: string, port: number): string {
 export class SessionManager {
   private sessions: Map<string, ServerSession> = new Map();
   private activeKey: string | null = null;
+  private viewingHome = false;
   /** Session the global proxies currently resolve to — not always the visible
    * one, since `route()` borrows them while a background event is handled. */
   private installedBundle: ServerSession | null = null;
+  private unbindLocalVoice: (() => void) | null = null;
 
   public install(): void {
     setSessionEventRouter((sessionKey, event, emit) => this.route(sessionKey, event, emit));
+    this.unbindLocalVoice?.();
+    this.unbindLocalVoice = appEvents.on('voice.channel_changed', () => {
+      for (const session of this.sessions.values()) session.localExecution.syncVoiceContext();
+    });
   }
 
   public getActive(): ServerSession | null {
@@ -74,6 +94,23 @@ export class SessionManager {
 
   public getActiveKey(): string | null {
     return this.activeKey;
+  }
+
+  public isHome(): boolean {
+    return this.viewingHome;
+  }
+
+  public showHome(): void {
+    if (this.viewingHome) return;
+    this.viewingHome = true;
+    if (!this.activeKey) {
+      const remaining = this.getAll()[0];
+      this.activeKey = remaining?.key ?? null;
+      if (remaining) this.applyBundle(remaining);
+    }
+    const active = this.getActive();
+    if (active) this.mute(active);
+    appEvents.emit('navigation.home');
   }
 
   public get(key: string): ServerSession | undefined {
@@ -116,12 +153,26 @@ export class SessionManager {
     clientLog.info('CONNECTION', `Creating new session for ${host}:${port}`);
     const client = createNetworkClient();
     client.sessionKey = key;
+    const server = createServerStore();
+    const participants = createParticipantManager();
+    const localExecution = new LocalExecutionController(client, server, () => {
+      const user = server.currentUser;
+      const channel = voiceStore.voiceSessionKey === key ? voiceStore.currentVoiceChannelId : null;
+      return user?.sessionId && channel && participants.get(user.sessionId)?.voiceState?.channelId === channel ? channel : null;
+    }, undefined, {
+      botIsInVoice: (botId, botSessionId, channelId) => {
+        const bot = participants.get(botSessionId);
+        return bot?.user.id === botId && bot.user.isBot === true && bot.voiceState?.channelId === channelId;
+      },
+    });
     const session: ServerSession = {
       key,
       client,
-      serverStore: createServerStore(),
+      serverStore: server,
       chatStore: createChatStore(),
-      participants: createParticipantManager(),
+      botScreenStore: new BotScreenStore(key),
+      participants,
+      localExecution,
       host,
       port,
       nickname,
@@ -138,15 +189,17 @@ export class SessionManager {
    */
   public activate(key: string): void {
     const session = this.sessions.get(key);
-    if (!session || this.activeKey === key) return;
+    if (!session || (this.activeKey === key && !this.viewingHome)) return;
     clientLog.info('CONNECTION', `Activating session: ${key}`);
 
     const previous = this.getActive();
     if (previous) this.mute(previous);
 
     this.activeKey = key;
+    this.viewingHome = false;
     session.serverStore.bus = appEvents;
     session.chatStore.bus = appEvents;
+    session.botScreenStore.bus = appEvents;
     session.participants.bus = appEvents;
 
     this.applyBundle(session);
@@ -160,14 +213,19 @@ export class SessionManager {
     if (!session) return;
     clientLog.info('CONNECTION', `Removing session: ${key}`);
     const wasActive = this.activeKey === key;
+    session.localExecution.dispose();
     session.client.dispose();
     this.sessions.delete(key);
     // The disconnect above may have already handed the screen to another
     // session, and clearing the key then would undo it.
     if (wasActive && this.activeKey === key) {
-      this.activeKey = null;
-      appEvents.emit('session.changed', { key: null });
+      const next = this.viewingHome ? this.getAll().find(candidate => candidate.client.getStatus() === 'CONNECTED')
+        ?? this.getAll()[0] : undefined;
+      this.activeKey = next?.key ?? null;
+      if (next) this.applyBundle(next);
+      appEvents.emit('session.changed', { key: this.activeKey });
     }
+    emitOutsideRouting(() => appEvents.emit('session.connections_changed'));
   }
 
   public removeAll(): void {
@@ -178,6 +236,12 @@ export class SessionManager {
     if (this.activeKey) this.remove(this.activeKey);
   }
 
+  public dispose(): void {
+    this.unbindLocalVoice?.();
+    this.unbindLocalVoice = null;
+    this.removeAll();
+  }
+
   /** Points the global proxies at a session's bundle of state. */
   private applyBundle(session: ServerSession | null): void {
     if (!session) return;
@@ -185,12 +249,14 @@ export class SessionManager {
     setActiveNetworkClient(session.client);
     setActiveServerStore(session.serverStore);
     setActiveChatStore(session.chatStore);
+    setActiveBotScreenStore(session.botScreenStore);
     setActiveParticipantManager(session.participants);
   }
 
   private mute(session: ServerSession): void {
     session.serverStore.bus = silentBus;
     session.chatStore.bus = silentBus;
+    session.botScreenStore.bus = silentBus;
     session.participants.bus = silentBus;
   }
 
@@ -210,13 +276,16 @@ export class SessionManager {
     const previousForeground = isForegroundEvent();
     const previousOrigin = currentEventOrigin();
 
-    if (!session || session.key === this.activeKey) {
+    if (!session || (session.key === this.activeKey && !this.viewingHome)) {
+      if (this.viewingHome) setForegroundContext(false);
       setEventOrigin(sessionKey || this.activeKey);
       try {
         emit();
       } finally {
+        setForegroundContext(previousForeground);
         setEventOrigin(previousOrigin);
       }
+      this.notifyVoiceContext(sessionKey, event);
       return;
     }
 
@@ -229,13 +298,21 @@ export class SessionManager {
     } finally {
       setForegroundContext(previousForeground);
       setEventOrigin(previousOrigin);
-      this.applyBundle(previousBundle);
+      this.applyBundle(previousBundle && this.sessions.has(previousBundle.key) ? previousBundle : this.getActive());
     }
+    this.notifyVoiceContext(sessionKey, event);
 
     // The background bundle notified nobody, so the rail is told separately
     // that this server now has something worth a badge (#400).
     if (event === `message.${MessageType.CHAT_MESSAGE}`) {
       appEvents.emit('session.background_activity', { key: session.key });
+    }
+  }
+
+  private notifyVoiceContext(key: string, event: string): void {
+    if (VOICE_CONTEXT_EVENTS.has(event)) {
+      this.sessions.get(key)?.localExecution.syncVoiceContext();
+      emitOutsideRouting(() => appEvents.emit('session.voice_context_updated', { key }));
     }
   }
 }

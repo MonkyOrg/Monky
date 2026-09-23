@@ -8,8 +8,17 @@ import {
   OverlayPosition,
   OverlayBounds,
   OverlayConfig,
+  botSettingsValuesSchema,
+  normalizeBotLocale,
+  type BotFormValues,
+  type BotLocale,
 } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
+import {
+  isNoiseSuppressionMode, resolveAudioOutput, restoreAudioOutputDevices, restoreNoiseSuppressionMode,
+  type AudioOutputCategory, type AudioOutputDevices, type NoiseSuppressionMode,
+} from '../utils/audioPreferences';
+import { autoEntryServerKey, restoreAutoEntryServerKeys, type AutoEntryServerAddress } from '../utils/autoEntry';
 
 /**
  * Chat-notification-sound mode for the 3-level configuration (#153).
@@ -24,6 +33,26 @@ export type ChatSoundMode = 'inherit' | 'all' | 'mentions' | 'none';
 export type ResolvedChatSoundMode = 'all' | 'mentions' | 'none';
 
 const CHAT_SOUND_MODES: ChatSoundMode[] = ['inherit', 'all', 'mentions', 'none'];
+const MAX_BOT_PREFERENCE_SCOPES = 256;
+
+function restoreBotLocalePreferences(value: unknown): Record<string, BotLocale> {
+  if (value === undefined) return {};
+  const entries = value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value) : null;
+  if (entries && entries.length <= MAX_BOT_PREFERENCE_SCOPES) {
+    const locales = new Map<string, BotLocale>();
+    for (const [key, raw] of entries) {
+      const locale = normalizeBotLocale(raw);
+      if (!key || key.length > 2048 || !locale) {
+        console.warn('[Settings] Invalid bot language preferences; saved overrides were discarded.');
+        return {};
+      }
+      locales.set(key, locale);
+    }
+    return Object.fromEntries(locales);
+  }
+  console.warn('[Settings] Invalid bot language preferences; saved overrides were discarded.');
+  return {};
+}
 
 export class SettingsStore {
   public qualityPreset: QualityPresetType = 'NORMAL';
@@ -38,6 +67,8 @@ export class SettingsStore {
   public vadSensitivity: number = 25; // 0 - 100
   public selectedMicrophoneId: string = '';
   public selectedSpeakerId: string = '';
+  public advancedAudioOutputs: boolean = false;
+  public audioOutputDevices: AudioOutputDevices = { voice: null, screen: null, media: null };
   public selectedCameraId: string = '';
   public maxUploadKbps: number = 1000;
   public maxDownloadKbps: number = 2000;
@@ -53,14 +84,27 @@ export class SettingsStore {
    * across reconnects and restarts.
    */
   public userVolumes: Record<string, number> = {};
-  public noiseSuppressionEnabled: boolean = true;
+  public noiseSuppressionMode: NoiseSuppressionMode = 'rnnoise';
+  public lastNoiseSuppressionMode: Exclude<NoiseSuppressionMode, 'off'> = 'rnnoise';
+  public get noiseSuppressionEnabled(): boolean {
+    return this.noiseSuppressionMode !== 'browser' && this.noiseSuppressionMode !== 'off';
+  }
+  public set noiseSuppressionEnabled(enabled: boolean) {
+    this.noiseSuppressionMode = enabled ? 'rnnoise' : 'browser';
+  }
   public soundboardFolderPath: string = '';
+  public botDownloadConfirmationExceptions: string[] = [];
+  public botUserPreferences: Record<string, BotFormValues> = {};
+  public botLocalePreferences: Record<string, BotLocale> = {};
   public soundboardVolume: number = 80; // 0 - 100
   public soundboardMuted: boolean = false;
+  public soundboardLimiterEnabled: boolean = false;
+  public soundboardLoudnessLimit: number = 6;
   /** Folder the user picked for custom chat stickers (#356). */
   public stickersFolderPath: string = '';
   public screenAudioVolumes: Record<string, number> = {}; // per-connection screen audio volume (#75), keyed by sessionId (#363)
   public screenShareTelemetryEnabled: boolean = false;
+  public screenSharePreviewPauseWhenUnfocused: boolean = true;
   public screenShareTelemetryPosition: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' = 'top-right';
   public screenShareTelemetryMode: 'simple' | 'complete' = 'simple';
   public customSounds: Partial<Record<string, string>> = {}; // key → file path
@@ -81,6 +125,7 @@ export class SettingsStore {
   public chatSoundServerOverrides: Record<string, ChatSoundMode> = {};
   public chatSoundChannelOverrides: Record<string, ChatSoundMode> = {};
   public onboardingCompleted: boolean = false;
+  public autoEntryServerKeys: string[] = [];
 
   // Sobreposição de Tela Flutuante (Overlay) (#169)
   public overlayMode: OverlayMode = 'cameras-only';
@@ -94,23 +139,50 @@ export class SettingsStore {
   public overlaySavedBounds: OverlayBounds | null = null;
 
   constructor() {
-    this.load();
+    this.load(false);
   }
 
-  public load(): void {
+  public load(notify = true): void {
+    this.soundboardLimiterEnabled = false;
+    this.soundboardLoudnessLimit = 6;
+    this.botDownloadConfirmationExceptions = [];
+    this.botUserPreferences = {};
+    this.botLocalePreferences = {};
+    this.autoEntryServerKeys = [];
+    if (typeof localStorage === 'undefined') return;
     try {
       const raw = localStorage.getItem('monky_settings');
       if (raw) {
         const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new TypeError('Saved settings must be an object');
+        }
         Object.assign(this, parsed);
+        this.autoEntryServerKeys = restoreAutoEntryServerKeys(parsed.autoEntryServerKeys);
+        this.botLocalePreferences = restoreBotLocalePreferences(parsed.botLocalePreferences);
         if (!this.userVolumes || typeof this.userVolumes !== 'object') {
           this.userVolumes = {};
         }
-        if (typeof this.noiseSuppressionEnabled !== 'boolean') {
-          this.noiseSuppressionEnabled = true;
-        }
+        this.noiseSuppressionMode = restoreNoiseSuppressionMode(parsed.noiseSuppressionMode, parsed.noiseSuppressionEnabled);
+        this.lastNoiseSuppressionMode = isNoiseSuppressionMode(parsed.lastNoiseSuppressionMode) && parsed.lastNoiseSuppressionMode !== 'off'
+          ? parsed.lastNoiseSuppressionMode : this.noiseSuppressionMode === 'off' ? 'rnnoise' : this.noiseSuppressionMode;
+        this.advancedAudioOutputs = parsed.advancedAudioOutputs === true;
+        this.audioOutputDevices = restoreAudioOutputDevices(parsed.audioOutputDevices);
         if (typeof this.soundboardFolderPath !== 'string') {
           this.soundboardFolderPath = '';
+        }
+        if (!Array.isArray(this.botDownloadConfirmationExceptions) ||
+            this.botDownloadConfirmationExceptions.length > MAX_BOT_PREFERENCE_SCOPES ||
+            this.botDownloadConfirmationExceptions.some((key: unknown) => typeof key !== 'string' || !key || key.length > 2048)) {
+          console.warn('[Settings] Invalid bot download confirmations; confirmation is required again.');
+          this.botDownloadConfirmationExceptions = [];
+        }
+        if (!this.botUserPreferences || typeof this.botUserPreferences !== 'object' || Array.isArray(this.botUserPreferences) ||
+            Object.keys(this.botUserPreferences).length > MAX_BOT_PREFERENCE_SCOPES ||
+            Object.entries(this.botUserPreferences).some(([key, values]) => !key || key.length > 2048 ||
+              !botSettingsValuesSchema.safeParse(values).success)) {
+          console.warn('[Settings] Invalid individual bot preferences; saved overrides were discarded.');
+          this.botUserPreferences = {};
         }
         if (typeof this.stickersFolderPath !== 'string') {
           this.stickersFolderPath = '';
@@ -121,12 +193,27 @@ export class SettingsStore {
         if (typeof this.soundboardMuted !== 'boolean') {
           this.soundboardMuted = false;
         }
+        if (parsed.soundboardLimiterEnabled !== undefined && typeof parsed.soundboardLimiterEnabled !== 'boolean') {
+          console.warn('[Settings] Invalid soundboard limiter state; the limiter remains disabled.');
+        }
+        this.soundboardLimiterEnabled = parsed.soundboardLimiterEnabled === true;
+        if (parsed.soundboardLoudnessLimit !== undefined &&
+            (typeof parsed.soundboardLoudnessLimit !== 'number' || !Number.isInteger(parsed.soundboardLoudnessLimit)
+              || parsed.soundboardLoudnessLimit < 1 || parsed.soundboardLoudnessLimit > 10)) {
+          console.warn('[Settings] Invalid soundboard loudness limit; using level 6.');
+          this.soundboardLoudnessLimit = 6;
+        }
         if (!this.screenAudioVolumes || typeof this.screenAudioVolumes !== 'object') {
           this.screenAudioVolumes = {};
         }
         if (typeof this.screenShareTelemetryEnabled !== 'boolean') {
           this.screenShareTelemetryEnabled = false;
         }
+        if (parsed.screenSharePreviewPauseWhenUnfocused !== undefined
+          && typeof parsed.screenSharePreviewPauseWhenUnfocused !== 'boolean') {
+          console.warn('[Settings] Invalid screen preview focus preference; enabling background pause.');
+        }
+        this.screenSharePreviewPauseWhenUnfocused = parsed.screenSharePreviewPauseWhenUnfocused !== false;
         if (!['top-left', 'top-right', 'bottom-left', 'bottom-right'].includes(this.screenShareTelemetryPosition)) {
           this.screenShareTelemetryPosition = 'top-right';
         }
@@ -189,7 +276,7 @@ export class SettingsStore {
         if (typeof this.appearOffline !== 'boolean') {
           this.appearOffline = false;
         }
-        this.chatSoundServerOverrides = this.sanitizeModeMap(this.chatSoundServerOverrides);
+        this.chatSoundServerOverrides = this.sanitizeModeMap(parsed.chatSoundServerOverrides);
         this.chatSoundChannelOverrides = this.sanitizeModeMap(this.chatSoundChannelOverrides);
         if (typeof this.onboardingCompleted !== 'boolean') {
           this.onboardingCompleted = false;
@@ -227,8 +314,18 @@ export class SettingsStore {
         ) {
           this.overlaySavedBounds = null;
         }
+      } else {
+        this.chatSoundServerOverrides = {};
       }
-    } catch (e) {}
+    } catch (error) {
+      this.botDownloadConfirmationExceptions = [];
+      this.botUserPreferences = {};
+      this.botLocalePreferences = {};
+      this.autoEntryServerKeys = [];
+      console.warn('[Settings] Could not load settings; bot downloads require confirmation:', error);
+      return;
+    }
+    if (notify) appEvents.emit('settings.updated');
   }
 
   public getOverlayConfig(): OverlayConfig {
@@ -243,6 +340,44 @@ export class SettingsStore {
       hideSelf: this.overlayHideSelf,
       bounds: this.overlaySavedBounds || undefined,
     };
+  }
+
+  public getAudioOutputDeviceId(category: AudioOutputCategory): string {
+    return resolveAudioOutput(this, category);
+  }
+
+  public isServerAutoEntryEnabled(server: AutoEntryServerAddress): boolean {
+    const key = autoEntryServerKey(server);
+    return key !== null && this.autoEntryServerKeys.includes(key);
+  }
+
+  public setServerAutoEntry(server: AutoEntryServerAddress, enabled: boolean): void {
+    const key = autoEntryServerKey(server);
+    if (!key) throw new TypeError('Invalid automatic-entry server address');
+    const next = enabled ? [key] : this.autoEntryServerKeys.filter(item => item !== key);
+    this.saveAutoEntryServerKeys(next);
+  }
+
+  public clearServerAutoEntry(): void {
+    this.saveAutoEntryServerKeys([]);
+  }
+
+  public retainAutoEntryServers(servers: readonly AutoEntryServerAddress[]): void {
+    const available = new Set(servers.map(autoEntryServerKey));
+    const retained = restoreAutoEntryServerKeys(this.autoEntryServerKeys).filter(key => available.has(key));
+    this.saveAutoEntryServerKeys(retained);
+  }
+
+  private saveAutoEntryServerKeys(keys: string[]): void {
+    const previous = this.autoEntryServerKeys;
+    if (keys.length === previous.length && keys.every((key, index) => key === previous[index])) return;
+    this.autoEntryServerKeys = keys;
+    try {
+      this.save();
+    } catch (error) {
+      this.autoEntryServerKeys = previous;
+      throw error;
+    }
   }
 
   public setOverlayConfig(config: Partial<OverlayConfig>): void {
@@ -338,9 +473,17 @@ export class SettingsStore {
 
   public setServerChatSoundOverride(serverId: string, mode: ChatSoundMode): void {
     if (!serverId) return;
-    if (mode === 'inherit') delete this.chatSoundServerOverrides[serverId];
-    else this.chatSoundServerOverrides[serverId] = mode;
-    this.save();
+    const previous = this.chatSoundServerOverrides;
+    const next = { ...previous };
+    if (mode === 'inherit') delete next[serverId];
+    else next[serverId] = mode;
+    this.chatSoundServerOverrides = next;
+    try {
+      this.save();
+    } catch (error) {
+      this.chatSoundServerOverrides = previous;
+      throw error;
+    }
   }
 
   public getChannelChatSoundOverride(channelId: string | undefined): ChatSoundMode {
@@ -370,6 +513,66 @@ export class SettingsStore {
     return this.getGlobalChatSoundMode();
   }
 
+  public suppressBotDownloadConfirmation(key: string): void {
+    this.saveBotPreferences(key, this.getBotUserSettings(key), false);
+  }
+
+  public getBotUserSettings(key: string): BotFormValues {
+    return Object.hasOwn(this.botUserPreferences, key) ? structuredClone(this.botUserPreferences[key]) : {};
+  }
+
+  public getBotLocalePreference(key: string): BotLocale | 'auto' {
+    return Object.hasOwn(this.botLocalePreferences, key) ? this.botLocalePreferences[key] : 'auto';
+  }
+
+  public saveBotPreferences(key: string, values: BotFormValues, confirmFileName?: boolean, locale?: BotLocale | 'auto'): void {
+    if (!key || key.length > 2048 || (confirmFileName !== undefined && typeof confirmFileName !== 'boolean')) {
+      throw new Error('Invalid individual bot preference scope.');
+    }
+    const parsed = botSettingsValuesSchema.safeParse(values);
+    if (!parsed.success) throw new Error('Invalid individual bot preferences.');
+    const previousLocale = this.getBotLocalePreference(key);
+    const nextLocale = locale === undefined ? previousLocale : locale === 'auto' ? 'auto' : normalizeBotLocale(locale);
+    if (!nextLocale) throw new Error('Invalid individual bot language preference.');
+    const previousPreferences = this.botUserPreferences;
+    const previousConfirmations = this.botDownloadConfirmationExceptions;
+    const previousLocales = this.botLocalePreferences;
+    const customChanged = previousLocale !== nextLocale || JSON.stringify(this.getBotUserSettings(key)) !== JSON.stringify(parsed.data);
+    const entries = Object.entries(previousPreferences).filter(([scope]) => scope !== key);
+    if (Object.keys(parsed.data).length) entries.push([key, structuredClone(parsed.data)]);
+    this.botUserPreferences = Object.fromEntries(entries.slice(-MAX_BOT_PREFERENCE_SCOPES));
+    if (confirmFileName !== undefined) {
+      const confirmations = previousConfirmations.filter((scope) => scope !== key);
+      if (!confirmFileName) confirmations.push(key);
+      this.botDownloadConfirmationExceptions = confirmations.slice(-MAX_BOT_PREFERENCE_SCOPES);
+    }
+    if (locale !== undefined) {
+      const locales = Object.entries(previousLocales).filter(([scope]) => scope !== key);
+      if (nextLocale !== 'auto') locales.push([key, nextLocale]);
+      this.botLocalePreferences = Object.fromEntries(locales.slice(-MAX_BOT_PREFERENCE_SCOPES));
+    }
+    try {
+      this.save();
+    } catch (error) {
+      this.botUserPreferences = previousPreferences;
+      this.botDownloadConfirmationExceptions = previousConfirmations;
+      this.botLocalePreferences = previousLocales;
+      throw new Error('Could not save individual bot preferences.', { cause: error });
+    }
+    appEvents.emit('bot.preferences_updated', { scope: key, customChanged });
+  }
+
+  public resetBotDownloadConfirmations(): void {
+    const previous = this.botDownloadConfirmationExceptions;
+    this.botDownloadConfirmationExceptions = [];
+    try {
+      this.save();
+    } catch (error) {
+      this.botDownloadConfirmationExceptions = previous;
+      throw new Error('Could not restore bot download confirmations.', { cause: error });
+    }
+  }
+
   public save(): void {
     try {
       localStorage.setItem('monky_settings', JSON.stringify({
@@ -378,11 +581,15 @@ export class SettingsStore {
         vadSensitivity: this.vadSensitivity,
         selectedMicrophoneId: this.selectedMicrophoneId,
         selectedSpeakerId: this.selectedSpeakerId,
+        advancedAudioOutputs: this.advancedAudioOutputs,
+        audioOutputDevices: this.audioOutputDevices,
         selectedCameraId: this.selectedCameraId,
         maxUploadKbps: this.maxUploadKbps,
         maxDownloadKbps: this.maxDownloadKbps,
         userVolumes: this.userVolumes,
         noiseSuppressionEnabled: this.noiseSuppressionEnabled,
+        noiseSuppressionMode: this.noiseSuppressionMode,
+        lastNoiseSuppressionMode: this.lastNoiseSuppressionMode,
         inputMode: this.inputMode,
         pttKey: this.pttKey,
         pttReleaseDelay: this.pttReleaseDelay,
@@ -390,11 +597,17 @@ export class SettingsStore {
         isMuted: this.isMuted,
         isDeafened: this.isDeafened,
         soundboardFolderPath: this.soundboardFolderPath,
+        botDownloadConfirmationExceptions: this.botDownloadConfirmationExceptions,
+        botUserPreferences: this.botUserPreferences,
+        botLocalePreferences: this.botLocalePreferences,
         soundboardVolume: this.soundboardVolume,
         soundboardMuted: this.soundboardMuted,
+        soundboardLimiterEnabled: this.soundboardLimiterEnabled,
+        soundboardLoudnessLimit: this.soundboardLoudnessLimit,
         stickersFolderPath: this.stickersFolderPath,
         screenAudioVolumes: this.screenAudioVolumes,
         screenShareTelemetryEnabled: this.screenShareTelemetryEnabled,
+        screenSharePreviewPauseWhenUnfocused: this.screenSharePreviewPauseWhenUnfocused,
         screenShareTelemetryPosition: this.screenShareTelemetryPosition,
         screenShareTelemetryMode: this.screenShareTelemetryMode,
         customProfile: this.customProfile,
@@ -411,6 +624,7 @@ export class SettingsStore {
         chatSoundServerOverrides: this.chatSoundServerOverrides,
         chatSoundChannelOverrides: this.chatSoundChannelOverrides,
         onboardingCompleted: this.onboardingCompleted,
+        autoEntryServerKeys: this.autoEntryServerKeys,
         overlayMode: this.overlayMode,
         overlayLayout: this.overlayLayout,
         overlayPosition: this.overlayPosition,
@@ -422,8 +636,21 @@ export class SettingsStore {
         overlaySavedBounds: this.overlaySavedBounds,
       }));
       appEvents.emit('settings.updated');
-    } catch (e) {}
+    } catch (error) {
+      console.error('[SettingsStore] Could not save settings:', error);
+      throw error;
+    }
   }
 }
 
 export const settingsStore = new SettingsStore();
+
+// Register only after singleton construction; initial hydration must not notify
+// consumers that can still be initializing their imports.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (event) => {
+    if (event.key !== 'monky_settings' && event.key !== null) return;
+    if (event.storageArea !== localStorage) return;
+    settingsStore.load();
+  });
+}

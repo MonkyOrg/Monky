@@ -1,0 +1,50 @@
+.chat-edit-composer {
+  padding: 10px 12px;
+  border: 1px solid var(--border-focus);
+  border-bottom: 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.chat-edit-composer[hidden] {
+  display: none;
+}
+
+.chat-edit-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-edit-heading strong {
+  flex: 1;
+  font-size: 13px;
+}
+
+.chat-edit-heading button {
+  flex-shrink: 0;
+  padding: 5px 10px;
+}
+
+.chat-edit-composer p {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chat-edit-composer .chat-edit-error {
+  color: var(--text-primary);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.chat-input-container--editing .chat-input-wrapper {
+  border-color: var(--border-focus);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
+.chat-input-container--editing .chat-input-field {
+  min-width: 0;
+}

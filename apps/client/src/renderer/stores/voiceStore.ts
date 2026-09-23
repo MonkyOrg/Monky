@@ -2,6 +2,7 @@ import { appEvents } from '../core/EventBus';
 import { emitOutsideRouting } from '../core/sessionRouting';
 import { settingsStore } from './settingsStore';
 import { clientLog } from '../core/ClientLogService';
+import { screenShareQualitySchema, type ScreenShareQuality, type VoiceConnectionHealth } from '@monky/shared';
 
 export class VoiceStore {
   public currentVoiceChannelId: string | null = null;
@@ -17,6 +18,8 @@ export class VoiceStore {
   public serverDeafened: boolean = false;
   private micMutedBeforeDeafen: boolean = false;
   public isSpeaking: boolean = false;
+  public microphoneOpen: boolean = false;
+  public pttPressed: boolean = false;
   public isCameraOn: boolean = false;
   /**
    * Ids of the local screen shares currently being broadcast (#253).
@@ -27,6 +30,77 @@ export class VoiceStore {
   public isScreenSharing: boolean = false;
   /** Share whose system audio is being captured, if any (#253: at most one). */
   public screenAudioShareId: string | null = null;
+  /** Explicit receive intent belongs to the call, never to a mounted view. */
+  private watchedScreenShares = new Map<string, Set<string>>();
+  private mutedScreenAudioSessions = new Set<string>();
+  private screenQualities = new Map<string, Map<string, ScreenShareQuality>>();
+
+  public getScreenQuality(sessionId: string, shareId: string): ScreenShareQuality {
+    return this.screenQualities.get(sessionId)?.get(shareId) ?? 'source';
+  }
+
+  public setScreenQuality(sessionId: string, shareId: string, quality: ScreenShareQuality): void {
+    const selected = screenShareQualitySchema.parse(quality);
+    if (!this.currentVoiceChannelId || this.getScreenQuality(sessionId, shareId) === selected) return;
+    const shares = this.screenQualities.get(sessionId) ?? new Map<string, ScreenShareQuality>();
+    shares.set(shareId, selected);
+    this.screenQualities.set(sessionId, shares);
+    emitOutsideRouting(() => appEvents.emit('voice.screen_quality_changed', { sessionId, shareId, quality: selected }));
+  }
+
+  public isWatchingScreen(sessionId: string, shareId: string): boolean {
+    return this.watchedScreenShares.get(sessionId)?.has(shareId) ?? false;
+  }
+
+  public isWatchingAnyScreen(sessionId: string): boolean {
+    return (this.watchedScreenShares.get(sessionId)?.size ?? 0) > 0;
+  }
+
+  public getScreenWatchers(): ReadonlyArray<readonly [string, readonly string[]]> {
+    return [...this.watchedScreenShares].map(([sessionId, ids]) => [sessionId, [...ids]] as const);
+  }
+
+  public setScreenWatching(sessionId: string, shareId: string, watching: boolean): void {
+    if (watching && !this.currentVoiceChannelId) return;
+    if (this.isWatchingScreen(sessionId, shareId) === watching) return;
+    if (watching) {
+      const shares = this.watchedScreenShares.get(sessionId) ?? new Set<string>();
+      shares.add(shareId);
+      this.watchedScreenShares.set(sessionId, shares);
+    } else {
+      const shares = this.watchedScreenShares.get(sessionId);
+      shares?.delete(shareId);
+      if (!shares?.size) this.watchedScreenShares.delete(sessionId);
+    }
+    emitOutsideRouting(() => appEvents.emit('voice.screen_watch_changed', { sessionId, shareId, watching }));
+  }
+
+  public retainScreenShares(sessionId: string, shareIds: readonly string[]): void {
+    const qualities = this.screenQualities.get(sessionId);
+    for (const id of qualities?.keys() ?? []) if (!shareIds.includes(id)) qualities?.delete(id);
+    if (!qualities?.size) this.screenQualities.delete(sessionId);
+    for (const shareId of [...(this.watchedScreenShares.get(sessionId) ?? [])]) {
+      if (!shareIds.includes(shareId)) this.setScreenWatching(sessionId, shareId, false);
+    }
+    if (shareIds.length === 0) this.mutedScreenAudioSessions.delete(sessionId);
+  }
+
+  public isScreenAudioMuted(sessionId: string): boolean {
+    return this.mutedScreenAudioSessions.has(sessionId);
+  }
+
+  public setScreenAudioMuted(sessionId: string, muted: boolean): void {
+    if (this.isScreenAudioMuted(sessionId) === muted) return;
+    if (muted) this.mutedScreenAudioSessions.add(sessionId);
+    else this.mutedScreenAudioSessions.delete(sessionId);
+    emitOutsideRouting(() => appEvents.emit('voice.screen_audio_mute_changed', { sessionId, muted }));
+  }
+
+  private clearScreenWatching(): void {
+    for (const [sessionId] of this.getScreenWatchers()) this.retainScreenShares(sessionId, []);
+    this.mutedScreenAudioSessions.clear();
+    this.screenQualities.clear();
+  }
 
   /**
    * True while the active call is trying to re-establish its link (#553).
@@ -34,6 +108,7 @@ export class VoiceStore {
    * cue instead of a screen-blocking overlay.
    */
   public isReconnecting: boolean = false;
+  public isConnecting: boolean = false;
 
   /** Hard cap on simultaneous screen shares per participant (#253). */
   public static readonly MAX_SCREEN_SHARES = 2;
@@ -41,6 +116,20 @@ export class VoiceStore {
   public setChannel(channelId: string | null, sessionKey: string | null = null): void {
     clientLog.info('CONNECTION', `Voice channel ${channelId ? 'joined' : 'left'}`, { channelId, sessionKey });
     const wasReconnecting = this.isReconnecting;
+    if (!channelId || channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
+      this.clearScreenWatching();
+      this.setSpeaking(false);
+    }
+    const clearedModeration = (!channelId || sessionKey !== this.voiceSessionKey)
+      && (this.serverMuted || this.serverDeafened);
+    if (!channelId || sessionKey !== this.voiceSessionKey) {
+      this.serverMuted = false;
+      this.serverDeafened = false;
+    }
+    if (channelId !== this.currentVoiceChannelId || sessionKey !== this.voiceSessionKey) {
+      this.isConnecting = false;
+      this.isReconnecting = false;
+    }
     this.currentVoiceChannelId = channelId;
     if (channelId) {
       this.voiceSessionKey = sessionKey;
@@ -52,16 +141,19 @@ export class VoiceStore {
       this.screenAudioShareId = null;
       this.isSpeaking = false;
       this.isReconnecting = false;
+      this.isConnecting = false;
     }
     emitOutsideRouting(() => {
       appEvents.emit('voice.channel_changed', channelId);
-      if (!channelId && wasReconnecting) appEvents.emit('voice.reconnecting_changed', false);
+      if (clearedModeration) appEvents.emit('voice.state_updated');
+      if (wasReconnecting && !this.isReconnecting) appEvents.emit('voice.reconnecting_changed', false);
     });
   }
 
   public setMuted(muted: boolean): void {
     clientLog.info('AUDIO', `Muted: ${muted}`);
     this.isMuted = muted;
+    if (this.getEffectiveMuted()) this.setSpeaking(false);
     settingsStore.isMuted = muted;
     settingsStore.save();
     appEvents.emit('voice.state_updated');
@@ -82,6 +174,7 @@ export class VoiceStore {
     this.isDeafened = deafened;
     settingsStore.isDeafened = deafened;
     settingsStore.isMuted = this.isMuted;
+    if (this.getEffectiveMuted()) this.setSpeaking(false);
     settingsStore.save();
     appEvents.emit('voice.state_updated');
   }
@@ -89,13 +182,15 @@ export class VoiceStore {
   public setServerMuted(muted: boolean): void {
     clientLog.warn('AUDIO', `Server muted: ${muted}`);
     this.serverMuted = muted;
-    appEvents.emit('voice.state_updated');
+    if (this.getEffectiveMuted()) this.setSpeaking(false);
+    emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
   }
 
   public setServerDeafened(deafened: boolean): void {
     clientLog.warn('AUDIO', `Server deafened: ${deafened}`);
     this.serverDeafened = deafened;
-    appEvents.emit('voice.state_updated');
+    if (this.getEffectiveMuted()) this.setSpeaking(false);
+    emitOutsideRouting(() => appEvents.emit('voice.state_updated'));
   }
 
   public getEffectiveMuted(): boolean {
@@ -107,25 +202,49 @@ export class VoiceStore {
   }
 
   public setSpeaking(speaking: boolean): void {
-    if (this.isSpeaking !== speaking) {
-      this.isSpeaking = speaking;
-      appEvents.emit('voice.speaking_changed', speaking);
-      appEvents.emit('voice.state_updated');
+    const active = speaking && this.currentVoiceChannelId !== null
+      && this.microphoneOpen && !this.getEffectiveMuted();
+    if (this.isSpeaking !== active) {
+      this.isSpeaking = active;
+      emitOutsideRouting(() => {
+        appEvents.emit('voice.speaking_changed', active);
+        appEvents.emit('voice.state_updated');
+      });
     }
   }
 
+  public setMicrophoneState(open: boolean, pttPressed: boolean): void {
+    if (this.microphoneOpen === open && this.pttPressed === pttPressed) return;
+    this.microphoneOpen = open;
+    this.pttPressed = pttPressed;
+    if (!open) this.setSpeaking(false);
+    emitOutsideRouting(() => appEvents.emit('voice.microphone_updated'));
+  }
+
   /**
-   * Flags the active call as (re)connecting so the UI can react (#553). A
+   * Flags recovery of an active call so the UI can react (#553). A
    * `true` with no live call is ignored, so a late event fired right after
    * hang-up can never strand the indicator in the reconnecting state.
    */
   public setReconnecting(reconnecting: boolean): void {
-    if (this.isReconnecting === reconnecting) return;
-    if (reconnecting && !this.currentVoiceChannelId) return;
+    this.setConnectionHealth(reconnecting ? 'reconnecting' : 'connected');
+  }
+
+  public setConnectionHealth(health: VoiceConnectionHealth): void {
+    if (health !== 'connected' && !this.currentVoiceChannelId) return;
+    // Rebuilding transports during recovery is not a new initial connection.
+    const connecting = health === 'connecting' && !this.isReconnecting;
+    const reconnecting = health !== 'connected' && !connecting;
+    if (this.isConnecting === connecting && this.isReconnecting === reconnecting) return;
+    const wasReconnecting = this.isReconnecting;
+    this.isConnecting = connecting;
     this.isReconnecting = reconnecting;
-    clientLog.info('CONNECTION', `Voice reconnecting: ${reconnecting}`);
-    appEvents.emit('voice.reconnecting_changed', reconnecting);
-    appEvents.emit('voice.state_updated');
+    clientLog.info('CONNECTION', `Voice connection: ${connecting ? 'connecting' : reconnecting ? 'reconnecting' : 'connected'}`);
+    emitOutsideRouting(() => {
+      if (wasReconnecting !== reconnecting) appEvents.emit('voice.reconnecting_changed', reconnecting);
+      appEvents.emit('voice.connection_changed');
+      appEvents.emit('voice.state_updated');
+    });
   }
 
   public setCameraOn(on: boolean): void {
@@ -169,8 +288,10 @@ export class VoiceStore {
   }
 
   public reset(): void {
+    this.clearScreenWatching();
     const hadChannel = this.currentVoiceChannelId !== null;
     const wasReconnecting = this.isReconnecting;
+    this.setSpeaking(false);
     this.currentVoiceChannelId = null;
     this.voiceSessionKey = null;
     // Note (#358): isMuted and isDeafened are persistent user privacy states
@@ -183,6 +304,8 @@ export class VoiceStore {
     this.isScreenSharing = false;
     this.screenAudioShareId = null;
     this.isReconnecting = false;
+    this.isConnecting = false;
+    this.setMicrophoneState(false, false);
     emitOutsideRouting(() => {
       appEvents.emit('voice.state_updated');
       // Ending a call is a channel change: without this the sidebar row and the

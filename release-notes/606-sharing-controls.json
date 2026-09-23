@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Atualize as fontes e escolha manter a proporção. A prévia entra em foco só ao iniciar. Se a captura de jogo falhar, o Monky tenta Normal na mesma janela e avisa; prévia e espectadores mostram o modo confirmado, sem alterar proteções.",
+  "en": "Refresh sources and choose whether to keep their aspect ratio. New previews focus only once. If Game Capture fails, Monky notifies you and tries Normal for the same window; previews and viewers show the confirmed mode, without changing protections."
+}

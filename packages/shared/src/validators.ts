@@ -1,7 +1,151 @@
 import { z } from 'zod';
 import { LIMITS, PROTOCOL_VERSION } from './constants.js';
+import { screenShareIdSchema, nativeScreenRenditionSchema } from './screenSharing.js';
+export { screenShareIdSchema } from './screenSharing.js';
 
 export const messageReferenceSchema = z.string().min(1).max(128);
+export const rtcTransportPurposeSchema = z.enum(['call', 'screen']);
+export const sfuCreateWebRtcTransportSchema = z.object({
+  channelId: messageReferenceSchema,
+  direction: z.enum(['send', 'recv']),
+  purpose: rtcTransportPurposeSchema.default('call'),
+  screenSessionId: z.string().uuid().optional(),
+}).strict().refine(value => value.screenSessionId === undefined || value.purpose === 'screen');
+export const screenWatchSignalSchema = z.object({
+  fromSessionId: messageReferenceSchema,
+  targetSessionId: messageReferenceSchema,
+  signalType: z.literal('screen-watch'),
+  streamId: screenShareIdSchema,
+  subscriptionId: screenShareIdSchema,
+  watcherSubscriptionId: screenShareIdSchema,
+  subscriptionRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  watching: z.boolean(),
+}).strict();
+export const screenMetadataSignalSchema = z.object({
+  fromSessionId: messageReferenceSchema,
+  targetSessionId: messageReferenceSchema,
+  signalType: z.enum(['screen-video-meta', 'screen-audio-meta']),
+  streamId: screenShareIdSchema,
+  subscriptionId: screenShareIdSchema,
+}).strict();
+export const rtcSignalSchema = z.union([
+  screenWatchSignalSchema,
+  screenMetadataSignalSchema,
+  z.object({
+    fromSessionId: messageReferenceSchema,
+    targetSessionId: messageReferenceSchema,
+    signalType: z.enum(['offer', 'answer', 'candidate', 'user-left']),
+    subscriptionId: screenShareIdSchema.optional(),
+    sdp: z.object({
+      type: z.enum(['offer', 'answer', 'pranswer', 'rollback']),
+      sdp: z.string().max(1024 * 1024).optional(),
+    }).optional(),
+    candidate: z.object({
+      candidate: z.string().max(8192).optional(),
+      sdpMid: z.string().max(128).nullable().optional(),
+      sdpMLineIndex: z.number().int().min(0).max(65535).nullable().optional(),
+      usernameFragment: z.string().max(256).nullable().optional(),
+    }).optional(),
+  }).strict().refine(value => (value.signalType !== 'offer' && value.signalType !== 'answer') || !!value.subscriptionId),
+]);
+export const sfuConsumerClosedSchema = z.object({
+  channelId: messageReferenceSchema,
+  consumerId: messageReferenceSchema,
+}).strict();
+export const sfuProducerClosedSchema = z.object({
+  channelId: messageReferenceSchema,
+  producerId: messageReferenceSchema,
+}).strict();
+export const sfuProducerSetPausedSchema = sfuProducerClosedSchema.extend({
+  paused: z.boolean(),
+  purpose: z.literal('screen'),
+});
+export const sfuCloseWebRtcTransportSchema = z.object({
+  channelId: messageReferenceSchema,
+  transportId: messageReferenceSchema,
+  purpose: z.literal('screen'),
+}).strict();
+export const sfuConsumerSetPausedSchema = sfuConsumerClosedSchema.extend({
+  paused: z.boolean(),
+});
+export const sfuMediaAppDataSchema = z.discriminatedUnion('mediaType', [
+  z.object({ mediaType: z.literal('mic') }).strict(),
+  z.object({ mediaType: z.literal('camera') }).strict(),
+  z.object({
+    mediaType: z.literal('screen_video'), shareId: screenShareIdSchema,
+    nativeScreen: nativeScreenRenditionSchema.optional(),
+  }).strict(),
+  // Screen audio is a single publisher resource, not one consumer per screen.
+  z.object({
+    mediaType: z.literal('screen_audio'), shareId: screenShareIdSchema,
+    nativeScreen: nativeScreenRenditionSchema.optional(),
+  }).strict(),
+]);
+export const sfuConsumeSchema = z.object({
+  channelId: messageReferenceSchema,
+  transportId: messageReferenceSchema,
+  producerId: messageReferenceSchema,
+  rtpCapabilities: z.object({
+    codecs: z.array(z.object({
+      kind: z.enum(['audio', 'video']),
+      mimeType: z.string().min(1).max(128),
+      preferredPayloadType: z.number().int().min(0).max(127),
+      clockRate: z.number().int().positive(),
+      channels: z.number().int().min(1).max(64).optional(),
+      parameters: z.record(z.union([z.string().max(1024), z.number().finite()]))
+        .refine(value => Object.keys(value).length <= 64).optional(),
+      rtcpFeedback: z.array(z.object({
+        type: z.string().max(64), parameter: z.string().max(128).optional(),
+      })).max(32).optional(),
+    })).max(128).optional(),
+    headerExtensions: z.array(z.object({
+      kind: z.enum(['audio', 'video']),
+      uri: z.enum([
+        'urn:ietf:params:rtp-hdrext:sdes:mid',
+        'urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id',
+        'urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id',
+        'http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time',
+        'http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01',
+        'urn:ietf:params:rtp-hdrext:ssrc-audio-level',
+        'https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension',
+        'urn:3gpp:video-orientation',
+        'http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time',
+        'urn:ietf:params:rtp-hdrext:toffset',
+        'http://www.webrtc.org/experiments/rtp-hdrext/playout-delay',
+        'urn:mediasoup:params:rtp-hdrext:packet-id',
+      ]),
+      preferredId: z.number().int().min(1).max(255),
+      preferredEncrypt: z.boolean().optional(),
+      direction: z.enum(['sendrecv', 'sendonly', 'recvonly', 'inactive']).optional(),
+    })).max(64).optional(),
+  }),
+}).strict();
+export const adminVoiceRestrictionsGetSchema = z.object({
+  targetUserId: messageReferenceSchema,
+});
+export const adminMuteUserSchema = adminVoiceRestrictionsGetSchema.extend({
+  muted: z.boolean(),
+});
+export const adminDeafenUserSchema = adminVoiceRestrictionsGetSchema.extend({
+  deafened: z.boolean(),
+});
+export const voiceRestrictionsUpdatedSchema = z.object({
+  userId: messageReferenceSchema,
+  serverMuted: z.boolean(),
+  serverDeafened: z.boolean(),
+});
+
+export const voiceModeTransitionSchema = z.object({
+  id: messageReferenceSchema,
+  from: z.literal('sfu'),
+  to: z.literal('p2p'),
+});
+export const voiceReconnectSchema = z.object({
+  channelId: messageReferenceSchema,
+  transitionId: messageReferenceSchema,
+  isMuted: z.boolean().optional(),
+  isDeafened: z.boolean().optional(),
+});
 export const chatHistoryRequestSchema = z.object({
   channelId: messageReferenceSchema,
   limit: z.number().int().positive().optional(),

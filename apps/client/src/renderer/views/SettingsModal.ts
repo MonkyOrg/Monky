@@ -5,6 +5,7 @@ import { serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
 import { t } from '../i18n';
 import { enableBackdropClose } from '../utils/modal';
+import { escapeHtml } from '../utils/html';
 import { AccountTab } from './settings/tabs/AccountTab';
 import { VoiceVideoTab } from './settings/tabs/VoiceVideoTab';
 import { SoundboardTab } from './settings/tabs/SoundboardTab';
@@ -12,12 +13,15 @@ import { StickersTab } from './settings/tabs/StickersTab';
 import { KeybindsTab } from './settings/tabs/KeybindsTab';
 import { NotificationsTab } from './settings/tabs/NotificationsTab';
 import { QualityTab } from './settings/tabs/QualityTab';
+import { LocalToolsTab } from './settings/tabs/LocalToolsTab';
 import { LogsTab } from './settings/tabs/LogsTab';
 import { AboutTab } from './settings/tabs/AboutTab';
+import { SettingsSectionNavigation } from './settings/SettingsSectionNavigation';
 
 export class SettingsModal {
   private modalEl: HTMLElement | null = null;
   private activeTab = 'account';
+  private sectionNavigation: SettingsSectionNavigation | null = null;
 
   private accountTab = new AccountTab();
   private voiceVideoTab = new VoiceVideoTab();
@@ -26,11 +30,16 @@ export class SettingsModal {
   private keybindsTab = new KeybindsTab();
   private notificationsTab = new NotificationsTab();
   private qualityTab = new QualityTab();
+  private localToolsTab = new LocalToolsTab();
   private logsTab = new LogsTab();
   private aboutTab = new AboutTab();
 
-  public async open(): Promise<void> {
+  public async open(
+    tab?: 'voice_video' | 'local_tools',
+    section?: 'camera' | 'noise-suppression' | 'local-tools-storage' | 'local-tools-tools' | 'local-tools-permissions' | 'local-tools-tasks',
+  ): Promise<void> {
     this.close();
+    if (tab) this.activeTab = tab;
 
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop modal-backdrop--settings';
@@ -68,6 +77,10 @@ export class SettingsModal {
           <button type="button" class="settings-tab-btn ${this.activeTab === 'quality' ? 'active' : ''}" data-tab="quality">
             <span class="material-symbols-outlined md-18">speed</span>
             <span>${t('settings.tabQuality')}</span>
+          </button>
+          <button type="button" class="settings-tab-btn ${this.activeTab === 'local_tools' ? 'active' : ''}" data-tab="local_tools">
+            <span class="material-symbols-outlined md-18">build</span>
+            <span>${escapeHtml(t('settings.tabLocalTools'))}</span>
           </button>
           <button type="button" class="settings-tab-btn ${this.activeTab === 'logs' ? 'active' : ''}" data-tab="logs">
             <span class="material-symbols-outlined md-18">description</span>
@@ -125,6 +138,10 @@ export class SettingsModal {
               ${this.qualityTab.renderHtml()}
             </div>
 
+            <div class="settings-tab-panel" id="tab-panel-local_tools" style="${this.activeTab === 'local_tools' ? '' : 'display: none;'}">
+              ${this.localToolsTab.renderHtml()}
+            </div>
+
             <div class="settings-tab-panel" id="tab-panel-logs" style="${this.activeTab === 'logs' ? '' : 'display: none;'}">
               ${this.logsTab.renderHtml()}
             </div>
@@ -143,10 +160,23 @@ export class SettingsModal {
     `;
 
     document.body.appendChild(this.modalEl);
-    this.attachEvents();
-    await this.voiceVideoTab.refreshDevices(this.modalEl);
-    await this.aboutTab.loadAppVersion(this.modalEl);
-    this.voiceVideoTab.startVadMeter(this.modalEl);
+    const localToolsReady = this.attachEvents();
+    this.sectionNavigation = new SettingsSectionNavigation(this.modalEl);
+    this.sectionNavigation.setTab(this.activeTab);
+    if (section && this.activeTab !== 'local_tools') this.sectionNavigation.revealSection(section);
+    if (this.activeTab === 'voice_video') {
+      this.voiceVideoTab.activateCameraPreview();
+    }
+    const modal = this.modalEl;
+    await Promise.all([
+      this.voiceVideoTab.refreshDevices(modal).then(() => {
+        if (this.modalEl === modal && this.activeTab === 'voice_video') this.voiceVideoTab.startVadMeter(modal);
+      }),
+      this.aboutTab.loadAppVersion(modal),
+      localToolsReady.then(() => {
+        if (section && this.modalEl === modal && this.activeTab === 'local_tools') this.sectionNavigation?.revealSection(section);
+      }),
+    ]);
   }
 
   private getTabHeaderTitle(tab: string): string {
@@ -163,6 +193,8 @@ export class SettingsModal {
         return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">notifications</span><span>${t('settings.tabNotifications')}</span>`;
       case 'quality':
         return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">speed</span><span>${t('settings.tabQuality')}</span>`;
+      case 'local_tools':
+        return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">build</span><span>${escapeHtml(t('settings.tabLocalTools'))}</span>`;
       case 'logs':
         return `<span class="material-symbols-outlined" style="color: var(--accent-primary);">description</span><span>${t('settings.tabLogs')}</span>`;
       case 'about':
@@ -173,8 +205,8 @@ export class SettingsModal {
     }
   }
 
-  private attachEvents(): void {
-    if (!this.modalEl) return;
+  private attachEvents(): Promise<void> {
+    if (!this.modalEl) return Promise.resolve();
 
     // Tab switcher
     this.modalEl.querySelectorAll('.settings-tab-btn').forEach((btn) => {
@@ -232,8 +264,10 @@ export class SettingsModal {
     this.keybindsTab.attachEvents(this.modalEl);
     this.notificationsTab.attachEvents(this.modalEl);
     this.qualityTab.attachEvents(this.modalEl);
+    const localToolsReady = this.localToolsTab.attachEvents(this.modalEl);
     this.logsTab.attachEvents(this.modalEl);
     this.aboutTab.attachEvents(this.modalEl);
+    return localToolsReady;
   }
 
   private switchTab(tab: string): void {
@@ -253,10 +287,12 @@ export class SettingsModal {
       header.innerHTML = this.getTabHeaderTitle(tab);
     }
 
+    this.sectionNavigation?.setTab(tab);
     if (tab === 'voice_video') {
       this.voiceVideoTab.startVadMeter(this.modalEl);
+      this.voiceVideoTab.activateCameraPreview();
     } else {
-      this.voiceVideoTab.cleanup();
+      this.voiceVideoTab.deactivate();
     }
   }
 
@@ -272,8 +308,15 @@ export class SettingsModal {
   }
 
   public close(): void {
+    this.sectionNavigation?.destroy();
+    this.sectionNavigation = null;
     this.voiceVideoTab.cleanup();
+    this.soundboardTab.cleanup();
+    this.notificationsTab.cleanup();
     this.accountTab.cleanup();
+    this.aboutTab.cleanup();
+    this.localToolsTab.cleanup();
+    this.qualityTab.cleanup();
     if (this.modalEl) {
       const handler = (this.modalEl as any)._escHandler;
       if (handler) window.removeEventListener('keydown', handler);

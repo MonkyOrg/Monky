@@ -1,18 +1,21 @@
-import { MessageType, Permission, UserSummary } from '@monky/shared';
+import { AdminDeafenUserPayload, AdminMuteUserPayload, AdminVoiceRestrictionsGetPayload, MessageType, Permission, UserSummary, voiceRestrictionsUpdatedSchema } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { avatarFileExtension, getAvatarUrl } from '../utils/avatar';
 import { renderRoleOption } from '../utils/roleOption';
 import { settingsStore } from '../stores/settingsStore';
-import { serverStore } from '../stores/serverStore';
+import { getActiveServerStore, serverStore } from '../stores/serverStore';
 import { connectionStore } from '../stores/connectionStore';
+import { voiceStore } from '../stores/voiceStore';
+import { getVoiceControlModeration, toggleAudioDeafen, toggleMicrophoneMute } from '../core/voiceControls';
 import { webRtcManager } from '../core/WebRtcManager';
 import { appEvents } from '../core/EventBus';
 import { participantManager, ParticipantViewModel } from '../core/ParticipantManager';
-import { networkClient } from '../core/NetworkClient';
+import { getActiveNetworkClient, networkClient } from '../core/NetworkClient';
 import { showAlert } from './Dialog';
 import { downloadLightboxFile, lightboxModal } from './LightboxModal';
 import { warnIfMoveBlocked } from '../utils/channelAccess';
 import { t } from '../i18n';
+import { botSettingsMenuItem } from './BotSettingsModal';
 
 export class UserContextMenu {
   private menuEl: HTMLElement | null = null;
@@ -20,29 +23,15 @@ export class UserContextMenu {
   private static readonly SUBMENU_GAP_PX = 2;
   private static readonly SUBMENU_MIN_WIDTH_PX = 192;
 
-  constructor() {
-    appEvents.on('network.disconnected', () => this.close());
-    appEvents.on('voice.channel_changed', () => this.close());
-  }
-
   public open(x: number, y: number, user: UserSummary): void {
-    if (
-      user.id === serverStore.currentUser?.id ||
-      user.clientId === connectionStore.clientId ||
-      user.clientId === serverStore.currentUser?.clientId
-    ) {
-      return;
-    }
-
     this.close();
 
-    const volumeSessionId = this.resolveVolumeTarget(user);
-    const currentVol = settingsStore.getUserVolume(volumeSessionId, user.clientId);
+    const isSelf = this.isSelf(user);
+    const currentVol = isSelf ? 100 : settingsStore.getUserVolume(this.resolveVolumeTarget(user), user.clientId);
     const avatarSrc = getAvatarUrl(user.avatarUrl);
     // Sem foto o que se abriria é o logo padrão, então o olho não aparece (#406).
     const hasAvatar = !!user.avatarUrl;
-    // Voice moderation addresses a connection, not a person: prefer the exact
-    // session the menu was opened from, else any session of theirs in voice (#309).
+    // Kick and move still require a live voice connection; mute/deafen target the identity.
     const targetState = this.resolveVoiceTarget(user)?.voiceState;
     const voiceChannels = (serverStore.serverDetails?.channels ?? []).filter((channel) => channel.type === 'VOICE');
     const roleIds = new Set(serverStore.getUserRoleIds(user.id));
@@ -50,15 +39,16 @@ export class UserContextMenu {
       .filter((role) => !role.isDefault && !serverStore.isAdminRole(role))
       .sort((a, b) => b.position - a.position);
 
-    const canMuteMembers = !!targetState && serverStore.hasPermission(Permission.MUTE_MEMBERS);
-    const canDeafenMembers = !!targetState && serverStore.hasPermission(Permission.DEAFEN_MEMBERS);
+    const canMuteMembers = serverStore.hasPermission(Permission.MUTE_MEMBERS);
+    const canDeafenMembers = serverStore.hasPermission(Permission.DEAFEN_MEMBERS);
     const canKickMembers = !!targetState && serverStore.hasPermission(Permission.KICK_MEMBERS);
     const canMoveMembers = !!targetState && serverStore.hasPermission(Permission.MOVE_MEMBERS) && voiceChannels.length > 0;
-    const canManageRoles = serverStore.hasPermission(Permission.MANAGE_ROLES) && manageableRoles.length > 0;
+    const canManageRoles = !user.isBot && serverStore.hasPermission(Permission.MANAGE_ROLES) && manageableRoles.length > 0;
     // Promoting/demoting admins is also available straight from the member list (#273).
     const adminRole = serverStore.getAdminRole();
     const isTargetAdmin = !!adminRole && roleIds.has(adminRole.id);
     const canManageAdmin =
+      !user.isBot &&
       !!adminRole &&
       user.id !== serverStore.ownerId &&
       serverStore.hasPermission(Permission.MANAGE_ROLES);
@@ -84,6 +74,17 @@ export class UserContextMenu {
 
       <div class="context-menu-divider"></div>
 
+      ${user.isBot ? `<button type="button" class="btn btn-secondary" data-action="bot-settings">
+        <span class="material-symbols-outlined md-18" aria-hidden="true">settings</span>
+        ${t('botSettings.title')}
+      </button>` : ''}
+
+      ${isSelf ? `
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <button type="button" class="btn btn-secondary" data-action="self-mute"></button>
+        <button type="button" class="btn btn-secondary" data-action="self-deafen"></button>
+      </div>
+      ` : `
       <div class="context-menu-volume-section">
         <div class="context-menu-volume-header">
           <div class="context-menu-volume-title">
@@ -114,6 +115,7 @@ export class UserContextMenu {
           <button id="ctx-vol-200" class="btn-ctx-quick" title="200%">200%</button>
         </div>
       </div>
+      `}
 
       ${showAdminSection ? `
       <div class="context-menu-divider"></div>
@@ -121,8 +123,8 @@ export class UserContextMenu {
         <div style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px;">
           ${t('userMenu.adminActions')}
         </div>
-        ${canMuteMembers ? `<button type="button" class="btn btn-secondary" data-action="server-mute">${targetState?.serverMuted ? t('userMenu.serverUnmute') : t('userMenu.serverMute')}</button>` : ''}
-        ${canDeafenMembers ? `<button type="button" class="btn btn-secondary" data-action="server-deafen">${targetState?.serverDeafened ? t('userMenu.serverUndeafen') : t('userMenu.serverDeafen')}</button>` : ''}
+        ${canMuteMembers ? `<button type="button" class="btn btn-secondary" data-action="server-mute" disabled aria-busy="true">${t('userMenu.loadingRestrictions')}</button>` : ''}
+        ${canDeafenMembers ? `<button type="button" class="btn btn-secondary" data-action="server-deafen" disabled aria-busy="true">${t('userMenu.loadingRestrictions')}</button>` : ''}
         ${canKickMembers ? `<button type="button" class="btn btn-secondary" data-action="kick-voice">${t('userMenu.kickFromVoice')}</button>` : ''}
         ${canMoveMembers ? `
           <div class="ctx-submenu-wrap">
@@ -162,7 +164,7 @@ export class UserContextMenu {
           </div>
         ` : ''}
         ${canManageAdmin ? `
-          <button type="button" class="btn btn-secondary" data-action="toggle-admin" data-role-id="${adminRole!.id}">
+          <button type="button" class="btn btn-secondary" data-action="toggle-admin" data-role-id="${adminRole?.id}">
             <span style="display: inline-flex; align-items: center; gap: 8px; width: 100%;">
               <span class="material-symbols-outlined md-16">${isTargetAdmin ? 'remove_moderator' : 'shield_person'}</span>
               <span>${isTargetAdmin ? t('userMenu.removeAdmin') : t('userMenu.promoteToAdmin')}</span>
@@ -271,26 +273,118 @@ export class UserContextMenu {
     webRtcManager.setPeerVolume(sessionId, clamped);
   }
 
-  private async runAdminAction(action: () => Promise<void>): Promise<void> {
+  private async runAdminAction(action: () => Promise<unknown>): Promise<void> {
+    const menu = this.menuEl;
     try {
       await action();
-      this.close();
-    } catch (err: any) {
+      if (this.menuEl === menu) this.close();
+    } catch (err: unknown) {
+      if (this.menuEl !== menu) return;
       await showAlert({
         title: t('common.error'),
-        message: err?.message || t('userMenu.actionFailed'),
+        message: err instanceof Error ? err.message : t('userMenu.actionFailed'),
         variant: 'danger',
       });
     }
   }
 
+  private async attachModerationEvents(user: UserSummary): Promise<void> {
+    const menu = this.menuEl;
+    const mute = menu?.querySelector<HTMLButtonElement>('[data-action="server-mute"]');
+    const deafen = menu?.querySelector<HTMLButtonElement>('[data-action="server-deafen"]');
+    if (!menu || (!mute && !deafen)) return;
+    const client = getActiveNetworkClient();
+    const targetUserId = this.isSelf(user) && serverStore.currentUser ? serverStore.currentUser.id : user.id;
+    try {
+      const response = await client.sendRequest<unknown>(MessageType.ADMIN_GET_VOICE_RESTRICTIONS, {
+        targetUserId,
+      } satisfies AdminVoiceRestrictionsGetPayload);
+      if (this.menuEl !== menu) return;
+      const parsed = voiceRestrictionsUpdatedSchema.safeParse(response);
+      if (!parsed.success || parsed.data.userId !== targetUserId) throw new Error(t('userMenu.actionFailed'));
+      let restrictions = parsed.data;
+      let busy = false;
+      const updateLabels = () => {
+        if (this.menuEl !== menu) return;
+        if (mute) {
+          mute.textContent = t(restrictions.serverMuted ? 'userMenu.serverUnmute' : 'userMenu.serverMute');
+          mute.disabled = busy;
+          mute.setAttribute('aria-busy', String(busy));
+        }
+        if (deafen) {
+          deafen.textContent = t(restrictions.serverDeafened ? 'userMenu.serverUndeafen' : 'userMenu.serverDeafen');
+          deafen.disabled = busy;
+          deafen.setAttribute('aria-busy', String(busy));
+        }
+      };
+      const act = (action: () => Promise<unknown>) => {
+        if (busy || this.menuEl !== menu) return;
+        busy = true;
+        updateLabels();
+        void this.runAdminAction(action).finally(() => {
+          busy = false;
+          updateLabels();
+        });
+      };
+      mute?.addEventListener('click', () => act(() => client.sendRequest(MessageType.ADMIN_MUTE_USER, {
+        targetUserId, muted: !restrictions.serverMuted,
+      } satisfies AdminMuteUserPayload)));
+      deafen?.addEventListener('click', () => act(() => client.sendRequest(MessageType.ADMIN_DEAFEN_USER, {
+        targetUserId, deafened: !restrictions.serverDeafened,
+      } satisfies AdminDeafenUserPayload)));
+      this.unbindGlobalListeners.push(appEvents.on('i18n.language_changed', updateLabels));
+      this.unbindGlobalListeners.push(appEvents.on('server.voice_restrictions_updated', () => {
+        if (serverStore.currentUser?.id !== targetUserId) return;
+        restrictions = { userId: targetUserId, ...serverStore.voiceRestrictions };
+        updateLabels();
+      }));
+      updateLabels();
+    } catch (err: unknown) {
+      if (this.menuEl !== menu) return;
+      this.close();
+      await showAlert({
+        title: t('common.error'),
+        message: err instanceof Error ? err.message : t('userMenu.actionFailed'),
+        variant: 'danger',
+      });
+    }
+  }
+
+  private isSelf(user: UserSummary): boolean {
+    return user.id === serverStore.currentUser?.id ||
+      !!user.clientId && (
+        user.clientId === connectionStore.clientId ||
+        user.clientId === serverStore.currentUser?.clientId
+      );
+  }
+
+  private updateSelfControls(): void {
+    const mute = this.menuEl?.querySelector<HTMLButtonElement>('[data-action="self-mute"]');
+    const deafen = this.menuEl?.querySelector<HTMLButtonElement>('[data-action="self-deafen"]');
+    if (mute) {
+      mute.textContent = t(voiceStore.isMuted ? 'stage.unmuteMic' : 'stage.muteMic');
+      mute.setAttribute('aria-pressed', String(voiceStore.isMuted));
+      mute.title = getVoiceControlModeration().muteReason ?? mute.textContent;
+    }
+    if (deafen) {
+      deafen.textContent = t(voiceStore.isDeafened ? 'main.undeafen' : 'main.deafen');
+      deafen.setAttribute('aria-pressed', String(voiceStore.isDeafened));
+      deafen.title = getVoiceControlModeration().deafenReason ?? deafen.textContent;
+    }
+  }
+
   /**
-   * The connection a voice moderation action should target: the exact session
+   * The connection a kick or move should target: the exact session
    * the menu was opened from, else any session of that person in voice (#309).
    */
   private resolveVoiceTarget(user: UserSummary): ParticipantViewModel | undefined {
     const exact = participantManager.get(user.sessionId || '');
     if (exact?.voiceState) return exact;
+    // A local profile must never fall back to another device of the same person.
+    if (this.isSelf(user)) {
+      if (user.sessionId && !serverStore.isMySession(user.sessionId)) return exact;
+      return participantManager.get(serverStore.currentUser?.sessionId || '');
+    }
     return participantManager.getByUserId(user.id) ?? exact;
   }
 
@@ -306,6 +400,26 @@ export class UserContextMenu {
 
   private attachEvents(user: UserSummary): void {
     if (!this.menuEl) return;
+
+    if (user.isBot) {
+      const settingsAction = botSettingsMenuItem(user.id, getActiveNetworkClient(), getActiveServerStore());
+      this.menuEl.querySelector('[data-action="bot-settings"]')?.addEventListener('click', () => {
+        this.close();
+        settingsAction.onClick();
+      });
+    }
+
+    for (const event of ['network.disconnected', 'voice.channel_changed', 'session.changed']) {
+      this.unbindGlobalListeners.push(appEvents.on(event, () => this.close()));
+    }
+    if (this.isSelf(user)) {
+      this.menuEl.querySelector('[data-action="self-mute"]')?.addEventListener('click', toggleMicrophoneMute);
+      this.menuEl.querySelector('[data-action="self-deafen"]')?.addEventListener('click', toggleAudioDeafen);
+      this.updateSelfControls();
+      for (const event of ['voice.state_updated', 'server.voice_restrictions_updated', 'i18n.language_changed']) {
+        this.unbindGlobalListeners.push(appEvents.on(event, () => this.updateSelfControls()));
+      }
+    }
 
     const slider = this.menuEl.querySelector('#ctx-volume-slider') as HTMLInputElement | null;
     slider?.addEventListener('input', () => this.applyVolume(user, parseInt(slider.value, 10)));
@@ -350,26 +464,13 @@ export class UserContextMenu {
       wrap.addEventListener('mouseenter', () => this.syncSubmenuVerticalOffset(wrap));
     });
 
-    this.menuEl.querySelector('[data-action="server-mute"]')?.addEventListener('click', () => {
-      const target = this.resolveVoiceTarget(user);
-      void this.runAdminAction(() => networkClient.sendRequest(MessageType.ADMIN_MUTE_USER, {
-        targetSessionId: target?.user.sessionId || user.sessionId || user.id,
-        muted: !(target?.voiceState?.serverMuted ?? false),
-      }));
-    });
-
-    this.menuEl.querySelector('[data-action="server-deafen"]')?.addEventListener('click', () => {
-      const target = this.resolveVoiceTarget(user);
-      void this.runAdminAction(() => networkClient.sendRequest(MessageType.ADMIN_DEAFEN_USER, {
-        targetSessionId: target?.user.sessionId || user.sessionId || user.id,
-        deafened: !(target?.voiceState?.serverDeafened ?? false),
-      }));
-    });
+    void this.attachModerationEvents(user);
 
     this.menuEl.querySelector('[data-action="kick-voice"]')?.addEventListener('click', () => {
-      const target = this.resolveVoiceTarget(user);
+      const state = this.resolveVoiceTarget(user)?.voiceState;
+      if (!state) return this.close();
       void this.runAdminAction(() => networkClient.sendRequest(MessageType.ADMIN_KICK_VOICE, {
-        targetSessionId: target?.user.sessionId || user.sessionId || user.id,
+        targetSessionId: state.sessionId,
       }));
     });
 
@@ -381,9 +482,10 @@ export class UserContextMenu {
           this.close();
           return;
         }
-        const target = this.resolveVoiceTarget(user);
+        const state = this.resolveVoiceTarget(user)?.voiceState;
+        if (!state) return this.close();
         void this.runAdminAction(() => networkClient.sendRequest(MessageType.ADMIN_MOVE_USER, {
-          targetSessionId: target?.user.sessionId || user.sessionId || user.id,
+          targetSessionId: state.sessionId,
           channelId,
         }));
       });
@@ -422,7 +524,7 @@ export class UserContextMenu {
     const handleKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') this.close(); };
     const handleWindowResize = () => this.close();
 
-    setTimeout(() => {
+    const listenerTimer = window.setTimeout(() => {
       document.addEventListener('pointerdown', handleOutsideClick, true);
       document.addEventListener('contextmenu', handleOutsideClick, true);
       window.addEventListener('keydown', handleKeyDown, true);
@@ -430,6 +532,7 @@ export class UserContextMenu {
     }, 10);
 
     this.unbindGlobalListeners.push(() => {
+      window.clearTimeout(listenerTimer);
       document.removeEventListener('pointerdown', handleOutsideClick, true);
       document.removeEventListener('contextmenu', handleOutsideClick, true);
       window.removeEventListener('keydown', handleKeyDown, true);

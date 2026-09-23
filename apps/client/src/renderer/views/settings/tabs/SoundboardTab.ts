@@ -1,16 +1,50 @@
 import { settingsStore } from '../../../stores/settingsStore';
 import { soundboardService, SoundItem } from '../../../core/SoundboardService';
-import { t, tCount } from '../../../i18n';
+import { getLanguage, t, tCount } from '../../../i18n';
 import { escapeHtml } from '../../../utils/html';
 import { matchesSearch } from '../../../utils/search';
+import { sortFavoritesFirst } from '../../../utils/favoriteOrder';
+import { FavoriteListMotion, type FavoriteMotionKind } from '../../../utils/favoriteMotion';
 import { captureShortcut } from '../../../utils/keybind';
+import { appEvents } from '../../../core/EventBus';
+import { favoritesStore, soundFavoriteKey } from '../../../stores/favoritesStore';
+import { clientLog } from '../../../core/ClientLogService';
+import { renderFavoriteToggle, renderFavoritesFilter } from '../../FavoritesControls';
+import { showAlert } from '../../Dialog';
+import type { SoundboardDownloadAvailability } from '@monky/shared';
+import { renderLoadingError, renderLoadingSkeleton } from '../../../utils/loadingSkeleton';
+import { bindSoundboardLimiterControls, renderSoundboardLimiterControls } from '../../SoundboardLimiterControls';
 
 export class SoundboardTab {
   private searchQuery: string = '';
+  private unbindSounds: (() => void) | null = null;
+  private unbindLoading: (() => void) | null = null;
+  private unbindSettings: (() => void) | null = null;
+  private unbindFolderControls: (() => void) | null = null;
+  private folderContainer: HTMLElement | null = null;
+  private folderCheckGeneration = 0;
+  private favoritesOnly = false;
+  private pickingFolder = false;
+  private readonly favoriteMotion = new FavoriteListMotion();
+
+  public cleanup(): void {
+    this.unbindSounds?.();
+    this.unbindSounds = null;
+    this.unbindLoading?.();
+    this.unbindLoading = null;
+    this.unbindSettings?.();
+    this.unbindSettings = null;
+    this.unbindFolderControls?.();
+    this.unbindFolderControls = null;
+    this.folderContainer = null;
+    this.folderCheckGeneration++;
+    this.favoriteMotion.cancel();
+  }
 
   public renderHtml(): string {
+    this.favoriteMotion.cancel();
     return `
-      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+      <div data-settings-section="sound-folder" data-settings-label="${escapeHtml(t('settings.soundFolder'))}" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
         <span style="font-size: 13px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">music_note</span>
           ${t('settings.soundboardSection')}
@@ -20,18 +54,22 @@ export class SoundboardTab {
       <div class="form-group" style="margin-bottom: 12px;">
         <label>${t('settings.soundFolder')}</label>
         <div style="display: flex; gap: 8px; align-items: center;">
-          <input id="input-soundboard-path" type="text" readonly value="${settingsStore.soundboardFolderPath || ''}" placeholder="${t('settings.noFolderPlaceholder')}" style="flex: 1; font-size: 12px; cursor: pointer;">
+          <input id="input-soundboard-path" type="text" readonly value="${escapeHtml(settingsStore.soundboardFolderPath || '')}" placeholder="${t('settings.noFolderPlaceholder')}" style="flex: 1; font-size: 12px; cursor: pointer;">
           <button type="button" id="btn-select-soundboard-folder" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px; white-space: nowrap;">
             <span class="material-symbols-outlined md-14" style="margin-right: 4px;">folder_open</span>
             ${t('soundboard.chooseFolder')}
           </button>
         </div>
         <div id="soundboard-folder-info" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
-          ${settingsStore.soundboardFolderPath ? tCount('settings.soundsFound', soundboardService.getSounds().length) : t('soundboard.formatsBadge')}
+          ${this.folderSummary()}
         </div>
+        <p id="soundboard-download-folder-status" role="status" aria-live="polite" style="font-size: 12px; color: var(--text-muted); margin-top: 8px;" hidden></p>
+        <button type="button" id="btn-confirm-soundboard-folder" class="btn btn-secondary" style="font-size: 12px;" hidden>
+          ${t('soundboard.confirmFolder')}
+        </button>
       </div>
 
-      <div class="form-group" style="margin-bottom: 12px;">
+      <div data-settings-section="soundboard-volume" data-settings-label="${escapeHtml(t('settings.soundboardVolume'))}" class="form-group" style="margin-bottom: 12px;">
         <label style="display: flex; align-items: center; justify-content: space-between;">
           <span>${t('settings.soundboardVolume')}</span>
           <span id="soundboard-vol-val" style="font-family: var(--font-mono); font-size: 12px;">${settingsStore.soundboardVolume}%</span>
@@ -60,8 +98,12 @@ export class SoundboardTab {
         </div>
       </div>
 
+      <div data-settings-section="soundboard-limiter" data-settings-label="${escapeHtml(t('settings.soundboardLimiter'))}" class="form-group" style="margin-top: 16px;">
+        ${renderSoundboardLimiterControls('soundboard')}
+      </div>
+
       <!-- Soundboard Shortcuts Table -->
-      <div style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
+      <div data-settings-section="soundboard-shortcuts" data-settings-label="${escapeHtml(t('soundboard.shortcut'))}" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
           <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 0;">
             <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">keyboard</span>
@@ -79,20 +121,31 @@ export class SoundboardTab {
   }
 
   public renderShortcutsTable(): string {
+    const status = soundboardService.getLoadStatus();
+    if (status === 'loading') return renderLoadingSkeleton('lines', 4);
+    if (status === 'error') return renderLoadingError(t('soundboard.loadFailed'));
     const sounds = soundboardService.getSounds();
     if (sounds.length === 0) {
       return `
-        <div style="padding: 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); text-align: center; color: var(--text-muted); font-size: 12px;">
+        <div class="favorite-motion-empty" style="padding: 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); text-align: center; color: var(--text-muted); font-size: 12px;">
           ${t('soundboard.noAudioFilesTitle')}
         </div>
       `;
     }
 
-    const filteredSounds = this.searchQuery.trim()
-      ? sounds.filter((s) => matchesSearch(s.name, this.searchQuery))
-      : sounds;
+    const filteredSounds = sortFavoritesFirst(
+      sounds.filter(sound => (!this.favoritesOnly || favoritesStore.isSoundFavorite(sound.filePath))
+        && (!this.searchQuery.trim() || matchesSearch(sound.name, this.searchQuery))),
+      sound => ({
+        favorite: favoritesStore.isSoundFavorite(sound.filePath),
+        name: sound.name,
+        identity: soundFavoriteKey(sound.filePath),
+      }),
+      getLanguage()
+    );
+    const filterHtml = `<div style="margin-bottom: 8px;">${renderFavoritesFilter('sb-settings-filter', this.favoritesOnly)}</div>`;
 
-    const searchHtml = sounds.length > 3 ? `
+    const searchHtml = sounds.length > 3 || this.searchQuery ? `
       <div style="margin-bottom: 8px; position: relative; display: flex; align-items: center;">
         <span class="material-symbols-outlined md-16" style="position: absolute; left: 8px; color: var(--text-muted); pointer-events: none;">search</span>
         <input
@@ -105,10 +158,20 @@ export class SoundboardTab {
       </div>
     ` : '';
 
+    if (this.favoritesOnly && !sounds.some(sound => favoritesStore.isSoundFavorite(sound.filePath))) {
+      return `${filterHtml}${searchHtml}
+        <div class="favorites-empty" role="status">
+          <strong>${t('favorites.emptySoundsTitle')}</strong>
+          <span>${t('favorites.emptySoundsDescription')}</span>
+          <button type="button" id="sb-settings-show-all" class="btn btn-secondary">${t('favorites.showAll')}</button>
+        </div>`;
+    }
+
     if (filteredSounds.length === 0) {
       return `
+        ${filterHtml}
         ${searchHtml}
-        <div style="padding: 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); text-align: center; color: var(--text-muted); font-size: 12px;">
+        <div class="favorite-motion-empty" style="padding: 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); text-align: center; color: var(--text-muted); font-size: 12px;">
           ${t('soundboard.noSearchResultsTitle')}
         </div>
       `;
@@ -120,11 +183,12 @@ export class SoundboardTab {
       const hasShortcut = Boolean(shortcut);
 
       return `
-        <div class="sb-shortcut-row" style="display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 4px; gap: 8px;">
+        <div class="sb-shortcut-row" data-soundname="${escapeHtml(sound.name)}" style="display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 4px; gap: 8px;">
           <span style="font-size: 12px; color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
             ${escapeHtml(sound.name)}
           </span>
           <div style="display: flex; align-items: center; gap: 6px;">
+            ${renderFavoriteToggle(soundFavoriteKey(sound.filePath), sound.name, favoritesStore.isSoundFavorite(sound.filePath))}
             <span class="sb-keybind-badge ${hasShortcut ? 'has-key' : ''}" style="font-family: var(--font-mono); font-size: 11px; padding: 2px 8px; background: rgba(255,255,255,0.06); border-radius: 4px; border: 1px solid var(--border-color); color: ${hasShortcut ? 'var(--accent-primary)' : 'var(--text-muted)'}; min-width: 60px; text-align: center;">
               ${escapeHtml(displayKey)}
             </span>
@@ -142,40 +206,103 @@ export class SoundboardTab {
     }).join('');
 
     return `
+      ${filterHtml}
       ${searchHtml}
-      <div style="max-height: 200px; overflow-y: auto; padding-right: 2px;">${rows}</div>
+      <div class="sb-shortcuts-list" style="max-height: 200px; overflow-y: auto; padding-right: 2px;">${rows}</div>
     `;
   }
 
+  private folderSummary(): string {
+    if (!settingsStore.soundboardFolderPath) return t('soundboard.formatsBadge');
+    const status = soundboardService.getLoadStatus();
+    if (status === 'loading') return t('common.loading');
+    if (status === 'error') return t('soundboard.loadFailed');
+    return tCount('settings.soundsFound', soundboardService.getSounds().length);
+  }
+
   public attachEvents(container: HTMLElement): void {
+    this.cleanup();
+    this.folderContainer = container;
+    this.unbindSounds = appEvents.on('soundboard.sounds_loaded', () => {
+      if (!container.isConnected) return;
+      const info = container.querySelector('#soundboard-folder-info');
+      if (info) info.textContent = this.folderSummary();
+      this.refreshTable(container);
+      void this.refreshFolderDownloadState(container);
+    });
+    this.unbindLoading = appEvents.on('soundboard.sounds_loading', () => {
+      if (this.folderContainer !== container || !container.isConnected) return;
+      const info = container.querySelector('#soundboard-folder-info');
+      if (info) info.textContent = t('common.loading');
+      this.refreshTable(container);
+    });
     const inputPath = container.querySelector<HTMLInputElement>('#input-soundboard-path');
     const btnSelectFolder = container.querySelector<HTMLButtonElement>('#btn-select-soundboard-folder');
+    const btnConfirmFolder = container.querySelector<HTMLButtonElement>('#btn-confirm-soundboard-folder');
     const sliderVol = container.querySelector<HTMLInputElement>('#slider-soundboard-vol');
     const volVal = container.querySelector<HTMLElement>('#soundboard-vol-val');
     const checkboxMute = container.querySelector<HTMLInputElement>('#checkbox-soundboard-mute');
-
+    const unbindLimiter = bindSoundboardLimiterControls(container);
+    let observedFolder = settingsStore.soundboardFolderPath;
+    this.unbindSettings = appEvents.on('settings.updated', () => {
+      if (observedFolder === settingsStore.soundboardFolderPath) return;
+      observedFolder = settingsStore.soundboardFolderPath;
+      if (inputPath) inputPath.value = observedFolder;
+      void this.refreshFolderDownloadState(container);
+    });
     const handlePickFolder = async () => {
-      if (!window.api?.selectSoundboardFolder) return;
-      const folder = await window.api.selectSoundboardFolder();
-      if (folder) {
-        settingsStore.soundboardFolderPath = folder;
-        settingsStore.save();
+      if (this.pickingFolder) return;
+      this.setPickingFolder(true);
+      try {
+        const folder = await soundboardService.selectFolder();
+        if (!folder || !container.isConnected) return;
         if (inputPath) inputPath.value = folder;
-        await soundboardService.loadSounds();
         const info = container.querySelector<HTMLElement>('#soundboard-folder-info');
         if (info) {
-          info.textContent = tCount('settings.soundsFound', soundboardService.getSounds().length);
+          info.textContent = this.folderSummary();
         }
-        const tableContainer = container.querySelector<HTMLElement>('#soundboard-shortcuts-table-container');
-        if (tableContainer) {
-          tableContainer.innerHTML = this.renderShortcutsTable();
-          this.attachShortcutButtons(container);
+        this.refreshTable(container);
+      } catch (error: unknown) {
+        clientLog.warn('AUDIO', 'Could not select the soundboard settings folder', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (container.isConnected) {
+          await showAlert({ title: t('common.error'), message: t('soundboard.chooseFolderFailed'), variant: 'danger' });
         }
+      } finally {
+        this.setPickingFolder(false);
+        if (this.folderContainer) await this.refreshFolderDownloadState(this.folderContainer);
+      }
+    };
+    const handleConfirmFolder = async () => {
+      if (this.pickingFolder) return;
+      this.setPickingFolder(true);
+      try {
+        await soundboardService.confirmConfiguredFolder();
+      } catch (error: unknown) {
+        clientLog.warn('AUDIO', 'Could not authorize downloads in the configured soundboard folder', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (this.folderContainer === container && container.isConnected) {
+          await showAlert({ title: t('common.error'), message: t('soundboard.confirmFolderFailed'), variant: 'danger' });
+        }
+      } finally {
+        this.setPickingFolder(false);
+        if (this.folderContainer) await this.refreshFolderDownloadState(this.folderContainer);
       }
     };
 
     btnSelectFolder?.addEventListener('click', handlePickFolder);
     inputPath?.addEventListener('click', handlePickFolder);
+    btnConfirmFolder?.addEventListener('click', handleConfirmFolder);
+    this.unbindFolderControls = () => {
+      btnSelectFolder?.removeEventListener('click', handlePickFolder);
+      inputPath?.removeEventListener('click', handlePickFolder);
+      btnConfirmFolder?.removeEventListener('click', handleConfirmFolder);
+      unbindLimiter();
+    };
+    this.setPickingFolder(this.pickingFolder);
+    void this.refreshFolderDownloadState(container);
 
     sliderVol?.addEventListener('input', () => {
       const val = parseInt(sliderVol.value, 10);
@@ -193,19 +320,85 @@ export class SoundboardTab {
     this.attachShortcutButtons(container);
   }
 
+  private setPickingFolder(picking: boolean): void {
+    this.pickingFolder = picking;
+    this.folderContainer?.querySelectorAll<HTMLButtonElement>('#btn-select-soundboard-folder, #btn-confirm-soundboard-folder')
+      .forEach(button => { button.disabled = picking; });
+  }
+
+  private async refreshFolderDownloadState(container: HTMLElement): Promise<void> {
+    if (this.folderContainer !== container || !container.isConnected) return;
+    const generation = ++this.folderCheckGeneration;
+    const folder = settingsStore.soundboardFolderPath;
+    const status = container.querySelector<HTMLElement>('#soundboard-download-folder-status');
+    const confirm = container.querySelector<HTMLButtonElement>('#btn-confirm-soundboard-folder');
+    if (!status || !confirm) return;
+    if (!folder || !window.api?.soundDownloadAvailability) {
+      status.hidden = true;
+      confirm.hidden = true;
+      return;
+    }
+    let availability: SoundboardDownloadAvailability | null = null;
+    try {
+      availability = await window.api.soundDownloadAvailability(folder);
+    } catch (error: unknown) {
+      clientLog.warn('AUDIO', 'Could not check soundboard download authorization', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (generation !== this.folderCheckGeneration || this.folderContainer !== container ||
+        !container.isConnected || settingsStore.soundboardFolderPath !== folder) return;
+    status.hidden = false;
+    status.textContent = t(availability === null ? 'soundboard.downloadFolderCheckFailed'
+      : availability === 'ready' ? 'soundboard.downloadFolderReady'
+      : availability === 'confirmation_required' ? 'soundboard.downloadFolderNeedsConfirmation' : 'soundboard.downloadFolderUnavailable');
+    confirm.hidden = availability !== 'confirmation_required' || !window.api?.confirmSoundboardFolder;
+    confirm.disabled = this.pickingFolder;
+  }
+
   public attachShortcutButtons(container: HTMLElement): void {
+    const table = container.querySelector('#soundboard-shortcuts-table-container');
+    table?.setAttribute('aria-busy', String(soundboardService.getLoadStatus() === 'loading'));
+    table?.querySelector('[data-loading-retry]')?.addEventListener('click', () => {
+      if (this.folderContainer === container) void soundboardService.loadSounds();
+    });
+    table?.querySelectorAll<HTMLButtonElement>('[data-favorites-filter]').forEach(button => {
+      button.addEventListener('click', () => {
+        this.favoritesOnly = button.dataset.favoritesFilter === 'favorites';
+        this.refreshTable(container, 'filter');
+      });
+    });
+    table?.querySelector('#sb-settings-show-all')?.addEventListener('click', () => {
+      this.favoritesOnly = false;
+      this.refreshTable(container, 'filter');
+      container.querySelector<HTMLButtonElement>('#sb-settings-filter-all')?.focus();
+    });
+    table?.querySelectorAll<HTMLButtonElement>('.favorite-toggle').forEach(button => {
+      button.addEventListener('click', async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const key = button.dataset.favoriteKey;
+        if (!key) return;
+        try {
+          favoritesStore.toggleSound(key);
+          this.refreshTable(container, 'reorder');
+        } catch (error: unknown) {
+          clientLog.warn('STORE', 'Could not save the sound favorite in settings', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          await showAlert({ title: t('common.error'), message: t('favorites.saveFailed'), variant: 'danger' });
+        }
+      });
+    });
+
     const searchInput = container.querySelector<HTMLInputElement>('#sb-shortcuts-search-input');
     searchInput?.addEventListener('input', () => {
       this.searchQuery = searchInput.value;
-      const tableContainer = container.querySelector<HTMLElement>('#soundboard-shortcuts-table-container');
-      if (tableContainer) {
-        tableContainer.innerHTML = this.renderShortcutsTable();
-        this.attachShortcutButtons(container);
-        const newInput = container.querySelector<HTMLInputElement>('#sb-shortcuts-search-input');
-        if (newInput) {
-          newInput.focus();
-          newInput.setSelectionRange(newInput.value.length, newInput.value.length);
-        }
+      this.refreshTable(container);
+      const newInput = container.querySelector<HTMLInputElement>('#sb-shortcuts-search-input');
+      if (newInput) {
+        newInput.focus();
+        newInput.setSelectionRange(newInput.value.length, newInput.value.length);
       }
     });
 
@@ -223,14 +416,47 @@ export class SoundboardTab {
           delete settingsStore.soundboardShortcuts[soundName];
           settingsStore.save();
           soundboardService.syncShortcuts();
-          const tableContainer = container.querySelector<HTMLElement>('#soundboard-shortcuts-table-container');
-          if (tableContainer) {
-            tableContainer.innerHTML = this.renderShortcutsTable();
-            this.attachShortcutButtons(container);
-          }
+          this.refreshTable(container);
         }
       });
     });
+  }
+
+  private refreshTable(container: HTMLElement, animate: FavoriteMotionKind | false = false): void {
+    const table = container.querySelector<HTMLElement>('#soundboard-shortcuts-table-container');
+    if (!table || !container.isConnected) return;
+    this.favoriteMotion.update(table, '.sb-shortcut-row', () => {
+      const scrollTop = table.scrollTop;
+      const listScrollTop = table.querySelector('.sb-shortcuts-list')?.scrollTop ?? 0;
+      const focused = document.activeElement;
+      const selection = focused instanceof HTMLInputElement && table.contains(focused)
+        ? { id: focused.id, start: focused.selectionStart, end: focused.selectionEnd } : null;
+      const buttons = Array.from(table.querySelectorAll<HTMLButtonElement>('.favorite-toggle'));
+      const favorite = focused instanceof HTMLButtonElement && buttons.includes(focused) ? focused : null;
+      const favoriteIndex = favorite ? buttons.indexOf(favorite) : -1;
+      const filterId = focused instanceof HTMLButtonElement && focused.hasAttribute('data-favorites-filter') ? focused.id : null;
+      table.innerHTML = this.renderShortcutsTable();
+      this.attachShortcutButtons(container);
+      table.scrollTop = scrollTop;
+      const list = table.querySelector('.sb-shortcuts-list');
+      if (list) list.scrollTop = listScrollTop;
+      if (favorite) {
+        const nextButtons = Array.from(table.querySelectorAll<HTMLButtonElement>('.favorite-toggle'));
+        const next = nextButtons.find(button => button.dataset.favoriteKey === favorite.dataset.favoriteKey)
+          ?? nextButtons[Math.min(favoriteIndex, nextButtons.length - 1)]
+          ?? table.querySelector<HTMLButtonElement>('#sb-settings-filter-favorites');
+        next?.focus({ preventScroll: true });
+        next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      } else if (filterId) {
+        const next = table.querySelector<HTMLButtonElement>(`#${filterId}`);
+        next?.focus({ preventScroll: true });
+        next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      } else if (selection) {
+        const input = table.querySelector<HTMLInputElement>(`#${selection.id}`);
+        input?.focus({ preventScroll: true });
+        if (selection.start !== null && selection.end !== null) input?.setSelectionRange(selection.start, selection.end);
+      }
+    }, animate);
   }
 
   private openShortcutModal(container: HTMLElement, soundName: string): void {
@@ -269,11 +495,7 @@ export class SoundboardTab {
 
       cleanup();
 
-      const tableContainer = container.querySelector<HTMLElement>('#soundboard-shortcuts-table-container');
-      if (tableContainer) {
-        tableContainer.innerHTML = this.renderShortcutsTable();
-        this.attachShortcutButtons(container);
-      }
+      this.refreshTable(container);
     }, () => cleanup(), container);
 
     const cleanup = () => {

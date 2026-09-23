@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { isDeepStrictEqual } from 'node:util';
 import {
   AttachmentMeta,
   ChatMessage,
@@ -15,6 +16,9 @@ import {
   botCommandContextSchema,
   messageReferenceSchema,
   type MessageReply,
+  botMessageLocalizationsSchema,
+  botMessagePreviewLocalizations,
+  type BotMessageLocalizations,
 } from '@monky/shared';
 import { BotRecord, MentionRecord, MessageRecord } from '../../domain/entities';
 import {
@@ -59,10 +63,12 @@ export class ChatService {
     messageId?: string,
     canSend: () => boolean = () => true,
     accessUserId: string = bot.id,
-    replyToMessageId?: string
+    replyToMessageId?: string,
+    localizations?: BotMessageLocalizations
   ): Promise<BotMessageResult> {
     const parsed = messageContentSchema.safeParse(content);
-    if (!parsed.success || typeof channelId !== 'string' || !channelId || channelId.length > 128 ||
+    const variants = botMessageLocalizationsSchema.optional().safeParse(localizations);
+    if (!parsed.success || !variants.success || typeof channelId !== 'string' || !channelId || channelId.length > 128 ||
         (messageId !== undefined && (!messageId || messageId.length > 128))) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de bot inválida.' };
     }
@@ -77,7 +83,8 @@ export class ChatService {
     if (!canSend()) return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Publicação cancelada.' };
     if (existing) {
       if (!existing.botAuthor || existing.userId !== bot.id || existing.channelId !== channelId ||
-          existing.content !== parsed.data || existing.deletedAt || existing.replyToMessageId !== replyToMessageId) {
+          existing.content !== parsed.data || existing.deletedAt || existing.replyToMessageId !== replyToMessageId ||
+          !isDeepStrictEqual(existing.localizations, variants.data)) {
         return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem já utilizado.' };
       }
       return { success: true, message: { ...this.botMessage(existing), reply: await this.resolveReply(existing) } };
@@ -90,13 +97,15 @@ export class ChatService {
       botAuthor: { id: bot.id, name: bot.name, avatarPath: bot.avatarPath, ownerUserId: bot.createdByUserId },
       botCommand: botCommand ? botCommandContextSchema.parse(botCommand) : undefined,
       replyToMessageId,
+      localizations: variants.data,
     };
     const persisted = await this.messageRepo.createBotMessage(record);
     if (!persisted) {
       return { success: false, errorCode: ProtocolErrorCode.UNAUTHORIZED, errorMessage: 'Bot indisponível.' };
     }
     if (!persisted.botAuthor || persisted.userId !== bot.id || persisted.channelId !== channelId ||
-        persisted.content !== parsed.data || persisted.deletedAt || persisted.replyToMessageId !== replyToMessageId) {
+        persisted.content !== parsed.data || persisted.deletedAt || persisted.replyToMessageId !== replyToMessageId ||
+        !isDeepStrictEqual(persisted.localizations, variants.data)) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem já utilizado.' };
     }
     return { success: true, message: { ...this.botMessage(persisted), reply: await this.resolveReply(persisted) } };
@@ -122,6 +131,7 @@ export class ChatService {
       messageId: original.id,
       userNickname: original.botAuthor?.name ?? user?.nickname ?? 'Usuário Desconhecido',
       content: original.content.slice(0, 200),
+      ...(original.botAuthor ? { isBot: true, localizations: botMessagePreviewLocalizations(original.localizations) } : {}),
       deleted: false,
       hasAttachments: (attachments.get(original.id)?.length ?? 0) > 0,
     };
@@ -133,6 +143,7 @@ export class ChatService {
     return {
       id: record.id, channelId: record.channelId, userId: author.id, userNickname: author.name,
       userAvatarUrl: this.avatarStorage.getPublicUrl(author.avatarPath), content: record.content,
+      localizations: record.localizations,
       createdAt: record.createdAt, isSystem: false, isBot: true, botCommand: record.botCommand,
       editedAt: record.editedAt, deletedAt: record.deletedAt,
     };
@@ -526,6 +537,7 @@ export class ChatService {
         isBot: !!m.botAuthor,
         botCommand: m.botCommand,
         content: m.deletedAt ? '' : m.content,
+        localizations: m.deletedAt ? undefined : m.localizations,
         createdAt: m.createdAt,
         isSystem: m.isSystem,
         attachments: attachments && attachments.length > 0 ? attachments : undefined,

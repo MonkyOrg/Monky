@@ -3,6 +3,7 @@ import type { IpcEvents, PttConfig, PttKeyBinding } from '@monky/shared';
 import { SHORTCUT_MODIFIERS, type ShortcutModifier } from '@monky/shared';
 import { parseAcceleratorToHotkey, type ParsedHotkey } from './shortcutParser';
 import { windowsKeyboardLayout, type WindowsKeyboardLayout } from './windowsKeyboardLayout';
+import type { ShortcutConfiguration } from './shortcutWorkerProtocol';
 export { parseAcceleratorToHotkey } from './shortcutParser';
 
 const KEYCODE_TO_NAME = new Map<number, string>(
@@ -187,6 +188,16 @@ export class GlobalInputHook {
     this.soundboardBindings = parsed.bindings;
     this.armHeldHotkeys();
     return this.ensureHookState() && parsed.allSupported;
+  }
+
+  public getConfiguration(): ShortcutConfiguration {
+    return {
+      actions: this.actionBindings.map(({ id, accelerator }) => ({ action: id, accelerator })),
+      sounds: this.soundboardBindings.map(({ id, accelerator }) => ({ soundName: id, accelerator })),
+      ptt: this.pttConfig,
+      pttCapture: this.isCapturing,
+      shortcutCapture: this.isShortcutCapturing,
+    };
   }
 
   private parseHotkeys(list: unknown, idKey: 'action' | 'soundName'): {

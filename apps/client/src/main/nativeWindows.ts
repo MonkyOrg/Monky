@@ -1,0 +1,138 @@
+import { createHash } from 'node:crypto';
+import type { DesktopCapturerSource, Display, Rectangle } from 'electron';
+import type { NativeMonitorInfo, NativeWindowInfo, NativeWindowState } from '@monky/screen-audio';
+import { validateCaptureTarget, type NativeScreenCaptureTarget } from '@monky/screen-share';
+import type { DesktopSource, NativeScreenCaptureKind } from '@monky/shared';
+
+export function nativeWindowIdFromSourceId(sourceId: string): number | null {
+  const match = /^window:([1-9][0-9]{0,15}):(?:[0-9]{1,10}|[a-f0-9]{64})$/.exec(sourceId);
+  const hwnd = match ? Number(match[1]) : NaN;
+  return Number.isSafeInteger(hwnd) && hwnd > 0 ? hwnd : null;
+}
+
+export function isGhostWindow(window: NativeWindowInfo): boolean {
+  return window.isCloaked || window.isToolWindow
+    || (window.isLayered && (window.isTransparent || window.isNoActivate));
+}
+
+type Inspection = {
+  windows(): NativeWindowInfo[];
+  windowState(hwnd: number): NativeWindowState | null;
+  monitors(): NativeMonitorInfo[];
+  monitorState(deviceId: string): NativeMonitorInfo | null;
+};
+type MonitorTarget = Extract<NativeScreenCaptureTarget, { kind: 'monitor' }>;
+type WindowTarget = Extract<NativeScreenCaptureTarget, { hwnd: number }>;
+
+function monitorTarget(monitor: NativeMonitorInfo): MonitorTarget {
+  const target: MonitorTarget = {
+    kind: 'monitor', deviceId: monitor.deviceId, deviceName: monitor.deviceName,
+    bounds: { ...monitor.bounds },
+  };
+  validateCaptureTarget(target);
+  return target;
+}
+
+function monitorIdentity(target: MonitorTarget): string {
+  const { x, y, width, height } = target.bounds;
+  return JSON.stringify([target.deviceId, target.deviceName, x, y, width, height]);
+}
+
+export function nativeMonitorDesktopSources(
+  monitors: readonly { id: string; monitor: NativeMonitorInfo }[],
+  previews: readonly Pick<DesktopCapturerSource, 'id' | 'display_id' | 'thumbnail'>[],
+  displays: readonly Pick<Display, 'id' | 'bounds'>[],
+  toDipRect: (bounds: Rectangle) => Rectangle,
+  warn: (message: string) => void,
+): DesktopSource[] {
+  return [...monitors].sort((a, b) => a.monitor.deviceName.localeCompare(b.monitor.deviceName, 'en', { numeric: true }))
+    .map(({ id, monitor }, index) => {
+      const bounds = toDipRect({ ...monitor.bounds });
+      const matches = displays.filter(display => display.bounds.x === bounds.x && display.bounds.y === bounds.y
+        && display.bounds.width === bounds.width && display.bounds.height === bounds.height);
+      const images = matches.length === 1
+        ? previews.filter(source => source.id.startsWith('screen:') && source.display_id === String(matches[0].id))
+        : [];
+      let thumbnailDataUrl = '';
+      if (images.length === 1 && !images[0].thumbnail.isEmpty()) thumbnailDataUrl = images[0].thumbnail.toDataURL();
+      else warn(`Native monitor preview unavailable for ${monitor.deviceName}: `
+        + `${matches.length} matching displays, ${images.length} matching images; an unambiguous, nonempty thumbnail is required.`);
+      return { id, name: monitor.name, displayNumber: index + 1, type: 'screen', thumbnailDataUrl, appIconDataUrl: null };
+    });
+}
+
+export class NativeDesktopSources {
+  private windows = new Map<string, WindowTarget>();
+  private monitors = new Map<string, MonitorTarget>();
+
+  constructor(private readonly inspect: Inspection) {}
+
+  listWindows(): { id: string; window: NativeWindowInfo }[] {
+    // Refreshing another picker must not revoke a still-owned hidden/minimized
+    // selection needed for source restoration.
+    const selected = new Map([...this.windows].filter(([, target]) => {
+      const state = this.inspect.windowState(target.hwnd);
+      return state?.isTopLevel && state.processId === target.expectedProcessId
+        && state.processCreationTime100ns === target.expectedProcessCreationTime100ns;
+    }));
+    const handles = new Set<number>();
+    const result: { id: string; window: NativeWindowInfo }[] = [];
+    for (const window of this.inspect.windows()) {
+      if (isGhostWindow(window) || (!window.isVisible && !window.isIconic) || !window.processCreationTime100ns) continue;
+      if (handles.has(window.hwnd)) throw new Error('Native window identity is ambiguous.');
+      handles.add(window.hwnd);
+      const target: WindowTarget = { kind: 'window', hwnd: window.hwnd, expectedProcessId: window.processId,
+        expectedProcessCreationTime100ns: window.processCreationTime100ns };
+      validateCaptureTarget(target);
+      const identity = JSON.stringify([target.hwnd, target.expectedProcessId, target.expectedProcessCreationTime100ns]);
+      const id = `window:${window.hwnd}:${createHash('sha256').update(identity).digest('hex')}`;
+      const previous = this.windows.get(id);
+      if (previous && (previous.hwnd !== target.hwnd
+        || previous.expectedProcessId !== target.expectedProcessId
+        || previous.expectedProcessCreationTime100ns !== target.expectedProcessCreationTime100ns))
+        throw new Error('Native window selection identity collision.');
+      selected.set(id, target);
+      result.push({ id, window });
+    }
+    this.windows = selected;
+    return result;
+  }
+
+  listMonitors(): { id: string; monitor: NativeMonitorInfo }[] {
+    const selected = new Map<string, MonitorTarget>();
+    const devices = new Set<string>();
+    const result = this.inspect.monitors().map(monitor => {
+      const target = monitorTarget(monitor);
+      if (devices.has(target.deviceId)) throw new Error('Native monitor device identity is ambiguous.');
+      devices.add(target.deviceId);
+      // Geometry is part of this selection: a mode/topology change invalidates
+      // stored IDs rather than silently restoring capture on different pixels.
+      const id = `native-monitor:${createHash('sha256').update(monitorIdentity(target)).digest('hex')}`;
+      const previous = this.monitors.get(id);
+      if (selected.has(id) || (previous && monitorIdentity(previous) !== monitorIdentity(target)))
+        throw new Error('Native monitor selection identity collision.');
+      selected.set(id, target);
+      return { id, monitor };
+    });
+    this.monitors = selected;
+    return result;
+  }
+
+  resolve(sourceId: string, kind: NativeScreenCaptureKind): NativeScreenCaptureTarget {
+    if (kind === 'monitor') {
+      const selected = this.monitors.get(sourceId);
+      const current = selected ? this.inspect.monitorState(selected.deviceId) : null;
+      if (!selected || !current || monitorIdentity(monitorTarget(current)) !== monitorIdentity(selected))
+        throw new Error('The selected monitor changed or disconnected. Select it again explicitly.');
+      return { ...selected, bounds: { ...selected.bounds } };
+    }
+    const selected = this.windows.get(sourceId);
+    const state = selected ? this.inspect.windowState(selected.hwnd) : null;
+    if (!selected || !state?.isTopLevel || state.processId !== selected.expectedProcessId
+      || state.processCreationTime100ns !== selected.expectedProcessCreationTime100ns)
+      throw new Error('The selected screen-sharing window is unavailable or was replaced.');
+    const target: WindowTarget = { ...selected, kind };
+    validateCaptureTarget(target);
+    return target;
+  }
+}

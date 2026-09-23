@@ -33,6 +33,7 @@ Todo código produzido deve seguir as melhores práticas da indústria, com foco
 - **Limpeza de Event Listeners:** Sempre remova listeners vinculados a `window`, `document`, elementos do DOM ou ao `EventBus` quando uma view, modal ou componente for desmontado/fechado.
 - **Gerenciamento de Estado Previsível:** Concentre estados nas Stores dedicadas (`chatStore`, `voiceStore`, `serverStore`, `settingsStore`, `connectionStore`), aplicando mutações claras e sem dependências circulares.
 - **Performance de Renderização:** Evite reflows e repaints desnecessários no DOM; prefira mutações cirúrgicas a recriações massivas de HTML.
+- **Controles de Escolha:** Nunca apresente checkbox ou radio button nativos na interface. Use **switch buttons** para opções de liga/desliga e **cards selecionáveis** para escolhas mutuamente exclusivas, como modo de entrada do microfone ou modo de voz do servidor. Reutilize os componentes e estilos existentes, com estado selecionado e operação por teclado acessíveis. O `input type="checkbox"` interno do componente `toggle-switch` é apenas um detalhe de implementação: não pode aparecer como checkbox isolado.
 
 #### 🔹 Backend / Servidor (Clean Architecture Pragmática)
 
@@ -69,6 +70,23 @@ A comunicação do agente deve ser sempre **clara, didática, transparente e res
 
 - **Verifique antes de afirmar.** Nunca diga que algo está feito, verde ou mergeado sem ter conferido. O estado de um PR muda enquanto você trabalha: consulte `state` junto de `mergeable`, porque `mergeable: UNKNOWN` tanto significa "o GitHub ainda está calculando" quanto "o PR já foi fechado".
 - **Documentação apodrece em silêncio.** Link, âncora, caminho de menu e nome de arquivo não dão erro quando ficam errados — apenas passam a apontar para o lugar errado. Ao mexer em documentação, confira o que citou: âncoras contra o render real, caminhos de menu contra a interface, nomes de arquivo e comandos contra o que existe de fato.
+
+---
+
+## 🧪 Desenvolvimento ao lado da versão instalada
+
+- **Nunca feche a versão instalada para testar uma alteração.** O cliente não empacotado usa automaticamente um perfil próprio por checkout/worktree, em `appData/Monky-development/<identificador>`, separado da identidade, configurações, cache e servidores da instalação. O título da janela é `Monky Dev`.
+- **Mantenha o lock de instância única.** Ele continua valendo por perfil; não remova `requestSingleInstanceLock()` nem mate processos pelo nome. Encerre apenas os PIDs que o próprio teste iniciou.
+- **Duas instâncias de desenvolvimento precisam de perfis diferentes.** Para QA descartável, passe um `--user-data-dir` próprio para cada participante. Nunca aponte esse parâmetro para o perfil da instalação:
+
+```powershell
+npm run build
+npm run start --workspace=apps/client -- --user-data-dir="C:\Projetos\Monky-qa\participante-a"
+npm run start --workspace=apps/client -- --user-data-dir="C:\Projetos\Monky-qa\participante-b"
+```
+
+- O cliente de desenvolvimento mantém também o cache Chromium e o `MONKY_HOME` dos processos filhos dentro do perfil selecionado. Um **CLI de servidor iniciado separadamente** precisa do seu próprio `MONKY_HOME` e diretório de dados; não reutilize registros, bancos, portas ou credenciais de produção.
+- Cliente, servidor e bots de QA devem usar versões compatíveis do protocolo. Crie um servidor descartável da mesma branch e valide voz com dois participantes; não use um servidor real para contornar incompatibilidade de versões.
 
 ---
 

@@ -1,4 +1,4 @@
-import type { SlashCommand } from '@monky/shared';
+import { getCommandPresentation, resolveBotLocale, type BotLocale, type SlashCommand } from '@monky/shared';
 
 export const COMMAND_USAGE_STORAGE_KEY = 'monky_bot_command_usage_v1';
 export const MAX_COMMAND_USAGE_SCOPES = 20;
@@ -32,6 +32,29 @@ export interface CommandGroup {
   botName?: string;
   botAvatarUrl?: string | null;
   commands: SlashCommand[];
+}
+
+export type CommandLocaleResolver = (command: SlashCommand) => BotLocale;
+
+export function findCommandsByInputName(
+  commands: SlashCommand[], input: string, localeFor: CommandLocaleResolver = () => 'pt-BR',
+): SlashCommand[] {
+  const name = input.toLowerCase();
+  const matches = commands.filter((command) => getCommandPresentation(command, localeFor(command)).inputNames.includes(name));
+  // Rejecting collisions at registration is primary; stale metadata must never shadow a canonical ID.
+  const canonicalBots = new Set(matches.filter((command) => command.name === name).map((command) => command.botId));
+  return matches.filter((command) => command.name === name || !canonicalBots.has(command.botId));
+}
+
+export function filterCommands(
+  commands: SlashCommand[], input: string, localeFor: CommandLocaleResolver = () => 'pt-BR',
+): SlashCommand[] {
+  const query = input.toLowerCase();
+  return commands.filter((command) => {
+    const locale = localeFor(command);
+    return getCommandPresentation(command, locale).inputNames.some((name) => name.includes(query)) ||
+      command.botName.toLocaleLowerCase(locale).includes(query);
+  });
 }
 
 export function commandKey(command: Pick<SlashCommand, 'botId' | 'name'>): string {
@@ -138,7 +161,8 @@ export function groupCommands(
   commands: SlashCommand[],
   usage: CommandUsage[],
   locale = 'pt-BR',
-  includeEmptyFrequent = true
+  includeEmptyFrequent = true,
+  localeFor: CommandLocaleResolver = () => resolveBotLocale(locale),
 ): CommandGroup[] {
   if (commands.length === 0) return [];
   const catalog = new Map(commands.map((command) => [commandKey(command), command]));
@@ -162,7 +186,9 @@ export function groupCommands(
   }
   const groups = [...byBot.values()].sort((a, b) =>
     (a.botName ?? '').localeCompare(b.botName ?? '', locale, { sensitivity: 'base' }) || a.id.localeCompare(b.id));
-  for (const group of groups) group.commands.sort((a, b) => a.name.localeCompare(b.name, locale));
+  for (const group of groups) group.commands.sort((a, b) =>
+    getCommandPresentation(a, localeFor(a)).displayName.localeCompare(getCommandPresentation(b, localeFor(b)).displayName, locale) ||
+    a.name.localeCompare(b.name, locale));
   if (frequent.length || includeEmptyFrequent) groups.unshift({ id: 'frequent', kind: 'frequent', commands: frequent });
   return groups;
 }

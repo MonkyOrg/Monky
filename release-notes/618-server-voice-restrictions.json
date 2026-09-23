@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Os bloqueios de voz ficam no servidor certo e continuam valendo ao sair, voltar ou trocar de dispositivo. Sem confundir a conversa de um servidor com a de outro.",
+  "en": "Voice restrictions stay with the right server, even when you leave, return, or switch devices. One server's conversation no longer gets mixed up with another."
+}

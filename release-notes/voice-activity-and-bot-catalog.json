@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Corrigido o indicador de fala de participantes em P2P e SFU quando há áudio, mas as estatísticas indicam silêncio. O catálogo agora explica por que bots online não têm comandos disponíveis e facilita revisar suas permissões.",
+  "en": "Fixed speaking indicators in P2P and SFU when audio is playing but statistics report silence. The catalog now explains why online bots have no available commands and makes it easier to review their permissions."
+}

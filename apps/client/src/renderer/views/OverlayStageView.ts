@@ -5,6 +5,7 @@ import type {
 } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
+import { renderAudioMuteIndicators } from './AudioStateIcon';
 
 /**
  * `availLeft`/`availWidth` let the overlay work out which side of the display it
@@ -465,19 +466,23 @@ export class OverlayStageView {
 
   private getMiniIconsHtml(p: OverlayParticipantState): string {
     return `
-      ${p.isMuted ? '<span class="material-symbols-outlined md-14" style="color: var(--danger);">mic_off</span>' : ''}
-      ${p.isDeafened ? '<span class="material-symbols-outlined md-14" style="color: var(--danger);">headset_off</span>' : ''}
+      ${renderAudioMuteIndicators(p)}
       ${p.screenShareIds.length > 0 ? '<span class="material-symbols-outlined md-14" style="color: var(--success);">screen_share</span>' : ''}
       ${p.isCameraOn ? '<span class="material-symbols-outlined md-14" style="color: var(--primary);">videocam</span>' : ''}
     `;
   }
 
   private getBadgesHtml(tile: OverlayTile): string {
+    const selected = tile.shareId ? tile.p.screenCaptureModes?.[tile.shareId] : undefined;
+    const mode = selected === 'normal' || selected === 'game' ? selected : undefined;
+    if (selected !== undefined && mode === undefined) console.warn('[OverlayStage] Invalid screen capture mode.');
+    const label = mode ? escapeHtml(t(mode === 'game' ? 'screenShare.gameCapture' : 'screenShare.windowCapture')) : '';
     return `
-      ${tile.p.isMuted ? '<span class="material-symbols-outlined md-12" style="color: var(--danger);">mic_off</span>' : ''}
-      ${tile.p.isDeafened ? '<span class="material-symbols-outlined md-12" style="color: var(--danger);">headset_off</span>' : ''}
+      ${renderAudioMuteIndicators(tile.p, { size: 12 })}
       ${tile.kind === 'camera' ? '<span class="material-symbols-outlined md-12" style="color: var(--primary);">videocam</span>' : ''}
-      ${tile.kind === 'screen' ? '<span class="material-symbols-outlined md-12" style="color: var(--success);">screen_share</span>' : ''}
+      ${tile.kind === 'screen' ? `<span class="material-symbols-outlined md-12" style="color: var(--success);"
+        ${mode ? `data-capture-mode="${mode}" role="img" aria-label="${label}" title="${label}"` : 'aria-hidden="true"'}
+        >${mode === 'game' ? 'sports_esports' : 'screen_share'}</span>` : ''}
     `;
   }
 

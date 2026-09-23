@@ -39,7 +39,7 @@ export interface MonkyBackup {
  * dropped on the way in: a restored backup falls back to the system default
  * instead of pointing at a microphone that does not exist here.
  */
-const MACHINE_SPECIFIC_SETTINGS = ['selectedMicrophoneId', 'selectedSpeakerId', 'selectedCameraId'] as const;
+const MACHINE_SPECIFIC_SETTINGS = ['selectedMicrophoneId', 'selectedSpeakerId', 'selectedCameraId', 'audioOutputDevices'] as const;
 
 function readJson(key: string): unknown {
   try {

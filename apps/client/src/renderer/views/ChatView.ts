@@ -1,33 +1,42 @@
-import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, hasEveryoneMention } from '@monky/shared';
-import type { AttachmentMeta, MessageReply, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
+import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, getCommandPresentation, getMessageText, hasEveryoneMention } from '@monky/shared';
+import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, CommandPresentation, MessageReply, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
 import { networkClient, getActiveNetworkClient } from '../core/NetworkClient';
-import { chatStore, getActiveChatStore, type BotInvocation } from '../stores/chatStore';
+import { chatStore, getActiveChatStore, type BotInvocation, type MessageEditDraft } from '../stores/chatStore';
 import { serverStore, getActiveServerStore } from '../stores/serverStore';
 import { participantManager } from '../core/ParticipantManager';
 import { userContextMenu } from './UserContextMenu';
-import { contextMenu, ContextMenuItem } from './ContextMenu';
+import { contextMenu, type ContextMenuEntry, type ContextMenuItem } from './ContextMenu';
 import { getAvatarUrl } from '../utils/avatar';
 import { renderMarkdown } from '../utils/markdown';
+import { markdownMessageClipboard, pasteMonkyClipboard, renderedMessageClipboard, selectedMessageClipboard,
+  setMessageClipboardData, writeMessageClipboard, type MessageClipboardContent, type MessageCopyMode } from '../utils/messageClipboard';
 import { getLanguage, t } from '../i18n';
 import { uploadAttachment, UploadHandle } from '../core/AttachmentUploader';
 import { getAttachmentUrl, formatBytes, fileIconName } from '../utils/attachment';
 import { showAlert, showConfirm } from './Dialog';
+import { showCopyToast } from './CopyToast';
+import { ImageClipboard } from '../utils/imageClipboard';
 import { downloadLightboxFile, lightboxModal, LightboxMedia } from './LightboxModal';
 import { linkPreviewService } from '../core/LinkPreviewService';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
 import { EmojiPicker } from './EmojiPicker';
 import { buildCodeMessage, codeBlockModal } from './CodeBlockModal';
+import { bindChatComposerMotion } from './FooterControlsMotion';
 import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
 import { extractStickerIds, stickerToken, stripStickerTokens } from '../utils/stickers';
-import { parseTypedCommand } from '../utils/botInputs';
+import { formatCommandContext, parseTypedCommand } from '../utils/botInputs';
 import { BotChatView, renderBotInvocation } from './BotChatView';
-import { groupCommands, type CommandGroup } from '../utils/commandCatalog';
-import { renderCommandCatalog } from './commandCatalog';
+import { filterCommands, findCommandsByInputName, groupCommands, type CommandGroup } from '../utils/commandCatalog';
+import { renderCommandCatalog, renderEmptyCommandCatalog } from './commandCatalog';
 import { renderBotCommandContext } from './botResponse';
 import { PublicSelectorView } from './PublicSelectorView';
+import { botSettingsModal, botSettingsMenuItem } from './BotSettingsModal';
+import { commandVoiceError } from '../utils/botVoice';
+import { botLocaleFor } from '../utils/botLocale';
+import { translateProtocolError } from '../i18n/protocolErrors';
 
 /** How close to the end the feed must be to keep following new messages (#270). */
 const BOTTOM_SCROLL_THRESHOLD_PX = 48;
@@ -53,7 +62,12 @@ type MentionCandidate =
 
 export class ChatView {
   private container: HTMLElement;
+  private readonly store = getActiveChatStore();
+  private readonly client = getActiveNetworkClient();
+  private readonly server = getActiveServerStore();
   private currentChannelId: string | null = null;
+  private composerInput: HTMLTextAreaElement | null = null;
+  private composerChannelId: string | null = null;
   private unbindEvents: Array<() => void> = [];
   /** Tracks whether the feed is following the end of the conversation (#270). */
   private pinnedToBottom = true;
@@ -70,11 +84,12 @@ export class ChatView {
   private commandActiveIndex = 0;
   private commandQuery = '';
   private botChat: BotChatView | null = null;
+  private commandSelection = 0;
   private publicSelectors: PublicSelectorView | null = null;
+  private voiceNoticeCommand: SlashCommand | null = null;
+  private commandLocale = (command: SlashCommand): BotLocale => botLocaleFor(this.client, this.server, command.botId);
   // Files picked for the next message, keyed by a local id (#11).
   private pending: PendingAttachment[] = [];
-  /** Message currently open in the inline editor, if any (#504). */
-  private editingMessageId: string | null = null;
   private uploadSeq = 0;
   /** Emoji/sticker popover anchored to the composer (#356). */
   private emojiPicker: EmojiPicker | null = null;
@@ -82,13 +97,15 @@ export class ChatView {
   private pendingJumpId: string | null = null;
   private copyRequestId = 0;
   private clearCopyFeedback: (() => void) | null = null;
+  private readonly imageClipboard = new ImageClipboard();
 
   constructor(container: HTMLElement) {
     this.container = container;
   }
 
   public setChannel(channelId: string): void {
-    if (this.currentChannelId === channelId && this.container.querySelector('#chat-messages-feed')) {
+    if (!this.isCurrentSession()) return;
+    if (this.currentChannelId === channelId && this.composerInput && this.container.querySelector('#chat-messages-feed')) {
       // Channel is already active and rendered; keep existing DOM and media state
       this.focusChatInput({ defer: true });
       return;
@@ -112,7 +129,8 @@ export class ChatView {
   public render(): void {
     this.unbindListeners();
 
-    if (!this.currentChannelId || !serverStore.serverDetails) {
+    const serverDetails = this.server.serverDetails;
+    if (!this.isCurrentSession() || !this.currentChannelId || !serverDetails) {
       this.container.innerHTML = `
         <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted);">
           ${t('chat.selectChannel')}
@@ -121,10 +139,17 @@ export class ChatView {
       return;
     }
 
-    const channel = serverStore.serverDetails.channels.find((c) => c.id === this.currentChannelId);
+    if (this.server.currentUser) {
+      this.store.setComposerScope({
+        sessionKey: this.client.sessionKey || this.client.getCurrentServerUrl(),
+        serverId: serverDetails.id,
+        userId: this.server.currentUser.id,
+      });
+    }
+    const channel = serverDetails.channels.find((c) => c.id === this.currentChannelId);
     const channelName = channel ? channel.name : 'geral';
 
-    this.container.innerHTML = `
+    const markup = `
       <div class="chat-container">
         <div id="chat-drop-overlay" class="chat-drop-overlay">
           <div class="drop-inner">
@@ -145,6 +170,15 @@ export class ChatView {
         <button type="button" id="chat-return-latest" class="btn btn-secondary" hidden>${t('chat.returnLatest')}</button>
 
         <div class="chat-input-container">
+          <div id="chat-edit-composer" class="chat-edit-composer" hidden>
+            <div class="chat-edit-heading">
+              <span class="material-symbols-outlined md-18" aria-hidden="true">edit</span>
+              <strong id="chat-edit-label" role="status">${t('chat.editingMessage')}</strong>
+              <button type="button" id="btn-cancel-message-edit" class="btn btn-secondary">${t('common.cancel')}</button>
+            </div>
+            <p id="chat-edit-hint">${t('chat.editComposerHint')}</p>
+            <p id="chat-edit-error" class="chat-edit-error" role="alert" hidden></p>
+          </div>
           <div id="chat-reply-composer" class="chat-reply-composer" hidden></div>
           <div id="mention-dropup" class="mention-dropup" style="display: none;"></div>
           <div id="command-dropup" class="command-dropup" style="display: none;"></div>
@@ -166,14 +200,15 @@ export class ChatView {
             </button>
             <textarea id="chat-message-input" class="chat-input-field" rows="1" placeholder="${t('chat.inputPlaceholder', { channel: escapeHtml(channelName) })}" maxlength="${LIMITS.MAX_MESSAGE_LENGTH}"></textarea>
             <span id="chat-char-counter" class="chat-char-count">0/${LIMITS.MAX_MESSAGE_LENGTH}</span>
-            <button id="btn-send-message" class="btn btn-primary chat-send-btn">
-              <span class="material-symbols-outlined md-16">send</span>
-              ${t('chat.send')}
+            <button type="button" id="btn-send-message" class="btn btn-primary chat-send-btn">
+              <span class="material-symbols-outlined md-16" aria-hidden="true">send</span>
+              <span class="chat-send-label">${t('chat.send')}</span>
             </button>
           </div>
         </div>
       </div>
     `;
+    this.container.innerHTML = markup;
 
     this.renderMessages({ forceScroll: true });
     this.attachEvents();
@@ -197,9 +232,6 @@ export class ChatView {
     // Read before the feed is replaced: new messages only pull the view down when
     // the user is already reading the end of the conversation (#270).
     const shouldScroll = options.forceScroll === true || this.isFeedAtBottom(feed);
-
-    // The feed is rebuilt from scratch, so any open inline editor goes with it.
-    this.editingMessageId = null;
 
     const messages = chatStore.getMessages(this.currentChannelId);
     if (messages.length === 0 && chatStore.getInvocations(this.currentChannelId).length === 0) {
@@ -313,18 +345,47 @@ export class ChatView {
       : Array.from(container.querySelectorAll<HTMLElement>('.chat-message-row'));
 
     rows.forEach((row) => {
+      const toolbar = row.querySelector<HTMLElement>('.chat-message-toolbar');
+      const dismissToolbar = () => this.dismissMessageToolbar(row);
+      const resetToolbar = () => row.classList.remove('chat-message-actions-dismissed');
+      // Closing a submenu over the row can synthesize an enter without moving
+      // the pointer. Only real movement should undo an action's dismissal.
+      row.addEventListener('pointermove', (event) => {
+        if (event.movementX || event.movementY) resetToolbar();
+      });
+      row.addEventListener('mouseleave', resetToolbar);
+      toolbar?.addEventListener('focusin', resetToolbar);
+      toolbar?.addEventListener('click', (event) => {
+        const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-message-action]') : null;
+        if (button && !button.disabled && !['more', 'emoji', 'copy'].includes(button.dataset.messageAction ?? '')) dismissToolbar();
+      }, true);
       this.bindReactionButtons(row);
       row.querySelector<HTMLButtonElement>('[data-message-action="reply"]')?.addEventListener('click', () => {
         this.startReply(row.dataset.messageId ?? '');
       });
       row.querySelector<HTMLButtonElement>('[data-message-action="copy"]')?.addEventListener('click', () => {
-        void this.copyMessage(row.dataset.messageId ?? '');
+        const messageId = row.dataset.messageId ?? '';
+        const selection = this.selectedClipboard(messageId);
+        dismissToolbar();
+        void this.copyMessage(messageId, 'formatted', selection);
       });
       const more = row.querySelector<HTMLButtonElement>('[data-message-action="more"]');
-      more?.addEventListener('click', () => {
+      more?.addEventListener('click', (event) => {
+        if (contextMenu.isOpenFor(more)) {
+          contextMenu.close();
+          (event.detail === 0 ? more : row).focus({ preventScroll: true });
+          return;
+        }
         this.reactionPicker?.close();
+        resetToolbar();
         const rect = more.getBoundingClientRect();
-        contextMenu.open(rect.right, rect.bottom, this.buildMessageMenuItems(row.dataset.messageId ?? null), more);
+        const dismissItem = (item: ContextMenuItem): ContextMenuItem => ({
+          ...item,
+          onClick: () => { dismissToolbar(); item.onClick(); },
+        });
+        const items = this.buildMessageMenuItems(row.dataset.messageId ?? null).map((item) =>
+          'submenu' in item ? { ...item, submenu: item.submenu.map(dismissItem) } : dismissItem(item));
+        contextMenu.open(rect.right, rect.bottom, items, more);
       });
       row.querySelector<HTMLButtonElement>('[data-reply-target]')?.addEventListener('click', (event) => {
         const button = event.currentTarget;
@@ -332,6 +393,17 @@ export class ChatView {
       });
       row.addEventListener('contextmenu', (e: Event) => {
         const mouseEvent = e as MouseEvent;
+        const image = mouseEvent.target instanceof Element
+          ? mouseEvent.target.closest<HTMLImageElement>('img.chat-attachment-image, img.chat-sticker') : null;
+        if (image && row.contains(image)) {
+          mouseEvent.preventDefault();
+          userContextMenu.close();
+          contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, [{
+            label: t('chat.copyImage'), icon: 'content_copy',
+            onClick: () => { void this.copyAttachmentImage(image); },
+          }, ...this.buildMessageMenuItems(row.dataset.messageId ?? null)]);
+          return;
+        }
         // If text is currently highlighted / selected, allow normal browser selection copy
         const selection = window.getSelection()?.toString();
         if (selection && selection.trim().length > 0) {
@@ -341,20 +413,40 @@ export class ChatView {
         const userId = row.getAttribute('data-user-id');
         if (!userId) return;
 
+        const targetUser =
+          participantManager.getByUserId(userId)?.user ||
+          serverStore.serverDetails?.members.find((m) => m.id === userId) ||
+          serverStore.knownMembers.get(userId);
+        if (mouseEvent.target instanceof Element && mouseEvent.target.closest('.chat-author-name, .chat-author-avatar')) {
+          if (targetUser) {
+            mouseEvent.preventDefault();
+            contextMenu.close();
+            userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, targetUser);
+            return;
+          }
+          const message = this.currentChannelId
+            ? chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === row.dataset.messageId)
+            : undefined;
+          if (message?.isBot && message.userId === userId) {
+            mouseEvent.preventDefault();
+            userContextMenu.close();
+            contextMenu.open(mouseEvent.clientX, mouseEvent.clientY,
+              [botSettingsMenuItem(userId, getActiveNetworkClient(), getActiveServerStore())]);
+            return;
+          }
+        }
+
         // Editing/deleting acts on this specific message, so it takes
         // precedence over the per-person menu (#504).
         const messageActions = this.buildMessageMenuItems(row.getAttribute('data-message-id'));
         if (messageActions.length > 0) {
           mouseEvent.preventDefault();
+          userContextMenu.close();
           contextMenu.open(mouseEvent.clientX, mouseEvent.clientY, messageActions);
           return;
         }
 
-        const targetUser =
-          participantManager.getByUserId(userId)?.user ||
-          serverStore.serverDetails?.members.find((m) => m.id === userId);
-
-        if (targetUser && targetUser.id !== serverStore.currentUser?.id) {
+        if (targetUser) {
           mouseEvent.preventDefault();
           userContextMenu.open(mouseEvent.clientX, mouseEvent.clientY, targetUser);
         }
@@ -373,7 +465,7 @@ export class ChatView {
    * be able to clean up after other people. Deleted and system messages offer
    * nothing.
    */
-  private buildMessageMenuItems(messageId: string | null): ContextMenuItem[] {
+  private buildMessageMenuItems(messageId: string | null): ContextMenuEntry[] {
     if (!messageId || !this.currentChannelId) return [];
     const message = chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId);
     if (!message || message.isSystem || message.isEphemeral || message.deletedAt) return [];
@@ -382,16 +474,27 @@ export class ChatView {
     const canModerate = serverStore.hasPermission(Permission.MANAGE_SERVER);
     const editingAllowed = serverStore.serverDetails?.allowMessageEdit !== false;
 
-    const items: ContextMenuItem[] = [];
+    const items: ContextMenuEntry[] = [];
     if (serverStore.hasPermission(Permission.SEND_MESSAGES)) {
       items.push({
         label: t('chat.emojiAction'), icon: 'add_reaction',
         onClick: () => this.container.querySelector<HTMLButtonElement>(
           `.chat-message-row[data-message-id="${CSS.escape(message.id)}"] .chat-reaction-add`
         )?.click(),
-      }, { label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(message.id) });
+      });
+      if (!this.messageEdit) items.push({ label: t('chat.replyMessage'), icon: 'reply', onClick: () => this.startReply(message.id) });
     }
-    items.push({ label: t('chat.copyMessage'), icon: 'content_copy', onClick: () => { void this.copyMessage(message.id); } });
+    const selection = this.selectedClipboard(message.id);
+    const modifier = navigator.platform.startsWith('Mac') ? 'Cmd' : 'Ctrl';
+    items.push({
+      label: t('chat.copyMessage'), icon: 'content_copy',
+      submenu: [
+        { label: t('chat.copyFormatted'), shortcut: `${modifier}+C`,
+          onClick: () => { void this.copyMessage(message.id, 'formatted', selection); } },
+        { label: t('chat.copyPlain'),
+          onClick: () => { void this.copyMessage(message.id, 'plain', selection); } },
+      ],
+    });
     if (isAuthor && editingAllowed) {
       items.push({
         label: t('chat.editMessage'),
@@ -410,102 +513,127 @@ export class ChatView {
     return items;
   }
 
-  /** Swaps a message's text for an inline editor (#504). */
+  /** Edit text and the new-message draft occupy separate, session-owned slots. */
   private startEditingMessage(messageId: string): void {
-    if (!this.currentChannelId) return;
-    const row = document.querySelector<HTMLElement>(
-      `#chat-messages-feed .chat-message-row[data-message-id="${CSS.escape(messageId)}"]`
-    );
-    const message = chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId);
-    if (!row || !message) return;
+    if (!this.isCurrentComposer() || !this.currentChannelId) return;
+    const message = this.store.getMessages(this.currentChannelId).find((entry) => entry.id === messageId);
+    if (!message || message.isSystem || message.isEphemeral || message.deletedAt ||
+        message.userId !== this.server.currentUser?.id || this.server.serverDetails?.allowMessageEdit === false) return;
+    this.rememberComposerText();
+    const previous = this.store.getMessageEdit(this.currentChannelId);
+    if (previous) {
+      if (previous.message.id !== messageId && !previous.pending) {
+        this.store.setMessageEditPending(this.currentChannelId, previous, false, 'in-progress');
+      }
+      this.focusChatInput();
+      return;
+    }
+    this.store.beginMessageEdit(message);
+    this.focusChatInput();
+  }
 
-    // Only one editor at a time, otherwise leaving one open and starting
-    // another would strand the first without a way back.
-    this.cancelMessageEdit();
+  private async submitMessageEdit(): Promise<void> {
+    if (!this.isCurrentComposer() || !this.currentChannelId || !this.composerInput) return;
+    const channelId = this.currentChannelId;
+    const edit = this.store.getMessageEdit(channelId);
+    if (!edit || edit.pending) return;
+    this.rememberComposerText();
+    if (this.messageEditDeniedReason(edit)) {
+      this.syncComposerPermissionState();
+      return;
+    }
+    const content = edit.content.trim();
+    if (!content && !edit.message.attachments?.length) {
+      this.store.setMessageEditPending(channelId, edit, false, 'empty');
+      return;
+    }
+    if (content.length > LIMITS.MAX_MESSAGE_LENGTH) {
+      this.store.setMessageEditPending(channelId, edit, false, 'too-long');
+      return;
+    }
+    if (edit.content === edit.message.content || content === edit.message.content) {
+      this.cancelMessageEdit();
+      return;
+    }
 
-    const body = row.querySelector('.chat-message-body');
-    const textEl = row.querySelector<HTMLElement>('.chat-message-text');
-    if (!body) return;
-
-    const editor = document.createElement('div');
-    editor.className = 'chat-message-editor';
-    editor.innerHTML = `
-      <textarea class="chat-message-edit-input" rows="1">${escapeHtml(message.content)}</textarea>
-      <div class="chat-message-edit-hint">${t('chat.editHint')}</div>
-    `;
-
-    if (textEl) textEl.style.display = 'none';
-    body.insertBefore(editor, textEl ? textEl.nextSibling : null);
-    this.editingMessageId = messageId;
-
-    const input = editor.querySelector('textarea') as HTMLTextAreaElement;
-    const autoGrow = () => {
-      input.style.height = 'auto';
-      input.style.height = `${input.scrollHeight}px`;
-    };
-    autoGrow();
-    input.focus();
-    input.setSelectionRange(input.value.length, input.value.length);
-
-    input.addEventListener('input', autoGrow);
-    input.addEventListener('keydown', (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        this.cancelMessageEdit();
+    const { store, client, server } = this;
+    const connectionId = client.getConnectionId();
+    const serverId = server.serverDetails?.id;
+    store.setMessageEditPending(channelId, edit, true);
+    try {
+      const result = await client.sendRequest<ChatMessageUpdatedPayload>(MessageType.CHAT_EDIT, {
+        channelId,
+        messageId: edit.message.id,
+        content,
+      });
+      if (store.getMessageEdit(channelId) !== edit) return;
+      if (client.getConnectionId() !== connectionId || client.getStatus() !== 'CONNECTED' ||
+          server.serverDetails?.id !== serverId || server.currentUser?.id !== edit.message.userId ||
+          result.message.id !== edit.message.id || result.message.channelId !== channelId ||
+          result.message.userId !== edit.message.userId || result.message.deletedAt || edit.message.deletedAt ||
+          result.message.content !== content) {
+        store.setMessageEditPending(channelId, edit, false, 'failed');
         return;
       }
-      // Shift+Enter keeps inserting line breaks, same as the composer.
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        this.submitMessageEdit(messageId, input.value);
-      }
-    });
+      const refocus = this.isCurrentComposer() && this.currentChannelId === channelId &&
+        (document.activeElement === this.composerInput ||
+          document.activeElement === this.container.querySelector('#btn-send-message'));
+      store.updateMessage(result.message);
+      store.finishMessageEdit(channelId, edit);
+      if (refocus && this.isCurrentComposer() && this.currentChannelId === channelId) this.focusChatInput();
+    } catch {
+      store.setMessageEditPending(channelId, edit, false, 'failed');
+    }
   }
 
-  private submitMessageEdit(messageId: string, content: string): void {
-    const trimmed = content.trim();
-    const original = this.currentChannelId
-      ? chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId)
-      : undefined;
-
-    // An empty edit is a deletion in disguise; asking for it explicitly keeps
-    // the two actions distinguishable in the UI (#504).
-    if (trimmed.length === 0) {
-      this.cancelMessageEdit();
-      void this.confirmDeleteMessage(messageId);
-      return;
-    }
-
-    if (!original || trimmed === original.content) {
-      this.cancelMessageEdit();
-      return;
-    }
-
-    networkClient.send(MessageType.CHAT_EDIT, {
-      channelId: original.channelId,
-      messageId,
-      content: trimmed,
-    });
-    this.cancelMessageEdit();
-  }
-
-  /** Closes the inline editor and puts the original text back on screen. */
   private cancelMessageEdit(): void {
-    if (!this.editingMessageId) return;
-    const row = document.querySelector<HTMLElement>(
-      `#chat-messages-feed .chat-message-row[data-message-id="${CSS.escape(this.editingMessageId)}"]`
-    );
-    this.editingMessageId = null;
-    if (!row) return;
-    row.querySelector('.chat-message-editor')?.remove();
-    const textEl = row.querySelector<HTMLElement>('.chat-message-text');
-    if (textEl) textEl.style.display = '';
+    if (!this.isCurrentComposer() || !this.currentChannelId) return;
+    const edit = this.store.getMessageEdit(this.currentChannelId);
+    if (!edit || edit.pending) return;
+    this.store.finishMessageEdit(this.currentChannelId, edit);
+    this.focusChatInput();
+  }
+
+  private isCurrentSession(): boolean {
+    return getActiveChatStore() === this.store && getActiveNetworkClient() === this.client &&
+      getActiveServerStore() === this.server;
+  }
+
+  private isCurrentComposer(): boolean {
+    return this.isCurrentSession() && !!this.composerInput?.isConnected &&
+      this.composerChannelId === this.currentChannelId;
+  }
+
+  private rememberComposerText(): void {
+    const channelId = this.composerChannelId;
+    if (!channelId || !this.composerInput) return;
+    if (this.store.getMessageEdit(channelId)) this.store.setMessageEditContent(channelId, this.composerInput.value);
+    else this.store.setDraft(channelId, this.composerInput.value);
+  }
+
+  private messageEditDeniedReason(edit: MessageEditDraft): string | undefined {
+    if (this.client.getStatus() !== 'CONNECTED') return t('chat.editDisconnected');
+    const message = edit.message;
+    if (message.deletedAt || message.isSystem || message.isEphemeral ||
+        !this.server.serverDetails?.channels.some((channel) => channel.id === message.channelId && channel.type === 'TEXT')) {
+      return t('chat.editUnavailable');
+    }
+    if (message.userId !== this.server.currentUser?.id || this.server.serverDetails.allowMessageEdit === false) {
+      return t('chat.editPermissionDenied');
+    }
+    return;
+  }
+
+  private get messageEdit(): MessageEditDraft | undefined {
+    return this.currentChannelId ? this.store.getMessageEdit(this.currentChannelId) : undefined;
   }
 
   private async confirmDeleteMessage(messageId: string): Promise<void> {
-    if (!this.currentChannelId) return;
-    const message = chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId);
+    if (!this.isCurrentComposer() || !this.currentChannelId) return;
+    const message = this.store.getMessages(this.currentChannelId).find((m) => m.id === messageId);
     if (!message) return;
+    const channelId = this.currentChannelId;
+    const connectionId = this.client.getConnectionId();
 
     const confirmed = await showConfirm({
       title: t('chat.deleteMessageTitle'),
@@ -513,9 +641,10 @@ export class ChatView {
       confirmLabel: t('chat.deleteMessage'),
       variant: 'danger',
     });
-    if (!confirmed) return;
+    if (!confirmed || !this.isCurrentComposer() || this.currentChannelId !== channelId ||
+        this.client.getConnectionId() !== connectionId || this.client.getStatus() !== 'CONNECTED') return;
 
-    networkClient.send(MessageType.CHAT_DELETE, {
+    this.client.send(MessageType.CHAT_DELETE, {
       channelId: message.channelId,
       messageId,
     });
@@ -529,8 +658,6 @@ export class ChatView {
       `.chat-message-row[data-message-id="${CSS.escape(msg.id)}"]`
     );
     if (!row) return;
-
-    if (this.editingMessageId === msg.id) this.cancelMessageEdit();
 
     const wrapper = document.createElement('div');
     wrapper.innerHTML = this.renderMessageRow(msg);
@@ -574,7 +701,8 @@ export class ChatView {
       ...messages.map((message) => ({ createdAt: message.createdAt, html: this.renderMessageRow(message) })),
       ...chatStore.getInvocations(this.currentChannelId ?? '').map((invocation) => ({
         createdAt: invocation.createdAt,
-        html: renderBotInvocation(invocation, !this.getBotCommandDeniedReason()),
+        html: renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id,
+          this.getVoiceCommandDeniedReason(invocation), this.commandPresentation(invocation.botId, invocation.commandName)),
       })),
     ].filter((item) => item.html !== '').sort((a, b) => a.createdAt - b.createdAt);
     for (const item of items) {
@@ -612,7 +740,8 @@ export class ChatView {
 
   private focusChatInput(options?: { defer?: boolean }): void {
     const applyFocus = () => {
-      if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+      if (!this.isCurrentComposer()) return;
+      if (!this.messageEdit && this.currentChannelId && this.store.getCommandDraft(this.currentChannelId)) {
         this.botChat?.focusComposer();
         return;
       }
@@ -636,6 +765,7 @@ export class ChatView {
   }
 
   private syncComposerPermissionState(): void {
+    if (!this.isCurrentComposer()) return;
     const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
     const inputWrapper = this.container.querySelector('.chat-input-wrapper') as HTMLElement | null;
     const permissionBanner = this.container.querySelector('#chat-send-permission-banner') as HTMLElement | null;
@@ -645,25 +775,51 @@ export class ChatView {
     const btnCode = this.container.querySelector('#btn-code') as HTMLButtonElement | null;
     if (!input || !inputWrapper) return;
 
+    const edit = this.messageEdit;
+    const editError = edit ? this.messageEditDeniedReason(edit) ??
+      (edit.error === 'failed' ? t('chat.editSaveFailed') :
+        edit.error === 'empty' ? t('chat.editEmpty') :
+          edit.error === 'too-long' ? t('chat.editTooLong', { max: LIMITS.MAX_MESSAGE_LENGTH }) :
+            edit.error === 'in-progress' ? t('chat.editInProgress') : '') : '';
+    const editBanner = this.container.querySelector<HTMLElement>('#chat-edit-composer');
+    if (editBanner) editBanner.hidden = !edit;
+    const editErrorEl = this.container.querySelector<HTMLElement>('#chat-edit-error');
+    if (editErrorEl) {
+      editErrorEl.hidden = !editError;
+      if (editErrorEl.textContent !== editError) editErrorEl.textContent = editError;
+    }
+    const cancelEdit = this.container.querySelector<HTMLButtonElement>('#btn-cancel-message-edit');
+    if (cancelEdit) cancelEdit.disabled = !!edit?.pending;
+    this.container.querySelector('.chat-input-container')?.classList.toggle('chat-input-container--editing', !!edit);
+
     const channelName = serverStore.serverDetails?.channels.find((c) => c.id === this.currentChannelId)?.name || 'geral';
     const permissionsResolved = this.arePermissionsResolved();
     const canSendMessages = !permissionsResolved || serverStore.hasPermission(Permission.SEND_MESSAGES);
     this.container.querySelectorAll<HTMLButtonElement>('.chat-reaction, .chat-reaction-add, [data-message-action="reply"]').forEach((button) => {
-      button.disabled = !canSendMessages;
+      button.disabled = !canSendMessages || (!!edit && button.dataset.messageAction === 'reply');
     });
     if (!canSendMessages) { this.reactionPicker?.destroy(); this.reactionPicker = null; }
     const canAttachFiles = canSendMessages && (!permissionsResolved || serverStore.hasPermission(Permission.ATTACH_FILES));
-    const locked = permissionsResolved && !canSendMessages;
+    const locked = !edit && permissionsResolved && !canSendMessages;
+    const readOnly = locked || !!edit?.pending;
     const commandSelected = !!this.currentChannelId && !!chatStore.getCommandDraft(this.currentChannelId);
-    inputWrapper.style.display = commandSelected ? 'none' : '';
+    inputWrapper.style.display = commandSelected && !edit ? 'none' : '';
+    const commandComposer = this.container.querySelector<HTMLElement>('#chat-command-composer');
+    if (commandComposer) {
+      commandComposer.hidden = !!edit || !commandSelected;
+      commandComposer.inert = !!edit;
+    }
 
-    input.readOnly = locked;
+    input.readOnly = readOnly;
     input.placeholder = locked
       ? t('chat.sendPermissionDenied')
-      : t('chat.inputPlaceholder', { channel: escapeHtml(channelName) });
-    input.setAttribute('aria-readonly', locked ? 'true' : 'false');
-    inputWrapper.classList.toggle('chat-input-wrapper--disabled', locked);
-    input.classList.toggle('chat-input-field--readonly', locked);
+      : edit ? t('chat.editingMessage') : t('chat.inputPlaceholder', { channel: channelName });
+    input.setAttribute('aria-label', input.placeholder);
+    input.setAttribute('aria-readonly', String(readOnly));
+    if (edit) input.setAttribute('aria-describedby', 'chat-edit-hint chat-edit-error');
+    else input.removeAttribute('aria-describedby');
+    inputWrapper.classList.toggle('chat-input-wrapper--disabled', readOnly);
+    input.classList.toggle('chat-input-field--readonly', readOnly);
 
     if (permissionBanner) {
       permissionBanner.textContent = locked ? t('chat.sendPermissionDenied') : '';
@@ -672,33 +828,45 @@ export class ChatView {
 
     if (btnSend) {
       btnSend.hidden = locked;
-      btnSend.disabled = locked || this.pending.some((p) => p.status === 'uploading');
+      btnSend.disabled = edit ? edit.pending || !!this.messageEditDeniedReason(edit) :
+        locked || this.pending.some((p) => p.status === 'uploading');
+      btnSend.setAttribute('aria-busy', String(!!edit?.pending));
+      const label = btnSend.querySelector('.chat-send-label');
+      const text = t(edit?.pending ? 'chat.editSaving' : edit ? 'common.save' : 'chat.send');
+      if (label && label.textContent !== text) label.textContent = text;
+      const icon = btnSend.querySelector('.material-symbols-outlined');
+      if (icon) icon.textContent = edit?.pending ? 'hourglass_empty' : edit ? 'check' : 'send';
+      btnSend.style.opacity = '';
+      btnSend.style.cursor = '';
     }
 
     if (btnAttach) {
-      btnAttach.disabled = !canAttachFiles;
+      btnAttach.style.display = edit ? 'none' : '';
+      btnAttach.disabled = !!edit || !canAttachFiles;
       btnAttach.setAttribute('aria-disabled', btnAttach.disabled ? 'true' : 'false');
     }
 
     if (btnEmoji) {
       // Emojis only need permission to talk; the sticker upload additionally
       // checks ATTACH_FILES when it is actually sent.
-      btnEmoji.disabled = locked;
+      btnEmoji.disabled = readOnly;
       btnEmoji.setAttribute('aria-disabled', btnEmoji.disabled ? 'true' : 'false');
     }
 
     if (btnCode) {
-      btnCode.disabled = locked;
+      btnCode.style.display = edit ? 'none' : '';
+      btnCode.disabled = !!edit || locked;
       btnCode.setAttribute('aria-disabled', btnCode.disabled ? 'true' : 'false');
     }
 
-    if (locked) {
+    if (readOnly) {
       this.closeMentionDropup();
       this.closeCommandDropup();
       this.emojiPicker?.close();
     } else if (this.commandActive) {
       this.updateCommandDropup(input);
     }
+    if (edit) this.closeCommandDropup();
   }
 
   private isEditableTarget(target: EventTarget | null): boolean {
@@ -727,6 +895,7 @@ export class ChatView {
 
   private renderMessageRow(m: ChatMessage): string {
     const time = this.formatDateTime(m.createdAt);
+    const messageText = getMessageText(m, getLanguage());
 
     if (m.isSystem) {
       return `
@@ -740,7 +909,7 @@ export class ChatView {
 
     const me = serverStore.currentUser;
     const currentNickname = me?.nickname?.trim();
-    const isMentioned = !m.isSystem && this.isUserMentioned(m.content, currentNickname ?? '');
+    const isMentioned = !m.isSystem && this.isUserMentioned(messageText, currentNickname ?? '');
 
     const knownNicknames = Array.from(serverStore.knownMembers.values()).map((u) => u.nickname);
     if (currentNickname && !knownNicknames.includes(currentNickname)) {
@@ -749,7 +918,8 @@ export class ChatView {
 
     const avatarSrc = escapeHtml(getAvatarUrl(m.userAvatarUrl));
     const isBot = m.isBot || serverStore.knownMembers.get(m.userId)?.isBot === true;
-    const botContext = isBot ? renderBotCommandContext(m) : '';
+    const botContext = isBot ? renderBotCommandContext(m,
+      m.botCommand ? this.commandPresentation(m.userId, m.botCommand.commandName) : undefined) : '';
     const botBadge = isBot ? `<span class="member-badge-bot">${t('botChat.badge')}</span>` : '';
     const privateCue = m.isEphemeral ? `<span class="bot-private-cue"><span class="material-symbols-outlined md-14" aria-hidden="true">lock</span>${t('botChat.private')}</span>` : '';
 
@@ -783,12 +953,12 @@ export class ChatView {
     // hand-typed marker, an id that no longer exists, a video/file attachment)
     // is left alone so no text or attachment can disappear from the UI.
     const stickers: AttachmentMeta[] = [];
-    for (const id of extractStickerIds(m.content)) {
+    for (const id of extractStickerIds(messageText)) {
       const found = m.attachments?.find((a) => a.id === id);
       if (found && found.kind === 'image') stickers.push(found);
     }
     const stickerIds = stickers.map((a) => a.id);
-    const visibleText = stickerIds.length > 0 ? stripStickerTokens(m.content, stickerIds) : m.content;
+    const visibleText = stickerIds.length > 0 ? stripStickerTokens(messageText, stickerIds) : messageText;
     const otherAttachments =
       stickerIds.length > 0 ? m.attachments?.filter((a) => !stickerIds.includes(a.id)) : m.attachments;
 
@@ -848,17 +1018,23 @@ export class ChatView {
     const button = (action: string, icon: string, label: string, extra = '') =>
       `<button type="button" ${extra} data-message-action="${action}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><span class="material-symbols-outlined md-18" aria-hidden="true">${icon}</span></button>`;
     return `<div class="chat-message-toolbar" role="group" aria-label="${t('chat.messageActions')}">
-      ${button('emoji', 'add_reaction', t('chat.emojiAction'), `class="chat-reaction-add" ${disabled}`)}
+      ${button('emoji', 'add_reaction', t('chat.emojiAction'), `class="chat-reaction-add" aria-haspopup="dialog" aria-expanded="false" ${disabled}`)}
       ${button('reply', 'reply', t('chat.replyMessage'), disabled)}
       ${button('copy', 'content_copy', t('chat.copyMessage'))}
-      <span class="chat-message-copy-status" role="status"></span>
-      ${button('more', 'more_horiz', t('chat.moreActions'), 'aria-haspopup="menu"')}
+      ${button('more', 'more_horiz', t('chat.moreActions'), 'aria-haspopup="menu" aria-expanded="false"')}
     </div>`;
   }
 
+  private dismissMessageToolbar(row: HTMLElement): void {
+    contextMenu.close();
+    row.classList.add('chat-message-actions-dismissed');
+    row.focus({ preventScroll: true });
+  }
+
   private replyPreview(reply: MessageReply): string {
-    return reply.deleted ? t('chat.messageDeleted') : stripStickerTokens(reply.content, extractStickerIds(reply.content)).trim()
-      || (reply.hasAttachments ? t('chat.replyAttachment') : reply.content);
+    const content = getMessageText(reply, getLanguage());
+    return reply.deleted ? t('chat.messageDeleted') : stripStickerTokens(content, extractStickerIds(content)).trim()
+      || (reply.hasAttachments ? t('chat.replyAttachment') : content);
   }
 
   private renderReplyReference(reply: MessageReply): string {
@@ -871,7 +1047,7 @@ export class ChatView {
   }
 
   private startReply(messageId: string): void {
-    if (!this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+    if (!this.isCurrentComposer() || this.messageEdit || !this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
     const message = chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === messageId);
     if (!message || message.deletedAt || message.isSystem || message.isEphemeral) return;
     chatStore.setReplyDraft(this.currentChannelId, message);
@@ -883,7 +1059,7 @@ export class ChatView {
     const el = this.container.querySelector<HTMLElement>('#chat-reply-composer');
     if (!el) return;
     const reply = this.currentChannelId ? chatStore.getReplyDraft(this.currentChannelId) : undefined;
-    el.hidden = !reply;
+    el.hidden = !!this.messageEdit || !reply;
     el.innerHTML = reply ? `<span>${escapeHtml(reply.deleted ? t('chat.messageDeleted') : t('chat.replyingTo', { user: reply.userNickname }))}: ${escapeHtml(this.replyPreview(reply))}</span>
       <button type="button" aria-label="${t('chat.cancelReply')}" title="${t('chat.cancelReply')}"><span class="material-symbols-outlined md-18" aria-hidden="true">close</span></button>` : '';
     el.querySelector('button')?.addEventListener('click', () => {
@@ -893,46 +1069,83 @@ export class ChatView {
   }
 
   private clearReply(): void {
+    if (this.messageEdit) return;
     if (this.currentChannelId) chatStore.setReplyDraft(this.currentChannelId);
     this.renderReplyComposer();
   }
 
-  private async copyMessage(messageId: string): Promise<void> {
+  private messageClipboard(messageId: string): MessageClipboardContent | null {
     const message = this.currentChannelId ? chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === messageId) : undefined;
-    if (!message || message.deletedAt) return;
+    if (!message || message.deletedAt || message.isSystem) return null;
+    const messageText = getMessageText(message, getLanguage());
+    const stickerIds = extractStickerIds(messageText).filter((id) =>
+      message.attachments?.some((attachment) => attachment.id === id && attachment.kind === 'image'));
+    const content = stripStickerTokens(messageText, stickerIds);
+    if (!content.trim()) {
+      return { text: message.attachments?.map((entry) => entry.originalName).join('\n') || content };
+    }
+    const rendered = this.container.querySelector(
+      `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] .chat-message-text`);
+    return rendered ? renderedMessageClipboard(rendered, content) : markdownMessageClipboard(content);
+  }
+
+  private selectedClipboard(messageId?: string): MessageClipboardContent | null {
+    const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
+    const selection = window.getSelection();
+    if (!feed || !selection || selection.isCollapsed) return null;
+    if (messageId) {
+      const row = feed.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+      if (!row || !selection.rangeCount || !selection.getRangeAt(0).intersectsNode(row)) return null;
+    }
+    return selectedMessageClipboard(feed, selection);
+  }
+
+  private keyboardClipboard(target: EventTarget | null): MessageClipboardContent | null {
+    if (!this.isCurrentSession() || !this.container.isConnected ||
+        this.isEditableTarget(target) || this.isEditableTarget(document.activeElement)) return null;
+    const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
+    const element = target instanceof Element ? target : document.activeElement;
+    if (!feed || (element !== document.body && element !== document.documentElement && !feed.contains(element))) return null;
+    // An unsupported or out-of-chat selection must never fall back to copying a whole row.
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) {
+      return this.selectedClipboard();
+    }
+    const row = document.activeElement?.closest<HTMLElement>('.chat-message-row');
+    return row && feed.contains(row) ? this.messageClipboard(row.dataset.messageId ?? '') : null;
+  }
+
+  private copyMessage(messageId: string, mode: MessageCopyMode = 'formatted', selection: MessageClipboardContent | null = null): Promise<void> {
+    if (!this.isCurrentSession()) return Promise.resolve();
+    const content = this.messageClipboard(messageId);
+    return content ? this.copyContent(selection ?? content, mode) : Promise.resolve();
+  }
+
+  private async copyContent(content: MessageClipboardContent, mode: MessageCopyMode, event?: ClipboardEvent): Promise<void> {
+    this.imageClipboard.cancel();
     const requestId = ++this.copyRequestId;
     this.clearCopyFeedback?.();
     try {
-      await navigator.clipboard.writeText(message.content || message.attachments?.map((entry) => entry.originalName).join('\n') || '');
+      if (event?.clipboardData) {
+        setMessageClipboardData(event.clipboardData, content, mode);
+        event.preventDefault();
+      } else {
+        await writeMessageClipboard(content, mode);
+      }
     } catch (error) {
       console.warn('[ChatView] Could not copy message', error);
       if (requestId === this.copyRequestId) void showAlert({ message: t('chat.copyFailed'), variant: 'danger' });
       return;
     }
     if (requestId !== this.copyRequestId) return;
-    const toolbar = this.container.querySelector<HTMLElement>(
-      `.chat-message-row[data-message-id="${CSS.escape(messageId)}"] .chat-message-toolbar`
-    );
-    const button = toolbar?.querySelector<HTMLButtonElement>('[data-message-action="copy"]');
-    const icon = button?.querySelector<HTMLElement>('.material-symbols-outlined');
-    const status = toolbar?.querySelector<HTMLElement>('.chat-message-copy-status');
-    if (!toolbar || !button || !icon || !status) return;
-    toolbar.classList.add('copy-confirmed');
-    icon.textContent = 'check';
-    status.textContent = t('chat.messageCopied');
-    button.title = t('chat.messageCopied');
-    button.setAttribute('aria-label', t('chat.messageCopied'));
-    const clear = () => {
-      window.clearTimeout(timeout);
-      toolbar.classList.remove('copy-confirmed');
-      icon.textContent = 'content_copy';
-      status.textContent = '';
-      button.title = t('chat.copyMessage');
-      button.setAttribute('aria-label', t('chat.copyMessage'));
-      this.clearCopyFeedback = null;
-    };
-    const timeout = window.setTimeout(clear, 1600);
-    this.clearCopyFeedback = clear;
+    this.clearCopyFeedback = showCopyToast(t('chat.messageCopied'));
+  }
+
+  private async copyAttachmentImage(image: HTMLImageElement): Promise<void> {
+    if (!this.isCurrentSession() || !image.isConnected) return;
+    this.copyRequestId++;
+    this.clearCopyFeedback?.();
+    await this.imageClipboard.copy(image.currentSrc || image.src);
   }
 
   private jumpToMessage(messageId: string): void {
@@ -951,7 +1164,7 @@ export class ChatView {
 
   private bindReactionButtons(row: HTMLElement): void {
     row.querySelectorAll<HTMLButtonElement>('.chat-reaction, .chat-reaction-add').forEach((button) => {
-      button.addEventListener('click', () => {
+      button.addEventListener('click', (event) => {
         if (!this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
         const channelId = this.currentChannelId;
         const store = getActiveChatStore();
@@ -967,11 +1180,22 @@ export class ChatView {
           });
         };
         if (button.dataset.reactionEmoji) { toggle(button.dataset.reactionEmoji); return; }
+        const messageRow = button.closest<HTMLElement>('.chat-message-row');
+        if (this.reactionPicker?.isOpenFor(button)) {
+          this.reactionPicker.close();
+          (event.detail === 0 ? button : messageRow)?.focus({ preventScroll: true });
+          return;
+        }
         this.reactionPicker?.destroy();
         contextMenu.close();
+        messageRow?.classList.remove('chat-message-actions-dismissed');
         const picker = new EmojiPicker({
           container: document.body, anchor: button, emojiOnly: true, floating: true,
-          onSelectEmoji: (emoji) => { picker.close(); toggle(emoji); },
+          onSelectEmoji: (emoji) => {
+            picker.close();
+            if (messageRow) this.dismissMessageToolbar(messageRow);
+            toggle(emoji);
+          },
         });
         this.reactionPicker = picker;
         void picker.open();
@@ -1047,6 +1271,14 @@ export class ChatView {
     `;
     const inlineActions = `
       <div class="chat-inline-media-actions">
+        ${a.kind === 'image' ? `<button
+          type="button"
+          class="chat-attachment-action chat-attachment-copy"
+          title="${t('chat.copyImage')}"
+          aria-label="${t('chat.copyImage')}"
+        >
+          <span class="material-symbols-outlined md-18">content_copy</span>
+        </button>` : ''}
         <button
           type="button"
           class="chat-attachment-action chat-attachment-lightbox-trigger"
@@ -1117,6 +1349,14 @@ export class ChatView {
   }
 
   private bindMediaInteractions(feed: HTMLElement): void {
+    feed.querySelectorAll<HTMLButtonElement>('.chat-attachment-copy').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const image = button.closest('.chat-inline-media')?.querySelector<HTMLImageElement>('.chat-attachment-image');
+        if (image) void this.copyAttachmentImage(image);
+      });
+    });
     feed.querySelectorAll('.chat-inline-media[data-lightbox-kind="image"] .chat-attachment-image').forEach((img) => {
       img.addEventListener('click', () => {
         const source = (img as HTMLElement).closest('[data-lightbox-kind]') as HTMLElement | null;
@@ -1229,14 +1469,41 @@ export class ChatView {
     // Clear old unbinders
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
+    this.unbindEvents.push(bindChatComposerMotion(this.container));
 
     const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
     const inputContainer = this.container.querySelector('.chat-input-container') as HTMLElement | null;
     const inputWrapper = this.container.querySelector('.chat-input-wrapper') as HTMLElement | null;
     const charCounter = document.getElementById('chat-char-counter');
     const btnSend = document.getElementById('btn-send-message');
+    this.composerInput = input;
+    this.composerChannelId = this.currentChannelId;
+    const isCurrentInput = () => input === this.composerInput && this.isCurrentComposer();
+    let displayedEdit = this.messageEdit;
+    let displayedEditPending = displayedEdit?.pending;
+    let displayedEditError = displayedEdit?.error;
+    let displayedEditMessage = displayedEdit?.message;
 
     const messagesFeed = this.container.querySelector('#chat-messages-feed') as HTMLElement | null;
+    const onCopyKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.altKey || event.shiftKey ||
+          !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'c') return;
+      const content = this.keyboardClipboard(event.target);
+      if (!content) return;
+      event.preventDefault();
+      void this.copyContent(content, 'formatted');
+    };
+    const onCopy = (event: ClipboardEvent) => {
+      if (event.defaultPrevented || !event.clipboardData) return;
+      const content = this.keyboardClipboard(event.target);
+      if (content) void this.copyContent(content, 'formatted', event);
+    };
+    document.addEventListener('keydown', onCopyKey);
+    document.addEventListener('copy', onCopy);
+    this.unbindEvents.push(() => {
+      document.removeEventListener('keydown', onCopyKey);
+      document.removeEventListener('copy', onCopy);
+    });
     const commandDropup = this.container.querySelector<HTMLElement>('#command-dropup');
     const onCommandFocusOut = (event: FocusEvent) => {
       if (event.relatedTarget === input || (event.relatedTarget instanceof Node && commandDropup?.contains(event.relatedTarget))) return;
@@ -1281,7 +1548,7 @@ export class ChatView {
 
     const updateComposeLinkPreview = () => {
       if (!input || !composeLinkPreviewEl || !input.isConnected) return;
-      if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+      if (!this.messageEdit && this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
         composeLinkPreviewEl.style.display = 'none';
         return;
       }
@@ -1334,6 +1601,7 @@ export class ChatView {
     };
 
     input?.addEventListener('input', () => {
+      if (!isCurrentInput()) return;
       if (charCounter) {
         charCounter.innerText = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
       }
@@ -1361,7 +1629,7 @@ export class ChatView {
     // because the HTML parser silently eats a newline right after the opening
     // `<textarea>` tag, which would swallow the first line of a draft that
     // starts with a line break.
-    const draft = this.currentChannelId ? chatStore.getDraft(this.currentChannelId) : '';
+    const draft = this.messageEdit?.content ?? (this.currentChannelId ? this.store.getDraft(this.currentChannelId) : '');
     if (input && draft.length > 0) {
       input.value = draft;
       if (charCounter) {
@@ -1371,14 +1639,57 @@ export class ChatView {
       updateComposeLinkPreview();
     }
 
-    const handleSend = () => {
-      if (!input || !this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+    this.unbindEvents.push(appEvents.on('chat.message_edit_updated', ({ channelId }: { channelId: string }) => {
+      if (!isCurrentInput() || channelId !== this.currentChannelId || !input) return;
+      const edit = this.messageEdit;
+      const modeChanged = displayedEdit !== edit;
+      const statusChanged = modeChanged || displayedEditPending !== edit?.pending ||
+        displayedEditError !== edit?.error || displayedEditMessage !== edit?.message;
+      if (modeChanged) {
+        this.commandSelection++;
+        this.closeCommandDropup();
+        this.closeMentionDropup();
+        this.showCommandNotice('');
+        this.emojiPicker?.close();
+        codeBlockModal.close();
+      }
+      const text = edit?.content ?? this.store.getDraft(channelId);
+      if (input.value !== text) {
+        input.value = text;
+        if (charCounter) charCounter.textContent = `${text.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+        autoResize();
+      }
+      displayedEdit = edit;
+      displayedEditPending = edit?.pending;
+      displayedEditError = edit?.error;
+      displayedEditMessage = edit?.message;
+      if (statusChanged) this.syncComposerPermissionState();
+      if (modeChanged) {
+        this.renderReplyComposer();
+        this.renderTray();
+        this.botChat?.renderComposer();
+        lastComposeUrl = '';
+        if (composeLinkPreviewEl) {
+          composeLinkPreviewEl.style.display = 'none';
+          composeLinkPreviewEl.innerHTML = '';
+        }
+        updateComposeLinkPreview();
+      }
+    }));
+
+    const handleSend = (gesture: Event | boolean = false) => {
+      if (!isCurrentInput() || !input || !this.currentChannelId) return;
+      if (this.messageEdit) {
+        void this.submitMessageEdit();
+        return;
+      }
+      if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
       const text = input.value.trim();
       if (chatStore.getCommandDraft(this.currentChannelId)) {
         this.botChat?.focusComposer();
         return;
       }
-      const command = parseTypedCommand(input.value, chatStore.getCommands());
+      const command = parseTypedCommand(input.value, chatStore.getCommands(), this.commandLocale);
       if (command.kind !== 'chat') {
         const denied = this.getBotCommandDeniedReason();
         if (denied) {
@@ -1386,10 +1697,11 @@ export class ChatView {
           this.updateCommandDropup(input);
           return;
         }
-        if (command.kind === 'command') this.selectCommand(command.command, command.text);
+        if (command.kind === 'command') this.selectCommand(command.command, command.text,
+          typeof gesture === 'boolean' ? gesture : gesture.isTrusted);
         else if (command.kind === 'ambiguous') {
           this.showCommandNotice(t('botChat.commandAmbiguous'));
-          this.commandGroups = groupCommands(command.commands, [], getLanguage(), false);
+          this.commandGroups = groupCommands(command.commands, [], getLanguage(), false, this.commandLocale);
           this.commandMatches = this.commandGroups.flatMap((group) => group.commands);
           this.commandActiveIndex = 0;
           this.commandActive = true;
@@ -1442,7 +1754,7 @@ export class ChatView {
     const fileInput = document.getElementById('chat-file-input') as HTMLInputElement | null;
 
     btnAttach?.addEventListener('click', () => {
-      if (!serverStore.hasPermission(Permission.ATTACH_FILES)) return;
+      if (!isCurrentInput() || this.messageEdit || !serverStore.hasPermission(Permission.ATTACH_FILES)) return;
       fileInput?.click();
     });
     fileInput?.addEventListener('change', () => {
@@ -1456,19 +1768,23 @@ export class ChatView {
     // --- Emoji & sticker picker (#356) ---
     const btnEmoji = document.getElementById('btn-emoji');
     if (btnEmoji && inputContainer) {
-      const picker = new EmojiPicker({
+      const pickerOptions = {
         container: inputContainer,
         anchor: btnEmoji,
-        onSelectEmoji: (emoji) => this.insertAtCaret(emoji),
-        onSelectSticker: (sticker) => {
+        emojiOnly: !!this.messageEdit,
+        onSelectEmoji: (emoji: string) => this.insertAtCaret(emoji),
+        onSelectSticker: (sticker: StickerEntry) => {
           picker.close();
           void this.sendSticker(sticker);
         },
-      });
+      };
+      const picker = new EmojiPicker(pickerOptions);
       this.emojiPicker = picker;
 
       const onEmojiClick = () => {
-        if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+        if (!isCurrentInput() || this.messageEdit?.pending) return;
+        if (!this.messageEdit && this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+        pickerOptions.emojiOnly = !!this.messageEdit;
         picker.toggle();
       };
       btnEmoji.addEventListener('click', onEmojiClick);
@@ -1485,6 +1801,7 @@ export class ChatView {
     const btnCode = document.getElementById('btn-code');
     if (btnCode) {
       const onCodeClick = () => {
+        if (!isCurrentInput() || this.messageEdit) return;
         if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
         codeBlockModal.open({
           onSubmit: (language, code) => this.sendCodeBlock(language, code),
@@ -1498,14 +1815,19 @@ export class ChatView {
     }
 
     // Paste files/images directly into the message box.
-    input?.addEventListener('paste', (e: ClipboardEvent) => {
+    const onInputPaste = (e: ClipboardEvent) => {
+      if (!input || !isCurrentInput() || e.defaultPrevented) return;
       const files = e.clipboardData?.files;
       if (files && files.length > 0) {
         if (!serverStore.hasPermission(Permission.ATTACH_FILES)) return;
         e.preventDefault();
         this.addFiles(files);
+        return;
       }
-    });
+      if (e.clipboardData && pasteMonkyClipboard(input, e.clipboardData)) e.preventDefault();
+    };
+    input?.addEventListener('paste', onInputPaste);
+    this.unbindEvents.push(() => input?.removeEventListener('paste', onInputPaste));
 
     // Global paste handler: Ctrl+V anywhere on the page uploads files when a
     // text channel is open (#181).
@@ -1537,6 +1859,10 @@ export class ChatView {
       const de = e as DragEvent;
       if (!de.dataTransfer || !Array.from(de.dataTransfer.types).includes('Files')) return;
       e.preventDefault();
+      if (this.messageEdit) {
+        de.dataTransfer.dropEffect = 'none';
+        return;
+      }
       de.dataTransfer.dropEffect = 'copy';
       this.container.querySelector('.chat-container')?.classList.add('chat-drag-over');
     };
@@ -1571,7 +1897,18 @@ export class ChatView {
     this.syncComposerPermissionState();
 
     input?.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && !this.mentionActive && !this.commandActive) this.clearReply();
+      if (!isCurrentInput()) return;
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Escape' && this.messageEdit && !this.mentionActive) {
+        e.preventDefault();
+        this.cancelMessageEdit();
+        return;
+      }
+      if (e.key === 'Escape' && !this.messageEdit && !this.mentionActive && !this.commandActive) this.clearReply();
+      if (this.messageEdit && e.shiftKey && (e.key === 'Enter' || e.key === 'Tab')) {
+        this.closeMentionDropup();
+        return;
+      }
       // While the mention dropup is open, arrows/enter/tab/esc drive it (#14).
       if (this.mentionActive && this.mentionMatches.length > 0) {
         if (e.key === 'ArrowDown') {
@@ -1600,7 +1937,7 @@ export class ChatView {
       }
 
       // While the command dropup is open (#569).
-      if (this.commandActive) {
+      if (!this.messageEdit && this.commandActive) {
         if (e.key === 'Escape') {
           e.preventDefault();
           this.closeCommandDropup();
@@ -1617,16 +1954,17 @@ export class ChatView {
           this.setActiveCommand((this.commandActiveIndex - 1 + this.commandMatches.length) % this.commandMatches.length);
           return;
         }
-        if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+        const selectWithSpace = e.key === ' ' && !e.ctrlKey && !e.altKey && !e.metaKey;
+        if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey) || selectWithSpace) {
           e.preventDefault();
-          this.applyCommand(this.commandActiveIndex);
+          this.applyCommand(this.commandActiveIndex, e.isTrusted, !selectWithSpace);
           return;
         }
       }
 
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        handleSend();
+        handleSend(e.isTrusted);
       }
     });
 
@@ -1656,6 +1994,7 @@ export class ChatView {
     btnSend?.addEventListener('click', () => {
       handleSend();
     });
+    this.container.querySelector('#btn-cancel-message-edit')?.addEventListener('click', () => this.cancelMessageEdit());
 
     // Listen for new messages
     const u1 = appEvents.on('server.updated', () => this.syncComposerPermissionState());
@@ -1698,12 +2037,42 @@ export class ChatView {
     });
 
     const u6 = appEvents.on('chat.commands_updated', () => {
+      if (!isCurrentInput()) return;
       if (input && !chatStore.getCommandDraft(this.currentChannelId ?? '')) this.updateCommandDropup(input);
+      this.refreshCommandAttribution();
     });
+    const refreshCommandLocale = () => {
+      if (!isCurrentInput()) return;
+      if (input && this.commandActive && !this.messageEdit) this.updateCommandDropup(input);
+      this.refreshCommandAttribution();
+    };
+    const updateVoiceCommands = () => {
+      if (this.commandActive) this.renderCommandDropup();
+      const command = this.voiceNoticeCommand;
+      if (command) {
+        this.showCommandNotice(this.getVoiceCommandDeniedReason(command) ?? '');
+        this.voiceNoticeCommand = command;
+      }
+    };
+    this.unbindEvents.push(
+      appEvents.on('voice.channel_changed', updateVoiceCommands),
+      appEvents.on('participants.updated', updateVoiceCommands),
+      appEvents.on('session.voice_context_updated', updateVoiceCommands),
+      appEvents.on('i18n.language_changed', refreshCommandLocale),
+      appEvents.on('bot.preferences_updated', refreshCommandLocale),
+    );
     this.unbindEvents.push(appEvents.on('chat.reactions_updated', (message: ChatMessage) => {
       if (message.channelId === this.currentChannelId) this.updateReactionRow(message);
     }), () => { this.reactionPicker?.destroy(); this.reactionPicker = null; });
-    this.unbindEvents.push(u1, u2, u3, u4, u5, u6);
+    this.unbindEvents.push(u1, u2, u3, u4, u5, u6,
+      appEvents.on('network.status', () => this.syncComposerPermissionState()),
+      appEvents.on('user.updated', () => this.syncComposerPermissionState()),
+      appEvents.on('chat.cleared', () => {
+        if (!this.isCurrentSession()) return;
+        this.composerInput = null;
+        this.composerChannelId = null;
+      }),
+    );
 
     const composer = this.container.querySelector<HTMLElement>('#chat-command-composer');
     if (composer && messagesFeed && this.currentChannelId) {
@@ -1716,16 +2085,17 @@ export class ChatView {
       this.botChat = new BotChatView(
         store, getActiveNetworkClient(), getActiveServerStore(), channelId, composer, messagesFeed,
         () => {
+          if (!isCurrentInput() || this.currentChannelId !== channelId) return;
           const selected = !!store.getCommandDraft(channelId);
           this.syncComposerPermissionState();
-          if (input && (selected || wasSelected)) {
+          if (!this.messageEdit && input && (selected || wasSelected)) {
             input.value = store.getDraft(channelId);
             if (charCounter) charCounter.textContent = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
             if (!selected) autoResize();
           }
-          if (selected && composeLinkPreviewEl) composeLinkPreviewEl.style.display = 'none';
-          if (selected && this.pending.length > 0) this.showCommandNotice(t('botChat.attachmentsKept'));
-          if (!selected && wasSelected) {
+          if (selected && !this.messageEdit && composeLinkPreviewEl) composeLinkPreviewEl.style.display = 'none';
+          if (selected && !this.messageEdit && this.pending.length > 0) this.showCommandNotice(t('botChat.attachmentsKept'));
+          if (!selected && wasSelected && !this.messageEdit) {
             this.showCommandNotice('');
             this.focusChatInput();
           }
@@ -1749,7 +2119,8 @@ export class ChatView {
       ? { start: focused.selectionStart, end: focused.selectionEnd }
       : undefined;
     const wrapper = document.createElement('div');
-    wrapper.innerHTML = renderBotInvocation(invocation, !this.getBotCommandDeniedReason());
+    wrapper.innerHTML = renderBotInvocation(invocation, !this.getBotCommandDeniedReason(), serverStore.serverDetails?.id,
+      this.getVoiceCommandDeniedReason(invocation), this.commandPresentation(invocation.botId, invocation.commandName));
     const card = wrapper.firstElementChild;
     if (!card) {
       previous?.remove();
@@ -1776,6 +2147,7 @@ export class ChatView {
   }
 
   private showCommandNotice(message: string): void {
+    this.voiceNoticeCommand = null;
     const notice = this.container.querySelector<HTMLElement>('#chat-command-notice');
     if (notice) {
       notice.textContent = message;
@@ -1923,8 +2295,9 @@ export class ChatView {
    * textarea without going through a real `input` event.
    */
   private persistDraft(text: string): void {
-    if (!this.currentChannelId) return;
-    chatStore.setDraft(this.currentChannelId, text);
+    if (!this.isCurrentComposer() || !this.currentChannelId) return;
+    if (this.messageEdit) this.store.setMessageEditContent(this.currentChannelId, text);
+    else this.store.setDraft(this.currentChannelId, text);
   }
 
   private closeMentionDropup(): void {
@@ -1941,18 +2314,46 @@ export class ChatView {
 
   // ── Slash command dropup (#569) ──────────────────────────────────────
 
-  private getBotCommandDeniedReason(): string | undefined {
+  private commandPresentation(botId: string, commandName: string): CommandPresentation {
+    const command = this.store.getCommands().find((entry) => entry.botId === botId && entry.name === commandName);
+    return getCommandPresentation(command ?? { name: commandName }, botLocaleFor(this.client, this.server, botId));
+  }
+
+  private refreshCommandAttribution(): void {
+    if (!this.currentChannelId) return;
+    const feed = this.container.querySelector<HTMLElement>('#chat-messages-feed');
+    if (!feed) return;
+    const messages = new Map(this.store.getMessages(this.currentChannelId).map((message) => [message.id, message]));
+    for (const label of feed.querySelectorAll<HTMLElement>('[data-command-context-label]')) {
+      const row = label.closest<HTMLElement>('[data-message-id]');
+      const message = messages.get(row?.dataset.messageId ?? '');
+      if (message?.botCommand) label.textContent = formatCommandContext(message.botCommand,
+        this.commandPresentation(message.userId, message.botCommand.commandName));
+    }
+    for (const card of feed.querySelectorAll<HTMLElement>('[data-invocation-id]')) {
+      const invocation = this.store.getInvocation(card.dataset.invocationId ?? '');
+      const label = card.querySelector<HTMLElement>('.bot-command-name');
+      if (invocation && label) label.textContent = `/${this.commandPresentation(invocation.botId, invocation.commandName).displayName}`;
+    }
+  }
+
+  private getVoiceCommandDeniedReason(command: Pick<SlashCommand, 'botId' | 'voiceRequirement'>): string | undefined {
+    const error = commandVoiceError(command, getActiveNetworkClient(), getActiveServerStore());
+    return error ? translateProtocolError(error) : undefined;
+  }
+
+  private getBotCommandDeniedReason(command?: SlashCommand): string | undefined {
     const channel = serverStore.serverDetails?.channels.find((candidate) => candidate.id === this.currentChannelId);
     if (!channel || channel.type !== 'TEXT' || !channel.botCommandsEnabled) {
       return t('botChat.commandsDisabledInChannel');
     }
     if (!serverStore.hasPermission(Permission.USE_BOT_COMMANDS)) return t('botChat.commandsPermissionDenied');
     if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) return t('chat.sendPermissionDenied');
-    return undefined;
+    return command ? this.getVoiceCommandDeniedReason(command) : undefined;
   }
 
   private updateCommandDropup(input: HTMLTextAreaElement): void {
-    if (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId)) {
+    if (this.messageEdit || (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId))) {
       this.closeCommandDropup();
       return;
     }
@@ -1974,15 +2375,13 @@ export class ChatView {
     }
     const query = match[1].toLowerCase();
     const all = chatStore.getCommands();
-    const matches = query
-      ? all.filter((command) => command.name.includes(query) || command.botName.toLocaleLowerCase(getLanguage()).includes(query))
-      : all;
+    const matches = query ? filterCommands(all, query, this.commandLocale) : all;
     const previous = query === this.commandQuery ? this.commandMatches[this.commandActiveIndex] : undefined;
     const retained = previous && matches.find((command) => command.botId === previous.botId && command.name === previous.name);
-    const exact = matches.filter((command) => command.name === query);
+    const exact = findCommandsByInputName(matches, query, this.commandLocale);
     const preferred = retained ?? (exact.length === 1 ? exact[0] : undefined);
     this.commandQuery = query;
-    this.commandGroups = groupCommands(matches, chatStore.getCommandUsage(), getLanguage(), query.length === 0);
+    this.commandGroups = groupCommands(matches, chatStore.getCommandUsage(), getLanguage(), query.length === 0, this.commandLocale);
     this.commandMatches = this.commandGroups.flatMap((group) => group.commands);
     this.commandActive = true;
     this.commandActiveIndex = Math.max(0, this.commandMatches.findIndex((command) =>
@@ -1991,6 +2390,10 @@ export class ChatView {
   }
 
   private renderCommandDropup(): void {
+    if (!this.isCurrentComposer() || this.messageEdit) {
+      this.closeCommandDropup();
+      return;
+    }
     const el = document.getElementById('command-dropup');
     if (!el) return;
     const denied = this.getBotCommandDeniedReason();
@@ -2001,9 +2404,31 @@ export class ChatView {
       el.style.display = 'block';
       return;
     }
-    el.innerHTML = renderCommandCatalog(this.commandGroups, this.commandActiveIndex);
+    el.innerHTML = renderCommandCatalog(
+      this.commandGroups, this.commandActiveIndex,
+      (command) => this.getVoiceCommandDeniedReason(command),
+      this.commandLocale,
+      this.commandGroups.length === 0
+        ? renderEmptyCommandCatalog(this.store.getCommandBots(), this.commandQuery.length > 0 && this.store.getCommands().length > 0)
+        : undefined,
+    );
     el.style.display = 'block';
+    el.querySelectorAll<HTMLButtonElement>('[data-command-bot-configure]').forEach(button => {
+      button.addEventListener('click', () => {
+        const botId = button.dataset.commandBotConfigure;
+        if (!botId || !this.isCurrentComposer()) return;
+        this.closeCommandDropup();
+        input?.focus();
+        void botSettingsModal.open(botId);
+      });
+    });
     const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
+    if (this.commandGroups.length === 0) {
+      for (const attribute of ['role', 'aria-expanded', 'aria-controls', 'aria-autocomplete', 'aria-activedescendant']) {
+        input?.removeAttribute(attribute);
+      }
+      return;
+    }
     input?.setAttribute('role', 'combobox');
     input?.setAttribute('aria-expanded', 'true');
     input?.setAttribute('aria-controls', 'command-list-options');
@@ -2013,7 +2438,7 @@ export class ChatView {
         this.setActiveCommand(Number(item.dataset.cmdIndex), false);
       });
       item.addEventListener('mousedown', (event) => event.preventDefault());
-      item.addEventListener('click', () => this.applyCommand(Number(item.dataset.cmdIndex)));
+      item.addEventListener('click', (event) => this.applyCommand(Number(item.dataset.cmdIndex), event.isTrusted));
     });
     const groupButtons = [...el.querySelectorAll<HTMLButtonElement>('[data-command-group]')];
     groupButtons.forEach((button, index) => {
@@ -2061,7 +2486,8 @@ export class ChatView {
     if (scroll) active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
-  private applyCommand(index: number): void {
+  private applyCommand(index: number, userGesture = false, autoInvoke = true): void {
+    if (!this.isCurrentComposer() || this.messageEdit) return;
     const denied = this.getBotCommandDeniedReason();
     if (denied) {
       this.showCommandNotice(denied);
@@ -2074,25 +2500,78 @@ export class ChatView {
       this.closeCommandDropup();
       return;
     }
-    const typed = parseTypedCommand(input.value, chatStore.getCommands());
-    this.selectCommand(cmd, typed.kind === 'command' || typed.kind === 'ambiguous' ? typed.text : '');
+    const typed = parseTypedCommand(input.value, chatStore.getCommands(), this.commandLocale);
+    this.selectCommand(cmd, typed.kind === 'command' || typed.kind === 'ambiguous' ? typed.text : '', userGesture, autoInvoke);
   }
 
-  private selectCommand(command: SlashCommand, text = ''): void {
-    if (!this.currentChannelId) return;
+  private selectCommand(command: SlashCommand, text = '', userGesture = false, autoInvoke = true): void {
+    if (!this.isCurrentComposer() || this.messageEdit) return;
+    this.commandSelection++;
+    const denied = this.getBotCommandDeniedReason(command);
+    if (denied) {
+      this.showCommandNotice(denied);
+      this.voiceNoticeCommand = command;
+      return;
+    }
+    if (command.downloadsSound) {
+      void this.prepareDownloadCommand(command, text, userGesture, autoInvoke);
+      return;
+    }
+    this.activateCommand(command, text, userGesture, false, autoInvoke);
+  }
+
+  private async prepareDownloadCommand(command: SlashCommand, text: string, userGesture: boolean, autoInvoke: boolean): Promise<void> {
+    const store = getActiveChatStore();
+    const client = getActiveNetworkClient();
+    const connectionId = client.getConnectionId();
+    const channelId = this.currentChannelId;
+    const view = this.botChat;
+    const selection = this.commandSelection;
+    const sourceText = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input')?.value;
+    const current = () => view !== null && this.botChat === view && this.currentChannelId === channelId &&
+      getActiveChatStore() === store && client.getConnectionId() === connectionId &&
+      !this.messageEdit && selection === this.commandSelection && client.getStatus() === 'CONNECTED' &&
+      this.container.querySelector<HTMLTextAreaElement>('#chat-message-input')?.value === sourceText;
+    if (!window.api?.soundDownloadAvailability) {
+      this.showCommandNotice(t('botChat.downloadDesktopOnly'));
+      return;
+    }
+    if (!settingsStore.soundboardFolderPath) {
+      this.closeCommandDropup();
+      this.showCommandNotice(t('botChat.downloadFolderRequired'));
+      return;
+    }
+    try {
+      const availability = await window.api.soundDownloadAvailability(settingsStore.soundboardFolderPath);
+      if (!current()) return;
+      if (availability === 'ready') {
+        this.activateCommand(command, text, userGesture, true, autoInvoke);
+        return;
+      }
+      this.closeCommandDropup();
+      this.showCommandNotice(t(availability === 'unavailable' ? 'botChat.downloadWriteFailed'
+        : availability === 'confirmation_required' ? 'botChat.downloadFolderNeedsConfirmation' : 'botChat.downloadFolderRequired'));
+    } catch {
+      if (current()) this.showCommandNotice(t('botChat.downloadWriteFailed'));
+    }
+  }
+
+  private activateCommand(command: SlashCommand, text: string, userGesture: boolean, downloadConsent: boolean, autoInvoke: boolean): void {
+    if (!this.isCurrentComposer() || this.messageEdit || !this.currentChannelId) return;
+    if (this.getBotCommandDeniedReason(command) || !chatStore.isCommandAvailable(command)) {
+      this.showCommandNotice(this.getBotCommandDeniedReason(command) ?? t('botChat.commandUnavailable'));
+      return;
+    }
     this.showCommandNotice('');
     this.closeMentionDropup();
     this.closeCommandDropup();
     this.emojiPicker?.close();
-    chatStore.selectCommand(this.currentChannelId, command, text);
+    chatStore.selectCommand(this.currentChannelId, command, text, downloadConsent);
     const draft = chatStore.getCommandDraft(this.currentChannelId);
     if (draft && !command.options?.length && text.trim()) {
       chatStore.setCommandPending(this.currentChannelId, draft, false, t('botChat.unexpectedText'));
-    } else if (draft && !command.options?.length) {
-      void this.botChat?.invoke();
-      return;
     }
-    this.botChat?.focusComposer();
+    void this.botChat?.activateCommand(userGesture, autoInvoke);
   }
 
   private closeCommandDropup(): void {
@@ -2116,6 +2595,7 @@ export class ChatView {
    * user had typed it (#356).
    */
   private insertAtCaret(text: string): void {
+    if (!this.isCurrentComposer()) return;
     const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
     if (!input || input.readOnly) return;
 
@@ -2138,7 +2618,7 @@ export class ChatView {
    */
   private sendCodeBlock(language: string, code: string): void {
     const channelId = this.currentChannelId;
-    if (!channelId) return;
+    if (!this.isCurrentComposer() || this.messageEdit || !channelId) return;
     if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) {
       void showAlert({ message: t('chat.sendPermissionDenied'), variant: 'danger' });
       return;
@@ -2160,9 +2640,12 @@ export class ChatView {
    */
   private async sendSticker(sticker: StickerEntry): Promise<void> {
     const channelId = this.currentChannelId;
-    if (!channelId) return;
+    if (!this.isCurrentComposer() || this.messageEdit || !channelId) return;
     const client = getActiveNetworkClient();
     const store = getActiveChatStore();
+    const connectionId = client.getConnectionId();
+    const current = () => this.isCurrentComposer() && this.currentChannelId === channelId &&
+      !store.getMessageEdit(channelId) && client.getConnectionId() === connectionId;
     const reply = store.getReplyDraft(channelId);
     if (reply?.deleted) { void showAlert({ message: t('chat.replyUnavailable'), variant: 'danger' }); return; }
     if (
@@ -2176,8 +2659,10 @@ export class ChatView {
     try {
       const file = await stickerService.toFile(sticker);
       if (!file) throw new Error(t('chat.stickerReadFailed'));
+      if (!current()) return;
 
       const meta = await uploadAttachment(channelId, file).promise;
+      if (!current()) return;
       client.send(MessageType.CHAT_SEND, {
         channelId,
         content: stickerToken(meta.id),
@@ -2195,7 +2680,7 @@ export class ChatView {
   }
 
   private addFiles(fileList: FileList): void {
-    if (!this.currentChannelId) return;
+    if (!this.isCurrentComposer() || this.messageEdit || !this.currentChannelId) return;
     if (this.arePermissionsResolved() && (!serverStore.hasPermission(Permission.SEND_MESSAGES) || !serverStore.hasPermission(Permission.ATTACH_FILES))) {
       return;
     }
@@ -2262,14 +2747,14 @@ export class ChatView {
   }
 
   private renderTray(): void {
-    const tray = document.getElementById('chat-attachment-tray');
+    const tray = this.container.querySelector<HTMLElement>('#chat-attachment-tray');
     if (!tray) return;
     if (this.pending.length === 0) {
       tray.style.display = 'none';
       tray.innerHTML = '';
       return;
     }
-    tray.style.display = 'flex';
+    tray.style.display = this.messageEdit ? 'none' : 'flex';
     tray.innerHTML = this.pending.map((p) => this.renderTrayItem(p)).join('');
     tray.querySelectorAll('[data-remove-id]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -2326,13 +2811,7 @@ export class ChatView {
   }
 
   private updateSendButtonState(): void {
-    const btnSend = document.getElementById('btn-send-message') as HTMLButtonElement | null;
-    if (!btnSend) return;
-    const uploading = this.pending.some((p) => p.status === 'uploading');
-    const permissionLocked = this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES);
-    btnSend.disabled = uploading || permissionLocked;
-    btnSend.style.opacity = uploading ? '0.6' : '';
-    btnSend.style.cursor = uploading ? 'not-allowed' : '';
+    this.syncComposerPermissionState();
   }
 
   private removePending(localId: string): void {
@@ -2370,7 +2849,10 @@ export class ChatView {
   }
 
   private unbindListeners(): void {
+    this.rememberComposerText();
+    this.commandSelection++;
     this.copyRequestId++;
+    this.imageClipboard.cancel();
     this.clearCopyFeedback?.();
     contextMenu.close();
     this.pendingJumpId = null;
@@ -2381,6 +2863,8 @@ export class ChatView {
     this.closeCommandDropup();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
+    this.composerInput = null;
+    this.composerChannelId = null;
   }
 
   public destroy(): void {

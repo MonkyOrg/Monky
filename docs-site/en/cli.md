@@ -1,5 +1,8 @@
 # Monky CLI
 
+This is the **server CLI**, not the CLI generated for a bot. To package
+and operate your own bot, see [Bot distribution](/en/bots-distribuicao).
+
 Command line tool to create and administer Monky servers.
 
 ```
@@ -67,10 +70,10 @@ When there is **one** server, commands act on it directly. When there is **more
 than one**, the CLI asks which one you mean:
 
 ```
-Há 2 servidores Monky nesta máquina.
-Qual servidor deseja reiniciar?
-❯ Friends — porta 3000 — /srv/monky-friends
-  Work — porta 3100 — /srv/monky-work
+There are 2 Monky servers on this machine.
+Which server would you like to restart?
+❯ Friends — port 3000 — /srv/monky-friends
+  Work — port 3100 — /srv/monky-work
 ```
 
 Scripts and cron jobs have no interactive terminal, so pass `--data` explicitly:
@@ -79,12 +82,64 @@ Scripts and cron jobs have no interactive terminal, so pass `--data` explicitly:
 monky --data /srv/monky-friends restart
 ```
 
+## CLI language
+
+The first command run in an interactive terminal asks for **English (US)** or
+**Português (Brasil)** and saves the choice in `~/.monky/cli-config.json`.
+`monky`, `--help` and `--version` neither ask this question nor save a
+preference. Commands in scripts or with redirected input/output do not ask
+or change the saved language either.
+
+To change it later, open `monky config` and choose **Idioma / Language**, or run:
+
+```bash
+monky config language en-US
+monky config language pt-BR
+```
+
+This setting works without creating or selecting a server. The next menu already
+uses the new language; identity, database and server configuration are unchanged.
+`monky config language` without a code opens the picker in a terminal; in scripts,
+it only queries the preference. The `monky --lang pt-BR|en-US` shortcut remains available.
+
+`en-US` is normalized to `en`; English and Portuguese variants, including
+`pt_BR.UTF-8`, use the `en` and `pt-BR` catalogs. An unsupported code, a
+missing `--lang` value or an invalid configuration produces an error instead
+of silently overwriting the preference with a default.
+
+Precedence is **`--lang` → `MONKY_LANG` → saved preference → terminal locale
+→ English**. For terminal detection, the CLI checks `LC_ALL`, `LC_MESSAGES`,
+`LANG` and `LANGUAGE`, in that order. `MONKY_LANG` lets an app or script pass
+its selected language without reading or changing the CLI preference; the
+CLI does not read Electron profiles.
+
+`--lang` alongside an interactive command saves the choice. With help,
+version or non-interactive commands, it applies only to that invocation.
+Standalone `monky --lang <code>` explicitly edits the preference and saves
+it even in scripts.
+
+**QA isolation:** `MONKY_HOME` changes the directory of both the server
+registry and the language preference. For example, in PowerShell:
+
+```powershell
+$env:MONKY_HOME = Join-Path $PWD '.monky-qa'
+monky --lang en-US
+monky --help
+```
+
+The preference then lives in `.monky-qa\cli-config.json`; `--data` still
+selects a server's data, not its language. Command names, keys such as
+`maxUsers` and `voiceMode`, permissions such as `MANAGE_ROLES`, and values
+such as `true`, `false`, `p2p` and `sfu` are not translated.
+
 ## Global options
 
 | Option | Description |
 |---|---|
 | `--data <folder>` | Data directory of the target server. Required when there are several servers and the terminal is not interactive. |
 | `--help`, `-h` | Show the help. |
+| `--version`, `-v` | Show the installed version. |
+| `--lang <code>` | Select `en`/`en-US` or `pt-BR`; used alone, save the preference. |
 
 ## Data directory layout
 
@@ -105,7 +160,7 @@ monky --data /srv/monky-friends restart
 
 ---
 
-# Command reference
+## Command reference
 
 ## `monky create`
 
@@ -116,19 +171,21 @@ It replaces the former `monky bootstrap`, which still works as an alias.
 monky create [options]
 ```
 
-The command is interactive and asks, in order:
+After the initial language choice, when needed, the command asks:
 
 1. **Where to store the data** — suggests `./data`, but any path works. If the
    chosen folder already holds a server, it asks for another one.
 2. **Owner identity code** (`MONKY-ID:...`) — export it from the Monky app under
-   *Settings → Identity → Export*.
+   *Settings → My Profile → Identity*. Treat the backup and password as
+   credentials: use them only on a trusted administration machine.
 3. **Identity password** — the one you set when exporting.
-4. **Owner nickname**
-5. **Server name**
-6. **Server port** (default: `3000`)
-7. **Server password** — leave empty for an open server.
-8. **Member limit** — asks whether you want a cap on registrations. The default
+4. **Server name**
+5. **Server port** (default: `3000`)
+6. **Server password** — leave empty for an open server.
+7. **Member limit** — asks whether you want a cap on registrations. The default
    is no limit.
+8. **Voice/video mode** — `p2p` or `sfu`. In SFU mode, it checks ports and
+   dependencies and asks for available upload bandwidth to estimate capacity.
 
 It then prints a summary, asks for confirmation and offers to start the server.
 
@@ -137,7 +194,7 @@ It then prints a summary, asks for confirmation and offers to start the server.
 | Option | Description | Default |
 |---|---|---|
 | `--identity <code>` | Owner identity code | asked |
-| `--name <name>` | Server name | `Servidor dos Amigos` |
+| `--name <name>` | Server name | `Friends Server` |
 | `--port <n>` | Server port | `3000` |
 | `--password <password>` | Server password (empty = no password) | asked |
 | `--max-users <n>` | Registered member limit (`0` = no limit) | asked |
@@ -173,7 +230,7 @@ monky list
 ```
 
 ```
-NOME       STATUS   PORTA  PASTA DE DADOS
+NAME       STATUS   PORT   DATA DIRECTORY
 Friends    online   3000   /srv/monky-friends
 Work       stopped  3100   /srv/monky-work
 ```
@@ -257,6 +314,17 @@ before restarting.
 `--fresh` works the same as in `monky start`: it drops the PM2 process
 registration before bringing the server back up.
 
+If PM2 still executes a file from another CLI installation, `start` and
+`restart` automatically recreate only that server's registration. Rewriting
+`ecosystem.config.cjs` is not enough in this case: PM2 may retain the previous
+executable path. The data directory and logs are preserved; a change only to
+the Node interpreter still uses the normal restart.
+
+Database reads performed by `start`, `restart` and `status` (including
+`--watch`) do not write data or apply migrations. The server owns migrations
+at startup, after the previous instance exits, so its in-memory snapshot
+cannot overwrite a schema upgraded by the CLI.
+
 ---
 
 ## `monky status`
@@ -270,17 +338,17 @@ monky status [--data <folder>]
 With a single server (or with `--data`), it shows the details:
 
 ```
-Estado do servidor: Friends
-status: online
-dataDir: /srv/monky-friends
-porta: 3000
-processo PM2: monky-server-a1b2c3d4
-pid: 21877
-uptime: 2026-08-27T18:02:11.000Z
-restarts: 0
-memória: 88 MB
-cpu: 0%
-node: 24.20.0
+Server state: Friends
+State: online
+Data directory: /srv/monky-friends
+port 3000
+PM2 process: monky-server-a1b2c3d4
+PID: 21877
+Started at: 2026-08-27T18:02:11.000Z
+Restarts: 0
+Memory: 88 MB
+CPU: 0%
+Node.js: 24.20.0
 ```
 
 `status` does not just echo what PM2 says: the port is actually probed. PM2
@@ -298,6 +366,18 @@ Diagnostics
 
 With several servers and no `--data`, it prints the same table as `monky list` —
 a read-only query has no side effects, so asking would be busywork.
+
+Detailed status for a running server also reports bots with an incompatible
+or unchecked protocol. These warnings appear after `monky start` and
+`monky restart` and explain when to update or check the bots' SDK. If the
+server is still starting or `/preview` does not respond, the CLI reports that
+compatibility could not be retrieved; check again with
+`monky status --data <folder>`.
+
+`monky list` and multi-server tables keep these warnings next to the relevant
+server. In `monky status --watch`, the warning refreshes each cycle and clears
+when bots reconnect with a compatible SDK. Stopped servers are not queried or
+reported as incompatible.
 
 ---
 
@@ -352,6 +432,14 @@ monky restart --fresh
 That drops the PM2 process and registers it again. Files under `~/.pm2/logs` are
 preserved.
 :::
+
+If the updated CLI shows the new version but connections still report an old
+protocol, check `monky status --data <folder>`. Diagnostics compare the file
+actually executed by PM2 with the current CLI installation's file, showing
+both when they differ. On versions without this automatic recovery,
+`monky restart --fresh --data <folder>` recreates only the selected registration
+without deleting the database. Run it as the user managing that instance;
+if the mismatch persists, check which process is listening on the server port.
 
 Native modules are a **separate** concern: `better-sqlite3` and the mediasoup
 worker are compiled against the Node ABI (20 = 115, 22 = 127, 24 = 137). Any
@@ -443,10 +531,13 @@ role cannot be removed from a member.
 
 ## `monky config`
 
-Shows or changes the server configuration.
+In a terminal, opens CLI settings, including language and access to the server
+configuration. Without a TTY or in CI, it keeps the direct server query.
 
 ```bash
-monky config                       # show everything
+monky config                       # settings menu in a terminal
+monky config show                  # show server data directly
+monky config language en-US        # CLI language, even without a server
 monky config set                   # pick the key interactively
 monky config set <key> [value]     # change it directly
 ```
@@ -475,7 +566,7 @@ Changing `voiceMode` applies dynamically and notifies all connected clients.
 ### Examples
 
 ```bash
-monky config
+monky config show
 monky config set name "Friends Server"
 monky config set password           # typed hidden
 monky config set password clear     # removes the password
@@ -578,6 +669,13 @@ The command downloads and installs the new package with `npm install -g` from
 the GitHub release artifacts.
 
 At the end the server is restarted (with confirmation, except with `--yes`).
+
+Before disconnecting participants for that restart, the server reports that
+it is updating. Clients show a dedicated notice in their selected language
+and ask them to reconnect in a few seconds. This requires a running server
+process that already supports the notice; an older process still running
+during its first upgrade may send only the generic shutdown notice.
+Declining the restart neither disconnects participants nor sends an update notice.
 
 ### Examples
 

@@ -201,10 +201,47 @@ test('unsupported capture keys invalidate the whole chord instead of saving a we
   const capture = new ShortcutCapture();
   capture.keyDown({ code: 'KeyQ', key: 'q', repeat: false });
   assert.equal(capture.keyDown({ code: 'Unidentified', key: 'Unknown', repeat: false }), null);
-  assert.equal(capture.keyUp('Unidentified'), null);
+  assert.equal(capture.keyUp('Unidentified', 'Unknown'), null);
   assert.equal(capture.keyUp('KeyQ'), null);
   capture.keyDown({ code: 'KeyW', key: 'w', repeat: false });
   assert.equal(capture.keyUp('KeyW')?.accelerator, 'code:KeyW');
+});
+
+test('virtual keyboard events without DOM codes retain logical keys instead of losing the action binding', () => {
+  const capture = new ShortcutCapture();
+  capture.keyDown({ code: '', key: 'Control', repeat: false, ctrlKey: true });
+  capture.keyDown({ code: '', key: 'q', repeat: false, ctrlKey: true });
+  capture.keyDown({ code: 'Unidentified', key: 'w', repeat: false, ctrlKey: true });
+  assert.equal(capture.keyUp('', 'Control'), null);
+  assert.equal(capture.keyUp('Unidentified', 'w'), null);
+  const combo = capture.keyUp('', 'q');
+  assert.equal(combo?.accelerator, 'Ctrl+Q+W');
+  assert.deepEqual(parseAcceleratorToHotkey('mute', combo!.accelerator)?.keyCodes, [K.Q, K.W]);
+
+  const unsupported = new ShortcutCapture();
+  assert.equal(unsupported.keyDown({ code: '', key: 'Dead', repeat: false }), null);
+  assert.equal(unsupported.keyUp('', 'Dead'), null);
+});
+
+test('missing physical codes preserve international logical mappings and plus serialization', () => {
+  const capture = new ShortcutCapture();
+  capture.keyDown({ code: '', key: 'ñ', repeat: false });
+  const combo = capture.keyUp('', 'Ñ');
+  assert.equal(combo?.accelerator, 'Ñ');
+  const layout = new WindowsKeyboardLayout(() => SPANISH_LAYOUT);
+  assert.deepEqual(parseNativeAccelerator('enye', combo!.accelerator, layout)?.keyCodes, [K.Backquote]);
+
+  const plus = new ShortcutCapture();
+  plus.keyDown({ code: 'ControlLeft', key: 'Control', repeat: false });
+  plus.keyDown({ code: '', key: '+', repeat: false });
+  assert.equal(plus.combo?.accelerator, 'Ctrl++');
+  assert.deepEqual(parseAcceleratorToHotkey('plus', plus.combo!.accelerator)?.keyCodes, [K.Equal]);
+
+  const shifted = new ShortcutCapture();
+  shifted.keyDown({ code: '', key: 'Shift', keyCode: 16, repeat: false, shiftKey: true });
+  shifted.keyDown({ code: '', key: '!', keyCode: 49, repeat: false, shiftKey: true });
+  assert.equal(shifted.keyUp('', 'Shift', 16), null);
+  assert.equal(shifted.keyUp('', '1', 49)?.accelerator, 'Shift+!');
 });
 
 test('failed native start is reported, retries use latest registrations, init is idempotent', async () => {
@@ -393,6 +430,21 @@ test('Windows AZERTY physical letters differ from legacy logical letter bindings
   assert.deepEqual(parseNativeAccelerator('physical-Q', 'code:KeyQ', layout)?.keyCodes, [K.A]);
   assert.deepEqual(parseNativeAccelerator('logical-Q', 'Q', layout)?.keyCodes, [K.Q]);
   assert.deepEqual(parseNativeAccelerator('physical-A', 'code:KeyA', layout)?.keyCodes, [K.Q]);
+});
+
+test('Windows ISO key uses the observed native VC_LESSER_GREATER, not its physical scan code', () => {
+  const snapshot: KeyboardLayoutSnapshot = {
+    id: 'windows-iso', scanCodeToVirtualKey: { 86: 0xe2 }, characterToVirtualKey: {},
+  };
+  const layout = new WindowsKeyboardLayout((previous) => previous === snapshot.id ? null : snapshot);
+  const { hook, key, sent } = fixture(layout);
+  assert.equal(hook.setActionHotkeys([{ action: 'iso', accelerator: 'code:IntlBackslash' }]), true);
+  assert.equal(hook.setSoundboardHotkeys([{ soundName: 'iso', accelerator: 'code:IntlBackslash' }]), true);
+  key(0x56); key(0x56, false);
+  assert.equal(sent.length, 0, 'physical Windows scan codes are not libuiohook event codes');
+  key(0x0e46); key(0x0e46); key(0x0e46, false);
+  assert.deepEqual(sent.map((event) => event.channel), ['shortcut:action-triggered', 'soundboard:shortcut-triggered']);
+  hook.destroy();
 });
 
 test('legacy character mappings never drop required layout modifiers to fire a different key', () => {

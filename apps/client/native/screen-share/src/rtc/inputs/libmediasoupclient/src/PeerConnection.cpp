@@ -1,0 +1,796 @@
+#define MSC_CLASS "PeerConnection"
+
+#include "PeerConnection.hpp"
+#include "Logger.hpp"
+#include "MediaSoupClientErrors.hpp"
+#include "api/jsep.h"
+#include "api/peer_connection_interface.h"
+#include "api/video_codecs/video_decoder_factory_template.h"
+#include "api/video_codecs/video_decoder_factory_template_dav1d_adapter.h"
+#include "api/video_codecs/video_decoder_factory_template_libvpx_vp8_adapter.h"
+#include "api/video_codecs/video_decoder_factory_template_libvpx_vp9_adapter.h"
+#include "api/video_codecs/video_decoder_factory_template_open_h264_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template.h"
+#include "api/video_codecs/video_encoder_factory_template_libaom_av1_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template_libvpx_vp8_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template_libvpx_vp9_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template_open_h264_adapter.h"
+#include <api/audio_codecs/builtin_audio_decoder_factory.h>
+#include <api/audio_codecs/builtin_audio_encoder_factory.h>
+#include <api/create_peerconnection_factory.h>
+#include <api/sctp_transport_interface.h>
+#include <api/video_codecs/builtin_video_decoder_factory.h>
+#include <api/video_codecs/builtin_video_encoder_factory.h>
+#include <rtc_base/ssl_adapter.h>
+
+using json = nlohmann::json;
+
+/**
+ * Waits for a future while pumping the current WebRTC thread's message queue
+ * if we are running on one.
+ *
+ * Without this, calling PeerConnection methods from the signaling thread
+ * deadlocks: future.get() blocks the thread, preventing it from processing
+ * the observer callback task that would resolve the future.
+ */
+template<typename T>
+static T waitForFuture(std::future<T>& future)
+{
+	auto* thread = webrtc::Thread::Current();
+
+	if (thread)
+	{
+		// We are on a WebRTC thread. Pump its message queue so observer
+		// callbacks (posted as tasks) can fire while we wait.
+		while (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+		{
+			thread->ProcessMessages(10);
+		}
+	}
+
+	return future.get();
+}
+
+namespace mediasoupclient
+{
+	/* Static. */
+
+	// clang-format off
+	std::map<webrtc::PeerConnectionInterface::IceConnectionState, const std::string>
+		PeerConnection::iceConnectionState2String =
+	{
+		{ webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionNew,          "new"          },
+		{ webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionChecking,     "checking"     },
+		{ webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionConnected,    "connected"    },
+		{ webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionCompleted,    "completed"    },
+		{ webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed,       "failed"       },
+		{ webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionDisconnected, "disconnected" },
+		{ webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionClosed,       "closed"       }
+	};
+
+	std::map<webrtc::PeerConnectionInterface::IceGatheringState, const std::string>
+		PeerConnection::iceGatheringState2String =
+	{
+		{ webrtc::PeerConnectionInterface::IceGatheringState::kIceGatheringNew,       "new"       },
+		{ webrtc::PeerConnectionInterface::IceGatheringState::kIceGatheringGathering, "gathering" },
+		{ webrtc::PeerConnectionInterface::IceGatheringState::kIceGatheringComplete,  "complete"  }
+	};
+
+	std::map<webrtc::PeerConnectionInterface::SignalingState, const std::string>
+		PeerConnection::signalingState2String =
+	{
+		{ webrtc::PeerConnectionInterface::SignalingState::kStable,             "stable"               },
+		{ webrtc::PeerConnectionInterface::SignalingState::kHaveLocalOffer,     "have-local-offer"     },
+		{ webrtc::PeerConnectionInterface::SignalingState::kHaveLocalPrAnswer,  "have-local-pranswer"  },
+		{ webrtc::PeerConnectionInterface::SignalingState::kHaveRemoteOffer,    "have-remote-offer"    },
+		{ webrtc::PeerConnectionInterface::SignalingState::kHaveRemotePrAnswer, "have-remote-pranswer" },
+		{ webrtc::PeerConnectionInterface::SignalingState::kClosed,             "closed"               }
+	};
+	// clang-format on
+
+	/* Instance methods. */
+
+	PeerConnection::PeerConnection(
+	  PeerConnection::PrivateListener* privateListener, const PeerConnection::Options* options)
+	{
+		MSC_TRACE();
+
+		webrtc::PeerConnectionInterface::RTCConfiguration config;
+
+		if (options != nullptr)
+		{
+			config = options->config;
+		}
+
+		// PeerConnection factory provided.
+		if ((options != nullptr) && (options->factory != nullptr))
+		{
+			this->peerConnectionFactory =
+			  webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>(options->factory);
+		}
+		else
+		{
+			this->networkThread   = webrtc::Thread::CreateWithSocketServer();
+			this->signalingThread = webrtc::Thread::Create();
+			this->workerThread    = webrtc::Thread::Create();
+
+			this->networkThread->SetName("network_thread", nullptr);
+			this->signalingThread->SetName("signaling_thread", nullptr);
+			this->workerThread->SetName("worker_thread", nullptr);
+
+			if (!this->networkThread->Start() || !this->signalingThread->Start() || !this->workerThread->Start())
+			{
+				MSC_THROW_INVALID_STATE_ERROR("thread start errored");
+			}
+
+			this->peerConnectionFactory = webrtc::CreatePeerConnectionFactory(
+			  this->networkThread.get(),
+			  this->workerThread.get(),
+			  this->signalingThread.get(),
+			  nullptr /*default_adm*/,
+			  webrtc::CreateBuiltinAudioEncoderFactory(),
+			  webrtc::CreateBuiltinAudioDecoderFactory(),
+			  std::make_unique<webrtc::VideoEncoderFactoryTemplate<
+			    webrtc::LibvpxVp8EncoderTemplateAdapter,
+			    webrtc::LibvpxVp9EncoderTemplateAdapter,
+			    webrtc::OpenH264EncoderTemplateAdapter,
+			    webrtc::LibaomAv1EncoderTemplateAdapter>>(),
+			  std::make_unique<webrtc::VideoDecoderFactoryTemplate<
+			    webrtc::LibvpxVp8DecoderTemplateAdapter,
+			    webrtc::LibvpxVp9DecoderTemplateAdapter,
+			    webrtc::OpenH264DecoderTemplateAdapter,
+			    webrtc::Dav1dDecoderTemplateAdapter>>(),
+			  nullptr /*audio_mixer*/,
+			  nullptr /*audio_processing*/,
+			  nullptr /*audio_frame_processor*/,
+			  nullptr /*field_trials*/);
+		}
+
+		// Set SDP semantics to Unified Plan.
+		config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
+
+		// Create the webrtc::Peerconnection.
+		auto pcOrError = this->peerConnectionFactory->CreatePeerConnectionOrError(
+		  config, webrtc::PeerConnectionDependencies{ privateListener });
+		if (!pcOrError.ok())
+		{
+			MSC_THROW_INVALID_STATE_ERROR(
+			  "failed to create peer connection: %s", pcOrError.error().message());
+		}
+		this->pc = pcOrError.value();
+	}
+
+	void PeerConnection::Close()
+	{
+		MSC_TRACE();
+
+		this->pc->Close();
+	}
+
+	webrtc::PeerConnectionInterface::RTCConfiguration PeerConnection::GetConfiguration() const
+	{
+		MSC_TRACE();
+
+		return this->pc->GetConfiguration();
+	}
+
+	bool PeerConnection::SetConfiguration(const webrtc::PeerConnectionInterface::RTCConfiguration& config)
+	{
+		MSC_TRACE();
+
+		webrtc::RTCError error = this->pc->SetConfiguration(config);
+
+		if (error.ok())
+		{
+			return true;
+		}
+
+		MSC_WARN(
+		  "webrtc::PeerConnection::SetConfiguration failed [%s:%s]",
+		  std::string(webrtc::ToString(error.type())).c_str(),
+		  error.message());
+
+		return false;
+	}
+
+	std::string PeerConnection::CreateOffer(
+	  const webrtc::PeerConnectionInterface::RTCOfferAnswerOptions& options)
+	{
+		MSC_TRACE();
+
+		CreateSessionDescriptionObserver* sessionDescriptionObserver =
+		  new webrtc::RefCountedObject<CreateSessionDescriptionObserver>();
+
+		auto future = sessionDescriptionObserver->GetFuture();
+
+		this->pc->CreateOffer(sessionDescriptionObserver, options);
+
+		return waitForFuture(future);
+	}
+
+	std::string PeerConnection::CreateAnswer(
+	  const webrtc::PeerConnectionInterface::RTCOfferAnswerOptions& options)
+	{
+		MSC_TRACE();
+
+		CreateSessionDescriptionObserver* sessionDescriptionObserver =
+		  new webrtc::RefCountedObject<CreateSessionDescriptionObserver>();
+
+		auto future = sessionDescriptionObserver->GetFuture();
+
+		this->pc->CreateAnswer(sessionDescriptionObserver, options);
+
+		return waitForFuture(future);
+	}
+
+	void PeerConnection::SetLocalDescription(webrtc::SdpType type, const std::string& sdp)
+	{
+		MSC_TRACE();
+
+		webrtc::SdpParseError error;
+		std::unique_ptr<webrtc::SessionDescriptionInterface> sessionDescription;
+		webrtc::scoped_refptr<SetLocalDescriptionObserver> observer(
+		  new webrtc::RefCountedObject<SetLocalDescriptionObserver>());
+		auto future = observer->GetFuture();
+
+		sessionDescription = webrtc::CreateSessionDescription(type, sdp, &error);
+		if (sessionDescription == nullptr)
+		{
+			MSC_WARN(
+			  "webrtc::CreateSessionDescription failed [%s]: %s",
+			  error.line.c_str(),
+			  error.description.c_str());
+
+			observer->Reject(error.description);
+			waitForFuture(future);
+
+			return;
+		}
+
+		this->pc->SetLocalDescription(std::move(sessionDescription), observer);
+		waitForFuture(future);
+	}
+
+	void PeerConnection::SetRemoteDescription(webrtc::SdpType type, const std::string& sdp)
+	{
+		MSC_TRACE();
+
+		webrtc::SdpParseError error;
+		std::unique_ptr<webrtc::SessionDescriptionInterface> sessionDescription;
+		webrtc::scoped_refptr<SetRemoteDescriptionObserver> observer(
+		  new webrtc::RefCountedObject<SetRemoteDescriptionObserver>());
+		auto future = observer->GetFuture();
+
+		sessionDescription = webrtc::CreateSessionDescription(type, sdp, &error);
+		if (sessionDescription == nullptr)
+		{
+			MSC_WARN(
+			  "webrtc::CreateSessionDescription failed [%s]: %s",
+			  error.line.c_str(),
+			  error.description.c_str());
+
+			observer->Reject(error.description);
+			waitForFuture(future);
+			return;
+		}
+
+		this->pc->SetRemoteDescription(std::move(sessionDescription), observer);
+		waitForFuture(future);
+	}
+
+	std::string PeerConnection::GetLocalDescription()
+	{
+		MSC_TRACE();
+
+		const auto* desc = this->pc->local_description();
+		std::string sdp;
+
+		desc->ToString(&sdp);
+
+		return sdp;
+	}
+
+	std::string PeerConnection::GetRemoteDescription()
+	{
+		MSC_TRACE();
+
+		const auto* desc = this->pc->remote_description();
+		std::string sdp;
+
+		desc->ToString(&sdp);
+
+		return sdp;
+	}
+
+	std::vector<webrtc::scoped_refptr<webrtc::RtpTransceiverInterface>> PeerConnection::GetTransceivers() const
+	{
+		MSC_TRACE();
+
+		return this->pc->GetTransceivers();
+	}
+
+	webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> PeerConnection::AddTransceiver(
+	  webrtc::MediaType mediaType)
+	{
+		MSC_TRACE();
+
+		auto result = this->pc->AddTransceiver(mediaType);
+
+		if (!result.ok())
+		{
+			webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver = nullptr;
+
+			return transceiver;
+		}
+
+		return result.value();
+	}
+
+	webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> PeerConnection::AddTransceiver(
+	  webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track,
+	  webrtc::RtpTransceiverInit rtpTransceiverInit)
+	{
+		MSC_TRACE();
+
+		/*
+		 * Define a stream id so the generated local description is correct.
+		 * - with a stream id:    "a=ssrc:<ssrc-id> mslabel:<value>"
+		 * - without a stream id: "a=ssrc:<ssrc-id> mslabel:"
+		 *
+		 * The second is incorrect (https://tools.ietf.org/html/rfc5576#section-4.1)
+		 */
+		rtpTransceiverInit.stream_ids.emplace_back("0");
+
+		auto result = this->pc->AddTransceiver(
+		  track, rtpTransceiverInit); // NOLINT(performance-unnecessary-value-param)
+
+		if (!result.ok())
+		{
+			webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver = nullptr;
+
+			return transceiver;
+		}
+
+		return result.value();
+	}
+
+	std::vector<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> PeerConnection::GetSenders()
+	{
+		MSC_TRACE();
+
+		return this->pc->GetSenders();
+	}
+
+	bool PeerConnection::RemoveTrack(webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender)
+	{
+		MSC_TRACE();
+
+		const auto result = this->pc->RemoveTrackOrError(std::move(sender));
+
+		return result.ok();
+	}
+
+	json PeerConnection::GetStats()
+	{
+		MSC_TRACE();
+
+		webrtc::scoped_refptr<RTCStatsCollectorCallback> callback(
+		  new webrtc::RefCountedObject<RTCStatsCollectorCallback>());
+
+		auto future = callback->GetFuture();
+
+		this->pc->GetStats(callback.get());
+
+		return waitForFuture(future);
+	}
+
+	json PeerConnection::GetStats(webrtc::scoped_refptr<webrtc::RtpSenderInterface> selector)
+	{
+		MSC_TRACE();
+
+		webrtc::scoped_refptr<RTCStatsCollectorCallback> callback(
+		  new webrtc::RefCountedObject<RTCStatsCollectorCallback>());
+
+		auto future = callback->GetFuture();
+
+		this->pc->GetStats(std::move(selector), callback);
+
+		return waitForFuture(future);
+	}
+
+	json PeerConnection::GetStats(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> selector)
+	{
+		MSC_TRACE();
+
+		webrtc::scoped_refptr<RTCStatsCollectorCallback> callback(
+		  new webrtc::RefCountedObject<RTCStatsCollectorCallback>());
+
+		auto future = callback->GetFuture();
+
+		this->pc->GetStats(std::move(selector), callback);
+
+		return waitForFuture(future);
+	}
+
+	webrtc::scoped_refptr<webrtc::DataChannelInterface> PeerConnection::CreateDataChannel(
+	  const std::string& label, const webrtc::DataChannelInit* config)
+	{
+		MSC_TRACE();
+
+		const auto result = this->pc->CreateDataChannelOrError(label, config);
+
+		if (result.ok())
+		{
+			MSC_DEBUG("Success creating data channel");
+		}
+		else
+		{
+			MSC_THROW_ERROR("Failed creating data channel");
+		}
+
+		return result.value();
+	}
+
+	std::optional<int> PeerConnection::GetSctpMaxChannels() const
+	{
+		auto sctpTransport = this->pc->GetSctpTransport();
+
+		if (!sctpTransport)
+		{
+			return std::nullopt;
+		}
+
+		return sctpTransport->Information().MaxChannels();
+	}
+
+	/* SetLocalDescriptionObserver */
+
+	std::future<void> PeerConnection::SetLocalDescriptionObserver::GetFuture()
+	{
+		MSC_TRACE();
+
+		return this->promise.get_future();
+	}
+
+	void PeerConnection::SetLocalDescriptionObserver::Reject(const std::string& error)
+	{
+		MSC_TRACE();
+
+		this->promise.set_exception(std::make_exception_ptr(MediaSoupClientError(error.c_str())));
+	}
+
+	void PeerConnection::SetLocalDescriptionObserver::OnSetLocalDescriptionComplete(webrtc::RTCError error)
+	{
+		MSC_TRACE();
+
+		if (!error.ok())
+		{
+			MSC_WARN(
+			  "webrtc::SetLocalDescriptionObserverWrapper failure [%s:%s]",
+			  std::string(webrtc::ToString(error.type())).c_str(),
+			  error.message());
+
+			auto message = std::string(error.message());
+
+			this->Reject(message);
+		}
+		else
+		{
+			this->promise.set_value();
+		}
+	};
+
+	/* SetRemoteDescriptionObserver */
+
+	std::future<void> PeerConnection::SetRemoteDescriptionObserver::GetFuture()
+	{
+		MSC_TRACE();
+
+		return this->promise.get_future();
+	}
+
+	void PeerConnection::SetRemoteDescriptionObserver::Reject(const std::string& error)
+	{
+		MSC_TRACE();
+
+		this->promise.set_exception(std::make_exception_ptr(MediaSoupClientError(error.c_str())));
+	}
+
+	void PeerConnection::SetRemoteDescriptionObserver::OnSetRemoteDescriptionComplete(webrtc::RTCError error)
+	{
+		MSC_TRACE();
+
+		if (!error.ok())
+		{
+			MSC_WARN(
+			  "webrtc::SetRemoteDescriptionObserverWrapper failure [%s:%s]",
+			  std::string(webrtc::ToString(error.type())).c_str(),
+			  error.message());
+
+			auto message = std::string(error.message());
+
+			this->Reject(message);
+		}
+		else
+		{
+			this->promise.set_value();
+		}
+	};
+
+	/* SetSessionDescriptionObserver */
+
+	std::future<void> PeerConnection::SetSessionDescriptionObserver::GetFuture()
+	{
+		MSC_TRACE();
+
+		return this->promise.get_future();
+	}
+
+	void PeerConnection::SetSessionDescriptionObserver::Reject(const std::string& error)
+	{
+		MSC_TRACE();
+
+		this->promise.set_exception(std::make_exception_ptr(MediaSoupClientError(error.c_str())));
+	}
+
+	void PeerConnection::SetSessionDescriptionObserver::OnSuccess()
+	{
+		MSC_TRACE();
+
+		this->promise.set_value();
+	};
+
+	void PeerConnection::SetSessionDescriptionObserver::OnFailure(webrtc::RTCError error)
+	{
+		MSC_TRACE();
+
+		MSC_WARN(
+		  "webrtc::SetSessionDescriptionObserver failure [%s:%s]",
+		  std::string(webrtc::ToString(error.type())).c_str(),
+		  error.message());
+
+		auto message = std::string(error.message());
+
+		this->Reject(message);
+	};
+
+	/* CreateSessionDescriptionObserver */
+
+	std::future<std::string> PeerConnection::CreateSessionDescriptionObserver::GetFuture()
+	{
+		MSC_TRACE();
+
+		return this->promise.get_future();
+	}
+
+	void PeerConnection::CreateSessionDescriptionObserver::Reject(const std::string& error)
+	{
+		MSC_TRACE();
+
+		this->promise.set_exception(std::make_exception_ptr(MediaSoupClientError(error.c_str())));
+	}
+
+	void PeerConnection::CreateSessionDescriptionObserver::OnSuccess(
+	  webrtc::SessionDescriptionInterface* desc)
+	{
+		MSC_TRACE();
+
+		// This callback should take the ownership of |desc|.
+		std::unique_ptr<webrtc::SessionDescriptionInterface> ownedDesc(desc);
+
+		std::string sdp;
+
+		ownedDesc->ToString(&sdp);
+		this->promise.set_value(sdp);
+	};
+
+	void PeerConnection::CreateSessionDescriptionObserver::OnFailure(webrtc::RTCError error)
+	{
+		MSC_TRACE();
+
+		MSC_WARN(
+		  "webtc::CreateSessionDescriptionObserver failure [%s:%s]",
+		  std::string(webrtc::ToString(error.type())).c_str(),
+		  error.message());
+
+		auto message = std::string(error.message());
+
+		this->Reject(message);
+	}
+
+	/* RTCStatsCollectorCallback */
+
+	std::future<json> PeerConnection::RTCStatsCollectorCallback::GetFuture()
+	{
+		MSC_TRACE();
+
+		return this->promise.get_future();
+	}
+
+	void PeerConnection::RTCStatsCollectorCallback::OnStatsDelivered(
+	  const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report)
+	{
+		MSC_TRACE();
+
+		std::string s = report->ToJson();
+
+		// RtpReceiver stats JSON string is sometimes empty.
+		if (s.empty())
+		{
+			this->promise.set_value(json::array());
+		}
+		else
+		{
+			this->promise.set_value(json::parse(s));
+		}
+	};
+
+	/* PeerConnection::PrivateListener */
+
+	/**
+	 * Triggered when the SignalingState changed.
+	 */
+	void PeerConnection::PrivateListener::OnSignalingChange(
+	  webrtc::PeerConnectionInterface::SignalingState newState)
+	{
+		MSC_TRACE();
+
+		MSC_DEBUG("[newState:%s]", PeerConnection::signalingState2String[newState].c_str());
+	}
+
+	/**
+	 * Triggered when media is received on a new stream from remote peer.
+	 */
+	void PeerConnection::PrivateListener::OnAddStream(
+	  webrtc::scoped_refptr<webrtc::MediaStreamInterface> /*stream*/)
+	{
+		MSC_TRACE();
+	}
+
+	/**
+	 * Triggered when a remote peer closes a stream.
+	 */
+	void PeerConnection::PrivateListener::OnRemoveStream(
+	  webrtc::scoped_refptr<webrtc::MediaStreamInterface> /*stream*/)
+	{
+		MSC_TRACE();
+	}
+
+	/**
+	 * Triggered when a remote peer opens a data channel.
+	 */
+	void PeerConnection::PrivateListener::OnDataChannel(
+	  webrtc::scoped_refptr<webrtc::DataChannelInterface> /*dataChannel*/)
+	{
+		MSC_TRACE();
+	}
+
+	/**
+	 * Triggered when renegotiation is needed. For example, an ICE restart has begun.
+	 */
+	void PeerConnection::PrivateListener::OnRenegotiationNeeded()
+	{
+		MSC_TRACE();
+	}
+
+	/**
+	 * Triggered any time the IceConnectionState changes.
+	 *
+	 * Note that our ICE states lag behind the standard slightly. The most
+	 * notable differences include the fact that "failed" occurs after 15
+	 * seconds, not 30, and this actually represents a combination ICE + DTLS
+	 * state, so it may be "failed" if DTLS fails while ICE succeeds.
+	 */
+	void PeerConnection::PrivateListener::OnIceConnectionChange(
+	  webrtc::PeerConnectionInterface::IceConnectionState newState)
+	{
+		MSC_TRACE();
+
+		MSC_DEBUG("[newState:%s]", PeerConnection::iceConnectionState2String[newState].c_str());
+	}
+
+	/**
+	 * Triggered any time the IceGatheringState changes.
+	 */
+	void PeerConnection::PrivateListener::OnIceGatheringChange(
+	  webrtc::PeerConnectionInterface::IceGatheringState newState)
+	{
+		MSC_TRACE();
+
+		MSC_DEBUG("[newState:%s]", PeerConnection::iceGatheringState2String[newState].c_str());
+	}
+
+	/**
+	 * Triggered when a new ICE candidate has been gathered.
+	 */
+	void PeerConnection::PrivateListener::OnIceCandidate(const webrtc::IceCandidateInterface* candidate)
+	{
+		MSC_TRACE();
+
+		std::string candidateStr;
+
+		candidate->ToString(&candidateStr);
+
+		MSC_DEBUG("[candidate:%s]", candidateStr.c_str());
+	}
+
+	/**
+	 * Triggered when the ICE candidates have been removed.
+	 */
+	void PeerConnection::PrivateListener::OnIceCandidatesRemoved(
+	  const std::vector<webrtc::Candidate>& /*candidates*/)
+	{
+		MSC_TRACE();
+	}
+
+	/**
+	 * Triggered when the ICE connection receiving status changes.
+	 */
+	void PeerConnection::PrivateListener::OnIceConnectionReceivingChange(bool /*receiving*/)
+	{
+		MSC_TRACE();
+	}
+
+	/**
+	 * Triggered when a receiver and its track are created.
+	 *
+	 * Note: This is called with both Plan B and Unified Plan semantics. Unified
+	 * Plan users should prefer OnTrack, OnAddTrack is only called as backwards
+	 * compatibility (and is called in the exact same situations as OnTrack).
+	 */
+	void PeerConnection::PrivateListener::OnAddTrack(
+	  webrtc::scoped_refptr<webrtc::RtpReceiverInterface> /*receiver*/,
+	  const std::vector<webrtc::scoped_refptr<webrtc::MediaStreamInterface>>& /*streams*/)
+	{
+		MSC_TRACE();
+	}
+
+	/**
+	 * Triggered when signaling indicates a transceiver will be receiving
+	 *
+	 * media from the remote endpoint. This is fired during a call to
+	 * SetRemoteDescription. The receiving track can be accessed by:
+	 * transceiver->receiver()->track() and its associated streams by
+	 * transceiver->receiver()->streams().
+	 *
+	 * NOTE: This will only be called if Unified Plan semantics are specified.
+	 * This behavior is specified in section 2.2.8.2.5 of the "Set the
+	 * RTCSessionDescription" algorithm:
+	 *   https://w3c.github.io/webrtc-pc/#set-description
+	 */
+	void PeerConnection::PrivateListener::OnTrack(
+	  webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> /*transceiver*/)
+	{
+		MSC_TRACE();
+	}
+
+	/**
+	 * Triggered when signaling indicates that media will no longer be received on a
+	 * track.
+	 *
+	 * With Plan B semantics, the given receiver will have been removed from the
+	 * PeerConnection and the track muted.
+	 * With Unified Plan semantics, the receiver will remain but the transceiver
+	 * will have changed direction to either sendonly or inactive.
+	 *   https://w3c.github.io/webrtc-pc/#process-remote-track-removal
+	 */
+	void PeerConnection::PrivateListener::OnRemoveTrack(
+	  webrtc::scoped_refptr<webrtc::RtpReceiverInterface> /*receiver*/)
+	{
+		MSC_TRACE();
+	}
+
+	/**
+	 * Triggered when an interesting usage is detected by WebRTC.
+	 *
+	 * An appropriate action is to add information about the context of the
+	 * PeerConnection and write the event to some kind of "interesting events"
+	 * log function.
+	 * The heuristics for defining what constitutes "interesting" are
+	 * implementation-defined.
+	 */
+	void PeerConnection::PrivateListener::OnInterestingUsage(int /*usagePattern*/)
+	{
+		MSC_TRACE();
+	}
+} // namespace mediasoupclient

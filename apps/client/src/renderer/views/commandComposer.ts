@@ -1,16 +1,28 @@
-import { LIMITS, type BotFormValues, type UserSummary } from '@monky/shared';
+import { LIMITS, getCommandPresentation, localizeCommand, type BotLocale, type BotFormValues, type UserSummary } from '@monky/shared';
 import type { CommandDraft } from '../stores/chatStore';
-import { t } from '../i18n';
+import { getLanguage, t } from '../i18n';
 import { getAvatarUrl } from '../utils/avatar';
 import { escapeHtml } from '../utils/html';
-import { visibleCommandFields, type BotInputField } from '../utils/botInputs';
+import { renderLoadingIndicator } from '../utils/loadingIndicator';
+import {
+  commandValuesFromInputs,
+  botInputError,
+  visibleCommandFields,
+  visibleCommandValues,
+  type BotInputField,
+} from '../utils/botInputs';
 import { optionalParameterLabel } from './commandCatalog';
+import { AUTOCOMPLETE_MAX_QUERY } from '../utils/commandAutocomplete';
+import {
+  renderSelectionChoiceList, renderSelectionChoiceItems, type RenderableSelectionChoice, type SelectionChoiceListOptions,
+} from '../utils/selectionChoices';
 
-export interface ParameterChoice {
-  value: string;
-  label: string;
-  description?: string;
+export interface ParameterChoice extends RenderableSelectionChoice {
   avatarUrl?: string | null;
+}
+
+export function commandParameterLabel(command: CommandDraft['command'], name: string): string {
+  return command.options?.find((option) => option.name === name)?.label ?? name;
 }
 
 export function commandParameterChoices(field: BotInputField, members: UserSummary[]): ParameterChoice[] {
@@ -22,7 +34,7 @@ export function commandParameterChoices(field: BotInputField, members: UserSumma
 }
 
 export function commandParameterHint(field: BotInputField): string {
-  const parts = [field.label];
+  const parts = [field.description ?? field.label];
   if (field.type === 'integer') {
     if (field.min !== undefined) parts.push(t('botChat.minimum', { value: field.min }));
     if (field.max !== undefined) parts.push(t('botChat.maximum', { value: field.max }));
@@ -31,12 +43,31 @@ export function commandParameterHint(field: BotInputField): string {
   return parts.join(' · ');
 }
 
-function renderInlineField(field: BotInputField, values: BotFormValues, prefix: string, disabled: boolean, members: UserSummary[]): string {
+export function commandParameterError(draft: CommandDraft, field: BotInputField, members: UserSummary[]): string | undefined {
+  const value = draft.values[field.name];
+  const touched = draft.touchedFields?.includes(field.name);
+  if (!touched && (field.type === 'autocomplete' || value === undefined || value === '')) return;
+  const option = draft.command.options?.find((entry) => entry.name === field.name);
+  if (!option) return;
+  const result = commandValuesFromInputs(
+    { ...draft.command, options: [option] }, value === undefined ? {} : { [field.name]: value },
+    members, draft.autocomplete, draft.visibleOptionalNames
+  );
+  return result.success ? undefined : botInputError([field], result.field, result.reason);
+}
+
+function renderInlineField(field: BotInputField, draft: CommandDraft, prefix: string, disabled: boolean, members: UserSummary[]): string {
   if (field.type === 'string-list') return '';
   const id = escapeHtml(`${prefix}-${field.name}`);
   const name = escapeHtml(field.name);
-  const value = values[field.name];
-  const attributes = `id="${id}" name="${name}" data-bot-input aria-label="${escapeHtml(`${field.name}: ${field.label}`)}" aria-required="${!!field.required}" ${disabled ? 'disabled' : ''}`;
+  const label = commandParameterLabel(draft.command, field.name);
+  const value = field.type === 'autocomplete' ? draft.autocomplete[field.name]?.query ?? '' : draft.values[field.name];
+  const error = commandParameterError(draft, field, members);
+  const accessibleLabel = label === field.label ? label : `${label}: ${field.label}`;
+  const attributes = `id="${id}" name="${name}" data-bot-input aria-label="${escapeHtml(accessibleLabel)}" aria-required="${!!field.required}" ${error ? 'aria-invalid="true"' : ''} ${disabled ? 'disabled' : ''}`;
+  const placeholder = field.type === 'text' || field.type === 'integer' || field.type === 'autocomplete'
+    ? field.placeholder ?? t(field.type === 'autocomplete' ? 'botChat.autocompleteHint' :
+      field.type === 'integer' ? 'botChat.integerPlaceholder' : 'botChat.textPlaceholder') : '';
   let control: string;
   if (field.type === 'boolean') {
     control = `<span class="bot-switch-row">
@@ -46,6 +77,11 @@ function renderInlineField(field: BotInputField, values: BotFormValues, prefix: 
       </label>
       <span class="bot-switch-value">${t(typeof value === 'boolean' ? value ? 'botChat.switchOn' : 'botChat.switchOff' : 'botChat.skipped')}</span>
     </span>`;
+  } else if (field.type === 'autocomplete') {
+    control = `<input class="bot-argument-input" type="text" ${attributes}
+      data-bot-autocomplete="${name}" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false"
+      autocomplete="off" maxlength="${AUTOCOMPLETE_MAX_QUERY}" value="${escapeHtml(typeof value === 'string' ? value : '')}"
+      placeholder="${escapeHtml(placeholder)}">`;
   } else if (field.type === 'select' || field.type === 'user') {
     const selected = commandParameterChoices(field, members).find((choice) => choice.value === value);
     control = `<button type="button" class="bot-argument-choice" ${attributes} data-bot-choice="${name}"
@@ -55,7 +91,6 @@ function renderInlineField(field: BotInputField, values: BotFormValues, prefix: 
     </button>`;
   } else {
     const text = typeof value === 'string' || typeof value === 'number' ? String(value) : '';
-    const placeholder = field.placeholder ?? t(field.type === 'integer' ? 'botChat.integerPlaceholder' : 'botChat.textPlaceholder');
     control = field.type === 'integer'
       ? `<input class="bot-argument-input bot-argument-number" type="text" inputmode="numeric" maxlength="30" ${attributes}
           value="${escapeHtml(text)}" placeholder="${escapeHtml(placeholder)}">`
@@ -63,24 +98,47 @@ function renderInlineField(field: BotInputField, values: BotFormValues, prefix: 
           maxlength="${LIMITS.MAX_MESSAGE_LENGTH}" placeholder="${escapeHtml(placeholder)}">
 ${escapeHtml(text)}</textarea>`;
   }
-  return `<div class="bot-inline-argument ${field.required ? 'required' : 'optional'}" data-field-name="${name}">
-    <label class="bot-argument-name" for="${id}">${name}</label>
+  if (field.type === 'text' || field.type === 'integer' || field.type === 'autocomplete') {
+    const text = typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+    control = `<span class="bot-argument-size">
+      <span class="bot-argument-measure" aria-hidden="true">${escapeHtml(placeholder)}</span>
+      <span class="bot-argument-measure" data-argument-measure-value aria-hidden="true">${escapeHtml(text)}</span>
+      ${control}
+    </span>`;
+  }
+  return `<div class="bot-inline-argument ${field.required ? 'required' : 'optional'} ${error ? 'invalid' : ''}" data-field-name="${name}" ${error ? `title="${escapeHtml(error)}"` : ''}>
+    <label class="bot-argument-name" for="${id}">${escapeHtml(label)}</label>
     ${control}
     ${!field.required ? `<button type="button" class="bot-remove-argument" data-remove-parameter="${name}"
-      aria-label="${escapeHtml(t('botChat.removeParameter', { name: field.name }))}" title="${escapeHtml(t('botChat.removeParameter', { name: field.name }))}"
+      aria-label="${escapeHtml(t('botChat.removeParameter', { name: label }))}" title="${escapeHtml(t('botChat.removeParameter', { name: label }))}"
       ${disabled ? 'disabled' : ''}><span class="material-symbols-outlined md-14">close</span></button>` : ''}
   </div>`;
 }
 
-export function renderCompactCommand(draft: CommandDraft, channelId: string, members: UserSummary[], canSend: boolean, available: boolean): string {
+export function renderCompactCommand(
+  draft: CommandDraft, channelId: string, members: UserSummary[], canSend: boolean, available: boolean, voiceError?: string,
+  locale: BotLocale = getLanguage(),
+  preparing = false,
+): string {
+  draft = { ...draft, command: localizeCommand(draft.command, locale) };
+  const presentation = getCommandPresentation(draft.command, locale);
   const fields = visibleCommandFields(draft.command, draft.visibleOptionalNames);
   const optionalCount = (draft.command.options ?? []).filter((option) =>
     !option.required && !draft.visibleOptionalNames.includes(option.name)).length;
-  const disabled = draft.pending || !canSend;
+  const disabled = draft.pending || preparing || !canSend;
+  const canExecute = commandValuesFromInputs(
+    draft.command,
+    visibleCommandValues(draft.command, draft.values, draft.visibleOptionalNames),
+    members,
+    draft.autocomplete,
+    draft.visibleOptionalNames
+  ).success;
   const hint = fields[0] ? commandParameterHint(fields[0]) : draft.command.description;
-  return `<form class="bot-compact-command-form" data-command-form novalidate>
+  const actionLabel = t(draft.pending ? 'botChat.invoking' : preparing ? 'localExecution.preparing' : 'botChat.execute');
+  return `<form class="bot-compact-command-form" data-command-form
+    data-bot-id="${escapeHtml(draft.command.botId)}" data-command-name="${escapeHtml(draft.command.name)}" novalidate>
     <div class="bot-command-hint">
-      <strong data-parameter-hint-name>${escapeHtml(fields[0]?.name ?? `/${draft.command.name}`)}</strong>
+      <strong data-parameter-hint-name>${escapeHtml(fields[0] ? commandParameterLabel(draft.command, fields[0].name) : `/${presentation.displayName}`)}</strong>
       <span data-parameter-hint-description>${escapeHtml(hint)}</span>
       <span class="bot-private-cue" title="${t('botChat.private')}"><span class="material-symbols-outlined md-14">lock</span><span>${t('botChat.private')}</span></span>
       <button type="button" class="bot-command-close" data-bot-action="cancel-command" title="${t('botChat.cancelCommand')}"
@@ -89,28 +147,49 @@ export function renderCompactCommand(draft: CommandDraft, channelId: string, mem
     <div class="bot-inline-command">
       <img class="bot-command-avatar" src="${escapeHtml(getAvatarUrl(draft.command.botAvatarUrl))}" alt=""
         title="${escapeHtml(t('botChat.commandFrom', { bot: draft.command.botName }))}" data-fallback="avatar">
-      <span class="bot-command-token"><strong>/${escapeHtml(draft.command.name)}</strong><small>${escapeHtml(draft.command.botName)}</small></span>
+      <span class="bot-command-token"><strong>/${escapeHtml(presentation.displayName)}</strong><small>${escapeHtml(draft.command.botName)}</small></span>
       <div class="bot-command-arguments">
-        ${fields.map((field) => renderInlineField(field, draft.values, `command-${channelId}`, disabled, members)).join('')}
+        ${fields.map((field) => renderInlineField(field, draft, `command-${channelId}`, disabled, members)).join('')}
         ${optionalCount ? `<button type="button" class="bot-add-parameters" data-bot-action="optional-parameters" aria-haspopup="listbox"
           aria-expanded="false" title="${t('botChat.addParameters')}" ${disabled ? 'disabled' : ''}>${optionalParameterLabel(optionalCount)}</button>` : ''}
       </div>
-      <button type="submit" class="btn btn-primary bot-command-run" ${disabled || !available ? 'disabled' : ''}
-        title="${t(draft.pending ? 'botChat.invoking' : 'botChat.execute')}" aria-label="${t(draft.pending ? 'botChat.invoking' : 'botChat.execute')}">
-        <span class="material-symbols-outlined md-18">${draft.pending ? 'hourglass_empty' : 'send'}</span>
+      <button type="submit" class="btn btn-primary bot-command-run" ${disabled || !available || !canExecute || voiceError ? 'disabled' : ''}
+        ${draft.pending || preparing ? 'data-loading="1" aria-busy="true"' : ''}
+        title="${escapeHtml(actionLabel)}" aria-label="${escapeHtml(actionLabel)}">
+        <span class="material-symbols-outlined md-18">send</span>
       </button>
     </div>
+    ${preparing ? `<p class="bot-status bot-command-preparation" role="status">${renderLoadingIndicator(t('localExecution.preparing'))}</p>` : ''}
+    ${draft.command.downloadsSound ? `<p class="bot-local-download-cue"><span class="material-symbols-outlined md-16" aria-hidden="true">download</span>${t('botChat.localDownload')}</p>` : ''}
+    <p class="bot-command-voice-error" role="status" ${voiceError ? '' : 'hidden'}>${escapeHtml(voiceError ?? '')}</p>
     <p class="bot-error" role="alert" ${draft.error || !available ? '' : 'hidden'}>${escapeHtml(draft.error ?? (!available ? t('botChat.commandUnavailable') : ''))}</p>
     <div class="bot-parameter-menu" id="bot-parameter-options" hidden></div>
   </form>`;
 }
 
-export function renderParameterChoices(choices: ParameterChoice[], activeIndex: number, label: string): string {
-  return `<div role="listbox" aria-label="${escapeHtml(label)}">
-    ${choices.map((choice, index) => `<button type="button" class="bot-parameter-option ${index === activeIndex ? 'active' : ''}"
-      id="bot-parameter-option-${index}" role="option" aria-selected="${index === activeIndex}" data-parameter-option="${index}">
-      ${choice.avatarUrl ? `<img src="${escapeHtml(getAvatarUrl(choice.avatarUrl))}" alt="" data-fallback="avatar">` : ''}
-      <span><strong>${escapeHtml(choice.label)}</strong>${choice.description ? `<small>${escapeHtml(choice.description)}</small>` : ''}</span>
-    </button>`).join('')}
-  </div>`;
+export function renderParameterChoices(
+  choices: ParameterChoice[], activeIndex: number, label: string, keyPrefix = `command:${label}`, volumeScope = keyPrefix
+): string {
+  return renderSelectionChoiceList(parameterChoiceOptions(choices, activeIndex, label, keyPrefix, volumeScope));
+}
+
+export function renderParameterChoiceItems(
+  choices: ParameterChoice[], activeIndex: number, label: string, keyPrefix: string, volumeScope: string, startIndex: number
+): string {
+  return renderSelectionChoiceItems(parameterChoiceOptions(choices, activeIndex, label, keyPrefix, volumeScope), startIndex);
+}
+
+function parameterChoiceOptions(
+  choices: ParameterChoice[], activeIndex: number, label: string, keyPrefix: string, volumeScope: string
+): SelectionChoiceListOptions {
+  return {
+    choices,
+    activeIndex,
+    label,
+    header: label,
+    idPrefix: 'bot-parameter-option',
+    keyPrefix,
+    volumeScope,
+    optionAttributes: (_choice, index) => `data-parameter-option="${index}"`,
+  };
 }

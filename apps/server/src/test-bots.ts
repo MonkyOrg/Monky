@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { listOnlineHumans } from './application/services/onlineHumans';
-import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { WebSocket } from 'ws';
 import {
   DEFAULT_PERMISSIONS,
@@ -16,254 +16,1423 @@ import {
   ProtocolErrorCode,
   ProtocolMessage,
   UserSummary,
+  CommandAutocompletePayload,
+  CommandAudioPreviewPayload,
+  CommandSoundDownloadReceivedPayload,
+  commandAutocompleteResultSchema,
+  commandAudioPreviewResultSchema,
+  commandSoundDownloadReceivedSchema,
+  commandSoundDownloadResultSchema,
   commandExecutionSchema,
   commandFinishedSchema,
   commandSubmitSchema,
+  botSettingsSnapshotSchema,
+  botSettingsListResponseSchema,
+  botSelectorRespondedSchema,
+  botVoiceJoinedSchema,
+  botScreenSchema,
+  botScreenRemovedSchema,
+  localSourceResultSchema,
+  localTaskOfferSchema,
+  localTaskEventSchema,
+  type LocalTaskOffer,
+  type LocalTaskSpec,
+  type LocalRequestContext,
+  type BotSettingsDefinition,
+  type BotSettingsPatch,
 } from '@monky/shared';
-import { AttachmentService } from './application/services/AttachmentService';
-import { AuthService } from './application/services/AuthService';
 import { BotService } from './application/services/BotService';
 import { BotSelectorService } from './application/services/BotSelectorService';
+import { BotSettingsService } from './application/services/BotSettingsService';
+import { SqliteBotSettingsRepository } from './infrastructure/database/SqliteBotSettingsRepository';
 import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
-import { ChannelService } from './application/services/ChannelService';
-import { ChatService } from './application/services/ChatService';
+import { ChannelAccessContext } from './application/services/ChannelService';
 import type { MessageRecord } from './domain/entities';
 import { CommandRegistry } from './application/services/CommandRegistry';
-import { PermissionService } from './application/services/PermissionService';
-import { RoleService } from './application/services/RoleService';
-import { SignalingService } from './application/services/SignalingService';
-import { UserService } from './application/services/UserService';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
+import { SqliteVoiceRestrictionRepository } from './infrastructure/database/SqliteVoiceRestrictionRepository';
 import { SqlJsDriver } from './infrastructure/database/SqliteWrapper';
 import {
-  SqliteAttachmentRepository,
   SqliteBotRepository,
   SqliteChannelRepository,
-  SqliteMentionRepository,
   SqliteMessageRepository,
   SqliteRoleRepository,
   SqliteServerRepository,
   SqliteUserRepository,
 } from './infrastructure/database/SqliteRepositories';
-import { AttachmentStorageService } from './infrastructure/security/AttachmentStorageService';
 import { AvatarStorageService } from './infrastructure/security/AvatarStorageService';
-import { RateLimiter } from './infrastructure/security/RateLimiter';
-import { SfuManager } from './infrastructure/sfu/SfuManager';
-import { CoturnManager } from './infrastructure/turn/CoturnManager';
 import { BotInteractionHandler, BotInteractionSession } from './infrastructure/websocket/BotInteractionHandler';
-import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
 import { ensureServerSeedData } from './server';
+import { createApprovedBotFixture as createFixture, identity, record, records, text, type Received } from './testFixtures/bots';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+const AUDIO_PREVIEW = { url: 'https://cdn.example.test/effect.mp3', fileName: 'effect.mp3', durationMs: 1200 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
+const SETTINGS_DEFINITION = {
+  server: { title: 'Shared behavior', fields: [
+    { name: 'count', label: 'Count', type: 'integer', min: 0, max: 10, required: true, defaultValue: 2 },
+    { name: 'enabled', label: 'Enabled', type: 'boolean', defaultValue: true },
+  ] },
+  user: { title: 'Individual preferences', fields: [
+    { name: 'compact', label: 'Compact', type: 'boolean', defaultValue: true },
+    { name: 'tags', label: 'Tags', type: 'string-list' },
+  ] },
+} satisfies BotSettingsDefinition;
 
-function record(value: unknown): Record<string, unknown> {
-  assert.ok(isRecord(value), 'expected an object payload');
-  return value;
-}
-
-function records(value: unknown): Record<string, unknown>[] {
-  assert.ok(Array.isArray(value), 'expected an array');
-  return value.map(record);
-}
-
-function text(value: unknown): string {
-  assert.equal(typeof value, 'string');
-  assert.ok(typeof value === 'string');
-  return value;
-}
-
-interface Received {
-  type: string;
-  requestId?: string;
-  payload: Record<string, unknown>;
-}
-
-function readMessage(data: string): Received {
-  const parsed: unknown = JSON.parse(data);
-  const value = record(parsed);
-  return {
-    type: text(value.type),
-    requestId: value.requestId === undefined ? undefined : text(value.requestId),
-    payload: record(value.payload),
-  };
-}
-
-function identity() {
-  const pair = generateKeyPairSync('ed25519');
-  return {
-    privateKey: pair.privateKey,
-    publicKey: pair.publicKey.export({ format: 'der', type: 'spki' }).toString('hex'),
-  };
-}
-
-class Peer {
-  readonly messages: Received[] = [];
-  private listeners = new Set<(message: Received) => void>();
-
-  constructor(readonly ws: WebSocket) {
-    ws.on('message', (data) => {
-      const message = readMessage(data.toString());
-      this.messages.push(message);
-      for (const listener of this.listeners) listener(message);
-    });
-  }
-
-  async wait(predicate: (message: Received) => boolean, since = 0): Promise<Received> {
-    const existing = this.messages.slice(since).find(predicate);
-    if (existing) return existing;
-    return new Promise((resolve, reject) => {
-      const listener = (message: Received) => {
-        if (!predicate(message)) return;
-        clearTimeout(timer);
-        this.listeners.delete(listener);
-        resolve(message);
-      };
-      const timer = setTimeout(() => {
-        this.listeners.delete(listener);
-        reject(new Error(`Timed out waiting for socket message; last types: ${this.messages.slice(-5).map((m) => m.type).join(', ')}`));
-      }, 5000);
-      this.listeners.add(listener);
-    });
-  }
-
-  send(type: MessageType, payload: unknown, requestId?: string): void {
-    this.ws.send(JSON.stringify({ type, payload, requestId }));
-  }
-
-  async request(type: MessageType, payload: unknown = {}): Promise<Received> {
-    const requestId = randomUUID();
-    const response = this.wait((message) => message.requestId === requestId);
-    this.send(type, payload, requestId);
-    return response;
-  }
-
-  async error(type: MessageType, payload: unknown, code: ProtocolErrorCode): Promise<void> {
-    const response = await this.request(type, payload);
-    assert.equal(response.type, MessageType.SERVER_ERROR);
-    assert.equal(response.payload.code, code);
-  }
-
-  async barrier(): Promise<void> {
-    if (this.ws.readyState !== WebSocket.OPEN) return;
-    assert.equal((await this.request(MessageType.PING)).type, MessageType.PONG);
-  }
-
-  async close(): Promise<void> {
-    if (this.ws.readyState === WebSocket.CLOSED) return;
-    const closed = once(this.ws, 'close');
-    this.ws.terminate();
-    await closed;
-  }
-}
-
-async function createFixture() {
-  const dataDir = path.join(__dirname, '..', `.bot-test-data-${process.pid}-${randomUUID()}`);
-  const database = await DatabaseConnection.create(path.join(dataDir, 'server.db'));
-  const db = database.getDb();
-  const serverRepo = new SqliteServerRepository(db);
-  const userRepo = new SqliteUserRepository(db);
-  const channelRepo = new SqliteChannelRepository(db);
-  const messageRepo = new SqliteMessageRepository(db);
-  const mentionRepo = new SqliteMentionRepository(db);
-  const roleRepo = new SqliteRoleRepository(db);
-  const botRepo = new SqliteBotRepository(db);
-  const avatars = new AvatarStorageService(dataDir);
-  const rateLimiter = new RateLimiter();
-  const attachmentRepo = new SqliteAttachmentRepository(db);
-  const attachmentService = new AttachmentService(
-    attachmentRepo, serverRepo, new AttachmentStorageService(dataDir), rateLimiter
-  );
-  const permissions = new PermissionService(serverRepo, roleRepo);
-  const roleService = new RoleService(roleRepo, userRepo, permissions);
-  const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissions);
-  const registry = new CommandRegistry();
-  let online: () => Map<string, { user: UserSummary }> = () => new Map();
-  const userService = new UserService(userRepo, avatars, () => online());
-  const botService = new BotService(botRepo, serverRepo, avatars, () => {
-    const bots = new Map<string, UserSummary>();
-    for (const { user } of online().values()) if (user.isBot) bots.set(user.id, user);
-    return bots;
+async function createPrivateVoiceFixture(t: TestContext, mode: 'p2p' | 'sfu' = 'p2p') {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Private voice owner');
+  const caller = await f.human('Private voice caller');
+  const channels = records(record(owner.auth.payload.server).channels);
+  const textId = text(channels.find((channel) => channel.type === 'TEXT')?.id);
+  const publicVoiceId = text(channels.find((channel) => channel.type === 'VOICE')?.id);
+  const role = { id: randomUUID(), name: 'Private listeners', color: null, position: 1,
+    permissions: 0, isDefault: false, createdAt: Date.now() };
+  await f.roleRepo.create(role);
+  await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: caller.id, roleId: role.id });
+  const createdRoom = await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'private-listening', type: 'VOICE', isPrivate: true, allowedRoleIds: [role.id],
   });
-  await ensureServerSeedData({ serverName: 'Bot tests', maxUsers: 10 }, serverRepo, channelRepo, roleRepo);
-  const httpServer = http.createServer();
-  const chatService = new ChatService(
-    messageRepo, channelRepo, userRepo, mentionRepo, avatars, rateLimiter, attachmentService, serverRepo,
-    (userId, channelId) => channelService.canUserAccessChannel(userId, channelId)
-  );
-  const wsServer = new WebSocketServer(
-    httpServer,
-    new AuthService(serverRepo, userRepo, channelRepo, mentionRepo, avatars, () => online(), attachmentService, permissions, roleService),
-    userService,
-    channelService,
-    chatService,
-    new SignalingService(channelRepo),
-    serverRepo,
-    attachmentService,
-    permissions,
-    roleService,
-    new CoturnManager(dataDir),
-    new RateLimiter(),
-    new SfuManager(),
-    botService,
-    registry,
-    new BotSelectorService(new SqliteBotSelectorRepository(database.getDb()))
-  );
-  online = () => wsServer.getOnlineUsersMap();
-  httpServer.listen(0, '127.0.0.1');
-  await once(httpServer, 'listening');
-  const address = httpServer.address();
-  assert.ok(address && typeof address === 'object');
-  const url = `ws://127.0.0.1:${address.port}`;
-  const peers: Peer[] = [];
-  const connect = async () => {
-    const peer = new Peer(new WebSocket(url));
-    peers.push(peer);
-    await once(peer.ws, 'open');
-    return peer;
-  };
-  const human = async (nickname: string, keys = identity(), deviceId = randomUUID(), appearOffline = false) => {
-    const peer = await connect();
-    const challenge = await peer.request(MessageType.AUTH_CONNECT, {
-      protocolVersion: PROTOCOL_VERSION, nickname, publicKey: keys.publicKey, deviceId, appearOffline,
-    });
-    assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
-    const signature = sign(null, Buffer.from(text(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex');
-    const auth = await peer.request(MessageType.AUTH_CHALLENGE_RESPONSE, { signature });
-    assert.equal(auth.type, MessageType.AUTH_SUCCESS);
-    return { peer, keys, deviceId, id: text(record(auth.payload.currentUser).id), auth };
-  };
-  const bot = async (token: string, keys = identity()) => {
-    const peer = await connect();
-    const auth = await peer.request(MessageType.AUTH_CONNECT, {
-      protocolVersion: PROTOCOL_VERSION, nickname: 'Untrusted SDK nickname', publicKey: keys.publicKey, botToken: token,
-    });
-    assert.equal(auth.type, MessageType.AUTH_SUCCESS);
-    return { peer, keys, auth };
-  };
-  const dispose = async () => {
-    wsServer.close();
-    await Promise.all(peers.map((peer) => peer.close()));
-    await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
-    rateLimiter.dispose();
-    database.close();
-    fs.rmSync(dataDir, { recursive: true, force: true });
-  };
-  return {
-    connect, human, bot, dispose, peers, wsServer, botService, botRepo, roleRepo, avatars,
-    channelService, userService, registry, dataDir, messageRepo, channelRepo, userRepo, serverRepo, chatService, attachmentRepo,
-  };
+  const voiceId = text(record(createdRoom.payload.channel).id);
+  await caller.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const token = text(created.payload.token);
+  await f.serverRepo.updateServer({ voiceMode: mode });
+  const bot = await f.bot(token);
+  const botSessionId = text(record(bot.auth.payload.currentUser).sessionId);
+  await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: [{ name: 'play', description: 'Play audio' }] });
+  const invocation = await caller.peer.request(MessageType.COMMAND_INVOKE, { botId, channelId: textId, commandName: 'play' });
+  assert.equal(invocation.type, MessageType.COMMAND_INVOKED);
+  return { ...f, connectBot: f.bot, owner, caller, bot, botId, token, role, textId, voiceId, publicVoiceId, botSessionId,
+    invocationId: text(invocation.payload.invocationId) };
 }
+
+test('miniapp end uses authenticated creator identity, real owner permissions and terminal invocation routing', async (t) => {
+  const f = await createPrivateVoiceFixture(t);
+  const otherDevice = await f.human('Private voice caller', f.caller.keys);
+  const create = async (invocationId: string) => {
+    const response = await f.bot.peer.request(MessageType.BOT_SCREEN_CREATE, {
+      id: 'reusable-game', channelId: f.voiceId, invocationId,
+      title: 'Private game', html: '<p>Game</p>', state: { turn: 'X' },
+    });
+    assert.equal(response.type, MessageType.BOT_SCREEN_SNAPSHOT);
+    return botScreenSchema.parse(response.payload);
+  };
+  const first = await create(f.invocationId);
+  const firstRef = { id: first.id, instanceId: first.instanceId };
+  assert.equal(first.creatorUserId, f.caller.id);
+  assert.notEqual(first.creatorUserId, text(record(f.bot.auth.payload.currentUser).id));
+  await f.owner.peer.error(MessageType.BOT_SCREEN_END, firstRef, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await otherDevice.peer.error(MessageType.BOT_SCREEN_END, firstRef, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await otherDevice.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  await f.caller.peer.request(MessageType.VOICE_LEAVE, { channelId: f.voiceId });
+  await f.caller.peer.close();
+  const ended = botScreenRemovedSchema.parse((await otherDevice.peer.request(MessageType.BOT_SCREEN_END, firstRef)).payload);
+  assert.equal(ended.reason, 'ended');
+  assert.equal(ended.reason === 'ended' && ended.endedByUserId, f.caller.id);
+  assert.deepEqual((await f.bot.peer.wait((message) =>
+    message.type === MessageType.BOT_SCREEN_REMOVED && message.payload.instanceId === first.instanceId)).payload, ended);
+  await f.bot.peer.error(MessageType.BOT_SCREEN_UPDATE, { ...firstRef, state: {}, expectedRevision: 0 }, ProtocolErrorCode.BOT_SCREEN_NOT_FOUND);
+
+  const invocation = await otherDevice.peer.request(MessageType.COMMAND_INVOKE, {
+    botId: f.botId, channelId: f.textId, commandName: 'play',
+  });
+  assert.equal(invocation.type, MessageType.COMMAND_INVOKED);
+  const invocationId = text(invocation.payload.invocationId);
+  const second = await create(invocationId);
+  assert.notEqual(second.instanceId, first.instanceId);
+  const secondRef = { id: second.id, instanceId: second.instanceId };
+  await otherDevice.peer.error(MessageType.BOT_SCREEN_END, firstRef, ProtocolErrorCode.BOT_SCREEN_NOT_FOUND);
+  f.bot.peer.send(MessageType.COMMAND_PROMPT, {
+    invocationId, interactionId: 'pending-game-option',
+    form: { title: 'Game option', fields: [{ name: 'answer', label: 'Answer', type: 'text' }] },
+  });
+  await otherDevice.peer.wait((message) =>
+    message.type === MessageType.COMMAND_PROMPT && message.payload.invocationId === invocationId);
+  await f.owner.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  assert.equal(await f.permissions.getUserPermissions(f.owner.id), 0xFFFFFFFF);
+  const ownerEnded = botScreenRemovedSchema.parse((await f.owner.peer.request(MessageType.BOT_SCREEN_END, secondRef)).payload);
+  assert.equal(ownerEnded.reason === 'ended' && ownerEnded.endedByUserId, f.owner.id);
+  for (const peer of [otherDevice.peer, f.bot.peer]) {
+    const finished = await peer.wait((message) =>
+      message.type === MessageType.COMMAND_FINISHED && message.payload.invocationId === invocationId);
+    assert.equal(finished.payload.reason, 'cancelled');
+  }
+  await otherDevice.peer.error(MessageType.COMMAND_SUBMIT, {
+    invocationId, interactionId: 'pending-game-option', values: { answer: 'late' },
+  }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  for (const id of ['reusable-game', 'stale-command-new-id']) {
+    await f.bot.peer.error(MessageType.BOT_SCREEN_CREATE, {
+      id, channelId: f.voiceId, invocationId, title: 'Stale game', html: 'Game', state: {},
+    }, ProtocolErrorCode.PERMISSION_DENIED);
+  }
+  await f.bot.peer.error(MessageType.COMMAND_FINISH, { invocationId }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  assert.deepEqual(records((await otherDevice.peer.request(MessageType.BOT_SCREEN_LIST, { channelId: f.voiceId })).payload.screens), []);
+});
+
+test('miniapp end rejects admin revocation committed before its role broadcast', { timeout: 15000 }, async (t) => {
+  const f = await createPrivateVoiceFixture(t);
+  const moderator = await f.human('Miniapp moderator');
+  const adminRole = await f.roleRepo.findByName('Admin');
+  assert.ok(adminRole && !adminRole.isDefault);
+  await f.owner.peer.request(MessageType.ROLE_ASSIGN, { userId: moderator.id, roleId: adminRole.id });
+  assert.equal((await moderator.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId })).type,
+    MessageType.VOICE_USER_JOINED);
+  const screen = botScreenSchema.parse((await f.bot.peer.request(MessageType.BOT_SCREEN_CREATE, {
+    id: 'role-fenced-game', channelId: f.voiceId, invocationId: f.invocationId,
+    title: 'Role fence', html: '<p>Game</p>', state: { turn: 'X' },
+  })).payload);
+  await moderator.peer.wait((message) =>
+    message.type === MessageType.BOT_SCREEN_SNAPSHOT && message.payload.id === screen.id);
+
+  let authorizationRead!: () => void;
+  let resumeAuthorization!: () => void;
+  let rolePersisted!: () => void;
+  let resumeRoleWrite!: () => void;
+  const authorizationReady = new Promise<void>((resolve) => { authorizationRead = resolve; });
+  const authorizationGate = new Promise<void>((resolve) => { resumeAuthorization = resolve; });
+  const persistenceReady = new Promise<void>((resolve) => { rolePersisted = resolve; });
+  const persistenceGate = new Promise<void>((resolve) => { resumeRoleWrite = resolve; });
+  const getAccess = f.channelService.getAccessContext.bind(f.channelService);
+  let reads = 0;
+  t.mock.method(f.channelService, 'getAccessContext', async (userId: string) => {
+    const context = await getAccess(userId);
+    // Sweep and room admission read first; hold the actual END administrator check.
+    if (userId === moderator.id && ++reads === 3) {
+      authorizationRead();
+      await authorizationGate;
+    }
+    return context;
+  });
+  const unassignRole = f.roleRepo.unassignRole.bind(f.roleRepo);
+  t.mock.method(f.roleRepo, 'unassignRole', async (userId: string, roleId: string) => {
+    await unassignRole(userId, roleId);
+    if (userId === moderator.id && roleId === adminRole.id) {
+      rolePersisted();
+      await persistenceGate;
+    }
+  });
+
+  const ending = moderator.peer.request(MessageType.BOT_SCREEN_END, { id: screen.id, instanceId: screen.instanceId });
+  let mutation: Promise<Received> | undefined;
+  try {
+    await authorizationReady;
+    mutation = f.owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: moderator.id, roleId: adminRole.id });
+    await persistenceReady;
+    assert.equal(f.permissions.getRoleAccessVersion(), null, 'the repository write is held before RoleService and WS publication finish');
+    assert.equal(await f.permissions.checkPermission(moderator.id, Permission.ADMINISTRATOR), false);
+    resumeAuthorization();
+    const response = await ending;
+    resumeRoleWrite();
+    await mutation;
+    assert.equal(response.type, MessageType.SERVER_ERROR, 'a stale administrator grant must not end the shared game');
+    assert.equal(response.payload.code, ProtocolErrorCode.BOT_COMMAND_BUSY);
+    await f.bot.peer.barrier();
+    assert.equal(f.bot.peer.messages.some((message) =>
+      message.type === MessageType.BOT_SCREEN_REMOVED && message.payload.instanceId === screen.instanceId), false);
+    assert.equal(f.bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_FINISHED && message.payload.invocationId === f.invocationId), false);
+    const listed = await f.bot.peer.request(MessageType.BOT_SCREEN_LIST, { channelId: f.voiceId });
+    assert.equal(records(listed.payload.screens)[0]?.instanceId, screen.instanceId);
+  } finally {
+    resumeAuthorization();
+    resumeRoleWrite();
+    await Promise.allSettled(mutation ? [ending, mutation] : [ending]);
+  }
+});
+
+test('private invocation voice grants allow only room media, retain rosters and revoke on role loss', { timeout: 30000 }, async (t) => {
+  for (const mode of ['p2p', 'sfu'] as const) await t.test(mode, async (subtest) => {
+    const f = await createPrivateVoiceFixture(subtest, mode);
+    const payload = { channelId: f.voiceId, invocationId: f.invocationId };
+    assert.equal(records(record(f.bot.auth.payload.server).channels).some((channel) => channel.id === f.voiceId), false);
+    await f.bot.peer.error(MessageType.VOICE_JOIN, { channelId: f.voiceId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+    await f.bot.peer.error(MessageType.VOICE_JOIN, { ...payload, invocationId: 'unowned' }, ProtocolErrorCode.PERMISSION_DENIED);
+    await f.bot.peer.error(MessageType.VOICE_JOIN, { ...payload, channelId: f.publicVoiceId }, ProtocolErrorCode.PERMISSION_DENIED);
+    const original = f.permissions.getUserPermissions.bind(f.permissions);
+    f.permissions.getUserPermissions = async (userId) => userId === f.caller.id ? DEFAULT_PERMISSIONS & ~Permission.SPEAK : original(userId);
+    await f.bot.peer.error(MessageType.VOICE_JOIN, payload, ProtocolErrorCode.PERMISSION_DENIED);
+    f.permissions.getUserPermissions = async (userId) => userId === f.botId ? 0 : original(userId);
+    assert.deepEqual((await f.channelService.getAccessContext(f.botId)).roleIds, []);
+    await f.owner.peer.error(MessageType.ROLE_ASSIGN, { userId: f.botId, roleId: f.role.id }, ProtocolErrorCode.BAD_REQUEST);
+    await f.owner.peer.error(MessageType.ROLE_UNASSIGN, { userId: f.botId, roleId: f.role.id }, ProtocolErrorCode.BAD_REQUEST);
+    const joined = await f.bot.peer.request(MessageType.VOICE_JOIN, payload);
+    assert.equal(joined.type, MessageType.VOICE_USER_JOINED);
+    assert.ok(records(joined.payload.participants).some((entry) => record(entry.user).id === f.caller.id));
+    const currentSessions = [...f.wsServer['sessions'].values()];
+    const callerSession = currentSessions.find(session => session.user?.id === f.caller.id);
+    const activeBot = currentSessions.find(session => session.botId === f.botId);
+    assert.ok(callerSession && activeBot);
+    assert.equal(await f.wsServer['authorizeLocalVoice'](callerSession, activeBot, f.voiceId), true,
+      'Local audio uses approved bot capabilities and caller channel access, not a bot role');
+    await f.bot.peer.request(MessageType.COMMAND_FINISH, { invocationId: f.invocationId });
+    let transportId: string | undefined;
+    if (mode === 'sfu') {
+      const created = await f.bot.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'send' });
+      assert.equal(created.type, MessageType.SFU_WEBRTC_TRANSPORT_CREATED);
+      transportId = text(record(created.payload.transportOptions).id);
+      assert.ok(f.wsServer['sfuManager']['transports'].has(transportId));
+    }
+    const rosterSince = f.bot.peer.messages.length;
+    await f.owner.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+    await f.bot.peer.wait((message) => message.type === MessageType.VOICE_USER_JOINED &&
+      message.payload.userId === f.owner.id, rosterSince);
+    const privateText = await f.owner.peer.request(MessageType.CHANNEL_CREATE, {
+      name: 'private-chat', type: 'TEXT', isPrivate: true, allowedRoleIds: [f.role.id],
+    });
+    const privateTextId = text(record(privateText.payload.channel).id);
+    const since = f.bot.peer.messages.length;
+    await f.owner.peer.request(MessageType.CHAT_SEND, { channelId: privateTextId, content: 'not voice permission' });
+    await f.bot.peer.barrier();
+    assert.equal(f.bot.peer.messages.slice(since).some((message) => message.type === MessageType.CHAT_MESSAGE &&
+      message.payload.channelId === privateTextId), false);
+    assert.equal(f.bot.peer.messages.some((message) => message.type === MessageType.CHANNEL_CREATED &&
+      record(message.payload.channel).id === privateTextId), false);
+    await f.bot.peer.error(MessageType.CHAT_LOAD_HISTORY, { channelId: privateTextId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+    assert.equal(f.wsServer['signalingService'].getVoiceState(f.botSessionId)?.channelId, f.voiceId);
+    const leaveSince = f.bot.peer.messages.length;
+    await f.owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: f.caller.id, roleId: f.role.id });
+    await f.bot.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT &&
+      message.payload.sessionId === f.botSessionId, leaveSince);
+    assert.equal(f.wsServer['signalingService'].getVoiceState(f.botSessionId), undefined);
+    if (transportId) assert.equal(f.wsServer['sfuManager']['transports'].has(transportId), false);
+    await f.bot.peer.error(MessageType.VOICE_JOIN, { channelId: f.voiceId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  });
+});
+
+test('bot speaking and moderation preserve the private voice audience and authoritative restrictions', { timeout: 30000 }, async (t) => {
+  for (const mode of ['p2p', 'sfu'] as const) await t.test(mode, async (subtest) => {
+    const f = await createPrivateVoiceFixture(subtest, mode);
+    const outsider = await f.human('Outside the private voice room');
+    assert.equal(records(record(outsider.auth.payload.server).channels).some((channel) => channel.id === f.voiceId), false);
+    const joined = await f.bot.peer.request(MessageType.VOICE_JOIN, {
+      channelId: f.voiceId, invocationId: f.invocationId, isMuted: false, isDeafened: false,
+    });
+    assert.equal(record(joined.payload.voiceState).isMuted, false);
+    assert.equal(record(joined.payload.voiceState).isDeafened, false);
+    await f.bot.peer.request(MessageType.COMMAND_FINISH, { invocationId: f.invocationId });
+    const outsiderSince = outsider.peer.messages.length;
+    const callerSince = f.caller.peer.messages.length;
+    const speaking = await f.bot.peer.request(MessageType.VOICE_STATE_UPDATE, { isSpeaking: true });
+    assert.equal(speaking.type, MessageType.VOICE_STATE_CHANGED);
+    assert.equal(record(speaking.payload.voiceState).isSpeaking, true);
+    await f.caller.peer.wait((message) => message.type === MessageType.VOICE_STATE_CHANGED &&
+      record(message.payload.voiceState).sessionId === f.botSessionId &&
+      record(message.payload.voiceState).isSpeaking === true, callerSince);
+    await f.caller.peer.error(MessageType.ADMIN_MUTE_USER, { targetUserId: f.botId, muted: true }, ProtocolErrorCode.PERMISSION_DENIED);
+    assert.equal(f.wsServer['signalingService'].getVoiceState(f.botSessionId)?.isSpeaking, true);
+
+    for (const restriction of ['serverMuted', 'serverDeafened'] as const) {
+      const type = restriction === 'serverMuted' ? MessageType.ADMIN_MUTE_USER : MessageType.ADMIN_DEAFEN_USER;
+      const payload = (value: boolean) => restriction === 'serverMuted'
+        ? { targetUserId: f.botId, muted: value }
+        : { targetUserId: f.botId, deafened: value };
+      const since = f.bot.peer.messages.length;
+      await f.owner.peer.request(type, payload(true));
+      const restricted = await f.bot.peer.wait((message) => message.type === MessageType.VOICE_STATE_CHANGED &&
+        record(message.payload.voiceState).sessionId === f.botSessionId &&
+        record(message.payload.voiceState)[restriction] === true, since);
+      assert.equal(record(restricted.payload.voiceState).isSpeaking, false);
+      const suppressed = await f.bot.peer.request(MessageType.VOICE_STATE_UPDATE, { isSpeaking: true });
+      assert.equal(record(suppressed.payload.voiceState)[restriction], true);
+      assert.equal(record(suppressed.payload.voiceState).isSpeaking, false);
+      await f.owner.peer.request(type, payload(false));
+      const resumed = await f.bot.peer.request(MessageType.VOICE_STATE_UPDATE, { isSpeaking: true });
+      assert.equal(record(resumed.payload.voiceState)[restriction], false);
+      assert.equal(record(resumed.payload.voiceState).isSpeaking, true);
+    }
+
+    const quiet = await f.bot.peer.request(MessageType.VOICE_STATE_UPDATE, { isSpeaking: false });
+    assert.equal(record(quiet.payload.voiceState).isSpeaking, false);
+    await outsider.peer.barrier();
+    assert.equal(outsider.peer.messages.slice(outsiderSince).some((message) =>
+      message.type === MessageType.VOICE_STATE_CHANGED &&
+      record(message.payload.voiceState).channelId === f.voiceId), false,
+    'speaking and moderation must not reveal a hidden voice room to outsiders');
+  });
+});
+
+test('pending bot speaking updates cannot revive a departed voice session', { timeout: 10000 }, async (t) => {
+  const f = await createPrivateVoiceFixture(t);
+  await f.bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId, invocationId: f.invocationId });
+  await f.bot.peer.request(MessageType.COMMAND_FINISH, { invocationId: f.invocationId });
+  const session = f.wsServer['findSessionById'](f.botSessionId);
+  assert.ok(session);
+  const channels = f.wsServer['channelService'];
+  const original = channels.getChannelSummary.bind(channels);
+  let release!: () => void;
+  let started!: () => void;
+  let held = false;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  t.after(release);
+  t.mock.method(channels, 'getChannelSummary', async (...args: Parameters<typeof original>) => {
+    const channel = await original(...args);
+    if (args[0] === f.voiceId && !held) {
+      held = true;
+      started();
+      await gate;
+    }
+    return channel;
+  });
+  const since = f.caller.peer.messages.length;
+  const pending = f.wsServer['handleVoiceStateUpdate'](session, { isSpeaking: true });
+  await waiting;
+  await f.bot.peer.request(MessageType.VOICE_LEAVE, { channelId: f.voiceId });
+  await f.caller.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT &&
+    message.payload.sessionId === f.botSessionId, since);
+  release();
+  await pending;
+  await f.caller.peer.barrier();
+  assert.equal(f.caller.peer.messages.slice(since).some((message) =>
+    message.type === MessageType.VOICE_STATE_CHANGED &&
+    record(message.payload.voiceState).sessionId === f.botSessionId), false);
+  assert.equal(f.wsServer['signalingService'].getVoiceState(f.botSessionId), undefined);
+});
+
+test('private invocation voice admission rechecks caller movement, cancellation and access during joins', async (t) => {
+  for (const change of ['move', 'cancel', 'permissions'] as const) await t.test(change, async (subtest) => {
+    const f = await createPrivateVoiceFixture(subtest);
+    const service = f.wsServer['signalingService'];
+    const original = service.joinVoiceChannel.bind(service);
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const waiting = new Promise<void>((resolve) => { started = resolve; });
+    subtest.after(release);
+    subtest.mock.method(service, 'joinVoiceChannel', async (...args: Parameters<typeof original>) => {
+      if (args[0] === f.botSessionId) { started(); await gate; }
+      return original(...args);
+    });
+    const rejected = f.bot.peer.error(MessageType.VOICE_JOIN, {
+      channelId: f.voiceId, invocationId: f.invocationId,
+    }, ProtocolErrorCode.PERMISSION_DENIED);
+    await waiting;
+    if (change === 'move') await f.caller.peer.request(MessageType.VOICE_JOIN, { channelId: f.publicVoiceId });
+    else if (change === 'cancel') await f.caller.peer.request(MessageType.COMMAND_CANCEL, { invocationId: f.invocationId });
+    else await f.owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: f.voiceId, allowedRoleIds: [] });
+    release();
+    await rejected;
+    assert.equal(service.getVoiceState(f.botSessionId), undefined);
+    assert.equal(f.wsServer['findSessionById'](f.botSessionId)?.botVoiceGrant, undefined);
+  });
+});
+
+test('private invocation voice grants do not survive leave, replacement or channel deletion', async (t) => {
+  const f = await createPrivateVoiceFixture(t, 'sfu');
+  const payload = { channelId: f.voiceId, invocationId: f.invocationId };
+  assert.equal((await f.bot.peer.request(MessageType.VOICE_JOIN, payload)).type, MessageType.VOICE_USER_JOINED);
+  await f.bot.peer.request(MessageType.VOICE_LEAVE, { channelId: f.voiceId });
+  await f.bot.peer.error(MessageType.VOICE_JOIN, { channelId: f.voiceId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await f.bot.peer.request(MessageType.VOICE_JOIN, payload);
+  const replacement = await f.connectBot(f.token, f.bot.keys);
+  await replacement.peer.error(MessageType.VOICE_JOIN, { channelId: f.voiceId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await replacement.peer.error(MessageType.VOICE_JOIN, payload, ProtocolErrorCode.PERMISSION_DENIED);
+  await replacement.peer.request(MessageType.COMMAND_REGISTER, { commands: [{ name: 'play', description: 'Play audio' }] });
+  const invocation = await f.caller.peer.request(MessageType.COMMAND_INVOKE, { botId: f.botId, channelId: f.textId, commandName: 'play' });
+  await replacement.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId, invocationId: text(invocation.payload.invocationId) });
+  const transport = await replacement.peer.request(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: f.voiceId, direction: 'send' });
+  const transportId = text(record(transport.payload.transportOptions).id);
+  const since = replacement.peer.messages.length;
+  await f.owner.peer.request(MessageType.CHANNEL_DELETE, { channelId: f.voiceId });
+  await replacement.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT &&
+    message.payload.sessionId === f.botSessionId, since);
+  assert.equal(f.wsServer['signalingService'].getVoiceState(f.botSessionId), undefined);
+  assert.equal(f.wsServer['sfuManager']['transports'].has(transportId), false);
+});
+
+test('bot voice uses real authentication metadata, room admission and originating human session context', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Voice owner');
+  const otherDevice = await f.human('Voice owner', owner.keys);
+  const channels = records(record(owner.auth.payload.server).channels);
+  const voiceId = text(channels.find((channel) => channel.type === 'VOICE')?.id);
+  const textId = text(channels.find((channel) => channel.type === 'TEXT')?.id);
+  const ownerSessionId = text(record(owner.auth.payload.currentUser).sessionId);
+  assert.equal((await owner.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId })).type, MessageType.VOICE_USER_JOINED);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const token = text(created.payload.token);
+  const bot = await f.bot(token);
+  const botSessionId = text(record(bot.auth.payload.currentUser).sessionId);
+  assert.equal(record(bot.auth.payload.server).voiceMode, 'p2p');
+  assert.ok(Array.isArray(bot.auth.payload.iceServers));
+  assert.equal(record(record(record(bot.auth.payload.server).voiceStates)[ownerSessionId]).channelId, voiceId);
+  const joined = await bot.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
+  assert.equal(joined.type, MessageType.VOICE_USER_JOINED);
+  assert.ok(records(joined.payload.participants).some((participant) => record(participant.user).isBot === true));
+  assert.ok(records(joined.payload.participants).some((participant) => record(participant.voiceState).sessionId === ownerSessionId));
+  await bot.peer.error(MessageType.VOICE_JOIN, { channelId: textId }, ProtocolErrorCode.BAD_REQUEST);
+  await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: [{ name: 'play', description: 'Play audio' }] });
+  for (const [caller, expectedChannel] of [[owner, voiceId], [otherDevice, null]] as const) {
+    const since = bot.peer.messages.length;
+    const invoked = await caller.peer.request(MessageType.COMMAND_INVOKE, { botId, channelId: textId, commandName: 'play' });
+    assert.equal(invoked.type, MessageType.COMMAND_INVOKED);
+    const execution = commandExecutionSchema.parse((await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_INVOKE && message.payload.invocationId === invoked.payload.invocationId, since)).payload);
+    assert.equal(execution.invokerSessionId, record(caller.auth.payload.currentUser).sessionId);
+    assert.equal(execution.invokerVoiceChannelId, expectedChannel);
+  }
+  await owner.peer.error(MessageType.COMMAND_INVOKE, {
+    botId, channelId: textId, commandName: 'play', invokerSessionId: botSessionId, invokerVoiceChannelId: voiceId,
+  }, ProtocolErrorCode.BOT_INVALID_OPTIONS);
+  const leaveSince = owner.peer.messages.length;
+  await f.bot(token, bot.keys);
+  await owner.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT &&
+    message.payload.sessionId === botSessionId, leaveSince);
+  assert.equal(f.wsServer['signalingService'].getVoiceState(botSessionId), undefined);
+});
+
+test('bot voice rejects inaccessible/full rooms but approved publishing does not require a human role', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Voice permissions');
+  const voiceId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const bot = await f.bot(text(created.payload.token));
+  await f.channelRepo.update(voiceId, { isPrivate: true, allowedRoleIds: [] });
+  await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await f.channelRepo.update(voiceId, { isPrivate: false, maxParticipants: 1 });
+  await owner.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
+  await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.CHANNEL_FULL);
+  const original = f.permissions.getUserPermissions.bind(f.permissions);
+  f.permissions.getUserPermissions = async (id) => id === botId ? DEFAULT_PERMISSIONS & ~Permission.SPEAK : original(id);
+  await bot.peer.error(MessageType.VOICE_JOIN, { channelId: voiceId }, ProtocolErrorCode.CHANNEL_FULL);
+  await owner.peer.request(MessageType.VOICE_LEAVE, { channelId: voiceId });
+  assert.equal((await bot.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId })).type, MessageType.VOICE_USER_JOINED);
+  const left = await bot.peer.request(MessageType.VOICE_LEAVE, { channelId: voiceId });
+  assert.equal(left.type, MessageType.VOICE_USER_LEFT);
+});
+
+test('bot SFU metadata is truthful and media requires admitted, owned voice transports', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('SFU bot owner');
+  const voiceId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  await f.serverRepo.updateServer({ voiceMode: 'sfu' });
+  const bot = await f.bot(text(created.payload.token));
+  assert.equal(record(bot.auth.payload.server).voiceMode, 'sfu');
+  await bot.peer.error(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: voiceId, direction: 'send' }, ProtocolErrorCode.BAD_REQUEST);
+  await bot.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
+  await bot.peer.error(MessageType.SFU_CONNECT_WEBRTC_TRANSPORT, {
+    channelId: voiceId, transportId: 'foreign-transport', dtlsParameters: {},
+  }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.error(MessageType.SFU_CONSUME, { channelId: voiceId }, ProtocolErrorCode.BAD_REQUEST);
+  await bot.peer.error(MessageType.SFU_CONSUME, {
+    channelId: voiceId, transportId: 'foreign-transport', producerId: 'foreign-producer', rtpCapabilities: {},
+  }, ProtocolErrorCode.PERMISSION_DENIED);
+  await bot.peer.error(MessageType.SFU_CREATE_WEBRTC_TRANSPORT, { channelId: voiceId, direction: 'recv' }, ProtocolErrorCode.PERMISSION_DENIED);
+});
+
+test('bot voice moderation is permission-checked and survives leaving and replacing the bot connection', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Bot moderator');
+  const listener = await f.human('Listener');
+  const voiceId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const token = text(created.payload.token);
+  const bot = await f.bot(token);
+  const botSessionId = text(record(bot.auth.payload.currentUser).sessionId);
+  await bot.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
+  await listener.peer.error(MessageType.ADMIN_MUTE_USER, { targetUserId: botId, muted: true }, ProtocolErrorCode.PERMISSION_DENIED);
+  await listener.peer.error(MessageType.ADMIN_DEAFEN_USER, { targetUserId: botId, deafened: true }, ProtocolErrorCode.PERMISSION_DENIED);
+  await listener.peer.error(MessageType.ADMIN_GET_VOICE_RESTRICTIONS, { targetUserId: botId }, ProtocolErrorCode.PERMISSION_DENIED);
+  await listener.peer.error(MessageType.ADMIN_KICK_VOICE, { targetSessionId: botSessionId }, ProtocolErrorCode.PERMISSION_DENIED);
+  const updateSince = bot.peer.messages.length;
+  const muted = await owner.peer.request(MessageType.ADMIN_MUTE_USER, { targetUserId: botId, muted: true });
+  assert.equal(muted.type, MessageType.VOICE_RESTRICTIONS_UPDATED);
+  assert.equal(muted.payload.serverMuted, true);
+  const deafened = await owner.peer.request(MessageType.ADMIN_DEAFEN_USER, { targetUserId: botId, deafened: true });
+  assert.equal(deafened.payload.serverDeafened, true);
+  await bot.peer.wait((message) => message.type === MessageType.VOICE_RESTRICTIONS_UPDATED &&
+    message.payload.userId === botId && message.payload.serverMuted === true && message.payload.serverDeafened === true, updateSince);
+  await bot.peer.wait((message) => message.type === MessageType.VOICE_STATE_CHANGED &&
+    record(message.payload.voiceState).sessionId === botSessionId &&
+    record(message.payload.voiceState).serverMuted === true, updateSince);
+  await bot.peer.request(MessageType.VOICE_LEAVE, { channelId: voiceId });
+  const restrictions = await owner.peer.request(MessageType.ADMIN_GET_VOICE_RESTRICTIONS, { targetUserId: botId });
+  assert.deepEqual(restrictions.payload, { userId: botId, serverMuted: true, serverDeafened: true });
+  const replacement = await f.bot(token, bot.keys);
+  assert.deepEqual(replacement.auth.payload.voiceRestrictions, { serverMuted: true, serverDeafened: true });
+  const joined = await replacement.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
+  assert.equal(record(joined.payload.voiceState).serverMuted, true);
+  assert.equal(record(joined.payload.voiceState).serverDeafened, true);
+  const kickedSince = replacement.peer.messages.length;
+  await owner.peer.request(MessageType.ADMIN_KICK_VOICE, { targetSessionId: botSessionId });
+  await replacement.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT &&
+    message.payload.sessionId === botSessionId, kickedSince);
+  assert.equal(f.wsServer['signalingService'].getVoiceState(botSessionId), undefined);
+  const afterKick = await replacement.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
+  assert.equal(record(afterKick.payload.voiceState).serverMuted, true);
+  assert.equal(record(afterKick.payload.voiceState).serverDeafened, true);
+  await owner.peer.request(MessageType.BOT_REVOKE, { botId });
+  assert.equal(record(f.database.getDb().prepare('SELECT count(*) AS count FROM bot_voice_restrictions').get()).count, 0);
+});
+
+test('administrative moves carry authenticated participant metadata into and out of a bot room', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Move moderator');
+  const listener = await f.human('Moved listener');
+  const listenerUser = record(listener.auth.payload.currentUser);
+  const voiceId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'VOICE')?.id);
+  const destination = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Other voice', type: 'VOICE' });
+  const destinationId = text(record(destination.payload.channel).id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const bot = await f.bot(text(created.payload.token));
+  await bot.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
+  await listener.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId });
+  for (const channelId of [destinationId, voiceId]) {
+    const since = bot.peer.messages.length;
+    await owner.peer.request(MessageType.ADMIN_MOVE_USER, { targetSessionId: listenerUser.sessionId, channelId });
+    const arrival = await bot.peer.wait((message) => message.type === MessageType.VOICE_USER_JOINED &&
+      message.payload.sessionId === listenerUser.sessionId && message.payload.channelId === channelId, since);
+    const joined = botVoiceJoinedSchema.parse(arrival.payload);
+    assert.equal(joined.user.id, listenerUser.id);
+    assert.equal(joined.user.sessionId, listenerUser.sessionId);
+    assert.notEqual(joined.user.isBot, true);
+    assert.equal(record(arrival.payload.user).nickname, 'Moved listener');
+  }
+});
+
+test('bot voice restrictions persist across database reopen without weakening human foreign keys', async (t) => {
+  const dataDir = path.join(__dirname, '..', `.bot-voice-data-${process.pid}-${randomUUID()}`);
+  const filename = path.join(dataDir, 'server.db');
+  let database = await DatabaseConnection.create(filename);
+  t.after(() => { database.close(); fs.rmSync(dataDir, { recursive: true, force: true }); });
+  await new SqliteUserRepository(database.getDb()).create({
+    id: 'owner', clientId: 'owner', publicKey: null, nickname: 'Owner', avatarPath: null, createdAt: 0, lastSeenAt: 0,
+  });
+  await new SqliteBotRepository(database.getDb()).create({
+    id: 'voice-bot', name: 'Voice bot', tokenHash: 'test-hash', avatarPath: null, boundPublicKey: null,
+    profilePending: false, createdByUserId: 'owner', createdAt: 0,
+  });
+  new SqliteVoiceRestrictionRepository(database.getDb()).save('voice-bot', { serverMuted: true, serverDeafened: false });
+  database.close();
+  database = await DatabaseConnection.create(filename);
+  const repository = new SqliteVoiceRestrictionRepository(database.getDb());
+  assert.deepEqual(repository.getForUser('voice-bot'), { serverMuted: true, serverDeafened: false });
+  assert.throws(() => repository.save('missing', { serverMuted: true, serverDeafened: false }), /FOREIGN KEY/);
+  await new SqliteBotRepository(database.getDb()).delete('voice-bot');
+  assert.deepEqual(repository.getForUser('voice-bot'), { serverMuted: false, serverDeafened: false });
+});
+
+test('live bot voice context follows the exact caller device after prompts and rejects invalid capabilities', async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Voice context owner');
+  const caller = await f.human('Voice context caller');
+  const otherDevice = await f.human('Voice context caller', caller.keys);
+  const channels = records(record(owner.auth.payload.server).channels);
+  const textId = text(channels.find((channel) => channel.type === 'TEXT')?.id);
+  const firstRoom = text(channels.find((channel) => channel.type === 'VOICE')?.id);
+  const createdRoom = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'other-voice-room', type: 'VOICE' });
+  const secondRoom = text(record(createdRoom.payload.channel).id);
+  await caller.peer.request(MessageType.VOICE_JOIN, { channelId: firstRoom });
+  await otherDevice.peer.request(MessageType.VOICE_JOIN, { channelId: secondRoom });
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const bot = await f.bot(text(created.payload.token));
+  await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: [{ name: 'play', description: 'Pick music' }] });
+  const invoke = async () => {
+    const response = await caller.peer.request(MessageType.COMMAND_INVOKE, { botId, channelId: textId, commandName: 'play' });
+    assert.equal(response.type, MessageType.COMMAND_INVOKED);
+    const id = text(response.payload.invocationId);
+    await bot.peer.wait((message) => message.type === MessageType.COMMAND_INVOKE && message.payload.invocationId === id);
+    return id;
+  };
+  const query = async (invocationId: string) => {
+    const response = await bot.peer.request(MessageType.BOT_VOICE_CONTEXT, { invocationId });
+    assert.equal(response.type, MessageType.BOT_VOICE_CONTEXT_RESULT);
+    assert.equal(response.payload.invocationId, invocationId);
+    return response.payload.voiceChannelId;
+  };
+  const id = await invoke();
+  assert.equal(await query(id), firstRoom);
+  const otherAccount = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const otherBot = await f.bot(text(otherAccount.payload.token));
+  await otherBot.peer.error(MessageType.BOT_VOICE_CONTEXT, { invocationId: id }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+  await caller.peer.error(MessageType.BOT_VOICE_CONTEXT, { invocationId: id }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+  await bot.peer.error(MessageType.BOT_VOICE_CONTEXT, {
+    invocationId: id, sessionId: record(otherDevice.auth.payload.currentUser).sessionId,
+  }, ProtocolErrorCode.BAD_REQUEST);
+  bot.peer.send(MessageType.COMMAND_PROMPT, {
+    invocationId: id, interactionId: 'voice-choice', form: {
+      title: 'Pick audio', fields: [{ name: 'answer', label: 'Answer', type: 'text', required: true }],
+    },
+  });
+  await caller.peer.wait((message) => message.type === MessageType.COMMAND_PROMPT && message.payload.invocationId === id);
+  await caller.peer.request(MessageType.VOICE_JOIN, { channelId: secondRoom });
+  await caller.peer.request(MessageType.COMMAND_SUBMIT, { invocationId: id, interactionId: 'voice-choice', values: { answer: 'selected' } });
+  await bot.peer.wait((message) => message.type === MessageType.COMMAND_SUBMITTED && message.payload.invocationId === id);
+  assert.equal(await query(id), secondRoom);
+  await caller.peer.request(MessageType.VOICE_LEAVE, { channelId: secondRoom });
+  assert.equal(await query(id), null, 'the other device still in voice is not the invoking session');
+  await caller.peer.request(MessageType.COMMAND_CANCEL, { invocationId: id });
+  await bot.peer.error(MessageType.BOT_VOICE_CONTEXT, { invocationId: id }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+
+  const permissionId = await invoke();
+  const permissions = f.permissions.getUserPermissions.bind(f.permissions);
+  f.permissions.getUserPermissions = async (userId) => userId === caller.id
+    ? DEFAULT_PERMISSIONS & ~Permission.USE_BOT_COMMANDS : permissions(userId);
+  await bot.peer.error(MessageType.BOT_VOICE_CONTEXT, { invocationId: permissionId }, ProtocolErrorCode.PERMISSION_DENIED);
+  f.permissions.getUserPermissions = permissions;
+  const disconnectedId = await invoke();
+  await caller.peer.close();
+  await bot.peer.wait((message) => message.type === MessageType.COMMAND_FINISHED && message.payload.invocationId === disconnectedId);
+  await bot.peer.error(MessageType.BOT_VOICE_CONTEXT, { invocationId: disconnectedId }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+});
+
+test('normal room changes notify the old private audience without exposing the destination or losing peers on denied moves', async (t) => {
+  const f = await createPrivateVoiceFixture(t);
+  await f.bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId, invocationId: f.invocationId });
+  await f.bot.peer.request(MessageType.COMMAND_FINISH, { invocationId: f.invocationId });
+  await f.owner.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  const denied = await f.owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'forbidden-destination', type: 'VOICE', isPrivate: true, allowedRoleIds: [],
+  });
+  const deniedId = text(record(denied.payload.channel).id);
+  const beforeDenied = f.bot.peer.messages.length;
+  await f.caller.peer.error(MessageType.VOICE_JOIN, { channelId: deniedId }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await f.bot.peer.barrier();
+  assert.equal(f.bot.peer.messages.slice(beforeDenied).some((message) =>
+    message.type === MessageType.VOICE_USER_LEFT && message.payload.userId === f.caller.id), false);
+  assert.equal(f.signalingService.getVoiceState(text(record(f.caller.auth.payload.currentUser).sessionId))?.channelId, f.voiceId);
+  const destination = await f.owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'permitted-hidden-destination', type: 'VOICE', isPrivate: true, allowedRoleIds: [f.role.id],
+  });
+  const destinationId = text(record(destination.payload.channel).id);
+  const beforeMove = f.bot.peer.messages.length;
+  const callerBeforeMove = f.caller.peer.messages.length;
+  const joined = await f.caller.peer.request(MessageType.VOICE_JOIN, { channelId: destinationId });
+  assert.equal(joined.type, MessageType.VOICE_USER_JOINED);
+  const left = await f.bot.peer.wait((message) => message.type === MessageType.VOICE_USER_LEFT &&
+    message.payload.userId === f.caller.id, beforeMove);
+  assert.deepEqual(left.payload, {
+    channelId: f.voiceId, userId: f.caller.id, sessionId: record(f.caller.auth.payload.currentUser).sessionId,
+  });
+  assert.equal(left.requestId, undefined);
+  await f.bot.peer.barrier();
+  assert.equal(f.bot.peer.messages.slice(beforeMove).some((message) =>
+    message.type === MessageType.VOICE_USER_JOINED && message.payload.channelId === destinationId), false);
+  assert.deepEqual(f.signalingService.getParticipantsInChannel(f.voiceId).map((member) => member.userId).sort(),
+    [f.owner.id, f.botId].sort());
+  const movement = f.caller.peer.messages.slice(callerBeforeMove);
+  const departureIndex = movement.findIndex((message) =>
+    message.type === MessageType.VOICE_USER_LEFT && message.payload.channelId === f.voiceId && message.payload.userId === f.caller.id);
+  const arrivalIndex = movement.findIndex((message) =>
+    message.type === MessageType.VOICE_USER_JOINED && message.payload.channelId === destinationId && message.payload.userId === f.caller.id);
+  assert.ok(departureIndex >= 0 && arrivalIndex > departureIndex);
+});
+
+test('voice-bound bot interactions protect commands, searches, previews and exact-device membership', { timeout: 30000 }, async (t) => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Voice policy owner');
+  const caller = await f.human('Voice policy caller');
+  const otherDevice = await f.human('Voice policy caller', caller.keys);
+  const callerSessionId = text(record(caller.auth.payload.currentUser).sessionId);
+  const channels = records(record(owner.auth.payload.server).channels);
+  const textId = text(channels.find((channel) => channel.type === 'TEXT')?.id);
+  const firstRoom = text(channels.find((channel) => channel.type === 'VOICE')?.id);
+  const secondRoom = text(record((await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'Other voice', type: 'VOICE' })).payload.channel).id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const bot = await f.bot(text(created.payload.token));
+  const botSessionId = text(record(bot.auth.payload.currentUser).sessionId);
+  const musicNames = ['play', 'queue', 'nowplaying', 'pause', 'resume', 'skip', 'stop', 'leave', 'remove', 'clear'];
+  assert.equal((await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: [
+    ...musicNames.map((name) => ({
+      name, description: 'Music', voiceRequirement: 'same-bot-channel',
+      ...(name === 'play' ? { options: [{ name: 'busca', description: 'Music', type: 'string', autocomplete: true }] } : {}),
+    })),
+    { name: 'game', description: 'Miniapp', voiceRequirement: 'joined' },
+    { name: 'ping', description: 'No voice required' },
+  ] })).type, MessageType.COMMAND_REGISTERED);
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const commandInput = (commandName: string) => ({ botId, channelId: textId, commandName, locale: 'en' });
+  const invoke = async (name: string) => {
+    const response = await caller.peer.request(MessageType.COMMAND_INVOKE, commandInput(name));
+    assert.equal(response.type, MessageType.COMMAND_INVOKED);
+    const id = text(response.payload.invocationId);
+    const execution = await bot.peer.wait((message) => message.type === MessageType.COMMAND_INVOKE && message.payload.invocationId === id);
+    return { id, execution };
+  };
+  const finish = async (invocationId: string) => {
+    assert.equal((await bot.peer.request(MessageType.COMMAND_FINISH, { invocationId })).type, MessageType.COMMAND_FINISHED);
+  };
+  const searchInput = () => ({ ...commandInput('play'), optionName: 'busca', query: 'Authorized original' });
+  const search = async (page?: number) => {
+    now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+    const requestId = randomUUID();
+    const since = bot.peer.messages.length;
+    caller.peer.send(MessageType.COMMAND_AUTOCOMPLETE, { ...searchInput(), ...(page !== undefined ? { page } : {}) }, requestId);
+    const execution = await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE, since);
+    return { requestId, providerId: text(execution.requestId) };
+  };
+  await otherDevice.peer.request(MessageType.VOICE_JOIN, { channelId: secondRoom });
+  for (const name of [...musicNames, 'game']) {
+    await caller.peer.error(MessageType.COMMAND_INVOKE, commandInput(name), ProtocolErrorCode.BOT_VOICE_REQUIRED);
+  }
+  await caller.peer.error(MessageType.COMMAND_AUTOCOMPLETE, searchInput(), ProtocolErrorCode.BOT_VOICE_REQUIRED);
+  assert.equal(bot.peer.messages.some((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE), false);
+  await finish((await invoke('ping')).id);
+  await caller.peer.request(MessageType.VOICE_JOIN, { channelId: firstRoom });
+
+  const access = f.channelService.getAccessContext.bind(f.channelService);
+  let moved = false;
+  f.channelService.getAccessContext = async (userId) => {
+    const context = await access(userId);
+    if (userId === caller.id && !moved) {
+      moved = true;
+      await f.signalingService.joinVoiceChannel(callerSessionId, caller.id, secondRoom);
+    }
+    return context;
+  };
+  try {
+    await caller.peer.error(MessageType.COMMAND_INVOKE, commandInput('queue'), ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  } finally { f.channelService.getAccessContext = access; }
+  assert.equal(moved, true);
+  await caller.peer.request(MessageType.VOICE_JOIN, { channelId: firstRoom });
+  await bot.peer.request(MessageType.VOICE_JOIN, { channelId: secondRoom });
+  for (const name of musicNames) {
+    await caller.peer.error(MessageType.COMMAND_INVOKE, commandInput(name), ProtocolErrorCode.BOT_VOICE_CHANNEL_MISMATCH);
+  }
+  now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+  await caller.peer.error(MessageType.COMMAND_AUTOCOMPLETE, searchInput(), ProtocolErrorCode.BOT_VOICE_CHANNEL_MISMATCH);
+
+  const game = await invoke('game');
+  assert.equal(game.execution.payload.invokerVoiceChannelId, firstRoom);
+  const screen = await bot.peer.request(MessageType.BOT_SCREEN_CREATE, {
+    id: 'voice-game', channelId: firstRoom, invocationId: game.id,
+    title: 'Voice game', html: '<p>Game</p>', state: { turn: 'X' },
+  });
+  assert.equal(screen.type, MessageType.BOT_SCREEN_SNAPSHOT);
+  await caller.peer.wait((message) => message.type === MessageType.BOT_SCREEN_SNAPSHOT && message.payload.id === 'voice-game');
+  for (const peer of [owner.peer, otherDevice.peer]) {
+    await peer.barrier();
+    assert.equal(peer.messages.some((message) => message.type === MessageType.BOT_SCREEN_SNAPSHOT), false);
+    await peer.error(MessageType.BOT_SCREEN_LIST, { channelId: firstRoom }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  }
+  await finish(game.id);
+  await bot.peer.request(MessageType.VOICE_LEAVE, { channelId: secondRoom });
+  const accepted = await invoke('play');
+  assert.equal(accepted.execution.payload.invokerVoiceChannelId, firstRoom);
+  await bot.peer.request(MessageType.VOICE_JOIN, { channelId: firstRoom, invocationId: accepted.id });
+  await finish(accepted.id);
+
+  const pending = await invoke('play');
+  const query = await search();
+  await otherDevice.peer.request(MessageType.VOICE_LEAVE, { channelId: secondRoom });
+  await bot.peer.barrier();
+  assert.equal(bot.peer.messages.some((message) =>
+    message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === query.providerId), false);
+  bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, { status: 'ok', choices: [{
+    label: 'Original', value: 'original', audio: { resourceId: 'private-preview', durationMs: 10_000 },
+  }] }, query.providerId);
+  const choices = commandAutocompleteResultSchema.parse((await caller.peer.wait((message) =>
+    message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === query.requestId)).payload);
+  assert.equal(choices.status, 'ok');
+  if (choices.status !== 'ok') throw new Error('Expected authorized music choices.');
+  const audio = choices.choices[0].audio;
+  assert.ok(audio && 'resourceId' in audio);
+  const nextQuery = await search(1);
+  bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, { status: 'ok', choices: [{
+    label: 'Next', value: 'next', audio: { resourceId: 'next-private-preview' },
+  }] }, nextQuery.providerId);
+  await caller.peer.wait((message) =>
+    message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === nextQuery.requestId);
+  const previewInput = {
+    botId, channelId: textId, commandName: 'play', optionName: 'busca',
+    autocompleteRequestId: query.requestId, resourceId: audio.resourceId,
+  };
+  const previewId = randomUUID();
+  caller.peer.send(MessageType.COMMAND_AUDIO_PREVIEW, previewInput, previewId);
+  const preview = await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW);
+  assert.equal(preview.payload.resourceId, 'private-preview');
+  await caller.peer.request(MessageType.VOICE_LEAVE, { channelId: firstRoom });
+  await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === preview.requestId);
+  await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === query.providerId);
+  await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === nextQuery.providerId);
+  await caller.peer.wait((message) =>
+    message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === nextQuery.requestId);
+  assert.equal((await caller.peer.wait((message) =>
+    message.type === MessageType.COMMAND_FINISHED && message.payload.invocationId === pending.id)).payload.reason, 'cancelled');
+  assert.deepEqual(commandAudioPreviewResultSchema.parse((await caller.peer.wait((message) =>
+    message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT && message.requestId === previewId)).payload),
+  { status: 'failed', reason: 'expired' });
+  bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, {
+    status: 'ok', mimeType: 'audio/ogg', audioBase64: 'AAECAw==',
+  }, preview.requestId);
+  assert.equal((await bot.peer.wait((message) => message.type === MessageType.SERVER_ERROR && message.requestId === preview.requestId)).payload.code,
+    ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  await caller.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, previewInput, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  await bot.peer.error(MessageType.BOT_VOICE_CONTEXT, { invocationId: pending.id }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  assert.equal(f.signalingService.getVoiceState(botSessionId)?.channelId, firstRoom, 'Accepted playback is independent of the caller leaving.');
+
+  await otherDevice.peer.request(MessageType.VOICE_JOIN, { channelId: firstRoom });
+  const retained = await otherDevice.peer.request(MessageType.BOT_SCREEN_LIST, { channelId: firstRoom });
+  assert.equal(retained.type, MessageType.BOT_SCREEN_LIST_RESULT);
+  assert.equal(records(retained.payload.screens)[0].id, 'voice-game');
+  await caller.peer.error(MessageType.BOT_SCREEN_LIST, { channelId: firstRoom }, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+  await caller.peer.error(MessageType.COMMAND_INVOKE, commandInput('queue'), ProtocolErrorCode.BOT_VOICE_REQUIRED);
+  assert.equal((await bot.peer.request(MessageType.BOT_SCREEN_UPDATE, {
+    id: 'voice-game', instanceId: screen.payload.instanceId, expectedRevision: 0, state: { turn: 'O' },
+  })).type, MessageType.BOT_SCREEN_SNAPSHOT);
+
+  await bot.peer.request(MessageType.VOICE_LEAVE, { channelId: firstRoom });
+  await caller.peer.request(MessageType.VOICE_JOIN, { channelId: firstRoom });
+  const movedQuery = await search();
+  await caller.peer.request(MessageType.VOICE_JOIN, { channelId: secondRoom });
+  await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === movedQuery.providerId);
+  assert.equal((await caller.peer.wait((message) => message.requestId === movedQuery.requestId)).payload.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  await finish((await invoke('queue')).id);
+});
+
+async function createSettingsFixture(t: TestContext) {
+  const fixture = await createFixture();
+  t.after(() => fixture.dispose());
+  const owner = await fixture.human('Settings owner');
+  const alice = await fixture.human('Settings Alice');
+  const bob = await fixture.human('Settings Bob');
+  const channelId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'TEXT')?.id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const token = text(created.payload.token);
+  const bot = await fixture.bot(token, undefined, 'Settings bot');
+  const commands = [{
+    name: 'run', description: 'Configured command',
+    options: [{ name: 'query', description: 'Query', type: 'string', autocomplete: true }],
+  }, { name: 'download', description: 'Download sound', downloadsSound: true }];
+  assert.equal((await bot.peer.request(MessageType.COMMAND_REGISTER, {
+    commands, settings: SETTINGS_DEFINITION,
+  })).type, MessageType.COMMAND_REGISTERED);
+  await bot.peer.barrier();
+  const get = async (peer = owner.peer) => {
+    const response = await peer.request(MessageType.BOT_SETTINGS_GET, { botId });
+    assert.equal(response.type, MessageType.BOT_SETTINGS_SNAPSHOT);
+    return botSettingsSnapshotSchema.parse(response.payload);
+  };
+  const update = async (patch: BotSettingsPatch, peer = owner.peer) => {
+    const current = await get(peer);
+    return peer.request(MessageType.BOT_SETTINGS_UPDATE, {
+      botId, schemaRevision: current.bot.schemaRevision, expectedRevision: current.bot.revision, patch,
+    });
+  };
+  return { ...fixture, connectBot: fixture.bot, owner, alice, bob, bot, botId, token, channelId, commands, get, update };
+}
+
+test('bot settings catalog separates configuration permissions, broadcasts safe revisions and retains offline declarations', async (t) => {
+  const f = await createSettingsFixture(t);
+  const publicSnapshot = await f.get(f.alice.peer);
+  assert.equal(publicSnapshot.bot.canConfigure, false);
+  assert.equal(publicSnapshot.bot.capabilities.downloadsSound, true);
+  assert.deepEqual(publicSnapshot.definition, { user: SETTINGS_DEFINITION.user });
+  assert.equal(publicSnapshot.server, undefined);
+  const list = botSettingsListResponseSchema.parse((await f.alice.peer.request(MessageType.BOT_SETTINGS_LIST)).payload);
+  assert.equal(list.bots[0].botId, f.botId);
+  for (const key of ['token', 'tokenHash', 'bound', 'createdByUserId', 'definition', 'server']) {
+    assert.equal(key in list.bots[0], false);
+  }
+  await f.alice.peer.error(MessageType.BOT_LIST, {}, ProtocolErrorCode.PERMISSION_DENIED);
+  await f.alice.peer.error(MessageType.BOT_SETTINGS_UPDATE, {
+    botId: f.botId, schemaRevision: publicSnapshot.bot.schemaRevision, expectedRevision: publicSnapshot.bot.revision,
+    patch: { count: 4 },
+  }, ProtocolErrorCode.PERMISSION_DENIED);
+  const configRole = { id: randomUUID(), name: 'Configurators', color: null, position: 1,
+    permissions: Permission.CONFIGURE_BOTS, isDefault: false, createdAt: Date.now() };
+  const manageRole = { ...configRole, id: randomUUID(), name: 'Bot managers', permissions: Permission.MANAGE_BOTS };
+  await f.roleRepo.create(configRole);
+  await f.roleRepo.create(manageRole);
+  await f.owner.peer.request(MessageType.ROLE_ASSIGN, { userId: f.bob.id, roleId: configRole.id });
+  await f.owner.peer.request(MessageType.ROLE_ASSIGN, { userId: f.alice.id, roleId: manageRole.id });
+  await f.owner.peer.barrier();
+  assert.equal((await f.get(f.bob.peer)).bot.canConfigure, true);
+  assert.equal((await f.get(f.alice.peer)).server, undefined);
+  await f.bob.peer.error(MessageType.BOT_CREATE, {}, ProtocolErrorCode.PERMISSION_DENIED);
+  await f.bob.peer.error(MessageType.BOT_REVOKE, { botId: f.botId }, ProtocolErrorCode.PERMISSION_DENIED);
+  await f.bob.peer.error(MessageType.BOT_UPDATE_PROFILE, { botId: f.botId, name: 'No rename' }, ProtocolErrorCode.PERMISSION_DENIED);
+  const since = f.alice.peer.messages.length;
+  const saved = botSettingsSnapshotSchema.parse((await f.update({ count: 0, enabled: false }, f.bob.peer)).payload);
+  assert.deepEqual(saved.server?.values, { count: 0, enabled: false });
+  const broadcast = await f.alice.peer.wait((message) => message.type === MessageType.BOT_SETTINGS_LIST_RESPONSE &&
+    records(message.payload.bots).some((entry) => entry.botId === f.botId && entry.revision === saved.bot.revision), since);
+  const safe = botSettingsListResponseSchema.parse(broadcast.payload).bots.find((entry) => entry.botId === f.botId);
+  assert.ok(safe && !safe.canConfigure);
+  await f.bob.peer.barrier();
+  const managerSnapshots = f.alice.peer.messages.slice(since).filter((message) => message.type === MessageType.BOT_SETTINGS_SNAPSHOT);
+  assert.ok(managerSnapshots.length > 0);
+  for (const message of managerSnapshots) {
+    const managerSnapshot = botSettingsSnapshotSchema.parse(message.payload);
+    assert.equal(managerSnapshot.bot.canManage, true);
+    assert.equal(managerSnapshot.server, undefined);
+    assert.equal(managerSnapshot.definition.server, undefined);
+  }
+  await f.bot.peer.error(MessageType.BOT_SETTINGS_UPDATE, {
+    botId: f.botId, schemaRevision: saved.bot.schemaRevision, expectedRevision: saved.bot.revision, patch: { count: 1 },
+  }, ProtocolErrorCode.PERMISSION_DENIED);
+  const other = await f.owner.peer.request(MessageType.BOT_CREATE, {});
+  await f.bot.peer.error(MessageType.BOT_SETTINGS_GET, { botId: record(other.payload.bot).id }, ProtocolErrorCode.PERMISSION_DENIED);
+  const offlineSince = f.bob.peer.messages.length;
+  await f.bot.peer.close();
+  await f.bob.peer.wait((message) => message.type === MessageType.BOT_SETTINGS_LIST_RESPONSE &&
+    records(message.payload.bots).some((entry) => entry.botId === f.botId && entry.online === false), offlineSince);
+  const offline = await f.get(f.bob.peer);
+  assert.equal(offline.bot.online, false);
+  assert.deepEqual(offline.server?.values, { count: 0, enabled: false });
+  assert.equal(offline.bot.capabilities.downloadsSound, true);
+  assert.equal(f.registry.find(f.botId, 'run'), undefined);
+  const newValues = botSettingsSnapshotSchema.parse((await f.update({ count: 4 }, f.bob.peer)).payload);
+  const restored = await f.connectBot(f.token, f.bot.keys);
+  const registration = await restored.peer.request(MessageType.COMMAND_REGISTER, { commands: f.commands, settings: SETTINGS_DEFINITION });
+  assert.deepEqual(record(registration.payload.settings).values, newValues.server?.values);
+  await f.owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: f.bob.id, roleId: configRole.id });
+  assert.equal((await f.get(f.bob.peer)).server, undefined);
+  await f.owner.peer.request(MessageType.BOT_REVOKE, { botId: f.botId });
+  assert.equal(botSettingsListResponseSchema.parse((await f.alice.peer.request(MessageType.BOT_SETTINGS_LIST)).payload)
+    .bots.some((entry) => entry.botId === f.botId), false);
+  assert.equal(f.database.getDb().prepare('SELECT bot_id FROM bot_settings WHERE bot_id = ?').get(f.botId), undefined);
+});
+
+test('localized bot settings retain labels without exposing an unauthorized shared scope', async (t) => {
+  const f = await createSettingsFixture(t);
+  const before = await f.get();
+  const userField = SETTINGS_DEFINITION.user?.fields[0];
+  assert.ok(userField);
+  const definition: BotSettingsDefinition = {
+    ...SETTINGS_DEFINITION,
+    localizations: {
+      'pt-BR': {
+        server: { title: 'Comportamento', fields: { count: { label: 'Quantidade' } } },
+        user: { title: 'Preferencias', fields: { [userField.name]: { label: 'Preferencia individual' } } },
+      },
+    },
+  };
+  assert.equal((await f.bot.peer.request(MessageType.COMMAND_REGISTER, {
+    commands: f.commands, settings: definition,
+  })).type, MessageType.COMMAND_REGISTERED);
+  const owner = await f.get();
+  assert.deepEqual(owner.server?.values, before.server?.values);
+  assert.equal(owner.definition.localizations?.['pt-BR']?.server?.title, 'Comportamento');
+  const member = await f.get(f.alice.peer);
+  assert.equal(member.server, undefined);
+  assert.equal(member.definition.server, undefined);
+  assert.equal(member.definition.localizations?.['pt-BR']?.server, undefined);
+  assert.equal(member.definition.localizations?.['pt-BR']?.user?.title, 'Preferencias');
+});
+
+test('bot settings reject incompatible registration atomically and support explicit resets and compare-and-set edits', async (t) => {
+  const f = await createSettingsFixture(t);
+  const initial = await f.get();
+  assert.equal((await f.update({ count: 7 })).type, MessageType.BOT_SETTINGS_SNAPSHOT);
+  const saved = await f.get();
+  assert.equal(saved.bot.schemaRevision, initial.bot.schemaRevision);
+  assert.ok(saved.bot.revision > initial.bot.revision);
+  const tighter: BotSettingsDefinition = {
+    ...SETTINGS_DEFINITION,
+    server: { ...SETTINGS_DEFINITION.server, fields: SETTINGS_DEFINITION.server.fields.map((field) =>
+      field.type === 'integer' ? { ...field, max: 3 } : field) },
+  };
+  const originalCommand = f.registry.find(f.botId, 'run');
+  const rejected = await f.bot.peer.request(MessageType.COMMAND_REGISTER, {
+    commands: [{ name: 'replacement', description: 'Must not replace' }], settings: tighter,
+  });
+  assert.equal(rejected.payload.code, ProtocolErrorCode.BOT_SETTINGS_INVALID);
+  assert.match(text(rejected.payload.message), /count.*Reset/s);
+  assert.equal(f.registry.find(f.botId, 'run'), originalCommand);
+  assert.deepEqual(await f.get(), saved);
+  await f.bot.peer.error(MessageType.COMMAND_REGISTER, { commands: [] }, ProtocolErrorCode.BOT_SETTINGS_INVALID);
+  await f.owner.peer.error(MessageType.BOT_SETTINGS_UPDATE, {
+    botId: f.botId, schemaRevision: saved.bot.schemaRevision, expectedRevision: saved.bot.revision,
+    patch: { count: 8, enabled: 'not-a-boolean' },
+  }, ProtocolErrorCode.BOT_SETTINGS_INVALID);
+  assert.deepEqual((await f.get()).server, saved.server);
+  await f.owner.peer.error(MessageType.BOT_SETTINGS_UPDATE, {
+    botId: f.botId, schemaRevision: initial.bot.schemaRevision, expectedRevision: initial.bot.revision, patch: { count: 1 },
+  }, ProtocolErrorCode.BOT_SETTINGS_CONFLICT);
+  const [first, second] = await Promise.all([4, 5].map((count) => f.owner.peer.request(MessageType.BOT_SETTINGS_UPDATE, {
+    botId: f.botId, schemaRevision: saved.bot.schemaRevision, expectedRevision: saved.bot.revision, patch: { count },
+  })));
+  assert.equal(first.type, MessageType.BOT_SETTINGS_SNAPSHOT);
+  assert.equal(second.payload.code, ProtocolErrorCode.BOT_SETTINGS_CONFLICT);
+  const noOpBefore = await f.get();
+  const noOp = botSettingsSnapshotSchema.parse((await f.update({ count: 4 })).payload);
+  assert.equal(noOp.bot.revision, noOpBefore.bot.revision);
+  await f.update({ count: null });
+  const reset = await f.get();
+  assert.equal((await f.bot.peer.request(MessageType.COMMAND_REGISTER, { commands: f.commands, settings: tighter })).type,
+    MessageType.COMMAND_REGISTERED);
+  const changed = await f.get();
+  assert.ok(changed.bot.schemaRevision > reset.bot.schemaRevision);
+  assert.equal(changed.server?.values.count, 2);
+  await f.owner.peer.error(MessageType.BOT_SETTINGS_UPDATE, {
+    botId: f.botId, schemaRevision: reset.bot.schemaRevision, expectedRevision: changed.bot.revision, patch: { count: 1 },
+  }, ProtocolErrorCode.BOT_SETTINGS_CONFLICT);
+  const defaultChange: BotSettingsDefinition = { ...tighter,
+    server: { title: 'New default', fields: [{ name: 'count', label: 'Count', type: 'integer', defaultValue: 3 }] } };
+  assert.equal((await f.bot.peer.request(MessageType.COMMAND_REGISTER, { commands: f.commands, settings: defaultChange })).type,
+    MessageType.COMMAND_REGISTERED);
+  assert.equal((await f.get()).server?.values.count, 3);
+  assert.equal((await f.bot.peer.request(MessageType.COMMAND_REGISTER, { commands: f.commands })).type, MessageType.COMMAND_REGISTERED);
+  const empty = await f.get(f.alice.peer);
+  assert.deepEqual(empty.definition, {});
+  assert.equal(empty.bot.hasUserSettings, false);
+  assert.equal(empty.bot.hasServerSettings, false);
+  assert.equal(empty.bot.capabilities.downloadsSound, true);
+});
+
+test('bot settings validate private raw preferences for commands, autocomplete and independent selector responses', async (t) => {
+  const f = await createSettingsFixture(t);
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const invocation = await f.alice.peer.request(MessageType.COMMAND_INVOKE, {
+    botId: f.botId, channelId: f.channelId, commandName: 'run', userSettings: { compact: false, tags: ['PRIVATE-ALICE'] },
+  });
+  const id = text(invocation.payload.invocationId);
+  const execution = commandExecutionSchema.parse((await f.bot.peer.wait((message) =>
+    message.type === MessageType.COMMAND_INVOKE && message.payload.invocationId === id)).payload);
+  assert.deepEqual(execution.settings?.user, { compact: false, tags: ['PRIVATE-ALICE'] });
+  assert.deepEqual(execution.settings?.server, { count: 2, enabled: true });
+  assert.equal('userSettings' in execution, false);
+  const second = await f.bob.peer.request(MessageType.COMMAND_INVOKE, {
+    botId: f.botId, channelId: f.channelId, commandName: 'run',
+  });
+  const secondExecution = commandExecutionSchema.parse((await f.bot.peer.wait((message) =>
+    message.type === MessageType.COMMAND_INVOKE && message.payload.invocationId === second.payload.invocationId)).payload);
+  assert.deepEqual(secondExecution.settings?.user, { compact: true });
+  for (const userSettings of [{ compact: 'false' }, { host: true }, { tags: ['a', ' A '] }]) {
+    await f.alice.peer.error(MessageType.COMMAND_INVOKE, {
+      botId: f.botId, channelId: f.channelId, commandName: 'run', userSettings,
+    }, ProtocolErrorCode.BOT_SETTINGS_INVALID);
+  }
+  f.bot.peer.send(MessageType.COMMAND_PROMPT, {
+    invocationId: id, interactionId: 'settings-form', form: {
+      title: 'Next step', fields: [{ name: 'answer', label: 'Answer', type: 'text', required: true }],
+    },
+  });
+  await f.alice.peer.wait((message) => message.type === MessageType.COMMAND_PROMPT && message.payload.invocationId === id);
+  await f.update({ count: 5 });
+  await f.alice.peer.error(MessageType.COMMAND_SUBMIT, {
+    invocationId: id, interactionId: 'settings-form', values: { answer: 'ok' }, userSettings: { compact: true },
+  }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+  const submitted = await f.alice.peer.request(MessageType.COMMAND_SUBMIT, {
+    invocationId: id, interactionId: 'settings-form', values: { answer: 'ok' },
+  });
+  assert.equal('settings' in submitted.payload, false);
+  assert.equal('userSettings' in submitted.payload, false);
+  assert.equal(execution.settings?.server.count, 2);
+  now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+  const requestId = randomUUID();
+  f.alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE, {
+    botId: f.botId, channelId: f.channelId, commandName: 'run', optionName: 'query', query: 'settings',
+    userSettings: { compact: false },
+  }, requestId);
+  const autocomplete = await f.bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE);
+  assert.deepEqual(record(autocomplete.payload.settings).user, { compact: false });
+  assert.deepEqual(record(autocomplete.payload.settings).server, { count: 5, enabled: true });
+  assert.equal('userSettings' in autocomplete.payload, false);
+  await f.update({ count: 6 });
+  assert.equal((await f.alice.peer.wait((message) => message.requestId === requestId)).payload.code, ProtocolErrorCode.BOT_SETTINGS_CONFLICT);
+  now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+  await f.bob.peer.error(MessageType.COMMAND_AUTOCOMPLETE, {
+    botId: f.botId, channelId: f.channelId, commandName: 'run', optionName: 'query', query: '',
+    userSettings: { compact: 'invalid' },
+  }, ProtocolErrorCode.BOT_SETTINGS_INVALID);
+  const selector = await f.bot.peer.request(MessageType.SELECTOR_CREATE, {
+    channelId: f.channelId, title: 'Independent', choices: [{ label: 'A', value: 'a' }, { label: 'B', value: 'b' }],
+    presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 5,
+  });
+  const selectorId = text(selector.payload.id);
+  const publicList = await f.alice.peer.request(MessageType.SELECTOR_LIST, { channelId: f.channelId });
+  assert.equal(records(publicList.payload.selectors)[0].botId, f.botId);
+  const since = f.bot.peer.messages.length;
+  const response = await f.alice.peer.request(MessageType.SELECTOR_RESPOND, {
+    id: selectorId, value: 'a', userSettings: { compact: false, tags: ['PRIVATE-SELECTOR'] },
+  });
+  assert.equal('settings' in response.payload, false);
+  const event = botSelectorRespondedSchema.parse((await f.bot.peer.wait((message) =>
+    message.type === MessageType.SELECTOR_RESPONDED && message.payload.id === selectorId, since)).payload);
+  assert.equal(event.userId, f.alice.id);
+  assert.deepEqual(event.settings?.user, { compact: false, tags: ['PRIVATE-SELECTOR'] });
+  assert.equal(event.settings?.server.count, 6);
+  await f.alice.peer.request(MessageType.SELECTOR_RESPOND, { id: selectorId, value: 'a', userSettings: {} });
+  await f.bot.peer.barrier();
+  assert.equal(f.bot.peer.messages.slice(since).filter((message) => message.type === MessageType.SELECTOR_RESPONDED).length, 1);
+  assert.equal(f.bob.peer.messages.some((message) => message.type === MessageType.SELECTOR_RESPONDED), false);
+  const stored = record(f.database.getDb().prepare('SELECT snapshot FROM bot_selectors WHERE id = ?').get(selectorId));
+  assert.equal(text(stored.snapshot).includes('PRIVATE-SELECTOR'), false);
+  await f.bob.peer.error(MessageType.SELECTOR_RESPOND, {
+    id: selectorId, value: 'b', userSettings: { unknown: true },
+  }, ProtocolErrorCode.BOT_SETTINGS_INVALID);
+  await f.bot.peer.close();
+  assert.equal((await f.bob.peer.request(MessageType.SELECTOR_RESPOND, {
+    id: selectorId, value: 'b', userSettings: { compact: true },
+  })).type, MessageType.SELECTOR_SNAPSHOT);
+});
+
+test('bot settings reject stale sessions and recheck permissions changed during authorization', async (t) => {
+  const f = await createSettingsFixture(t);
+  const role = { id: randomUUID(), name: 'Settings writers', color: null, position: 1,
+    permissions: Permission.CONFIGURE_BOTS, isDefault: false, createdAt: Date.now() };
+  await f.roleRepo.create(role);
+  await f.owner.peer.request(MessageType.ROLE_ASSIGN, { userId: f.alice.id, roleId: role.id });
+  await f.owner.peer.barrier();
+  const snapshot = await f.get(f.alice.peer);
+  const original = f.permissions.checkPermission.bind(f.permissions);
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const waiting = new Promise<void>((resolve) => { entered = resolve; });
+  let paused = false;
+  t.mock.method(f.permissions, 'checkPermission', async (userId: string, permission: Permission) => {
+    const allowed = await original(userId, permission);
+    if (userId === f.alice.id && permission === Permission.CONFIGURE_BOTS && !paused) {
+      paused = true;
+      entered();
+      await gate;
+    }
+    return allowed;
+  });
+
+  await t.test('lazy audio preview settings reuse only the authorized search snapshot and invalidate on shared changes', async (t) => {
+    const f = await createSettingsFixture(t);
+    let now = Date.now();
+    t.mock.method(Date, 'now', () => now);
+    const queryId = randomUUID();
+    f.alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE, {
+      botId: f.botId, channelId: f.channelId, commandName: 'run', optionName: 'query', query: 'clip',
+      userSettings: { compact: false, tags: ['PRIVATE-PREVIEW'] },
+    }, queryId);
+    const query = await f.bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE);
+    f.bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, {
+      status: 'ok', choices: [{ label: 'Clip', value: 'canonical', audio: { resourceId: 'provider-clip' } }],
+    }, query.requestId);
+    const choices = commandAutocompleteResultSchema.parse((await f.alice.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === queryId)).payload);
+    assert.ok(choices.status === 'ok' && choices.choices[0].audio && 'resourceId' in choices.choices[0].audio);
+    now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+    const nextQueryId = randomUUID();
+    const beforeNext = f.bot.peer.messages.length;
+    f.alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE, {
+      botId: f.botId, channelId: f.channelId, commandName: 'run', optionName: 'query', query: 'clip', page: 1,
+      userSettings: { tags: ['PRIVATE-PREVIEW'], compact: false },
+    }, nextQueryId);
+    const nextQuery = await f.bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE, beforeNext);
+    assert.deepEqual(nextQuery.payload.settings, query.payload.settings);
+    f.bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, {
+      status: 'ok', choices: [{ label: 'Next clip', value: 'canonical-next', audio: { resourceId: 'provider-next' } }],
+    }, nextQuery.requestId);
+    await f.alice.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === nextQueryId);
+    const requestId = randomUUID();
+    f.alice.peer.send(MessageType.COMMAND_AUDIO_PREVIEW, {
+      botId: f.botId, channelId: f.channelId, commandName: 'run', optionName: 'query',
+      autocompleteRequestId: queryId, resourceId: choices.choices[0].audio.resourceId,
+    }, requestId);
+    const preview = await f.bot.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW);
+    assert.deepEqual(preview.payload.settings, query.payload.settings);
+    assert.deepEqual(record(preview.payload.settings).user, { compact: false, tags: ['PRIVATE-PREVIEW'] });
+    assert.equal(f.bob.peer.messages.some((message) => JSON.stringify(message.payload).includes('PRIVATE-PREVIEW')), false);
+    await f.update({ count: 3 });
+    await f.bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === preview.requestId);
+    for (const pageId of [queryId, nextQueryId]) {
+      await f.alice.peer.wait((message) =>
+        message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === pageId);
+    }
+    assert.deepEqual((await f.alice.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT && message.requestId === requestId)).payload,
+    { status: 'failed', reason: 'expired' });
+  });
+  const read = f.alice.peer.request(MessageType.BOT_SETTINGS_GET, { botId: f.botId });
+  await waiting;
+  await f.owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: f.alice.id, roleId: role.id });
+  await f.owner.peer.barrier();
+  release();
+  assert.equal(botSettingsSnapshotSchema.parse((await read).payload).server, undefined);
+  assert.deepEqual((await f.get()).server, snapshot.server);
+  t.mock.restoreAll();
+  await f.owner.peer.request(MessageType.ROLE_ASSIGN, { userId: f.alice.id, roleId: role.id });
+  await f.owner.peer.barrier();
+  paused = false;
+  const writeGate = new Promise<void>((resolve) => { release = resolve; });
+  const writeWaiting = new Promise<void>((resolve) => { entered = resolve; });
+  t.mock.method(f.permissions, 'checkPermission', async (userId: string, permission: Permission) => {
+    const allowed = await original(userId, permission);
+    if (userId === f.alice.id && permission === Permission.CONFIGURE_BOTS && !paused) {
+      paused = true; entered(); await writeGate;
+    }
+    return allowed;
+  });
+  f.alice.peer.send(MessageType.BOT_SETTINGS_UPDATE, {
+    botId: f.botId, schemaRevision: snapshot.bot.schemaRevision, expectedRevision: snapshot.bot.revision, patch: { count: 9 },
+  }, 'stale-settings-write');
+  await writeWaiting;
+  const replacement = await f.human('Settings Alice', f.alice.keys, f.alice.deviceId);
+  release();
+  await replacement.peer.barrier();
+  assert.deepEqual((await f.get()).server, snapshot.server);
+});
+
+test('bot settings selector events revalidate creator access after responder authorization', async (t) => {
+  const f = await createSettingsFixture(t);
+  const role = { id: randomUUID(), name: 'Private settings', color: null, position: 1,
+    permissions: 0, isDefault: false, createdAt: Date.now() };
+  await f.roleRepo.create(role);
+  await f.roleRepo.assignRole(f.alice.id, role.id);
+  await f.roleRepo.assignRole(f.bob.id, role.id);
+  const channel = await f.owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'private-settings', type: 'TEXT', isPrivate: true, allowedRoleIds: [role.id],
+  });
+  const channelId = text(record(channel.payload.channel).id);
+  const invocation = await f.alice.peer.request(MessageType.COMMAND_INVOKE, {
+    botId: f.botId, commandName: 'run', channelId,
+  });
+  const invocationId = text(invocation.payload.invocationId);
+  const selector = await f.bot.peer.request(MessageType.SELECTOR_CREATE, {
+    invocationId, channelId, title: 'Private response',
+    choices: [{ label: 'A', value: 'a' }], presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 5,
+  });
+  const id = text(selector.payload.id);
+  await f.bot.peer.request(MessageType.COMMAND_FINISH, { invocationId });
+  const original = f.channelService.getAccessContext.bind(f.channelService);
+  let entered!: () => void;
+  let release!: () => void;
+  const waiting = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let paused = false;
+  t.mock.method(f.channelService, 'getAccessContext', async (userId: string) => {
+    const context = await original(userId);
+    if (userId === f.bob.id && !paused) {
+      paused = true;
+      entered();
+      await gate;
+    }
+    return context;
+  });
+  const since = f.bot.peer.messages.length;
+  const response = f.bob.peer.request(MessageType.SELECTOR_RESPOND, {
+    id, value: 'a', userSettings: { tags: ['PRIVATE-REVOKED'] },
+  });
+  await waiting;
+  await f.owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: f.alice.id, roleId: role.id });
+  await f.owner.peer.barrier();
+  release();
+  assert.equal((await response).type, MessageType.SELECTOR_SNAPSHOT);
+  await f.bot.peer.barrier();
+  assert.equal(f.bot.peer.messages.slice(since).some((message) => message.type === MessageType.SELECTOR_RESPONDED), false);
+});
+
+test('bot settings selector responses wait for registration hydration without consuming the response', async (t) => {
+  const f = await createSettingsFixture(t);
+  const selector = await f.bot.peer.request(MessageType.SELECTOR_CREATE, {
+    channelId: f.channelId, title: 'Reconnect response', choices: [{ label: 'A', value: 'a' }],
+    presentation: 'buttons', responder: 'any', allowChange: false, maxResponders: 1,
+  });
+  const id = text(selector.payload.id);
+  await f.bot.peer.close();
+  const reconnect = await f.connectBot(f.token, f.bot.keys);
+  await f.alice.peer.error(MessageType.SELECTOR_RESPOND, {
+    id, value: 'a', userSettings: { compact: false },
+  }, ProtocolErrorCode.BOT_COMMAND_BUSY);
+  const list = await f.alice.peer.request(MessageType.SELECTOR_LIST, { channelId: f.channelId });
+  assert.equal(records(list.payload.selectors).find((item) => item.id === id)?.responseCount, 0);
+  const registered = await reconnect.peer.request(MessageType.COMMAND_REGISTER, { commands: f.commands, settings: SETTINGS_DEFINITION });
+  assert.equal(registered.type, MessageType.COMMAND_REGISTERED);
+  assert.equal((await f.alice.peer.request(MessageType.SELECTOR_RESPOND, {
+    id, value: 'a', userSettings: { compact: false },
+  })).type, MessageType.SELECTOR_SNAPSHOT);
+  const delivered = await reconnect.peer.wait((message) => message.type === MessageType.SELECTOR_RESPONDED && message.payload.id === id);
+  assert.deepEqual(botSelectorRespondedSchema.parse(delivered.payload).settings?.user, { compact: false });
+  assert.ok(reconnect.peer.messages.indexOf(registered) < reconnect.peer.messages.indexOf(delivered));
+});
+
+test('bot settings migration preserves revisions and overrides across database reopen and deletes revoked metadata', async (t) => {
+  const dataDir = path.join(__dirname, '..', `.bot-settings-data-${process.pid}-${randomUUID()}`);
+  const filename = path.join(dataDir, 'server.db');
+  let database = await DatabaseConnection.create(filename);
+  t.after(() => { database.close(); fs.rmSync(dataDir, { recursive: true, force: true }); });
+  await new SqliteUserRepository(database.getDb()).create({
+    id: 'owner', clientId: 'owner', publicKey: null, nickname: 'Owner', avatarPath: null, createdAt: 0, lastSeenAt: 0,
+  });
+  await new SqliteBotRepository(database.getDb()).create({
+    id: 'persisted', name: 'Persisted bot', tokenHash: 'test-hash', avatarPath: null, boundPublicKey: null,
+    createdByUserId: 'owner', createdAt: 0, profilePending: false,
+  });
+  let repository = new SqliteBotSettingsRepository(database.getDb());
+  let service = new BotSettingsService(repository);
+  const registered = service.register('persisted', SETTINGS_DEFINITION, true);
+  const changed = service.update({ botId: 'persisted', schemaRevision: registered.schemaRevision,
+    expectedRevision: registered.revision, patch: { count: 0, enabled: false } });
+  const before = repository.findById('persisted');
+  database.close();
+  database = await DatabaseConnection.create(filename);
+  repository = new SqliteBotSettingsRepository(database.getDb());
+  service = new BotSettingsService(repository);
+  assert.deepEqual(repository.findById('persisted'), before);
+  assert.deepEqual(service.register('persisted', SETTINGS_DEFINITION, true), changed);
+  assert.deepEqual(service.context('persisted', { compact: false })?.server, { count: 0, enabled: false });
+  assert.equal(record(database.getDb().prepare('SELECT count(*) AS count FROM schema_migrations WHERE version = ?')
+    .get('023_bot_settings.sql')).count, 1);
+  await new SqliteBotRepository(database.getDb()).delete('persisted');
+  assert.equal(repository.findById('persisted'), undefined);
+  assert.equal(record(database.getDb().prepare('SELECT count(*) AS count FROM bot_settings').get()).count, 0);
+});
+
+test('bot identity migration preserves legacy profiles and persists new pending links across restart', async (t) => {
+  const dataDir = path.join(__dirname, '..', `.bot-profile-data-${process.pid}-${randomUUID()}`);
+  const filename = path.join(dataDir, 'server.db');
+  let database = await DatabaseConnection.create(filename);
+  t.after(() => { database.close(); fs.rmSync(dataDir, { recursive: true, force: true }); });
+  await new SqliteUserRepository(database.getDb()).create({
+    id: 'owner', clientId: 'owner', publicKey: null, nickname: 'Owner', avatarPath: null, createdAt: 0, lastSeenAt: 0,
+  });
+  const legacy = {
+    id: 'legacy', name: 'Existing identity', tokenHash: BotService.hashToken('legacy-token'),
+    avatarPath: 'legacy-avatar.png', boundPublicKey: identity().publicKey,
+    createdByUserId: 'owner', createdAt: 123, profilePending: false,
+  };
+  await new SqliteBotRepository(database.getDb()).create(legacy);
+  // Reopen the populated database with the schema immediately before this migration.
+  database.getDb().exec('ALTER TABLE bots DROP COLUMN profile_pending');
+  database.getDb().prepare('DELETE FROM schema_migrations WHERE version = ?').run('024_bot_profile_authority.sql');
+  database.close();
+  database = await DatabaseConnection.create(filename);
+  const repository = new SqliteBotRepository(database.getDb());
+  assert.deepEqual(await repository.findById(legacy.id), { ...legacy, lastProtocolVersion: null });
+  assert.equal(record(database.getDb().prepare('SELECT count(*) AS count FROM schema_migrations WHERE version = ?')
+    .get('024_bot_profile_authority.sql')).count, 1);
+  const service = new BotService(repository, new SqliteServerRepository(database.getDb()),
+    new AvatarStorageService(dataDir), () => new Map<string, UserSummary>());
+  const pending = await service.create('owner');
+  assert.equal(pending.success, true);
+  assert.ok(pending.success);
+  assert.equal(pending.bot.profilePending, true);
+  assert.equal(pending.bot.avatarUrl, null);
+  const before = await repository.findById(pending.bot.id);
+  assert.ok(before);
+  assert.equal(before.tokenHash, BotService.hashToken(pending.token));
+  database.close();
+  database = await DatabaseConnection.create(filename);
+  const restored = new SqliteBotRepository(database.getDb());
+  assert.deepEqual(await restored.findById(legacy.id), { ...legacy, lastProtocolVersion: null });
+  assert.deepEqual(await restored.findById(pending.bot.id), before);
+});
 
 test('human counts exclude bot accounts and collapse multiple devices without changing the online bot map', async (t) => {
   const fixture = await createFixture();
   t.after(() => fixture.dispose());
   const owner = await fixture.human('Human counter');
   const second = await fixture.human('Human counter', owner.keys);
-  const created = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Not a person' });
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
   const bot = await fixture.bot(text(created.payload.token));
   const people = () => listOnlineHumans(fixture.wsServer.getOnlineUsersMap().values());
   assert.equal(fixture.wsServer.getOnlineUsersMap().size, 3);
@@ -336,7 +1505,7 @@ test('public selectors persist responses, expire across restart and count distin
     let selectors = new BotSelectorService(new SqliteBotSelectorRepository(db));
     const input = {
       id: 'durable-poll', channelId: 'text', title: 'Choose?', choices: [
-        { label: 'A', value: 'a' }, { label: 'B', value: 'b' },
+        { label: 'A', value: 'a', description: 'Preview A', audio: AUDIO_PREVIEW }, { label: 'B', value: 'b' },
       ], presentation: 'buttons' as const, responder: 'any' as const, allowChange: true,
       expiresAt: 2000, maxResponders: 2,
     };
@@ -354,6 +1523,7 @@ test('public selectors persist responses, expire across restart and count distin
     selectors = new BotSelectorService(new SqliteBotSelectorRepository(db));
     assert.equal(selectors.get(scoped.id)?.creatorUserId, 'alice');
     assert.equal(selectors.get(scoped.id)?.sourceInvocationId, 'authorized-invocation');
+    assert.deepEqual(selectors.get(first.id)?.choices[0].audio, AUDIO_PREVIEW);
     assert.deepEqual(selectors.get(first.id)?.responses, { alice: 'b' });
     const closed = selectors.respond(first.id, 'bob', 'a', 1003);
     assert.equal(closed.closedAt, 1003);
@@ -386,16 +1556,17 @@ test('public selectors publish durable controls, enforce permissions and finaliz
   const alice = await fixture.human('Selector Alice');
   const bob = await fixture.human('Selector Bob');
   const channelId = text(records(record(owner.auth.payload.server).channels).find((channel) => channel.type === 'TEXT')?.id);
-  const created = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Selector bot' });
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
   const bot = await fixture.bot(text(created.payload.token));
   const input = {
     id: randomUUID(), channelId, title: 'Choose A or B', choices: [
-      { label: 'A', value: 'a' }, { label: 'B', value: 'b' },
+      { label: 'A', value: 'a', description: 'Preview A', audio: AUDIO_PREVIEW }, { label: 'B', value: 'b' },
     ], presentation: 'buttons', responder: 'any', allowChange: true, maxResponders: 2,
     metadata: { kind: 'poll', locale: 'en' },
   };
   const published = await bot.peer.request(MessageType.SELECTOR_CREATE, input);
   assert.equal(published.type, MessageType.SELECTOR_SNAPSHOT);
+  assert.deepEqual(record(records(published.payload.choices)[0]).audio, AUDIO_PREVIEW);
   const id = text(published.payload.id);
   const messageId = text(published.payload.messageId);
   const replay = await bot.peer.request(MessageType.SELECTOR_CREATE, input);
@@ -406,6 +1577,7 @@ test('public selectors publish durable controls, enforce permissions and finaliz
   const publicSnapshot = records(publicList.payload.selectors)[0];
   assert.equal('responses' in publicSnapshot, false);
   assert.equal('metadata' in publicSnapshot, false);
+  assert.deepEqual(record(records(publicSnapshot.choices)[0]).audio, AUDIO_PREVIEW);
   await bot.peer.error(MessageType.SELECTOR_RESPOND, { id, value: 'a' }, ProtocolErrorCode.PERMISSION_DENIED);
   await alice.peer.request(MessageType.SELECTOR_RESPOND, { id, value: 'a' });
   const changed = await alice.peer.request(MessageType.SELECTOR_RESPOND, { id, value: 'b' });
@@ -462,11 +1634,11 @@ test('private channel selectors bind invocations and revalidate durable creator 
   });
   const channelId = text(record(channel.payload.channel).id);
   const publicChannelId = text(records(record(owner.auth.payload.server).channels).find((entry) => entry.type === 'TEXT')?.id);
-  const account = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Capability bot' });
+  const account = await owner.peer.request(MessageType.BOT_CREATE, {});
   const botId = text(record(account.payload.bot).id);
   const token = text(account.payload.token);
   let bot = await fixture.bot(token);
-  const otherAccount = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Other capability bot' });
+  const otherAccount = await owner.peer.request(MessageType.BOT_CREATE, {});
   const otherBot = await fixture.bot(text(otherAccount.payload.token));
   await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: [{ name: 'enquete', description: 'Private-channel poll' }] });
   const invoke = async () => {
@@ -651,8 +1823,8 @@ test('persisted chat replies resolve trusted originals, edits, deletion and old 
   assert.equal(corruptPage[0].reply?.deleted, true);
   assert.equal(corruptPage[0].reply?.content, '');
 
-  const created = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Reply bot' });
-  const bot = await fixture.bot(text(created.payload.token));
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const bot = await fixture.bot(text(created.payload.token), undefined, 'Reply bot');
   const botAnswer = await bot.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Bot answer', replyToMessageId: originalId });
   assert.equal(record(botAnswer.payload.reply).content, 'Edited original');
   const replyToBot = await owner.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Thanks bot', replyToMessageId: text(botAnswer.payload.id) });
@@ -678,13 +1850,17 @@ test('persistent text reactions support bot events and enforce privacy', async (
   const channels = records(record(owner.auth.payload.server).channels);
   const channelId = text(channels.find((channel) => channel.type === 'TEXT')?.id);
   const voiceChannelId = text(channels.find((channel) => channel.type === 'VOICE')?.id);
-  const created = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Question bot' });
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
   const botId = text(record(created.payload.bot).id);
-  const bot = await fixture.bot(text(created.payload.token));
-  const question = await bot.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Choose with reactions' });
+  const bot = await fixture.bot(text(created.payload.token), undefined, 'Question bot');
+  const localizations = { 'pt-BR': 'Escolha com reações', en: 'Choose with reactions' };
+  const question = await bot.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Choose with reactions', localizations });
   assert.equal(question.type, MessageType.CHAT_MESSAGE);
   assert.equal(question.payload.userId, botId);
   assert.equal(question.payload.isBot, true);
+  assert.deepEqual(question.payload.localizations, localizations);
+  await owner.peer.error(MessageType.CHAT_SEND, { channelId, content: 'Human text', localizations }, ProtocolErrorCode.BAD_REQUEST);
+  await bot.peer.error(MessageType.CHAT_SEND, { channelId, content: 'Invalid bot text', localizations: { fr: 'Unknown locale' } }, ProtocolErrorCode.BAD_REQUEST);
   const messageId = text(question.payload.id);
   const reaction = { channelId, messageId, emoji: '👍' };
   const added = await alice.peer.request(MessageType.CHAT_REACTION_ADD, reaction);
@@ -699,6 +1875,7 @@ test('persistent text reactions support bot events and enforce privacy', async (
   assert.equal(historyMessage.userId, botId);
   assert.equal(historyMessage.isBot, true);
   assert.equal(historyMessage.userNickname, 'Question bot');
+  assert.deepEqual(historyMessage.localizations, localizations);
   const reactions = records(historyMessage.reactions);
   assert.equal(reactions.length, 2);
   assert.equal(records(reactions.find((entry) => entry.emoji === '👍')?.users).length, 2);
@@ -767,10 +1944,11 @@ test('reaction rows survive reopening SQLite and enforce atomic bounds and clean
   const botMessageId = randomUUID();
   await new SqliteBotRepository(db).create({
     id: botId, name: 'Persistent bot', tokenHash: randomUUID(), avatarPath: null,
-    boundPublicKey: null, createdByUserId: userId, createdAt: 1,
+    boundPublicKey: null, createdByUserId: userId, createdAt: 1, profilePending: false,
   });
   const botMessage = {
     id: botMessageId, channelId: channel.id, userId: botId, content: 'Persistent bot question', createdAt: 2,
+    localizations: { 'pt-BR': 'Pergunta persistida', en: 'Persistent bot question' },
     botAuthor: { id: botId, name: 'Persistent bot', avatarPath: null, ownerUserId: userId },
     botCommand: { invocationId: randomUUID(), commandName: 'question', invokerId: userId, invokerNickname: 'Reactor' },
     replyToMessageId: messageId,
@@ -788,6 +1966,7 @@ test('reaction rows survive reopening SQLite and enforce atomic bounds and clean
   assert.equal(restoredBotMessage?.userId, botId);
   assert.equal(restoredBotMessage?.botAuthor?.name, 'Persistent bot');
   assert.deepEqual(restoredBotMessage?.botCommand, botMessage.botCommand);
+  assert.deepEqual(restoredBotMessage?.localizations, botMessage.localizations);
   assert.equal(restoredBotMessage?.replyToMessageId, messageId);
   assert.equal((await repo.listReactions([botMessageId])).length, 1);
   await new SqliteBotRepository(db).delete(botId);
@@ -835,12 +2014,28 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     name: 'private-bot-tests', type: 'TEXT', isPrivate: true, allowedRoleIds: [privateRole.id],
   });
   const privateChannel = text(record(privateCreated.payload.channel).id);
-  const created = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Actual Bot', avatarBase64: `data:image/png;base64,${PNG}` });
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
   assert.equal(created.type, MessageType.BOT_CREATED);
   const botInfo = record(created.payload.bot);
   const botId = text(botInfo.id);
-  const avatarUrl = text(botInfo.avatarUrl);
   const token = text(created.payload.token);
+  await t.test('reserves only a pending link and rejects client-supplied identity, including owner changes', async () => {
+    assert.equal(botInfo.profilePending, true);
+    assert.equal(botInfo.bound, false);
+    assert.equal(botInfo.online, false);
+    assert.equal(botInfo.avatarUrl, null);
+    assert.equal(botInfo.lastProtocolVersion, null);
+    assert.equal(botInfo.requiredProtocolVersion, PROTOCOL_VERSION);
+    const catalog = botSettingsListResponseSchema.parse((await owner.peer.request(MessageType.BOT_SETTINGS_LIST)).payload);
+    assert.deepEqual(catalog.bots, []);
+    await owner.peer.error(MessageType.BOT_SETTINGS_GET, { botId }, ProtocolErrorCode.BAD_REQUEST);
+    for (const profile of [{ name: 'Client name' }, { avatarBase64: PNG }, { name: 'Client name', avatarBase64: PNG }]) {
+      await owner.peer.error(MessageType.BOT_CREATE, profile, ProtocolErrorCode.BAD_REQUEST);
+      await owner.peer.error(MessageType.BOT_UPDATE_PROFILE, { botId, ...profile }, ProtocolErrorCode.PERMISSION_DENIED);
+    }
+    assert.equal(await fixture.botRepo.count(), 1);
+    assert.equal((await fixture.botRepo.findById(botId))?.profilePending, true);
+  });
   await t.test('rejects incompatible bot protocols before authentication or TOFU binding', async () => {
     const rejected = await fixture.connect();
     const keys = identity();
@@ -852,6 +2047,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       assert.equal(response.payload.code, ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED);
       assert.equal(response.payload.serverProtocolVersion, PROTOCOL_VERSION);
       assert.equal((await fixture.botRepo.findById(botId))?.boundPublicKey, null);
+      assert.equal((await fixture.botRepo.findById(botId))?.lastProtocolVersion, null);
       assert.equal((await fixture.botService.list()).find((item) => item.id === botId)?.online, false);
       assert.equal(await fixture.botRepo.count(), 1);
     }
@@ -864,15 +2060,60 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.equal(fixture.registry.listAll().length, 0);
     await rejected.close();
   });
-  let bot = await fixture.bot(token);
-  const secondCreated = await owner.peer.request(MessageType.BOT_CREATE, { name: 'Other Bot' });
+  await t.test('rejects an invalid bot-announced name before claiming the token', async () => {
+    const rejected = await fixture.connect();
+    const keys = identity();
+    for (const nickname of [undefined, '', 'x', 'x'.repeat(33)]) {
+      await rejected.error(MessageType.AUTH_CONNECT, {
+        protocolVersion: PROTOCOL_VERSION, nickname, publicKey: keys.publicKey, botToken: token,
+      }, ProtocolErrorCode.BOT_INVALID_PROFILE);
+      assert.equal((await fixture.botRepo.findById(botId))?.boundPublicKey, null);
+      assert.equal((await fixture.botRepo.findById(botId))?.profilePending, true);
+    }
+    await rejected.close();
+  });
+  let bot = await fixture.bot(token, undefined, 'Actual Bot');
+  await t.test('authenticates and persists the bot protocol; pending compatibility clears only after verification', async () => {
+    assert.equal((await fixture.botRepo.findById(botId))?.lastProtocolVersion, PROTOCOL_VERSION);
+    assert.deepEqual(await fixture.botService.getCompatibility(), {
+      protocolVersion: PROTOCOL_VERSION, incompatibleBots: 0, uncheckedBots: 0,
+    });
+    await fixture.botRepo.update(botId, { lastProtocolVersion: PROTOCOL_VERSION - 1 });
+    assert.equal((await fixture.botService.getCompatibility()).incompatibleBots, 1);
+    const listed = (await fixture.botService.list()).find((item) => item.id === botId);
+    assert.equal(listed?.lastProtocolVersion, PROTOCOL_VERSION - 1);
+    assert.equal(listed?.requiredProtocolVersion, PROTOCOL_VERSION);
+    await fixture.botRepo.update(botId, { lastProtocolVersion: null });
+    assert.equal((await fixture.botService.getCompatibility()).uncheckedBots, 1);
+    await fixture.botService.recordCompatibleConnection(botId);
+    assert.equal((await fixture.botRepo.findById(botId))?.lastProtocolVersion, PROTOCOL_VERSION);
+    assert.equal((await fixture.botService.getCompatibility()).uncheckedBots, 0);
+  });
+  await t.test('an obsolete duplicate cannot mark a currently connected compatible bot as incompatible', async () => {
+    const rejected = await fixture.connect();
+    await rejected.error(MessageType.AUTH_CONNECT, {
+      protocolVersion: PROTOCOL_VERSION - 1, nickname: 'Obsolete duplicate',
+      publicKey: bot.keys.publicKey, botToken: token,
+    }, ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED);
+    assert.equal((await fixture.botRepo.findById(botId))?.lastProtocolVersion, PROTOCOL_VERSION);
+    assert.equal((await fixture.botService.getCompatibility()).incompatibleBots, 0);
+    await rejected.close();
+  });
+  const initialProfile = await bot.peer.request(MessageType.BOT_UPDATE_PROFILE, {
+    avatarBase64: `data:image/png;base64,${PNG}`,
+  });
+  assert.equal(initialProfile.type, MessageType.BOT_PROFILE_UPDATED);
+  const avatarUrl = text(record(initialProfile.payload.bot).avatarUrl);
+  const secondCreated = await owner.peer.request(MessageType.BOT_CREATE, {});
   const otherBotId = text(record(secondCreated.payload.bot).id);
   const otherBot = await fixture.bot(text(secondCreated.payload.token));
   const commands = [
     { name: 'ping', description: 'A simple command' },
     {
       name: 'survey', description: 'Typed options', options: [
-        { name: 'topic', description: 'Topic', type: 'string', required: true, choices: [{ label: 'News', value: 'news' }] },
+        { name: 'topic', description: 'Topic', type: 'string', required: true, choices: [{
+          label: 'News', value: 'news', description: 'News preview', audio: AUDIO_PREVIEW,
+        }] },
         { name: 'count', description: 'Count', type: 'integer', required: true, min: 1, max: 10 },
         { name: 'notify', description: 'Notify', type: 'boolean', required: true },
         { name: 'target', description: 'Target', type: 'user', required: true },
@@ -903,26 +2144,31 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await Promise.all(fixture.peers.map((peer) => peer.barrier()));
   };
 
-  await t.test('uses stored bot profiles and rejects invalid profile changes without partial writes', async () => {
+  await t.test('uses bot-announced profiles and rejects human edits without partial writes', async () => {
     const authUser = record(bot.auth.payload.currentUser);
     assert.equal(authUser.nickname, 'Actual Bot');
-    assert.equal(authUser.avatarUrl, avatarUrl);
+    assert.equal(authUser.avatarUrl, undefined);
+    assert.equal((await fixture.botService.getInfo(botId))?.avatarUrl, avatarUrl);
     assert.ok(!records(record(bot.auth.payload.server).channels).some((channel) => channel.id === privateChannel));
     const listed = await owner.peer.request(MessageType.BOT_LIST);
     assert.equal(listed.type, MessageType.BOT_LIST_RESPONSE);
     const onlineBot = records(listed.payload.bots).find((item) => item.id === botId);
     assert.equal(onlineBot?.online, true);
     assert.equal(onlineBot?.bound, true);
+    assert.equal(onlineBot?.profilePending, false);
     for (const key of ['token', 'tokenHash', 'boundPublicKey', 'avatarPath']) assert.ok(!(key in record(onlineBot)));
     await bob.peer.error(MessageType.BOT_UPDATE_PROFILE, { botId, name: 'Not allowed' }, ProtocolErrorCode.PERMISSION_DENIED);
     await bot.peer.error(MessageType.BOT_UPDATE_PROFILE, { botId: otherBotId, name: 'Not allowed' }, ProtocolErrorCode.PERMISSION_DENIED);
-    await owner.peer.error(MessageType.BOT_UPDATE_PROFILE, { name: 'Missing id' }, ProtocolErrorCode.BOT_INVALID_PROFILE);
+    await owner.peer.error(MessageType.BOT_UPDATE_PROFILE, { botId, name: 'Owner override' }, ProtocolErrorCode.PERMISSION_DENIED);
+    await owner.peer.error(MessageType.BOT_UPDATE_PROFILE, { name: 'Missing id' }, ProtocolErrorCode.PERMISSION_DENIED);
     await bot.peer.error(MessageType.BOT_UPDATE_PROFILE, {}, ProtocolErrorCode.BOT_INVALID_PROFILE);
     await bot.peer.error(MessageType.BOT_UPDATE_PROFILE, { name: 'Partial change', avatarBase64: 'invalid!' }, ProtocolErrorCode.AVATAR_INVALID_TYPE);
     await bot.peer.error(MessageType.BOT_UPDATE_PROFILE, { avatarBase64: `data:image/jpeg;base64,${PNG}` }, ProtocolErrorCode.AVATAR_INVALID_TYPE);
-    await owner.peer.error(MessageType.BOT_CREATE, { name: 'Invalid image', avatarBase64: 'AAAA' }, ProtocolErrorCode.AVATAR_INVALID_TYPE);
-    await owner.peer.error(MessageType.BOT_CREATE, { name: 'Invalid fields', avatarBase64: PNG, unexpected: true }, ProtocolErrorCode.BOT_INVALID_PROFILE);
-    const tooLarge = await fixture.botService.create('Too big', owner.id, 'A'.repeat(Math.ceil(LIMITS.MAX_AVATAR_SIZE * 4 / 3) + 257));
+    await owner.peer.error(MessageType.BOT_CREATE, { name: 'Invalid image', avatarBase64: 'AAAA' }, ProtocolErrorCode.BAD_REQUEST);
+    await owner.peer.error(MessageType.BOT_CREATE, { name: 'Invalid fields', avatarBase64: PNG, unexpected: true }, ProtocolErrorCode.BAD_REQUEST);
+    const tooLarge = await fixture.botService.updateProfile(botId, {
+      name: 'Too big', avatarBase64: 'A'.repeat(Math.ceil(LIMITS.MAX_AVATAR_SIZE * 4 / 3) + 257),
+    });
     assert.equal(tooLarge.success, false);
     if (!tooLarge.success) assert.equal(tooLarge.errorCode, ProtocolErrorCode.AVATAR_TOO_LARGE);
     assert.equal((await fixture.botRepo.findById(botId))?.name, 'Actual Bot');
@@ -937,6 +2183,8 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     const commandsResponse = await alice.peer.request(MessageType.COMMANDS_LIST);
     assert.equal(commandsResponse.type, MessageType.COMMANDS_LIST_RESPONSE);
     assert.ok(records(commandsResponse.payload.commands).every((c) => c.botName === 'Updated Bot' && c.botAvatarUrl === profile.avatarUrl));
+    const surveyCommand = records(commandsResponse.payload.commands).find((command) => command.name === 'survey');
+    assert.deepEqual(record(records(record(records(surveyCommand?.options)[0]).choices)[0]).audio, AUDIO_PREVIEW);
     const filename = text(profile.avatarUrl).split('/').pop();
     assert.ok(filename);
     const saved = fixture.avatars.getAvatarFile(filename);
@@ -1019,11 +2267,14 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   await t.test('isolates callers and devices, defaults to private, and scopes explicit public replies', async () => {
     const first = await invoke();
     const second = await invoke(bob.peer);
-    bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Only Alice' });
+    const localizations = { 'pt-BR': 'Canal público', en: 'Public channel' };
+    bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Only Alice',
+      localizations: { 'pt-BR': 'Somente Alice', en: 'Only Alice' } });
     bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: second.id, content: 'Only Bob' });
     await barrier();
     const privateMessage = await alice.peer.wait((m) => hasInvocation(m, MessageType.COMMAND_RESPONSE, first.id));
     assert.equal(privateMessage.payload.ephemeral, true);
+    assert.deepEqual(privateMessage.payload.localizations, { 'pt-BR': 'Somente Alice', en: 'Only Alice' });
     assert.equal(privateMessage.payload.botId, botId);
     assert.equal(privateMessage.payload.botName, 'Updated Bot');
     assert.equal(privateMessage.payload.channelId, textChannel);
@@ -1044,7 +2295,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       invokerId: bob.id, invokerNickname: 'Bob', invokerAvatarUrl: PNG,
     }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     await otherBot.peer.error(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Forged' }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
-    bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Public channel', ephemeral: false });
+    bot.peer.send(MessageType.COMMAND_RESPONSE, { invocationId: first.id, content: 'Public channel', localizations, ephemeral: false });
     await barrier();
     const publicMessage = bob.peer.messages.find((m) => m.payload.content === 'Public channel');
     assert.ok(publicMessage);
@@ -1052,11 +2303,17 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.equal(publicMessage.payload.invokerId, alice.id);
     assert.equal(publicMessage.payload.invokerNickname, 'Alice');
     assert.equal(publicMessage.payload.options, undefined);
+    assert.deepEqual(publicMessage.payload.localizations, localizations);
     const persistedHistory = await bob.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId: textChannel });
     const persisted = records(persistedHistory.payload.messages).find((message) => message.id === publicMessage.payload.messageId);
     assert.ok(persisted);
     assert.equal(persisted.isBot, true);
     assert.equal(persisted.userId, botId);
+    assert.deepEqual(persisted.localizations, localizations);
+    const reply = await bob.peer.request(MessageType.CHAT_SEND, {
+      channelId: textChannel, content: 'Reply in my own language', replyToMessageId: publicMessage.payload.messageId,
+    });
+    assert.deepEqual(record(reply.payload.reply).localizations, localizations);
     assert.equal(record(persisted.botCommand).invocationId, first.id);
     assert.equal(record(persisted.botCommand).invokerId, alice.id);
     assert.equal(records(persistedHistory.payload.messages).some((message) => message.id === privateMessage.payload.messageId), false);
@@ -1073,6 +2330,16 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await finish(secret.id);
     await bob.peer.request(MessageType.CHAT_REACTION_ADD, { channelId: textChannel, messageId: text(publicMessage.payload.messageId), emoji: '👍' });
     await bot.peer.wait((message) => message.type === MessageType.CHAT_REACTION_ADDED && message.payload.messageId === publicMessage.payload.messageId);
+    await owner.peer.request(MessageType.CHAT_DELETE, { channelId: textChannel, messageId: publicMessage.payload.messageId });
+    const deletedHistory = await bob.peer.request(MessageType.CHAT_LOAD_HISTORY, { channelId: textChannel });
+    const deleted = records(deletedHistory.payload.messages).find(message => message.id === publicMessage.payload.messageId);
+    assert.equal(deleted?.content, '');
+    assert.equal(deleted?.localizations, undefined);
+    const deletedReference = records(deletedHistory.payload.messages).find(message => message.id === reply.payload.id);
+    assert.equal(record(deletedReference?.reply).localizations, undefined);
+    const stored = fixture.database.getDb().prepare('SELECT bot_localizations_json AS variants FROM messages WHERE id = ?')
+      .get(publicMessage.payload.messageId) as { variants: string | null };
+    assert.equal(stored.variants, null, 'deletion erases variants from storage, not only the response');
   });
 
   await t.test('delivers the last asynchronous private-channel publication before completion', async () => {
@@ -1135,7 +2402,9 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     title: 'First step', fields: [
       { name: 'title', type: 'text', label: 'Title', required: true, minLength: 2, maxLength: 20, multiline: true, defaultValue: '' },
       { name: 'size', type: 'integer', label: 'Size', required: true, min: 1, max: 10 },
-      { name: 'mode', type: 'select', label: 'Mode', required: true, choices: [{ label: 'One', value: 'one' }] },
+      { name: 'mode', type: 'select', label: 'Mode', required: true, choices: [{
+        label: 'One', value: 'one', description: 'Preview one', audio: AUDIO_PREVIEW,
+      }] },
       { name: 'enabled', type: 'boolean', label: 'Enabled', required: true },
       { name: 'teams', type: 'string-list', label: 'Teams', required: true, minItems: 2, maxItems: 3, defaultValue: [] },
     ],
@@ -1152,6 +2421,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     const prompt = await ask(id, 'round-one');
     assert.equal(prompt.payload.botName, 'Updated Bot');
     assert.equal(prompt.payload.channelId, textChannel);
+    assert.deepEqual(record(records(record(records(record(prompt.payload.form).fields)[2]).choices)[0]).audio, AUDIO_PREVIEW);
     assert.ok(typeof prompt.payload.expiresAt === 'number' && prompt.payload.expiresAt > Date.now());
     await barrier();
     for (const peer of [bob.peer, otherDevice.peer, otherBot.peer, owner.peer]) {
@@ -1160,10 +2430,12 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await bot.peer.error(MessageType.COMMAND_PROMPT, { invocationId: id, interactionId: 'parallel', form }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     await otherBot.peer.error(MessageType.COMMAND_PROMPT, { invocationId: id, interactionId: 'forged', form }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     const submission = { invocationId: id, interactionId: 'round-one', values: formValues };
-    for (const peer of [bob.peer, otherDevice.peer, otherBot.peer]) {
+    for (const peer of [bob.peer, otherDevice.peer]) {
       await peer.error(MessageType.COMMAND_SUBMIT, submission, ProtocolErrorCode.BOT_INTERACTION_INVALID);
       await peer.error(MessageType.COMMAND_CANCEL, { invocationId: id }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     }
+    await otherBot.peer.error(MessageType.COMMAND_SUBMIT, submission, ProtocolErrorCode.PERMISSION_DENIED);
+    await otherBot.peer.error(MessageType.COMMAND_CANCEL, { invocationId: id }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     await otherBot.peer.error(MessageType.COMMAND_FINISH, { invocationId: id }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
     for (const values of [
       {}, { ...formValues, size: '2' }, { ...formValues, mode: 'unknown' },
@@ -1353,7 +2625,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   });
 
   await t.test('MANAGE_BOTS grants management independently from bot command permission', async () => {
-    await alice.peer.error(MessageType.BOT_CREATE, { name: 'Forbidden bot' }, ProtocolErrorCode.PERMISSION_DENIED);
+    await alice.peer.error(MessageType.BOT_CREATE, {}, ProtocolErrorCode.PERMISSION_DENIED);
     const managerRole = {
       id: randomUUID(), name: 'Bot managers', color: '#123456', permissions: Permission.MANAGE_BOTS,
       position: 2, isDefault: false, createdAt: Date.now(),
@@ -1361,9 +2633,10 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     await fixture.roleRepo.create(managerRole);
     await fixture.roleRepo.assignRole(alice.id, managerRole.id);
     try {
-      const managed = await alice.peer.request(MessageType.BOT_CREATE, { name: 'Managed bot' });
+      const managed = await alice.peer.request(MessageType.BOT_CREATE, {});
       assert.equal(managed.type, MessageType.BOT_CREATED);
       const managedId = text(record(managed.payload.bot).id);
+      await alice.peer.error(MessageType.BOT_UPDATE_PROFILE, { botId, name: 'Manager override' }, ProtocolErrorCode.PERMISSION_DENIED);
       assert.equal((await alice.peer.request(MessageType.BOT_REVOKE, { botId: managedId })).type, MessageType.BOT_REVOKED);
     } finally {
       await fixture.roleRepo.delete(managerRole.id);
@@ -1454,7 +2727,9 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     } finally {
       failStorage.mock.restore();
     }
-    const cleared = await owner.peer.request(MessageType.BOT_UPDATE_PROFILE, { botId, avatarBase64: null });
+    await owner.peer.error(MessageType.BOT_UPDATE_PROFILE, { botId, avatarBase64: null }, ProtocolErrorCode.PERMISSION_DENIED);
+    assert.equal((await fixture.botRepo.findById(botId))?.avatarPath, before.avatarPath);
+    const cleared = await bot.peer.request(MessageType.BOT_UPDATE_PROFILE, { avatarBase64: null });
     assert.equal(cleared.type, MessageType.BOT_PROFILE_UPDATED);
     assert.equal(record(cleared.payload.bot).avatarUrl, null);
     assert.equal(fixture.registry.find(botId, 'ping')?.botAvatarUrl, null);
@@ -1472,7 +2747,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
         const address = manifestServer.address();
         assert.ok(address && typeof address === 'object');
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ name: 'Installed Bot', icon, registrationUrl: `http://127.0.0.1:${address.port}/register` }));
+        res.end(JSON.stringify({ name: 'Installed Bot', icon, requestedCapabilities: [], registrationUrl: `http://127.0.0.1:${address.port}/register` }));
       } else {
         const chunks: Buffer[] = [];
         req.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -1490,8 +2765,13 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     const address = manifestServer.address();
     assert.ok(address && typeof address === 'object');
     const manifestUrl = `http://127.0.0.1:${address.port}/manifest`;
+    const previewInstall = async () => {
+      const preview = await owner.peer.request(MessageType.BOT_INSTALL_PREVIEW, { manifestUrl });
+      assert.equal(preview.type, MessageType.BOT_INSTALL_PREVIEW_RESULT);
+      return { previewId: text(preview.payload.previewId), grantedCapabilities: [] };
+    };
     try {
-      const installed = await owner.peer.request(MessageType.BOT_INSTALL, { manifestUrl });
+      const installed = await owner.peer.request(MessageType.BOT_INSTALL, await previewInstall());
       assert.equal(installed.type, MessageType.BOT_INSTALLED);
       const installedBot = record(installed.payload.bot);
       assert.equal(installedBot.name, 'Installed Bot');
@@ -1502,18 +2782,18 @@ test('bot interactions over authenticated WebSockets', async (t) => {
       assert.equal(registration.serverName, 'Bot tests');
       const count = await fixture.botRepo.count();
       icon = 'not an image';
-      await owner.peer.error(MessageType.BOT_INSTALL, { manifestUrl }, ProtocolErrorCode.AVATAR_INVALID_TYPE);
+      await owner.peer.error(MessageType.BOT_INSTALL, await previewInstall(), ProtocolErrorCode.AVATAR_INVALID_TYPE);
       assert.equal(await fixture.botRepo.count(), count);
       icon = PNG;
       registrationStatus = 502;
-      const rejected = await owner.peer.request(MessageType.BOT_INSTALL, { manifestUrl });
+      const rejected = await owner.peer.request(MessageType.BOT_INSTALL, await previewInstall());
       assert.equal(rejected.type, MessageType.SERVER_ERROR);
       assert.equal(rejected.payload.code, ProtocolErrorCode.BAD_REQUEST);
       assert.match(text(rejected.payload.message), /registro.*502/);
       assert.equal(await fixture.botRepo.count(), count, 'a rejected registration must not leave an offline account behind');
       registrationStatus = 200;
       registrationKey = 'invalid-key';
-      await owner.peer.error(MessageType.BOT_INSTALL, { manifestUrl }, ProtocolErrorCode.BAD_REQUEST);
+      await owner.peer.error(MessageType.BOT_INSTALL, await previewInstall(), ProtocolErrorCode.BAD_REQUEST);
       assert.equal(await fixture.botRepo.count(), count, 'an invalid confirmation must not leave an account behind');
     } finally {
       await new Promise<void>((resolve, reject) => manifestServer.close((error) => error ? reject(error) : resolve()));
@@ -1543,6 +2823,731 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     fixture.wsServer.close();
     assert.equal((await alice.peer.wait((m) => hasInvocation(m, MessageType.COMMAND_FINISHED, id))).payload.reason, 'failed');
     assert.equal((await otherBot.peer.wait((m) => hasInvocation(m, MessageType.COMMAND_FINISHED, id))).payload.reason, 'failed');
+  });
+});
+
+test('autocomplete and sound downloads over authenticated WebSockets', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.dispose());
+  const owner = await fixture.human('Download owner');
+  let alice = await fixture.human('Download Alice');
+  const otherDevice = await fixture.human('Download Alice', alice.keys);
+  const bob = await fixture.human('Download Bob');
+  const channels = records(record(owner.auth.payload.server).channels);
+  const channelId = text(channels.find((channel) => channel.type === 'TEXT')?.id);
+  const voiceChannelId = text(channels.find((channel) => channel.type === 'VOICE')?.id);
+  const role = { id: randomUUID(), name: 'Download members', color: '#123456', permissions: 0, position: 1, isDefault: false, createdAt: Date.now() };
+  await fixture.roleRepo.create(role);
+  await fixture.roleRepo.assignRole(alice.id, role.id);
+  const privateCreated = await owner.peer.request(MessageType.CHANNEL_CREATE, {
+    name: 'private-downloads', type: 'TEXT', isPrivate: true, allowedRoleIds: [role.id],
+  });
+  const privateChannelId = text(record(privateCreated.payload.channel).id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const token = text(created.payload.token);
+  let bot = await fixture.bot(token, undefined, 'Downloader');
+  const otherCreated = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const otherBot = await fixture.bot(text(otherCreated.payload.token));
+  const definitions = [
+    {
+      name: 'search', description: 'Search audio', downloadsSound: true,
+      options: [
+        { name: 'sound', description: 'Sound', type: 'string', required: true, autocomplete: true },
+        { name: 'count', description: 'Count', type: 'integer', min: 0, max: 10 },
+        { name: 'enabled', description: 'Enabled', type: 'boolean' },
+        { name: 'target', description: 'Target', type: 'user' },
+      ],
+    },
+    { name: 'plain', description: 'No download' },
+  ];
+  const register = async () => {
+    assert.equal((await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: definitions })).type, MessageType.COMMAND_REGISTERED);
+  };
+  await register();
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  let queryNumber = 0;
+  const searchInput = (overrides: Partial<CommandAutocompletePayload> = {}): CommandAutocompletePayload => ({
+    botId, commandName: 'search', channelId, optionName: 'sound',
+    query: `query-${++queryNumber}`, options: { count: 0, enabled: false }, locale: 'en', ...overrides,
+  });
+  const search = async (peer = alice.peer, overrides: Partial<CommandAutocompletePayload> = {}, requestId = randomUUID()) => {
+    now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+    const input = searchInput(overrides);
+    const since = bot.peer.messages.length;
+    peer.send(MessageType.COMMAND_AUTOCOMPLETE, input, requestId);
+    const execution = await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE && message.payload.query === input.query, since);
+    return { peer, requestId, execution, searchInput: input, botRequestId: text(execution.requestId) };
+  };
+  const invoke = async (peer = alice.peer, commandName = 'search', targetChannelId = channelId) => {
+    const acknowledged = await peer.request(MessageType.COMMAND_INVOKE, {
+      botId, commandName, channelId: targetChannelId, locale: 'en',
+      options: commandName === 'search' ? { sound: `/instant/${'x'.repeat(503)}` } : {},
+      allowSoundDownload: commandName === 'search',
+    });
+    assert.equal(acknowledged.type, MessageType.COMMAND_INVOKED);
+    const id = text(acknowledged.payload.invocationId);
+    const execution = await bot.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_INVOKE, id));
+    assert.equal(execution.payload.invokerId, peer === alice.peer ? alice.id : bob.id);
+    return id;
+  };
+  const sound = { url: 'https://example.com/sound.mp3', fileName: 'sound.mp3', title: 'Selected sound' };
+  const download = async (invocationId: string, peer = alice.peer) => {
+    const requestId = randomUUID();
+    bot.peer.send(MessageType.COMMAND_SOUND_DOWNLOAD, { invocationId, ...sound }, requestId);
+    const message = await peer.wait((entry) => hasInvocation(entry, MessageType.COMMAND_SOUND_DOWNLOAD, invocationId));
+    return { requestId, received: commandSoundDownloadReceivedSchema.parse(message.payload) };
+  };
+  const finish = async (invocationId: string) => {
+    assert.equal((await bot.peer.request(MessageType.COMMAND_FINISH, { invocationId })).type, MessageType.COMMAND_FINISHED);
+  };
+  const result = {
+    status: 'ok',
+    choices: [{ label: 'Sound', value: `/instant/${'x'.repeat(503)}`, description: 'Audio', audio: AUDIO_PREVIEW }],
+  };
+  const previewResult = { status: 'ok', mimeType: 'audio/ogg', audioBase64: Buffer.from([0xf8, 0xff, 0xfe]).toString('base64') };
+  const lazySearch = async (
+    peer = alice.peer, overrides: Partial<CommandAutocompletePayload> = {}, requestId = randomUUID(),
+    pagination: { hasMore?: boolean; nextCursor?: string } = {},
+  ) => {
+    const query = await search(peer, overrides, requestId);
+    bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, {
+      status: 'ok', ...pagination, choices: [
+        { label: 'First clip', value: 'canonical-first', audio: { resourceId: 'source-first', fileName: 'first.ogg', durationMs: 10_000 } },
+        { label: 'Second clip', value: 'canonical-second', audio: { resourceId: 'source-second', fileName: 'second.ogg' } },
+        result.choices[0],
+      ],
+    }, query.botRequestId);
+    const received = commandAutocompleteResultSchema.parse((await peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === query.requestId)).payload);
+    assert.equal(received.status, 'ok');
+    if (received.status !== 'ok') throw new Error('Missing lazy choices');
+    const audio = received.choices[0].audio;
+    const second = received.choices[1].audio;
+    assert.ok(audio && 'resourceId' in audio && second && 'resourceId' in second);
+    assert.notEqual(audio.resourceId, 'source-first');
+    assert.notEqual(second.resourceId, 'source-second');
+    assert.deepEqual(received.choices[2].audio, AUDIO_PREVIEW, 'HTTPS choices must not be rewritten');
+    const input: CommandAudioPreviewPayload = {
+      botId, commandName: 'search', channelId: overrides.channelId ?? channelId, optionName: 'sound',
+      autocompleteRequestId: query.requestId, resourceId: audio.resourceId,
+    };
+    return { ...query, input, received, secondResourceId: second.resourceId };
+  };
+  const startPreview = async (query: Awaited<ReturnType<typeof lazySearch>>, requestId = randomUUID(), resourceId = query.input.resourceId) => {
+    const since = bot.peer.messages.length;
+    query.peer.send(MessageType.COMMAND_AUDIO_PREVIEW, { ...query.input, resourceId }, requestId);
+    const execution = await bot.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW, since);
+    return { requestId, execution, botRequestId: text(execution.requestId) };
+  };
+
+  await t.test('correlates identical client IDs privately and authenticates the responding bot', async () => {
+    await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, {
+      ...searchInput(), localPreparation: { capability: 'youtube-audio', permit: 'ab'.repeat(32) },
+    }, ProtocolErrorCode.BOT_INVALID_OPTIONS);
+    const sharedId = randomUUID();
+    const first = await search(alice.peer, {
+      channelId: privateChannelId, localPreparation: { capability: 'youtube-audio' },
+    }, sharedId);
+    const second = await search(bob.peer, {}, sharedId);
+    assert.notEqual(first.botRequestId, second.botRequestId);
+    assert.notEqual(first.botRequestId, sharedId);
+    assert.deepEqual(first.execution.payload, {
+      botId, channelId: privateChannelId, invokerId: alice.id, invokerNickname: 'Download Alice',
+      invokerSessionId: record(alice.auth.payload.currentUser).sessionId, invokerVoiceChannelId: null,
+      commandName: 'search', optionName: 'sound', query: first.execution.payload.query,
+      options: { count: 0, enabled: false }, locale: 'en',
+    });
+    assert.equal(second.execution.payload.invokerId, bob.id);
+    assert.equal(second.execution.payload.invokerSessionId, record(bob.auth.payload.currentUser).sessionId);
+    assert.equal('localPreparation' in first.execution.payload, false);
+    const denied = otherBot.peer.wait((message) => message.type === MessageType.SERVER_ERROR && message.requestId === first.botRequestId);
+    otherBot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, first.botRequestId);
+    assert.equal((await denied).payload.code, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    otherDevice.peer.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: sharedId });
+    await otherDevice.peer.barrier();
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === first.botRequestId), false);
+    bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, second.botRequestId);
+    bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, first.botRequestId);
+    for (const peer of [alice.peer, bob.peer]) {
+      const received = await peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === sharedId);
+      assert.deepEqual(commandAutocompleteResultSchema.parse(received.payload), result);
+    }
+    await otherDevice.peer.barrier();
+    assert.equal(otherDevice.peer.messages.some((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT), false);
+    assert.equal(alice.peer.messages.some((message) => message.type === MessageType.COMMAND_INVOKED), false);
+  });
+
+  await t.test('paginated autocomplete forwards opaque cursors and preserves metadata and page-scoped preview authorities', async () => {
+    const first = await lazySearch(alice.peer, { locale: undefined }, randomUUID(), { hasMore: true, nextCursor: 'opaque:page/1' });
+    assert.equal('page' in first.execution.payload, false, 'The first page keeps the legacy execution envelope');
+    assert.equal('cursor' in first.execution.payload, false);
+    assert.equal(first.received.hasMore, true);
+    assert.equal(first.received.nextCursor, 'opaque:page/1');
+    const firstPreview = await startPreview(first);
+    const second = await lazySearch(alice.peer, {
+      ...first.searchInput, options: { enabled: false, count: 0 }, locale: 'pt-BR', userSettings: {},
+      page: 1, cursor: first.received.nextCursor,
+    }, randomUUID(), { hasMore: false });
+    assert.equal(second.execution.payload.page, 1);
+    assert.equal(second.execution.payload.cursor, 'opaque:page/1');
+    assert.equal(second.received.hasMore, false);
+    assert.equal('nextCursor' in second.received, false);
+    assert.notEqual(first.input.resourceId, second.input.resourceId);
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === first.botRequestId), false);
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === firstPreview.botRequestId), false,
+    'Loading a page must not cancel a preview from an earlier page');
+    for (const input of [
+      { ...first.input, resourceId: second.input.resourceId },
+      { ...second.input, resourceId: first.input.resourceId },
+    ]) await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, input, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    await otherDevice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, first.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    otherDevice.peer.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: first.requestId });
+    await otherDevice.peer.barrier();
+    const secondPreview = await startPreview(second);
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === firstPreview.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+      message.requestId === firstPreview.requestId)).payload, { status: 'failed', reason: 'expired' });
+    bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, firstPreview.botRequestId);
+    assert.equal((await bot.peer.wait((message) => message.type === MessageType.SERVER_ERROR &&
+      message.requestId === firstPreview.botRequestId)).payload.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, secondPreview.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+      message.requestId === secondPreview.requestId)).payload, previewResult);
+    const replay = await startPreview(first);
+    assert.equal(replay.execution.payload.resourceId, 'source-first');
+    alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: second.requestId });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === second.botRequestId);
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === replay.botRequestId), false,
+    'Cancelling one page cannot cancel another page’s preview');
+    alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: first.requestId });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === replay.botRequestId);
+    for (const page of [first, second]) {
+      await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    }
+  });
+
+  await t.test('page throttles, provider failures, legacy responses and cancelled continuations preserve valid earlier pages', async () => {
+    const first = await lazySearch(alice.peer, {}, randomUUID(), { hasMore: true });
+    const continuation = { ...first.searchInput, page: 1 };
+    await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, continuation, ProtocolErrorCode.RATE_LIMITED);
+    for (const [response, expected] of [
+      [{ status: 'failed', reason: 'handler_failed' }, { status: 'failed', reason: 'handler_failed' }],
+      [{ ...result, choices: Array.from({ length: 21 }, (_, index) => ({ label: `Choice ${index}`, value: `${index}` })) },
+        { status: 'failed', reason: 'invalid_response' }],
+      [{ ...result, nextCursor: 'without-has-more' }, { status: 'failed', reason: 'invalid_response' }],
+      [result, result],
+      [{ status: 'ok', choices: [] }, { status: 'ok', choices: [] }],
+    ]) {
+      const page = await search(alice.peer, continuation);
+      bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, response, page.botRequestId);
+      assert.deepEqual((await alice.peer.wait((message) =>
+        message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === page.requestId)).payload, expected);
+    }
+    const timeout = await search(alice.peer, continuation);
+    now += LIMITS.BOT_AUTOCOMPLETE_TIMEOUT_MS;
+    bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, timeout.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT &&
+      message.requestId === timeout.requestId)).payload, { status: 'failed', reason: 'timeout' });
+    const superseded = await search(alice.peer, continuation);
+    await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, { ...continuation, page: 2 }, ProtocolErrorCode.RATE_LIMITED);
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === superseded.botRequestId), false,
+    'A throttle must not cancel the existing in-flight page');
+    const cancelled = await search(alice.peer, { ...continuation, page: 2 });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === superseded.botRequestId);
+    alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: cancelled.requestId });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === cancelled.botRequestId);
+    for (const page of [superseded, cancelled]) {
+      bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, page.botRequestId);
+      assert.equal((await bot.peer.wait((message) => message.type === MessageType.SERVER_ERROR &&
+        message.requestId === page.botRequestId)).payload.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+      assert.equal(alice.peer.messages.some((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT &&
+        message.requestId === page.requestId), false);
+    }
+    now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+    alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE, continuation, first.requestId);
+    assert.equal((await alice.peer.wait((message) => message.type === MessageType.SERVER_ERROR &&
+      message.requestId === first.requestId)).payload.code, ProtocolErrorCode.BOT_INTERACTION_INVALID,
+    'A new page cannot overwrite a retained page’s request ID');
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === first.botRequestId), false);
+    const preview = await startPreview(first);
+    bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, preview.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+      message.requestId === preview.requestId)).payload, previewResult);
+  });
+
+  await t.test('autocomplete limits choices per response without capping a search at twenty results', async () => {
+    const input = searchInput();
+    let delivered = 0;
+    const providerIds: string[] = [];
+    for (let page = 0; page < 3; page++) {
+      const pending = await search(alice.peer, { ...input, page });
+      assert.equal(pending.execution.payload.page, page);
+      providerIds.push(pending.botRequestId);
+      bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, {
+        status: 'ok', hasMore: page < 2, choices: Array.from({ length: 20 }, (_, index) => ({
+          label: `Choice ${page}-${index}`, value: `${page}-${index}`,
+          audio: { resourceId: `resource-${page}-${index}` },
+        })),
+      }, pending.botRequestId);
+      const received = commandAutocompleteResultSchema.parse((await alice.peer.wait((message) =>
+        message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === pending.requestId)).payload);
+      assert.ok(received.status === 'ok');
+      assert.equal(received.choices.length, 20);
+      assert.equal(received.hasMore, page < 2);
+      delivered += received.choices.length;
+    }
+    assert.equal(delivered, 60);
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && providerIds.includes(text(message.payload.requestId))), false);
+  });
+
+  await t.test('changed search identities and page zero immediately revoke every page even when throttled', async () => {
+    const changes: Partial<CommandAutocompletePayload>[] = [
+      { page: 0 }, { page: undefined }, { query: 'replacement' }, { optionName: 'count' },
+      { commandName: 'plain' }, { botId: text(record(otherCreated.payload.bot).id) },
+      { channelId: privateChannelId }, { locale: 'pt-BR' }, { options: { count: 1, enabled: false } },
+      { userSettings: { changed: true } },
+    ];
+    for (const change of changes) {
+      const first = await lazySearch();
+      const second = await lazySearch(alice.peer, { ...first.searchInput, page: 1 });
+      await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, {
+        ...first.searchInput, page: 2, ...change,
+      }, ProtocolErrorCode.RATE_LIMITED);
+      for (const page of [first, second]) {
+        await bot.peer.wait((message) =>
+          message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === page.botRequestId);
+        await alice.peer.wait((message) =>
+          message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === page.requestId);
+        await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+      }
+    }
+  });
+
+  await t.test('validates partial inputs and throttles across devices while cancelling superseded work', async () => {
+    for (const invalid of [
+      { optionName: 'count' }, { query: 'x'.repeat(201) }, { options: { sound: 'edited' } },
+      { options: { count: 'wrong' } }, { options: { count: 11 } }, { options: { target: 'non-member' } },
+      { page: -1 }, { page: 1.5 }, { page: Number.MAX_SAFE_INTEGER + 1 }, { cursor: 'x'.repeat(513) },
+    ]) {
+      now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+      await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, { ...searchInput(), ...invalid }, ProtocolErrorCode.BOT_INVALID_OPTIONS);
+    }
+    now += LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS;
+    await alice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, searchInput({ channelId: voiceChannelId }), ProtocolErrorCode.CHANNEL_NOT_FOUND);
+    await bot.peer.error(MessageType.COMMAND_AUTOCOMPLETE, searchInput(), ProtocolErrorCode.PERMISSION_DENIED);
+    const old = await search();
+    await otherDevice.peer.error(MessageType.COMMAND_AUTOCOMPLETE, searchInput(), ProtocolErrorCode.RATE_LIMITED);
+    const nextId = randomUUID();
+    alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE, searchInput(), nextId);
+    assert.equal((await alice.peer.wait((message) => message.requestId === nextId)).payload.code, ProtocolErrorCode.RATE_LIMITED);
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === old.botRequestId);
+    bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, old.botRequestId);
+    assert.equal((await bot.peer.wait((message) =>
+      message.type === MessageType.SERVER_ERROR && message.requestId === old.botRequestId)).payload.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    assert.equal(alice.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === old.requestId), false);
+  });
+
+  await t.test('rejects invalid choices, expires late replies and aborts on explicit cancellation or registry changes', async () => {
+    const invalid = await search();
+    bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, { ...result, choices: [result.choices[0], result.choices[0]] }, invalid.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) => message.requestId === invalid.requestId)).payload, {
+      status: 'failed', reason: 'invalid_response',
+    });
+    const expired = await search();
+    now += LIMITS.BOT_AUTOCOMPLETE_TIMEOUT_MS;
+    bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, expired.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) => message.requestId === expired.requestId)).payload, {
+      status: 'failed', reason: 'timeout',
+    });
+    const cancelled = await search();
+    alice.peer.send(MessageType.COMMAND_AUTOCOMPLETE_CANCEL, { requestId: cancelled.requestId });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === cancelled.botRequestId);
+    const replaced = await search();
+    await register();
+    assert.equal((await alice.peer.wait((message) => message.requestId === replaced.requestId)).payload.code, ProtocolErrorCode.BOT_COMMAND_NOT_FOUND);
+  });
+
+  await t.test('revalidates autocomplete permission and channel access on replies without a broadcast', async () => {
+    const member = await fixture.roleRepo.findByName('Membro');
+    assert.ok(member);
+    for (const revoked of ['permission', 'send', 'channel']) {
+      const pending = await search();
+      try {
+        if (revoked === 'channel') await fixture.channelService.updateChannel({ channelId, botCommandsEnabled: false });
+        else await fixture.roleRepo.update(member.id, {
+          permissions: DEFAULT_PERMISSIONS & ~(revoked === 'permission' ? Permission.USE_BOT_COMMANDS : Permission.SEND_MESSAGES),
+        });
+        bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, result, pending.botRequestId);
+        const denied = await alice.peer.wait((message) => message.requestId === pending.requestId);
+        assert.equal(denied.type, MessageType.SERVER_ERROR);
+        assert.equal(denied.payload.code, ProtocolErrorCode.PERMISSION_DENIED);
+        await bot.peer.wait((message) =>
+          message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === pending.botRequestId);
+      } finally {
+        await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS });
+        await fixture.channelService.updateChannel({ channelId, botCommandsEnabled: true });
+      }
+    }
+  });
+
+  await t.test('lazy audio previews require an advertised opaque choice, the exact caller, device and command context', async () => {
+    const before = bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length;
+    const sharedId = randomUUID();
+    const first = await lazySearch(alice.peer, { channelId: privateChannelId }, sharedId);
+    const second = await lazySearch(bob.peer, {}, sharedId);
+    assert.equal(bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length, before,
+      'Searching cannot start a preview provider');
+    for (const input of [
+      { ...first.input, resourceId: 'source-first' }, { ...first.input, resourceId: second.input.resourceId },
+      { ...first.input, autocompleteRequestId: 'stale-query' }, { ...first.input, commandName: 'plain' },
+      { ...first.input, botId: text(record(otherCreated.payload.bot).id) }, { ...first.input, optionName: 'enabled' },
+      { ...first.input, channelId }, { ...first.input, invokerId: bob.id },
+    ]) await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, input, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    await otherDevice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, first.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    await bob.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, first.input, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    await bot.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, first.input, ProtocolErrorCode.PERMISSION_DENIED);
+    assert.equal(bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length, before);
+    const samePreviewId = randomUUID();
+    first.input.localPreparation = { capability: 'youtube-audio' };
+    const alicePreview = await startPreview(first, samePreviewId);
+    const bobPreview = await startPreview(second, samePreviewId);
+    assert.notEqual(alicePreview.botRequestId, samePreviewId);
+    assert.notEqual(alicePreview.botRequestId, bobPreview.botRequestId);
+    assert.deepEqual(alicePreview.execution.payload, {
+      botId, channelId: privateChannelId, invokerId: alice.id, invokerNickname: 'Download Alice',
+      invokerSessionId: record(alice.auth.payload.currentUser).sessionId, invokerVoiceChannelId: null,
+      commandName: 'search', optionName: 'sound', resourceId: 'source-first', locale: 'en',
+    });
+    assert.equal(bobPreview.execution.payload.invokerId, bob.id);
+    assert.equal(bobPreview.execution.payload.invokerSessionId, record(bob.auth.payload.currentUser).sessionId);
+    assert.equal('localPreparation' in alicePreview.execution.payload, false);
+    otherBot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, alicePreview.botRequestId);
+    assert.equal((await otherBot.peer.wait((message) =>
+      message.requestId === alicePreview.botRequestId && message.type === MessageType.SERVER_ERROR)).payload.code,
+    ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    const bobResult = { ...previewResult, audioBase64: Buffer.from([1, 2, 3]).toString('base64') };
+    bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, bobResult, bobPreview.botRequestId);
+    bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, alicePreview.botRequestId);
+    for (const [peer, expected] of [[alice.peer, previewResult], [bob.peer, bobResult]] as const) {
+      assert.deepEqual(commandAudioPreviewResultSchema.parse((await peer.wait((message) =>
+        message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT && message.requestId === samePreviewId)).payload), expected);
+    }
+    await otherDevice.peer.barrier();
+    assert.equal(otherDevice.peer.messages.some((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT), false);
+    assert.equal(alice.peer.messages.some((message) => message.type === MessageType.COMMAND_INVOKED), false);
+  });
+
+  await t.test('lazy audio preview replacement, cancellation and stale queries abort only the owning provider', async () => {
+    const query = await lazySearch();
+    const first = await startPreview(query);
+    otherDevice.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_CANCEL, { requestId: first.requestId });
+    await otherDevice.peer.barrier();
+    assert.equal(bot.peer.messages.some((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === first.botRequestId), false);
+    const replacement = await startPreview(query, randomUUID(), query.secondResourceId);
+    assert.equal(replacement.execution.payload.resourceId, 'source-second');
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === first.botRequestId);
+    assert.equal((await alice.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT && message.requestId === first.requestId)).payload.status, 'failed');
+    alice.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_CANCEL, { requestId: replacement.requestId });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === replacement.botRequestId);
+    bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, replacement.botRequestId);
+    assert.equal((await bot.peer.wait((message) => message.type === MessageType.SERVER_ERROR &&
+      message.requestId === replacement.botRequestId)).payload.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    assert.equal(alice.peer.messages.some((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+      message.requestId === replacement.requestId), false);
+    const old = await startPreview(query);
+    await search();
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === old.botRequestId);
+    await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, query.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  });
+
+  await t.test('lazy audio preview payload limits and malformed provider replies fail explicitly', async () => {
+    const query = await lazySearch();
+    for (const invalid of [
+      { ...previewResult, audioBase64: '' }, { ...previewResult, audioBase64: '!!!!' },
+      { ...previewResult, mimeType: 'text/html' }, { ...previewResult, url: 'https://example.com/untrusted.ogg' },
+      { ...previewResult, audioBase64: Buffer.alloc(LIMITS.MAX_BOT_AUDIO_PREVIEW_BYTES + 1).toString('base64') },
+    ]) {
+      const pending = await startPreview(query);
+      bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, invalid, pending.botRequestId);
+      assert.deepEqual((await alice.peer.wait((message) =>
+        message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT && message.requestId === pending.requestId)).payload,
+      { status: 'failed', reason: 'invalid_response' });
+    }
+    const pending = await startPreview(query);
+    bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, { status: 'failed', reason: 'handler_failed' }, pending.botRequestId);
+    assert.deepEqual((await alice.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT && message.requestId === pending.requestId)).payload,
+    { status: 'failed', reason: 'handler_failed' });
+  });
+
+  await t.test('lazy audio previews revalidate access before dispatch and delivery, and abort on registry changes', async () => {
+    const member = await fixture.roleRepo.findByName('Membro');
+    assert.ok(member);
+    for (const stage of ['request', 'result']) {
+      for (const permission of [Permission.USE_BOT_COMMANDS, Permission.SEND_MESSAGES]) {
+        const query = await lazySearch();
+        const nextPage = await lazySearch(alice.peer, { ...query.searchInput, page: 1 });
+        const pending = stage === 'result' ? await startPreview(query) : null;
+        const before = bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length;
+        await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS & ~permission });
+        try {
+          if (pending) {
+            bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, previewResult, pending.botRequestId);
+            assert.equal((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+              message.requestId === pending.requestId)).payload.status, 'failed');
+          } else {
+            const denied = await alice.peer.request(MessageType.COMMAND_AUDIO_PREVIEW, query.input);
+            assert.equal(denied.type, MessageType.COMMAND_AUDIO_PREVIEW_RESULT);
+            assert.deepEqual(denied.payload, { status: 'failed', reason: 'expired' });
+            assert.equal(bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length, before);
+          }
+        } finally {
+          await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS });
+        }
+        for (const page of [query, nextPage]) {
+          await alice.peer.wait((message) =>
+            message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === page.requestId);
+          await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+        }
+      }
+    }
+    const query = await lazySearch(alice.peer, { channelId: privateChannelId });
+    const pending = await startPreview(query);
+    await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: privateChannelId, botCommandsEnabled: false });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === pending.botRequestId);
+    assert.equal((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+      message.requestId === pending.requestId)).payload.status, 'failed');
+    await owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: privateChannelId, botCommandsEnabled: true });
+    const privateQuery = await lazySearch(alice.peer, { channelId: privateChannelId });
+    const privatePreview = await startPreview(privateQuery);
+    await owner.peer.request(MessageType.ROLE_UNASSIGN, { userId: alice.id, roleId: role.id });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === privatePreview.botRequestId);
+    await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, privateQuery.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    await owner.peer.request(MessageType.ROLE_ASSIGN, { userId: alice.id, roleId: role.id });
+    const changed = await lazySearch();
+    const changedPage = await lazySearch(alice.peer, { ...changed.searchInput, page: 1 });
+    const active = await startPreview(changed);
+    await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: definitions.filter((command) => command.name !== 'search') });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === active.botRequestId);
+    for (const page of [changed, changedPage]) {
+      await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    }
+    await register();
+  });
+
+  await t.test('lazy audio preview contexts expire and cannot survive replacement sockets, bot disconnects or channel deletion', async () => {
+    const expired = await lazySearch();
+    const before = bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length;
+    now += LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS;
+    const rejected = await alice.peer.request(MessageType.COMMAND_AUDIO_PREVIEW, expired.input);
+    assert.deepEqual(rejected.payload, { status: 'failed', reason: 'expired' });
+    assert.equal(bot.peer.messages.filter((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length, before);
+    const old = await lazySearch();
+    const oldPage = await lazySearch(alice.peer, { ...old.searchInput, page: 1 });
+    const active = await startPreview(old);
+    alice = await fixture.human('Download Alice', alice.keys, alice.deviceId);
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === active.botRequestId);
+    for (const page of [old, oldPage]) {
+      await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    }
+    const disconnected = await lazySearch();
+    const disconnectedPage = await lazySearch(alice.peer, { ...disconnected.searchInput, page: 1 });
+    const generating = await startPreview(disconnected);
+    const keys = bot.keys;
+    await bot.peer.close();
+    assert.equal((await alice.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+      message.requestId === generating.requestId)).payload.status, 'failed');
+    bot = await fixture.bot(token, keys);
+    await register();
+    for (const page of [disconnected, disconnectedPage]) {
+      await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    }
+    const channel = await owner.peer.request(MessageType.CHANNEL_CREATE, { name: 'preview-lifetime', type: 'TEXT' });
+    const target = text(record(channel.payload.channel).id);
+    const removed = await lazySearch(alice.peer, { channelId: target });
+    const removedPage = await lazySearch(alice.peer, { ...removed.searchInput, page: 1 });
+    const removing = await startPreview(removed);
+    await owner.peer.request(MessageType.CHANNEL_DELETE, { channelId: target });
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUDIO_PREVIEW_CANCEL && message.payload.requestId === removing.botRequestId);
+    for (const page of [removed, removedPage]) {
+      await alice.peer.error(MessageType.COMMAND_AUDIO_PREVIEW, page.input, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    }
+  });
+
+  await t.test('requires explicit declared consent and never upgrades an existing invocation through re-registration', async () => {
+    for (const allowSoundDownload of [undefined, false]) {
+      await alice.peer.error(MessageType.COMMAND_INVOKE, {
+        botId, commandName: 'search', channelId, options: { sound: 'selected' }, allowSoundDownload,
+      }, ProtocolErrorCode.PERMISSION_DENIED);
+    }
+    await alice.peer.error(MessageType.COMMAND_INVOKE, {
+      botId, commandName: 'plain', channelId, allowSoundDownload: true,
+    }, ProtocolErrorCode.BOT_INVALID_OPTIONS);
+    await bot.peer.error(MessageType.COMMAND_INVOKE, {
+      botId, commandName: 'search', channelId, options: { sound: 'selected' }, allowSoundDownload: true,
+    }, ProtocolErrorCode.PERMISSION_DENIED);
+    await bot.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD, {
+      ...sound, invocationId: randomUUID(),
+    }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    const invocationId = await invoke(alice.peer, 'plain');
+    await bot.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD, { ...sound, invocationId }, ProtocolErrorCode.PERMISSION_DENIED);
+    await bot.peer.request(MessageType.COMMAND_REGISTER, {
+      commands: definitions.map((definition) => ({ ...definition, downloadsSound: true })),
+    });
+    await bot.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD, { ...sound, invocationId }, ProtocolErrorCode.PERMISSION_DENIED);
+    await finish(invocationId);
+    await register();
+  });
+
+  await t.test('routes downloads and results only to the original device with trusted attribution and single consumption', async () => {
+    const invocationId = await invoke(alice.peer, 'search', privateChannelId);
+    await bot.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD, {
+      ...sound, invocationId, userId: bob.id, channelId,
+    }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    await otherBot.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD, { ...sound, invocationId }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    const pending = await download(invocationId);
+    assert.equal(pending.received.botId, botId);
+    assert.equal(pending.received.botName, 'Downloader');
+    assert.equal(pending.received.commandName, 'search');
+    assert.equal(pending.received.channelId, privateChannelId);
+    assert.equal(pending.received.invokerId, alice.id);
+    assert.equal(pending.received.invokerNickname, 'Download Alice');
+    assert.equal(pending.received.expiresAt - pending.received.createdAt, LIMITS.BOT_SOUND_DOWNLOAD_TIMEOUT_MS);
+    assert.notEqual(pending.received.downloadId, pending.requestId);
+    await bot.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD, { ...sound, invocationId }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    const submitted = { invocationId, downloadId: pending.received.downloadId, result: { status: 'downloaded' } };
+    for (const peer of [otherDevice.peer, bob.peer]) {
+      await peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, submitted, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    }
+    for (const peer of [bot.peer, otherBot.peer]) {
+      await peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, submitted, ProtocolErrorCode.PERMISSION_DENIED);
+    }
+    for (const invalid of [
+      { ...submitted, downloadId: 'forged' },
+      { ...submitted, result: { status: 'downloaded', filePath: 'C:\\Private\\sound.mp3' } },
+      { ...submitted, userId: bob.id },
+    ]) await alice.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, invalid, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    const ack = await alice.peer.request(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, submitted);
+    assert.equal(ack.type, MessageType.COMMAND_SOUND_DOWNLOAD_RESULT);
+    const delivered = await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_SOUND_DOWNLOAD_RESULT && message.requestId === pending.requestId);
+    assert.deepEqual(commandSoundDownloadResultSchema.parse(delivered.payload), submitted);
+    for (const peer of [otherDevice.peer, bob.peer, otherBot.peer]) {
+      await peer.barrier();
+      assert.equal(peer.messages.some((message) => hasInvocation(message, MessageType.COMMAND_SOUND_DOWNLOAD, invocationId)), false);
+      assert.equal(peer.messages.some((message) => hasInvocation(message, MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, invocationId)), false);
+    }
+    await alice.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, submitted, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    await bot.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD, { ...sound, invocationId }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    await finish(invocationId);
+  });
+
+  await t.test('forwards exists, failure and cancellation without renewing the download allowance', async () => {
+    for (const outcome of [{ status: 'exists' }, { status: 'failed', reason: 'too_large' }, { status: 'cancelled' }]) {
+      const invocationId = await invoke();
+      const pending = await download(invocationId);
+      await alice.peer.request(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+        invocationId, downloadId: pending.received.downloadId, result: outcome,
+      });
+      const delivered = await bot.peer.wait((message) =>
+        message.type === MessageType.COMMAND_SOUND_DOWNLOAD_RESULT && message.requestId === pending.requestId);
+      assert.deepEqual(delivered.payload.result, outcome);
+      await bot.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD, { ...sound, invocationId }, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+      await finish(invocationId);
+    }
+  });
+
+  await t.test('cancels pending I/O with invocation lifecycle and rechecks permissions before accepting a result', async () => {
+    const invocationId = await invoke();
+    const pending = await download(invocationId);
+    await alice.peer.request(MessageType.COMMAND_CANCEL, { invocationId });
+    const cancellation = await alice.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_SOUND_DOWNLOAD_CANCEL, invocationId));
+    assert.equal(cancellation.payload.downloadId, pending.received.downloadId);
+    await alice.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+      invocationId, downloadId: pending.received.downloadId, result: { status: 'downloaded' },
+    }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    const member = await fixture.roleRepo.findByName('Membro');
+    assert.ok(member);
+    for (const revoked of ['permission', 'channel']) {
+      const active = await invoke();
+      const downloadRequest = await download(active);
+      try {
+        if (revoked === 'channel') await fixture.channelService.updateChannel({ channelId, botCommandsEnabled: false });
+        else await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS & ~Permission.USE_BOT_COMMANDS });
+        await alice.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+          invocationId: active, downloadId: downloadRequest.received.downloadId, result: { status: 'downloaded' },
+        }, ProtocolErrorCode.PERMISSION_DENIED);
+        await alice.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_SOUND_DOWNLOAD_CANCEL, active));
+        assert.equal((await bot.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_FINISHED, active))).payload.reason, 'cancelled');
+        assert.equal(bot.peer.messages.some((message) => hasInvocation(message, MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, active)), false);
+      } finally {
+        await fixture.roleRepo.update(member.id, { permissions: DEFAULT_PERMISSIONS });
+        await fixture.channelService.updateChannel({ channelId, botCommandsEnabled: true });
+      }
+    }
+  });
+
+  await t.test('channel deletion cancels both autocomplete and local download work', async () => {
+    const invocationId = await invoke(alice.peer, 'search', privateChannelId);
+    await download(invocationId);
+    const pending = await search(alice.peer, { channelId: privateChannelId });
+    await owner.peer.request(MessageType.CHANNEL_DELETE, { channelId: privateChannelId });
+    assert.equal((await alice.peer.wait((message) => message.requestId === pending.requestId)).payload.code, ProtocolErrorCode.CHANNEL_NOT_FOUND);
+    await alice.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_SOUND_DOWNLOAD_CANCEL, invocationId));
+    assert.equal((await bot.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_FINISHED, invocationId))).payload.reason, 'cancelled');
+  });
+
+  await t.test('replacement sockets and bot disconnects cannot inherit pending downloads or searches', async () => {
+    const invocationId = await invoke();
+    const pendingDownload = await download(invocationId);
+    const pendingSearch = await search();
+    alice = await fixture.human('Download Alice', alice.keys, alice.deviceId);
+    assert.equal((await bot.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_FINISHED, invocationId))).payload.reason, 'caller_disconnected');
+    await bot.peer.wait((message) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && message.payload.requestId === pendingSearch.botRequestId);
+    await alice.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT, {
+      invocationId, downloadId: pendingDownload.received.downloadId, result: { status: 'downloaded' },
+    }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    assert.equal(alice.peer.messages.some((message) => hasInvocation(message, MessageType.COMMAND_SOUND_DOWNLOAD, invocationId)), false);
+    const active = await invoke();
+    await download(active);
+    const searchBeforeDisconnect = await search();
+    const keys = bot.keys;
+    await bot.peer.close();
+    await alice.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_SOUND_DOWNLOAD_CANCEL, active));
+    assert.equal((await alice.peer.wait((message) => hasInvocation(message, MessageType.COMMAND_FINISHED, active))).payload.reason, 'bot_disconnected');
+    assert.equal((await alice.peer.wait((message) => message.requestId === searchBeforeDisconnect.requestId)).payload.code, ProtocolErrorCode.BOT_OFFLINE);
+    bot = await fixture.bot(token, keys);
+    await register();
+    await bot.peer.error(MessageType.COMMAND_SOUND_DOWNLOAD, { ...sound, invocationId: active }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
   });
 });
 
@@ -1653,4 +3658,778 @@ test('invocation limits and timers bound memory and release all capacity', async
     handler.close();
     t.mock.timers.reset();
   }
+});
+
+test('autocomplete and sound download timers bound state and discard responses cancelled during authorization', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.dispose());
+  const caller = await fixture.human('Download timers');
+  const channelId = text(records(record(caller.auth.payload.server).channels).find((channel) => channel.type === 'TEXT')?.id);
+  const current = new Set<BotInteractionSession>();
+  const socket = (): WebSocket => {
+    // Transport-only sockets avoid opening a thousand network connections for the capacity test.
+    const value: unknown = Reflect.construct(WebSocket, [null, undefined, { autoPong: true, closeTimeout: 0 }]);
+    assert.ok(value instanceof WebSocket);
+    return value;
+  };
+  const origin = (index: number): BotInteractionSession => {
+    const session: BotInteractionSession = {
+      ws: socket(), sessionId: `caller-${index}:device`,
+      user: { id: `caller-${index}`, clientId: `client-${index}`, nickname: `Caller ${index}`, status: 'ONLINE', joinedAt: 0 },
+    };
+    current.add(session);
+    return session;
+  };
+  const bot: BotInteractionSession = {
+    ws: socket(), sessionId: 'bot:timer', isBot: true, botId: 'timer',
+    user: { id: 'timer', clientId: 'bot-timer', nickname: 'Timer bot', status: 'ONLINE', joinedAt: 0, isBot: true },
+  };
+  current.add(bot);
+  const messages: Array<{ ws: WebSocket; message: ProtocolMessage<unknown> }> = [];
+  const errors: Array<{ ws: WebSocket; code: ProtocolErrorCode; requestId?: string }> = [];
+  const registry = new CommandRegistry();
+  registry.register('timer', 'Timer bot', [{
+    name: 'search', description: 'Search', downloadsSound: true,
+    options: [{ name: 'sound', description: 'Sound', type: 'string', required: true, autocomplete: true }],
+  }]);
+  const handler = new BotInteractionHandler({
+    isCurrent: (session) => current.has(session),
+    findBot: () => bot,
+    send: (ws, message) => { messages.push({ ws, message }); },
+    sendError: (ws, code, _message, requestId) => { errors.push({ ws, code, requestId }); },
+    broadcastToChannel: async () => assert.fail('Downloads must not be broadcast'),
+    publishResponse: async () => assert.fail('Downloads must not be published'),
+  }, fixture.channelService, fixture.userService, registry);
+  const granted: ChannelAccessContext = { permissions: DEFAULT_PERMISSIONS, roleIds: [] };
+  let accessGate: Promise<ChannelAccessContext> | null = null;
+  t.mock.method(fixture.userService, 'isMember', async () => true);
+  t.mock.method(fixture.channelService, 'getAccessContext', async () => accessGate ?? granted);
+  const input = { botId: 'timer', commandName: 'search', channelId, optionName: 'sound', query: 'sound' };
+  const sound = { url: 'https://example.com/sound.mp3', fileName: 'sound.mp3', title: 'Sound' };
+  const lastMessage = (type: MessageType): ProtocolMessage<unknown> => {
+    const entry = messages.filter(({ message }) => message.type === type).pop();
+    assert.ok(entry);
+    return entry.message;
+  };
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  try {
+    const first = origin(0);
+    await handler.autocomplete(first, input, 'first-query');
+    const firstId = text(lastMessage(MessageType.COMMAND_AUTOCOMPLETE).requestId);
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_TIMEOUT_MS);
+    await flush();
+    const timeout = lastMessage(MessageType.COMMAND_AUTOCOMPLETE_RESULT);
+    assert.equal(timeout.requestId, 'first-query');
+    assert.deepEqual(timeout.payload, { status: 'failed', reason: 'timeout' });
+    await handler.autocompleteResult(bot, { status: 'ok', choices: [] }, firstId);
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+
+    await handler.autocomplete(first, input, 'race-old');
+    const oldId = text(lastMessage(MessageType.COMMAND_AUTOCOMPLETE).requestId);
+    let releaseAccess: ((value: ChannelAccessContext) => void) | undefined;
+    accessGate = new Promise((resolve) => { releaseAccess = resolve; });
+    const lateResponse = handler.autocompleteResult(bot, {
+      status: 'ok', choices: [{ label: 'Stale', value: 'stale' }],
+    }, oldId);
+    accessGate = null;
+    handler.cancelAutocomplete(first, { requestId: 'race-old' });
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await handler.autocomplete(first, input, 'race-new');
+    assert.ok(releaseAccess);
+    releaseAccess(granted);
+    await lateResponse;
+    assert.equal(messages.some(({ message }) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === 'race-old'), false);
+    handler.cancelAutocomplete(first, { requestId: 'race-new' });
+
+    const origins = Array.from({ length: LIMITS.MAX_BOT_AUTOCOMPLETE_REQUESTS }, (_, index) => origin(index + 1));
+    for (const [index, session] of origins.entries()) {
+      await handler.autocomplete(session, input, `capacity-${index}`);
+    }
+    assert.equal(errors.length, 0);
+    const extra = origin(LIMITS.MAX_BOT_AUTOCOMPLETE_REQUESTS + 1);
+    await handler.autocomplete(extra, input, 'capacity-full');
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_COMMAND_BUSY);
+    handler.cancelAutocomplete(origins[0], { requestId: 'capacity-0' });
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await handler.autocomplete(extra, input, 'capacity-released');
+    assert.equal(errors.length, 0);
+    current.delete(bot);
+    handler.disconnect(bot);
+    assert.equal(errors.length, LIMITS.MAX_BOT_AUTOCOMPLETE_REQUESTS);
+    assert.ok(errors.every((error) => error.code === ProtocolErrorCode.BOT_OFFLINE));
+    errors.length = 0;
+    current.add(bot);
+
+    const lazyChoice = async (
+      session: BotInteractionSession, requestId: string, overrides: Partial<CommandAutocompletePayload> = {},
+    ): Promise<CommandAudioPreviewPayload> => {
+      await handler.autocomplete(session, { ...input, ...overrides }, requestId);
+      const queryId = text(lastMessage(MessageType.COMMAND_AUTOCOMPLETE).requestId);
+      await handler.autocompleteResult(bot, {
+        status: 'ok', choices: [{ label: 'Clip', value: 'canonical', audio: { resourceId: 'provider-clip' } }],
+      }, queryId);
+      const result = commandAutocompleteResultSchema.parse(lastMessage(MessageType.COMMAND_AUTOCOMPLETE_RESULT).payload);
+      assert.ok(result.status === 'ok' && result.choices[0].audio && 'resourceId' in result.choices[0].audio);
+      return {
+        botId: 'timer', commandName: 'search', channelId, optionName: 'sound',
+        autocompleteRequestId: requestId, resourceId: result.choices[0].audio.resourceId,
+      };
+    };
+    const leaseOwner = origin(1900);
+    const firstLease = await lazyChoice(leaseOwner, 'first-page-lease');
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS / 2);
+    const secondLease = await lazyChoice(leaseOwner, 'second-page-lease', { page: 1 });
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS / 2);
+    await flush();
+    const beforeExpiredPreview = messages.filter(({ message }) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length;
+    await handler.audioPreview(leaseOwner, firstLease, 'expired-first-page');
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    assert.equal(messages.filter(({ message }) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length, beforeExpiredPreview);
+    await handler.audioPreview(leaseOwner, secondLease, 'unexpired-second-page');
+    assert.equal(record(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW).payload).resourceId, 'provider-clip');
+    handler.cancelAudioPreview(leaseOwner, { requestId: 'unexpired-second-page' });
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS / 2);
+    await flush();
+    await handler.audioPreview(leaseOwner, secondLease, 'expired-second-page');
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    for (const page of [firstLease, secondLease]) {
+      assert.equal(messages.filter(({ ws, message }) => ws === leaseOwner.ws &&
+        message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL &&
+        record(message.payload).requestId === page.autocompleteRequestId).length, 1,
+      'Each page expires on its own original lease');
+    }
+
+    const pageRaceOwner = origin(1901);
+    const retained = await lazyChoice(pageRaceOwner, 'retained-before-race');
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await handler.autocomplete(pageRaceOwner, { ...input, page: 1 }, 'cancelled-page-race');
+    const cancelledPageId = text(lastMessage(MessageType.COMMAND_AUTOCOMPLETE).requestId);
+    accessGate = new Promise((resolve) => { releaseAccess = resolve; });
+    const latePage = handler.autocompleteResult(bot, {
+      status: 'ok', hasMore: true, choices: [{ label: 'Late', value: 'late', audio: { resourceId: 'late-resource' } }],
+    }, cancelledPageId);
+    accessGate = null;
+    handler.cancelAutocomplete(pageRaceOwner, { requestId: 'cancelled-page-race' });
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await handler.autocomplete(pageRaceOwner, { ...input, page: 1 }, 'retry-page-race');
+    assert.ok(releaseAccess);
+    releaseAccess(granted);
+    await latePage;
+    assert.equal(messages.some(({ message }) =>
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === 'cancelled-page-race'), false);
+    handler.cancelAutocomplete(pageRaceOwner, { requestId: 'retry-page-race' });
+    await handler.audioPreview(pageRaceOwner, retained, 'retained-after-race');
+    assert.equal(record(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW).payload).resourceId, 'provider-clip');
+    handler.cancelAutocomplete(pageRaceOwner, { requestId: 'retained-before-race' });
+
+    const retainedOrigins = origins.slice(0, LIMITS.MAX_BOT_AUTOCOMPLETE_REQUESTS / 2);
+    const firstPages: CommandAudioPreviewPayload[] = [];
+    const secondPages: CommandAudioPreviewPayload[] = [];
+    for (const [index, session] of retainedOrigins.entries()) {
+      firstPages.push(await lazyChoice(session, `retained-first-${index}`));
+    }
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    for (const [index, session] of retainedOrigins.entries()) {
+      secondPages.push(await lazyChoice(session, `retained-second-${index}`, { page: 1 }));
+    }
+    assert.equal(errors.length, 0);
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await handler.autocomplete(retainedOrigins[0], { ...input, page: 2 }, 'retained-capacity-full');
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_COMMAND_BUSY,
+      'Settled preview pages share the existing global outstanding request limit');
+    await handler.audioPreview(retainedOrigins[0], firstPages[0], 'retained-despite-capacity');
+    assert.equal(record(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW).payload).resourceId, 'provider-clip');
+    handler.cancelAutocomplete(retainedOrigins[0], { requestId: firstPages[0].autocompleteRequestId });
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await lazyChoice(retainedOrigins[0], 'retained-capacity-released', { page: 2 });
+    assert.equal(errors.length, 0, 'Cancelling one retained page immediately releases its global slot');
+    await handler.audioPreview(retainedOrigins[0], secondPages[0], 'retained-after-capacity');
+    assert.equal(record(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW).payload).resourceId, 'provider-clip');
+    handler.settingsChanged('timer');
+    assert.equal(errors.length, 0);
+    const afterRetainedCleanup = messages.length;
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS * 2);
+    await flush();
+    assert.equal(messages.length, afterRetainedCleanup, 'Invalidating page groups releases every page and preview timer');
+
+    const previewOwner = origin(2001);
+    const choice = await lazyChoice(previewOwner, 'lazy-timeout-query');
+    await handler.audioPreview(previewOwner, choice, 'lazy-timeout');
+    const timedPreviewId = text(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW).requestId);
+    t.mock.timers.tick(LIMITS.BOT_AUDIO_PREVIEW_TIMEOUT_MS);
+    await flush();
+    assert.deepEqual(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW_RESULT).payload, { status: 'failed', reason: 'timeout' });
+    await handler.audioPreviewResult(bot, { status: 'ok', mimeType: 'audio/ogg', audioBase64: 'AAAA' }, timedPreviewId);
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS);
+    await flush();
+    await handler.audioPreview(previewOwner, choice, 'expired-choices');
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+
+    const previewOrigins = Array.from({ length: LIMITS.MAX_BOT_AUDIO_PREVIEW_REQUESTS + 1 }, (_, index) => origin(3000 + index));
+    const previewInputs: CommandAudioPreviewPayload[] = [];
+    const previewIds: string[] = [];
+    for (const [index, session] of previewOrigins.entries()) {
+      const input = await lazyChoice(session, `preview-query-${index}`);
+      previewInputs.push(input);
+      await handler.audioPreview(session, input, `preview-${index}`);
+      if (index < LIMITS.MAX_BOT_AUDIO_PREVIEW_REQUESTS) previewIds.push(text(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW).requestId));
+    }
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_COMMAND_BUSY);
+    handler.cancelAudioPreview(previewOrigins[0], { requestId: 'preview-0' });
+    const extraPreviewOrigin = previewOrigins.at(-1);
+    const extraPreviewInput = previewInputs.at(-1);
+    assert.ok(extraPreviewOrigin && extraPreviewInput);
+    await handler.audioPreview(extraPreviewOrigin, extraPreviewInput, 'preview-released');
+    assert.equal(errors.length, 0, 'Cancellation immediately releases the server request slot');
+    handler.cancelAudioPreview(previewOrigins[1], { requestId: 'preview-1' });
+    let releasePreviewAccess: ((value: ChannelAccessContext) => void) | undefined;
+    accessGate = new Promise((resolve) => { releasePreviewAccess = resolve; });
+    const blockedStart = handler.audioPreview(previewOrigins[0], previewInputs[0], 'cancel-before-dispatch');
+    handler.cancelAudioPreview(previewOrigins[0], { requestId: 'cancel-before-dispatch' });
+    accessGate = null;
+    const beforeDispatch = messages.filter(({ message }) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length;
+    assert.ok(releasePreviewAccess);
+    releasePreviewAccess(granted);
+    await blockedStart;
+    assert.equal(messages.filter(({ message }) => message.type === MessageType.COMMAND_AUDIO_PREVIEW).length, beforeDispatch);
+    accessGate = new Promise((resolve) => { releasePreviewAccess = resolve; });
+    const blockedResult = handler.audioPreviewResult(bot, { status: 'ok', mimeType: 'audio/ogg', audioBase64: 'AAAA' }, previewIds[2]);
+    handler.cancelAutocomplete(previewOrigins[2], { requestId: 'preview-query-2' });
+    accessGate = null;
+    const beforeResult = messages.length;
+    releasePreviewAccess(granted);
+    await blockedResult;
+    assert.equal(messages.length, beforeResult, 'Cancellation during delivery authorization discards the audio');
+    handler.settingsChanged('timer');
+    const afterPreviewCleanup = messages.length;
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS * 2);
+    await flush();
+    assert.equal(messages.length, afterPreviewCleanup, 'Invalidated lazy choices and previews leave no active timers');
+
+    const downloader = origin(LIMITS.MAX_BOT_AUTOCOMPLETE_REQUESTS + 2);
+    await handler.autocomplete(downloader, input, 'before-invocation');
+    const invocationInput = {
+      botId: 'timer', commandName: 'search', channelId, options: { sound: 'selected' }, allowSoundDownload: true,
+    };
+    await handler.invoke(downloader, invocationInput);
+    const invocationId = text(record(lastMessage(MessageType.COMMAND_INVOKED).payload).invocationId);
+    await handler.downloadSound(bot, { ...sound, invocationId }, 'download-timeout');
+    const received: CommandSoundDownloadReceivedPayload =
+      commandSoundDownloadReceivedSchema.parse(lastMessage(MessageType.COMMAND_SOUND_DOWNLOAD).payload);
+    t.mock.timers.tick(LIMITS.BOT_SOUND_DOWNLOAD_TIMEOUT_MS);
+    await flush();
+    assert.deepEqual(lastMessage(MessageType.COMMAND_SOUND_DOWNLOAD_CANCEL).payload, {
+      invocationId, downloadId: received.downloadId,
+    });
+    const timedResult = lastMessage(MessageType.COMMAND_SOUND_DOWNLOAD_RESULT);
+    assert.equal(timedResult.requestId, 'download-timeout');
+    assert.deepEqual(commandSoundDownloadResultSchema.parse(timedResult.payload).result, { status: 'failed', reason: 'timeout' });
+    await handler.respond(bot, { invocationId, content: 'The download timed out.' });
+    assert.equal(record(lastMessage(MessageType.COMMAND_RESPONSE).payload).ephemeral, true);
+    await handler.downloadSound(bot, { ...sound, invocationId }, 'duplicate');
+    assert.equal(errors.pop()?.code, ProtocolErrorCode.BOT_INTERACTION_INVALID);
+    handler.complete(bot, { invocationId });
+
+    await handler.invoke(downloader, invocationInput);
+    const cancelledId = text(record(lastMessage(MessageType.COMMAND_INVOKED).payload).invocationId);
+    await handler.downloadSound(bot, { ...sound, invocationId: cancelledId }, 'cancelled-download');
+    handler.cancel(downloader, { invocationId: cancelledId });
+    const afterCancellation = messages.length;
+    t.mock.timers.tick(LIMITS.BOT_INTERACTION_TIMEOUT_MS * 2);
+    await flush();
+    assert.equal(messages.length, afterCancellation, 'Cancelled work must leave no live timers.');
+    const closeFirst = await lazyChoice(downloader, 'close-first');
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    const closeSecond = await lazyChoice(downloader, 'close-second', { page: 1 });
+    await handler.audioPreview(downloader, closeFirst, 'close-preview');
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_THROTTLE_MS);
+    await handler.autocomplete(downloader, { ...input, page: 2 }, 'close-pending');
+    const closePendingId = text(lastMessage(MessageType.COMMAND_AUTOCOMPLETE).requestId);
+    handler.close();
+    for (const page of [closeFirst, closeSecond]) {
+      assert.equal(messages.some(({ ws, message }) => ws === downloader.ws &&
+        message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL &&
+        record(message.payload).requestId === page.autocompleteRequestId), true);
+    }
+    assert.equal(messages.some(({ ws, message }) => ws === bot.ws &&
+      message.type === MessageType.COMMAND_AUTOCOMPLETE_CANCEL && record(message.payload).requestId === closePendingId), true);
+    assert.equal(lastMessage(MessageType.COMMAND_AUDIO_PREVIEW_RESULT).requestId, 'close-preview');
+    const afterClose = messages.length;
+    t.mock.timers.tick(LIMITS.BOT_AUTOCOMPLETE_CHOICE_TTL_MS * 2);
+    await flush();
+    await handler.autocomplete(downloader, input, 'closed');
+    assert.equal(messages.length, afterClose);
+  } finally {
+    handler.close();
+    t.mock.timers.reset();
+  }
+});
+
+const LOCAL_TEST_URL = 'https://www.youtube.com/watch?v=abcdefghijk';
+const LOCAL_TEST_TRACK = { id: 'abcdefghijk', title: 'Authored local fixture', url: LOCAL_TEST_URL, duration: 1 };
+const LOCAL_TEST_SDP = 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=sctp-port:5000\r\n';
+const LOCAL_TEST_COMMANDS = [
+  { name: 'local', description: 'Local fixture', localCapabilities: ['youtube-audio'],
+    options: [{ name: 'query', description: 'Query', type: 'string', autocomplete: true }] },
+  { name: 'plain', description: 'Legacy fixture' },
+];
+
+async function createLocalExecutionFixture(t: TestContext) {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Local owner');
+  const caller = await f.human('Local caller');
+  const channels = records(record(owner.auth.payload.server).channels);
+  const textId = text(channels.find((channel) => channel.type === 'TEXT')?.id);
+  const voiceId = text(channels.find((channel) => channel.type === 'VOICE')?.id);
+  const created = await owner.peer.request(MessageType.BOT_CREATE, {});
+  const botId = text(record(created.payload.bot).id);
+  const token = text(created.payload.token);
+  const bot = await f.bot(token, undefined, 'Local fixture bot');
+  assert.equal((await bot.peer.request(MessageType.COMMAND_REGISTER, { commands: LOCAL_TEST_COMMANDS })).type,
+    MessageType.COMMAND_REGISTERED);
+  const invoke = async (peer = caller.peer, commandName = 'local', requestId = randomUUID()) => {
+    const since = peer.messages.length;
+    peer.send(MessageType.COMMAND_INVOKE, {
+      botId, channelId: textId, commandName, ...(commandName === 'local' ? { localPreparation: { capability: 'youtube-audio' } } : {}),
+    }, requestId);
+    const response = await peer.wait((message) => message.requestId === requestId, since);
+    assert.equal(response.type, MessageType.COMMAND_INVOKED);
+    return { id: text(response.payload.invocationId), requestId };
+  };
+  const retain = async (invocationId: string) => {
+    const response = await bot.peer.request(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+      { action: 'retain', invocationId, url: LOCAL_TEST_URL });
+    assert.equal(response.type, MessageType.BOT_LOCAL_SOURCE_RESULT);
+    const result = localSourceResultSchema.parse(response.payload);
+    assert.equal(result.status, 'retained');
+    if (result.status !== 'retained') throw new Error('Expected retained source');
+    return result.source;
+  };
+  const task = async (
+    context: LocalRequestContext, spec: LocalTaskSpec = { operation: 'youtube.resolve', url: LOCAL_TEST_URL },
+    botPeer = bot.peer, executor = caller.peer,
+  ) => {
+    const response = await botPeer.request(MessageType.BOT_LOCAL_TASK_REQUEST, {
+      context, spec, ...(spec.operation === 'youtube.stream' ? { voiceChannelId: voiceId } : {}),
+    });
+    assert.equal(response.type, MessageType.BOT_LOCAL_TASK_OFFER, JSON.stringify(response.payload));
+    const offer = localTaskOfferSchema.parse(response.payload);
+    const received = await executor.wait((message) => message.type === MessageType.BOT_LOCAL_TASK_OFFER &&
+      message.payload.taskId === offer.taskId);
+    assert.equal(received.requestId, undefined, 'unsolicited delegation must not settle an executor UI request');
+    const executorOffer = localTaskOfferSchema.parse(received.payload);
+    assert.equal(executorOffer.taskId, offer.taskId);
+    return { offer, executorOffer };
+  };
+  const event = async (offer: LocalTaskOffer, state: string, peer = bot.peer) => localTaskEventSchema.parse(
+    (await peer.wait((message) => message.type === MessageType.BOT_LOCAL_TASK_EVENT &&
+      message.payload.taskId === offer.taskId && message.payload.state === state)).payload);
+  const join = async (invocationId: string) => {
+    assert.equal((await caller.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId })).type, MessageType.VOICE_USER_JOINED);
+    assert.equal((await bot.peer.request(MessageType.VOICE_JOIN, { channelId: voiceId, invocationId })).type,
+      MessageType.VOICE_USER_JOINED);
+  };
+  const negotiate = async (offer: LocalTaskOffer, botPeer = bot.peer, executor = caller.peer) => {
+    assert.ok(offer.media);
+    executor.send(MessageType.BOT_LOCAL_MEDIA_SIGNAL, {
+      taskId: offer.taskId, mediaGeneration: offer.media.generation,
+      signal: { signalType: 'offer', sdp: { type: 'offer', sdp: LOCAL_TEST_SDP } },
+    });
+    await botPeer.wait((message) => message.type === MessageType.BOT_LOCAL_MEDIA_SIGNAL && message.payload.taskId === offer.taskId);
+    botPeer.send(MessageType.BOT_LOCAL_MEDIA_SIGNAL, {
+      taskId: offer.taskId, mediaGeneration: offer.media.generation,
+      signal: { signalType: 'answer', sdp: { type: 'answer', sdp: LOCAL_TEST_SDP } },
+    });
+    await executor.wait((message) => message.type === MessageType.BOT_LOCAL_MEDIA_SIGNAL && message.payload.taskId === offer.taskId);
+  };
+  return { ...f, connectBot: f.bot, owner, caller, bot, botId, token, textId, voiceId, invoke, retain, task, event, join, negotiate };
+}
+
+test('administrator capability revocation cancels local work, sources, voice and pending interactions', async (t) => {
+  const f = await createLocalExecutionFixture(t);
+  const invocation = await f.invoke();
+  const source = await f.retain(invocation.id);
+  await f.join(invocation.id);
+  const task = await f.task({ kind: 'source', sourceContextId: source.sourceContextId },
+    { operation: 'youtube.stream', url: LOCAL_TEST_URL });
+  await f.negotiate(task.offer);
+  f.bot.peer.send(MessageType.COMMAND_PROMPT, {
+    invocationId: invocation.id, interactionId: 'permission-prompt',
+    form: { title: 'Pending consent', fields: [{ name: 'answer', label: 'Answer', type: 'text' }] },
+  });
+  await f.caller.peer.wait((message) => message.type === MessageType.COMMAND_PROMPT &&
+    message.payload.invocationId === invocation.id);
+  const state = f.botPermissions.get(f.botId);
+  assert.ok(state);
+  const response = await f.owner.peer.request(MessageType.BOT_PERMISSIONS_UPDATE, {
+    botId: f.botId, expectedRevision: state.revision, granted: state.granted.filter((capability) => capability !== 'local_execution'),
+  });
+  assert.equal(response.type, MessageType.BOT_PERMISSIONS_SNAPSHOT);
+  assert.deepEqual(await f.event(task.offer, 'cancelled', f.caller.peer),
+    { state: 'cancelled', taskId: task.offer.taskId, cause: 'permission_revoked' });
+  await f.caller.peer.wait((message) => message.type === MessageType.COMMAND_FINISHED &&
+    message.payload.invocationId === invocation.id && message.payload.reason === 'bot_disconnected');
+  assert.equal(f.signalingService.getVoiceState(`bot:${f.botId}`), undefined);
+  await f.caller.peer.error(MessageType.COMMAND_SUBMIT, {
+    invocationId: invocation.id, interactionId: 'permission-prompt', values: { answer: 'late' },
+  }, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  const reconnected = await f.connectBot(f.token, f.bot.keys);
+  await reconnected.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'release', sourceContextId: source.sourceContextId }, ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED);
+});
+
+test('local execution real sockets expose only authenticated public keys and derive retained sources from original invocation capability', async (t) => {
+  const f = await createLocalExecutionFixture(t);
+  const otherDevice = await f.human('Local caller', f.caller.keys);
+  const commands = records((await f.caller.peer.request(MessageType.COMMANDS_LIST)).payload.commands);
+  assert.equal(commands.find((command) => command.name === 'local')?.botPublicKey, f.bot.keys.publicKey);
+  await f.bot.peer.error(MessageType.COMMAND_REGISTER, {
+    commands: [{ ...LOCAL_TEST_COMMANDS[0], botPublicKey: identity().publicKey }],
+  }, ProtocolErrorCode.BOT_INVALID_OPTIONS);
+  const invocation = await f.invoke();
+  const source = await f.retain(invocation.id);
+  assert.equal(source.invokerId, f.caller.id);
+  assert.equal(source.invokerSessionId, record(f.caller.auth.payload.currentUser).sessionId);
+  assert.notEqual(source.invokerSessionId, record(otherDevice.auth.payload.currentUser).sessionId);
+  assert.equal(source.originChannelId, f.textId);
+  assert.equal(source.botPublicKey, f.bot.keys.publicKey);
+  assert.equal(source.url, LOCAL_TEST_URL);
+  assert.equal('permit' in source, false);
+  assert.equal('subject' in source, false);
+  await f.caller.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'retain', invocationId: invocation.id, url: LOCAL_TEST_URL }, ProtocolErrorCode.PERMISSION_DENIED);
+  await f.bot.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'retain', invocationId: 'forged-invocation', url: LOCAL_TEST_URL }, ProtocolErrorCode.PERMISSION_DENIED);
+  await f.bot.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'retain', invocationId: invocation.id, url: LOCAL_TEST_URL, invokerId: otherDevice.id }, ProtocolErrorCode.BAD_REQUEST);
+  await f.bot.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'retain', invocationId: invocation.id, url: LOCAL_TEST_URL, permit: 'native-secret' }, ProtocolErrorCode.BAD_REQUEST);
+  await f.caller.peer.error(MessageType.COMMAND_INVOKE, {
+    botId: f.botId, channelId: f.textId, commandName: 'local',
+    localPreparation: { capability: 'youtube-audio', permit: 'native-secret' },
+  }, ProtocolErrorCode.BOT_INVALID_OPTIONS);
+  const legacy = await f.invoke(f.caller.peer, 'plain');
+  assert.equal((await f.bot.peer.request(MessageType.COMMAND_REGISTER, { commands: [
+    LOCAL_TEST_COMMANDS[0], { ...LOCAL_TEST_COMMANDS[1], localCapabilities: ['youtube-audio'] },
+  ] })).type, MessageType.COMMAND_REGISTERED);
+  await f.bot.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'retain', invocationId: legacy.id, url: LOCAL_TEST_URL }, ProtocolErrorCode.PERMISSION_DENIED);
+  const before = f.caller.peer.messages.length;
+  f.caller.peer.send(MessageType.COMMAND_INVOKE, { botId: f.botId, channelId: f.textId, commandName: 'local' });
+  const noCorrelation = await f.caller.peer.wait((message) => message.type === MessageType.COMMAND_INVOKED, before);
+  await f.bot.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'retain', invocationId: noCorrelation.payload.invocationId, url: LOCAL_TEST_URL }, ProtocolErrorCode.PERMISSION_DENIED);
+  const other = await f.owner.peer.request(MessageType.BOT_CREATE, {});
+  const foreign = await f.connectBot(text(other.payload.token));
+  await foreign.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'retain', invocationId: invocation.id, url: LOCAL_TEST_URL }, ProtocolErrorCode.PERMISSION_DENIED);
+  await foreign.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'release', sourceContextId: source.sourceContextId }, ProtocolErrorCode.PERMISSION_DENIED);
+  await f.bot.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'release', sourceContextId: randomUUID() }, ProtocolErrorCode.PERMISSION_DENIED);
+  await f.bot.peer.error(MessageType.BOT_LOCAL_TASK_REQUEST, {
+    context: { kind: 'source', sourceContextId: source.sourceContextId },
+    spec: { operation: 'youtube.resolve', url: 'https://www.youtube.com/watch?v=zyxwvutsrqp' },
+  }, ProtocolErrorCode.BAD_REQUEST);
+  const { offer } = await f.task({ kind: 'invocation', invocationId: invocation.id });
+  assert.equal(offer.requestId, invocation.requestId);
+  assert.equal(offer.bot.botPublicKey, f.bot.keys.publicKey);
+  assert.equal(offer.bot.botName, 'Local fixture bot');
+  assert.equal(otherDevice.peer.messages.some((message) => message.type === MessageType.BOT_LOCAL_TASK_OFFER), false);
+  await otherDevice.peer.error(MessageType.BOT_LOCAL_TASK_ACCEPT, {
+    taskId: offer.taskId, result: { operation: 'youtube.resolve', track: LOCAL_TEST_TRACK },
+  }, ProtocolErrorCode.PERMISSION_DENIED);
+  await f.bot.peer.error(MessageType.BOT_LOCAL_TASK_ACCEPT, {
+    taskId: offer.taskId, result: { operation: 'youtube.resolve', track: LOCAL_TEST_TRACK },
+  }, ProtocolErrorCode.PERMISSION_DENIED);
+  f.caller.peer.send(MessageType.BOT_LOCAL_TASK_ACCEPT, {
+    taskId: offer.taskId, result: { operation: 'youtube.resolve', track: LOCAL_TEST_TRACK },
+  });
+  await f.event(offer, 'accepted');
+  await f.event(offer, 'completed');
+  const completedSince = f.caller.peer.messages.length;
+  f.caller.peer.send(MessageType.BOT_LOCAL_TASK_EVENT, { taskId: offer.taskId, state: 'completed' });
+  await f.caller.peer.barrier();
+  assert.equal(f.caller.peer.messages.slice(completedSince).some((message) => message.type === MessageType.SERVER_ERROR), false);
+  assert.equal((await f.bot.peer.request(MessageType.COMMAND_FINISH, { invocationId: invocation.id })).type, MessageType.COMMAND_FINISHED);
+  const retainedTask = await f.task({ kind: 'source', sourceContextId: source.sourceContextId });
+  assert.notEqual(retainedTask.offer.requestId, invocation.requestId);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.deepEqual((await f.bot.peer.request(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+      { action: 'release', sourceContextId: source.sourceContextId })).payload,
+    { status: 'released', sourceContextId: source.sourceContextId });
+  }
+  assert.deepEqual(await f.event(retainedTask.offer, 'cancelled'),
+    { state: 'cancelled', taskId: retainedTask.offer.taskId, cause: 'source_released' });
+});
+
+test('local execution real stream routing bootstraps before Main acceptance and cancels only active physical voice/socket leases', async (t) => {
+  const f = await createLocalExecutionFixture(t);
+  const invocation = await f.invoke();
+  const source = await f.retain(invocation.id);
+  await f.join(invocation.id);
+  await f.bot.peer.request(MessageType.COMMAND_FINISH, { invocationId: invocation.id });
+  const context: LocalRequestContext = { kind: 'source', sourceContextId: source.sourceContextId };
+  const { offer } = await f.task(context, { operation: 'youtube.stream', url: LOCAL_TEST_URL });
+  assert.ok(offer.media);
+  await f.negotiate(offer);
+  assert.equal(f.bot.peer.messages.some((message) => message.type === MessageType.BOT_LOCAL_TASK_EVENT &&
+    message.payload.taskId === offer.taskId && message.payload.state === 'accepted'), false);
+  const ready = { state: 'ready', taskId: offer.taskId, mediaGeneration: offer.media.generation };
+  f.bot.peer.send(MessageType.BOT_LOCAL_TASK_EVENT, ready);
+  f.caller.peer.send(MessageType.BOT_LOCAL_TASK_EVENT, ready);
+  await f.caller.peer.barrier();
+  assert.equal(f.bot.peer.messages.some((message) => message.type === MessageType.BOT_LOCAL_TASK_EVENT &&
+    message.payload.taskId === offer.taskId && message.payload.state === 'ready'), false);
+  f.caller.peer.send(MessageType.BOT_LOCAL_TASK_ACCEPT, {
+    taskId: offer.taskId, result: { operation: 'youtube.stream', track: LOCAL_TEST_TRACK },
+  });
+  await f.event(offer, 'ready');
+  assert.deepEqual(f.bot.peer.messages.filter((message) => message.type === MessageType.BOT_LOCAL_TASK_EVENT &&
+    message.payload.taskId === offer.taskId).map((message) => message.payload.state), ['accepted', 'ready']);
+  f.bot.peer.send(MessageType.BOT_LOCAL_TASK_CONTROL, { taskId: offer.taskId, revision: 1, action: 'pause' });
+  await f.caller.peer.wait((message) => message.type === MessageType.BOT_LOCAL_TASK_CONTROL && message.payload.taskId === offer.taskId);
+  f.caller.peer.send(MessageType.BOT_LOCAL_TASK_EVENT, { state: 'paused', taskId: offer.taskId, revision: 1 });
+  await f.event(offer, 'paused');
+  await f.caller.peer.request(MessageType.USER_UPDATE_VISIBILITY, { appearOffline: true });
+  await f.caller.peer.request(MessageType.VOICE_STATE_UPDATE, { isMuted: true });
+  assert.equal(f.bot.peer.messages.some((message) => message.type === MessageType.BOT_LOCAL_TASK_EVENT &&
+    message.payload.taskId === offer.taskId && message.payload.state === 'cancelled'), false);
+  await f.caller.peer.request(MessageType.VOICE_LEAVE, { channelId: f.voiceId });
+  assert.deepEqual(await f.event(offer, 'cancelled'), { state: 'cancelled', taskId: offer.taskId, cause: 'requester_left_voice' });
+  await f.caller.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId });
+  const next = await f.task(context, { operation: 'youtube.stream', url: LOCAL_TEST_URL });
+  assert.notEqual(next.offer.taskId, offer.taskId);
+  assert.notEqual(next.offer.media?.generation, offer.media.generation);
+  await f.bot.peer.request(MessageType.VOICE_LEAVE, { channelId: f.voiceId });
+  assert.deepEqual(await f.event(next.offer, 'cancelled'), { state: 'cancelled', taskId: next.offer.taskId, cause: 'bot_left_voice' });
+  const joinInvocation = await f.invoke();
+  await f.bot.peer.request(MessageType.VOICE_JOIN, { channelId: f.voiceId, invocationId: joinInvocation.id });
+  const active = await f.task(context, { operation: 'youtube.stream', url: LOCAL_TEST_URL });
+  const replacement = await f.human('Local caller', f.caller.keys, f.caller.deviceId);
+  assert.equal(record(replacement.auth.payload.currentUser).sessionId, source.invokerSessionId);
+  assert.deepEqual(await f.event(active.offer, 'cancelled'),
+    { state: 'cancelled', taskId: active.offer.taskId, cause: 'requester_disconnected' });
+  const refused = await f.bot.peer.request(MessageType.BOT_LOCAL_TASK_REQUEST,
+    { context, spec: { operation: 'youtube.resolve', url: LOCAL_TEST_URL } });
+  assert.equal(refused.type, MessageType.SERVER_ERROR);
+  assert.equal(refused.payload.message, 'requester_disconnected');
+  assert.equal(replacement.peer.messages.some((message) => message.type === MessageType.BOT_LOCAL_TASK_OFFER), false);
+  assert.equal((await f.bot.peer.request(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'release', sourceContextId: source.sourceContextId })).type, MessageType.BOT_LOCAL_SOURCE_RESULT);
+});
+
+test('local execution real preview RPC accepts only a completed one-shot proof for its remapped context and original UI', async (t) => {
+  const f = await createLocalExecutionFixture(t);
+  const queryId = randomUUID();
+  f.caller.peer.send(MessageType.COMMAND_AUTOCOMPLETE, {
+    botId: f.botId, channelId: f.textId, commandName: 'local', optionName: 'query', query: 'authored fixture',
+    localPreparation: { capability: 'youtube-audio' },
+  }, queryId);
+  const execution = await f.bot.peer.wait((message) => message.type === MessageType.COMMAND_AUTOCOMPLETE);
+  const remappedQuery = text(execution.requestId);
+  assert.notEqual(remappedQuery, queryId);
+  const search = await f.task({ kind: 'autocomplete', requestId: remappedQuery }, { operation: 'youtube.search', query: 'authored fixture' });
+  assert.equal(search.offer.requestId, queryId);
+  f.caller.peer.send(MessageType.BOT_LOCAL_TASK_ACCEPT, {
+    taskId: search.offer.taskId, result: { operation: 'youtube.search', tracks: [LOCAL_TEST_TRACK] },
+  });
+  await f.event(search.offer, 'completed');
+  f.bot.peer.send(MessageType.COMMAND_AUTOCOMPLETE_RESULT, { status: 'ok', choices: [{
+    label: 'Authored fixture', value: LOCAL_TEST_URL, audio: { resourceId: 'fixture-resource', fileName: 'fixture.ogg' },
+  }] }, remappedQuery);
+  const choices = commandAutocompleteResultSchema.parse((await f.caller.peer.wait((message) =>
+    message.type === MessageType.COMMAND_AUTOCOMPLETE_RESULT && message.requestId === queryId)).payload);
+  assert.ok(choices.status === 'ok');
+  const audio = choices.choices[0].audio;
+  assert.ok(audio && 'resourceId' in audio);
+  const preview = async () => {
+    const requestId = randomUUID();
+    const since = f.bot.peer.messages.length;
+    f.caller.peer.send(MessageType.COMMAND_AUDIO_PREVIEW, {
+      botId: f.botId, channelId: f.textId, commandName: 'local', optionName: 'query',
+      autocompleteRequestId: queryId, resourceId: audio.resourceId, localPreparation: { capability: 'youtube-audio' },
+    }, requestId);
+    const execution = await f.bot.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW, since);
+    return { requestId, remapped: text(execution.requestId) };
+  };
+  const cancelled = await preview();
+  const cancelledTask = await f.task({ kind: 'audio-preview', requestId: cancelled.remapped },
+    { operation: 'youtube.preview', url: LOCAL_TEST_URL });
+  f.caller.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_CANCEL, { requestId: cancelled.requestId });
+  assert.deepEqual(await f.event(cancelledTask.offer, 'cancelled'),
+    { state: 'cancelled', taskId: cancelledTask.offer.taskId, cause: 'requested' });
+  const forged = await preview();
+  f.bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, {
+    status: 'local', localPreviewId: 'forged-handle', taskId: 'forged-task', requestId: forged.requestId,
+    executorSessionId: text(record(f.caller.auth.payload.currentUser).sessionId),
+  }, forged.remapped);
+  assert.deepEqual((await f.caller.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+    message.requestId === forged.requestId)).payload, { status: 'failed', reason: 'invalid_response' });
+  const request = await preview();
+  const local = await f.task({ kind: 'audio-preview', requestId: request.remapped }, { operation: 'youtube.preview', url: LOCAL_TEST_URL });
+  assert.equal(local.offer.requestId, request.requestId);
+  const result = {
+    localPreviewId: 'renderer-owned-opaque-handle', taskId: local.offer.taskId,
+    requestId: request.requestId, executorSessionId: local.offer.invokerSessionId,
+  };
+  f.caller.peer.send(MessageType.BOT_LOCAL_TASK_ACCEPT, {
+    taskId: local.offer.taskId, result: { operation: 'youtube.preview', ...result },
+  });
+  await f.event(local.offer, 'completed');
+  f.bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, { status: 'local', ...result }, request.remapped);
+  const returned = await f.caller.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+    message.requestId === request.requestId);
+  assert.deepEqual(returned.payload, { status: 'local', ...result });
+  assert.equal('audioBase64' in returned.payload, false);
+  assert.equal('url' in returned.payload, false);
+  const staleSince = f.bot.peer.messages.length;
+  f.bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, { status: 'local', ...result }, request.remapped);
+  assert.equal((await f.bot.peer.wait((message) => message.type === MessageType.SERVER_ERROR &&
+    message.requestId === request.remapped, staleSince)).payload.code, ProtocolErrorCode.BOT_INTERACTION_EXPIRED);
+  const replay = await preview();
+  f.bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT, { status: 'local', ...result, requestId: replay.requestId }, replay.remapped);
+  assert.deepEqual((await f.caller.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+    message.requestId === replay.requestId)).payload, { status: 'failed', reason: 'invalid_response' });
+  const legacy = await preview();
+  f.bot.peer.send(MessageType.COMMAND_AUDIO_PREVIEW_RESULT,
+    { status: 'ok', mimeType: 'audio/ogg', audioBase64: 'AAAA' }, legacy.remapped);
+  assert.equal((await f.caller.peer.wait((message) => message.type === MessageType.COMMAND_AUDIO_PREVIEW_RESULT &&
+    message.requestId === legacy.requestId)).payload.status, 'ok');
+});
+
+test('local execution real lifetimes cancel scoped work and invalidate references on capabilities, ACL and bot key changes', async (t) => {
+  const f = await createLocalExecutionFixture(t);
+  const invocation = await f.invoke();
+  const source = await f.retain(invocation.id);
+  const ephemeral = await f.task({ kind: 'invocation', invocationId: invocation.id });
+  await f.caller.peer.request(MessageType.COMMAND_CANCEL, { invocationId: invocation.id });
+  assert.deepEqual(await f.event(ephemeral.offer, 'cancelled'),
+    { state: 'cancelled', taskId: ephemeral.offer.taskId, cause: 'requested' });
+  const retained = await f.task({ kind: 'source', sourceContextId: source.sourceContextId });
+  assert.equal((await f.bot.peer.request(MessageType.COMMAND_REGISTER, { commands: [{ name: 'local', description: 'No capability' }] })).type,
+    MessageType.COMMAND_REGISTERED);
+  assert.deepEqual(await f.event(retained.offer, 'cancelled'),
+    { state: 'cancelled', taskId: retained.offer.taskId, cause: 'permission_revoked' });
+  await f.bot.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'release', sourceContextId: source.sourceContextId }, ProtocolErrorCode.PERMISSION_DENIED);
+  await f.bot.peer.request(MessageType.COMMAND_REGISTER, { commands: LOCAL_TEST_COMMANDS });
+  const second = await f.invoke();
+  const secondSource = await f.retain(second.id);
+  const secondTask = await f.task({ kind: 'source', sourceContextId: secondSource.sourceContextId });
+  await f.owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: f.textId, botCommandsEnabled: false });
+  assert.deepEqual(await f.event(secondTask.offer, 'cancelled'),
+    { state: 'cancelled', taskId: secondTask.offer.taskId, cause: 'permission_revoked' });
+  await f.bot.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'release', sourceContextId: secondSource.sourceContextId }, ProtocolErrorCode.PERMISSION_DENIED);
+  await f.owner.peer.request(MessageType.CHANNEL_UPDATE, { channelId: f.textId, botCommandsEnabled: true });
+  const third = await f.invoke();
+  const thirdSource = await f.retain(third.id);
+  const thirdTask = await f.task({ kind: 'source', sourceContextId: thirdSource.sourceContextId });
+  await f.botRepo.update(f.botId, { boundPublicKey: identity().publicKey });
+  f.caller.peer.send(MessageType.BOT_LOCAL_TASK_ACCEPT, {
+    taskId: thirdTask.offer.taskId, result: { operation: 'youtube.resolve', track: LOCAL_TEST_TRACK },
+  });
+  assert.deepEqual(await f.event(thirdTask.offer, 'cancelled'),
+    { state: 'cancelled', taskId: thirdTask.offer.taskId, cause: 'permission_revoked' });
+  await f.bot.peer.error(MessageType.BOT_LOCAL_SOURCE_REQUEST,
+    { action: 'release', sourceContextId: thirdSource.sourceContextId }, ProtocolErrorCode.PERMISSION_DENIED);
+});
+
+test('local execution real bot reconnect keeps references but exact requester replacement during an await cannot gain a lease', async (t) => {
+  const f = await createLocalExecutionFixture(t);
+  const invocation = await f.invoke();
+  const source = await f.retain(invocation.id);
+  const first = await f.task({ kind: 'source', sourceContextId: source.sourceContextId });
+  const reconnected = await f.connectBot(f.token, f.bot.keys, 'Local fixture bot');
+  assert.deepEqual(await f.event(first.offer, 'cancelled', f.caller.peer),
+    { state: 'cancelled', taskId: first.offer.taskId, cause: 'bot_disconnected' });
+  await reconnected.peer.request(MessageType.COMMAND_REGISTER, { commands: LOCAL_TEST_COMMANDS });
+  const next = await f.task({ kind: 'source', sourceContextId: source.sourceContextId },
+    { operation: 'youtube.resolve', url: LOCAL_TEST_URL }, reconnected.peer);
+  f.caller.peer.send(MessageType.BOT_LOCAL_TASK_ACCEPT, {
+    taskId: next.offer.taskId, result: { operation: 'youtube.resolve', track: LOCAL_TEST_TRACK },
+  });
+  await f.event(next.offer, 'completed', reconnected.peer);
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const original = f.channelService.getAccessContext.bind(f.channelService);
+  let held = false;
+  t.mock.method(f.channelService, 'getAccessContext', async (userId: string) => {
+    const access = await original(userId);
+    if (userId === f.caller.id && !held) { held = true; enter(); await gate; }
+    return access;
+  });
+  const pending = reconnected.peer.request(MessageType.BOT_LOCAL_TASK_REQUEST, {
+    context: { kind: 'source', sourceContextId: source.sourceContextId },
+    spec: { operation: 'youtube.resolve', url: LOCAL_TEST_URL },
+  });
+  try {
+    await entered;
+    const replacement = await f.human('Local caller', f.caller.keys, f.caller.deviceId);
+    release();
+    const refused = await pending;
+    assert.equal(refused.type, MessageType.SERVER_ERROR);
+    assert.equal(refused.payload.message, 'requester_disconnected');
+    assert.equal(replacement.peer.messages.some((message) => message.type === MessageType.BOT_LOCAL_TASK_OFFER), false);
+  } finally {
+    release();
+    await pending;
+  }
+});
+
+test('local execution real private ICE uses authorized per-recipient TURN, excludes TURN in SFU and never masks builder failure', async (t) => {
+  const f = await createLocalExecutionFixture(t);
+  const invocation = await f.invoke();
+  const source = await f.retain(invocation.id);
+  await f.join(invocation.id);
+  const context: LocalRequestContext = { kind: 'source', sourceContextId: source.sourceContextId };
+  t.mock.method(f.coturnManager, 'isRunning', () => true);
+  await f.serverRepo.updateServer({ turnEnabled: true, turnSecret: 'fixture-only-turn-secret', voiceMode: 'p2p' });
+  const p2p = await f.task(context, { operation: 'youtube.stream', url: LOCAL_TEST_URL });
+  const botTurn = p2p.offer.media?.iceServers.find((ice) => ice.username);
+  const executorTurn = p2p.executorOffer.media?.iceServers.find((ice) => ice.username);
+  assert.ok(botTurn && executorTurn);
+  assert.ok(botTurn.username?.endsWith(`:${f.botId}`));
+  assert.ok(executorTurn.username?.endsWith(`:${f.caller.id}`));
+  f.bot.peer.send(MessageType.BOT_LOCAL_TASK_CONTROL, { taskId: p2p.offer.taskId, revision: 0, action: 'cancel' });
+  await f.event(p2p.offer, 'cancelled');
+  await f.serverRepo.updateServer({ voiceMode: 'sfu' });
+  const sfu = await f.task(context, { operation: 'youtube.stream', url: LOCAL_TEST_URL });
+  assert.equal(sfu.offer.media?.iceServers.some((ice) => ice.username), false);
+  assert.equal(sfu.executorOffer.media?.iceServers.some((ice) => ice.username), false);
+  f.bot.peer.send(MessageType.BOT_LOCAL_TASK_CONTROL, { taskId: sfu.offer.taskId, revision: 0, action: 'cancel' });
+  await f.event(sfu.offer, 'cancelled');
+  t.mock.method(f.coturnManager, 'buildIceServers', () => { throw new Error('Controlled local ICE builder failure'); });
+  const failed = await f.bot.peer.request(MessageType.BOT_LOCAL_TASK_REQUEST, {
+    context, spec: { operation: 'youtube.stream', url: LOCAL_TEST_URL }, voiceChannelId: f.voiceId,
+  });
+  assert.equal(failed.type, MessageType.SERVER_ERROR);
+  assert.equal(failed.payload.message, 'transport_failed');
+});
+
+test('local execution real voice mode change and bot removal cancel private tasks before allowing further work', async (t) => {
+  const f = await createLocalExecutionFixture(t);
+  const invocation = await f.invoke();
+  const source = await f.retain(invocation.id);
+  await f.join(invocation.id);
+  const context: LocalRequestContext = { kind: 'source', sourceContextId: source.sourceContextId };
+  const stream = await f.task(context, { operation: 'youtube.stream', url: LOCAL_TEST_URL });
+  t.mock.method(f.wsServer['sfuManager'], 'checkPortAvailability', async () => null);
+  t.mock.method(f.wsServer['sfuManager'], 'init', async () => true);
+  assert.equal((await f.owner.peer.request(MessageType.SERVER_UPDATE_SETTINGS, { voiceMode: 'sfu' })).type,
+    MessageType.SERVER_SETTINGS_UPDATED);
+  assert.deepEqual(await f.event(stream.offer, 'cancelled'),
+    { state: 'cancelled', taskId: stream.offer.taskId, cause: 'voice_mode_changed' });
+  const metadata = await f.task(context);
+  assert.equal((await f.owner.peer.request(MessageType.BOT_REVOKE, { botId: f.botId })).type, MessageType.BOT_REVOKED);
+  assert.deepEqual(await f.event(metadata.offer, 'cancelled', f.caller.peer),
+    { state: 'cancelled', taskId: metadata.offer.taskId, cause: 'permission_revoked' });
+  assert.deepEqual(f.wsServer['botLocalExecution'].counts, { tasks: 0, sources: 0, released: 0, previews: 0, retired: 0 });
 });

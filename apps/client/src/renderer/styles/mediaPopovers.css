@@ -1,0 +1,56 @@
+.media-settings-popover {
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.media-settings-popover--camera {
+  width: 420px;
+  padding: 12px;
+}
+
+.media-settings-popover--noise {
+  width: 320px;
+}
+
+.media-settings-popover .audio-device-settings {
+  position: sticky;
+  bottom: -8px;
+  z-index: 1;
+  background: var(--bg-secondary);
+}
+
+.media-settings-popover--camera .audio-device-settings {
+  bottom: -12px;
+}
+
+.media-settings-popover .audio-device-settings:hover,
+.media-settings-popover .audio-device-settings:focus-visible {
+  background: var(--bg-card-hover);
+}
+
+.media-popover-title {
+  margin: 4px 10px 12px;
+  font-size: 13px;
+}
+
+.media-settings-popover .noise-suppression-control {
+  margin: 4px 0;
+}
+
+.noise-suppression-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.media-settings-popover--noise .audio-device-status {
+  padding: 0 10px;
+}
+
+.media-settings-popover--camera .camera-effects-cards {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.media-settings-popover .camera-effects-notices {
+  flex-wrap: wrap;
+}

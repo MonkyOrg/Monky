@@ -1,3 +1,8 @@
+import type { SelectionChoice } from './selection.js';
+import type { CommandLocalizations } from './botLocales.js';
+import type { LocalCapabilityId } from './localExecution.js';
+import type { NativeScreenSource } from './screenSharing.js';
+
 export type ChannelType = 'VOICE' | 'TEXT';
 
 export type VoiceMode = 'p2p' | 'sfu';
@@ -122,6 +127,8 @@ export interface BotCommandContext {
 
 /** Resolved by the server from the original, never supplied by the sender. */
 export interface MessageReply {
+  isBot?: boolean;
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   messageId: string;
   userNickname: string;
   content: string;
@@ -130,6 +137,7 @@ export interface MessageReply {
 }
 
 export interface ChatMessage {
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   reply?: MessageReply;
   reactions?: import('./reactions.js').MessageReaction[];
   id: string;
@@ -182,19 +190,31 @@ export interface VoiceRosterParticipant {
   voiceState: VoiceParticipantState;
 }
 
-export interface VoiceParticipantState {
+export interface VoiceRestrictions {
+  serverMuted: boolean;
+  serverDeafened: boolean;
+}
+
+export interface VoiceParticipantState extends VoiceRestrictions {
   /** The connection this state belongs to (#309). Unique per device. */
   sessionId: string;
   userId: string;
   channelId: string;
   isMuted: boolean;
   isDeafened: boolean;
-  serverMuted: boolean;
-  serverDeafened: boolean;
   isSpeaking: boolean;
   isCameraOn: boolean;
   isScreenSharing: boolean;
   isSharingScreenAudio: boolean;
+  /** Server-authorized bot microphone reception; never granted by a renderer update. */
+  receivesVoice?: boolean;
+  /** Requested and granted bot directions, independent of administrative mute/deafen. */
+  botVoicePermissions?: {
+    publish: boolean;
+    receive: boolean;
+    publishRequested: boolean;
+    receiveRequested: boolean;
+  };
   /** SFU transport health, measured by the server rather than signaling presence. */
   connectionHealth?: VoiceConnectionHealth;
   /**
@@ -205,6 +225,8 @@ export interface VoiceParticipantState {
    * source of truth for clients that predate this field.
    */
   screenShareIds?: string[];
+  /** Descriptors only: native capture starts when an authenticated viewer watches. */
+  nativeScreenShares?: NativeScreenSource[];
 }
 
 /** CPU and RAM of the machine hosting the server, as measured by the server. */
@@ -221,26 +243,41 @@ export type CommandOptionType = 'string' | 'integer' | 'boolean' | 'user';
 /** One option (parameter) a slash command accepts. */
 export interface CommandOption {
   name: string;
+  /** Display label only; name remains the stable argument identifier. */
+  label?: string;
   description: string;
   type: CommandOptionType;
   required?: boolean;
   placeholder?: string;
-  choices?: Array<{ label: string; value: string }>;
+  choices?: SelectionChoice[];
+  /** Dynamic suggestions for a string option; mutually exclusive with choices. */
+  autocomplete?: boolean;
   min?: number;
   max?: number;
 }
+
+export type CommandVoiceRequirement = 'joined' | 'same-bot-channel';
 
 /** A registered slash command. */
 export interface SlashCommand {
   /** Unique per bot; the command name without the leading `/`. */
   name: string;
   description: string;
+  localizations?: CommandLocalizations;
   /** The bot that owns this command (`UserSummary.id`). */
   botId: string;
   /** Display-friendly bot name for the command dropup. */
   botName: string;
   botAvatarUrl?: string | null;
+  /** Server-authenticated key; required when localCapabilities is nonempty. */
+  botPublicKey?: string;
   options?: CommandOption[];
+  /** Prepare these capabilities before starting an invocation or suggestion deadline. */
+  localCapabilities?: LocalCapabilityId[];
+  /** Requires explicit caller consent for one local soundboard download. */
+  downloadsSound?: boolean;
+  /** Enforced for invocation, autocomplete and private previews on the caller's device. */
+  voiceRequirement?: CommandVoiceRequirement;
 }
 
 /** A bot account visible in the management UI. */
@@ -253,6 +290,18 @@ export interface BotInfo {
   /** Whether TOFU binding is complete (first connection done). */
   bound: boolean;
   online: boolean;
+  /** A manual link awaiting the bot's first identity announcement. */
+  profilePending: boolean;
+  lastProtocolVersion?: number | null;
+  requiredProtocolVersion?: number;
+  /** Absent declarations are unreviewed, never implicitly approved. */
+  permissions?: import('./botPermissions.js').BotPermissions;
+}
+
+export interface BotCompatibilitySummary {
+  protocolVersion: number;
+  incompatibleBots: number;
+  uncheckedBots: number;
 }
 
 // ── End bot types ─────────────────────────────────────────────────────────
@@ -260,6 +309,8 @@ export interface BotInfo {
 export interface ServerDetails {
   id: string;
   name: string;
+  /** Version of the running server, not the connected desktop application. */
+  serverVersion?: string | null;
   createdAt: number;
   maxUsers: number;
   hasPassword?: boolean;
@@ -358,14 +409,32 @@ export interface TurnAvailability {
  */
 export type TurnInstallStage = 'refreshing' | 'installing' | 'configuring';
 
+export type RtcTransportPurpose = 'call' | 'screen';
+
 export interface WebRtcSignalPayload {
   /** Peers are addressed per connection, not per person (#309). */
   targetSessionId: string;
   fromSessionId: string;
-  signalType: 'offer' | 'answer' | 'candidate' | 'user-left' | 'screen-audio-meta' | 'screen-video-meta';
+  signalType: 'offer' | 'answer' | 'candidate' | 'user-left' | 'screen-audio-meta' | 'screen-video-meta' | 'screen-watch';
   sdp?: any; // RTCSessionDescriptionInit
   candidate?: any; // RTCIceCandidateInit
   streamId?: string; // For screen-audio-meta/screen-video-meta: the MediaStream ID of the screen track
+  /** Sender's epoch for SDP/metadata; publisher's epoch for a Watch command. */
+  subscriptionId?: string;
+  /** Prevents a previous call on the same device/session ID from authorizing reception. */
+  watcherSubscriptionId?: string;
+  watching?: boolean;
+  /** Monotonic per share and subscriptionId, including Stop commands. */
+  subscriptionRevision?: number;
+}
+
+export interface ScreenWatchSignalPayload extends WebRtcSignalPayload {
+  signalType: 'screen-watch';
+  streamId: string;
+  subscriptionId: string;
+  watcherSubscriptionId: string;
+  subscriptionRevision: number;
+  watching: boolean;
 }
 
 export interface BandwidthSettings {

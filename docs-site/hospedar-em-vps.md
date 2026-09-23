@@ -4,7 +4,8 @@ Para manter o servidor no ar 24/7, rode só o servidor em uma máquina Linux —
 sem interface gráfica e sem clonar o repositório. Todo o trabalho é feito pelo
 **Monky CLI**, que é distribuído pronto em cada release.
 
-Requer **Node.js 22 ou superior** (exigência do mediasoup; a CI também usa 22).
+Use **Node.js 22 ou 24**. O modo SFU depende do worker nativo do mediasoup;
+confira os pré-requisitos de instalação no [CLI](/cli#instalacao).
 
 ## Passo a passo
 
@@ -25,8 +26,20 @@ O `monky create` pergunta onde guardar os dados, pede o código de identidade do
 dono e oferece iniciar o servidor ao final. Numa VPS, prefira um caminho fora do
 seu diretório pessoal, como `/srv/monky`.
 
-O servidor roda como daemon do PM2 e volta sozinho depois de um reboot. A
-referência completa dos comandos está em [Monky CLI](/cli).
+O servidor roda como processo gerenciado pelo PM2. **Voltar após um reboot
+depende de configurar o serviço de inicialização**, não apenas de aparecer
+como `online`:
+
+```bash
+pm2 save
+pm2 startup
+```
+
+Execute o comando privilegiado que `pm2 startup` indicar para o usuário correto.
+Se já existe um serviço de inicialização desse usuário, confira-o em vez de
+criar outro. `pm2 save` salva a lista de processos gerenciados, incluindo outros
+apps do mesmo usuário. Confira serviço, processo e porta depois de reiniciar.
+A referência completa está em [Monky CLI](/cli).
 
 ## Portas usadas
 
@@ -34,7 +47,7 @@ referência completa dos comandos está em [Monky CLI](/cli).
 |---|---|---|---|
 | `3000` (ou escolhida) | TCP | Login, chat, canais e sinalização | Sim, no firewall da VPS |
 | `41234` | UDP | Descoberta na rede local | Não, numa VPS |
-| Altas dinâmicas | UDP | Voz, vídeo e tela P2P | Normalmente funciona via STUN |
+| Altas dinâmicas nos participantes | UDP | Voz, vídeo e tela P2P | São conexões dos clientes, não uma faixa adicional a abrir na VPS sem relay |
 | `40000-49151` | UDP e TCP | Mídia WebRTC no Modo SFU (mediasoup) | Só com o modo SFU ativado |
 | `3478` | TCP e UDP | Relay TURN, se você ligar | Só com o relay ligado |
 | `49152-65535` | UDP | Mídia repassada pelo relay | Só com o relay ligado |
@@ -62,6 +75,10 @@ sudo iptables -I INPUT -p tcp --dport 40000:49151 -j ACCEPT
 sudo netfilter-persistent save
 ```
 
+O comando de persistência pressupõe `netfilter-persistent` instalado e
+configurado, comum em Debian/Ubuntu. Em outra distribuição, use o mecanismo do
+firewall existente. Não misture gerenciadores de firewall sem revisar suas regras.
+
 ::: tip Se usar `ufw` em vez de `iptables`
 ```bash
 sudo ufw allow 40000:49151/udp
@@ -82,10 +99,13 @@ Para conferir se está valendo, entre num canal de voz e veja se a mídia chega:
 sudo tcpdump -n -i any udp portrange 40000-49151 -c 20
 ```
 
-Pacotes `In` de fora da máquina significam que o range está aberto. Só tráfego
-`Out`, ou nada, quer dizer que algo antes está barrando — repare se existe uma
-regra `REJECT` na cadeia `INPUT` acima das que você acabou de inserir
-(`sudo iptables -L INPUT -n -v --line-numbers` mostra a ordem).
+Teste com participantes em redes diferentes e confira a reprodução nos dois
+sentidos. Pacotes capturados comprovam chegada à interface, não que o firewall
+ou o serviço os aceitou. Ausência de UDP também pode significar IP anunciado
+incorreto, falta de envio ou uso de TCP; não diagnostique só pela captura.
+
+Confira a ordem das regras com `sudo iptables -L INPUT -n -v --line-numbers`
+e os endereços/portas anunciados nos logs do servidor.
 
 ## Manutenção
 
@@ -93,7 +113,7 @@ regra `REJECT` na cadeia `INPUT` acima das que você acabou de inserir
 monky logs --level WARN         # o que precisa de atenção
 monky config set port 3010      # muda a porta e oferece reiniciar
 monky update --check            # há versão nova?
-monky config set autoUpdate true  # atualiza sozinho, diariamente às 4h
+monky config set autoUpdate true  # configura a agenda de atualização automática
 ```
 
 ### Atualizar a versão do Node

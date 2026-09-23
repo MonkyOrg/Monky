@@ -3,10 +3,8 @@ import { settingsStore } from '../stores/settingsStore';
 import { voiceStore } from '../stores/voiceStore';
 import { soundEffects } from './SoundEffects';
 import { clientLog } from './ClientLogService';
-import { RnnoiseWorkletNode, loadRnnoise } from '@sapphi-red/web-noise-suppressor';
-import rnnoiseWorkletUrl from '@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url';
-import rnnoiseWasmUrl from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url';
-import rnnoiseSimdWasmUrl from '@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url';
+import { createNoiseSuppressor, destroyNoiseSuppressor, type NoiseSuppressorNode } from './NoiseSuppression';
+import type { NoiseSuppressionMode } from '../utils/audioPreferences';
 
 export class AudioProcessor {
   private rawMicStream: MediaStream | null = null;
@@ -14,21 +12,29 @@ export class AudioProcessor {
   private audioContext: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
   private microphoneSource: MediaStreamAudioSourceNode | null = null;
-  private rnnoiseNode: RnnoiseWorkletNode | null = null;
+  private noiseSuppressorNode: NoiseSuppressorNode | null = null;
+  private noiseSuppressionGeneration = 0;
+  private noiseSuppressionChanging = false;
+  private noiseProcessorFailed = false;
   private destinationNode: MediaStreamAudioDestinationNode | null = null;
 
-  private vadInterval: any = null;
+  private vadInterval: ReturnType<typeof setInterval> | null = null;
   private isSpeaking: boolean = false;
   private vadThreshold: number = settingsStore.vadSensitivity !== undefined ? settingsStore.vadSensitivity : 14;
   private isMuted: boolean = voiceStore.getEffectiveMuted();
   private isDeafened: boolean = voiceStore.getEffectiveDeafened();
 
   private isPttActive: boolean = false;
-  private pttReleaseTimeout: any = null;
+  private isPttPressed: boolean = false;
+  private inputMode = settingsStore.inputMode;
+  private pttReleaseTimeout: ReturnType<typeof setTimeout> | null = null;
   private unbindPttEvents: Array<() => void> = [];
-
-  private cachedWasmBinary: ArrayBuffer | null = null;
-  private isWorkletModuleLoaded: boolean = false;
+  private unbindMicrophoneEvents: Array<() => void> = [];
+  private captureGeneration = 0;
+  private pendingDeviceSwitch: AbortController | null = null;
+  private deviceSwitchTask: Promise<void> | null = null;
+  private graphReady = false;
+  private microphonePublicationPending = false;
 
   constructor() {
     this.initPtt();
@@ -36,30 +42,34 @@ export class AudioProcessor {
 
   public async startMicrophone(deviceId?: string): Promise<MediaStream> {
     this.stopMicrophone();
+    const generation = this.captureGeneration;
 
-    const targetDeviceId = deviceId || settingsStore.selectedMicrophoneId || undefined;
+    const targetDeviceId = deviceId ?? settingsStore.selectedMicrophoneId;
     clientLog.info('AUDIO', 'Starting microphone', { deviceId: targetDeviceId || 'default' });
     const constraints: MediaStreamConstraints = {
       audio: {
         deviceId: targetDeviceId ? { exact: targetDeviceId } : undefined,
+        channelCount: 1,
         echoCancellation: true,
-        // If RNNoise is active, we avoid double-processing artifacts by turning off standard browser NS
-        noiseSuppression: !settingsStore.noiseSuppressionEnabled,
+        noiseSuppression: settingsStore.noiseSuppressionMode === 'browser',
         autoGainControl: true,
       },
       video: false,
     };
 
+    let rawStream: MediaStream;
     try {
-      this.rawMicStream = await navigator.mediaDevices.getUserMedia(constraints);
-    } catch (err: any) {
+      rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err: unknown) {
+      if (generation !== this.captureGeneration) throw new DOMException('Microphone startup was cancelled', 'AbortError');
       if (targetDeviceId) {
-        clientLog.warn('AUDIO', 'Could not open specific mic, falling back to default', { error: err.message });
+        clientLog.warn('AUDIO', 'Could not open specific mic, falling back to default', { error: err instanceof Error ? err.message : String(err) });
         console.warn('[AudioProcessor] Could not open specific mic, falling back to default mic:', err);
-        this.rawMicStream = await navigator.mediaDevices.getUserMedia({
+        rawStream = await navigator.mediaDevices.getUserMedia({
           audio: {
+            channelCount: 1,
             echoCancellation: true,
-            noiseSuppression: !settingsStore.noiseSuppressionEnabled,
+            noiseSuppression: settingsStore.noiseSuppressionMode === 'browser',
             autoGainControl: true,
           },
           video: false,
@@ -68,99 +78,238 @@ export class AudioProcessor {
         throw err;
       }
     }
+    if (generation !== this.captureGeneration) {
+      rawStream.getTracks().forEach((track) => track.stop());
+      throw new DOMException('Microphone startup was cancelled', 'AbortError');
+    }
+    this.rawMicStream = rawStream;
+    rawStream.getAudioTracks().forEach((track) => { track.enabled = false; });
 
-    // Setup Web Audio graph (RNNoise + VAD + Destination stream)
-    await this.setupAudioGraph(this.rawMicStream);
+    try {
+      await this.setupAudioGraph(rawStream);
+    } catch (error) {
+      if (generation === this.captureGeneration) this.releaseMicrophoneResources();
+      throw error;
+    }
+    if (this.rawMicStream !== rawStream) {
+      throw new DOMException('Microphone startup was cancelled', 'AbortError');
+    }
     this.isMuted = voiceStore.getEffectiveMuted();
     this.isDeafened = voiceStore.getEffectiveDeafened();
+    this.bindMicrophoneTracks();
+    this.graphReady = true;
     this.applyTrackEnabled();
     return this.localStream || this.rawMicStream;
   }
 
-  private async loadWasmBinary(): Promise<ArrayBuffer | null> {
-    if (this.cachedWasmBinary) return this.cachedWasmBinary;
-    try {
-      this.cachedWasmBinary = await loadRnnoise({
-        url: rnnoiseWasmUrl,
-        simdUrl: rnnoiseSimdWasmUrl,
-      });
-      return this.cachedWasmBinary;
-    } catch (err) {
-      console.warn('[AudioProcessor] Could not load RNNoise WASM binary:', err);
-      return null;
+  private bindMicrophoneTracks(): void {
+    this.unbindMicrophoneEvents.forEach((unbind) => unbind());
+    this.unbindMicrophoneEvents = [];
+    const tracks = new Set([
+      ...(this.rawMicStream?.getAudioTracks() ?? []),
+      ...(this.localStream?.getAudioTracks() ?? []),
+    ]);
+    for (const track of tracks) {
+      const onEnded = () => {
+        this.resetPttState();
+        this.applyTrackEnabled();
+      };
+      track.addEventListener('ended', onEnded);
+      this.unbindMicrophoneEvents.push(() => track.removeEventListener('ended', onEnded));
     }
   }
 
-  private async setupAudioGraph(rawStream: MediaStream): Promise<void> {
+  public async switchMicrophone(
+    deviceId: string,
+    replaceTrack: (track: MediaStreamTrack, signal: AbortSignal) => Promise<void | (() => Promise<void>)>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.noiseSuppressionChanging) throw new Error('Noise suppression is being changed');
+    this.pendingDeviceSwitch?.abort();
+    const preceding = this.deviceSwitchTask;
+    const controller = new AbortController();
+    this.pendingDeviceSwitch = controller;
+    const cancel = () => controller.abort();
+    signal?.addEventListener('abort', cancel, { once: true });
+    const channelId = voiceStore.currentVoiceChannelId;
+    const sessionKey = voiceStore.voiceSessionKey;
+    const ensureCurrent = () => {
+      if (signal?.aborted || controller.signal.aborted ||
+          voiceStore.currentVoiceChannelId !== channelId || voiceStore.voiceSessionKey !== sessionKey) {
+        throw new DOMException('Microphone switch was cancelled', 'AbortError');
+      }
+    };
+    const task = (async () => {
+      // Finish rollback before another selection can publish or build a graph.
+      if (preceding) await preceding.catch(() => {});
+      ensureCurrent();
+      if (!this.graphReady) {
+        // A switch may supersede initial capture or asynchronous RNNoise setup.
+        this.captureGeneration++;
+        this.releaseMicrophoneResources();
+      }
+      await this.performMicrophoneSwitch(deviceId, replaceTrack, controller.signal, ensureCurrent);
+    })();
+    this.deviceSwitchTask = task;
     try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      // RNNoise operates on 48kHz audio frames
-      this.audioContext = new AudioCtx({ sampleRate: 48000 });
-      this.isWorkletModuleLoaded = false;
-      if (this.audioContext.state !== 'running') {
-        this.audioContext.resume().catch(() => {});
-      }
-
-      this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 256;
-      this.analyser.smoothingTimeConstant = 0.25;
-
-      this.destinationNode = this.audioContext.createMediaStreamDestination();
-      this.microphoneSource = this.audioContext.createMediaStreamSource(rawStream);
-
-      const rnnoiseWanted = settingsStore.noiseSuppressionEnabled;
-      let rnnoiseApplied = false;
-
-      if (rnnoiseWanted) {
-        try {
-          const wasm = await this.loadWasmBinary();
-          if (wasm && this.audioContext) {
-            await this.audioContext.audioWorklet.addModule(rnnoiseWorkletUrl);
-            this.isWorkletModuleLoaded = true;
-            this.rnnoiseNode = new RnnoiseWorkletNode(this.audioContext, {
-              maxChannels: 1,
-              wasmBinary: wasm,
-            });
-
-            this.microphoneSource.connect(this.rnnoiseNode);
-            this.rnnoiseNode.connect(this.destinationNode);
-            this.rnnoiseNode.connect(this.analyser);
-            rnnoiseApplied = true;
-            clientLog.info('AUDIO', 'RNNoise Neural Noise Suppression initialized');
-            console.log('[AudioProcessor] RNNoise Neural Noise Suppression successfully initialized.');
-          }
-        } catch (rnnoiseErr) {
-          clientLog.warn('AUDIO', 'RNNoise initialization failed, using standard routing', {
-            error: rnnoiseErr instanceof Error ? rnnoiseErr.message : String(rnnoiseErr),
-          });
-          console.warn('[AudioProcessor] RNNoise initialization failed, using standard routing:', rnnoiseErr);
-          rnnoiseApplied = false;
-          if (this.rnnoiseNode) {
-            try {
-              this.rnnoiseNode.disconnect();
-            } catch {}
-            this.rnnoiseNode = null;
-          }
-        }
-      }
-
-      if (!rnnoiseApplied) {
-        this.microphoneSource.connect(this.destinationNode);
-        this.microphoneSource.connect(this.analyser);
-        console.log('[AudioProcessor] Standard audio routing initialized.');
-      }
-
-      this.localStream = this.destinationNode.stream;
-      this.applyTrackEnabled();
-      this.startVadLoop();
-    } catch (err) {
-      clientLog.error('AUDIO', 'AudioContext graph setup failed, falling back to raw stream', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      console.warn('[AudioProcessor] AudioContext graph setup failed, falling back to raw stream:', err);
-      this.localStream = rawStream;
-      this.applyTrackEnabled();
+      await task;
+    } finally {
+      signal?.removeEventListener('abort', cancel);
+      if (this.pendingDeviceSwitch === controller) this.pendingDeviceSwitch = null;
+      if (this.deviceSwitchTask === task) this.deviceSwitchTask = null;
     }
+  }
+
+  private async performMicrophoneSwitch(
+    deviceId: string,
+    replaceTrack: (track: MediaStreamTrack, signal: AbortSignal) => Promise<void | (() => Promise<void>)>,
+    signal: AbortSignal,
+    ensureCurrent: () => void,
+  ): Promise<void> {
+    const previous = this.rawMicStream;
+    const generation = this.captureGeneration;
+    let next: MediaStream | null = null;
+    let source: MediaStreamAudioSourceNode | null = null;
+    try {
+      ensureCurrent();
+      next = await this.captureSelectedMicrophone(deviceId, signal);
+      next.getTracks().forEach((track) => { track.enabled = false; });
+      ensureCurrent();
+      const track = next.getAudioTracks()[0];
+      if (!track || track.readyState !== 'live') throw new Error('Selected microphone has no live audio track');
+      if (!previous) {
+        this.rawMicStream = next;
+        this.microphonePublicationPending = true;
+        await this.setupAudioGraph(next, ensureCurrent);
+        ensureCurrent();
+        const processedTrack = this.localStream?.getAudioTracks()[0];
+        if (!processedTrack || processedTrack.readyState !== 'live') throw new Error('Microphone graph has no live audio track');
+        const rollback = await replaceTrack(processedTrack, signal);
+        try {
+          ensureCurrent();
+        } catch (error) {
+          await rollback?.();
+          throw error;
+        }
+        this.microphonePublicationPending = false;
+        this.graphReady = true;
+      } else if (this.audioContext && this.destinationNode && this.analyser && this.localStream !== previous) {
+        // Keep the outgoing processed track stable for both P2P and SFU calls.
+        source = this.audioContext.createMediaStreamSource(next);
+        if (this.noiseSuppressorNode) source.connect(this.noiseSuppressorNode);
+        else {
+          source.connect(this.destinationNode);
+          source.connect(this.analyser);
+        }
+        this.microphoneSource?.disconnect();
+        this.microphoneSource = source;
+      } else {
+        await replaceTrack(track, signal);
+        try {
+          ensureCurrent();
+        } catch (error) {
+          const previousTrack = previous.getAudioTracks()[0];
+          if (this.rawMicStream === previous && previousTrack?.readyState === 'live') {
+            await replaceTrack(previousTrack, new AbortController().signal);
+          }
+          throw error;
+        }
+        this.localStream = next;
+      }
+      this.rawMicStream = next;
+      this.bindMicrophoneTracks();
+      this.isMuted = voiceStore.getEffectiveMuted();
+      this.isDeafened = voiceStore.getEffectiveDeafened();
+      this.applyTrackEnabled();
+      previous?.getTracks().forEach((oldTrack) => oldTrack.stop());
+      next = null;
+    } finally {
+      if (next) {
+        source?.disconnect();
+        next.getTracks().forEach((track) => track.stop());
+        if (!previous && generation === this.captureGeneration) this.releaseMicrophoneResources();
+      }
+    }
+  }
+
+  private captureSelectedMicrophone(deviceId: string, signal: AbortSignal): Promise<MediaStream> {
+    return new Promise((resolve, reject) => {
+      const cancel = () => reject(new DOMException('Microphone capture was cancelled', 'AbortError'));
+      if (signal.aborted) { cancel(); return; }
+      signal.addEventListener('abort', cancel, { once: true });
+      void navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: deviceId ? { exact: deviceId } : undefined,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: settingsStore.noiseSuppressionMode === 'browser',
+          autoGainControl: true,
+        },
+        video: false,
+      }).then((stream) => {
+        signal.removeEventListener('abort', cancel);
+        if (signal.aborted) stream.getTracks().forEach((track) => track.stop());
+        else resolve(stream);
+      }, (error: unknown) => {
+        signal.removeEventListener('abort', cancel);
+        reject(error);
+      });
+    });
+  }
+
+  private async setupAudioGraph(rawStream: MediaStream, ensureActive?: () => void): Promise<void> {
+    const generation = this.captureGeneration;
+    const ensureCurrent = () => {
+      ensureActive?.();
+      if (generation !== this.captureGeneration || this.rawMicStream !== rawStream) {
+        throw new DOMException('Microphone startup was cancelled', 'AbortError');
+      }
+    };
+    const context = new AudioContext({ sampleRate: 48000 });
+    this.audioContext = context;
+    this.analyser = context.createAnalyser();
+    this.analyser.fftSize = 256;
+    this.analyser.smoothingTimeConstant = 0.25;
+    this.destinationNode = context.createMediaStreamDestination();
+    this.microphoneSource = context.createMediaStreamSource(rawStream);
+    let node: NoiseSuppressorNode | null = null;
+    try {
+      await context.resume();
+      ensureCurrent();
+      node = await createNoiseSuppressor(context, settingsStore.noiseSuppressionMode);
+      ensureCurrent();
+    } catch (error) {
+      destroyNoiseSuppressor(node);
+      ensureCurrent();
+      throw error;
+    }
+    this.noiseSuppressorNode = node;
+    this.noiseProcessorFailed = false;
+    this.bindNoiseSuppressorError(node);
+    if (node) {
+      this.microphoneSource.connect(node);
+      node.connect(this.destinationNode);
+      node.connect(this.analyser);
+    } else {
+      this.microphoneSource.connect(this.destinationNode);
+      this.microphoneSource.connect(this.analyser);
+    }
+    this.localStream = this.destinationNode.stream;
+    this.applyTrackEnabled();
+    this.startVadLoop();
+    clientLog.info('AUDIO', 'Microphone processing initialized', { mode: settingsStore.noiseSuppressionMode });
+  }
+
+  private bindNoiseSuppressorError(node: NoiseSuppressorNode | null): void {
+    if (!node) return;
+    node.onprocessorerror = () => {
+      if (this.noiseSuppressorNode !== node) return;
+      this.noiseProcessorFailed = true;
+      this.graphReady = false;
+      this.applyTrackEnabled();
+      clientLog.error('AUDIO', 'Noise suppression processor failed; microphone transmission stopped');
+      appEvents.emit('audio.processing_error');
+    };
   }
 
   private initPtt(): void {
@@ -175,7 +324,19 @@ export class AudioProcessor {
     });
     this.unbindPttEvents.push(unbindSettings);
 
+    let channelId = voiceStore.currentVoiceChannelId;
+    let sessionKey = voiceStore.voiceSessionKey;
+    this.unbindPttEvents.push(appEvents.on('voice.channel_changed', () => {
+      if (channelId === voiceStore.currentVoiceChannelId && sessionKey === voiceStore.voiceSessionKey) return;
+      channelId = voiceStore.currentVoiceChannelId;
+      sessionKey = voiceStore.voiceSessionKey;
+      this.resetPttState();
+      this.setSpeaking(false);
+      this.applyTrackEnabled();
+    }));
+
     const handleWindowKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
       if (settingsStore.inputMode !== 'push_to_talk') return;
       if (!settingsStore.pttKey || settingsStore.pttKey.keyType !== 'keyboard') return;
       const target = e.target as HTMLElement | null;
@@ -244,48 +405,88 @@ export class AudioProcessor {
   }
 
   public handlePttState(active: boolean): void {
-    if (settingsStore.inputMode !== 'push_to_talk') return;
-    if (this.isMuted || this.isDeafened || voiceStore.getEffectiveMuted()) return;
+    if (settingsStore.inputMode !== 'push_to_talk'
+      || !this.isMicrophonePermitted()) {
+      this.resetPttState();
+      this.applyTrackEnabled();
+      return;
+    }
 
     if (active) {
+      this.isPttPressed = true;
       if (this.pttReleaseTimeout) {
         clearTimeout(this.pttReleaseTimeout);
         this.pttReleaseTimeout = null;
       }
-      if (!this.isPttActive) {
-        this.isPttActive = true;
-        this.applyTrackEnabled();
-        if (!this.isMuted && !this.isDeafened) {
-          this.setSpeaking(true);
-          soundEffects.playPttTone(true);
-        }
-      }
+      const newlyActive = !this.isPttActive;
+      this.isPttActive = true;
+      this.applyTrackEnabled();
+      this.setSpeaking(true);
+      if (newlyActive && voiceStore.microphoneOpen) soundEffects.playPttTone(true);
     } else {
-      if (this.isPttActive) {
-        if (this.pttReleaseTimeout) clearTimeout(this.pttReleaseTimeout);
+      // Native and focused-window handlers can report the same release.
+      // Only the first release starts the tail; duplicates must not extend it.
+      if (this.isPttPressed) {
+        this.isPttPressed = false;
+        this.applyTrackEnabled();
         const delay = Math.max(0, settingsStore.pttReleaseDelay || 0);
         this.pttReleaseTimeout = setTimeout(() => {
+          const wasOpen = voiceStore.microphoneOpen;
           this.isPttActive = false;
           this.pttReleaseTimeout = null;
           if (settingsStore.inputMode === 'push_to_talk') {
             this.applyTrackEnabled();
             this.setSpeaking(false);
-            soundEffects.playPttTone(false);
+            if (wasOpen) soundEffects.playPttTone(false);
           }
         }, delay);
       }
     }
   }
 
+  private resetPttState(): void {
+    if (this.pttReleaseTimeout) clearTimeout(this.pttReleaseTimeout);
+    this.pttReleaseTimeout = null;
+    this.isPttPressed = false;
+    this.isPttActive = false;
+    if (this.inputMode === 'push_to_talk') this.setSpeaking(false);
+  }
+
+  private isMicrophonePermitted(): boolean {
+    return voiceStore.currentVoiceChannelId !== null
+      && !this.isMuted && !this.isDeafened && !voiceStore.getEffectiveMuted();
+  }
+
+  private canActivateMicrophone(): boolean {
+    return this.isMicrophonePermitted() && this.graphReady && !this.microphonePublicationPending
+      && [this.rawMicStream, this.localStream || this.rawMicStream].every((stream) =>
+        stream?.getAudioTracks().some((track) => track.readyState === 'live'));
+  }
+
+  private publishMicrophoneState(): void {
+    const hasEnabledTrack = (stream: MediaStream | null): boolean =>
+      stream?.getAudioTracks().some((track) => track.readyState === 'live' && track.enabled) ?? false;
+    // A Web Audio destination can stay live after the physical input ends.
+    const ready = this.canActivateMicrophone();
+    const open = ready && hasEnabledTrack(this.rawMicStream) && hasEnabledTrack(this.localStream || this.rawMicStream);
+    // An in-call key may stay held during device recovery, but no activity is published before capture is ready.
+    voiceStore.setMicrophoneState(open, ready && this.isPttPressed);
+    if (!open) this.setSpeaking(false);
+  }
+
   public applyTrackEnabled(forceState?: boolean): void {
     const isPtt = settingsStore.inputMode === 'push_to_talk';
-    const isMuted = this.isMuted || this.isDeafened || voiceStore.getEffectiveMuted();
+    const canActivate = this.canActivateMicrophone();
+    if (this.inputMode !== settingsStore.inputMode || !this.isMicrophonePermitted()) {
+      this.resetPttState();
+      this.inputMode = settingsStore.inputMode;
+    }
     let enabled: boolean;
 
-    if (typeof forceState === 'boolean') {
-      enabled = forceState;
-    } else if (isMuted) {
+    if (!canActivate) {
       enabled = false;
+    } else if (typeof forceState === 'boolean') {
+      enabled = forceState;
     } else if (isPtt) {
       enabled = this.isPttActive;
     } else {
@@ -302,57 +503,89 @@ export class AudioProcessor {
         track.enabled = enabled;
       });
     }
+    this.publishMicrophoneState();
   }
 
-  public async setNoiseSuppression(enabled: boolean): Promise<void> {
-    clientLog.info('AUDIO', `Noise suppression ${enabled ? 'enabled' : 'disabled'}`);
-    if (!this.audioContext || !this.microphoneSource || !this.destinationNode || !this.analyser) {
+  public async setNoiseSuppression(mode: NoiseSuppressionMode, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new DOMException('Noise suppression selection was cancelled', 'AbortError');
+    if (this.noiseSuppressionChanging) throw new Error('Noise suppression is already being changed');
+    const generation = ++this.noiseSuppressionGeneration;
+    const context = this.audioContext;
+    const source = this.microphoneSource;
+    const destination = this.destinationNode;
+    const analyser = this.analyser;
+    const raw = this.rawMicStream;
+    if (!raw) {
+      const probe = new AudioContext({ sampleRate: 48000 });
+      let node: NoiseSuppressorNode | null = null;
+      try {
+        node = await createNoiseSuppressor(probe, mode);
+        if (signal?.aborted || generation !== this.noiseSuppressionGeneration || this.rawMicStream) {
+          throw new DOMException('Noise suppression selection was cancelled', 'AbortError');
+        }
+      } finally {
+        destroyNoiseSuppressor(node);
+        await probe.close();
+      }
       return;
     }
-
-    try {
-      // Disconnect previous audio graph nodes
-      try {
-        this.microphoneSource.disconnect();
-      } catch {}
-      if (this.rnnoiseNode) {
-        try {
-          this.rnnoiseNode.disconnect();
-          this.rnnoiseNode.destroy();
-        } catch {}
-        this.rnnoiseNode = null;
+    if ((!this.graphReady && !this.noiseProcessorFailed) || !context || !source || !destination || !analyser || this.pendingDeviceSwitch) {
+      throw new Error('Microphone capture is changing; try again when it is ready');
+    }
+    const ensureCurrent = () => {
+      if (signal?.aborted || generation !== this.noiseSuppressionGeneration ||
+          this.audioContext !== context || this.microphoneSource !== source || this.rawMicStream !== raw) {
+        throw new DOMException('Noise suppression selection was cancelled', 'AbortError');
       }
-
-      if (enabled) {
-        const wasm = await this.loadWasmBinary();
-        if (wasm) {
-          if (!this.isWorkletModuleLoaded) {
-            await this.audioContext.audioWorklet.addModule(rnnoiseWorkletUrl);
-            this.isWorkletModuleLoaded = true;
-          }
-          this.rnnoiseNode = new RnnoiseWorkletNode(this.audioContext, {
-            maxChannels: 1,
-            wasmBinary: wasm,
-          });
-
-          this.microphoneSource.connect(this.rnnoiseNode);
-          this.rnnoiseNode.connect(this.destinationNode);
-          this.rnnoiseNode.connect(this.analyser);
-          console.log('[AudioProcessor] Switched to RNNoise Neural Noise Suppression.');
-          return;
+    };
+    const previous = this.noiseSuppressorNode;
+    const previousBrowserSuppression = settingsStore.noiseSuppressionMode === 'browser';
+    this.noiseSuppressionChanging = true;
+    let next: NoiseSuppressorNode | null = null;
+    let constraintsChanged = false;
+    try {
+      next = await createNoiseSuppressor(context, mode);
+      ensureCurrent();
+      const track = raw.getAudioTracks()[0];
+      if (!track || track.readyState !== 'live') throw new Error('Microphone is no longer available');
+      await track.applyConstraints({ ...track.getConstraints(), noiseSuppression: mode === 'browser' });
+      constraintsChanged = true;
+      ensureCurrent();
+      if (next) {
+        next.connect(destination);
+        next.connect(analyser);
+      }
+      source.disconnect();
+      if (next) source.connect(next);
+      else {
+        source.connect(destination);
+        source.connect(analyser);
+      }
+      this.noiseSuppressorNode = next;
+      this.noiseProcessorFailed = false;
+      this.graphReady = true;
+      this.bindNoiseSuppressorError(next);
+      destroyNoiseSuppressor(previous);
+      this.applyTrackEnabled();
+      clientLog.info('AUDIO', 'Noise suppression changed', { mode });
+    } catch (error) {
+      destroyNoiseSuppressor(next);
+      if (this.rawMicStream === raw && this.microphoneSource === source && constraintsChanged) {
+        const track = raw.getAudioTracks()[0];
+        if (track?.readyState === 'live') {
+          await track.applyConstraints({ ...track.getConstraints(), noiseSuppression: previousBrowserSuppression });
+        }
+        source.disconnect();
+        if (previous) source.connect(previous);
+        else {
+          source.connect(destination);
+          source.connect(analyser);
         }
       }
-
-      // If disabled or RNNoise unavailable, route directly to destination
-      this.microphoneSource.connect(this.destinationNode);
-      this.microphoneSource.connect(this.analyser);
-      console.log('[AudioProcessor] Switched to standard/direct audio routing.');
-    } catch (err) {
-      console.warn('[AudioProcessor] Error switching noise suppression mode:', err);
-      try {
-        this.microphoneSource.connect(this.destinationNode);
-        this.microphoneSource.connect(this.analyser);
-      } catch {}
+      ensureCurrent();
+      throw error;
+    } finally {
+      this.noiseSuppressionChanging = false;
     }
   }
 
@@ -371,8 +604,8 @@ export class AudioProcessor {
 
     this.vadInterval = setInterval(() => {
       const isPtt = settingsStore.inputMode === 'push_to_talk';
-      const effectiveMuted = this.isMuted || this.isDeafened || voiceStore.getEffectiveMuted();
-      if (!this.analyser || effectiveMuted) {
+      if (!this.analyser || !this.canActivateMicrophone() || !voiceStore.microphoneOpen) {
+        silenceCounter = 0;
         if (this.isSpeaking) {
           this.setSpeaking(false);
         }
@@ -424,19 +657,16 @@ export class AudioProcessor {
   }
 
   private setSpeaking(speaking: boolean): void {
-    if (this.isSpeaking !== speaking) {
-      this.isSpeaking = speaking;
-      appEvents.emit('local.speaking', speaking);
+    const active = speaking && this.canActivateMicrophone() && voiceStore.microphoneOpen
+      && (settingsStore.inputMode !== 'push_to_talk' || this.isPttActive);
+    if (this.isSpeaking !== active) {
+      this.isSpeaking = active;
+      appEvents.emit('local.speaking', active);
     }
   }
 
   public setMuted(muted: boolean): void {
     this.isMuted = muted;
-    if (muted && this.pttReleaseTimeout) {
-      clearTimeout(this.pttReleaseTimeout);
-      this.pttReleaseTimeout = null;
-      this.isPttActive = false;
-    }
     this.applyTrackEnabled();
     if (muted && this.isSpeaking) {
       this.setSpeaking(false);
@@ -463,13 +693,16 @@ export class AudioProcessor {
     return this.localStream || this.rawMicStream;
   }
 
+  public getRawMicrophoneStream(): MediaStream | null {
+    return this.rawMicStream;
+  }
+
   /**
-   * Returns the current microphone input level (0..100) from the active VAD
-   * analyser, or -1 when the microphone is not currently active. Used by the
-   * settings UI to draw a live level meter next to the sensitivity slider.
+   * Returns the live call's input level, or -1 while transmission is disabled.
+   * Microphone settings use a separate local-only preview graph.
    */
   public getInputLevel(): number {
-    if (!this.analyser || this.isMuted) return -1;
+    if (!this.analyser || !this.canActivateMicrophone() || !voiceStore.microphoneOpen) return -1;
     const bufferLength = this.analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
     this.analyser.getByteFrequencyData(dataArray);
@@ -480,23 +713,43 @@ export class AudioProcessor {
   }
 
   public stopMicrophone(): void {
+    this.captureGeneration++;
+    this.pendingDeviceSwitch?.abort();
+    this.pendingDeviceSwitch = null;
     clientLog.info('AUDIO', 'Stopping microphone');
-    if (this.pttReleaseTimeout) {
-      clearTimeout(this.pttReleaseTimeout);
-      this.pttReleaseTimeout = null;
-      this.isPttActive = false;
+    this.resetPttState();
+    this.releaseMicrophoneResources();
+  }
+
+  private releaseMicrophoneResources(): void {
+    this.graphReady = false;
+    this.microphonePublicationPending = false;
+    this.unbindMicrophoneEvents.forEach((unbind) => unbind());
+    this.unbindMicrophoneEvents = [];
+    this.releaseAudioGraph();
+    if (this.rawMicStream) {
+      this.rawMicStream.getTracks().forEach((t) => t.stop());
+      this.rawMicStream = null;
     }
+    if (this.localStream) {
+      this.localStream.getTracks().forEach((t) => t.stop());
+      this.localStream = null;
+    }
+    if (this.isSpeaking) {
+      this.setSpeaking(false);
+    }
+    this.publishMicrophoneState();
+  }
+
+  private releaseAudioGraph(): void {
+    this.noiseSuppressionGeneration++;
+    this.noiseProcessorFailed = false;
     if (this.vadInterval) {
       clearInterval(this.vadInterval);
       this.vadInterval = null;
     }
-    if (this.rnnoiseNode) {
-      try {
-        this.rnnoiseNode.destroy();
-      } catch {}
-      this.rnnoiseNode = null;
-    }
-    this.isWorkletModuleLoaded = false;
+    destroyNoiseSuppressor(this.noiseSuppressorNode);
+    this.noiseSuppressorNode = null;
     if (this.microphoneSource) {
       try {
         this.microphoneSource.disconnect();
@@ -510,25 +763,15 @@ export class AudioProcessor {
       this.analyser = null;
     }
     if (this.destinationNode) {
+      this.destinationNode.stream.getTracks().forEach((track) => track.stop());
       try {
         this.destinationNode.disconnect();
       } catch {}
       this.destinationNode = null;
     }
-    if (this.audioContext && this.audioContext.state !== 'closed') {
-      this.audioContext.close().catch(() => {});
+    if (this.audioContext) {
+      if (this.audioContext.state !== 'closed') this.audioContext.close().catch(() => {});
       this.audioContext = null;
-    }
-    if (this.rawMicStream) {
-      this.rawMicStream.getTracks().forEach((t) => t.stop());
-      this.rawMicStream = null;
-    }
-    if (this.localStream) {
-      this.localStream.getTracks().forEach((t) => t.stop());
-      this.localStream = null;
-    }
-    if (this.isSpeaking) {
-      this.setSpeaking(false);
     }
   }
 
@@ -544,4 +787,3 @@ export class AudioProcessor {
 }
 
 export const audioProcessor = new AudioProcessor();
-

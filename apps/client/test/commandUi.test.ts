@@ -1,22 +1,26 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { BotCommandMessagePayload, SlashCommand, UserSummary } from '@monky/shared';
+import { getCommandPresentation, localizeCommand, type BotCommandMessagePayload, type BotPermissions, type BotSettingsSummary, type SlashCommand, type UserSummary } from '@monky/shared';
 import { createChatStore } from '../src/renderer/stores/chatStore';
 import { createServerStore, setActiveServerStore } from '../src/renderer/stores/serverStore';
 import { EventBus } from '../src/renderer/core/EventBus';
 import {
   COMMAND_USAGE_STORAGE_KEY, MAX_COMMAND_USAGE_ENTRIES, MAX_COMMAND_USAGE_SCOPES,
-  groupCommands, incrementCommandUsage, readCommandUsage, writeCommandUsage,
+  filterCommands, findCommandsByInputName, groupCommands, incrementCommandUsage, readCommandUsage, writeCommandUsage,
   type CommandUsage, type CommandUsageStorage,
 } from '../src/renderer/utils/commandCatalog';
 import {
   botCommandMessage, commandInputFields, commandValuesFromInputs, formatCommandContext,
-  visibleCommandFields, visibleCommandValues,
+  parseTypedCommand, visibleCommandFields, visibleCommandValues,
 } from '../src/renderer/utils/botInputs';
-import { renderCommandCatalog, renderCommandParameters } from '../src/renderer/views/commandCatalog';
-import { commandParameterChoices, renderCompactCommand, renderParameterChoices } from '../src/renderer/views/commandComposer';
+import { renderCommandCatalog, renderCommandParameters, renderEmptyCommandCatalog } from '../src/renderer/views/commandCatalog';
+import { commandParameterChoices, commandParameterError, renderCompactCommand, renderParameterChoices } from '../src/renderer/views/commandComposer';
 import { renderBotCommandContext } from '../src/renderer/views/botResponse';
-import { setLanguage } from '../src/renderer/i18n';
+import { renderBotFields } from '../src/renderer/views/botFields';
+import { renderBotInvocation } from '../src/renderer/views/BotChatView';
+import { getLanguage, setLanguage, t } from '../src/renderer/i18n';
+import { commandPreviewVolumeScope, type SelectionChoice } from '../src/renderer/utils/selectionChoices';
+import { translateProtocolError } from '../src/renderer/i18n/protocolErrors';
 
 class MemoryUsageStorage implements CommandUsageStorage {
   public values = new Map<string, string>();
@@ -42,6 +46,206 @@ const member: UserSummary = {
   id: 'member-one', clientId: 'member-client', nickname: 'Alice', status: 'ONLINE', joinedAt: 1,
   avatarUrl: 'http://127.0.0.1:9900/avatars/alice.png',
 };
+
+test('per-bot command metadata is localized for display without translating submitted identifiers', (context) => {
+  const previousLanguage = getLanguage();
+  context.after(() => setLanguage(previousLanguage));
+  setLanguage('en');
+  const localized: SlashCommand = {
+    ...command,
+    localizations: { 'pt-BR': {
+      name: 'tocar', aliases: ['musica'],
+      description: 'Escolha a música',
+      options: {
+        song: { label: 'Música', description: 'Título da música', placeholder: 'Digite o título' },
+        mode: { label: 'Modo', choices: { shuffle: { label: 'Aleatório' } } },
+      },
+    } },
+  };
+  const original = structuredClone(localized);
+  const catalog = renderCommandCatalog(groupCommands([localized, { ...localized, botId: 'english-bot' }], [], 'pt-BR', false), 0,
+    () => undefined, (entry) => entry.botId === localized.botId ? 'pt-BR' : 'en');
+  assert.ok(catalog.includes('Escolha a música'));
+  assert.ok(catalog.includes('Choose what to play'));
+  assert.ok(catalog.includes('/play'));
+  assert.ok(catalog.includes('/tocar'));
+  assert.ok(catalog.includes('data-command-name="play"'));
+  assert.ok(!catalog.includes('data-command-name="tocar"'));
+  assert.ok(catalog.includes('Música'));
+  const store = createChatStore();
+  store.selectCommand('channel', localized);
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  const translated = localizeCommand(draft.command, 'pt-BR');
+  const markup = renderCompactCommand(draft, 'channel', [member], true, true, undefined, 'pt-BR');
+  assert.match(markup, /data-field-name="song"/);
+  assert.match(markup, /name="song"/);
+  assert.match(markup, /data-command-name="play"/);
+  assert.ok(markup.includes('<strong>/tocar</strong>'));
+  assert.ok(markup.includes('>Música</label>'));
+  assert.ok(markup.includes('placeholder="Digite o título"'));
+  const choices = commandInputFields(translated).find((field) => field.name === 'mode');
+  assert.ok(choices);
+  assert.deepEqual(commandParameterChoices(choices, [member]).map(({ value, label }) => ({ value, label })), [
+    { value: 'ordered', label: 'In order' }, { value: 'shuffle', label: 'Aleatório' },
+  ]);
+  assert.deepEqual(commandValuesFromInputs(translated, { song: 'Private song', count: 1, mode: 'shuffle' }, [member]),
+    { success: true, values: { song: 'Private song', count: 1, mode: 'shuffle' } });
+  assert.deepEqual(localized, original);
+  assert.deepEqual(draft.command, original);
+});
+
+test('catalog filtering and sorting use each bot locale while frequency and IDs remain canonical', () => {
+  const first: SlashCommand = {
+    ...command, name: 'able', localizations: { 'pt-BR': { name: 'zulu', aliases: ['musica'] }, en: { aliases: ['audio'] } },
+  };
+  const last: SlashCommand = {
+    ...command, name: 'zebra', localizations: { 'pt-BR': { name: 'alpha' } },
+  };
+  const commands = [first, last, { ...first, botId: 'english' }, { ...last, botId: 'english' }];
+  const localeFor = (entry: SlashCommand) => entry.botId === 'english' ? 'en' as const : 'pt-BR' as const;
+  const groups = groupCommands(commands, [
+    { botId: first.botId, commandName: first.name, count: 10, lastUsedAt: 1 },
+  ], 'en', true, localeFor);
+  assert.deepEqual(groups.find((group) => group.id === `bot:${command.botId}`)?.commands.map((entry) => entry.name), ['zebra', 'able']);
+  assert.deepEqual(groups.find((group) => group.id === 'bot:english')?.commands.map((entry) => entry.name), ['able', 'zebra']);
+  assert.equal(groups[0].commands[0], first);
+  assert.deepEqual(filterCommands(commands, 'MUSICa', localeFor), [first]);
+  assert.deepEqual(filterCommands(commands, 'aud', localeFor), [commands[2]]);
+  assert.deepEqual(filterCommands(commands, 'zul', localeFor), [first]);
+  assert.deepEqual(filterCommands(commands, 'abl', localeFor), [first, commands[2]]);
+  assert.deepEqual(filterCommands(commands, 'Music Bot', localeFor), commands);
+  assert.deepEqual(filterCommands(commands, 'unavailable', localeFor), []);
+});
+
+test('slash input accepts only canonical and selected-locale names while preserving cross-bot ambiguity', () => {
+  const localized: SlashCommand = {
+    ...command, localizations: {
+      'pt-BR': { name: 'tocar', aliases: ['musica'] }, en: { name: 'listen', aliases: ['audio'] },
+    },
+  };
+  const duplicate: SlashCommand = { ...localized, botId: 'duplicate' };
+  const localeFor = (entry: SlashCommand) => entry.botId === 'duplicate' ? 'en' as const : 'pt-BR' as const;
+  for (const input of ['play', 'TOCAR', 'musica']) {
+    assert.deepEqual(parseTypedCommand(`/${input} Keep  spaces,\nand lines`, [localized], localeFor), {
+      kind: 'command', command: localized, text: 'Keep  spaces,\nand lines',
+    });
+  }
+  assert.deepEqual(parseTypedCommand('/audio', [localized], localeFor), { kind: 'unavailable' });
+  assert.deepEqual(parseTypedCommand('/listen', [localized], localeFor), { kind: 'unavailable' });
+  assert.deepEqual(parseTypedCommand('/audio Selected', [localized, duplicate], localeFor), {
+    kind: 'command', command: duplicate, text: 'Selected',
+  });
+  assert.deepEqual(parseTypedCommand('/play Input', [localized, duplicate], localeFor), {
+    kind: 'ambiguous', commands: [localized, duplicate], text: 'Input',
+  });
+  assert.deepEqual(parseTypedCommand('/musica Input', [localized, duplicate], () => 'pt-BR'), {
+    kind: 'ambiguous', commands: [localized, duplicate], text: 'Input',
+  });
+  const otherCanonical = { ...duplicate, name: 'tocar', localizations: undefined };
+  assert.deepEqual(findCommandsByInputName([localized, otherCanonical], 'tocar', () => 'pt-BR'), [localized, otherCanonical]);
+});
+
+test('stale same-bot aliases cannot shadow a canonical name regardless of registry ordering', () => {
+  const canonical = { ...command, name: 'stop' };
+  const shadow: SlashCommand = { ...command, localizations: { 'pt-BR': { name: 'stop', aliases: ['halt'] } } };
+  for (const commands of [[shadow, canonical], [canonical, shadow]]) {
+    assert.deepEqual(parseTypedCommand('/stop', commands, () => 'pt-BR'), { kind: 'command', command: canonical, text: '' });
+  }
+  const aliasCollision: SlashCommand = { ...canonical, localizations: { 'pt-BR': { aliases: ['halt'] } } };
+  assert.deepEqual(parseTypedCommand('/halt', [shadow, aliasCollision], () => 'pt-BR'), {
+    kind: 'ambiguous', commands: [shadow, aliasCollision], text: '',
+  });
+});
+
+test('rendering another locale preserves selected canonical command, optional fields and entered values', () => {
+  const localized: SlashCommand = {
+    ...command, localizations: {
+      'pt-BR': { name: 'tocar', options: { song: { label: 'Música' }, mode: { label: 'Modo', choices: { shuffle: { label: 'Aleatório' } } } } },
+      en: { name: 'listen', options: { song: { label: 'Song' }, mode: { label: 'Mode' } } },
+    },
+  };
+  const store = createChatStore();
+  store.selectCommand('channel', localized);
+  store.setCommandOptionVisible('channel', 'mode', true);
+  store.setCommandValues('channel', { song: 'Never translate this value', count: '2', mode: 'shuffle' });
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  const original = structuredClone(draft);
+  for (const locale of ['pt-BR', 'en'] as const) {
+    const markup = renderCompactCommand(draft, 'channel', [member], true, true, undefined, locale);
+    assert.ok(markup.includes(`<strong>/${locale === 'en' ? 'listen' : 'tocar'}</strong>`));
+    assert.ok(markup.includes('Never translate this value'));
+    assert.match(markup, /data-command-name="play"/);
+    assert.match(markup, /data-field-name="mode"/);
+    assert.ok(markup.includes(locale === 'en' ? 'Shuffle' : 'Aleatório'));
+    assert.deepEqual(commandValuesFromInputs(draft.command, draft.values, [member]), {
+      success: true, values: { song: 'Never translate this value', count: 2, mode: 'shuffle' },
+    });
+  }
+  assert.deepEqual(draft, original);
+});
+
+test('legacy command options keep compact identifier labels when no display label is declared', () => {
+  const store = createChatStore();
+  const legacy: SlashCommand = {
+    ...command,
+    options: [{ name: 'song', description: 'Search for a song using its title or URL.', type: 'string', required: true }],
+    localizations: { 'pt-BR': { options: { song: { description: 'Pesquise uma música pelo título ou URL.' } } } },
+  };
+  store.selectCommand('channel', legacy);
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  const markup = renderCompactCommand(draft, 'channel', [member], true, true, undefined, 'pt-BR');
+  assert.ok(markup.includes('>song</label>'));
+  assert.match(markup, /aria-label="song: Pesquise uma música/);
+  assert.ok(markup.includes('Pesquise uma música pelo título ou URL.'));
+  assert.ok(!markup.includes('>Pesquise uma música pelo título ou URL.</label>'));
+});
+
+test('voice denial explains catalog and composer gating without disabling editing or unrelated commands', () => {
+  const store = createChatStore();
+  const music = { ...command, voiceRequirement: 'same-bot-channel' as const };
+  store.setCommands([music]);
+  store.selectCommand('channel', music);
+  const draft = store.getCommandDraft('channel')!;
+  for (const locale of ['pt-BR', 'en'] as const) {
+    setLanguage(locale);
+    const required = translateProtocolError('BOT_VOICE_REQUIRED');
+    const mismatch = translateProtocolError('BOT_VOICE_CHANNEL_MISMATCH');
+    assert.match(required, locale === 'en' ? /voice channel.*device/i : /canal de voz.*dispositivo/i);
+    assert.match(mismatch, locale === 'en' ? /already in another voice channel/i : /já está em outro canal de voz/i);
+    const markup = renderCompactCommand(draft, 'channel', [member], true, true, mismatch);
+    assert.ok(markup.includes(mismatch));
+    assert.match(markup, /class="btn btn-primary bot-command-run" disabled/);
+    assert.doesNotMatch(markup, /data-bot-input[^>]*disabled/);
+    assert.doesNotMatch(markup, /data-bot-action="cancel-command"[^>]*disabled/);
+    const catalog = renderCommandCatalog(groupCommands([music, { ...command, name: 'utility' }], [], locale), 0,
+      (entry) => entry.voiceRequirement ? required : undefined);
+    assert.equal(catalog.match(/aria-disabled="true"/g)?.length, 1);
+  }
+  setLanguage('pt-BR');
+});
+
+test('changing voice context clears selected opaque choices while preserving editable queries and utility drafts', () => {
+  const store = createChatStore();
+  const music: SlashCommand = {
+    ...command, voiceRequirement: 'same-bot-channel',
+    options: [{ name: 'track', description: 'Track', type: 'string', required: true, autocomplete: true }],
+  };
+  store.selectCommand('voice-command', music, 'query');
+  store.setCommandVoiceContext('voice-command', 'first-room');
+  store.selectCommandChoice('voice-command', 'track', { label: 'Generated fixture', value: 'opaque-id' });
+  assert.equal(store.setCommandVoiceContext('voice-command', 'first-room'), false);
+  assert.equal(store.getCommandDraft('voice-command')?.values.track, 'opaque-id');
+  assert.equal(store.setCommandVoiceContext('voice-command', 'other-room'), true);
+  assert.deepEqual(store.getCommandDraft('voice-command')?.autocomplete.track, { query: 'Generated fixture' });
+  assert.equal(store.getCommandDraft('voice-command')?.values.track, undefined);
+  store.selectCommand('utility', { ...music, voiceRequirement: undefined });
+  store.selectCommandChoice('utility', 'track', { label: 'Fixture', value: 'other-id' });
+  assert.equal(store.setCommandVoiceContext('utility', 'outside-voice'), false);
+  assert.equal(store.getCommandDraft('utility')?.values.track, 'other-id');
+});
 
 function usageStore(storage: CommandUsageStorage, serverId: string, commands = [command, otherBot], callerId = member.id) {
   const store = createChatStore(storage);
@@ -272,6 +476,46 @@ test('command discovery renders avatars, grouped rows, required chips and an hon
   assert.ok(escaped.includes('&lt;img src=x&gt;'));
 });
 
+test('empty discovery distinguishes loading, offline bots, consent, denied commands and missing registration', (context) => {
+  const previous = getLanguage();
+  context.after(() => setLanguage(previous));
+  const permissions: BotPermissions = {
+    requested: ['commands'], granted: [], revision: 1,
+    reviewRequired: true, reviewedBy: null, reviewedAt: null,
+  };
+  const bot: BotSettingsSummary = {
+    botId: 'music-bot', name: '<Music Bot>', online: true, capabilities: { downloadsSound: false },
+    schemaRevision: 1, revision: 0, hasServerSettings: false, hasUserSettings: false,
+    canConfigure: false, canManage: true,
+    permissions,
+  };
+  for (const language of ['pt-BR', 'en'] as const) {
+    setLanguage(language);
+    assert.ok(renderEmptyCommandCatalog(null).includes(t('botChat.loadingCommands')));
+    assert.ok(renderEmptyCommandCatalog([]).includes(t('botChat.noOnlineBots')));
+    assert.ok(renderEmptyCommandCatalog([{ ...bot, online: false }]).includes(t('botChat.noOnlineBots')));
+    const pending = renderEmptyCommandCatalog([bot]);
+    assert.ok(pending.includes(t('botChat.commandsReviewRequired')));
+    assert.ok(pending.includes('&lt;Music Bot&gt;'));
+    assert.ok(pending.includes('data-command-bot-configure="music-bot"'));
+    assert.ok(!pending.includes(t('botChat.noOnlineBots')));
+    assert.ok(!renderEmptyCommandCatalog([{ ...bot, canManage: false }]).includes('data-command-bot-configure'));
+    const denied = { ...bot, permissions: { ...permissions, reviewRequired: false } };
+    assert.ok(renderEmptyCommandCatalog([denied]).includes(t('botChat.commandsNotGranted')));
+    const undeclared = { ...bot, permissions: { ...permissions, requested: null } };
+    assert.ok(renderEmptyCommandCatalog([undeclared]).includes(t('botChat.commandsUndeclared')));
+    const ready: BotSettingsSummary = {
+      ...bot, permissions: { ...permissions, granted: ['commands'], reviewRequired: false },
+    };
+    assert.ok(renderEmptyCommandCatalog([ready]).includes(t('botChat.commandsUnavailable')));
+    assert.ok(renderEmptyCommandCatalog([bot], true).includes(t('botChat.noMatchingCommands')));
+    assert.ok(!renderEmptyCommandCatalog([bot], true).includes('data-command-bot-configure'));
+    const empty = renderCommandCatalog([], 0, undefined, undefined, pending);
+    assert.ok(empty.includes(t('botChat.commandsReviewRequired')));
+    assert.ok(!empty.includes('role="listbox"'), 'Configuration actions are not exposed as command options');
+  }
+});
+
 test('required arguments stay visible; removing optional arguments omits them without losing typed values', () => {
   const store = usageStore(new MemoryUsageStorage(), 'server');
   store.selectCommand('channel', command, 'A title with spaces and, commas');
@@ -372,6 +616,10 @@ test('compact composer uses inline controls and anchored declared/member choices
   assert.equal(html.includes('class="bot-fields"'), false);
   assert.equal(html.includes('<select'), false);
   assert.equal((html.match(/type="submit"/g) ?? []).length, 1);
+  assert.match(html, /bot-command-run" disabled/);
+  store.setCommandValues('channel', { song: 'Multiword title', count: '0' });
+  const readyHtml = renderCompactCommand(draft, 'channel', [member], true, true);
+  assert.doesNotMatch(readyHtml, /bot-command-run" disabled/);
   assert.equal(store.getInvocations('channel').length, 0);
   const fields = commandInputFields(command);
   const userField = fields.find((field) => field.name === 'member');
@@ -382,6 +630,176 @@ test('compact composer uses inline controls and anchored declared/member choices
   const choices = renderParameterChoices([{ value: 'real-value', label: '<script>unsafe</script>' }], 0, 'Options');
   assert.ok(choices.includes('role="listbox"'));
   assert.equal(choices.includes('<script>'), false);
+});
+
+test('generic selection choices render reusable audio previews without changing submitted values', () => {
+  const audioChoices: SelectionChoice[] = [
+    {
+      label: 'Generic preview',
+      value: 'stable-id',
+      description: 'Reusable outside any specific bot',
+      audio: { url: 'https://cdn.example.test/preview.ogg', fileName: 'preview.ogg', durationMs: 12_345 },
+    },
+    { label: 'Plain option', value: 'plain' },
+    { label: 'Another preview', value: 'another', audio: { url: 'https://cdn.example.test/another.ogg' } },
+  ];
+  const audioCommand: SlashCommand & {
+    options: [{
+      name: 'clip';
+      description: 'Clip';
+      type: 'string';
+      required: true;
+      choices: SelectionChoice[];
+    }];
+  } = {
+    name: 'preview', description: 'Preview audio', botId: 'generic-bot', botName: 'Generic Bot',
+    options: [{ name: 'clip', description: 'Clip', type: 'string', required: true, choices: audioChoices }],
+  };
+  const field = commandInputFields(audioCommand)[0];
+  assert.ok(field.type === 'select');
+  const audio = field.choices[0].audio;
+  assert.ok(audio && 'url' in audio);
+  assert.equal(audio.url, 'https://cdn.example.test/preview.ogg');
+  assert.deepEqual(commandValuesFromInputs(audioCommand, { clip: 'stable-id' }, []), {
+    success: true, values: { clip: 'stable-id' },
+  });
+  const menu = renderParameterChoices(field.choices, 0, 'Clip choices');
+  assert.ok(menu.includes('data-audio-preview-action="toggle"'));
+  assert.ok(menu.includes('data-audio-url="https://cdn.example.test/preview.ogg"'));
+  assert.ok(menu.includes('type="range"'));
+  assert.ok(menu.includes('0:12'));
+  assert.equal((menu.match(/data-audio-preview-volume\s/g) ?? []).length, 1);
+  assert.equal((menu.match(/data-audio-preview-progress\s/g) ?? []).length, 2);
+  assert.ok(menu.includes('data-audio-preview-percentage>60%</output>'));
+  const lazyMenu = renderParameterChoices([{
+    label: 'Lazy clip', value: 'canonical-track', audio: { resourceId: 'opaque-preview', fileName: 'clip.ogg', durationMs: 10_000 },
+  }], 0, 'Lazy choices');
+  assert.ok(lazyMenu.includes('data-audio-resource-id="opaque-preview"'));
+  assert.ok(!lazyMenu.includes('data-audio-url='));
+  assert.ok(lazyMenu.includes('data-audio-preview-action="toggle"'));
+  const form = renderBotFields([
+    { ...field, label: 'Clip', presentation: 'buttons' },
+    { ...field, name: 'second-clip', label: 'Second clip', presentation: 'dropdown' },
+  ], {}, {
+    prefix: 'generic-form', disabled: false,
+  });
+  assert.ok(form.includes('data-bot-select-value="stable-id"'));
+  assert.ok(form.includes('data-bot-select-submit="true"'));
+  assert.equal(form.includes('<select'), false);
+  assert.equal((form.match(/data-audio-preview-volume\s/g) ?? []).length, 1, 'Multiple audio fields share one form volume control');
+  assert.equal((form.match(/data-audio-preview-progress\s/g) ?? []).length, 4);
+});
+
+test('command parameter errors reuse validation, retain optional removal and allow false and zero', () => {
+  const store = usageStore(new MemoryUsageStorage(), 'server');
+  store.selectCommand('channel', command);
+  for (const name of ['private', 'member', 'mode']) store.setCommandOptionVisible('channel', name, true);
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  const fields = commandInputFields(command);
+  const error = (name: string) => {
+    const field = fields.find((entry) => entry.name === name);
+    assert.ok(field);
+    return commandParameterError(draft, field, [member]);
+  };
+  assert.equal(error('count'), undefined, 'Untouched missing values should not start with an error');
+  store.touchCommandField('channel', 'count');
+  assert.ok(error('count'));
+  for (const count of ['11', '-1', '2.5', 'word']) {
+    store.setCommandValues('channel', { song: 'Song', count });
+    assert.ok(error('count'));
+    assert.match(renderCompactCommand(draft, 'channel', [member], true, true), /required invalid" data-field-name="count"/);
+  }
+  store.setCommandValues('channel', { song: 'Song', count: 0, private: false, mode: 'unknown', member: 'departed' });
+  assert.equal(error('count'), undefined);
+  assert.equal(error('private'), undefined);
+  assert.ok(error('mode'));
+  assert.ok(error('member'));
+  const html = renderCompactCommand(draft, 'channel', [member], true, true);
+  assert.ok(html.includes('data-remove-parameter="mode"'));
+  assert.ok(html.includes('bot-argument-measure'));
+  assert.ok(html.includes('Enter the full title'));
+  store.setCommandOptionVisible('channel', 'mode', false);
+  assert.doesNotMatch(renderCompactCommand(draft, 'channel', [member], true, true), /data-field-name="mode"/);
+});
+
+test('autocomplete errors wait for interaction and disappear after selecting a valid choice', () => {
+  const query: SlashCommand = {
+    ...command, options: [{ name: 'audio', description: 'Audio', type: 'string', required: true, autocomplete: true }],
+  };
+  const store = usageStore(new MemoryUsageStorage(), 'server', [query]);
+  store.selectCommand('channel', query);
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  const field = commandInputFields(query)[0];
+  store.setCommandQuery('channel', 'audio', 'searching');
+  assert.equal(commandParameterError(draft, field, []), undefined);
+  store.touchCommandField('channel', 'audio');
+  assert.ok(commandParameterError(draft, field, []));
+  store.selectCommandChoice('channel', 'audio', { label: 'Result', value: 'opaque-id' });
+  assert.equal(commandParameterError(draft, field, []), undefined);
+});
+
+test('preview volume scope belongs to the command, independently of fields and other commands or servers', () => {
+  const scope = commandPreviewVolumeScope('server', 'bot', 'query');
+  for (const other of [
+    commandPreviewVolumeScope('another-server', 'bot', 'query'),
+    commandPreviewVolumeScope('server', 'another-bot', 'query'),
+    commandPreviewVolumeScope('server', 'bot', 'another-command'),
+  ]) assert.notEqual(scope, other);
+  const choices = [{ label: 'Preview', value: 'id', audio: { url: 'https://cdn.example.test/clip.mp3' } }];
+  for (const field of ['first', 'second']) {
+    const html = renderParameterChoices(choices, 0, field, `command:${field}`, scope);
+    assert.ok(html.includes('data-audio-volume-scope="[&quot;command&quot;,&quot;server&quot;,&quot;bot&quot;,&quot;query&quot;]"'));
+  }
+});
+
+test('command preparation shows a visible localized status without inventing progress or asking for consent again', (context) => {
+  const previousLanguage = getLanguage();
+  context.after(() => setLanguage(previousLanguage));
+  const store = createChatStore();
+  store.selectCommand('channel', command);
+  const draft = store.getCommandDraft('channel');
+  assert.ok(draft);
+  for (const language of ['pt-BR', 'en'] as const) {
+    setLanguage(language);
+    const html = renderCompactCommand(draft, 'channel', [], true, true, undefined, language, true);
+    assert.match(html, /class="bot-status bot-command-preparation" role="status">/);
+    assert.ok(html.includes(`<span>${t('localExecution.preparing')}</span>`));
+    assert.match(html, /bot-loading-spinner/);
+    assert.doesNotMatch(html, /<progress/);
+    assert.doesNotMatch(renderCompactCommand(draft, 'channel', [], true, true, undefined, language),
+      /bot-command-preparation|bot-loading-spinner/);
+  }
+});
+
+test('download confirmation phase shows pending copy without transfer progress', () => {
+  const html = renderBotInvocation({
+    invocationId: 'download-confirming', channelId: 'channel', botId: 'music-bot', commandName: 'play',
+    botName: 'Music Bot', createdAt: 1, expiresAt: Date.now() + 60_000, status: 'active',
+    cancelPending: false, forms: [], acknowledged: true, hasResponse: false,
+    soundDownload: {
+      downloadId: 'download', title: 'Sound title', fileName: 'sound.mp3', receivedBytes: 0,
+      phase: 'confirming',
+    },
+  });
+  assert.ok(html.includes('Aguardando sua confirmação para baixar.'));
+  assert.equal(html.includes('<progress'), false);
+  assert.match(html, /bot-loading-spinner/);
+});
+
+test('an early bot acknowledgement keeps its invocation animated until the operation finishes', () => {
+  const invocation: Parameters<typeof renderBotInvocation>[0] = {
+    invocationId: 'music-preparing', channelId: 'channel', botId: 'music-bot', commandName: 'play',
+    botName: 'Music Bot', createdAt: 1, expiresAt: Date.now() + 60_000, status: 'active',
+    cancelPending: false, forms: [], acknowledged: true, hasResponse: true,
+  };
+  const html = renderBotInvocation(invocation);
+  assert.match(html, /bot-loading-spinner/);
+  assert.match(html, /aria-busy="true"/);
+  assert.equal(html.includes('<progress'), false, 'Unknown source startup time is not a download percentage');
+  invocation.status = 'completed';
+  assert.equal(renderBotInvocation(invocation), '');
 });
 
 test('flat attribution maps to distinct nested caller snapshots for private and public bot messages', () => {
@@ -405,6 +823,46 @@ test('flat attribution maps to distinct nested caller snapshots for private and 
     assert.equal(message.userAvatarUrl, payload.botAvatarUrl);
     payload.invokerNickname = 'Changed after dispatch';
     assert.equal(message.botCommand?.invokerNickname, member.nickname);
+  }
+});
+
+test('each recipient localizes private, public and persisted invocation attribution without rewriting snapshots', () => {
+  const localized: SlashCommand = { ...command, localizations: { 'pt-BR': { name: 'tocar' }, en: { name: 'listen' } } };
+  try {
+    for (const ephemeral of [true, false]) {
+      const message = botCommandMessage({
+        invocationId: 'invocation', commandName: 'play', invokerId: member.id, invokerNickname: member.nickname,
+        messageId: 'message', channelId: 'channel', botId: localized.botId, botName: localized.botName,
+        content: 'Never translate reply content', createdAt: 1, ephemeral,
+      });
+      const store = createChatStore();
+      store.setHistory('channel', [message]);
+      const snapshot = structuredClone(store.getMessages('channel')[0]);
+      for (const locale of ['pt-BR', 'en'] as const) {
+        setLanguage(locale);
+        const presentation = getCommandPresentation(localized, locale);
+        const markup = renderBotCommandContext(snapshot, presentation);
+        assert.ok(markup.includes(locale === 'pt-BR' ? 'Alice usou /tocar' : 'Alice used /listen'));
+        assert.match(markup, /data-command-name="play"/);
+        assert.equal(snapshot.botCommand?.commandName, 'play');
+        assert.equal(snapshot.content, 'Never translate reply content');
+      }
+      assert.deepEqual(store.getMessages('channel')[0], snapshot);
+    }
+    const invocation = {
+      invocationId: 'active', channelId: 'channel', botId: localized.botId, commandName: localized.name,
+      botName: localized.botName, createdAt: 1, expiresAt: Date.now() + 60_000, status: 'active' as const,
+      cancelPending: false, forms: [], acknowledged: true, hasResponse: false,
+    };
+    const markup = renderBotInvocation(invocation, true, 'server', undefined, getCommandPresentation(localized, 'pt-BR'));
+    assert.ok(markup.includes('<div class="bot-command-name">/tocar</div>'));
+    assert.match(markup, /data-command-name="play"/);
+    assert.equal(invocation.commandName, 'play');
+    assert.ok(renderBotCommandContext({ botCommand: {
+      invocationId: 'offline', commandName: 'play', invokerId: member.id, invokerNickname: member.nickname,
+    } }).includes('/play'), 'Absent bot metadata falls back to the persisted canonical command');
+  } finally {
+    setLanguage('pt-BR');
   }
 });
 

@@ -5,20 +5,35 @@ import undeafenUrl from '../assets/sounds/Desmutar_Auto-Falante.wav';
 import joinVoiceUrl from '../assets/sounds/Entrando_Na_Call.wav';
 import leaveVoiceUrl from '../assets/sounds/Saindo_Da_Call.wav';
 import { settingsStore } from '../stores/settingsStore';
-import { t } from '../i18n';
+import { t, type TranslationKey } from '../i18n';
+import { setAudioOutputSink } from './AudioOutputSink';
 
-export type SoundEffectType =
-  | 'mic_mute'
-  | 'mic_unmute'
-  | 'deafen'
-  | 'undeafen'
-  | 'join_voice'
-  | 'leave_voice'
-  | 'screen_share_start'
-  | 'screen_share_stop'
-  | 'chat_message';
+export const SOUND_EFFECT_TYPES = [
+  'mic_mute', 'mic_unmute', 'deafen', 'undeafen', 'join_voice', 'leave_voice',
+  'screen_share_start', 'screen_share_stop', 'chat_message', 'ptt_press', 'ptt_release', 'reconnecting',
+] as const;
+export type SoundEffectType = typeof SOUND_EFFECT_TYPES[number];
 
-const DEFAULT_URLS: Record<string, string> = {
+const SOUND_LABEL_KEYS: Record<SoundEffectType, TranslationKey> = {
+  mic_mute: 'sounds.micMute',
+  mic_unmute: 'sounds.micUnmute',
+  deafen: 'sounds.deafen',
+  undeafen: 'sounds.undeafen',
+  join_voice: 'sounds.joinVoice',
+  leave_voice: 'sounds.leaveVoice',
+  screen_share_start: 'sounds.screenShareStart',
+  screen_share_stop: 'sounds.screenShareStop',
+  chat_message: 'sounds.chatMessage',
+  ptt_press: 'sounds.pttPress',
+  ptt_release: 'sounds.pttRelease',
+  reconnecting: 'sounds.reconnecting',
+};
+
+export function isSoundEffectType(value: unknown): value is SoundEffectType {
+  return SOUND_EFFECT_TYPES.some(key => key === value);
+}
+
+const DEFAULT_URLS: Partial<Record<SoundEffectType, string>> = {
   mic_unmute: micUnmuteUrl,
   mic_mute: micMuteUrl,
   deafen: deafenUrl,
@@ -31,22 +46,17 @@ const DEFAULT_URLS: Record<string, string> = {
  * Rótulos dos efeitos sonoros, resolvidos no idioma ativo a cada chamada (#16)
  * — por isso é uma função, e não um objeto constante.
  */
-export function getSoundLabels(): Record<string, string> {
-  return {
-    mic_mute: t('sounds.micMute'),
-    mic_unmute: t('sounds.micUnmute'),
-    deafen: t('sounds.deafen'),
-    undeafen: t('sounds.undeafen'),
-    join_voice: t('sounds.joinVoice'),
-    leave_voice: t('sounds.leaveVoice'),
-    screen_share_start: t('sounds.screenShareStart'),
-    screen_share_stop: t('sounds.screenShareStop'),
-  };
+export function getSoundLabels(): Record<SoundEffectType, string> {
+  const labels: Record<SoundEffectType, string> = { ...SOUND_LABEL_KEYS };
+  for (const key of SOUND_EFFECT_TYPES) labels[key] = t(SOUND_LABEL_KEYS[key]);
+  return labels;
 }
 
 export class SoundEffectManager {
   private audioMap: Partial<Record<SoundEffectType, HTMLAudioElement>> = {};
   private toneCtx: AudioContext | null = null;
+  private speakerDeviceId: string | null = null;
+  private playRequests: Partial<Record<SoundEffectType, number>> = {};
   // Handle for the repeating reconnection cue (#553): a window.setInterval id
   // while a voice call is reconnecting, or null when it is not.
   private reconnectLoopTimer: number | null = null;
@@ -57,22 +67,36 @@ export class SoundEffectManager {
 
   public loadAll(): void {
     const customSounds = settingsStore.customSounds || {};
-    for (const [key, defaultUrl] of Object.entries(DEFAULT_URLS)) {
-      const url = customSounds[key] || defaultUrl;
-      this.preload(key as SoundEffectType, url);
-    }
+    for (const key of SOUND_EFFECT_TYPES) this.reloadSound(key, customSounds[key]);
   }
 
   public reloadSound(key: SoundEffectType, url?: string): void {
+    this.stopCachedSound(key);
+    const previous = this.audioMap[key];
+    if (previous) previous.src = '';
+    delete this.audioMap[key];
+    if (url !== undefined && (typeof url !== 'string' || !url.trim())) {
+      console.warn(`[SoundEffects] Invalid custom sound for ${key}; restoring the default.`);
+      url = undefined;
+    }
     const finalUrl = url || DEFAULT_URLS[key];
     if (finalUrl) this.preload(key, finalUrl);
+  }
+
+  private stopCachedSound(key: SoundEffectType): void {
+    this.playRequests[key] = (this.playRequests[key] ?? 0) + 1;
+    const audio = this.audioMap[key];
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+    }
   }
 
   private preload(key: SoundEffectType, url: string): void {
     try {
       const audio = new Audio(url);
       audio.volume = 0.6;
-      this.applySink(audio);
+      void this.applySink(audio).catch((error: unknown) => console.warn('[SoundEffects] Could not preload the selected output:', error));
       this.audioMap[key] = audio;
     } catch (e) {
       console.warn(`[SoundEffects] Error preloading sound ${key}:`, e);
@@ -84,24 +108,21 @@ export class SoundEffectManager {
    * sound effects respect the user's choice instead of the OS default.
    */
   private applySink(audio: HTMLAudioElement): Promise<void> {
-    const deviceId = settingsStore.selectedSpeakerId;
-    if (deviceId && typeof (audio as any).setSinkId === 'function' && (audio as any).sinkId !== deviceId) {
-      return (audio as any).setSinkId(deviceId).catch(() => {
-        /* device may be gone; ignore and fall back to default */
-      });
-    }
-    return Promise.resolve();
+    const deviceId = this.speakerDeviceId ?? settingsStore.selectedSpeakerId;
+    return setAudioOutputSink(audio, deviceId);
   }
 
   /** Reapplies the currently selected speaker to all preloaded sound effects. */
-  public setSinkId(deviceId: string): void {
+  public async setSinkId(deviceId: string): Promise<void> {
+    this.speakerDeviceId = deviceId;
     for (const audio of Object.values(this.audioMap)) {
-      if (audio && typeof (audio as any).setSinkId === 'function') {
-        (audio as any).setSinkId(deviceId).catch(() => {});
+      if (audio) {
+        if (typeof audio.setSinkId !== 'function') throw new Error('Output selection unavailable');
+        await setAudioOutputSink(audio, deviceId);
       }
     }
-    if (this.toneCtx && typeof (this.toneCtx as any).setSinkId === 'function') {
-      (this.toneCtx as any).setSinkId(deviceId).catch(() => {});
+    if (this.toneCtx && 'setSinkId' in this.toneCtx && typeof this.toneCtx.setSinkId === 'function') {
+      await setAudioOutputSink(this.toneCtx, deviceId);
     }
   }
 
@@ -111,11 +132,7 @@ export class SoundEffectManager {
    */
   private ensureToneCtx(): AudioContext {
     if (!this.toneCtx) {
-      const Ctor = window.AudioContext || (window as any).webkitAudioContext;
-      this.toneCtx = new Ctor();
-      if (settingsStore.selectedSpeakerId && typeof (this.toneCtx as any).setSinkId === 'function') {
-        (this.toneCtx as any).setSinkId(settingsStore.selectedSpeakerId).catch(() => {});
-      }
+      this.toneCtx = new AudioContext({ sinkId: { type: 'none' } });
     }
     return this.toneCtx!;
   }
@@ -131,12 +148,12 @@ export class SoundEffectManager {
    */
   private withRunningToneCtx(schedule: (ctx: AudioContext, now: number) => void): void {
     const ctx = this.ensureToneCtx();
-    const run = () => schedule(ctx, ctx.currentTime);
-    if (ctx.state === 'suspended') {
-      ctx.resume().then(run).catch(() => {});
-    } else {
-      run();
-    }
+    void setAudioOutputSink(ctx, this.speakerDeviceId ?? settingsStore.selectedSpeakerId)
+      .then(async () => {
+        if (ctx.state === 'suspended') await ctx.resume();
+        if (ctx.state !== 'closed') schedule(ctx, ctx.currentTime);
+      })
+      .catch((error: unknown) => console.warn('[SoundEffects] Could not play the tone on the selected output:', error));
   }
 
   /**
@@ -202,6 +219,10 @@ export class SoundEffectManager {
    */
   public playPttTone(activate: boolean): void {
     if (!settingsStore.pttSoundCue) return;
+    this.play(activate ? 'ptt_press' : 'ptt_release');
+  }
+
+  private playPttCue(activate: boolean): void {
     try {
       this.withRunningToneCtx((ctx, now) => {
         const freq = activate ? 620 : 440;
@@ -260,8 +281,11 @@ export class SoundEffectManager {
    */
   public startReconnectingLoop(): void {
     if (this.reconnectLoopTimer !== null) return;
-    this.playReconnectCue();
-    this.reconnectLoopTimer = window.setInterval(() => this.playReconnectCue(), 5000);
+    this.play('reconnecting');
+    this.reconnectLoopTimer = window.setInterval(() => {
+      const current = this.audioMap.reconnecting;
+      if (!current || current.paused || current.ended) this.play('reconnecting');
+    }, 5000);
   }
 
   /** Stops the recurring reconnection cue, if one is running. */
@@ -269,33 +293,49 @@ export class SoundEffectManager {
     if (this.reconnectLoopTimer !== null) {
       clearInterval(this.reconnectLoopTimer);
       this.reconnectLoopTimer = null;
+      this.stopCachedSound('reconnecting');
     }
   }
 
   public play(key: SoundEffectType): void {
-    if (key === 'screen_share_start') {
-      this.playTone(true);
-      return;
-    }
-    if (key === 'screen_share_stop') {
-      this.playTone(false);
-      return;
-    }
-    if (key === 'chat_message') {
-      this.playChatCue();
-      return;
-    }
     try {
       const audio = this.audioMap[key];
       if (audio) {
+        const request = (this.playRequests[key] ?? 0) + 1;
+        this.playRequests[key] = request;
         audio.currentTime = 0;
         // Apply the selected speaker BEFORE playing so the sound doesn't briefly
         // (or entirely) come out of the OS default device (#46).
-        this.applySink(audio).finally(() => {
-          audio.play().catch((err) => {
-            console.debug(`[SoundEffects] Play prevented for ${key}:`, err);
+        void this.applySink(audio)
+          .then(() => {
+            if (this.audioMap[key] === audio && this.playRequests[key] === request) return audio.play();
+          })
+          .catch((error: unknown) => {
+            if (this.audioMap[key] === audio && this.playRequests[key] === request) {
+              console.warn(`[SoundEffects] Could not play ${key} on the selected output:`, error);
+            }
           });
-        });
+        return;
+      }
+      switch (key) {
+        case 'screen_share_start': this.playTone(true); return;
+        case 'screen_share_stop': this.playTone(false); return;
+        case 'chat_message': this.playChatCue(); return;
+        case 'ptt_press': this.playPttCue(true); return;
+        case 'ptt_release': this.playPttCue(false); return;
+        case 'reconnecting': this.playReconnectCue(); return;
+        case 'mic_mute':
+        case 'mic_unmute':
+        case 'deafen':
+        case 'undeafen':
+        case 'join_voice':
+        case 'leave_voice':
+          console.warn(`[SoundEffects] Default audio is unavailable for ${key}.`);
+          return;
+        default: {
+          const unknownSound: never = key;
+          throw new Error(`Unknown sound effect: ${unknownSound}`);
+        }
       }
     } catch (e) {
       console.warn(`[SoundEffects] Error playing sound ${key}:`, e);

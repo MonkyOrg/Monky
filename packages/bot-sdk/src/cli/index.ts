@@ -1,0 +1,200 @@
+import { ANSI, color } from './constants';
+import { createCliContext, type CliContext } from './config';
+import { normalizeBotLocale, type BotLocale } from '@monky/shared';
+import {
+  chooseCliLocale, CliError, cliErrorMessage, cliText, isInteractiveCliAccess, parseCliLocaleArgs,
+  languageCommand, saveCliLocale, shouldPromptCliLocale,
+} from './locale';
+import { autoUpdateCommand, updateCommand } from './commands/update';
+import {
+  configCommand,
+  logsCommand,
+  restartCommand,
+  startCommand,
+  statusCommand,
+  stopCommand,
+} from './commands/lifecycle';
+import { setupCommand } from './commands/setup';
+import { CliPromptCancelled } from './prompts';
+
+function printUsage(context: CliContext): void {
+  const modes = context.project.definition.modes.join(', ');
+  console.log(cliText(context.locale, `
+${color(context.cliName, ANSI.bold)} — ${context.displayName} runtime CLI
+
+${color('USO', ANSI.bold)}
+  ${context.cliName} <comando> [opções]
+
+${color('COMANDOS', ANSI.bold)}
+  setup                         Configura o bot (${modes})
+  start [--foreground]          Inicia em background via pm2 ou em foreground
+  stop                          Para o processo gerenciado
+  restart [--fresh]             Reinicia usando a configuração salva
+  status                        Mostra estado do processo e configuração
+  logs [--lines N] [--no-follow]
+  config                        Exibe a configuração atual
+  config language [pt-BR|en-US]  Consulta ou altera o idioma em Configuração
+  config set <k> <v>             Ajusta mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
+  config update-source          Consulta a origem de atualização deste perfil
+  config update-source github <URL> [--asset-name <nome.tgz>] [--token-env <VAR>]
+  config update-source https <URL.tgz> [--token-env <VAR>]
+  config update-source file <caminho.tgz>
+  config update-source reset    Restaura a origem padrão do pacote
+  config update-token           Salva token GitHub com entrada oculta (não é o token Monky)
+  config update-token --from-env VAR | --status | --clear
+  menu                          Abre o menu por setas (também ao executar sem comando)
+  update [--check] [--beta] [--yes]
+  autoupdate on [HH:MM] [--beta]
+  autoupdate off
+  autoupdate status
+  language [pt-BR|en-US]        Atalho para config language
+
+${color('OPÇÕES GLOBAIS', ANSI.bold)}
+  --version, -v                 Exibe a versão do bot
+  --help, -h                    Exibe esta ajuda
+  --locale pt-BR|en-US          Usa este idioma somente nesta execução
+
+${color('SETUP NÃO INTERATIVO', ANSI.bold)}
+  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
+  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-ou-domínio> [--serve-port 7780] [--name "Meu Bot"] [--bot-dir <diretório>] [--yes]
+
+${color('ORIGEM DAS ATUALIZAÇÕES', ANSI.bold)}
+  O padrão vem de monkyBot.releases ou monkyBot.updateSource no package.json.
+  config update-source salva uma escolha por perfil, fora do pacote instalado.
+  update e autoupdate usam stable; betas exigem --beta.
+`, `
+${color(context.cliName, ANSI.bold)} — ${context.displayName} runtime CLI
+
+${color('USAGE', ANSI.bold)}
+  ${context.cliName} <command> [options]
+
+${color('COMMANDS', ANSI.bold)}
+  setup                         Configure the bot (${modes})
+  start [--foreground]          Start via pm2 in the background or in the foreground
+  stop                          Stop the managed process
+  restart [--fresh]             Restart using the saved configuration
+  status                        Show the process state and configuration
+  logs [--lines N] [--no-follow]
+  config                        Show the current configuration
+  config language [pt-BR|en-US]  Show or change language in Configuration
+  config set <k> <v>             Set mode, botName, botDir, serverUrl, botToken, tokenEnv, servePort, publicHost
+  config update-source          Show the update source for this profile
+  config update-source github <URL> [--asset-name <name.tgz>] [--token-env <VAR>]
+  config update-source https <URL.tgz> [--token-env <VAR>]
+  config update-source file <path.tgz>
+  config update-source reset    Restore the package default source
+  config update-token           Save GitHub token through hidden input (not the Monky token)
+  config update-token --from-env VAR | --status | --clear
+  menu                          Open arrow menu (also used when no command is provided)
+  update [--check] [--beta] [--yes]
+  autoupdate on [HH:MM] [--beta]
+  autoupdate off
+  autoupdate status
+  language [pt-BR|en-US]        Alias for config language
+
+${color('GLOBAL OPTIONS', ANSI.bold)}
+  --version, -v                 Show the bot version
+  --help, -h                    Show this help
+  --locale pt-BR|en-US          Use this language for this invocation only
+
+${color('NON-INTERACTIVE SETUP', ANSI.bold)}
+  ${context.cliName} setup --non-interactive --mode manual --server-url localhost:3000 --token-env MONKY_BOT_TOKEN [--name "My Bot"] [--bot-dir <directory>] [--yes]
+  ${context.cliName} setup --non-interactive --mode marketplace --public-host <IP-or-domain> [--serve-port 7780] [--name "My Bot"] [--bot-dir <directory>] [--yes]
+
+${color('UPDATE SOURCE', ANSI.bold)}
+  Defaults come from monkyBot.releases or monkyBot.updateSource in package.json.
+  config update-source saves a per-profile choice outside the installed package.
+  update and autoupdate use stable; beta releases require --beta.
+`).trim());
+}
+
+export async function runBotCli(packageRoot: string, args: string[] = process.argv.slice(2)): Promise<void> {
+  const parsed = parseCliLocaleArgs(args);
+  const versionOnly = ['--version', '-v', 'version'].includes(parsed.args[0]);
+  const languageArgs = parsed.args[0] === 'language' ? parsed.args.slice(1)
+    : parsed.args[0] === 'config' && parsed.args[1] === 'language' ? parsed.args.slice(2) : [];
+  const selectedLanguage = languageArgs.length === 1 ? normalizeBotLocale(languageArgs[0]) : undefined;
+  const context = createCliContext(packageRoot, process.env, {
+    locale: parsed.locale ?? selectedLanguage ?? (versionOnly ? 'pt-BR' : undefined),
+    toleratePreferenceErrors: !isInteractiveCliAccess(parsed.args),
+  });
+  try {
+    await dispatchBotCli(context, parsed.args, parsed.locale);
+  } catch (error) {
+    if (error instanceof CliPromptCancelled) { console.log(cliErrorMessage(error, context.locale)); return; }
+    if (error instanceof CliError) throw new Error(cliErrorMessage(error, context.locale));
+    throw error;
+  }
+}
+
+async function dispatchBotCli(context: CliContext, args: string[], explicitLocale?: BotLocale): Promise<void> {
+  const [command, ...rest] = args;
+  if (command === '--version' || command === '-v' || command === 'version') {
+    console.log(`${context.cliName} ${context.version}`);
+    return;
+  }
+  if (shouldPromptCliLocale(context.homeDir, args, explicitLocale)) {
+    context.locale = await chooseCliLocale(context.locale);
+    saveCliLocale(context.homeDir, context.locale);
+  }
+  if (!command || command === '--help' || command === '-h' || command === 'help' || rest.includes('--help') || rest.includes('-h')) {
+    if (!command && isInteractiveCliAccess(args)) {
+      const { botCliMenu } = await import('./menu');
+      await botCliMenu(context);
+      return;
+    }
+    printUsage(context);
+    return;
+  }
+  if (command === 'menu') {
+    if (rest.length) throw new CliError('menu não aceita argumentos.', 'menu does not take arguments.');
+    if (!isInteractiveCliAccess(args)) throw new CliError('O menu exige um terminal interativo, fora de CI. Use --help para comandos de automação.',
+      'The menu requires an interactive terminal outside CI. Use --help for automation commands.');
+    const { botCliMenu } = await import('./menu');
+    await botCliMenu(context);
+    return;
+  }
+  if (command === 'language') {
+    await languageCommand(context, rest);
+    return;
+  }
+  if (command === 'setup') {
+    await setupCommand(context, rest);
+    return;
+  }
+  if (command === 'start') {
+    await startCommand(context, rest);
+    return;
+  }
+  if (command === 'stop') {
+    stopCommand(context, rest);
+    return;
+  }
+  if (command === 'restart') {
+    await restartCommand(context, rest);
+    return;
+  }
+  if (command === 'status') {
+    statusCommand(context, rest);
+    return;
+  }
+  if (command === 'logs') {
+    logsCommand(context, rest);
+    return;
+  }
+  if (command === 'config') {
+    await configCommand(context, rest);
+    return;
+  }
+  if (command === 'update') {
+    await updateCommand(context, rest);
+    return;
+  }
+  if (command === 'autoupdate') {
+    await autoUpdateCommand(context, rest);
+    return;
+  }
+  throw new Error(cliText(context.locale,
+    `Comando desconhecido. Use "${context.cliName} --help".`,
+    `Unknown CLI command. Use "${context.cliName} --help".`));
+}

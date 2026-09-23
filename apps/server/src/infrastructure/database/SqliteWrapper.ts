@@ -1,6 +1,16 @@
 import initSqlJs, { Database as SqlJsDatabase, Statement } from 'sql.js';
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'node:crypto';
+import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
+
+export interface DatabaseCloseOptions {
+  discardChanges?: boolean;
+}
+
+export interface DatabaseOpenOptions {
+  readOnly?: boolean;
+}
 
 export interface IDatabaseDriver {
   prepare(sql: string): {
@@ -10,8 +20,9 @@ export interface IDatabaseDriver {
   };
   exec(sql: string): void;
   transaction<T>(fn: () => T): () => T;
+  transactionAsync<T>(fn: () => Promise<T>): Promise<T>;
   pragma(pragmaStr: string): void;
-  close(): void;
+  close(options?: DatabaseCloseOptions): void;
 }
 
 export class SqlJsDriver implements IDatabaseDriver {
@@ -23,30 +34,46 @@ export class SqlJsDriver implements IDatabaseDriver {
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly SAVE_DEBOUNCE_MS = 3000;
 
-  private constructor(dbPath: string, db: SqlJsDatabase) {
+  private constructor(dbPath: string, db: SqlJsDatabase, private readonly readOnly = false) {
     this.dbPath = dbPath;
     this.db = db;
   }
 
-  public static async create(dbPath: string): Promise<SqlJsDriver> {
+  public static async create(dbPath: string, options: DatabaseOpenOptions = {}): Promise<SqlJsDriver> {
     const SQL = await initSqlJs();
+    const readOnly = options.readOnly === true;
     const dir = path.dirname(dbPath);
-    if (!fs.existsSync(dir)) {
+    if (!readOnly && !fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
 
     let db: SqlJsDatabase;
-    if (fs.existsSync(dbPath)) {
+    if (readOnly || fs.existsSync(dbPath)) {
       const fileBuffer = fs.readFileSync(dbPath);
       db = new SQL.Database(fileBuffer);
     } else {
       db = new SQL.Database();
     }
 
-    const driver = new SqlJsDriver(dbPath, db);
-    // Ensure the file exists immediately on first creation.
-    driver.flushToDisk();
-    return driver;
+    const driver = new SqlJsDriver(dbPath, db, readOnly);
+    const resources = new ServerResourceScope();
+    resources.defer('SQLite allocation', () => driver.close({ discardChanges: true }));
+    try {
+      if (readOnly) {
+        // get/all can also execute SQL with side effects, so SQLite enforces the snapshot.
+        db.exec('PRAGMA query_only = ON;');
+      } else {
+        // A failed initial write must not publish an unpersisted database.
+        driver.flushToDisk(true);
+      }
+      return driver;
+    } catch (error) {
+      return resources.fail(error);
+    }
+  }
+
+  private assertWritable(): void {
+    if (this.readOnly) throw new Error('Cannot modify a read-only database snapshot.');
   }
 
   /**
@@ -68,8 +95,8 @@ export class SqlJsDriver implements IDatabaseDriver {
   }
 
   /** Synchronously exports the in-memory database to disk if dirty. */
-  private flushToDisk(): void {
-    if (this.isClosed) {
+  private flushToDisk(throwOnError = false): void {
+    if (this.isClosed || this.readOnly) {
       return;
     }
     if (this.saveTimer !== null) {
@@ -82,10 +109,52 @@ export class SqlJsDriver implements IDatabaseDriver {
     try {
       const data = this.db.export();
       const buffer = Buffer.from(data);
-      fs.writeFileSync(this.dbPath, buffer);
+      this.writeSnapshot(buffer);
       this.dirty = false;
     } catch (e) {
       console.error('[DATABASE] Error persisting sqlite database to disk:', e);
+      if (throwOnError) throw e;
+    }
+  }
+
+  private writeSnapshot(buffer: Buffer): void {
+    const temporaryPath = `${this.dbPath}.tmp-${randomUUID()}`;
+    let created = false;
+    try {
+      const mode = fs.existsSync(this.dbPath) ? fs.statSync(this.dbPath).mode & 0o777 : 0o666;
+      const descriptor = fs.openSync(temporaryPath, 'wx', mode);
+      created = true;
+      let writeFailed = false;
+      let writeError: unknown;
+      try {
+        fs.writeFileSync(descriptor, buffer);
+      } catch (error) {
+        writeFailed = true;
+        writeError = error;
+        throw error;
+      } finally {
+        try {
+          fs.closeSync(descriptor);
+        } catch (closeError) {
+          if (writeFailed) {
+            throw new AggregateError([writeError, closeError], `Database snapshot failed: ${describeFailure(writeError)}; ${describeFailure(closeError)}`);
+          }
+          throw closeError;
+        }
+      }
+      fs.renameSync(temporaryPath, this.dbPath);
+      created = false;
+    } catch (error) {
+      if (created) {
+        try {
+          fs.unlinkSync(temporaryPath);
+        } catch (cleanupError) {
+          if (!(cleanupError instanceof Error && 'code' in cleanupError && cleanupError.code === 'ENOENT')) {
+            throw new AggregateError([error, cleanupError], `Database snapshot failed: ${describeFailure(error)}; temporary cleanup failed: ${describeFailure(cleanupError)}`);
+          }
+        }
+      }
+      throw error;
     }
   }
 
@@ -126,6 +195,7 @@ export class SqlJsDriver implements IDatabaseDriver {
       },
 
       run(...params: any[]) {
+        self.assertWritable();
         const stmt: Statement = db.prepare(sql);
         try {
           if (params.length > 0) {
@@ -145,6 +215,7 @@ export class SqlJsDriver implements IDatabaseDriver {
   }
 
   public exec(sql: string): void {
+    this.assertWritable();
     this.db.exec(sql);
     this.saveToDisk();
   }
@@ -152,6 +223,7 @@ export class SqlJsDriver implements IDatabaseDriver {
   public transaction<T>(fn: () => T): () => T {
     const self = this;
     return () => {
+      self.assertWritable();
       self.inTransaction++;
       if (self.inTransaction === 1) {
         self.db.exec('BEGIN TRANSACTION;');
@@ -178,7 +250,44 @@ export class SqlJsDriver implements IDatabaseDriver {
     };
   }
 
+  public async transactionAsync<T>(fn: () => Promise<T>): Promise<T> {
+    this.assertWritable();
+    if (this.inTransaction !== 0) {
+      throw new Error('An asynchronous database transaction must own the outer transaction');
+    }
+    // Exporting sql.js while setup is awaiting work would end its transaction.
+    if (this.saveTimer !== null) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.db.exec('BEGIN TRANSACTION;');
+    this.inTransaction = 1;
+    let settled = false;
+    try {
+      const result = await fn();
+      this.db.exec('COMMIT;');
+      settled = true;
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec('ROLLBACK;');
+        settled = true;
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          `Database setup failed: ${describeFailure(error)}. Rollback failed: ${describeFailure(rollbackError)}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    } finally {
+      this.inTransaction = 0;
+      if (settled) this.saveToDisk();
+    }
+  }
+
   public pragma(pragmaStr: string): void {
+    this.assertWritable();
     try {
       this.db.exec(`PRAGMA ${pragmaStr};`);
     } catch (e) {
@@ -186,13 +295,16 @@ export class SqlJsDriver implements IDatabaseDriver {
     }
   }
 
-  public close(): void {
+  public close(options: DatabaseCloseOptions = {}): void {
     if (this.isClosed) {
       return;
     }
-    // Flush any pending debounced writes synchronously before closing.
-    this.flushToDisk();
-    this.isClosed = true;
+    if (this.saveTimer !== null) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    if (!options.discardChanges) this.flushToDisk(true);
     this.db.close();
+    this.isClosed = true;
   }
 }

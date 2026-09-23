@@ -1,16 +1,92 @@
-/**
- * Diagramas da página de arquitetura (#349).
- *
- * Os diagramas são SVGs prontos, gerados a partir dos fontes mermaid em
- * `docs-site/diagramas/src/` — ver `diagramas/scripts/gerar.mjs`. São dois por
- * diagrama, claro e escuro, e a troca acontece aqui.
- *
- * O tamanho é o natural do desenho. Deixar o navegador encolher para caber na
- * coluna de texto (~688px) é justamente o que tornava os diagramas ilegíveis:
- * um desenho de 1600px chegava à tela a 43%, com texto de 16px virando 7px.
- * Então o que não cabe rola na horizontal, como já acontece com tabela e bloco
- * de código no VitePress.
- */
+:root {
+  --vp-c-brand-1: #4f55d8;
+  --vp-c-brand-2: #6266eb;
+  --vp-c-brand-3: #575df5;
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #575df5 20%, #2997ad);
+  --vp-layout-max-width: 1480px;
+}
+
+.dark {
+  --vp-c-brand-1: #a2a8ff;
+  --vp-c-brand-2: #828aff;
+  --vp-c-brand-3: #6268f4;
+  --vp-home-hero-name-background: linear-gradient(120deg, #a2a8ff 20%, #67c9d7);
+}
+
+.VPHome .vp-doc {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 32px 64px;
+}
+
+.VPDoc.has-aside .content-container {
+  max-width: 780px;
+}
+
+.vp-doc .app-screenshot {
+  margin: 28px 0 36px;
+}
+
+.app-screenshot > a {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  background: #0b0e13;
+  box-shadow: 0 12px 36px rgb(15 20 38 / 12%);
+  line-height: 0;
+}
+
+.app-screenshot > a:focus-visible {
+  outline: 3px solid var(--vp-c-brand-1);
+  outline-offset: 4px;
+}
+
+.app-screenshot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0;
+}
+
+.app-screenshot-enlarge {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  width: fit-content;
+  margin-left: auto;
+  padding: 7px 10px;
+  border: 1px solid #53576c;
+  border-radius: 6px;
+  background: #191c28;
+  color: #f3f4ff;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  opacity: 0;
+}
+
+.app-screenshot a:hover .app-screenshot-enlarge,
+.app-screenshot a:focus-visible .app-screenshot-enlarge {
+  opacity: 1;
+}
+
+.app-screenshot figcaption {
+  margin-top: 10px;
+  color: var(--vp-c-text-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+@media (max-width: 639px) {
+  .VPHome .vp-doc { padding-right: 24px; padding-left: 24px; }
+  .app-screenshot-enlarge { position: static; display: block; width: 100%; border-radius: 0; border: 0; opacity: 1; }
+}
+
+/* Preserve the diagrams' natural size; shrinking their text makes them illegible. */
 .vp-doc .diagrama {
   overflow-x: auto;
   overflow-y: hidden;

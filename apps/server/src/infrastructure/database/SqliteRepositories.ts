@@ -1,5 +1,5 @@
 import { IDatabaseDriver } from './SqliteWrapper';
-import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema } from '@monky/shared';
+import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema, botMessageLocalizationsSchema } from '@monky/shared';
 import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
 import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
 
@@ -14,6 +14,22 @@ import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepo
 
 export class SqliteServerRepository implements IServerRepository {
   constructor(private db: IDatabaseDriver) {}
+
+  async getLifecycleSettings(): Promise<Pick<ServerRecord, 'name' | 'turnEnabled'> | null> {
+    const columns: unknown[] = this.db.prepare('PRAGMA table_info(server_meta)').all();
+    if (columns.length === 0) return null;
+    const hasTurn = columns.some((column) =>
+      column !== null && typeof column === 'object' && 'name' in column && column.name === 'turn_enabled');
+    // Lifecycle reads must also work before the running server applies newer migrations.
+    const row: unknown = this.db.prepare(
+      `SELECT name, ${hasTurn ? 'turn_enabled' : '0'} AS turnEnabled FROM server_meta LIMIT 1`
+    ).get();
+    if (row === undefined) return null;
+    if (!row || typeof row !== 'object' || !('name' in row) || typeof row.name !== 'string' || !('turnEnabled' in row)) {
+      throw new Error('Invalid stored server lifecycle settings.');
+    }
+    return { name: row.name, turnEnabled: Boolean(row.turnEnabled) };
+  }
 
   async getServer(): Promise<ServerRecord | null> {
     const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as any;
@@ -369,6 +385,7 @@ export class SqliteChannelRepository implements IChannelRepository {
 }
 
 interface SqliteMessageRow {
+  botLocalizationsJson: string | null;
   replyToMessageId: string | null;
   authorBotId: string | null;
   authorBotName: string | null;
@@ -386,7 +403,7 @@ interface SqliteMessageRow {
 
 /** Columns every message read shares, so the three queries cannot drift (#504). */
 const MESSAGE_COLUMNS =
-  'id, channel_id as channelId, user_id as userId, content, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId';
+  'id, channel_id as channelId, user_id as userId, content, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId, bot_localizations_json as botLocalizationsJson';
 
 function toMessageRecord(r: SqliteMessageRow): MessageRecord {
   if (r.authorBotId && !r.authorBotName) throw new Error('Stored bot message is missing its author name.');
@@ -400,6 +417,8 @@ function toMessageRecord(r: SqliteMessageRow): MessageRecord {
       : undefined,
     botCommand: r.botCommandJson ? botCommandContextSchema.parse(JSON.parse(r.botCommandJson)) : undefined,
     content: r.content,
+    localizations: r.authorBotId && !r.deletedAt && r.botLocalizationsJson
+      ? botMessageLocalizationsSchema.parse(JSON.parse(r.botLocalizationsJson)) : undefined,
     createdAt: r.createdAt,
     isSystem: Boolean(r.isSystem),
     editedAt: r.editedAt ?? null,
@@ -469,11 +488,12 @@ export class SqliteMessageRepository implements IMessageRepository {
 
   private insertMessage(message: MessageRecord, idempotent = false): void {
     this.db.prepare(
-      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json, reply_to_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
+      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json, reply_to_message_id, bot_localizations_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
       (idempotent ? ' ON CONFLICT(id) DO NOTHING' : '')
     ).run(message.id, message.channelId, message.botAuthor?.ownerUserId ?? message.userId, message.content, message.createdAt, message.isSystem ? 1 : 0,
       message.botAuthor?.id ?? null, message.botAuthor?.name ?? null, message.botAuthor?.avatarPath ?? null,
-      message.botCommand ? JSON.stringify(message.botCommand) : null, message.replyToMessageId ?? null);
+      message.botCommand ? JSON.stringify(message.botCommand) : null, message.replyToMessageId ?? null,
+      message.botAuthor && message.localizations ? JSON.stringify(message.localizations) : null);
   }
 
   async findById(messageId: string): Promise<MessageRecord | null> {
@@ -500,13 +520,13 @@ export class SqliteMessageRepository implements IMessageRepository {
   }
 
   async updateContent(messageId: string, content: string, editedAt: number): Promise<void> {
-    this.db.prepare('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?').run(content, editedAt, messageId);
+    this.db.prepare('UPDATE messages SET content = ?, bot_localizations_json = NULL, edited_at = ? WHERE id = ?').run(content, editedAt, messageId);
   }
 
   async markDeleted(messageId: string, deletedAt: number): Promise<void> {
     // The content goes with the deletion: keeping it would leave the text one
     // query away from anyone with access to the database file (#504).
-    this.db.prepare("UPDATE messages SET content = '', deleted_at = ? WHERE id = ?").run(deletedAt, messageId);
+    this.db.prepare("UPDATE messages SET content = '', bot_localizations_json = NULL, deleted_at = ? WHERE id = ?").run(deletedAt, messageId);
   }
 
   async deleteByChannel(channelId: string): Promise<void> {
@@ -785,23 +805,25 @@ export class SqliteRoleRepository implements IRoleRepository {
   }
 }
 
+type BotRow = Omit<BotRecord, 'profilePending'> & { profilePending: number };
+
 export class SqliteBotRepository implements IBotRepository {
   constructor(private db: IDatabaseDriver) {}
 
   async create(bot: BotRecord): Promise<void> {
     this.db.prepare(
-      `INSERT INTO bots (id, name, token_hash, avatar_path, bound_public_key, created_by_user_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(bot.id, bot.name, bot.tokenHash, bot.avatarPath, bot.boundPublicKey, bot.createdByUserId, bot.createdAt);
+      `INSERT INTO bots (id, name, token_hash, avatar_path, bound_public_key, created_by_user_id, created_at, profile_pending, last_protocol_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(bot.id, bot.name, bot.tokenHash, bot.avatarPath, bot.boundPublicKey, bot.createdByUserId, bot.createdAt, bot.profilePending ? 1 : 0, bot.lastProtocolVersion ?? null);
   }
 
   async findById(id: string): Promise<BotRecord | null> {
     const row = this.db.prepare(
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
-              created_at as createdAt
+              created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion
        FROM bots WHERE id = ?`
-    ).get(id) as BotRecord | undefined;
+    ).get(id) as BotRow | undefined;
     return row ? this.mapRow(row) : null;
   }
 
@@ -809,9 +831,9 @@ export class SqliteBotRepository implements IBotRepository {
     const row = this.db.prepare(
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
-              created_at as createdAt
+              created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion
        FROM bots WHERE token_hash = ?`
-    ).get(tokenHash) as BotRecord | undefined;
+    ).get(tokenHash) as BotRow | undefined;
     return row ? this.mapRow(row) : null;
   }
 
@@ -819,19 +841,21 @@ export class SqliteBotRepository implements IBotRepository {
     const rows = this.db.prepare(
       `SELECT id, name, token_hash as tokenHash, avatar_path as avatarPath,
               bound_public_key as boundPublicKey, created_by_user_id as createdByUserId,
-              created_at as createdAt
+              created_at as createdAt, profile_pending as profilePending, last_protocol_version as lastProtocolVersion
        FROM bots ORDER BY created_at ASC`
-    ).all() as BotRecord[];
+    ).all() as BotRow[];
     return rows.map((r) => this.mapRow(r));
   }
 
   async update(id: string, updates: Partial<BotRecord>): Promise<void> {
     const cols: string[] = [];
-    const vals: Array<string | null> = [];
+    const vals: Array<string | number | null> = [];
     if (updates.name !== undefined) { cols.push('name = ?'); vals.push(updates.name); }
+    if (updates.profilePending !== undefined) { cols.push('profile_pending = ?'); vals.push(updates.profilePending ? 1 : 0); }
     if (updates.tokenHash !== undefined) { cols.push('token_hash = ?'); vals.push(updates.tokenHash); }
     if (updates.avatarPath !== undefined) { cols.push('avatar_path = ?'); vals.push(updates.avatarPath); }
     if (updates.boundPublicKey !== undefined) { cols.push('bound_public_key = ?'); vals.push(updates.boundPublicKey); }
+    if (updates.lastProtocolVersion !== undefined) { cols.push('last_protocol_version = ?'); vals.push(updates.lastProtocolVersion); }
     if (cols.length === 0) return;
     vals.push(id);
     this.db.prepare(`UPDATE bots SET ${cols.join(', ')} WHERE id = ?`).run(...vals);
@@ -846,15 +870,17 @@ export class SqliteBotRepository implements IBotRepository {
     return row.cnt;
   }
 
-  private mapRow(row: BotRecord): BotRecord {
+  private mapRow(row: BotRow): BotRecord {
     return {
       id: row.id,
       name: row.name,
+      profilePending: row.profilePending === 1,
       tokenHash: row.tokenHash,
       avatarPath: row.avatarPath ?? null,
       boundPublicKey: row.boundPublicKey ?? null,
       createdByUserId: row.createdByUserId,
       createdAt: row.createdAt,
+      lastProtocolVersion: row.lastProtocolVersion ?? null,
     };
   }
 }

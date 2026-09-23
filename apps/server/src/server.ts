@@ -2,21 +2,27 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator } from '@monky/shared';
+import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, LIMITS, Permission, ProtocolErrorCode, ServerStats, UserSummary, VoiceMode, stripAdministrator, type ServerShutdownReason } from '@monky/shared';
 import { AuthService } from './application/services/AuthService';
 import { AttachmentService } from './application/services/AttachmentService';
 import { BotService } from './application/services/BotService';
 import { BotSelectorService } from './application/services/BotSelectorService';
+import { BotSettingsService } from './application/services/BotSettingsService';
+import { SqliteBotSettingsRepository } from './infrastructure/database/SqliteBotSettingsRepository';
+import { SqliteBotPermissionRepository } from './infrastructure/database/SqliteBotPermissionRepository';
+import { BotPermissionService } from './application/services/BotPermissionService';
 import { SqliteBotSelectorRepository } from './infrastructure/database/SqliteBotSelectorRepository';
 import { CommandRegistry } from './application/services/CommandRegistry';
 import { ChannelService } from './application/services/ChannelService';
 import { ChatService } from './application/services/ChatService';
 import { PermissionService } from './application/services/PermissionService';
+import { ServerMonitorService } from './application/services/ServerMonitorService';
 import { RoleService } from './application/services/RoleService';
 import { SignalingService } from './application/services/SignalingService';
 import { UserService } from './application/services/UserService';
 import { listOnlineHumans } from './application/services/onlineHumans';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
+import { SqliteVoiceRestrictionRepository } from './infrastructure/database/SqliteVoiceRestrictionRepository';
 import {
   SqliteAttachmentRepository,
   SqliteBotRepository,
@@ -28,6 +34,7 @@ import {
   SqliteUserRepository,
 } from './infrastructure/database/SqliteRepositories';
 import { Logger } from './infrastructure/logger/Logger';
+import { ServerLogScope } from './infrastructure/logger/ServerLogScope';
 import { LanBroadcaster } from './infrastructure/discovery/LanBroadcaster';
 import { scanServerNetworkInterfaces } from './infrastructure/discovery/ServerIpScanner';
 import { AttachmentStorageService } from './infrastructure/security/AttachmentStorageService';
@@ -37,10 +44,14 @@ import { RateLimiter } from './infrastructure/security/RateLimiter';
 import { CoturnManager } from './infrastructure/turn/CoturnManager';
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import { WebSocketServer } from './infrastructure/websocket/WebSocketServer';
+import { closeHttpServer, listenHttpServer } from './infrastructure/lifecycle/httpLifecycle';
+import { ServerResourceScope } from './infrastructure/lifecycle/ServerResourceScope';
+import { resolveServerVersion } from './runtimeVersion';
 
 export interface ServerConfig {
   port: number;
   dataDir: string;
+  version?: string;
   serverName?: string;
   discoveryPort?: number;
   password?: string;
@@ -182,6 +193,11 @@ export class MonkyServer {
   private sfuManager: SfuManager;
   private serverRepo: SqliteServerRepository;
   private startedAt: number | null = null;
+  private startPromise: Promise<void> | null = null;
+  private readonly startupTasks: Promise<void>[] = [];
+  private stopping = false;
+  private stopped = false;
+  private shutdownReason: ServerShutdownReason = 'stopped';
 
   private constructor(
     private config: ServerConfig,
@@ -194,7 +210,9 @@ export class MonkyServer {
     attachmentService: AttachmentService,
     coturnManager: CoturnManager,
     sfuManager: SfuManager,
-    serverRepo: SqliteServerRepository
+    serverRepo: SqliteServerRepository,
+    private readonly resources: ServerResourceScope,
+    private readonly logScope: ServerLogScope,
   ) {
     this.dbConn = dbConn;
     this.httpServer = httpServer;
@@ -209,12 +227,31 @@ export class MonkyServer {
   }
 
   public static async create(config: ServerConfig): Promise<MonkyServer> {
-    const dbPath = path.join(config.dataDir, 'server.db');
-    const dbConn = await DatabaseConnection.create(dbPath);
+    const resources = new ServerResourceScope();
+    const logScope = new ServerLogScope();
+    resources.defer('monitor log history', () => logScope.close());
+    return Logger.withScope(logScope, async () => {
+      let setupComplete = false;
+      try {
+        const dbConn = await DatabaseConnection.create(path.join(config.dataDir, 'server.db'));
+        resources.defer('database', () => dbConn.close({ discardChanges: !setupComplete }));
+        const server = await dbConn.getDb().transactionAsync(() => MonkyServer.createResources(config, dbConn, resources, logScope));
+        setupComplete = true;
+        return server;
+      } catch (error) {
+        return resources.fail(error);
+      }
+    });
+  }
 
+  private static async createResources(
+    config: ServerConfig, dbConn: DatabaseConnection, resources: ServerResourceScope,
+    logScope: ServerLogScope,
+  ): Promise<MonkyServer> {
     const avatarStorage = new AvatarStorageService(config.dataDir);
     const attachmentStorage = new AttachmentStorageService(config.dataDir);
     const rateLimiter = new RateLimiter();
+    resources.defer('rate limiter', () => rateLimiter.dispose());
 
     const db = dbConn.getDb();
     const serverRepo = new SqliteServerRepository(db);
@@ -229,8 +266,9 @@ export class MonkyServer {
     const permissionService = new PermissionService(serverRepo, roleRepo);
     const roleService = new RoleService(roleRepo, userRepo, permissionService);
 
-    const signalingService = new SignalingService(channelRepo);
-    const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService);
+    const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
+    const botPermissions = new BotPermissionService(new SqliteBotPermissionRepository(db));
+    const channelService = new ChannelService(channelRepo, serverRepo, roleRepo, permissionService, botPermissions);
     const chatService = new ChatService(
       messageRepo,
       channelRepo,
@@ -276,7 +314,8 @@ export class MonkyServer {
           if (user.isBot) bots.set(user.id, user);
         }
         return bots;
-      }
+      },
+      botPermissions,
     );
     const commandRegistry = new CommandRegistry();
 
@@ -300,7 +339,12 @@ export class MonkyServer {
         return;
       }
       if (req.url === '/preview') {
-        const people = listOnlineHumans(getOnlineUsers().values());
+        const onlineSessions = getOnlineUsers();
+        const people = listOnlineHumans(onlineSessions.values());
+        const voiceStates = signalingService.getAllVoiceStates();
+        const voicePeople = listOnlineHumans(
+          [...onlineSessions.entries()].filter(([sessionId]) => voiceStates[sessionId]).map(([, value]) => value)
+        );
         const users = people
           .filter((user) => !user.invisible)
           .slice(0, 10)
@@ -308,8 +352,12 @@ export class MonkyServer {
             nickname: user.nickname,
             avatarUrl: user.avatarUrl || null,
           }));
-        Promise.all([serverRepo.getServer(), userRepo.count()])
-          .then(([server, memberCount]) => {
+        const voiceUsers = voicePeople
+          .filter((user) => !user.invisible)
+          .slice(0, 10)
+          .map((user) => ({ nickname: user.nickname, avatarUrl: user.avatarUrl || null }));
+        Promise.all([serverRepo.getServer(), userRepo.count(), botService.getCompatibility()])
+          .then(([server, memberCount, botCompatibility]) => {
             res.writeHead(200, {
               'Content-Type': 'application/json',
               'Access-Control-Allow-Origin': '*',
@@ -321,6 +369,9 @@ export class MonkyServer {
                 iconUrl: avatarStorage.getPublicUrl(server?.iconPath),
                 // Distinct people, matching the per-person maxUsers semantics (#309).
                 userCount: people.length,
+                voiceUserCount: voicePeople.length,
+                voiceUsers,
+                botCompatibility,
                 // Registered members and the cap they count against, so a visitor
                 // can tell whether there is room before trying to join (#403).
                 // `??` rather than `||`: 0 is the "unlimited" sentinel and must
@@ -331,7 +382,8 @@ export class MonkyServer {
               })
             );
           })
-          .catch(() => {
+          .catch((error) => {
+            Logger.error('NETWORK', 'Failed to prepare the public server preview.', error);
             res.writeHead(500, { 'Access-Control-Allow-Origin': '*' });
             res.end();
           });
@@ -390,9 +442,26 @@ export class MonkyServer {
       res.writeHead(404);
       res.end();
     });
+    resources.defer('HTTP listener', () => closeHttpServer(httpServer));
 
     const coturnManager = new CoturnManager(config.dataDir);
+    resources.defer('TURN relay', () => coturnManager.stop());
     const sfuManager = new SfuManager();
+    resources.defer('SFU runtime', () => sfuManager.close());
+    const lanBroadcaster = new LanBroadcaster({
+      serverName: config.serverName || 'Monky Server',
+      serverPort: config.port,
+      discoveryPort: config.discoveryPort,
+    });
+    resources.defer('LAN broadcaster', () => lanBroadcaster.stop());
+    let instance: MonkyServer | undefined;
+    resources.defer('startup tasks', async () => { await instance?.waitForStartupTasks(); });
+    const serverRecord = await serverRepo.getServer();
+    if (!serverRecord) throw new Error('The initialized server record is missing.');
+    const monitorService = new ServerMonitorService(serverRecord.id, logScope, () => {
+      if (!instance) throw new Error('The server monitor is not ready.');
+      return instance.getStats();
+    }, rateLimiter);
 
     const wsServer = new WebSocketServer(
       httpServer,
@@ -410,18 +479,16 @@ export class MonkyServer {
       sfuManager,
       botService,
       commandRegistry,
-      new BotSelectorService(new SqliteBotSelectorRepository(db))
+      new BotSelectorService(new SqliteBotSelectorRepository(db)),
+      new BotSettingsService(new SqliteBotSettingsRepository(db), botPermissions),
+      monitorService,
+      resolveServerVersion(config.version),
     );
+    resources.defer('WebSocket server', () => wsServer.close(instance?.shutdownReason ?? 'stopped'));
 
     getOnlineUsers = () => wsServer.getOnlineUsersMap();
 
-    const lanBroadcaster = new LanBroadcaster({
-      serverName: config.serverName || 'Monky Server',
-      serverPort: config.port,
-      discoveryPort: config.discoveryPort,
-    });
-
-    return new MonkyServer(
+    instance = new MonkyServer(
       config,
       dbConn,
       httpServer,
@@ -432,8 +499,11 @@ export class MonkyServer {
       attachmentService,
       coturnManager,
       sfuManager,
-      serverRepo
+      serverRepo,
+      resources,
+      logScope,
     );
+    return instance;
   }
 
   private static async handleAttachmentUpload(
@@ -582,20 +652,33 @@ export class MonkyServer {
     fs.createReadStream(filePath).pipe(res);
   }
 
-  public async start(): Promise<void> {
-    return new Promise((resolve) => {
-      this.httpServer.listen(this.config.port, '0.0.0.0', () => {
-        this.startedAt = Date.now();
-        Logger.info('INFO', `Monky Server running on 0.0.0.0:${this.config.port}`);
-        Logger.info('INFO', `Data directory: ${this.config.dataDir}`);
-        void this.attachmentService.reconcile();
-        void this.startTurnIfEnabled();
-        this.lanBroadcaster
-          .start()
-          .catch((error) => Logger.warn('NETWORK', 'LAN discovery broadcast unavailable; continuing without it.', error))
-          .finally(() => resolve());
-      });
-    });
+  public start(): Promise<void> {
+    if (this.stopping || this.stopped) return Promise.reject(new Error('Server shutdown has already started'));
+    if (this.startPromise) return this.startPromise;
+    const attempt = Logger.withScope(this.logScope, () => this.startListening());
+    this.startPromise = attempt;
+    void attempt.catch(() => { if (this.startPromise === attempt) this.startPromise = null; });
+    return attempt;
+  }
+
+  private async startListening(): Promise<void> {
+    await listenHttpServer(this.httpServer, this.config.port, '0.0.0.0');
+    if (this.stopping) throw new Error('Server startup was interrupted by shutdown');
+    this.startedAt = Date.now();
+    Logger.info('INFO', `Monky Server running on 0.0.0.0:${this.config.port}`);
+    Logger.info('INFO', `Data directory: ${this.config.dataDir}`);
+    this.startupTasks.push(
+      this.attachmentService.reconcile().catch((error) => Logger.warn('ATTACHMENT', 'Startup reconciliation failed', error)),
+      this.startTurnIfEnabled(),
+    );
+    await this.lanBroadcaster.start()
+      .catch((error) => Logger.warn('NETWORK', 'LAN discovery broadcast unavailable; continuing without it.', error));
+    if (this.stopping) throw new Error('Server startup was interrupted by shutdown');
+  }
+
+  private async waitForStartupTasks(): Promise<void> {
+    // Start owns its rejection; shutdown must still wait until that work settles.
+    await Promise.allSettled([...(this.startPromise ? [this.startPromise] : []), ...this.startupTasks]);
   }
 
   /**
@@ -608,6 +691,7 @@ export class MonkyServer {
   private async startTurnIfEnabled(): Promise<void> {
     try {
       const server = await this.serverRepo.getServer();
+      if (this.stopping) return;
       if (!server?.turnEnabled) return;
 
       // TURN and SFU are mutually exclusive (#515), but the pair was legal
@@ -633,33 +717,22 @@ export class MonkyServer {
     }
   }
 
-  public async stop(): Promise<void> {
-    Logger.info('INFO', 'Stopping Monky Server...');
-    this.sfuManager.close();
-    await this.coturnManager.stop();
-    await this.lanBroadcaster.stop();
-    this.rateLimiter.dispose();
-    this.wsServer.close();
-    // The desktop host awaits this call before it can start another server, so
-    // the shutdown must be bounded: destroy whatever is still hanging on rather
-    // than waiting on it forever (#333).
-    await new Promise<void>((resolve) => {
-      const forceClose = setTimeout(() => {
-        this.httpServer.closeAllConnections?.();
-      }, LIMITS.SHUTDOWN_GRACE_MS * 2);
-      forceClose.unref?.();
-      this.httpServer.close(() => {
-        clearTimeout(forceClose);
-        resolve();
-      });
+  public async stop(reason: ServerShutdownReason = 'stopped'): Promise<void> {
+    await Logger.withScope(this.logScope, async () => {
+      if (this.stopped) return;
+      if (!this.stopping) this.shutdownReason = reason;
+      this.stopping = true;
+      Logger.info('INFO', 'Stopping Monky Server...');
+      await this.resources.close();
+      this.stopped = true;
+      this.startedAt = null;
+      this.startupTasks.length = 0;
+      Logger.info('INFO', 'Server stopped.');
     });
-    this.dbConn.close();
-    this.startedAt = null;
-    Logger.info('INFO', 'Server stopped.');
   }
 
   /**
-   * Snapshot of the running server, for whoever is hosting it.
+   * Snapshot reused by local hosting and the authorized remote monitor.
    *
    * This exists as a public method on purpose: the Server GUI used to read the
    * same numbers by casting the instance to reach `dbConn` and `wsServer`
@@ -681,10 +754,11 @@ export class MonkyServer {
     // Counts people rather than sockets: one person may hold several sessions
     // since a single identity can be connected from more than one device.
     const onlineUsers = listOnlineHumans(this.wsServer.getOnlineUsersMap().values()).length;
+    const address = this.httpServer.address();
 
     return {
       serverName: serverRecord?.name ?? this.config.serverName ?? 'Monky Server',
-      port: this.config.port,
+      port: address && typeof address === 'object' ? address.port : this.config.port,
       dataDir: this.config.dataDir,
       startedAt: this.startedAt,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,

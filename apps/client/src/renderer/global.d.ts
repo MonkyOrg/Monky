@@ -6,6 +6,16 @@ declare global {
   interface Window {
     api: ElectronApi;
   }
+
+  // Chromium supports these output-routing APIs before our DOM typings.
+  interface AudioContextOptions {
+    sinkId?: string | { type: 'none' };
+  }
+
+  interface AudioContext {
+    readonly sinkId: string | { type: 'none' };
+    setSinkId?(sinkId: string): Promise<void>;
+  }
 }
 
 declare module '*.mp3' {
@@ -26,4 +36,3 @@ declare module 'highlight.js/lib/languages/*' {
 }
 
 export {};
-

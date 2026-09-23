@@ -38,6 +38,9 @@ export function clearLines(count: number): void {
 export async function askChoiceArrows(question: string, choices: string[]): Promise<string> {
   const stdin = process.stdin;
   const stdout = process.stdout;
+  if (stdin.destroyed || stdin.readableEnded) throw new Error(t('prompt.cancelled'));
+  const wasRaw = !!stdin.isRaw;
+  const wasFlowing = stdin.readableFlowing === true;
 
   stdout.write(`${color(question, ANSI.bold)}\n`);
   stdout.write(color(`  ${t('prompt.navigate')}\n`, ANSI.dim));
@@ -46,6 +49,7 @@ export async function askChoiceArrows(question: string, choices: string[]): Prom
   renderChoiceList(choices, cursor);
 
   return new Promise((resolve, reject) => {
+    let settled = false;
     stdin.resume();
     stdin.setEncoding('utf8');
     stdin.setRawMode(true);
@@ -65,17 +69,30 @@ export async function askChoiceArrows(question: string, choices: string[]): Prom
 
     const cleanup = () => {
       clearNumericTimer();
-      stdin.setRawMode(false);
-      stdin.pause();
+      if (!stdin.destroyed) stdin.setRawMode(wasRaw);
+      if (wasFlowing) stdin.resume(); else stdin.pause();
       stdin.removeListener('data', onData);
+      stdin.removeListener('end', cancel);
+      stdin.removeListener('close', cancel);
+      stdin.removeListener('error', fail);
     };
 
     const select = (index: number) => {
+      if (settled) return;
+      settled = true;
       cleanup();
       clearLines(choices.length);
       stdout.write(`${color('❯', ANSI.cyan)} ${choices[index]}\n`);
       resolve(choices[index]);
     };
+
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const cancel = () => fail(new Error(t('prompt.cancelled')));
 
     const commitNumeric = () => {
       const value = Number.parseInt(numericBuffer, 10);
@@ -93,9 +110,8 @@ export async function askChoiceArrows(question: string, choices: string[]): Prom
     };
 
     const onData = (data: string) => {
-      if (data === '\u0003') {
-        cleanup();
-        reject(new Error(t('prompt.cancelled')));
+      if (data === '\u0003' || data === '\u0004' || data === '\u001b') {
+        cancel();
         return;
       }
       if (data === '\r' || data === '\n') {
@@ -132,6 +148,9 @@ export async function askChoiceArrows(question: string, choices: string[]): Prom
     };
 
     stdin.on('data', onData);
+    stdin.once('end', cancel);
+    stdin.once('close', cancel);
+    stdin.once('error', fail);
   });
 }
 
@@ -164,7 +183,7 @@ export async function askChoice(question: string, choices: string[]): Promise<st
 }
 
 export async function confirm(question: string, defaultYes: boolean = true): Promise<boolean> {
-  const suffix = defaultYes ? ' (S/n)' : ' (s/N)';
+  const suffix = ` ${t(defaultYes ? 'prompt.confirmDefaultYes' : 'prompt.confirmDefaultNo')}`;
   while (true) {
     const answer = (await ask(`${question}${suffix}`)).trim().toLowerCase();
     if (!answer) return defaultYes;

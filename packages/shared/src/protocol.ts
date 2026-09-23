@@ -1,5 +1,13 @@
-import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, WebRtcSignalPayload } from './models.js';
-import type { BotForm, BotFormValues, CommandValues } from './botInteractions.js';
+import { AttachmentStorageInfo, BotCommandContext, BotInfo, ChannelSummary, ChannelType, ChatMessage, CommandOption, Role, RtcTransportPurpose, ServerDetails, SlashCommand, TurnAvailability, TurnInstallStage, UserRoleSummary, UserSummary, VoiceMode, VoiceParticipantState, VoiceRestrictions, WebRtcSignalPayload } from './models.js';
+import type {
+  BotForm, BotFormValues, BotSettingsContext, BotSettingsDefinition, BotSettingsListResponse,
+  BotSettingsPatch, BotSettingsSnapshot, BotServerSettingsSnapshot, CommandAutocompleteResult, CommandValues,
+} from './botInteractions.js';
+import type { SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
+import type { CommandCallerContext, LocalCommandPreparation } from './localExecutionProtocol.js';
+import type { ServerShutdownReason } from './serverLifecycle.js';
+import type { BotCapability, BotPermissions } from './botPermissions.js';
+import type { NativeScreenSource } from './screenSharing.js';
 
 export enum ProtocolErrorCode {
   AUTH_INVALID_PASSWORD = 'AUTH_INVALID_PASSWORD',
@@ -31,8 +39,18 @@ export enum ProtocolErrorCode {
   BOT_INVALID_OPTIONS = 'BOT_INVALID_OPTIONS',
   BOT_INTERACTION_EXPIRED = 'BOT_INTERACTION_EXPIRED',
   BOT_INTERACTION_INVALID = 'BOT_INTERACTION_INVALID',
+  BOT_SCREEN_CONFLICT = 'BOT_SCREEN_CONFLICT',
+  BOT_SCREEN_NOT_FOUND = 'BOT_SCREEN_NOT_FOUND',
   BOT_COMMAND_BUSY = 'BOT_COMMAND_BUSY',
+  BOT_VOICE_REQUIRED = 'BOT_VOICE_REQUIRED',
+  BOT_VOICE_CHANNEL_MISMATCH = 'BOT_VOICE_CHANNEL_MISMATCH',
   BOT_INVALID_PROFILE = 'BOT_INVALID_PROFILE',
+  BOT_SETTINGS_INVALID = 'BOT_SETTINGS_INVALID',
+  BOT_SETTINGS_CONFLICT = 'BOT_SETTINGS_CONFLICT',
+  BOT_PERMISSIONS_REQUIRED = 'BOT_PERMISSIONS_REQUIRED',
+  BOT_CAPABILITIES_INVALID = 'BOT_CAPABILITIES_INVALID',
+  BOT_PERMISSIONS_CONFLICT = 'BOT_PERMISSIONS_CONFLICT',
+  BOT_MANIFEST_CHANGED = 'BOT_MANIFEST_CHANGED',
   /**
    * The relay cannot run on the host. Kept apart from BAD_REQUEST so the
    * client can explain what to do instead of showing a generic message (#429).
@@ -45,6 +63,7 @@ export enum ProtocolErrorCode {
    * degrading to P2P (#515).
    */
   SFU_UNAVAILABLE = 'SFU_UNAVAILABLE',
+  VOICE_RECONNECT_EXPIRED = 'VOICE_RECONNECT_EXPIRED',
 }
 
 export enum MessageType {
@@ -53,9 +72,30 @@ export enum MessageType {
   SELECTOR_UPDATE = 'SELECTOR_UPDATE',
   SELECTOR_CLOSE = 'SELECTOR_CLOSE',
   SELECTOR_RESPOND = 'SELECTOR_RESPOND',
+  SELECTOR_RESPONDED = 'SELECTOR_RESPONDED',
   SELECTOR_FINALIZE = 'SELECTOR_FINALIZE',
   SELECTOR_SNAPSHOT = 'SELECTOR_SNAPSHOT',
   SELECTOR_LIST_RESULT = 'SELECTOR_LIST_RESULT',
+  BOT_SCREEN_CREATE = 'BOT_SCREEN_CREATE',
+  BOT_SCREEN_UPDATE = 'BOT_SCREEN_UPDATE',
+  BOT_SCREEN_CLOSE = 'BOT_SCREEN_CLOSE',
+  BOT_SCREEN_END = 'BOT_SCREEN_END',
+  BOT_SCREEN_LIST = 'BOT_SCREEN_LIST',
+  BOT_SCREEN_SNAPSHOT = 'BOT_SCREEN_SNAPSHOT',
+  BOT_SCREEN_LIST_RESULT = 'BOT_SCREEN_LIST_RESULT',
+  BOT_SCREEN_ACTION = 'BOT_SCREEN_ACTION',
+  BOT_SCREEN_ACTION_EVENT = 'BOT_SCREEN_ACTION_EVENT',
+  BOT_SCREEN_REMOVED = 'BOT_SCREEN_REMOVED',
+  BOT_VOICE_CONTEXT = 'BOT_VOICE_CONTEXT',
+  BOT_VOICE_CONTEXT_RESULT = 'BOT_VOICE_CONTEXT_RESULT',
+  BOT_LOCAL_SOURCE_REQUEST = 'BOT_LOCAL_SOURCE_REQUEST',
+  BOT_LOCAL_SOURCE_RESULT = 'BOT_LOCAL_SOURCE_RESULT',
+  BOT_LOCAL_TASK_REQUEST = 'BOT_LOCAL_TASK_REQUEST',
+  BOT_LOCAL_TASK_OFFER = 'BOT_LOCAL_TASK_OFFER',
+  BOT_LOCAL_TASK_ACCEPT = 'BOT_LOCAL_TASK_ACCEPT',
+  BOT_LOCAL_TASK_CONTROL = 'BOT_LOCAL_TASK_CONTROL',
+  BOT_LOCAL_TASK_EVENT = 'BOT_LOCAL_TASK_EVENT',
+  BOT_LOCAL_MEDIA_SIGNAL = 'BOT_LOCAL_MEDIA_SIGNAL',
   // Client -> Server
   AUTH_CONNECT = 'AUTH_CONNECT',
   AUTH_CHALLENGE_RESPONSE = 'AUTH_CHALLENGE_RESPONSE',
@@ -84,14 +124,19 @@ export enum MessageType {
   ROLE_ASSIGN = 'ROLE_ASSIGN',
   ROLE_UNASSIGN = 'ROLE_UNASSIGN',
   VOICE_JOIN = 'VOICE_JOIN',
+  VOICE_RECONNECT = 'VOICE_RECONNECT',
+  VOICE_RECONNECTED = 'VOICE_RECONNECTED',
   VOICE_LEAVE = 'VOICE_LEAVE',
   VOICE_STATE_UPDATE = 'VOICE_STATE_UPDATE',
   ADMIN_MUTE_USER = 'ADMIN_MUTE_USER',
   ADMIN_DEAFEN_USER = 'ADMIN_DEAFEN_USER',
+  ADMIN_GET_VOICE_RESTRICTIONS = 'ADMIN_GET_VOICE_RESTRICTIONS',
   ADMIN_KICK_VOICE = 'ADMIN_KICK_VOICE',
   ADMIN_MOVE_USER = 'ADMIN_MOVE_USER',
   MEMBER_KICK = 'MEMBER_KICK',
   RTC_SIGNAL = 'RTC_SIGNAL',
+  NATIVE_SCREEN_SIGNAL = 'NATIVE_SCREEN_SIGNAL',
+  NATIVE_SCREEN_SIGNAL_ACK = 'NATIVE_SCREEN_SIGNAL_ACK',
   RTC_DIAGNOSTICS_REPORT = 'RTC_DIAGNOSTICS_REPORT',
   PING = 'PING',
   USER_LOGOUT = 'USER_LOGOUT',
@@ -113,11 +158,14 @@ export enum MessageType {
   SFU_WEBRTC_TRANSPORT_CREATED = 'SFU_WEBRTC_TRANSPORT_CREATED',
   SFU_CONNECT_WEBRTC_TRANSPORT = 'SFU_CONNECT_WEBRTC_TRANSPORT',
   SFU_WEBRTC_TRANSPORT_CONNECTED = 'SFU_WEBRTC_TRANSPORT_CONNECTED',
+  SFU_CLOSE_WEBRTC_TRANSPORT = 'SFU_CLOSE_WEBRTC_TRANSPORT',
+  SFU_WEBRTC_TRANSPORT_CLOSED = 'SFU_WEBRTC_TRANSPORT_CLOSED',
   SFU_PRODUCE = 'SFU_PRODUCE',
   SFU_PRODUCED = 'SFU_PRODUCED',
   SFU_CONSUME = 'SFU_CONSUME',
   SFU_CONSUMED = 'SFU_CONSUMED',
   SFU_PRODUCER_CLOSED = 'SFU_PRODUCER_CLOSED',
+  SFU_PRODUCER_SET_PAUSED = 'SFU_PRODUCER_SET_PAUSED',
   SFU_CONSUMER_CLOSED = 'SFU_CONSUMER_CLOSED',
   SFU_CONSUMER_SET_PAUSED = 'SFU_CONSUMER_SET_PAUSED',
   SFU_NEW_PRODUCER = 'SFU_NEW_PRODUCER',
@@ -135,10 +183,20 @@ export enum MessageType {
   BOT_LIST_RESPONSE = 'BOT_LIST_RESPONSE',
   /** Admin -> server: revoke a bot's token and disconnect it. */
   BOT_REVOKE = 'BOT_REVOKE',
-  /** Server -> admin: bot was revoked. */
+  /** Server -> members and the affected bot: its installation was revoked. */
   BOT_REVOKED = 'BOT_REVOKED',
   BOT_UPDATE_PROFILE = 'BOT_UPDATE_PROFILE',
   BOT_PROFILE_UPDATED = 'BOT_PROFILE_UPDATED',
+  BOT_SETTINGS_LIST = 'BOT_SETTINGS_LIST',
+  BOT_SETTINGS_LIST_RESPONSE = 'BOT_SETTINGS_LIST_RESPONSE',
+  BOT_SETTINGS_GET = 'BOT_SETTINGS_GET',
+  BOT_SETTINGS_UPDATE = 'BOT_SETTINGS_UPDATE',
+  BOT_SETTINGS_SNAPSHOT = 'BOT_SETTINGS_SNAPSHOT',
+  BOT_PERMISSIONS_GET = 'BOT_PERMISSIONS_GET',
+  BOT_PERMISSIONS_UPDATE = 'BOT_PERMISSIONS_UPDATE',
+  BOT_PERMISSIONS_SNAPSHOT = 'BOT_PERMISSIONS_SNAPSHOT',
+  BOT_INSTALL_PREVIEW = 'BOT_INSTALL_PREVIEW',
+  BOT_INSTALL_PREVIEW_RESULT = 'BOT_INSTALL_PREVIEW_RESULT',
   /** Bot -> server: register slash commands. */
   COMMAND_REGISTER = 'COMMAND_REGISTER',
   /** Server -> bot: commands were registered. */
@@ -147,10 +205,19 @@ export enum MessageType {
   COMMANDS_LIST = 'COMMANDS_LIST',
   /** Server -> client: available slash commands. */
   COMMANDS_LIST_RESPONSE = 'COMMANDS_LIST_RESPONSE',
+  COMMAND_AUTOCOMPLETE = 'COMMAND_AUTOCOMPLETE',
+  COMMAND_AUTOCOMPLETE_RESULT = 'COMMAND_AUTOCOMPLETE_RESULT',
+  COMMAND_AUTOCOMPLETE_CANCEL = 'COMMAND_AUTOCOMPLETE_CANCEL',
+  COMMAND_AUDIO_PREVIEW = 'COMMAND_AUDIO_PREVIEW',
+  COMMAND_AUDIO_PREVIEW_RESULT = 'COMMAND_AUDIO_PREVIEW_RESULT',
+  COMMAND_AUDIO_PREVIEW_CANCEL = 'COMMAND_AUDIO_PREVIEW_CANCEL',
   /** Client -> server: invoke a slash command. */
   COMMAND_INVOKE = 'COMMAND_INVOKE',
   COMMAND_INVOKED = 'COMMAND_INVOKED',
   COMMAND_PROMPT = 'COMMAND_PROMPT',
+  COMMAND_SOUND_DOWNLOAD = 'COMMAND_SOUND_DOWNLOAD',
+  COMMAND_SOUND_DOWNLOAD_RESULT = 'COMMAND_SOUND_DOWNLOAD_RESULT',
+  COMMAND_SOUND_DOWNLOAD_CANCEL = 'COMMAND_SOUND_DOWNLOAD_CANCEL',
   COMMAND_SUBMIT = 'COMMAND_SUBMIT',
   COMMAND_SUBMITTED = 'COMMAND_SUBMITTED',
   COMMAND_CANCEL = 'COMMAND_CANCEL',
@@ -170,6 +237,8 @@ export enum MessageType {
   SERVER_STATE = 'SERVER_STATE',
   ROLES_LIST = 'ROLES_LIST',
   SERVER_SETTINGS_UPDATED = 'SERVER_SETTINGS_UPDATED',
+  SERVER_MONITOR_GET = 'SERVER_MONITOR_GET',
+  SERVER_MONITOR_SNAPSHOT = 'SERVER_MONITOR_SNAPSHOT',
   /**
    * Server -> client, while coturn is being installed (#438). Purely
    * informational: a client that does not know it simply ignores it.
@@ -194,6 +263,7 @@ export enum MessageType {
   VOICE_USER_JOINED = 'VOICE_USER_JOINED',
   VOICE_USER_LEFT = 'VOICE_USER_LEFT',
   VOICE_STATE_CHANGED = 'VOICE_STATE_CHANGED',
+  VOICE_RESTRICTIONS_UPDATED = 'VOICE_RESTRICTIONS_UPDATED',
   SOUNDBOARD_PLAYED = 'SOUNDBOARD_PLAYED',
   /** Server -> clients in the channel: drop this user's ongoing sound (#499). */
   SOUNDBOARD_STOPPED = 'SOUNDBOARD_STOPPED',
@@ -247,6 +317,8 @@ export interface AuthFailedPayload {
 }
 
 export interface ChatSendPayload {
+  /** Bot-authored variants; rejected for human messages. */
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   replyToMessageId?: string;
   channelId: string;
   content: string;
@@ -418,6 +490,21 @@ export interface VoiceJoinPayload {
   channelId: string;
   isMuted?: boolean;
   isDeafened?: boolean;
+  /** Bot-only admission scoped to the originating command invocation. */
+  invocationId?: string;
+  /** Bot-only opt-in, requiring the separate receive_voice capability. */
+  receiveAudio?: boolean;
+}
+
+export interface VoiceModeTransition {
+  id: string;
+  from: 'sfu';
+  to: 'p2p';
+}
+
+/** One-use admission after a server-requested clean transport teardown (#607). */
+export interface VoiceReconnectPayload extends VoiceJoinPayload {
+  transitionId: string;
 }
 
 export interface VoiceLeavePayload {
@@ -433,16 +520,21 @@ export interface VoiceStateUpdatePayload {
   isSharingScreenAudio?: boolean;
   /** See VoiceParticipantState.screenShareIds (#253). */
   screenShareIds?: string[];
+  nativeScreenShares?: NativeScreenSource[];
 }
 
 export interface AdminMuteUserPayload {
-  targetSessionId: string;
+  targetUserId: string;
   muted: boolean;
 }
 
 export interface AdminDeafenUserPayload {
-  targetSessionId: string;
+  targetUserId: string;
   deafened: boolean;
+}
+
+export interface AdminVoiceRestrictionsGetPayload {
+  targetUserId: string;
 }
 
 export interface AdminKickVoicePayload {
@@ -502,6 +594,8 @@ export interface IceServerConfig {
 export interface AuthSuccessPayload {
   server: ServerDetails;
   currentUser: UserSummary;
+  /** Identity-level policy on this server, including when not in voice. */
+  voiceRestrictions: VoiceRestrictions;
   roles?: Role[];
   userRoles?: UserRoleSummary[];
   ownerId?: string | null;
@@ -540,6 +634,7 @@ export interface ServerSettingsUpdatedPayload {
   showRoleBadgesToEveryone?: boolean;
   /** Current state of the voice/video topology mode ('p2p' | 'sfu') (#515). */
   voiceMode?: VoiceMode;
+  voiceTransition?: VoiceModeTransition;
   iconUrl?: string | null;
   // Current attachment-storage limits + usage, so the settings UI stays in sync (#11).
   attachmentStorage?: AttachmentStorageInfo;
@@ -589,6 +684,7 @@ export interface SoundboardStoppedPayload {
 
 export interface ServerShutdownPayload {
   reason?: string;
+  reasonCode?: ServerShutdownReason;
 }
 
 export interface UserJoinedPayload {
@@ -650,10 +746,16 @@ export interface VoiceUserLeftPayload {
   channelId: string;
   userId: string;
   sessionId: string;
+  /** Only this departure permits automatic re-entry into the same channel. */
+  reconnect?: VoiceModeTransition;
 }
 
 export interface VoiceStateChangedPayload {
   voiceState: VoiceParticipantState;
+}
+
+export interface VoiceRestrictionsUpdatedPayload extends VoiceRestrictions {
+  userId: string;
 }
 
 export interface RolesListPayload {
@@ -689,11 +791,17 @@ export interface SfuRouterRtpCapabilitiesPayload {
 export interface SfuCreateWebRtcTransportPayload {
   channelId: string;
   direction: 'send' | 'recv';
+  /** Omitted by the browser's existing call; native screen media uses its own pair. */
+  purpose?: RtcTransportPurpose;
+  /** One native engine/rendition; replacing it must not close other screen profiles. */
+  screenSessionId?: string;
 }
 
 export interface SfuWebRtcTransportCreatedPayload {
   channelId: string;
   direction: 'send' | 'recv';
+  purpose?: RtcTransportPurpose;
+  screenSessionId?: string;
   transportOptions: {
     id: string;
     iceParameters: any;
@@ -707,6 +815,12 @@ export interface SfuConnectWebRtcTransportPayload {
   channelId: string;
   transportId: string;
   dtlsParameters: any;
+}
+
+export interface SfuCloseWebRtcTransportPayload {
+  channelId: string;
+  transportId: string;
+  purpose: 'screen';
 }
 
 export interface SfuProducePayload {
@@ -744,6 +858,11 @@ export interface SfuProducerClosedPayload {
   producerId: string;
 }
 
+export interface SfuProducerSetPausedPayload extends SfuProducerClosedPayload {
+  paused: boolean;
+  purpose: 'screen';
+}
+
 export interface SfuConsumerClosedPayload {
   channelId: string;
   consumerId: string;
@@ -752,6 +871,7 @@ export interface SfuConsumerClosedPayload {
 export interface SfuConsumerSetPausedPayload {
   channelId: string;
   consumerId: string;
+  /** Screen consumers start paused and only resume after an explicit Watch. */
   paused: boolean;
 }
 
@@ -775,11 +895,8 @@ export interface SfuProducersListPayload {
 
 // ── Bot & Slash Command Payloads (#569) ───────────────────────────────────
 
-/** Admin -> server: create a new bot account. */
-export interface BotCreatePayload {
-  name: string;
-  avatarBase64?: string;
-}
+/** Admin -> server: reserve a manual token link without defining the bot's identity. */
+export type BotCreatePayload = Record<string, never>;
 
 /** Server -> admin: bot created with its one-time token. */
 export interface BotCreatedPayload {
@@ -803,7 +920,7 @@ export interface BotRevokedPayload {
   botId: string;
 }
 
-/** Bots update themselves; administrators supply the botId to edit another bot. */
+/** Only bots update their own identity; botId, when present, must refer to themselves. */
 export interface BotProfileUpdatePayload {
   botId?: string;
   name?: string;
@@ -816,21 +933,72 @@ export interface BotProfileUpdatedPayload {
 
 /** Bot -> server: register slash commands (replaces the bot's previous set). */
 export interface CommandRegisterPayload {
+  requestedCapabilities: BotCapability[];
   commands: Array<{
     name: string;
     description: string;
     options?: CommandOption[];
+    localizations?: SlashCommand['localizations'];
+    downloadsSound?: boolean;
+    voiceRequirement?: SlashCommand['voiceRequirement'];
+    localCapabilities?: SlashCommand['localCapabilities'];
   }>;
+  settings?: BotSettingsDefinition;
 }
 
 /** Server -> bot: registration result. */
 export interface CommandRegisteredPayload {
   registered: number;
+  settings: BotServerSettingsSnapshot;
+  permissions?: BotPermissions;
+}
+
+export type BotSettingsListResponsePayload = BotSettingsListResponse;
+export type BotSettingsSnapshotPayload = BotSettingsSnapshot;
+export interface BotSettingsGetPayload { botId: string }
+export interface BotSettingsUpdatePayload extends BotSettingsGetPayload {
+  schemaRevision: number;
+  expectedRevision: number;
+  patch: BotSettingsPatch;
 }
 
 /** Server -> client: available slash commands. */
 export interface CommandsListResponsePayload {
   commands: SlashCommand[];
+}
+
+/** The envelope requestId is required and is remapped before dispatch to the bot. */
+export interface CommandAutocompletePayload {
+  botId: string;
+  commandName: string;
+  channelId: string;
+  optionName: string;
+  query: string;
+  /** Zero-based page; omission preserves the original, non-paginated request. */
+  page?: number;
+  /** Opaque continuation returned by the bot, when its source uses cursors. */
+  cursor?: string;
+  options?: CommandValues;
+  locale?: 'pt-BR' | 'en';
+  userSettings?: BotFormValues;
+  localPreparation?: LocalCommandPreparation;
+}
+
+export interface CommandAutocompleteExecutionPayload extends CommandCallerContext {
+  commandName: string;
+  optionName: string;
+  query: string;
+  page?: number;
+  cursor?: string;
+  options: CommandValues;
+  locale: 'pt-BR' | 'en';
+  settings?: BotSettingsContext;
+}
+
+export type CommandAutocompleteResultPayload = CommandAutocompleteResult;
+
+export interface CommandAutocompleteCancelPayload {
+  requestId: string;
 }
 
 /** Client -> server: invoke a slash command. */
@@ -842,13 +1010,16 @@ export interface CommandInvokePayload {
   /** Typed options keyed by option name. */
   options?: CommandValues;
   locale?: 'pt-BR' | 'en';
+  /** Consent for one local soundboard download by this invocation only. */
+  allowSoundDownload?: boolean;
+  userSettings?: BotFormValues;
+  localPreparation?: LocalCommandPreparation;
 }
 
 /** Server -> bot: caller identity and invocation ID are assigned by the server. */
-export interface CommandExecutionPayload extends CommandInvokePayload {
+export interface CommandExecutionPayload extends Omit<CommandInvokePayload, 'userSettings' | 'localPreparation'>, CommandCallerContext {
   invocationId: string;
-  invokerId: string;
-  invokerNickname: string;
+  settings?: BotSettingsContext;
 }
 
 export interface CommandInvokedPayload {
@@ -860,6 +1031,7 @@ export interface CommandInvokedPayload {
 
 /** Bot -> server. The destination and author come from the stored invocation. */
 export interface CommandResponsePayload {
+  localizations?: import('./botMessages.js').BotMessageLocalizations;
   invocationId: string;
   content: string;
   /** Private by default. Public output must be explicitly requested. */
@@ -890,6 +1062,31 @@ export interface CommandPromptReceivedPayload extends CommandPromptPayload {
   botName: string;
   botAvatarUrl?: string | null;
   expiresAt: number;
+}
+
+/** Bot -> server. The envelope requestId correlates the eventual result. */
+export interface CommandSoundDownloadPayload extends SoundDownloadRequest {
+  invocationId: string;
+}
+
+/** Server -> originating connection. Identity and downloadId are server-assigned. */
+export interface CommandSoundDownloadReceivedPayload extends CommandSoundDownloadPayload, BotCommandContext {
+  downloadId: string;
+  channelId: string;
+  botId: string;
+  botName: string;
+  botAvatarUrl?: string | null;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface CommandSoundDownloadCancelPayload {
+  invocationId: string;
+  downloadId: string;
+}
+
+export interface CommandSoundDownloadResultPayload extends CommandSoundDownloadCancelPayload {
+  result: SoundDownloadResult;
 }
 
 /** Client -> server -> bot; also acknowledged to the submitting client. */
@@ -931,6 +1128,7 @@ export interface CommandFinishedPayload {
  * the token back automatically.
  */
 export interface BotManifest {
+  requestedCapabilities: BotCapability[];
   /** Display name of the bot. */
   name: string;
   /** Short description shown in the install preview. */
@@ -949,8 +1147,9 @@ export interface BotManifest {
 
 /** Client -> server: install a bot from a manifest URL (#578). */
 export interface BotInstallPayload {
-  /** URL of the bot's manifest endpoint (e.g. http://bot-host:4000/manifest). */
-  manifestUrl: string;
+  /** One-time, short-lived preview bound to the requesting administrator. */
+  previewId: string;
+  grantedCapabilities: BotCapability[];
 }
 
 /** Server -> client: bot installed successfully (#578). */

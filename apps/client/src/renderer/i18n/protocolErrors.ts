@@ -29,6 +29,7 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.STORAGE_FULL]: 'protocolError.storageFull',
   [ProtocolErrorCode.TURN_UNAVAILABLE]: 'protocolError.turnUnavailable',
   [ProtocolErrorCode.SFU_UNAVAILABLE]: 'protocolError.sfuUnavailable',
+  [ProtocolErrorCode.VOICE_RECONNECT_EXPIRED]: 'voiceReconnect.expired',
   [ProtocolErrorCode.BOT_OFFLINE]: 'protocolError.botOffline',
   [ProtocolErrorCode.BOT_COMMAND_NOT_FOUND]: 'protocolError.botCommandNotFound',
   [ProtocolErrorCode.BOT_INVALID_OPTIONS]: 'protocolError.botInvalidOptions',
@@ -36,6 +37,16 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.BOT_INTERACTION_INVALID]: 'protocolError.botInteractionInvalid',
   [ProtocolErrorCode.BOT_COMMAND_BUSY]: 'protocolError.botCommandBusy',
   [ProtocolErrorCode.BOT_INVALID_PROFILE]: 'protocolError.botInvalidProfile',
+  [ProtocolErrorCode.BOT_SETTINGS_INVALID]: 'botSettings.stalePreferences',
+  [ProtocolErrorCode.BOT_SETTINGS_CONFLICT]: 'botSettings.conflict',
+  [ProtocolErrorCode.BOT_PERMISSIONS_REQUIRED]: 'botPermissions.denied',
+  [ProtocolErrorCode.BOT_CAPABILITIES_INVALID]: 'botPermissions.invalidDeclaration',
+  [ProtocolErrorCode.BOT_PERMISSIONS_CONFLICT]: 'botPermissions.conflict',
+  [ProtocolErrorCode.BOT_MANIFEST_CHANGED]: 'botPermissions.manifestChanged',
+  [ProtocolErrorCode.BOT_SCREEN_CONFLICT]: 'botScreen.actionError',
+  [ProtocolErrorCode.BOT_SCREEN_NOT_FOUND]: 'botScreen.loadError',
+  [ProtocolErrorCode.BOT_VOICE_REQUIRED]: 'protocolError.botVoiceRequired',
+  [ProtocolErrorCode.BOT_VOICE_CHANNEL_MISMATCH]: 'protocolError.botVoiceChannelMismatch',
 };
 
 /**
@@ -46,6 +57,11 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
  */
 const LEGACY_MISMATCH_MESSAGE = /vers[ãa]o de protocolo/i;
 const LEGACY_EXPECTED_VERSION = /esperado:\s*(\d+)/i;
+
+const BOT_ADDRESS_ERRORS = new Map<string, TranslationKey>([
+  ['Não foi possível determinar o endereço do servidor para o bot. Reconecte usando a URL completa do servidor.', 'bots.serverAddressUnavailable'],
+  ['Um bot remoto não pode usar localhost para acessar este servidor. Reconecte pelo IP ou domínio acessível ao bot e tente novamente.', 'bots.serverAddressLoopback'],
+]);
 
 /**
  * The protocol version the server speaks, or `null` when the rejection was not
@@ -83,6 +99,9 @@ export function translateProtocolError(
 ): string {
   const mismatch = detectVersionMismatch(code, serverMessage, serverProtocolVersion);
   if (mismatch) return describeVersionMismatch(mismatch.serverVersion);
+  const botAddressKey = code === ProtocolErrorCode.BAD_REQUEST && serverMessage
+    ? BOT_ADDRESS_ERRORS.get(serverMessage) : undefined;
+  if (botAddressKey) return t(botAddressKey);
 
   const key = code ? ERROR_KEYS[code as ProtocolErrorCode] : undefined;
   // For BAD_REQUEST, prefer the server's specific message (e.g. bot install

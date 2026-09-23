@@ -1,13 +1,19 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType } from '@monky/shared';
+import { test, type TestContext } from 'node:test';
+import { aggregateTransportHealth, VoiceConnectionHealth, VoiceRosterParticipant, SfuConsumedPayload, MessageType, DEFAULT_CUSTOM_PROFILE } from '@monky/shared';
 import { ParticipantManager } from '../src/renderer/core/ParticipantManager';
 import { NetworkClient } from '../src/renderer/core/NetworkClient';
 import { SfuClientEngine } from '../src/renderer/core/webrtc/SfuClientEngine';
 import { RemoteMediaRouter } from '../src/renderer/core/webrtc/RemoteMediaRouter';
+import { RemoteVadMonitor } from '../src/renderer/core/webrtc/RemoteVadMonitor';
 import { settingsStore } from '../src/renderer/stores/settingsStore';
-import { voiceStore } from '../src/renderer/stores/voiceStore';
-import { participantConnectionIndicators, voiceConnectionIndicator } from '../src/renderer/utils/voiceConnection';
+import { VoiceStore, voiceStore } from '../src/renderer/stores/voiceStore';
+import { appEvents } from '../src/renderer/core/EventBus';
+import { sessionManager } from '../src/renderer/core/SessionManager';
+import { currentEventOrigin, setEventOrigin } from '../src/renderer/core/sessionRouting';
+import { createServerStore, getActiveServerStore, setActiveServerStore } from '../src/renderer/stores/serverStore';
+import { isParticipantSpeaking, participantConnectionIndicators, voiceConnectionIndicator } from '../src/renderer/utils/voiceConnection';
+import { clientLog } from '../src/renderer/core/ClientLogService';
 
 function participant(sessionId: string, channelId = 'room'): VoiceRosterParticipant {
   return {
@@ -32,6 +38,279 @@ test('authoritative join/rejoin roster repairs missing users and ghosts without 
   assert.equal(manager.getInVoiceChannel('other').length, 1);
 });
 
+test('human and bot speaking share the same muted/deafened and departed-session gates', () => {
+  for (const isBot of [false, true]) {
+    const manager = new ParticipantManager();
+    const entry = participant(isBot ? 'bot:voice' : 'human:voice');
+    entry.user.isBot = isBot;
+    manager.reconcileVoiceChannel('room', [entry]);
+    const model = manager.get(entry.voiceState.sessionId);
+    assert.ok(model);
+    manager.setSpeaking(entry.voiceState.sessionId, true);
+    assert.equal(model.isSpeaking, true);
+    for (const flag of ['isMuted', 'isDeafened', 'serverMuted', 'serverDeafened'] as const) {
+      manager.updateVoiceState({ ...entry.voiceState, isSpeaking: true, [flag]: true });
+      assert.equal(model.isSpeaking, false, `${flag} clears a published speaking state`);
+      manager.setSpeaking(entry.voiceState.sessionId, true);
+      assert.equal(model.isSpeaking, false, `${flag} also rejects late RTP activity`);
+      manager.updateVoiceState({ ...entry.voiceState, isSpeaking: true });
+      assert.equal(model.isSpeaking, true, 'unmuted published activity uses the normal participant state');
+    }
+    manager.removeVoiceState(entry.voiceState.sessionId);
+    manager.setSpeaking(entry.voiceState.sessionId, true);
+    assert.equal(model.isSpeaking, false, 'late activity cannot revive a departed session');
+  }
+});
+
+test('local speaking uses current physical audio flags without reviving a departed session', () => {
+  const manager = new ParticipantManager();
+  const entry = participant('self');
+  entry.voiceState.serverDeafened = true;
+  manager.reconcileVoiceChannel('room', [entry]);
+  const physicalAudio = new VoiceStore();
+  physicalAudio.isMuted = false;
+  physicalAudio.isDeafened = false;
+  manager.setSpeaking('self', true, physicalAudio);
+  assert.equal(manager.get('self')?.isSpeaking, true, 'an older muted echo cannot suppress current local capture');
+  assert.equal(manager.get('self')?.voiceState?.serverDeafened, true, 'local activity does not rewrite server state');
+  for (const flag of ['isMuted', 'isDeafened', 'serverMuted', 'serverDeafened'] as const) {
+    physicalAudio[flag] = true;
+    manager.setSpeaking('self', true, physicalAudio);
+    assert.equal(manager.get('self')?.isSpeaking, false, `${flag} still gates the physical microphone`);
+    physicalAudio[flag] = false;
+  }
+  manager.removeVoiceState('self');
+  manager.setSpeaking('self', true, physicalAudio);
+  assert.equal(manager.get('self')?.isSpeaking, false);
+});
+
+function speakingFixture(t: TestContext) {
+  const previousServer = getActiveServerStore();
+  const physical = {
+    currentVoiceChannelId: voiceStore.currentVoiceChannelId, voiceSessionKey: voiceStore.voiceSessionKey,
+    isMuted: voiceStore.isMuted, isDeafened: voiceStore.isDeafened,
+    serverMuted: voiceStore.serverMuted, serverDeafened: voiceStore.serverDeafened,
+    isSpeaking: voiceStore.isSpeaking,
+  };
+  const local = participant('listener');
+  const bot = participant('bot:voice');
+  bot.user.isBot = true;
+  bot.voiceState.isSpeaking = true;
+  const call = sessionManager.create('speaking-ui-fixture', 9001, 'Listener');
+  call.serverStore.currentUser = local.user;
+  call.participants.reconcileVoiceChannel('room', [local, bot]);
+  Object.assign(voiceStore, {
+    currentVoiceChannelId: 'room', voiceSessionKey: call.key,
+    isMuted: false, isDeafened: false, serverMuted: false, serverDeafened: false, isSpeaking: false,
+  });
+  setActiveServerStore(call.serverStore);
+  t.after(() => {
+    Object.assign(voiceStore, physical);
+    setActiveServerStore(previousServer);
+    sessionManager.remove(call.key);
+  });
+  const model = call.participants.get(bot.voiceState.sessionId);
+  assert.ok(model);
+  return { call, local, bot, model };
+}
+
+test('speaking UI is limited to the physical listening room without erasing published activity', (t) => {
+  const { call, local, bot, model } = speakingFixture(t);
+  assert.equal(isParticipantSpeaking(model), true);
+  for (const channel of [null, 'another-room']) {
+    voiceStore.currentVoiceChannelId = channel;
+    assert.equal(isParticipantSpeaking(model), false);
+    assert.equal(model.isSpeaking, true);
+    assert.equal(model.voiceState?.isSpeaking, true);
+  }
+  voiceStore.currentVoiceChannelId = 'room';
+  call.participants.updateVoiceState({ ...bot.voiceState, channelId: 'another-room' });
+  assert.equal(isParticipantSpeaking(model), false, 'a different room on the same server is not audible here');
+  call.participants.updateVoiceState(bot.voiceState);
+  call.participants.removeVoiceState(local.voiceState.sessionId);
+  assert.equal(isParticipantSpeaking(model), false, 'a room ID alone does not establish physical membership');
+  call.participants.updateVoiceState(local.voiceState);
+  assert.equal(isParticipantSpeaking(model), true, 'rejoining restores the projection from existing metadata');
+  voiceStore.voiceSessionKey = 'missing-session';
+  assert.equal(isParticipantSpeaking(model), false);
+  assert.equal(model.voiceState?.isSpeaking, true);
+});
+
+test('speaking UI rejects another server, participant object or physical device with matching account IDs', (t) => {
+  const { call, local, bot, model } = speakingFixture(t);
+  const otherServer = createServerStore();
+  const otherParticipants = new ParticipantManager();
+  otherParticipants.reconcileVoiceChannel('room', [local, bot]);
+  const foreignModel = otherParticipants.get(bot.voiceState.sessionId);
+  assert.ok(foreignModel);
+  assert.equal(isParticipantSpeaking(foreignModel, call.serverStore), false, 'colliding session IDs do not cross stores');
+  assert.equal(isParticipantSpeaking(model, otherServer), false);
+  setActiveServerStore(otherServer);
+  assert.equal(isParticipantSpeaking(model), false, 'foreground rows do not inherit a background call');
+  assert.equal(isParticipantSpeaking(model, call.serverStore), true, 'the overlay may project the actual background call');
+  call.serverStore.currentUser = { ...local.user, sessionId: 'another-device' };
+  assert.equal(isParticipantSpeaking(model, call.serverStore), false, 'another device on the account cannot authorize this device');
+  call.serverStore.currentUser = local.user;
+  model.voiceState = { ...bot.voiceState, sessionId: 'wrong-speaker' };
+  assert.equal(isParticipantSpeaking(model, call.serverStore), false, 'voice state must identify the participant being rendered');
+});
+
+test('one speaking bot cannot turn a muted human or a silent bot green', (t) => {
+  const { call, model } = speakingFixture(t);
+  const human = participant('human');
+  human.voiceState.isMuted = true;
+  human.voiceState.isSpeaking = true;
+  const quietBot = participant('bot:quiet');
+  quietBot.user.isBot = true;
+  for (const entry of [human, quietBot]) {
+    call.participants.addUser(entry.user);
+    call.participants.updateVoiceState(entry.voiceState);
+  }
+  assert.equal(isParticipantSpeaking(model), true);
+  assert.equal(isParticipantSpeaking(call.participants.get('human')), false);
+  assert.equal(isParticipantSpeaking(call.participants.get('bot:quiet')), false);
+  call.participants.updateVoiceState({ ...human.voiceState, isMuted: false });
+  assert.equal(isParticipantSpeaking(call.participants.get('human')), true, 'independent real human activity remains visible');
+  assert.equal(isParticipantSpeaking(call.participants.get('bot:quiet')), false);
+});
+
+test('speaking UI respects sender restrictions and listener deafen but not listener microphone mute', (t) => {
+  const { call, bot, model } = speakingFixture(t);
+  for (const flag of ['isMuted', 'serverMuted', 'isDeafened', 'serverDeafened'] as const) {
+    call.participants.updateVoiceState({ ...bot.voiceState, [flag]: true });
+    assert.equal(isParticipantSpeaking(model), false, `${flag} gates that sender`);
+    assert.equal(model.voiceState?.isSpeaking, true, 'visual masking preserves authoritative metadata');
+    call.participants.updateVoiceState(bot.voiceState);
+  }
+  for (const flag of ['isMuted', 'serverMuted'] as const) {
+    voiceStore[flag] = true;
+    assert.equal(isParticipantSpeaking(model), true, `${flag} does not deafen the listener`);
+    voiceStore[flag] = false;
+  }
+  for (const flag of ['isDeafened', 'serverDeafened'] as const) {
+    voiceStore[flag] = true;
+    assert.equal(isParticipantSpeaking(model), false, `${flag} hides activity while not listening`);
+    assert.equal(model.isSpeaking, true);
+    assert.equal(model.voiceState?.isSpeaking, true);
+    voiceStore[flag] = false;
+    assert.equal(isParticipantSpeaking(model), true, 'undeafen needs no fabricated speech event');
+  }
+});
+
+test('local visual speech uses physical flags rather than older server echoes', (t) => {
+  const { call, local } = speakingFixture(t);
+  call.participants.updateVoiceState({ ...local.voiceState, serverMuted: true, isSpeaking: false });
+  const model = call.participants.get(local.voiceState.sessionId);
+  voiceStore.isSpeaking = true;
+  assert.equal(isParticipantSpeaking(model), true);
+  assert.equal(model?.voiceState?.serverMuted, true);
+  for (const flag of ['isMuted', 'serverMuted', 'isDeafened', 'serverDeafened'] as const) {
+    voiceStore[flag] = true;
+    assert.equal(isParticipantSpeaking(model), false);
+    voiceStore[flag] = false;
+  }
+  voiceStore.isSpeaking = false;
+  call.participants.updateVoiceState({ ...local.voiceState, isSpeaking: true });
+  assert.equal(isParticipantSpeaking(model), false, 'a stale echo cannot light the closed physical microphone');
+});
+
+function audioStats(audioLevel: number): RTCStatsReport {
+  return new Map([['voice', { id: 'voice', type: 'inbound-rtp', timestamp: 1, kind: 'audio', audioLevel }]]);
+}
+
+test('remote VAD preserves published speech, samples ordinary human audio and obeys server mute', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const manager = new ParticipantManager();
+  const entry = participant('peer');
+  entry.voiceState.isSpeaking = true;
+  manager.reconcileVoiceChannel('room', [entry]);
+  let level = 0;
+  const receiver = {
+    track: { readyState: 'live' } satisfies Pick<MediaStreamTrack, 'readyState'>,
+    getStats: async () => audioStats(level),
+  };
+  const vad = new RemoteVadMonitor(() => manager);
+  t.after(() => vad.cleanupAll());
+  vad.setupRemoteReceiverVad('peer', () => receiver);
+  const tick = async () => { t.mock.timers.tick(150); await Promise.resolve(); };
+  for (let i = 0; i < 8; i++) await tick();
+  assert.equal(manager.get('peer')?.isSpeaking, true, 'zero receiver telemetry cannot erase published transmission');
+  manager.updateVoiceState({ ...entry.voiceState, isSpeaking: false });
+  level = 0.3;
+  await tick();
+  assert.equal(manager.get('peer')?.isSpeaking, true, 'human RTP activity works without a published flag');
+  level = 0;
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(manager.get('peer')?.isSpeaking, false, 'ordinary RTP silence still clears human activity');
+  manager.updateVoiceState({ ...entry.voiceState, serverMuted: true });
+  level = 0.3;
+  await tick();
+  assert.equal(manager.get('peer')?.isSpeaking, false, 'server mute overrides both activity sources');
+});
+
+test('retired asynchronous VAD samples cannot revive a rejoined participant or overlap sampling', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const manager = new ParticipantManager();
+  const entry = participant('peer');
+  manager.reconcileVoiceChannel('room', [entry]);
+  let complete: ((stats: RTCStatsReport) => void) | undefined;
+  const pendingStats = new Promise<RTCStatsReport>(resolve => { complete = resolve; });
+  let samples = 0;
+  const receiver = {
+    track: { readyState: 'live' } satisfies Pick<MediaStreamTrack, 'readyState'>,
+    getStats: () => { samples++; return pendingStats; },
+  };
+  const vad = new RemoteVadMonitor(() => manager);
+  t.after(() => vad.cleanupAll());
+  vad.setupRemoteReceiverVad('peer', () => receiver);
+  t.mock.timers.tick(150);
+  t.mock.timers.tick(300);
+  assert.equal(samples, 1, 'a slow native getStats call is never overlapped');
+  vad.cleanupRemoteVad('peer');
+  manager.removeVoiceState('peer');
+  manager.reconcileVoiceChannel('room', [entry]);
+  const nextReceiver = { ...receiver, getStats: async () => audioStats(0) };
+  vad.setupRemoteReceiverVad('peer', () => nextReceiver);
+  if (!complete) throw new Error('The deferred VAD sample was not created');
+  complete(audioStats(0.5));
+  await Promise.resolve();
+  assert.equal(manager.get('peer')?.isSpeaking, false, 'the old timer cannot affect the new voice lifetime');
+  t.mock.timers.tick(150);
+  await Promise.resolve();
+  assert.equal(manager.get('peer')?.isSpeaking, false);
+});
+
+test('decoded microphone VAD stays per-peer, takes precedence over RTP and retains a startup fallback', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const manager = new ParticipantManager();
+  manager.reconcileVoiceChannel('room', [participant('talking'), participant('quiet')]);
+  let decoded: number | null = 0.2;
+  let statReads = 0;
+  const receiver = {
+    track: { readyState: 'live' } satisfies Pick<MediaStreamTrack, 'readyState'>,
+    getStats: async () => { statReads++; return audioStats(0.4); },
+  };
+  const monitor = new RemoteVadMonitor(() => manager, id => id === 'talking' ? decoded : 0);
+  t.after(() => monitor.cleanupAll());
+  for (const id of ['talking', 'quiet']) monitor.setupRemoteReceiverVad(id, () => receiver);
+  const tick = async () => { t.mock.timers.tick(150); await Promise.resolve(); };
+  await tick();
+  assert.equal(manager.get('talking')?.isSpeaking, true);
+  assert.equal(manager.get('quiet')?.isSpeaking, false);
+  assert.equal(statReads, 0, 'A ready PCM meter needs no native stats allocation');
+  decoded = 0;
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(manager.get('talking')?.isSpeaking, false, 'Real silence is not replaced by a stale RTP level');
+  decoded = null;
+  await tick();
+  assert.equal(manager.get('talking')?.isSpeaking, true, 'RTP remains available before the playback graph is ready');
+  assert.equal(statReads, 1);
+  manager.updateVoiceState({ ...participant('talking').voiceState, serverMuted: true });
+  decoded = 0.3;
+  await tick();
+  assert.equal(manager.get('talking')?.isSpeaking, false);
+});
+
 test('SFU health badges are visible to local users, remote users and observers, independently of signaling', () => {
   const manager = new ParticipantManager();
   for (const health of ['connecting', 'connected', 'reconnecting', 'failed'] satisfies VoiceConnectionHealth[]) {
@@ -46,6 +325,35 @@ test('SFU health badges are visible to local users, remote users and observers, 
       assert.equal(indicator.isPeerFailed, health === 'failed');
     }
   }
+});
+
+test('SFU candidate diagnostics expose addresses and ports without ICE credentials or DTLS material', t => {
+  const log = t.mock.method(clientLog, 'info', () => {});
+  const engine = new SfuClientEngine(() => { throw new Error('Unexpected network access'); }, () => 'self', {
+    onHealthChanged() {}, onRoster() {}, onConsumerTrack() {}, onConsumerClosed() {},
+    onConnectionFailed() {}, onConnected() {},
+  });
+  const transport = {
+    id: 'transport',
+    iceParameters: { usernameFragment: 'private-username', password: 'private-password' },
+    dtlsParameters: { fingerprints: [{ value: 'private-fingerprint' }] },
+    iceCandidates: [
+      { ip: '127.0.0.1', protocol: 'udp', port: 42000, password: 'never-log-this' },
+      { address: '192.0.2.1', protocol: 'tcp', port: 42001 },
+      null,
+    ],
+  };
+  engine['logTransportCandidates']('send', transport);
+  assert.equal(log.mock.callCount(), 1);
+  assert.deepEqual(log.mock.calls[0].arguments[2], {
+    transportId: 'transport',
+    candidates: [
+      { address: '127.0.0.1', protocol: 'udp', port: 42000 },
+      { address: '192.0.2.1', protocol: 'tcp', port: 42001 },
+      { invalid: true },
+    ],
+  });
+  assert.doesNotMatch(JSON.stringify(log.mock.calls[0].arguments), /private-|never-log-this/);
 });
 
 test('logical offline presence and subsequent SFU reconciliation preserve the physical voice session and streams', () => {
@@ -77,8 +385,56 @@ test('RSS glyph is preserved while quality thresholds agree with the call stage,
   assert.equal(voiceConnectionIndicator(120).quality, 'bad');
   for (const ping of [null, -1, NaN]) assert.equal(voiceConnectionIndicator(ping).quality, 'unknown');
   assert.deepEqual(voiceConnectionIndicator(20, true), { quality: 'reconnecting', icon: 'signal_wifi_bad' });
+  assert.deepEqual(voiceConnectionIndicator(null, false, true), { quality: 'connecting', icon: 'sync' });
   for (const ping of [null, -1, NaN, 0, 49, 50, 119, 120, 200]) {
     assert.equal(voiceConnectionIndicator(ping).icon, 'rss_feed');
+  }
+});
+
+test('initial voice connection is distinct from recovery and never starts the reconnection cue', () => {
+  const store = new VoiceStore();
+  const cues: boolean[] = [];
+  let updates = 0;
+  const offCue = appEvents.on('voice.reconnecting_changed', (value: boolean) => cues.push(value));
+  const offUpdate = appEvents.on('voice.connection_changed', () => updates++);
+  try {
+    store.setChannel('room');
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isConnecting, true);
+    assert.equal(store.isReconnecting, false);
+    assert.equal(updates, 1);
+    assert.deepEqual(cues, []);
+    store.setConnectionHealth('connected');
+    assert.equal(store.isConnecting, false);
+    assert.deepEqual(cues, []);
+    store.setConnectionHealth('reconnecting');
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isReconnecting, true, 'rebuilding transports keeps the recovery state');
+    assert.equal(store.isConnecting, false);
+    assert.deepEqual(cues, [true]);
+    store.setConnectionHealth('connected');
+    assert.deepEqual(cues, [true, false]);
+    store.setConnectionHealth('failed');
+    assert.equal(store.isReconnecting, true);
+    store.reset();
+    assert.equal(store.isReconnecting, false);
+    assert.equal(store.isConnecting, false);
+    assert.deepEqual(cues, [true, false, true, false]);
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isConnecting, false, 'late callbacks cannot resurrect a left call');
+    store.setChannel('next-room');
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isConnecting, true);
+    store.setConnectionHealth('failed');
+    store.setChannel('another-room');
+    store.setConnectionHealth('connecting');
+    assert.equal(store.isReconnecting, false, 'switching rooms does not inherit recovery from the old call');
+    assert.equal(store.isConnecting, true);
+    store.setChannel(null);
+    assert.equal(store.isConnecting, false);
+  } finally {
+    offCue();
+    offUpdate();
   }
 });
 
@@ -94,6 +450,131 @@ function engineFixture() {
     onConnected: () => { connected++; },
   });
   return { engine, client, health, failures: () => failures, connected: () => connected };
+}
+
+function captureTrack(kind: 'video' | 'audio'): MediaStreamTrack {
+  const events = new EventTarget();
+  let state: MediaStreamTrackState = 'live';
+  return {
+    id: 'screen-capture', kind, label: 'screen', enabled: true, muted: false, contentHint: '',
+    get readyState() { return state; },
+    onended: null, onmute: null, onunmute: null,
+    getCapabilities: () => ({}), getConstraints: () => ({}), getSettings: () => ({}),
+    applyConstraints: async () => {}, clone: () => captureTrack(kind),
+    stop: () => { state = 'ended'; },
+    addEventListener: events.addEventListener.bind(events),
+    removeEventListener: events.removeEventListener.bind(events),
+    dispatchEvent: events.dispatchEvent.bind(events),
+  };
+}
+
+class ScreenProducer {
+  closed = false;
+  private onTransportClose = () => {};
+  readonly rtpParameters = { codecs: [{ mimeType: 'video/H264' }] };
+  parameters: RTCRtpSendParameters = {
+    transactionId: 'screen', encodings: [{ active: true }], codecs: [], headerExtensions: [], rtcp: {},
+  };
+  readonly rtpSender = {
+    getParameters: () => structuredClone(this.parameters),
+    setParameters: async (parameters: RTCRtpSendParameters) => { this.parameters = structuredClone(parameters); },
+  };
+  constructor(readonly id: string) {}
+  on(event: string, listener: () => void) {
+    if (event === 'transportclose') this.onTransportClose = listener;
+  }
+  close() { this.closed = true; }
+  transportClosed() { this.close(); this.onTransportClose(); }
+}
+
+function screenProducerFixture(t: TestContext) {
+  const { engine, client } = engineFixture();
+  const preferred = settingsStore.preferredVideoCodec;
+  settingsStore.preferredVideoCodec = 'auto';
+  t.after(() => { engine.leave(); client.dispose(); settingsStore.preferredVideoCodec = preferred; });
+  t.mock.method(engine, 'canProduceKind', () => true);
+  const closed: unknown[] = [];
+  t.mock.method(client, 'send', (type: MessageType, payload: unknown) => {
+    if (type === MessageType.SFU_PRODUCER_CLOSED) closed.push(payload);
+  });
+  const pending: {
+    options: { track: MediaStreamTrack; stopTracks?: boolean; encodings?: RTCRtpEncodingParameters[] };
+    resolve: (producer: ScreenProducer) => void;
+    reject: (error: Error) => void;
+  }[] = [];
+  Object.defineProperties(engine, {
+    channelId: { writable: true, value: 'room' },
+    sendTransport: { writable: true, value: {
+      close() {},
+      produce(options: typeof pending[number]['options']) {
+        return new Promise<ScreenProducer>((resolve, reject) => { pending.push({ options, resolve, reject }); });
+      },
+    } },
+  });
+  return { engine, pending, closed };
+}
+
+for (const kind of ['video', 'audio'] as const) {
+  test(`SFU screen ${kind}: stop during publish retires late producers without stopping capture`, async t => {
+    const { engine, pending, closed } = screenProducerFixture(t);
+    const track = captureTrack(kind);
+    const result = (kind === 'video' ? engine.produceScreenVideo(track, 'share')
+      : engine.produceScreenAudio(track, 'share')).then(value => value, (error: unknown) => error);
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].options.stopTracks, false);
+    engine.closeProducer(`screen_${kind}:share`);
+    const late = new ScreenProducer('late');
+    pending[0].resolve(late);
+    const outcome = await result;
+    if (kind === 'video') assert.ok(outcome instanceof Error && outcome.name === 'AbortError');
+    else assert.equal(outcome, null);
+    assert.equal(late.closed, true);
+    assert.equal(engine['producers'].size, 0);
+    assert.equal(engine['pendingScreenProducers'].size, 0);
+    assert.equal(track.readyState, 'live');
+    assert.deepEqual(closed, [{ channelId: 'room', producerId: 'late' }]);
+  });
+
+  test(`SFU screen ${kind}: superseded failure and old close events never remove the replacement`, async t => {
+    const { engine, pending } = screenProducerFixture(t);
+    const track = captureTrack(kind);
+    const produce = () => kind === 'video' ? engine.produceScreenVideo(track, 'share')
+      : engine.produceScreenAudio(track, 'share');
+    const first = produce().then(value => value, (error: unknown) => error);
+    const second = produce();
+    const replacement = new ScreenProducer('replacement');
+    pending[1].resolve(replacement);
+    assert.equal(await second, replacement);
+    pending[0].reject(new Error('obsolete transport error'));
+    const obsolete = await first;
+    if (kind === 'video') assert.ok(obsolete instanceof Error && obsolete.name === 'AbortError');
+    else assert.equal(obsolete, null);
+    assert.equal(engine['producers'].get(`screen_${kind}:share`), replacement);
+    const third = produce();
+    const latest = new ScreenProducer('latest');
+    pending[2].resolve(latest);
+    await third;
+    replacement.transportClosed();
+    assert.equal(engine['producers'].get(`screen_${kind}:share`), latest);
+    assert.equal(latest.closed, false);
+    assert.equal(track.readyState, 'live');
+  });
+
+  test(`SFU screen ${kind}: common quality caps apply before and after producer creation`, async t => {
+    const { engine, pending } = screenProducerFixture(t);
+    const profile = { ...DEFAULT_CUSTOM_PROFILE, screenFps: 120, screenBitrateKbps: 20000 };
+    await engine.applyQualityParams('CUSTOM', profile);
+    const track = captureTrack(kind);
+    const result = kind === 'video' ? engine.produceScreenVideo(track, 'share') : engine.produceScreenAudio(track, 'share');
+    const encoding = kind === 'video'
+      ? { maxBitrate: 20000000, maxFramerate: 120 } : { maxBitrate: profile.audioBitrateKbps * 1000 };
+    assert.deepEqual(pending[0].options.encodings, [encoding]);
+    const producer = new ScreenProducer('configured');
+    pending[0].resolve(producer);
+    await result;
+    assert.deepEqual(producer.parameters.encodings, [{ active: true, ...encoding }]);
+    assert.equal(producer.parameters.degradationPreference, kind === 'video' ? 'maintain-resolution' : undefined);
+  });
 }
 
 test('aggregate health never hides a failed/disconnected direction behind a healthy one', () => {
@@ -154,23 +635,137 @@ test('rebuilding SFU producers does not stop caller-owned capture tracks', async
   t.mock.method(engine, 'canProduceKind', () => true);
   let stops = 0;
   let closes = 0;
-  const track = { id: 'capture', kind: 'audio', stop: () => { stops++; } } as MediaStreamTrack;
+  const track = { id: 'capture', kind: 'audio', readyState: 'live', stop: () => { stops++; } } as MediaStreamTrack;
+  const cameraTrack = { ...track, id: 'camera-capture', kind: 'video' };
   Object.defineProperty(engine, 'sendTransport', { writable: true, value: {
     close() {},
     async produce(options: { stopTracks?: boolean; track?: MediaStreamTrack }) {
-      return { id: 'producer', on() {}, close() {
+      return { id: 'producer', track: options.track, closed: false, on() {}, close() {
+        if (this.closed) return;
+        this.closed = true;
         closes++;
         if (options.stopTracks !== false) options.track?.stop();
       } };
     },
   } });
   assert.ok(await engine.produceMic(track));
-  assert.ok(await engine.produceCamera(track));
-  assert.ok(await engine.produceScreenVideo(track, 'share'));
+  assert.ok(await engine.produceCamera(cameraTrack));
+  assert.ok(await engine.produceScreenVideo(cameraTrack, 'share'));
   assert.ok(await engine.produceScreenAudio(track, 'share'));
   engine.leave();
   assert.equal(closes, 4);
   assert.equal(stops, 0, 'capture ownership remains with AudioProcessor/VideoService across reconnect');
+});
+
+test('failed microphone publication cannot be hidden by a healthy receive transport', async (t) => {
+  const { engine, client, failures, connected, health } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  t.mock.method(engine, 'canProduceKind', () => true);
+  engine['channelId'] = 'room';
+  engine['recvTransportState'] = 'connected';
+  Object.defineProperty(engine, 'sendTransport', { writable: true, value: {
+    close() {},
+    async produce() { throw new Error('Fixture microphone negotiation failed'); },
+  } });
+  const track = { id: 'mic', kind: 'audio', readyState: 'live' } as MediaStreamTrack;
+  assert.equal(await engine.produceMic(track), null);
+  assert.equal(health.at(-1), 'failed');
+  assert.equal(failures(), 1);
+  engine['sendTransportState'] = 'connected';
+  engine['notifyIfHealthy']();
+  assert.equal(connected(), 0);
+  assert.equal(engine.isChannelConnected(), false);
+  engine.closeProducer('mic');
+  assert.equal(engine.isChannelConnected(), true, 'explicit receive-only mode no longer requires microphone publication');
+});
+
+test('pending microphone publication stays connecting and a cancelled producer cannot replace its successor', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { engine, client, health, failures } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  t.mock.method(engine, 'canProduceKind', () => true);
+  t.mock.method(client, 'send', () => {});
+  engine['channelId'] = 'room';
+  engine['sendTransportState'] = 'connected';
+  engine['recvTransportState'] = 'connected';
+  const makeProducer = (id: string, track: MediaStreamTrack) => ({
+    id, track, closed: false, on() {}, close() { this.closed = true; },
+  });
+  let finishFirst!: (producer: ReturnType<typeof makeProducer>) => void;
+  let calls = 0;
+  Object.defineProperty(engine, 'sendTransport', { writable: true, value: {
+    close() {},
+    produce({ track }: { track: MediaStreamTrack }) {
+      if (++calls === 1) return new Promise<ReturnType<typeof makeProducer>>(resolve => { finishFirst = resolve; });
+      return Promise.resolve(makeProducer('new-producer', track));
+    },
+  } });
+  const oldTrack = { id: 'old-mic', kind: 'audio', readyState: 'live' } as MediaStreamTrack;
+  const newTrack = { id: 'new-mic', kind: 'audio', readyState: 'live' } as MediaStreamTrack;
+  const pending = engine.produceMic(oldTrack);
+  assert.equal(health.at(-1), 'connecting');
+  assert.equal(engine.isChannelConnected(), false);
+  t.mock.timers.tick(15_000);
+  assert.equal(failures(), 1, 'a healthy DTLS connection cannot hide stalled microphone negotiation');
+  const current = await engine.produceMic(newTrack);
+  assert.ok(current);
+  const abandoned = makeProducer('old-producer', oldTrack);
+  finishFirst(abandoned);
+  assert.equal(await pending, null);
+  assert.equal(abandoned.closed, true);
+  assert.equal(engine['producers'].get('mic'), current);
+  assert.equal(engine.isChannelConnected(), true);
+});
+
+test('a pending receive operation is monitored even when the sending transport is healthy', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { engine, client, health, failures } = engineFixture();
+  t.after(() => { engine.leave(); client.dispose(); });
+  let finish!: (payload: SfuConsumedPayload) => void;
+  Object.defineProperty(client, 'sendRequest', { value: () => new Promise<SfuConsumedPayload>(resolve => { finish = resolve; }) });
+  Object.defineProperties(engine, {
+    recvTransport: { writable: true, value: { id: 'recv', close() {} } },
+    device: { writable: true, value: { rtpCapabilities: {} } },
+    channelId: { writable: true, value: 'room' },
+  });
+  engine['sendTransportState'] = 'connected';
+  const pending = engine['consumeRemoteProducer']({
+    channelId: 'room', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', appData: { mediaType: 'mic' },
+  });
+  assert.equal(health.at(-1), 'connecting');
+  assert.equal(engine.isChannelConnected(), false);
+  t.mock.timers.tick(15_000);
+  assert.equal(failures(), 1);
+  engine.leave();
+  finish({ channelId: 'room', id: 'consumer', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', rtpParameters: {}, appData: {} });
+  await pending;
+  assert.equal(engine['pendingConsumers'].size, 0);
+});
+
+test('SFU announcements from a background server cannot alter the call even with matching channel IDs', async (t) => {
+  const { engine, client } = engineFixture();
+  const origin = currentEventOrigin();
+  t.after(() => { setEventOrigin(origin); engine.leave(); client.dispose(); });
+  client.sessionKey = 'call-server';
+  engine['channelId'] = 'room';
+  let consumes = 0;
+  let closes = 0;
+  Object.defineProperties(engine, {
+    consumeRemoteProducer: { value: async () => { consumes++; } },
+    handleRemoteProducerClosed: { value: () => { closes++; } },
+  });
+  engine['subscribeNetworkEvents']();
+  const producer = { channelId: 'room', producerId: 'producer', producerSessionId: 'peer', kind: 'audio', appData: { mediaType: 'mic' } };
+  setEventOrigin('other-server');
+  appEvents.emit(`message.${MessageType.SFU_NEW_PRODUCER}`, producer);
+  appEvents.emit(`message.${MessageType.SFU_PRODUCER_CLOSED}`, producer);
+  assert.equal(consumes, 0);
+  assert.equal(closes, 0);
+  setEventOrigin('call-server');
+  appEvents.emit(`message.${MessageType.SFU_NEW_PRODUCER}`, producer);
+  appEvents.emit(`message.${MessageType.SFU_PRODUCER_CLOSED}`, producer);
+  assert.equal(consumes, 1);
+  assert.equal(closes, 1);
 });
 
 test('duplicate producer announcements and a leave during consume cannot resurrect stale media', async (t) => {
@@ -225,6 +820,8 @@ test('a failed consumer setup cannot be masked by the sending transport connecti
 test('missing-producer request completion before the close broadcast never poisons a healthy SFU session', async (t) => {
   const { engine, client, failures, health } = engineFixture();
   t.after(() => { engine.leave(); client.dispose(); });
+  client['status'] = 'CONNECTED';
+  Object.defineProperty(client, 'ws', { writable: true, value: { readyState: 1, send() {}, close() {} } });
   let requestId: string | undefined;
   let consumes = 0;
   t.mock.method(client, 'send', (_type: MessageType, _payload: unknown, id?: string) => { requestId = id; });
@@ -257,13 +854,14 @@ class AudioElement {
   muted = false;
   volume = 1;
   autoplay = false;
+  isConnected = true;
   srcObject: unknown = null;
   attributes = new Set<string>();
   setAttribute(name: string) { this.attributes.add(name); }
   hasAttribute(name: string) { return this.attributes.has(name); }
   async play() {}
   pause() {}
-  remove() {}
+  remove() { this.isConnected = false; }
 }
 class Stream {
   constructor(private tracks: MediaStreamTrack[]) {}
@@ -271,32 +869,210 @@ class Stream {
   getTracks() { return this.tracks; }
 }
 
+test('remote WebRTC output changes keep default voice separate from screen speakers at every volume', async (t) => {
+  const contexts: Context[] = [];
+  let nativeSinkChanges = 0;
+  class RemoteAudioElement extends AudioElement {
+    sinkId = '';
+    async setSinkId(id: string) {
+      this.sinkId = id;
+      nativeSinkChanges++;
+    }
+  }
+  class Context {
+    state = 'running';
+    sinkId: string | { type: string };
+    destination = {};
+    gains: Array<{ gain: { value: number }; connect: () => void; disconnect: () => void }> = [];
+    streams: MediaStream[] = [];
+    meterReads = 0;
+    closedMeters = 0;
+    constructor(options: { sinkId: string | { type: string } }) {
+      this.sinkId = options.sinkId;
+      contexts.push(this);
+    }
+    createMediaStreamSource(stream: MediaStream) {
+      this.streams.push(stream);
+      return { connect() {}, disconnect() {} };
+    }
+    createGain() {
+      const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
+      this.gains.push(gain);
+      return gain;
+    }
+    createAnalyser() {
+      const owner = this;
+      return {
+        context: this, fftSize: 1024, connect() {}, disconnect() { owner.closedMeters++; },
+        getFloatTimeDomainData(values: Float32Array) { owner.meterReads++; values.fill(0.125); },
+      };
+    }
+    async close() { this.state = 'closed'; }
+    async setSinkId(id: string) { this.sinkId = id; }
+  }
+  const restoreMediaGlobals: Array<() => void> = [];
+  for (const [key, value] of Object.entries({
+    document: { createElement: () => new RemoteAudioElement(), body: { appendChild() {} } },
+    MediaStream: Stream, AudioContext: Context,
+  })) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    restoreMediaGlobals.push(() => { if (previous) Object.defineProperty(globalThis, key, previous); else Reflect.deleteProperty(globalThis, key); });
+  }
+  const previousSettings = {
+    selectedSpeakerId: settingsStore.selectedSpeakerId,
+    advancedAudioOutputs: settingsStore.advancedAudioOutputs,
+    audioOutputDevices: settingsStore.audioOutputDevices,
+    userVolumes: settingsStore.userVolumes,
+    screenAudioVolumes: settingsStore.screenAudioVolumes,
+  };
+  const previousDeafened = voiceStore.isDeafened;
+  const manager = new ParticipantManager();
+  const router = new RemoteMediaRouter(() => manager);
+  t.after(() => {
+    try {
+      router.closeAllMedia();
+      Object.assign(settingsStore, previousSettings);
+      voiceStore.isDeafened = previousDeafened;
+    } finally {
+      for (const restore of restoreMediaGlobals.reverse()) restore();
+    }
+  });
+  settingsStore.selectedSpeakerId = '';
+  settingsStore.advancedAudioOutputs = false;
+  settingsStore.userVolumes = {};
+  settingsStore.screenAudioVolumes = {};
+  voiceStore.isDeafened = false;
+  const microphone = { id: 'microphone', kind: 'audio', stop() {} } as MediaStreamTrack;
+  const otherMicrophone = { id: 'other-microphone', kind: 'audio', stop() {} } as MediaStreamTrack;
+  const screen = { id: 'screen-sound', kind: 'audio', stop() {} } as MediaStreamTrack;
+  const voice = router.ensureVoiceAudioElement('peer', new MediaStream([microphone]));
+  const otherVoice = router.ensureVoiceAudioElement('other-peer', new MediaStream([otherMicrophone]));
+  router.routeScreenAudioTrack('peer', screen);
+  router.setScreenAudioMuted('peer', false);
+  await router.setOutputDeviceIds('', 'screen-speakers');
+
+  assert.equal(nativeSinkChanges, 0, 'screen selection never switches the shared native renderer to screen speakers');
+  assert.equal(contexts.length, 2, 'all volumes use independent voice/screen AudioContexts');
+  assert.deepEqual(contexts.map(context => context.sinkId), ['', 'screen-speakers']);
+  assert.deepEqual(contexts[0].streams.map(stream => stream.getAudioTracks()[0].id), ['microphone', 'other-microphone']);
+  assert.deepEqual(contexts[1].streams.map(stream => stream.getAudioTracks()[0].id), ['screen-sound']);
+  assert.equal(router.getVoiceAudioLevel('peer'), 0.125);
+  assert.equal(router.getVoiceAudioLevel('missing'), null);
+  assert.equal(router['screenAudioPipelines'].get('peer')?.activity, undefined, 'Screen audio is not a microphone meter');
+  for (const volume of [0, 50, 100, 150, 200]) {
+    router.setPeerVolume('peer', volume);
+    router.setScreenAudioVolume('peer', volume);
+    assert.equal(contexts[0].gains[0].gain.value, volume / 100);
+    assert.equal(contexts[1].gains[0].gain.value, volume / 100);
+    assert.equal(voice.volume, 0, 'the microphone decoder element never becomes an audible second path');
+    assert.equal(otherVoice.volume, 0);
+    assert.equal(router.getScreenAudioElement('peer')?.volume, 0);
+    assert.equal(router.getVoiceAudioLevel('peer'), 0.125, 'Activity is measured before per-listener volume');
+  }
+  for (const isBot of [false, true]) {
+    const peer = participant('peer');
+    peer.user.isBot = isBot;
+    manager.reconcileVoiceChannel('room', [peer]);
+    for (const flag of ['isMuted', 'isDeafened', 'serverMuted', 'serverDeafened'] as const) {
+      manager.updateVoiceState({ ...peer.voiceState, [flag]: true });
+      router.applyUserVolumes();
+      assert.equal(contexts[0].gains[0].gain.value, 0, `${flag} gates incoming human and bot voice`);
+      router.setPeerVolume('peer', 200);
+      assert.equal(contexts[0].gains[0].gain.value, 0, 'local amplification cannot bypass a voice restriction');
+      assert.equal(contexts[0].gains[1].gain.value, 1, 'another participant is unaffected');
+      assert.equal(contexts[1].gains[0].gain.value, 2, 'screen playback remains independently controlled');
+      manager.updateVoiceState(peer.voiceState);
+      router.applyUserVolumes();
+      assert.equal(contexts[0].gains[0].gain.value, 1);
+    }
+  }
+  await router.setOutputDeviceIds('', 'other-screen-speakers');
+  assert.deepEqual(contexts.map(context => context.sinkId), ['', 'other-screen-speakers']);
+  await router.setOutputDeviceIds('voice-headset', 'other-screen-speakers');
+  assert.deepEqual(contexts.map(context => context.sinkId), ['voice-headset', 'other-screen-speakers']);
+  assert.deepEqual([voice.sinkId, otherVoice.sinkId, router.getScreenAudioElement('peer')?.sinkId],
+    ['voice-headset', 'voice-headset', 'voice-headset'],
+    'the shared native renderer aligns echo cancellation with voice, never the screen device');
+  let releaseFirst!: () => void;
+  let startedFirst!: () => void;
+  const started = new Promise<void>(resolve => { startedFirst = resolve; });
+  const delayed = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const nativeVoiceSink = voice.setSinkId.bind(voice);
+  voice.setSinkId = async id => {
+    if (id === 'first-headset') {
+      startedFirst();
+      await delayed;
+    }
+    await nativeVoiceSink(id);
+  };
+  const firstChange = router.setOutputDeviceIds('first-headset', 'first-screen');
+  await started;
+  const latestChange = router.setOutputDeviceIds('latest-headset', 'latest-screen');
+  releaseFirst();
+  await Promise.all([firstChange, latestChange]);
+  assert.deepEqual(contexts.map(context => context.sinkId), ['latest-headset', 'latest-screen']);
+  assert.deepEqual([voice.sinkId, otherVoice.sinkId, router.getScreenAudioElement('peer')?.sinkId],
+    ['latest-headset', 'latest-headset', 'latest-headset'],
+    'delayed native switches across different elements all finish on the latest voice device');
+  await router.cleanupScreenAudio('peer');
+  assert.equal(router.getAudioElement('peer'), voice, 'ending a share preserves both voice players');
+  assert.equal(router.getAudioElement('other-peer'), otherVoice);
+  await router.setOutputDeviceIds('', '');
+  assert.equal(contexts[0].sinkId, '');
+  assert.equal(contexts[1].state, 'closed', 'ending the last screen retires its output context');
+  assert.equal(router['audioContexts'].has('screen'), false, 'output changes never revive a retired screen context');
+  const contextCount = contexts.length;
+  const closingRouter = new RemoteMediaRouter(() => manager);
+  closingRouter.ensureVoiceAudioElement('closing', new MediaStream([microphone]));
+  closingRouter.closeAllMedia();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closingRouter['audioContexts'].size, 0, 'pending decoder routing cannot recreate contexts after leaving');
+  assert.equal(contexts.slice(contextCount).every(context => context.state === 'closed'), true);
+  assert.equal(contexts.slice(contextCount).every(context => context.closedMeters === 1), true);
+  assert.equal(closingRouter.getVoiceAudioLevel('closing'), null, 'A retired graph has no activity sample');
+});
+
 test('screen audio opt-in and 0–200% volume stay independent of voice deafen in the shared P2P/SFU router', (t) => {
   const gains: Array<{ gain: { value: number }; connect: () => void; disconnect: () => void }> = [];
   class Context {
     state = 'running';
+    sinkId = '';
     destination = {};
     createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
     createMediaStreamDestination() { return {}; }
+    createAnalyser() {
+      return { context: this, fftSize: 1024, connect() {}, disconnect() {}, getFloatTimeDomainData(values: Float32Array) { values.fill(0); } };
+    }
     createGain() {
       const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
       gains.push(gain);
       return gain;
     }
     async close() { this.state = 'closed'; }
+    async setSinkId(sinkId: string) { this.sinkId = sinkId; }
   }
+  const restoreMediaGlobals: Array<() => void> = [];
   for (const [key, value] of Object.entries({
     document: { createElement: () => new AudioElement(), body: { appendChild() {} } },
-    MediaStream: Stream, window: { AudioContext: Context },
+    MediaStream: Stream, AudioContext: Context, window: { AudioContext: Context },
   })) {
     const previous = Object.getOwnPropertyDescriptor(globalThis, key);
     Object.defineProperty(globalThis, key, { configurable: true, value });
-    t.after(() => previous ? Object.defineProperty(globalThis, key, previous) : Reflect.deleteProperty(globalThis, key));
+    restoreMediaGlobals.push(() => { if (previous) Object.defineProperty(globalThis, key, previous); else Reflect.deleteProperty(globalThis, key); });
   }
   const manager = new ParticipantManager();
   const router = new RemoteMediaRouter(() => manager);
   const track = { id: 'screen-track', kind: 'audio', stop() {} } as MediaStreamTrack;
-  t.after(() => { router.closeAllMedia(); settingsStore.screenAudioVolumes = {}; voiceStore.isDeafened = false; });
+  t.after(() => {
+    try {
+      router.closeAllMedia();
+      settingsStore.screenAudioVolumes = {};
+      voiceStore.isDeafened = false;
+    } finally {
+      for (const restore of restoreMediaGlobals.reverse()) restore();
+    }
+  });
   settingsStore.screenAudioVolumes = { peer: 150 };
   voiceStore.isDeafened = true;
   router.setDeafened(true);
@@ -317,7 +1093,8 @@ test('screen audio opt-in and 0–200% volume stay independent of voice deafen i
   router.setScreenAudioMuted('peer', false);
   assert.equal(gains[0].gain.value, 1.5, 'unmute restores configured amplified volume');
   router.setScreenAudioVolume('peer', 75);
-  assert.equal(router.getScreenAudioElement('peer')?.volume, 0.75);
+  assert.equal(gains[0].gain.value, 0.75);
+  assert.equal(router.getScreenAudioElement('peer')?.volume, 0);
   assert.equal(router.getScreenAudioElement('peer')?.muted, false);
   router.setScreenAudioMuted('peer', true);
   voiceStore.isDeafened = false;

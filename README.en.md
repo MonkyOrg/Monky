@@ -7,7 +7,7 @@
     <a href="https://github.com/MonkyOrg/Monky/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/MonkyOrg/Monky?label=download&color=5865f2"></a>
     <a href="https://monkyorg.github.io/Monky/en/"><img alt="Documentation" src="https://img.shields.io/badge/docs-monkyorg.github.io-blue"></a>
     <a href="https://buymeacoffee.com/monkyorg"><img alt="Buy Me A Coffee" src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-yellow.svg"></a>
-    <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
+    <a href="LICENSE"><img alt="GPL-3.0-or-later license" src="https://img.shields.io/badge/license-GPL--3.0--or--later-green"></a>
     <a href="https://github.com/MonkyOrg/Monky/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/MonkyOrg/Monky/actions/workflows/ci.yml/badge.svg"></a>
     <a href="https://github.com/MonkyOrg/Monky/discussions/categories/ideas"><img alt="Ideas" src="https://img.shields.io/badge/ideas-vote%20here-orange"></a>
   </p>
@@ -95,14 +95,36 @@ Bugs start in [Discussions › Bug Reports](https://github.com/MonkyOrg/Monky/di
 
 ## 💻 For developers
 
-Requirements: Node.js 22+ (the version CI uses) and npm. On Windows, the native screen-audio module needs Python 3.11 and Visual Studio Build Tools (MSVC).
+Requirements: Node.js 22+ (the version CI uses) and npm. On Windows, native modules need Python 3.11 x64 and Visual Studio **2022 (17.x)** C++ tools. Capture preparation selects v143/MSVC 14.30–14.44 even with a newer VS installed; VS2026 does not replace this prerequisite. Also check ATL/MFC and SDK 10.0.26100.0 with minimum servicing 10.0.26100.3323 in the guide below.
 
 ```bash
-npm install
+npm ci
 npm run build
 npm start
 npm test
 ```
+
+The screen-sharing picker has two tabs: **Screens** and **Windows**.
+After selecting a window, choose **Window Capture (WGC)** (default)
+or **Game Capture (hook)** and confirm. These are methods for the same window,
+not separate lists or automatic game detection.
+
+For native **window, monitor or Game Capture** on Windows x64, follow the
+[module guide](apps/client/native/screen-share/README.en.md): rebuilding addons
+for the pinned Electron, preparing libobs/WebRTC and meeting Python 3.11/MSVC/SDK
+prerequisites are separate steps. Video uses H.264 through AMD AMF or NVIDIA
+NVENC; AV1 is unavailable. The selected source is probed after confirmation,
+with no automatic Chromium/software fallback and no compatibility guarantee
+based on GPU brand. `npm ci` and `npm run build` alone do not prepare this runtime.
+On first setup, or when `screen-audio` sources or Electron change, follow the
+guide's `buildScreenAudio.cjs`: it uses local `node-gyp` and the same VS2022/MSVC/SDK
+selector, after `prepare:native-screen`. Preparation builds `screen-share`
+RTC/capture, not `screen_audio.node`. An already-compatible addon does not need
+rebuilding for a scripts/TypeScript-only update.
+
+Preparation is required before Windows packaging. When redistributing, include
+licenses, the same-tag code and the native source archive with its JSON manifest
+as described in the guide; do not copy just the executable or mix OBS runtimes.
 
 Architecture details live in [Architecture](https://monkyorg.github.io/Monky/en/arquitetura), the contribution flow in [CONTRIBUTING.en.md](CONTRIBUTING.en.md) and the server commands in the [Monky CLI manual](https://monkyorg.github.io/Monky/en/cli). The project's original specification — with MVP and roadmap — is kept in [docs/especificacao-tecnica.md](docs/especificacao-tecnica.md).
 
@@ -114,4 +136,9 @@ If you love Monky and want to support ongoing development, buy us a coffee! Ever
 
 ## 📄 License
 
-[MIT](LICENSE) — use it, modify it and host it freely.
+[GNU GPL version 3 or later](LICENSE) — free software, without warranty.
+You may use, modify and redistribute Monky under these terms; when distributing
+binaries, also provide the corresponding source code and license notices.
+Copyright (c) 2026 Monky Contributors. The [original MIT notice](LICENSE-MIT)
+is preserved for code previously published under that license. Third-party
+dependencies retain their own notices and licenses.

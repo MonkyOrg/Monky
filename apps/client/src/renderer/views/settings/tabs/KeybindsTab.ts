@@ -7,7 +7,7 @@ import { captureShortcut } from '../../../utils/keybind';
 export class KeybindsTab {
   public renderHtml(): string {
     return `
-      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+      <div data-settings-section="keybinds" data-settings-label="${escapeHtml(t('keybinds.title'))}" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
         <span style="font-size: 13px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px;">
           <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">keyboard</span>
           ${t('keybinds.title')}
