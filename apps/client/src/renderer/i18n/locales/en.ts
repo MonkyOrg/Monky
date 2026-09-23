@@ -530,6 +530,7 @@ export const en: TranslationMap = {
   'screenShare.nativeProfileChangeBlocked': 'The active native stream supports up to 1920×1080 at 120 FPS, video from 150 to 20000 kbps in steps of 50, and audio from 6 to 510 kbps. The previous profile was kept.',
   'screenShare.nativeFailure.unsupported': 'This device or profile does not support the requested screen share.',
   'screenShare.nativeFailure.source-unavailable': 'The shared source was closed, disconnected or is no longer available.',
+  'screenShare.sourceStopping': 'The shared source was closed or disconnected. Screen sharing is stopping.',
   'screenShare.nativeFailure.capture-failed': 'Could not continue capturing this source. Check that the window is available and try again. No other window or screen will be selected automatically.',
   'screenShare.nativeFailure.connection-failed': 'Could not establish or maintain this screen share.',
   'screenShare.nativeFailure.capacity-exceeded': 'This screen share has reached the viewer limit for the selected quality.',

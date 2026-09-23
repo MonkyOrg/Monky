@@ -245,6 +245,16 @@ for (const language of ['pt-BR', 'en']) {
 }
 
 for (const language of ['pt-BR', 'en']) {
+  test(`expected source closure uses an informational toast without a blocking alert (${language})`, t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    f.notifyNativeFailure({ reason: 'source-unavailable' });
+    assert.equal(f.alerts.length, 0);
+    assert.deepEqual(f.traces, [['info-toast', f.i18n.t('screenShare.sourceStopping'), 8000]]);
+    f.notifyNativeFailure({ reason: 'connection-failed' });
+    assert.equal(f.alerts.length, 1, 'A separate failure must not be hidden by the expected closure notice.');
+  });
+
   test(`terminal Game Capture failures use the structured code for localized Normal guidance (${language})`, async t => {
     const f = fixture(language);
     t.after(() => f.close());

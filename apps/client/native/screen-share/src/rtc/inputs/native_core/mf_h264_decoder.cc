@@ -361,10 +361,7 @@ struct MfH264Decoder::Impl {
         sps.cropLeft != stats.sps.cropLeft || sps.cropTop != stats.sps.cropTop)) {
       Fail("ERR_DECODER_CONFIGURATION_CHANGED", "SPS profile/coded geometry/crop changed; create a new decoder session");
     }
-    if ((sps.fullRange && *sps.fullRange) ||
-        (sps.colorPrimaries && *sps.colorPrimaries != 1 && *sps.colorPrimaries != 2) ||
-        (sps.transferCharacteristics && *sps.transferCharacteristics != 1 && *sps.transferCharacteristics != 2) ||
-        (sps.matrixCoefficients && *sps.matrixCoefficients != 1 && *sps.matrixCoefficients != 2)) {
+    if (!IsBt709LimitedCompatible(sps)) {
       Fail("ERR_DECODER_COLOR_SPACE", "This qualifier requires limited-range BT.709, not hidden color conversion");
     }
     CheckCaps(sps.codedWidth, sps.codedHeight);

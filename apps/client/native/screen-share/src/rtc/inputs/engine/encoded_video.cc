@@ -132,10 +132,16 @@ sv::H264AccessUnit Normalize(sv::H264Bitstream& stream, const MonkyEngineEncoded
     Require(packet.hasPicture && packet.keyFrame == (frame.keyframe != 0),
         "The packet keyframe flag must match one complete I/P picture");
     const auto& sps = candidate.Sps();
-    Require(!sps.fullRange.value_or(false) && (!sps.colorPrimaries || *sps.colorPrimaries == 1) &&
-        (!sps.transferCharacteristics || *sps.transferCharacteristics == 1) &&
-        (!sps.matrixCoefficients || *sps.matrixCoefficients == 1),
-        "External H264 must retain the admitted BT.709 limited-range mode");
+    if (!sv::IsBt709LimitedCompatible(sps)) {
+      const auto field = [](std::optional<std::uint8_t> value) {
+        return value ? std::to_string(*value) : std::string("absent");
+      };
+      throw Error("ERR_RTC_ENCODED_COLOR",
+          "External H264 must retain the admitted BT.709 limited-range mode: fullRange=" +
+          (sps.fullRange ? std::to_string(*sps.fullRange) : std::string("absent")) +
+          ", primaries=" + field(sps.colorPrimaries) + ", transfer=" + field(sps.transferCharacteristics) +
+          ", matrix=" + field(sps.matrixCoefficients), MONKY_ENGINE_INVALID);
+    }
     Require(packet.data.size() <= kEncodedMaximumPacket, "Current SPS/PPS plus AU exceed the packet bound");
   } catch (const Error&) { throw; }
   catch (const std::exception& error) {
@@ -891,6 +897,29 @@ std::shared_ptr<VideoSource> CreateEncodedVideoSource(Host& host, std::uint64_t 
 }
 
 void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) {
+  const std::array<std::optional<std::uint8_t>, 3> compatible_colours{std::nullopt, 1, 2};
+  for (const auto primaries : compatible_colours) {
+    for (const auto transfer : compatible_colours) {
+      for (const auto matrix : compatible_colours) {
+        sv::H264Sps sps;
+        sps.colorPrimaries = primaries; sps.transferCharacteristics = transfer; sps.matrixCoefficients = matrix;
+        check(sv::IsBt709LimitedCompatible(sps), "Absent and explicitly unspecified H264 colour must agree");
+        sps.fullRange = false;
+        check(sv::IsBt709LimitedCompatible(sps), "Limited-range colour contract changed");
+        sps.fullRange = true;
+        check(!sv::IsBt709LimitedCompatible(sps), "Full-range H264 cannot enter the limited-range pipeline");
+      }
+    }
+  }
+  for (unsigned value = 0; value <= 255; ++value) {
+    if (value == 1 || value == 2) continue;
+    for (const auto member : {&sv::H264Sps::colorPrimaries, &sv::H264Sps::transferCharacteristics,
+                              &sv::H264Sps::matrixCoefficients}) {
+      sv::H264Sps sps;
+      sps.*member = static_cast<std::uint8_t>(value);
+      check(!sv::IsBt709LimitedCompatible(sps), "Conflicting or reserved H264 colour description was accepted");
+    }
+  }
   const auto rejects = [&](auto&& operation) {
     bool rejected = false;
     try { operation(); } catch (const std::exception&) { rejected = true; }
@@ -928,6 +957,29 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
   MonkyEngineEncodedFrame frame{sizeof(frame), MONKY_ENGINE_ABI_VERSION, 1, &byte, 1, 1, 10000, 8333, -1, -2, -2, 1, 120};
   ValidateEncodedFrame(frame);
   check(true, "Signed PTS and genuine QPC metadata are accepted without index retiming");
+  {
+    std::vector<std::uint8_t> packet{
+      0, 0, 0, 1, 0x67, 0x4d, 0x00, 0x33, 0xf4, 0x02, 0x80, 0x2d, 0xd3, 0x50, 0x20, 0x20, 0x20, 0x20,
+      0, 0, 0, 1, 0x68, 0xc8, 0, 0, 0, 1, 0x65, 0xbc,
+    };
+    auto input = frame;
+    input.data = packet.data(); input.data_bytes = static_cast<std::uint32_t>(packet.size());
+    sv::H264Bitstream parser(1280, 720, kEncodedH264Level, sv::H264Profile::Main);
+    const auto admitted = Normalize(parser, input);
+    check(admitted.hasPicture && admitted.keyFrame && parser.Sps().colorPrimaries == 2 &&
+        parser.Sps().transferCharacteristics == 2 && parser.Sps().matrixCoefficients == 2,
+        "The actual external-input path rejected explicitly unspecified H264 colour");
+    check(admitted.data == packet, "Colour compatibility must not rewrite encoded parameter sets");
+    packet[14] = packet[15] = packet[16] = 0x60;
+    bool rejected = false;
+    try { Normalize(parser, input); }
+    catch (const Error& error) {
+      rejected = error.code == "ERR_RTC_ENCODED_COLOR" &&
+          std::string(error.what()).find("primaries=6, transfer=6, matrix=6") != std::string::npos;
+    }
+    check(rejected, "Contradictory colour must retain its exact observed values in the error");
+    check(parser.Sps().colorPrimaries == 2, "Rejected colour must not poison the admitted SPS cache");
+  }
   for (const auto bad : {0u, static_cast<unsigned>(kEncodedMaximumPacket + 1)}) {
     auto copy = frame; copy.data_bytes = bad; rejects([&] { ValidateEncodedFrame(copy); });
   }

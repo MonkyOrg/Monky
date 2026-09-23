@@ -278,6 +278,37 @@ unrelated applications. It produces `release\win-unpacked\Monky.exe` and
 `release\Monky-Windows.zip`. Packaging fails when binaries, compiled sources,
 runtime, CRT or third-party notices are inconsistent.
 
+## Windows CI and release reuse
+
+CI runs the Windows DOM suite on a separate `windows-2022` runner, concurrently
+with native preparation and packaging. Tests remain sequential within that
+runner to avoid competing desktop/audio fixtures. Both existing `Build check`
+checks wait for packaging on both platforms and the Windows DOM lane; failure,
+cancellation or a skipped lane cannot pass those gates. The macOS DOM suite
+still runs in its packaging job.
+
+CI and release cache only `.native-screen\downloads`: content-addressed OBS
+runtime/dependency archives and the source archives selected by the pinned
+OBS recipes. The key includes Windows x64, the archive manifests and the
+download/verification recipes, without prefix fallback. CI and release use
+separate cache namespaces. Before use, every restored archive is checked
+against its trusted SHA-256 and any pinned size; corruption fails explicitly,
+not by silently downloading a replacement. A cache miss downloads and verifies
+the inputs normally.
+
+This is **not a native binary cache**: Electron ABI, compiler and source changes
+still compile afresh. No WebRTC tree, checkout ownership markers, Python venv,
+extracted tools or native build outputs are restored. Python 3.11, VS2022 v143
+and SDK 10.0.26100.0 selection, native contracts, package checks, licenses and
+Corresponding Source generation/publication gates remain in place.
+
+Cold runs gain only the opportunity to overlap Windows DOM with native work,
+at the cost of another runner's installation and workspace build. Warm runs
+can additionally avoid those OBS archive downloads, but still extract,
+validate, compile WebRTC and create the release source archive. This does not
+promise a duration or remove the main native compilation cost; measure actual
+CI/release runs before claiming a speedup.
+
 ## License and Corresponding Source
 
 Monky is **GPL-3.0-or-later**. `LICENSE-MIT` preserves the project's historical
@@ -370,6 +401,10 @@ Application scenarios cover P2P/SFU, Chromium reception, audio, quality,
 local preview, Watch/Stop, fullscreen, overlay, server navigation and connection
 loss. `--window-lifecycle` adds minimize/restore coverage;
 `--idle-source-close` checks closing an unwatched source.
+`--publisher-stop` checks two publisher Stop cycles while another participant
+is watching, followed by restarting with audio in the same call.
+`--source-resize` resizes the synthetic window while preserving its source and
+output profile; it does not change monitor resolution or simulate exclusive fullscreen.
 Preview QA must validate operation without viewers, focus loss/return,
 disabling background pause and uninterrupted viewers. Resolution and frame
 counts alone do not prove that decoded pixels were displayed in the interface.

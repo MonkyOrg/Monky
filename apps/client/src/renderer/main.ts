@@ -1049,6 +1049,10 @@ class App {
     });
     window.addEventListener('pagehide', unbindCaptureFallback, { once: true });
     appEvents.on('native_screen.source_failed', (payload: Pick<Extract<NativeScreenEvent, { type: 'error' }>, 'reason' | 'code'>) => {
+      if (payload.reason === 'source-unavailable') {
+        showInfoToast(t('screenShare.sourceStopping'), 8000);
+        return;
+      }
       void showAlert({
         title: t('screenShare.errorTitle'),
         message: payload.code === 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE'

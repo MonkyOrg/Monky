@@ -492,6 +492,11 @@ confirmada. Não escolhe outro monitor ou janela, não usa Chromium e não
 desativa anti-cheat, Trusted Mode ou outras proteções. Se Normal também
 falhar, o erro continua visível; não há troca para outra fonte.
 
+O aviso de fonte fechada ou desconectada aparece por 8 segundos, sem exigir
+confirmação em uma caixa de diálogo. Falhas repetidas da mesma fonte são
+agrupadas enquanto ela não se recupera; os detalhes continuam nos logs.
+Quando a prévia volta a apresentar vídeo, uma nova falha pode gerar outro aviso.
+
 Para jogos, prefira **Captura de jogo** como primeira opção, seguindo a
 [recomendação do OBS](https://obsproject.com/kb/game-capture-source).
 Ela não é destinada a toda janela; jogos como CS2 podem impedir esse método.
@@ -562,6 +567,37 @@ Consulte os eventos do cliente para identificar em qual etapa uma operação
 falhou. Antes de compartilhar logs, revise seu conteúdo e remova dados
 sensíveis. O [Monitor do Servidor](/criar-seu-servidor#monitor-do-servidor)
 é uma consulta separada, sujeita às permissões daquele servidor.
+
+### Diagnosticar compartilhamento de tela
+
+1. Em **Configurações → Logs**, ative **Gravar logs** antes de reproduzir.
+2. Compartilhe a janela, jogo ou monitor e anote o horário, modo e qualidade
+   escolhidos. Se possível, peça a outro participante para assistir, trocar a
+   qualidade e parar de assistir. Teste também pausar a prévia ao desfocar o app.
+3. Pare o compartilhamento e use **Exportar logs** na mesma aba. Para problemas
+   de recepção, exporte também os logs do participante que estava assistindo.
+
+Os registros `SCREEN_SHARE` com prefixo `Native screen` mostram admissão da
+fonte, pré-verificação do encoder (inclusive falhas antes de existir uma fonte),
+backend, resolução/FPS/bitrate, pipelines por qualidade, assistir/parar,
+fallback de Jogo para Normal, estados da prévia e liberação de recursos.
+`retained: true` indica que a limpeza ainda reteve recursos; não é confirmação
+de encerramento. Os identificadores de correlação são hashes, não títulos de
+janelas.
+
+Esses diagnósticos não gravam pixels, quadros individuais, SDP/ICE, credenciais,
+payloads completos ou mensagens/stacks livres de erros. Falhas registram a etapa
+e códigos nativos disponíveis. Em `nativeDiagnostics`, o diagnóstico NVENC
+preserva operações/capacidades conhecidas, versão da API, status numérico,
+contagens de enumeração e valores obtidos/exigidos. Falhas de cor H264 preservam
+`fullRange`, `primaries`, `transfer` e `matrix` observados (`null` indica campo
+ausente), inclusive em erros aninhados. Outros textos continuam omitidos.
+Repetições idênticas são limitadas. Consultar
+métricas não gera uma linha por atualização. Os registros usam o mesmo
+armazenamento local e rotação dos demais logs; com **Gravar logs** desativado,
+novos eventos não são persistidos nem recuperados retroativamente. A gravação
+continua enquanto o diálogo de exportação está aberto; o arquivo exportado
+inclui os eventos gravados até a confirmação.
 
 ## Sobre e Updates
 

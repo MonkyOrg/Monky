@@ -397,11 +397,7 @@ void ValidateSps(const sv::H264Sps& sps, NegotiatedH264 negotiated,
       !IsSupportedLevel(sps.levelIdc) || sps.levelIdc > negotiated.level ||
       !sv::MatchesH264Profile(sps, negotiated.profile) ||
       (sps.profileIdc == 66 && !(sps.compatibility & 0x40)) ||
-      (sps.fullRange && *sps.fullRange) ||
-      (sps.colorPrimaries && *sps.colorPrimaries != 1 && *sps.colorPrimaries != 2) ||
-      (sps.transferCharacteristics && *sps.transferCharacteristics != 1 &&
-       *sps.transferCharacteristics != 2) ||
-      (sps.matrixCoefficients && *sps.matrixCoefficients != 1 && *sps.matrixCoefficients != 2)) {
+      !sv::IsBt709LimitedCompatible(sps)) {
     throw AdapterError("ERR_RTC_NEGOTIATED_SPS",
                        "Actual SPS violates negotiated profile/level, geometry, or BT.709-limited input");
   }

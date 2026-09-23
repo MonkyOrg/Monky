@@ -482,6 +482,11 @@ confirmed image. It never chooses another monitor or window, uses Chromium,
 or disables anti-cheat, Trusted Mode or other protections. If Normal also
 fails, the error remains visible; there is no switch to another source.
 
+A closed or disconnected source notice appears for 8 seconds without requiring
+dialog confirmation. Repeated failures from the same source are grouped until
+it recovers; their details remain in the logs. Once the preview displays video
+again, a new failure can trigger another notification.
+
 For games, try **Game Capture** first, following the
 [OBS recommendation](https://obsproject.com/kb/game-capture-source).
 It is not intended for every window; games such as CS2 may prevent this method.
@@ -549,6 +554,36 @@ Inspect client events to identify the failing stage of an operation. Review
 and remove sensitive content before sharing logs.
 The [Server Monitor](/en/criar-seu-servidor#server-monitor) is a separate query,
 subject to that server's permissions.
+
+### Diagnose screen sharing
+
+1. Under **Settings → Logs**, enable **Record logs** before reproducing.
+2. Share the window, game or monitor and note the time, mode and selected
+   quality. If possible, ask another participant to watch, change quality and
+   stop watching. Also test pausing the preview when the app loses focus.
+3. Stop sharing and use **Export logs** in the same tab. For receiving problems,
+   also export the logs from the participant who was watching.
+
+`SCREEN_SHARE` entries prefixed with `Native screen` show source admission,
+encoder preflight (including failures before a source exists), backend,
+resolution/FPS/bitrate, per-quality pipelines, watch/stop, Game-to-Normal
+fallback, preview states and resource retirement. `retained: true` means cleanup
+still retains resources; it is not confirmation of shutdown. Correlation
+identifiers are hashes, not window titles.
+
+These diagnostics do not record pixels, individual frames, SDP/ICE,
+credentials, complete payloads or free-form error messages/stacks. Failures
+record their stage and available native codes. In `nativeDiagnostics`, NVENC
+diagnostics preserve known operations/capabilities, API version, numeric status,
+enumeration counts and observed/required values. H264 color failures preserve
+the observed `fullRange`, `primaries`, `transfer` and `matrix` (`null` means
+absent), including nested errors. Other text remains omitted.
+Identical repeats are limited.
+Polling metrics does not add a line per update. Entries use the existing local
+log storage and rotation; while **Record logs** is disabled, new events are
+neither persisted nor recovered retroactively. Logging continues while the
+export dialog is open; the exported file includes events written up to
+confirmation.
 
 ## About and Updates
 

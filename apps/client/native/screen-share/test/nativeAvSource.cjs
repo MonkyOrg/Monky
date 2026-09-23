@@ -57,7 +57,7 @@ process.on('message', message => {
   const run = async () => {
     assert.equal(typeof message.id, 'string');
     assert.ok(['tone-start', 'tone-stop', 'minimize-source', 'restore-source', 'duplicate-title',
-      'close-duplicate', 'close-source'].includes(message.command));
+      'close-duplicate', 'close-source', 'resize-source'].includes(message.command));
     assert.ok(window && !window.isDestroyed());
     if (message.command === 'tone-start') await window.webContents.executeJavaScript('ownedAvTone.start()');
     else if (message.command === 'minimize-source') {
@@ -66,6 +66,11 @@ process.on('message', message => {
     } else if (message.command === 'restore-source') {
       window.restore();
       assert.equal(window.isMinimized(), false);
+    } else if (message.command === 'resize-source') {
+      assert.ok(Number.isInteger(message.width) && message.width >= 320 && message.width <= 1920);
+      assert.ok(Number.isInteger(message.height) && message.height >= 240 && message.height <= 1080);
+      window.setContentSize(message.width, message.height);
+      assert.deepEqual(window.getContentSize(), [message.width, message.height]);
     } else if (message.command === 'duplicate-title') {
       assert.ok(!duplicate || duplicate.isDestroyed());
       duplicate = new BrowserWindow({ show: false, title: window.getTitle(),

@@ -132,6 +132,15 @@ jobs:
       - name: Build workspaces
         run: npm run build
 
+      # Separate from PR-produced caches; each used archive is rehashed against
+      # its immutable pin by fetchObs before extraction. No native outputs.
+      - name: Cache verified native screen archives (Windows)
+        if: runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
+        uses: actions/cache@v4
+        with:
+          path: .native-screen\downloads
+          key: native-screen-archives-v1-release-windows-x64-${{ hashFiles('apps/client/native/screen-share/scripts/fetchObs.cjs', 'apps/client/native/screen-share/scripts/buildTools.cjs', 'apps/client/native/screen-share/src/vendor/obs/sources.json', 'apps/client/native/screen-share/src/vendor/obs/runtime-inputs.json', 'apps/client/native/screen-share/src/capture/runtime-additions.json') }}
+
       - name: Build native screen runtime and corresponding sources (Windows)
         if: runner.os == 'Windows' && hashFiles('apps/client/native/screen-share/scripts/prepare.cjs') != ''
         shell: pwsh

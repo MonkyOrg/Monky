@@ -434,9 +434,34 @@ test('active local Game Capture errors preserve the typed code, public reason an
   await tick();
   assert.equal(notices().length, 1, 'Stale or foreign errors must not reach the local sharing alert');
   const { code, ...generic } = failure;
+  f.emit({ type: 'preview-state', publisherSessionId: 'self', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, state: 'playing' });
   f.emit(generic);
   await tick();
   assert.deepEqual(notices()[1], ['native_screen.source_failed', { reason: 'capture-failed', shareId: source.shareId }]);
+});
+
+test('one failing source episode cannot queue alerts for every pipeline cleanup error', async t => {
+  const f = fixture(t), source = await f.local();
+  const scope = { publisherSessionId: 'self', shareId: source.shareId, sourceInstanceId: source.instanceId };
+  for (let i = 0; i < 20; i++) f.emit({
+    ...scope, type: 'error', reason: 'connection-failed', message: `Native cleanup diagnostic ${i}`,
+  });
+  await tick();
+  const notices = () => f.events.filter(([type]) => type === 'native_screen.source_failed');
+  assert.equal(notices().length, 1);
+  assert.equal(f.errors.filter(value => value[2]?.error.startsWith('Native cleanup diagnostic')).length, 20,
+    'Coalescing user notifications must preserve every native diagnostic.');
+  for (let i = 0; i < 3; i++) f.emit({
+    ...scope, type: 'error', reason: 'source-unavailable', message: 'The owned source closed.',
+  });
+  await tick();
+  assert.equal(notices().length, 2, 'Expected source closure gets its own single nonblocking notification.');
+  assert.equal(notices()[1][1].reason, 'source-unavailable');
+  f.emit({ ...scope, type: 'preview-state', state: 'playing' });
+  f.emit({ ...scope, type: 'error', reason: 'connection-failed', message: 'A later failure after recovered video.' });
+  await tick();
+  assert.equal(notices().length, 3, 'Confirmed video recovery must rearm notification of a new failure.');
 });
 
 test('all configured STUN/TURN URLs and credentials survive the bounded IPC grouping', async t => {

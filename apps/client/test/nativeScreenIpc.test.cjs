@@ -9,6 +9,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { randomUUID } = require('node:crypto');
+const { finished } = require('node:stream/promises');
 const ts = require('typescript');
 const shared = require('@monky/shared');
 const runtime = require('../native/screen-share/index.cjs');
@@ -25,6 +26,15 @@ const deferred = () => {
   return { promise, resolve };
 };
 const video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 };
+const nvencProbeDiagnostic = 'NVENC nvEncGetEncodeCaps NV_ENC_CAPS_WIDTH_MAX(16) status=8(NV_ENC_ERR_INVALID_PARAM)'
+  + ' value=-1 required=1920 capsVersion=1073807361; api=12.2'
+  + '; nvEncGetEncodeGUIDCount(status=0,count=2); nvEncGetEncodeGUIDs(status=0,returned=2,H264=1)'
+  + '; nvEncGetEncodeProfileGUIDCount(status=0,count=3); nvEncGetEncodeProfileGUIDs(status=0,returned=3,Main=1)'
+  + '; nvEncGetInputFormatCount(status=0,count=4); nvEncGetInputFormats(status=0,returned=4,NV12=1)'
+  + '; NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE=1'
+  + '; NVENC nvEncDestroyEncoder status=20(NV_ENC_ERR_RESOURCE_NOT_REGISTERED) retirement=unconfirmed';
+const h264ColorDiagnostic = 'External H264 must retain the admitted BT.709 limited-range mode:'
+  + ' fullRange=1, primaries=6, transfer=6, matrix=6';
 const audio = { sinkId: 'selected-output', muted: false, volume: 1 };
 const monitorTarget = {
   kind: 'monitor', deviceId: String.raw`\\?\DISPLAY#SELECTED#ONE`, deviceName: String.raw`\\.\DISPLAY2`,
@@ -34,9 +44,9 @@ const monitorId = `native-monitor:${'a'.repeat(64)}`;
 
 function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   encoder = 'h264_texture_amf', probeFailure, probeFailureBeforeSpawn, probeStop,
-  probeVerified = true, probeRetires = true, probeStopReportsFailure = false } = {}) {
+  probeVerified = true, probeRetires = true, probeStopReportsFailure = false, logger } = {}) {
   const handlers = new Map(), sent = [], endpoints = [], selections = [], errors = [], captures = [], directories = [];
-  const probes = [], removedDirectories = [];
+  const probes = [], removedDirectories = [], logs = [], ports = [];
   let target = { kind: 'window', hwnd: 12345, expectedProcessId: 56789,
     expectedProcessCreationTime100ns: '123456789' }, frameDestroyed = false, contentDestroyed = false;
   let windowOpen = true, windowPaused = false, creationTime = '123456789';
@@ -62,6 +72,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
           start() {}, postMessage() {}, close() { this.emit('close'); },
         });
         this.port1 = port(); this.port2 = port();
+        ports.push(this);
       }
     },
   };
@@ -119,7 +130,11 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
       return { pipelineId: this.options.pipelineId, profile: shared.getScreenShareProfile(this.options.source.video, this.options.quality),
         readErrors: 0, rtp: [], decoders: [] };
     }
-    async close() { this.closed = true; }
+    async close() {
+      if (this.closed) return;
+      this.closed = true;
+      this.options.onState({ type: 'closed' });
+    }
     snapshot() { return { closed: this.closed, nativeClosed: this.closed }; }
   }
   const captureModule = {
@@ -158,7 +173,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     if (kind === 'monitor') { assert.equal(id, monitorId); return structuredClone(monitorTarget); }
     assert.match(id, /^window:/);
     return { ...target, kind };
-  });
+  }, { write: entry => { logs.push(structuredClone(entry)); logger?.write(entry); } });
   const event = () => ({ sender: contents, senderFrame: contents.mainFrame });
   const invoke = (input, caller = event()) => handlers.get(shared.NATIVE_SCREEN_IPC.invoke)(caller, input);
   const reply = input => handlers.get(shared.NATIVE_SCREEN_IPC.reply)(event(), input);
@@ -200,7 +215,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     assert.equal(electron.app.listenerCount('browser-window-blur'), 0);
   });
   return { service, config, command, invoke, source, join, addSource, participants, watch, accepted,
-    frame, contents, event, endpoints, sent, errors, selections, captures, directories, probes, removedDirectories, captureModule,
+    frame, contents, event, endpoints, sent, errors, selections, captures, directories, probes, removedDirectories, captureModule, logs, ports,
     replaceMonitor: value => { monitor = value; },
     allowProbeRetirement: () => { probeRetires = true; },
     setProbeFailure: value => { probeFailure = value; },
@@ -217,6 +232,33 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   };
 }
 
+function persistentLogger(t, { saveDialog } = {}) {
+  const directory = path.join(__dirname, `native-log-test-${randomUUID()}`);
+  fs.mkdirSync(directory);
+  const exportPath = path.join(directory, 'export.jsonl');
+  const filename = path.resolve(__dirname, '..', 'src', 'main', 'clientLogger.ts');
+  const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
+  }).outputText;
+  const module = { exports: {} };
+  const dialogResult = { canceled: false, filePath: exportPath };
+  const loadLogger = vm.runInThisContext(`(function(exports, require, module) { ${code}\n})`, { filename });
+  loadLogger(module.exports, name => name === 'electron' ? {
+    app: { getPath: () => directory }, dialog: { showSaveDialog: async () => {
+      if (saveDialog) await saveDialog();
+      return dialogResult;
+    } },
+  } : require(name), module);
+  const logger = new module.exports.ClientLogger();
+  t.after(async () => {
+    const stream = logger.writeStream;
+    logger.shutdown();
+    if (stream) await finished(stream);
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  return { logger, directory, exportPath, dialogResult };
+}
+
 test('native IPC rejects other WebContents, subframes, unknown payload fields and renderer-supplied HWNDs', async t => {
   const f = fixture(t);
   await assert.rejects(f.invoke({ action: 'capabilities' }, { ...f.event(), sender: {} }), /owned main frame/);
@@ -228,6 +270,275 @@ test('native IPC rejects other WebContents, subframes, unknown payload fields an
     await assert.rejects(f.addSource('bad-scaling', { preserveAspectRatio }));
   assert.equal(f.endpoints.length, 0);
   assert.equal(f.selections.length, 0);
+});
+
+test('failed preflight before source creation persists only selected diagnostics and exports immediately', async t => {
+  const { logger, exportPath } = persistentLogger(t);
+  logger.setConfig({ enabled: true });
+  const secret = 'TURN-password-private-source-title-SDP';
+  const native = Object.assign(new Error(secret), { code: 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE' });
+  const f = fixture(t, { logger, probeFailureBeforeSpawn: new AggregateError([native], secret) });
+  f.config.iceServers = [{ urls: ['turn:private.example'], username: secret, credential: secret }];
+  await f.join();
+  await assert.rejects(f.addSource(secret, { captureKind: 'game' }), /TURN-password/);
+  assert.equal(f.sent.some(event => event.type === 'error'), false, 'Admission failed before a source event exists.');
+  assert.equal(f.endpoints.length, 0);
+  const failure = f.logs.find(entry => entry.message === 'Native screen source-admission failed');
+  assert.equal(failure.data.stage, 'preflight');
+  assert.equal(failure.data.captureKind, 'game');
+  assert.deepEqual(failure.data.video, video);
+  assert.deepEqual(failure.data.nativeCodes, ['ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE']);
+  assert.equal(f.logs.filter(entry => entry.level === 'ERROR').length, 1, 'The IPC wrapper must not duplicate the same error.');
+  await assert.rejects(f.invoke({ action: 'join', password: secret, iceServers: secret }));
+  await f.command({ action: 'leave' });
+  const exported = await logger.exportLogs();
+  assert.equal(exported.success, true);
+  const text = fs.readFileSync(exportPath, 'utf8');
+  assert.match(text, /SCREEN_SHARE/);
+  assert.match(text, /ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE/);
+  assert.match(text, /call-retirement-result/);
+  assert.doesNotMatch(text, /TURN-password|private\.example|password|stack|desktopSourceId/);
+  assert.equal(f.removedDirectories.length, 1);
+});
+
+test('disabled persistent logging writes no lifecycle events and does not replay them when reenabled', async t => {
+  const { logger, directory, exportPath } = persistentLogger(t);
+  const initial = logger.writeStream;
+  logger.setConfig({ enabled: false });
+  if (initial) await finished(initial);
+  const f = fixture(t, { logger });
+  await f.join(); await f.addSource(); await f.command({ action: 'leave' });
+  await f.join();
+  f.setProbeFailure(new AggregateError([
+    Object.assign(new Error(nvencProbeDiagnostic), { code: 'ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE' }),
+    Object.assign(new Error(h264ColorDiagnostic), { code: 'ERR_RTC_ENCODED_COLOR' }),
+  ], 'private credential'));
+  await assert.rejects(f.addSource('disabled-native-diagnostics'));
+  await f.command({ action: 'leave' });
+  const logsDirectory = path.join(directory, 'client-logs');
+  const content = () => fs.readdirSync(logsDirectory).filter(name => name.endsWith('.jsonl'))
+    .map(name => fs.readFileSync(path.join(logsDirectory, name), 'utf8')).join('');
+  assert.equal(content(), '');
+  logger.setConfig({ enabled: true });
+  await f.join();
+  await f.command({ action: 'leave' });
+  assert.equal((await logger.exportLogs()).success, true);
+  const text = fs.readFileSync(exportPath, 'utf8');
+  assert.match(text, /call-joined/);
+  assert.doesNotMatch(text, /source-admission|source-admitted|preflight|nativeDiagnostics|nvEnc|h264-color/);
+});
+
+test('nested NVENC and H264 failures export exact allowlisted native measurements without message content', async t => {
+  const { logger, exportPath } = persistentLogger(t);
+  logger.setConfig({ enabled: true });
+  const secret = 'PRIVATE_CREDENTIAL_SDP_PATH';
+  const nvenc = Object.assign(new Error(`${nvencProbeDiagnostic}; password=${secret}; C:\\${secret}`),
+    { code: 'ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE' });
+  const color = Object.assign(new Error(`${h264ColorDiagnostic}; credential=${secret}`),
+    { code: 'ERR_RTC_ENCODED_COLOR' });
+  const error = new Error(secret, { cause: new AggregateError([nvenc, new Error(secret, { cause: color })], secret) });
+  const f = fixture(t, { logger, probeFailure: error });
+  await f.join();
+  await assert.rejects(f.addSource(), /PRIVATE_CREDENTIAL/);
+  const failure = f.logs.find(entry => entry.message === 'Native screen source-admission failed');
+  assert.deepEqual(failure.data.nativeCodes, ['ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE', 'ERR_RTC_ENCODED_COLOR']);
+  const diagnostics = failure.data.nativeDiagnostics;
+  assert.deepEqual(diagnostics.find(value => value.operation === 'nvEncGetEncodeCaps'), {
+    kind: 'nvenc-operation', operation: 'nvEncGetEncodeCaps', status: 8, value: -1, required: 1920,
+    capsVersion: 1073807361, capability: 'NV_ENC_CAPS_WIDTH_MAX', capabilityId: 16,
+  });
+  assert.deepEqual(diagnostics.find(value => value.kind === 'nvenc-api'), { kind: 'nvenc-api', major: 12, minor: 2 });
+  for (const [operation, count] of [
+    ['nvEncGetEncodeGUIDCount', 2], ['nvEncGetEncodeProfileGUIDCount', 3], ['nvEncGetInputFormatCount', 4],
+  ]) assert.deepEqual(diagnostics.find(value => value.operation === operation),
+    { kind: 'nvenc-operation', operation, status: 0, count });
+  for (const [operation, returned, flag] of [
+    ['nvEncGetEncodeGUIDs', 2, 'H264'], ['nvEncGetEncodeProfileGUIDs', 3, 'Main'], ['nvEncGetInputFormats', 4, 'NV12'],
+  ]) assert.deepEqual(diagnostics.find(value => value.operation === operation),
+    { kind: 'nvenc-operation', operation, status: 0, returned, [flag]: true });
+  assert.deepEqual(diagnostics.find(value => value.kind === 'nvenc-capability'),
+    { kind: 'nvenc-capability', capability: 'NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE', value: 1 });
+  assert.deepEqual(diagnostics.find(value => value.operation === 'nvEncDestroyEncoder'),
+    { kind: 'nvenc-operation', operation: 'nvEncDestroyEncoder', status: 20, retirementConfirmed: false });
+  assert.deepEqual(diagnostics.find(value => value.kind === 'h264-color'),
+    { kind: 'h264-color', fullRange: true, primaries: 6, transfer: 6, matrix: 6 });
+  await f.command({ action: 'leave' });
+  assert.equal((await logger.exportLogs()).success, true);
+  const text = fs.readFileSync(exportPath, 'utf8');
+  const exported = text.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line))
+    .find(entry => entry.message === 'Native screen source-admission failed');
+  assert.deepEqual(exported.data.nativeDiagnostics, diagnostics);
+  assert.doesNotMatch(text, /PRIVATE_CREDENTIAL|password|credential|NV_ENC_ERR_INVALID_PARAM|External H264/);
+});
+
+test('native diagnostics ignore hostile identifiers and malformed numbers while keeping safe classifications', async t => {
+  const f = fixture(t);
+  await f.join();
+  for (const [index, message] of [
+    'NVENC PRIVATE_PASSWORD status=8 value=123; PRIVATE_CAPABILITY=8; api=private.credential',
+    'External H264 must retain the admitted BT.709 limited-range mode: fullRange=0, primaries=999, transfer=6, matrix=6',
+    'PRIVATE_PASSWORD SDP v=0 ice-pwd=private',
+  ].entries()) {
+    f.setProbeFailure(new Error(message));
+    await assert.rejects(f.addSource(`unknown-diagnostic-${index}`));
+    const failure = f.logs.findLast(entry => entry.message === 'Native screen source-admission failed');
+    assert.equal(failure.data.error, 'operation-failed');
+    assert.equal(failure.data.nativeDiagnostics, undefined);
+  }
+  f.setProbeFailure(new Error('NVENC nvEncGetEncodeCaps PRIVATE_CAPABILITY(16) status=8(PRIVATE_PASSWORD)'
+    + ' value=999999999999999 required=12PRIVATE_PASSWORD capsVersion=4294967296; api=12.2'));
+  await assert.rejects(f.addSource('hostile-fields'));
+  assert.deepEqual(f.logs.findLast(entry => entry.message === 'Native screen source-admission failed').data.nativeDiagnostics, [
+    { kind: 'nvenc-operation', operation: 'nvEncGetEncodeCaps', status: 8 },
+    { kind: 'nvenc-api', major: 12, minor: 2 },
+  ]);
+  f.setProbeFailure(new Error(h264ColorDiagnostic.replace('fullRange=1', 'fullRange=absent').replace('primaries=6', 'primaries=absent')));
+  await assert.rejects(f.addSource('absent-color'));
+  assert.deepEqual(f.logs.findLast(entry => entry.message === 'Native screen source-admission failed').data.nativeDiagnostics, [
+    { kind: 'h264-color', fullRange: null, primaries: null, transfer: 6, matrix: 6 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(f.logs), /PRIVATE_|ice-pwd|private\.credential|999999999999999/);
+});
+
+test('export keeps logging active while Save As is open and flushes those events into the saved file', async t => {
+  const opened = deferred(), closeDialog = deferred();
+  const { logger, exportPath } = persistentLogger(t, { saveDialog: () => {
+    opened.resolve();
+    return closeDialog.promise;
+  } });
+  logger.setConfig({ enabled: true });
+  const f = fixture(t, { logger });
+  await f.join();
+  const stream = logger.writeStream;
+  const exporting = logger.exportLogs();
+  await opened.promise;
+  try {
+    assert.equal(logger.writeStream, stream);
+    assert.equal(stream.writableEnded, false);
+    await f.addSource('during-save-dialog');
+    await f.command({ action: 'leave' });
+  } finally { closeDialog.resolve(); }
+  assert.equal((await exporting).success, true);
+  const text = fs.readFileSync(exportPath, 'utf8');
+  assert.match(text, /source-admitted/);
+  assert.match(text, /call-retirement-result/);
+  assert.equal(logger.writeStream, stream);
+});
+
+test('persistent screen logs use existing rotation and report export write failures', async t => {
+  const { logger, directory, exportPath, dialogResult } = persistentLogger(t);
+  const oldPath = path.join(directory, 'client-logs', 'session-old.jsonl');
+  fs.writeFileSync(oldPath, 'old'.repeat(200));
+  logger.setConfig({ enabled: true, maxSizeBytes: 100 });
+  assert.equal(fs.existsSync(oldPath), false);
+  const f = fixture(t, { logger });
+  await f.join(); await f.command({ action: 'leave' });
+  dialogResult.filePath = path.join(directory, 'missing-directory', 'export.jsonl');
+  assert.equal((await logger.exportLogs()).success, false, 'An asynchronous output error is not a successful export.');
+  dialogResult.filePath = exportPath;
+  assert.equal((await logger.exportLogs()).success, true);
+  assert.match(fs.readFileSync(exportPath, 'utf8'), /call-retirement-result/);
+});
+
+test('publisher diagnostics correlate profiles, demand, fallback and teardown without per-frame or polling logs', async t => {
+  const f = fixture(t);
+  await f.join(); await f.participants();
+  const { source } = await f.addSource('game-diagnostics', { captureKind: 'game' });
+  await f.command({ action: 'preview-start', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+  const endpoint = f.endpoints[0];
+  endpoint.options.onState({ type: 'capture', state: 'starting' });
+  endpoint.options.onState({ type: 'capture', state: 'running' });
+  endpoint.options.onState({ type: 'capture-fallback' });
+  endpoint.options.onState({ type: 'capture-fallback' });
+  endpoint.options.onState({ type: 'capture-mode', capture: { mode: 'normal', ready: true } });
+  const before = f.logs.length;
+  for (let index = 0; index < 100; index++) {
+    endpoint.options.onState({ type: 'capture', state: 'running' });
+    endpoint.options.onState({ type: 'frame' });
+    endpoint.options.onPreview({ data: new Uint8Array([1]), timestampUs: index, keyframe: true });
+    await f.command({ action: 'stats' });
+    await f.command({ action: 'diagnostics', publisherSessionId: f.config.sessionId, shareId: source.shareId,
+      sourceInstanceId: source.instanceId });
+  }
+  assert.equal(f.logs.length, before);
+  const signal = { fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+    subscriptionId: randomUUID() };
+  await f.command({ action: 'signal', signal: { ...signal, action: 'watch', quality: '480p30', backend: 'native' } });
+  const pipelines = f.logs.filter(entry => entry.message === 'Native screen pipeline-create');
+  assert.equal(pipelines.length, 2);
+  assert.deepEqual(pipelines.map(entry => entry.data.quality), ['source', '480p30']);
+  assert.deepEqual(pipelines[1].data.video, shared.getScreenShareProfile(video, '480p30'));
+  assert.equal(pipelines[1].data.captureKind, 'window');
+  assert.notEqual(pipelines[0].data.pipeline, pipelines[1].data.pipeline);
+  assert.equal(pipelines[0].data.source, pipelines[1].data.source);
+  assert.equal(f.logs.filter(entry => entry.message === 'Native screen capture-fallback').length, 1);
+  await f.focus(false);
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen preview-state' && entry.data.state === 'paused'));
+  await f.command({ action: 'signal', signal: { ...signal, action: 'stop' } });
+  assert.deepEqual(f.logs.filter(entry => entry.message === 'Native screen viewer-demand').map(entry => entry.data.action),
+    ['watch', 'stop']);
+  await f.command({ action: 'leave' });
+  assert.equal(f.logs.filter(entry => entry.message === 'Native screen pipeline-state' && entry.data.type === 'closed').length, 2);
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen source-retirement-result' && !entry.data.retained));
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen call-retirement-result' && !entry.data.retained));
+});
+
+test('receiver lifecycle records watch, playing and unwatch once without logging frames or peer payloads', async t => {
+  const f = fixture(t, { role: 'viewer' });
+  await f.join(); await f.participants();
+  const watched = await f.watch();
+  await f.accepted(f.sent.find(event => event.type === 'signal' && event.signal.action === 'watch').signal);
+  const endpoint = f.endpoints[0];
+  const peer = { remoteSessionId: 'private-peer', status: 'open', nativeState: { connectionState: 'connected',
+    sdp: 'secret-sdp' }, error: { message: 'secret-password' }, credential: 'secret-credential' };
+  endpoint.options.onState({ type: 'peer', state: peer });
+  for (let index = 0; index < 100; index++) {
+    endpoint.options.onState({ type: 'peer', state: peer });
+    endpoint.options.onState({ type: 'frame' });
+  }
+  assert.equal(f.logs.filter(entry => entry.message === 'Native screen pipeline-state' && entry.data.type === 'peer').length, 1);
+  assert.equal(f.logs.filter(entry => entry.message === 'Native screen subscription-state' && entry.data.state === 'playing').length, 1);
+  await f.command({ action: 'stop', publisherSessionId: 'publisher', shareId: f.source.shareId,
+    presentationId: watched.presentationId });
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen unwatch-requested'));
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen subscription-retirement-result' && entry.data.closed));
+  assert.doesNotMatch(JSON.stringify(f.logs), /secret-|private-peer|sdp|credential/);
+});
+
+test('asynchronous capture and preview failures persist bounded diagnostics without changing source ownership', async t => {
+  const f = fixture(t);
+  await f.join();
+  const { source } = await f.addSource();
+  await f.command({ action: 'preview-start', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+  const endpoint = f.endpoints[0];
+  for (let index = 0; index < 100; index++)
+    endpoint.options.onDiagnostic(Object.assign(new Error(`secret-${index}`), { code: 'ERR_SCREEN_CAPTURE_TEST' }));
+  assert.equal(f.logs.filter(entry => entry.message === 'Native screen capture-diagnostic failed').length, 1);
+  f.ports[0].port1.emit('message', { data: { password: 'secret-preview' } });
+  await tick();
+  assert.equal(f.logs.filter(entry => entry.message === 'Native screen preview failed').length, 1);
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen preview-state' && entry.data.state === 'unavailable'));
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
+  assert.equal(f.sent.some(event => event.type === 'error'), false);
+  assert.doesNotMatch(JSON.stringify(f.logs), /secret-|password/);
+  assert.equal(f.ports[0].port1.listenerCount('message'), 0);
+  assert.equal(endpoint.closed, true);
+});
+
+test('a failed diagnostic sink cannot bypass native ownership guards or prevent teardown', async t => {
+  const f = fixture(t, { logger: { write() { throw new Error('modeled disk failure'); } } });
+  await f.join();
+  const { source } = await f.addSource();
+  await assert.rejects(f.addSource(), /already exists/);
+  await f.command({ action: 'source-remove', shareId: source.shareId });
+  await f.command({ action: 'leave' });
+  assert.equal(f.removedDirectories.length, 1);
+  assert.equal((await f.command({ action: 'leave' })).kind, 'ok');
+  assert.equal(f.errors.filter(values => values[0] === '[NativeScreen] Persistent diagnostic sink failed; media ownership is unchanged.').length, 1);
+  assert.equal(f.errors.some(values => values.some(value => value instanceof Error && value.message === 'modeled disk failure')), false);
 });
 
 test('unsupported native platforms report browser-only capabilities without touching GPU or capture', async t => {
