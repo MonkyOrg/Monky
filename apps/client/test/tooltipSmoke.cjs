@@ -107,8 +107,13 @@ if (require.main === module || process.argv[1] === __filename) {
         window.tooltipPreviewPointer = false;
         resolve();
       }))`);
-      window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await window.webContents.executeJavaScript('window.armTooltipPreviewHover()');
+      const sendHover = () => window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+      // Regression: native delivery may consume more than the 100 ms slack
+      // between a Main-side 250 ms sleep and the renderer's 150 ms intent timer.
+      if (process.argv.includes('--delayed-native-input')) setTimeout(sendHover, 180);
+      else sendHover();
+      const observation = await window.webContents.executeJavaScript('window.tooltipPreviewHover');
       const nativeHover = await window.webContents.executeJavaScript(`(() => {
         const button = document.querySelector('#tooltip-preview-button');
         const tip = document.querySelector('.monky-tooltip');
@@ -117,15 +122,15 @@ if (require.main === module || process.argv[1] === __filename) {
           trustedPointer: window.tooltipPreviewPointer,
           focused: document.hasFocus(), visibility: document.visibilityState,
           hovered: button.matches(':hover'), title: button.title, attribute: button.getAttribute('title'),
-          tooltipHidden: tip.hidden, tooltipText: tip.textContent
+          tooltipHidden: tip.hidden, tooltipText: tip.textContent, trace: window.tooltipPreviewTrace
         };
       })()`);
-      if (!nativeHover.correct || !nativeHover.trustedPointer)
-        throw new Error(`Real Electron pointer hover on disabled button did not show/suppress tooltip: ${JSON.stringify(nativeHover)}`);
+      if (!observation.delivered || !nativeHover.correct || !nativeHover.trustedPointer)
+        throw new Error(`Real Electron pointer hover on disabled button did not show/suppress tooltip: ${JSON.stringify({ ...nativeHover, observation })}`);
       const image = await window.webContents.capturePage();
       const filename = path.join(clientRoot, 'dist-test', 'tooltip-preview.png');
       fs.writeFileSync(filename, image.toPNG());
-      console.log(`Real disabled hover passed; screenshot: ${filename}`);
+      console.log(`Real disabled hover passed (${observation.elapsed} ms after trusted input); screenshot: ${filename}`);
       await window.webContents.executeJavaScript('window.disposeTooltipPreview()', true);
       await finish(0);
     }).catch(async (error) => { console.error(error); await finish(1); });
@@ -145,17 +150,88 @@ async function renderTooltipPreview() {
       </button>
     </div>
   </main>`;
+  const started = performance.now();
+  const trace = window.tooltipPreviewTrace = [];
+  const record = (kind, data = {}) => {
+    if (trace.length >= 80) trace.shift();
+    trace.push({ at: Math.round(performance.now() - started), kind, ...data });
+  };
+  const targetName = target => target instanceof Element ? target.id || target.tagName : null;
+  const eventTrace = event => record(event.type, {
+    target: targetName(event.target), related: targetName(event.relatedTarget), trusted: event.isTrusted,
+  });
+  const events = ['pointerover', 'pointerout', 'pointermove', 'mouseover', 'mouseout', 'mousemove',
+    'scroll', 'visibilitychange'];
+  const windowEvents = ['blur', 'focus', 'resize'];
+  for (const event of events) document.addEventListener(event, eventTrace, true);
+  for (const event of windowEvents) window.addEventListener(event, eventTrace, true);
+  const originalSetTimeout = window.setTimeout, originalClearTimeout = window.clearTimeout;
+  const timers = new Set();
+  window.setTimeout = (handler, delay, ...args) => {
+    if (typeof handler !== 'function' || handler.name !== 'show')
+      return originalSetTimeout.call(window, handler, delay, ...args);
+    const id = originalSetTimeout.call(window, (...values) => {
+      timers.delete(id);
+      record('intent-fired', { id });
+      handler(...values);
+    }, delay, ...args);
+    timers.add(id);
+    record('intent-scheduled', { id, delay });
+    return id;
+  };
+  window.clearTimeout = id => {
+    if (timers.delete(id)) record('intent-cancelled', { id });
+    originalClearTimeout.call(window, id);
+  };
   const dispose = initTooltips();
+  const mutations = new MutationObserver(() => {
+    const tip = document.querySelector('.monky-tooltip');
+    record('tooltip-state', { hidden: tip.hidden, text: tip.textContent });
+  });
+  mutations.observe(document.querySelector('.monky-tooltip'), { attributes: true, childList: true, subtree: true });
   window.tooltipPreviewPointer = false;
+  let inputDeadline, hoverObservation, settleHover;
+  window.armTooltipPreviewHover = () => {
+    window.tooltipPreviewPointer = false;
+    window.tooltipPreviewHover = new Promise(resolve => {
+      settleHover = resolve;
+      inputDeadline = originalSetTimeout.call(window, () => {
+        settleHover = null;
+        record('input-delivery-deadline');
+        resolve({ delivered: false });
+      }, 2000);
+    });
+  };
   const pointer = event => {
-    if (event.isTrusted && document.querySelector('#tooltip-preview-button').contains(event.target))
-      window.tooltipPreviewPointer = true;
+    if (!event.isTrusted || !document.querySelector('#tooltip-preview-button').contains(event.target)) return;
+    window.tooltipPreviewPointer = true;
+    if (!settleHover || hoverObservation !== undefined) return;
+    originalClearTimeout.call(window, inputDeadline);
+    const receivedAt = performance.now();
+    record('hover-observation-start');
+    // Measure the unchanged 250 ms budget in the renderer, after trusted input
+    // arrived, rather than before Electron's asynchronous dispatch completed.
+    hoverObservation = originalSetTimeout.call(window, () => {
+      record('hover-observation-end');
+      settleHover({ delivered: true, elapsed: Math.round(performance.now() - receivedAt) });
+      settleHover = null;
+    }, 250);
   };
   document.addEventListener('pointerover', pointer, true);
   window.disposeTooltipPreview = () => {
     document.removeEventListener('pointerover', pointer, true);
+    for (const event of events) document.removeEventListener(event, eventTrace, true);
+    for (const event of windowEvents) window.removeEventListener(event, eventTrace, true);
+    mutations.disconnect();
+    originalClearTimeout.call(window, inputDeadline);
+    originalClearTimeout.call(window, hoverObservation);
     dispose();
+    window.setTimeout = originalSetTimeout;
+    window.clearTimeout = originalClearTimeout;
+    delete window.tooltipPreviewTrace;
     delete window.tooltipPreviewPointer;
+    delete window.tooltipPreviewHover;
+    delete window.armTooltipPreviewHover;
     delete window.disposeTooltipPreview;
   };
   await document.fonts.ready;
