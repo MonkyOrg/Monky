@@ -56,6 +56,37 @@ Availability has three distinct levels:
    only then can `hardwareSessionConfirmed` become true.
    `hardwareQualified` remains false: one session does not qualify every use.
 
+SPS/PPS are required and validated on the first packet, before sending any
+video, not during initialization: the OBS NVENC plugin only exposes those
+headers when it produces its first packet. The stream starts with an IDR,
+and each keyframe receives current parameters for late viewers.
+Missing, invalid or oversized headers remain errors.
+
+When closing the entire source, removing viewers directly retires their shared
+pipelines; it does not update remaining-viewer demand on an endpoint that is
+shutting down. Actual cleanup failures are still reported.
+The native-preview track belongs to preload, not `VideoService`: stopping it
+before the decoder closes the writer while frames are still arriving.
+Its owner blocks new frames, closes the decoder and drains the writer before
+stopping the track; a timeout retains resources for a subsequent retry.
+
+A QPC/RTC observation exceeding 2 ms drops its frame and fences dependent
+pictures, requesting a real IDR through the existing bounded recovery (1.5 s).
+It neither widens clock tolerance nor invents timestamps or treats clock
+discontinuities as success. Connection notices use an 8-second toast instead
+of leaving a modal over the game after recovery.
+
+If AMF diagnostics show `primaries=0`, with `transfer=1`, `matrix=1` and limited
+range, check the driver: [AMF #354](https://github.com/GPUOpen-LibrariesAndSDKs/AMF/issues/354)
+documents this reserved metadata even when OBS requests BT.709.
+On 2026-07-20 AMD reported that the fix was in the public driver; this does not
+establish availability for every model. The same error was reported on a 5600G
+after updating, so updating is not a guaranteed solution.
+The host also sets `InColorPrimaries=1` through OBS's AMF option to explicitly
+declare BT.709 NV12 input instead of the undefined default; OBS already configures
+the output. Its effect on the 5600G still requires physical confirmation.
+Monky neither relabels the reserved value as valid nor rewrites the SPS.
+
 The separate `probeCaptureCapabilities()` export initializes the encoder on
 the GPU without capturing a source, but **is not Main's global discovery
 flow**. Its API does not expose a PID/nonce-bound retirement receipt or an
@@ -109,7 +140,12 @@ does not need a remote viewer for local preview.
 Audio uses the timestamped native PCM path: window/game captures the selected
 application; monitor captures the system **excluding Monky**, not just apps
 visible on that monitor. It does not capture the microphone. Only one source
-can reserve audio at a time. When audio capture is unavailable, explicitly
+can capture audio at a time. When replacing an audible share, the picker keeps
+the audio option enabled: Main prepares the new source without acquiring PCM,
+and the renderer waits for the previous source to retire before activating
+preview and the new audio selector. Preparation failure preserves the old share;
+retirement failure prevents replacement activation. Adding another audible
+share remains blocked while the first owns audio. When audio capture is unavailable, explicitly
 disable it to send video only; there is no silent change of scope. Module
 support and device-free tests do not replace physical audio validation on
 the target Windows machine.

@@ -92,6 +92,7 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
     desktopSourceId: z.string().regex(/^(?:window:[1-9][0-9]{0,15}:(?:[0-9]{1,10}|[a-f0-9]{64})|screen:[0-9]{1,16}:[0-9]{1,10}|native-monitor:[a-f0-9]{64})$/),
     captureKind: nativeScreenCaptureKindSchema.optional(),
     preserveAspectRatio: z.boolean().optional(),
+    replacesAudioShareId: screenShareIdSchema.optional(),
     video: nativeScreenVideoProfileSchema, audio: z.boolean(), audioBitrateKbps: nativeScreenAudioBitrateSchema,
   }).strict(),
   callScope.extend({ action: z.literal('source-remove'), shareId: screenShareIdSchema }).strict(),

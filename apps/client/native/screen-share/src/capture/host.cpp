@@ -862,12 +862,14 @@ class Host {
           "Invalid video-only encoded callback packet", "ERR_SCREEN_CAPTURE_ENCODER_PACKET");
       auto delivered = *packet;
       std::vector<std::uint8_t> independentKeyframe;
+      std::span<const std::uint8_t> parameterSets;
       if (packet->keyframe) {
         std::uint8_t* extra = nullptr;
         std::size_t size = 0;
         Require(host.api().obs_encoder_get_extra_data(host.encoder_, &extra, &size) &&
                 extra && size > 0 && size <= kMaxPacketBytes,
                 "Hardware encoder did not expose its current H264 parameter sets", "ERR_SCREEN_CAPTURE_H264");
+        parameterSets = {extra, size};
         // Preview may have consumed the first headers before a viewer joins.
         independentKeyframe = CompleteH264Keyframe({packet->data, packet->size}, {extra, size}, host.arguments_.video);
         delivered.data = independentKeyframe.data();
@@ -876,6 +878,8 @@ class Host {
       const auto qpc = Qpc();
       {
         std::lock_guard lock(host.bufferMutex_);
+        // NVENC exposes SPS/PPS only after producing its first packet.
+        if (host.buffer_.Count() == 0) host.buffer_.SetPrefix(parameterSets);
         host.buffer_.Add({{delivered.data, delivered.size}, delivered.pts, delivered.dts,
             static_cast<std::uint32_t>(delivered.timebase_num), static_cast<std::uint32_t>(delivered.timebase_den),
             delivered.keyframe, qpc});
@@ -1297,7 +1301,7 @@ class Host {
     } else {
       SetBoolean(properties.value, encoderSettings_, "pre_analysis", false);
       Property(properties.value, "ffmpeg_opts", abi::PropertyType::Text);
-      api().obs_data_set_string(encoderSettings_, "ffmpeg_opts", "");
+      api().obs_data_set_string(encoderSettings_, "ffmpeg_opts", EncoderExtraOptions(capability_.encoder));
     }
     api().obs_properties_apply_settings(properties.value, encoderSettings_);
     capability_.verified = true;
@@ -1308,7 +1312,8 @@ class Host {
     Require(BoundedString(api().obs_data_get_string(settings.value, "rate_control"), 32) == EncoderRateControl(capability_.encoder) &&
         BoundedString(api().obs_data_get_string(settings.value, "profile"), 32) == "main" &&
         BoundedString(api().obs_data_get_string(settings.value, "preset"), 32) == (nvenc ? "p4" : "balanced") &&
-        BoundedString(api().obs_data_get_string(settings.value, nvenc ? "opts" : "ffmpeg_opts"), 32).empty() &&
+        BoundedString(api().obs_data_get_string(settings.value, nvenc ? "opts" : "ffmpeg_opts"), 32) ==
+            EncoderExtraOptions(capability_.encoder) &&
         api().obs_data_get_int(settings.value, "bitrate") == (live_ ? live_->Bitrate() : arguments_.video.bitrateKbps) &&
         api().obs_data_get_int(settings.value, "bf") == 0 &&
         api().obs_data_get_int(settings.value, "keyint_sec") == 1,
@@ -1603,14 +1608,6 @@ class Host {
         capability_.encoder, capability_.verified);
     Require(BoundedString(api().obs_encoder_get_id(encoder_), 128) == SelectedEncoder(),
             "Configured hardware encoder registration identity changed", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
-    std::uint8_t* extra = nullptr;
-    std::size_t size = 0;
-    Require(api().obs_encoder_get_extra_data(encoder_, &extra, &size) && extra && size > 0 && size <= kMaxPacketBytes,
-            "Hardware encoder did not expose bounded H264 extra data", "ERR_SCREEN_CAPTURE_H264");
-    {
-      std::lock_guard lock(bufferMutex_);
-      buffer_.SetPrefix({extra, size});
-    }
     CheckFailure();
     Require(api().obs_encoder_video(encoder_) == canvasVideo_ && api().obs_output_get_video_encoder(output_) == encoder_,
             "Initialization changed the admitted canvas/encoder binding", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");

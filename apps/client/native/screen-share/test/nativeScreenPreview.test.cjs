@@ -9,6 +9,10 @@ const { NativeScreenPreviewBridge, MAX_PACKETS, MAX_BYTES } = require('../runtim
 const { EncodedPreviewRenderer, h264Codec } = require('../runtime/encodedPreviewRenderer.cjs');
 const { createNativeScreenPresentation } = require('../runtime/nativePresentationRenderer.cjs');
 const { within } = require('../runtime/nativeDeadline.cjs');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const ts = require('typescript');
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 };
@@ -244,4 +248,193 @@ test('presentation retirement aborts a blocked preview writer and releases alias
   assert.deepEqual(errors, []);
   await controller.close();
   assert.equal(ipc.listenerCount(NATIVE_SCREEN_PREVIEW_IPC.port), 0);
+});
+
+function presentationFixture(t, { blocked = false, writeFailure = null } = {}) {
+  const platform = decoderPlatform(), ipc = new EventEmitter(), port = new Port(), errors = [];
+  let resolveAbort, rejectWrite, pending = false, frameClosed = 0, released = false;
+  const abortGate = new Promise(resolve => { resolveAbort = resolve; });
+  const writer = {
+    write() {
+      if (track.readyState === 'ended') return Promise.reject(new DOMException('Stream closed', 'InvalidStateError'));
+      if (writeFailure) return Promise.reject(writeFailure);
+      if (!blocked) return Promise.resolve();
+      pending = true;
+      return new Promise((_resolve, reject) => { rejectWrite = error => { pending = false; reject(error); }; });
+    },
+    async abort(reason) {
+      if (blocked) await abortGate;
+      rejectWrite?.(reason);
+    },
+    releaseLock() { assert.equal(pending, false); released = true; },
+  };
+  class Track {
+    readyState = 'live';
+    writable = { getWriter: () => writer };
+    stop() {
+      this.readyState = 'ended';
+      if (pending) rejectWrite(new DOMException('Stream closed', 'InvalidStateError'));
+    }
+  }
+  class Stream {
+    constructor(tracks) { this.tracks = tracks; }
+    getVideoTracks() { return this.tracks; }
+    getTracks() { return this.tracks; }
+  }
+  for (const [name, value] of Object.entries({ VideoDecoder: platform.VideoDecoder,
+    EncodedVideoChunk: platform.EncodedVideoChunk, MediaStreamTrackGenerator: Track, MediaStream: Stream })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    });
+  }
+  const owner = { id: randomUUID(), nodeName: 'VIDEO', srcObject: null, async play() {}, pause() {} };
+  const controller = createNativeScreenPresentation({ setSharedTextureReceiver() {} }, {
+    getElementById: () => owner, querySelectorAll: () => [owner],
+  }, (_id, error) => errors.push(error), ipc);
+  t.after(async () => { resolveAbort(); await controller.close(); });
+  const scope = info(), input = packet();
+  let track;
+  return { controller, scope, port, errors, platform, owner, resolveAbort, rejectPending: error => rejectWrite(error),
+    get track() { return track; }, get pending() { return pending; },
+    get frameClosed() { return frameClosed; }, get released() { return released; },
+    async start() {
+      await controller.attachPreview({ presentationId: scope.presentationId, elementId: owner.id });
+      track = owner.srcObject.getVideoTracks()[0];
+      ipc.emit(NATIVE_SCREEN_PREVIEW_IPC.port, { ports: [port] }, scope);
+      port.receive(input);
+      await tick();
+    },
+    output() {
+      platform.decoders[0].callbacks.output({
+        timestamp: input.timestampUs, codedWidth: 1920, codedHeight: 1080, displayWidth: 1920, displayHeight: 1080,
+        visibleRect: { x: 0, y: 0, width: 1920, height: 1080 }, close() { frameClosed++; },
+      });
+    },
+  };
+}
+
+test('real VideoService source replacement does not stop the preload-owned generator before its decoder', async t => {
+  const f = presentationFixture(t);
+  await f.start();
+  const filename = path.resolve(__dirname, '..', '..', '..', 'src', 'renderer', 'core', 'VideoService.ts');
+  const source = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.ES2022, true);
+  const declaration = source.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'VideoService');
+  const method = declaration?.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === 'stopScreenShare');
+  assert.ok(method, 'Exercise the actual native/browser track ownership boundary.');
+  const compiled = ts.transpileModule(`class Owner { ${method.getText(source)} }; Owner;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const Owner = vm.runInNewContext(compiled, { clientLog: { info() {} }, appEvents: { emit() {} } });
+  const owner = { screenStreams: new Map([['native', f.owner.srcObject]]), screenSourceIds: new Map([['native', 'owned-hwnd']]),
+    nativeScreenCaptures: new Map([['native', { source: { shareId: 'native' } }]]) };
+  Owner.prototype.stopScreenShare.call(owner, 'native');
+  f.output();
+  await tick();
+  assert.deepEqual(f.errors, [], 'Source removal closed the generator before a still-active decoded frame reached its writer.');
+  assert.equal(f.track.readyState, 'live', 'Only the preload presentation owner may stop its generator.');
+  assert.equal(owner.screenStreams.size, 0);
+  await f.controller.stop(f.scope.presentationId);
+  assert.equal(f.track.readyState, 'ended');
+  assert.equal(f.platform.decoders[0].state, 'closed');
+  let browserStops = 0;
+  const browserTrack = { stop() { browserStops++; } };
+  owner.screenStreams.set('browser', { getVideoTracks: () => [browserTrack], getTracks: () => [browserTrack] });
+  Owner.prototype.stopScreenShare.call(owner, 'browser');
+  assert.equal(browserStops, 1, 'Browser captures remain owned and stopped by VideoService.');
+});
+
+test('Stop closes preview admission/decoder then drains an aborted writer before stopping its generator', async t => {
+  const f = presentationFixture(t, { blocked: true });
+  await f.start(); f.output(); await tick();
+  assert.equal(f.pending, true);
+  let stopped = false;
+  const stopping = f.controller.stop(f.scope.presentationId).then(() => { stopped = true; });
+  try {
+    await tick();
+    assert.equal(f.platform.decoders[0].state, 'closed');
+    assert.equal(f.port.closed, true);
+    assert.equal(stopped, false);
+    assert.equal(f.track.readyState, 'live', 'Stopping the generator races the outstanding writer with Stream closed.');
+    assert.equal(f.released, false);
+    f.output();
+    assert.equal(f.frameClosed, 1, 'A late decoder output must close without entering the writer.');
+  } finally {
+    f.resolveAbort();
+    await stopping;
+  }
+  assert.equal(f.frameClosed, 2);
+  assert.equal(f.track.readyState, 'ended');
+  assert.equal(f.released, true);
+  assert.deepEqual(f.errors, []);
+  assert.deepEqual(f.port.messages, [], 'Stop cannot acknowledge rendering or release a fictitious frame receipt.');
+});
+
+test('an active presentation still reports genuine writer failures and closes its decoder', async t => {
+  const failure = new Error('Actual active writer failure');
+  const f = presentationFixture(t, { writeFailure: failure });
+  await f.start(); f.output(); await tick();
+  assert.deepEqual(f.errors, [failure]);
+  assert.equal(f.frameClosed, 1);
+  assert.equal(f.platform.decoders[0].state, 'closed');
+  assert.deepEqual(f.port.messages, []);
+  await f.controller.stop(f.scope.presentationId);
+  assert.equal(f.released, true);
+});
+
+test('an unrelated pending write failure during Stop remains observable, not a cancellation receipt', async t => {
+  const f = presentationFixture(t, { blocked: true }), failure = new Error('Actual writer failure during retirement');
+  await f.start(); f.output(); await tick();
+  const stopping = f.controller.stop(f.scope.presentationId);
+  await tick();
+  f.rejectPending(failure);
+  f.resolveAbort();
+  await assert.rejects(stopping, error => {
+    assert.ok(error instanceof AggregateError);
+    assert.ok(error.errors.some(error => error instanceof AggregateError && error.errors.includes(failure)));
+    return true;
+  });
+  assert.equal(f.frameClosed, 1);
+  assert.deepEqual(f.port.messages, []);
+  await f.controller.stop(f.scope.presentationId);
+  assert.equal(f.released, true);
+});
+
+test('a blocked writer timeout retains its generator and frame until an acknowledged retirement retry', async t => {
+  const f = presentationFixture(t, { blocked: true });
+  await f.start(); f.output(); await tick();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const stopping = f.controller.stop(f.scope.presentationId);
+  const rejected = assert.rejects(stopping, /owners did not retire/);
+  await tick();
+  t.mock.timers.tick(5001);
+  await rejected;
+  assert.equal(f.track.readyState, 'live');
+  assert.equal(f.pending, true);
+  assert.equal(f.frameClosed, 0);
+  assert.equal(f.released, false);
+  assert.deepEqual(f.port.messages, []);
+  f.resolveAbort();
+  await tick();
+  await f.controller.stop(f.scope.presentationId);
+  assert.equal(f.track.readyState, 'ended');
+  assert.equal(f.frameClosed, 1);
+  assert.equal(f.released, true);
+});
+
+test('a detached preview port callback cannot retain new packets after Stop', async () => {
+  const platform = decoderPlatform(), port = new Port(), errors = [];
+  const renderer = new EncodedPreviewRenderer({ acceptFrame() { assert.fail('No stopped output can be admitted.'); } },
+    error => errors.push(error), platform);
+  renderer.attach(port);
+  const staleMessage = renderer.message;
+  await renderer.stop();
+  staleMessage({ data: packet() });
+  await renderer.tail;
+  assert.equal(renderer.pending.size, 0);
+  assert.equal(platform.decoders.length, 0);
+  assert.deepEqual(port.messages, []);
+  assert.deepEqual(errors, []);
 });

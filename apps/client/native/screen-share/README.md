@@ -57,6 +57,38 @@ A disponibilidade tem três níveis diferentes:
    `hardwareSessionConfirmed` só então pode ser verdadeiro.
    `hardwareQualified` permanece falso: uma sessão não qualifica todos os usos.
 
+SPS/PPS são exigidos e validados no primeiro pacote, antes de enviar qualquer
+vídeo, não na inicialização: o plugin NVENC do OBS só disponibiliza esses
+cabeçalhos ao produzir o primeiro pacote. O fluxo começa com um IDR, e cada
+keyframe recebe os parâmetros atuais para permitir espectadores tardios.
+Cabeçalhos ausentes, inválidos ou fora dos limites continuam sendo erros.
+
+Ao encerrar a fonte inteira, a retirada dos espectadores fecha diretamente
+os pipelines compartilhados; não atualiza a demanda dos espectadores restantes
+em um endpoint que está sendo encerrado. Falhas reais de limpeza continuam
+sendo reportadas.
+A trilha da prévia nativa pertence ao preload, não ao `VideoService`: encerrar
+essa trilha antes do decoder fecha o writer enquanto ainda há frames chegando.
+O proprietário bloqueia novos frames, encerra o decoder e drena o writer antes
+de parar a trilha; timeout mantém os recursos retidos para nova tentativa.
+
+Uma amostragem QPC/RTC que excede 2 ms descarta o quadro e invalida seus
+dependentes, solicitando um IDR real pela recuperação existente (limite de
+1,5 s). Não aumenta a tolerância do relógio, não inventa timestamps e não
+transforma descontinuidades em sucesso. Avisos de conexão usam toast de
+8 segundos, para não deixar um diálogo bloqueando o jogo após a recuperação.
+
+Se o diagnóstico AMF indicar `primaries=0`, com `transfer=1`, `matrix=1` e faixa
+limitada, confira o driver: [AMF #354](https://github.com/GPUOpen-LibrariesAndSDKs/AMF/issues/354)
+documenta esse metadado reservado mesmo quando o OBS solicita BT.709.
+A AMD informou em 20/07/2026 que a correção estava no driver público; isso não
+comprova disponibilidade para todo modelo. O mesmo erro foi relatado em um 5600G
+após atualização, portanto atualizar não é uma solução garantida.
+O host também declara `InColorPrimaries=1` via a opção AMF do OBS para explicitar
+BT.709 na entrada NV12, em vez do padrão indefinido; a saída já é configurada pelo
+OBS. O efeito no 5600G ainda exige confirmação física. O Monky não transforma
+o valor reservado em uma declaração de cor válida nem reescreve o SPS.
+
 O export separado `probeCaptureCapabilities()` inicializa o encoder na GPU
 sem capturar uma fonte, mas **não é o fluxo de descoberta global do Main**.
 Sua API não entrega ao chamador um comprovante de encerramento vinculado a
@@ -110,7 +142,13 @@ Captura de Jogo, que não precisa de um espectador remoto para a prévia.
 O áudio usa o caminho PCM nativo com timestamps: janela/jogo captura o
 aplicativo selecionado; monitor captura o sistema **excluindo o Monky**, não
 somente aplicativos visíveis naquele monitor. Não é captura de microfone.
-Apenas uma fonte pode reservar áudio por vez. Se a captura de áudio não
+Apenas uma fonte pode capturar áudio por vez. Ao substituir uma transmissão
+com som, o seletor mantém a opção de áudio habilitada: o Main prepara a nova
+fonte sem adquirir PCM, e o renderer aguarda o encerramento da fonte anterior
+antes de ativar a prévia e o novo seletor de áudio. Uma falha de preparação
+preserva a transmissão anterior; uma falha no encerramento impede a ativação
+da substituta. Adicionar outra transmissão com som continua bloqueado enquanto
+a primeira possui o áudio. Se a captura de áudio não
 estiver disponível, é preciso desativá-la explicitamente para enviar só vídeo;
 não há troca silenciosa de escopo. Suporte do módulo e testes sem dispositivos
 não substituem a validação do áudio físico no Windows de destino.

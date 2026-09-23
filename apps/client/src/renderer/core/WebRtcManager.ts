@@ -411,6 +411,7 @@ export class WebRtcManager {
     desktopSourceId: string, audio: boolean, thumbnail: string, isWanted: () => boolean,
     captureKind: NativeScreenCaptureKind = 'window',
     preserveAspectRatio = false,
+    audioReplacement?: { shareId?: string; retirePrevious: () => Promise<void> },
   ): Promise<MediaStream> {
     if (this.voiceReconnectSuspended) throw new Error(t('screenCodec.reconnecting'));
     if (settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264')
@@ -428,11 +429,18 @@ export class WebRtcManager {
       const source = await this.nativeScreens.addSource({
         shareId: stream.id, desktopSourceId, captureKind, preserveAspectRatio, video, audio, thumbnail,
         audioBitrateKbps: profile.audioBitrateKbps,
+        ...(audioReplacement?.shareId ? { replacesAudioShareId: audioReplacement.shareId } : {}),
       });
       if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');
       videoService.registerNativeScreenShare(stream, {
         source, desktopSourceId, captureKind, preserveAspectRatio, thumbnail, audioBitrateKbps: profile.audioBitrateKbps,
       });
+      // Admission/preflight does not acquire PCM. Retire its exact former owner
+      // before preview demand can activate the replacement's selected capture.
+      if (audioReplacement) {
+        await audioReplacement.retirePrevious();
+        if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');
+      }
       try {
         await this.nativeScreens.attachLocalPreview(stream.id);
         if (!isWanted()) throw new DOMException('Screen selection was cancelled.', 'AbortError');
@@ -442,6 +450,7 @@ export class WebRtcManager {
       }
       return stream;
     } catch (error) {
+      if (videoService.getScreenStream(stream.id) === stream) videoService.stopScreenShare(stream.id);
       try { await this.nativeScreens.removeSource(stream.id); }
       catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Native source preparation and cleanup failed.'); }
       throw error;

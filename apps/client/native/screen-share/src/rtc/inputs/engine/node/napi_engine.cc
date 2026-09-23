@@ -1966,7 +1966,7 @@ void ProcessEvent(napi_env env, const StateOwner& state, const QueuedEvent& even
             Id(env, Get(env, data, "generation"));
             const auto reason = String(env, Get(env, data, "reason"), 1, 32, "Encoded recovery reason must be bounded");
             if (reason != "rtc-unconsumed" && reason != "input-expired" &&
-                reason != "publication-expired" && reason != "codec-expired")
+                reason != "publication-expired" && reason != "codec-expired" && reason != "clock-sample-uncertain")
               ContractFailure(env, "Unknown encoded dependency recovery reason");
           }
           if (String(env, Get(env, data, "mode"), 1, 32, "Invalid encoded recovery mode") != "next-real-idr" ||

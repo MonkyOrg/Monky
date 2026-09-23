@@ -259,6 +259,8 @@ int main(int argc, char** argv) {
     rejects([&] { ExpectedModuleIdentity("obs-ffmpeg", "C:\\runtime\\obs-plugins\\64bit\\obs-ffmpeg.dll",
         "C:\\qa\\hooks-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\data\\obs-plugins\\obs-ffmpeg", config, cacheDigest); });
     check(sizeof(PacketStatistics) < 256);
+    check(std::string(EncoderExtraOptions(EncoderKind::Amf)) == "InColorPrimaries=1");
+    check(std::string(EncoderExtraOptions(EncoderKind::Nvenc)).empty());
     for (const auto video : {VideoConfiguration{1920, 1080, 120, 5000}, {1920, 1080, 60, 5000},
                             {1280, 720, 60, 3000}, {852, 480, 30, 1500}}) {
       ValidateVideoConfiguration(video);
@@ -274,6 +276,24 @@ int main(int argc, char** argv) {
           std::equal(prefix.begin(), prefix.end(), complete.begin()) &&
           std::equal(idr.begin(), idr.end(), complete.begin() + prefix.size()));
       check(CompleteH264Keyframe(idr, prefix, video) == complete);
+      PacketStatistics delayed(video);
+      check(delayed.Count() == 0 && !delayed.First());
+      rejects([&] { delayed.Add({idr, 0, -1, 1, video.fps, true, 1000}); });
+      rejects([&] { delayed.SetPrefix({}); });
+      rejects([&] { CompleteH264Keyframe(idr, {}, video); });
+      // Model NVENC: headers become available with the first actual IDR, not at initialization.
+      delayed.SetPrefix(prefix);
+      delayed.Add({complete, 0, -1, 1, video.fps, true, 1000});
+      check(delayed.Count() == 1 && delayed.Keyframes() == 1 && delayed.OutputBytes() == complete.size());
+      delayed.Add({delta, 1, 0, 1, video.fps, false, 1001});
+      const auto nextIdr = CompleteH264Keyframe(idr, prefix, video);
+      delayed.Add({nextIdr, 2, 1, 1, video.fps, true, 1002});
+      check(delayed.Count() == 3 && delayed.Keyframes() == 2);
+      rejects([&] { delayed.SetPrefix(prefix); });
+      PacketStatistics startsWithDelta(video);
+      startsWithDelta.SetPrefix(prefix);
+      rejects([&] { startsWithDelta.Add({delta, 0, -1, 1, video.fps, false, 1000}); });
+      check(startsWithDelta.Count() == 0);
       rejects([&] { CompleteH264Keyframe(delta, prefix, video); });
       rejects([&] { CompleteH264Keyframe(idr, idr, video); });
       rejects([&] { CompleteH264Keyframe(idr, complete, video); });

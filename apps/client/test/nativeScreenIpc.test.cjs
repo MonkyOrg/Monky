@@ -44,7 +44,7 @@ const monitorId = `native-monitor:${'a'.repeat(64)}`;
 
 function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   encoder = 'h264_texture_amf', probeFailure, probeFailureBeforeSpawn, probeStop,
-  probeVerified = true, probeRetires = true, probeStopReportsFailure = false, logger } = {}) {
+  probeVerified = true, probeRetires = true, probeStopReportsFailure = false, logger, packetCapture } = {}) {
   const handlers = new Map(), sent = [], endpoints = [], selections = [], errors = [], captures = [], directories = [];
   const probes = [], removedDirectories = [], logs = [], ports = [];
   let target = { kind: 'window', hwnd: 12345, expectedProcessId: 56789,
@@ -145,7 +145,11 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
         isIconic: windowPaused, isVisible: !windowPaused, isTopLevel: true } : null;
     },
     getMonitorState: id => monitor && id === monitor.deviceId ? structuredClone(monitor) : null,
-    createPacketCapture() { captures.push(true); assert.fail('IPC/source admission cannot itself capture audio.'); },
+    createPacketCapture(selection, onEvent) {
+      captures.push(selection);
+      if (packetCapture) return packetCapture(selection, onEvent);
+      assert.fail('IPC/source admission cannot itself capture audio.');
+    },
   };
   const module = { exports: {} };
   load(module.exports, name => {
@@ -898,6 +902,158 @@ test('application audio is reserved before discovery and remains exclusive until
   await f.command({ action: 'source-remove', shareId: 'audio-owner' });
   assert.equal((await f.addSource('second-audio')).source.audio, true);
   assert.equal(f.captures.length, 0, 'An audio reservation must not capture before Watch.');
+});
+
+test('audio replacement reserves only the exact same-call source and failed preflight leaves its owner intact', async t => {
+  const f = fixture(t);
+  await f.join();
+  const old = (await f.addSource('old-audio', { captureKind: 'game' })).source;
+  for (const changes of [
+    { replacesAudioShareId: 'missing' }, { replacesAudioShareId: old.shareId, audio: false },
+  ]) await assert.rejects(f.addSource('invalid', changes), /existing audible source/);
+  const otherCallId = randomUUID();
+  await f.invoke({ ...f.config, callId: otherCallId, action: 'join' });
+  await assert.rejects(f.invoke({
+    action: 'source-add', callId: otherCallId, shareId: 'cross-call', desktopSourceId: monitorId,
+    captureKind: 'monitor', video, audio: true, audioBitrateKbps: 128, replacesAudioShareId: old.shareId,
+  }), /existing audible source/);
+  await f.invoke({ action: 'leave', callId: otherCallId });
+  f.setProbeFailure(new Error('Replacement preflight failed'));
+  await assert.rejects(f.addSource('new-audio', {
+    captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareId: old.shareId,
+  }), /preflight failed/);
+  f.setProbeFailure(null);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
+  assert.equal(f.sent.some(event => event.shareId === old.shareId && event.state === 'closed'), false);
+  await f.addSource('new-audio', {
+    captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareId: old.shareId,
+  });
+  await assert.rejects(f.addSource('third-audio', { replacesAudioShareId: old.shareId }), /reserve capture audio/);
+  assert.equal(f.captures.length, 0);
+  await f.command({ action: 'source-remove', shareId: 'new-audio' });
+  await assert.rejects(f.addSource('unrelated-audio'), /reserve capture audio/);
+});
+
+test('replacement preview cannot activate PCM before the prior owner retires', async t => {
+  const f = fixture(t);
+  await f.join();
+  const old = (await f.addSource('old-audio')).source;
+  const next = (await f.addSource('new-audio', {
+    captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareId: old.shareId,
+  })).source;
+  await assert.rejects(f.command({
+    action: 'preview-start', shareId: next.shareId, sourceInstanceId: next.instanceId, presentationId: randomUUID(),
+  }), /previous screen audio owner must retire/);
+  assert.equal(f.endpoints.length, 0);
+  assert.equal(f.captures.length, 0);
+  assert.equal(f.sent.some(event => event.shareId === old.shareId && event.state === 'closed'), false);
+});
+
+test('cancelling replacement admission releases its reservation without cancelling the old audio owner', async t => {
+  const f = fixture(t);
+  await f.join();
+  const old = (await f.addSource('old-audio')).source;
+  const replacement = { captureKind: 'monitor', desktopSourceId: monitorId, replacesAudioShareId: old.shareId };
+  const pending = f.addSource('new-audio', replacement);
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  await f.command({ action: 'source-remove', shareId: 'new-audio' });
+  await rejected;
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
+  assert.equal(f.sent.some(event => event.shareId === old.shareId && event.state === 'closed'), false);
+  const retried = (await f.addSource('new-audio', replacement)).source;
+  assert.equal(retried.audio, true);
+  assert.equal(f.captures.length, 0);
+});
+
+test('same-call game/window to monitor swaps retire PCM, reset selectors and reject stale deliveries', async t => {
+  const active = new Set(), nativeCaptures = [];
+  let stopFailure = false, captureFailure = false;
+  const f = fixture(t, { packetCapture(selection, onEvent) {
+    assert.equal(active.size, 0, 'Exclusive PCM acquisition cannot overlap during a source swap');
+    const closed = deferred();
+    const capture = {
+      selection, onEvent, closed: false,
+      getStats: () => ({ state: capture.closed ? 'closed' : 'capturing' }),
+    };
+    active.add(capture); nativeCaptures.push(capture);
+    const ready = { type: 'ready', sessionId: randomUUID(), format: { sampleRate: 48000, channels: 2 } };
+    if (!captureFailure) onEvent(ready);
+    return {
+      ready: captureFailure ? Promise.reject(new Error('Selected PCM acquisition failed')) : Promise.resolve(ready),
+      closed: closed.promise, getStats: capture.getStats,
+      async stop() {
+        if (stopFailure) throw new Error('PCM worker retirement failed');
+        capture.closed = true; active.delete(capture); closed.resolve();
+      },
+    };
+  } });
+  const watch = source => f.command({ action: 'signal', signal: {
+    fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+    subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+  } });
+  await f.join(); await f.participants();
+  let previous = null, previousEndpoint = null, previousPackets = null;
+  for (const [index, kind] of ['game', 'monitor', 'window', 'monitor', 'game'].entries()) {
+    const source = (await f.addSource(`swap-${index}`, {
+      captureKind: kind, desktopSourceId: kind === 'monitor' ? monitorId : 'window:12345:0',
+      ...(previous ? { replacesAudioShareId: previous.shareId } : {}),
+    })).source;
+    assert.equal(nativeCaptures.length, index, 'Admission/preflight alone never opens a PCM capture');
+    if (previous) {
+      const oldCapture = nativeCaptures.at(-1);
+      const oldCount = previousPackets.length;
+      if (index === 1) {
+        stopFailure = true;
+        await assert.rejects(f.command({ action: 'source-remove', shareId: previous.shareId }), /retirement reported failures/);
+        assert.equal(active.size, 1, 'Failed retirement retains the real PCM obligation');
+        assert.equal((await f.command({ action: 'stats' })).publishers.length, 2);
+        stopFailure = false;
+      }
+      await f.command({ action: 'source-remove', shareId: previous.shareId });
+      assert.equal(oldCapture.closed, true);
+      assert.equal(previousEndpoint.options.audio.captureHub.getStats().closed, true);
+      oldCapture.onEvent({ type: 'packet', sequence: 999, pcm: Buffer.alloc(8) });
+      assert.equal(previousPackets.length, oldCount, 'Detached subscribers cannot receive late old-source PCM');
+    }
+    await watch(source);
+    const endpoint = f.endpoints.at(-1);
+    const selection = kind === 'monitor' ? { excludePid: process.pid }
+      : { includeWindowId: 12345, expectedProcessId: 56789 };
+    assert.equal(endpoint.options.source.instanceId, source.instanceId);
+    assert.notEqual(source.instanceId, previous?.instanceId);
+    assert.equal(endpoint.options.target.kind, kind);
+    assert.ok(runtime.NativePcmCaptureHub.matches(endpoint.options.audio.captureHub, endpoint.options.audio.captureModule, selection));
+    assert.notEqual(endpoint.options.audio.captureHub, previousEndpoint?.options.audio.captureHub);
+    const packets = [];
+    const subscription = endpoint.options.audio.captureHub.subscribe(selection, event => packets.push(event));
+    await subscription.ready;
+    const capture = nativeCaptures.at(-1);
+    assert.deepEqual(capture.selection, selection);
+    const packet = { type: 'packet', sequence: 1, pcm: Buffer.from([1, 2, 3, 4]) };
+    capture.onEvent(packet);
+    assert.equal(packets.at(-1), packet, 'The production hub forwards the modeled packet payload unchanged');
+    if (previous) {
+      await f.command({ action: 'source-remove', shareId: previous.shareId });
+      assert.equal(active.size, 1, 'A late old Stop cannot stop the replacement capture');
+    }
+    previous = source; previousEndpoint = endpoint; previousPackets = packets;
+  }
+  await f.command({ action: 'source-remove', shareId: previous.shareId });
+  assert.equal(active.size, 0);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
+  captureFailure = true;
+  const failed = (await f.addSource('failed-audio', { captureKind: 'monitor', desktopSourceId: monitorId })).source;
+  await watch(failed);
+  const failedSubscription = f.endpoints.at(-1).options.audio.captureHub.subscribe({ excludePid: process.pid }, () => {});
+  await assert.rejects(failedSubscription.ready, /Selected PCM acquisition failed/);
+  await tick();
+  assert.ok(f.sent.some(event => event.type === 'error' && event.shareId === failed.shareId
+    && event.sourceInstanceId === failed.instanceId), 'PCM readiness failure must reach the real source error boundary');
+  await f.command({ action: 'source-remove', shareId: failed.shareId });
+  assert.equal(active.size, 0);
+  assert.equal(new Set(f.logs.filter(entry => entry.message === 'Native screen source-admitted')
+    .map(entry => entry.data.call)).size, 1, 'All swaps remain in the original native call');
 });
 
 test('cancelling pending audio admission releases only its own reservation', async t => {

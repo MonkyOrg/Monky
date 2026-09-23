@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const STARTUP_BITRATE_KBPS = 150;
-const RECOVERY_REASONS = new Set(['rtc-unconsumed', 'input-expired', 'publication-expired', 'codec-expired']);
+const RECOVERY_REASONS = new Set(['rtc-unconsumed', 'input-expired', 'publication-expired', 'codec-expired', 'clock-sample-uncertain']);
 
 class LiveSenderFlow {
   constructor({ engine, sourceId, onError, initialBitrateKbps, now = () => performance.now() }) {

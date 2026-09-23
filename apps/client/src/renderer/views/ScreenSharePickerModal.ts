@@ -48,6 +48,11 @@ export class ScreenSharePickerModal {
     return voiceStore.screenAudioShareId !== null || screenAudioService.getIsCapturing();
   }
 
+  private canReplaceScreenAudio(): boolean {
+    return voiceStore.screenAudioShareId !== null
+      && voiceStore.screenShareIds.includes(voiceStore.screenAudioShareId);
+  }
+
   private captureKind(tab = this.activeTab): NativeScreenCaptureKind {
     return tab === 'screen' ? 'monitor' : this.windowCaptureMethod;
   }
@@ -78,14 +83,15 @@ export class ScreenSharePickerModal {
       && this.sourceMatchesTab(source) && !videoService.getActiveSourceIds().has(source.id));
   }
 
-  private usesNativeCapture(sourceId: string | undefined, audio: boolean, kind = this.captureKind()): boolean {
+  private usesNativeCapture(sourceId: string | undefined, audio: boolean, kind = this.captureKind(), mode: 'add' | 'replace' = 'replace'): boolean {
     return !!sourceId?.startsWith(kind === 'monitor' ? 'native-monitor:' : 'window:') && this.supportsCaptureKind(kind)
-      && (!audio || (this.nativeCapabilities?.captureAudio === true && !this.hasScreenAudio()))
+      && (!audio || (this.nativeCapabilities?.captureAudio === true
+        && (!this.hasScreenAudio() || (mode === 'replace' && this.canReplaceScreenAudio()))))
       && (settingsStore.preferredVideoCodec === 'auto' || settingsStore.preferredVideoCodec === 'h264')
       && nativeScreenProfile(videoService.getProfile()) !== null;
   }
 
-  private captureUnavailableMessage(audio: boolean, kind = this.captureKind()): string {
+  private captureUnavailableMessage(audio: boolean, kind = this.captureKind(), mode: 'add' | 'replace' = 'replace'): string {
     const capabilities = this.nativeCapabilities;
     if (!capabilities && this.sourceState.status === 'loading') return t('common.loading');
     if (!capabilities || (!capabilities.capture && capabilities.requiresSelectionProbe !== true)) {
@@ -98,7 +104,8 @@ export class ScreenSharePickerModal {
           : kind === 'window' ? 'screenShare.windowCapture' : 'screenShare.gameCapture'),
       });
     }
-    if (audio && this.hasScreenAudio()) return t('screenShare.audioAlreadySharing');
+    if (audio && this.hasScreenAudio() && (mode === 'add' || !this.canReplaceScreenAudio()))
+      return t('screenShare.audioAlreadySharing');
     if (audio && !capabilities.captureAudio) return t('screenShare.nativeAudioUnavailable');
     if (settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264')
       return t('screenShare.codecsSoon');
@@ -126,7 +133,7 @@ export class ScreenSharePickerModal {
     if (!info) return;
     const audioInput = this.modalEl?.querySelector<HTMLInputElement>('#chk-share-audio');
     const audio = audioInput?.checked ?? false;
-    if (audioInput) audioInput.disabled = this.isStarting || this.hasScreenAudio();
+    if (audioInput) audioInput.disabled = this.isStarting || (this.hasScreenAudio() && !this.canReplaceScreenAudio());
     const aspectInput = this.modalEl?.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio');
     if (aspectInput) aspectInput.disabled = this.isStarting;
     const audioText = this.modalEl?.querySelector('#share-audio-text');
@@ -141,6 +148,10 @@ export class ScreenSharePickerModal {
     this.modalEl?.querySelectorAll<HTMLButtonElement>('#btn-share, #btn-share-add')
       .forEach(button => {
         button.disabled = this.isStarting || !source || !native;
+        if (button.id === 'btn-share-add' && audio && this.hasScreenAudio()) {
+          button.disabled = true;
+          button.title = t('screenShare.audioAlreadySharing');
+        } else button.removeAttribute('title');
         if (source && this.captureKind() === 'game') button.setAttribute('aria-describedby', 'share-game-tip');
         else button.removeAttribute('aria-describedby');
       });
@@ -231,7 +242,7 @@ export class ScreenSharePickerModal {
    * label must be honest instead of promising something we cannot deliver.
    */
   private audioToggleLabel(tab: SourceTab): string {
-    if (this.hasScreenAudio()) return t('screenShare.audioAlreadySharing');
+    if (this.hasScreenAudio() && !this.canReplaceScreenAudio()) return t('screenShare.audioAlreadySharing');
     if (tab !== 'screen') {
       return this.isMac
         ? t('screenShare.shareAudioMacWindow')
@@ -244,7 +255,7 @@ export class ScreenSharePickerModal {
     this.close();
 
     const alreadySharing = voiceStore.isScreenSharing;
-    const audioAlreadyCaptured = this.hasScreenAudio();
+    const audioAlreadyCaptured = this.hasScreenAudio() && !this.canReplaceScreenAudio();
     const shareAudio = !audioAlreadyCaptured && !screenAudioService.getIsTestTone();
     this.shareAudioByTab = { screen: shareAudio, window: shareAudio };
 
@@ -591,6 +602,7 @@ export class ScreenSharePickerModal {
     const call = captureScreenShareCall();
     let stream: MediaStream | null = null;
     let published = false;
+    let retiringPrevious = false;
     const assertCurrent = () => {
       if (this.modalEl !== modal || !call.isCurrent()
         || (stream && (videoService.getScreenStream(stream.id) !== stream
@@ -626,12 +638,19 @@ export class ScreenSharePickerModal {
         if (!proceed) return;
       }
       assertCurrent();
-      const native = this.usesNativeCapture(sourceId, shareAudio, captureKind);
-      if (!native) throw new Error(this.captureUnavailableMessage(shareAudio, captureKind));
-      // Acquire the new capture BEFORE tearing anything down: if the user
-      // cancels the OS picker or the source vanished, the current share must
-      // survive untouched instead of leaving local and server state disagreeing.
+      const native = this.usesNativeCapture(sourceId, shareAudio, captureKind, mode);
+      if (!native) throw new Error(this.captureUnavailableMessage(shareAudio, captureKind, mode));
+      // Prepare the selection before retiring existing shares. Audible
+      // replacements defer preview until the previous PCM owner is closed.
       const previousShareIds = mode === 'replace' ? [...voiceStore.screenShareIds] : [];
+      const previousAudioId = shareAudio && mode === 'replace' && this.canReplaceScreenAudio()
+        ? voiceStore.screenAudioShareId : null;
+      const retirePrevious = async (): Promise<void> => {
+        assertCurrent();
+        retiringPrevious = true;
+        await stopLocalScreenShares(screenAudioService, { shareIds: previousShareIds, notify: false });
+        assertCurrent();
+      };
       if (native && sourceId) {
         const restored = tab !== 'screen' && await window.api.prepareScreenShareWindow(sourceId);
         if (restored) await new Promise(resolve => setTimeout(resolve, 350));
@@ -639,13 +658,15 @@ export class ScreenSharePickerModal {
         stream = await webRtcManager.startNativeScreenShare(sourceId, shareAudio, source.thumbnailDataUrl,
           () => this.modalEl === modal && call.isCurrent() && this.activeTab === tab
             && this.selectedSourceId === sourceId && this.captureKind() === captureKind,
-          captureKind, preserveAspectRatio);
+          captureKind, preserveAspectRatio,
+          previousAudioId ? {
+            ...(videoService.getNativeScreenCapture(previousAudioId) ? { shareId: previousAudioId } : {}),
+            retirePrevious,
+          } : undefined);
       } else stream = await videoService.startScreenShare(sourceId);
       assertCurrent();
       if (!native) webRtcManager.assertScreenShareSupported();
-      if (previousShareIds.length > 0) {
-        await stopLocalScreenShares(screenAudioService, { shareIds: previousShareIds, notify: false });
-      }
+      if (previousShareIds.length > 0 && !retiringPrevious) await retirePrevious();
 
       assertCurrent();
       if (!native) await webRtcManager.addLocalScreenTrack(stream);
@@ -681,6 +702,7 @@ export class ScreenSharePickerModal {
 
       if (this.modalEl === modal) this.close();
     } catch (err) {
+      if (retiringPrevious && !published) notifyScreenShareState(call);
       if (stream && !published && videoService.getScreenStream(stream.id) === stream) {
         try {
           if (call.isCurrent()) await stopLocalScreenShares(screenAudioService, { shareIds: [stream.id] });

@@ -270,7 +270,7 @@ class NativeScreenPublisher {
     if (pipeline?.viewers.get(viewer.sessionId) === viewer) pipeline.viewers.delete(viewer.sessionId);
     viewer.retirement = (async () => {
       if (!pipeline) return;
-      if (pipeline.viewers.size === 0) await this.retirePipeline(pipeline);
+      if (this.closed || pipeline.viewers.size === 0) await this.retirePipeline(pipeline);
       else {
         if (this.mode === 'p2p') await pipeline.endpoint.closePeer(viewer.sessionId);
         if (!pipeline.closing) await pipeline.endpoint.setDemand(pipeline.viewers.size,

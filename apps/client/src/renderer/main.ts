@@ -1053,6 +1053,10 @@ class App {
         showInfoToast(t('screenShare.sourceStopping'), 8000);
         return;
       }
+      if (payload.reason === 'connection-failed') {
+        showInfoToast(t('screenShare.nativeFailure.connection-failed'), 8000);
+        return;
+      }
       void showAlert({
         title: t('screenShare.errorTitle'),
         message: payload.code === 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE'

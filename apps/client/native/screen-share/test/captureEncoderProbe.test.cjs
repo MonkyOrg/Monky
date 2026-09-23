@@ -268,3 +268,20 @@ test('native encoder-only mode reuses initialization without selecting, creating
   assert.match(host, /Require\(!arguments_\.encoderProbe, "Encoder probing cannot create a capture source"/u);
   assert.match(host, /Require\(!host\.arguments_\.encoderProbe, "Encoder probing cannot start data capture"/u);
 });
+
+test('capture waits for the first encoded packet before requesting lazy NVENC parameter sets', () => {
+  const host = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'host.cpp'), 'utf8');
+  const initialization = host.slice(host.indexOf('  void InitializeEncoder() {'), host.indexOf('  void CheckProbeIsolation() {'));
+  assert.doesNotMatch(initialization, /obs_encoder_get_extra_data|SetPrefix/u);
+  const start = host.slice(host.indexOf('  static bool __cdecl OutputStart('), host.indexOf('  static void __cdecl OutputStop('));
+  assert.match(start, /InitializeEncoder\(\);[\s\S]*obs_output_begin_data_capture/u);
+  const callback = host.slice(host.indexOf('  static void __cdecl EncodedPacket('), host.indexOf('\n private:', host.indexOf('  static void __cdecl EncodedPacket(')));
+  assert.match(callback, /if \(packet->keyframe\) \{[\s\S]*obs_encoder_get_extra_data[\s\S]*extra && size > 0 && size <= kMaxPacketBytes/u);
+  assert.match(callback, /CompleteH264Keyframe[\s\S]*Count\(\) == 0\) host\.buffer_\.SetPrefix\(parameterSets\);[\s\S]*host\.buffer_\.Add[\s\S]*host\.live_->Packet/u);
+});
+
+test('AMF declares input primaries and verifies the exact fixed option without relaxing H264 colour admission', () => {
+  const host = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'host.cpp'), 'utf8');
+  assert.match(host, /obs_data_set_string\(encoderSettings_, "ffmpeg_opts", EncoderExtraOptions\(capability_\.encoder\)\)/u);
+  assert.match(host, /obs_data_get_string\(settings\.value, nvenc \? "opts" : "ffmpeg_opts"\), 32\) ==\s*EncoderExtraOptions\(capability_\.encoder\)/u);
+});

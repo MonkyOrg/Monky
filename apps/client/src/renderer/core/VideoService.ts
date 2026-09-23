@@ -610,7 +610,9 @@ export class VideoService {
       // platforms, which would re-enter this method and emit a bogus
       // "ended externally" event (#159).
       stream.getVideoTracks().forEach((t) => { t.onended = null; });
-      stream.getTracks().forEach((t) => t.stop());
+      // Native preview tracks are borrowed from preload. Its presentation owner
+      // must stop decoder output and drain the writer before ending the generator.
+      if (!this.nativeScreenCaptures.has(id)) stream.getTracks().forEach((t) => t.stop());
       this.screenStreams.delete(id);
       this.screenSourceIds.delete(id);
       this.nativeScreenCaptures.delete(id);
