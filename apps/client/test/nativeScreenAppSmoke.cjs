@@ -33,20 +33,63 @@ const preserveAspectRatio = process.argv.includes('--preserve-aspect-ratio');
 const gameFallback = process.argv.includes('--game-fallback');
 const publisherStop = process.argv.includes('--publisher-stop');
 const sourceResize = process.argv.includes('--source-resize');
+const sourceReplacement = process.argv.includes('--source-replacement');
+assert.ok(!sourceReplacement || (browserReceiver && mode === 'sfu' && audioEnabled
+  && !gameFallback && !unsupportedBrowserCodec && !incompatibleViewer && !idleSourceClose
+  && !admissionRecovery && !publisherStop && !windowLifecycle && !serverLoss && !sessionNavigation
+  && !overlayEnabled && !sourceResize && !debugPublisher),
+'Source replacement requires an audio-enabled browser SFU receiver and two owned Normal windows, without other smoke scenarios.');
 assert.ok(!unsupportedBrowserCodec || (browserReceiver && mode === 'p2p'), 'The unsupported-codec case requires a browser P2P receiver.');
 assert.ok(!incompatibleViewer || (!browserReceiver && mode === 'p2p'), 'Mixed compatibility requires a native primary P2P receiver.');
 const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbols='))?.slice('--debug-symbols='.length);
-const report = { mode, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize,
+const report = { mode, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement,
   normalMain: true, normalPreload: true, ownedSyntheticSource: true,
   qaFocusHooks: 'owned parent IPC only; normal Main and preload checks unchanged',
   capabilityOverride: browserReceiver ? 'viewer.receive=false (real Chromium receiver, not a macOS hardware test)' : null,
   recordedMedia: false, phases: [] };
-const clients = [], roots = [], failures = [];
-let server, otherServer, vite, source, sourceExited, sourceStopping = false;
+const clients = [], roots = [], failures = [], sourceOwners = [];
+let server, otherServer, vite, source;
 let debuggerProcess, debuggerExited;
 let incompatibleSessionId = null;
 
 function phase(name) { report.phases.push(name); console.log(`Native Monky app: ${name}`); }
+function processAlive(pid) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 0);
+  try { process.kill(pid, 0); return true; }
+  catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+}
+
+async function startSyntheticSource(label) {
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const child = spawn(require('electron'), [path.join(clientRoot, 'native', 'screen-share', 'test', 'nativeAvSource.cjs'),
+    `--profile=${path.join(artifacts, `${label}-profile`)}`, ...(gameFallback ? ['--software-rendering'] : [])],
+  { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  const owner = { child, label, stopping: false, exited: null, ready: null };
+  sourceOwners.push(owner);
+  const log = await fs.open(path.join(artifacts, `${label}.log`), 'wx');
+  child.stdout.on('data', value => { void log.write(value); });
+  child.stderr.on('data', value => { void log.write(value); });
+  owner.exited = once(child, 'exit').then(async ([code]) => {
+    await log.close();
+    if (!owner.stopping) failures.push(new Error(`The owned ${label} exited unexpectedly (${code}).`));
+    return code;
+  });
+  const [ready] = await within(once(child, 'message'), 20000, 'Owned source readiness timed out.');
+  assert.equal(ready.type, 'ready');
+  assert.equal(ready.pid, child.pid);
+  assert.equal(ready.softwareRendering, gameFallback);
+  assert.ok(Number.isSafeInteger(ready.hwnd) && ready.hwnd > 0, 'The source child did not prove its own HWND.');
+  owner.ready = ready;
+  return owner;
+}
+
+async function sourceCommand(command, dimensions = {}, child = source) {
+  const id = randomUUID(), response = once(child, 'message');
+  child.send({ type: 'source-command', id, command, ...dimensions });
+  const [result] = await within(response, 10000, `Owned source command timed out: ${command}`);
+  assert.equal(result.id, id); assert.equal(result.ok, true, result.error);
+}
 async function until(probe, message, timeout = 30000) {
   const deadline = performance.now() + timeout;
   while (performance.now() < deadline) {
@@ -415,7 +458,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
     return matches[0];
   };
   window.nativeAppSmoke = {
-    async share(ownedHwnd, expectedFailure = false) {
+    async share(ownedHwnd, expectedFailure = false, replace = false) {
       const wait = async (condition, message) => {
         const deadline = performance.now() + 20000;
         while (!condition()) {
@@ -424,6 +467,9 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         }
       };
       const opening = !document.querySelector('#share-sources-panel');
+      const previous = videoService.getNativeScreenCaptures()[0]?.source;
+      if (replace && (!previous?.audio || voiceStore.screenAudioShareId !== previous.shareId))
+        throw new Error('Replacement requires the currently published, owned audible source.');
       if (opening) {
         const button = document.querySelector('#stage-btn-screen');
         if (!(button instanceof HTMLButtonElement)) throw new Error('The real Share Screen control is missing.');
@@ -483,6 +529,8 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       }
       const audioToggle = document.querySelector('#chk-share-audio');
       if (!(audioToggle instanceof HTMLInputElement)) throw new Error('The real audio switch is missing.');
+      if (replace && (!audioToggle.checked || audioToggle.disabled))
+        throw new Error('Replace silently disabled or unchecked the existing audio choice.');
       if (audioToggle.checked !== audioEnabled) audioToggle.closest('.toggle-switch').querySelector('.toggle-slider').click();
       if (audioToggle.checked !== audioEnabled) throw new Error('The audio switch did not select the requested state.');
       const aspectToggle = document.querySelector('.screen-share-picker-card #chk-preserve-aspect-ratio');
@@ -507,6 +555,8 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         throw new Error('The picker must distinguish verified capture from an explicit selection awaiting its native probe.');
       const confirm = document.querySelector('#btn-share');
       if (!(confirm instanceof HTMLButtonElement) || confirm.disabled) throw new Error('The real share confirmation is unavailable.');
+      if (replace && !confirm.textContent.includes(t('screenShare.confirmSwitch')))
+        throw new Error('The real Replace action is not selected.');
       confirm.click();
       const capture = () => videoService.getNativeScreenCaptures().find(value => value.desktopSourceId === desktopSourceId);
       if (expectedFailure) {
@@ -523,9 +573,13 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         return { error, desktopSourceId, audio: audioEnabled };
       }
       await wait(() => !document.querySelector('#share-sources-panel') && capture(), 'Picker confirmation did not announce its native source.');
+      if (replace && (capture().source.audio !== true || capture().source.shareId === previous.shareId
+        || capture().source.instanceId === previous.instanceId || videoService.getNativeScreenCaptures().length !== 1
+        || voiceStore.screenAudioShareId !== capture().source.shareId))
+        throw new Error('Replace did not transfer the single audio owner to a fresh source instance.');
       return { source: capture().source, self: auth.currentUser.sessionId, desktopSourceId,
         picker: { backend, audio: audioEnabled, preserveAspectRatio, captureKind: gameFallback ? 'game' : 'window',
-          refreshed: true, keyboardSelection: true, gameGuideChecked: gameFallback, ownedHwnd } };
+          refreshed: true, keyboardSelection: true, gameGuideChecked: gameFallback, ownedHwnd, replace } };
     },
     watch() {
       const button = document.querySelector('.stage-watch-btn');
@@ -607,6 +661,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         mainCall: webRtcManager['nativeScreens']['call']?.config.callId ?? null,
         visibleSession: sessionManager.getActive()?.key ?? null, voiceSession: voiceStore.voiceSessionKey,
         localNativeSources: videoService.getNativeScreenCaptures().length,
+        localScreenShareIds: [...voiceStore.screenShareIds], screenAudioShareId: voiceStore.screenAudioShareId,
         previewState: document.querySelector('[data-preview-state]')?.dataset.previewState ?? null,
         focused: document.hasFocus(),
         previewPauseWhenUnfocused: settingsStore.screenSharePreviewPauseWhenUnfocused,
@@ -787,25 +842,21 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
 async function run() {
   await fs.mkdir(artifacts);
   phase('starting-owned-source');
-  const sourceEnv = { ...process.env };
-  delete sourceEnv.ELECTRON_RUN_AS_NODE;
-  source = spawn(require('electron'), [path.join(clientRoot, 'native', 'screen-share', 'test', 'nativeAvSource.cjs'),
-    `--profile=${path.join(artifacts, 'source-profile')}`, ...(gameFallback ? ['--software-rendering'] : [])],
-  { env: sourceEnv, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  const sourceLog = await fs.open(path.join(artifacts, 'source.log'), 'wx');
-  source.stdout.on('data', value => { void sourceLog.write(value); });
-  source.stderr.on('data', value => { void sourceLog.write(value); });
-  sourceExited = once(source, 'exit').then(async ([code]) => {
-    await sourceLog.close();
-    if (!sourceStopping) failures.push(new Error(`The owned source exited unexpectedly (${code}).`));
-    return code;
-  });
-  const [sourceReady] = await within(once(source, 'message'), 20000, 'Owned source readiness timed out.');
-  assert.equal(sourceReady.type, 'ready');
-  assert.equal(sourceReady.pid, source.pid);
-  assert.equal(sourceReady.softwareRendering, gameFallback);
-  assert.ok(Number.isSafeInteger(sourceReady.hwnd) && sourceReady.hwnd > 0, 'The source child did not prove its own HWND.');
+  const primarySource = await startSyntheticSource('source');
+  source = primarySource.child;
+  const sourceReady = primarySource.ready;
   report.sourcePid = source.pid;
+  const secondarySource = sourceReplacement ? await startSyntheticSource('replacement-source') : null;
+  if (secondarySource) {
+    assert.notEqual(secondarySource.child.pid, source.pid);
+    assert.notEqual(secondarySource.ready.hwnd, sourceReady.hwnd);
+    report.sourceReplacementCoverage = {
+      actual: 'Normal window A -> Normal window B -> A, twice; separate owned processes and independent real stereo tones',
+      monitor: 'Not captured: no isolated synthetic display is provisioned; private desktop capture is forbidden.',
+      game: 'Not exercised: no gameplay or game injection.',
+      sources: sourceOwners.map(owner => ({ pid: owner.child.pid, hwnd: owner.ready.hwnd })),
+    };
+  }
 
   phase('starting-real-server');
   const { MonkyServer } = require(path.join(repo, 'apps', 'server', 'dist', 'server.js'));
@@ -897,12 +948,6 @@ async function run() {
     debuggerExited = once(debuggerProcess, 'exit').then(async () => { await log.close(); });
     await until(() => output.includes('OWNED_SCREEN_DEBUGGER_READY'), 'Debugger did not attach to the owned publisher.', 15000);
   }
-  const sourceCommand = async (command, dimensions = {}) => {
-    const id = randomUUID(), response = once(source, 'message');
-    source.send({ type: 'source-command', id, command, ...dimensions });
-    const [result] = await within(response, 10000, `Owned source command timed out: ${command}`);
-    assert.equal(result.id, id); assert.equal(result.ok, true, result.error);
-  };
   const waitForLocalPreview = () => until(async () => {
     const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
     assert.deepEqual(state.errors, []);
@@ -1056,6 +1101,128 @@ async function run() {
     assert.deepEqual(value.errors, []);
     return value.video?.width === 1920 && value.video.height === 1080 && value.video.frames >= 30;
   }, 'Native frames did not reach the normal Monky stage.', 45000);
+  if (sourceReplacement) {
+    phase('measuring-owned-audio-before-direct-replacement');
+    await until(() => viewer.cdp.evaluate('nativeAppSmoke.browserAudioReady()'), 'Initial browser screen audio did not start.');
+    const initialSignal = await viewer.cdp.evaluate('nativeAppSmoke.browserAudioSignal()');
+    assert.ok(initialSignal.nonzeroFrames > 4800 && initialSignal.leftRms > 1e-5 && initialSignal.rightRms > 1e-5);
+    const initial = await collectEvidence('sourceReplacementInitial', publisher, viewer);
+    const publisherCall = initial.publisherState.mainCall, viewerCall = initial.receiverState.mainCall;
+    let current = report.published, currentSource = primarySource;
+    const pcmSessions = new Set(), retiredCapturePids = new Set();
+    const assertActiveAudio = evidence => {
+      assert.equal(evidence.publisherStats.publishers.length, 1);
+      const owner = evidence.publisherStats.publishers[0];
+      assert.deepEqual(owner.source, current.source);
+      assert.equal(owner.source.audio, true);
+      assert.equal(owner.viewers, 1);
+      assert.equal(owner.pipelines.length, 1);
+      const endpoint = owner.pipelines[0].endpoint;
+      assert.ok(Number.isSafeInteger(endpoint.capturePid) && endpoint.capturePid > 0);
+      assert.ok(endpoint.audioInput?.submitted > 0, 'The selected PCM input never reached native RTC.');
+      assert.deepEqual(endpoint.audioInput.errors, []);
+      assert.equal(endpoint.audioInput.capture.state, 'capturing');
+      assert.equal(endpoint.audioInput.capture.overflowCount, 0);
+      assert.equal(pcmSessions.has(endpoint.audioInput.sessionId), false, 'A replacement reused the retired PCM capture session.');
+      pcmSessions.add(endpoint.audioInput.sessionId);
+      assert.equal(evidence.publisherState.mainCall, publisherCall);
+      assert.equal(evidence.receiverState.mainCall, viewerCall);
+      assert.equal(evidence.publisherState.channelId, publisher.identity.channelId);
+      assert.equal(evidence.receiverState.channelId, viewer.identity.channelId);
+      assert.equal(evidence.publisherState.screenAudioShareId, current.source.shareId);
+      assert.deepEqual(evidence.publisherState.localScreenShareIds, [current.source.shareId]);
+      assert.deepEqual(evidence.receiverState.sources, [current.source]);
+      assert.equal(evidence.receiverState.browserWatches, 1);
+      assert.deepEqual(evidence.publisherState.errors, []);
+      assert.deepEqual(evidence.receiverState.errors, []);
+      assert.equal(evidence.publisherState.dialog, null);
+      assert.equal(evidence.receiverState.dialog, null);
+      assert.ok(evidence.sfuScreenProducers.some(producer => producer.appData.mediaType === 'screen_audio'));
+      for (const diagnostics of [evidence.senderDiagnostics, evidence.receiverDiagnostics]) {
+        if (diagnostics?.backend === 'native') assert.ok(diagnostics.endpoints.every(endpoint => endpoint.readErrors === 0));
+      }
+      return endpoint.capturePid;
+    };
+    let capturePid = assertActiveAudio(initial);
+    report.sourceReplacementCycles = [];
+    for (const [index, next] of [secondarySource, primarySource, secondarySource, primarySource].entries()) {
+      phase(`replacing-owned-audible-source-${index + 1}`);
+      const old = current, oldSource = currentSource, oldCapturePid = capturePid;
+      const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+      assert.ok(before.watches.some(([sessionId, shares]) => sessionId === publisher.identity.sessionId
+        && shares.includes(old.source.shareId)), 'The old share must still be watched when Replace is pressed.');
+      await focusOwned(publisher);
+      current = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(next.ready.hwnd)}, false, true)`);
+      currentSource = next;
+      assert.notEqual(current.source.shareId, old.source.shareId);
+      assert.notEqual(current.source.instanceId, old.source.instanceId);
+      assert.equal(current.source.audio, true);
+      await until(async () => {
+        const local = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
+        const remote = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+        return local.publishers.length === 1 && local.publishers[0].source.instanceId === current.source.instanceId
+          && remote.sources.length === 1 && remote.sources[0].instanceId === current.source.instanceId
+          && remote.watchButton && remote.watchStates.length === 0 && remote.browserWatches === 0;
+      }, 'Replace retained the previous exact publisher or spectator instead of requiring a new explicit Watch.');
+      await until(() => !processAlive(oldCapturePid), 'Replace retained the previous owned capture host process.');
+      retiredCapturePids.add(oldCapturePid);
+      const prepared = await collectEvidence(`sourceReplacementPrepared-${index + 1}`, publisher, viewer);
+      assert.equal(prepared.publisherStats.publishers[0].viewers, 0);
+      assert.ok(prepared.publisherStats.publishers[0].pipelines.every(pipeline => pipeline.endpoint.audioInput === null));
+      assert.deepEqual(prepared.sfuScreenProducers, [], 'Retired source media remained published before a new Watch.');
+      assert.deepEqual(prepared.publisherState.errors, []);
+      assert.deepEqual(prepared.receiverState.errors, []);
+      await focusOwned(viewer);
+      await viewer.cdp.evaluate('nativeAppSmoke.watch()');
+      await until(async () => {
+        const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+        return state.video?.frames >= 30 && state.sources[0]?.instanceId === current.source.instanceId
+          && await viewer.cdp.evaluate('nativeAppSmoke.browserAudioReady()');
+      }, 'The explicitly watched replacement did not produce frames and a real audio route.');
+      // The old process is still sounding; the selected new process is silent.
+      // This negative control detects a stale INCLUDE target or system-mix leak.
+      await delay(1000);
+      const unselectedTone = await viewer.cdp.evaluate('nativeAppSmoke.browserAudioSignal()');
+      assert.ok(unselectedTone.leftRms < initialSignal.leftRms * 0.05
+        && unselectedTone.rightRms < initialSignal.rightRms * 0.05,
+      `Replacement still captured the unselected old process: ${JSON.stringify(unselectedTone)}`);
+      await sourceCommand('tone-start', {}, next.child);
+      await delay(500);
+      const selectedTone = await viewer.cdp.evaluate('nativeAppSmoke.browserAudioSignal()');
+      assert.ok(selectedTone.nonzeroFrames > 4800 && selectedTone.leftRms > initialSignal.leftRms * 0.5
+        && selectedTone.rightRms > initialSignal.rightRms * 0.5,
+      `The replacement lost actual selected-process stereo audio: ${JSON.stringify(selectedTone)}`);
+      await sourceCommand('tone-stop', {}, oldSource.child);
+      const evidence = await collectEvidence(`sourceReplacementPlaying-${index + 1}`, publisher, viewer);
+      capturePid = assertActiveAudio(evidence);
+      assert.equal(retiredCapturePids.has(capturePid), false);
+      report.sourceReplacementCycles.push({ old: old.source, next: current.source, oldPid: oldSource.child.pid,
+        nextPid: next.child.pid, oldCapturePid, capturePid, unselectedTone, selectedTone,
+        oldExactSourceRetired: true, oldCapturePidClosed: true, explicitWatch: true });
+    }
+    phase('stopping-final-replacement-through-real-ui');
+    await publisher.cdp.evaluate('nativeAppSmoke.stopSharing()');
+    await until(async () => {
+      const stats = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
+      const remote = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+      return stats.publishers.length === 0 && remote.sources.length === 0 && remote.watchStates.length === 0
+        && remote.browserWatches === 0 && !processAlive(capturePid);
+    }, 'The final Stop retained an owned publisher, capture host or spectator.');
+    retiredCapturePids.add(capturePid);
+    const final = await collectEvidence('sourceReplacementRetired', publisher, viewer);
+    assert.equal(final.publisherState.localNativeSources, 0);
+    assert.equal(final.publisherState.screenAudioShareId, null);
+    assert.equal(final.receiverState.screenOutputContext, null);
+    assert.deepEqual(final.sfuScreenProducers, []);
+    assert.deepEqual(final.publisherState.errors, []);
+    assert.deepEqual(final.receiverState.errors, []);
+    assert.equal(final.publisherState.dialog, null);
+    assert.equal(final.receiverState.dialog, null);
+    report.sourceReplacementResult = { rounds: 2, swaps: 4, pcmSessions: [...pcmSessions],
+      retiredCapturePids: [...retiredCapturePids], initialSignal, sourceScopedAudioConfirmed: true,
+      wholeMonitorCaptured: false, gameplayCaptured: false };
+    return;
+  }
   await until(async () => {
     const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
     return state.previewState === 'playing' && state.video?.width === 1920 && state.video.frames >= 15;
@@ -1488,7 +1655,16 @@ void run().catch(error => { failures.push(error); console.error(error); }).final
     try {
       const logs = path.join(client.profile, 'client-logs');
       for (const file of await fs.readdir(logs)) {
-        if (file.endsWith('.jsonl')) await fs.copyFile(path.join(logs, file), path.join(artifacts, `${client.label}-${file}`));
+        if (!file.endsWith('.jsonl')) continue;
+        const destination = path.join(artifacts, `${client.label}-${file}`);
+        await fs.copyFile(path.join(logs, file), destination);
+        if (sourceReplacement) {
+          const errors = (await fs.readFile(destination, 'utf8')).split(/\r?\n/).filter(Boolean)
+            .map(line => JSON.parse(line)).filter(entry => entry.category === 'SCREEN_SHARE' && entry.level === 'ERROR');
+          (report[`${client.label}ScreenErrors`] ??= []).push(...errors);
+          if (errors.length) failures.push(new Error(`${client.label} logged ${errors.length} screen lifecycle errors: `
+            + errors.map(entry => entry.data?.error ?? entry.message).join(' / ')));
+        }
       }
     } catch (error) {
       if (error.code !== 'ENOENT') { failures.push(error); console.error(error); }
@@ -1504,11 +1680,22 @@ void run().catch(error => { failures.push(error); console.error(error); }).final
     try { await within(debuggerExited, 10000, 'Owned debugger did not terminate with its target.'); }
     catch (error) { failures.push(error); debuggerProcess.kill(); }
   }
-  if (source) {
-    sourceStopping = true;
-    if (source.connected) source.disconnect();
-    try { assert.equal(await within(sourceExited, 10000, 'Owned source did not terminate.'), 0); }
-    catch (error) { failures.push(error); source.kill('SIGKILL'); }
+  report.ownedProcessClosure = clients.map(client => ({
+    role: client.label, pid: client.child.child.pid, closed: client.child.isClosed(),
+  }));
+  for (const owner of sourceOwners) {
+    owner.stopping = true;
+    if (sourceReplacement && owner.ready && owner.child.connected && owner.child.exitCode === null) {
+      try { await sourceCommand('tone-stop', {}, owner.child); }
+      catch (error) { failures.push(error); }
+    }
+    if (owner.child.connected) owner.child.disconnect();
+    try {
+      const code = await within(owner.exited, 10000, 'Owned source did not terminate.');
+      assert.equal(code, 0);
+      assert.equal(processAlive(owner.child.pid), false);
+      report.ownedProcessClosure.push({ role: owner.label, pid: owner.child.pid, closed: true, code });
+    } catch (error) { failures.push(error); owner.child.kill('SIGKILL'); }
   }
   try { await server?.stop(); } catch (error) { failures.push(error); }
   try { await otherServer?.stop(); } catch (error) { failures.push(error); }

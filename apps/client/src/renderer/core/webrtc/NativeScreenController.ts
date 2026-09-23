@@ -62,6 +62,7 @@ interface Presentation {
 
 type SourceInput = Omit<NativeScreenCapture, 'source'> & {
   shareId: string; video: NativeScreenVideoProfile; audio: boolean;
+  replacesAudioShareId?: string;
 };
 interface Source {
   readonly ready: Promise<NativeScreenSource>;
@@ -461,6 +462,7 @@ export class NativeScreenController {
         action: 'source-add', callId: call.config.callId, shareId: input.shareId,
         desktopSourceId: input.desktopSourceId, video: input.video, audio: input.audio, audioBitrateKbps: input.audioBitrateKbps,
         preserveAspectRatio: input.preserveAspectRatio ?? false,
+        ...(input.replacesAudioShareId ? { replacesAudioShareId: input.replacesAudioShareId } : {}),
         ...(input.captureKind ? { captureKind: input.captureKind } : {}),
       }).then(result => {
         this.current(call);

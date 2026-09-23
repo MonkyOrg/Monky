@@ -165,6 +165,7 @@ class NativeVideoPresentationSink extends VideoFrameSink {
   async teardown() {
     const writer = this.writer;
     const track = this.track;
+    const previousWriterError = this.writerError;
     const outcomes = await Promise.allSettled([
       Promise.resolve().then(() => {
         if (this.observation !== null) this.video.cancelVideoFrameCallback(this.observation);
@@ -178,15 +179,14 @@ class NativeVideoPresentationSink extends VideoFrameSink {
       }),
       boundedCleanup(Promise.resolve().then(() => writer?.abort('pipeline-stopped')),
         'Native presentation writer did not abort.'),
-      Promise.resolve().then(() => {
-        track?.stop();
-        if (this.track === track) this.track = null;
-      }),
       boundedCleanup(this.writeInFlight ?? Promise.resolve(), 'Native presentation frame did not finish during stop.'),
     ]);
     const released = await Promise.allSettled([Promise.resolve().then(() => {
-      // Keep the writer available to retry cancellation while an imported frame is still being written.
-      if (outcomes[3].status === 'rejected') return;
+      // Ending the generator first closes its writable underneath an in-flight
+      // frame. Retain both owners if that frame still needs cancellation/retry.
+      if (outcomes[2].status === 'rejected') return;
+      track?.stop();
+      if (this.track === track) this.track = null;
       writer?.releaseLock();
       if (this.writer === writer) this.writer = null;
     })]);
@@ -194,6 +194,7 @@ class NativeVideoPresentationSink extends VideoFrameSink {
     const failures = [...outcomes, ...released]
       .filter(result => result.status === 'rejected' && result.reason !== 'pipeline-stopped')
       .map(result => result.reason);
+    if (this.writerError && this.writerError !== previousWriterError) failures.push(this.writerError);
     if (failures.length) {
       for (const error of failures) this.errors.push(error instanceof Error ? error.message : String(error));
       throw new AggregateError(failures, 'Native presentation cleanup failed.');

@@ -343,6 +343,43 @@ test('SFU last-viewer removal closes the publishing endpoint, not just a consume
   await publisher.close();
 });
 
+for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: publisher Stop retires shared pipelines without restarting remaining-viewer demand`, async () => {
+    const f = fixture({ mode });
+    await f.publisher.receive(f.watch('first'));
+    await f.publisher.receive(f.watch('second'));
+    await f.publisher.setPreviewEnabled(true);
+    const endpoint = f.endpoints[0], demandUpdates = [];
+    const original = endpoint.setDemand;
+    endpoint.setDemand = async function (count, preview) {
+      demandUpdates.push([count, preview]);
+      if (count > 0) {
+        await tick();
+        if (this.closed) throw new DOMException('The native screen endpoint was retired.', 'AbortError');
+      }
+      return original.call(this, count, preview);
+    };
+    await f.publisher.close();
+    assert.deepEqual(demandUpdates, [[0, false]]);
+    assert.equal(f.sent.filter(value => value.action === 'closed').length, 2);
+    assert.equal(f.publisher.snapshot().closed, true);
+    assert.equal(endpoint.closed, true);
+    assert.deepEqual(f.errors, []);
+  });
+
+  test(`${mode}: publisher Stop must still surface failed native retirement`, async () => {
+    const f = fixture({ mode });
+    await f.publisher.receive(f.watch('first'));
+    await f.publisher.receive(f.watch('second'));
+    const failure = new Error('Owned native engine failed to close.');
+    f.endpoints[0].setDemand = async () => { throw failure; };
+    await assert.rejects(f.publisher.close(), error => error instanceof AggregateError &&
+      error.errors.includes(failure));
+    assert.equal(f.publisher.snapshot().closed, false);
+    assert.equal(f.publisher.snapshot().pipelines.length, 1);
+  });
+}
+
 test('roster departure and source replacement cannot retain an old subscription', async () => {
   const { publisher, endpoints, watch } = fixture();
   const request = watch('a');

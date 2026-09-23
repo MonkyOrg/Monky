@@ -241,6 +241,14 @@ struct State : std::enable_shared_from_this<State> {
     } catch (...) { Fail("ERR_RTC_ENCODED_FEEDBACK", "Cannot retire encoded feedback state"); }
   }
   void Recover(std::uint64_t expected_generation, std::uint64_t frame, const char* reason);
+  bool AcceptClockMapping(const CaptureClockMapping& mapping, std::uint64_t generation, std::uint64_t frame) {
+    if (mapping.status == CaptureClockStatus::kSampleUncertain) {
+      Recover(generation, frame, "clock-sample-uncertain");
+      return false;
+    }
+    Require(mapping.status == CaptureClockStatus::kOk, CaptureClockErrorMessage(mapping.status), MONKY_ENGINE_FAILURE);
+    return true;
+  }
   void DispatchRetired(Token& token, const webrtc::VideoFrameBuffer* buffer) noexcept;
   void Forwarded(const Token& token);
   void CheckRecoveryDeadline() const {
@@ -316,7 +324,7 @@ void State::Recover(std::uint64_t expected_generation, std::uint64_t frame, cons
     CheckRecoveryDeadline();
     if (!recovering) { recovering = true; recovery_started = Clock::now(); }
     ++generation; need_idr = true; ++recovery_requests;
-    if (std::string_view(reason) != "rtc-unconsumed") ++expired;
+    if (std::string_view(reason) != "rtc-unconsumed" && std::string_view(reason) != "clock-sample-uncertain") ++expired;
     discarded.swap(queue); recovery_discards += discarded.size();
     for (const auto& queued : discarded) queued->cancelled.store(true);
     feedback = {{"sourceId", id}, {"kind", "recovery"}, {"frameId", frame},
@@ -808,7 +816,10 @@ class Source final : public VideoSource {
           lock.unlock();
           mapped = clock_->Map(token->metadata.timestamp_us, order);
         }
-        Require(mapped.status == CaptureClockStatus::kOk, CaptureClockErrorMessage(mapped.status), MONKY_ENGINE_FAILURE);
+        if (!state_->AcceptClockMapping(mapped, token->generation, token->metadata.frame_id)) {
+          token->cancelled.store(true);
+          continue;
+        }
         {
           auto buffer = webrtc::make_ref_counted<NativeBuffer>(token);
           const auto color = policy::Bt709Limited();
@@ -1157,6 +1168,36 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
       "Only a current, actually accepted IDR completes compressed recovery");
   missing.reset(); replacement.reset();
   check(state->retained.empty() && state->retained_bytes == 0, "Recovery must eventually retire every owned byte");
+  {
+    CaptureClockMapping uncertain;
+    uncertain.status = CaptureClockStatus::kSampleUncertain;
+    const auto requests = state->recovery_requests, expired = state->expired;
+    auto dependent = retain(8);
+    state->queue.push_back(dependent);
+    check(!state->AcceptClockMapping(uncertain, state->generation, 7) &&
+        !state->failed.load() && state->need_idr && state->recovering &&
+        dependent->cancelled.load() && state->queue.empty() && state->recovery_requests == requests + 1 &&
+        state->expired == expired,
+        "Uncertain clock sampling must fence compressed dependencies without terminating the source or counting expiry");
+    dependent.reset();
+    const auto deadline = state->recovery_started;
+    check(!state->AcceptClockMapping(uncertain, state->generation, 9) && state->recovery_started == deadline,
+        "Repeated uncertain clock sampling must not extend the recovery deadline");
+    CaptureClockMapping valid;
+    check(state->AcceptClockMapping(valid, state->generation, 10) && state->recovering,
+        "A valid clock sample alone must not pretend that a replacement IDR was delivered");
+    auto resumed = retain(10);
+    resumed->metadata.keyframe = 1; resumed->accepted.store(1);
+    state->Forwarded(*resumed);
+    check(!state->recovering && !state->failed.load(), "A real current IDR must resume after uncertain clock sampling");
+    resumed.reset();
+    for (const auto status : {CaptureClockStatus::kInvalidTimestamp, CaptureClockStatus::kClockDiscontinuity,
+                              CaptureClockStatus::kSourceResetRequired, CaptureClockStatus::kClosed}) {
+      CaptureClockMapping invalid;
+      invalid.status = status;
+      rejects([&] { state->AcceptClockMapping(invalid, state->generation, 11); });
+    }
+  }
   state->Recover(state->generation, 4, "input-expired");
   const auto recovery_started = state->recovery_started;
   state->Recover(state->generation, 5, "publication-expired");

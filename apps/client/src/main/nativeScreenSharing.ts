@@ -664,8 +664,13 @@ class NativeScreenSharingService {
     if (call.sources.has(command.shareId) || call.sourceSelections.has(command.shareId)
       || call.sources.size + call.sourceSelections.size >= 3)
       throw new Error('Native screen source already exists or exceeds the two-share plus pending-replacement limit.');
+    const replacedAudio = command.replacesAudioShareId === undefined ? null : call.sources.get(command.replacesAudioShareId);
+    if (command.replacesAudioShareId !== undefined && (!command.audio || !replacedAudio?.source.audio))
+      throw new Error('Audio replacement must name an existing audible source in this call.');
+    const replacedAudioInstanceId = replacedAudio?.source.instanceId;
     if (command.audio && [...this.calls.values()].some(owner =>
-      [...owner.sources.values()].some(entry => entry.source.audio)
+      [...owner.sources.values()].some(entry => entry.source.audio
+        && (owner !== call || entry.source.shareId !== command.replacesAudioShareId))
       || [...owner.sourceSelections.values()].some(entry => entry.audio)))
       throw new Error('Only one shared source can reserve capture audio at a time.');
     let finish!: () => void;
@@ -779,6 +784,9 @@ class NativeScreenSharingService {
         },
         createEndpoint: options => {
           this.current(call);
+          if (command.replacesAudioShareId
+            && call.sources.get(command.replacesAudioShareId)?.source.instanceId === replacedAudioInstanceId)
+            throw new Error('The previous screen audio owner must retire before replacement capture starts.');
           sourceState();
           const diagnostic = { ...this.context(call, source.shareId, options.pipelineId), role: 'publish',
             quality: options.quality, video: diagnosticProfile(getScreenShareProfile(source.video, options.quality)),

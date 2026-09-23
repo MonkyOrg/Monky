@@ -327,11 +327,12 @@ test('Watch resume can bootstrap a new codec from a real IDR after the previous 
   await m.flow.close();
 });
 
-test('native dependency recovery consumes no rejected copy and waits for a real new IDR', async () => {
+for (const reason of ['rtc-unconsumed', 'clock-sample-uncertain']) {
+test(`${reason}: native dependency recovery consumes no rejected copy and waits for a real new IDR`, async () => {
   const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
   m.flow.packet(m.frame(1, true));
   m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 1, kind: 'recovery',
-    reason: 'rtc-unconsumed', frameId: 1, generation: 2, mode: 'next-real-idr',
+    reason, frameId: 1, generation: 2, mode: 'next-real-idr',
     maximumWaitMs: 1500, keyframeConfirmed: false } });
   m.flow.packet(m.frame(2)); assert.equal(m.submitted.length, 1);
   m.flow.packet(m.frame(3, true)); assert.equal(m.submitted.length, 2);
@@ -346,9 +347,10 @@ test('native dependency recovery consumes no rejected copy and waits for a real 
   m.flow.packet(m.frame(5)); assert.equal(m.submitted.length, 2);
   m.flow.packet(m.frame(6, true)); assert.equal(m.submitted.length, 3);
   assert.equal(m.flow.snapshot().nativeRecoveryRequests, 1);
-  assert.equal(m.flow.snapshot().recovery.reason, 'rtc-unconsumed');
+  assert.equal(m.flow.snapshot().recovery.reason, reason);
   await m.flow.close(); assert.deepEqual(m.errors, []);
 });
+}
 
 test('persistent recovery rejection is bounded and unknown errors never become recovery success', async () => {
   const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);

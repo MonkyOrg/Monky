@@ -54,7 +54,7 @@ function fixture(t, { iceServers = [], capabilities = {
   let commandHook = async () => {}, attachHook = async () => {}, current = true, connectionId = 'connection-one';
   let diagnosticsRetired = false;
   let status = 'CONNECTED', watching = false, quality = 'source', muted = false, deafened = false, volume = 100, announces = 0;
-  const remote = { shareId: 'remote-screen', instanceId: randomUUID(), video, audio: true };
+  let remote = { shareId: 'remote-screen', instanceId: randomUUID(), video, audio: true };
   class Stream {
     tracks = [];
     getVideoTracks() { return [...this.tracks]; }
@@ -207,9 +207,10 @@ function fixture(t, { iceServers = [], capabilities = {
     assert.equal(elements.size + attached.size, 0);
     assert.equal(appBus.listenerCount('settings.updated'), 0);
   });
-  return { controller, local, captures, sources, commands, events, errors, replies, requests, watches, elements, stopped, retired, Stream,
+  return { controller, local, captures, captureStreams, sources, commands, events, errors, replies, requests, watches, elements, stopped, retired, Stream,
     registerCapture: (stream, capture) => { captures.set(stream.id, capture); captureStreams.set(stream.id, stream); },
-    mainListeners, networkListeners, context, remote, nativeScreenProfile: exports.nativeScreenProfile,
+    mainListeners, networkListeners, context, get remote() { return remote; }, nativeScreenProfile: exports.nativeScreenProfile,
+    replaceRemote: source => { remote = source; attachRemote(); },
     emit: emitForCall, announceCount: () => announces,
     retireDiagnostics: () => { diagnosticsRetired = true; },
     previewPreference: value => {
@@ -322,6 +323,63 @@ test('independent aspect-ratio choices survive quality replacement and reconnect
     assert.equal(Object.hasOwn(f.captures.get(shareId).source, 'preserveAspectRatio'), false);
   }
 });
+
+for (const failure of [null, 'admission', 'retirement', 'cancelled']) {
+  test(`source-start audio handoff gates preview on exact old retirement (${failure ?? 'success'})`, async t => {
+    const f = fixture(t, { capabilities: {
+      capture: true, captureKinds: ['window', 'game', 'monitor'], captureAudio: true, receive: true,
+      backend: 'libobs-amf', reason: null,
+    } }), exports = {}, gate = deferred();
+    const old = await f.local();
+    let current = true, retireCalls = 0;
+    loadStart(exports, {
+      getProfile: () => profile(), registerNativeScreenShare: f.registerCapture,
+      getScreenStream: id => f.captureStreams.get(id),
+      stopScreenShare: id => { f.captures.delete(id); f.captureStreams.delete(id); },
+    }, { preferredVideoCodec: 'auto' }, f.nativeScreenProfile, key => key, class extends f.Stream { id = randomUUID(); });
+    f.hook(async command => {
+      if (failure === 'admission' && command.action === 'source-add') throw new Error('Selected monitor probe failed');
+    });
+    const starting = exports.SourceStartCore.prototype.startNativeScreenShare.call(
+      { nativeScreens: f.controller, voiceReconnectSuspended: false },
+      `native-monitor:${'a'.repeat(64)}`, true, '', () => current, 'monitor', false, {
+        shareId: old.shareId,
+        retirePrevious: async () => {
+          retireCalls++;
+          await gate.promise;
+          if (failure === 'retirement') throw new Error('Old PCM capture did not retire');
+          await f.controller.removeSource(old.shareId);
+          f.captures.delete(old.shareId); f.captureStreams.delete(old.shareId);
+        },
+      });
+    const checked = failure ? assert.rejects(starting,
+      failure === 'cancelled' ? { name: 'AbortError' } : /probe failed|did not retire/) : starting;
+    await tick();
+    assert.equal(f.commands.some(command => command.action === 'preview-start'), false,
+      'Replacement must never acquire PCM while the previous owner may still be active');
+    assert.equal(f.commands.findLast(command => command.action === 'source-add').replacesAudioShareId, old.shareId);
+    if (failure === 'cancelled') current = false;
+    gate.resolve();
+    const stream = await checked;
+    assert.equal(retireCalls, failure === 'admission' ? 0 : 1);
+    if (failure) {
+      assert.equal(f.commands.some(command => command.action === 'preview-start'), false);
+      assert.equal(f.captures.size, failure === 'cancelled' ? 0 : 1);
+    } else {
+      const add = f.commands.findLast(command => command.action === 'source-add');
+      const remove = f.commands.findIndex(command => command.action === 'source-remove' && command.shareId === old.shareId);
+      const preview = f.commands.findIndex(command => command.action === 'preview-start');
+      assert.equal(add.replacesAudioShareId, old.shareId);
+      assert.equal(add.audio, true);
+      assert.ok(remove >= 0 && preview > remove);
+      assert.equal(f.captures.get(stream.id).source.audio, true);
+      assert.equal(f.captures.size, 1);
+      f.emit({ type: 'state', publisherSessionId: 'self', shareId: old.shareId, sourceInstanceId: old.instanceId, state: 'closed' });
+      await tick();
+      assert.equal(f.captures.has(stream.id), true, 'Late old source callbacks cannot retire the replacement');
+    }
+  });
+}
 
 test('native profile alignment is explicit and unsupported ceilings are not silently clamped', t => {
   const f = fixture(t);
@@ -751,6 +809,38 @@ test('quality and output-device changes replace the actual receiver and retain c
   assert.equal(new Set(watches.map(command => command.presentationId)).size, 3);
   assert.deepEqual(watches[2].audio, { sinkId: 'another-output', muted: true, volume: 0.8 });
   assert.equal(f.retired.length, 2);
+});
+
+test('same-call source replacements renew watched presentations and preserve output, mute and volume', async t => {
+  const f = fixture(t);
+  f.audio({ muted: true, volume: 65 });
+  await f.controller.setOutputDeviceId('screen-headphones');
+  f.watching(true);
+  await f.controller.sync();
+  for (const shareId of ['remote-screen', 'monitor-screen', 'monitor-screen', 'game-screen']) {
+    const old = f.remote;
+    const oldWatch = f.commands.findLast(command => command.action === 'watch');
+    const stoppedBefore = f.stopped.length;
+    f.replaceRemote({ ...old, shareId, instanceId: randomUUID() });
+    // New share IDs require explicit Watch consent; same-ID publisher restarts
+    // retain that intent. Neither operation may retain the old presentation.
+    f.watching(true);
+    await f.controller.sync();
+    const nextWatch = f.commands.findLast(command => command.action === 'watch');
+    assert.equal(nextWatch.callId, oldWatch.callId);
+    assert.notEqual(nextWatch.presentationId, oldWatch.presentationId);
+    assert.deepEqual(nextWatch.audio, { sinkId: 'screen-headphones', muted: true, volume: 0.65 });
+    assert.ok(f.stopped.length > stoppedBefore);
+    assert.equal(f.watches.size, 1);
+    assert.equal(f.elements.size, 1);
+    f.emit({ type: 'state', publisherSessionId: 'publisher', shareId: old.shareId,
+      sourceInstanceId: old.instanceId, presentationId: oldWatch.presentationId, state: 'closed' });
+    f.emit({ type: 'error', publisherSessionId: 'publisher', shareId: old.shareId,
+      sourceInstanceId: old.instanceId, presentationId: oldWatch.presentationId, reason: 'capture-failed',
+      message: 'Late retired capture error' });
+    await tick();
+    assert.equal(f.controller.getWatchState('publisher', shareId).state, 'playing');
+  }
 });
 
 test('failed quality retirement displays an error and Retry completes cleanup before restarting', async t => {

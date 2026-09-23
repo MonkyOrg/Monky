@@ -27,6 +27,7 @@ class EncodedPreviewRenderer {
       throw new Error('The local H.264 preview decoder is unavailable or already attached.');
     this.port = port;
     this.message = event => {
+      if (this.closed) return;
       try {
         if (event.data?.type === 'reset' && Object.keys(event.data).length === 1) {
           this.reset();

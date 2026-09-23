@@ -167,6 +167,8 @@ inline const char* KindName(CaptureKind kind) {
 enum class EncoderKind { Auto, Amf, Nvenc };
 inline const char* EncoderId(EncoderKind kind) { return kind == EncoderKind::Nvenc ? kNvencEncoderId : kEncoderId; }
 inline const char* EncoderRateControl(EncoderKind kind) { return kind == EncoderKind::Nvenc ? "CBR" : "VBR_LAT"; }
+// OBS supplies the output colour description; AMF's input primaries otherwise default to undefined.
+inline const char* EncoderExtraOptions(EncoderKind kind) { return kind == EncoderKind::Nvenc ? "" : "InColorPrimaries=1"; }
 inline const char* SourceId(CaptureKind kind) {
   return kind == CaptureKind::Monitor ? "monitor_capture" : kind == CaptureKind::Game ? "game_capture" : "window_capture";
 }

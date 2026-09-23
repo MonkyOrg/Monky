@@ -244,7 +244,7 @@ function fixture(language = 'en') {
   const controls = {
     capabilities: async () => capabilities, sources: async () => sources,
     current: true, confirm: true, capturingAudio: false, settingsError: null,
-    start: null, reapply: async () => {},
+    start: null, stop: null, reapply: async () => {},
     openExternal: async () => ({ success: true }),
   };
   let saves = 0, enumerations = 0, cancelled = 0, sequence = 0;
@@ -283,9 +283,15 @@ function fixture(language = 'en') {
   };
   const webRtcManager = {
     getNativeScreenCapabilities: () => controls.capabilities(),
-    async startNativeScreenShare(id, audio, thumbnail, isWanted, kind, preserveAspectRatio) {
+    async startNativeScreenShare(id, audio, thumbnail, isWanted, kind, preserveAspectRatio, audioReplacement) {
       traces.push(['native-start', id, audio, thumbnail, kind, preserveAspectRatio]);
-      return controls.start ? controls.start({ id, audio, thumbnail, isWanted, kind, preserveAspectRatio }) : createStream(id);
+      if (controls.start) return controls.start({ id, audio, thumbnail, isWanted, kind, preserveAspectRatio, audioReplacement });
+      if (audioReplacement) {
+        traces.push(['audio-replacement', audioReplacement.shareId]);
+        await audioReplacement.retirePrevious();
+        if (!isWanted()) throw new DOMException('Cancelled selection', 'AbortError');
+      }
+      return createStream(id);
     },
     assertScreenSharingSettings(profile, codec) {
       traces.push(['assert-settings', profile, codec]);
@@ -296,6 +302,7 @@ function fixture(language = 'en') {
   };
   const stopLocalScreenShares = async (_, { shareIds, notify }) => {
     traces.push(['stop-shares', [...shareIds], notify]);
+    if (controls.stop) await controls.stop(shareIds);
     for (const id of shareIds) {
       streams.delete(id); captures.delete(id);
       voiceStore.screenShareIds = voiceStore.screenShareIds.filter(value => value !== id);
