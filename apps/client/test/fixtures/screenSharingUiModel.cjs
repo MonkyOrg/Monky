@@ -391,7 +391,10 @@ function fixture(language = 'en') {
   };
   return {
     picker, quality, SettingsSectionNavigation, i18n, load, mountQuality, document, api, controls, sources, source,
-    notifyNativeFailure: appEventHandler('native_screen.source_failed', { t: i18n.t, showAlert: stubs['views/Dialog'].showAlert }),
+    notifyNativeFailure: appEventHandler('native_screen.source_failed', {
+      t: i18n.t, showAlert: stubs['views/Dialog'].showAlert,
+      showInfoToast: (message, durationMs) => traces.push(['info-toast', message, durationMs]),
+    }),
     notifyCaptureFallback: appEventHandler('native_screen.capture_fallback', {
       t: i18n.t, showInfoToast: (message, durationMs) => traces.push(['info-toast', message, durationMs]),
       showAlert: stubs['views/Dialog'].showAlert,

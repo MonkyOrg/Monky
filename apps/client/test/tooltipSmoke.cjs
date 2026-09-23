@@ -2,7 +2,30 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-module.exports = { runTooltipSmoke };
+module.exports = { runTooltipSmoke, focusTooltipPreview };
+
+async function focusTooltipPreview(browser, timeoutMs = 2000) {
+  // sendInputEvent requires a focused BrowserWindow; showInactive does not
+  // establish that prerequisite, particularly on hosted macOS desktops.
+  browser.show();
+  browser.focus();
+  browser.webContents.focus();
+  const deadline = Date.now() + timeoutMs;
+  let state;
+  do {
+    state = {
+      visible: browser.isVisible(),
+      nativeFocus: browser.isFocused(),
+      ...await browser.webContents.executeJavaScript(`({
+        rendererFocus: document.hasFocus(), visibility: document.visibilityState
+      })`),
+    };
+    if (state.visible && state.nativeFocus && state.rendererFocus && state.visibility === 'visible') return state;
+    if (Date.now() >= deadline) break;
+    await new Promise(resolve => setTimeout(resolve, 16));
+  } while (true);
+  throw new Error(`Tooltip native pointer prerequisite not ready: ${JSON.stringify(state)}`);
+}
 
 if (require.main === module || process.argv[1] === __filename) {
   const clientRoot = path.resolve(__dirname, '..');
@@ -65,22 +88,49 @@ if (require.main === module || process.argv[1] === __filename) {
       const checks = await window.webContents.executeJavaScript(`(${runTooltipSmoke.toString()})()`, true);
       console.log(`Tooltip smoke: ${checks} checks passed`);
       await window.webContents.executeJavaScript(`(${renderTooltipPreview.toString()})()`, true);
-      window.showInactive();
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await focusTooltipPreview(window);
+      const point = await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+        requestAnimationFrame(() => {
+          const button = document.querySelector('#tooltip-preview-button');
+          const rect = button.getBoundingClientRect();
+          const point = { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+          if (!button.contains(document.elementFromPoint(point.x, point.y))) {
+            reject(new Error('Tooltip button is not the native pointer hit target'));
+            return;
+          }
+          resolve(point);
+        });
+      })`);
       // Exercise Chromium's real pointer dispatch over a disabled button, not just DOM events.
       window.webContents.sendInputEvent({ type: 'mouseMove', x: 20, y: 20 });
-      window.webContents.sendInputEvent({ type: 'mouseMove', x: 315, y: 238 });
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await window.webContents.executeJavaScript(`new Promise(resolve => requestAnimationFrame(() => {
+        window.tooltipPreviewPointer = false;
+        resolve();
+      }))`);
+      await window.webContents.executeJavaScript('window.armTooltipPreviewHover()');
+      const sendHover = () => window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+      // Regression: native delivery may consume more than the 100 ms slack
+      // between a Main-side 250 ms sleep and the renderer's 150 ms intent timer.
+      if (process.argv.includes('--delayed-native-input')) setTimeout(sendHover, 180);
+      else sendHover();
+      const observation = await window.webContents.executeJavaScript('window.tooltipPreviewHover');
       const nativeHover = await window.webContents.executeJavaScript(`(() => {
         const button = document.querySelector('#tooltip-preview-button');
         const tip = document.querySelector('.monky-tooltip');
-        return !tip.hidden && tip.textContent === button.title && button.getAttribute('title') === '';
+        return {
+          correct: !tip.hidden && tip.textContent === button.title && button.getAttribute('title') === '',
+          trustedPointer: window.tooltipPreviewPointer,
+          focused: document.hasFocus(), visibility: document.visibilityState,
+          hovered: button.matches(':hover'), title: button.title, attribute: button.getAttribute('title'),
+          tooltipHidden: tip.hidden, tooltipText: tip.textContent, trace: window.tooltipPreviewTrace
+        };
       })()`);
-      if (!nativeHover) throw new Error('Real Electron pointer hover on disabled button did not show/suppress tooltip');
+      if (!observation.delivered || !nativeHover.correct || !nativeHover.trustedPointer)
+        throw new Error(`Real Electron pointer hover on disabled button did not show/suppress tooltip: ${JSON.stringify({ ...nativeHover, observation })}`);
       const image = await window.webContents.capturePage();
       const filename = path.join(clientRoot, 'dist-test', 'tooltip-preview.png');
       fs.writeFileSync(filename, image.toPNG());
-      console.log(`Real disabled hover passed; screenshot: ${filename}`);
+      console.log(`Real disabled hover passed (${observation.elapsed} ms after trusted input); screenshot: ${filename}`);
       await window.webContents.executeJavaScript('window.disposeTooltipPreview()', true);
       await finish(0);
     }).catch(async (error) => { console.error(error); await finish(1); });
@@ -100,8 +150,90 @@ async function renderTooltipPreview() {
       </button>
     </div>
   </main>`;
+  const started = performance.now();
+  const trace = window.tooltipPreviewTrace = [];
+  const record = (kind, data = {}) => {
+    if (trace.length >= 80) trace.shift();
+    trace.push({ at: Math.round(performance.now() - started), kind, ...data });
+  };
+  const targetName = target => target instanceof Element ? target.id || target.tagName : null;
+  const eventTrace = event => record(event.type, {
+    target: targetName(event.target), related: targetName(event.relatedTarget), trusted: event.isTrusted,
+  });
+  const events = ['pointerover', 'pointerout', 'pointermove', 'mouseover', 'mouseout', 'mousemove',
+    'scroll', 'visibilitychange'];
+  const windowEvents = ['blur', 'focus', 'resize'];
+  for (const event of events) document.addEventListener(event, eventTrace, true);
+  for (const event of windowEvents) window.addEventListener(event, eventTrace, true);
+  const originalSetTimeout = window.setTimeout, originalClearTimeout = window.clearTimeout;
+  const timers = new Set();
+  window.setTimeout = (handler, delay, ...args) => {
+    if (typeof handler !== 'function' || handler.name !== 'show')
+      return originalSetTimeout.call(window, handler, delay, ...args);
+    const id = originalSetTimeout.call(window, (...values) => {
+      timers.delete(id);
+      record('intent-fired', { id });
+      handler(...values);
+    }, delay, ...args);
+    timers.add(id);
+    record('intent-scheduled', { id, delay });
+    return id;
+  };
+  window.clearTimeout = id => {
+    if (timers.delete(id)) record('intent-cancelled', { id });
+    originalClearTimeout.call(window, id);
+  };
   const dispose = initTooltips();
-  window.disposeTooltipPreview = () => { dispose(); delete window.disposeTooltipPreview; };
+  const mutations = new MutationObserver(() => {
+    const tip = document.querySelector('.monky-tooltip');
+    record('tooltip-state', { hidden: tip.hidden, text: tip.textContent });
+  });
+  mutations.observe(document.querySelector('.monky-tooltip'), { attributes: true, childList: true, subtree: true });
+  window.tooltipPreviewPointer = false;
+  let inputDeadline, hoverObservation, settleHover;
+  window.armTooltipPreviewHover = () => {
+    window.tooltipPreviewPointer = false;
+    window.tooltipPreviewHover = new Promise(resolve => {
+      settleHover = resolve;
+      inputDeadline = originalSetTimeout.call(window, () => {
+        settleHover = null;
+        record('input-delivery-deadline');
+        resolve({ delivered: false });
+      }, 2000);
+    });
+  };
+  const pointer = event => {
+    if (!event.isTrusted || !document.querySelector('#tooltip-preview-button').contains(event.target)) return;
+    window.tooltipPreviewPointer = true;
+    if (!settleHover || hoverObservation !== undefined) return;
+    originalClearTimeout.call(window, inputDeadline);
+    const receivedAt = performance.now();
+    record('hover-observation-start');
+    // Measure the unchanged 250 ms budget in the renderer, after trusted input
+    // arrived, rather than before Electron's asynchronous dispatch completed.
+    hoverObservation = originalSetTimeout.call(window, () => {
+      record('hover-observation-end');
+      settleHover({ delivered: true, elapsed: Math.round(performance.now() - receivedAt) });
+      settleHover = null;
+    }, 250);
+  };
+  document.addEventListener('pointerover', pointer, true);
+  window.disposeTooltipPreview = () => {
+    document.removeEventListener('pointerover', pointer, true);
+    for (const event of events) document.removeEventListener(event, eventTrace, true);
+    for (const event of windowEvents) window.removeEventListener(event, eventTrace, true);
+    mutations.disconnect();
+    originalClearTimeout.call(window, inputDeadline);
+    originalClearTimeout.call(window, hoverObservation);
+    dispose();
+    window.setTimeout = originalSetTimeout;
+    window.clearTimeout = originalClearTimeout;
+    delete window.tooltipPreviewTrace;
+    delete window.tooltipPreviewPointer;
+    delete window.tooltipPreviewHover;
+    delete window.armTooltipPreviewHover;
+    delete window.disposeTooltipPreview;
+  };
   await document.fonts.ready;
 }
 

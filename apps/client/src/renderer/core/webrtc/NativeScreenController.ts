@@ -71,6 +71,8 @@ interface Source {
   previewState?: NativeScreenPreviewState;
   captureMode?: NativeScreenCaptureMode;
   fallbackNotified?: boolean;
+  failureNotified?: boolean;
+  sourceUnavailableNotified?: boolean;
   preview?: {
     presentationId: string; video: HTMLVideoElement; stream: MediaStream | null;
     attachment: Promise<void>; retirement?: Promise<void>;
@@ -334,6 +336,7 @@ export class NativeScreenController {
         emitOutsideRouting(() => appEvents.emit('local.screen_ended_externally', event.shareId));
       } else if (event.type === 'preview-state') {
         entry.previewState = event.state;
+        if (event.state === 'playing') entry.failureNotified = false;
         this.changed();
       } else if (event.type === 'capture-mode') {
         if (entry.preview?.presentationId !== event.presentationId) return;
@@ -346,6 +349,13 @@ export class NativeScreenController {
         videoService.updateNativeScreenCapture({ ...capture, captureKind: 'window' });
         emitOutsideRouting(() => appEvents.emit('native_screen.capture_fallback', { shareId: event.shareId }));
       } else if (event.type === 'error') {
+        if (event.reason === 'source-unavailable') {
+          if (entry.sourceUnavailableNotified) return;
+          entry.sourceUnavailableNotified = true;
+        } else {
+          if (entry.failureNotified) return;
+          entry.failureNotified = true;
+        }
         emitOutsideRouting(() => appEvents.emit('native_screen.source_failed', {
           reason: event.reason, shareId: event.shareId, ...(event.code ? { code: event.code } : {}),
         }));

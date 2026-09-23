@@ -98,7 +98,7 @@ jobs:
       - name: Test bot contracts and SDK
         run: |
           node scripts/test-changelog.js
-          node --test scripts/test-light-contracts.js scripts/test-light-build.js
+          node --test scripts/test-light-contracts.js scripts/test-light-build.js scripts/test-native-ci.js
           npm run test --workspace=packages/shared
           npm run test --workspace=packages/bot-sdk
       - name: Test server, client state and real bot conversations
@@ -226,8 +226,41 @@ jobs:
         shell: bash
         run: node scripts/check-protocol-bump.js
 
-  build:
-    name: Build check (${{ matrix.platform }})
+  client-dom:
+    name: Client DOM (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Setup MSVC (Windows)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vsversion: '2022'
+          toolset: '14.44'
+          sdk: '10.0.26100.0'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build workspaces
+        run: npm run build
+      - name: Install FFmpeg for generated voice fixtures
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress --limit-output
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          ffmpeg -hide_banner -version
+      - name: Exercise client DOM and microphone state in Electron
+        run: node scripts/test-client-dom.cjs
+
+  package:
+    name: Package check (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
@@ -274,6 +307,15 @@ jobs:
       - name: Build workspaces
         run: npm run build
 
+      # Only content-addressed upstream archives are portable. Do not cache the
+      # checkout-owned RTC tree, generated binaries, toolchains or Python venv.
+      - name: Cache verified native screen archives (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: .native-screen\downloads
+          key: native-screen-archives-v1-ci-windows-x64-${{ hashFiles('apps/client/native/screen-share/scripts/fetchObs.cjs', 'apps/client/native/screen-share/scripts/buildTools.cjs', 'apps/client/native/screen-share/src/vendor/obs/sources.json', 'apps/client/native/screen-share/src/vendor/obs/runtime-inputs.json', 'apps/client/native/screen-share/src/capture/runtime-additions.json') }}
+
       - name: Build native screen runtime and corresponding-source inputs (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -311,32 +353,8 @@ jobs:
           npm run test:qa
 
       - name: Exercise client DOM and microphone state in Electron
-        shell: bash
-        run: |
-          npm run test:bots:ui --workspace=apps/client
-          npm run test:development --workspace=apps/client
-          npm run test:updates --workspace=apps/client
-          npm run test:editing --workspace=apps/client
-          npm run test:clipboard --workspace=apps/client
-          node apps/client/test/messageClipboardDomSmoke.cjs --system-clipboard
-          npm run test:screens --workspace=apps/client
-          node packages/bot-sdk/test-browser/voiceRendererSmoke.cjs
-          node apps/client/test/userContextMenuSmoke.cjs
-          node apps/client/test/audioDeviceSmoke.cjs
-          node apps/client/test/liveAudioDeviceSmoke.cjs
-          node apps/client/test/dropdownSmoke.cjs
-          node apps/client/test/tooltipSmoke.cjs
-          node apps/client/test/microphoneStateSmoke.cjs
-          node apps/client/test/microphoneTestSmoke.cjs
-          node apps/client/test/settingsNavigationSmoke.cjs
-          node apps/client/test/settingsNavigationSmoke.cjs --release-notes
-          node apps/client/test/settingsNavigationSmoke.cjs --quality-settings
-          node apps/client/test/settingsNavigationSmoke.cjs --screen-stage
-          npm run test:settings:ui --workspace=apps/client
-          npm run test:camera --workspace=apps/client
-          node apps/client/test/footerControlsSmoke.cjs
-          npm run test:transport --workspace=apps/client
-          npm run test:bot-marketplace --workspace=apps/client
+        if: runner.os == 'macOS'
+        run: node scripts/test-client-dom.cjs
 
       # Mirror the release pipeline: tsc does not copy the .sql migration files
       # into the compiled server output, so we copy them next to the compiled
@@ -369,3 +387,20 @@ jobs:
       - name: Restore macOS Keychain configuration
         if: always() && runner.os == 'macOS'
         run: python scripts/macos-test-keychain.py restore
+
+  # Preserve the required check names: neither a failed nor a skipped parallel
+  # lane may turn the original build gate green.
+  build:
+    name: Build check (${{ matrix.platform }})
+    if: always()
+    needs: [package, client-dom]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [win, mac]
+    steps:
+      - name: Require packaging and DOM success
+        env:
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          DOM_RESULT: ${{ needs.client-dom.result }}
+        run: test "$PACKAGE_RESULT" = success && test "$DOM_RESULT" = success

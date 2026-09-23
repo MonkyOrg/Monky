@@ -281,6 +281,38 @@ alheias. Produz `release\win-unpacked\Monky.exe` e
 `release\Monky-Windows.zip`. O empacotamento falha se binários, fontes
 compiladas, runtime, CRT ou avisos de terceiros estiverem inconsistentes.
 
+## Reaproveitamento no CI e na release Windows
+
+O CI executa a suíte DOM Windows em outro runner `windows-2022`, em paralelo
+ao preparo nativo e ao empacotamento. Os testes continuam sequenciais dentro
+desse runner para não disputar fixtures de desktop/áudio. Os dois checks
+`Build check` existentes aguardam o empacotamento nas duas plataformas e a
+suíte DOM Windows; falha, cancelamento ou uma etapa paralela pulada não aprova
+esses gates. A suíte DOM macOS continua no job de empacotamento.
+
+CI e release mantêm cache somente de `.native-screen\downloads`: arquivos
+compactados de runtime/dependências OBS, identificados pelo conteúdo, e os
+arquivos de fontes selecionados pelas receitas OBS fixadas. A chave inclui
+Windows x64, os manifestos e as receitas de download/verificação, sem fallback
+por prefixo. CI e release usam namespaces separados. Antes do uso, cada arquivo
+restaurado é conferido contra o SHA-256 confiável e o tamanho, quando fixado;
+corrupção falha explicitamente, sem baixar uma substituição silenciosa. Sem
+cache, os arquivos são baixados e verificados normalmente.
+
+Isso **não é cache de binários nativos**: alterações de ABI do Electron,
+compilador e fontes continuam compilando do zero. Não são restaurados árvore
+WebRTC, marcadores de propriedade do checkout, venv Python, ferramentas
+extraídas nem resultados de compilação nativa. Permanecem a seleção de Python
+3.11, VS2022 v143 e SDK 10.0.26100.0, os contratos nativos, as verificações de
+pacote, as licenças e os gates de geração/publicação das fontes correspondentes.
+
+A execução fria ganha somente a oportunidade de sobrepor DOM Windows ao
+trabalho nativo, ao custo da instalação e do build dos workspaces em outro
+runner. A execução quente pode também evitar esses downloads OBS, mas ainda
+extrai, valida, compila WebRTC e gera o arquivo de fontes da release. Não há
+promessa de duração nem eliminação do custo principal da compilação nativa;
+meça as execuções reais de CI/release antes de afirmar ganho de tempo.
+
 ## Licença e fontes correspondentes
 
 O Monky é **GPL-3.0-or-later**. `LICENSE-MIT` preserva o aviso histórico do
@@ -373,6 +405,10 @@ Os ensaios do aplicativo cobrem P2P/SFU, receptor Chromium, áudio, qualidade,
 prévia local, Assistir/Parar, fullscreen, overlay, troca de servidor e queda
 de conexão. `--window-lifecycle` acrescenta minimizar/restaurar;
 `--idle-source-close` verifica fechar uma fonte sem espectadores.
+`--publisher-stop` verifica dois ciclos de Parar no transmissor enquanto outro
+participante assiste, seguidos de reinício com áudio na mesma chamada.
+`--source-resize` altera o tamanho da janela sintética mantendo a fonte e o
+perfil de saída; não altera a resolução do monitor nem simula tela cheia exclusiva.
 O QA da prévia deve validar funcionamento sem espectadores, perda/retorno de
 foco, opção de pausa desativada e continuidade dos espectadores. Resolução
 e contagem de frames, sozinhas, não comprovam que os pixels decodificados

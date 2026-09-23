@@ -340,7 +340,9 @@ export function setupIpcHandlers(
       return screenAudio.getMonitorState(deviceId);
     },
   });
-  const nativeScreenSharing = setupNativeScreenSharingIpc(mainWindow, (sourceId, kind) => nativeSources.resolve(sourceId, kind));
+  const nativeScreenSharing = setupNativeScreenSharingIpc(
+    mainWindow, (sourceId, kind) => nativeSources.resolve(sourceId, kind), options?.clientLogger,
+  );
   const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
     event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {

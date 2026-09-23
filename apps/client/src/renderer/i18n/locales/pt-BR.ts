@@ -491,6 +491,7 @@ export const ptBR = {
   'screenShare.nativeProfileChangeBlocked': 'O compartilhamento nativo em andamento aceita até 1920×1080 a 120 FPS, vídeo de 150 a 20000 kbps em passos de 50 e áudio de 6 a 510 kbps. O perfil anterior foi mantido.',
   'screenShare.nativeFailure.unsupported': 'Este dispositivo ou perfil não oferece suporte à transmissão solicitada.',
   'screenShare.nativeFailure.source-unavailable': 'A fonte compartilhada foi fechada, desconectada ou não está mais disponível.',
+  'screenShare.sourceStopping': 'A fonte compartilhada foi fechada ou desconectada. O compartilhamento está sendo encerrado.',
   'screenShare.nativeFailure.capture-failed': 'Não foi possível continuar a captura desta fonte. Verifique se a janela está disponível e tente novamente. Nenhuma outra janela ou tela será escolhida automaticamente.',
   'screenShare.nativeFailure.connection-failed': 'Não foi possível estabelecer ou manter esta transmissão.',
   'screenShare.nativeFailure.capacity-exceeded': 'Esta transmissão atingiu o limite de espectadores para a qualidade escolhida.',

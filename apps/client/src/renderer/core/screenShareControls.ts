@@ -75,11 +75,14 @@ export async function stopLocalScreenShares(
     if (options.teardown) webRtcManager.clearLocalScreenTracks();
     else for (const shareId of shareIds) await webRtcManager.removeLocalScreenTrack(shareId);
   })();
-  if (!options.teardown && options.notify !== false) notifyScreenShareState(call);
+  const notify = !options.teardown && options.notify !== false;
+  if (notify && nativeIds.length === 0) notifyScreenShareState(call);
 
   const results = await Promise.allSettled([
     detached, audioStopped, ...nativeIds.map(shareId => webRtcManager.removeNativeScreenSource(shareId)),
   ]);
+  // Native Closed/control messages still need the source's server-side leases.
+  if (notify && nativeIds.length > 0) notifyScreenShareState(call);
   for (const result of results) {
     if (result.status === 'rejected') throw result.reason;
   }

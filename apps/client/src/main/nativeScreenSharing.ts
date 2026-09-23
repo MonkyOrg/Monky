@@ -1,10 +1,11 @@
 import { app, ipcMain, sharedTexture, MessageChannelMain, BrowserWindow, type IpcMainInvokeEvent, type WebFrameMain } from 'electron';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import {
   MessageType, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenCommandSchema, nativeScreenEventSchema,
+  getScreenShareProfile,
   nativeScreenProducerSchema, nativeScreenReplySchema, nativeScreenRpcMethodSchema, nativeScreenSignalSchema,
   type NativeScreenCall, type NativeScreenCapabilities, type NativeScreenCommand, type NativeScreenCommandResult,
   type NativeScreenEvent, type NativeScreenFailure, type NativeScreenParticipant, type NativeScreenSignalPayload,
@@ -16,8 +17,10 @@ import {
   NativeScreenPreviewBridge, CaptureBridge,
   validateCaptureTarget, type NativeScreenRuntime, type NativeScreenAudioOptions, type NativeScreenCaptureTarget,
   type NativeScreenCaptureCapability,
+  type NativeScreenEndpointState,
 } from '@monky/screen-share';
 import * as screenAudio from '@monky/screen-audio';
+import type { ClientLogger } from './clientLogger';
 
 type RendererRequest = Extract<NativeScreenEvent, { requestId: string }>;
 type RequestInput = Omit<Extract<RendererRequest, { type: 'signal' }>, 'requestId' | 'callId'>
@@ -48,6 +51,78 @@ type PendingRequest = {
   call: CallRecord; type: RendererRequest['type'];
   resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout;
 };
+type NativeErrorDiagnostic = Record<string, string | number | boolean | null>;
+type DiagnosticData = Record<string, string | number | boolean | null | undefined | NativeScreenVideoProfile
+  | readonly string[] | readonly NativeErrorDiagnostic[]>;
+const nvencOperations = [
+  'LoadLibraryExW', 'GetProcAddress', 'NvEncodeAPICreateInstance', 'nvEncOpenEncodeSessionEx',
+  'nvEncGetEncodeGUIDCount', 'nvEncGetEncodeGUIDs', 'nvEncGetEncodeProfileGUIDCount',
+  'nvEncGetEncodeProfileGUIDs', 'nvEncGetInputFormatCount', 'nvEncGetInputFormats',
+  'nvEncGetEncodeCaps', 'nvEncDestroyEncoder', 'FreeLibrary',
+] as const;
+const nvencCapabilities = [
+  'NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE', 'NV_ENC_CAPS_WIDTH_MAX', 'NV_ENC_CAPS_HEIGHT_MAX',
+] as const;
+function nativeErrorDiagnostics(error: Error): NativeErrorDiagnostic[] {
+  const message = error.message.slice(0, 8192);
+  const color = /^External H264 must retain the admitted BT\.709 limited-range mode: fullRange=(absent|[01]), primaries=(absent|\d{1,3}), transfer=(absent|\d{1,3}), matrix=(absent|\d{1,3})(?=$|[;\s])/.exec(message);
+  if (color) {
+    const fields = color.slice(1).map(value => value === 'absent' ? null : Number(value));
+    if (fields.some(value => value !== null && value > 255)) return [];
+    return [{ kind: 'h264-color', fullRange: fields[0] === null ? null : fields[0] === 1,
+      primaries: fields[1], transfer: fields[2], matrix: fields[3] }];
+  }
+  if (!message.startsWith('NVENC ')) return [];
+  const diagnostics: NativeErrorDiagnostic[] = [];
+  for (const raw of message.split(';').slice(0, 32)) {
+    const segment = raw.trim().replace(/^NVENC /, '');
+    const api = /^api=(\d{1,2})\.(\d{1,2})$/.exec(segment);
+    if (api) { diagnostics.push({ kind: 'nvenc-api', major: Number(api[1]), minor: Number(api[2]) }); continue; }
+    const capability = nvencCapabilities.find(name => segment.startsWith(`${name}=`));
+    if (capability) {
+      const match = /^-?\d{1,10}$/.exec(segment.slice(capability.length + 1));
+      if (match && Number(match[0]) >= -2147483648 && Number(match[0]) <= 4294967295)
+        diagnostics.push({ kind: 'nvenc-capability', capability, value: Number(match[0]) });
+      continue;
+    }
+    const operation = nvencOperations.find(name => segment === name
+      || segment.startsWith(`${name} `) || segment.startsWith(`${name}(`));
+    if (!operation) continue;
+    const diagnostic: NativeErrorDiagnostic = { kind: 'nvenc-operation', operation };
+    for (const field of ['status', 'count', 'bound', 'capacity', 'returned', 'value', 'required',
+      'capsVersion', 'functionListVersion', 'openVersion', 'win32']) {
+      const match = new RegExp(`(?:^|[\\s,(])${field}=(-?\\d{1,10})(?=$|[\\s,;()])`).exec(segment);
+      if (match && Number(match[1]) >= -2147483648 && Number(match[1]) <= 4294967295)
+        diagnostic[field] = Number(match[1]);
+    }
+    for (const field of ['H264', 'Main', 'NV12', 'session']) {
+      const match = new RegExp(`(?:^|[\\s,(])${field}=([01])(?=$|[\\s,;)])`).exec(segment);
+      if (match) diagnostic[field] = match[1] === '1';
+    }
+    if (operation === 'nvEncGetEncodeCaps') {
+      const capability = nvencCapabilities.find(name => segment.startsWith(`${operation} ${name}(`));
+      if (capability) {
+        diagnostic.capability = capability;
+        const id = /^\((\d{1,3})\)/.exec(segment.slice(operation.length + capability.length + 1));
+        if (id) diagnostic.capabilityId = Number(id[1]);
+      }
+    }
+    if (operation === 'NvEncodeAPICreateInstance') {
+      const missing = nvencOperations.find(name => segment === `${operation} missing ${name}`);
+      if (missing) diagnostic.missingOperation = missing;
+    }
+    if (operation === 'nvEncDestroyEncoder' && /(?:^|\s)retirement=unconfirmed(?:$|\s)/.test(segment))
+      diagnostic.retirementConfirmed = false;
+    diagnostics.push(diagnostic);
+  }
+  return diagnostics;
+}
+const diagnosticId = (value: string): string => createHash('sha256').update(value).digest('hex').slice(0, 16);
+const diagnosticProfile = ({ width, height, fps, maxBitrateKbps }: NativeScreenVideoProfile): NativeScreenVideoProfile =>
+  ({ width, height, fps, maxBitrateKbps });
+const diagnosticState = (value: unknown): string => typeof value === 'string'
+  && ['waiting', 'starting', 'running', 'stopping', 'closed', 'new', 'connecting', 'connected',
+    'disconnected', 'failed', 'completed', 'opening', 'open', 'closing'].includes(value) ? value : 'other';
 export interface NativeScreenSharingIpc { dispose(): Promise<void> }
 
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -94,7 +169,8 @@ class SelectedCaptureProbe {
   private closeWork: Promise<void> | null = null;
   retired = false;
 
-  constructor(private readonly runtime: NativeScreenRuntime, private readonly root: string) {
+  constructor(private readonly runtime: NativeScreenRuntime, private readonly root: string,
+    private readonly onError: (error: Error) => void) {
     this.directory = path.join(root, `monky-screen-capture-${this.runId}`);
   }
 
@@ -111,7 +187,10 @@ class SelectedCaptureProbe {
         host: this.runtime.host, runtime: this.runtime.obs, runId: this.runId, runDirectory: this.directory,
         encoder: 'auto', video: { width, height, fps, bitrateKbps: maxBitrateKbps,
           scaleMode: preserveAspectRatio ? 'fit' : 'stretch' },
-        onError: error => console.warn('[NativeScreen] Selected-source probe failed:', error),
+        onError: error => {
+          console.warn('[NativeScreen] Selected-source probe failed:', error);
+          this.onError(error);
+        },
         onPacket: () => { throw new Error('A source-selection probe must not capture pixels.'); }, onNotice() {},
       });
       const preparing = this.bridge.prepare(target, signal);
@@ -184,11 +263,106 @@ class NativeScreenSharingService {
   private runtime: NativeScreenRuntime | null = null;
   private availability: Promise<NativeScreenCapabilities> | null = null;
   private disposed = false;
+  private readonly loggedErrors = new WeakSet<object>();
+  private readonly recentFailures = new Map<string, number>();
+  private logSinkFailureReported = false;
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly resolveSource: (sourceId: string, kind: NativeScreenCaptureKind) => NativeScreenCaptureTarget,
+    private readonly logger?: Pick<ClientLogger, 'write'>,
   ) {}
+
+  private log(operation: string, data: DiagnosticData = {}, level: 'INFO' | 'WARN' | 'ERROR' = 'INFO'): void {
+    try {
+      this.logger?.write({ timestamp: new Date().toISOString(), level, category: 'SCREEN_SHARE',
+        message: `Native screen ${operation}`, data });
+      this.logSinkFailureReported = false;
+    } catch {
+      if (!this.logSinkFailureReported) {
+        this.logSinkFailureReported = true;
+        console.error('[NativeScreen] Persistent diagnostic sink failed; media ownership is unchanged.');
+      }
+    }
+  }
+
+  private context(call: CallRecord, shareId?: string, pipelineId?: string): DiagnosticData {
+    return { call: diagnosticId(call.config.callId), mode: call.config.mode,
+      ...(shareId ? { source: diagnosticId(shareId) } : {}),
+      ...(pipelineId ? { pipeline: diagnosticId(pipelineId) } : {}) };
+  }
+
+  logFailure(operation: string, error: unknown, input?: unknown, context: DiagnosticData = {}): void {
+    if (error instanceof Error && error.name === 'AbortError') return;
+    if (record(error) && this.loggedErrors.has(error)) return;
+    const command = nativeScreenCommandSchema.safeParse(input);
+    const pending: unknown[] = [error], seen = new Set<unknown>(), codes = new Set<string>();
+    const diagnostics = new Map<string, NativeErrorDiagnostic>();
+    while (pending.length && seen.size < 12) {
+      const current = pending.shift();
+      if (seen.has(current)) continue;
+      seen.add(current);
+      if (record(current) && typeof current.code === 'string' && /^ERR_[A-Z0-9_]{1,120}$/.test(current.code))
+        codes.add(current.code);
+      if (current instanceof Error) {
+        for (const diagnostic of nativeErrorDiagnostics(current)) {
+          if (diagnostics.size >= 64) break;
+          diagnostics.set(JSON.stringify(diagnostic), diagnostic);
+        }
+      }
+      if (current instanceof AggregateError) pending.push(...current.errors.slice(0, 8));
+      if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
+    }
+    // Error messages/stacks can contain SDP, TURN passwords, paths or source titles.
+    // Only known native formats contribute allowlisted identifiers/numbers.
+    // Keep the existing renderer error contract intact.
+    const data: DiagnosticData = { ...context, nativeCodes: [...codes],
+      ...(diagnostics.size ? { nativeDiagnostics: [...diagnostics.values()] } : {}),
+      error: error instanceof Error && error.name === 'ZodError' ? 'schema-validation'
+        : error instanceof AggregateError ? 'aggregate' : 'operation-failed',
+      ...(command.success ? { action: command.data.action,
+        ...('callId' in command.data ? { call: diagnosticId(command.data.callId) } : {}),
+        ...('shareId' in command.data ? { source: diagnosticId(command.data.shareId) } : {}) } : {}),
+      ...(command.success && command.data.action === 'source-add' ? {
+        captureKind: command.data.captureKind ?? 'window', audio: command.data.audio,
+        video: diagnosticProfile(command.data.video),
+      } : {}) };
+    const signature = JSON.stringify([operation, data]);
+    const now = Date.now(), previous = this.recentFailures.get(signature);
+    if (record(error)) this.loggedErrors.add(error);
+    if (previous !== undefined && now - previous < 5000) return;
+    const oldest = this.recentFailures.keys().next().value;
+    if (this.recentFailures.size >= 128 && oldest !== undefined) this.recentFailures.delete(oldest);
+    this.recentFailures.set(signature, now);
+    this.log(`${operation} failed`, data, 'ERROR');
+  }
+
+  private endpointObserver(call: CallRecord, shareId: string, pipelineId: string, role: 'publish' | 'receive',
+    quality: string): (state: NativeScreenEndpointState) => void {
+    const previous = new Map<string, string>();
+    return state => {
+      if (state.type === 'frame') return;
+      const data: DiagnosticData = { ...this.context(call, shareId, pipelineId), role, quality, type: state.type };
+      if (state.type === 'capture-mode') {
+        data.captureMode = state.capture.mode;
+        data.ready = state.capture.ready;
+      } else if (state.type === 'capture' || state.type === 'transport') {
+        data.state = diagnosticState(state.state);
+      } else if (state.type === 'peer') {
+        if (!record(state.state)) return;
+        data.state = diagnosticState(state.state.status);
+        if (typeof state.state.remoteSessionId === 'string') data.viewer = diagnosticId(state.state.remoteSessionId);
+        if (record(state.state.nativeState)) data.connection = diagnosticState(state.state.nativeState.connectionState);
+      }
+      const signature = JSON.stringify(data);
+      const key = `${state.type}:${data.viewer ?? ''}`;
+      if (previous.get(key) === signature) return;
+      const oldest = previous.keys().next().value;
+      if (previous.size >= 128 && oldest !== undefined) previous.delete(oldest);
+      previous.set(key, signature);
+      this.log('pipeline-state', data);
+    };
+  }
 
   owns(event: IpcMainInvokeEvent): boolean {
     return !this.disposed && !this.window.isDestroyed() && !this.window.webContents.isDestroyed()
@@ -209,6 +383,9 @@ class NativeScreenSharingService {
     presentationId?: string, sourceInstanceId?: string): void {
     if (call.stopping && error instanceof Error && error.name === 'AbortError') return;
     console.error('[NativeScreen]', error);
+    this.logFailure('media', error, undefined, { ...this.context(call, shareId),
+      publisher: diagnosticId(publisherSessionId),
+      ...(presentationId ? { presentation: diagnosticId(presentationId) } : {}) });
     const details = errorDetails(error);
     this.emit(call, { type: 'error', callId: call.config.callId, publisherSessionId,
       ...(shareId ? { shareId } : {}), ...(presentationId ? { presentationId } : {}),
@@ -265,14 +442,18 @@ class NativeScreenSharingService {
 
   private capabilities(): Promise<NativeScreenCapabilities> {
     if (!this.availability) this.availability = (async (): Promise<NativeScreenCapabilities> => {
-      if (process.platform !== 'win32' || process.arch !== 'x64')
+      if (process.platform !== 'win32' || process.arch !== 'x64') {
+        this.log('runtime-unavailable', { reason: 'platform' }, 'WARN');
         return { capture: false, captureAudio: false, receive: false, backend: null, reason: 'platform' };
+      }
       try {
         this.runtime = loadRuntime();
+        this.log('runtime-ready', { requiresSelectionProbe: true, captureAudio: screenAudio.isPacketCaptureSupported() });
         return { capture: false, captureAudio: screenAudio.isPacketCaptureSupported(), receive: true,
           requiresSelectionProbe: true, captureKinds: [...this.runtime.capture.captureKinds], backend: null, reason: null };
       } catch (error) {
         console.error('[NativeScreen] Production media runtime is unavailable:', error);
+        this.logFailure('runtime-load', error);
         return { capture: false, captureAudio: false, receive: false, backend: null, reason: 'runtime' };
       }
     })();
@@ -321,6 +502,7 @@ class NativeScreenSharingService {
         pausePreviewWhenUnfocused: true,
         sources: new Map(), subscriptions: new Map(), participants: new Map(), watchVersions: new Map(), sourceSelections: new Map(),
       });
+      this.log('call-joined', { call: diagnosticId(config.callId), mode: config.mode });
       return { kind: 'ok' };
     }
     // Closing is idempotent even if the renderer lost the join acknowledgement.
@@ -336,6 +518,7 @@ class NativeScreenSharingService {
       catch (error) {
         if (this.calls.has(call.config.callId)) throw error;
         console.warn('[NativeScreen] Media retired with cleanup errors:', error);
+        this.logFailure('remote-retirement', error, undefined, this.context(call));
         return { kind: 'retired-with-errors', remoteAcknowledged: !call.remoteUnavailable, error: errorDetails(error).message };
       }
       return { kind: 'ok' };
@@ -352,6 +535,7 @@ class NativeScreenSharingService {
         break;
       case 'preview-preferences':
         call.pausePreviewWhenUnfocused = command.pauseWhenUnfocused;
+        this.log('preview-preferences', { ...this.context(call), pauseWhenUnfocused: command.pauseWhenUnfocused });
         await this.refreshCallPreviews(call);
         this.current(call);
         break;
@@ -362,18 +546,29 @@ class NativeScreenSharingService {
         const info = { callId: call.config.callId, shareId: command.shareId,
           sourceInstanceId: command.sourceInstanceId, presentationId: command.presentationId };
         entry.previewMode = null;
+        let previousState: string | undefined;
         entry.preview = new NativeScreenPreviewBridge({
           frame: call.frame, info, createMessageChannel: () => new MessageChannelMain(),
-          onState: state => this.emit(call, { type: 'preview-state', callId: call.config.callId,
-            publisherSessionId: call.config.sessionId, shareId: entry.source.shareId,
-            sourceInstanceId: entry.source.instanceId, state }),
+          onState: state => {
+            if (state !== previousState) {
+              previousState = state;
+              this.log('preview-state', { ...this.context(call, entry.source.shareId), state });
+            }
+            this.emit(call, { type: 'preview-state', callId: call.config.callId,
+              publisherSessionId: call.config.sessionId, shareId: entry.source.shareId,
+              sourceInstanceId: entry.source.instanceId, state });
+          },
           onError: error => {
             console.warn('[NativeScreen] Local preview failed without changing the broadcast:', error);
+            this.logFailure('preview', error, undefined, this.context(call, entry.source.shareId));
             if (!entry.publisher.snapshot().stopping)
-              void entry.publisher.setPreviewEnabled(false).catch(cleanupError =>
-                console.error('[NativeScreen] Failed local preview retained capture ownership:', cleanupError));
+              void entry.publisher.setPreviewEnabled(false).catch(cleanupError => {
+                console.error('[NativeScreen] Failed local preview retained capture ownership:', cleanupError);
+                this.logFailure('preview-retirement', cleanupError, undefined, this.context(call, entry.source.shareId));
+              });
           },
         });
+        this.log('preview-start', { ...this.context(call, entry.source.shareId), state: 'waiting' });
         await this.refreshSourcePreview(call, entry);
         break;
       }
@@ -390,6 +585,7 @@ class NativeScreenSharingService {
         const subscriptionKey = key(command.publisherSessionId, command.shareId);
         const intent = call.watchVersions.get(subscriptionKey);
         if (!intent || intent.presentationId !== command.presentationId) throw cancelled();
+        this.log('watch-audio', { ...this.context(call, command.shareId), muted: command.muted, volume: command.volume });
         intent.audio = { ...intent.audio, muted: command.muted, volume: command.volume };
         const entry = call.subscriptions.get(subscriptionKey);
         if (entry?.subscription.presentationId === command.presentationId)
@@ -397,6 +593,8 @@ class NativeScreenSharingService {
         break;
       }
       case 'stop': {
+        this.log('unwatch-requested', { ...this.context(call, command.shareId),
+          presentation: diagnosticId(command.presentationId) });
         const subscriptionKey = key(command.publisherSessionId, command.shareId);
         if (call.watchVersions.get(subscriptionKey)?.presentationId === command.presentationId) call.watchVersions.delete(subscriptionKey);
         const entry = call.subscriptions.get(subscriptionKey);
@@ -460,6 +658,9 @@ class NativeScreenSharingService {
   }
 
   private async addSource(call: CallRecord, command: Extract<NativeScreenCommand, { action: 'source-add' }>): Promise<NativeScreenCommandResult> {
+    const diagnostic = { ...this.context(call, command.shareId), captureKind: command.captureKind ?? 'window',
+      video: diagnosticProfile(command.video), audio: command.audio, preserveAspectRatio: command.preserveAspectRatio ?? false };
+    this.log('source-admission', diagnostic);
     if (call.sources.has(command.shareId) || call.sourceSelections.has(command.shareId)
       || call.sources.size + call.sourceSelections.size >= 3)
       throw new Error('Native screen source already exists or exceeds the two-share plus pending-replacement limit.');
@@ -476,6 +677,7 @@ class NativeScreenSharingService {
       selection.abort.signal.throwIfAborted();
       if (call.sourceSelections.get(command.shareId) !== selection) throw cancelled();
     };
+    let stage = 'capabilities';
     try {
       const capabilities = await this.capabilities();
       assertCurrent();
@@ -483,6 +685,7 @@ class NativeScreenSharingService {
         throw new Error(`Native screen capture is unavailable: ${capabilities.reason}.`);
       if (command.audio && !capabilities.captureAudio) throw new Error('Timestamped screen-sharing audio capture is unavailable.');
       const kind = command.captureKind ?? 'window';
+      stage = 'source-validation';
       if (kind === 'monitor' ? !command.desktopSourceId.startsWith('native-monitor:')
         : !command.desktopSourceId.startsWith('window:'))
         throw new Error('Native source identity does not match its requested capture kind.');
@@ -506,27 +709,40 @@ class NativeScreenSharingService {
           || state.processCreationTime100ns !== target.expectedProcessCreationTime100ns)
           throw Object.assign(new Error('The selected screen-sharing window was closed or replaced.'),
             { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST' });
-        paused = state.isIconic || !state.isVisible;
+        const nextPaused = state.isIconic || !state.isVisible;
+        if (paused !== nextPaused) this.log('source-visibility', { ...diagnostic, paused: nextPaused });
+        paused = nextPaused;
       };
       sourceState();
       const captureDirectory = path.join(app.getPath('userData'), 'native-screen-capture');
       await mkdir(captureDirectory, { recursive: true });
       assertCurrent();
       sourceState();
-      selection.probe = new SelectedCaptureProbe(this.nativeRuntime(), captureDirectory);
+      stage = 'preflight';
+      this.log('preflight-start', diagnostic);
+      selection.probe = new SelectedCaptureProbe(this.nativeRuntime(), captureDirectory,
+        error => this.logFailure('preflight', error, undefined, { ...diagnostic, stage: 'preflight' }));
       const proof = await selection.probe.prepare(target, command.video, selection.abort.signal, command.preserveAspectRatio);
       assertCurrent();
       sourceState();
       this.availability = Promise.resolve({ ...capabilities, capture: true,
         backend: proof.encoderId === 'obs_nvenc_h264_tex' ? 'libobs-nvenc' : 'libobs-amf' });
+      this.log('preflight-ready', { ...diagnostic, encoder: proof.encoderId,
+        backend: proof.encoderId === 'obs_nvenc_h264_tex' ? 'libobs-nvenc' : 'libobs-amf' });
+      stage = 'publisher-creation';
       const source: NativeScreenSource = {
         shareId: command.shareId, instanceId: randomUUID(), video: command.video, audio: command.audio,
       };
       const onError = (error: Error, context?: unknown): void => {
         if (record(context) && typeof context.remoteSessionId === 'string') {
           console.warn('[NativeScreen] Screen viewer failed:', { shareId: source.shareId, remoteSessionId: context.remoteSessionId }, error);
+          this.logFailure('viewer', error, undefined, { ...this.context(call, source.shareId),
+            viewer: diagnosticId(context.remoteSessionId),
+            ...(typeof context.pipelineId === 'string' ? { pipeline: diagnosticId(context.pipelineId) } : {}) });
           return;
         }
+        this.logFailure('publisher', error, undefined, { ...this.context(call, source.shareId),
+          ...(record(context) && typeof context.pipelineId === 'string' ? { pipeline: diagnosticId(context.pipelineId) } : {}) });
         this.error(call, error, call.config.sessionId, source.shareId, undefined, source.instanceId);
         if (!call.stopping && call.sources.get(source.shareId)?.source === source && failureReason(error) === 'source-unavailable')
           void this.removeSource(call, source.shareId).catch(cleanupError => {
@@ -544,6 +760,7 @@ class NativeScreenSharingService {
           this.current(call);
           sourceState();
           captureTarget = { ...captureTarget, kind: 'window' };
+          this.log('capture-fallback', { ...this.context(call, source.shareId), from: 'game', to: 'window' }, 'WARN');
           this.emit(call, { type: 'capture-fallback', callId: call.config.callId,
             publisherSessionId: call.config.sessionId, shareId: source.shareId, sourceInstanceId: source.instanceId });
         },
@@ -563,8 +780,14 @@ class NativeScreenSharingService {
         createEndpoint: options => {
           this.current(call);
           sourceState();
+          const diagnostic = { ...this.context(call, source.shareId, options.pipelineId), role: 'publish',
+            quality: options.quality, video: diagnosticProfile(getScreenShareProfile(source.video, options.quality)),
+            captureKind: captureTarget.kind, encoder: proof.encoderId };
+          this.log('pipeline-create', diagnostic);
+          const observe = this.endpointObserver(call, source.shareId, options.pipelineId, 'publish', options.quality);
           return new NativeScreenEndpoint({
             ...options, runtime: this.nativeRuntime(), textures: sharedTexture, role: 'publish', ...call.config,
+            onState: state => { observe(state); options.onState(state); },
             publisherSessionId: call.config.sessionId, target: captureTarget, captureDirectory, captureEncoder: proof.encoderId,
             preserveAspectRatio: command.preserveAspectRatio ?? false,
             isSourcePaused: () => paused,
@@ -578,7 +801,10 @@ class NativeScreenSharingService {
               captureModule: screenAudio, captureHub, maxBitrateBps: command.audioBitrateKbps * 1000,
             } } : {}),
             rpc: (type, payload) => this.rpc(call, type, payload),
-            onDiagnostic: error => console.warn('[NativeScreen] Capture diagnostic:', error),
+            onDiagnostic: error => {
+              console.warn('[NativeScreen] Capture diagnostic:', error);
+              this.logFailure('capture-diagnostic', error, undefined, diagnostic);
+            },
           });
         },
       });
@@ -590,6 +816,7 @@ class NativeScreenSharingService {
         catch (error) {
           if (entry.monitor) clearInterval(entry.monitor);
           entry.monitor = null;
+          this.logFailure('source-monitor', error, undefined, this.context(call, source.shareId));
           if (target.kind === 'monitor' || failureReason(error) !== 'source-unavailable')
             this.error(call, error, call.config.sessionId, source.shareId, undefined, source.instanceId);
           void this.removeSource(call, source.shareId).catch(cleanupError =>
@@ -597,7 +824,12 @@ class NativeScreenSharingService {
         }
       }, 250);
       entry.monitor.unref();
+      this.log('source-admitted', { ...diagnostic, instance: diagnosticId(source.instanceId) });
       return { kind: 'source', source };
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') this.log('source-admission-cancelled', { ...diagnostic, stage });
+      else this.logFailure('source-admission', error, undefined, { ...diagnostic, stage });
+      throw error;
     } finally {
       selection.finish();
       if ((!selection.probe || selection.probe.retired) && call.sourceSelections.get(command.shareId) === selection)
@@ -609,16 +841,19 @@ class NativeScreenSharingService {
     const entry = call.sources.get(shareId);
     const selection = call.sourceSelections.get(shareId);
     if (selection) {
+      this.log('preflight-retirement', this.context(call, shareId));
       selection.abort.abort(cancelled());
       await selection.done;
       await selection.probe?.close();
       if (call.sourceSelections.get(shareId) === selection) call.sourceSelections.delete(shareId);
     }
     if (!entry) return;
+    this.log('source-retirement', this.context(call, shareId));
     if (entry.monitor) clearInterval(entry.monitor);
     entry.monitor = null;
     const errors: unknown[] = [];
     const preview = entry.preview;
+    if (preview) this.log('preview-retirement', this.context(call, shareId));
     preview?.close();
     const retired = await Promise.allSettled([
       entry.publisher.close(),
@@ -636,10 +871,14 @@ class NativeScreenSharingService {
           shareId, sourceInstanceId: entry.source.instanceId, state: 'closed' });
       }
     }
+    this.log('source-retirement-result', { ...this.context(call, shareId),
+      retained: call.sources.get(shareId) === entry, failures: errors.length });
     if (errors.length) throw new AggregateError(errors, 'Native screen source retirement reported failures.');
   }
 
   private async watch(call: CallRecord, command: Extract<NativeScreenCommand, { action: 'watch' }>): Promise<NativeScreenCommandResult> {
+    this.log('watch-requested', { ...this.context(call, command.shareId), quality: command.quality,
+      presentation: diagnosticId(command.presentationId) });
     const subscriptionKey = key(command.publisherSessionId, command.shareId);
     if (call.watchVersions.get(subscriptionKey)?.presentationId === command.presentationId)
       throw new Error('A new native Watch requires a new presentation identity.');
@@ -662,11 +901,20 @@ class NativeScreenSharingService {
     if (!isDeepStrictEqual(source, call.participants.get(command.publisherSessionId)?.nativeScreenShares
       .find(value => value.shareId === source.shareId))) throw cancelled();
     if (call.subscriptions.size >= 32) throw new Error('Native screen receiver capacity was reached.');
+    let previousState: string | undefined;
     const subscription = new NativeScreenSubscription({
       ...call.config, source, publisherSessionId: command.publisherSessionId, quality: command.quality,
       presentationId: command.presentationId, send: signal => this.send(call, signal),
       onError: error => this.error(call, error, command.publisherSessionId, source.shareId, command.presentationId, source.instanceId),
       onState: state => {
+        const diagnostic = { ...this.context(call, source.shareId), state: state.type,
+          quality: state.quality, presentation: diagnosticId(state.presentationId),
+          ...(state.type === 'capture-mode' ? { captureMode: state.mode } : { reason: state.reason }) };
+        const signature = JSON.stringify(diagnostic);
+        if (previousState !== signature) {
+          previousState = signature;
+          this.log('subscription-state', diagnostic);
+        }
         if (state.type === 'capture-mode') {
           this.emit(call, { type: 'capture-mode', callId: call.config.callId,
             publisherSessionId: command.publisherSessionId, shareId: source.shareId, sourceInstanceId: source.instanceId,
@@ -686,13 +934,21 @@ class NativeScreenSharingService {
         ? this.request(call, { type: 'presentation-stop', presentationId }) : Promise.resolve(null),
       createEndpoint: options => {
         this.current(call);
+        const diagnostic = { ...this.context(call, source.shareId, options.pipelineId), role: 'receive',
+          quality: options.quality, video: diagnosticProfile(getScreenShareProfile(source.video, options.quality)) };
+        this.log('pipeline-create', diagnostic);
+        const observe = this.endpointObserver(call, source.shareId, options.pipelineId, 'receive', options.quality);
         return new NativeScreenEndpoint({
           ...options, runtime: this.nativeRuntime(), textures: sharedTexture, role: 'receive', ...call.config,
+          onState: state => { observe(state); options.onState(state); },
           publisherSessionId: command.publisherSessionId,
           destination: { frame: call.frame, presentationId: options.presentationId },
           ...(source.audio ? { audio: this.audioOptions(call, intent.audio) } : {}),
           rpc: (type, payload) => this.rpc(call, type, payload),
-          onDiagnostic: error => console.warn('[NativeScreen] Receive diagnostic:', error),
+          onDiagnostic: error => {
+            console.warn('[NativeScreen] Receive diagnostic:', error);
+            this.logFailure('receive-diagnostic', error, undefined, diagnostic);
+          },
         });
       },
     });
@@ -712,10 +968,14 @@ class NativeScreenSharingService {
 
   private async closeSubscription(call: CallRecord, entry: SubscriptionRecord): Promise<void> {
     const subscriptionKey = key(entry.publisherSessionId, entry.source.shareId);
+    const diagnostic = { ...this.context(call, entry.source.shareId),
+      presentation: diagnosticId(entry.subscription.presentationId) };
+    this.log('subscription-retirement', diagnostic);
     try { await entry.subscription.close(); }
     finally {
       if (entry.subscription.snapshot().closed && call.subscriptions.get(subscriptionKey) === entry)
         call.subscriptions.delete(subscriptionKey);
+      this.log('subscription-retirement-result', { ...diagnostic, closed: entry.subscription.snapshot().closed });
     }
   }
 
@@ -740,6 +1000,10 @@ class NativeScreenSharingService {
       const entry = call.sources.get(signal.shareId);
       if (entry?.source.instanceId === signal.sourceInstanceId) {
         if (!call.participants.has(signal.fromSessionId)) throw new Error('Native screen viewer is absent from the call roster.');
+        if (signal.action === 'watch' || signal.action === 'stop')
+          this.log('viewer-demand', { ...this.context(call, signal.shareId), action: signal.action,
+            viewer: diagnosticId(signal.fromSessionId), subscription: diagnosticId(signal.subscriptionId),
+            ...(signal.action === 'watch' ? { quality: signal.quality } : {}) });
         await entry.publisher.receive(signal);
       } else if (signal.action === 'watch') {
         await this.send(call, nativeScreenSignalSchema.parse({
@@ -768,6 +1032,8 @@ class NativeScreenSharingService {
 
   private closeCall(call: CallRecord): Promise<void> {
     if (call.retirement) return call.retirement;
+    this.log('call-retirement', { ...this.context(call), remoteUnavailable: call.remoteUnavailable,
+      sources: call.sources.size, selections: call.sourceSelections.size, subscriptions: call.subscriptions.size });
     call.stopping = true;
     for (const selection of call.sourceSelections.values()) selection.abort.abort(cancelled());
     call.watchVersions.clear();
@@ -794,12 +1060,18 @@ class NativeScreenSharingService {
         }
       }
       if (call.sources.size === 0 && call.sourceSelections.size === 0 && call.subscriptions.size === 0) this.calls.delete(call.config.callId);
+      this.log('call-retirement-result', { ...this.context(call), retained: this.calls.has(call.config.callId),
+        remoteAcknowledged: !call.remoteUnavailable, failures: errors.length,
+        sources: call.sources.size, selections: call.sourceSelections.size, subscriptions: call.subscriptions.size });
       if (errors.length) throw new AggregateError(errors, 'Native screen call shutdown reported failures.');
       if (call.sources.size || call.sourceSelections.size || call.subscriptions.size)
         throw new Error('A native screen call retained media resources.');
     })();
     call.retirement = retirement;
-    void retirement.catch(() => { if (this.calls.get(call.config.callId) === call) call.retirement = null; });
+    void retirement.catch(error => {
+      this.logFailure('call-retirement', error, undefined, this.context(call));
+      if (this.calls.get(call.config.callId) === call) call.retirement = null;
+    });
     return retirement;
   }
 
@@ -820,6 +1092,7 @@ class NativeScreenSharingService {
   }
 
   retireDocument(): Promise<void> {
+    if (this.calls.size) this.log('document-retirement', { calls: this.calls.size });
     for (const call of this.calls.values()) { call.documentRetired = true; call.remoteUnavailable = true; }
     return this.closeCalls();
   }
@@ -828,15 +1101,17 @@ class NativeScreenSharingService {
     await this.closeCalls();
     if (this.requests.size) throw new Error('Native screen IPC still owns pending requests.');
     this.disposed = true;
+    this.recentFailures.clear();
   }
 }
 
 export function setupNativeScreenSharingIpc(
   window: BrowserWindow,
   resolveSource: (sourceId: string, kind: NativeScreenCaptureKind) => NativeScreenCaptureTarget,
+  logger?: Pick<ClientLogger, 'write'>,
 ): NativeScreenSharingIpc {
-  const service = new NativeScreenSharingService(window, resolveSource);
-  const invoke = async <T>(event: IpcMainInvokeEvent, action: () => Promise<T> | T): Promise<T> => {
+  const service = new NativeScreenSharingService(window, resolveSource, logger);
+  const invoke = async <T>(event: IpcMainInvokeEvent, action: () => Promise<T> | T, input?: unknown): Promise<T> => {
     if (!service.owns(event)) {
       console.warn('[NativeScreen] Rejected IPC from a non-owner frame.');
       throw new Error('Native screen IPC requires the owned main frame.');
@@ -845,6 +1120,7 @@ export function setupNativeScreenSharingIpc(
     catch (error) {
       const message = errorDetails(error).message;
       console.error('[NativeScreen] IPC operation failed:', message, error);
+      service.logFailure('IPC', error, input);
       if (error instanceof AggregateError) throw new Error(message, { cause: error });
       throw error;
     }
@@ -858,10 +1134,13 @@ export function setupNativeScreenSharingIpc(
       }
       throw error;
     }
-  }));
+  }, input));
   ipcMain.handle(NATIVE_SCREEN_IPC.reply, (event, input: unknown) => invoke(event, () => service.reply(input)));
   const cleanup = (): void => {
-    void service.retireDocument().catch(error => console.error('[NativeScreen] Renderer teardown reported failures:', error));
+    void service.retireDocument().catch(error => {
+      console.error('[NativeScreen] Renderer teardown reported failures:', error);
+      service.logFailure('document-retirement', error);
+    });
   };
   const navigation = (details: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>): void => {
     if (details.isMainFrame && !details.isSameDocument) cleanup();
@@ -872,8 +1151,10 @@ export function setupNativeScreenSharingIpc(
     if (focusUpdate) return;
     focusUpdate = setImmediate(() => {
       focusUpdate = null;
-      void service.refreshPreviewVisibility().catch(error =>
-        console.error('[NativeScreen] Preview focus update failed:', error));
+      void service.refreshPreviewVisibility().catch(error => {
+        console.error('[NativeScreen] Preview focus update failed:', error);
+        service.logFailure('preview-focus', error);
+      });
     });
   };
   app.on('browser-window-focus', focusChanged);

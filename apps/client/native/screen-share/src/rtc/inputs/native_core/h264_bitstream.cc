@@ -132,6 +132,16 @@ const char* H264ProfileName(H264Profile profile) {
   throw std::runtime_error("Unsupported H264 profile");
 }
 
+bool IsBt709LimitedCompatible(const H264Sps& sps) {
+  // H.264 value 2 is unspecified, just like an absent colour description.
+  // The capture/decoder contract supplies BT.709 limited; conflicting VUI is rejected.
+  const auto compatible = [](std::optional<std::uint8_t> value) {
+    return !value || *value == 1 || *value == 2;
+  };
+  return !sps.fullRange.value_or(false) && compatible(sps.colorPrimaries) &&
+      compatible(sps.transferCharacteristics) && compatible(sps.matrixCoefficients);
+}
+
 bool MatchesH264Profile(const H264Sps& sps, H264Profile profile) {
   switch (profile) {
     case H264Profile::Baseline: return sps.profileIdc == 66;

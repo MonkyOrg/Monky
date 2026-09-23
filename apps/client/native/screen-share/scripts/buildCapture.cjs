@@ -204,7 +204,9 @@ function build(config) {
       runtime.map(file => `  {L${JSON.stringify(file.path)}, ${file.bytes}ULL, "${file.sha256}"},`).join('\n') + '\n};\n}\n');
     const executable = path.join(buildDirectory, 'monky-screen-capture.exe');
     const tests = path.join(buildDirectory, 'capture-contract-test.exe');
-    for (const [name, input, output] of [['host', 'host.cpp', executable], ['contracts', 'contractTest.cpp', tests]]) {
+    const nvencTests = path.join(buildDirectory, 'nvenc-probe-contract-test.exe');
+    for (const [name, input, output] of [['host', 'host.cpp', executable], ['contracts', 'contractTest.cpp', tests],
+      ['nvenc-probe-contracts', 'nvencProbeTest.cpp', nvencTests]]) {
       compile(name, ['/nologo', '/std:c++20', '/EHsc', '/MD', '/W4', '/WX', '/O2', '/utf-8', '/Brepro',
         `/I${quote(generated)}`, `/I${quote(path.join(dependencies, 'include'))}`,
         quote(path.join(source, input)), `/Fo${quote(path.join(buildDirectory, `${name}.obj`))}`,
@@ -213,6 +215,12 @@ function build(config) {
     inspect(executable);
     const contracts = JSON.parse(execute(tests, [], { env, capture: true }));
     assert.ok(contracts.deviceFree && contracts.checks >= 60 && contracts.headerBytes === 96);
+    const nvencProbe = JSON.parse(execute(nvencTests, [], { env, capture: true }));
+    assert.equal(nvencProbe.deviceFree, true); assert.equal(nvencProbe.modeledApi, true);
+    assert.equal(nvencProbe.sdkMajor, 12); assert.equal(nvencProbe.sdkMinor, 2);
+    assert.ok(nvencProbe.scenarios >= 65 && nvencProbe.checks >= 1500);
+    assert.ok(nvencProbe.maximumDiagnosticBytes > 0 && nvencProbe.maximumDiagnosticBytes <= 1024);
+    contracts.nvencProbe = nvencProbe;
     const platformProbe = JSON.parse(execute(tests, ['--platform-probe'], { env, capture: true }));
     assert.equal(platformProbe.deviceFree, true); assert.equal(platformProbe.synthetic, true);
     assert.equal(platformProbe.messages.length, 48);

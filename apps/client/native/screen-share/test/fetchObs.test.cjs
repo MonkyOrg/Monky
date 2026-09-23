@@ -5,7 +5,6 @@ const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const https = require('node:https');
-const os = require('node:os');
 const path = require('node:path');
 const { Readable } = require('node:stream');
 const { test } = require('node:test');
@@ -78,7 +77,7 @@ test('native archive body errors propagate to the consumer instead of completing
 });
 
 function downloadFixture(t) {
-  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'monky-obs-download-'));
+  const directory = fs.mkdtempSync(path.join(__dirname, 'monky-obs-download-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const delays = [], warnings = [];
   t.mock.method(timers, 'setTimeout', async milliseconds => { delays.push(milliseconds); });
@@ -156,8 +155,21 @@ test('verified archives are reused and a corrupt existing cache is not silently 
   assert.equal(fs.readFileSync(filename, 'utf8'), 'corrupt cache fixture');
 });
 
+test('restored archives must also match the pinned size and be regular files before use', async t => {
+  const f = downloadFixture(t);
+  const filename = path.join(f.directory, f.record.sha256 + '.zip');
+  fs.writeFileSync(filename, f.body);
+  const requests = archiveRequests(t, () => assert.fail('A restored archive must be checked before any network request'));
+  assert.equal(await download(f.record, f.directory), filename);
+  await assert.rejects(download({ ...f.record, bytes: f.body.length + 1 }, f.directory), { code: 'ERR_ASSERTION' });
+  fs.unlinkSync(filename);
+  fs.mkdirSync(filename);
+  await assert.rejects(download(f.record, f.directory), /regular file/u);
+  assert.equal(requests.length, 0);
+});
+
 test('source recipes are parsed as data, without evaluating downloaded PowerShell', t => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-obs-recipes-'));
+  const directory = fs.mkdtempSync(path.join(__dirname, 'monky-obs-recipes-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.mkdirSync(path.join(directory, 'checksums'));
   const recipe = [

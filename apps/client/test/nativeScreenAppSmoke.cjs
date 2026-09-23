@@ -31,10 +31,12 @@ const idleSourceClose = process.argv.includes('--idle-source-close');
 const admissionRecovery = process.argv.includes('--admission-recovery');
 const preserveAspectRatio = process.argv.includes('--preserve-aspect-ratio');
 const gameFallback = process.argv.includes('--game-fallback');
+const publisherStop = process.argv.includes('--publisher-stop');
+const sourceResize = process.argv.includes('--source-resize');
 assert.ok(!unsupportedBrowserCodec || (browserReceiver && mode === 'p2p'), 'The unsupported-codec case requires a browser P2P receiver.');
 assert.ok(!incompatibleViewer || (!browserReceiver && mode === 'p2p'), 'Mixed compatibility requires a native primary P2P receiver.');
 const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbols='))?.slice('--debug-symbols='.length);
-const report = { mode, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback,
+const report = { mode, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize,
   normalMain: true, normalPreload: true, ownedSyntheticSource: true,
   qaFocusHooks: 'owned parent IPC only; normal Main and preload checks unchanged',
   capabilityOverride: browserReceiver ? 'viewer.receive=false (real Chromium receiver, not a macOS hardware test)' : null,
@@ -530,6 +532,12 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       if (!(button instanceof HTMLButtonElement)) throw new Error('The real Watch control is missing.');
       button.click();
     },
+    stopSharing() {
+      const button = document.querySelector('#stage-btn-stop-share');
+      if (!(button instanceof HTMLButtonElement) || button.disabled || !button.getClientRects().length)
+        throw new Error('The real publisher Stop control is unavailable.');
+      button.click();
+    },
     toggleLocalFocus() {
       const capture = videoService.getNativeScreenCaptures()[0];
       if (!capture) throw new Error('The owned local source is missing.');
@@ -584,6 +592,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         video: video ? { width: video.videoWidth, height: video.videoHeight, readyState: video.readyState,
           frames: video.getVideoPlaybackQuality().totalVideoFrames, at: performance.now() } : null,
         errors: [...nativeErrors],
+        dialog: document.querySelector('.dialog-card .dialog-message')?.textContent ?? null,
         captureFallbacks: [...captureFallbacks],
         fallbackToasts: [...fallbackToasts],
         captureModes: [...document.querySelectorAll('.stage-capture-mode-badge[data-capture-mode]')]
@@ -888,9 +897,9 @@ async function run() {
     debuggerExited = once(debuggerProcess, 'exit').then(async () => { await log.close(); });
     await until(() => output.includes('OWNED_SCREEN_DEBUGGER_READY'), 'Debugger did not attach to the owned publisher.', 15000);
   }
-  const sourceCommand = async command => {
+  const sourceCommand = async (command, dimensions = {}) => {
     const id = randomUUID(), response = once(source, 'message');
-    source.send({ type: 'source-command', id, command });
+    source.send({ type: 'source-command', id, command, ...dimensions });
     const [result] = await within(response, 10000, `Owned source command timed out: ${command}`);
     assert.equal(result.id, id); assert.equal(result.ok, true, result.error);
   };
@@ -1246,6 +1255,26 @@ async function run() {
     assert.ok(report.overlayBefore.every(video => video.captureMode === 'normal'));
   }
 
+  if (sourceResize) {
+    phase('resizing-the-owned-source-with-an-active-spectator');
+    report.sourceResizes = [];
+    for (const [width, height] of [[640, 480], [1280, 720], [800, 600]]) {
+      const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+      await sourceCommand('resize-source', { width, height });
+      await until(async () => {
+        const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+        const local = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+        assert.equal(local.dialog, null);
+        assert.deepEqual(local.errors, []);
+        assert.equal(state.sources[0]?.instanceId, report.published.source.instanceId);
+        return state.video?.width === 1920 && state.video.height === 1080
+          && state.video.frames >= before.video.frames + 30;
+      }, 'Source resize interrupted the selected window, source identity or decoded output.');
+      report.sourceResizes.push({ width, height,
+        receiver: await viewer.cdp.evaluate('nativeAppSmoke.snapshot()') });
+    }
+  }
+
   phase('entering-fullscreen');
   await viewer.cdp.evaluate('nativeAppSmoke.fullscreen()');
   await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).fullscreen, 'Normal fullscreen did not open.');
@@ -1387,6 +1416,37 @@ async function run() {
     }, 'The original call did not resume visible playback at the quality selected in the background.');
     assert.equal(misplacedSignals, 0, 'Screen signaling escaped to the foreground server.');
     report.backgroundCallPreserved = true;
+  }
+
+  if (publisherStop) {
+    report.publisherStopCycles = [];
+    for (let cycle = 0; cycle < 2; cycle++) {
+      phase(`publisher-stop-while-watched-${cycle + 1}`);
+      const before = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+      await publisher.cdp.evaluate('nativeAppSmoke.stopSharing()');
+      await until(async () => {
+        const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+        assert.equal(state.dialog, null, 'Stopping a watched source must not raise a retirement alert.');
+        assert.deepEqual(state.errors, [], 'Publisher Stop must not emit native failure notifications.');
+        const stats = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
+        return state.localNativeSources === 0 && stats.publishers.length === 0;
+      }, 'Publisher Stop retained its native source or audio reservation.');
+      await until(async () => {
+        const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+        return state.sources.length === 0 && state.watchStates.length === 0;
+      }, 'Publisher Stop did not retire the actual spectator subscription.');
+      await focusOwned(publisher);
+      const restarted = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(sourceReady.hwnd)})`);
+      assert.equal(restarted.source.audio, audioEnabled);
+      assert.equal((await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).mainCall, before.mainCall);
+      await waitForLocalPreview();
+      await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).watchButton,
+        'Restarting the same source did not restore the spectator Watch control.');
+      await viewer.cdp.evaluate('nativeAppSmoke.watch()');
+      await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).video?.frames >= 15,
+        'The spectator did not receive the restarted source.');
+      report.publisherStopCycles.push(await collectEvidence(`publisherRestart-${cycle + 1}`, publisher, viewer));
+    }
   }
 
   if (serverLoss) {
