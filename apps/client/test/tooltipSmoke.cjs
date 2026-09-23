@@ -2,7 +2,30 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-module.exports = { runTooltipSmoke };
+module.exports = { runTooltipSmoke, focusTooltipPreview };
+
+async function focusTooltipPreview(browser, timeoutMs = 2000) {
+  // sendInputEvent requires a focused BrowserWindow; showInactive does not
+  // establish that prerequisite, particularly on hosted macOS desktops.
+  browser.show();
+  browser.focus();
+  browser.webContents.focus();
+  const deadline = Date.now() + timeoutMs;
+  let state;
+  do {
+    state = {
+      visible: browser.isVisible(),
+      nativeFocus: browser.isFocused(),
+      ...await browser.webContents.executeJavaScript(`({
+        rendererFocus: document.hasFocus(), visibility: document.visibilityState
+      })`),
+    };
+    if (state.visible && state.nativeFocus && state.rendererFocus && state.visibility === 'visible') return state;
+    if (Date.now() >= deadline) break;
+    await new Promise(resolve => setTimeout(resolve, 16));
+  } while (true);
+  throw new Error(`Tooltip native pointer prerequisite not ready: ${JSON.stringify(state)}`);
+}
 
 if (require.main === module || process.argv[1] === __filename) {
   const clientRoot = path.resolve(__dirname, '..');
@@ -65,18 +88,40 @@ if (require.main === module || process.argv[1] === __filename) {
       const checks = await window.webContents.executeJavaScript(`(${runTooltipSmoke.toString()})()`, true);
       console.log(`Tooltip smoke: ${checks} checks passed`);
       await window.webContents.executeJavaScript(`(${renderTooltipPreview.toString()})()`, true);
-      window.showInactive();
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await focusTooltipPreview(window);
+      const point = await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+        requestAnimationFrame(() => {
+          const button = document.querySelector('#tooltip-preview-button');
+          const rect = button.getBoundingClientRect();
+          const point = { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+          if (!button.contains(document.elementFromPoint(point.x, point.y))) {
+            reject(new Error('Tooltip button is not the native pointer hit target'));
+            return;
+          }
+          resolve(point);
+        });
+      })`);
       // Exercise Chromium's real pointer dispatch over a disabled button, not just DOM events.
       window.webContents.sendInputEvent({ type: 'mouseMove', x: 20, y: 20 });
-      window.webContents.sendInputEvent({ type: 'mouseMove', x: 315, y: 238 });
+      await window.webContents.executeJavaScript(`new Promise(resolve => requestAnimationFrame(() => {
+        window.tooltipPreviewPointer = false;
+        resolve();
+      }))`);
+      window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
       await new Promise((resolve) => setTimeout(resolve, 250));
       const nativeHover = await window.webContents.executeJavaScript(`(() => {
         const button = document.querySelector('#tooltip-preview-button');
         const tip = document.querySelector('.monky-tooltip');
-        return !tip.hidden && tip.textContent === button.title && button.getAttribute('title') === '';
+        return {
+          correct: !tip.hidden && tip.textContent === button.title && button.getAttribute('title') === '',
+          trustedPointer: window.tooltipPreviewPointer,
+          focused: document.hasFocus(), visibility: document.visibilityState,
+          hovered: button.matches(':hover'), title: button.title, attribute: button.getAttribute('title'),
+          tooltipHidden: tip.hidden, tooltipText: tip.textContent
+        };
       })()`);
-      if (!nativeHover) throw new Error('Real Electron pointer hover on disabled button did not show/suppress tooltip');
+      if (!nativeHover.correct || !nativeHover.trustedPointer)
+        throw new Error(`Real Electron pointer hover on disabled button did not show/suppress tooltip: ${JSON.stringify(nativeHover)}`);
       const image = await window.webContents.capturePage();
       const filename = path.join(clientRoot, 'dist-test', 'tooltip-preview.png');
       fs.writeFileSync(filename, image.toPNG());
@@ -101,7 +146,18 @@ async function renderTooltipPreview() {
     </div>
   </main>`;
   const dispose = initTooltips();
-  window.disposeTooltipPreview = () => { dispose(); delete window.disposeTooltipPreview; };
+  window.tooltipPreviewPointer = false;
+  const pointer = event => {
+    if (event.isTrusted && document.querySelector('#tooltip-preview-button').contains(event.target))
+      window.tooltipPreviewPointer = true;
+  };
+  document.addEventListener('pointerover', pointer, true);
+  window.disposeTooltipPreview = () => {
+    document.removeEventListener('pointerover', pointer, true);
+    dispose();
+    delete window.tooltipPreviewPointer;
+    delete window.disposeTooltipPreview;
+  };
   await document.fonts.ready;
 }
 

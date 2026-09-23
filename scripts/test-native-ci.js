@@ -8,6 +8,7 @@ import { test } from 'node:test';
 const require = createRequire(import.meta.url);
 const { load } = require('js-yaml');
 const { commands, run } = require('./test-client-dom.cjs');
+const { focusTooltipPreview } = require('../apps/client/test/tooltipSmoke.cjs');
 const root = fileURLToPath(new URL('..', import.meta.url));
 const workflow = name => load(fs.readFileSync(path.join(root, '.github', 'workflows', name), 'utf8'));
 const ci = workflow('ci.yml');
@@ -149,4 +150,52 @@ test('DOM runner preserves Windows npm shell handling and stops immediately on f
     assert.throws(() => run(() => { calls++; return result; }), /failed|spawn failure/u);
     assert.equal(calls, 1);
   }
+});
+
+test('native tooltip input requires actual window and renderer focus, not a fixed showInactive delay', async () => {
+  const calls = [];
+  let shown = false, nativeFocused = false, rendererFocused = false;
+  const browser = {
+    show() { calls.push('show'); shown = true; },
+    focus() { assert.ok(shown); calls.push('focus'); nativeFocused = true; },
+    isVisible: () => shown,
+    isFocused: () => nativeFocused,
+    webContents: {
+      focus() { assert.ok(nativeFocused); calls.push('renderer-focus'); rendererFocused = true; },
+      async executeJavaScript() {
+        calls.push('readiness');
+        return { rendererFocus: rendererFocused, visibility: 'visible' };
+      },
+    },
+  };
+  assert.deepEqual(await focusTooltipPreview(browser), {
+    visible: true, nativeFocus: true, rendererFocus: true, visibility: 'visible',
+  });
+  assert.deepEqual(calls, ['show', 'focus', 'renderer-focus', 'readiness']);
+
+  for (const missing of ['visible', 'nativeFocus', 'rendererFocus', 'visibility']) {
+    const state = { visible: true, nativeFocus: true, rendererFocus: true, visibility: 'visible',
+      [missing]: missing === 'visibility' ? 'hidden' : false };
+    const unavailable = {
+      show() {}, focus() {}, isVisible: () => state.visible, isFocused: () => state.nativeFocus,
+      webContents: {
+        focus() {},
+        async executeJavaScript() { return { rendererFocus: state.rendererFocus, visibility: state.visibility }; },
+      },
+    };
+    await assert.rejects(focusTooltipPreview(unavailable, 0), /native pointer prerequisite not ready/u);
+  }
+});
+
+test('native tooltip readiness waits for asynchronous renderer focus instead of assuming show focused it', async () => {
+  let reads = 0;
+  const browser = {
+    show() {}, focus() {}, isVisible: () => true, isFocused: () => true,
+    webContents: {
+      focus() {},
+      async executeJavaScript() { return { rendererFocus: ++reads > 1, visibility: 'visible' }; },
+    },
+  };
+  assert.equal((await focusTooltipPreview(browser)).rendererFocus, true);
+  assert.equal(reads, 2);
 });
