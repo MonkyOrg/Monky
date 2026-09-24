@@ -62,6 +62,7 @@ export class RoleService {
   public async ensureDefaultRolesAssigned(userId: string): Promise<void> {
     const defaultRoles = await this.roleRepo.getDefaultRoles();
     for (const role of defaultRoles) {
+      if ((role.permissions & Permission.ADMINISTRATOR) !== 0 || await this.isBuiltInAdminRole(role.id)) continue;
       await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, role.id));
     }
   }
@@ -130,6 +131,12 @@ export class RoleService {
     }
 
     const isBuiltInAdmin = await this.isBuiltInAdminRole(existing.id);
+    if (isBuiltInAdmin && !(await this.permissionService.isOwner(actorUserId))) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode editar o cargo Admin.' };
+    }
+    if (isBuiltInAdmin && parsed.data.isDefault === true) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O cargo Admin não pode ser atribuído automaticamente.' };
+    }
     if (parsed.data.name !== undefined && parsed.data.name !== existing.name) {
       // Renaming either direction would move the ADMINISTRATOR exemption around.
       if (isBuiltInAdmin || this.usesReservedAdminName(parsed.data.name)) {

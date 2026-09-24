@@ -16,6 +16,7 @@ export function isPrivateHostname(hostname: string): boolean {
 }
 
 export function isPrivateAddress(address: string): boolean {
+  address = address.trim().replace(/^\[|\]$/g, '').split('%')[0];
   const version = net.isIP(address);
   if (version === 4) return isPrivateIPv4(address);
   if (version === 6) return isPrivateIPv6(address);
@@ -26,7 +27,7 @@ export function isPrivateAddress(address: string): boolean {
 function isPrivateIPv4(address: string): boolean {
   const parts = address.split('.').map((part) => Number.parseInt(part, 10));
   if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) return true;
-  const [a, b] = parts;
+  const [a, b, c] = parts;
 
   if (a === 0) return true;                          // 0.0.0.0/8 — "esta rede"
   if (a === 10) return true;                         // 10.0.0.0/8
@@ -34,7 +35,7 @@ function isPrivateIPv4(address: string): boolean {
   if (a === 169 && b === 254) return true;           // link-local, inclui metadata de nuvem
   if (a === 172 && b >= 16 && b <= 31) return true;  // 172.16.0.0/12
   if (a === 192 && b === 168) return true;           // 192.168.0.0/16
-  if (a === 192 && b === 0) return true;             // 192.0.0.0/24 — uso especial
+  if (a === 192 && b === 0 && c === 0) return true;  // 192.0.0.0/24 — uso especial
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
   if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
   if (a >= 224) return true;                         // multicast e reservado
@@ -43,19 +44,16 @@ function isPrivateIPv4(address: string): boolean {
 }
 
 function isPrivateIPv6(address: string): boolean {
-  const host = address.trim().toLowerCase().replace(/^\[|\]$/g, '').split('%')[0];
-
-  if (host === '::' || host === '::1') return true;
-
-  // IPv4 mapeado (::ffff:192.168.0.1) herda a decisão da versão 4.
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host);
-  if (mapped) return isPrivateIPv4(mapped[1]);
-
-  if (host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb')) {
-    return true; // fe80::/10 link-local
+  const host = new URL(`http://[${address}]/`).hostname.slice(1, -1);
+  const [left, right] = host.split('::');
+  const prefix = left ? left.split(':') : [];
+  const suffix = right ? right.split(':') : [];
+  const words = (right === undefined ? prefix
+    : [...prefix, ...Array<string>(8 - prefix.length - suffix.length).fill('0'), ...suffix])
+    .map((word) => Number.parseInt(word, 16));
+  if (words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff) {
+    return isPrivateIPv4(`${words[6] >>> 8}.${words[6] & 255}.${words[7] >>> 8}.${words[7] & 255}`);
   }
-  if (host.startsWith('fc') || host.startsWith('fd')) return true; // fc00::/7 unique local
-  if (host.startsWith('ff')) return true; // multicast
-
-  return false;
+  if (words.slice(0, 7).every((word) => word === 0) && words[7] <= 1) return true;
+  return (words[0] & 0xffc0) === 0xfe80 || (words[0] & 0xfe00) === 0xfc00 || (words[0] & 0xff00) === 0xff00;
 }

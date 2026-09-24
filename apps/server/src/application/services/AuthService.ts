@@ -1,5 +1,5 @@
 import { createPublicKey, randomBytes, verify } from 'crypto';
-import type { WebSocket } from 'ws';
+import { WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import {
   AttachmentStorageInfo,
@@ -87,6 +87,8 @@ export function resolveTurnSfuExclusion(
 
 export class AuthService {
   private pendingChallenges = new Map<WebSocket, PendingAuthChallenge>();
+  private attempts = new WeakMap<WebSocket, symbol>();
+  private challengeTimers = new Map<WebSocket, ReturnType<typeof setTimeout>>();
 
   constructor(
     private serverRepo: IServerRepository,
@@ -144,7 +146,13 @@ export class AuthService {
       };
     }
 
+    this.clearChallenge(ws);
+    const attempt = Symbol();
+    this.attempts.set(ws, attempt);
+    const isCurrent = () => this.attempts.get(ws) === attempt && ws.readyState === WebSocket.OPEN;
+    const cancelled = { success: false, errorCode: ProtocolErrorCode.UNAUTHORIZED, errorMessage: 'Conexão encerrada.' };
     const server = await this.serverRepo.getServer();
+    if (!isCurrent()) return cancelled;
     if (!server) {
       return {
         success: false,
@@ -155,6 +163,7 @@ export class AuthService {
 
     if (server.passwordHash && server.passwordHash.length > 0) {
       const isValid = await PasswordService.verifyPassword(parseResult.data.password || '', server.passwordHash);
+      if (!isCurrent()) return cancelled;
       if (!isValid) {
         Logger.security(`Failed authentication attempt for nickname: ${parseResult.data.nickname}`);
         return {
@@ -177,6 +186,9 @@ export class AuthService {
       deviceId: parseResult.data.deviceId || randomBytes(16).toString('hex'),
       appearOffline: parseResult.data.appearOffline === true,
     });
+    const timer = setTimeout(() => this.clearChallenge(ws), 30_000);
+    timer.unref();
+    this.challengeTimers.set(ws, timer);
 
     return {
       success: true,
@@ -197,7 +209,7 @@ export class AuthService {
 
     const parseResult = authChallengeResponseSchema.safeParse({ signature });
     if (!parseResult.success) {
-      this.pendingChallenges.delete(ws);
+      this.clearChallenge(ws);
       return {
         success: false,
         errorCode: ProtocolErrorCode.BAD_REQUEST,
@@ -220,7 +232,7 @@ export class AuthService {
     }
 
     if (!isValidSignature) {
-      this.pendingChallenges.delete(ws);
+      this.clearChallenge(ws);
       return {
         success: false,
         authFailed: true,
@@ -229,11 +241,15 @@ export class AuthService {
       };
     }
 
-    this.pendingChallenges.delete(ws);
+    this.clearChallenge(ws);
     return await this.finishAuthentication(pending);
   }
 
   public clearChallenge(ws: WebSocket): void {
+    this.attempts.delete(ws);
+    const timer = this.challengeTimers.get(ws);
+    if (timer) clearTimeout(timer);
+    this.challengeTimers.delete(ws);
     this.pendingChallenges.delete(ws);
   }
 

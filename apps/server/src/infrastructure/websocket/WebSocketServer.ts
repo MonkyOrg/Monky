@@ -628,18 +628,23 @@ export class WebSocketServer {
       // um jeito de manter o servidor ocupado (#372). Só a tentativa que falha
       // gasta cota: quem entra normalmente não é penalizado, e várias pessoas
       // atrás do mesmo IP público continuam reconectando depois de uma queda.
-      if (!this.rateLimiter.peek(
+      const release = this.rateLimiter.reserve(
         `auth:${session.ip}`,
         LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS,
         LIMITS.RATE_LIMIT_AUTH_WINDOW_MS
-      )) {
+      );
+      if (!release) {
         Logger.security(`Authentication rate limit reached for ${session.ip}`);
         // Código próprio: o cliente traduz por código, e RATE_LIMITED já
         // significa "flood de mensagens" para ele (#372).
         this.sendError(session.ws, ProtocolErrorCode.AUTH_RATE_LIMITED, 'Muitas tentativas de conexão. Aguarde um minuto.', requestId);
         return;
       }
-      await this.handleAuthConnect(session, payload as AuthConnectPayload, requestId);
+      try {
+        await this.handleAuthConnect(session, payload as AuthConnectPayload, requestId);
+      } finally {
+        release();
+      }
       return;
     }
 
@@ -1105,6 +1110,10 @@ export class WebSocketServer {
     payload: AuthConnectPayload,
     requestId?: string
   ): Promise<void> {
+    if (!payload || typeof payload !== 'object') {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de autenticação inválidos.', requestId);
+      return;
+    }
     // Bot token auth: skip challenge-response, authenticate directly (#569).
     if (payload.botToken && this.botService) {
       await this.handleBotAuth(session, payload, requestId);
@@ -1112,6 +1121,7 @@ export class WebSocketServer {
     }
 
     const result = await this.authService.createChallenge(session.ws, payload);
+    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
 
     if (!result.success || !result.nonce) {
       // Aqui é onde a senha errada aparece: é esta tentativa que conta para o

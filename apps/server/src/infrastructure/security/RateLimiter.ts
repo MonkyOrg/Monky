@@ -2,6 +2,8 @@ import { LIMITS } from '@monky/shared';
 
 export class RateLimiter {
   private userMessageTimestamps: Map<string, number[]> = new Map();
+  private windows = new Map<string, number>();
+  private reservations = new Map<string, number>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(cleanupIntervalMs: number = 60_000) {
@@ -23,6 +25,7 @@ export class RateLimiter {
     maxCount: number = LIMITS.RATE_LIMIT_MAX_MESSAGES,
     windowMs: number = LIMITS.RATE_LIMIT_WINDOW_MS
   ): boolean {
+    this.windows.set(userIdOrIp, Math.max(windowMs, this.windows.get(userIdOrIp) ?? 0));
     const now = Date.now();
     let timestamps = this.userMessageTimestamps.get(userIdOrIp);
 
@@ -62,12 +65,29 @@ export class RateLimiter {
     return timestamps.filter((t) => now - t < windowMs).length < maxCount;
   }
 
+  public reserve(key: string, maxCount: number, windowMs: number): (() => void) | null {
+    const active = this.reservations.get(key) ?? 0;
+    const failures = (this.userMessageTimestamps.get(key) ?? [])
+      .filter((time) => Date.now() - time < windowMs).length;
+    if (active + failures >= maxCount) return null;
+    this.reservations.set(key, active + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.reservations.get(key) ?? 1) - 1;
+      if (remaining === 0) this.reservations.delete(key);
+      else this.reservations.set(key, remaining);
+    };
+  }
+
   public cleanup(): void {
     const now = Date.now();
     for (const [key, timestamps] of this.userMessageTimestamps.entries()) {
-      const valid = timestamps.filter((t) => now - t < LIMITS.RATE_LIMIT_WINDOW_MS);
+      const valid = timestamps.filter((t) => now - t < (this.windows.get(key) ?? LIMITS.RATE_LIMIT_WINDOW_MS));
       if (valid.length === 0) {
         this.userMessageTimestamps.delete(key);
+        this.windows.delete(key);
       } else {
         this.userMessageTimestamps.set(key, valid);
       }
@@ -80,5 +100,8 @@ export class RateLimiter {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
     }
+    this.userMessageTimestamps.clear();
+    this.windows.clear();
+    this.reservations.clear();
   }
 }
