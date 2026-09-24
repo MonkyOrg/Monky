@@ -20,6 +20,12 @@ if (require.main === module || process.argv[1] === __filename) {
   } else {
     const { app, BrowserWindow } = require('electron');
     app.setPath('userData', process.env.MONKY_AUDIO_DEVICE_TEST_PROFILE);
+    if (process.env.CI === 'true') {
+      // Exercise the real shaders on GPU-less runners, without changing app startup.
+      app.commandLine.appendSwitch('use-gl', 'angle');
+      app.commandLine.appendSwitch('use-angle', 'swiftshader');
+      app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+    }
     let vite;
     let window;
     let timeout;
