@@ -683,6 +683,32 @@ async function runQualitySettingsSmoke() {
         check(info.hidden && !info.textContent && !confirmation.disabled &&
           gameMethod.querySelector('.share-method-status').hidden && capabilities.capture === false,
         'Returning to an eligible selection hides obsolete notices without marking its capture as verified.');
+        const ownWindow = { ...candidate(`window:999:${'f'.repeat(64)}`, 'window', 'Monky Dev'), isOwnWindow: true };
+        sources.push(ownWindow);
+        refresh.click();
+        await settled(() => !refresh.disabled, `${locale}/own window`);
+        audio.checked = true;
+        audio.dispatchEvent(new Event('change', { bubbles: true }));
+        pickerRoot.querySelector(`[data-source-id="${ownWindow.id}"]`)
+          .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        const audioWarning = pickerRoot.querySelector('#share-audio-warning');
+        check(!audio.checked && audio.disabled && !confirmation.disabled && !audioWarning.hidden &&
+          audioWarning.textContent === language.t('screenShare.ownWindowAudioUnavailable') &&
+          audioWarning.getAttribute('role') === 'status' && audio.getAttribute('aria-describedby') === audioWarning.id,
+        'Monky windows remain shareable without audio, with a disabled switch and a localized, accessible reason.');
+        gameMethod.click();
+        check(!audio.checked && audio.disabled && !confirmation.disabled,
+          'Changing capture method cannot enable Monky window audio.');
+        check(audioWarning.scrollWidth <= audioWarning.clientWidth + 1 && pickerRoot.scrollWidth <= pickerRoot.clientWidth + 1,
+          'The own-window audio warning fits narrow viewports in both languages.');
+        pickerRoot.querySelector('#share-tab-screen').click();
+        check(audio.checked && !audio.disabled && audioWarning.hidden, 'Monitor audio is not blocked by visiting a Monky window.');
+        pickerRoot.querySelector('#share-tab-window').click();
+        choose();
+        check(audio.checked && !audio.disabled && audioWarning.hidden && !audio.hasAttribute('aria-describedby'),
+          'Returning to another application restores its prior audio choice without reconnecting.');
+        audio.checked = false;
+        audio.dispatchEvent(new Event('change', { bubbles: true }));
         sources = sources.filter(source => source.id !== windowId);
         refresh.click();
         await settled(() => !refresh.disabled, `${locale}/removed source`);

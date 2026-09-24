@@ -563,6 +563,7 @@ export const ptBR = {
   'voiceJoin.microphoneUnavailable': 'A chamada continua conectada, mas não foi possível iniciar o microfone. Verifique as permissões ou selecione outro dispositivo de entrada: {error}',
   'voiceJoin.noAudioTrack': 'O microfone selecionado não forneceu uma trilha de áudio ativa.',
   'screenShare.shareAppAudio': 'Compartilhar áudio do aplicativo',
+  'screenShare.ownWindowAudioUnavailable': 'A janela do Monky só pode ser compartilhada sem áudio, para evitar eco da chamada.',
   'screenShare.shareAudioMacWindow': 'Compartilhar áudio (sistema inteiro)',
   'screenShare.macSystemAudioWarnTitle': 'Será compartilhado o áudio do sistema inteiro',
   'screenShare.macSystemAudioWarnMessage': 'No macOS, o Monky não consegue isolar o áudio de uma única janela. Ao continuar com o áudio ligado, TODO o som do seu computador será transmitido — notificações, música, outras chamadas e qualquer outro app —, não apenas o do aplicativo escolhido. Deseja continuar?',

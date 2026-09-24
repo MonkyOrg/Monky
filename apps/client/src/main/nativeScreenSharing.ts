@@ -21,6 +21,7 @@ import {
 } from '@monky/screen-share';
 import * as screenAudio from '@monky/screen-audio';
 import type { ClientLogger } from './clientLogger';
+import { mt } from './i18n';
 
 type RendererRequest = Extract<NativeScreenEvent, { requestId: string }>;
 type RequestInput = Omit<Extract<RendererRequest, { type: 'signal' }>, 'requestId' | 'callId'>
@@ -742,6 +743,8 @@ class NativeScreenSharingService {
       const target = this.resolveSource(command.desktopSourceId, kind);
       validateCaptureTarget(target);
       if (target.kind !== kind) throw new Error('Native source resolution changed the requested capture kind.');
+      if (command.audio && target.kind !== 'monitor' && target.expectedProcessId === process.pid)
+        throw Object.assign(new Error(mt('screenShare.ownWindowAudioUnavailable')), { code: 'ERR_AUDIO_TARGET' });
       let paused = false;
       const sourceState = (): void => {
         if (target.kind === 'monitor') {

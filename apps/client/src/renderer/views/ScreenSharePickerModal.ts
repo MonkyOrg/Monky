@@ -85,6 +85,7 @@ export class ScreenSharePickerModal {
 
   private usesNativeCapture(sourceId: string | undefined, audio: boolean, kind = this.captureKind(), mode: 'add' | 'replace' = 'replace'): boolean {
     return !!sourceId?.startsWith(kind === 'monitor' ? 'native-monitor:' : 'window:') && this.supportsCaptureKind(kind)
+      && (!audio || !this.selectedSource()?.isOwnWindow)
       && (!audio || (this.nativeCapabilities?.captureAudio === true
         && (!this.hasScreenAudio() || (mode === 'replace' && this.canReplaceScreenAudio()))))
       && (settingsStore.preferredVideoCodec === 'auto' || settingsStore.preferredVideoCodec === 'h264')
@@ -92,6 +93,7 @@ export class ScreenSharePickerModal {
   }
 
   private captureUnavailableMessage(audio: boolean, kind = this.captureKind(), mode: 'add' | 'replace' = 'replace'): string {
+    if (audio && this.selectedSource()?.isOwnWindow) return t('screenShare.ownWindowAudioUnavailable');
     const capabilities = this.nativeCapabilities;
     if (!capabilities && this.sourceState.status === 'loading') return t('common.loading');
     if (!capabilities || (!capabilities.capture && capabilities.requiresSelectionProbe !== true)) {
@@ -132,8 +134,19 @@ export class ScreenSharePickerModal {
     const info = this.modalEl?.querySelector<HTMLElement>('#share-capture-info');
     if (!info) return;
     const audioInput = this.modalEl?.querySelector<HTMLInputElement>('#chk-share-audio');
+    const ownWindow = source?.isOwnWindow === true;
+    if (audioInput) {
+      audioInput.checked = !ownWindow && this.shareAudioByTab[this.activeTab];
+      audioInput.disabled = this.isStarting || ownWindow || (this.hasScreenAudio() && !this.canReplaceScreenAudio());
+      if (ownWindow) audioInput.setAttribute('aria-describedby', 'share-audio-warning');
+      else audioInput.removeAttribute('aria-describedby');
+    }
     const audio = audioInput?.checked ?? false;
-    if (audioInput) audioInput.disabled = this.isStarting || (this.hasScreenAudio() && !this.canReplaceScreenAudio());
+    const audioWarning = this.modalEl?.querySelector<HTMLElement>('#share-audio-warning');
+    if (audioWarning) {
+      audioWarning.hidden = !ownWindow;
+      audioWarning.textContent = ownWindow ? t('screenShare.ownWindowAudioUnavailable') : '';
+    }
     const aspectInput = this.modalEl?.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio');
     if (aspectInput) aspectInput.disabled = this.isStarting;
     const audioText = this.modalEl?.querySelector('#share-audio-text');
@@ -332,6 +345,7 @@ export class ScreenSharePickerModal {
           </label>
         </div>
         <p id="share-capture-info" class="share-game-tip" role="status" hidden></p>
+        <p id="share-audio-warning" class="share-game-tip" role="status" hidden></p>
 
         <div class="modal-footer">
           <div id="share-audio-label" style="display: flex; align-items: center; gap: 8px; margin-right: auto; font-size: 0.85rem; color: var(--text-secondary); ${audioAlreadyCaptured ? 'opacity: 0.5;' : ''}">
@@ -477,7 +491,7 @@ export class ScreenSharePickerModal {
   private selectTab(tab: SourceTab): void {
     if (this.isStarting || !this.supportsTab(tab) || this.activeTab === tab) return;
     const audio = this.modalEl?.querySelector<HTMLInputElement>('#chk-share-audio');
-    if (audio) this.shareAudioByTab[this.activeTab] = audio.checked;
+    if (audio && !this.selectedSource()?.isOwnWindow) this.shareAudioByTab[this.activeTab] = audio.checked;
     this.activeTab = tab;
     this.selectedSourceId = null;
     if (audio) audio.checked = this.shareAudioByTab[tab];
@@ -571,7 +585,8 @@ export class ScreenSharePickerModal {
       if (this.selectSource(sourceId(event)) && this.captureKind() !== 'game') void this.startSharing('replace');
     }, options);
     modal.querySelector<HTMLInputElement>('#chk-share-audio')?.addEventListener('change', event => {
-      if (event.currentTarget instanceof HTMLInputElement) this.shareAudioByTab[this.activeTab] = event.currentTarget.checked;
+      if (event.currentTarget instanceof HTMLInputElement && !this.selectedSource()?.isOwnWindow)
+        this.shareAudioByTab[this.activeTab] = event.currentTarget.checked;
       this.updateCaptureInfo();
     }, options);
   }

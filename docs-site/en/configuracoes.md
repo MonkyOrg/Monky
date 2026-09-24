@@ -521,6 +521,10 @@ window, the method cards offer **Normal** by default and
 same window and its audio choice. Selecting another window resets the method
 to Normal rather than carrying over the previous window's Game Capture choice.
 
+Monky's own window can be shared **only without audio** to prevent call
+feedback. Selecting it turns the audio switch off and disables it, with an
+explanation. Selecting another application restores your previous audio choice.
+
 Choosing the Game Capture card does not start capture or test the application:
 you must confirm with **Share**, **Switch Source** or **Add screen**. Only
 methods advertised by the backend are available; compatibility with the

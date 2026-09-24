@@ -602,6 +602,7 @@ export const en: TranslationMap = {
   'voiceJoin.microphoneUnavailable': 'Your call remains connected, but your microphone could not start. Check its permissions or select another input device: {error}',
   'voiceJoin.noAudioTrack': 'The selected microphone did not provide a live audio track.',
   'screenShare.shareAppAudio': 'Share app audio',
+  'screenShare.ownWindowAudioUnavailable': 'Monky windows can only be shared without audio to prevent call feedback.',
   'screenShare.shareAudioMacWindow': 'Share audio (entire system)',
   'screenShare.macSystemAudioWarnTitle': 'The entire system audio will be shared',
   'screenShare.macSystemAudioWarnMessage': 'On macOS, Monky cannot isolate a single window\'s audio. If you continue with audio enabled, ALL of your computer\'s sound will be broadcast — notifications, music, other calls and every other app — not just the chosen application. Do you want to continue?',
