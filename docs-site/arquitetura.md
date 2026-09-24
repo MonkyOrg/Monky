@@ -230,6 +230,7 @@ Reconfiguração ou mudança de tamanho reinicia a memória temporal; no chroma
 o modelo fica ocioso, sem inferência, preservando os shaders compilados.
 A configuração e o primeiro frame têm até 60 segundos cada para inicialização
 e compilação fria dos shaders, que pode ultrapassar 30 segundos no Metal.
+O primeiro frame de uma nova resolução também recebe esse prazo de compilação.
 Os frames seguintes mantêm watchdog de 8 segundos. Durante a preparação
 nenhum frame é publicado, e cancelar a captura não espera esses prazos.
 Os testes CI usam SwiftShader no Windows e Metal no macOS ARM, mantendo

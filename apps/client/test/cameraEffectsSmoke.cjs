@@ -152,10 +152,12 @@ if (!process.versions.electron) {
     const fpsOnly = process.argv.includes('--fps-only') || process.argv.includes('--quality-only');
     const keyColorsOnly = process.argv.includes('--key-colors-only');
     const gpuOnly = process.argv.includes('--gpu-only');
+    const normalOnly = process.argv.includes('--normal-only');
     const selectedPhases = [
       ...(ownershipOnly ? ['ownership'] : []), ...(keyColorsOnly ? ['key-colors'] : []),
       ...(fpsOnly ? ['quality'] : []), ...(transitionsOnly ? ['transitions'] : []), ...(chromaOnly ? ['chroma'] : []),
       ...(gpuOnly ? ['gpu'] : []),
+      ...(normalOnly ? ['normal'] : []),
     ];
     const phases = selectedPhases.length ? selectedPhases
       : cpuCompositor ? ['chroma']
@@ -577,11 +579,21 @@ async function runCameraEffectsSmoke(phase) {
   const sampleCanvas = document.createElement('canvas');
   const sampleContext = sampleCanvas.getContext('2d', { willReadFrequently: true });
   async function watch(stream, video = sampleVideo) {
+    if (!stream?.active) throw new Error(`Cannot watch an inactive camera stream: ${JSON.stringify(frameDiagnostics(0.5, 0.5, video))}`);
+    let started = true;
+    let playError;
     if (video.srcObject !== stream) {
       video.srcObject = stream;
-      await video.play();
+      started = false;
+      video.play().then(() => { started = true; }, error => { playError = error; });
     }
-    await until(() => video.readyState >= 2 && video.videoWidth, 'No actual video frames reached the preview');
+    await until(() => {
+      if (playError) throw playError;
+      if (service.getCameraState().status === 'error') {
+        throw new Error(`Camera failed while awaiting playback: ${JSON.stringify(frameDiagnostics(0.5, 0.5, video))}`);
+      }
+      return started && video.readyState >= 2 && video.videoWidth;
+    }, 'No actual video frames reached the preview', 12000, () => frameDiagnostics(0.5, 0.5, video));
   }
   function pixel(x, y, video = sampleVideo) {
     sampleCanvas.width = video.videoWidth;
@@ -602,7 +614,7 @@ async function runCameraEffectsSmoke(phase) {
       : null;
     return {
       phase, mode: store.snapshot.settings.mode, status: state.status, publishing: state.publishing,
-      error: state.error?.code, failures: failures.map(error => error.code),
+      error: state.error?.code, cause: state.error?.cause?.message, failures: failures.map(error => error.code),
       preview: {
         readyState: video.readyState, paused: video.paused, currentTime: video.currentTime,
         width: video.videoWidth, height: video.videoHeight, presented,
@@ -882,19 +894,30 @@ async function runCameraEffectsSmoke(phase) {
       check(processor.targetFps === 60 && store.snapshot.settings.limitQuality === false,
         'Real processor follows a 60 FPS profile by default instead of the old 15/24 ceiling');
       check(!!processor.reader && !processor.video, 'Direct camera capture does not rely on a hidden video compositor');
+      check(requests[0].video.width.exact === 1920 && requests[0].video.height.exact === 1080
+        && requests[0].video.frameRate.exact === 60, 'Capture requests the selected full-resolution/FPS profile');
+      await expectSize(1920, 1080, 'Uncapped genuine output retains the selected 1080p resolution');
+      await expectVideoPixel(0.9, 0.85, actual => near(actual, [17, 34, 221]),
+        'Profile-rate processing still exposes only the keyed composite');
+      // Test scheduling, not the runner's full-HD software rasterization throughput.
+      source.width = 320;
+      source.height = 180;
+      drawSource();
+      await expectSize(320, 180, 'Cadence probe uses real small frames on the same hidden capture');
       let receivedFrames = 0;
       const receive = processor.receive;
       processor.receive = function (message) {
         if (message.type === 'frame') receivedFrames++;
         receive.call(this, message);
       };
-      try { await tick(1200); } finally { processor.receive = receive; }
+      try { await tick(1200); } finally {
+        processor.receive = receive;
+        source.width = 1920;
+        source.height = 1080;
+        drawSource();
+      }
       check(receivedFrames >= 5, `Hidden-window capture must not throttle to 1 FPS: ${receivedFrames} frames in 1.2s`);
-      check(requests[0].video.width.exact === 1920 && requests[0].video.height.exact === 1080
-        && requests[0].video.frameRate.exact === 60, 'Capture requests the selected full-resolution/FPS profile');
-      await expectSize(1920, 1080, 'Uncapped genuine output retains the selected 1080p resolution');
-      await expectVideoPixel(0.9, 0.85, actual => near(actual, [17, 34, 221]),
-        'Profile-rate processing still exposes only the keyed composite');
+      await expectSize(1920, 1080, 'Full-HD processing resumes after the isolated cadence probe');
       await service.setCameraEffects({ limitQuality: true });
       check(processor.targetFps === 30 && service.getCameraState().stream === stream,
         'Combined quality cap changes the real scheduler without replacing its processed track');
@@ -964,6 +987,24 @@ async function runCameraEffectsSmoke(phase) {
       'Rapid combined-limit changes preserve selected FPS, publication identity and single capture');
 
       const Processor = processor.constructor;
+      const timeoutProbe = new Processor(sourceStream, service.getProfile(), error => { throw error; });
+      const scheduleTimeout = window.setTimeout;
+      let scheduledDelay;
+      window.setTimeout = function (callback, delay, ...args) {
+        scheduledDelay = delay;
+        return scheduleTimeout.call(this, callback, delay, ...args);
+      };
+      try {
+        timeoutProbe.armFrameTimeout(false);
+        check(scheduledDelay === 8000, 'Steady frames retain the eight-second deadline');
+        timeoutProbe.armFrameTimeout(true);
+        check(scheduledDelay === 60000, 'Cold initialization has a bounded sixty-second deadline');
+        timeoutProbe.armFrameTimeout(false);
+        check(scheduledDelay === 8000, 'The next steady frame does not inherit the cold-start allowance');
+      } finally {
+        window.setTimeout = scheduleTimeout;
+        timeoutProbe.stop();
+      }
       for (const [profileFps, sourceFps, cap, expected] of [
         [60, 60, false, 60], [60, 120, true, 30], [20, 60, true, 20], [24, 120, false, 24], [120, 240, false, 120],
         [60, 12, false, 12], [60, 12, true, 12],
@@ -1421,7 +1462,7 @@ async function runCameraEffectsSmoke(phase) {
     settings.customProfile = { ...settings.customProfile, cameraWidth: 160, cameraHeight: 90, cameraFps: 12 };
     await service.applyQualityPreset('CUSTOM');
     await until(async () => { await watch(service.getCameraStream()); return sampleVideo.videoWidth === 160 && sampleVideo.videoHeight === 90; },
-      'Quality changes did not update effect output bounds');
+      'Quality changes did not update effect output bounds', 65000);
     check(requests.length === 1, 'Quality changes do not reopen hardware');
     await service.setCameraEffects({ mode: 'chroma', backgroundSource: 'color' });
     let frames = 0;

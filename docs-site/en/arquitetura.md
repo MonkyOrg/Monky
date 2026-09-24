@@ -228,6 +228,7 @@ Reconfiguration or resolution changes reset temporal memory; during chroma
 the model stays idle without inference, retaining compiled shaders.
 Configuration and the first frame each have up to 60 seconds for initialization
 and cold shader compilation, which can exceed 30 seconds on Metal.
+The first frame at a new resolution also receives that compilation budget.
 Subsequent frames retain an 8-second watchdog. No frames are published during
 preparation, and cancelling capture does not wait for these deadlines.
 CI tests use SwiftShader on Windows and Metal on macOS ARM, retaining real

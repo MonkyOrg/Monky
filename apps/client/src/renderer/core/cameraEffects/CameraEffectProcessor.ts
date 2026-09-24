@@ -291,9 +291,7 @@ export class CameraEffectProcessor {
     if (this.reader) {
       const revision = this.revision;
       this.inFlightRevision = revision;
-      this.frameTimeout = setTimeout(() => this.fail(new CameraEffectError('processing', {
-        cause: new Error('Direct camera frame processing timed out'),
-      })), this.pending?.revision === revision ? STARTUP_TIMEOUT_MS : 8000);
+      this.armFrameTimeout(this.pending?.revision === revision);
       void this.captureSourceFrame(this.reader, revision).catch((error: unknown) => {
         this.completeFrame(revision);
         if (revision === this.revision && !isCameraOperationCancelled(error)) {
@@ -314,8 +312,7 @@ export class CameraEffectProcessor {
       this.lastVideoTime = this.video.currentTime;
       const revision = this.revision;
       this.inFlightRevision = revision;
-      this.frameTimeout = setTimeout(() => this.fail(new CameraEffectError('processing')),
-        this.pending?.revision === revision ? STARTUP_TIMEOUT_MS : 8000);
+      this.armFrameTimeout(this.pending?.revision === revision);
       void this.captureFrame(revision, now).catch((error: unknown) => {
         this.completeFrame(revision);
         if (revision === this.revision && !isCameraOperationCancelled(error)) {
@@ -337,6 +334,13 @@ export class CameraEffectProcessor {
       ? this.nextFrameAt + (Math.floor(Math.max(0, now - this.nextFrameAt) / interval) + 1) * interval
       : now + interval;
     return true;
+  }
+
+  private armFrameTimeout(initializing: boolean): void {
+    clearTimeout(this.frameTimeout);
+    this.frameTimeout = setTimeout(() => this.fail(new CameraEffectError('processing', {
+      cause: new Error(initializing ? 'Camera frame initialization timed out' : 'Camera frame processing timed out'),
+    })), initializing ? STARTUP_TIMEOUT_MS : 8000);
   }
 
   private async captureSourceFrame(reader: ReadableStreamDefaultReader<VideoFrame>, revision: number): Promise<void> {
@@ -370,6 +374,10 @@ export class CameraEffectProcessor {
       this.limitQuality ? Math.min(this.profile.cameraWidth, CAMERA_EFFECT_LIMITS.maxWidth) : this.profile.cameraWidth,
       this.limitQuality ? Math.min(this.profile.cameraHeight, CAMERA_EFFECT_LIMITS.maxHeight) : this.profile.cameraHeight,
     );
+    // A new tensor shape also needs cold shaders when the capture/profile resizes.
+    if (this.canvas && (size.width !== this.canvas.width || size.height !== this.canvas.height)) {
+      this.armFrameTimeout(true);
+    }
     const bitmap = await createImageBitmap(source, { resizeWidth: size.width, resizeHeight: size.height });
     if (this.stopped || !this.active || revision !== this.revision) {
       bitmap.close();
