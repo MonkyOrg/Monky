@@ -1,4 +1,4 @@
-import { QUALITY_PRESETS, QualityPresetType, QualityProfile } from '@monky/shared';
+import { QUALITY_PRESETS, QualityPresetType, QualityProfile, NATIVE_SCREEN_VIDEO_LIMITS } from '@monky/shared';
 import { settingsStore } from '../../../stores/settingsStore';
 import { webRtcManager } from '../../../core/WebRtcManager';
 import { t } from '../../../i18n';
@@ -11,6 +11,7 @@ import {
   CUSTOM_OPTION,
   FPS_OPTIONS,
   VIDEO_BITRATE_OPTIONS,
+  SCREEN_BITRATE_OPTIONS,
   aspectRatioGroup,
   aspectRatioIdFor,
   closestResolution,
@@ -34,6 +35,24 @@ export class QualityTab {
   public renderHtml(): string {
     const unavailableCodec = settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264';
     return `
+      <div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
+        <label>${t('settings.screenReceiverSection')}</label>
+        <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenReceiverSection'))}" aria-describedby="screen-receiver-warning screen-receiver-apply">
+          <button type="button" class="voice-mode-card input-mode-card" id="screen-receiver-native"
+            aria-pressed="${settingsStore.getScreenShareReceiver() === 'native'}" ${settingsStore.nativeScreenReceiverComingSoon ? 'disabled' : ''}>
+            <span class="input-mode-card-title">${t('settings.screenReceiverNative')}${settingsStore.nativeScreenReceiverComingSoon ? ` · ${t('screenShare.comingSoon')}` : ''}</span>
+            <span class="input-mode-card-description">${t(settingsStore.nativeScreenReceiverComingSoon ? 'settings.screenReceiverMac' : 'settings.screenReceiverNativeDesc')}</span>
+          </button>
+          <button type="button" class="voice-mode-card input-mode-card" id="screen-receiver-chromium"
+            aria-pressed="${settingsStore.getScreenShareReceiver() === 'chromium'}">
+            <span class="input-mode-card-title">Chromium</span>
+            <span class="input-mode-card-description">${t('settings.screenReceiverChromiumDesc')}</span>
+          </button>
+        </div>
+        <p id="screen-receiver-warning" class="audio-device-status" role="note" style="color: var(--warning);">${t('settings.screenReceiverWarning')}</p>
+        <p id="screen-receiver-apply" class="audio-device-status">${t('settings.screenReceiverApply')}</p>
+      </div>
+
       <!-- Quality Preset -->
       <div class="form-group">
         <label data-settings-section="quality-preset" data-settings-label="${escapeHtml(t('settings.qualitySection'))}" style="display: flex; align-items: center; gap: 6px;">
@@ -235,7 +254,7 @@ export class QualityTab {
   /** Resolution (with aspect-ratio picker), FPS and bitrate of one media kind (#476). */
   private renderMediaFields(kind: 'camera' | 'screen', width: number, height: number, fps: number, bitrate: number): string {
     const aspectId = aspectRatioIdFor(width, height);
-    const group = aspectRatioGroup(aspectId);
+    const group = this.mediaResolutionGroup(aspectId, kind);
     const isKnownResolution = group.resolutions.some((r) => r.width === width && r.height === height);
 
     return `
@@ -256,15 +275,22 @@ export class QualityTab {
       <div class="quality-custom-row" id="q-res-${kind}-custom" ${isKnownResolution ? 'hidden' : ''}>
         <span class="quality-custom-label"></span>
         <div class="quality-custom-pair">
-          <input id="custom-${kind}Width" type="number" min="1" value="${width}" title="${t('settings.width')}" aria-label="${t('settings.width')}">
+          <input id="custom-${kind}Width" type="number" min="1" ${kind === 'screen' ? `max="${NATIVE_SCREEN_VIDEO_LIMITS.width}"` : ''} value="${width}" title="${t('settings.width')}" aria-label="${t('settings.width')}">
           <span class="quality-custom-times">×</span>
-          <input id="custom-${kind}Height" type="number" min="1" value="${height}" title="${t('settings.height')}" aria-label="${t('settings.height')}">
+          <input id="custom-${kind}Height" type="number" min="1" ${kind === 'screen' ? `max="${NATIVE_SCREEN_VIDEO_LIMITS.height}"` : ''} value="${height}" title="${t('settings.height')}" aria-label="${t('settings.height')}">
         </div>
         <span class="quality-custom-unit">px</span>
       </div>
       ${this.renderNumberChoice(`${kind}Fps`, 'FPS', FPS_OPTIONS, fps, 'fps')}
-      ${this.renderNumberChoice(`${kind}Bitrate`, t('settings.bitrate'), VIDEO_BITRATE_OPTIONS, bitrate, 'kbps', kind)}
+      ${this.renderNumberChoice(`${kind}Bitrate`, t('settings.bitrate'), kind === 'screen' ? SCREEN_BITRATE_OPTIONS : VIDEO_BITRATE_OPTIONS, bitrate, 'kbps', kind)}
+      ${kind === 'screen' ? `<p class="quality-custom-help">${escapeHtml(t('settings.screen4kLimits'))}</p>` : ''}
     `;
+  }
+
+  private mediaResolutionGroup(id: string, kind: 'camera' | 'screen'): AspectRatioGroup {
+    const group = aspectRatioGroup(id);
+    return kind === 'camera' ? group : { ...group, resolutions: group.resolutions.filter(option =>
+      option.width <= NATIVE_SCREEN_VIDEO_LIMITS.width && option.height <= NATIVE_SCREEN_VIDEO_LIMITS.height) };
   }
 
   private renderResolutionOptions(group: AspectRatioGroup, width: number, height: number): string {
@@ -279,6 +305,19 @@ export class QualityTab {
     this.cleanup();
     this.eventController = new AbortController();
     const options = { signal: this.eventController.signal };
+    const nativeReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-native');
+    const chromiumReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-chromium');
+    for (const receiver of ['native', 'chromium'] as const) {
+      const button = receiver === 'native' ? nativeReceiver : chromiumReceiver;
+      button?.addEventListener('click', () => {
+        if (button.disabled) return;
+        try {
+          settingsStore.setScreenShareReceiver(receiver);
+          nativeReceiver?.setAttribute('aria-pressed', String(settingsStore.getScreenShareReceiver() === 'native'));
+          chromiumReceiver?.setAttribute('aria-pressed', String(settingsStore.getScreenShareReceiver() === 'chromium'));
+        } catch (error) { this.settingsError(error); }
+      }, options);
+    }
     const selectPreset = container.querySelector<HTMLSelectElement>('#select-preset');
     const presetDetails = container.querySelector<HTMLElement>('#preset-details');
     const checkboxPreviewFocus = container.querySelector<HTMLInputElement>('#checkbox-screen-preview-focus');
@@ -442,7 +481,7 @@ export class QualityTab {
       }, options);
 
       aspectSelect?.addEventListener('change', () => {
-        const group = aspectRatioGroup(aspectSelect.value);
+        const group = this.mediaResolutionGroup(aspectSelect.value, kind);
         // Switching the aspect ratio snaps to the entry closest in height, so
         // the user keeps roughly the same quality instead of being thrown to
         // the top of the new list.

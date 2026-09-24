@@ -18,14 +18,24 @@ export type NativeScreenCaptureStatus = z.infer<typeof nativeScreenCaptureStatus
 // One Game Capture attempt, verified teardown and one Normal attempt, not an unlimited retry.
 export const NATIVE_SCREEN_GAME_STARTUP_TIMEOUT_MS = 75000;
 
+export const NATIVE_SCREEN_VIDEO_LIMITS = Object.freeze({
+  width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000,
+});
+
 export const nativeScreenVideoProfileSchema = z.object({
   // libobs aligns output width to four pixels before encoding; reject silent truncation.
-  width: z.number().int().min(4).max(1920).multipleOf(4),
-  height: z.number().int().min(2).max(1080).multipleOf(2),
-  fps: z.number().int().min(1).max(120),
-  maxBitrateKbps: z.number().int().min(150).max(20000).multipleOf(50),
+  width: z.number().int().min(4).max(NATIVE_SCREEN_VIDEO_LIMITS.width).multipleOf(4),
+  height: z.number().int().min(2).max(NATIVE_SCREEN_VIDEO_LIMITS.height).multipleOf(2),
+  fps: z.number().int().min(1).max(NATIVE_SCREEN_VIDEO_LIMITS.fps),
+  maxBitrateKbps: z.number().int().min(150).max(NATIVE_SCREEN_VIDEO_LIMITS.maxBitrateKbps).multipleOf(50),
 }).strict();
 export type NativeScreenVideoProfile = z.infer<typeof nativeScreenVideoProfileSchema>;
+
+export function getScreenH264ProfileLevelId(profile: Readonly<NativeScreenVideoProfile>): '4d0033' | '4d0034' | '4d003c' {
+  const video = nativeScreenVideoProfileSchema.parse(profile);
+  const macroblocksPerSecond = Math.ceil(video.width / 16) * Math.ceil(video.height / 16) * video.fps;
+  return macroblocksPerSecond <= 983040 ? '4d0033' : macroblocksPerSecond <= 2073600 ? '4d0034' : '4d003c';
+}
 
 export const nativeScreenRenditionSchema = z.object({
   sourceInstanceId: z.string().uuid(),

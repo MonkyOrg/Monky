@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine_shared.h"
+#include "encoded_video.h"
 #include "h264_bitstream.h"
 
 #include "api\jsep.h"
@@ -11,6 +12,7 @@
 #include "api\set_remote_description_observer_interface.h"
 #include "api\stats\rtc_stats_collector_callback.h"
 #include "api\transport\bitrate_settings.h"
+#include "api\video_codecs\sdp_video_format.h"
 #include "rtc_send_diagnostics.h"
 #include "rtc_receive_diagnostics.h"
 #include "pc\session_description.h"
@@ -30,6 +32,27 @@
 #include <vector>
 
 namespace monky::native_rtc::engine::peer_detail {
+
+template <typename Accepts>
+Json SelectScreenSendCodec(const Json& capabilities, Accepts accepts) {
+  for (const auto& codec : capabilities.at("codecs")) {
+    if (!codec.contains("mimeType") || !codec.at("mimeType").is_string()) continue;
+    const auto mime = codec.at("mimeType").get<std::string>();
+    if (mime != "video/H264" && mime != "video/h264") continue;
+    webrtc::CodecParameterMap parameters;
+    if (codec.contains("parameters")) {
+      for (const auto& [key, value] : codec.at("parameters").items()) {
+        if (value.is_string()) parameters[key] = value.get<std::string>();
+        else if (value.is_number_integer()) parameters[key] = value.dump();
+        else throw Error("ERR_RTC_ENCODED_FORMAT", "Invalid H264 router codec parameter", MONKY_ENGINE_INVALID);
+      }
+    }
+    if (accepts(webrtc::SdpVideoFormat("H264", parameters))) return codec;
+  }
+  throw Error("ERR_RTC_ENCODED_FORMAT",
+      "The SFU router cannot receive this screen's actual H264 Main profile and required level",
+      MONKY_ENGINE_UNSUPPORTED);
+}
 
 constexpr std::size_t kMaxMediaSections = 64;
 constexpr std::size_t kMaxCandidates = 256;
@@ -109,7 +132,7 @@ inline webrtc::RtpEncodingParameters Encoding(const Json& data, bool enabled) {
   webrtc::RtpEncodingParameters result;
   result.active = enabled;
   result.max_bitrate_bps = static_cast<int>(Integer(
-      data, "maxBitrateBps", 64000, screen_video::H264LevelMaxBitrate(52)));
+      data, "maxBitrateBps", 64000, kEncodedBitrateCeiling));
   if (!data.contains("maxFramerate") || !data.at("maxFramerate").is_number())
     Invalid("maxFramerate is required");
   const double fps = data.at("maxFramerate").get<double>();
@@ -121,7 +144,7 @@ inline webrtc::RtpEncodingParameters Encoding(const Json& data, bool enabled) {
 
 inline Json SfuVideoCodecOptions(const webrtc::RtpEncodingParameters& encoding) {
   if (!encoding.max_bitrate_bps || *encoding.max_bitrate_bps < 64000 ||
-      *encoding.max_bitrate_bps > static_cast<int>(screen_video::H264LevelMaxBitrate(52)))
+      *encoding.max_bitrate_bps > static_cast<int>(kEncodedBitrateCeiling))
     Invalid("SFU video requires its validated bitrate ceiling");
   const auto maximum_kbps = *encoding.max_bitrate_bps / 1000;
   // Match the native P2P startup estimate without forcing a congestion-control floor.
@@ -445,8 +468,8 @@ inline void GateSender(webrtc::RtpSenderInterface& sender, bool enabled) {
 inline webrtc::BitrateSettings StartupBitrate(const Json& data) {
   Keys(data, {"startBitrateBps", "maxBitrateBps"});
   const auto start = Id(data, "startBitrateBps"), maximum = Id(data, "maxBitrateBps");
-  if (start < 150000 || start > maximum || maximum > 20000000)
-    Invalid("Startup bitrate must satisfy150000 <= start <= max <=20000000");
+  if (start < 150000 || start > maximum || maximum > kEncodedBitrateCeiling)
+    Invalid("Startup bitrate must satisfy150000 <= start <= max <=80000000");
   webrtc::BitrateSettings result;
   result.start_bitrate_bps = static_cast<int>(start);
   result.max_bitrate_bps = static_cast<int>(maximum);

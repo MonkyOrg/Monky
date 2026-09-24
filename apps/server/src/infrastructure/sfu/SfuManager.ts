@@ -63,7 +63,7 @@ const MEDIA_CODECS: RouterRtpCodecCapability[] = [
     clockRate: 90000,
     parameters: {
       'packetization-mode': 1,
-      'profile-level-id': '4d0033',
+      'profile-level-id': '4d003c',
       'level-asymmetry-allowed': 1,
     },
   },

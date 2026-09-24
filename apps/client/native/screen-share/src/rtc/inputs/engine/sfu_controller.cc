@@ -467,6 +467,7 @@ struct DeviceEntry {
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory;
   mediasoupclient::PeerConnection::Options options;
   mediasoupclient::Device native;
+  Json router_capabilities;
 };
 
 struct TransportEntry final : public mediasoupclient::SendTransport::Listener,
@@ -982,6 +983,7 @@ class NativeSfuController final : public SfuController {
     auto device = std::make_unique<DeviceEntry>();
     device->id = host_.AllocateHandle();
     device->factory = host_.Factory();
+    device->router_capabilities = router;
     if (!device->factory) throw Error("ERR_RTC_NOT_READY", "The RTC factory is unavailable");
     device->options.factory = device->factory.get();
     device->options.config = std::move(configuration);
@@ -1075,6 +1077,10 @@ class NativeSfuController final : public SfuController {
       if (existing->transport_id == target && existing->source_id == source_id)
         Invalid("This transport already publishes the screen source");
     if (!device.native.CanProduce(kind)) Unsupported("Device cannot produce compatible screen media");
+    const auto selected_codec = source
+        ? SelectScreenSendCodec(device.router_capabilities,
+            [&](const auto& format) { return source->AcceptsSendCodec(format); })
+        : Json{};
     if (audio_source) {
       if (data.contains("maxFramerate")) Invalid("Audio publication has no video framerate");
       for (const auto& [id, existing] : producers_)
@@ -1122,7 +1128,7 @@ class NativeSfuController final : public SfuController {
           ? audio::OpusCodecOptions() : SfuVideoCodecOptions(encodings.front());
       producer->native.reset(transport.send->Produce(
           producer.get(), producer->track.get(), &encodings,
-          &codec_options, nullptr, app_data));
+          &codec_options, producer->audio_source ? nullptr : &selected_codec, app_data));
       if (!producer->native) throw Error("ERR_RTC_PRODUCER", "SFU returned no producer");
       ++transport.creations;
       producer->server_id = producer->native->GetId();

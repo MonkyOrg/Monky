@@ -120,6 +120,7 @@ export class VideoService {
     }
 
     for (const [shareId, stream] of this.screenStreams.entries()) {
+      if (this.nativeScreenCaptures.has(shareId)) continue;
       const screenTrack = stream.getVideoTracks()[0];
       if (screenTrack && screenTrack.readyState === 'live') {
         screenTrack.contentHint = isHighFps ? 'motion' : 'detail';

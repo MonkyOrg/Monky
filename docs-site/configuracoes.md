@@ -94,16 +94,22 @@ motivo; a marca da GPU não garante suporte. Não há troca automática para
 Chromium ou para outra fonte. A tentativa automática de **Captura de jogo**
 para **Normal**, quando necessária, usa somente a mesma janela e gera um aviso.
 
-Para até **1920×1080 a 120 FPS**, use **Personalizado** em **Qualidade e
-compartilhamento**; os presets existentes não foram convertidos automaticamente
-para 120 FPS. No seletor, **Manter proporção** encaixa a imagem no tamanho
+Para até **3840×2160**, **120 FPS** e **80000 kbps**, use **Personalizado** em
+**Qualidade e compartilhamento**; os presets existentes não mudam.
+Os limites dependem do encoder: **4K/60** exige H.264 nível 5.2 e **4K/120**
+exige nível 6. Se o dispositivo não admitir o perfil, ele será recusado, sem
+reduzir FPS silenciosamente; em uma troca de qualidade, o preflight mantém a
+fonte anterior enquanto verifica a nova configuração. Reserve banda para o
+jogo e para cada perfil transmitido. No seletor, **Manter proporção** encaixa a imagem no tamanho
 escolhido, adicionando bordas quando necessário, sem distorcer. Desligado,
 mantém o comportamento atual de esticar para preencher. O switch começa
 desligado em cada novo compartilhamento e não é uma preferência global.
 
 A prévia de um novo compartilhamento entra em foco assim que seu tile fica
 disponível. Você pode desfocá-la: mudanças de qualidade, reconexões e tentativas
-de outro método não voltam a focá-la. A prévia e cada espectador mostram um
+de outro método não voltam a focá-la. Com uma tela em foco, use o scroll para
+dar zoom, sem precisar de Ctrl; arraste para mover a imagem ampliada e dê um
+duplo clique para restaurar. A prévia e cada espectador mostram um
 indicador **Normal** ou **Jogo** conforme o modo confirmado para aquele fluxo,
 inclusive nas miniaturas. Enquanto não houver confirmação por imagem, o
 indicador fica oculto; escolher Captura de jogo não basta para exibir Jogo.
@@ -470,7 +476,22 @@ do mouse configurado separadamente.
 
 O perfil controla o que **você transmite**; não aumenta a resolução da câmera
 ou da tela de outra pessoa. A mesma aba reúne codec, prévia local do
-compartilhamento e telemetria; os perfis continuam incluindo voz e câmera.
+compartilhamento, recepção de tela e telemetria; os perfis continuam incluindo voz e câmera.
+
+### Recepção de tela
+
+Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, escolha
+**Nativo** ou **Chromium**. No Windows, **Nativo é o padrão**, usando o runtime
+incluído no Monky. Não há fallback automático: se ele falhar, o aviso indica
+onde selecionar Chromium manualmente. A escolha é salva e vale ao começar a
+assistir ou clicar em **Tentar novamente**; para uma tela já aberta, pare de
+assistir e assista novamente. Câmera, voz e transmissão da própria tela não mudam.
+
+**Chromium tem uma limitação conhecida:** no ensaio Windows houve quedas de FPS
+e congelamentos periódicos. O aviso permanece visível nas configurações; escolher
+esse receptor não corrige a limitação. No macOS, **Chromium é o padrão** e
+**Nativo** fica desabilitado como **Em breve**. Isso permite assistir a perfis
+compatíveis, mas não habilita captura libobs no Mac nem qualifica seu desempenho.
 
 ### Perfis de qualidade
 

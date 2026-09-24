@@ -108,6 +108,25 @@ test('Stop before Accepted cannot create a late receiver or retain a presentatio
   assert.equal(f.phases.includes('presentation-retired'), true);
 });
 
+test('failed presentation retirement retains the subscription and Retry performs the missing acknowledgement', async () => {
+  const f = fixture();
+  await f.subscription.start();
+  await f.subscription.receive(f.accepted());
+  let attempts = 0;
+  const retire = f.subscription.retirePresentation;
+  f.subscription.retirePresentation = async id => {
+    if (++attempts === 1) throw new Error('Renderer has not released its presentation');
+    await retire(id);
+  };
+  f.endpoints[0].close = async function() { this.closed = true; };
+  await assert.rejects(f.subscription.close(), /shutdown failures/);
+  assert.equal(f.endpoints[0].closed, true);
+  assert.equal(f.subscription.snapshot().closed, false, 'Native closure cannot forge renderer retirement.');
+  await f.subscription.close();
+  assert.equal(attempts, 2);
+  assert.equal(f.subscription.snapshot().closed, true);
+});
+
 test('continuous frames emit a single playing transition instead of frame-rate IPC updates', async () => {
   const f = fixture();
   await f.subscription.start();

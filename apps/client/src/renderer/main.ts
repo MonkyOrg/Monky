@@ -167,7 +167,11 @@ class App {
     window.addEventListener('pagehide', () => {
       this.autoEntryService.dispose();
       this.connectionView.dispose();
-      sessionManager.dispose();
+      void sessionManager.dispose().catch((error: unknown) => {
+        clientLog.error('CONNECTION', 'Failed to dispose sessions after page retirement', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     }, { once: true });
 
     // Must run before any await in init(): otherwise the Windows-style window
@@ -388,16 +392,16 @@ class App {
    * The main process waits for the ack (with a short timeout) before quitting.
    */
   private setupGracefulQuit(): void {
-    window.api?.onAppBeforeQuit(() => {
-      try {
-        sessionManager.removeAll();
-      } catch (err) {
+    window.api?.onAppBeforeQuit(request => {
+      void (async () => {
+        await webRtcManager.prepareForQuit();
+        if (request.phase === 'farewell') await sessionManager.removeAll();
+        await window.api?.notifyLeaveComplete(request);
+      })().catch((err: unknown) => {
         clientLog.error('CONNECTION', 'Failed to leave servers before quitting', {
-          error: (err as Error)?.message,
+          error: err instanceof Error ? err.message : String(err),
         });
-      } finally {
-        void window.api?.notifyLeaveComplete();
-      }
+      });
     });
   }
 

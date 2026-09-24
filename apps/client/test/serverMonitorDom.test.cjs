@@ -235,7 +235,7 @@ async function runRegression(config) {
   check(!document.querySelector('[role="dialog"]'), 'switching servers closes the remote monitor immediately');
   requests[4].resolve(result('server-b', 3));
   await switchOpening;
-  sessionManager.removeAll();
+  await sessionManager.removeAll();
   let resolveLocal;
   localStatsRead = () => new Promise((resolve) => { resolveLocal = resolve; });
   const localOpening = modal.openLocal();

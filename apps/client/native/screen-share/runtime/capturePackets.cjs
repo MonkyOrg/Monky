@@ -36,7 +36,7 @@ function parseHeader(bytes, fps) {
   assert.ok(BigInt(frame.observedQpc) > 0n && BigInt(frame.qpcFrequency) > 0n);
   assert.equal(frame.timebaseNumerator, 1); assert.equal(frame.timebaseDenominator, fps);
   assert.ok(frame.keyframe === 0 || frame.keyframe === 1);
-  assert.ok(frame.settingsBitrateKbps >= 50 && frame.settingsBitrateKbps <= 20000 && frame.settingsBitrateKbps % 50 === 0);
+  assert.ok(frame.settingsBitrateKbps >= 50 && frame.settingsBitrateKbps <= 80000 && frame.settingsBitrateKbps % 50 === 0);
   frame.keyframe = frame.keyframe === 1;
   return { kind, sequence, payloadBytes, frame };
 }

@@ -198,7 +198,7 @@ int main() {
       for (const Json& data : std::vector<Json>{
           Json::object(), {{"startBitrateBps", 149999u}, {"maxBitrateBps", 20000000u}},
           {{"startBitrateBps", 5000000u}, {"maxBitrateBps", 4999999u}},
-          {{"startBitrateBps", 5000000u}, {"maxBitrateBps", 20000001u}},
+          {{"startBitrateBps", 5000000u}, {"maxBitrateBps", 80000001u}},
           {{"startBitrateBps", 5000000.5}, {"maxBitrateBps", 20000000u}}})
         Reject([&] { (void)rtc::peer_detail::StartupBitrate(data); }, MONKY_ENGINE_INVALID);
       Reject([] {
@@ -220,7 +220,7 @@ int main() {
     });
     group("sfuVideoStartupBitrate", [] {
       for (const auto [maximum, start] : std::vector<std::pair<unsigned, unsigned>>{
-          {20000000u, 5000u}, {1500000u, 1500u}, {64000u, 64u}}) {
+          {80000000u, 5000u}, {20000000u, 5000u}, {1500000u, 1500u}, {64000u, 64u}}) {
         const auto encoding = rtc::peer_detail::Encoding(
             {{"maxBitrateBps", maximum}, {"maxFramerate", 120}}, false);
         const auto options = rtc::peer_detail::SfuVideoCodecOptions(encoding);
@@ -254,7 +254,7 @@ int main() {
     group("rtcReceiveSdk", [] { rtc::RunRtcReceiveSdkChecks(Check); });
     group("adapterPolicies", [] { monky::native_rtc::VerifyDeviceFreeAdapterPolicies(Check); });
     group("binaryLayout", [] {
-      Check(MONKY_ENGINE_ABI_VERSION == 2 && MONKY_ENGINE_CONTRACT_REVISION == 7,
+      Check(MONKY_ENGINE_ABI_VERSION == 2 && MONKY_ENGINE_CONTRACT_REVISION == 8,
             "Binary ABI or JSON contract revision changed unexpectedly");
       Check(sizeof(MonkyEngineError) == 608 && offsetof(MonkyEngineError, code) == 16,
             "C error POD layout changed");

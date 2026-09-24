@@ -36,6 +36,15 @@ export interface RendererBootstrapFailure {
   stack?: string;
 }
 
+export interface AppShutdownRequest {
+  requestId: number;
+  phase: 'native' | 'farewell';
+}
+export const APP_SHUTDOWN_EVENT = 'app:before-quit' satisfies keyof IpcEvents;
+export const APP_SHUTDOWN_IPC = {
+  acknowledge: 'app:leave-complete',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
 export const DEVELOPMENT_QA_IPC = {
   config: 'development-qa:config',
   report: 'development-qa:report',
@@ -683,7 +692,7 @@ export interface IpcInvokeChannels {
   'app:set-minimize-to-tray': { args: [enabled: boolean]; returnType: void };
   'app:download-file': { args: [url: string, fileName: string]; returnType: { success: boolean; error?: string } };
   // Ack do renderer ao 'app:before-quit': confirma que ja saiu das chamadas (#458)
-  'app:leave-complete': { args: []; returnType: void };
+  'app:leave-complete': { args: [request: AppShutdownRequest]; returnType: void };
 
   // Identidade
   'identity:has': { args: []; returnType: boolean };
@@ -808,7 +817,7 @@ export interface IpcEvents {
   'server-invite:available': [];
   // Pedido de despedida antes do processo morrer: o renderer sai das chamadas e
   // avisa os servidores enquanto ainda esta vivo (#458)
-  'app:before-quit': [];
+  'app:before-quit': [request: AppShutdownRequest];
   'lan:found': [server: DiscoveredLanServer];
   'lan:lost': [server: DiscoveredLanServer];
   'soundboard:shortcut-triggered': [soundName: string];

@@ -1065,9 +1065,9 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
   for (let offset = 0; offset < wave.length; offset += 16384) binary.push(String.fromCharCode(...wave.subarray(offset, offset + 16384)));
   const ready = { status: 'ok', audioBase64: btoa(binary.join('')), mimeType: 'audio/wav' };
   const nativeListeners = [];
-  const cleanup = () => {
+  const cleanup = async () => {
     nativeListeners.forEach(unbind => unbind());
-    view.destroy(); off(); audioPreviewService.release(); voiceStore.reset(); sessionManager.removeAll();
+    view.destroy(); off(); audioPreviewService.release(); voiceStore.reset(); await sessionManager.removeAll();
     // Later fixtures install standalone stores instead of SessionManager bundles.
     routing.setSessionEventRouter((_sessionKey, _event, emit) => emit());
     window.Audio = NativeAudio; window.api = previousApi; language.setLanguage('pt-BR');
@@ -1298,7 +1298,7 @@ async function runVoiceCommandDomSmoke(nativeMusic = false) {
     }
     return checks;
   } finally {
-    cleanup();
+    await cleanup();
   }
 }
 

@@ -59,6 +59,8 @@ test('doctor checks declared SDK protocol, entry and real TypeScript without cha
   assert.equal(fs.existsSync(path.join(root, '.keys')), false);
   require(sdkFile).PROTOCOL_VERSION = PROTOCOL_VERSION - 1;
   assert.equal(inspectBotProject(root).find(check => check.name === '@monky/bot-sdk').ok, true);
+  require(sdkFile).PROTOCOL_VERSION = 24;
+  assert.equal(inspectBotProject(root).find(check => check.name === '@monky/bot-sdk').ok, true);
   require(sdkFile).PROTOCOL_VERSION = MIN_BOT_PROTOCOL - 1;
   assert.equal(inspectBotProject(root).find(check => check.name === '@monky/bot-sdk').ok, false);
   require(sdkFile).PROTOCOL_VERSION = PROTOCOL_VERSION;

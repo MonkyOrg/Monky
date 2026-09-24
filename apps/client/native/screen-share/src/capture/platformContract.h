@@ -19,6 +19,18 @@ inline void ValidateNvencProbeEvidence(bool openedOnSelectedD3d11Device, bool h2
           "ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE");
 }
 
+inline void ValidateAmfLevelCapability(std::int64_t maximum, const VideoConfiguration& video) {
+  Require(maximum >= 10 && maximum <= 62, "AMF returned an invalid H264 MaxLevel capability",
+          "ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE");
+  const auto required = RequiredCaptureH264Level(video);
+  if (required > maximum)
+    throw ContractError("ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED",
+        "AMF H264 requires level_idc=" + std::to_string(required) + " for " +
+        std::to_string(video.width) + "x" + std::to_string(video.height) + "@" + std::to_string(video.fps) +
+        "; selected adapter/runtime reports MaxLevel=" + std::to_string(maximum) +
+        ". This rendition is unsupported; no lower-level or software fallback was applied.");
+}
+
 inline std::string CapabilityJson(const EncoderCapability& capability) {
   if (!capability.verified) return "null";
   Require(capability.encoder != EncoderKind::Auto && capability.adapterIndex == 0 &&

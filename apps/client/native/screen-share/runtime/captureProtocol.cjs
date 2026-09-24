@@ -82,8 +82,8 @@ function validateVideo(video) {
   exact(video, ['width', 'height', 'fps', 'bitrateKbps',
     ...(Object.hasOwn(video ?? {}, 'scaleMode') ? ['scaleMode'] : [])], 'capture video configuration');
   if (Object.hasOwn(video, 'scaleMode')) assert.ok(['stretch', 'fit'].includes(video.scaleMode), 'Invalid capture scaling mode.');
-  integer(video.width, 4, 1920); integer(video.height, 2, 1080); integer(video.fps, 1, 120);
-  integer(video.bitrateKbps, 50, 20000);
+  integer(video.width, 4, 3840); integer(video.height, 2, 2160); integer(video.fps, 1, 120);
+  integer(video.bitrateKbps, 50, 80000);
   assert.ok(video.width % 4 === 0 && video.height % 2 === 0 && video.bitrateKbps % 50 === 0);
   return video;
 }

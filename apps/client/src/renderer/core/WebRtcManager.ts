@@ -466,7 +466,7 @@ export class WebRtcManager {
     this.applyBitrateConstraints();
     void this.nativeScreens.applyQuality(this.getQualityProfile()).catch(error => {
       this.nativeScreens.report(error);
-      appEvents.emit('native_screen.source_failed', { reason: 'unsupported' });
+      appEvents.emit('native_screen.source_failed', { reason: 'runtime' });
     });
   }
 
@@ -3134,6 +3134,10 @@ export class WebRtcManager {
   public resumeAfterVoiceReconnect(): void {
     this.voiceReconnectSuspended = false;
     void this.nativeScreens.sync().catch(error => this.nativeScreens.report(error));
+  }
+
+  public async prepareForQuit(): Promise<void> {
+    await this.nativeScreens.prepareShutdown();
   }
 
   public closeAllPeers(): void {

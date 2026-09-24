@@ -655,13 +655,13 @@ async function setupVoiceStage(id, locale, adminPermission) {
       connected = true; connection++;
       routing.routeSessionEvent(session.key, 'network.status', () => appEvents.emit('network.status', 'CONNECTED'));
     },
-    destroy() {
+    async destroy() {
       document.exitFullscreen = nativeExitFullscreen;
       finishFullscreenExit?.();
       window.removeEventListener('error', onError);
       window.removeEventListener('unhandledrejection', onRejection);
       offLanguage(); offNavigation(); offNotifications(); view.destroy(); offScreens();
-      voiceStore.reset(); sessionManager.removeAll();
+      voiceStore.reset(); await sessionManager.removeAll();
       return listenerCount() === before;
     },
   };

@@ -114,6 +114,12 @@ async function packSources(config) {
     write(path.join(temporary, 'SOURCE-MANIFEST.json'), JSON.stringify(snapshot, null, 2) + '\n');
     fs.copyFileSync(path.join(root, 'README.md'), path.join(temporary, 'SOURCE-README.md'));
     fs.copyFileSync(path.join(root, 'README.en.md'), path.join(temporary, 'SOURCE-README.en.md'));
+    fs.cpSync(path.join(root, 'src', 'rtc', 'inputs', 'sdk'),
+      path.join(temporary, 'SOURCE-PATCHES', 'webrtc'), { recursive: true });
+    fs.copyFileSync(path.join(root, 'src', 'rtc', 'level6-upstream.json'),
+      path.join(temporary, 'SOURCE-PATCHES', 'level6-upstream.json'));
+    fs.copyFileSync(path.join(repository, 'patches', 'h264-profile-level-id+2.3.3.patch'),
+      path.join(temporary, 'SOURCE-PATCHES', 'h264-profile-level-id+2.3.3.patch'));
     const list = path.join(temporary, 'members.txt');
     write(list, entries.join('\n') + '\n');
     console.log(`Archiving ${snapshot.sourceFiles} native source files and ${snapshot.sourceDirectories} directories; generated builds, caches and unused tools are excluded.`);

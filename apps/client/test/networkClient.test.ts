@@ -100,24 +100,24 @@ test('initial connection failure rejects without creating an automatic reconnect
   assert.equal(f.sockets.length, 1);
 });
 
-test('a current client retries the known legacy contract exactly once without changing identity', async context => {
-  const f = fixture(context);
-  const pending = f.connect();
-  const socket = f.lastSocket();
-  socket.open();
-  const request = socket.sent[0];
-  assert.equal(request.payload.protocolVersion, PROTOCOL_VERSION);
-  socket.receive({ type: MessageType.SERVER_ERROR, requestId: request.requestId,
-    payload: { code: 'PROTOCOL_VERSION_UNSUPPORTED', serverProtocolVersion: 24 } });
-  const retry = socket.sent.at(-1);
-  assert.equal(retry?.payload.protocolVersion, 24);
-  assert.equal(retry?.payload.publicKey, request.payload.publicKey);
-  assert.equal(retry?.payload.deviceId, request.payload.deviceId);
-  socket.receive({ type: MessageType.AUTH_SUCCESS, requestId: retry?.requestId, payload: {} });
-  await pending;
-  assert.equal(f.client.getStatus(), 'CONNECTED');
-  assert.equal(f.sockets.length, 1);
-});
+for (const serverProtocolVersion of [24, 25]) {
+  test(`native protocol 26 never falls back to incompatible server protocol ${serverProtocolVersion}`, async context => {
+    const f = fixture(context);
+    const pending = assert.rejects(f.connect());
+    const socket = f.lastSocket();
+    socket.open();
+    const request = socket.sent[0];
+    assert.equal(request.payload.protocolVersion, 26);
+    assert.equal(request.payload.protocolVersion, PROTOCOL_VERSION);
+    assert.equal(request.payload.protocolOffer.minimumVersion, 26);
+    socket.receive({ type: MessageType.SERVER_ERROR, requestId: request.requestId,
+      payload: { code: 'PROTOCOL_VERSION_UNSUPPORTED', serverProtocolVersion } });
+    await pending;
+    assert.equal(socket.sent.filter(message => message.type === MessageType.AUTH_CONNECT).length, 1);
+    assert.equal(f.client.getStatus(), 'DISCONNECTED');
+    assert.equal(f.sockets.length, 1);
+  });
+}
 
 test('a current client never retries below the security floor', async context => {
   const f = fixture(context);

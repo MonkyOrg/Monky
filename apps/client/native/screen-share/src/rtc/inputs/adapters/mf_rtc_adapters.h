@@ -26,7 +26,7 @@ class SourceWorker;
 }
 
 struct AdapterOptions {
-  std::uint8_t maximum_h264_level = 52;
+  std::uint8_t maximum_h264_level = 60;
   std::uint32_t maximum_workers = 8;
   std::uint32_t maximum_in_flight = 8;
   std::uint32_t maximum_pending_frames = 32;

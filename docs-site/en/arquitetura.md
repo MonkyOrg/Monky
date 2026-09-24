@@ -309,12 +309,14 @@ Payload validation uses **zod**, with the schemas in `packages/shared` — the v
 same ones the client uses to validate before sending.
 
 ::: warning Negotiated compatibility, never an unrestricted downgrade
-Protocol 25 negotiates independent client and bot minimum versions, initially
-**24**, plus feature flags in `AUTH_CONNECT`/`AUTH_SUCCESS`. Version 24 peers
-retain their existing contract. Message blocks and message-limit settings are
-only enabled when negotiated. New clients and SDKs may retry authentication
-once using an old server's known version-24 contract. Versions below the floor
-are rejected; future versions must explicitly advertise a compatible range.
+Protocol **26** negotiates independent minimum versions: **26 for clients** and
+**24 for bots**, plus feature flags in `AUTH_CONNECT`/`AUTH_SUCCESS`. The native
+4K/80 Mbps screen contract requires updating client and server; clients 24/25
+are not silently downgraded. Version 24 bots retain their existing audio and
+command contract. Message blocks and message-limit settings are enabled only
+when negotiated. The SDK may retry authentication once using an old server's
+known contract, respecting the bot floor. Versions below the floor are rejected;
+future versions must explicitly advertise a compatible range.
 
 Additive features need not raise the floor. Critical fixes or incompatible
 changes must raise `MIN_CLIENT_PROTOCOL` and/or `MIN_BOT_PROTOCOL` in

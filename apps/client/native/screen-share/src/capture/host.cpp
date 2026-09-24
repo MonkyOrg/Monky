@@ -10,6 +10,7 @@
 #include "contract.h"
 #include "platformContract.h"
 #include "nvencProbe.h"
+#include "amfProbe.h"
 #include <runtime-pins.h>
 #include "liveNative.h"
 
@@ -861,7 +862,14 @@ class Host {
           packet->timebase_num > 0 && packet->timebase_den > 0,
           "Invalid video-only encoded callback packet", "ERR_SCREEN_CAPTURE_ENCODER_PACKET");
       auto delivered = *packet;
+      auto normalizedPacket = NormalizeAmfBt709({packet->data, packet->size}, host.arguments_.video,
+          host.capability_.encoder, host.amfColorNormalizationAllowed_);
+      if (!normalizedPacket.bytes.empty()) {
+        delivered.data = normalizedPacket.bytes.data();
+        delivered.size = normalizedPacket.bytes.size();
+      }
       std::vector<std::uint8_t> independentKeyframe;
+      AmfColorNormalization normalizedParameters;
       std::span<const std::uint8_t> parameterSets;
       if (packet->keyframe) {
         std::uint8_t* extra = nullptr;
@@ -870,8 +878,11 @@ class Host {
                 extra && size > 0 && size <= kMaxPacketBytes,
                 "Hardware encoder did not expose its current H264 parameter sets", "ERR_SCREEN_CAPTURE_H264");
         parameterSets = {extra, size};
+        normalizedParameters = NormalizeAmfBt709(parameterSets, host.arguments_.video,
+            host.capability_.encoder, host.amfColorNormalizationAllowed_);
+        if (!normalizedParameters.bytes.empty()) parameterSets = normalizedParameters.bytes;
         // Preview may have consumed the first headers before a viewer joins.
-        independentKeyframe = CompleteH264Keyframe({packet->data, packet->size}, {extra, size}, host.arguments_.video);
+        independentKeyframe = CompleteH264Keyframe({delivered.data, delivered.size}, parameterSets, host.arguments_.video);
         delivered.data = independentKeyframe.data();
         delivered.size = independentKeyframe.size();
       }
@@ -884,6 +895,11 @@ class Host {
             static_cast<std::uint32_t>(delivered.timebase_num), static_cast<std::uint32_t>(delivered.timebase_den),
             delivered.keyframe, qpc});
       }
+      if ((normalizedPacket.parameterSets || normalizedParameters.parameterSets) &&
+          !host.amfColorNormalizationLogged_.exchange(true))
+        host.AppendLog("{\"kind\":\"amf-color-normalization\",\"encoder\":\"h264_texture_amf\","
+            "\"input\":\"NV12-BT709-limited\",\"originalPrimaries\":0,\"primaries\":1,"
+            "\"transfer\":1,\"matrix\":1,\"fullRange\":false,\"maximumReportsPerHost\":1}");
       host.live_->Packet(delivered, qpc);
     } catch (const ContractError& error) { host.Fail(error.code, error.what()); }
     catch (const std::exception& error) { host.Fail("ERR_SCREEN_CAPTURE_ENCODER_PACKET", error.what()); }
@@ -1114,6 +1130,8 @@ class Host {
     if (capability_.encoder == EncoderKind::Nvenc) {
       ProbeNvencDevice(device, arguments_.video);
       nvencProbeVerified_ = true;
+    } else if (capability_.encoder == EncoderKind::Amf) {
+      AppendLog(ProbeAmfDevice(device, arguments_.video));
     }
     AppendLog("{\"schemaVersion\":1,\"kind\":\"screen-capture-device\",\"encoderId\":" + JsonString(SelectedEncoder()) +
         ",\"adapterIndex\":" + std::to_string(capability_.adapterIndex) + ",\"vendorId\":" + std::to_string(description.VendorId) +
@@ -1168,7 +1186,8 @@ class Host {
     } else {
       const auto minimum = api().obs_property_int_min(property), maximum = api().obs_property_int_max(property);
       const auto step = api().obs_property_int_step(property);
-      Require(step > 0 && value >= minimum && value <= maximum && (value - minimum) % step == 0,
+      if (std::strcmp(name, "bitrate") == 0) ValidateEncoderBitrateRange(value, minimum, maximum, step);
+      else Require(step > 0 && value >= minimum && value <= maximum && (value - minimum) % step == 0,
           "Required integer setting is outside supported range/step", "ERR_SCREEN_CAPTURE_SETTINGS");
     }
     api().obs_data_set_int(settings, name, value);
@@ -1301,7 +1320,8 @@ class Host {
     } else {
       SetBoolean(properties.value, encoderSettings_, "pre_analysis", false);
       Property(properties.value, "ffmpeg_opts", abi::PropertyType::Text);
-      api().obs_data_set_string(encoderSettings_, "ffmpeg_opts", EncoderExtraOptions(capability_.encoder));
+      const auto options = EncoderProfileOptions(capability_.encoder, arguments_.video);
+      api().obs_data_set_string(encoderSettings_, "ffmpeg_opts", options.c_str());
     }
     api().obs_properties_apply_settings(properties.value, encoderSettings_);
     capability_.verified = true;
@@ -1312,8 +1332,8 @@ class Host {
     Require(BoundedString(api().obs_data_get_string(settings.value, "rate_control"), 32) == EncoderRateControl(capability_.encoder) &&
         BoundedString(api().obs_data_get_string(settings.value, "profile"), 32) == "main" &&
         BoundedString(api().obs_data_get_string(settings.value, "preset"), 32) == (nvenc ? "p4" : "balanced") &&
-        BoundedString(api().obs_data_get_string(settings.value, nvenc ? "opts" : "ffmpeg_opts"), 32) ==
-            EncoderExtraOptions(capability_.encoder) &&
+        BoundedString(api().obs_data_get_string(settings.value, nvenc ? "opts" : "ffmpeg_opts"), 64) ==
+            EncoderProfileOptions(capability_.encoder, arguments_.video) &&
         api().obs_data_get_int(settings.value, "bitrate") == (live_ ? live_->Bitrate() : arguments_.video.bitrateKbps) &&
         api().obs_data_get_int(settings.value, "bf") == 0 &&
         api().obs_data_get_int(settings.value, "keyint_sec") == 1,
@@ -1594,8 +1614,13 @@ class Host {
             api().obs_output_can_begin_data_capture(output_, abi::kVideoEncoded),
             "Custom output cannot initialize encoded video", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
     strictEncoderWarnings_.store(true);
+    const auto refusal = "Hardware H264 encoder refused " + std::to_string(arguments_.video.width) + "x" +
+        std::to_string(arguments_.video.height) + "@" + std::to_string(arguments_.video.fps) +
+        " at " + std::to_string(arguments_.video.bitrateKbps) + " Kbps" +
+        "; required Main level_idc=" + std::to_string(RequiredCaptureH264Level(arguments_.video)) +
+        ". Select a lower capture profile or a capable GPU/driver.";
     Require(api().obs_output_initialize_encoders(output_, abi::kVideoEncoded),
-            "Stock hardware H264 encoder initialization failed", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
+            refusal.c_str(), "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
     CheckFailure();
     const auto* encoderError = api().obs_encoder_get_last_error(encoder_);
     Require(!encoderError || !*encoderError, "Hardware texture initialization reported an encoder error or reroute",
@@ -1611,6 +1636,13 @@ class Host {
     CheckFailure();
     Require(api().obs_encoder_video(encoder_) == canvasVideo_ && api().obs_output_get_video_encoder(output_) == encoder_,
             "Initialization changed the admitted canvas/encoder binding", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
+    if (capability_.encoder == EncoderKind::Amf) {
+      abi::VideoInfo canvasInfo{};
+      Require(api().obs_canvas_get_video_info(mainCanvas_, &canvasInfo) &&
+              ExactVideoConfiguration(canvasInfo, arguments_.video, capability_.adapterIndex),
+              "Initialized encoder lost its NV12 BT709 limited-range video", "ERR_SCREEN_CAPTURE_VIDEO");
+      amfColorNormalizationAllowed_ = true;
+    }
     encoderInitialized_ = true;
   }
   void CheckProbeIsolation() {
@@ -1827,6 +1859,8 @@ class Host {
   bool eof_ = false, obsStarted_ = false, videoStarted_ = false, comInitialized_ = false;
   bool targetBound_ = false;
   bool matchingDevice_ = false, nvencProbeVerified_ = false, sourcePlatformVerified_ = false, encoderInitialized_ = false;
+  bool amfColorNormalizationAllowed_ = false;
+  std::atomic<bool> amfColorNormalizationLogged_{false};
 };
 }  // namespace
 

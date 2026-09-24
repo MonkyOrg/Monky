@@ -1,4 +1,4 @@
-import type { NativeScreenVideoProfile } from '@monky/shared';
+import { getScreenH264ProfileLevelId, type NativeScreenVideoProfile } from '@monky/shared';
 
 export async function supportsBrowserScreenCodec(profile: Readonly<NativeScreenVideoProfile>): Promise<boolean> {
   const main = RTCRtpReceiver.getCapabilities('video')?.codecs.some(codec =>
@@ -9,14 +9,17 @@ export async function supportsBrowserScreenCodec(profile: Readonly<NativeScreenV
   const capability = await navigator.mediaCapabilities.decodingInfo({
     type: 'webrtc',
     video: {
-      contentType: 'video/H264;profile-level-id=4d0033;packetization-mode=1',
+      contentType: `video/H264;profile-level-id=${getScreenH264ProfileLevelId(profile)};packetization-mode=1`,
       width: profile.width, height: profile.height, framerate: profile.fps, bitrate: profile.maxBitrateKbps * 1000,
     },
   });
   return capability.supported;
 }
 
-export function withBrowserScreenReceiveParameters(sdp: string, stereo: boolean): string {
+export function withBrowserScreenReceiveParameters(
+  sdp: string, stereo: boolean, profile: Readonly<NativeScreenVideoProfile>,
+): string {
+  const receiveLevel = getScreenH264ProfileLevelId(profile).slice(2);
   let media = '';
   const codecs = new Map<string, string>();
   return sdp.split('\r\n').map(line => {
@@ -32,10 +35,10 @@ export function withBrowserScreenReceiveParameters(sdp: string, stereo: boolean)
     }));
     const profile = parameters.get('profile-level-id');
     if (media === 'video' && kind === 'h264' && profile && /^4d[0-9a-f]{4}$/i.test(profile)
-      && Number.parseInt(profile.slice(4), 16) < 51) {
+      && Number.parseInt(profile.slice(4), 16) < Number.parseInt(receiveLevel.slice(2), 16)) {
       // RFC 6184: extend receive capacity only after the WebRTC decoder capability probe.
       // Keep Chromium's default profile/level rather than pretending it negotiated another one.
-      parameters.set('max-recv-level', '0033');
+      parameters.set('max-recv-level', receiveLevel);
     } else if (media === 'audio' && kind === 'opus' && stereo) {
       parameters.set('stereo', '1');
     } else return line;

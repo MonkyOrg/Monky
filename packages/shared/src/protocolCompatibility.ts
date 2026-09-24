@@ -3,7 +3,9 @@ import { PROTOCOL_VERSION } from './constants.js';
 
 // Raise the affected floor for security or wire-breaking changes; additive
 // features only raise PROTOCOL_VERSION and are negotiated independently.
-export const MIN_CLIENT_PROTOCOL = 24;
+// Native 4K/80 Mbps renditions require the new bounds and H.264 negotiation;
+// both incompatible published protocol-25 client contracts must be rejected.
+export const MIN_CLIENT_PROTOCOL = 26;
 export const MIN_BOT_PROTOCOL = 24;
 export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];

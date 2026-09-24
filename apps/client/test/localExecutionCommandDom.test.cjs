@@ -305,7 +305,7 @@ async function runSelectionPreflight(language) {
       'A late preparation cannot execute or steal the new channel composer');
   } finally {
     view.destroy();
-    sessionManager.dispose();
+    await sessionManager.dispose();
     root.remove();
     window.api = previousApi;
   }
@@ -595,7 +595,7 @@ async function runPreflight(language, audioBase64) {
     window.setTimeout = originalSetTimeout;
     view.destroy();
     voiceStore.reset();
-    sessionManager.dispose();
+    await sessionManager.dispose();
     root.remove();
     window.Audio = OriginalAudio;
     URL.revokeObjectURL = revokeObjectUrl;

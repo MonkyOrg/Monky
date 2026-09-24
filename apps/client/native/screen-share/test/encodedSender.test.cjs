@@ -22,7 +22,7 @@ function model() {
     timebaseNumerator: 1, timebaseDenominator: 120 });
   const feedback = (sequence, bitrate, paused = false, requestedFps = 120) => flow.feedback({ target: 7, data: {
     sourceId: 7, sequence, kind: 'rate', bitrateBps: bitrate, paused, keyframeConfirmed: false,
-    requestedFps, fpsApplied: null, bitrateCeilingBps: 20000000,
+    requestedFps, fpsApplied: null, bitrateCeilingBps: 80000000,
   } });
   return { flow, submitted, errors, calls, frame, feedback, tick: value => { now = value; } };
 }
@@ -319,7 +319,7 @@ test('Watch resume can bootstrap a new codec from a real IDR after the previous 
   const m = model(); m.flow.setConnected(true); m.flow.setDemand(true);
   m.flow.packet(m.frame(1, true)); m.flow.setDemand(false);
   m.flow.feedback({ target: 7, data: { sourceId: 7, sequence: 1, kind: 'encoder-closed',
-    bitrateBps: 0, paused: false, requestedFps: 0, fpsApplied: null, bitrateCeilingBps: 20000000, keyframeConfirmed: false } });
+    bitrateBps: 0, paused: false, requestedFps: 0, fpsApplied: null, bitrateCeilingBps: 80000000, keyframeConfirmed: false } });
   m.flow.setDemand(true);
   m.flow.packet(m.frame(2)); assert.equal(m.submitted.length, 1);
   m.flow.packet(m.frame(3, true)); assert.equal(m.submitted.length, 2);

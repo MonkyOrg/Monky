@@ -870,6 +870,60 @@ test('actual renderer clock-client brackets and converted feedback reach native 
   await f.owner.stop();
 });
 
+test('native clock expiry withdraws measurement and recalibrates without retiring live audio or video', async () => {
+    const f = fixture();
+    await f.owner.start('selected');
+    let now = 1000;
+    const errors = [];
+    const clock = new NativeAudioClockClient({
+      epoch: 1, now: () => now,
+      async requestProbe(data) { const result = f.owner.probe(data); now += .5; return result; },
+      async calibrate(data) { return f.owner.calibrate(data); },
+      sendFeedback: data => f.owner.feedback(data), onError: error => errors.push(error),
+      setTimer() { return 1; }, clearTimer() {},
+    });
+    await clock.start();
+    const expired = () => Object.assign(new Error('Clock calibration is stale or uncertain'), {
+      code: 'ERR_RTC_AUDIO_CLOCK_OBSERVATION', status: 8,
+    });
+    f.hooks.calibrate = () => { throw expired(); };
+    now += 100;
+    assert.equal(await clock.refresh(), false);
+    assert.equal(clock.getStats().lastUnavailableReason, 'native-observation-expired');
+    assert.equal(f.owner.getStats().ready, true);
+    f.hooks.calibrate = undefined;
+    now += 100;
+    assert.equal(await clock.refresh(), true);
+    f.hooks.feedback = () => { throw expired(); };
+    const feedback = { epoch: 1, available: true, clockEpoch: 1, atPerformanceTimeMs: now,
+      estimatedPlayoutFrame: 0, confirmedPcmEnd: 0, feedbackAgeMs: 0, outputClockAgeMs: 0 };
+    assert.equal(clock.feedback(feedback), false);
+    assert.equal(f.owner.getStats().rejectedClockObservations, 2);
+    assert.equal(f.owner.getStats().lastClockRejection.phase, 'feedback');
+    assert.equal(f.owner.getStats().activeEpoch, 1);
+    assert.equal(f.owner.getStats().ready, true);
+    assert.equal(f.count('audio.stopOutput'), 0);
+    assert.equal(f.count('engine.close'), 0);
+    f.hooks.feedback = undefined;
+    assert.equal(clock.feedback(feedback), true);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(f.errors, []);
+    clock.stop();
+    await f.owner.stop();
+  });
+
+test('unclassified native clock errors remain fatal instead of being silently retried', async () => {
+    const failure = Object.assign(new Error('Physical audio feedback is beyond actual PCM'), {
+      code: 'ERR_RTC_AUDIO', status: 2,
+    });
+    const f = fixture({ feedback() { throw failure; } });
+    await f.owner.start('selected');
+    assert.throws(() => f.owner.feedback({ epoch: 1, available: false }), error => error === failure);
+    await f.owner.stop();
+    assert.equal(f.owner.getStats().stopped, true);
+    assert.ok(f.errors.some(value => containsError(value.error, /beyond actual PCM/)));
+  });
+
 test('repeated delayed renderer probes expire only when a new native observation proves their retirement', async () => {
   let now = 1000, slow = false;
   const f = fixture({

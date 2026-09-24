@@ -20,7 +20,8 @@ constexpr Level levels[] = {
     {31, 108000, 3600, 14000000}, {32, 216000, 5120, 20000000},
     {40, 245760, 8192, 20000000}, {41, 245760, 8192, 50000000},
     {42, 522240, 8704, 50000000}, {50, 589824, 22080, 135000000},
-    {51, 983040, 36864, 240000000}, {52, 2073600, 36864, 240000000}};
+    {51, 983040, 36864, 240000000}, {52, 2073600, 36864, 240000000},
+    {60, 4177920, 139264, 240000000}};
 constexpr std::size_t maxAccessUnitBytes = 8 * 1024 * 1024;
 constexpr std::size_t maxParameterBytes = 64 * 1024;
 
@@ -106,7 +107,7 @@ std::uint8_t RequiredH264Level(std::uint32_t width, std::uint32_t height,
         w * w <= 8ull * level.frameMbs && h * h <= 8ull * level.frameMbs &&
         bitrateBps <= level.bitrate) return level.id;
   }
-  throw std::runtime_error("Requested H264 mode exceeds supported Level 5.2 bounds");
+  throw std::runtime_error("Requested H264 mode exceeds supported Level 6 bounds");
 }
 
 std::uint32_t H264LevelMaxBitrate(std::uint8_t id) {

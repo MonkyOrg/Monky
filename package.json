@@ -18,6 +18,7 @@
     "apps/*"
   ],
   "scripts": {
+    "postinstall": "patch-package --error-on-fail",
     "start": "npm run start --workspace=apps/client",
     "qa": "npm run build && node scripts/qa.js",
     "test:qa": "node --test scripts/test-qa.js",
@@ -56,6 +57,12 @@
   ],
   "author": "",
   "license": "GPL-3.0-or-later",
+  "dependencies": {
+    "patch-package": "8.0.1"
+  },
+  "overrides": {
+    "h264-profile-level-id": "2.3.3"
+  },
   "devDependencies": {
     "mermaid": "^11.17.2",
     "rimraf": "^6.0.1",

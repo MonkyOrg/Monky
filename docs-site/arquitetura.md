@@ -311,13 +311,15 @@ A validação dos payloads usa **zod**, com os schemas em `packages/shared` —
 os mesmos que o cliente usa para validar antes de enviar.
 
 ::: warning Compatibilidade negociada, nunca um downgrade irrestrito
-O protocolo 25 negocia um piso independente para clientes e bots, inicialmente
-**24**, e uma lista de recursos em `AUTH_CONNECT`/`AUTH_SUCCESS`. Versões 24
-continuam usando o contrato anterior; blocos de mensagem e configuração de
-limite só são habilitados com as capacidades correspondentes. O cliente e o SDK
-novos podem repetir a autenticação uma única vez no contrato 24 de um servidor
-antigo. Versões abaixo do piso são recusadas; versões futuras precisam anunciar
-explicitamente um intervalo compatível.
+O protocolo **26** negocia pisos independentes: **26 para clientes** e **24 para
+bots**, além de recursos em `AUTH_CONNECT`/`AUTH_SUCCESS`. O contrato nativo de
+tela 4K/80 Mbps exige atualizar cliente e servidor; clientes 24/25 não são
+rebaixados silenciosamente. Bots 24 continuam usando seu contrato anterior de
+áudio e comandos. Blocos de mensagem e configuração de limite só são habilitados
+com as capacidades correspondentes. O SDK pode repetir a autenticação uma vez
+no contrato conhecido de um servidor antigo, respeitando o piso de bots. Versões
+abaixo do piso são recusadas; versões futuras precisam anunciar explicitamente
+um intervalo compatível.
 
 Mudanças aditivas não exigem elevar o piso. Uma correção crítica ou alteração
 incompatível deve elevar `MIN_CLIENT_PROTOCOL` e/ou `MIN_BOT_PROTOCOL` em

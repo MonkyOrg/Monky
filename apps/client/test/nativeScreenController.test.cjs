@@ -43,7 +43,7 @@ const profile = (width = 1280, height = 720, fps = 60) => ({
 });
 const cancelled = () => new DOMException('Modeled operation was cancelled.', 'AbortError');
 
-function fixture(t, { iceServers = [], capabilities = {
+function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false, capabilities = {
   capture: true, captureAudio: true, receive: true, backend: 'libobs-amf', reason: null,
 } } = {}) {
   const appBus = new EventEmitter();
@@ -51,6 +51,7 @@ function fixture(t, { iceServers = [], capabilities = {
   const mainListeners = new Set(), presentationListeners = new Set(), networkListeners = new Set();
   const calls = new Set(), sources = new Map(), sourceIntents = new Map(), watches = new Map();
   const elements = new Map(), attached = new Map(), retired = [], stopped = [], requests = [], replyGates = new Map();
+  const browsers = [];
   let commandHook = async () => {}, attachHook = async () => {}, current = true, connectionId = 'connection-one';
   let diagnosticsRetired = false;
   let status = 'CONNECTED', watching = false, quality = 'source', muted = false, deafened = false, volume = 100, announces = 0;
@@ -63,6 +64,7 @@ function fixture(t, { iceServers = [], capabilities = {
   }
   class Video {
     srcObject = null;
+    pause() {}
     setAttribute() {}
     remove() { elements.delete(this.id); }
   }
@@ -151,7 +153,16 @@ function fixture(t, { iceServers = [], capabilities = {
   const dependencies = {
     '@monky/shared': shared,
     './BrowserScreenSubscription': { BrowserScreenSubscription: class {
-      constructor() { throw new Error('Native controller scenarios must not create a browser receiver.'); }
+      starts = 0;
+      closes = 0;
+      constructor(options) {
+        assert.ok(allowBrowser, 'Native controller scenarios must not create a browser receiver.');
+        this.options = options;
+        browsers.push(this);
+      }
+      async start() { this.starts++; }
+      async close() { this.closes++; }
+      async setMuted() {}
     } },
     '../EventBus': { appEvents: { on: (event, listener) => {
       appBus.on(event, listener);
@@ -176,6 +187,7 @@ function fixture(t, { iceServers = [], capabilities = {
     } },
     '../../stores/settingsStore': { settingsStore: {
       getScreenAudioVolume: () => volume, screenSharePreviewPauseWhenUnfocused: true,
+      getScreenShareReceiver: () => receiver,
     } },
     '../../stores/voiceStore': { voiceStore: {
       getScreenWatchers: () => watching ? [['publisher', [remote.shareId]]] : [],
@@ -183,6 +195,7 @@ function fixture(t, { iceServers = [], capabilities = {
       getScreenQuality: () => quality, getEffectiveDeafened: () => deafened, isScreenAudioMuted: () => muted,
     } },
     '../../utils/audioPreferences': { resolveAudioOutput: () => 'default' },
+    '../../i18n': { t: key => key },
   };
   const exports = {};
   load(exports, name => {
@@ -207,7 +220,8 @@ function fixture(t, { iceServers = [], capabilities = {
     assert.equal(elements.size + attached.size, 0);
     assert.equal(appBus.listenerCount('settings.updated'), 0);
   });
-  return { controller, local, captures, captureStreams, sources, commands, events, errors, replies, requests, watches, elements, stopped, retired, Stream,
+  return { controller, local, captures, captureStreams, sources, commands, events, errors, replies, requests, watches, elements, stopped, retired, Stream, browsers,
+    receiver: value => { receiver = value; },
     registerCapture: (stream, capture) => { captures.set(stream.id, capture); captureStreams.set(stream.id, stream); },
     mainListeners, networkListeners, context, get remote() { return remote; }, nativeScreenProfile: exports.nativeScreenProfile,
     replaceRemote: source => { remote = source; attachRemote(); },
@@ -235,6 +249,87 @@ function fixture(t, { iceServers = [], capabilities = {
     },
   };
 }
+
+for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: native unavailability never starts Chromium; explicit selection allows retry`, async t => {
+    const f = fixture(t, { allowBrowser: true, capabilities: {
+      capture: false, captureAudio: false, receive: false, backend: null, reason: 'Runtime unavailable.',
+    } });
+    f.context.mode = mode;
+    f.watching(true);
+    await assert.rejects(f.controller.sync(), /nativeReceiverUnavailable/);
+    assert.equal(f.browsers.length, 0);
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).receiver, 'native');
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'unavailable');
+    assert.ok(f.errors.some(entry => entry.includes('Selected native screen receiver is unavailable; no browser fallback')));
+    assert.equal(f.commands.filter(command => command.action === 'watch' || command.action === 'stop').length, 0);
+    f.receiver('chromium');
+    await f.controller.retry('publisher', f.remote.shareId);
+    assert.equal(f.browsers.length, 1);
+    assert.equal(f.browsers[0].starts, 1);
+    assert.equal(f.browsers[0].options.call.mode, mode);
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).receiver, 'chromium');
+  });
+
+  test(`${mode}: Chromium is an explicit choice even when native reception is available`, async t => {
+    const f = fixture(t, { receiver: 'chromium', allowBrowser: true });
+    f.context.mode = mode;
+    f.watching(true);
+    await f.controller.sync();
+    assert.equal(f.browsers.length, 1);
+    assert.equal(f.commands.filter(command => command.action === 'watch' || command.action === 'capabilities').length, 0);
+    f.receiver('native');
+    await f.controller.sync();
+    assert.equal(f.browsers[0].closes, 0, 'Saving preferences must not interrupt an active subscription.');
+    await f.controller.retry('publisher', f.remote.shareId);
+    assert.ok(f.browsers[0].closes > 0);
+    assert.equal(f.commands.filter(command => command.action === 'watch').length, 1);
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).receiver, 'native');
+  });
+}
+
+for (const failure of ['capabilities', 'watch']) {
+  test(`native ${failure} failure retains the native receiver on retry`, async t => {
+    const f = fixture(t, { allowBrowser: true });
+    f.watching(true);
+    f.hook(async command => { if (command.action === failure) throw new Error('Modeled native failure.'); });
+    await assert.rejects(f.controller.sync(), /Modeled native failure/);
+    await assert.rejects(f.controller.retry('publisher', f.remote.shareId), /Modeled native failure/);
+    assert.equal(f.browsers.length, 0);
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).receiver, 'native');
+  });
+}
+
+test('shutdown quiesces SFU control producers, drains admitted commands and still answers cleanup RPCs', async t => {
+  const f = fixture(t), controls = deferred();
+  await f.local();
+  const joined = f.commands.find(command => command.action === 'join');
+  f.hook(command => command.action === 'producer-remove' ? controls.promise : Promise.resolve());
+  const closed = () => {
+    for (const listener of f.networkListeners)
+      listener(`message.${shared.MessageType.SFU_PRODUCER_CLOSED}`, { channelId: 'room', producerId: 'retiring-producer' });
+  };
+  for (let count = 0; count < 4; count++) closed();
+  await tick();
+  assert.equal(f.commands.filter(command => command.action === 'producer-remove').length, 4);
+  const preparing = f.controller.prepareShutdown();
+  await tick();
+  assert.equal(f.commands.some(command => command.action === 'leave'), false,
+    'Main must not invalidate a call while its admitted control commands are pending.');
+  for (let count = 0; count < 4; count++) closed();
+  f.previewPreference(false);
+  await assert.rejects(f.controller.addSource({ ...input, shareId: 'late-source' }), { name: 'AbortError' });
+  const reply = await f.request(joined);
+  assert.equal(reply.ok, true, 'The original network connection must still service scoped native cleanup RPCs.');
+  assert.equal(f.commands.filter(command => command.action === 'producer-remove').length, 4);
+  controls.resolve();
+  await preparing;
+  await f.controller.prepareShutdown();
+  assert.equal(f.commands.filter(command => command.action === 'leave').length, 1);
+  assert.equal(f.commands.some(command => command.action === 'leave-local'), false);
+  assert.equal(f.mainListeners.size + f.networkListeners.size, 0);
+  assert.deepEqual(f.errors, []);
+});
 
 for (const scenario of [
   { name: 'probe permission without kinds', capture: false, requiresSelectionProbe: true, kind: 'window', allowed: false },
@@ -384,7 +479,10 @@ for (const failure of [null, 'admission', 'retirement', 'cancelled']) {
 test('native profile alignment is explicit and unsupported ceilings are not silently clamped', t => {
   const f = fixture(t);
   assert.equal(f.nativeScreenProfile(profile(854, 480)).width, 852);
-  assert.equal(f.nativeScreenProfile(profile(2560, 1440)), null);
+  assert.deepEqual(f.nativeScreenProfile(profile(3840, 2160, 120)), {
+    width: 3840, height: 2160, fps: 120, maxBitrateKbps: 6000,
+  });
+  assert.equal(f.nativeScreenProfile(profile(3844, 2160)), null);
   assert.equal(f.nativeScreenProfile(profile(1920, 1080, 121)), null);
 });
 
@@ -567,7 +665,8 @@ test('roster sync and late old Closed cannot restore or terminate a profile repl
   assert.equal(f.events.filter(([type]) => type === 'local.screen_ended_externally').length, 0);
   gate.resolve(); await Promise.all([changing, syncing]);
   assert.equal(f.commands.filter(command => command.action === 'source-add').length, 2);
-  assert.equal(f.commands.filter(command => command.action === 'source-remove').length, 1);
+  assert.equal(f.commands.filter(command => command.action === 'source-remove').length, 0);
+  assert.equal(f.commands.filter(command => command.action === 'source-add').at(-1).replacesSourceInstanceId, old.instanceId);
   assert.equal(f.captures.get(old.shareId).source.video.width, 1280);
   assert.equal(f.sources.size, 1);
 });
@@ -584,7 +683,7 @@ test('Stop during a profile replacement prevents a queued sync from resurrecting
   await tick();
   assert.equal(retired, false, 'Stop cannot claim retirement while the Main acknowledgement is pending.');
   gate.resolve(); await Promise.all([changing, syncing, stopping]);
-  assert.equal(f.commands.filter(command => command.action === 'source-add').length, 1);
+  assert.equal(f.commands.filter(command => command.action === 'source-add').length, 2);
   assert.equal(f.sources.size, 0);
 });
 
@@ -636,7 +735,9 @@ test('active native settings reject incompatible codecs and profiles before chan
   assert.equal(f.controller.settingsIssue(profile(), 'vp8'), 'codec');
   assert.equal(f.controller.settingsIssue(profile(), 'auto'), null);
   assert.equal(f.controller.settingsIssue(profile(), 'h264'), null);
-  assert.equal(f.controller.settingsIssue(profile(3840, 2160), 'h264'), 'profile');
+  assert.equal(f.controller.settingsIssue(profile(3840, 2160, 120), 'h264'), null);
+  assert.equal(f.controller.settingsIssue({ ...profile(3840, 2160, 120), screenBitrateKbps: 80000 }, 'h264'), null);
+  assert.equal(f.controller.settingsIssue({ ...profile(), screenBitrateKbps: 80050 }, 'h264'), 'profile');
   assert.equal(f.controller.settingsIssue(profile(1920, 1080, 144), 'h264'), 'profile');
   assert.equal(f.controller.settingsIssue({ ...profile(), screenBitrateKbps: 1501 }, 'h264'), 'profile');
   assert.equal(f.controller.settingsIssue({ ...profile(), audioBitrateKbps: 512 }, 'h264'), 'profile');
@@ -644,17 +745,53 @@ test('active native settings reject incompatible codecs and profiles before chan
   assert.equal(f.captures.get(source.shareId).source, source);
 });
 
-test('failed quality admission restores the last profile under a new source instance and surfaces the error', async t => {
+test('rapid resolution FPS and bitrate changes serialize exact instances without disturbing an active Watch', async t => {
+  const f = fixture(t), old = await f.local(), gate = deferred();
+  f.watching(true);
+  await f.controller.sync();
+  const watched = f.commands.filter(command => command.action === 'watch').length;
+  let active = 0, peak = 0, admissions = 0;
+  f.hook(async command => {
+    if (command.action !== 'source-add') return;
+    active++; peak = Math.max(peak, active);
+    if (++admissions === 1) await gate.promise;
+    await tick();
+    active--;
+  });
+  const choices = [profile(), { ...profile(), screenFps: 120 },
+    { ...profile(), screenFps: 120, screenBitrateKbps: 20000 }];
+  const changes = choices.map(choice => f.controller.applyQuality(choice));
+  await tick();
+  assert.equal(f.captures.get(old.shareId).source, old);
+  assert.equal(admissions, 1);
+  gate.resolve();
+  await Promise.all(changes);
+  assert.equal(peak, 1);
+  assert.equal(admissions, choices.length);
+  const replacements = f.commands.filter(command => command.action === 'source-add').slice(1);
+  assert.equal(replacements[0].replacesSourceInstanceId, old.instanceId);
+  assert.equal(new Set(replacements.map(command => command.replacesSourceInstanceId)).size, choices.length);
+  const current = f.captures.get(old.shareId).source;
+  assert.deepEqual(current.video, { width: 1280, height: 720, fps: 120, maxBitrateKbps: 20000 });
+  f.emit({ type: 'state', publisherSessionId: 'self', shareId: old.shareId, sourceInstanceId: old.instanceId, state: 'closed' });
+  await f.controller.sync();
+  assert.equal(f.captures.get(old.shareId).source, current);
+  assert.equal(f.commands.filter(command => command.action === 'watch').length, watched);
+  assert.equal(f.commands.some(command => command.action === 'source-remove'), false);
+});
+
+test('failed quality admission preserves the original live instance and surfaces the error', async t => {
   const f = fixture(t), old = await f.local();
   f.hook(async command => {
     if (command.action === 'source-add' && command.video.width === 1280) throw new Error('modeled selected profile failure');
   });
   await assert.rejects(f.controller.applyQuality(profile()), /modeled selected profile failure/);
   const restored = f.captures.get(old.shareId).source;
-  assert.notEqual(restored.instanceId, old.instanceId);
+  assert.equal(restored.instanceId, old.instanceId);
   assert.deepEqual(restored.video, old.video);
   assert.equal(f.sources.size, 1);
-  assert.equal(f.announceCount(), 1);
+  assert.equal(f.announceCount(), 0);
+  assert.equal(f.commands.some(command => command.action === 'source-remove'), false);
   assert.equal(f.events.filter(([type]) => type === 'local.screen_ended_externally').length, 0);
 });
 
@@ -671,23 +808,29 @@ for (const captureKind of ['window', 'monitor', 'game']) {
       });
       await assert.rejects(f.controller.applyQuality(profile()), /modeled selected profile failure/);
       const additions = f.commands.filter(command => command.action === 'source-add');
-      assert.equal(additions.length, 3);
+      assert.equal(additions.length, 2);
       assert.ok(additions.every(command => command.captureKind === captureKind && command.preserveAspectRatio === preserveAspectRatio
         && command.desktopSourceId === selection.desktopSourceId));
       const restored = f.captures.get(old.shareId);
       assert.equal(restored.captureKind, captureKind);
       assert.equal(restored.preserveAspectRatio, preserveAspectRatio);
       assert.equal(restored.desktopSourceId, selection.desktopSourceId);
-      assert.notEqual(restored.source.instanceId, old.instanceId);
+      assert.equal(restored.source.instanceId, old.instanceId);
       assert.equal(f.events.some(([type]) => type === 'local.screen_ended_externally'), false);
     });
   }
 }
 
-test('a failed replacement and rollback withdraw the retired source instead of announcing a stale descriptor', async t => {
+test('a failure after acknowledged old retirement withdraws the old descriptor instead of resurrecting it', async t => {
   const f = fixture(t), old = await f.local();
-  f.hook(async command => { if (command.action === 'source-add') throw new Error('modeled unavailable window'); });
-  await assert.rejects(f.controller.applyQuality(profile()), /quality change and restoration failed/);
+  f.hook(async command => {
+    if (command.action !== 'source-add') return;
+    f.sources.clear();
+    f.emit({ type: 'state', publisherSessionId: 'self', shareId: old.shareId, sourceInstanceId: old.instanceId, state: 'closed' });
+    await tick();
+    throw new Error('modeled failure after old retirement');
+  });
+  await assert.rejects(f.controller.applyQuality(profile()), /modeled failure after old retirement/);
   assert.equal(f.captures.has(old.shareId), false);
   assert.equal(f.sources.size, 0);
   assert.equal(f.announceCount(), 0);
@@ -850,7 +993,7 @@ test('failed quality retirement displays an error and Retry completes cleanup be
   f.quality('480p30');
   await assert.rejects(f.controller.sync(), /retirement failed/);
   assert.deepEqual(f.controller.getWatchState('publisher', f.remote.shareId), {
-    state: 'unavailable', reason: 'connection-failed',
+    state: 'unavailable', reason: 'connection-failed', receiver: 'native',
   });
   f.hook(async () => {});
   await f.controller.retry('publisher', f.remote.shareId);

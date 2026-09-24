@@ -393,6 +393,12 @@ function modelBuilder(name, f, selected, env, paths = path) {
     mkdirSync: value => directories.add(value), writeFileSync: save,
     readFileSync(filename, encoding) {
       let bytes = files.get(filename);
+      if (filename === paths.join(source, 'rtc', 'level6-upstream.json')) {
+        bytes = Buffer.from(JSON.stringify({ revision: pins.repositories.webrtc.commit, files: [
+          { path: 'api/video_codecs/h264_profile_level_id.h', sha256: real.digest('modeled build input') },
+          { path: 'api/video_codecs/h264_profile_level_id.cc', sha256: real.digest('modeled build input') },
+        ] }));
+      }
       if (!bytes) {
         const relative = paths.relative(source, filename);
         if (!relative.startsWith('..') && !paths.isAbsolute(relative))

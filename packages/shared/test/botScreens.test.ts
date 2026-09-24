@@ -6,18 +6,49 @@ import {
 } from '../src/botScreens.js';
 import { PROTOCOL_VERSION } from '../src/constants.js';
 import { authConnectSchema } from '../src/validators.js';
-import { negotiateProtocol } from '../src/protocolCompatibility.js';
+import {
+  MIN_CLIENT_PROTOCOL, MIN_BOT_PROTOCOL, createProtocolOffer, negotiateProtocol, legacyProtocolFallback,
+} from '../src/protocolCompatibility.js';
 
 test('authentication shape allows negotiation while the compatibility floor rejects obsolete peers', () => {
   const input = { nickname: 'Member', publicKey: 'ab'.repeat(32), protocolVersion: PROTOCOL_VERSION };
-  assert.equal(PROTOCOL_VERSION, 25);
+  assert.equal(PROTOCOL_VERSION, 26);
+  assert.equal(MIN_CLIENT_PROTOCOL, 26);
+  assert.equal(MIN_BOT_PROTOCOL, 24);
   assert.equal(authConnectSchema.safeParse(input).success, true);
   for (const version of [16, 17, 18, 19, 21, 22, 23]) {
+    assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: version }).success, true);
     assert.equal(negotiateProtocol(version, undefined, 'client'), null);
     assert.equal(negotiateProtocol(version, undefined, 'bot'), null);
   }
-  assert.ok(negotiateProtocol(24, undefined, 'client'));
-  assert.ok(negotiateProtocol(24, undefined, 'bot'));
+  for (const version of [24, 25]) {
+    for (const protocolOffer of [undefined, { minimumVersion: 24, features: ['chat-blocks', 'message-length-setting', 'chat-delivery'] }]) {
+      assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: version, protocolOffer }).success, true);
+      assert.equal(negotiateProtocol(version, protocolOffer, 'client'), null);
+      assert.deepEqual(negotiateProtocol(version, protocolOffer, 'bot'), {
+        version: 26, minimumVersion: 24, features: protocolOffer ? ['message-length-setting'] : [],
+      });
+    }
+    assert.equal(legacyProtocolFallback(version, 'client'), null);
+    assert.equal(legacyProtocolFallback(version, 'bot'), version);
+  }
+});
+
+test('protocol 26 retains feature negotiation without restoring obsolete native client contracts', () => {
+  assert.deepEqual(createProtocolOffer('client'), {
+    minimumVersion: 26, features: ['chat-blocks', 'message-length-setting', 'chat-delivery'],
+  });
+  assert.deepEqual(createProtocolOffer('bot'), { minimumVersion: 24, features: ['message-length-setting'] });
+  assert.deepEqual(negotiateProtocol(26, undefined, 'client'), { version: 26, ...createProtocolOffer('client') });
+  assert.deepEqual(negotiateProtocol(26, { minimumVersion: 26, features: [] }, 'client')?.features, []);
+  assert.deepEqual(negotiateProtocol(27, { minimumVersion: 26, features: ['chat-blocks', 'unknown'] }, 'client'), {
+    version: 26, minimumVersion: 26, features: ['chat-blocks'],
+  });
+  assert.equal(negotiateProtocol(27, undefined, 'client'), null);
+  assert.equal(negotiateProtocol(27, { minimumVersion: 27, features: [] }, 'client'), null);
+  for (const offer of [null, { minimumVersion: 26, features: 'chat-blocks' }, { minimumVersion: 27, features: [] }]) {
+    assert.equal(negotiateProtocol(26, offer, 'client'), null);
+  }
 });
 
 test('screen JSON is finite, bounded, cycle-safe and rejects executable values', () => {

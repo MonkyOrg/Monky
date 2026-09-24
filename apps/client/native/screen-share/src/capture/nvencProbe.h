@@ -130,6 +130,7 @@ inline void ProbeNvencDevice(ID3D11Device* device, const VideoConfiguration& vid
     const auto dynamicBitrate = cap(NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE, "NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE", 1);
     const auto maximumWidth = cap(NV_ENC_CAPS_WIDTH_MAX, "NV_ENC_CAPS_WIDTH_MAX", video.width);
     const auto maximumHeight = cap(NV_ENC_CAPS_HEIGHT_MAX, "NV_ENC_CAPS_HEIGHT_MAX", video.height);
+    cap(NV_ENC_CAPS_LEVEL_MAX, "NV_ENC_CAPS_LEVEL_MAX", RequiredCaptureH264Level(video));
     ValidateNvencProbeEvidence(true, h264, main, nv12, dynamicBitrate != 0, maximumWidth, maximumHeight, video);
   } catch (...) { failure = std::current_exception(); }
   const auto cleanupFailure = [&](const std::string& detail) {

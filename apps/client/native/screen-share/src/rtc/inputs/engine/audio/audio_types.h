@@ -21,7 +21,7 @@ inline constexpr std::uint64_t kMaxSafeInteger = 9007199254740991ull;
 enum class Failure {
   InvalidPacket, UnsupportedFormat, WrongEpoch, Discontinuity, NotReady,
   Closed, InvalidCredit, CreditOverflow, Transport, OutputRejected, Clock,
-  WrongThread
+  WrongThread, ClockObservationUnavailable
 };
 
 class AudioError : public std::runtime_error {

@@ -93,16 +93,22 @@ the GPU brand does not guarantee support. There is no automatic switch to
 Chromium or another source. The automatic **Game Capture** to **Normal**
 attempt, when needed, uses only the same window and displays a notice.
 
-For up to **1920×1080 at 120 FPS**, select **Custom** under **Quality & sharing**;
-existing presets were not automatically changed to 120 FPS. In the picker,
-**Keep aspect ratio** fits the image into the selected dimensions, adding
+For up to **3840×2160**, **120 FPS** and **80000 kbps**, select **Custom** under
+**Quality & sharing**; existing presets remain unchanged.
+Limits depend on the encoder: **4K/60** requires H.264 Level 5.2 and **4K/120**
+requires Level 6. Unsupported profiles are rejected rather than silently reducing
+FPS; during a quality change, preflight keeps the old source while checking the
+new configuration. Leave bandwidth for your game and every outgoing profile.
+In the picker, **Keep aspect ratio** fits the image into the selected dimensions, adding
 borders when needed without distortion. Off retains the current stretch-to-fill
 behavior. The switch starts off for each new screen share and is not a global
 preference.
 
 A new screen share's preview enters focus as soon as its tile is available.
 You can unfocus it: quality changes, reconnections and capture-method retries
-do not refocus it. The preview and each viewer show a **Normal** or **Game**
+do not refocus it. With one screen in focus, scroll to zoom without holding Ctrl;
+drag to pan the enlarged image and double-click to reset.
+The preview and each viewer show a **Normal** or **Game**
 badge for the confirmed mode of that stream, including in thumbnails.
 Until an image confirms the mode, the badge stays hidden; selecting Game
 Capture alone does not establish that Game is in use.
@@ -459,7 +465,22 @@ Push-to-Talk keeps its separately configured keyboard key or mouse button.
 
 The profile controls what **you transmit**; it does not increase someone
 else's camera or screen resolution. This tab also groups codec, local sharing
-preview and telemetry; profiles still include voice and camera settings.
+preview, screen reception and telemetry; profiles still include voice and camera settings.
+
+### Screen reception
+
+Under **Settings → Quality & sharing → Screen reception**, choose **Native** or
+**Chromium**. On Windows, **Native is the default**, using the runtime included
+with Monky. There is no automatic fallback: if it fails, the message explains
+where to select Chromium manually. The choice is saved and applies when you
+start watching or click **Try again**; for an open screen, stop watching and
+watch again. Camera, voice and outgoing screen sharing are unchanged.
+
+**Chromium has a known limitation:** the Windows scenario showed FPS drops and
+periodic freezes. The warning remains visible in settings; selecting this
+receiver does not fix the limitation. On macOS, **Chromium is the default** and
+**Native** is disabled as **Coming soon**. This allows watching compatible
+profiles, but does not enable libobs capture on Mac or qualify its performance.
 
 ### Quality profiles
 

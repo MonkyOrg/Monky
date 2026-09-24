@@ -23,7 +23,8 @@ const answer = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 98', 'a=rtpmap:98 H264/90000
   'a=fmtp:98 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f',
   'm=audio 9 UDP/TLS/RTP/SAVPF 111', 'a=rtpmap:111 opus/48000/2', 'a=fmtp:111 minptime=10;useinbandfec=1', ''].join('\r\n');
 
-function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = true, capabilityGate, transportGate } = {}) {
+function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = true, capabilityGate, transportGate,
+  sourceVideo = video } = {}) {
   const sent = [], rpc = [], peers = [], transports = [], tracks = [], admitted = [], states = [], errors = [], probes = [], modes = [];
   const availableProducers = new Map();
   let closeFailures = 0;
@@ -111,7 +112,7 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
     vm.runInContext(`(function(exports, require) {${code}\n})`, context, { filename })(exports, load);
     return exports;
   };
-  const source = { shareId: 'one', instanceId: randomUUID(), video, audio };
+  const source = { shareId: 'one', instanceId: randomUUID(), video: sourceVideo, audio };
   const call = { callId: randomUUID(), sessionId: leader ? 'a-viewer' : 'z-viewer', channelId: 'room', mode,
     iceServers: [{ urls: ['stun:example.invalid'] }] };
   const publisherSessionId = 'm-publisher';
@@ -163,7 +164,7 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
   const producer = (kind, pipelineId = 'cb54a93e-7e32-41f2-a755-90e3d9459c94') => {
     const value = { channelId: call.channelId, producerId: `${kind}-${pipelineId}`, producerSessionId: publisherSessionId,
       kind, appData: { mediaType: kind === 'audio' ? 'screen_audio' : 'screen_video', shareId: source.shareId,
-        nativeScreen: { sourceInstanceId: source.instanceId, pipelineId, video } } };
+        nativeScreen: { sourceInstanceId: source.instanceId, pipelineId, video: sourceVideo } } };
     availableProducers.set(value.producerId, value);
     return value;
   };
@@ -219,9 +220,32 @@ test('browser Watch qualifies actual WebRTC Main5.1 decoding before asking for a
 
 test('unsupported browser decoder starts no capture request, PC or SFU transport', async t => {
   const f = fixture(t, { supported: false });
-  await assert.rejects(f.sub.start(), /Main Level 5.1/);
+  await assert.rejects(f.sub.start(), /H.264 Main at its required level/);
   assert.deepEqual(f.states, ['unsupported']);
   assert.equal(f.sent.length + f.rpc.length + f.peers.length + f.transports.length, 0);
+});
+
+for (const [fps, level] of [[30, '0033'], [60, '0034'], [120, '003c']]) {
+  test(`4K${fps} browser probe and receive extension agree on level ${level}`, async t => {
+    const f = fixture(t, { sourceVideo: { width: 3840, height: 2160, fps, maxBitrateKbps: 80000 } });
+    await f.open();
+    assert.match(f.probes[0].video.contentType, new RegExp(`profile-level-id=4d${level}`));
+    assert.equal(f.probes[0].video.width, 3840);
+    assert.equal(f.probes[0].video.height, 2160);
+    assert.equal(f.probes[0].video.bitrate, 80000000);
+    await f.turn();
+    const answer = f.sent.find(message => message.action === 'control' && message.control.type === 'answer');
+    assert.ok(answer.control.sdp.includes(`profile-level-id=4d001f;max-recv-level=${level}`));
+    assert.deepEqual(f.errors, []);
+  });
+}
+
+test('unsupported 4K120 browser decode does not silently request a lower rendition', async t => {
+  const f = fixture(t, { supported: false,
+    sourceVideo: { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 } });
+  await assert.rejects(f.sub.start(), /required level/);
+  assert.equal(f.sent.length + f.rpc.length + f.peers.length + f.transports.length, 0);
+  assert.deepEqual(f.states, ['unsupported']);
 });
 
 test('Stop cancels pending codec discovery without waiting for the capability service or sending a late Watch', async t => {

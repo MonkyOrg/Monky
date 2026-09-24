@@ -63,7 +63,8 @@ test('attachment delivery is atomic and retries preserve its original links', as
 });
 
 test('negotiation keeps known legacy contracts and refuses security-floor downgrades', () => {
-  assert.ok(negotiateProtocol(24, undefined, 'client'));
+  assert.equal(negotiateProtocol(24, undefined, 'client'), null);
+  assert.equal(negotiateProtocol(25, createProtocolOffer('client'), 'client'), null);
   assert.ok(negotiateProtocol(24, undefined, 'bot'));
   assert.equal(negotiateProtocol(MIN_CLIENT_PROTOCOL - 1, createProtocolOffer('client'), 'client'), null);
   assert.equal(negotiateProtocol(MIN_BOT_PROTOCOL - 1, createProtocolOffer('bot'), 'bot'), null);
@@ -72,12 +73,15 @@ test('negotiation keeps known legacy contracts and refuses security-floor downgr
   assert.deepEqual(negotiateProtocol(PROTOCOL_VERSION + 1, { minimumVersion: 24, features: ['chat-blocks', 'unknown'] }, 'client')?.features, ['chat-blocks']);
 });
 
-test('legacy clients and bots connect without receiving unsupported features', async (t) => {
+test('clients without negotiated features and legacy bots never receive unsupported features', async (t) => {
   const f = await createFixture();
   t.after(() => f.dispose());
   const keys = identity();
   const peer = await f.connect();
-  const challenge = await peer.request(MessageType.AUTH_CONNECT, { protocolVersion: 24, nickname: 'Legacy owner', publicKey: keys.publicKey });
+  const challenge = await peer.request(MessageType.AUTH_CONNECT, {
+    protocolVersion: PROTOCOL_VERSION, protocolOffer: { ...createProtocolOffer('client'), features: [] },
+    nickname: 'Basic owner', publicKey: keys.publicKey,
+  });
   assert.equal(challenge.type, MessageType.AUTH_CHALLENGE);
   const auth = await peer.request(MessageType.AUTH_CHALLENGE_RESPONSE, {
     signature: sign(null, Buffer.from(text(challenge.payload.nonce), 'hex'), keys.privateKey).toString('hex'),

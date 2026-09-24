@@ -15,6 +15,13 @@ Se Captura de jogo não conseguir iniciar, há uma tentativa em **Normal** para
 a mesma janela, após comprovar o encerramento da tentativa anterior.
 A recepção Chromium continua disponível para perfis H.264 que o
 dispositivo receptor consiga decodificar; isso não comprova capacidade de envio.
+Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, Windows
+usa Nativo por padrão e Chromium somente por escolha explícita, nunca como
+fallback. Uma falha nativa indica essa opção sem mudar o receptor. No macOS,
+Chromium é o padrão e Nativo permanece desabilitado como Em breve. A preferência
+salva vale para o próximo Assistir/Tentar novamente, sem interromper a recepção
+ativa, alterar câmera/voz ou a captura. O aviso de limitações Chromium permanece
+visível nas configurações.
 
 ## Fontes e verificação de disponibilidade
 
@@ -84,10 +91,44 @@ documenta esse metadado reservado mesmo quando o OBS solicita BT.709.
 A AMD informou em 20/07/2026 que a correção estava no driver público; isso não
 comprova disponibilidade para todo modelo. O mesmo erro foi relatado em um 5600G
 após atualização, portanto atualizar não é uma solução garantida.
-O host também declara `InColorPrimaries=1` via a opção AMF do OBS para explicitar
-BT.709 na entrada NV12, em vez do padrão indefinido; a saída já é configurada pelo
-OBS. O efeito no 5600G ainda exige confirmação física. O Monky não transforma
-o valor reservado em uma declaração de cor válida nem reescreve o SPS.
+Declarar `InColorPrimaries=1` também não resolveu no 5600G testado. O host agora
+corrige exclusivamente o metadado de primárias do SPS produzido pelo AMF quando
+o pipeline próprio foi verificado como NV12/BT.709/faixa limitada e o SPS declara
+exatamente `primaries=0`, `transfer=1`, `matrix=1`, `fullRange=false`. O parser
+limitado de RBSP/EBSP corrige extradata e SPS em banda antes da prévia e da rede,
+sem recodificar nem alterar VCL, dimensões, perfil ou timestamps. A correção é
+registrada uma vez por host. Outros metadados, fluxos de terceiros e a validação
+de cor do RTC não recebem essa exceção. A publicação física no 5600G ainda
+precisa ser confirmada.
+
+Na recepção, uma observação de relógio que expira durante o transporte IPC é
+indisponível, não uma falha do áudio inteiro. O código estruturado
+`ERR_RTC_AUDIO_CLOCK_OBSERVATION` retira a medição e permite recalibrar no mesmo
+epoch, mantendo os limites de 200 ms e de incerteza. Contadores
+`rejectedClockObservations` e `lastClockRejection` preservam o diagnóstico.
+Valores impossíveis, PCM não confirmado e regressões reais continuam erros.
+
+Alterações de qualidade fazem preflight com a fonte anterior ainda ativa.
+Somente após admissão encerram a instância antiga e publicam a substituta com
+o mesmo ID de compartilhamento. Stop bloqueia novas demandas imediatamente,
+mas drena transações SFU/PCM já admitidas antes de invalidar seus callbacks;
+timeout retém o proprietário para retry. Consultas de diagnóstico durante essa
+retirada retornam indisponibilidade, sem inventar FPS zero.
+
+O teto configurável é 3840x2160/120 FPS/80 Mbps, sem mudar os presets existentes.
+Cada perfil negocia o nível H.264 necessário: pelo menos 5.1 para 1080p120,
+5.2 para 4K60 e 6 para 4K120. O overlay versionado do WebRTC e o patch de
+`h264-profile-level-id` acrescentam suporte real ao nível 6; os patches e
+licenças acompanham as fontes correspondentes. Cliente e servidor exigem
+protocolo 26. O teto de bitrate não é um piso: o controle de congestionamento
+continua ativo e diferentes perfis podem consumir upload adicional.
+
+Isso não torna todo encoder compatível com 4K120. No AMF instalado na RX 9070 XT
+do ensaio, `MaxLevel=52` e `ProfileLevel=60` é rejeitado; 4K60/80 Mbps inicializa
+em nível 5.2. O preflight consulta essa capacidade no adaptador selecionado,
+sem capturar pixels, e recusa o perfil incompatível antes de retirar a fonte
+antiga. Não muda para 60 FPS nem falsifica o nível silenciosamente. NVENC também
+precisa admitir o nível solicitado. Inicialização não comprova cadência física.
 
 O export separado `probeCaptureCapabilities()` inicializa o encoder na GPU
 sem capturar uma fonte, mas **não é o fluxo de descoberta global do Main**.
@@ -107,7 +148,7 @@ e limite de sessões do encoder podem impedir o preparo ou a captura.
 ## Vídeo, áudio e demanda de prévia
 
 O vídeo usa NV12, perfil H.264 Main, zero B-frames e GOP de um segundo, com
-limites de 1920x1080, 120 FPS e 20000 kbps. O switch **Manter proporção** no
+limites de 3840x2160, 120 FPS e 80000 kbps, sujeitos ao encoder. O switch **Manter proporção** no
 seletor vale somente para o compartilhamento que está sendo criado. Desligado
 (padrão), estica a imagem para a resolução solicitada. Ligado, mantém a imagem
 inteira centralizada e acrescenta barras pretas quando as proporções diferem,
@@ -129,7 +170,7 @@ Um novo compartilhamento abre sua prévia no modo foco; atualizações de
 qualidade ou recuperação não desfazem a escolha posterior de sair do foco.
 O indicador **Normal / Captura de jogo** só aparece depois de observar frames,
 e acompanha o pipeline efetivo da prévia ou do espectador, não apenas a opção
-solicitada. A sinalização desse estado exige cliente e servidor no protocolo 24.
+solicitada. A sinalização desse estado exige cliente e servidor compatíveis com o protocolo 26.
 
 A opção **Pausar prévia quando o Monky estiver fora de foco**, ativa por padrão,
 controla somente a prévia local; perder foco não interrompe espectadores.
@@ -451,6 +492,24 @@ O QA da prévia deve validar funcionamento sem espectadores, perda/retorno de
 foco, opção de pausa desativada e continuidade dos espectadores. Resolução
 e contagem de frames, sozinhas, não comprovam que os pixels decodificados
 foram exibidos na interface.
+
+### Limitação conhecida da recepção Chromium no Windows
+
+O ensaio integrado na RX 9070 XT qualificou 4K60 com recepção nativa, mas
+**não qualificou a cadência do receptor Chromium**. Mesmo em 1080p60, houve
+congelamentos periódicos e resultados abaixo de 50 FPS. Durante um intervalo
+sem ações do QA, o escopo `DXGISwapChainImageBacking::Present` bloqueou a thread
+GPU por 262–285 ms; o despacho de decode atrasou, a fila do adapter encheu e
+foram solicitados novos keyframes. O trace não distingue a chamada `Present1`
+da espera de inicialização da swap chain, nem atribui a causa ao driver ou DWM.
+
+A análise de 1.166 slices não encontrou quebra de continuidade de `frame_num`
+ou POC. Desativar somente video overlays manteve o decode D3D11 por hardware,
+mas não resolveu os bloqueios; esse workaround não foi aplicado ao aplicativo.
+Não foram ampliadas filas, relaxados guards de IDR ou reduzidos os critérios
+de aprovação. Essa falha permanece aberta e não deve ser apresentada como
+corrigida pela qualificação do caminho nativo. O ensaio local também não
+estabelece se houve regressão entre as betas.
 
 Esses scripts de janela não qualificam monitor, Game Capture, NVIDIA ou tela
 cheia exclusiva. A evidência local desta integração cobre AMF e WGC/Game em

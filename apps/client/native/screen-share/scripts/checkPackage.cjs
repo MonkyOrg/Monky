@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createRequire } = require('node:module');
 const { root, digest, regularFiles, verify } = require('./buildTools.cjs');
 const { verifiedFile } = require('../runtime/runtimeFiles.cjs');
 const { copyMonkyLicenses } = require('../../../../../scripts/legal.cjs');
@@ -64,6 +65,12 @@ async function afterPack(context) {
   if (platform !== 'win32') return;
   assert.equal(context.arch, require('builder-util').Arch.x64, 'The native Windows screen runtime requires x64.');
   verifySourceInputs();
+  const packagedRequire = createRequire(path.join(directory, 'index.cjs'));
+  const h264Path = packagedRequire.resolve('h264-profile-level-id');
+  assert.ok(h264Path.startsWith(path.resolve(modules, '..') + path.sep),
+    'Packaged H264 negotiation dependency escaped the application.');
+  assert.equal(packagedRequire('h264-profile-level-id').parseProfileLevelId('4d003c')?.level, 60,
+    'Packaged H264 negotiation dependency is missing the maintained Level 6 patch.');
   verifyLegalFiles(root);
   fs.cpSync(path.join(root, 'licenses'), path.join(directory, 'licenses'), { recursive: true });
   for (const name of ['README.md', 'README.en.md', 'THIRD_PARTY_NOTICES'])

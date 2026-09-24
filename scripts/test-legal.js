@@ -5,7 +5,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { license, copyMonkyLicenses } from './legal.cjs';
-import { buildCliPackageJson, buildSharedPackageJson } from './pack-cli.js';
+import { buildCliPackageJson, buildSharedPackageJson, bundleH264Dependency } from './pack-cli.js';
+import { createRequire } from 'node:module';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -40,4 +41,17 @@ test('standalone CLI and bundled shared metadata declare GPL rather than inherit
   const server = { name: '@monky/server', version: '1.0.0', main: 'dist/index.js', bin: { monky: 'dist/cli/index.js' } };
   assert.equal(buildSharedPackageJson(shared).license, license);
   assert.equal(buildCliPackageJson(server, shared, '9.0.0').license, license);
+  assert.ok(buildCliPackageJson(server, shared, '9.0.0').bundleDependencies.includes('h264-profile-level-id'));
+});
+
+test('standalone CLI bundles the patched ISC H264 dependency instead of reinstalling an unpatched parser', t => {
+  const destination = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-h264-bundle-'));
+  t.after(() => fs.rmSync(destination, { recursive: true, force: true }));
+  bundleH264Dependency(destination);
+  const require = createRequire(import.meta.url);
+  const source = path.dirname(require.resolve('h264-profile-level-id/package.json'));
+  const bundled = path.join(destination, 'node_modules', 'h264-profile-level-id');
+  for (const name of ['LICENSE', 'package.json', path.join('lib', 'index.js'), path.join('lib', 'index.d.ts')])
+    assert.deepEqual(fs.readFileSync(path.join(bundled, name)), fs.readFileSync(path.join(source, name)));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(bundled, 'package.json'), 'utf8')).license, 'ISC');
 });

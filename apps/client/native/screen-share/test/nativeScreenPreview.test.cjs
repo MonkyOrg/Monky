@@ -346,6 +346,30 @@ test('real VideoService source replacement does not stop the preload-owned gener
   assert.equal(browserStops, 1, 'Browser captures remain owned and stopped by VideoService.');
 });
 
+test('live quality never applies browser constraints to a borrowed native preview track', async () => {
+  const filename = path.resolve(__dirname, '..', '..', '..', 'src', 'renderer', 'core', 'VideoService.ts');
+  const source = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.ES2022, true);
+  const declaration = source.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'VideoService');
+  const method = declaration.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === 'applyQualityPreset');
+  const compiled = ts.transpileModule(`class Owner { ${method.getText(source)} }; Owner;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const warnings = [], constraints = [];
+  const Owner = vm.runInNewContext(compiled, { clientLog: { warn: (...values) => warnings.push(values) } });
+  const native = { readyState: 'live', applyConstraints() { throw new Error('Native generator is not a browser capture device.'); } };
+  const browser = { readyState: 'live', async applyConstraints(value) { constraints.push(value); } };
+  await Owner.prototype.applyQualityPreset.call({
+    getProfile: () => ({ screenWidth: 1920, screenHeight: 1080, screenFps: 120 }),
+    nativeScreenCaptures: new Map([['native', {}]]),
+    screenStreams: new Map([['native', { getVideoTracks: () => [native] }], ['browser', { getVideoTracks: () => [browser] }]]),
+  }, 'CUSTOM');
+  assert.deepEqual(warnings, []);
+  assert.equal(constraints.length, 1);
+  assert.equal(constraints[0].frameRate.max, 120);
+  assert.equal(browser.contentHint, 'motion');
+  assert.equal(native.contentHint, undefined);
+});
+
 test('Stop closes preview admission/decoder then drains an aborted writer before stopping its generator', async t => {
   const f = presentationFixture(t, { blocked: true });
   await f.start(); f.output(); await tick();
