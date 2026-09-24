@@ -17,6 +17,7 @@ import { videoService, type NativeScreenCapture } from '../VideoService';
 import { settingsStore, type ScreenShareReceiver } from '../../stores/settingsStore';
 import { voiceStore } from '../../stores/voiceStore';
 import { resolveAudioOutput } from '../../utils/audioPreferences';
+import { customVideoFpsLimit } from '../../utils/qualityProfileLimits';
 import { BrowserScreenSubscription } from './BrowserScreenSubscription';
 import type { RemoteMediaRouter } from './RemoteMediaRouter';
 import type { PreferredVideoCodec } from './codecPreferences';
@@ -110,6 +111,7 @@ const cancelled = (): DOMException => new DOMException('The native screen call w
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 export function nativeScreenProfile(profile: QualityProfile): NativeScreenVideoProfile | null {
+  if (profile.screenFps > customVideoFpsLimit(profile.screenWidth, profile.screenHeight)) return null;
   const parsed = nativeScreenVideoProfileSchema.safeParse({
     width: Math.floor(profile.screenWidth / 4) * 4, height: Math.floor(profile.screenHeight / 2) * 2,
     fps: profile.screenFps, maxBitrateKbps: profile.screenBitrateKbps,

@@ -162,6 +162,10 @@ async function runQualitySettingsSmoke() {
         'Changing presets must not recreate the preview focus switch.');
       const helps = [...quality.querySelectorAll('[data-bitrate-help]')];
       check(helps.length === 3, 'Audio, camera and screen bitrates must each have help.');
+      const cameraBitrates = [...quality.querySelector('#q-select-cameraBitrate').options].map(option => option.value);
+      const screenBitrates = [...quality.querySelector('#q-select-screenBitrate').options].map(option => option.value);
+      check(JSON.stringify(cameraBitrates) === JSON.stringify(screenBitrates) && cameraBitrates.includes('80000'),
+        'Camera and screen must offer the same video bitrate choices through 80000 kbps plus custom.');
       const custom = JSON.stringify(settingsStore.customProfile);
       for (const button of helps) {
         button.scrollIntoView({ block: 'center', behavior: 'instant' });
@@ -269,13 +273,65 @@ async function runQualitySettingsSmoke() {
         const frameRate = quality.querySelector('#custom-screenFps');
         frameRate.value = '144';
         frameRate.dispatchEvent(new Event('change', { bubbles: true }));
-        check(JSON.stringify(settingsStore.customProfile) === custom, 'An unsupported native profile must restore every previous field.');
-        check(Number(quality.querySelector('#custom-screenFps').value) === settingsStore.customProfile.screenFps,
-          'The custom form must display the restored native frame rate.');
-        check(localStorage.getItem('monky_settings') === previousSettings, 'A rejected profile must leave persisted settings unchanged.');
-        await dismiss('screenShare.nativeProfileChangeBlocked');
+        check(settingsStore.customProfile.screenFps === Number(frameRate.max) && Number(frameRate.value) === Number(frameRate.max),
+          'Typed FPS above the ceiling must clamp both the saved profile and visible value.');
+        check(!quality.querySelector('#quality-custom-status')
+          && document.querySelector('.chat-copy-toast[role="status"] .chat-copy-toast-label')?.textContent === language.t('settings.qualityValueAdjusted'),
+          'The adjusted limit must use the localized accessible toast, not a persistent paragraph.');
+        const helpStyle = getComputedStyle(quality.querySelector('.quality-custom-help'));
+        check(helpStyle.fontSize === '11px' && helpStyle.fontWeight === '400',
+          'Permanent limit guidance must remain small and regular-weight rather than dominate the form.');
+        const change = (id, value) => {
+          const field = quality.querySelector(`#${id}`);
+          field.value = value;
+          field.dispatchEvent(new Event('change', { bubbles: true }));
+          return field;
+        };
+        for (const kind of ['camera', 'screen']) {
+          for (const aspect of ['16:9', '16:10', '4:3', '21:9']) {
+            change(`q-aspect-${kind}`, aspect);
+            for (const option of quality.querySelector(`#q-res-${kind}`).options) {
+              if (option.value === '__custom__') continue;
+              const [width, height] = option.value.split('x').map(Number);
+              check(width <= 3840 && height <= 2160, 'Resolution dropdowns must obey the same custom ceilings.');
+            }
+          }
+          change(`q-aspect-${kind}`, '16:9');
+          change(`q-res-${kind}`, '1920x1080');
+          change(`q-select-${kind}Fps`, '120');
+          change(`q-res-${kind}`, '3840x2160');
+          check(settingsStore.customProfile[`${kind}Fps`] === 60 &&
+            quality.querySelector(`#q-select-${kind}Fps`).value === '60', 'Selecting 4K must immediately reduce 120 FPS to 60.');
+          check([...quality.querySelector(`#q-select-${kind}Fps`).options]
+            .every(option => option.value === '__custom__' || Number(option.value) <= 60), '4K dropdown cannot offer more than 60 FPS.');
+          change(`q-res-${kind}`, '__custom__');
+          const width = change(`custom-${kind}Width`, '9999');
+          const height = change(`custom-${kind}Height`, '9999');
+          change(`q-select-${kind}Fps`, '__custom__');
+          const fps = change(`custom-${kind}Fps`, '9999');
+          change(`q-select-${kind}Bitrate`, '__custom__');
+          const bitrate = change(`custom-${kind}Bitrate`, '1e6');
+          check(width.value === '3840' && height.value === '2160' && fps.value === '60' && bitrate.value === '80000',
+            'Typing or pasting custom/exponential values cannot bypass resolution, FPS or bitrate limits.');
+          for (const input of [width, height, fps, bitrate]) {
+            check(input.validity.valid && getComputedStyle(input).appearance === 'textfield',
+              'Custom fields keep native numeric validity and keyboard access without visible number spinners.');
+          }
+          change(`custom-${kind}Fps`, '');
+          check(fps.value === '60' && document.querySelector('.chat-copy-toast-label')?.textContent === language.t('settings.qualityValueInvalid')
+            && document.querySelectorAll('.chat-copy-toast').length === 1,
+            'An empty custom value must restore the previous value and replace, not stack, feedback toasts.');
+          change(`custom-${kind}Width`, '1920');
+          change(`custom-${kind}Height`, '1080');
+          change(`custom-${kind}Fps`, '121');
+          check(fps.max === '120' && fps.value === '120', 'Leaving 4K must restore the 120 FPS ceiling without exceeding it.');
+        }
+        settingsStore.load(false);
+        check(settingsStore.customProfile.screenBitrateKbps === 80000 && settingsStore.customProfile.cameraBitrateKbps === 80000
+          && settingsStore.customProfile.screenFps === 120, 'Normalized custom values must persist across reloads.');
       } finally { videoService.stopScreenShare(metadataOnly.id); }
       modal.close();
+      check(!document.querySelector('.chat-copy-toast'), 'Closing quality settings must retire its toast and timer.');
       const storedAfterClose = localStorage.getItem('monky_settings');
       chromiumReceiver.click();
       check(localStorage.getItem('monky_settings') === storedAfterClose,

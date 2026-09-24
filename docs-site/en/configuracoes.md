@@ -94,9 +94,12 @@ Chromium or another source. The automatic **Game Capture** to **Normal**
 attempt, when needed, uses only the same window and displays a notice.
 
 For up to **3840×2160**, **120 FPS** and **80000 kbps**, select **Custom** under
-**Quality & sharing**; existing presets remain unchanged.
-Limits depend on the encoder: **4K/60** requires H.264 Level 5.2 and **4K/120**
-requires Level 6. Unsupported profiles are rejected rather than silently reducing
+**Quality & sharing**; existing presets remain unchanged. **4K is capped at
+60 FPS**: reaching 3840 px wide or 2160 px high automatically limits the FPS
+field and dropdown. Typed values obey the same ceilings; values above them
+are adjusted with a visible notice.
+Limits still depend on the encoder: **4K/60** requires H.264 Level 5.2.
+Unsupported profiles are rejected rather than silently reducing
 FPS; during a quality change, preflight keeps the old source while checking the
 new configuration. Leave bandwidth for your game and every outgoing profile.
 In the picker, **Keep aspect ratio** fits the image into the selected dimensions, adding
@@ -498,7 +501,9 @@ Devices, codecs, networks, participant count and content affect the result.
 The **Custom** profile offers dropdowns with the most common values — aspect
 ratio (16:9, 16:10, 4:3 and 21:9), resolution (from the lowest up to 4K), FPS
 and bitrate. Every dropdown keeps a **Custom...** entry that reveals the plain
-number box for anything outside the list. Changing the aspect ratio keeps the
+number box for values outside the list, within the same ceilings: 3840×2160,
+80000 kbps for video and 120 FPS (60 FPS at 3840 px wide or 2160 px high).
+Audio retains its own 510 kbps ceiling. Changing the aspect ratio keeps the
 resolution closest to the one you were already using.
 
 ### Sharing your screen while gaming

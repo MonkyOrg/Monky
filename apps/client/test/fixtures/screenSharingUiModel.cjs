@@ -107,6 +107,7 @@ class ModelElement {
     return (options.find(option => option.hasAttribute('selected')) ?? options.find(option => !option.disabled))?.value ?? '';
   }
   set value(value) { this.currentValue = String(value); }
+  get valueAsNumber() { return this.value === '' ? NaN : Number(this.value); }
   get innerHTML() { return this.markup ?? ''; }
   set innerHTML(value) {
     this.markup = value;
@@ -360,7 +361,7 @@ function fixture(language = 'en') {
   const allowed = new Set([
     'views/ScreenSharePickerModal', 'views/GameCaptureGuideModal', 'views/CopyToast', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
-    'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton',
+    'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits',
   ]);
   function load(name) {
     if (Object.hasOwn(stubs, name)) return stubs[name];

@@ -6,6 +6,62 @@ import {
   type AudioOutputPreferences,
 } from '../src/renderer/utils/audioPreferences';
 import { SettingsStore } from '../src/renderer/stores/settingsStore';
+import { DEFAULT_CUSTOM_PROFILE } from '@monky/shared';
+import { customVideoFpsLimit, normalizeCustomQualityProfile } from '../src/renderer/utils/qualityProfileLimits';
+
+test('custom video ceilings apply to both camera and screen including 4K FPS combinations', () => {
+  for (const [width, height, limit] of [[1920, 1080, 120], [2560, 1440, 120], [3440, 1440, 120],
+    [3840, 2160, 60], [3840, 1080, 60], [1920, 2160, 60]]) {
+    assert.equal(customVideoFpsLimit(width, height), limit);
+    for (const fps of [1, 59, 60, 61, 119, 120, 121, 10000]) {
+      const normalized = normalizeCustomQualityProfile({
+        ...DEFAULT_CUSTOM_PROFILE, cameraWidth: width, cameraHeight: height, cameraFps: fps,
+        screenWidth: width, screenHeight: height, screenFps: fps,
+      });
+      assert.equal(normalized.cameraFps, Math.min(fps, limit));
+      assert.equal(normalized.screenFps, Math.min(fps, limit));
+    }
+  }
+});
+
+test('custom dimensions and video bitrate are bounded before frame rates are resolved', () => {
+  const normalized = normalizeCustomQualityProfile({
+    ...DEFAULT_CUSTOM_PROFILE, cameraWidth: 9000, cameraHeight: 9000, cameraFps: 144,
+    screenWidth: 9000, screenHeight: 9000, screenFps: 144, cameraBitrateKbps: 80001, screenBitrateKbps: 999999,
+  });
+  for (const kind of ['camera', 'screen'] as const) {
+    assert.equal(normalized[`${kind}Width`], 3840);
+    assert.equal(normalized[`${kind}Height`], 2160);
+    assert.equal(normalized[`${kind}Fps`], 60);
+    assert.equal(normalized[`${kind}BitrateKbps`], 80000);
+  }
+  assert.deepEqual(normalizeCustomQualityProfile(normalized), normalized);
+  const invalid = normalizeCustomQualityProfile({ ...DEFAULT_CUSTOM_PROFILE, screenFps: NaN,
+    screenWidth: Infinity, screenHeight: -1, screenBitrateKbps: 149 });
+  assert.equal(invalid.screenFps, DEFAULT_CUSTOM_PROFILE.screenFps);
+  assert.equal(invalid.screenWidth, DEFAULT_CUSTOM_PROFILE.screenWidth);
+  assert.equal(invalid.screenHeight, 2);
+  assert.equal(invalid.screenBitrateKbps, 150);
+  assert.equal(normalizeCustomQualityProfile({ ...DEFAULT_CUSTOM_PROFILE, screenBitrateKbps: 12345 }).screenBitrateKbps, 12300);
+});
+
+test('old custom preferences and saved profiles cannot bypass current ceilings', () => {
+  withSettingsStorage(storage => {
+    storage.setItem('monky_settings', JSON.stringify({ customProfile: {
+      ...DEFAULT_CUSTOM_PROFILE, screenWidth: 3840, screenHeight: 2160, screenFps: 120, screenBitrateKbps: 100000,
+    } }));
+    const store = new SettingsStore();
+    assert.equal(store.customProfile.screenFps, 60);
+    assert.equal(store.customProfile.screenBitrateKbps, 80000);
+    store.customProfile.screenFps = 144;
+    store.customProfile.cameraWidth = 6000;
+    store.save();
+    const loaded = new SettingsStore();
+    assert.equal(loaded.customProfile.screenFps, 60);
+    assert.equal(loaded.customProfile.cameraWidth, 3840);
+    assert.equal(JSON.parse(storage.getItem('monky_settings')!).customProfile.screenFps, 60);
+  });
+});
 
 function withSettingsStorage(run: (storage: Storage) => void): void {
   const values = new Map<string, string>();

@@ -165,7 +165,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(reopened.querySelector('#checkbox-screen-preview-focus').checked, false);
   });
 
-  test(`4K and 80 Mbps are explicit screen choices without raising camera or preset defaults (${language})`, t => {
+  test(`4K and 80 Mbps are camera/screen choices without raising preset defaults (${language})`, t => {
     const f = fixture(language);
     t.after(() => f.close());
     const presetBefore = f.settingsStore.qualityPreset;
@@ -178,7 +178,7 @@ for (const language of ['pt-BR', 'en']) {
     change(preset);
     const screenRate = control(f, 'q-select-screenBitrate');
     assert.ok(screenRate.querySelector('option[value="80000"]'));
-    assert.equal(control(f, 'q-select-cameraBitrate').querySelector('option[value="80000"]'), null);
+    assert.ok(control(f, 'q-select-cameraBitrate').querySelector('option[value="80000"]'));
     const resolution = control(f, 'q-res-screen');
     assert.ok(resolution.querySelector('option[value="3840x2160"]'));
     resolution.value = '3840x2160';
@@ -188,6 +188,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(f.settingsStore.customProfile.screenWidth, 3840);
     assert.equal(f.settingsStore.customProfile.screenHeight, 2160);
     assert.equal(f.settingsStore.customProfile.screenBitrateKbps, 80000);
+    assert.ok(f.settingsStore.customProfile.screenFps <= 60);
     assert.equal(control(f, 'custom-screenWidth').getAttribute('max'), '3840');
     assert.equal(control(f, 'custom-screenHeight').getAttribute('max'), '2160');
   });
