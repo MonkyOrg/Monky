@@ -16,7 +16,10 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_CAMERA_EFFECTS_PROFILE);
+  require('./fixtures/ciGraphics.cjs')(app);
   app.commandLine.appendSwitch('allow-loopback-in-peer-connection');
+  const cpuCompositor = process.argv.includes('--cpu-compositor');
+  let injectedCpuCompositors = 0;
   app.on('window-all-closed', () => {});
   let vite, window, timeout;
   let blockModel = false;
@@ -38,8 +41,20 @@ if (!process.versions.electron) {
       base: './',
       logLevel: 'error',
       cacheDir: path.join(app.getPath('userData'), 'vite-cache'),
-      worker: { format: 'es' },
-      optimizeDeps: { exclude: ['@mediapipe/tasks-vision'] },
+      worker: {
+        format: 'es',
+        plugins: () => [{
+          name: 'camera-compositor-unavailable-fixture',
+          enforce: 'pre',
+          transform(code, id) {
+            if (!cpuCompositor || !id.split('?')[0].endsWith('CameraGpuCompositor.ts')) return null;
+            const replaced = code.replace(/const gl = canvas\.getContext\('webgl2', \{[\s\S]*?\}\);/, 'const gl = null;');
+            if (replaced === code) throw new Error('CPU compositor fault injection no longer matches the context factory');
+            injectedCpuCompositors++;
+            return { code: replaced, map: null };
+          },
+        }],
+      },
     };
     let fixture;
     let packagedModel = null;
@@ -55,31 +70,35 @@ if (!process.versions.electron) {
       fixture = path.join(output, 'test', 'fixtures', 'cameraEffects.html');
       const assets = path.join(output, 'assets');
       const assetNames = fs.readdirSync(assets);
-      const modelName = assetNames.find(name => name.endsWith('.tflite'));
-      if (!modelName || !assetNames.some(name => name.endsWith('.wasm'))) {
-        throw new Error('Offline fixture must include real local model and WASM files');
+      const modelName = assetNames.find(name => name.startsWith('rvm-mobilenetv3-') && name.endsWith('.bin'));
+      const manifestName = assetNames.find(name => name.startsWith('rvm-model-') && name.endsWith('.json'));
+      if (!modelName || !manifestName || !assetNames.some(name => name.startsWith('RVM-LICENSE-'))
+        || !assetNames.some(name => name.startsWith('LICENSE-')) || !assetNames.some(name => name.startsWith('SOURCES-'))) {
+        throw new Error(`Offline fixture must include local RVM weights, graph and redistribution notices: ${JSON.stringify(assetNames)}`);
       }
       packagedModel = path.join(assets, modelName);
       const sourceInfo = JSON.parse(fs.readFileSync(
         path.join(clientRoot, 'src', 'renderer', 'assets', 'camera-effects', 'SOURCES.json'), 'utf8'));
       const hash = createHash('sha256').update(fs.readFileSync(packagedModel)).digest('hex');
       if (hash !== sourceInfo.model.sha256) throw new Error('Packaged model differs from the pinned licensed asset');
+      const manifestHash = createHash('sha256').update(fs.readFileSync(path.join(assets, manifestName))).digest('hex');
+      if (manifestHash !== sourceInfo.model.manifestSha256) throw new Error('Packaged graph differs from the approved model');
       console.log('CAMERA TEST offline assets ' + JSON.stringify({
         model: modelName, sha256: hash,
-        wasm: assetNames.filter(name => name.endsWith('.wasm')),
+        manifest: manifestName, manifestSha256: manifestHash,
         worker: assetNames.filter(name => name.startsWith('cameraEffects.worker-')),
-        loader: assetNames.filter(name => name.startsWith('vision_wasm_module_internal-') && name.endsWith('.js')),
       }));
     } else {
       vite = await createServer({
         ...config,
-        server: { host: '127.0.0.1', port: 0, strictPort: true, open: false, hmr: false, watch: null },
+        server: { host: '127.0.0.1', port: 0, strictPort: true, open: false, hmr: false,
+          watch: { ignored: ['**/dist-test/**'] } },
         plugins: [{
           name: 'camera-effect-model-fault',
           configureServer(server) {
             server.middlewares.use((request, response, next) => {
               const url = new URL(request.url, 'http://127.0.0.1');
-              if (!url.pathname.endsWith('.tflite') || url.searchParams.has('url')) return next();
+              if (!url.pathname.endsWith('rvm-mobilenetv3.bin') || url.searchParams.has('url')) return next();
               modelRequests.push(url.href);
               response.setHeader('Cache-Control', 'no-store');
               if (!blockModel) return next();
@@ -104,8 +123,8 @@ if (!process.versions.electron) {
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.setAudioMuted(true);
-    window.webContents.on('console-message', (_event, _level, message) => {
-      if (message.startsWith('CAMERA TEST') || process.argv.includes('--camera-trace')) {
+    window.webContents.on('console-message', (_event, level, message) => {
+      if (message.startsWith('CAMERA TEST') || level === 3 || process.argv.includes('--camera-trace')) {
         console.log(`[camera ${packaged ? 'offline' : 'dev'}] ${message}`);
       }
     });
@@ -116,7 +135,8 @@ if (!process.versions.electron) {
       if (!local) externalRequests.push(details.url);
       callback({ cancel: !local });
     });
-    timeout = setTimeout(() => { console.error('Camera effects smoke timed out'); void finish(1); }, 150000);
+    timeout = setTimeout(() => { console.error('Camera effects smoke timed out'); void finish(1); },
+      process.env.CI === 'true' ? 300000 : 150000);
     if (packaged) await window.loadFile(fixture);
     else await window.loadURL(fixture);
     await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
@@ -131,12 +151,17 @@ if (!process.versions.electron) {
     const transitionsOnly = process.argv.includes('--transitions-only');
     const fpsOnly = process.argv.includes('--fps-only') || process.argv.includes('--quality-only');
     const keyColorsOnly = process.argv.includes('--key-colors-only');
+    const gpuOnly = process.argv.includes('--gpu-only');
+    const normalOnly = process.argv.includes('--normal-only');
     const selectedPhases = [
       ...(ownershipOnly ? ['ownership'] : []), ...(keyColorsOnly ? ['key-colors'] : []),
       ...(fpsOnly ? ['quality'] : []), ...(transitionsOnly ? ['transitions'] : []), ...(chromaOnly ? ['chroma'] : []),
+      ...(gpuOnly ? ['gpu'] : []),
+      ...(normalOnly ? ['normal'] : []),
     ];
     const phases = selectedPhases.length ? selectedPhases
-      : ['ownership', 'key-colors', 'quality', 'transitions', 'missing-model', 'normal', 'recovery'];
+      : cpuCompositor ? ['chroma']
+        : ['gpu', 'ownership', 'key-colors', 'quality', 'transitions', 'missing-model', 'normal', 'recovery'];
     let checks = 0;
     for (const phase of phases) {
       blockModel = phase === 'missing-model';
@@ -144,18 +169,269 @@ if (!process.versions.electron) {
       if (blockModel) await window.webContents.session.clearCache();
       if (blockModel && packagedModel) fs.renameSync(packagedModel, `${packagedModel}.smoke-missing`);
       try {
-        checks += await window.webContents.executeJavaScript(`(${runCameraEffectsSmoke.toString()})('${phase}')`, true);
+        const run = phase === 'gpu' ? runCameraGpuChecks : runCameraEffectsSmoke;
+        checks += await window.webContents.executeJavaScript(`window.cameraEffectsTrace = ${process.argv.includes('--camera-trace')}; (${run.toString()})('${phase}')`, true);
       } finally {
         if (blockModel && packagedModel) fs.renameSync(`${packagedModel}.smoke-missing`, packagedModel);
       }
     }
-    if (!selectedPhases.length && !packaged && (!modelRequests.length || !deniedModelRequests.length)) {
+    if (!selectedPhases.length && !cpuCompositor && !packaged && (!modelRequests.length || !deniedModelRequests.length)) {
       throw new Error('The real local model must be requested and its missing-file failure exercised');
     }
     if (externalRequests.length) throw new Error(`Unexpected external requests: ${externalRequests.join(', ')}`);
+    if (cpuCompositor && !injectedCpuCompositors) throw new Error('CPU fallback fixture did not reach the worker context factory');
     console.log(`Camera effects ${phases.join(' + ')} (${packaged ? 'packaged offline' : 'dev'}) smoke: ${checks} checks passed; no external requests`);
     await finish(0);
   }).catch(async error => { console.error(error); await finish(1); });
+}
+
+async function runCameraGpuChecks() {
+  const { CameraGpuCompositor, CameraCpuBackgroundBlur, DEFAULT_CAMERA_EFFECT_SETTINGS: defaults, applyChromaKey } = window.cameraEffectsFixture;
+  let checks = 0;
+  const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+  const gpu = CameraGpuCompositor.create();
+  check(gpu !== null, 'GPU parity requires an actual WebGL2 context');
+  const source = new OffscreenCanvas(127, 65);
+  const context = source.getContext('2d', { willReadFrequently: true });
+  const output = new OffscreenCanvas(source.width, source.height);
+  const result = output.getContext('2d', { willReadFrequently: true });
+  let bitmap, background;
+  const capture = (settings, mask = null, compositor = gpu) => {
+    const frame = compositor.render(bitmap, settings, mask, background ?? null);
+    output.width = frame.width;
+    output.height = frame.height;
+    try { result.drawImage(frame, 0, 0); } finally { frame.close(); }
+    return result.getImageData(0, 0, output.width, output.height).data;
+  };
+  const mask = new ImageData(new Uint8ClampedArray([255, 255, 255, 0]), 1, 1);
+  try {
+    const input = context.createImageData(source.width, source.height);
+    let seed = 704;
+    for (let offset = 0; offset < input.data.length; offset++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      input.data[offset] = offset % 4 === 3 ? 255 : seed >>> 24;
+    }
+    context.putImageData(input, 0, 0);
+    bitmap = await createImageBitmap(source);
+    for (const keyColor of ['#00ff00', '#0000ff', '#ff00ff', '#ff0000', '#000000', '#ffffff', '#808080', '#102010', '#101f10']) {
+      for (const [keyTolerance, keySoftness, spillReduction] of [[5, 1, 0], [25, 10, 50], [60, 30, 100]]) {
+        const settings = { ...defaults, mode: 'chroma', keyColor, keyTolerance, keySoftness, spillReduction, backgroundColor: '#152a3f' };
+        const reference = new Uint8ClampedArray(input.data);
+        applyChromaKey(reference, settings);
+        const actual = capture(settings);
+        let maximum = 0;
+        for (let offset = 0; offset < actual.length; offset += 4) {
+          const alpha = reference[offset + 3] / 255;
+          for (let channel = 0; channel < 3; channel++) {
+            const expected = Math.round(reference[offset + channel] * alpha + [21, 42, 63][channel] * (1 - alpha));
+            maximum = Math.max(maximum, Math.abs(actual[offset + channel] - expected));
+          }
+        }
+        check(actual.every((value, index) => index % 4 !== 3 || value === 255), 'GPU composition must remain opaque');
+        check(maximum <= 2, `GPU/CPU parity, orientation and spill ${keyColor}/${keyTolerance}: maximum error ${maximum}`);
+      }
+    }
+    for (const alpha of [0, 128, 255]) {
+      mask.data[3] = alpha;
+      const actual = capture({ ...defaults, mode: 'color', backgroundColor: '#152a3f' }, mask);
+      let maximum = 0;
+      for (let offset = 0; offset < actual.length; offset += 4) {
+        for (let channel = 0; channel < 3; channel++) {
+          const expected = Math.round(input.data[offset + channel] * alpha / 255 + [21, 42, 63][channel] * (1 - alpha / 255));
+          maximum = Math.max(maximum, Math.abs(actual[offset + channel] - expected));
+        }
+      }
+      check(maximum <= 2, `GPU segmentation alpha ${alpha} preserves foreground, background and orientation: ${maximum}`);
+    }
+    const spatialMask = new ImageData(new Uint8ClampedArray([
+      255, 255, 255, 255, 255, 255, 255, 0,
+      255, 255, 255, 0, 255, 255, 255, 255,
+    ]), 2, 2);
+    const spatial = capture({ ...defaults, mode: 'color', backgroundColor: '#152a3f' }, spatialMask);
+    for (const [x, y, opaque] of [[0, 0, true], [126, 0, false], [0, 64, false], [126, 64, true]]) {
+      const offset = (y * source.width + x) * 4;
+      check([0, 1, 2].every(channel => Math.abs(spatial[offset + channel] - (opaque ? input.data[offset + channel] : [21, 42, 63][channel])) <= 1),
+        'Scaled spatial mask preserves orientation and full-resolution foreground pixels');
+    }
+    bitmap.close();
+    source.width = source.height = 40;
+    context.fillStyle = '#00ff00'; context.fillRect(0, 0, 40, 40);
+    bitmap = await createImageBitmap(source);
+    const image = new OffscreenCanvas(120, 40);
+    const imageContext = image.getContext('2d');
+    imageContext.fillStyle = '#0000ff'; imageContext.fillRect(0, 0, 120, 40);
+    imageContext.fillStyle = '#bb2200'; imageContext.fillRect(40, 0, 40, 20);
+    imageContext.clearRect(40, 20, 40, 20);
+    imageContext.fillStyle = 'rgba(187, 34, 0, 0.5)'; imageContext.fillRect(40, 20, 20, 20);
+    background = await createImageBitmap(image, { premultiplyAlpha: 'none' });
+    mask.data[3] = 0;
+    for (const mode of ['chroma', 'image']) {
+      const actual = capture({ ...defaults, mode, backgroundSource: 'image', backgroundColor: '#152a3f' }, mask);
+      for (const [x, y, expected] of [[3, 3, [187, 34, 0]], [36, 3, [187, 34, 0]], [3, 36, [104, 38, 32]], [36, 36, [21, 42, 63]]]) {
+        const offset = (y * 40 + x) * 4;
+        check(expected.every((value, index) => Math.abs(actual[offset + index] - value) <= 2),
+          `${mode}: image cover, alpha, resize and vertical orientation: ${Array.from(actual.slice(offset, offset + 4))}`);
+      }
+    }
+    background.close(); background = undefined;
+    for (const [width, height, blurRadius] of [[32, 18, 4], [128, 72, 16], [256, 144, 32]]) {
+      bitmap.close();
+      source.width = width; source.height = height;
+      context.fillStyle = '#cd3219'; context.fillRect(0, 0, width, height);
+      bitmap = await createImageBitmap(source);
+      const actual = capture({ ...defaults, mode: 'blur', blurRadius }, mask);
+      check(actual.every((value, index) => Math.abs(value - [205, 50, 25, 255][index % 4]) <= 1),
+        `Blur ${width}x${height}/${blurRadius} preserves color and clamps edges without transparent borders`);
+    }
+    bitmap.close();
+    context.fillStyle = '#000000'; context.fillRect(0, 0, source.width, source.height);
+    context.fillStyle = '#ffffff';
+    for (let x = 0; x < source.width; x += 4) context.fillRect(x, 0, 2, source.height);
+    bitmap = await createImageBitmap(source);
+    const blurred = capture({ ...defaults, mode: 'blur', blurRadius: 32 }, mask);
+    const middle = [];
+    for (let x = 16; x < source.width - 16; x++) middle.push(blurred[(Math.floor(source.height / 2) * source.width + x) * 4]);
+    check(Math.max(...middle) - Math.min(...middle) < 30 && middle.every(value => value > 90 && value < 165),
+      'GPU blur actually removes background detail rather than only resampling it');
+    bitmap.close();
+    context.fillStyle = '#808080'; context.fillRect(0, 0, source.width, source.height);
+    context.fillStyle = '#ff0000'; context.fillRect(100, 30, 56, 98);
+    bitmap = await createImageBitmap(source);
+    const person = new ImageData(source.width, source.height);
+    for (let y = 30; y < 128; y++) for (let x = 100; x < 156; x++) person.data[(y * source.width + x) * 4 + 3] = 255;
+    const maskCanvas = new OffscreenCanvas(source.width, source.height);
+    maskCanvas.getContext('2d').putImageData(person, 0, 0);
+    const cpu = new CameraCpuBackgroundBlur();
+    const cpuCanvas = new OffscreenCanvas(source.width, source.height);
+    const cpuContext = cpuCanvas.getContext('2d', { willReadFrequently: true });
+    const originalExtension = WebGL2RenderingContext.prototype.getExtension;
+    let gpuBytes;
+    try {
+      WebGL2RenderingContext.prototype.getExtension = function(name) {
+        return name === 'EXT_color_buffer_float' ? null : originalExtension.call(this, name);
+      };
+      gpuBytes = CameraGpuCompositor.create();
+    } finally { WebGL2RenderingContext.prototype.getExtension = originalExtension; }
+    try {
+      for (const blurRadius of [4, 9, 16, 32]) {
+        const settings = { ...defaults, mode: 'blur', blurRadius };
+        const gpuPixels = capture(settings, person);
+        const bytePixels = capture(settings, person, gpuBytes);
+        cpu.draw(cpuContext, bitmap, maskCanvas, settings);
+        const cpuPixels = cpuContext.getImageData(0, 0, source.width, source.height).data;
+        for (const [backend, pixels] of [['GPU', gpuPixels], ['GPU without float render targets', bytePixels], ['CPU', cpuPixels]]) {
+          for (const [x, y] of [[96, 72], [159, 72], [128, 26], [128, 132]]) {
+            const offset = (y * source.width + x) * 4;
+            const pixel = Array.from(pixels.slice(offset, offset + 4));
+            check(pixel.slice(0, 3).every(value => Math.abs(value - 128) <= 3),
+              `${backend} blur ${blurRadius} must not expand or smear foreground colors into the background contour: ${pixel}`);
+          }
+        }
+      }
+      bitmap.close();
+      context.fillStyle = '#000000'; context.fillRect(0, 0, source.width, source.height);
+      context.fillStyle = '#ffffff'; context.fillRect(40, 0, 9, source.height);
+      bitmap = await createImageBitmap(source);
+      maskCanvas.getContext('2d').clearRect(0, 0, source.width, source.height);
+      for (const blurRadius of [4, 32]) {
+        const settings = { ...defaults, mode: 'blur', blurRadius };
+        const gpuPixels = capture(settings, mask);
+        cpu.draw(cpuContext, bitmap, maskCanvas, settings);
+        const cpuPixels = cpuContext.getImageData(0, 0, source.width, source.height).data;
+        for (const [backend, pixels] of [['GPU', gpuPixels], ['CPU', cpuPixels]]) {
+          let mass = 0, position = 0;
+          for (let x = 0; x < source.width; x++) {
+            const value = pixels[(Math.floor(source.height / 2) * source.width + x) * 4];
+            mass += value; position += x * value;
+          }
+          check(mass > 0 && Math.abs(position / mass - 44) <= 1,
+            `${backend} blur preserves background registration instead of zooming it: centroid ${position / mass}`);
+        }
+      }
+    } finally { cpu.dispose(); gpuBytes?.dispose(); }
+    const gl = gpu.gl;
+    const shared = CameraGpuCompositor.forMatting(gl);
+    const matte = gl.createTexture();
+    const rgba = new Uint8Array(source.width * source.height * 4);
+    const alphaMask = new ImageData(source.width, source.height);
+    const sourcePixels = new ImageData(source.width, source.height);
+    for (let index = 0; index < rgba.length; index += 4) {
+      const x = (index / 4) % source.width;
+      const y = Math.floor(index / 4 / source.width);
+      rgba.set([x % 256, y % 256, 173, [0, 32, 127, 192, 255][(x + y) % 5]], index);
+      sourcePixels.data.set([rgba[index], rgba[index + 1], rgba[index + 2], 255], index);
+      alphaMask.data.set([255, 255, 255, rgba[index + 3]], index);
+    }
+    bitmap.close();
+    bitmap = await createImageBitmap(sourcePixels);
+    background?.close();
+    background = await createImageBitmap(new ImageData(new Uint8ClampedArray([13, 91, 189, 128]), 1, 1),
+      { premultiplyAlpha: 'none' });
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, matte);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, source.width, source.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    const sharedCapture = async settings => {
+      const frame = await shared.renderMatting(bitmap, settings, matte, background ?? null, async () => gl.finish());
+      output.width = frame.width; output.height = frame.height;
+      try { result.drawImage(frame, 0, 0); } finally { frame.close(); }
+      return result.getImageData(0, 0, output.width, output.height).data;
+    };
+    try {
+      for (const mode of ['color', 'image', 'blur']) {
+        const settings = { ...defaults, mode, backgroundColor: '#152a3f' };
+        const expected = capture(settings, alphaMask);
+        const program = gl.getParameter(gl.CURRENT_PROGRAM);
+        const vao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+        const activeTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
+        const actual = await sharedCapture(settings);
+        let maximum = 0;
+        for (let index = 0; index < actual.length; index++) maximum = Math.max(maximum, Math.abs(actual[index] - expected[index]));
+        check(maximum <= 2, `Native RVM alpha preserves orientation, fractional edges and ${mode} composition: error ${maximum}`);
+        check(gl.getParameter(gl.CURRENT_PROGRAM) === program && gl.getParameter(gl.VERTEX_ARRAY_BINDING) === vao
+          && gl.getParameter(gl.ACTIVE_TEXTURE) === activeTexture,
+        'Matting restores the inference context program, VAO and texture unit');
+        const legacy = await sharedCapture({ ...settings, personThreshold: 90, edgeSoftness: 0 });
+        check(actual.every((value, index) => Math.abs(value - legacy[index]) <= 1),
+          'Legacy cutout sliders must not harden or otherwise alter native RVM transparency');
+      }
+      const actual = await sharedCapture({ ...defaults, mode: 'color', backgroundColor: '#000000' });
+      let maximum = 0;
+      for (let index = 0; index < actual.length; index += 4) {
+        for (let channel = 0; channel < 3; channel++) {
+          maximum = Math.max(maximum, Math.abs(actual[index + channel] - Math.round(rgba[index + channel] * rgba[index + 3] / 255)));
+        }
+      }
+      check(maximum <= 1, `Native foreground RGB and alpha match the CPU formula: error ${maximum}`);
+    } finally { shared.dispose(); gl.deleteTexture(matte); }
+    check(!gl.isContextLost(), 'Disposing a shared compositor must not destroy TensorFlow-owned WebGL');
+    let missingMask = false;
+    try { capture({ ...defaults, mode: 'color' }); } catch (error) { missingMask = error.code === 'processing'; }
+    check(missingMask, 'GPU must reject missing masks instead of emitting raw frames');
+    const loss = gpu.gl.getExtension('WEBGL_lose_context');
+    check(!!loss, 'Context-loss fixture requires the actual WebGL extension');
+    loss.loseContext();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    let failedClosed = false;
+    try { capture({ ...defaults, mode: 'chroma' }); } catch (error) { failedClosed = error.code === 'processing'; }
+    check(failedClosed, 'Lost GPU context must fail closed, not return a raw or empty success frame');
+  } finally {
+    bitmap?.close();
+    background?.close();
+    gpu.dispose();
+    gpu.dispose();
+  }
+  const recovered = CameraGpuCompositor.create();
+  try {
+    bitmap = await createImageBitmap(source);
+    const frame = recovered.render(bitmap, { ...defaults, mode: 'chroma' }, null, null);
+    check(frame.width === source.width && frame.height === source.height, 'A fresh compositor recovers after context loss');
+    frame.close();
+  } finally { bitmap.close(); recovered.dispose(); }
+  return checks;
 }
 
 async function runCameraEffectsSmoke(phase) {
@@ -211,7 +487,29 @@ async function runCameraEffectsSmoke(phase) {
   let sender = null;
   let replaceChain = Promise.resolve();
   window.Worker = class extends original.Worker {
-    constructor(...args) { super(...args); workers.add(this); }
+    constructor(...args) {
+      super(...args); workers.add(this);
+      let revision = null;
+      this.addEventListener('message', ({ data }) => {
+        if (window.cameraEffectsTrace && (data.type !== 'frame' || data.revision !== revision)) {
+          console.log('CAMERA TEST worker response ' + JSON.stringify({
+            type: data.type, revision: data.revision, code: data.code,
+            frameMs: data.type === 'frame' ? Math.round(performance.now() - this.sentAt) : undefined,
+          }));
+        }
+        if (data.type === 'frame') revision = data.revision;
+      });
+    }
+    postMessage(message, ...transfer) {
+      if (window.cameraEffectsTrace && (message.type !== 'frame' || this.tracedRevision !== message.revision)) {
+        console.log('CAMERA TEST worker request ' + JSON.stringify({
+          type: message.type, revision: message.revision, width: message.bitmap?.width, height: message.bitmap?.height,
+        }));
+      }
+      if (message.type === 'frame') this.tracedRevision = message.revision;
+      if (message.type === 'frame') this.sentAt = performance.now();
+      super.postMessage(message, ...transfer);
+    }
     terminate() { workers.delete(this); super.terminate(); }
   };
   document.createElement = function (name, options) {
@@ -281,11 +579,21 @@ async function runCameraEffectsSmoke(phase) {
   const sampleCanvas = document.createElement('canvas');
   const sampleContext = sampleCanvas.getContext('2d', { willReadFrequently: true });
   async function watch(stream, video = sampleVideo) {
+    if (!stream?.active) throw new Error(`Cannot watch an inactive camera stream: ${JSON.stringify(frameDiagnostics(0.5, 0.5, video))}`);
+    let started = true;
+    let playError;
     if (video.srcObject !== stream) {
       video.srcObject = stream;
-      await video.play();
+      started = false;
+      video.play().then(() => { started = true; }, error => { playError = error; });
     }
-    await until(() => video.readyState >= 2 && video.videoWidth, 'No actual video frames reached the preview');
+    await until(() => {
+      if (playError) throw playError;
+      if (service.getCameraState().status === 'error') {
+        throw new Error(`Camera failed while awaiting playback: ${JSON.stringify(frameDiagnostics(0.5, 0.5, video))}`);
+      }
+      return started && video.readyState >= 2 && video.videoWidth;
+    }, 'No actual video frames reached the preview', 12000, () => frameDiagnostics(0.5, 0.5, video));
   }
   function pixel(x, y, video = sampleVideo) {
     sampleCanvas.width = video.videoWidth;
@@ -306,7 +614,7 @@ async function runCameraEffectsSmoke(phase) {
       : null;
     return {
       phase, mode: store.snapshot.settings.mode, status: state.status, publishing: state.publishing,
-      error: state.error?.code, failures: failures.map(error => error.code),
+      error: state.error?.code, cause: state.error?.cause?.message, failures: failures.map(error => error.code),
       preview: {
         readyState: video.readyState, paused: video.paused, currentTime: video.currentTime,
         width: video.videoWidth, height: video.videoHeight, presented,
@@ -585,11 +893,31 @@ async function runCameraEffectsSmoke(phase) {
       };
       check(processor.targetFps === 60 && store.snapshot.settings.limitQuality === false,
         'Real processor follows a 60 FPS profile by default instead of the old 15/24 ceiling');
+      check(!!processor.reader && !processor.video, 'Direct camera capture does not rely on a hidden video compositor');
       check(requests[0].video.width.exact === 1920 && requests[0].video.height.exact === 1080
         && requests[0].video.frameRate.exact === 60, 'Capture requests the selected full-resolution/FPS profile');
       await expectSize(1920, 1080, 'Uncapped genuine output retains the selected 1080p resolution');
       await expectVideoPixel(0.9, 0.85, actual => near(actual, [17, 34, 221]),
         'Profile-rate processing still exposes only the keyed composite');
+      // Test scheduling, not the runner's full-HD software rasterization throughput.
+      source.width = 320;
+      source.height = 180;
+      drawSource();
+      await expectSize(320, 180, 'Cadence probe uses real small frames on the same hidden capture');
+      let receivedFrames = 0;
+      const receive = processor.receive;
+      processor.receive = function (message) {
+        if (message.type === 'frame') receivedFrames++;
+        receive.call(this, message);
+      };
+      try { await tick(1200); } finally {
+        processor.receive = receive;
+        source.width = 1920;
+        source.height = 1080;
+        drawSource();
+      }
+      check(receivedFrames >= 5, `Hidden-window capture must not throttle to 1 FPS: ${receivedFrames} frames in 1.2s`);
+      await expectSize(1920, 1080, 'Full-HD processing resumes after the isolated cadence probe');
       await service.setCameraEffects({ limitQuality: true });
       check(processor.targetFps === 30 && service.getCameraState().stream === stream,
         'Combined quality cap changes the real scheduler without replacing its processed track');
@@ -659,6 +987,24 @@ async function runCameraEffectsSmoke(phase) {
       'Rapid combined-limit changes preserve selected FPS, publication identity and single capture');
 
       const Processor = processor.constructor;
+      const timeoutProbe = new Processor(sourceStream, service.getProfile(), error => { throw error; });
+      const scheduleTimeout = window.setTimeout;
+      let scheduledDelay;
+      window.setTimeout = function (callback, delay, ...args) {
+        scheduledDelay = delay;
+        return scheduleTimeout.call(this, callback, delay, ...args);
+      };
+      try {
+        timeoutProbe.armFrameTimeout(false);
+        check(scheduledDelay === 8000, 'Steady frames retain the eight-second deadline');
+        timeoutProbe.armFrameTimeout(true);
+        check(scheduledDelay === 60000, 'Cold initialization has a bounded sixty-second deadline');
+        timeoutProbe.armFrameTimeout(false);
+        check(scheduledDelay === 8000, 'The next steady frame does not inherit the cold-start allowance');
+      } finally {
+        window.setTimeout = scheduleTimeout;
+        timeoutProbe.stop();
+      }
       for (const [profileFps, sourceFps, cap, expected] of [
         [60, 60, false, 60], [60, 120, true, 30], [20, 60, true, 20], [24, 120, false, 24], [120, 240, false, 120],
         [60, 12, false, 12], [60, 12, true, 12],
@@ -734,6 +1080,29 @@ async function runCameraEffectsSmoke(phase) {
         } finally {
           simulation.stop();
         }
+        const direct = new Processor(sourceStream, profile, error => { throw error; });
+        const directFrames = [];
+        direct.active = true;
+        direct.limitQuality = cap;
+        direct.setProfile(profile);
+        direct.scheduleFrame = () => {};
+        direct.captureBitmap = async (frame, _width, _height, revision) => {
+          directFrames.push(frame.timestamp / 1000);
+          direct.completeFrame(revision);
+        };
+        const pixelSource = new OffscreenCanvas(2, 2);
+        pixelSource.getContext('2d').fillRect(0, 0, 2, 2);
+        try {
+          for (let index = 0; index < sourceFps * 5; index++) {
+            direct.inFlightRevision = direct.revision;
+            const frame = new VideoFrame(pixelSource, { timestamp: Math.round(index * 1000000 / sourceFps) });
+            await direct.captureSourceFrame({ read: async () => ({ value: frame, done: false }) }, direct.revision);
+            check(frame.codedWidth === 0, 'Every directly read frame is closed after processing or admission rejection');
+          }
+          const steady = directFrames.filter(time => time >= 1000).length / 4;
+          check(Math.abs(steady - expected) <= 1,
+            `Direct capture follows ${expected} FPS using source timestamps, independent of batched delivery: ${steady}`);
+        } finally { direct.stop(); }
       }
       await service.setCameraEffects({ mode: 'off', limitQuality: true });
       const raw = service.getCameraStream();
@@ -835,7 +1204,7 @@ async function runCameraEffectsSmoke(phase) {
       await transition('blur');
       let capturedSnapshot = false;
       window.createImageBitmap = async (source, ...options) => {
-        if (source instanceof HTMLVideoElement && !capturedSnapshot) {
+        if ((source instanceof HTMLVideoElement || source instanceof VideoFrame) && !capturedSnapshot) {
           capturedSnapshot = true;
           await new Promise(resolve => { releaseSnapshot = resolve; });
         }
@@ -1093,7 +1462,7 @@ async function runCameraEffectsSmoke(phase) {
     settings.customProfile = { ...settings.customProfile, cameraWidth: 160, cameraHeight: 90, cameraFps: 12 };
     await service.applyQualityPreset('CUSTOM');
     await until(async () => { await watch(service.getCameraStream()); return sampleVideo.videoWidth === 160 && sampleVideo.videoHeight === 90; },
-      'Quality changes did not update effect output bounds');
+      'Quality changes did not update effect output bounds', 65000);
     check(requests.length === 1, 'Quality changes do not reopen hardware');
     await service.setCameraEffects({ mode: 'chroma', backgroundSource: 'color' });
     let frames = 0;

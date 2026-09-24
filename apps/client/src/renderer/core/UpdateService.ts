@@ -1,4 +1,4 @@
-import { PROTOCOL_VERSION, type ReleaseCompatibilityResult } from '@monky/shared';
+import { releaseRequiresProtocolUpdate, type ReleaseCompatibilityResult } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { settingsStore } from '../stores/settingsStore';
@@ -215,7 +215,7 @@ class UpdateService {
   }
 
   private compatibilityWarning(compatibility?: ReleaseCompatibilityResult): string | null {
-    return compatibility?.status === 'available' && compatibility.manifest.protocolVersion !== PROTOCOL_VERSION
+    return compatibility?.status === 'available' && releaseRequiresProtocolUpdate(compatibility.manifest, 'bot')
       ? t('update.botCompatibilityChanged', {
         protocol: compatibility.manifest.protocolVersion, sdk: compatibility.manifest.botSdkVersion,
       })

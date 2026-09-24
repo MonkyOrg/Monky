@@ -16,6 +16,49 @@ function createStore() {
   return store;
 }
 
+test('outgoing messages survive failures/history and reconcile exactly once, including late acknowledgements', () => {
+  const store = createStore();
+  const pending = { ...message, id: 'outgoing', createdAt: 200, content: 'Unconfirmed' };
+  const payload = { clientMessageId: pending.id, channelId: pending.channelId, content: pending.content, attachmentIds: ['file'] };
+  const outgoing = store.enqueueMessage(payload, pending);
+  payload.attachmentIds.push('not-sent');
+  pending.content = 'Not in the queued snapshot';
+  assert.deepEqual(outgoing.payload.attachmentIds, ['file']);
+  assert.equal(outgoing.message.content, 'Unconfirmed');
+  store.failOutgoing(outgoing, 'Connection interrupted');
+  store.setHistory('chat', [message]);
+  assert.equal(store.getMessages('chat').filter(entry => entry.id === outgoing.message.id).length, 1);
+  assert.equal(store.getOutgoing('outgoing')?.status, 'failed');
+  assert.equal(store.retryOutgoing('outgoing'), outgoing);
+  assert.equal(store.retryOutgoing('outgoing'), undefined, 'Double-clicking retry cannot start another attempt');
+  store.addMessage({ ...outgoing.message, createdAt: 210 });
+  store.failOutgoing(outgoing, 'Late timeout');
+  store.addMessage({ ...outgoing.message, createdAt: 210 });
+  assert.equal(store.getOutgoing('outgoing'), undefined);
+  assert.equal(store.getMessages('chat').filter(entry => entry.id === 'outgoing').length, 1);
+});
+
+test('outbox recovery is scoped to authenticated endpoint, server and user, and history can acknowledge it', () => {
+  const scope = { sessionKey: 'delivery-fixture', serverId: 'delivery-server', userId: message.userId };
+  const store = createStore();
+  store.setComposerScope(scope);
+  store.enqueueMessage({ clientMessageId: 'recover-send', channelId: 'chat', content: 'Recover' },
+    { ...message, id: 'recover-send', content: 'Recover' });
+  store.clear();
+  const unrelated = createStore();
+  unrelated.setComposerScope({ ...scope, userId: 'other-user' });
+  assert.equal(unrelated.getOutgoing('recover-send'), undefined);
+  const recovered = createStore();
+  recovered.setComposerScope(scope);
+  assert.equal(recovered.getOutgoing('recover-send')?.status, 'failed');
+  const pending = recovered.getOutgoing('recover-send');
+  assert.ok(pending);
+  recovered.setHistory('chat', [message, { ...pending.message, createdAt: 300 }]);
+  assert.equal(recovered.getOutgoing('recover-send'), undefined);
+  assert.equal(recovered.getMessages('chat').filter(entry => entry.id === 'recover-send').length, 1);
+  recovered.clear();
+});
+
 test('editing keeps the exact original text and the independent new-message and reply drafts', () => {
   const store = createStore();
   const draft = '\nUnsent message\nwith multiple lines';

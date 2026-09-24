@@ -40,6 +40,41 @@ test('legacy noise suppression settings preserve RNNoise and browser behavior', 
   }
 });
 
+for (const platform of ['win32', 'darwin']) {
+  test(`screen receiver defaults and explicit persistence on ${platform}`, () => {
+    const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { api: { platform } } });
+    try {
+      withSettingsStorage(storage => {
+        const defaultReceiver = platform === 'darwin' ? 'chromium' : 'native';
+        const store = new SettingsStore();
+        assert.equal(store.getScreenShareReceiver(), defaultReceiver);
+        assert.equal(store.nativeScreenReceiverComingSoon, platform === 'darwin');
+        storage.setItem('monky_settings', JSON.stringify({ screenShareReceiver: 'automatic' }));
+        store.load(false);
+        assert.equal(store.getScreenShareReceiver(), defaultReceiver);
+        store.setScreenShareReceiver('chromium');
+        assert.equal(new SettingsStore().getScreenShareReceiver(), 'chromium');
+        if (platform === 'darwin') {
+          assert.throws(() => store.setScreenShareReceiver('native'), /unavailable/);
+          storage.setItem('monky_settings', JSON.stringify({ screenShareReceiver: 'native' }));
+          store.load(false);
+          assert.equal(store.getScreenShareReceiver(), 'chromium');
+        } else {
+          store.setScreenShareReceiver('native');
+          assert.equal(new SettingsStore().getScreenShareReceiver(), 'native');
+        }
+        storage.clear();
+        store.load(false);
+        assert.equal(store.getScreenShareReceiver(), defaultReceiver, 'Cleared preferences must restore the platform default.');
+      });
+    } finally {
+      if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+      else Reflect.deleteProperty(globalThis, 'window');
+    }
+  });
+}
+
 test('output overrides distinguish inheritance from the explicit system default', () => {
   const preferences: AudioOutputPreferences = {
     selectedSpeakerId: 'headphones',

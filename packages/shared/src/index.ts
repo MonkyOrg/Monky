@@ -43,3 +43,7 @@ export * from './botScreens.js';
 export * from './localExecution.js';
 export * from './localExecutionProtocol.js';
 export * from './botPermissions.js';
+export * from './protocolCompatibility.js';
+export * from './messageBlocks.js';
+export { releaseRequiresProtocolUpdate } from './releaseCompatibility.js';
+export { createMessageContentSchema } from './validators.js';

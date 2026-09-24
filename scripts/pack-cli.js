@@ -109,6 +109,7 @@ function main() {
   }
   const require = createRequire(import.meta.url);
   const { PROTOCOL_VERSION } = require(path.join(sharedDist, 'constants.js'));
+  const { MIN_CLIENT_PROTOCOL, MIN_BOT_PROTOCOL } = require(path.join(sharedDist, 'protocolCompatibility.js'));
 
   const staging = path.join(ROOT, 'release', 'cli-pack');
   fs.rmSync(staging, { recursive: true, force: true });
@@ -174,6 +175,8 @@ function main() {
     version,
     protocolVersion: PROTOCOL_VERSION,
     botSdkVersion: version,
+    minimumClientProtocol: MIN_CLIENT_PROTOCOL,
+    minimumBotProtocol: MIN_BOT_PROTOCOL,
   }, null, 2) + '\n');
 
   console.log(`[pack-cli] ${migrations.length} migration(s) bundled`);

@@ -42,6 +42,7 @@ if (!process.versions.electron) {
     throw new Error('Run this smoke with Node so it owns an isolated temporary profile');
   }
   app.setPath('userData', profile);
+  require('./fixtures/ciGraphics.cjs')(app);
   app.commandLine.appendSwitch('disable-background-networking');
   app.commandLine.appendSwitch('disable-component-update');
   app.commandLine.appendSwitch('disable-sync');

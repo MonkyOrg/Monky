@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { PROTOCOL_VERSION } from '@monky/shared';
+import { PROTOCOL_VERSION, MIN_BOT_PROTOCOL } from '@monky/shared';
 import { BotService } from './application/services/BotService';
 import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
 import {
@@ -48,10 +48,10 @@ test('legacy links remain unchecked after migration and protocol warnings surviv
   assert.deepEqual(await current.service.getCompatibility(), {
     protocolVersion: PROTOCOL_VERSION, incompatibleBots: 0, uncheckedBots: 1,
   });
-  assert.equal(await current.service.recordRejectedProtocol('wrong-token', 'synthetic-bot-key', PROTOCOL_VERSION - 1), false);
-  assert.equal(await current.service.recordRejectedProtocol('synthetic-token', 'wrong-key', PROTOCOL_VERSION - 1), false);
+  assert.equal(await current.service.recordRejectedProtocol('wrong-token', 'synthetic-bot-key', MIN_BOT_PROTOCOL - 1), false);
+  assert.equal(await current.service.recordRejectedProtocol('synthetic-token', 'wrong-key', MIN_BOT_PROTOCOL - 1), false);
   assert.equal((await current.repository.findById('fixture-bot'))?.lastProtocolVersion, null);
-  assert.equal(await current.service.recordRejectedProtocol('synthetic-token', 'synthetic-bot-key', PROTOCOL_VERSION - 1), true);
+  assert.equal(await current.service.recordRejectedProtocol('synthetic-token', 'synthetic-bot-key', MIN_BOT_PROTOCOL - 1), true);
   current.connection.close();
   connection = null;
   current = await reopen();

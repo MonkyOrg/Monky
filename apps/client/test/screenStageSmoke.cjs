@@ -58,7 +58,9 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
   replace(rtc, 'getNativeScreenSource', (sessionId, shareId) =>
     sessionId === remote.sessionId && shareId === remoteSource.shareId ? remoteSource : null);
   replace(rtc, 'getLocalScreenPreviewState', id => previewStates.get(id) ?? 'waiting');
-  replace(rtc, 'getNativeScreenWatchState', () => null);
+  let watchState = null;
+  replace(rtc, 'getNativeScreenWatchState', (sessionId, shareId) =>
+    sessionId === remote.sessionId && shareId === remoteSource.shareId ? watchState : null);
   replace(rtc, 'getAverageP2pPing', async () => 0);
   replace(rtc, 'setRemoteScreenWatching', (sessionId, shareId, watching) => {
     if (!watching) modes.delete(modeKey(sessionId, shareId));
@@ -243,6 +245,19 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       verifyBadge(remote.sessionId, remoteSource.shareId, 'game');
       const remoteVideo = video(remote.sessionId, remoteSource.shareId);
       const remoteStream = remoteVideo.srcObject;
+      for (const receiver of ['native', 'chromium']) {
+        watchState = { state: 'unavailable', reason: 'connection-failed', receiver };
+        appEvents.emit('native_screen.updated');
+        const error = card(remote.sessionId, remoteSource.shareId).querySelector('.stage-native-error');
+        check(error?.textContent.includes(language.t('screenShare.nativeFailure.connection-failed')),
+          'Receiver failures must remain visible in the selected language.');
+        check(error.textContent.includes(language.t('screenShare.nativeReceiverSettingsHint')) === (receiver === 'native'),
+          'Only native receiver errors suggest manually choosing Chromium in settings.');
+        watchState = null;
+        appEvents.emit('native_screen.updated');
+        check(!card(remote.sessionId, remoteSource.shareId).querySelector('.stage-native-error'),
+          'A cleared failure must remove the obsolete receiver hint.');
+      }
       card(remote.sessionId, remoteSource.shareId).querySelector('.stage-quality-button').click();
       card(remote.sessionId, remoteSource.shareId).querySelector('[data-screen-quality="480p30"]').click();
       modes.set(modeKey(remote.sessionId, remoteSource.shareId), 'normal');

@@ -175,9 +175,9 @@ export class OverlayManager {
         point.x < b.x + b.width &&
         point.y >= b.y &&
         point.y < b.y + b.height;
-      if (inside !== this.isHovered) {
+      if (inside || inside !== this.isHovered) {
         this.isHovered = inside;
-        this.overlayWindow.webContents.send('overlay:hover-changed', inside);
+        this.overlayWindow.webContents.send('overlay:hover-changed', inside, { x: point.x - b.x, y: point.y - b.y });
       }
     }, 120);
   }

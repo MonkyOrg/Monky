@@ -15,6 +15,13 @@ If Game Capture cannot start, one **Normal** attempt uses the same window,
 only after proving the previous attempt has retired.
 Chromium reception remains available for H.264 profiles the receiving
 device can decode; this does not prove sending capability.
+Under **Settings → Quality & sharing → Screen reception**, Windows defaults to
+Native and uses Chromium only through explicit selection, never as a fallback.
+A native failure mentions this option without switching receivers. On macOS,
+Chromium is the default and Native remains disabled as Coming soon. The saved
+preference applies to the next Watch/Try again without interrupting an active
+receiver, changing camera/voice or capture. The Chromium limitation warning
+remains visible in settings.
 
 ## Sources and availability checks
 
@@ -111,7 +118,7 @@ presets. Each profile negotiates its required H.264 level: at least 5.1 for
 1080p120, 5.2 for 4K60 and 6 for 4K120. The versioned WebRTC overlay and
 `h264-profile-level-id` patch add actual Level 6 support; their patches and
 licenses accompany corresponding sources. Client and server require protocol
-25. The bitrate ceiling is not a floor: congestion control stays active and
+26. The bitrate ceiling is not a floor: congestion control stays active and
 different profiles may consume additional upload bandwidth.
 
 This does not make every encoder 4K120-capable. The AMF installed on the tested
@@ -162,7 +169,7 @@ A new share opens its preview in focus mode; quality updates and recovery do
 not override a later choice to leave focus. The **Normal / Game Capture**
 indicator only appears after frames are observed and follows the preview's
 or viewer's actual pipeline, not merely the requested method. Signaling this
-state requires both client and server to use protocol 24.
+state requires both client and server to support protocol 26.
 
 **Pause preview when Monky is not focused**, enabled by default, controls
 only local preview; losing focus does not interrupt viewers. Turning it off
@@ -479,6 +486,24 @@ output profile; it does not change monitor resolution or simulate exclusive full
 Preview QA must validate operation without viewers, focus loss/return,
 disabling background pause and uninterrupted viewers. Resolution and frame
 counts alone do not prove that decoded pixels were displayed in the interface.
+
+### Known limitation of Chromium reception on Windows
+
+The integrated RX 9070 XT scenario qualified 4K60 with native reception, but
+**did not qualify Chromium receiver cadence**. Even at 1080p60, periodic
+freezes and results below 50 FPS occurred. During an interval without QA
+actions, the `DXGISwapChainImageBacking::Present` scope blocked the GPU thread
+for 262–285 ms; decode dispatch was delayed, the adapter queue filled and new
+keyframes were requested. The trace does not distinguish `Present1` from the
+swap-chain initialization wait or attribute the cause to the driver or DWM.
+
+Analysis of 1,166 slices found no `frame_num` or POC discontinuity. Disabling
+only video overlays retained hardware D3D11 decode but did not resolve the
+stalls; that workaround was not applied to the application. Queues were not
+enlarged, IDR guards were not relaxed and acceptance criteria were not lowered.
+This failure remains open and must not be described as fixed based on native
+path qualification. The local scenario also does not establish whether a
+regression occurred between betas.
 
 These window scripts do not qualify monitors, Game Capture, NVIDIA or
 exclusive fullscreen. Local evidence for this integration covers AMF and

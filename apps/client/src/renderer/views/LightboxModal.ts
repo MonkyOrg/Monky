@@ -53,6 +53,8 @@ export class LightboxModal {
     let startPanX = 0;
     let startPanY = 0;
     let currentImage: HTMLImageElement | null = null;
+    let fittedWidth = 0;
+    let fittedHeight = 0;
     let currentLightboxVideo: HTMLVideoElement | null = null;
     let currentInlineVideo: HTMLVideoElement | null = null;
     let resumeInlineVideoOnClose = false;
@@ -115,9 +117,7 @@ export class LightboxModal {
         zoomIndicator.hidden = true;
         return;
       }
-      const fittedWidth = currentImage.clientWidth || currentImage.naturalWidth || 1;
-      const fittedHeight = currentImage.clientHeight || currentImage.naturalHeight || 1;
-      const actualScale = Math.max(currentImage.naturalWidth / fittedWidth, currentImage.naturalHeight / fittedHeight, 1);
+      const actualScale = getActualScale();
       const percent = Math.round((zoom / actualScale) * 100);
       zoomIndicator.hidden = false;
       zoomIndicator.innerText = `${percent}%`;
@@ -130,8 +130,8 @@ export class LightboxModal {
         panY = 0;
         return;
       }
-      const maxX = Math.max(0, (currentImage.clientWidth * zoom - stage.clientWidth) / 2);
-      const maxY = Math.max(0, (currentImage.clientHeight * zoom - stage.clientHeight) / 2);
+      const maxX = Math.max(0, (fittedWidth * zoom - overlay.clientWidth) / 2);
+      const maxY = Math.max(0, (fittedHeight * zoom - overlay.clientHeight) / 2);
       panX = clamp(panX, -maxX, maxX);
       panY = clamp(panY, -maxY, maxY);
     };
@@ -143,12 +143,25 @@ export class LightboxModal {
         return;
       }
       clampPan();
-      currentImage.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
-      currentImage.style.cursor = zoom > 1 ? (dragging ? 'grabbing' : 'grab') : 'zoom-in';
-      stage.classList.toggle('is-pannable', zoom > 1);
+      frame.style.width = `${fittedWidth * zoom}px`;
+      frame.style.height = `${fittedHeight * zoom}px`;
+      frame.style.transform = `translate(${panX}px, ${panY}px)`;
+      const pannable = fittedWidth * zoom > overlay.clientWidth || fittedHeight * zoom > overlay.clientHeight;
+      currentImage.style.cursor = pannable ? (dragging ? 'grabbing' : 'grab') : 'zoom-in';
+      stage.classList.toggle('is-pannable', pannable);
       stage.classList.toggle('is-dragging', dragging);
       updateZoomIndicator();
     };
+
+    const fitImage = () => {
+      if (!currentImage?.naturalWidth || !currentImage.naturalHeight || !stage.clientWidth || !stage.clientHeight) return;
+      const fit = Math.min(1, stage.clientWidth / currentImage.naturalWidth, stage.clientHeight / currentImage.naturalHeight);
+      fittedWidth = currentImage.naturalWidth * fit;
+      fittedHeight = currentImage.naturalHeight * fit;
+      updateImageTransform();
+    };
+    const resizeObserver = new ResizeObserver(fitImage);
+    resizeObserver.observe(stage);
 
     const resetZoom = () => {
       zoom = 1;
@@ -179,9 +192,7 @@ export class LightboxModal {
 
     const getActualScale = () => {
       if (!currentImage) return 1;
-      const fittedWidth = currentImage.clientWidth || currentImage.naturalWidth || 1;
-      const fittedHeight = currentImage.clientHeight || currentImage.naturalHeight || 1;
-      return Math.max(currentImage.naturalWidth / fittedWidth, currentImage.naturalHeight / fittedHeight, 1);
+      return Math.max(currentImage.naturalWidth / (fittedWidth || 1), currentImage.naturalHeight / (fittedHeight || 1), 1);
     };
 
     const setZoom = (nextZoom: number) => {
@@ -216,7 +227,10 @@ export class LightboxModal {
       resetZoom();
       frame.innerHTML = '';
       currentImage = null;
+      fittedWidth = fittedHeight = 0;
+      for (const property of ['width', 'height', 'transform']) frame.style.removeProperty(property);
       const item = items[currentIndex];
+      frame.classList.toggle('lightbox-media-frame--image', item.kind === 'image');
 
       counter.innerText = `${currentIndex + 1} / ${items.length}`;
       caption.innerText = item.fileName;
@@ -235,13 +249,13 @@ export class LightboxModal {
         img.alt = item.fileName;
         img.draggable = false;
         img.addEventListener('load', () => {
-          resetZoom();
-          updateImageTransform();
+          if (currentImage === img && overlay.isConnected) fitImage();
         });
         img.addEventListener(
           'wheel',
           (e) => {
             e.preventDefault();
+            if (e.deltaY === 0 || !fittedWidth) return;
             setZoom(zoom + (e.deltaY < 0 ? 0.2 : -0.2));
           },
           { passive: false },
@@ -252,7 +266,7 @@ export class LightboxModal {
           setZoom(zoom > 1.01 ? 1 : getActualScale());
         });
         img.addEventListener('pointerdown', (e) => {
-          if (zoom <= 1) return;
+          if (!stage.classList.contains('is-pannable')) return;
           e.preventDefault();
           e.stopPropagation();
           pointerId = e.pointerId;
@@ -274,7 +288,7 @@ export class LightboxModal {
         img.addEventListener('pointercancel', releaseDrag);
         currentImage = img;
         frame.appendChild(img);
-        updateImageTransform();
+        fitImage();
       } else {
         const player = document.createElement('div');
         player.className = 'chat-video-player chat-video-player--lightbox';
@@ -353,6 +367,8 @@ export class LightboxModal {
         void document.exitFullscreen().catch(() => undefined);
       }
       document.removeEventListener('keydown', onKey, true);
+      resizeObserver.disconnect();
+      currentImage = null;
       overlay.remove();
       if (this.closeCurrent === close) this.closeCurrent = null;
     };

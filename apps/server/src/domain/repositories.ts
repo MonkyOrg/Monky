@@ -63,6 +63,10 @@ export interface IChannelRepository {
 }
 
 export interface IMessageRepository {
+  /** Atomically commits a human message, its attachments and mentions; retries do not repeat side effects. */
+  createChatMessage(message: MessageRecord, attachmentIds: string[], mentions: MentionRecord[]): Promise<{
+    message: MessageRecord; created: boolean;
+  } | null>;
   createBotMessage(message: MessageRecord): Promise<MessageRecord | null>;
   setReaction(messageId: string, userId: string, emoji: string, add: boolean): Promise<'changed' | 'unchanged' | 'limit' | 'invalid'>;
   listReactions(messageIds: string[]): Promise<import('./entities').MessageReactionRecord[]>;
@@ -70,7 +74,7 @@ export interface IMessageRepository {
   findById(messageId: string): Promise<MessageRecord | null>;
   listByChannel(channelId: string, limit: number, beforeTimestamp?: number): Promise<MessageRecord[]>;
   /** Rewrites the content of a message and stamps it as edited (#504). */
-  updateContent(messageId: string, content: string, editedAt: number): Promise<void>;
+  updateContent(messageId: string, content: string, editedAt: number, blocks?: import('@monky/shared').MessageBlock[]): Promise<void>;
   /** Blanks a message's content and stamps it as deleted, keeping the row (#504). */
   markDeleted(messageId: string, deletedAt: number): Promise<void>;
   deleteByChannel(channelId: string): Promise<void>;

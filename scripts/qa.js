@@ -11,11 +11,12 @@ export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)
 export const scenarios = ['connected', 'server-settings', 'voice', 'voice-receive', 'music', 'home', 'login', 'bot-install', 'tool-consent'];
 
 export function parseQaArguments(args) {
-  const result = { scenario: 'connected', smoke: false, bot: null, botRoot: null };
+  const result = { scenario: 'connected', smoke: false, realMedia: false, bot: null, botRoot: null };
   let selected = false;
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
     if (argument === '--smoke') result.smoke = true;
+    else if (argument === '--real-media') result.realMedia = true;
     else if (argument === '--bot=fixture') {
       if (result.bot) throw new Error('Choose one explicit bot source.');
       result.bot = 'sdk-fixture';
@@ -31,6 +32,7 @@ export function parseQaArguments(args) {
     } else throw new Error(`Unknown QA argument/scenario: ${argument}. Use --help.`);
   }
   if (['home', 'login'].includes(result.scenario) && result.bot) throw new Error('Home/login QA must not install a bot before the tested login.');
+  if (result.smoke && result.realMedia) throw new Error('--real-media requires interactive QA; it cannot be combined with --smoke.');
   if (['voice', 'voice-receive'].includes(result.scenario) && !result.bot) result.bot = 'sdk-fixture';
   if (result.scenario === 'voice-receive' && result.bot !== 'sdk-fixture') throw new Error('Voice reception QA uses its explicit SDK fixture.');
   if (['bot-install', 'tool-consent'].includes(result.scenario) && !result.bot) throw new Error('Choose --bot=fixture or an explicit --bot-root for this scenario.');
@@ -69,6 +71,7 @@ export const scenarioPreparation = {
 
 export async function runQa(options, hooks = {}) {
   if (!scenarios.includes(options.scenario)) throw new Error('Unsupported QA scenario.');
+  if (options.smoke && options.realMedia) throw new Error('Real capture devices require interactive QA.');
   if (options.bot === 'production' ? !options.botRoot : options.botRoot) throw new Error('Production QA requires its explicit bot checkout; no fixture will be substituted.');
   const { developmentQaConfigSchema, developmentQaReportSchema, botManifestSchema, PROTOCOL_VERSION } = require('../packages/shared/dist/index.js');
   for (const filename of ['apps/client/dist/index.html', 'apps/client/dist-electron/main/main.js', 'apps/server/dist/server.js']) {
@@ -140,6 +143,7 @@ export async function runQa(options, hooks = {}) {
     }
     const config = developmentQaConfigSchema.parse({
       runId, scenario: options.scenario, smoke: options.smoke, nickname: 'QA Tester',
+      realMedia: options.realMedia === true,
       server: { host: '127.0.0.1', port: serverReady.port, name: serverReady.name, password },
       ...(botReady ? { bot: botReady } : {}),
     });
@@ -194,7 +198,10 @@ export async function runQa(options, hooks = {}) {
     }
     result = { scenario: options.scenario, root, runId, serverUrl: `ws://127.0.0.1:${serverReady.port}`,
       botManifestUrl: botReady?.manifestUrl, botKind: botReady?.kind, pids: children.map(child => child.child.pid),
-      prepared: scenarioPreparation[options.scenario], windowVisible, ready, stats, reports };
+      prepared: options.realMedia
+        ? `${scenarioPreparation[options.scenario].replace('synthetic input', 'real input')} Real capture devices enabled explicitly; camera starts only on user action.`
+        : scenarioPreparation[options.scenario],
+      mediaDevices: options.realMedia ? 'real' : 'synthetic', windowVisible, ready, stats, reports };
     await hooks.onReady?.(result);
     hooks.log?.(`QA_READY ${JSON.stringify(result)}`);
     if (!options.smoke) await Promise.race([client.closed, failure]);
@@ -221,9 +228,10 @@ export async function runQa(options, hooks = {}) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   if (process.argv.includes('--help')) {
-    console.log('Usage: npm run qa -- [scenario] [--bot=fixture | --bot-root <absolute MonkyBot checkout>] [--smoke]\n');
+    console.log('Usage: npm run qa -- [scenario] [--bot=fixture | --bot-root <absolute MonkyBot checkout>] [--smoke | --real-media]\n');
     for (const scenario of scenarios) console.log(`${scenario}: ${scenarioPreparation[scenario]}`);
     console.log('\nFresh isolated data is removed on shutdown. Ctrl+C closes owned processes. Normal npm start is unchanged.');
+    console.log('--real-media explicitly enables physical camera/microphone devices for interactive evaluation. Default and smoke use synthetic capture.');
   } else {
     runQa(parseQaArguments(process.argv.slice(2)), { log: console.log })
       .catch(error => { console.error(error); process.exitCode = 1; });

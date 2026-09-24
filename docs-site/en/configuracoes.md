@@ -318,6 +318,30 @@ If processing fails, the camera stops and reports the error rather than
 silently reverting to unprocessed video. Turning the effect off requires an
 explicit choice.
 
+Cutout uses **Robust Video Matting (RVM)**, estimating foreground color and
+transparency while using previous frames to follow motion. Blur, color and
+image effects require a WebGL2 GPU; if unavailable, the effect is not enabled
+and the camera stops with an error. There is no silent switch to another model.
+Physical chroma retains CPU composition when WebGL2 is unavailable.
+Final video resolution still follows your selected profile.
+Blur preserves framing and uses the mask to prevent foreground colors from
+spreading into the background near the contour. Matting is automatic: legacy
+**Person cutout threshold** and **Cutout edge softness** controls are not applied
+to RVM, preserving hair and edge transparency. Their saved values are retained
+without changing other preferences. The graph and weights total about 4.4 MB,
+in addition to the TensorFlow.js runtime. Licenses and sources are available in
+camera settings. Lighting and framing limitations
+still apply; this does not guarantee an identical cutout to other apps.
+
+### Call overlay
+
+**Preserve card aspect ratio** keeps cards at 16:9 as the overlay is resized
+or participants change. Turn the switch off for the previous free layout.
+Drag from empty areas and cards, not only the header; buttons remain clickable.
+Eight resize hints appear only near the pointer, at corners and edge midpoints.
+Only one is active at a time: corners show their own diagonal, and edges show
+the corresponding horizontal or vertical direction without overlapping a corner.
+
 ### Color picker
 
 The physical chroma-key screen color, virtual background color and role
@@ -441,7 +465,22 @@ Push-to-Talk keeps its separately configured keyboard key or mouse button.
 
 The profile controls what **you transmit**; it does not increase someone
 else's camera or screen resolution. This tab also groups codec, local sharing
-preview and telemetry; profiles still include voice and camera settings.
+preview, screen reception and telemetry; profiles still include voice and camera settings.
+
+### Screen reception
+
+Under **Settings → Quality & sharing → Screen reception**, choose **Native** or
+**Chromium**. On Windows, **Native is the default**, using the runtime included
+with Monky. There is no automatic fallback: if it fails, the message explains
+where to select Chromium manually. The choice is saved and applies when you
+start watching or click **Try again**; for an open screen, stop watching and
+watch again. Camera, voice and outgoing screen sharing are unchanged.
+
+**Chromium has a known limitation:** the Windows scenario showed FPS drops and
+periodic freezes. The warning remains visible in settings; selecting this
+receiver does not fix the limitation. On macOS, **Chromium is the default** and
+**Native** is disabled as **Coming soon**. This allows watching compatible
+profiles, but does not enable libobs capture on Mac or qualify its performance.
 
 ### Quality profiles
 

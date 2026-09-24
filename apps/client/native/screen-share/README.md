@@ -15,6 +15,13 @@ Se Captura de jogo não conseguir iniciar, há uma tentativa em **Normal** para
 a mesma janela, após comprovar o encerramento da tentativa anterior.
 A recepção Chromium continua disponível para perfis H.264 que o
 dispositivo receptor consiga decodificar; isso não comprova capacidade de envio.
+Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, Windows
+usa Nativo por padrão e Chromium somente por escolha explícita, nunca como
+fallback. Uma falha nativa indica essa opção sem mudar o receptor. No macOS,
+Chromium é o padrão e Nativo permanece desabilitado como Em breve. A preferência
+salva vale para o próximo Assistir/Tentar novamente, sem interromper a recepção
+ativa, alterar câmera/voz ou a captura. O aviso de limitações Chromium permanece
+visível nas configurações.
 
 ## Fontes e verificação de disponibilidade
 
@@ -113,7 +120,7 @@ Cada perfil negocia o nível H.264 necessário: pelo menos 5.1 para 1080p120,
 5.2 para 4K60 e 6 para 4K120. O overlay versionado do WebRTC e o patch de
 `h264-profile-level-id` acrescentam suporte real ao nível 6; os patches e
 licenças acompanham as fontes correspondentes. Cliente e servidor exigem
-protocolo 25. O teto de bitrate não é um piso: o controle de congestionamento
+protocolo 26. O teto de bitrate não é um piso: o controle de congestionamento
 continua ativo e diferentes perfis podem consumir upload adicional.
 
 Isso não torna todo encoder compatível com 4K120. No AMF instalado na RX 9070 XT
@@ -163,7 +170,7 @@ Um novo compartilhamento abre sua prévia no modo foco; atualizações de
 qualidade ou recuperação não desfazem a escolha posterior de sair do foco.
 O indicador **Normal / Captura de jogo** só aparece depois de observar frames,
 e acompanha o pipeline efetivo da prévia ou do espectador, não apenas a opção
-solicitada. A sinalização desse estado exige cliente e servidor no protocolo 24.
+solicitada. A sinalização desse estado exige cliente e servidor compatíveis com o protocolo 26.
 
 A opção **Pausar prévia quando o Monky estiver fora de foco**, ativa por padrão,
 controla somente a prévia local; perder foco não interrompe espectadores.
@@ -485,6 +492,24 @@ O QA da prévia deve validar funcionamento sem espectadores, perda/retorno de
 foco, opção de pausa desativada e continuidade dos espectadores. Resolução
 e contagem de frames, sozinhas, não comprovam que os pixels decodificados
 foram exibidos na interface.
+
+### Limitação conhecida da recepção Chromium no Windows
+
+O ensaio integrado na RX 9070 XT qualificou 4K60 com recepção nativa, mas
+**não qualificou a cadência do receptor Chromium**. Mesmo em 1080p60, houve
+congelamentos periódicos e resultados abaixo de 50 FPS. Durante um intervalo
+sem ações do QA, o escopo `DXGISwapChainImageBacking::Present` bloqueou a thread
+GPU por 262–285 ms; o despacho de decode atrasou, a fila do adapter encheu e
+foram solicitados novos keyframes. O trace não distingue a chamada `Present1`
+da espera de inicialização da swap chain, nem atribui a causa ao driver ou DWM.
+
+A análise de 1.166 slices não encontrou quebra de continuidade de `frame_num`
+ou POC. Desativar somente video overlays manteve o decode D3D11 por hardware,
+mas não resolveu os bloqueios; esse workaround não foi aplicado ao aplicativo.
+Não foram ampliadas filas, relaxados guards de IDR ou reduzidos os critérios
+de aprovação. Essa falha permanece aberta e não deve ser apresentada como
+corrigida pela qualificação do caminho nativo. O ensaio local também não
+estabelece se houve regressão entre as betas.
 
 Esses scripts de janela não qualificam monitor, Game Capture, NVIDIA ou tela
 cheia exclusiva. A evidência local desta integração cobre AMF e WGC/Game em

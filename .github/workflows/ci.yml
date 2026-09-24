@@ -74,8 +74,10 @@ jobs:
         run: node --test --test-concurrency=1 scripts/test-light-contracts.js scripts/test-light-build.js apps/light/test/platform_components.test.cjs apps/light/test/identity_key_interop.test.cjs apps/light/test/console_control.test.cjs apps/light/test/websocket_transport.test.cjs
       - name: Prepare disposable voice interoperability fixtures
         run: |
-          npm rebuild mediasoup electron esbuild
+          npm rebuild mediasoup esbuild
           npm run build --workspace=apps/server
+      - name: Install Electron runtime before tests
+        run: npm exec --no -- install-electron
       - name: Exercise native and Chromium voice through a real isolated server
         run: node --test apps/light/test/server_fixture.test.cjs apps/light/test/headless_interop.test.cjs apps/light/test/audio_devices.test.cjs apps/light/test/browser_interop.test.cjs
       - name: Restore macOS Keychain configuration
@@ -250,6 +252,8 @@ jobs:
           sdk: '10.0.26100.0'
       - name: Install dependencies
         run: npm ci
+      - name: Install Electron runtime before tests
+        run: npm exec --no -- install-electron
       - name: Build workspaces
         run: npm run build
       - name: Install FFmpeg for generated voice fixtures
@@ -300,6 +304,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install Electron runtime before tests
+        run: npm exec --no -- install-electron
+
       - name: Use lockfile node-gyp (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -310,6 +317,10 @@ jobs:
 
       - name: Build workspaces
         run: npm run build
+
+      - name: Verify macOS DMG packaging dependencies
+        if: runner.os == 'macOS'
+        run: node -e "require('dmg-builder/out/dmgLicense.js')"
 
       # Only content-addressed upstream archives are portable. Do not cache the
       # checkout-owned RTC tree, generated binaries, toolchains or Python venv.

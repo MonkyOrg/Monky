@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { LIMITS } from './constants.js';
 import { resolveBotLocale } from './botLocales.js';
 
-const text = z.string().trim().min(1).max(LIMITS.MAX_MESSAGE_LENGTH);
+const text = z.string().trim().min(1).max(LIMITS.WS_MAX_PAYLOAD_BYTES);
 export const botMessageLocalizationsSchema = z.object({
   'pt-BR': text.optional(),
   en: text.optional(),

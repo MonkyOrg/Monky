@@ -206,12 +206,37 @@ ficam no mesmo registro transacional. A falha de persistência não troca a
 preferência em memória; dados corrompidos não são interpretados como
 consentimento para transmitir a câmera sem efeito.
 
-A segmentação usa MediaPipe/Selfie Segmenter com modelo e WASM empacotados,
-sem CDN ou envio de frames a uma API. Segmentação, composição e chroma key
-rodam em um worker com `OffscreenCanvas`, com um frame em trânsito por vez.
-O segmentador é criado sob demanda uma vez por worker e reutilizado entre
-desfoque, cor, imagem e chroma; no chroma ele fica ocioso. Desativar os efeitos
-ou encerrar a captura libera o worker e o modelo. Resolução e cadência seguem
+A separação automática usa Robust Video Matting (RVM/MobileNetv3) com TensorFlow.js,
+modelo e pesos empacotados, sem CDN ou envio de frames a uma API. Inferência,
+composição e chroma key rodam em um worker com `OffscreenCanvas`, com um frame
+em trânsito por vez. `MediaStreamTrackProcessor` lê diretamente a captura;
+o fallback por elemento de vídeo emite aviso quando a API não está disponível.
+Chroma, composição e desfoque separável usam shaders WebGL2, sem leitura ou
+loop JavaScript dos pixels do vídeo inteiro. O desfoque exclui a pessoa antes
+da filtragem e normaliza o resultado pelo peso de fundo disponível, sem ampliar
+a imagem. Isso evita espalhar as cores da pessoa para o contorno ou desenhar
+uma segunda silhueta deslocada. O RVM recebe RGB na resolução completa e mantém
+quatro estados recorrentes. A razão interna é `min(1, 480 / max(largura, altura))`;
+cor do primeiro plano e alpha saem na resolução completa, sem download para a CPU.
+A composição compartilha o contexto WebGL2 do TensorFlow e restaura seu estado.
+O alpha não recebe o limiar ou a suavidade do segmentador antigo; os valores
+legados continuam armazenados, mas a interface informa que não são aplicados.
+Sem WebGL2, os efeitos de IA falham explicitamente. O chroma físico mantém
+o compositor Canvas2D com aviso no log; não há troca silenciosa do modelo de IA.
+Perda do contexto GPU durante o processamento interrompe a câmera, sem
+publicar frames crus ou trocar silenciosamente de backend.
+O modelo é criado sob demanda e reutilizado entre desfoque, cor e imagem.
+Reconfiguração ou mudança de tamanho reinicia a memória temporal; no chroma
+o modelo fica ocioso, sem inferência, preservando os shaders compilados.
+A configuração e o primeiro frame têm até 60 segundos cada para inicialização
+e compilação fria dos shaders, que pode ultrapassar 30 segundos no Metal.
+O primeiro frame de uma nova resolução também recebe esse prazo de compilação.
+Os frames seguintes mantêm watchdog de 8 segundos. Durante a preparação
+nenhum frame é publicado, e cancelar a captura não espera esses prazos.
+Os testes CI usam D3D11 WARP no Windows e Metal no macOS ARM, mantendo
+inferência real e sem alterar a seleção gráfica do aplicativo.
+Desativar efeitos ou encerrar a captura libera leitor, tensores,
+texturas, contexto e worker. Resolução e cadência seguem
 o perfil selecionado. O limitador opcional, desligado por padrão, restringe
 ambas a 1280 × 720 e 30 FPS, sem ampliar uma captura menor ou duplicar frames
 para compensar limitações de captura ou processamento.
@@ -285,15 +310,22 @@ ordem em que foram feitas.
 A validação dos payloads usa **zod**, com os schemas em `packages/shared` —
 os mesmos que o cliente usa para validar antes de enviar.
 
-::: warning A versão do protocolo é exata, não compatível
-`PROTOCOL_VERSION`, definida em `packages/shared/src/constants.ts`, precisa ser
-**idêntica** nos dois lados. Não há
-negociação nem modo de compatibilidade: se o cliente manda uma versão diferente
-da do servidor, a autenticação é recusada.
+::: warning Compatibilidade negociada, nunca um downgrade irrestrito
+O protocolo **26** negocia pisos independentes: **26 para clientes** e **24 para
+bots**, além de recursos em `AUTH_CONNECT`/`AUTH_SUCCESS`. O contrato nativo de
+tela 4K/80 Mbps exige atualizar cliente e servidor; clientes 24/25 não são
+rebaixados silenciosamente. Bots 24 continuam usando seu contrato anterior de
+áudio e comandos. Blocos de mensagem e configuração de limite só são habilitados
+com as capacidades correspondentes. O SDK pode repetir a autenticação uma vez
+no contrato conhecido de um servidor antigo, respeitando o piso de bots. Versões
+abaixo do piso são recusadas; versões futuras precisam anunciar explicitamente
+um intervalo compatível.
 
-É por isso que subir o protocolo é sempre uma *breaking change* e obriga uma
-release **major** — existe até uma verificação no CI que barra o PR se isso não
-for respeitado.
+Mudanças aditivas não exigem elevar o piso. Uma correção crítica ou alteração
+incompatível deve elevar `MIN_CLIENT_PROTOCOL` e/ou `MIN_BOT_PROTOCOL` em
+`protocolCompatibility.ts`, atualizar o manifesto de release e testar as
+rejeições antes da publicação. A política de versionamento major do CI para
+alterações de `PROTOCOL_VERSION` permanece vigente.
 :::
 
 ### Autenticação por identidade {#autenticacao-o-servidor-nunca-ve-uma-senha-sua}
@@ -364,7 +396,7 @@ independentemente dos cargos que tenha.
 | Proteção | Como |
 |---|---|
 | Flood de mensagens | Janela deslizante: 10 mensagens a cada 5 s |
-| Tamanho da mensagem | 2000 caracteres |
+| Tamanho da mensagem | 16.000 caracteres por padrão; configurável por servidor, `0` sem limite de caracteres; pacote WebSocket até 8 MiB |
 | Avatar | 5 MB, e o arquivo precisa ter assinatura de PNG, JPEG ou WebP |
 | Anexos | Limite por arquivo e orçamento total do servidor, ambos configuráveis |
 | Soundboard | Áudio recusado acima de ~4 MB |

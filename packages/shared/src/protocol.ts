@@ -30,6 +30,7 @@ export enum ProtocolErrorCode {
   STORAGE_FULL = 'STORAGE_FULL',
   SERVER_FULL = 'SERVER_FULL',
   PROTOCOL_VERSION_UNSUPPORTED = 'PROTOCOL_VERSION_UNSUPPORTED',
+  FEATURE_REQUIRES_UPDATE = 'FEATURE_REQUIRES_UPDATE',
   INTERNAL_ERROR = 'INTERNAL_ERROR',
   UNAUTHORIZED = 'UNAUTHORIZED',
   PERMISSION_DENIED = 'PERMISSION_DENIED',
@@ -280,6 +281,7 @@ export interface ProtocolMessage<T = any> {
 // Client Payloads
 export interface AuthConnectPayload {
   protocolVersion: number;
+  protocolOffer?: import('./protocolCompatibility.js').ProtocolOffer;
   publicKey: string;
   nickname: string;
   password?: string;
@@ -317,6 +319,9 @@ export interface AuthFailedPayload {
 }
 
 export interface ChatSendPayload {
+  /** Stable message ID, reused on explicit retries when chat-delivery is negotiated. */
+  clientMessageId?: string;
+  blocks?: import('./messageBlocks.js').MessageBlock[];
   /** Bot-authored variants; rejected for human messages. */
   localizations?: import('./botMessages.js').BotMessageLocalizations;
   replyToMessageId?: string;
@@ -411,6 +416,7 @@ export interface UserUpdateAvatarPayload {
 }
 
 export interface ServerUpdateSettingsPayload {
+  maxMessageLength?: number;
   name?: string;
   password?: string | null; // null or empty string removes the password
   allowSoundboard?: boolean;
@@ -623,6 +629,7 @@ export interface ServerErrorPayload {
 }
 
 export interface ServerSettingsUpdatedPayload {
+  maxMessageLength?: number;
   name: string;
   hasPassword: boolean;
   allowSoundboard?: boolean;

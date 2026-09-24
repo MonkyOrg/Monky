@@ -113,7 +113,7 @@ export async function startDevelopmentQa(config: DevelopmentQaConfig): Promise<v
       await until(() => webRtcManager.getVoiceStatus().connectedP2pPeers.length > 0, 'real SDK bot P2P peer', owner.signal);
       report.peers = webRtcManager.getVoiceStatus().connectedP2pPeers.length;
       report.muted = voiceStore.isMuted;
-      if (!report.muted) throw new Error('Prepared QA must start with its synthetic microphone muted.');
+      if (!report.muted) throw new Error('Prepared QA must start with its microphone muted.');
       if (config.scenario === 'voice-receive') {
         const botRow = () => {
           const user = session.serverStore.serverDetails?.members.find((member) => member.id === report.botId);

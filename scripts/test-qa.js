@@ -31,6 +31,8 @@ const baseConfig = () => ({
 test('QA scenarios validate explicit production, fixture and unprepared paths', () => {
   assert.deepEqual(scenarios, [...shared.DEVELOPMENT_QA_SCENARIOS]);
   assert.equal(parseQaArguments([]).scenario, 'connected');
+  assert.equal(parseQaArguments([]).realMedia, false);
+  assert.equal(parseQaArguments(['connected', '--real-media']).realMedia, true);
   assert.equal(parseQaArguments(['voice']).bot, 'sdk-fixture');
   assert.equal(parseQaArguments(['voice-receive']).bot, 'sdk-fixture');
   assert.equal(parseQaArguments(['tool-consent', '--bot=fixture']).bot, 'sdk-fixture');
@@ -43,9 +45,11 @@ test('QA scenarios validate explicit production, fixture and unprepared paths', 
     ['--bot-root'], ['--bot-root=relative'], ['--bot=fixture', '--bot=fixture'],
     ['--bot=fixture', `--bot-root=${repoRoot}`],
     ['voice-receive', `--bot-root=${repoRoot}`],
+    ['--smoke', '--real-media'], ['--real-media', '--smoke'],
   ]) assert.throws(() => parseQaArguments(args), Error, args.join(' '));
   const valid = baseConfig();
   assert.equal(shared.developmentQaConfigSchema.safeParse(valid).success, true);
+  assert.equal(shared.developmentQaConfigSchema.safeParse({ ...valid, smoke: false, realMedia: true }).success, true);
   for (const config of [
     { ...valid, server: { ...valid.server, host: '0.0.0.0' } },
     { ...valid, server: { ...valid.server, password: 'short' } },
@@ -57,7 +61,24 @@ test('QA scenarios validate explicit production, fixture and unprepared paths', 
     { ...valid, bot: { kind: 'sdk-fixture', manifestUrl: 'http://secret@127.0.0.1:54322/manifest' } },
     { ...valid, bot: { kind: 'sdk-fixture', manifestUrl: 'http://127.0.0.1:54322/manifest?token=secret' } },
     { ...valid, token: 'must-not-be-accepted' },
+    { ...valid, realMedia: true },
   ]) assert.equal(shared.developmentQaConfigSchema.safeParse(config).success, false);
+});
+
+test('physical media is opt-in, keeps normal permissions and is forbidden in smoke', async () => {
+  const { configureDevelopmentQaMedia } = loadMain({});
+  const switches = [];
+  const commandLine = { appendSwitch: name => switches.push(name) };
+  const configure = config => { switches.length = 0; configureDevelopmentQaMedia(commandLine, config); return [...switches]; };
+  assert.deepEqual(configure(null), []);
+  assert.deepEqual(configure({ ...baseConfig(), smoke: false }),
+    ['use-fake-device-for-media-stream', 'use-fake-ui-for-media-stream']);
+  assert.deepEqual(configure(baseConfig()),
+    ['use-fake-device-for-media-stream', 'use-fake-ui-for-media-stream', 'mute-audio']);
+  assert.deepEqual(configure({ ...baseConfig(), smoke: false, realMedia: true }), []);
+  assert.throws(() => configure({ ...baseConfig(), realMedia: true }), /unattended/);
+  assert.deepEqual(switches, []);
+  await assert.rejects(runQa({ scenario: 'connected', smoke: true, realMedia: true }), /interactive/);
 });
 
 test('QA environment does not inherit installed profiles, credentials or Node flags', () => {

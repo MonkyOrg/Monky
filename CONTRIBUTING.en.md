@@ -189,6 +189,7 @@ npm run qa -- bot-install --bot=fixture
 npm run qa -- tool-consent --bot=fixture
 npm run qa -- music --bot-root="C:\Projects\MonkyBot"
 npm run qa -- connected --smoke
+npm run qa -- connected --real-media
 ```
 
 `--bot=fixture` is an explicitly labeled SDK fixture, never a MonkyBot substitute.
@@ -232,9 +233,15 @@ The Electron process preserves `HOME` on macOS to access that system service.
 Its profile, identity, cache and `MONKY_HOME` still use explicit QA paths;
 server/bot workers keep their `HOME` isolated too.
 
-Prepared mode disables automatic updates, LAN discovery and global shortcuts,
-and uses synthetic capture. **Do not use it to test those steps, identities,
-onboarding or real hardware**: use ordinary `npm start` with another isolated
+Prepared mode uses synthetic capture by default, including interactive windows.
+To evaluate physical cameras and microphones, explicitly use `--real-media`:
+the profile and server remain isolated, the camera starts only on user action,
+and the microphone starts muted. This option cannot be combined with `--smoke`;
+do not close another application to release an occupied device.
+
+Prepared mode disables automatic updates, LAN discovery and global shortcuts.
+**Do not use it to test those steps, identities or onboarding**:
+use ordinary `npm start` with another isolated
 `--user-data-dir` and perform the step under test explicitly. The `voice` scenario
 does not replace two-machine QA for network, device or SFU problems.
 

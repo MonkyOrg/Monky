@@ -1,5 +1,11 @@
 'use strict';
 
+// Diagnostics are opt-in and use only this fixture's synthetic source and owned viewer.
+// --encoded-byte-trace records at most20s/32MiB/2400 packets; CDP trace exports stop at128MiB.
+// Viewer diagnostic logs are streamed with a32MiB/file cap; truncation fails the probe.
+// --gpu-task-trace is passive15-20s; --video-overlay-counterfactual changes only the viewer,
+// never production defaults or the original120fps/explicit60fps qualification thresholds.
+
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -38,21 +44,44 @@ const fourK120 = process.argv.includes('--4k') || process.argv.includes('--scree
 const fourK60 = process.argv.includes('--4k60');
 assert.ok(!(fourK120 && fourK60), 'Choose either explicit 4K120 or 4K60, never a silent downgrade.');
 const fourK = fourK120 || fourK60;
+const fullHd60 = process.argv.includes('--1080p60');
+assert.ok(!fullHd60 || (browserReceiver && audioEnabled && !fourK
+  && !process.argv.includes('--source-quality-changes') && !sourceReplacement
+  && !incompatibleViewer && !unsupportedBrowserCodec),
+  'Explicit 1080p60 requires the audio-enabled browser receiver, without a competing source profile.');
 const sourceQualityChanges = process.argv.includes('--source-quality-changes') || fourK;
 const strictMediaErrors = sourceQualityChanges || (browserReceiver && !unsupportedBrowserCodec);
 const observeSourceClosure = browserReceiver && !sourceQualityChanges && !sourceReplacement && !unsupportedBrowserCodec;
 const clockFeedbackStall = process.argv.includes('--clock-feedback-stall');
 const cadenceDiagnostics = process.argv.includes('--cadence-diagnostics');
+const cadenceFollowup = process.argv.includes('--cadence-followup');
+assert.ok(!cadenceFollowup || (fullHd60 && cadenceDiagnostics),
+  'Cadence follow-up requires explicit1080p60 and native cadence diagnostics.');
+const chromiumReceiveLog = process.argv.includes('--chromium-receive-log');
+assert.ok(!chromiumReceiveLog || (fullHd60 && browserReceiver && mode === 'sfu'),
+  'Chromium receive logging is scoped to the owned explicit1080p60 SFU viewer.');
+const encodedByteTrace = process.argv.includes('--encoded-byte-trace');
+assert.ok(!encodedByteTrace || (chromiumReceiveLog && cadenceFollowup),
+  'Encoded byte tracing requires the bounded owned-source Chromium cadence diagnostic.');
+const gpuTaskTrace = process.argv.includes('--gpu-task-trace');
+const videoOverlayCounterfactual = process.argv.includes('--video-overlay-counterfactual');
+assert.ok(!videoOverlayCounterfactual || gpuTaskTrace,
+  'The viewer-only overlay counterfactual requires the bounded passive GPU trace.');
+assert.ok(!gpuTaskTrace || (chromiumReceiveLog && cadenceDiagnostics && !cadenceFollowup && !encodedByteTrace),
+  'GPU task tracing requires the SFU60 logging scenario with passive cadence diagnostics, not byte/follow-up sampling.');
 const closeAppActive = process.argv.includes('--close-app-active');
 const sampleSeconds = Number(process.argv.find(value => value.startsWith('--sample-seconds='))?.slice('--sample-seconds='.length) ?? 3);
 assert.ok(Number.isFinite(sampleSeconds) && sampleSeconds >= 3 && sampleSeconds <= 30,
   'Cadence intervals must be explicit and between 3 and 30 seconds.');
-assert.ok(!closeAppActive || (!sourceQualityChanges && !sourceReplacement && !serverLoss && !sessionNavigation
+assert.ok(!gpuTaskTrace || (sampleSeconds >= 15 && sampleSeconds <= 20),
+  'The passive GPU task trace interval must be15-20seconds.');
+assert.ok(!closeAppActive || (!sourceReplacement && !serverLoss && !sessionNavigation
   && !incompatibleViewer && !unsupportedBrowserCodec && !windowLifecycle && !idleSourceClose && !overlayEnabled),
   'Active app-close regression requires one owned call without competing lifecycle scenarios.');
 const minimum120Fps = Number(process.argv.find(value => value.startsWith('--min-fps='))?.slice('--min-fps='.length) ?? 100);
 assert.ok(Number.isFinite(minimum120Fps) && minimum120Fps >= 100 && minimum120Fps <= 120,
   'The 120 FPS presentation threshold must stay between 100 and 120 FPS.');
+const minimumPresentationFps = fullHd60 ? 50 : minimum120Fps;
 assert.ok(!sourceQualityChanges || (!browserReceiver && (mode === 'sfu' || fourK) && audioEnabled
   && !sourceReplacement && !gameFallback && !unsupportedBrowserCodec && !incompatibleViewer
   && !idleSourceClose && !admissionRecovery && !publisherStop && !windowLifecycle && !serverLoss
@@ -67,20 +96,50 @@ assert.ok(!sourceReplacement || (browserReceiver && mode === 'sfu' && audioEnabl
 assert.ok(!unsupportedBrowserCodec || (browserReceiver && mode === 'p2p'), 'The unsupported-codec case requires a browser P2P receiver.');
 assert.ok(!incompatibleViewer || (!browserReceiver && mode === 'p2p'), 'Mixed compatibility requires a native primary P2P receiver.');
 const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbols='))?.slice('--debug-symbols='.length);
-const report = { mode, fourK, fourK60, fourK120, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement, sourceQualityChanges, clockFeedbackStall, cadenceDiagnostics, closeAppActive, sampleSeconds,
+const report = { mode, fourK, fourK60, fourK120, fullHd60, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement, sourceQualityChanges, clockFeedbackStall, cadenceDiagnostics, cadenceFollowup, chromiumReceiveLog, closeAppActive, sampleSeconds,
   normalMain: true, normalPreload: true, ownedSyntheticSource: true,
   qaFocusHooks: 'owned parent IPC only; normal Main and preload checks unchanged',
-  capabilityOverride: browserReceiver ? 'viewer.receive=false (real Chromium receiver, not a macOS hardware test)' : null,
-  recordedMedia: false, phases: [] };
+  receiverSelection: browserReceiver ? 'explicit Chromium preference (not a macOS hardware test)' : 'native',
+  recordedMedia: encodedByteTrace, phases: [] };
 const clients = [], roots = [], failures = [], sourceOwners = [];
 const cadenceFailures = [];
 const expectedWindowClosures = new Map(), shutdownDialogs = [];
 const shutdownErrors = [];
+report.encodedByteTrace = encodedByteTrace;
+report.gpuTaskTrace = gpuTaskTrace;
+report.videoOverlayCounterfactual = videoOverlayCounterfactual;
+const qaActionTimeline = [];
+if (gpuTaskTrace) report.qaActionTimeline = qaActionTimeline;
+const protocolContracts = require(path.join(repo, 'packages', 'shared', 'dist', 'index.js'));
+report.protocolContracts = { version: protocolContracts.PROTOCOL_VERSION,
+  minimumClient: protocolContracts.MIN_CLIENT_PROTOCOL, minimumBot: protocolContracts.MIN_BOT_PROTOCOL };
 let server, otherServer, vite, source;
 let debuggerProcess, debuggerExited;
 let incompatibleSessionId = null;
 
 function phase(name) { report.phases.push(name); console.log(`Native Monky app: ${name}`); }
+function boundedDiagnosticLog(file, label) {
+  const state = { label, bytes: 0, maximumBytes: 32 * 1024 * 1024, truncated: false, failed: false };
+  let pending = Promise.resolve();
+  return {
+    state,
+    write(value) {
+      if (state.truncated || state.failed) return;
+      const available = state.maximumBytes - state.bytes;
+      const chunk = value.subarray(0, available);
+      if (value.length > available) {
+        state.truncated = true;
+        failures.push(new Error(`${label} exceeded its32MiB diagnostic bound; log is truncated.`));
+      }
+      state.bytes += chunk.length;
+      pending = pending.then(async () => {
+        if (!state.failed) await file.writeFile(chunk);
+      }).catch(error => { state.failed = true; failures.push(error); });
+    },
+    async close() { await pending; await file.close(); },
+  };
+}
+
 function processAlive(pid) {
   assert.ok(Number.isSafeInteger(pid) && pid > 0);
   try { process.kill(pid, 0); return true; }
@@ -198,7 +257,8 @@ async function startLoopbackServer(instance, port) {
   assert.equal(instance.httpServer.address().address, '127.0.0.1');
 }
 
-function mainFixture({ clientRoot, origin, ownerPid, clockFeedbackStall, fourK, cadenceDiagnostics, closeAppActive, observeSourceClosure }) {
+function mainFixture({ clientRoot, origin, ownerPid, clockFeedbackStall, fourK, cadenceDiagnostics, closeAppActive, observeSourceClosure,
+  encodedByteTrace, videoOverlayCounterfactual, artifacts, ownedSource }) {
   const assert = require('node:assert/strict');
   const fs = require('node:fs');
   const path = require('node:path');
@@ -214,6 +274,46 @@ function mainFixture({ clientRoot, origin, ownerPid, clockFeedbackStall, fourK, 
   app.setName(metadata.productName ?? metadata.name);
   app.setVersion(metadata.version);
   const endpoints = new Set();
+  const byteTrace = { armed: false, startedAt: null, frames: [], bytes: 0,
+    maximumBytes: 32 * 1024 * 1024, maximumFrames: 2400, maximumMs: 20000, stopReason: null };
+  const byteChunks = [];
+  let traceHost, byteSave;
+  if (encodedByteTrace && envelope.config.nickname === 'Native QA publisher') {
+    const capture = require(path.join(clientRoot, 'native', 'screen-share', 'runtime', 'captureBridge.cjs'));
+    const Bridge = capture.CaptureBridge;
+    capture.CaptureBridge = class extends Bridge {
+      constructor(options, ...rest) {
+        let host;
+        super({ ...options, onPacket(frame) {
+          const result = options.onPacket(frame);
+          if (!byteTrace.armed || host !== traceHost || byteTrace.stopReason) return result;
+          if (performance.now() - byteTrace.startedAt >= byteTrace.maximumMs) {
+            byteTrace.stopReason = '20-second-limit'; return result;
+          }
+          if (byteTrace.frames.at(-1)?.frameId === frame.frameId) return result;
+          if (byteTrace.frames.length >= byteTrace.maximumFrames) {
+            byteTrace.stopReason = '2400-frame-limit'; return result;
+          }
+          if (byteTrace.bytes + frame.data.byteLength > byteTrace.maximumBytes) {
+            byteTrace.stopReason = '32-MiB-limit'; return result;
+          }
+          const bytes = Buffer.from(frame.data);
+          const { data, ...metadata } = frame;
+          byteTrace.frames.push({ ...metadata, offset: byteTrace.bytes, length: bytes.length,
+            observedAt: new Date().toISOString(), onPacketAccepted: result !== false });
+          byteChunks.push(bytes); byteTrace.bytes += bytes.length;
+          return result;
+        } }, ...rest);
+        host = this;
+      }
+      start(target) {
+        assert.equal(target.kind, 'window');
+        assert.equal(target.hwnd, ownedSource.hwnd);
+        assert.equal(target.expectedProcessId, ownedSource.pid);
+        return super.start(target);
+      }
+    };
+  }
   let assertEndpointLocallyClosed;
   if (fourK || cadenceDiagnostics || observeSourceClosure) {
     const runtime = require(path.join(clientRoot, 'native', 'screen-share', 'index.cjs'));
@@ -250,12 +350,58 @@ function mainFixture({ clientRoot, origin, ownerPid, clockFeedbackStall, fourK, 
       || !['qa-focus', 'qa-blur', 'qa-focus-state', ...(clockFeedbackStall ? ['qa-clock-stall'] : []),
         ...(fourK || cadenceDiagnostics ? ['qa-native-snapshots'] : []),
         ...(observeSourceClosure ? ['qa-native-retired'] : []),
+        ...(encodedByteTrace ? ['qa-byte-trace-arm', 'qa-byte-trace-save'] : []),
+        ...(videoOverlayCounterfactual ? ['qa-gpu-process-evidence'] : []),
         ...(closeAppActive ? ['qa-root-close'] : [])].includes(input.type)) return;
     try {
       assert.equal(typeof input.id, 'string');
       assert.equal(input.value, undefined);
       assert.equal(process.connected, true);
       assert.equal(process.ppid, ownerPid);
+      if (input.type === 'qa-gpu-process-evidence') {
+        process.send({ type: 'qa-response', id: input.id, value: {
+          at: new Date().toISOString(), pid: process.pid,
+          featureStatus: app.getGPUFeatureStatus(), metrics: app.getAppMetrics(),
+          switchEnabled: app.commandLine.hasSwitch('disable_direct_composition_video_overlays'),
+          windows: BrowserWindow.getAllWindows().filter(window => !window.isDestroyed())
+            .map(window => ({ windowId: window.id, rendererPid: window.webContents.getOSProcessId() })),
+        } });
+        return;
+      }
+      if (input.type === 'qa-byte-trace-arm') {
+        assert.equal(byteTrace.startedAt, null, 'The owned byte trace may only be armed once.');
+        assert.equal(byteTrace.armed, false);
+        const active = [...endpoints].filter(endpoint => endpoint.role === 'publish'
+          && !endpoint.stopRequested && !endpoint.closed && endpoint.flow?.demand
+          && endpoint.profile.width === 1920 && endpoint.profile.height === 1080 && endpoint.profile.fps === 60);
+        assert.equal(active.length, 1);
+        traceHost = active[0].host;
+        assert.ok(traceHost);
+        Object.assign(byteTrace, { armed: true, startedAt: performance.now(), startedAtUtc: new Date().toISOString(),
+          pipelineId: active[0].pipelineId, capturePid: traceHost.child.pid, target: ownedSource });
+        process.send({ type: 'qa-response', id: input.id, value: {
+          pipelineId: byteTrace.pipelineId, capturePid: byteTrace.capturePid, startedAtUtc: byteTrace.startedAtUtc } });
+        return;
+      }
+      if (input.type === 'qa-byte-trace-save') {
+        byteTrace.stopReason ??= 'explicit-save';
+        byteTrace.armed = false;
+        byteSave ??= (async () => {
+          assert.ok(byteTrace.frames.length > 0, 'The armed synthetic capture produced no recorded access units.');
+          const binary = path.join(artifacts, 'owned-source-annexb.h264');
+          const metadata = path.join(artifacts, 'owned-source-annexb.json');
+          await fs.promises.writeFile(binary, Buffer.concat(byteChunks, byteTrace.bytes), { flag: 'wx' });
+          await fs.promises.writeFile(metadata, JSON.stringify(byteTrace,
+            (_, value) => typeof value === 'bigint' ? String(value) : value, 2) + '\n', { flag: 'wx' });
+          byteChunks.length = 0;
+          return { binary, metadata, bytes: byteTrace.bytes, frames: byteTrace.frames.length,
+            maximumBytes: byteTrace.maximumBytes, maximumFrames: byteTrace.maximumFrames,
+            maximumMs: byteTrace.maximumMs, stopReason: byteTrace.stopReason };
+        })();
+        void byteSave.then(value => process.send({ type: 'qa-response', id: input.id, value }),
+          error => process.send({ type: 'qa-response', id: input.id, error: error.stack ?? String(error) }));
+        return;
+      }
       if (input.type === 'qa-native-retired') {
         const value = [...endpoints].map(endpoint => {
           const snapshot = endpoint.snapshot();
@@ -451,9 +597,11 @@ async function connectCdp(port, expectedOrigin, runId, diagnostics, overlayParen
   const socket = new WebSocket(page.webSocketDebuggerUrl);
   await once(socket, 'open');
   let sequence = 0;
+  let mediaTraceCompletion, resolveMediaTrace;
   const requests = new Map();
   socket.on('message', raw => {
     const value = JSON.parse(raw.toString());
+    if (value.method === 'Tracing.tracingComplete' && resolveMediaTrace) resolveMediaTrace(value.params);
     if (value.method === 'Runtime.exceptionThrown')
       diagnostics.push({ ...value.params.exceptionDetails, timestamp: value.params.timestamp });
     if (value.method === 'Runtime.consoleAPICalled' && ['error', 'warning'].includes(value.params.type))
@@ -469,6 +617,10 @@ async function connectCdp(port, expectedOrigin, runId, diagnostics, overlayParen
     requests.clear();
   });
   const call = (method, params) => {
+    if (gpuTaskTrace) qaActionTimeline.push({ at: new Date().toISOString(), runId,
+      action: method, ...(method === 'Runtime.evaluate' ? {
+        operation: params.expression.match(/nativeAppSmoke\.[A-Za-z]+|performance\.mark/)?.[0] ?? 'qa-expression',
+      } : {}) });
     const id = ++sequence;
     return within(new Promise((resolve, reject) => {
       requests.set(id, { resolve, reject });
@@ -488,6 +640,58 @@ async function connectCdp(port, expectedOrigin, runId, diagnostics, overlayParen
     'The real overlay must not acquire the Main document QA authority.');
   return {
     evaluate, close: () => socket.close(),
+    async startMediaTrace(requestedCategories = ['webrtc', 'media']) {
+      assert.equal(mediaTraceCompletion, undefined);
+      const categories = await call('Tracing.getCategories', {});
+      assert.ok(categories.categories.includes('media') && categories.categories.includes('webrtc'),
+        'The owned Chromium build does not expose the requested media/webrtc trace categories.');
+      if (requestedCategories.includes('toplevel'))
+        assert.ok(categories.categories.includes('toplevel') && categories.categories.includes('gpu'),
+          'The owned Chromium build does not expose GPU/toplevel trace categories.');
+      mediaTraceCompletion = new Promise(resolve => { resolveMediaTrace = resolve; });
+      try {
+        await call('Tracing.start', { categories: requestedCategories.join(','), transferMode: 'ReturnAsStream',
+          options: 'record-continuously' });
+      } catch (error) {
+        mediaTraceCompletion = undefined; resolveMediaTrace = undefined;
+        throw error;
+      }
+      return { requestedCategories, availableCategories: requestedCategories.filter(value => categories.categories.includes(value)) };
+    },
+    async stopMediaTrace(destination) {
+      assert.ok(mediaTraceCompletion);
+      let stream, file, bytes = 0;
+      const errors = [];
+      try {
+        await call('Tracing.end', {});
+        const completed = await within(mediaTraceCompletion, 15000, 'Owned Chromium media tracing did not complete.');
+        stream = completed.stream;
+        assert.equal(typeof stream, 'string');
+        assert.notEqual(completed.dataLossOccurred, true, 'Chromium reported lost diagnostic trace data.');
+        file = await fs.open(destination, 'wx');
+        for (;;) {
+          const chunk = await call('IO.read', { handle: stream, size: 65536 });
+          const data = Buffer.from(chunk.data, chunk.base64Encoded ? 'base64' : 'utf8');
+          bytes += data.length;
+          assert.ok(bytes <= 128 * 1024 * 1024, 'Owned media trace exceeded the128MiB diagnostic bound.');
+          await file.write(data);
+          if (chunk.eof) break;
+        }
+      } catch (error) {
+        errors.push(error);
+      } finally {
+        if (file) {
+          try { await file.close(); } catch (error) { errors.push(error); }
+        }
+        if (typeof stream === 'string') {
+          try { await call('IO.close', { handle: stream }); } catch (error) { errors.push(error); }
+        }
+        mediaTraceCompletion = undefined; resolveMediaTrace = undefined;
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, 'Owned trace export and cleanup failed.');
+      return { destination, bytes };
+    },
     async capture(clip) {
       const result = await call('Page.captureScreenshot', {
         format: 'png', fromSurface: true, captureBeyondViewport: false, clip: { ...clip, scale: 1 },
@@ -496,6 +700,45 @@ async function connectCdp(port, expectedOrigin, runId, diagnostics, overlayParen
       return result.data;
     },
   };
+}
+
+async function viewerSystemEvidence(viewer) {
+  qaActionTimeline.push({ at: new Date().toISOString(), runId: viewer.runId, action: 'qa-SystemInfo-before' });
+  const response = await fetch(`http://127.0.0.1:${viewer.debugPort}/json/version`,
+    { signal: AbortSignal.timeout(3000) });
+  assert.equal(response.ok, true);
+  const version = await response.json();
+  const endpoint = new URL(version.webSocketDebuggerUrl);
+  assert.equal(endpoint.hostname, '127.0.0.1');
+  assert.equal(Number(endpoint.port), viewer.debugPort);
+  const socket = new WebSocket(endpoint);
+  let sequence = 0;
+  try {
+    await within(once(socket, 'open'), 5000, 'Owned browser SystemInfo connection did not open.');
+    const call = async method => {
+      const id = ++sequence;
+      let listener;
+      try {
+        return await within(new Promise((resolve, reject) => {
+          listener = raw => {
+            const message = JSON.parse(raw.toString());
+            if (message.id !== id) return;
+            if (message.error) reject(new Error(`${method}: ${message.error.message}`));
+            else resolve(message.result);
+          };
+          socket.on('message', listener);
+          socket.send(JSON.stringify({ id, method }));
+        }), 10000, `Owned ${method} timed out.`);
+      } finally { socket.off('message', listener); }
+    };
+    return { at: new Date().toISOString(), version,
+      systemInfo: await call('SystemInfo.getInfo'),
+      processInfo: await call('SystemInfo.getProcessInfo'),
+      app: await viewer.child.call('qa-gpu-process-evidence') };
+  } finally {
+    socket.close();
+    qaActionTimeline.push({ at: new Date().toISOString(), runId: viewer.runId, action: 'qa-SystemInfo-after' });
+  }
 }
 
 async function previewPixels(client, state, name) {
@@ -534,7 +777,7 @@ async function previewPixels(client, state, name) {
   return pixels;
 }
 
-async function setupRenderer({ port, password, nickname, browserReceiver, audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60 }) {
+async function setupRenderer({ port, password, nickname, browserReceiver, audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60, fullHd60 }) {
   const [{ openServerSession, joinCallOnSession, leaveCurrentCall }, { sessionManager }, { webRtcManager },
     { videoService }, { voiceStore }, { settingsStore }, { stopLocalScreenShares },
     { screenAudioService }, { setLanguage, t }, { appEvents }, { QUALITY_PRESETS }, { overlayBridgeService }] = await Promise.all([
@@ -547,7 +790,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   setLanguage('en');
   settingsStore.qualityPreset = 'CUSTOM';
   settingsStore.customProfile = { ...QUALITY_PRESETS.ULTRA, screenWidth: 1920, screenHeight: 1080,
-    screenFps: 120, screenBitrateKbps: 20000, audioBitrateKbps: 128 };
+    screenFps: fullHd60 ? 60 : 120, screenBitrateKbps: 20000, audioBitrateKbps: 128 };
   if (sourceQualityChanges) Object.assign(settingsStore.customProfile, {
     screenWidth: 1280, screenHeight: 720, screenFps: 30, screenBitrateKbps: 2000,
   });
@@ -561,10 +804,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   settingsStore.save();
   webRtcManager.setQualityPreset('CUSTOM');
   videoService.setQualityPreset('CUSTOM');
-  if (browserReceiver) {
-    const capabilities = await webRtcManager.getNativeScreenCapabilities();
-    webRtcManager['nativeScreens']['availability'] = Promise.resolve({ ...capabilities, receive: false });
-  }
+  settingsStore.setScreenShareReceiver(browserReceiver ? 'chromium' : 'native');
   const auth = await openServerSession('127.0.0.1', port, await window.api.getIdentity(), nickname, password);
   const session = sessionManager.getActive();
   if (!session) throw new Error('The real application did not create its server session.');
@@ -1050,9 +1290,57 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
     },
   };
   return { sessionId: auth.currentUser.sessionId, channelId: channel.id,
+    protocol: auth.server.protocol,
     capabilities: await webRtcManager.getNativeScreenCapabilities(), profile: videoService.getProfile(),
     previewPauseWhenUnfocused: initialPreviewPauseWhenUnfocused,
     browserVideoCapabilities: browserReceiver ? RTCRtpReceiver.getCapabilities('video') : null };
+}
+
+function verifyExplicit1080p60(evidence) {
+  assert.equal(evidence.publisherStats.publishers.length, 1);
+  const owner = evidence.publisherStats.publishers[0];
+  assert.deepEqual(owner.source.video, { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 20000 });
+  assert.equal(owner.source.audio, true);
+  assert.equal(owner.pipelines.length, 1);
+  assert.deepEqual(owner.pipelines[0].endpoint.profile, owner.source.video);
+  const reports = evidence.browserStats.flatMap(entry => entry.reports);
+  const rtp = reports.find(row => row.type === 'inbound-rtp' && (row.kind ?? row.mediaType) === 'video');
+  assert.ok(rtp && rtp.packetsReceived > 0 && rtp.framesDecoded > 0);
+  assert.equal(rtp.frameWidth, 1920);
+  assert.equal(rtp.frameHeight, 1080);
+  const codec = reports.find(row => row.type === 'codec' && row.id === rtp.codecId);
+  assert.equal(codec?.mimeType?.toLowerCase(), 'video/h264');
+  const decoded = evidence.receiverState.video;
+  assert.equal(decoded?.width, 1920);
+  assert.equal(decoded?.height, 1080);
+  assert.ok(decoded.frames > 0);
+  return { requestedProfile: owner.source.video, admittedProfile: owner.pipelines[0].endpoint.profile,
+    rtp, codec, decoded, minimumPresentationFps };
+}
+
+async function closeActiveWindow(publisher, viewer, publisherStats) {
+  phase('closing-real-main-window-with-active-share-and-viewer');
+  assert.equal(publisherStats.publishers.length, 1);
+  assert.equal(publisherStats.publishers[0].viewers, 1);
+  const capturePids = publisherStats.publishers[0].pipelines.map(value => value.endpoint.capturePid);
+  const closureNotifications = [];
+  expectedWindowClosures.set(publisher.label, closureNotifications);
+  report.activeWindowClose = { before: publisherStats,
+    request: await publisher.child.call('qa-root-close'), shutdownDialogs, shutdownErrors, capturePids };
+  const closed = await within(publisher.child.closed, 20000, 'BrowserWindow.close did not complete real Main shutdown.');
+  report.activeWindowClose.processExit = closed;
+  assert.equal(closed.code, 0);
+  assert.equal(closed.signal, null);
+  assert.equal(shutdownDialogs.length, 0, 'Real Main shutdown displayed a Keep open/retry dialog.');
+  assert.equal(closureNotifications.length, 1, 'Only the supervisor notification for the requested process exit is expected.');
+  report.activeWindowClose.supervisorNotifications = closureNotifications.map(error => error.message);
+  await until(async () => {
+    const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+    const stats = await viewer.cdp.evaluate('nativeAppSmoke.stats()');
+    return state.sources.length === 0 && state.browserWatches === 0 && !state.video && stats.subscriptions.length === 0;
+  }, 'Real Main window close retained the spectator media.');
+  for (const pid of capturePids) await until(() => !processAlive(pid), `Real Main close retained capture host ${pid}.`);
+  report.activeWindowClose.nativeCaptureRetired = true;
 }
 
 async function exerciseSourceQualityChanges(publisher, viewer) {
@@ -1293,24 +1581,31 @@ async function exerciseSourceQualityChanges(publisher, viewer) {
     assert.deepEqual(recovered.receiverState.errors, []);
     assert.deepEqual(recovered.publisherState.errors, expectedPublisherEvents);
   }
-  phase('stopping-quality-scenario-through-real-ui');
-  await publisher.cdp.evaluate('nativeAppSmoke.stopSharing()');
-  await until(async () => {
-    const local = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
-    const remote = await viewer.cdp.evaluate('nativeAppSmoke.stats()');
-    const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
-    return local.publishers.length === 0 && remote.subscriptions.length === 0 && state.sources.length === 0;
-  }, 'Final quality Stop retained its publisher or native receiver.');
+  if (closeAppActive) {
+    const active = await collectEvidence('sourceQualityActiveBeforeClose', publisher, viewer);
+    assert.deepEqual(active.publisherState.errors, expectedPublisherEvents);
+    assert.deepEqual(active.receiverState.errors, []);
+    await closeActiveWindow(publisher, viewer, active.publisherStats);
+  } else {
+    phase('stopping-quality-scenario-through-real-ui');
+    await publisher.cdp.evaluate('nativeAppSmoke.stopSharing()');
+    await until(async () => {
+      const local = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
+      const remote = await viewer.cdp.evaluate('nativeAppSmoke.stats()');
+      const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+      return local.publishers.length === 0 && remote.subscriptions.length === 0 && state.sources.length === 0;
+    }, 'Final quality Stop retained its publisher or native receiver.');
+    const retired = await collectEvidence('sourceQualityRetired', publisher, viewer);
+    assert.deepEqual(retired.sfuScreenProducers, []);
+    assert.deepEqual(retired.publisherState.errors, expectedPublisherEvents);
+    assert.deepEqual(retired.receiverState.errors, []);
+  }
   for (const entry of observations.values()) for (const pid of entry.capturePids) {
     if (entry.retiredPids.has(pid)) continue;
     await until(() => !processAlive(pid), `Final quality Stop retained capture host ${pid}.`);
     entry.retiredPids.add(pid);
     retiredCapturePids.add(pid);
   }
-  const retired = await collectEvidence('sourceQualityRetired', publisher, viewer);
-  assert.deepEqual(retired.sfuScreenProducers, []);
-  assert.deepEqual(retired.publisherState.errors, expectedPublisherEvents);
-  assert.deepEqual(retired.receiverState.errors, []);
   report.sourceQualityChanges.retiredCapturePids = [...retiredCapturePids];
   report.sourceQualityChanges.performanceFailures = performanceFailures.map(error => error.message);
   if (performanceFailures.length) throw new AggregateError(performanceFailures, 'Native quality presentation thresholds failed.');
@@ -1367,7 +1662,8 @@ async function run() {
   const { startOwnedProcess } = await import(pathToFileURL(path.join(repo, 'scripts', 'qa', 'process.js')));
   const mainFixtureFile = path.join(artifacts, 'main-fixture.cjs');
   await fs.writeFile(mainFixtureFile, `(${mainFixture.toString()})(${JSON.stringify({
-    clientRoot, origin, ownerPid: process.pid, clockFeedbackStall, fourK, cadenceDiagnostics, closeAppActive, observeSourceClosure })});\n`,
+    clientRoot, origin, ownerPid: process.pid, clockFeedbackStall, fourK, cadenceDiagnostics, closeAppActive, observeSourceClosure,
+    encodedByteTrace, videoOverlayCounterfactual, artifacts, ownedSource: { pid: sourceReady.pid, hwnd: sourceReady.hwnd } })});\n`,
     { flag: 'wx' });
   const allowed = path.join(repo, '.qa', 'runs');
   await fs.mkdir(allowed, { recursive: true });
@@ -1382,8 +1678,17 @@ async function run() {
     const configFile = path.join(root, 'launch.json');
     await fs.writeFile(configFile, JSON.stringify({ ownerPid: process.pid, config }), { flag: 'wx' });
     const debugPort = await freePort();
+    const receiveLogArgs = chromiumReceiveLog && label === 'viewer' ? [
+      '--enable-logging=stderr',
+      '--vmodule=h264_decoder=3,d3d11_video_decoder=3,video_receive_stream2=3,rtp_video_stream_receiver2=3,frame_buffer*=3',
+    ] : [];
+    if (receiveLogArgs.length) report.chromiumReceiveLogArguments = receiveLogArgs;
+    const overlayArgs = videoOverlayCounterfactual && label === 'viewer'
+      ? ['--disable_direct_composition_video_overlays'] : [];
+    if (overlayArgs.length) report.viewerOverlayArguments = overlayArgs;
     const child = startOwnedProcess(require('electron'), [mainFixtureFile, `--user-data-dir=${profile}`,
-      `--remote-debugging-port=${debugPort}`, '--remote-debugging-address=127.0.0.1', '--allow-loopback-in-peer-connection'], {
+      `--remote-debugging-port=${debugPort}`, '--remote-debugging-address=127.0.0.1', '--allow-loopback-in-peer-connection',
+      ...receiveLogArgs, ...overlayArgs], {
       cwd: clientRoot, runId, label: `Native Monky ${label}`, timeoutMs: 60000,
       env: isolatedEnvironment(profile, { MONKY_QA_CONFIG: configFile, VITE_DEV_SERVER_URL: origin }),
       onFailure: error => {
@@ -1399,20 +1704,46 @@ async function run() {
       },
     });
     const owned = { child, profile, label, debugPort, runId, cdp: null, overlayCdp: null, diagnostics: [] };
+    if (gpuTaskTrace) {
+      const childCall = child.call.bind(child);
+      child.call = (...args) => {
+        qaActionTimeline.push({ at: new Date().toISOString(), runId, role: label, action: args[0] });
+        return childCall(...args);
+      };
+    }
     clients.push(owned);
     const log = await fs.open(path.join(artifacts, `${label}.log`), 'wx');
-    child.child.stdout.on('data', value => { void log.write(value); });
-    child.child.stderr.on('data', value => { void log.write(value); });
-    void child.closed.then(() => log.close());
+    if (chromiumReceiveLog && label === 'viewer') {
+      let diagnosticFile;
+      try { diagnosticFile = await fs.open(path.join(artifacts, 'viewer-chromium-receive.log'), 'wx'); }
+      catch (error) { await log.close(); throw error; }
+      const combined = boundedDiagnosticLog(log, 'viewer.log');
+      const diagnostic = boundedDiagnosticLog(diagnosticFile, 'viewer-chromium-receive.log');
+      report.viewerDiagnosticLogs = [combined.state, diagnostic.state];
+      child.child.stdout.on('data', value => combined.write(value));
+      child.child.stderr.on('data', value => { combined.write(value); diagnostic.write(value); });
+      owned.logsClosed = child.closed.then(async () => {
+        const results = await Promise.allSettled([combined.close(), diagnostic.close()]);
+        for (const result of results) if (result.status === 'rejected') failures.push(result.reason);
+      });
+    } else {
+      child.child.stdout.on('data', value => { void log.write(value); });
+      child.child.stderr.on('data', value => { void log.write(value); });
+      void child.closed.then(() => log.close());
+    }
     await child.ready;
     assert.equal((await child.call('qa-ping')).alive, true);
     owned.cdp = await connectCdp(debugPort, origin, runId, owned.diagnostics);
     await owned.cdp.evaluate(`globalThis.monkyAppSharedPath = ${JSON.stringify(path.join(repo, 'packages', 'shared', 'src', 'index.ts').replaceAll('\\', '/'))}`);
     owned.identity = await owned.cdp.evaluate(`(${setupRenderer.toString()})(${JSON.stringify({
       port, password, nickname: config.nickname, browserReceiver: label === 'incompatible' || browserReceiver && label === 'viewer',
-      audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60,
+      audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60, fullHd60,
     })})`);
     report[`${label}Setup`] = owned.identity;
+    if (report.protocolContracts.minimumClient !== undefined) {
+      assert.equal(owned.identity.protocol?.version, report.protocolContracts.version);
+      assert.equal(owned.identity.protocol?.minimumVersion, report.protocolContracts.minimumClient);
+    }
     if (label === 'incompatible') incompatibleSessionId = owned.identity.sessionId;
   }
   const [publisher, viewer] = clients;
@@ -1560,6 +1891,10 @@ async function run() {
   if (audioEnabled) await sourceCommand('tone-start');
 
   phase('watching-through-normal-ui');
+  if (encodedByteTrace) {
+    await viewer.cdp.startMediaTrace();
+    viewer.mediaTraceActive = true;
+  }
   await viewer.cdp.evaluate('nativeAppSmoke.watch()');
   if (unsupportedBrowserCodec) {
     phase('rejecting-an-insufficient-receive-level');
@@ -1592,6 +1927,8 @@ async function run() {
     return value.video?.width === report.published.source.video.width
       && value.video.height === report.published.source.video.height && value.video.frames >= 30;
   }, 'Native frames did not reach the normal Monky stage.', 45000);
+  if (encodedByteTrace)
+    report.encodedByteTraceArmed = await publisher.child.call('qa-byte-trace-arm');
   if (sourceQualityChanges) {
     await exerciseSourceQualityChanges(publisher, viewer);
     return;
@@ -1773,49 +2110,109 @@ async function run() {
     await fs.writeFile(path.join(artifacts, `${name}-native.json`), JSON.stringify(native, null, 2) + '\n', { flag: 'wx' });
     return evidence;
   };
+  if (gpuTaskTrace) {
+    report.gpuTaskTraceCategories = await viewer.cdp.startMediaTrace(videoOverlayCounterfactual
+      ? ['gpu', 'media', 'webrtc', 'blink.user_timing'] : [
+      'toplevel', 'toplevel.flow', 'gpu', 'disabled-by-default-gpu.debug', 'renderer.scheduler',
+      'sequence_manager', 'ipc', 'mojom', 'media', 'webrtc', 'blink.user_timing',
+    ]);
+    viewer.mediaTraceActive = true;
+    await viewer.cdp.evaluate(`performance.mark('qa-${videoOverlayCounterfactual ? 'D' : 'C'}-before-initial-evidence'); undefined`);
+  }
   if (cadenceDiagnostics) await cadenceRead('cadenceBefore');
+  if (videoOverlayCounterfactual) report.viewerSystemBefore = await viewerSystemEvidence(viewer);
   const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
   assert.ok(before.video, `The receiver has no video before the FPS interval: ${JSON.stringify(before.watchStates)}`);
+  if (gpuTaskTrace) {
+    await viewer.cdp.evaluate(`performance.mark('qa-${videoOverlayCounterfactual ? 'D' : 'C'}-passive-begin'); undefined`);
+    report.gpuTaskPassiveBegin = new Date().toISOString();
+  }
   await delay(sampleSeconds * 1000);
+  if (gpuTaskTrace) {
+    report.gpuTaskPassiveEnd = new Date().toISOString();
+    await viewer.cdp.evaluate(`performance.mark('qa-${videoOverlayCounterfactual ? 'D' : 'C'}-passive-end'); undefined`);
+  }
   const after = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
   assert.ok(after.video, `The receiver lost video during the FPS interval: ${JSON.stringify(after.watchStates)}`);
   report.stage = { ...after, fps: (after.video.frames - before.video.frames) * 1000 / (after.video.at - before.video.at) };
   report.stageBefore = before;
+  if (videoOverlayCounterfactual) report.viewerSystemAfter = await viewerSystemEvidence(viewer);
   const sourceRate = await collectEvidence('sourceRateBeforeAssertion', publisher, viewer);
   report.publishing = sourceRate.publisherStats;
   report.receiving = sourceRate.receiverStats;
   report.senderDiagnostics = sourceRate.senderDiagnostics;
   report.receiverDiagnostics = sourceRate.receiverDiagnostics;
+  if (fullHd60) report.explicit1080p60 = { initial: verifyExplicit1080p60(sourceRate) };
   if (cadenceDiagnostics) await cadenceRead('cadenceAfter');
+  if (report.stage.fps < minimumPresentationFps) {
+    cadenceFailures.push(new Error(`Normal-app presentation reached ${report.stage.fps.toFixed(2)} FPS; minimum is ${minimumPresentationFps}.`));
+    report.cadenceFailures = cadenceFailures.map(error => error.message);
+  }
+  if (gpuTaskTrace) {
+    await viewer.cdp.evaluate(`performance.mark('qa-${videoOverlayCounterfactual ? 'D' : 'C'}-after-final-evidence'); undefined`);
+    viewer.mediaTraceActive = false;
+    report.chromiumMediaTrace = await viewer.cdp.stopMediaTrace(path.join(artifacts, 'viewer-media-trace.json'));
+  }
   assert.equal(sourceRate.publisherState.previewPauseWhenUnfocused, false);
   assert.ok(sourceRate.receiverState.captureModes.some(value => value.mode === 'normal' && value.tileKey === publishedTileKey),
     'The spectator did not display the actual capture method for the selected source.');
-  if (report.stage.fps < minimum120Fps) {
-    cadenceFailures.push(new Error(`Normal-app presentation reached ${report.stage.fps.toFixed(2)} FPS; minimum is ${minimum120Fps}.`));
-    report.cadenceFailures = cadenceFailures.map(error => error.message);
+  if (cadenceFollowup) {
+    phase('measuring-bounded-stabilization-and-separate-20s-cadence');
+    const points = [];
+    const readPoint = async () => {
+      const [native, state, browser] = await Promise.all([
+        publisher.child.call('qa-native-snapshots'),
+        viewer.cdp.evaluate('nativeAppSmoke.snapshot()'),
+        viewer.cdp.evaluate('nativeAppSmoke.browserStats()'),
+      ]);
+      assert.equal(native.length, 1);
+      assert.equal(native[0].pipelineId, sourceRate.publisherStats.publishers[0].pipelines[0].pipelineId);
+      assert.deepEqual(state.errors, []);
+      assert.ok(state.video?.width === 1920 && state.video.height === 1080);
+      const rtp = browser.flatMap(entry => entry.reports)
+        .find(entry => entry.type === 'inbound-rtp' && (entry.kind ?? entry.mediaType) === 'video');
+      assert.ok(rtp);
+      const point = { at: new Date().toISOString(), native: native[0], video: state.video, rtp };
+      points.push(point);
+      return point;
+    };
+    const followup = report.cadenceFollowupResult = { points,
+      gate: 'Three consecutive >=50 received/encoded AU per second intervals, with no new PLI/IDR wait',
+      maximumGateSeconds: 15, stabilized: false, baselinePreserved: true };
+    let previous = await readPoint(), stableIntervals = 0;
+    for (let index = 0; index < 15; index++) {
+      await delay(1000);
+      const current = await readPoint();
+      const seconds = (current.rtp.timestamp - previous.rtp.timestamp) / 1000;
+      const encodedSeconds = Number(BigInt(current.native.capture.native.qpc)
+        - BigInt(previous.native.capture.native.qpc)) / Number(current.native.capture.native.qpcFrequency);
+      const stable = seconds > 0 && encodedSeconds > 0
+        && (current.rtp.framesReceived - previous.rtp.framesReceived) / seconds >= 50
+        && (current.native.flow.observed - previous.native.flow.observed) / encodedSeconds >= 50
+        && current.native.flow.awaitingIdr === previous.native.flow.awaitingIdr
+        && current.rtp.pliCount === previous.rtp.pliCount;
+      stableIntervals = stable ? stableIntervals + 1 : 0;
+      previous = current;
+      if (stableIntervals === 3) { followup.stabilized = true; break; }
+    }
+    followup.measurementStartIndex = points.length - 1;
+    const start = previous;
+    for (let index = 0; index < 20; index++) { await delay(1000); previous = await readPoint(); }
+    followup.measurementEndIndex = points.length - 1;
+    followup.seconds = (previous.video.at - start.video.at) / 1000;
+    followup.fps = (previous.video.frames - start.video.frames) / followup.seconds;
+    followup.thresholdPassed = followup.fps >= minimumPresentationFps;
+    await fs.writeFile(path.join(artifacts, 'cadence-followup.json'), JSON.stringify(followup, null, 2) + '\n', { flag: 'wx' });
+    if (!followup.thresholdPassed)
+      cadenceFailures.push(new Error(`Separate follow-up presentation reached ${followup.fps.toFixed(2)} FPS; minimum is ${minimumPresentationFps}.`));
   }
-  if (closeAppActive) {
-    phase('closing-real-main-window-with-active-share-and-viewer');
-    assert.equal(sourceRate.publisherStats.publishers.length, 1);
-    assert.equal(sourceRate.publisherStats.publishers[0].viewers, 1);
-    const capturePids = sourceRate.publisherStats.publishers[0].pipelines.map(value => value.endpoint.capturePid);
-    const closureNotifications = [];
-    expectedWindowClosures.set(publisher.label, closureNotifications);
-    report.activeWindowClose = { before: sourceRate.publisherStats,
-      request: await publisher.child.call('qa-root-close'), shutdownDialogs, shutdownErrors, capturePids };
-    const closed = await within(publisher.child.closed, 20000, 'BrowserWindow.close did not complete real Main shutdown.');
-    report.activeWindowClose.processExit = closed;
-    assert.equal(closed.code, 0);
-    assert.equal(closed.signal, null);
-    assert.equal(shutdownDialogs.length, 0, 'Real Main shutdown displayed a Keep open/retry dialog.');
-    assert.equal(closureNotifications.length, 1, 'Only the supervisor notification for the requested process exit is expected.');
-    report.activeWindowClose.supervisorNotifications = closureNotifications.map(error => error.message);
-    await until(async () => {
-      const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
-      return state.sources.length === 0 && state.browserWatches === 0 && !state.video;
-    }, 'Real Main window close retained the spectator media.');
-    for (const pid of capturePids) await until(() => !processAlive(pid), `Real Main close retained capture host ${pid}.`);
-    report.activeWindowClose.nativeCaptureRetired = true;
+  if (encodedByteTrace) {
+    report.encodedByteTraceSaved = await publisher.child.call('qa-byte-trace-save');
+    viewer.mediaTraceActive = false;
+    report.chromiumMediaTrace = await viewer.cdp.stopMediaTrace(path.join(artifacts, 'viewer-media-trace.json'));
+  }
+  if (closeAppActive && !fullHd60) {
+    await closeActiveWindow(publisher, viewer, sourceRate.publisherStats);
     return;
   }
   report.localCompositorPixels = await previewPixels(publisher, 'playing', 'preview-playing');
@@ -2161,6 +2558,26 @@ async function run() {
     return;
   }
 
+  if (closeAppActive && fullHd60) {
+    phase('restoring-explicit-1080p60-before-active-close');
+    await viewer.cdp.evaluate('nativeAppSmoke.quality("source")');
+    await until(async () => {
+      const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+      return state.video?.width === 1920 && state.video.height === 1080 && state.video.frames >= 15;
+    }, 'The full source controls did not restore actual 1080p60 playback before app close.');
+    const active = await collectEvidence('explicit1080p60ActiveBeforeClose', publisher, viewer);
+    report.explicit1080p60.restored = verifyExplicit1080p60(active);
+    assert.deepEqual(active.publisherState.errors, []);
+    assert.deepEqual(active.receiverState.errors, []);
+    assert.equal(active.publisherState.dialog, null);
+    assert.equal(active.receiverState.dialog, null);
+    await until(() => viewer.cdp.evaluate('nativeAppSmoke.browserAudioReady()'), 'Restored source audio did not start.');
+    const signal = await viewer.cdp.evaluate('nativeAppSmoke.browserAudioSignal()');
+    assert.ok(signal.nonzeroFrames > 4800 && signal.leftRms > 0 && signal.rightRms > 0);
+    report.explicit1080p60.restoredAudio = signal;
+    await closeActiveWindow(publisher, viewer, active.publisherStats);
+    return;
+  }
   phase('closing-the-owned-shared-window');
   const sourceCloseBefore = observeSourceClosure ? await collectEvidence('ownedSourceCloseBefore', publisher, viewer) : null;
   let closure;
@@ -2248,6 +2665,17 @@ void run().catch(error => { failures.push(error); console.error(error); }).final
   failures.push(...cadenceFailures);
   phase('closing-owned-applications');
   for (const client of [...clients].reverse()) {
+    if (client.mediaTraceActive && !client.child.isClosed()) {
+      try {
+        client.mediaTraceActive = false;
+        report.chromiumMediaTrace = await client.cdp.stopMediaTrace(path.join(artifacts, 'viewer-media-trace.json'));
+      } catch (error) { failures.push(error); console.error(error); }
+    }
+    if (encodedByteTrace && client.label === 'publisher' && report.encodedByteTraceArmed
+      && !report.encodedByteTraceSaved && !client.child.isClosed()) {
+      try { report.encodedByteTraceSaved = await client.child.call('qa-byte-trace-save'); }
+      catch (error) { failures.push(error); console.error(error); }
+    }
     report[`${client.label}Diagnostics`] = client.diagnostics;
     if (strictMediaErrors) {
       const errors = client.diagnostics.filter(entry => entry.type === 'error' || typeof entry.exceptionId === 'number');
@@ -2301,6 +2729,7 @@ void run().catch(error => { failures.push(error); console.error(error); }).final
     catch (error) { failures.push(error); console.error(error); }
     try { if (!client.child.isClosed()) await client.child.stop(); }
     catch (error) { failures.push(error); console.error(error); }
+    if (client.child.isClosed()) await client.logsClosed;
     client.cdp?.close();
     client.overlayCdp?.close();
   }

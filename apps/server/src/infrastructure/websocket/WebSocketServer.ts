@@ -36,6 +36,8 @@ import {
   LIMITS,
   MessageType,
   PROTOCOL_VERSION,
+  negotiateProtocol,
+  type ProtocolAgreement,
   MemberKickPayload,
   MemberKickedPayload,
   Permission,
@@ -182,6 +184,7 @@ const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
 ]);
 
 interface ClientSession {
+  protocol?: ProtocolAgreement;
   ws: WebSocket;
   messageQueue: Promise<void>;
   user?: UserSummary;
@@ -331,7 +334,8 @@ export class WebSocketServer {
       localContextEnded: (context, cause) => this.botLocalExecution.contextEnded(context, cause),
       consumeLocalPreview: (bot, origin, contextId, requestId, result) =>
         this.botLocalExecution.consumePreview(bot, origin, contextId, requestId, result),
-    }, this.channelService, this.userService, this.commandRegistry, this.botSettings);
+    }, this.channelService, this.userService, this.commandRegistry, this.botSettings,
+      async () => (await this.serverRepo.getServer())?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH);
     this.botLocalExecution = new BotLocalExecutionService({
       isCurrent: (session) => this.isCurrentBotOperation(session, 'local_execution'),
       accessVersion: () => {
@@ -1114,6 +1118,7 @@ export class WebSocketServer {
       this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de autenticação inválidos.', requestId);
       return;
     }
+    session.protocol = negotiateProtocol(payload.protocolVersion, payload.protocolOffer, payload.botToken ? 'bot' : 'client') ?? undefined;
     // Bot token auth: skip challenge-response, authenticate directly (#569).
     if (payload.botToken && this.botService) {
       await this.handleBotAuth(session, payload, requestId);
@@ -1242,6 +1247,7 @@ export class WebSocketServer {
     const successPayload: AuthSuccessPayload = {
       server: {
         ...result.serverDetails,
+        protocol: session.protocol,
         serverVersion: this.serverVersion,
         // Told at login because it never changes while the process lives: it
         // depends on the host OS and on coturn being installed (#429).
@@ -1382,7 +1388,7 @@ export class WebSocketServer {
 
     // Incompatible peers must never perform TOFU binding. An already-bound bot
     // can still identify its obsolete protocol for the owner's persistent warning.
-    if (payload.protocolVersion !== PROTOCOL_VERSION) {
+    if (!session.protocol) {
       await this.botService.recordRejectedProtocol(payload.botToken, payload.publicKey, payload.protocolVersion);
       if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
       this.sendError(
@@ -1431,7 +1437,7 @@ export class WebSocketServer {
       if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
     }
 
-    if (!await this.botService.recordCompatibleConnection(botRecord.id)) {
+    if (!await this.botService.recordCompatibleConnection(botRecord.id, payload.protocolVersion)) {
       this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'O vínculo do bot foi revogado.', requestId);
       return;
     }
@@ -1488,6 +1494,8 @@ export class WebSocketServer {
       .filter(([, state]) => visibleChannelIds.has(state.channelId)));
     const iceServers = await this.buildIceServersFor(botRecord.id, session);
     const serverDetails = {
+      protocol: session.protocol,
+      maxMessageLength: server?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
       id: server?.id ?? '',
       name: server?.name ?? '',
       serverVersion: this.serverVersion,
@@ -2061,13 +2069,22 @@ export class WebSocketServer {
     }
   }
 
-  private async handleChatSend(    session: ClientSession,
+  private async handleChatSend(
+    session: ClientSession,
     payload: ChatSendPayload,
     requestId?: string
   ): Promise<void> {
     if (!session.user) return;
 
     const bot = session.isBot && session.botId ? await this.botService?.findById(session.botId) : undefined;
+    if (payload.clientMessageId !== undefined && (session.isBot || !session.protocol?.features.includes('chat-delivery'))) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Confirmação de envio exige um cliente compatível atualizado.', requestId);
+      return;
+    }
+    if (payload.blocks !== undefined && (bot || !session.protocol?.features.includes('chat-blocks'))) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Blocos de mensagem exigem um cliente compatível atualizado.', requestId);
+      return;
+    }
     if (session.isBot && (!bot || !this.isCurrentSession(session))) {
       this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'Bot indisponível.', requestId);
       return;
@@ -2087,7 +2104,9 @@ export class WebSocketServer {
       payload.channelId,
       payload.content,
       payload.attachmentIds,
-      payload.replyToMessageId
+      payload.replyToMessageId,
+      payload.blocks,
+      payload.clientMessageId,
     );
     if (!result.success) {
       this.sendError(
@@ -2103,6 +2122,11 @@ export class WebSocketServer {
       return;
     }
 
+    // A retry acknowledges the original commit without notifying recipients twice.
+    if ('replayed' in result && result.replayed) {
+      this.send(session.ws, { type: MessageType.CHAT_MESSAGE, requestId, payload: result.message });
+      return;
+    }
     // Broadcast message to everyone allowed into this channel (#384).
     await this.broadcastToChannel(result.message.channelId, {
       type: MessageType.CHAT_MESSAGE,
@@ -2539,6 +2563,11 @@ export class WebSocketServer {
     payload: ServerUpdateSettingsPayload,
     requestId?: string
   ): Promise<void> {
+    if (payload.maxMessageLength !== undefined && !session.protocol?.features.includes('message-length-setting')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+        'Atualize o cliente e o servidor para configurar o limite de mensagens.', requestId);
+      return;
+    }
     // Admins have separate socket queues. Serialize settings across them so a
     // duplicate save cannot observe the old mode and evict the new call twice.
     const update = (this.settingsUpdateQueue ?? Promise.resolve()).then(() =>
@@ -2712,6 +2741,7 @@ export class WebSocketServer {
       iconUrl: result.iconUrl,
       attachmentStorage: result.attachmentStorage,
       maxUsers: result.maxUsers,
+      maxMessageLength: result.maxMessageLength,
       turnEnabled: result.turnEnabled,
       turnAvailability: CoturnManager.describeAvailability(),
     };

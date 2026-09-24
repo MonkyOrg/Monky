@@ -25,6 +25,8 @@ import {
   LIMITS,
   MessageType,
   PROTOCOL_VERSION,
+  createProtocolOffer,
+  legacyProtocolFallback,
   ProtocolErrorCode,
   botFormSchema,
   botManifestSchema,
@@ -276,6 +278,7 @@ interface PendingRegistration {
 }
 
 interface ServerConnection {
+  retriedProtocol?: boolean;
   voiceAuth?: BotVoiceAuth;
   voice?: BotVoiceConnection;
   voiceJoin?: Promise<BotVoiceConnection>;
@@ -841,6 +844,7 @@ export class BotClient extends EventEmitter {
     conn.botId = null;
     conn.serverSettings = undefined;
     conn.permissions = undefined;
+    conn.retriedProtocol = false;
     const ws = new WebSocket(conn.serverUrl);
     conn.ws = ws;
     const isCurrent = () => conn.ws === ws && !conn.disposed;
@@ -851,6 +855,7 @@ export class BotClient extends EventEmitter {
         type: MessageType.AUTH_CONNECT,
         payload: {
           protocolVersion: PROTOCOL_VERSION,
+          protocolOffer: createProtocolOffer('bot'),
           publicKey: this.options.publicKey,
           nickname: this.profile.name ?? 'bot',
           password: '',
@@ -1169,6 +1174,16 @@ export class BotClient extends EventEmitter {
         this.failAuthentication(conn, msg.payload);
         return;
       case MessageType.SERVER_ERROR: {
+        const fallback = isRecord(msg.payload) && msg.payload.code === ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED
+          ? legacyProtocolFallback(msg.payload.serverProtocolVersion, 'bot') : null;
+        if (!conn.connected && !conn.retriedProtocol && fallback !== null) {
+          conn.retriedProtocol = true;
+          this.sendToConn(conn, { type: MessageType.AUTH_CONNECT, payload: {
+            protocolVersion: fallback, protocolOffer: createProtocolOffer('bot'),
+            publicKey: this.options.publicKey, nickname: this.profile.name ?? 'bot', password: '', botToken: conn.token,
+          } });
+          return;
+        }
         const error = new Error(isRecord(msg.payload) && typeof msg.payload.message === 'string'
           ? msg.payload.message : 'The Monky server rejected the bot request.');
         if (this.rejectSoundDownload(conn, msg.requestId, error)) return;

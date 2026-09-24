@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { PROTOCOL_VERSION, type BotLocale } from '@monky/shared';
+import { PROTOCOL_VERSION, MIN_BOT_PROTOCOL, negotiateProtocol, type BotLocale } from '@monky/shared';
 import { CliError, cliText } from '../cli/locale';
 import { isRecord, loadBotProject, botEntryPath } from './config';
 import { runNpm } from './process';
@@ -32,7 +32,7 @@ export function inspectBotProject(root: string): DoctorCheck[] {
     const sdk: unknown = requireProject('@monky/bot-sdk');
     const protocol = isRecord(sdk) && typeof sdk.PROTOCOL_VERSION === 'number' ? sdk.PROTOCOL_VERSION : undefined;
     const declared = isRecord(project.manifest.dependencies) && typeof project.manifest.dependencies['@monky/bot-sdk'] === 'string';
-    checks.push({ name: '@monky/bot-sdk', ok: declared && protocol === PROTOCOL_VERSION,
+    checks.push({ name: '@monky/bot-sdk', ok: declared && !!negotiateProtocol(protocol, undefined, 'bot'),
       detail: declared ? `PROTOCOL_VERSION: SDK ${protocol ?? '?'} / CLI ${PROTOCOL_VERSION}` : 'package.json dependencies: @monky/bot-sdk' });
   } catch {
     checks.push({ name: '@monky/bot-sdk', ok: false, detail: 'npm install' });
@@ -69,7 +69,7 @@ export function doctorCommand(args: string[], locale: BotLocale, root = process.
   const checks = inspectBotProject(root);
   for (const check of checks) console.log(`[${check.ok ? 'OK' : cliText(locale, 'FALHA', 'FAIL')}] ${check.name}: ${check.detail}`);
   console.log(cliText(locale,
-    `Verificação local e sem alterações. Cliente e servidor também precisam do protocolo ${PROTOCOL_VERSION}; nenhuma conexão foi feita.`,
-    `Read-only local inspection. Client and server also require protocol ${PROTOCOL_VERSION}; no connection was made.`));
+    `Verificação local e sem alterações. Protocolos de bots ${MIN_BOT_PROTOCOL}–${PROTOCOL_VERSION} são compatíveis; recursos adicionais são negociados. Nenhuma conexão foi feita.`,
+    `Read-only local inspection. Bot protocols ${MIN_BOT_PROTOCOL}–${PROTOCOL_VERSION} are compatible; additional features are negotiated. No connection was made.`));
   if (checks.some(check => !check.ok)) throw new CliError('Corrija as falhas acima e execute doctor novamente.', 'Fix the failures above and run doctor again.');
 }

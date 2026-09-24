@@ -553,6 +553,7 @@ monky config set <chave> [valor]    # altera direto
 | `port` | Porta TCP | `3000` |
 | `icon` | Caminho de uma imagem, copiada para a pasta de dados. Vazio ou `clear` remove | sem ícone |
 | `maxUsers` | Máximo de membros cadastrados. `0` remove o limite | `20` |
+| `maxMessageLength` | Caracteres por mensagem. `0` remove o limite de caracteres; o teto técnico de 8 MiB por pacote permanece | `16000` |
 | `allowSoundboard` | Permite o soundboard (`true`/`false`) | `true` |
 | `allowEveryoneMention` | Permite `@todos`/`@everyone` no chat (`true`/`false`) | `true` |
 | `maxAttachmentFileBytes` | Tamanho máximo por anexo, em bytes | sem limite |

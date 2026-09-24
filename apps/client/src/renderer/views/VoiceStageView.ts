@@ -1146,6 +1146,7 @@ export class VoiceStageView {
       error.setAttribute('role', 'alert');
       const text = document.createElement('span');
       text.textContent = t(`screenShare.nativeFailure.${state.reason ?? 'connection-failed'}`);
+      if (state.receiver === 'native') text.textContent += ` ${t('screenShare.nativeReceiverSettingsHint')}`;
       const retry = document.createElement('button');
       retry.type = 'button';
       retry.className = 'btn btn-secondary';

@@ -325,6 +325,31 @@ P2P ou SFU. Em caso de falha, a câmera é desligada e o erro é mostrado, sem
 voltar silenciosamente ao vídeo sem efeito. Desativar o efeito exige uma
 escolha explícita.
 
+O recorte usa **Robust Video Matting (RVM)**, que estima a cor e a transparência
+do primeiro plano e usa os frames anteriores para acompanhar o movimento.
+Desfoque, cor e imagem exigem GPU com WebGL2; se ela não estiver disponível,
+o efeito não é ativado e a câmera fica parada com uma mensagem de erro.
+Não há troca silenciosa por outro modelo. Chroma físico continua oferecendo
+composição CPU quando WebGL2 não está disponível. A resolução final segue seu perfil.
+O desfoque preserva o enquadramento e usa a máscara para evitar que as cores
+da pessoa se espalhem pelo fundo junto ao contorno. O recorte é automático:
+os antigos controles **Recorte da pessoa** e **Suavidade do recorte** não são
+aplicados ao RVM, evitando endurecer as transparências de cabelo e bordas.
+Seus valores legados permanecem salvos, sem alterar os demais ajustes.
+O modelo e o grafo somam cerca de 4,4 MB, além do runtime TensorFlow.js.
+As licenças e fontes estão disponíveis nas configurações. Isso não elimina as limitações
+de iluminação e enquadramento, nem garante recorte idêntico ao de outros apps.
+
+### Overlay da chamada
+
+**Manter proporção dos cards** preserva 16:9 ao redimensionar o overlay ou mudar
+o número de participantes. Desligue o switch para o layout livre anterior.
+Arraste também pela área livre e pelos cards, não só pelo cabeçalho; botões
+continuam clicáveis. Os oito indicadores de redimensionamento aparecem apenas
+perto do ponteiro, nos cantos e no meio das bordas. Apenas um fica ativo por vez:
+cantos mostram sua própria diagonal e bordas mostram a direção horizontal ou
+vertical correspondente, sem sobrepor o indicador do canto.
+
 ### Seletor de cores
 
 A cor da tela física do chroma key, a cor do fundo virtual e as cores dos
@@ -451,7 +476,22 @@ do mouse configurado separadamente.
 
 O perfil controla o que **você transmite**; não aumenta a resolução da câmera
 ou da tela de outra pessoa. A mesma aba reúne codec, prévia local do
-compartilhamento e telemetria; os perfis continuam incluindo voz e câmera.
+compartilhamento, recepção de tela e telemetria; os perfis continuam incluindo voz e câmera.
+
+### Recepção de tela
+
+Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, escolha
+**Nativo** ou **Chromium**. No Windows, **Nativo é o padrão**, usando o runtime
+incluído no Monky. Não há fallback automático: se ele falhar, o aviso indica
+onde selecionar Chromium manualmente. A escolha é salva e vale ao começar a
+assistir ou clicar em **Tentar novamente**; para uma tela já aberta, pare de
+assistir e assista novamente. Câmera, voz e transmissão da própria tela não mudam.
+
+**Chromium tem uma limitação conhecida:** no ensaio Windows houve quedas de FPS
+e congelamentos periódicos. O aviso permanece visível nas configurações; escolher
+esse receptor não corrige a limitação. No macOS, **Chromium é o padrão** e
+**Nativo** fica desabilitado como **Em breve**. Isso permite assistir a perfis
+compatíveis, mas não habilita captura libobs no Mac nem qualifica seu desempenho.
 
 ### Perfis de qualidade
 

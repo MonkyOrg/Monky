@@ -143,6 +143,131 @@ async function dispatchClick(window, point, clickCount = 1) {
   });
 }
 
+async function runLightboxZoomSmoke(window) {
+  const evaluate = code => window.webContents.executeJavaScript(code, true);
+  const mouse = params => window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', params);
+  const paint = () => new Promise((resolve, reject) => {
+    const done = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      window.webContents.removeListener('paint', done);
+      reject(new Error('Lightbox did not present a frame'));
+    }, 3000);
+    window.webContents.once('paint', done);
+    window.webContents.invalidate();
+  });
+  let checks = 0;
+  const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+  const state = () => evaluate(`(() => {
+    const overlay = document.querySelector('.attachment-lightbox');
+    const frame = overlay.querySelector('.lightbox-media-frame');
+    const image = overlay.querySelector('.lightbox-media--image');
+    const close = overlay.querySelector('.lightbox-close');
+    const closeRect = close.getBoundingClientRect();
+    return {
+      frame: frame.getBoundingClientRect().toJSON(), stage: overlay.querySelector('.lightbox-stage').getBoundingClientRect().toJSON(),
+      image: image?.getBoundingClientRect().toJSON(), naturalWidth: image?.naturalWidth, naturalHeight: image?.naturalHeight,
+      percent: overlay.querySelector('.lightbox-zoom-indicator').textContent, width: innerWidth, height: innerHeight,
+      overflow: getComputedStyle(frame).overflow, dragging: overlay.querySelector('.lightbox-stage').classList.contains('is-dragging'),
+      imageFrame: frame.classList.contains('lightbox-media-frame--image'), inlineWidth: frame.style.width, transform: frame.style.transform,
+      copyHidden: overlay.querySelector('.lightbox-copy').hidden,
+      closeAccessible: document.elementFromPoint(closeRect.x + closeRect.width / 2, closeRect.y + closeRect.height / 2)?.closest('button') === close,
+    };
+  })()`);
+  const ready = async () => {
+    for (let index = 0; index < 100; index++) {
+      const value = await state();
+      if (value.naturalWidth && value.frame.width > 0 && value.inlineWidth !== '') return value;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error('Lightbox zoom fixture did not load');
+  };
+  const wheel = deltaY => evaluate(`document.querySelector('.lightbox-media--image').dispatchEvent(new WheelEvent('wheel', {
+    deltaY: ${deltaY}, bubbles: true, cancelable: true
+  }))`);
+  const initialSize = window.getContentSize();
+  try {
+    await evaluate(`(async () => {
+      const { lightboxModal } = await import('/views/LightboxModal.ts');
+      const image = (width, height) => {
+        const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+        const context = canvas.getContext('2d'); context.fillStyle = '#4488cc'; context.fillRect(0, 0, width, height);
+        return canvas.toDataURL('image/png');
+      };
+      const source = document.createElement('div');
+      window.closeZoomFixture = lightboxModal.open([
+        { kind: 'image', url: image(1600, 1000), fileName: 'Landscape', senderName: '', timestamp: '', source },
+        { kind: 'image', url: image(400, 900), fileName: 'Portrait', senderName: '', timestamp: '', source },
+        { kind: 'video', url: '', fileName: 'Video layout', senderName: '', timestamp: '', source }
+      ], 0, async () => {});
+    })()`);
+    const base = await ready();
+    await paint();
+    check(base.frame.width <= base.stage.width + 1 && base.frame.height <= base.stage.height + 1,
+      'Initial image and container fit the viewing stage');
+    await mouse({ type: 'mouseMoved', x: base.width / 2, y: base.height / 2 });
+    await mouse({ type: 'mouseWheel', x: base.width / 2, y: base.height / 2, deltaX: 0, deltaY: -100 });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const grown = await state();
+    check(Math.abs(grown.frame.width / base.frame.width - 1.2) < .01
+      && Math.abs(grown.frame.height / base.frame.height - 1.2) < .01,
+    'A real mouse-wheel event grows the container in both dimensions, not just the image inside it');
+    check(Math.abs(grown.frame.width - grown.image.width) < 1 && Math.abs(grown.frame.height - grown.image.height) < 1,
+      'Image and container bounds remain identical while zooming');
+    check(grown.frame.width > grown.stage.width && grown.overflow === 'visible',
+      'The zoomed container extends beyond the initial stage instead of remaining clipped inside it');
+    check(grown.percent === `${Math.round(grown.image.width / grown.naturalWidth * 100)}%`,
+      'The indicator reflects real image magnification instead of compounding the new container size');
+    check(grown.closeAccessible, 'Toolbar controls remain hit-testable above enlarged images');
+    await mouse({ type: 'mousePressed', x: grown.width / 2, y: grown.height / 2, button: 'left', clickCount: 1 });
+    await mouse({ type: 'mouseMoved', x: grown.width - 2, y: grown.height - 2, button: 'left', buttons: 1 });
+    await mouse({ type: 'mouseReleased', x: grown.width - 2, y: grown.height - 2, button: 'left', clickCount: 1 });
+    const dragged = await state();
+    check(Math.abs(dragged.frame.left) <= 1 && Math.abs(dragged.frame.top - grown.frame.top) <= 1,
+      'Native dragging reaches the image edge and clamps axes that still fit the window');
+    check(!dragged.dragging, 'Releasing the pointer ends panning');
+    await paint();
+    await dispatchClick(window, { x: grown.width / 2, y: grown.height / 2 }, 2);
+    const reset = await state();
+    check(Math.abs(reset.frame.width - base.frame.width) <= 1, 'Double-click returns image and container to the initial fit');
+    await dispatchClick(window, { x: grown.width / 2, y: grown.height / 2 }, 2);
+    const actual = await state();
+    check(Math.abs(actual.frame.width - actual.naturalWidth) <= 1 && actual.percent === '100%',
+      'Double-click from fitted size still reaches the original image size');
+    for (let index = 0; index < 45; index++) await wheel(-100);
+    const maximum = await state();
+    check(Math.abs(maximum.frame.width / base.frame.width - 8) < .01, 'Container zoom retains the existing bounded 8x maximum');
+    check(maximum.closeAccessible, 'The close control remains usable even at maximum zoom');
+    for (let index = 0; index < 45; index++) await wheel(100);
+    const minimum = await state();
+    check(Math.abs(minimum.frame.width - base.frame.width) <= 1, 'Zooming out restores fitted size without collapsing the container');
+    await wheel(0);
+    check(Math.abs((await state()).frame.width - base.frame.width) <= 1, 'Zero vertical wheel delta does not change zoom');
+    window.setContentSize(800, 620);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const resized = await state();
+    check(resized.frame.width < base.frame.width && resized.frame.width <= resized.stage.width + 1,
+      'Window resize recomputes image fitting instead of keeping stale geometry');
+    await dispatchKey(window, 'ArrowRight', 'ArrowRight', 39);
+    const portrait = await ready();
+    check(portrait.naturalWidth === 400 && portrait.frame.height <= portrait.stage.height + 1,
+      'Navigating to a portrait resets zoom and fits its own aspect ratio');
+    await wheel(-100);
+    check((await state()).frame.height > portrait.frame.height, 'Portrait containers grow vertically with their image');
+    await dispatchKey(window, 'ArrowRight', 'ArrowRight', 39);
+    const video = await state();
+    check(!video.imageFrame && video.inlineWidth === '' && video.transform === '' && video.copyHidden,
+      'Video navigation clears image-only geometry without changing video layout');
+    await dispatchKey(window, 'Escape', 'Escape', 27);
+    check(await evaluate('!document.querySelector(".attachment-lightbox")'), 'Escape still closes the enlarged viewer');
+    return checks;
+  } catch (error) {
+    throw new Error(`Lightbox zoom failed after ${checks} checks: ${error.message}`, { cause: error });
+  } finally {
+    await evaluate('window.closeZoomFixture?.(); delete window.closeZoomFixture');
+    window.setContentSize(...initialSize);
+  }
+}
+
 async function runSystemClipboardSmoke(sourceWindow) {
   const { BrowserWindow, clipboard, nativeImage } = require('electron');
   const evaluate = code => sourceWindow.webContents.executeJavaScript(code, true);
@@ -480,13 +605,18 @@ async function runSmoke(window) {
     state = await fixture('state()');
     check(state.writes === 1 && state.last?.kind === 'image' && state.last.width === 2 && state.last.height === 1,
       'A trusted pointer click copies the original tiny image through the real button handler');
+    checks += await runLightboxZoomSmoke(window);
     checks += await fixture('testImages()');
     checks += await fixture('testReaderLocales()');
     state = await fixture('state()');
     check(state.trustedKeys > 20 && state.trustedClicks > 5, 'Smoke scenarios actually exercise native keyboard and pointer events');
     check(state.trustedCopyEvents === 0, 'Native copies are intercepted before browser clipboard mutation; the user clipboard remains untouched');
   } catch (error) {
-    fs.writeFileSync(path.join(output, 'message-clipboard-failure.png'), (await window.webContents.capturePage()).toPNG());
+    try {
+      fs.writeFileSync(path.join(output, 'message-clipboard-failure.png'), (await window.webContents.capturePage()).toPNG());
+    } catch (captureError) {
+      console.warn('Could not capture clipboard fixture failure:', captureError);
+    }
     throw error;
   } finally {
     await fixture('cleanup()');
@@ -804,6 +934,19 @@ async function installFixture(systemClipboard = false) {
         await expectImage(false);
         await view.copyMessage('photo', 'plain');
         expect((await last()).text === 'Photo caption', 'Copy message keeps its text semantics after adding a separate image action');
+        for (const id of ['jpeg', 'image-sticker']) {
+          clearSelection();
+          const copy = find(`[data-message-id="${id}"] [data-message-action="copy"]`);
+          copy.click();
+          await expectImage(id !== 'jpeg');
+          copy.focus();
+          const shortcut = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
+          copy.dispatchEvent(shortcut);
+          expect(shortcut.defaultPrevented, 'Whole-message Ctrl+C handles image-only and sticker-only messages');
+          await expectImage(id !== 'jpeg');
+          await view.copyMessage(id, 'plain');
+          expect((await last()).kind !== 'image', 'Explicit plain copying preserves attachment filename semantics');
+        }
 
         for (const selector of ['[data-message-id="photo"] .chat-attachment-image', '[data-message-id="image-sticker"] .chat-sticker']) {
           clearSelection();

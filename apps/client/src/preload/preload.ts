@@ -215,7 +215,7 @@ export interface ElectronApi {
   onOverlaySignalReceived: (cb: (signal: string) => void) => () => void;
   onOverlaySyncStateReceived: (cb: (state: OverlaySyncState) => void) => () => void;
   onOverlayCloseRequested: (cb: () => void) => () => void;
-  onOverlayHoverChanged: (cb: (hovered: boolean) => void) => () => void;
+  onOverlayHoverChanged: (cb: (hovered: boolean, point?: { x: number; y: number }) => void) => () => void;
 
   // Client Logging (#444)
   writeClientLog: (entry: ClientLogEntry) => Promise<void>;
@@ -551,7 +551,7 @@ const api: ElectronApi = {
     };
   },
   onOverlayHoverChanged: (cb) => {
-    const listener = (_e: Electron.IpcRendererEvent, hovered: boolean) => cb(hovered);
+    const listener = (_e: Electron.IpcRendererEvent, hovered: boolean, point?: { x: number; y: number }) => cb(hovered, point);
     ipcRenderer.on('overlay:hover-changed', listener);
     return () => {
       ipcRenderer.removeListener('overlay:hover-changed', listener);
