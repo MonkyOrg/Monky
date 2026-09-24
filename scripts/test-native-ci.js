@@ -89,6 +89,20 @@ test('Electron is explicitly installed before browser tests instead of downloadi
     /npm rebuild[^\n]*\belectron\b/);
 });
 
+test('macOS fixtures use the complete FFmpeg codec set even when minimal FFmpeg is already installed', () => {
+  const install = step(ci.jobs.package, 'Install FFmpeg for generated voice fixtures');
+  assert.equal(install.shell, 'bash');
+  assert.equal(install['continue-on-error'], undefined);
+  assert.match(install.run, /if \[ "\$RUNNER_OS" = "macOS" \]; then\s+#[^\n]*\n\s+brew install ffmpeg-full/);
+  assert.doesNotMatch(install.run, /brew install ffmpeg(?:\s|$)/);
+  assert.match(install.run, /ffmpeg_bin="\$\(brew --prefix ffmpeg-full\)\/bin"/);
+  assert.match(install.run, /echo "\$ffmpeg_bin" >> "\$GITHUB_PATH"/);
+  assert.match(install.run, /export PATH="\$ffmpeg_bin:\$PATH"/);
+  assert.match(install.run, /ffmpeg -hide_banner -encoders \| grep -E .*libvorbis/);
+  assert.ok(ci.jobs.package.steps.indexOf(install)
+    < ci.jobs.package.steps.indexOf(step(ci.jobs.package, 'Exercise client DOM and microphone state in Electron')));
+});
+
 test('camera graphics use supported CI backends without weakening macOS or changing local startup', () => {
   const source = fs.readFileSync(path.join(root, 'apps/client/test/fixtures/ciGraphics.cjs'), 'utf8');
   for (const platform of ['win32', 'darwin', 'linux']) {
