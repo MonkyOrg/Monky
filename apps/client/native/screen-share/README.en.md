@@ -480,6 +480,24 @@ Preview QA must validate operation without viewers, focus loss/return,
 disabling background pause and uninterrupted viewers. Resolution and frame
 counts alone do not prove that decoded pixels were displayed in the interface.
 
+### Known limitation of Chromium reception on Windows
+
+The integrated RX 9070 XT scenario qualified 4K60 with native reception, but
+**did not qualify Chromium receiver cadence**. Even at 1080p60, periodic
+freezes and results below 50 FPS occurred. During an interval without QA
+actions, the `DXGISwapChainImageBacking::Present` scope blocked the GPU thread
+for 262–285 ms; decode dispatch was delayed, the adapter queue filled and new
+keyframes were requested. The trace does not distinguish `Present1` from the
+swap-chain initialization wait or attribute the cause to the driver or DWM.
+
+Analysis of 1,166 slices found no `frame_num` or POC discontinuity. Disabling
+only video overlays retained hardware D3D11 decode but did not resolve the
+stalls; that workaround was not applied to the application. Queues were not
+enlarged, IDR guards were not relaxed and acceptance criteria were not lowered.
+This failure remains open and must not be described as fixed based on native
+path qualification. The local scenario also does not establish whether a
+regression occurred between betas.
+
 These window scripts do not qualify monitors, Game Capture, NVIDIA or
 exclusive fullscreen. Local evidence for this integration covers AMF and
 WGC/Game on an owned synthetic D3D11 source, including minimize/restore.

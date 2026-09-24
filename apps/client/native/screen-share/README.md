@@ -486,6 +486,24 @@ foco, opção de pausa desativada e continuidade dos espectadores. Resolução
 e contagem de frames, sozinhas, não comprovam que os pixels decodificados
 foram exibidos na interface.
 
+### Limitação conhecida da recepção Chromium no Windows
+
+O ensaio integrado na RX 9070 XT qualificou 4K60 com recepção nativa, mas
+**não qualificou a cadência do receptor Chromium**. Mesmo em 1080p60, houve
+congelamentos periódicos e resultados abaixo de 50 FPS. Durante um intervalo
+sem ações do QA, o escopo `DXGISwapChainImageBacking::Present` bloqueou a thread
+GPU por 262–285 ms; o despacho de decode atrasou, a fila do adapter encheu e
+foram solicitados novos keyframes. O trace não distingue a chamada `Present1`
+da espera de inicialização da swap chain, nem atribui a causa ao driver ou DWM.
+
+A análise de 1.166 slices não encontrou quebra de continuidade de `frame_num`
+ou POC. Desativar somente video overlays manteve o decode D3D11 por hardware,
+mas não resolveu os bloqueios; esse workaround não foi aplicado ao aplicativo.
+Não foram ampliadas filas, relaxados guards de IDR ou reduzidos os critérios
+de aprovação. Essa falha permanece aberta e não deve ser apresentada como
+corrigida pela qualificação do caminho nativo. O ensaio local também não
+estabelece se houve regressão entre as betas.
+
 Esses scripts de janela não qualificam monitor, Game Capture, NVIDIA ou tela
 cheia exclusiva. A evidência local desta integração cobre AMF e WGC/Game em
 uma fonte D3D11 sintética própria, incluindo minimizar/restaurar. A captura
