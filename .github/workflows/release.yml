@@ -132,6 +132,10 @@ jobs:
       - name: Build workspaces
         run: npm run build
 
+      - name: Verify macOS DMG packaging dependencies
+        if: runner.os == 'macOS'
+        run: node -e "require('dmg-builder/out/dmgLicense.js')"
+
       # Separate from PR-produced caches; each used archive is rehashed against
       # its immutable pin by fetchObs before extraction. No native outputs.
       - name: Cache verified native screen archives (Windows)

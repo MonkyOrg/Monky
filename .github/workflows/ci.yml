@@ -311,6 +311,10 @@ jobs:
       - name: Build workspaces
         run: npm run build
 
+      - name: Verify macOS DMG packaging dependencies
+        if: runner.os == 'macOS'
+        run: node -e "require('dmg-builder/out/dmgLicense.js')"
+
       # Only content-addressed upstream archives are portable. Do not cache the
       # checkout-owned RTC tree, generated binaries, toolchains or Python venv.
       - name: Cache verified native screen archives (Windows)

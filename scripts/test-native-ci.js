@@ -20,6 +20,27 @@ const step = (job, name) => {
   return result;
 };
 
+test('the cross-platform lock retains macOS DMG dependencies and packaging checks load them', () => {
+  const { packages } = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
+  assert.ok(packages['node_modules/dmg-builder'].optionalDependencies['dmg-license']);
+  for (const name of ['dmg-license', 'iconv-corefoundation']) {
+    const locked = packages[`node_modules/${name}`];
+    assert.ok(locked, `Missing macOS optional dependency: ${name}`);
+    assert.ok(locked.os.includes('darwin'));
+    assert.ok(locked.integrity, `Missing integrity for ${name}`);
+    for (const dependency of Object.keys(locked.dependencies)) {
+      assert.ok(packages[`node_modules/${name}/node_modules/${dependency}`] || packages[`node_modules/${dependency}`],
+        `Missing ${name} dependency: ${dependency}`);
+    }
+  }
+  for (const job of [ci.jobs.package, release.jobs.build]) {
+    const verify = step(job, 'Verify macOS DMG packaging dependencies');
+    assert.equal(verify.if, "runner.os == 'macOS'");
+    assert.equal(verify.run, `node -e "require('dmg-builder/out/dmgLicense.js')"`);
+    assert.ok(job.steps.indexOf(verify) > job.steps.indexOf(step(job, 'Install dependencies')));
+  }
+});
+
 test('camera graphics use supported CI backends without weakening macOS or changing local startup', () => {
   const source = fs.readFileSync(path.join(root, 'apps/client/test/fixtures/ciGraphics.cjs'), 'utf8');
   for (const platform of ['win32', 'darwin', 'linux']) {
