@@ -123,8 +123,8 @@ if (!process.versions.electron) {
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.setAudioMuted(true);
-    window.webContents.on('console-message', (_event, _level, message) => {
-      if (message.startsWith('CAMERA TEST') || process.argv.includes('--camera-trace')) {
+    window.webContents.on('console-message', (_event, level, message) => {
+      if (message.startsWith('CAMERA TEST') || level === 3 || process.argv.includes('--camera-trace')) {
         console.log(`[camera ${packaged ? 'offline' : 'dev'}] ${message}`);
       }
     });

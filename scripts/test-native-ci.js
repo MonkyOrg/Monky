@@ -30,8 +30,8 @@ test('camera graphics use supported CI backends without weakening macOS or chang
       module.exports({ commandLine: { appendSwitch: (...args) => switches.push(args) } });
       assert.deepEqual(switches, enabled !== 'true' ? [] : [
         ['use-gl', 'angle'],
-        ['use-angle', platform === 'darwin' ? 'metal' : 'swiftshader'],
-        ...(platform === 'darwin' ? [] : [['enable-unsafe-swiftshader']]),
+        ['use-angle', platform === 'darwin' ? 'metal' : platform === 'win32' ? 'd3d11-warp' : 'swiftshader'],
+        ...(platform === 'linux' ? [['enable-unsafe-swiftshader']] : []),
       ]);
     }
   }

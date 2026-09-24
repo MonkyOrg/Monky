@@ -233,7 +233,7 @@ e compilação fria dos shaders, que pode ultrapassar 30 segundos no Metal.
 O primeiro frame de uma nova resolução também recebe esse prazo de compilação.
 Os frames seguintes mantêm watchdog de 8 segundos. Durante a preparação
 nenhum frame é publicado, e cancelar a captura não espera esses prazos.
-Os testes CI usam SwiftShader no Windows e Metal no macOS ARM, mantendo
+Os testes CI usam D3D11 WARP no Windows e Metal no macOS ARM, mantendo
 inferência real e sem alterar a seleção gráfica do aplicativo.
 Desativar efeitos ou encerrar a captura libera leitor, tensores,
 texturas, contexto e worker. Resolução e cadência seguem

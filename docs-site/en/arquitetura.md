@@ -231,7 +231,7 @@ and cold shader compilation, which can exceed 30 seconds on Metal.
 The first frame at a new resolution also receives that compilation budget.
 Subsequent frames retain an 8-second watchdog. No frames are published during
 preparation, and cancelling capture does not wait for these deadlines.
-CI tests use SwiftShader on Windows and Metal on macOS ARM, retaining real
+CI tests use D3D11 WARP on Windows and Metal on macOS ARM, retaining real
 inference without changing the application's graphics selection.
 Turning effects off or ending capture releases the reader, tensors,
 textures, context and worker. Resolution and frame cadence
