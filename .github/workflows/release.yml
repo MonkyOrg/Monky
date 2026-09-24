@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       promote_tag:
-        description: 'Beta tag to promote to a stable release (e.g. v1.8.0-beta). Leave empty to build a beta from the current ref.'
+        description: 'Beta tag to promote to stable (e.g. v1.8.0-beta). Run only from main with explicit approval. New betas require a PR merge.'
         required: false
         default: ''
 
@@ -52,6 +52,18 @@ jobs:
       prerelease: ${{ steps.bump.outputs.prerelease }}
       checkout_ref: ${{ steps.ref.outputs.checkout_ref }}
     steps:
+      - name: Require merged-main release flow
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref }}
+          PROMOTE_TAG: ${{ github.event.inputs.promote_tag }}
+        shell: bash
+        run: |
+          if [ "$RELEASE_REF" != "refs/heads/main" ] || { [ "$RELEASE_EVENT" != "push" ] && [ -z "$PROMOTE_TAG" ]; }; then
+            echo "::error::Publish betas by merging a PR into main, never from a working branch or a manual beta dispatch."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -62,8 +74,8 @@ jobs:
         with:
           node-version: 22
 
-      # push to main / manual dispatch (no tag) -> beta prerelease.
-      # manual dispatch with a beta tag -> promote that beta to a clean stable.
+      # A PR merge into main produces a beta. Manual dispatch only promotes
+      # an explicitly selected beta from main; it never builds a branch beta.
       - name: Calculate Semantic Version
         id: bump
         env:

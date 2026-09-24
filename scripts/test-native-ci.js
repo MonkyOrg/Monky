@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { spawnSync } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const { load } = require('js-yaml');
@@ -38,6 +39,35 @@ test('the cross-platform lock retains macOS DMG dependencies and packaging check
     assert.equal(verify.if, "runner.os == 'macOS'");
     assert.equal(verify.run, `node -e "require('dmg-builder/out/dmgLicense.js')"`);
     assert.ok(job.steps.indexOf(verify) > job.steps.indexOf(step(job, 'Install dependencies')));
+  }
+});
+
+test('beta publication requires main and cannot use a manual working-branch dispatch', () => {
+  const guard = step(release.jobs.version, 'Require merged-main release flow');
+  assert.equal(release.jobs.version.steps[0], guard);
+  assert.deepEqual(guard.env, {
+    RELEASE_EVENT: '${{ github.event_name }}',
+    RELEASE_REF: '${{ github.ref }}',
+    PROMOTE_TAG: '${{ github.event.inputs.promote_tag }}',
+  });
+  assert.match(guard.run, /"\$RELEASE_REF" != "refs\/heads\/main"/u);
+  assert.match(guard.run, /"\$RELEASE_EVENT" != "push".*"\$PROMOTE_TAG"/u);
+  assert.match(guard.run, /exit 1/u);
+  const bash = process.platform === 'win32'
+    ? path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe') : 'bash';
+  for (const [event, ref, promote, expected] of [
+    ['push', 'refs/heads/main', '', 0],
+    ['push', 'refs/heads/work', '', 1],
+    ['workflow_dispatch', 'refs/heads/work', '', 1],
+    ['workflow_dispatch', 'refs/heads/main', '', 1],
+    ['workflow_dispatch', 'refs/heads/work', 'v1.0.0-beta', 1],
+    ['workflow_dispatch', 'refs/heads/main', 'v1.0.0-beta', 0],
+  ]) {
+    const result = spawnSync(bash, ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', guard.run], {
+      encoding: 'utf8', env: { ...process.env, RELEASE_EVENT: event, RELEASE_REF: ref, PROMOTE_TAG: promote },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, expected, `${event}/${ref}/${promote}: ${result.stderr}`);
   }
 });
 
