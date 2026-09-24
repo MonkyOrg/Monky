@@ -15,6 +15,7 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.CHANNEL_FULL]: 'protocolError.channelFull',
   [ProtocolErrorCode.MESSAGE_TOO_LONG]: 'protocolError.messageTooLong',
   [ProtocolErrorCode.RATE_LIMITED]: 'protocolError.rateLimited',
+  [ProtocolErrorCode.AUTH_RATE_LIMITED]: 'protocolError.authRateLimited',
   [ProtocolErrorCode.AVATAR_TOO_LARGE]: 'protocolError.avatarTooLarge',
   [ProtocolErrorCode.AVATAR_INVALID_TYPE]: 'protocolError.avatarInvalidType',
   [ProtocolErrorCode.SERVER_FULL]: 'protocolError.serverFull',

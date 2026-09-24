@@ -45,6 +45,15 @@ export const LIMITS = {
   MAX_HISTORY_MESSAGES_INITIAL: 100,
   RATE_LIMIT_MAX_MESSAGES: 10,
   RATE_LIMIT_WINDOW_MS: 5000,
+  /** Tentativas de autenticação por IP antes de o servidor parar de responder (#372). */
+  RATE_LIMIT_MAX_AUTH_ATTEMPTS: 8,
+  RATE_LIMIT_AUTH_WINDOW_MS: 60_000,
+  /**
+   * Teto de um frame de WebSocket. O maior payload legítimo é um avatar em
+   * base64 (MAX_AVATAR_SIZE cresce ~33% na codificação), e o padrão da lib ws
+   * são 100 MiB, que qualquer cliente não autenticado podia mandar (#372).
+   */
+  WS_MAX_PAYLOAD_BYTES: 8 * 1024 * 1024,
   HEARTBEAT_INTERVAL_MS: 5000,
   HEARTBEAT_TIMEOUT_MS: 35000,
   RECONNECT_GRACE_MS: 20000,

@@ -196,9 +196,10 @@ export async function createFixture(options: {
   );
   const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
   const coturnManager = new CoturnManager(dataDir);
+  const authService = new AuthService(serverRepo, userRepo, channelRepo, mentionRepo, avatars, () => online(), attachmentService, permissions, roleService);
   const wsServer = new WebSocketServer(
     httpServer,
-    new AuthService(serverRepo, userRepo, channelRepo, mentionRepo, avatars, () => online(), attachmentService, permissions, roleService),
+    authService,
     userService,
     channelService,
     chatService,
@@ -208,6 +209,7 @@ export async function createFixture(options: {
     permissions,
     roleService,
     coturnManager,
+    rateLimiter,
     new SfuManager(),
     botService,
     registry,
@@ -269,6 +271,6 @@ export async function createFixture(options: {
     url,
     connect, human, bot, dispose, peers, wsServer, botService, botRepo, roleRepo, avatars,
     channelService, userService, registry, dataDir, messageRepo, channelRepo, userRepo, serverRepo, chatService, attachmentRepo,
-    database, permissions, botPermissions, signalingService, coturnManager,
+    database, permissions, botPermissions, signalingService, coturnManager, authService, roleService, rateLimiter,
   };
 }

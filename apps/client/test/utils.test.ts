@@ -17,6 +17,7 @@ import { isSafeServerId, migrateLegacyServerData, serverDataDirFor } from '../sr
 import { createActiveProxy, silentBus } from '../src/renderer/core/activeProxy';
 import { createChatStore, setActiveChatStore, chatStore } from '../src/renderer/stores/chatStore';
 import { appEvents } from '../src/renderer/core/EventBus';
+import { isPrivateAddress, isPrivateHostname } from '../src/main/privateAddress';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -758,6 +759,22 @@ function runTests() {
   assert(sfuEngine.isReady() === false, 'SfuClientEngine nasce com isReady() === false antes do join');
   sfuEngine.leave();
   assert(sfuEngine.isReady() === false, 'SfuClientEngine.leave() limpa o estado com segurança');
+
+  // Alvos da pré-visualização de link (#372)
+  console.log('\n--- Endereços recusados pela pré-visualização de link ---');
+  for (const interno of ['127.0.0.1', '10.0.0.5', '192.168.1.1', '172.16.4.2', '169.254.169.254', '100.64.0.1', '0.0.0.0']) {
+    assert(isPrivateAddress(interno), `${interno} é tratado como interno`);
+  }
+  for (const publico of ['8.8.8.8', '1.1.1.1', '172.32.0.1', '192.169.0.1', '99.99.99.99']) {
+    assert(!isPrivateAddress(publico), `${publico} continua alcançável`);
+  }
+  assert(isPrivateAddress('::1'), 'Loopback IPv6 é interno');
+  assert(isPrivateAddress('fd00::1'), 'Unique local IPv6 é interno');
+  assert(isPrivateAddress('fe80::1'), 'Link-local IPv6 é interno');
+  assert(isPrivateAddress('::ffff:192.168.0.1'), 'IPv4 mapeado em IPv6 não escapa da checagem');
+  assert(!isPrivateAddress('2606:4700:4700::1111'), 'IPv6 público continua alcançável');
+  assert(isPrivateHostname('localhost') && isPrivateHostname('impressora.local'), 'Nomes locais são recusados');
+  assert(!isPrivateHostname('exemplo.com'), 'Domínio comum não é recusado pelo nome');
 
   console.log(`\n=== Relatório dos Testes ===`);
   console.log(`Total: ${passed + failed} | Passaram: ${passed} | Falharam: ${failed}`);
