@@ -16,6 +16,7 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow } = require('electron');
   app.setPath('userData', process.env.MONKY_CAMERA_EFFECTS_PROFILE);
+  require('./fixtures/ciGraphics.cjs')(app);
   app.commandLine.appendSwitch('allow-loopback-in-peer-connection');
   const cpuCompositor = process.argv.includes('--cpu-compositor');
   let injectedCpuCompositors = 0;
@@ -134,7 +135,8 @@ if (!process.versions.electron) {
       if (!local) externalRequests.push(details.url);
       callback({ cancel: !local });
     });
-    timeout = setTimeout(() => { console.error('Camera effects smoke timed out'); void finish(1); }, 150000);
+    timeout = setTimeout(() => { console.error('Camera effects smoke timed out'); void finish(1); },
+      process.env.CI === 'true' ? 300000 : 150000);
     if (packaged) await window.loadFile(fixture);
     else await window.loadURL(fixture);
     await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 const require = createRequire(import.meta.url);
 const { load } = require('js-yaml');
@@ -18,6 +19,23 @@ const step = (job, name) => {
   assert.ok(result, `Missing step: ${name}`);
   return result;
 };
+
+test('camera graphics use supported CI backends without weakening macOS or changing local startup', () => {
+  const source = fs.readFileSync(path.join(root, 'apps/client/test/fixtures/ciGraphics.cjs'), 'utf8');
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    for (const enabled of [undefined, 'false', 'true']) {
+      const module = { exports: {} };
+      runInNewContext(source, { module, process: { platform, env: { CI: enabled } } });
+      const switches = [];
+      module.exports({ commandLine: { appendSwitch: (...args) => switches.push(args) } });
+      assert.deepEqual(switches, enabled !== 'true' ? [] : [
+        ['use-gl', 'angle'],
+        ['use-angle', platform === 'darwin' ? 'metal' : 'swiftshader'],
+        ...(platform === 'darwin' ? [] : [['enable-unsafe-swiftshader']]),
+      ]);
+    }
+  }
+});
 
 test('Windows DOM runs independently of native compilation while the existing required checks gate both', () => {
   const dom = ci.jobs['client-dom'];

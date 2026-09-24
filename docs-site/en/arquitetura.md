@@ -226,8 +226,12 @@ raw frames or silently switching backends.
 The model is loaded lazily and reused across blur, color and image modes.
 Reconfiguration or resolution changes reset temporal memory; during chroma
 the model stays idle without inference, retaining compiled shaders.
-The first frame has up to 30 seconds for initialization/compilation; subsequent
-frames have an 8-second watchdog. No frames are published during preparation.
+Configuration and the first frame each have up to 60 seconds for initialization
+and cold shader compilation, which can exceed 30 seconds on Metal.
+Subsequent frames retain an 8-second watchdog. No frames are published during
+preparation, and cancelling capture does not wait for these deadlines.
+CI tests use SwiftShader on Windows and Metal on macOS ARM, retaining real
+inference without changing the application's graphics selection.
 Turning effects off or ending capture releases the reader, tensors,
 textures, context and worker. Resolution and frame cadence
 follow the selected profile. The optional limiter, off by default, caps both at

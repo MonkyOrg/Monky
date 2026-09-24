@@ -6,6 +6,9 @@ import {
 } from '../../utils/cameraEffects';
 import type { CameraEffectRequest, CameraEffectResponse } from './cameraEffectProtocol';
 
+// Cold Metal shader compilation can exceed 30s; steady-state frames keep their 8s deadline.
+const STARTUP_TIMEOUT_MS = 60000;
+
 declare const MediaStreamTrackProcessor: {
   new(options: { track: MediaStreamTrack; maxBufferSize: number }): { readable: ReadableStream<VideoFrame> };
 } | undefined;
@@ -144,7 +147,7 @@ export class CameraEffectProcessor {
     const revision = this.revision;
     const operation = new Promise<MediaStream>((resolve, reject) => {
       this.pending = { revision, resolve, reject };
-      this.configurationTimeout = setTimeout(() => this.fail(new CameraEffectError('model')), 30000);
+      this.configurationTimeout = setTimeout(() => this.fail(new CameraEffectError('model')), STARTUP_TIMEOUT_MS);
       try {
         this.send({
           type: 'configure', revision, settings: { ...snapshot.settings },
@@ -290,7 +293,7 @@ export class CameraEffectProcessor {
       this.inFlightRevision = revision;
       this.frameTimeout = setTimeout(() => this.fail(new CameraEffectError('processing', {
         cause: new Error('Direct camera frame processing timed out'),
-      })), this.pending?.revision === revision ? 30000 : 8000);
+      })), this.pending?.revision === revision ? STARTUP_TIMEOUT_MS : 8000);
       void this.captureSourceFrame(this.reader, revision).catch((error: unknown) => {
         this.completeFrame(revision);
         if (revision === this.revision && !isCameraOperationCancelled(error)) {
@@ -312,7 +315,7 @@ export class CameraEffectProcessor {
       const revision = this.revision;
       this.inFlightRevision = revision;
       this.frameTimeout = setTimeout(() => this.fail(new CameraEffectError('processing')),
-        this.pending?.revision === revision ? 30000 : 8000);
+        this.pending?.revision === revision ? STARTUP_TIMEOUT_MS : 8000);
       void this.captureFrame(revision, now).catch((error: unknown) => {
         this.completeFrame(revision);
         if (revision === this.revision && !isCameraOperationCancelled(error)) {

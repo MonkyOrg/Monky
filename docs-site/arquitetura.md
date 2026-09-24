@@ -228,8 +228,12 @@ publicar frames crus ou trocar silenciosamente de backend.
 O modelo é criado sob demanda e reutilizado entre desfoque, cor e imagem.
 Reconfiguração ou mudança de tamanho reinicia a memória temporal; no chroma
 o modelo fica ocioso, sem inferência, preservando os shaders compilados.
-O primeiro frame tem até 30 segundos para inicialização/compilação; os seguintes
-têm watchdog de 8 segundos. Durante a preparação nenhum frame é publicado.
+A configuração e o primeiro frame têm até 60 segundos cada para inicialização
+e compilação fria dos shaders, que pode ultrapassar 30 segundos no Metal.
+Os frames seguintes mantêm watchdog de 8 segundos. Durante a preparação
+nenhum frame é publicado, e cancelar a captura não espera esses prazos.
+Os testes CI usam SwiftShader no Windows e Metal no macOS ARM, mantendo
+inferência real e sem alterar a seleção gráfica do aplicativo.
 Desativar efeitos ou encerrar a captura libera leitor, tensores,
 texturas, contexto e worker. Resolução e cadência seguem
 o perfil selecionado. O limitador opcional, desligado por padrão, restringe

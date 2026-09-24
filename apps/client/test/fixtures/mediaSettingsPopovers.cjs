@@ -531,7 +531,7 @@ async function runMediaSettingsPopoverSmoke() {
           const error = video.getCameraState().error;
           if (error) throw new Error(`${mode}: processed preview failed: ${error.message}`, { cause: error });
           return ready();
-        }, `${mode}: a completed background preference can start a processed preview`, 35_000);
+        }, `${mode}: a completed background preference can start a processed preview`, 125_000);
         escape();
         await video.setCameraEffects({ mode: 'off' });
         await video.removeCameraBackgroundImage();
