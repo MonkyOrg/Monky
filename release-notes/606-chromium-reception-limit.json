@@ -1,5 +1,5 @@
 {
   "group": "outros",
-  "pt-BR": "Limitação conhecida: a recepção alternativa via Chromium no Windows ainda pode apresentar congelamentos periódicos. A validação de 4K/60 foi feita no receptor nativo e não comprova a correção desse caminho alternativo.",
-  "en": "Known limitation: alternative Chromium reception on Windows can still freeze periodically. The 4K/60 validation used the native receiver and does not establish a fix for this alternative path."
+  "pt-BR": "Escolha o receptor de tela nas configurações: Windows usa Nativo por padrão, sem fallback automático. Chromium é opcional, com aviso de quedas de FPS e congelamentos conhecidos. No macOS, Chromium é o padrão e Nativo fica como Em breve.",
+  "en": "Choose screen reception in settings: Windows defaults to Native with no automatic fallback. Chromium is optional, with a warning about known FPS drops and freezes. On macOS, Chromium is the default and Native is marked Coming soon."
 }

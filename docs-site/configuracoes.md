@@ -476,7 +476,22 @@ do mouse configurado separadamente.
 
 O perfil controla o que **você transmite**; não aumenta a resolução da câmera
 ou da tela de outra pessoa. A mesma aba reúne codec, prévia local do
-compartilhamento e telemetria; os perfis continuam incluindo voz e câmera.
+compartilhamento, recepção de tela e telemetria; os perfis continuam incluindo voz e câmera.
+
+### Recepção de tela
+
+Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, escolha
+**Nativo** ou **Chromium**. No Windows, **Nativo é o padrão**, usando o runtime
+incluído no Monky. Não há fallback automático: se ele falhar, o aviso indica
+onde selecionar Chromium manualmente. A escolha é salva e vale ao começar a
+assistir ou clicar em **Tentar novamente**; para uma tela já aberta, pare de
+assistir e assista novamente. Câmera, voz e transmissão da própria tela não mudam.
+
+**Chromium tem uma limitação conhecida:** no ensaio Windows houve quedas de FPS
+e congelamentos periódicos. O aviso permanece visível nas configurações; escolher
+esse receptor não corrige a limitação. No macOS, **Chromium é o padrão** e
+**Nativo** fica desabilitado como **Em breve**. Isso permite assistir a perfis
+compatíveis, mas não habilita captura libobs no Mac nem qualifica seu desempenho.
 
 ### Perfis de qualidade
 

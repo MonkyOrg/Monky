@@ -14,7 +14,7 @@ import { emitOutsideRouting } from '../sessionRouting';
 import { clientLog } from '../ClientLogService';
 import { t } from '../../i18n';
 import { videoService, type NativeScreenCapture } from '../VideoService';
-import { settingsStore } from '../../stores/settingsStore';
+import { settingsStore, type ScreenShareReceiver } from '../../stores/settingsStore';
 import { voiceStore } from '../../stores/voiceStore';
 import { resolveAudioOutput } from '../../utils/audioPreferences';
 import { BrowserScreenSubscription } from './BrowserScreenSubscription';
@@ -34,6 +34,7 @@ export interface NativeScreenCallContext {
 export interface NativeScreenWatchState {
   readonly state: 'connecting' | 'playing' | 'unavailable';
   readonly reason?: NativeScreenFailure;
+  readonly receiver?: ScreenShareReceiver;
 }
 
 export type ScreenVideoDiagnostics =
@@ -42,6 +43,7 @@ export type ScreenVideoDiagnostics =
     reports: RTCStatsReport | null };
 
 interface Presentation {
+  readonly receiver: ScreenShareReceiver;
   readonly publisherSessionId: string;
   readonly source: NativeScreenSource;
   readonly quality: ScreenShareQuality;
@@ -705,20 +707,28 @@ export class NativeScreenController {
     video.setAttribute('aria-hidden', 'true');
     document.body.append(video);
     const entry: Presentation = {
+      receiver: settingsStore.getScreenShareReceiver(),
       publisherSessionId, source, quality, sinkId: this.sinkId, presentationId: crypto.randomUUID(),
       video, stream: null, state: { state: 'connecting' }, stopping: false, requested: false, restart: false,
     };
     call.presentations.set(key, entry);
     this.changed();
     try {
-      const native = (await this.capabilities()).receive;
       assertWanted(entry);
-      if (!native) {
+      if (entry.receiver === 'chromium') {
         entry.browser = this.createBrowserSubscription(call, entry);
         entry.requested = true;
         await entry.browser.start();
         assertWanted(entry);
         return;
+      }
+      const capabilities = await this.capabilities();
+      assertWanted(entry);
+      if (!capabilities.receive) {
+        clientLog.error('SCREEN_SHARE', 'Selected native screen receiver is unavailable; no browser fallback', {
+          reason: capabilities.reason,
+        });
+        throw new Error(t('screenShare.nativeReceiverUnavailable'));
       }
       entry.attachment = call.api.attachNativeScreenPresentation({ presentationId: entry.presentationId, elementId: video.id });
       await entry.attachment;
@@ -836,7 +846,8 @@ export class NativeScreenController {
   }
 
   public getWatchState(sessionId: string, shareId: string): NativeScreenWatchState | null {
-    return this.call?.presentations.get(keyOf(sessionId, shareId))?.state ?? null;
+    const entry = this.call?.presentations.get(keyOf(sessionId, shareId));
+    return entry ? { ...entry.state, receiver: entry.receiver } : null;
   }
 
   public getCaptureMode(sessionId: string, shareId: string): NativeScreenCaptureMode | null {
@@ -899,7 +910,7 @@ export class NativeScreenController {
         entry.video.onplaying = null;
         entry.video.pause();
         entry.video.srcObject = null;
-      } else await call.api.stopNativeScreenPresentation(entry.presentationId);
+      } else if (entry.attachment) await call.api.stopNativeScreenPresentation(entry.presentationId);
       entry.video.remove();
       entry.stream = null;
     })();
@@ -924,7 +935,7 @@ export class NativeScreenController {
     entry.stoppingTask = (async () => {
       const results = await Promise.allSettled([
         this.releasePresentation(call, entry),
-        entry.browser ? this.retireBrowser(call, entry.browser) : call.stopping ? Promise.resolve() : this.ok(call, { action: 'stop', callId: call.config.callId,
+        entry.browser ? this.retireBrowser(call, entry.browser) : call.stopping || !entry.requested ? Promise.resolve() : this.ok(call, { action: 'stop', callId: call.config.callId,
           publisherSessionId: entry.publisherSessionId, shareId: entry.source.shareId, presentationId: entry.presentationId }),
       ]);
       const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);

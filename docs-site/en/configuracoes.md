@@ -465,7 +465,22 @@ Push-to-Talk keeps its separately configured keyboard key or mouse button.
 
 The profile controls what **you transmit**; it does not increase someone
 else's camera or screen resolution. This tab also groups codec, local sharing
-preview and telemetry; profiles still include voice and camera settings.
+preview, screen reception and telemetry; profiles still include voice and camera settings.
+
+### Screen reception
+
+Under **Settings → Quality & sharing → Screen reception**, choose **Native** or
+**Chromium**. On Windows, **Native is the default**, using the runtime included
+with Monky. There is no automatic fallback: if it fails, the message explains
+where to select Chromium manually. The choice is saved and applies when you
+start watching or click **Try again**; for an open screen, stop watching and
+watch again. Camera, voice and outgoing screen sharing are unchanged.
+
+**Chromium has a known limitation:** the Windows scenario showed FPS drops and
+periodic freezes. The warning remains visible in settings; selecting this
+receiver does not fix the limitation. On macOS, **Chromium is the default** and
+**Native** is disabled as **Coming soon**. This allows watching compatible
+profiles, but does not enable libobs capture on Mac or qualify its performance.
 
 ### Quality profiles
 

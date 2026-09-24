@@ -35,6 +35,24 @@ export class QualityTab {
   public renderHtml(): string {
     const unavailableCodec = settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264';
     return `
+      <div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
+        <label>${t('settings.screenReceiverSection')}</label>
+        <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenReceiverSection'))}" aria-describedby="screen-receiver-warning screen-receiver-apply">
+          <button type="button" class="voice-mode-card input-mode-card" id="screen-receiver-native"
+            aria-pressed="${settingsStore.getScreenShareReceiver() === 'native'}" ${settingsStore.nativeScreenReceiverComingSoon ? 'disabled' : ''}>
+            <span class="input-mode-card-title">${t('settings.screenReceiverNative')}${settingsStore.nativeScreenReceiverComingSoon ? ` · ${t('screenShare.comingSoon')}` : ''}</span>
+            <span class="input-mode-card-description">${t(settingsStore.nativeScreenReceiverComingSoon ? 'settings.screenReceiverMac' : 'settings.screenReceiverNativeDesc')}</span>
+          </button>
+          <button type="button" class="voice-mode-card input-mode-card" id="screen-receiver-chromium"
+            aria-pressed="${settingsStore.getScreenShareReceiver() === 'chromium'}">
+            <span class="input-mode-card-title">Chromium</span>
+            <span class="input-mode-card-description">${t('settings.screenReceiverChromiumDesc')}</span>
+          </button>
+        </div>
+        <p id="screen-receiver-warning" class="audio-device-status" role="note" style="color: var(--warning);">${t('settings.screenReceiverWarning')}</p>
+        <p id="screen-receiver-apply" class="audio-device-status">${t('settings.screenReceiverApply')}</p>
+      </div>
+
       <!-- Quality Preset -->
       <div class="form-group">
         <label data-settings-section="quality-preset" data-settings-label="${escapeHtml(t('settings.qualitySection'))}" style="display: flex; align-items: center; gap: 6px;">
@@ -287,6 +305,19 @@ export class QualityTab {
     this.cleanup();
     this.eventController = new AbortController();
     const options = { signal: this.eventController.signal };
+    const nativeReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-native');
+    const chromiumReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-chromium');
+    for (const receiver of ['native', 'chromium'] as const) {
+      const button = receiver === 'native' ? nativeReceiver : chromiumReceiver;
+      button?.addEventListener('click', () => {
+        if (button.disabled) return;
+        try {
+          settingsStore.setScreenShareReceiver(receiver);
+          nativeReceiver?.setAttribute('aria-pressed', String(settingsStore.getScreenShareReceiver() === 'native'));
+          chromiumReceiver?.setAttribute('aria-pressed', String(settingsStore.getScreenShareReceiver() === 'chromium'));
+        } catch (error) { this.settingsError(error); }
+      }, options);
+    }
     const selectPreset = container.querySelector<HTMLSelectElement>('#select-preset');
     const presetDetails = container.querySelector<HTMLElement>('#preset-details');
     const checkboxPreviewFocus = container.querySelector<HTMLInputElement>('#checkbox-screen-preview-focus');

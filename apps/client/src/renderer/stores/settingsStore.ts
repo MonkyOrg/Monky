@@ -31,6 +31,7 @@ export type ChatSoundMode = 'inherit' | 'all' | 'mentions' | 'none';
 
 /** The resolved (effective) mode, after `inherit` has been resolved away. */
 export type ResolvedChatSoundMode = 'all' | 'mentions' | 'none';
+export type ScreenShareReceiver = 'native' | 'chromium';
 
 const CHAT_SOUND_MODES: ChatSoundMode[] = ['inherit', 'all', 'mentions', 'none'];
 const MAX_BOT_PREFERENCE_SCOPES = 256;
@@ -104,6 +105,7 @@ export class SettingsStore {
   public stickersFolderPath: string = '';
   public screenAudioVolumes: Record<string, number> = {}; // per-connection screen audio volume (#75), keyed by sessionId (#363)
   public screenShareTelemetryEnabled: boolean = false;
+  public screenShareReceiver: ScreenShareReceiver = 'native';
   public screenSharePreviewPauseWhenUnfocused: boolean = true;
   public screenShareTelemetryPosition: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' = 'top-right';
   public screenShareTelemetryMode: 'simple' | 'complete' = 'simple';
@@ -144,6 +146,7 @@ export class SettingsStore {
   }
 
   public load(notify = true): void {
+    this.screenShareReceiver = this.nativeScreenReceiverComingSoon ? 'chromium' : 'native';
     this.soundboardLimiterEnabled = false;
     this.soundboardLoudnessLimit = 6;
     this.botDownloadConfirmationExceptions = [];
@@ -159,6 +162,12 @@ export class SettingsStore {
           throw new TypeError('Saved settings must be an object');
         }
         Object.assign(this, parsed);
+        if (parsed.screenShareReceiver !== undefined && parsed.screenShareReceiver !== 'native'
+          && parsed.screenShareReceiver !== 'chromium') {
+          console.warn('[Settings] Invalid screen receiver preference; restoring the platform default.');
+        }
+        this.screenShareReceiver = this.nativeScreenReceiverComingSoon ? 'chromium'
+          : parsed.screenShareReceiver === 'chromium' ? 'chromium' : 'native';
         this.autoEntryServerKeys = restoreAutoEntryServerKeys(parsed.autoEntryServerKeys);
         this.botLocalePreferences = restoreBotLocalePreferences(parsed.botLocalePreferences);
         if (!this.userVolumes || typeof this.userVolumes !== 'object') {
@@ -579,6 +588,24 @@ export class SettingsStore {
     }
   }
 
+  public get nativeScreenReceiverComingSoon(): boolean {
+    return typeof window !== 'undefined' && window.api?.platform === 'darwin';
+  }
+
+  public getScreenShareReceiver(): ScreenShareReceiver {
+    return this.nativeScreenReceiverComingSoon ? 'chromium' : this.screenShareReceiver;
+  }
+
+  public setScreenShareReceiver(receiver: ScreenShareReceiver): void {
+    if ((receiver !== 'native' && receiver !== 'chromium') || (receiver === 'native' && this.nativeScreenReceiverComingSoon)) {
+      throw new TypeError('The selected screen receiver is unavailable on this platform.');
+    }
+    const previous = this.screenShareReceiver;
+    this.screenShareReceiver = receiver;
+    try { this.save(); }
+    catch (error) { this.screenShareReceiver = previous; throw error; }
+  }
+
   public save(): void {
     try {
       localStorage.setItem('monky_settings', JSON.stringify({
@@ -613,6 +640,7 @@ export class SettingsStore {
         stickersFolderPath: this.stickersFolderPath,
         screenAudioVolumes: this.screenAudioVolumes,
         screenShareTelemetryEnabled: this.screenShareTelemetryEnabled,
+        screenShareReceiver: this.getScreenShareReceiver(),
         screenSharePreviewPauseWhenUnfocused: this.screenSharePreviewPauseWhenUnfocused,
         screenShareTelemetryPosition: this.screenShareTelemetryPosition,
         screenShareTelemetryMode: this.screenShareTelemetryMode,

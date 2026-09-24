@@ -43,7 +43,7 @@ const profile = (width = 1280, height = 720, fps = 60) => ({
 });
 const cancelled = () => new DOMException('Modeled operation was cancelled.', 'AbortError');
 
-function fixture(t, { iceServers = [], capabilities = {
+function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false, capabilities = {
   capture: true, captureAudio: true, receive: true, backend: 'libobs-amf', reason: null,
 } } = {}) {
   const appBus = new EventEmitter();
@@ -51,6 +51,7 @@ function fixture(t, { iceServers = [], capabilities = {
   const mainListeners = new Set(), presentationListeners = new Set(), networkListeners = new Set();
   const calls = new Set(), sources = new Map(), sourceIntents = new Map(), watches = new Map();
   const elements = new Map(), attached = new Map(), retired = [], stopped = [], requests = [], replyGates = new Map();
+  const browsers = [];
   let commandHook = async () => {}, attachHook = async () => {}, current = true, connectionId = 'connection-one';
   let diagnosticsRetired = false;
   let status = 'CONNECTED', watching = false, quality = 'source', muted = false, deafened = false, volume = 100, announces = 0;
@@ -63,6 +64,7 @@ function fixture(t, { iceServers = [], capabilities = {
   }
   class Video {
     srcObject = null;
+    pause() {}
     setAttribute() {}
     remove() { elements.delete(this.id); }
   }
@@ -151,7 +153,16 @@ function fixture(t, { iceServers = [], capabilities = {
   const dependencies = {
     '@monky/shared': shared,
     './BrowserScreenSubscription': { BrowserScreenSubscription: class {
-      constructor() { throw new Error('Native controller scenarios must not create a browser receiver.'); }
+      starts = 0;
+      closes = 0;
+      constructor(options) {
+        assert.ok(allowBrowser, 'Native controller scenarios must not create a browser receiver.');
+        this.options = options;
+        browsers.push(this);
+      }
+      async start() { this.starts++; }
+      async close() { this.closes++; }
+      async setMuted() {}
     } },
     '../EventBus': { appEvents: { on: (event, listener) => {
       appBus.on(event, listener);
@@ -176,6 +187,7 @@ function fixture(t, { iceServers = [], capabilities = {
     } },
     '../../stores/settingsStore': { settingsStore: {
       getScreenAudioVolume: () => volume, screenSharePreviewPauseWhenUnfocused: true,
+      getScreenShareReceiver: () => receiver,
     } },
     '../../stores/voiceStore': { voiceStore: {
       getScreenWatchers: () => watching ? [['publisher', [remote.shareId]]] : [],
@@ -208,7 +220,8 @@ function fixture(t, { iceServers = [], capabilities = {
     assert.equal(elements.size + attached.size, 0);
     assert.equal(appBus.listenerCount('settings.updated'), 0);
   });
-  return { controller, local, captures, captureStreams, sources, commands, events, errors, replies, requests, watches, elements, stopped, retired, Stream,
+  return { controller, local, captures, captureStreams, sources, commands, events, errors, replies, requests, watches, elements, stopped, retired, Stream, browsers,
+    receiver: value => { receiver = value; },
     registerCapture: (stream, capture) => { captures.set(stream.id, capture); captureStreams.set(stream.id, stream); },
     mainListeners, networkListeners, context, get remote() { return remote; }, nativeScreenProfile: exports.nativeScreenProfile,
     replaceRemote: source => { remote = source; attachRemote(); },
@@ -235,6 +248,56 @@ function fixture(t, { iceServers = [], capabilities = {
       return gate.promise;
     },
   };
+}
+
+for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: native unavailability never starts Chromium; explicit selection allows retry`, async t => {
+    const f = fixture(t, { allowBrowser: true, capabilities: {
+      capture: false, captureAudio: false, receive: false, backend: null, reason: 'Runtime unavailable.',
+    } });
+    f.context.mode = mode;
+    f.watching(true);
+    await assert.rejects(f.controller.sync(), /nativeReceiverUnavailable/);
+    assert.equal(f.browsers.length, 0);
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).receiver, 'native');
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'unavailable');
+    assert.ok(f.errors.some(entry => entry.includes('Selected native screen receiver is unavailable; no browser fallback')));
+    assert.equal(f.commands.filter(command => command.action === 'watch' || command.action === 'stop').length, 0);
+    f.receiver('chromium');
+    await f.controller.retry('publisher', f.remote.shareId);
+    assert.equal(f.browsers.length, 1);
+    assert.equal(f.browsers[0].starts, 1);
+    assert.equal(f.browsers[0].options.call.mode, mode);
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).receiver, 'chromium');
+  });
+
+  test(`${mode}: Chromium is an explicit choice even when native reception is available`, async t => {
+    const f = fixture(t, { receiver: 'chromium', allowBrowser: true });
+    f.context.mode = mode;
+    f.watching(true);
+    await f.controller.sync();
+    assert.equal(f.browsers.length, 1);
+    assert.equal(f.commands.filter(command => command.action === 'watch' || command.action === 'capabilities').length, 0);
+    f.receiver('native');
+    await f.controller.sync();
+    assert.equal(f.browsers[0].closes, 0, 'Saving preferences must not interrupt an active subscription.');
+    await f.controller.retry('publisher', f.remote.shareId);
+    assert.ok(f.browsers[0].closes > 0);
+    assert.equal(f.commands.filter(command => command.action === 'watch').length, 1);
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).receiver, 'native');
+  });
+}
+
+for (const failure of ['capabilities', 'watch']) {
+  test(`native ${failure} failure retains the native receiver on retry`, async t => {
+    const f = fixture(t, { allowBrowser: true });
+    f.watching(true);
+    f.hook(async command => { if (command.action === failure) throw new Error('Modeled native failure.'); });
+    await assert.rejects(f.controller.sync(), /Modeled native failure/);
+    await assert.rejects(f.controller.retry('publisher', f.remote.shareId), /Modeled native failure/);
+    assert.equal(f.browsers.length, 0);
+    assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).receiver, 'native');
+  });
 }
 
 test('shutdown quiesces SFU control producers, drains admitted commands and still answers cleanup RPCs', async t => {
@@ -930,7 +993,7 @@ test('failed quality retirement displays an error and Retry completes cleanup be
   f.quality('480p30');
   await assert.rejects(f.controller.sync(), /retirement failed/);
   assert.deepEqual(f.controller.getWatchState('publisher', f.remote.shareId), {
-    state: 'unavailable', reason: 'connection-failed',
+    state: 'unavailable', reason: 'connection-failed', receiver: 'native',
   });
   f.hook(async () => {});
   await f.controller.retry('publisher', f.remote.shareId);

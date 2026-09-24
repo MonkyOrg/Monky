@@ -45,6 +45,7 @@ async function runQualitySettingsSmoke() {
     import('/core/WebRtcManager.ts'), import('/views/ScreenSharePickerModal.ts'),
   ]);
   const originalLanguage = language.getLanguage();
+  const originalApi = window.api;
   const original = {
     qualityPreset: settingsStore.qualityPreset,
     customProfile: { ...settingsStore.customProfile },
@@ -53,11 +54,13 @@ async function runQualitySettingsSmoke() {
     screenShareTelemetryMode: settingsStore.screenShareTelemetryMode,
     preferredVideoCodec: settingsStore.preferredVideoCodec,
     screenSharePreviewPauseWhenUnfocused: settingsStore.screenSharePreviewPauseWhenUnfocused,
+    screenShareReceiver: settingsStore.screenShareReceiver,
   };
   let modal;
   const disposeTooltips = initTooltips();
   try {
-    for (const locale of ['pt-BR', 'en']) {
+    for (const [locale, platform] of [['pt-BR', 'win32'], ['en', 'win32'], ['pt-BR', 'darwin'], ['en', 'darwin']]) {
+      window.api = { ...originalApi, platform };
       language.setLanguage(locale);
       settingsStore.qualityPreset = 'CUSTOM';
       settingsStore.screenShareTelemetryEnabled = false;
@@ -65,6 +68,7 @@ async function runQualitySettingsSmoke() {
       settingsStore.screenShareTelemetryMode = 'simple';
       settingsStore.screenSharePreviewPauseWhenUnfocused = true;
       settingsStore.preferredVideoCodec = 'auto';
+      settingsStore.screenShareReceiver = settingsStore.nativeScreenReceiverComingSoon ? 'chromium' : 'native';
       modal = new SettingsModal();
       for (const tab of Object.values(modal)) {
         if (tab !== modal.qualityTab && tab && typeof tab === 'object' && typeof tab.renderHtml === 'function') {
@@ -80,6 +84,29 @@ async function runQualitySettingsSmoke() {
       await settled(() => !!root.querySelector('[data-section-target="video-telemetry"]'), `${locale}/telemetry navigation`);
       const quality = root.querySelector('#tab-panel-quality');
       const voice = root.querySelector('#tab-panel-voice_video');
+      const nativeReceiver = quality.querySelector('#screen-receiver-native');
+      const chromiumReceiver = quality.querySelector('#screen-receiver-chromium');
+      const isMac = window.api.platform === 'darwin';
+      check(nativeReceiver.tagName === 'BUTTON' && chromiumReceiver.tagName === 'BUTTON'
+        && nativeReceiver.classList.contains('input-mode-card') && chromiumReceiver.classList.contains('input-mode-card'),
+      'Receiver choices must use accessible selectable cards, not native radios.');
+      check(nativeReceiver.disabled === isMac && nativeReceiver.getAttribute('aria-pressed') === String(!isMac)
+        && chromiumReceiver.getAttribute('aria-pressed') === String(isMac),
+      'Native must be the Windows default; macOS must disable native and select Chromium.');
+      check(!isMac || nativeReceiver.textContent.includes(language.t('screenShare.comingSoon')),
+        'macOS must label unavailable native reception as coming soon.');
+      check(quality.querySelector('#screen-receiver-warning').textContent === language.t('settings.screenReceiverWarning')
+        && quality.querySelector('#screen-receiver-apply').textContent === language.t('settings.screenReceiverApply'),
+      'The receiver limitation and next-Watch application policy must be visible in the selected language.');
+      check(root.querySelector('[data-section-target="screen-receiver"]')?.textContent === language.t('settings.screenReceiverSection'),
+        'Receiver settings must have a localized navigation anchor.');
+      chromiumReceiver.click();
+      settingsStore.load(false);
+      check(settingsStore.getScreenShareReceiver() === 'chromium' && chromiumReceiver.getAttribute('aria-pressed') === 'true',
+        'Explicit Chromium selection must persist across settings reload.');
+      nativeReceiver.click();
+      check(settingsStore.getScreenShareReceiver() === (isMac ? 'chromium' : 'native'),
+        'macOS cannot activate native reception; Windows can switch back explicitly.');
       const qualityTab = root.querySelector('[data-tab="quality"]');
       const menuLabel = locale === 'pt-BR' ? 'Qualidade e compartilhamento' : 'Quality & sharing';
       check(!/Verification pending|Verificação pendente/.test(quality.textContent),
@@ -250,6 +277,9 @@ async function runQualitySettingsSmoke() {
       } finally { videoService.stopScreenShare(metadataOnly.id); }
       modal.close();
       const storedAfterClose = localStorage.getItem('monky_settings');
+      chromiumReceiver.click();
+      check(localStorage.getItem('monky_settings') === storedAfterClose,
+        'Closing settings must remove detached receiver card listeners.');
       preview.checked = true;
       preview.dispatchEvent(new Event('change', { bubbles: true }));
       check(localStorage.getItem('monky_settings') === storedAfterClose && settingsStore.screenSharePreviewPauseWhenUnfocused === false,
@@ -625,6 +655,7 @@ async function runQualitySettingsSmoke() {
   } finally {
     modal?.close();
     disposeTooltips();
+    window.api = originalApi;
     Object.assign(settingsStore, original);
     settingsStore.save();
     language.setLanguage(originalLanguage);

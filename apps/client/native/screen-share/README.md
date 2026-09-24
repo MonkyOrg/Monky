@@ -15,6 +15,13 @@ Se Captura de jogo não conseguir iniciar, há uma tentativa em **Normal** para
 a mesma janela, após comprovar o encerramento da tentativa anterior.
 A recepção Chromium continua disponível para perfis H.264 que o
 dispositivo receptor consiga decodificar; isso não comprova capacidade de envio.
+Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, Windows
+usa Nativo por padrão e Chromium somente por escolha explícita, nunca como
+fallback. Uma falha nativa indica essa opção sem mudar o receptor. No macOS,
+Chromium é o padrão e Nativo permanece desabilitado como Em breve. A preferência
+salva vale para o próximo Assistir/Tentar novamente, sem interromper a recepção
+ativa, alterar câmera/voz ou a captura. O aviso de limitações Chromium permanece
+visível nas configurações.
 
 ## Fontes e verificação de disponibilidade
 

@@ -15,6 +15,13 @@ If Game Capture cannot start, one **Normal** attempt uses the same window,
 only after proving the previous attempt has retired.
 Chromium reception remains available for H.264 profiles the receiving
 device can decode; this does not prove sending capability.
+Under **Settings → Quality & sharing → Screen reception**, Windows defaults to
+Native and uses Chromium only through explicit selection, never as a fallback.
+A native failure mentions this option without switching receivers. On macOS,
+Chromium is the default and Native remains disabled as Coming soon. The saved
+preference applies to the next Watch/Try again without interrupting an active
+receiver, changing camera/voice or capture. The Chromium limitation warning
+remains visible in settings.
 
 ## Sources and availability checks
 

@@ -99,7 +99,7 @@ const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbol
 const report = { mode, fourK, fourK60, fourK120, fullHd60, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement, sourceQualityChanges, clockFeedbackStall, cadenceDiagnostics, cadenceFollowup, chromiumReceiveLog, closeAppActive, sampleSeconds,
   normalMain: true, normalPreload: true, ownedSyntheticSource: true,
   qaFocusHooks: 'owned parent IPC only; normal Main and preload checks unchanged',
-  capabilityOverride: browserReceiver ? 'viewer.receive=false (real Chromium receiver, not a macOS hardware test)' : null,
+  receiverSelection: browserReceiver ? 'explicit Chromium preference (not a macOS hardware test)' : 'native',
   recordedMedia: encodedByteTrace, phases: [] };
 const clients = [], roots = [], failures = [], sourceOwners = [];
 const cadenceFailures = [];
@@ -804,10 +804,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   settingsStore.save();
   webRtcManager.setQualityPreset('CUSTOM');
   videoService.setQualityPreset('CUSTOM');
-  if (browserReceiver) {
-    const capabilities = await webRtcManager.getNativeScreenCapabilities();
-    webRtcManager['nativeScreens']['availability'] = Promise.resolve({ ...capabilities, receive: false });
-  }
+  settingsStore.setScreenShareReceiver(browserReceiver ? 'chromium' : 'native');
   const auth = await openServerSession('127.0.0.1', port, await window.api.getIdentity(), nickname, password);
   const session = sessionManager.getActive();
   if (!session) throw new Error('The real application did not create its server session.');
