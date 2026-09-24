@@ -82,6 +82,11 @@ async function runMicrophoneTestSmoke() {
   let checks = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
   const wait = () => new Promise((resolve) => setTimeout(resolve, 65));
+  const waitFor = async (condition, message) => {
+    const deadline = performance.now() + 3000;
+    while (!condition() && performance.now() < deadline) await wait();
+    check(condition(), message);
+  };
   const original = {
     gum: navigator.mediaDevices.getUserMedia, enumerate: navigator.mediaDevices.enumerateDevices,
     AudioContext: window.AudioContext, raw: audio.getRawMicrophoneStream,
@@ -397,15 +402,23 @@ async function runMicrophoneTestSmoke() {
     voice.currentVoiceChannelId = null;
 
     button.click();
-    await wait();
+    await waitFor(() => status.textContent === t('settings.microphoneTestPlaying'), 'playback is ready before runtime error');
     const audioError = plays.at(-1);
     audioError.dispatchEvent(new Event('error'));
     await wait();
     stopped('media element runtime error stops test');
     check(audioError.srcObject === null && Boolean(status.textContent), 'runtime audio error releases playback and reports failure');
+    captureMode = 'pending';
+    pendingCapture = null;
     button.click();
-    await wait();
-    captures.at(-1).getAudioTracks()[0].dispatchEvent(new Event('ended'));
+    await waitFor(() => pendingCapture !== null, 'new capture is pending before microphone disconnect scenario');
+    const endingCapture = capture();
+    pendingCapture.resolve(endingCapture);
+    captureMode = 'normal';
+    // Capture and graph initialization are asynchronous; 65 ms does not prove the ended listener is bound.
+    await waitFor(() => status.textContent === t('settings.microphoneTestPlaying'), 'playback is ready before microphone disconnect');
+    check(endingCapture.getAudioTracks()[0].readyState === 'live', 'disconnect targets the current live microphone');
+    endingCapture.getAudioTracks()[0].dispatchEvent(new Event('ended'));
     await wait();
     stopped('microphone ending stops test');
     check(Boolean(status.textContent), 'ended microphone reports error');
