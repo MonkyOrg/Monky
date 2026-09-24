@@ -71,6 +71,24 @@ test('beta publication requires main and cannot use a manual working-branch disp
   }
 });
 
+test('Electron is explicitly installed before browser tests instead of downloading within their deadlines', () => {
+  for (const [job, dependencyStep, testStep] of [
+    [ci.jobs['light-native'], 'Prepare disposable voice interoperability fixtures',
+      'Exercise native and Chromium voice through a real isolated server'],
+    [ci.jobs['client-dom'], 'Install dependencies', 'Exercise client DOM and microphone state in Electron'],
+    [ci.jobs.package, 'Install dependencies', 'Exercise prepared application startup and scenarios'],
+  ]) {
+    const install = step(job, 'Install Electron runtime before tests');
+    assert.equal(install.run, 'npm exec --no -- install-electron');
+    assert.equal(install.if, undefined);
+    assert.equal(install['continue-on-error'], undefined);
+    assert.ok(job.steps.indexOf(install) > job.steps.indexOf(step(job, dependencyStep)));
+    assert.ok(job.steps.indexOf(install) < job.steps.indexOf(step(job, testStep)));
+  }
+  assert.doesNotMatch(step(ci.jobs['light-native'], 'Prepare disposable voice interoperability fixtures').run,
+    /npm rebuild[^\n]*\belectron\b/);
+});
+
 test('camera graphics use supported CI backends without weakening macOS or changing local startup', () => {
   const source = fs.readFileSync(path.join(root, 'apps/client/test/fixtures/ciGraphics.cjs'), 'utf8');
   for (const platform of ['win32', 'darwin', 'linux']) {

@@ -90,6 +90,18 @@ npm run start --workspace=apps/client -- --user-data-dir="C:\Projetos\Monky-qa\p
 
 ---
 
+## 🚢 Publicação de Releases: Somente por Merge de PR
+
+- **NUNCA publique releases a partir de branches de trabalho ou de integração.** Aprovar um teste local ou pedir uma release não autoriza publicar diretamente da branch.
+- **Novas versões devem sair exclusivamente do merge de um PR na `main`**, pelo workflow automático de release. Não use `workflow_dispatch`, `gh release create`, tags manuais ou upload de artefatos para contornar esse fluxo, mesmo que o CI da branch esteja aprovado.
+- O código publicado deve estar integrado à `main`. Não deixe a implementação apenas em uma branch com um PR aberto depois de anunciar a release.
+- PRs empilhados devem ser integrados na ordem correta. Antes de mergear o PR seguinte, ajuste sua base para `main`; nunca faça merge do lote na branch de outro colaborador.
+- Quando vários PRs compõem a mesma entrega, coordene os merges para publicar o conjunto completo uma única vez, sem uma versão intermediária que perca funcionalidades já publicadas.
+- Merge exige autorização explícita do desenvolvedor e as verificações aplicáveis aprovadas. Não confunda aprovação local, autorização de merge e aprovação formal de review.
+- Não promova beta para stable sem pedido explícito. Uma promoção também deve ter como origem código já integrado por PR na `main`, nunca uma beta publicada de uma branch de trabalho.
+
+---
+
 ## 🔄 Fluxo de Trabalho a partir do Board
 
 > ⚠️ **Esta seção só se aplica a quem tem acesso ao board da organização.**
@@ -134,6 +146,7 @@ flowchart TD
    - **O que foi implementado & Por quê (Explicação Didática):** Resumo claro da solução, motivação técnica e arquivos/módulos alterados.
    - **Como testar (Guia para QA/Dev):** Passo a passo reprodutível, cenários principais, casos de borda e resultados esperados.
 8. **Após o merge, aguarde a release ser gerada.**
+   - Siga a regra de **Publicação de Releases: Somente por Merge de PR** acima. Não substitua o merge por uma publicação manual da branch.
    - O push na `main` dispara automaticamente o workflow **Release** (GitHub Actions), que gera a versão SemVer (`v<MAJOR>.<MINOR>.<PATCH>`) baseada na convenção de commits:
      - **Patch** (`1.0.X`): Correções de bugs (`fix:`, `fix(...)`, `bugfix:`).
      - **Minor** (`1.X.0`): Novas funcionalidades (`feat:`, `feat(...)`, `feature:`).
