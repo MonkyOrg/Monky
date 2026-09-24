@@ -209,6 +209,7 @@ test('the extracted DOM lane preserves every existing test command and its order
     'node apps/client/test/footerControlsSmoke.cjs',
     'npm run test:transport --workspace=apps/client',
     'npm run test:bot-marketplace --workspace=apps/client',
+    'npm run test:soundboard --workspace=apps/client',
   ]);
   for (const [executable, scriptOrRun, script] of commands) {
     if (executable === 'node') assert.ok(fs.existsSync(path.join(root, ...scriptOrRun.split('/'))));

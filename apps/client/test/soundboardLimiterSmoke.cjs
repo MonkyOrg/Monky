@@ -21,6 +21,18 @@ if (!process.versions.electron) {
   let vite;
   let window;
   let timeout;
+  const capture = async fileName => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      window.webContents.invalidate();
+      await new Promise(resolve => setTimeout(resolve, 150));
+      try {
+        fs.writeFileSync(path.join(clientRoot, 'dist-test', fileName), (await window.webContents.capturePage()).toPNG());
+        return;
+      } catch (error) {
+        if (attempt === 2 || !String(error).includes('UnknownVizError')) throw error;
+      }
+    }
+  };
   const finish = async code => {
     clearTimeout(timeout);
     if (window && !window.isDestroyed()) {
@@ -85,6 +97,9 @@ if (!process.versions.electron) {
     window.webContents.focus();
     window.webContents.debugger.attach('1.3');
     await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+    });
     const key = async keyCode => {
       window.webContents.sendInputEvent({ type: 'keyDown', keyCode });
       if (keyCode === 'Space') window.webContents.sendInputEvent({ type: 'char', keyCode: ' ' });
@@ -98,6 +113,14 @@ if (!process.versions.electron) {
     });
     for (const locale of ['pt-BR', 'en']) {
       await window.webContents.executeJavaScript(`window.limiterModalSmoke.open(${JSON.stringify(locale)})`, true);
+      await key('Space');
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.opened()', true);
+      await capture(`soundboard-limiter-off-${locale}.png`);
+      await key('Tab');
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.hiddenCeilingSkipped()', true);
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.focusToggle()', true);
+      await key('Space');
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.enabled()', true);
       const start = await pointerTarget(3);
       await mouse('mouseDown', start);
       await mouse('mouseUp', start);
@@ -109,9 +132,7 @@ if (!process.versions.electron) {
       await mouse('mouseMove', end);
       await mouse('mouseUp', end);
       await window.webContents.executeJavaScript('window.limiterModalSmoke.value(4, false)', true);
-      await window.webContents.executeJavaScript('window.limiterModalSmoke.focusToggle()', true);
-      await key('Space');
-      await window.webContents.executeJavaScript('window.limiterModalSmoke.enabled()', true);
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.focusToggle(true)', true);
       await key('Tab');
       await window.webContents.executeJavaScript('window.limiterModalSmoke.sliderFocused()', true);
       await key('Left');
@@ -120,6 +141,9 @@ if (!process.versions.electron) {
       await window.webContents.executeJavaScript('window.limiterModalSmoke.value(1)', true);
       await key('End');
       await window.webContents.executeJavaScript('window.limiterModalSmoke.value(10)', true);
+      const sound = await window.webContents.executeJavaScript('window.limiterModalSmoke.playbackTarget()', true);
+      await mouse('mouseDown', sound);
+      await mouse('mouseUp', sound);
       await window.webContents.executeJavaScript('window.limiterModalSmoke.liveMeter()', true);
       await mouse('mouseDown', await pointerTarget(6));
       await mouse('mouseMove', await pointerTarget(4));
@@ -131,9 +155,27 @@ if (!process.versions.electron) {
       window.webContents.sendInputEvent({ type: 'mouseLeave', x: 0, y: 0 });
       window.setContentSize(640, 620);
       await window.webContents.executeJavaScript('window.limiterModalSmoke.visible()', true);
-      fs.writeFileSync(path.join(clientRoot, 'dist-test', `soundboard-limiter-${locale}.png`), (await window.webContents.capturePage()).toPNG());
+      await capture(`soundboard-limiter-${locale}.png`);
       window.setContentSize(1000, 850);
       await window.webContents.executeJavaScript('window.limiterModalSmoke.failuresAndCleanup()', true);
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.disclosure(false)', true);
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.sectionDisclosure(false)', true);
+      await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+      });
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.disclosure(true)', true);
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.sectionDisclosure(true)', true);
+      await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+      });
+      await key('Escape');
+      await window.webContents.executeJavaScript('window.limiterModalSmoke.escaped()', true);
+      for (const open of [true, false]) {
+        const target = await window.webContents.executeJavaScript('window.limiterModalSmoke.triggerTarget()', true);
+        await mouse('mouseDown', target);
+        await mouse('mouseUp', target);
+        await window.webContents.executeJavaScript(`window.limiterModalSmoke.mouseTrigger(${open})`, true);
+      }
     }
     const modalChecks = await window.webContents.executeJavaScript('window.limiterModalSmoke.finish()', true);
     console.log(`Soundboard modal limiter: ${modalChecks} checks passed (native keyboard, PT/EN, shared preferences, failures, resize and cleanup)`);
@@ -143,7 +185,7 @@ if (!process.versions.electron) {
   }).catch(async error => {
     console.error(error);
     if (window && !window.isDestroyed()) {
-      fs.writeFileSync(path.join(clientRoot, 'dist-test', 'soundboard-limiter-failure.png'), (await window.webContents.capturePage()).toPNG());
+      try { await capture('soundboard-limiter-failure.png'); } catch (captureError) { console.warn(captureError); }
     }
     await finish(1);
   });
@@ -247,7 +289,8 @@ async function runSmoke(fixture) {
       const slider = root.querySelector('#slider-soundboard-ceiling');
       check(!!toggle.closest('.toggle-switch'), 'Limiter activation uses the accessible switch component');
       if (!settingsStore.soundboardLimiterEnabled) {
-        check(!slider.disabled, 'The ceiling can be configured before opting in');
+        check(slider.disabled && root.querySelector('[data-limiter-details]').inert,
+          'The disabled ceiling is collapsed and unavailable to keyboard input before opting in');
         toggle.click();
         await until(() => !toggle.disabled, 'Limiter readiness check did not finish');
       }
@@ -340,9 +383,52 @@ async function setupModalSmoke() {
   };
   const toggle = () => document.getElementById('checkbox-soundboard-modal-limiter');
   const slider = () => document.getElementById('slider-soundboard-modal-ceiling');
+  const trigger = () => document.getElementById('sb-btn-settings');
+  const panel = () => document.getElementById('sb-settings-section');
+  const expanded = () => trigger().getAttribute('aria-expanded') === 'true';
+  const checkTriggerHighlight = async open => {
+    trigger().getBoundingClientRect();
+    await until(() => trigger().getAnimations().every(animation => animation.playState === 'finished'),
+      'Button color transition did not finish');
+    const probe = document.createElement('span');
+    probe.style.color = open ? 'var(--accent-primary)' : trigger().matches(':hover') ? 'var(--text-primary)' : 'var(--text-secondary)';
+    probe.style.backgroundColor = open ? 'color-mix(in srgb, var(--accent-primary) 15%, transparent)'
+      : trigger().matches(':hover') ? 'var(--bg-card-hover)' : 'var(--bg-card)';
+    root.append(probe);
+    const expected = getComputedStyle(probe);
+    const actual = getComputedStyle(trigger());
+    check(actual.color === expected.color && actual.backgroundColor === expected.backgroundColor,
+      `Button colors must indicate ${open ? 'open' : 'closed'}, independently of limiting being enabled: ${JSON.stringify({
+        color: actual.color, background: actual.backgroundColor, expectedColor: expected.color,
+        expectedBackground: expected.backgroundColor, hover: trigger().matches(':hover'), enabled: settingsStore.soundboardLimiterEnabled,
+        expanded: expanded(), animations: trigger().getAnimations().map(animation => animation.playState),
+      })}`);
+    check(actual.borderColor === 'rgba(0, 0, 0, 0)', 'The settings button has no decorative border resembling a focus ring');
+    probe.remove();
+  };
+  const settleSection = async open => {
+    await until(() => {
+      const height = panel().getBoundingClientRect().height;
+      return expanded() === open && (open ? height > 0 : height === 0)
+        && panel().getAnimations({ subtree: true }).every(animation => animation.playState === 'finished');
+    }, 'Inline settings must settle at their expected height');
+  };
+  const details = () => [...document.querySelectorAll('[data-limiter-details]')];
+  const settle = async enabled => {
+    await until(() => details().every(element => {
+      const height = element.getBoundingClientRect().height;
+      return element.getAnimations({ subtree: true }).every(animation => animation.playState === 'finished')
+        && (enabled ? height > 0 : height === 0);
+    }), 'Both limiter disclosures must finish at their expected height');
+  };
   const dismiss = async key => {
     await until(() => document.querySelector('.dialog-card'), 'Expected limiter error dialog');
     check(document.querySelector('.dialog-message').textContent === language.t(key), 'Failures use the selected language');
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const button = document.querySelector('.dialog-card [data-action="confirm"]');
+    const rect = button.getBoundingClientRect();
+    check(button.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)),
+      'Error dialogs stay above quick settings and can be acknowledged with a pointer');
     document.querySelector('.dialog-card [data-action="confirm"]').click();
     await until(() => !toggle().disabled, 'Limiter remained busy after acknowledging the error');
   };
@@ -357,25 +443,59 @@ async function setupModalSmoke() {
       root.innerHTML = tab.renderHtml();
       tab.attachEvents(root);
       await modal.open();
-      check(toggle().closest('.sb-limiter-toolbar') !== null, 'The limiter is directly visible below the modal volume toolbar');
+      check(panel().getBoundingClientRect().height === 0 && panel().inert && !document.querySelector('.sb-limiter-toolbar'),
+        'Inline settings occupy no space and are inert when initially closed');
+      check(!trigger().hasAttribute('aria-haspopup') && !expanded() && trigger().getAttribute('aria-controls') === panel().id,
+        'The compact trigger exposes an inline disclosure, not a popup dialog');
+      check(trigger().title.includes(language.t('soundboard.limiterInactive')), 'The tooltip exposes the saved disabled state');
+      await checkTriggerHighlight(false);
+      trigger().focus();
+    },
+    async opened() {
+      await settleSection(true);
+      await checkTriggerHighlight(true);
+      check(panel().parentElement.classList.contains('sb-modal-body') && !!panel().closest('.soundboard-modal-card'),
+        'Settings are in normal flow inside the soundboard, not floating above sounds');
+      const heading = document.getElementById(panel().getAttribute('aria-labelledby'));
+      const description = document.getElementById(panel().getAttribute('aria-describedby'));
+      check(panel().getAttribute('role') === 'region' && heading?.textContent === language.t('soundboard.limiterTitle'),
+        'Inline settings has a visible localized heading as its accessible name');
+      check(description?.textContent === language.t('soundboard.limiterHint'), 'A localized explanation gives context before enabling the limiter');
+      for (const element of [heading, description]) {
+        const rect = element.getBoundingClientRect();
+        check(rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility === 'visible'
+          && !element.closest('[inert], [aria-hidden="true"]'),
+          'Heading and explanation remain visible and accessible when the ceiling is collapsed');
+      }
+      check(document.activeElement === toggle(), 'Opening moves keyboard focus to the switch');
       check(toggle().getAttribute('role') === 'switch' && toggle().closest('.toggle-switch'), 'Uses the accessible switch, not an isolated checkbox');
-      check(toggle().labels[0].textContent === language.t('settings.soundboardLimiter'), 'Switch has a localized accessible name');
+      check(toggle().labels[0].textContent === language.t('soundboard.enableLimiter'), 'The inline switch uses a concise localized accessible name');
+      check(root.querySelector('#checkbox-soundboard-limiter').labels[0].textContent === language.t('settings.soundboardLimiter'),
+        'The full settings view retains its descriptive switch label');
       check(slider().labels[0].textContent === language.t('settings.soundboardCeiling'), 'Slider has a localized accessible name');
-      check(!slider().disabled && !toggle().checked, 'Limiting starts off but choosing its ceiling is allowed');
+      check(slider().disabled && !toggle().checked, 'Limiting starts off with an inaccessible hidden ceiling');
+      await settle(false);
+      for (const element of details()) {
+        check(element.inert && element.getAttribute('aria-hidden') === 'true', 'Both collapsed panels are inert and hidden from assistive technology');
+      }
       check(document.querySelector('[data-limiter-meter]').hidden, 'No fabricated level is shown while idle');
+    },
+    hiddenCeilingSkipped() {
+      check(expanded() && document.activeElement.id === 'sb-search-input', 'Tab skips the disabled ceiling without closing settings');
     },
     pointerTarget(value) {
       const rect = slider().getBoundingClientRect();
       return { x: Math.round(rect.left + 7 + (rect.width - 14) * (value - 1) / 9), y: Math.round(rect.top + rect.height / 2) };
     },
-    focusToggle() {
-      check(!settingsStore.soundboardLimiterEnabled, 'Editing a ceiling does not silently activate limiting');
+    focusToggle(enabled = false) {
+      check(settingsStore.soundboardLimiterEnabled === enabled, 'Opening the panel does not change the limiter preference');
       settingsStore.soundboardLoudnessLimit = 6;
       settingsStore.save();
       toggle().focus();
     },
     async enabled() {
       await until(() => settingsStore.soundboardLimiterEnabled && !toggle().disabled, 'Native Space did not enable the limiter');
+      await settle(true);
       check(root.querySelector('#checkbox-soundboard-limiter').checked, 'Modal activation synchronizes the settings view');
       check(document.activeElement === toggle(), 'Keyboard focus survives asynchronous preparation');
       check(getComputedStyle(toggle().closest('.toggle-switch')).outlineStyle === 'solid',
@@ -383,6 +503,15 @@ async function setupModalSmoke() {
     },
     sliderFocused() {
       check(document.activeElement === slider(), 'Native Tab reaches the ceiling control');
+    },
+    async playbackTarget() {
+      const button = document.querySelector('.soundboard-modal-card .sb-sound-btn');
+      button.scrollIntoView({ block: 'nearest' });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const rect = button.getBoundingClientRect();
+      const point = { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+      check(button.contains(document.elementFromPoint(point.x, point.y)), 'Inline settings never cover the actual sound playback target');
+      return point;
     },
     async value(expected, keyboard = true) {
       await until(() => settingsStore.soundboardLoudnessLimit === expected,
@@ -398,7 +527,8 @@ async function setupModalSmoke() {
       settingsStore.soundboardLoudnessLimit = 6;
       settingsStore.soundboardVolume = 100;
       settingsStore.save();
-      check(await soundboardService.playSound('authored.wav'), 'Real audio drives the modal meter');
+      await until(() => soundboardService.activePlaybacks.has('local'), 'Native sound click did not start real playback');
+      check(expanded() && !panel().inert, 'Clicking and focusing a sound keeps inline settings open');
       const playback = soundboardService.activePlaybacks.get('local');
       check(!!playback, 'The meter has an actual preview source');
       playback.audio.loop = true;
@@ -421,31 +551,38 @@ async function setupModalSmoke() {
       settingsStore.soundboardVolume = 8;
       settingsStore.save();
       await until(() => controls.dataset.intensityState === 'below' && soundboardService.getIntensity() > 0,
-        'Quieter audio did not enter the green band');
+        'Quieter audio did not enter the below-ceiling state');
       check(controls.querySelector('[data-limiter-status]').textContent === language.t('soundboard.intensityBelow'),
-        'Green has a textual meaning, not color alone');
+        'Below-ceiling state is textual');
       settingsStore.soundboardVolume = 13;
       settingsStore.save();
-      await until(() => controls.dataset.intensityState === 'near', 'Audio near the ceiling did not enter the yellow band');
+      await until(() => controls.dataset.intensityState === 'near', 'Audio did not enter the near-ceiling state');
       check(controls.querySelector('[data-limiter-status]').textContent === language.t('soundboard.intensityNear'),
-        'Yellow has a textual meaning');
+        'Near-ceiling state is textual');
       settingsStore.soundboardVolume = 25;
       settingsStore.save();
       await until(() => controls.dataset.intensityState === 'above' && soundboardService.getIntensity() < 9,
-        'Louder audio did not return to the red band');
+        'Louder audio did not return to the above-ceiling state');
       const expected = (soundboardService.getIntensity() - 1) / 9;
       const marker = meter.getBoundingClientRect();
       const bounds = track.getBoundingClientRect();
       check(Math.abs(marker.x + marker.width / 2 - (bounds.x + 7 + (bounds.width - 14) * expected)) < 1,
         'The marker moves to the measured position rather than a CSS default');
-      check(getComputedStyle(controls.querySelector('.sb-limiter-bands')).backgroundImage.includes('linear-gradient'),
-        'Color bands are actually painted on the slider track');
+      const rail = getComputedStyle(controls.querySelector('.sb-limiter-bands')).backgroundImage;
+      const probe = document.createElement('span');
+      controls.appendChild(probe);
+      for (const variable of ['--success', '--warning', '--danger']) {
+        probe.style.color = `var(${variable})`;
+        check(!rail.includes(getComputedStyle(probe).color), `The neutral rail must not use ${variable}`);
+      }
+      probe.remove();
+      check(!controls.querySelector('.sb-limiter-legend'), 'No decorative colored legend remains');
       const before = soundboardService.getIntensity();
       settingsStore.soundboardLoudnessLimit = 9;
       settingsStore.save();
       check(controls.dataset.intensityState === 'below', 'Moving the ceiling reclassifies the same signal immediately');
       check(soundboardService.getIntensity() === before, 'Moving the ceiling does not fabricate a different source level');
-      check(track.style.getPropertyValue('--limit-position').startsWith('88.88'), 'Color boundaries follow the selected ceiling');
+      check(track.style.getPropertyValue('--limit-position').startsWith('88.88'), 'Neutral fill follows the selected ceiling');
       let bypassReports = 0;
       const unbindReports = appEvents.on('soundboard.intensity', () => { bypassReports++; });
       try {
@@ -454,20 +591,36 @@ async function setupModalSmoke() {
         await until(() => bypassReports >= 3 && soundboardService.getIntensity() > 7 && soundboardService.getIntensity() < 8,
           'Fresh meter reports must continue when limiting is bypassed');
       } finally { unbindReports(); }
-      check(!meter.hidden && !slider().disabled && controls.querySelector('[data-limiter-status]').textContent === language.t('soundboard.limiterInactive'),
-        'Measurement and ceiling adjustment remain usable while the limiter is off');
+      await settle(false);
+      check(!meter.hidden && slider().disabled && controls.querySelector('[data-limiter-details]').inert
+        && controls.querySelector('[data-limiter-status]').textContent === language.t('soundboard.limiterInactive'),
+        'Fresh measurement continues internally while disabled controls are collapsed and inaccessible');
       settingsStore.soundboardLimiterEnabled = true;
       settingsStore.soundboardLoudnessLimit = 6;
       settingsStore.save();
+      await settle(true);
+      trigger().click();
+      await settleSection(false);
+      check(soundboardService.activePlaybacks.get('local') === playback && !playback.audio.paused
+        && soundboardService.audioOutput.graph.limiter.parameters.get('enabled').value === 1,
+        'Collapsing the settings UI neither stops playback nor disables its saved limiter');
+      await checkTriggerHighlight(false);
+      trigger().click();
+      await settleSection(true);
+      await checkTriggerHighlight(true);
+      check(!meter.hidden && slider().value === '6' && soundboardService.activePlaybacks.get('local') === playback,
+        'Reopening during playback restores live measurement without restarting the sound');
+      document.querySelector('.soundboard-modal-card .sb-modal-body').scrollTop = 0;
+      check(expanded(), 'Scrolling between sounds and the ceiling does not dismiss settings');
     },
     async visible() {
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      const card = document.querySelector('.soundboard-modal-card').getBoundingClientRect();
+      const card = { top: 0, bottom: innerHeight, left: 0, right: innerWidth };
       for (const element of [toggle().closest('.toggle-switch'), slider(), document.getElementById('sb-btn-close')]) {
         const box = element.getBoundingClientRect();
         check(box.width > 0 && box.height > 0 && box.top >= card.top && box.bottom <= card.bottom + 1 &&
           box.left >= card.left && box.right <= card.right + 1,
-          `Limiter and close button remain visible at 640x620: ${JSON.stringify({ id: element.id, box: box.toJSON(), card: card.toJSON() })}`);
+          `Limiter and close button remain visible at 640x620: ${JSON.stringify({ id: element.id, box: box.toJSON(), card })}`);
       }
       const box = slider().getBoundingClientRect();
       check(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === slider(), 'The ceiling is not covered by another modal surface');
@@ -490,6 +643,7 @@ async function setupModalSmoke() {
         slider().dispatchEvent(new Event('input', { bubbles: true }));
       } finally { Storage.prototype.setItem = setItem; }
       await dismiss('soundboard.limiterSaveFailed');
+      check(expanded(), 'A save error dialog does not collapse inline settings');
       check(settingsStore.soundboardLoudnessLimit === 4 && slider().value === '4',
         'A failed save rolls back the ceiling and the visible value');
       Storage.prototype.setItem = function(key, value) {
@@ -510,7 +664,7 @@ async function setupModalSmoke() {
       try {
         toggle().click();
         await dismiss('soundboard.limiterUnavailable');
-        check(!settingsStore.soundboardLimiterEnabled && !toggle().checked && !slider().disabled,
+        check(!settingsStore.soundboardLimiterEnabled && !toggle().checked && slider().disabled,
           'An unavailable graph cannot be enabled from the modal');
       } finally { soundboardService.prepareLimiter = prepare; }
       let resolve;
@@ -518,6 +672,13 @@ async function setupModalSmoke() {
       try {
         toggle().click();
         check(toggle().disabled, 'Preparation blocks duplicate requests');
+        trigger().click();
+        resolve();
+        await new Promise(done => setTimeout(done, 20));
+        check(!expanded() && panel().inert && !settingsStore.soundboardLimiterEnabled,
+          'Collapsing settings during preparation cannot activate a stale control');
+        trigger().click();
+        toggle().click();
         modal.close();
         resolve();
         await new Promise(done => setTimeout(done, 20));
@@ -526,6 +687,7 @@ async function setupModalSmoke() {
       const settingsOnly = subscriptions();
       for (let count = 0; count < 5; count++) {
         await modal.open();
+        trigger().click();
         const detached = slider();
         modal.close();
         detached.value = '8';
@@ -534,7 +696,137 @@ async function setupModalSmoke() {
         check(subscriptions() === settingsOnly, 'Repeated openings do not retain settings listeners');
       }
       await modal.open();
+      trigger().click();
       check(slider().value === '4' && !toggle().checked, 'Reopening restores the shared preference');
+    },
+    async disclosure(reduced) {
+      await settle(false);
+      await settleSection(true);
+      check(matchMedia('(prefers-reduced-motion: reduce)').matches === reduced, 'The test controls the system motion preference');
+      const library = document.getElementById('sb-sounds-container');
+      const libraryOffset = () => library.getBoundingClientRect().top - panel().getBoundingClientRect().top;
+      const before = libraryOffset();
+      const ceiling = settingsStore.soundboardLoudnessLimit;
+      toggle().click();
+      await until(() => settingsStore.soundboardLimiterEnabled && !toggle().disabled, 'Disclosure activation did not finish');
+      for (const element of details()) {
+        element.getBoundingClientRect();
+        check(!element.inert && element.getAttribute('aria-hidden') === 'false', 'Enabled details are exposed to keyboard and assistive technology');
+        const animations = element.getAnimations({ subtree: true });
+        if (reduced) {
+          check(animations.length === 0 && getComputedStyle(element).transitionDuration === '0s',
+            'Reduced motion expands immediately without any animation');
+        } else {
+          check(animations.some(animation => animation.transitionProperty === 'grid-template-rows'),
+            'Disclosure animates actual layout height rather than only opacity');
+          for (const animation of animations) {
+            animation.pause();
+            animation.currentTime = Number(animation.effect.getTiming().duration) / 2;
+          }
+          const intermediate = element.getBoundingClientRect().height;
+          for (const animation of animations) animation.finish();
+          check(intermediate > 0 && intermediate < element.getBoundingClientRect().height,
+            'The rendered disclosure passes through an intermediate height');
+        }
+      }
+      await settle(true);
+      check(trigger().title.includes(language.t('settings.soundboardLimitLevel', { level: ceiling })),
+        'The tooltip still reflects the enabled ceiling without a permanent text row');
+      await checkTriggerHighlight(true);
+      check(libraryOffset() > before && library.getBoundingClientRect().top >= panel().getBoundingClientRect().bottom,
+        'Expanding controls pushes the sound library down instead of covering it');
+      slider().focus();
+      settingsStore.soundboardLimiterEnabled = false;
+      settingsStore.save();
+      check(document.activeElement === toggle(), 'External disabling returns focus from the collapsed slider to its switch');
+      check(slider().disabled && details().every(element => element.inert), 'Collapsed controls immediately leave keyboard navigation');
+      if (!reduced) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        toggle().click();
+        await until(() => settingsStore.soundboardLimiterEnabled && !toggle().disabled, 'Rapid reversal failed to reopen');
+        toggle().click();
+      }
+      await settle(false);
+      check(settingsStore.soundboardLoudnessLimit === ceiling && slider().value === String(ceiling), 'Closing and reversing animations preserve the chosen ceiling');
+      await checkTriggerHighlight(true);
+      const search = document.getElementById('sb-search-input');
+      search.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      search.focus();
+      search.value = 'Authored';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      check(expanded() && !panel().inert, 'Clicking, focusing and searching elsewhere in the library keeps settings open');
+      search.value = '';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    },
+    async sectionDisclosure(reduced) {
+      await settleSection(true);
+      const ceiling = settingsStore.soundboardLoudnessLimit;
+      const openSubscriptions = subscriptions();
+      trigger().click();
+      check(!expanded() && panel().inert && panel().getAttribute('aria-hidden') === 'true',
+        'The settings button immediately removes collapsed controls from keyboard navigation');
+      const checkTransition = opening => {
+        panel().getBoundingClientRect();
+        const animations = panel().getAnimations();
+        if (reduced) {
+          check(animations.length === 0 && getComputedStyle(panel()).transitionDuration === '0s',
+            'The outer section also respects reduced motion');
+        } else {
+          check(animations.some(animation => animation.transitionProperty === 'grid-template-rows'),
+            `The outer section animates layout while ${opening ? 'opening' : 'closing'}`);
+          for (const animation of animations) {
+            animation.pause();
+            animation.currentTime = Number(animation.effect.getTiming().duration) / 2;
+          }
+          const intermediate = panel().getBoundingClientRect().height;
+          for (const animation of animations) animation.finish();
+          const final = panel().getBoundingClientRect().height;
+          check(intermediate > 0 && (opening ? intermediate < final : final === 0),
+            'The real section height passes through an intermediate value');
+        }
+      };
+      checkTransition(false);
+      await settleSection(false);
+      await checkTriggerHighlight(false);
+      check(subscriptions() === openSubscriptions - 2, 'Collapsed settings release their limiter subscriptions');
+      slider().value = '8';
+      slider().dispatchEvent(new Event('input', { bubbles: true }));
+      check(settingsStore.soundboardLoudnessLimit === ceiling, 'Collapsed controls cannot mutate settings programmatically');
+      trigger().click();
+      checkTransition(true);
+      await settleSection(true);
+      await checkTriggerHighlight(true);
+      check(slider().value === String(ceiling) && subscriptions() === openSubscriptions,
+        'Reopening restores saved values without duplicating listeners');
+      if (!reduced) {
+        trigger().click();
+        await new Promise(resolve => setTimeout(resolve, 50));
+        trigger().click();
+        trigger().click();
+        trigger().click();
+        await settleSection(true);
+        check(subscriptions() === openSubscriptions, 'Rapid reversals leave only the current limiter binding active');
+      }
+    },
+    async escaped() {
+      await settleSection(false);
+      check(panel().inert && document.activeElement === trigger(),
+        'Native Escape collapses the section and restores focus without closing soundboard');
+      await checkTriggerHighlight(false);
+      check(trigger().matches(':focus-visible') && getComputedStyle(trigger()).outlineStyle === 'solid',
+        'Keyboard navigation retains an accessible focus indicator');
+    },
+    async triggerTarget() {
+      trigger().scrollIntoView({ block: 'nearest' });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const rect = trigger().getBoundingClientRect();
+      return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+    },
+    async mouseTrigger(open) {
+      await settleSection(open);
+      await checkTriggerHighlight(open);
+      check(!trigger().matches(':focus-visible') && getComputedStyle(trigger()).outlineStyle === 'none',
+        'Native mouse activation does not leave a keyboard focus ring on the settings button');
     },
     finish() {
       soundboardService.stopSound();

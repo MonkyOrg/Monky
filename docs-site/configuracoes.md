@@ -386,19 +386,30 @@ para formatos, envio e permissões.
 
 **Controlar sons muito altos** fica desligado por padrão. Mesmo desligado,
 ajuste o **Teto de intensidade** de **1 a 10**; o valor inicial é **6**.
-Ative o switch para aplicar o teto escolhido.
+Ative o switch para exibir os controles e aplicar o teto escolhido. Ao desligar,
+os controles recolhem sem apagar o valor salvo. A expansão e o recolhimento são
+suaves e respeitam a preferência de movimento reduzido do sistema.
 Quanto menor o teto, maior a redução dos sons excessivamente altos.
 Sons abaixo do teto mantêm o volume; sons mais baixos nunca são amplificados.
-O mesmo switch e o ajuste do teto ficam diretamente no **modal do Soundboard**,
-logo abaixo dos controles de volume, sem precisar abrir as configurações.
+No **modal do Soundboard**, clique no botão **Ajustes da soundboard**, ao lado do
+volume, para expandir uma seção dentro do modal, abaixo do volume e sem cobrir
+a lista de sons. Ela começa recolhida e mantém o visual de **Controle de
+intensidade**, com uma explicação mesmo quando o limitador está desligado.
+Use **Limitar sons altos** para revelar o ajuste de teto e o medidor.
+A seção permanece aberta ao reproduzir, parar, buscar ou trocar de som, para
+ajustar o teto enquanto escuta. Clique novamente no botão de ajustes ou pressione
+**Esc** dentro do modal para recolher; clicar nos sons não fecha os ajustes.
+As alterações são salvas automaticamente. O botão fica azul somente enquanto a
+seção está aberta e volta à cor neutra quando recolhida, mesmo com o limitador
+ligado. O nível continua no tooltip. Recolher a seção devolve o espaço à biblioteca.
 As duas telas compartilham a preferência e podem ser operadas pelo teclado.
 Durante a reprodução, um marcador na barra mostra a intensidade **antes da
 redução**, na mesma escala do teto. A bolinha de arraste define o limite;
 o marcador móvel e o valor “Antes do limite” mostram o áudio real.
-Verde indica abaixo do teto, amarelo indica até um nível abaixo dele e vermelho
-indica acima. As faixas acompanham o teto escolhido. Um valor maior que 10
-continua visível no texto, mesmo quando o marcador chega ao fim da barra.
-As cores ajudam a escolher o corte; não diagnosticam distorção no arquivo.
+A barra usa uma escala neutra, sem faixas coloridas. O texto informa se o som
+está abaixo, perto ou acima do teto. Um valor maior que 10 continua visível
+no texto, mesmo quando o marcador chega ao fim da barra. A escala e o efeito
+do limitador não mudam.
 
 O teto é aplicado depois de misturar os soundboards, inclusive suas prévias
 locais, e depois do volume escolhido: vários sons simultâneos também respeitam

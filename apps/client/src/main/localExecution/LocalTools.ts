@@ -243,6 +243,17 @@ export class LocalTools {
     };
   }
 
+  /** Read-only, integrity-checked reuse; never prepares/downloads tools implicitly. */
+  async readyExecutable(tool: LocalToolId): Promise<string | null> {
+    if (!localToolIdSchema.safeParse(tool).success) throw new LocalExecutionError('invalid_request');
+    await this.initialize();
+    this.assertAvailable(this.lifetime.signal, this.generation);
+    if (this.tools[tool].status === 'installing' || this.tools[tool].status === 'removing') return null;
+    const info = await this.inspect(tool, this.lifetime.signal, true);
+    this.assertAvailable(this.lifetime.signal, this.generation);
+    return info.status === 'ready' ? localToolPath(this.root, 'tools', tool, this.executableName(tool)) : null;
+  }
+
   async snapshot(): Promise<{ supported: boolean; tools: LocalToolInfo[]; toolsBytes: number; cacheBytes: number }> {
     try {
       await this.initialize();

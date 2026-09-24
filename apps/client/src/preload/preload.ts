@@ -4,6 +4,7 @@ import {
   createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
 } from '@monky/screen-share';
 import * as nativeAudioProtocol from '@monky/shared';
+import { SOUNDBOARD_FILES_IPC, type IpcInvokeChannels } from '@monky/shared';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
 import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
@@ -126,6 +127,12 @@ export interface ElectronApi {
   getDefaultSoundboardFolder: () => Promise<string | null>;
   listSoundboardSounds: (folderPath: string) => Promise<SoundboardSoundEntry[]>;
   readSoundboardSound: (filePath: string) => Promise<SoundboardSoundData | null>;
+  readSoundboardEdit: (input: IpcInvokeChannels['soundboard:edit-read']['args'][0]) => Promise<IpcInvokeChannels['soundboard:edit-read']['returnType']>;
+  openSoundboardEditor: (input: IpcInvokeChannels['soundboard:open-editor']['args'][0]) => Promise<IpcInvokeChannels['soundboard:open-editor']['returnType']>;
+  overwriteSoundboardAudio: (input: IpcInvokeChannels['soundboard:overwrite-audio']['args'][0]) => Promise<IpcInvokeChannels['soundboard:overwrite-audio']['returnType']>;
+  renameSoundboardFile: (input: IpcInvokeChannels['soundboard:rename-file']['args'][0]) => Promise<IpcInvokeChannels['soundboard:rename-file']['returnType']>;
+  deleteSoundboardFile: (input: IpcInvokeChannels['soundboard:delete-file']['args'][0]) => Promise<IpcInvokeChannels['soundboard:delete-file']['returnType']>;
+  saveSoundboardEdit: (input: IpcInvokeChannels['soundboard:save-edited-copy']['args'][0]) => Promise<IpcInvokeChannels['soundboard:save-edited-copy']['returnType']>;
   soundDownloadAvailability: (configuredFolder: string) => Promise<SoundboardDownloadAvailability>;
   confirmSoundboardFolder: (configuredFolder: string) => Promise<boolean>;
   authorizeSoundDownload: (input: SoundboardDownloadAuthorization) => Promise<SoundboardDownloadPermit>;
@@ -343,6 +350,12 @@ const api: ElectronApi = {
   getDefaultSoundboardFolder: () => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.defaultFolder),
   listSoundboardSounds: (folderPath) => ipcRenderer.invoke('soundboard:list-sounds', folderPath),
   readSoundboardSound: (filePath) => ipcRenderer.invoke('soundboard:read-sound', filePath),
+  readSoundboardEdit: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.read, input),
+  openSoundboardEditor: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.open, input),
+  overwriteSoundboardAudio: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.overwrite, input),
+  renameSoundboardFile: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.rename, input),
+  deleteSoundboardFile: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.delete, input),
+  saveSoundboardEdit: (input) => ipcRenderer.invoke(SOUNDBOARD_FILES_IPC.edit, input),
   soundDownloadAvailability: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.availability, folder),
   confirmSoundboardFolder: (folder) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.confirmFolder, folder),
   authorizeSoundDownload: (input) => ipcRenderer.invoke(SOUND_DOWNLOAD_IPC.authorize, input),

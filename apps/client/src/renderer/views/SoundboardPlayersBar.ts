@@ -14,10 +14,7 @@ interface PlaybackProgressPayload {
 const EXIT_ANIMATION_MS = 160;
 
 /**
- * Soundboard playback bars living in the sidebar, right where the screen-share
- * notice appears (#517). They used to be inside the soundboard modal, which
- * meant the only way to see what was playing — or to stop it — was to keep that
- * modal open. Bars queue up, one per person playing, and animate in and out.
+ * Shared sidebar/modal transport view. Mounting never starts or stops audio.
  */
 export class SoundboardPlayersBar {
   private slot: HTMLElement | null = null;
@@ -37,11 +34,13 @@ export class SoundboardPlayersBar {
     appEvents.on('soundboard.playback_started', onStarted);
     appEvents.on('soundboard.playback_progress', onProgress);
     appEvents.on('soundboard.playback_ended', onEnded);
+    appEvents.on('soundboard.playback_changed', onStarted);
 
     this.unbindEvents.push(() => {
       appEvents.off('soundboard.playback_started', onStarted);
       appEvents.off('soundboard.playback_progress', onProgress);
       appEvents.off('soundboard.playback_ended', onEnded);
+      appEvents.off('soundboard.playback_changed', onStarted);
     });
   }
 
@@ -68,7 +67,7 @@ export class SoundboardPlayersBar {
   private sync(): void {
     if (!this.slot) return;
 
-    const playbacks = soundboardService.getActivePlaybacks();
+    const playbacks = soundboardService.getActivePlaybacks(true);
     const activeIds = new Set(playbacks.map((p) => p.userId));
 
     for (const bar of Array.from(this.slot.children) as HTMLElement[]) {
@@ -82,6 +81,7 @@ export class SoundboardPlayersBar {
       ) as HTMLElement | null;
 
       if (existing) {
+        existing.classList.toggle('is-paused', playback.audio.paused);
         // The same user swapped sounds (#156): the previous bar is mid-exit
         // because its `playback_ended` fired a tick before the new sound's
         // `playback_started`. Cancel the pending removal, bring the bar back and
@@ -94,11 +94,16 @@ export class SoundboardPlayersBar {
           existing.setAttribute('data-sound', playback.soundName);
           existing.innerHTML = this.renderBarInnerHtml(playback);
         }
+        this.updateProgress({
+          userId: playback.userId, currentTime: playback.audio.currentTime, duration: playback.audio.duration,
+          percent: playback.audio.duration > 0 ? playback.audio.currentTime / playback.audio.duration * 100 : 0,
+        });
         continue;
       }
 
       const bar = document.createElement('div');
       bar.className = 'sb-notice-bar';
+      bar.classList.toggle('is-paused', playback.audio.paused);
       bar.setAttribute('data-userid', playback.userId);
       bar.setAttribute('data-sound', playback.soundName);
       bar.innerHTML = this.renderBarInnerHtml(playback);
@@ -130,6 +135,8 @@ export class SoundboardPlayersBar {
     if (!bar) return;
     const fill = bar.querySelector('.sb-notice-progress-fill') as HTMLElement | null;
     if (fill) fill.style.width = `${Math.min(100, Math.max(0, payload.percent || 0))}%`;
+    const track = bar.querySelector('.sb-notice-progress-track');
+    track?.setAttribute('aria-valuenow', String(Math.min(100, Math.max(0, payload.percent || 0))));
     const time = bar.querySelector('.sb-notice-time') as HTMLElement | null;
     if (time && typeof payload.currentTime === 'number' && typeof payload.duration === 'number') {
       time.textContent = this.formatTimePair(payload.currentTime, payload.duration);
@@ -161,7 +168,7 @@ export class SoundboardPlayersBar {
       <div class="sb-notice-body">
         <span class="sb-notice-text" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
         <div class="sb-notice-progress-row">
-          <div class="sb-notice-progress-track">
+          <div class="sb-notice-progress-track" role="progressbar" aria-label="${escapeHtml(t('soundboard.playbackProgress'))}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
             <div class="sb-notice-progress-fill" style="width: ${percent}%"></div>
           </div>
           <span class="sb-notice-time">${escapeHtml(this.formatTimePair(currentTime, duration))}</span>

@@ -106,6 +106,32 @@ export interface SoundboardDownloadKey {
   downloadId: string;
 }
 
+export type SoundboardFileFailure = 'invalid_request' | 'no_folder' | 'missing' | 'exists' | 'locked' | 'too_large' | 'unsupported' | 'io_failed'
+  | 'source_changed' | 'encoder_unavailable' | 'encode_failed' | 'cleanup_failed';
+export type SoundboardFileResult<T> = { status: 'ok'; value: T } | { status: 'failed'; reason: SoundboardFileFailure };
+export interface SoundboardFileInput {
+  folder: string;
+  fileName: string;
+}
+export interface SoundboardRenameInput extends SoundboardFileInput { newFileName: string }
+export interface SoundboardEditTimes { start: number; end: number; fadeIn: number; fadeOut: number }
+export interface SoundboardEditInput extends SoundboardRenameInput, SoundboardEditTimes {
+  sampleRate: number;
+  channels: Float32Array[];
+}
+export interface SoundboardSavedFile { fileName: string; filePath: string; duration?: number }
+export interface SoundboardEditorSource { bytes: Uint8Array; revision: string; overwriteAvailable: boolean }
+export interface SoundboardOverwriteInput extends Omit<SoundboardEditInput, 'newFileName'> { revision: string }
+
+export const SOUNDBOARD_FILES_IPC = {
+  read: 'soundboard:edit-read',
+  rename: 'soundboard:rename-file',
+  delete: 'soundboard:delete-file',
+  edit: 'soundboard:save-edited-copy',
+  open: 'soundboard:open-editor',
+  overwrite: 'soundboard:overwrite-audio',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
+
 export interface SoundboardDownloadAuthorization {
   connectionId: string;
   invocationId: string;
@@ -736,6 +762,12 @@ export interface IpcInvokeChannels {
   'soundboard:default-folder': { args: []; returnType: string | null };
   'soundboard:list-sounds': { args: [folderPath: string]; returnType: SoundboardSoundEntry[] };
   'soundboard:read-sound': { args: [filePath: string]; returnType: SoundboardSoundData | null };
+  'soundboard:edit-read': { args: [input: SoundboardFileInput]; returnType: SoundboardFileResult<Uint8Array> };
+  'soundboard:rename-file': { args: [input: SoundboardRenameInput]; returnType: SoundboardFileResult<SoundboardSavedFile> };
+  'soundboard:delete-file': { args: [input: SoundboardFileInput]; returnType: SoundboardFileResult<null> };
+  'soundboard:save-edited-copy': { args: [input: SoundboardEditInput]; returnType: SoundboardFileResult<SoundboardSavedFile> };
+  'soundboard:open-editor': { args: [input: SoundboardFileInput]; returnType: SoundboardFileResult<SoundboardEditorSource> };
+  'soundboard:overwrite-audio': { args: [input: SoundboardOverwriteInput]; returnType: SoundboardFileResult<SoundboardSavedFile> };
   'soundboard:download-availability': { args: [configuredFolder: string]; returnType: SoundboardDownloadAvailability };
   'soundboard:confirm-download-folder': { args: [configuredFolder: string]; returnType: boolean };
   'soundboard:authorize-download': { args: [input: SoundboardDownloadAuthorization]; returnType: SoundboardDownloadPermit };

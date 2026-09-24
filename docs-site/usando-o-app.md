@@ -134,6 +134,55 @@ A pasta fica só na sua máquina: a imagem é enviada ao servidor quando você u
 
 ## Soundboard
 
+O modal e a barra lateral mostram o som em reprodução, o tempo decorrido/duração
+e **Parar reprodução de som**. Abrir o modal não toca nada; fechá-lo não
+interrompe a reprodução normal. Parar seu som também avisa a chamada; parar o
+som de outra pessoa só silencia a reprodução local.
+
+Na grade ou lista, abra o botão de **três pontos verticais** de um áudio para acessar
+**Editar**, **Renomear áudio** e **Apagar áudio**. **Editar** abre o editor de
+corte e fades. Na lista, o botão fica no extremo direito, depois do atalho.
+O menu funciona com teclado e fecha com `Esc` ou clique fora,
+sem iniciar a reprodução. Renomear e apagar alteram o arquivo na pasta do sistema operacional;
+a exclusão é permanente e pede confirmação. Favoritos e atalhos acompanham a
+alteração. Nomes existentes não são substituídos. Se uma pasta antiga não estiver
+autorizada, selecione-a novamente em **Trocar pasta**.
+
+O editor mostra a forma de onda real do áudio: arraste as alças superiores para
+definir início/fim do corte e as inferiores para ajustar fade-in/fade-out. Os
+tempos aparecem ao lado; não é preciso digitar números. Pelo teclado, use as
+setas para passos de 0,01 s, `Shift` para 0,1 s e `Alt` para uma amostra.
+`Home`/`End` vão aos limites e `Esc` cancela um arraste. Ao encurtar o corte,
+fades que não cabem são reduzidos proporcionalmente, com aviso.
+As alças de cada par ficam alinhadas; só se separam verticalmente quando estão
+próximas demais, para que uma não cubra a outra.
+
+O player **Resultado editado · Só para você** reproduz o trecho final, com corte
+e fades aplicados, usando a saída, volume e limitador da soundboard, sem
+transmitir à chamada. Use **Reproduzir/Pausar**, **Voltar ao início**, **Parar**
+e a barra de posição; o cursor acompanha a reprodução na forma de onda.
+Pausar mantém a posição; voltar ao início não retoma um áudio pausado.
+Alterar corte/fades reinicia o player para não tocar uma edição desatualizada,
+e fechar o editor libera a reprodução. Alterar o nome da cópia não interrompe o som.
+No rodapé ficam apenas as ações de salvamento. **Salvar novo áudio**
+mantém o original e cria um WAV PCM de 24 bits a 48 kHz, preservando mono/estéreo.
+**Sobrescrever original** pede confirmação e mantém nome, formato, favoritos e
+atalhos. WAV não exige ferramenta adicional; para outros formatos, prepare o
+FFmpeg em **Configurações › Ferramentas de bots**. Sem ele, a sobrescrita fica
+bloqueada com aviso, mas salvar um novo WAV continua disponível. A substituição
+só ocorre após gerar e validar o resultado; uma alteração externa no original
+impede a sobrescrita. A recodificação de formatos comprimidos pode acrescentar
+um pequeno preenchimento ao início/fim do áudio.
+
+O editor não normaliza nem adiciona outros efeitos. Entradas `.mp3`, `.wav`,
+`.ogg`, `.m4a`, `.aac` e `.webm` dependem do suporte do decodificador, em mono
+ou estéreo. O editor não impõe limites artificiais de tamanho ou duração:
+arquivos maiores que 3 MiB ou 120 segundos podem ser abertos, ouvidos no player
+e salvos. A capacidade real depende da memória disponível e do formato de
+arquivo (WAV RIFF usa tamanhos de 32 bits). O limite de envio de sons para a
+chamada continua separado e não limita a edição local. Formatos não suportados
+e falhas de gravação exibem um erro.
+
 O Monky prepara uma pasta local de soundboard automaticamente. Em **Configurações › Soundboard**, confira o caminho ou escolha outra pasta com `.mp3`, `.wav` ou `.ogg`; pastas já escolhidas são preservadas. Na chamada, toque pelo botão de soundboard. Volume e mudo local ficam nas mesmas configurações. O anfitrião pode desativar o soundboard do servidor inteiro e, em **Configurações do Servidor › Cargos**, liberar a permissão **Usar soundboard** apenas para os cargos desejados.
 
 Use as estrelas e o filtro **Todos/Favoritos** para localizar sons junto com
