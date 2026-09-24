@@ -423,7 +423,7 @@ test('finish, expiry, disconnect, revoked bots and channel access loss disable f
   }
 });
 
-test('server routing stores background prompts silently and restores the foreground proxy', () => {
+test('server routing stores background prompts silently and restores the foreground proxy', async () => {
   const manager = new SessionManager();
   manager.install();
   const foreground = manager.create('127.0.0.1', 9901, 'Caller');
@@ -453,7 +453,7 @@ test('server routing stores background prompts silently and restores the foregro
   } finally {
     unbindUi();
     unbindMessage();
-    manager.removeAll();
+    await manager.removeAll();
     setSessionEventRouter((_key, _event, emit) => emit());
     setActiveChatStore(createChatStore());
   }
@@ -491,7 +491,7 @@ test('canonical command registry responses reach both session stores through act
   }
 });
 
-test('initial registry snapshots populate new and reconnecting sessions without duplicate requests', () => {
+test('initial registry snapshots populate new and reconnecting sessions without duplicate requests', async () => {
   const manager = new SessionManager();
   manager.install();
   const foreground = manager.create('127.0.0.1', 9901, 'Caller');
@@ -539,14 +539,14 @@ test('initial registry snapshots populate new and reconnecting sessions without 
   } finally {
     unbind();
     unbindUi();
-    manager.removeAll();
+    await manager.removeAll();
     setSessionEventRouter((_key, _event, emit) => emit());
     setActiveChatStore(createChatStore());
     setActiveServerStore(createServerStore());
   }
 });
 
-test('bot availability snapshots stay scoped, refresh discovery and clear on revocation or disconnect', () => {
+test('bot availability snapshots stay scoped, refresh discovery and clear on revocation or disconnect', async () => {
   const manager = new SessionManager();
   manager.install();
   const foreground = manager.create('127.0.0.1', 9911, 'Caller');
@@ -580,7 +580,7 @@ test('bot availability snapshots stay scoped, refresh discovery and clear on rev
   } finally {
     unbindUi();
     unbind();
-    manager.removeAll();
+    await manager.removeAll();
     setSessionEventRouter((_key, _event, action) => action());
     setActiveChatStore(createChatStore());
     setActiveServerStore(createServerStore());

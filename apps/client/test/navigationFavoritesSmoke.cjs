@@ -415,13 +415,13 @@ async function setupNavigationFavoritesSmoke() {
     equal(hostStops, [], `${message}: no hosted shutdown`);
     check(navigation.callClient() === call.client, `${message}: callClient still owns the old call`);
   };
-  const prepareCall = (host = 'remote.test', mode = 'p2p') => {
+  const prepareCall = async (host = 'remote.test', mode = 'p2p') => {
     voice.voiceSessionKey = null;
     voice.currentVoiceChannelId = null;
     voice.isReconnecting = false;
     voice.isConnecting = false;
     for (const session of sessions.getAll()) session.client.status = 'DISCONNECTED';
-    sessions.removeAll();
+    await sessions.removeAll();
     hosted = { isRunning: false, port: null, serverId: null };
     startFailure = false;
     startGate = null;
@@ -1182,7 +1182,7 @@ async function setupNavigationFavoritesSmoke() {
     async navigation() {
       for (const host of ['remote.test', '127.0.0.1']) {
         for (const mode of ['p2p', 'sfu']) {
-          const { call, before } = prepareCall(host, mode);
+          const { call, before } = await prepareCall(host, mode);
           const opening = rail.connectToSavedServer(target);
           await until(() => document.querySelector('.dialog-card'), 'Owned-server start confirmation');
           equal(document.querySelector('.dialog-card [data-action="confirm"]').textContent,
@@ -1204,14 +1204,14 @@ async function setupNavigationFavoritesSmoke() {
         }
       }
       for (const [host, spelling] of [['remote.test', ' WSS://REMOTE.TEST '], ['[::1]', '::1']]) {
-        const { call, before } = prepareCall(host);
+        const { call, before } = await prepareCall(host);
         await navigation.openServerSession(spelling, call.port, identity, 'Fixture');
         equal(connects.length, 0, 'Equivalent address spelling does not create a duplicate voice socket');
         equal(sessions.getActiveKey(), call.key, 'Equivalent address spelling shows the existing session');
         preserveVoice(before, call, 'Equivalent server address');
       }
       {
-        const { call, visible, before } = prepareCall();
+        const { call, visible, before } = await prepareCall();
         const opening = rail.connectToSavedServer(target);
         await settleDialog(false);
         await opening;
@@ -1220,7 +1220,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Cancelled start');
       }
       for (const failure of ['start', 'different-hosted-server', 'same-port-different-id', 'unknown-hosted-id']) {
-        const { call, visible, before } = prepareCall('127.0.0.1', 'sfu');
+        const { call, visible, before } = await prepareCall('127.0.0.1', 'sfu');
         startFailure = failure === 'start';
         if (failure === 'different-hosted-server') hosted = { isRunning: true, port: 4100, serverId: 'call-host' };
         if (failure === 'same-port-different-id') hosted = { isRunning: true, port: 4200, serverId: 'different-data' };
@@ -1235,7 +1235,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, failure);
       }
       {
-        const { call, visible, before } = prepareCall();
+        const { call, visible, before } = await prepareCall();
         const failure = deferred();
         connectGates.set(sessionKeyFor(target.host, target.port), failure);
         const opening = navigation.openServerSession(target.host, target.port, identity, 'Fixture');
@@ -1245,7 +1245,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Failed authentication');
       }
       {
-        const { call, before } = prepareCall();
+        const { call, before } = await prepareCall();
         const failure = deferred();
         connectGates.set(sessionKeyFor(target.host, target.port), failure);
         const opening = navigation.openServerSession(target.host, target.port, identity, 'Fixture');
@@ -1257,7 +1257,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Late connection failure');
       }
       {
-        const { call, visible, before } = prepareCall();
+        const { call, visible, before } = await prepareCall();
         const firstFailure = deferred();
         const secondFailure = deferred();
         connectGates.set(sessionKeyFor(target.host, target.port), firstFailure);
@@ -1272,7 +1272,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Overlapping connection failures');
       }
       {
-        const { call, visible, before } = prepareCall();
+        const { call, visible, before } = await prepareCall();
         const failure = deferred();
         connectGates.set(sessionKeyFor(target.host, target.port), failure);
         const opening = navigation.openServerSession(target.host, target.port, identity, 'Fixture');
@@ -1286,7 +1286,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Refused navigation during connection');
       }
       {
-        const { call, before } = prepareCall();
+        const { call, before } = await prepareCall();
         startGate = deferred();
         const opening = rail.connectToSavedServer(target);
         await settleDialog();
@@ -1300,7 +1300,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Superseded hosted start');
       }
       {
-        const { call, before } = prepareCall();
+        const { call, before } = await prepareCall();
         const gate = deferred();
         connectGates.set(sessionKeyFor(target.host, target.port), gate);
         const first = navigation.openServerSession(target.host, target.port, identity, 'Fixture');
@@ -1322,7 +1322,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Native idempotent hosted start');
       }
       {
-        const { call, before } = prepareCall();
+        const { call, before } = await prepareCall();
         hosted = { isRunning: true, port: owned.port, serverId: owned.id };
         startFailure = true;
         await hosting.ensureHostedServerStarted(owned)
@@ -1331,7 +1331,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Failed native readiness');
       }
       {
-        const { call, before } = prepareCall();
+        const { call, before } = await prepareCall();
         startGate = deferred();
         const first = hosting.ensureHostedServerStarted(owned);
         const second = hosting.ensureHostedServerStarted(owned);
@@ -1344,7 +1344,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Concurrent hosted starts');
       }
       {
-        const { call, visible, before } = prepareCall();
+        const { call, visible, before } = await prepareCall();
         call.client.status = 'RECONNECTING';
         await navigation.openServerSession(call.host, call.port, identity, 'Fixture')
           .then(() => check(false, 'Browsing may not replace a recovering voice socket'), () => {});
@@ -1353,7 +1353,7 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Recovering call');
       }
       {
-        const { call, before } = prepareCall('remote.test', 'sfu');
+        const { call, before } = await prepareCall('remote.test', 'sfu');
         home.render();
         document.getElementById('join-host').value = target.host;
         document.getElementById('join-port').value = String(target.port);
@@ -1364,13 +1364,13 @@ async function setupNavigationFavoritesSmoke() {
         preserveVoice(before, call, 'Home browse');
       }
       {
-        const { call, before } = prepareCall();
+        const { call, before } = await prepareCall();
         await home.startHostedServer(owned, 'Fixture');
         equal(sessions.getActiveKey(), sessionKeyFor(target.host, target.port), 'Home start-and-view opens the target');
         preserveVoice(before, call, 'Home start button');
       }
       {
-        const { call } = prepareCall();
+        const { call } = await prepareCall();
         const destination = seed(target.host, target.port);
         await navigation.joinCallOnSession(destination.key, 'voice-room');
         equal(voice.voiceSessionKey, destination.key, 'An explicit voice join still moves to the requested session');
@@ -1383,7 +1383,7 @@ async function setupNavigationFavoritesSmoke() {
     },
     async homeNavigation() {
       for (const mode of ['p2p', 'sfu']) {
-        const { call, visible, before } = prepareCall('remote.test', mode);
+        const { call, visible, before } = await prepareCall('remote.test', mode);
         visible.chatStore.setDraft('text-room', 'Preserve this draft');
         click('#server-rail-home');
         await tick();
@@ -1431,7 +1431,7 @@ async function setupNavigationFavoritesSmoke() {
         check(!document.querySelector('.user-control-bar'), `${mode}: no stale disconnect target on empty Home`);
       }
       {
-        const { call, visible } = prepareCall();
+        const { call, visible } = await prepareCall();
         navigation.showHome();
         visible.client.disconnect();
         await tick();
@@ -1469,7 +1469,7 @@ async function setupNavigationFavoritesSmoke() {
       } });
       const submit = () => document.getElementById('join-invite-form').requestSubmit();
       try {
-        const { call, visible, before } = prepareCall();
+        const { call, visible, before } = await prepareCall();
         connection.saveUserProfile('Identity <Owner>');
         visible.password = ' Fixture & password 🐵 ';
         for (const language of ['pt-BR', 'en']) {
@@ -1656,7 +1656,7 @@ async function setupNavigationFavoritesSmoke() {
       const [{ settingsModal }, { serverSettingsModal }, { showConfirm }] = await Promise.all([
         import('/views/SettingsModal.ts'), import('/views/ServerSettingsModal.ts'), import('/views/Dialog.ts'),
       ]);
-      prepareCall();
+      await prepareCall();
       for (const homeVisible of [false, true]) {
         if (homeVisible) navigation.showHome();
         await tick();
@@ -1705,7 +1705,7 @@ async function setupNavigationFavoritesSmoke() {
       };
       for (const mode of ['p2p', 'sfu']) {
         {
-          const { call, visible } = prepareCall('remote.test', mode);
+          const { call, visible } = await prepareCall('remote.test', mode);
           const previousState = addLocalParticipant(call);
           call.client.setStatus('RECONNECTING');
           check(voice.isReconnecting && voice.voiceSessionKey === call.key
@@ -1735,7 +1735,7 @@ async function setupNavigationFavoritesSmoke() {
           equal(sessions.getActiveKey(), visible.key, `${mode}: background auth stays in its own bundle`);
         }
         {
-          const { call, visible } = prepareCall('remote.test', mode);
+          const { call, visible } = await prepareCall('remote.test', mode);
           addLocalParticipant(call);
           call.client.setStatus('RECONNECTING');
           clearMetrics();
@@ -1751,7 +1751,7 @@ async function setupNavigationFavoritesSmoke() {
           await tick();
         }
         for (const status of ['RECONNECTING', 'DISCONNECTED']) {
-          const { call, visible } = prepareCall('remote.test', mode);
+          const { call, visible } = await prepareCall('remote.test', mode);
           sessions.activate(call.key);
           addLocalParticipant(call);
           call.client.status = status;
@@ -1766,7 +1766,7 @@ async function setupNavigationFavoritesSmoke() {
             `${mode}/${status}: disconnect tears down every capture path`);
         }
         {
-          const { call, visible } = prepareCall('remote.test', mode);
+          const { call, visible } = await prepareCall('remote.test', mode);
           call.client.setStatus('RECONNECTING');
           visible.client.setStatus('RECONNECTING');
           click('#server-rail-home');
@@ -1782,7 +1782,7 @@ async function setupNavigationFavoritesSmoke() {
             `${mode}: background authentication must not steal Home`);
         }
         {
-          const { call } = prepareCall('remote.test', mode);
+          const { call } = await prepareCall('remote.test', mode);
           call.client.setStatus('RECONNECTING');
           clearMetrics();
           const payload = payloadFor(call.port);
@@ -1796,7 +1796,7 @@ async function setupNavigationFavoritesSmoke() {
       }
     },
     async noiseToggle() {
-      const { call } = prepareCall();
+      const { call } = await prepareCall();
       sessions.activate(call.key);
       let gate = null;
       const requests = [];
@@ -1860,7 +1860,7 @@ async function setupNavigationFavoritesSmoke() {
       }
       gate = null;
     },
-    cleanup() {
+    async cleanup() {
       modal.close();
       settingsRoot?.remove();
       app.mainView.destroy();
@@ -1870,7 +1870,7 @@ async function setupNavigationFavoritesSmoke() {
       voice.voiceSessionKey = null;
       voice.currentVoiceChannelId = null;
       for (const session of sessions.getAll()) session.client.status = 'DISCONNECTED';
-      sessions.removeAll();
+      await sessions.removeAll();
       for (const restore of restores.reverse()) restore();
       window.fetch = originalFetch;
       navigator.mediaDevices.enumerateDevices = originalEnumerateDevices;

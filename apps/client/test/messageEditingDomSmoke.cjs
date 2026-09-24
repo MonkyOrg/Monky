@@ -640,10 +640,10 @@ async function installFixture() {
     async rerender() { view.render(); await settle(); find('#chat-message-input').focus(); },
     trustedEvents() { return trusted; },
     settle,
-    cleanup() {
+    async cleanup() {
       view?.destroy();
       offUpdate();
-      sessionManager.removeAll();
+      await sessionManager.removeAll();
       routing.setSessionEventRouter((_key, _event, emit) => emit());
       document.removeEventListener('input', inputListener);
       document.removeEventListener('keydown', keyListener);
