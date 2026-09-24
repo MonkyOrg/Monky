@@ -6,15 +6,7 @@ import type {
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { renderAudioMuteIndicators } from './AudioStateIcon';
-
-/**
- * `availLeft`/`availWidth` let the overlay work out which side of the display it
- * is docked to, so the resize hint can hop to the corner that still has room to
- * grow. They are widely supported but absent from the DOM lib types (#543).
- */
-interface ScreenWithAvail extends Screen {
-  availLeft?: number;
-}
+import { fitOverlayCards, OVERLAY_RESIZE_HINTS, overlayResizeHint } from '../utils/overlayLayout';
 
 type OverlayTile = {
   p: OverlayParticipantState;
@@ -35,6 +27,8 @@ export class OverlayStageView {
   private unbindListeners: Array<() => void> = [];
   private leavingTimers = new Map<string, number>();
   private isHovered = false;
+  private pointer: { x: number; y: number } | undefined;
+  private layoutObserver: ResizeObserver | null = null;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -45,6 +39,11 @@ export class OverlayStageView {
     document.getElementById('titlebar')?.remove();
 
     this.initLocalPeerConnection();
+    this.layoutObserver = new ResizeObserver(() => {
+      this.applyCardLayout();
+      this.applyHoverState();
+    });
+    this.layoutObserver.observe(this.container);
 
     if (window.api?.onOverlaySyncStateReceived) {
       this.unbindListeners.push(
@@ -68,8 +67,9 @@ export class OverlayStageView {
 
     if (window.api?.onOverlayHoverChanged) {
       this.unbindListeners.push(
-        window.api.onOverlayHoverChanged((hovered) => {
+        window.api.onOverlayHoverChanged((hovered, point) => {
           this.isHovered = hovered;
+          this.pointer = point;
           this.applyHoverState();
         })
       );
@@ -214,7 +214,6 @@ export class OverlayStageView {
     // The DOM may have just been rebuilt, so re-apply the hover flag and the
     // corner the resize hint belongs in (#543).
     this.applyHoverState();
-    this.updateResizeHintSide();
 
     // Atualiza nome do canal
     const titleEl = this.container.querySelector('.overlay-channel-title') as HTMLElement | null;
@@ -227,6 +226,7 @@ export class OverlayStageView {
     if (cardsContainer) {
       cardsContainer.className = `overlay-cards-container ${layoutClass}`;
       this.reconcileCards(cardsContainer, tiles, isMinimalist, isFocusSpeaker);
+      this.applyCardLayout();
     }
 
     if (!isMinimalist) {
@@ -257,7 +257,6 @@ export class OverlayStageView {
     `;
     this.attachControls();
     this.applyHoverState();
-    this.updateResizeHintSide();
   }
 
   private ensureBaseStructure(): void {
@@ -515,39 +514,47 @@ export class OverlayStageView {
   private applyHoverState(): void {
     const root = this.container.querySelector('.overlay-stage-root');
     if (root) root.classList.toggle('is-hovered', this.isHovered);
+    const bounds = root?.getBoundingClientRect();
+    const direction = this.isHovered && this.pointer && bounds
+      ? overlayResizeHint(bounds.width, bounds.height, { x: this.pointer.x - bounds.left, y: this.pointer.y - bounds.top })
+      : undefined;
+    for (const hint of this.container.querySelectorAll<HTMLElement>('.overlay-resize-hint')) {
+      hint.classList.toggle('near-pointer', hint.dataset.direction === direction);
+    }
   }
 
-  /**
-   * A resize grip drawn flush in the bottom corner. The overlay window is
-   * frameless and fully transparent, so its OS resize edge is invisible; these
-   * diagonal strokes mimic the native grip and show the user where to grab. It
-   * is aria-hidden and ignores pointer events, so the real (OS-handled) resize
-   * border underneath keeps doing the work (#543).
-   */
+  private applyCardLayout(): void {
+    const cards = this.container.querySelector<HTMLElement>('.overlay-cards-container');
+    if (!cards) return;
+    const config = this.currentState?.config;
+    const preserve = config?.preserveAspectRatio !== false && !config?.minimalistMode;
+    cards.classList.toggle('preserve-aspect', preserve);
+    if (!preserve) {
+      cards.style.removeProperty('grid-template-columns');
+      cards.style.removeProperty('grid-auto-rows');
+      cards.style.removeProperty('--overlay-card-width');
+      cards.style.removeProperty('--overlay-card-height');
+      return;
+    }
+    const count = cards.querySelectorAll('.overlay-card:not(.leaving)').length;
+    const fitted = fitOverlayCards(cards.clientWidth, cards.clientHeight, count, config?.layout ?? 'grid');
+    cards.style.gridTemplateColumns = `repeat(${fitted.columns}, ${fitted.width}px)`;
+    cards.style.gridAutoRows = `${fitted.height}px`;
+    cards.style.setProperty('--overlay-card-width', `${fitted.width}px`);
+    cards.style.setProperty('--overlay-card-height', `${fitted.height}px`);
+  }
+
+  /** Visual hints only: the native window border still handles resizing. */
   private renderResizeHint(): string {
-    return `
-      <div class="overlay-resize-hint" aria-hidden="true">
+    return OVERLAY_RESIZE_HINTS.map(({ direction, x, y, rotation }) => `
+      <div class="overlay-resize-hint" data-direction="${direction}" style="left:calc(${x * 100}% - ${x * 18}px);top:calc(${y * 100}% - ${y * 18}px)" aria-hidden="true">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M15 6 L6 15 M15 10 L10 15 M15 14 L14 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+          <path transform="rotate(${rotation} 8 8)" d="${x === 0.5 || y === 0.5
+            ? 'M8 2V14 M5 5L8 2L11 5 M5 11L8 14L11 11'
+            : 'M15 6L6 15 M15 10L10 15 M15 14L14 15'}" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
       </div>
-    `;
-  }
-
-  /**
-   * Moves the resize hint to the bottom corner that faces away from the screen
-   * edge. Docked against the right of the display the window can only grow from
-   * its left side, so the hint hops there; otherwise it stays bottom-right
-   * (#543).
-   */
-  private updateResizeHintSide(): void {
-    const root = this.container.querySelector('.overlay-stage-root');
-    if (!root) return;
-    const scr = window.screen as ScreenWithAvail;
-    const availLeft = typeof scr.availLeft === 'number' ? scr.availLeft : 0;
-    const windowCenterX = window.screenX + window.outerWidth / 2;
-    const screenCenterX = availLeft + scr.availWidth / 2;
-    root.classList.toggle('dock-right', windowCenterX > screenCenterX);
+    `).join('');
   }
 
   private attachControls(): void {
@@ -560,6 +567,8 @@ export class OverlayStageView {
   }
 
   public destroy(): void {
+    this.layoutObserver?.disconnect();
+    this.layoutObserver = null;
     this.unbindListeners.forEach((u) => u());
     this.unbindListeners = [];
     this.leavingTimers.forEach((timer) => clearTimeout(timer));

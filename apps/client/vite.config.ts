@@ -8,8 +8,9 @@ export default defineConfig({
     format: 'es',
   },
   optimizeDeps: {
-    // Lazy optimization would reload the renderer during a live call.
-    exclude: ['@mediapipe/tasks-vision'],
+    // Prebundle lazy TensorFlow dependencies (including CommonJS kernels)
+    // before a call, not when the camera worker first imports them.
+    include: ['@tensorflow/tfjs-core', '@tensorflow/tfjs-converter', '@tensorflow/tfjs-backend-webgl', '@tensorflow/tfjs-backend-cpu'],
   },
   build: {
     outDir: path.resolve(__dirname, 'dist'),
@@ -20,6 +21,7 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    watch: { ignored: ['**/dist-test/**', '**/.qa/**'] },
   },
   resolve: {
     alias: {

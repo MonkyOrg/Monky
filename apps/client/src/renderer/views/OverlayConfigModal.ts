@@ -14,6 +14,7 @@ export class OverlayConfigModal {
   private currentAutoOpenOnLeaveStage: boolean = false;
   private currentMinimalistMode: boolean = false;
   private currentHideSelf: boolean = false;
+  private currentPreserveAspectRatio = true;
   private overlaySettingsUnbind: (() => void) | null = null;
 
   public open(): void {
@@ -28,6 +29,7 @@ export class OverlayConfigModal {
     this.currentAutoOpenOnLeaveStage = !!config.autoOpenOnLeaveStage;
     this.currentMinimalistMode = !!config.minimalistMode;
     this.currentHideSelf = !!config.hideSelf;
+    this.currentPreserveAspectRatio = config.preserveAspectRatio !== false;
 
     // The overlay only stores custom bounds once the user moves or resizes it.
     // The "reset size" control is pointless at the default size, so it only
@@ -92,6 +94,16 @@ export class OverlayConfigModal {
           </div>
 
           <!-- 2. Switch Ocultar-me -->
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+            <div>
+              <div>${t('overlay.preserveAspectRatio')}</div>
+              <small>${t('overlay.preserveAspectRatioDesc')}</small>
+            </div>
+            <label class="toggle-switch" aria-label="${t('overlay.preserveAspectRatio')}">
+              <input type="checkbox" id="overlay-aspect-ratio" ${this.currentPreserveAspectRatio ? 'checked' : ''} />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 10px 14px;">
             <div style="display: flex; align-items: center; gap: 8px;">
               <span class="material-symbols-outlined md-18" style="color: var(--text-secondary);">visibility_off</span>
@@ -302,6 +314,11 @@ export class OverlayConfigModal {
     });
     this.attachFooterEvents();
 
+    const aspectRatio = this.modalEl.querySelector<HTMLInputElement>('#overlay-aspect-ratio');
+    aspectRatio?.addEventListener('change', () => {
+      this.currentPreserveAspectRatio = aspectRatio.checked;
+      this.syncLiveIfActive();
+    });
     // Seleção de modo
     const modeCards = this.modalEl.querySelectorAll('.overlay-option-card[data-mode]');
     const focusWrapper = this.modalEl.querySelector('#overlay-focus-speaker-row') as HTMLElement | null;
@@ -444,6 +461,7 @@ export class OverlayConfigModal {
       autoOpenOnLeaveStage: this.currentAutoOpenOnLeaveStage,
       minimalistMode: this.currentMinimalistMode,
       hideSelf: this.currentHideSelf,
+      preserveAspectRatio: this.currentPreserveAspectRatio,
     });
   }
 

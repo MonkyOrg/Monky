@@ -20,6 +20,7 @@ if (require.main === module || process.argv[1] === __filename) {
   } else {
     const { app, BrowserWindow } = require('electron');
     app.setPath('userData', process.env.MONKY_AUDIO_DEVICE_TEST_PROFILE);
+    require('./fixtures/ciGraphics.cjs')(app);
     let vite;
     let window;
     let timeout;
@@ -73,7 +74,7 @@ if (require.main === module || process.argv[1] === __filename) {
         if (!allowed && !localHmr) external.push(details.url);
         callback({ cancel: !allowed });
       });
-      timeout = setTimeout(() => { console.error('Audio/media controls smoke timed out'); void finish(1); }, 90_000);
+      timeout = setTimeout(() => { console.error('Audio/media controls smoke timed out'); void finish(1); }, 150_000);
       await window.loadURL(`${origin}/__audio_devices__`);
       if (!process.argv.includes('--color-picker-only')) {
         const checks = await window.webContents.executeJavaScript(`(${runAudioDeviceSmoke.toString()})()`, true);

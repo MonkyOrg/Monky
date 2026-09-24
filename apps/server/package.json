@@ -12,7 +12,7 @@
     "dev": "node scripts/copy-migrations.js && tsc --watch",
     "start": "node dist/index.js",
     "cli": "node dist/cli.js",
-    "test": "node dist/test-server.js && node --test dist/test-bots.js dist/test-bot-permissions.js dist/test-bot-screens.js dist/test-command-localized-names.js dist/test-local-execution.js dist/test-bot-compatibility.js dist/test-online-preview.js dist/test-voice.js dist/test-voice-mode.js dist/test-screen-subscriptions.js dist/test-server-settings.js dist/test-startup-lifecycle.js dist/test-server-monitor.js dist/test-cli-i18n.js test/cliLanguageSettings.test.cjs test/cliUpdate.test.cjs test/cliBotCompatibility.test.cjs test/cliRuntimeUpgrade.test.cjs",
+    "test": "node dist/test-server.js && node --test dist/test-bots.js dist/test-bot-permissions.js dist/test-bot-screens.js dist/test-command-localized-names.js dist/test-local-execution.js dist/test-bot-compatibility.js dist/test-online-preview.js dist/test-voice.js dist/test-voice-mode.js dist/test-screen-subscriptions.js dist/test-server-settings.js dist/test-startup-lifecycle.js dist/test-server-monitor.js dist/test-cli-i18n.js test/cliLanguageSettings.test.cjs test/cliUpdate.test.cjs test/cliBotCompatibility.test.cjs test/cliRuntimeUpgrade.test.cjs && node --test dist/test-auth-hardening.js dist/test-message-composition.js",
     "test:bots": "node --test dist/test-bots.js dist/test-bot-permissions.js dist/test-bot-screens.js dist/test-command-localized-names.js dist/test-local-execution.js",
     "test:local-execution:integration": "tsc -p tsconfig.local-execution-test.json && node --test dist-test/local-execution-sdk.test.js",
     "clean": "rimraf dist"

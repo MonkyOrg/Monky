@@ -1,29 +1,33 @@
 {
   "engine": {
-    "package": "@mediapipe/tasks-vision",
-    "version": "0.10.35",
+    "packages": ["@tensorflow/tfjs-core", "@tensorflow/tfjs-converter", "@tensorflow/tfjs-backend-webgl", "@tensorflow/tfjs-backend-cpu"],
+    "version": "4.22.0",
     "license": "Apache-2.0",
-    "source": "https://github.com/google-ai-edge/mediapipe",
-    "packageMetadata": "https://registry.npmjs.org/@mediapipe/tasks-vision/0.10.35",
-    "documentation": "https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter/web_js",
-    "wasmAssets": [
-      "@mediapipe/tasks-vision/vision_wasm_module_internal.js",
-      "@mediapipe/tasks-vision/vision_wasm_module_internal.wasm"
-    ],
-    "selection": "Maintained Tasks API, local CPU inference in an OffscreenCanvas module worker. Version 0.10.35 has module-worker support without the telemetry added in 1.0.1. No API key or runtime CDN."
+    "copyright": "Copyright Google LLC. TensorFlow.js authors.",
+    "source": "https://github.com/tensorflow/tfjs",
+    "licenseFile": "LICENSE",
+    "selection": "WebGL2 inference and GPU tensor export in a dedicated module worker. CPU kernels handle small scalar/shape operations, not a silent fallback for the matting network. No runtime CDN, telemetry, remote inference or full-frame readback."
   },
   "model": {
-    "file": "selfie_segmenter_landscape.tflite",
-    "version": "float16/1",
-    "source": "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/1/selfie_segmenter_landscape.tflite",
-    "license": "Apache-2.0",
-    "licenseEvidence": "The official Google model card, page 1, explicitly states: LICENSED UNDER Apache License, Version 2.0.",
-    "modelCard": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Selfie%20Segmentation.pdf",
-    "overview": "https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter",
-    "input": "144 x 256, RGB; person/background selfie segmentation, not physical chroma key",
-    "bytes": 250177,
-    "sha256": "490e9ea734313e0de10fa0cd9e3c6133e36ea4db2b7a49bde9ef019f72796b8e"
+    "name": "Robust Video Matting (RVM), MobileNetv3, TFJS int8 weights",
+    "file": "rvm-mobilenetv3.bin",
+    "manifest": "rvm-model.json",
+    "revision": "72ed518756950796f10eea6eb6b301df97cef277",
+    "source": "https://github.com/PeterL1n/RobustVideoMatting/tree/72ed518756950796f10eea6eb6b301df97cef277",
+    "upstreamWeightsPath": "model/group1-shard1of1.bin",
+    "upstreamManifestPath": "model/model.json",
+    "license": "GPL-3.0",
+    "licenseFile": "RVM-LICENSE",
+    "licenseEvidence": "https://github.com/PeterL1n/RobustVideoMatting/blob/master/LICENSE",
+    "authors": "Shanchuan Lin, Linjie Yang, Imran Saleemi, Soumyadip Sengupta; developed at ByteDance",
+    "documentation": "https://github.com/PeterL1n/RobustVideoMatting/blob/master/documentation/inference.md",
+    "input": "Full-resolution RGB [1,H,W,3], normalized to 0..1. Four recurrent states persist across frames. Internal downsample_ratio = min(1,480/max(W,H)); full-resolution foreground RGB and alpha are retained.",
+    "bytes": 3739355,
+    "sha256": "64cf47fe743d510c2e1c5114af76c994d67e342a94bbc51a6ef9eaffbf4c8f90",
+    "manifestBytes": 626575,
+    "manifestSha256": "de775ec299d64361c26b643c72800da6f7b949fc0f16b56545d8145b92d2decf"
   },
-  "packaging": "Vite ?url imports emit the model and the two package WASM assets into dist. This directory's LICENSE and SOURCES.json are also imported as assets so the packaged application includes redistribution notices. Dev and packaged paths are local, relative to the module worker; no remote inference, uploads or model downloads occur at runtime.",
-  "limits": "Effects follow the selected camera profile resolution and frame rate within actual source capability. The optional, default-off quality limiter caps both at 1280x720 and 30 fps without upscaling smaller sources or increasing lower profiles. At most one frame is in flight. Segmentation is an approximation: use physical chroma or switch the camera off when background concealment is critical."
+  "packaging": "Vite ?url imports emit the exact pinned manifest and weights into dist. An explicit weight URL converter maps the upstream shard name to the bundled hashed asset. Both licenses and this source notice are packaged and downloadable from camera settings. No model download occurs during a call.",
+  "behavior": "RVM supplies foreground RGB and fractional alpha directly. Legacy personThreshold/edgeSoftness values remain stored for compatibility but are not applied to the matte. Blur normalizes background-only samples without zoom. WebGL2 is required for AI effects; errors stop video instead of exposing raw frames. Physical chroma retains its Canvas2D fallback.",
+  "limits": "Final resolution and frame rate follow the selected camera profile within actual capture/processing capability. The default-off limiter caps effects at 1280x720 and 30 FPS without upscaling. At most one frame is processed at a time. Matting is approximate, not a privacy guarantee; use physical chroma or stop the camera when background concealment is critical."
 }

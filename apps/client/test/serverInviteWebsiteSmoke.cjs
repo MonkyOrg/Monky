@@ -130,6 +130,12 @@ if (!process.versions.electron) {
       assert.equal(page.injected, false);
       assert.equal(page.text.includes(invite.password), false, 'the credential is not visible page text');
       assert.match(page.text, language === 'en' ? /Open in Monky/ : /Abrir no Monky/);
+      const beforeManual = attempts.length;
+      await read(`document.querySelector('.invite-primary').click();`);
+      const manualDeadline = Date.now() + 3000;
+      while (attempts.length === beforeManual && Date.now() < manualDeadline) await new Promise(resolve => setTimeout(resolve, 20));
+      assert.ok(attempts.length > beforeManual, 'the manual Open in Monky button dispatches the native URI');
+      assert.deepEqual(parseServerInviteLink(attempts.at(-1)), { ok: true, invite });
       await read(`Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
         writeText: async value => { window.inviteCopied = value; },
       } }); document.querySelector('.invite-actions button').click();`);

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { LIMITS, PROTOCOL_VERSION } from './constants.js';
+import { protocolOfferSchema } from './protocolCompatibility.js';
 import { screenShareIdSchema, nativeScreenRenditionSchema } from './screenSharing.js';
 export { screenShareIdSchema } from './screenSharing.js';
 
@@ -160,18 +161,17 @@ export const nicknameSchema = z
   .regex(/^[a-zA-Z0-9_\-\.\s]+$/, 'Nickname contém caracteres inválidos')
   .transform((val) => val.trim());
 
-export const messageContentSchema = z
-  .string()
-  .min(1, 'Mensagem não pode ser vazia')
-  .max(LIMITS.MAX_MESSAGE_LENGTH, `Mensagem não pode exceder ${LIMITS.MAX_MESSAGE_LENGTH} caracteres`)
-  .transform((val) => val.trim());
+export function createMessageContentSchema(limit: number = LIMITS.MAX_MESSAGE_LENGTH, allowEmpty = false) {
+  return z.string().transform(value => value.trim())
+    .refine(value => allowEmpty || value.length > 0, 'Mensagem não pode ser vazia')
+    .refine(value => limit === 0 || value.length <= limit, `Mensagem não pode exceder ${limit} caracteres`)
+    .refine(value => value.length <= LIMITS.WS_MAX_PAYLOAD_BYTES, 'Mensagem excede o limite de transporte');
+}
+export const messageContentSchema = createMessageContentSchema();
 
 // Optional caption for an attachment message (#11). Unlike messageContentSchema
 // it allows an empty string, because an attachments-only message carries no text.
-export const attachmentCaptionSchema = z
-  .string()
-  .max(LIMITS.MAX_MESSAGE_LENGTH, `Mensagem não pode exceder ${LIMITS.MAX_MESSAGE_LENGTH} caracteres`)
-  .transform((val) => val.trim());
+export const attachmentCaptionSchema = createMessageContentSchema(LIMITS.MAX_MESSAGE_LENGTH, true);
 
 export const channelNameSchema = z
   .string()
@@ -186,9 +186,8 @@ export const portSchema = z
   .max(LIMITS.MAX_PORT, `Porta deve ser menor ou igual a ${LIMITS.MAX_PORT}`);
 
 export const authConnectSchema = z.object({
-  protocolVersion: z.number().refine((v) => v === PROTOCOL_VERSION, {
-    message: `Versão de protocolo incompatível. Esperado: ${PROTOCOL_VERSION}`,
-  }),
+  protocolVersion: z.number().int().positive(),
+  protocolOffer: protocolOfferSchema.optional(),
   publicKey: z
     .string()
     .min(64, 'Chave pública inválida')

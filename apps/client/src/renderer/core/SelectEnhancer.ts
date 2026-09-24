@@ -10,6 +10,8 @@ export class SelectEnhancer {
   private listeners: AbortController | null = null;
   private select: HTMLSelectElement | null = null;
   private popup: HTMLDivElement | null = null;
+  private filterInput: HTMLInputElement | null = null;
+  private listbox: HTMLDivElement | null = null;
   private rows: OptionRow[] = [];
   private active: HTMLOptionElement | null = null;
   private savedAttributes = new Map<string, string | null>();
@@ -71,7 +73,7 @@ export class SelectEnhancer {
       if (this.select === event.target) this.close();
       else this.open(event.target);
     } else if (event.target instanceof Node && this.popup?.contains(event.target)) {
-      event.preventDefault(); // Keep focus (and active descendant) on the select.
+      if (event.target !== this.filterInput) event.preventDefault();
       event.stopImmediatePropagation();
     } else {
       this.close();
@@ -105,7 +107,9 @@ export class SelectEnhancer {
     }
   };
 
-  private onWindowBlur = (): void => { this.close(); };
+  private onWindowBlur = (event: FocusEvent): void => {
+    if (event.target === window) this.close();
+  };
 
   private onNativeChange = (event: Event): void => {
     if (event.target === this.select) {
@@ -127,6 +131,24 @@ export class SelectEnhancer {
   };
 
   private onKeyDown = (event: KeyboardEvent): void => {
+    if (this.filterInput && event.target === this.filterInput) {
+      if (event.isComposing) return;
+      if (event.key === 'Tab' || event.key === 'Escape') {
+        const select = this.select;
+        if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); }
+        this.close();
+        select?.focus({ preventScroll: true });
+      } else if (['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (event.key === 'Enter') { if (this.active) this.commit(this.active); return; }
+        const enabled = this.rows.filter(({ option }) => this.available(option));
+        const current = enabled.findIndex(({ option }) => option === this.active);
+        const next = Math.max(0, Math.min(enabled.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
+        if (enabled[next]) this.setActive(enabled[next].option);
+      }
+      return;
+    }
     if (!this.eligible(event.target) || event.isComposing) return;
     const select = event.target;
     const key = event.key;
@@ -150,6 +172,12 @@ export class SelectEnhancer {
     const wasOpen = this.select === select;
     if (!wasOpen) this.open(select);
     if (!this.popup) return;
+    if (this.filterInput && printable) {
+      this.filterInput.value += key;
+      this.active = null;
+      this.render();
+      return;
+    }
     if (wasOpen && (key === 'Enter' || (key === ' ' && !this.search) || (event.altKey && key === 'ArrowUp') || key === 'F4')) {
       if (this.active) this.commit(this.active);
       else this.close();
@@ -193,7 +221,7 @@ export class SelectEnhancer {
     const popup = document.createElement('div');
     popup.className = 'monky-select-popup';
     popup.id = `monky-select-listbox-${++this.sequence}`;
-    popup.setAttribute('role', 'listbox');
+    popup.setAttribute('role', select.dataset.searchPlaceholder ? 'dialog' : 'listbox');
     popup.setAttribute('popover', 'manual');
     const labelledBy = select.getAttribute('aria-labelledby');
     const label = select.getAttribute('aria-label')
@@ -203,13 +231,34 @@ export class SelectEnhancer {
     if (labelledBy) popup.setAttribute('aria-labelledby', labelledBy);
     else if (label) popup.setAttribute('aria-label', label);
     this.popup = popup;
+    this.listbox = popup;
+    if (select.dataset.searchPlaceholder) {
+      const input = document.createElement('input');
+      input.type = 'search';
+      input.className = 'monky-select-search';
+      input.placeholder = select.dataset.searchPlaceholder;
+      input.setAttribute('aria-label', input.placeholder);
+      input.setAttribute('role', 'combobox');
+      input.setAttribute('aria-autocomplete', 'list');
+      input.setAttribute('aria-expanded', 'true');
+      const list = document.createElement('div');
+      list.id = `${popup.id}-options`;
+      list.setAttribute('role', 'listbox');
+      if (label) list.setAttribute('aria-label', label);
+      input.setAttribute('aria-controls', list.id);
+      input.addEventListener('input', () => { this.active = null; this.render(); });
+      popup.append(input, list);
+      this.filterInput = input;
+      this.listbox = list;
+    }
     document.body.append(popup);
     // The top layer escapes modal stacking contexts without moving the select.
     popup.showPopover();
     select.setAttribute('aria-expanded', 'true');
-    select.setAttribute('aria-controls', popup.id);
+    select.setAttribute('aria-controls', this.listbox.id);
     this.render();
     if (this.popup !== popup) return;
+    this.filterInput?.focus({ preventScroll: true });
     popup.addEventListener('pointermove', event => {
       const row = this.rows.find(({ element }) => element.contains(event.target as Node));
       if (row && this.available(row.option)) this.setActive(row.option, false);
@@ -249,6 +298,8 @@ export class SelectEnhancer {
     groupContainer.setAttribute('role', 'presentation');
     for (const option of Array.from(select.options)) {
       if (!this.visible(option)) continue;
+      const term = this.filterInput?.value.trim().toLocaleLowerCase();
+      if (term && !`${option.label} ${option.value} ${option.dataset.searchTerms ?? ''}`.toLocaleLowerCase().includes(term)) continue;
       const group = option.parentElement instanceof HTMLOptGroupElement ? option.parentElement : null;
       if (group !== lastGroup) {
         groupContainer = document.createElement('div');
@@ -274,7 +325,14 @@ export class SelectEnhancer {
       groupContainer.append(element);
       this.rows.push({ option, element });
     }
-    popup.replaceChildren(fragment);
+    if (!this.rows.length && this.filterInput && select.dataset.emptyLabel) {
+      const empty = document.createElement('div');
+      empty.className = 'monky-select-empty';
+      empty.setAttribute('role', 'status');
+      empty.textContent = select.dataset.emptyLabel;
+      fragment.append(empty);
+    }
+    this.listbox?.replaceChildren(fragment);
     const active = this.rows.find(({ option }) => option === previousActive && this.available(option))?.option
       ?? this.rows.find(({ option }) => option.selected && this.available(option))?.option
       ?? this.rows.find(({ option }) => this.available(option))?.option;
@@ -282,7 +340,10 @@ export class SelectEnhancer {
     popup.scrollTop = scrollTop;
     this.position();
     if (active) this.setActive(active);
-    else select.removeAttribute('aria-activedescendant');
+    else {
+      select.removeAttribute('aria-activedescendant');
+      this.filterInput?.removeAttribute('aria-activedescendant');
+    }
   }
 
   private setActive(option: HTMLOptionElement, scroll = true): void {
@@ -293,6 +354,7 @@ export class SelectEnhancer {
       row.element.setAttribute('aria-selected', String(row.option.selected));
       if (row.option === option) {
         this.select?.setAttribute('aria-activedescendant', row.element.id);
+        this.filterInput?.setAttribute('aria-activedescendant', row.element.id);
         if (scroll) row.element.scrollIntoView({ block: 'nearest' });
       }
     }
@@ -304,7 +366,9 @@ export class SelectEnhancer {
     const changed = !option.selected;
     // Close before application listeners run: they may replace the entire settings view.
     select.selectedIndex = option.index;
+    const searchable = !!this.filterInput;
     this.close();
+    if (searchable) select.focus({ preventScroll: true });
     if (changed) {
       select.dispatchEvent(new Event('input', { bubbles: true }));
       select.dispatchEvent(new Event('change', { bubbles: true }));
@@ -349,6 +413,8 @@ export class SelectEnhancer {
     }
     this.select = null;
     this.popup = null;
+    this.filterInput = null;
+    this.listbox = null;
     this.rows = [];
     this.active = null;
     this.savedAttributes.clear();

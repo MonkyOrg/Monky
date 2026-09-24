@@ -16,6 +16,7 @@ export const developmentQaConfigSchema = z.object({
   runId: z.string().uuid(),
   scenario: z.enum(DEVELOPMENT_QA_SCENARIOS),
   smoke: z.boolean(),
+  realMedia: z.boolean().optional(),
   nickname: z.string().min(2).max(32),
   server: z.object({
     host: z.literal('127.0.0.1'),
@@ -28,6 +29,9 @@ export const developmentQaConfigSchema = z.object({
     manifestUrl: loopbackManifest,
   }).strict().optional(),
 }).strict().superRefine((value, context) => {
+  if (value.smoke && value.realMedia) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Real capture devices require interactive QA; smoke must remain synthetic.' });
+  }
   if (['voice', 'voice-receive', 'music', 'bot-install', 'tool-consent'].includes(value.scenario) && !value.bot) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'This QA scenario requires a bot.' });
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { getCommandPresentation, localizeCommand, type BotCommandMessagePayload, type BotPermissions, type BotSettingsSummary, type SlashCommand, type UserSummary } from '@monky/shared';
+import { getCommandPresentation, localizeCommand, Permission, type BotCommandMessagePayload, type BotPermissions, type BotSettingsSummary, type ChannelSummary, type SlashCommand, type UserSummary } from '@monky/shared';
 import { createChatStore } from '../src/renderer/stores/chatStore';
 import { createServerStore, setActiveServerStore } from '../src/renderer/stores/serverStore';
 import { EventBus } from '../src/renderer/core/EventBus';
@@ -573,7 +573,10 @@ test('bot user parameters include the human caller and exclude bot accounts with
   const bot = { ...member, id: 'bot-member', clientId: 'bot-client', nickname: 'Bot', isBot: true };
   const offlineBot: UserSummary = { ...bot, id: 'offline-bot', status: 'DISCONNECTED' };
   server.setServerDetails({
-    id: 'server', name: 'Server', createdAt: 1, channels: [], members: [member, other, bot],
+    id: 'server', name: 'Server', createdAt: 1, channels: [{
+      id: 'chat', serverId: 'server', name: 'Chat', type: 'TEXT', position: 0,
+      createdAt: 1, isPrivate: false, allowedRoleIds: [], botCommandsEnabled: true,
+    }], members: [member, other, bot],
     knownMembers: [member, other, bot, offlineBot], maxUsers: 10, voiceStates: {},
   }, member);
   const field = commandInputFields(command).find((input) => input.name === 'member');
@@ -581,10 +584,46 @@ test('bot user parameters include the human caller and exclude bot accounts with
   const candidates = server.getHumanMembersInDisplayOrder();
   assert.ok(commandParameterChoices(field, candidates).some((choice) => choice.value === member.id));
   assert.deepEqual(candidates.map((candidate) => candidate.id), [member.id, other.id]);
-  assert.equal(server.getMentionableUsers().some((candidate) => candidate.id === member.id), false);
-  assert.equal(server.getMentionableUsers().some((candidate) => candidate.id === bot.id), true);
+  assert.equal(server.getMentionableUsers('chat').some((candidate) => candidate.id === member.id), false);
+  assert.equal(server.getMentionableUsers('chat').some((candidate) => candidate.id === bot.id), true);
   assert.deepEqual(commandValuesFromInputs(command, { song: 'A song', count: '0', member: member.id }, candidates), {
     success: true, values: { song: 'A song', count: 0, member: member.id },
+  });
+
+  test('mentions follow channel access, reading permissions and live role changes for online and offline members', () => {
+    const server = createServerStore();
+    server.bus = new EventBus();
+    const candidate = (id: string, status: UserSummary['status'] = 'ONLINE'): UserSummary => ({
+      ...member, id, clientId: id, nickname: id, status,
+    });
+    const members = [member, candidate('allowed'), candidate('offline', 'DISCONNECTED'),
+      candidate('outsider'), candidate('owner'), candidate('admin'), candidate('manager'), candidate('no-read')];
+    const channel: ChannelSummary = {
+      id: 'private', serverId: 'server', name: 'Private', type: 'TEXT', position: 0,
+      createdAt: 1, isPrivate: true, allowedRoleIds: ['reader'], botCommandsEnabled: true,
+    };
+    const role = (id: string, permissions: number) => ({ id, name: id, permissions, color: '#123456', position: 1, isDefault: false, createdAt: 1 });
+    const roles = [role('reader', Permission.READ_MESSAGES), role('admin', Permission.ADMINISTRATOR),
+      role('manager', Permission.MANAGE_CHANNELS | Permission.READ_MESSAGES), role('no-read', Permission.MANAGE_CHANNELS)];
+    const userRoles = [
+      { userId: 'allowed', roleIds: ['reader'] }, { userId: 'offline', roleIds: ['reader'] },
+      { userId: 'admin', roleIds: ['admin'] }, { userId: 'manager', roleIds: ['manager'] },
+      { userId: 'no-read', roleIds: ['no-read'] },
+    ];
+    server.setServerDetails({ id: 'server', name: 'Server', createdAt: 1, channels: [channel],
+      members, knownMembers: members, maxUsers: 10, voiceStates: {}, roles, userRoles, ownerId: 'owner' }, member);
+    const ids = () => server.getMentionableUsers(channel.id).map(user => user.id);
+    assert.deepEqual(ids(), ['admin', 'allowed', 'manager', 'owner', 'offline']);
+    server.updateRoles(roles, userRoles.filter(entry => entry.userId !== 'allowed'));
+    assert.equal(ids().includes('allowed'), false);
+    server.updateChannel({ ...channel, isPrivate: false, allowedRoleIds: [] });
+    assert.equal(ids().includes('outsider'), true);
+    assert.equal(ids().includes('no-read'), false);
+    server.updateChannel({ ...channel, allowedRoleIds: [] });
+    assert.deepEqual(ids(), ['admin', 'manager', 'owner']);
+    assert.deepEqual(server.getMentionableUsers('missing'), []);
+    server.updateChannel({ ...channel, type: 'VOICE' });
+    assert.deepEqual(ids(), []);
   });
   assert.equal(commandValuesFromInputs(command, { song: 'A song', count: '0', member: bot.id }, candidates).success, false);
 });

@@ -1,4 +1,5 @@
 import { IDatabaseDriver } from './SqliteWrapper';
+import { messageBlocksSchema, type MessageBlock } from '@monky/shared';
 import { ChannelType, LIMITS, REACTION_LIMITS, botCommandContextSchema, botMessageLocalizationsSchema } from '@monky/shared';
 import { AttachmentRecord, BotRecord, ChannelRecord, MentionRecord, MessageRecord, RoleRecord, ServerRecord, UserRecord, UserRoleRecord } from '../../domain/entities';
 import { IAttachmentRepository, IBotRepository, IChannelRepository, IMentionRepository, IMessageRepository, IRoleRepository, IServerRepository, IUserRepository } from '../../domain/repositories';
@@ -32,7 +33,7 @@ export class SqliteServerRepository implements IServerRepository {
   }
 
   async getServer(): Promise<ServerRecord | null> {
-    const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as any;
+    const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
     if (!row) return null;
     return {
       id: row.id,
@@ -40,6 +41,7 @@ export class SqliteServerRepository implements IServerRepository {
       passwordHash: row.passwordHash,
       createdAt: row.createdAt,
       maxUsers: row.maxUsers,
+      maxMessageLength: row.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
       ownerUserId: row.ownerUserId ?? null,
       allowSoundboard: row.allowSoundboard !== undefined ? Boolean(row.allowSoundboard) : true,
       allowEveryoneMention: row.allowEveryoneMention !== undefined ? Boolean(row.allowEveryoneMention) : true,
@@ -57,7 +59,7 @@ export class SqliteServerRepository implements IServerRepository {
 
   async createServer(server: ServerRecord): Promise<void> {
     this.db.prepare(
-      'INSERT INTO server_meta (id, name, password_hash, created_at, max_users, owner_user_id, allow_soundboard, allow_everyone_mention, show_role_badges_to_everyone, voice_mode, icon_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO server_meta (id, name, password_hash, created_at, max_users, owner_user_id, allow_soundboard, allow_everyone_mention, show_role_badges_to_everyone, voice_mode, icon_path, max_message_length) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(
       server.id,
       server.name,
@@ -69,13 +71,18 @@ export class SqliteServerRepository implements IServerRepository {
       server.allowEveryoneMention !== false ? 1 : 0,
       server.showRoleBadgesToEveryone !== false ? 1 : 0,
       server.voiceMode || 'p2p',
-      server.iconPath || null
+      server.iconPath || null,
+      server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH
     );
   }
 
   async updateServer(server: Partial<ServerRecord>): Promise<void> {
     const fields: string[] = [];
     const values: any[] = [];
+    if (server.maxMessageLength !== undefined) {
+      fields.push('max_message_length = ?');
+      values.push(server.maxMessageLength);
+    }
 
     if (server.name !== undefined) {
       fields.push('name = ?');
@@ -385,6 +392,7 @@ export class SqliteChannelRepository implements IChannelRepository {
 }
 
 interface SqliteMessageRow {
+  blocksJson: string | null;
   botLocalizationsJson: string | null;
   replyToMessageId: string | null;
   authorBotId: string | null;
@@ -403,12 +411,13 @@ interface SqliteMessageRow {
 
 /** Columns every message read shares, so the three queries cannot drift (#504). */
 const MESSAGE_COLUMNS =
-  'id, channel_id as channelId, user_id as userId, content, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId, bot_localizations_json as botLocalizationsJson';
+  'id, channel_id as channelId, user_id as userId, content, blocks_json as blocksJson, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId, bot_localizations_json as botLocalizationsJson';
 
 function toMessageRecord(r: SqliteMessageRow): MessageRecord {
   if (r.authorBotId && !r.authorBotName) throw new Error('Stored bot message is missing its author name.');
   return {
     replyToMessageId: r.replyToMessageId ?? undefined,
+    blocks: !r.deletedAt && r.blocksJson ? messageBlocksSchema.parse(JSON.parse(r.blocksJson)) : undefined,
     id: r.id,
     channelId: r.channelId,
     userId: r.authorBotId ?? r.userId,
@@ -474,6 +483,29 @@ export class SqliteMessageRepository implements IMessageRepository {
     this.insertMessage(message);
   }
 
+  async createChatMessage(message: MessageRecord, attachmentIds: string[], mentions: MentionRecord[]): Promise<{
+    message: MessageRecord; created: boolean;
+  } | null> {
+    return this.db.transaction(() => {
+      const existing = this.db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`).get(message.id) as SqliteMessageRow | undefined;
+      if (existing) return { message: toMessageRecord(existing), created: false };
+      for (const id of attachmentIds) {
+        if (!this.db.prepare(`SELECT id FROM message_attachments
+          WHERE id = ? AND user_id = ? AND channel_id = ? AND message_id IS NULL AND evicted = 0`)
+          .get(id, message.userId, message.channelId)) return null;
+      }
+      this.insertMessage(message);
+      for (const id of attachmentIds) {
+        this.db.prepare('UPDATE message_attachments SET message_id = ? WHERE id = ?').run(message.id, id);
+      }
+      for (const mention of mentions) {
+        this.db.prepare('INSERT INTO mentions (id, user_id, channel_id, message_id, created_at) VALUES (?, ?, ?, ?, ?)')
+          .run(mention.id, mention.userId, mention.channelId, mention.messageId, mention.createdAt);
+      }
+      return { message, created: true };
+    })();
+  }
+
   async createBotMessage(message: MessageRecord): Promise<MessageRecord | null> {
     const author = message.botAuthor;
     if (!author) throw new Error('Bot messages require an author snapshot.');
@@ -488,12 +520,13 @@ export class SqliteMessageRepository implements IMessageRepository {
 
   private insertMessage(message: MessageRecord, idempotent = false): void {
     this.db.prepare(
-      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json, reply_to_message_id, bot_localizations_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
+      'INSERT INTO messages (id, channel_id, user_id, content, created_at, is_system, author_bot_id, author_bot_name, author_bot_avatar_path, bot_command_json, reply_to_message_id, bot_localizations_json, blocks_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
       (idempotent ? ' ON CONFLICT(id) DO NOTHING' : '')
     ).run(message.id, message.channelId, message.botAuthor?.ownerUserId ?? message.userId, message.content, message.createdAt, message.isSystem ? 1 : 0,
       message.botAuthor?.id ?? null, message.botAuthor?.name ?? null, message.botAuthor?.avatarPath ?? null,
       message.botCommand ? JSON.stringify(message.botCommand) : null, message.replyToMessageId ?? null,
-      message.botAuthor && message.localizations ? JSON.stringify(message.localizations) : null);
+      message.botAuthor && message.localizations ? JSON.stringify(message.localizations) : null,
+      message.blocks ? JSON.stringify(message.blocks) : null);
   }
 
   async findById(messageId: string): Promise<MessageRecord | null> {
@@ -519,14 +552,15 @@ export class SqliteMessageRepository implements IMessageRepository {
     return rows.reverse().map(toMessageRecord);
   }
 
-  async updateContent(messageId: string, content: string, editedAt: number): Promise<void> {
-    this.db.prepare('UPDATE messages SET content = ?, bot_localizations_json = NULL, edited_at = ? WHERE id = ?').run(content, editedAt, messageId);
+  async updateContent(messageId: string, content: string, editedAt: number, blocks?: MessageBlock[]): Promise<void> {
+    this.db.prepare('UPDATE messages SET content = ?, blocks_json = ?, bot_localizations_json = NULL, edited_at = ? WHERE id = ?')
+      .run(content, blocks ? JSON.stringify(blocks) : null, editedAt, messageId);
   }
 
   async markDeleted(messageId: string, deletedAt: number): Promise<void> {
     // The content goes with the deletion: keeping it would leave the text one
     // query away from anyone with access to the database file (#504).
-    this.db.prepare("UPDATE messages SET content = '', bot_localizations_json = NULL, deleted_at = ? WHERE id = ?").run(deletedAt, messageId);
+    this.db.prepare("UPDATE messages SET content = '', blocks_json = NULL, bot_localizations_json = NULL, deleted_at = ? WHERE id = ?").run(deletedAt, messageId);
   }
 
   async deleteByChannel(channelId: string): Promise<void> {

@@ -190,6 +190,15 @@ export class ServerSettingsModal {
       button.addEventListener('click', () => this.switchTab(button.dataset.tab ?? 'general'), options);
     });
     const details = () => context.store.serverDetails;
+    const messageLimitPatch = (): ServerUpdateSettingsPayload => {
+      const value = Number(root.querySelector<HTMLInputElement>('#input-message-limit')?.value);
+      return { maxMessageLength: root.querySelector<HTMLInputElement>('#toggle-message-limit')?.checked
+        ? value >= 1 ? value : Number.NaN : 0 };
+    };
+    this.bindSetting('#toggle-message-limit', 'messageLength', 'serverSettings.messageLimit',
+      () => String((details()?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH) > 0), messageLimitPatch);
+    this.bindSetting('#input-message-limit', 'messageLength', 'serverSettings.messageLimit',
+      () => String(details()?.maxMessageLength || LIMITS.MAX_MESSAGE_LENGTH), messageLimitPatch);
     this.bindSetting('#input-server-name', 'name', 'serverSettings.nameLabel',
       () => details()?.name ?? '', (value) => ({ name: value.trim() }));
     this.bindSetting('#input-server-pass', 'password', 'invite.passwordLabel', () => '',

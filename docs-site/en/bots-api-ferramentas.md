@@ -231,7 +231,7 @@ export interface HttpsUpdateSource {
 
 ```ts
 export const LIMITS = {
-    MAX_MESSAGE_LENGTH: 2000,
+    MAX_MESSAGE_LENGTH: 16000,
     MAX_AVATAR_SIZE: 5 * 1024 * 1024, // 5 MB
     MAX_USERS_DEFAULT: 20,
     // Sentinel stored in `max_users` when the owner chose not to cap membership

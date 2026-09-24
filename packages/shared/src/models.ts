@@ -127,6 +127,7 @@ export interface BotCommandContext {
 
 /** Resolved by the server from the original, never supplied by the sender. */
 export interface MessageReply {
+  createdAt?: number;
   isBot?: boolean;
   localizations?: import('./botMessages.js').BotMessageLocalizations;
   messageId: string;
@@ -137,6 +138,7 @@ export interface MessageReply {
 }
 
 export interface ChatMessage {
+  blocks?: import('./messageBlocks.js').ResolvedMessageBlock[];
   localizations?: import('./botMessages.js').BotMessageLocalizations;
   reply?: MessageReply;
   reactions?: import('./reactions.js').MessageReaction[];
@@ -282,6 +284,8 @@ export interface SlashCommand {
 
 /** A bot account visible in the management UI. */
 export interface BotInfo {
+  protocolCompatible?: boolean;
+  minimumProtocolVersion?: number;
   id: string;
   name: string;
   avatarUrl?: string | null;
@@ -307,6 +311,8 @@ export interface BotCompatibilitySummary {
 // ── End bot types ─────────────────────────────────────────────────────────
 
 export interface ServerDetails {
+  protocol?: import('./protocolCompatibility.js').ProtocolAgreement;
+  maxMessageLength?: number;
   id: string;
   name: string;
   /** Version of the running server, not the connected desktop application. */

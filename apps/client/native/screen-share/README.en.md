@@ -111,7 +111,7 @@ presets. Each profile negotiates its required H.264 level: at least 5.1 for
 1080p120, 5.2 for 4K60 and 6 for 4K120. The versioned WebRTC overlay and
 `h264-profile-level-id` patch add actual Level 6 support; their patches and
 licenses accompany corresponding sources. Client and server require protocol
-25. The bitrate ceiling is not a floor: congestion control stays active and
+26. The bitrate ceiling is not a floor: congestion control stays active and
 different profiles may consume additional upload bandwidth.
 
 This does not make every encoder 4K120-capable. The AMF installed on the tested
@@ -162,7 +162,7 @@ A new share opens its preview in focus mode; quality updates and recovery do
 not override a later choice to leave focus. The **Normal / Game Capture**
 indicator only appears after frames are observed and follows the preview's
 or viewer's actual pipeline, not merely the requested method. Signaling this
-state requires both client and server to use protocol 24.
+state requires both client and server to support protocol 26.
 
 **Pause preview when Monky is not focused**, enabled by default, controls
 only local preview; losing focus does not interrupt viewers. Turning it off

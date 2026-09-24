@@ -151,7 +151,7 @@ ctx.publish({
 O bot escreve as variantes; **não há tradução automática**. Cada leitor escolhe
 a variante pelo idioma do aplicativo, não pelo idioma de quem executou o comando
 nem pela preferência usada no formulário do bot. `content` é obrigatório e serve
-de fallback quando não existe variante. Cada texto aceita de 1 a 2.000 caracteres;
+de fallback quando não existe variante. Cada texto respeita o limite do servidor (16.000 caracteres por padrão; `0` sem limite de caracteres);
 as chaves suportadas são `pt-BR` e `en`.
 
 As variantes permanecem no histórico e nas referências de resposta; copiar usa

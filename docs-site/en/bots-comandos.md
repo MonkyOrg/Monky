@@ -151,7 +151,7 @@ ctx.publish({
 The bot authors the variants; **there is no automatic translation**. Each reader
 selects a variant through their app language, not the command caller's language
 or the preference used for the bot's forms. `content` is required and serves as
-the fallback when a variant is unavailable. Each text accepts 1–2,000 characters;
+the fallback when a variant is unavailable. Each text follows the server limit (16,000 characters by default; `0` disables the character limit);
 supported keys are `pt-BR` and `en`.
 
 Variants remain in history and reply references; copying uses the displayed text.

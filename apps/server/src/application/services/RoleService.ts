@@ -62,6 +62,7 @@ export class RoleService {
   public async ensureDefaultRolesAssigned(userId: string): Promise<void> {
     const defaultRoles = await this.roleRepo.getDefaultRoles();
     for (const role of defaultRoles) {
+      if ((role.permissions & Permission.ADMINISTRATOR) !== 0 || await this.isBuiltInAdminRole(role.id)) continue;
       await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, role.id));
     }
   }
@@ -130,6 +131,12 @@ export class RoleService {
     }
 
     const isBuiltInAdmin = await this.isBuiltInAdminRole(existing.id);
+    if (isBuiltInAdmin && !(await this.permissionService.isOwner(actorUserId))) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode editar o cargo Admin.' };
+    }
+    if (isBuiltInAdmin && parsed.data.isDefault === true) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O cargo Admin não pode ser atribuído automaticamente.' };
+    }
     if (parsed.data.name !== undefined && parsed.data.name !== existing.name) {
       // Renaming either direction would move the ADMINISTRATOR exemption around.
       if (isBuiltInAdmin || this.usesReservedAdminName(parsed.data.name)) {
@@ -188,6 +195,13 @@ export class RoleService {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Usuário ou cargo não encontrado.' };
     }
 
+    // MANAGE_ROLES não pode virar ADMINISTRATOR pela porta dos fundos: criar e
+    // editar cargo já barram isso (#277), mas atribuir o cargo Admin embutido
+    // dava o mesmo resultado em um passo. Só o dono promove alguém a admin.
+    if ((await this.isBuiltInAdminRole(role.id)) && !(await this.permissionService.isOwner(actorUserId))) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode promover alguém a administrador.' };
+    }
+
     await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(parsed.data.userId, parsed.data.roleId));
     return { success: true };
   }
@@ -209,6 +223,10 @@ export class RoleService {
     }
     if (role.isDefault) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'O cargo padrão não pode ser removido.' };
+    }
+    // Simétrico ao assign: quem tem MANAGE_ROLES não derruba um administrador.
+    if ((await this.isBuiltInAdminRole(role.id)) && !(await this.permissionService.isOwner(actorUserId))) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode remover um administrador.' };
     }
 
     await this.permissionService.withRoleMutation(() => this.roleRepo.unassignRole(parsed.data.userId, parsed.data.roleId));

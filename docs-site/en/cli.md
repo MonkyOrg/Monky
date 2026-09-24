@@ -551,6 +551,7 @@ monky config set <key> [value]     # change it directly
 | `port` | TCP port | `3000` |
 | `icon` | Path to an image, copied into the data directory. Empty or `clear` removes it | no icon |
 | `maxUsers` | Maximum registered members. `0` removes the limit | `20` |
+| `maxMessageLength` | Characters per message. `0` removes the character limit; the 8 MiB packet limit still applies | `16000` |
 | `allowSoundboard` | Allows the soundboard (`true`/`false`) | `true` |
 | `allowEveryoneMention` | Allows `@everyone`/`@todos` in chat (`true`/`false`) | `true` |
 | `maxAttachmentFileBytes` | Maximum size per attachment, in bytes | no limit |

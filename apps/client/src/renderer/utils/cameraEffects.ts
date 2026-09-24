@@ -168,6 +168,18 @@ export function writePersonMask(
   }
 }
 
+export function stabilizePersonMask(current: Float32Array, previous: Float32Array | null): Float32Array {
+  if (!previous || previous.length !== current.length) previous = new Float32Array(current);
+  for (let index = 0; index < current.length; index++) {
+    const value = current[index];
+    if (!Number.isFinite(value)) throw new CameraEffectError('processing');
+    // Smooth uncertain stationary edges, but follow motion immediately to avoid trails.
+    const stable = Math.abs(value - previous[index]) < 0.12 && value > 0.05 && value < 0.95;
+    previous[index] = stable ? previous[index] * 0.6 + value * 0.4 : value;
+  }
+  return previous;
+}
+
 /** Chromatic keys tolerate lighting changes; neutral keys also distinguish brightness. */
 export function applyChromaKey(rgba: Uint8ClampedArray, settings: CameraEffectSettings): void {
   if (!isHexColor(settings.keyColor)) throw new CameraEffectError('settings');

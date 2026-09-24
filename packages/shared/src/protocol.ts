@@ -17,6 +17,12 @@ export enum ProtocolErrorCode {
   CHANNEL_FULL = 'CHANNEL_FULL',
   MESSAGE_TOO_LONG = 'MESSAGE_TOO_LONG',
   RATE_LIMITED = 'RATE_LIMITED',
+  /**
+   * Tentativas de conexão limitadas por IP (#372). Separado de RATE_LIMITED
+   * porque o cliente traduz por código: reusar aquele mostraria "você está
+   * enviando mensagens rápido demais" para quem nem entrou no servidor.
+   */
+  AUTH_RATE_LIMITED = 'AUTH_RATE_LIMITED',
   AVATAR_TOO_LARGE = 'AVATAR_TOO_LARGE',
   AVATAR_INVALID_TYPE = 'AVATAR_INVALID_TYPE',
   ATTACHMENT_TOO_LARGE = 'ATTACHMENT_TOO_LARGE',
@@ -24,6 +30,7 @@ export enum ProtocolErrorCode {
   STORAGE_FULL = 'STORAGE_FULL',
   SERVER_FULL = 'SERVER_FULL',
   PROTOCOL_VERSION_UNSUPPORTED = 'PROTOCOL_VERSION_UNSUPPORTED',
+  FEATURE_REQUIRES_UPDATE = 'FEATURE_REQUIRES_UPDATE',
   INTERNAL_ERROR = 'INTERNAL_ERROR',
   UNAUTHORIZED = 'UNAUTHORIZED',
   PERMISSION_DENIED = 'PERMISSION_DENIED',
@@ -274,6 +281,7 @@ export interface ProtocolMessage<T = any> {
 // Client Payloads
 export interface AuthConnectPayload {
   protocolVersion: number;
+  protocolOffer?: import('./protocolCompatibility.js').ProtocolOffer;
   publicKey: string;
   nickname: string;
   password?: string;
@@ -311,6 +319,9 @@ export interface AuthFailedPayload {
 }
 
 export interface ChatSendPayload {
+  /** Stable message ID, reused on explicit retries when chat-delivery is negotiated. */
+  clientMessageId?: string;
+  blocks?: import('./messageBlocks.js').MessageBlock[];
   /** Bot-authored variants; rejected for human messages. */
   localizations?: import('./botMessages.js').BotMessageLocalizations;
   replyToMessageId?: string;
@@ -405,6 +416,7 @@ export interface UserUpdateAvatarPayload {
 }
 
 export interface ServerUpdateSettingsPayload {
+  maxMessageLength?: number;
   name?: string;
   password?: string | null; // null or empty string removes the password
   allowSoundboard?: boolean;
@@ -617,6 +629,7 @@ export interface ServerErrorPayload {
 }
 
 export interface ServerSettingsUpdatedPayload {
+  maxMessageLength?: number;
   name: string;
   hasPassword: boolean;
   allowSoundboard?: boolean;

@@ -1,7 +1,9 @@
+import dns from 'dns';
 import http from 'http';
 import https from 'https';
 import net from 'net';
 import { LruCache } from '@monky/shared';
+import { isPrivateAddress, isPrivateHostname } from './privateAddress';
 
 export interface LinkPreviewMetadata {
   url: string;
@@ -29,43 +31,7 @@ const previewCache = new LruCache<string, LinkPreviewMetadata | null>(200, 1000 
  * or cloud metadata/link-local addresses to prevent SSRF vulnerabilities.
  */
 function isPrivateOrLocalHost(hostname: string): boolean {
-  const lower = (hostname || '').toLowerCase().trim();
-  if (
-    lower === 'localhost' ||
-    lower.endsWith('.local') ||
-    lower.endsWith('.internal') ||
-    lower.endsWith('.localhost')
-  ) {
-    return true;
-  }
-
-  if (net.isIP(lower)) {
-    // IPv4 Loopback (127.0.0.0/8)
-    if (lower.startsWith('127.')) return true;
-    // IPv4 RFC 1918 Private ranges
-    if (lower.startsWith('10.')) return true;
-    if (lower.startsWith('192.168.')) return true;
-    if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(lower)) return true;
-    // IPv4 Link-Local / Cloud Metadata (169.254.0.0/16)
-    if (lower.startsWith('169.254.')) return true;
-    // IPv4 Broadcast / Any
-    if (lower === '0.0.0.0' || lower === '255.255.255.255') return true;
-    // IPv6 Loopback / Link-Local / Unique Local (fc00::/7, fe80::/10)
-    if (
-      lower === '::1' ||
-      lower === '::' ||
-      lower.startsWith('fe80:') ||
-      lower.startsWith('fe9') ||
-      lower.startsWith('fea') ||
-      lower.startsWith('feb') ||
-      lower.startsWith('fc') ||
-      lower.startsWith('fd')
-    ) {
-      return true;
-    }
-  }
-
-  return false;
+  return isPrivateHostname(hostname) || isPrivateAddress(hostname);
 }
 
 function detectEmbedProvider(url: string): 'youtube' | 'spotify' | null {
@@ -194,6 +160,45 @@ export async function fetchLinkPreview(rawUrl: string): Promise<LinkPreviewMetad
   }
 }
 
+/**
+ * A pré-visualização de link é disparada por qualquer mensagem do chat, inclusive
+ * de outra pessoa, e a busca acontece no processo main — sem origem, sem CORS. Sem
+ * esta trava, mandar `http://192.168.0.1/…` no chat fazia a máquina de cada um
+ * bater na própria rede local (#372).
+ *
+ * A checagem fica no `lookup` em vez de no hostname porque é o único ponto que vê
+ * o endereço realmente usado: um domínio público que resolve para 127.0.0.1 passa
+ * por qualquer inspeção feita na string da URL.
+ */
+const publicOnlyLookup: typeof dns.lookup = ((
+  hostname: string,
+  options: unknown,
+  callback: (err: NodeJS.ErrnoException | null, address?: unknown, family?: number) => void
+) => {
+  const done = typeof options === 'function' ? (options as typeof callback) : callback;
+  const lookupOptions = typeof options === 'function' ? {} : (options as dns.LookupOptions);
+
+  dns.lookup(hostname, lookupOptions, (err, address, family) => {
+    if (err) {
+      done(err);
+      return;
+    }
+
+    const addresses = Array.isArray(address) ? address : [{ address: address as string, family: family as number }];
+    const allowed = addresses.filter((entry) => !isPrivateAddress(entry.address));
+    if (allowed.length === 0) {
+      done(Object.assign(new Error(`Blocked private address for ${hostname}`), { code: 'EACCES' }));
+      return;
+    }
+
+    if (Array.isArray(address)) {
+      done(null, allowed);
+      return;
+    }
+    done(null, allowed[0].address, allowed[0].family);
+  });
+}) as typeof dns.lookup;
+
 async function fetchHtml(url: string, redirects = 0): Promise<HtmlFetchResult | null> {
   if (redirects > MAX_REDIRECTS) return null;
 
@@ -223,6 +228,7 @@ async function fetchHtml(url: string, redirects = 0): Promise<HtmlFetchResult | 
           'Accept-Encoding': 'identity',
           'User-Agent': 'Monky-App',
         },
+        lookup: publicOnlyLookup,
       },
       (response) => {
         const status = response.statusCode ?? 0;
@@ -433,6 +439,13 @@ function resolveUrl(rawUrl: string | null | undefined, baseUrl?: string): string
   try {
     const resolved = baseUrl ? new URL(rawUrl, baseUrl) : new URL(rawUrl);
     if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') {
+      return null;
+    }
+    // Um IP privado escrito na própria URL nem chega a virar requisição (#372).
+    // O caso do domínio que resolve para um endereço interno é barrado depois,
+    // no lookup.
+    const host = resolved.hostname.replace(/^\[|\]$/g, '');
+    if (net.isIP(host) ? isPrivateAddress(host) : isPrivateHostname(host)) {
       return null;
     }
 

@@ -20,11 +20,11 @@ import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
 import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
 import { resolveDevelopmentProfile } from './developmentProfile';
-import { bindDevelopmentQa, loadDevelopmentQa } from './developmentQa';
+import { bindDevelopmentQa, configureDevelopmentQaMedia, loadDevelopmentQa } from './developmentQa';
 import { CrashRecovery } from './crashRecovery';
 import { initializeMainLanguage, mt } from './i18n';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
-import { ServerInviteInbox } from './serverInvites';
+import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
 
 import fs from 'fs';
 
@@ -36,12 +36,7 @@ const developmentQa = loadDevelopmentQa({
   parentPid: process.ppid,
   supervised: typeof process.send === 'function',
 });
-if (developmentQa) {
-  // Prepared QA never opens physical capture devices, including after unmute.
-  app.commandLine.appendSwitch('use-fake-device-for-media-stream');
-  app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
-  if (developmentQa.smoke) app.commandLine.appendSwitch('mute-audio');
-}
+configureDevelopmentQaMedia(app.commandLine, developmentQa);
 
 const developmentProfile = resolveDevelopmentProfile({
   isPackaged: app.isPackaged,
@@ -193,12 +188,29 @@ ipcMain.handle(APP_SHUTDOWN_IPC.acknowledge, (event, request: unknown) => {
   onLeaveComplete?.(request);
 });
 
+/**
+ * Hands a URL to the OS only when it is a plain web link. Both guards below used
+ * to forward whatever they were given, so a link with another scheme — file://,
+ * or one of the Windows handlers that take arguments — would have been opened
+ * by the system (#372). The `app:open-external` IPC channel already checked
+ * this; the guards did not.
+ */
+function openExternalIfWebUrl(url: string): void {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+    void shell.openExternal(parsed.toString());
+  } catch {
+    // Not a URL we can make sense of: leaving it to the OS is the risk itself.
+  }
+}
+
 function bindMainWindowNavigationGuards(): void {
   if (!mainWindow) return;
   bindBotScreenIsolation(mainWindow.webContents);
 
   mainWindow.webContents.setWindowOpenHandler(({ url, referrer }) => {
-    if (!isBotScreenUrl(referrer.url) && /^https?:\/\//i.test(url)) void shell.openExternal(url);
+    if (!isBotScreenUrl(referrer.url)) openExternalIfWebUrl(url);
     return { action: 'deny' };
   });
 
@@ -207,7 +219,7 @@ function bindMainWindowNavigationGuards(): void {
     if (isBotScreenFrame(event.initiator)) { event.preventDefault(); return; }
     if (url === mainWindow.webContents.getURL()) return;
     event.preventDefault();
-    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    openExternalIfWebUrl(url);
   });
 }
 
@@ -500,6 +512,7 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
+    registerServerInviteProtocol(app);
     initializeMainLanguage(app.getPath('userData'), app.getPreferredSystemLanguages());
     getCrashRecovery();
     // TEST-ONLY (Bancada A): simulate the update install UX without a real

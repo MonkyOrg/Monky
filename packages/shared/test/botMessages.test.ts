@@ -24,13 +24,15 @@ test('plain text remains supported; variants and fallback are individually bound
   assert.deepEqual(normalizeBotMessageContent(' Plain text '), { content: 'Plain text' });
   assert.deepEqual(normalizeBotMessageContent(translated), translated);
   for (const localizations of [{}, { en: '' }, { en: ' '.repeat(10) }, { fr: 'Bonjour' },
-    { en: 'x'.repeat(LIMITS.MAX_MESSAGE_LENGTH + 1) }, { en: 42 }]) {
+    { en: 'x'.repeat(LIMITS.WS_MAX_PAYLOAD_BYTES + 1) }, { en: 42 }]) {
     assert.equal(botMessageLocalizationsSchema.safeParse(localizations).success, false);
     assert.equal(commandResponseSchema.safeParse({ invocationId: 'i', content: 'Fallback', localizations }).success, false);
   }
   const maximum = { en: 'x'.repeat(LIMITS.MAX_MESSAGE_LENGTH), 'pt-BR': 'y'.repeat(LIMITS.MAX_MESSAGE_LENGTH) };
   assert.equal(botMessageLocalizationsSchema.safeParse(maximum).success, true);
   assert.deepEqual(botMessagePreviewLocalizations(maximum), { en: 'x'.repeat(200), 'pt-BR': 'y'.repeat(200) });
+  assert.equal(botMessageLocalizationsSchema.safeParse({ en: 'x'.repeat(16001) }).success, true,
+    'the wire schema allows larger messages; the service applies each server limit');
 });
 
 test('command replies and durable acknowledgements retain variants and localized references', () => {

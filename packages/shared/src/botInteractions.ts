@@ -460,7 +460,7 @@ export const commandFinishedSchema = commandCancelSchema.extend({
   reason: z.enum(['completed', 'cancelled', 'expired', 'bot_disconnected', 'caller_disconnected', 'failed']),
 });
 export const commandResponseSchema = commandCancelSchema.extend({
-  content: z.string().trim().min(1).max(LIMITS.MAX_MESSAGE_LENGTH),
+  content: z.string().trim().min(1).max(LIMITS.WS_MAX_PAYLOAD_BYTES),
   localizations: botMessageLocalizationsSchema.optional(),
   ephemeral: z.boolean().optional(),
 });

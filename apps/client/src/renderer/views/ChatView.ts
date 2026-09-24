@@ -1,15 +1,17 @@
-import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, getCommandPresentation, getMessageText, hasEveryoneMention } from '@monky/shared';
-import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, CommandPresentation, MessageReply, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
+import { ChatMessage, EVERYONE_MENTION_TOKENS, LIMITS, MessageType, Permission, getCommandPresentation, getMessageText,
+  hasEveryoneMention, messageBlocksContent, messageBlocksInput, parseFencedMessageBlocks } from '@monky/shared';
+import type { AttachmentMeta, BotLocale, ChatMessageUpdatedPayload, ChatSendPayload, CommandPresentation, MessageReply, ResolvedMessageBlock, SlashCommand, StickerEntry, UserSummary } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
+import { formatMessageTime, renderReplyPreview } from '../utils/messageReply';
 import { appEvents } from '../core/EventBus';
 import { networkClient, getActiveNetworkClient } from '../core/NetworkClient';
-import { chatStore, getActiveChatStore, type BotInvocation, type MessageEditDraft } from '../stores/chatStore';
+import { chatStore, getActiveChatStore, type BotInvocation, type MessageEditDraft, type OutgoingMessage } from '../stores/chatStore';
 import { serverStore, getActiveServerStore } from '../stores/serverStore';
 import { participantManager } from '../core/ParticipantManager';
 import { userContextMenu } from './UserContextMenu';
 import { contextMenu, type ContextMenuEntry, type ContextMenuItem } from './ContextMenu';
 import { getAvatarUrl } from '../utils/avatar';
-import { renderMarkdown } from '../utils/markdown';
+import { renderCodeBlock, renderMarkdown } from '../utils/markdown';
 import { markdownMessageClipboard, pasteMonkyClipboard, renderedMessageClipboard, selectedMessageClipboard,
   setMessageClipboardData, writeMessageClipboard, type MessageClipboardContent, type MessageCopyMode } from '../utils/messageClipboard';
 import { getLanguage, t } from '../i18n';
@@ -23,6 +25,7 @@ import { linkPreviewService } from '../core/LinkPreviewService';
 import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
 import { EmojiPicker } from './EmojiPicker';
 import { buildCodeMessage, codeBlockModal } from './CodeBlockModal';
+import { renderMessageBlockComposer } from './MessageBlockComposer';
 import { bindChatComposerMotion } from './FooterControlsMotion';
 import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
@@ -61,6 +64,14 @@ type MentionCandidate =
   | { kind: 'everyone'; token: string };
 
 export class ChatView {
+  private blockSendPending = false;
+  private get messageLengthLimit(): number {
+    return this.server.serverDetails?.maxMessageLength ?? (this.server.serverDetails ? 2000 : LIMITS.MAX_MESSAGE_LENGTH);
+  }
+  private get messageLimitLabel(): string { return this.messageLengthLimit === 0 ? '∞' : String(this.messageLengthLimit); }
+  private isMessageTooLong(content: string): boolean {
+    return this.messageLengthLimit > 0 && content.length > this.messageLengthLimit;
+  }
   private container: HTMLElement;
   private readonly store = getActiveChatStore();
   private readonly client = getActiveNetworkClient();
@@ -179,7 +190,6 @@ export class ChatView {
             <p id="chat-edit-hint">${t('chat.editComposerHint')}</p>
             <p id="chat-edit-error" class="chat-edit-error" role="alert" hidden></p>
           </div>
-          <div id="chat-reply-composer" class="chat-reply-composer" hidden></div>
           <div id="mention-dropup" class="mention-dropup" style="display: none;"></div>
           <div id="command-dropup" class="command-dropup" style="display: none;"></div>
           <div id="chat-attachment-tray" class="chat-attachment-tray" style="display: none;"></div>
@@ -187,6 +197,9 @@ export class ChatView {
           <div id="chat-send-permission-banner" class="chat-permission-banner" style="display: none;"></div>
           <div id="chat-command-notice" class="bot-error" role="alert" hidden></div>
           <div id="chat-command-composer" class="bot-command-composer" hidden></div>
+          <div class="chat-composer-surface">
+          <div id="chat-reply-composer" class="chat-reply-composer" hidden></div>
+          <div id="chat-composer-blocks" aria-label="${t('chat.composerBlocks')}" hidden></div>
           <div class="chat-input-wrapper">
             <button id="btn-attach" type="button" class="chat-attach-btn" title="${t('chat.attachFile')}">
               <span class="material-symbols-outlined md-22">add_circle</span>
@@ -198,12 +211,13 @@ export class ChatView {
             <button id="btn-code" type="button" class="chat-attach-btn" title="${t('chat.codeBlockTitle')}">
               <span class="material-symbols-outlined md-22">code</span>
             </button>
-            <textarea id="chat-message-input" class="chat-input-field" rows="1" placeholder="${t('chat.inputPlaceholder', { channel: escapeHtml(channelName) })}" maxlength="${LIMITS.MAX_MESSAGE_LENGTH}"></textarea>
-            <span id="chat-char-counter" class="chat-char-count">0/${LIMITS.MAX_MESSAGE_LENGTH}</span>
+            <textarea id="chat-message-input" class="chat-input-field" rows="1" placeholder="${t('chat.inputPlaceholder', { channel: escapeHtml(channelName) })}" ${this.messageLengthLimit > 0 ? `maxlength="${this.messageLengthLimit}"` : ''}></textarea>
+            <span id="chat-char-counter" class="chat-char-count">0/${this.messageLimitLabel}</span>
             <button type="button" id="btn-send-message" class="btn btn-primary chat-send-btn">
               <span class="material-symbols-outlined md-16" aria-hidden="true">send</span>
               <span class="chat-send-label">${t('chat.send')}</span>
             </button>
+          </div>
           </div>
         </div>
       </div>
@@ -345,6 +359,9 @@ export class ChatView {
       : Array.from(container.querySelectorAll<HTMLElement>('.chat-message-row'));
 
     rows.forEach((row) => {
+      row.querySelector<HTMLButtonElement>('[data-retry-message]')?.addEventListener('click', () => {
+        this.retryMessage(row.dataset.messageId ?? '');
+      });
       const toolbar = row.querySelector<HTMLElement>('.chat-message-toolbar');
       const dismissToolbar = () => this.dismissMessageToolbar(row);
       const resetToolbar = () => row.classList.remove('chat-message-actions-dismissed');
@@ -468,7 +485,7 @@ export class ChatView {
   private buildMessageMenuItems(messageId: string | null): ContextMenuEntry[] {
     if (!messageId || !this.currentChannelId) return [];
     const message = chatStore.getMessages(this.currentChannelId).find((m) => m.id === messageId);
-    if (!message || message.isSystem || message.isEphemeral || message.deletedAt) return [];
+    if (!message || message.isSystem || message.isEphemeral || message.deletedAt || this.store.getOutgoing(message.id)) return [];
 
     const isAuthor = !!serverStore.currentUser && message.userId === serverStore.currentUser.id;
     const canModerate = serverStore.hasPermission(Permission.MANAGE_SERVER);
@@ -517,7 +534,7 @@ export class ChatView {
   private startEditingMessage(messageId: string): void {
     if (!this.isCurrentComposer() || !this.currentChannelId) return;
     const message = this.store.getMessages(this.currentChannelId).find((entry) => entry.id === messageId);
-    if (!message || message.isSystem || message.isEphemeral || message.deletedAt ||
+    if (!message || message.isSystem || message.isEphemeral || message.deletedAt || this.store.getOutgoing(message.id) ||
         message.userId !== this.server.currentUser?.id || this.server.serverDetails?.allowMessageEdit === false) return;
     this.rememberComposerText();
     const previous = this.store.getMessageEdit(this.currentChannelId);
@@ -547,7 +564,7 @@ export class ChatView {
       this.store.setMessageEditPending(channelId, edit, false, 'empty');
       return;
     }
-    if (content.length > LIMITS.MAX_MESSAGE_LENGTH) {
+    if (this.isMessageTooLong(content)) {
       this.store.setMessageEditPending(channelId, edit, false, 'too-long');
       return;
     }
@@ -732,10 +749,7 @@ export class ChatView {
 
   /** Full date + time shown on each message, e.g. "24/08/2026 19:15" (#11). */
   private formatDateTime(ts: number): string {
-    const d = new Date(ts);
-    const date = d.toLocaleDateString(getLanguage());
-    const time = d.toLocaleTimeString(getLanguage(), { hour: '2-digit', minute: '2-digit' });
-    return `${date} ${time}`;
+    return formatMessageTime(ts);
   }
 
   private focusChatInput(options?: { defer?: boolean }): void {
@@ -779,7 +793,7 @@ export class ChatView {
     const editError = edit ? this.messageEditDeniedReason(edit) ??
       (edit.error === 'failed' ? t('chat.editSaveFailed') :
         edit.error === 'empty' ? t('chat.editEmpty') :
-          edit.error === 'too-long' ? t('chat.editTooLong', { max: LIMITS.MAX_MESSAGE_LENGTH }) :
+          edit.error === 'too-long' ? t('chat.editTooLong', { max: this.messageLengthLimit }) :
             edit.error === 'in-progress' ? t('chat.editInProgress') : '') : '';
     const editBanner = this.container.querySelector<HTMLElement>('#chat-edit-composer');
     if (editBanner) editBanner.hidden = !edit;
@@ -801,9 +815,11 @@ export class ChatView {
     if (!canSendMessages) { this.reactionPicker?.destroy(); this.reactionPicker = null; }
     const canAttachFiles = canSendMessages && (!permissionsResolved || serverStore.hasPermission(Permission.ATTACH_FILES));
     const locked = !edit && permissionsResolved && !canSendMessages;
-    const readOnly = locked || !!edit?.pending;
+    const readOnly = locked || !!edit?.pending || this.blockSendPending;
     const commandSelected = !!this.currentChannelId && !!chatStore.getCommandDraft(this.currentChannelId);
     inputWrapper.style.display = commandSelected && !edit ? 'none' : '';
+    const surface = this.container.querySelector<HTMLElement>('.chat-composer-surface');
+    if (surface) surface.hidden = commandSelected && !edit;
     const commandComposer = this.container.querySelector<HTMLElement>('#chat-command-composer');
     if (commandComposer) {
       commandComposer.hidden = !!edit || !commandSelected;
@@ -829,7 +845,7 @@ export class ChatView {
     if (btnSend) {
       btnSend.hidden = locked;
       btnSend.disabled = edit ? edit.pending || !!this.messageEditDeniedReason(edit) :
-        locked || this.pending.some((p) => p.status === 'uploading');
+        locked || this.blockSendPending || this.pending.some((p) => p.status === 'uploading');
       btnSend.setAttribute('aria-busy', String(!!edit?.pending));
       const label = btnSend.querySelector('.chat-send-label');
       const text = t(edit?.pending ? 'chat.editSaving' : edit ? 'common.save' : 'chat.send');
@@ -877,7 +893,7 @@ export class ChatView {
           ? target.parentElement
           : null;
     if (!el) return false;
-    return !!el.closest('textarea, input, [contenteditable]:not([contenteditable="false"])');
+    return !!el.closest('textarea, input, select, [contenteditable]:not([contenteditable="false"])');
   }
 
   private isUserMentioned(content: string, currentNickname: string): boolean {
@@ -908,6 +924,7 @@ export class ChatView {
     }
 
     const me = serverStore.currentUser;
+    const outgoing = this.store.getOutgoing(m.id);
     const currentNickname = me?.nickname?.trim();
     const isMentioned = !m.isSystem && this.isUserMentioned(messageText, currentNickname ?? '');
 
@@ -962,8 +979,13 @@ export class ChatView {
     const otherAttachments =
       stickerIds.length > 0 ? m.attachments?.filter((a) => !stickerIds.includes(a.id)) : m.attachments;
 
-    const textHtml =
-      visibleText && visibleText.trim().length > 0
+    const textHtml = m.blocks?.length
+      ? `<div class="chat-message-text">${m.blocks.map(block => block.type === 'reply'
+        ? this.renderReplyReference(block.reply) : block.type === 'code'
+          ? renderCodeBlock(block.language, block.code)
+          : renderMarkdown(block.text, { currentNickname, knownNicknames,
+            everyoneMentionEnabled: serverStore.serverDetails?.allowEveryoneMention !== false })).join('')}</div>`
+      : visibleText && visibleText.trim().length > 0
         ? `<div class="chat-message-text">${renderMarkdown(visibleText, {
             currentNickname,
             knownNicknames,
@@ -976,27 +998,85 @@ export class ChatView {
 
     return `
       <div class="${rowClass}" tabindex="-1" data-user-id="${escapeHtml(m.userId)}" data-message-id="${escapeHtml(m.id)}">
-        ${m.isEphemeral ? '' : this.renderMessageToolbar()}
+        ${m.isEphemeral || outgoing ? '' : this.renderMessageToolbar()}
         ${botContext}
         ${isBot ? '<div class="bot-response-main">' : ''}
         <img class="chat-author-avatar" src="${avatarSrc}" data-fallback="avatar">
         <div class="chat-message-body${isBot ? ' bot-response-bubble' : ''}">
-          ${m.reply ? this.renderReplyReference(m.reply) : ''}
           <div class="chat-author-header">
             <span class="chat-author-name">${escapeHtml(m.userNickname)}</span>
             ${botBadge}${privateCue}
             <span class="chat-timestamp">${time}</span>
+            ${me?.id === m.userId && !isBot ? this.renderDelivery(m.id) : ''}
             ${m.editedAt ? `<span class="chat-edited-badge" title="${escapeHtml(t('chat.editedAtTitle', { time: this.formatDateTime(m.editedAt) }))}">${t('chat.messageEdited')}</span>` : ''}
           </div>
+          ${m.reply && !m.blocks?.length ? this.renderReplyReference(m.reply) : ''}
           ${textHtml}
           ${stickersHtml}
           <div class="chat-link-previews" data-message-id="${escapeHtml(m.id)}"></div>
           ${attachmentsHtml}
-          ${m.isEphemeral ? '' : `<div class="chat-reactions">${this.renderReactions(m)}</div>`}
+          ${m.isEphemeral || outgoing ? '' : `<div class="chat-reactions">${this.renderReactions(m)}</div>`}
         </div>
         ${isBot ? '</div>' : ''}
       </div>
     `;
+  }
+
+  private renderDelivery(messageId: string): string {
+    const outgoing = this.store.getOutgoing(messageId);
+    const state = outgoing?.status ?? 'sent';
+    const label = t(state === 'sending' ? 'chat.deliverySending' : state === 'failed' ? 'chat.deliveryFailed' : 'chat.deliverySent');
+    const icon = state === 'sending' ? 'schedule' : state === 'failed' ? 'error_outline' : 'check_circle';
+    return `<span class="chat-delivery chat-delivery--${state}" data-delivery="${state}" role="status" aria-label="${escapeHtml(label)}"
+      title="${escapeHtml(outgoing?.error || label)}">
+      <span class="material-symbols-outlined md-14" aria-hidden="true">${icon}</span>
+      ${state === 'failed' ? `<span>${escapeHtml(label)}</span><button type="button" data-retry-message>${t('chat.deliveryRetry')}</button>` : ''}
+    </span>`;
+  }
+
+  private queueMessage(payload: ChatSendPayload, preview: {
+    reply?: MessageReply; blocks?: ResolvedMessageBlock[]; attachments?: AttachmentMeta[];
+  }): void {
+    const user = this.server.currentUser;
+    if (!user || !payload.clientMessageId) throw new Error(t('chat.deliveryFailed'));
+    const outgoing = this.store.enqueueMessage(payload, {
+      id: payload.clientMessageId, channelId: payload.channelId,
+      userId: user.id, userNickname: user.nickname, userAvatarUrl: user.avatarUrl,
+      content: payload.content, createdAt: Date.now(), ...preview,
+    });
+    void this.transmitMessage(outgoing);
+  }
+
+  private async transmitMessage(outgoing: OutgoingMessage): Promise<void> {
+    const store = this.store;
+    const client = this.client;
+    try {
+      const message = await client.sendRequest<ChatMessage>(MessageType.CHAT_SEND, outgoing.payload);
+      if (!message || message.id !== outgoing.message.id || message.channelId !== outgoing.message.channelId ||
+          message.userId !== outgoing.message.userId) throw new Error(t('chat.deliveryInvalidAck'));
+      store.addMessage(message);
+    } catch (error) {
+      console.warn('[ChatView] Message delivery was not confirmed', error);
+      store.failOutgoing(outgoing, error instanceof Error ? error.message : t('chat.deliveryFailed'));
+    }
+  }
+
+  private retryMessage(messageId: string): void {
+    if (!this.isCurrentComposer()) return;
+    const outgoing = this.store.getOutgoing(messageId);
+    if (!outgoing || outgoing.status !== 'failed' || outgoing.message.channelId !== this.currentChannelId ||
+        outgoing.message.userId !== this.server.currentUser?.id) return;
+    if (!this.server.serverDetails?.protocol?.features.includes('chat-delivery')) {
+      void showAlert({ message: t('chat.featureUpdateRequired'), variant: 'danger' });
+      return;
+    }
+    if (!this.server.hasPermission(Permission.SEND_MESSAGES) ||
+        (outgoing.payload.attachmentIds?.length && !this.server.hasPermission(Permission.ATTACH_FILES))) {
+      void showAlert({ message: t('chat.sendPermissionDenied'), variant: 'danger' });
+      return;
+    }
+    const retry = this.store.retryOutgoing(messageId);
+    if (retry) void this.transmitMessage(retry);
   }
 
   private renderReactions(message: ChatMessage): string {
@@ -1031,37 +1111,34 @@ export class ChatView {
     row.focus({ preventScroll: true });
   }
 
-  private replyPreview(reply: MessageReply): string {
-    const content = getMessageText(reply, getLanguage());
-    return reply.deleted ? t('chat.messageDeleted') : stripStickerTokens(content, extractStickerIds(content)).trim()
-      || (reply.hasAttachments ? t('chat.replyAttachment') : content);
-  }
-
   private renderReplyReference(reply: MessageReply): string {
-    return `<button type="button" class="chat-reply-reference" ${reply.deleted ? 'disabled' : ''}
+    return `<button type="button" class="chat-reply-reference chat-quote" ${reply.deleted ? 'disabled' : ''}
       data-reply-target="${escapeHtml(reply.messageId)}" title="${escapeHtml(t('chat.jumpToMessage'))}">
-      <span class="material-symbols-outlined md-16" aria-hidden="true">reply</span>
-      ${reply.deleted ? '' : `<strong>${escapeHtml(reply.userNickname)}</strong>`}
-      <span>${escapeHtml(this.replyPreview(reply))}</span>
+      ${renderReplyPreview(reply)}
     </button>`;
   }
 
   private startReply(messageId: string): void {
     if (!this.isCurrentComposer() || this.messageEdit || !this.currentChannelId || !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
     const message = chatStore.getMessages(this.currentChannelId).find((entry) => entry.id === messageId);
-    if (!message || message.deletedAt || message.isSystem || message.isEphemeral) return;
+    if (!message || message.deletedAt || message.isSystem || message.isEphemeral || this.store.getOutgoing(message.id)) return;
+    if (this.server.serverDetails?.protocol?.features.includes('chat-blocks')) {
+      this.addComposerBlock({ type: 'reply', messageId: message.id, reply: this.store.messageReply(message) });
+      return;
+    }
     chatStore.setReplyDraft(this.currentChannelId, message);
     this.renderReplyComposer();
     this.focusChatInput();
   }
 
   private renderReplyComposer(): void {
+    this.renderComposerBlocks();
     const el = this.container.querySelector<HTMLElement>('#chat-reply-composer');
     if (!el) return;
     const reply = this.currentChannelId ? chatStore.getReplyDraft(this.currentChannelId) : undefined;
     el.hidden = !!this.messageEdit || !reply;
-    el.innerHTML = reply ? `<span>${escapeHtml(reply.deleted ? t('chat.messageDeleted') : t('chat.replyingTo', { user: reply.userNickname }))}: ${escapeHtml(this.replyPreview(reply))}</span>
-      <button type="button" aria-label="${t('chat.cancelReply')}" title="${t('chat.cancelReply')}"><span class="material-symbols-outlined md-18" aria-hidden="true">close</span></button>` : '';
+    el.innerHTML = reply ? `<div class="chat-quote">${renderReplyPreview(reply)}
+      <button type="button" aria-label="${t('chat.cancelReply')}" title="${t('chat.cancelReply')}"><span class="material-symbols-outlined md-18" aria-hidden="true">close</span></button></div>` : '';
     el.querySelector('button')?.addEventListener('click', () => {
       this.clearReply();
       this.focusChatInput();
@@ -1117,6 +1194,10 @@ export class ChatView {
 
   private copyMessage(messageId: string, mode: MessageCopyMode = 'formatted', selection: MessageClipboardContent | null = null): Promise<void> {
     if (!this.isCurrentSession()) return Promise.resolve();
+    if (!selection && mode === 'formatted') {
+      const image = this.messageClipboardImage(messageId);
+      if (image) return this.copyAttachmentImage(image);
+    }
     const content = this.messageClipboard(messageId);
     return content ? this.copyContent(selection ?? content, mode) : Promise.resolve();
   }
@@ -1146,6 +1227,13 @@ export class ChatView {
     this.copyRequestId++;
     this.clearCopyFeedback?.();
     await this.imageClipboard.copy(image.currentSrc || image.src);
+  }
+
+  private messageClipboardImage(messageId: string): HTMLImageElement | null {
+    const message = this.currentChannelId && this.store.getMessages(this.currentChannelId).find(entry => entry.id === messageId);
+    if (!message || stripStickerTokens(message.content, extractStickerIds(message.content)).trim() || message.deletedAt) return null;
+    return this.container.querySelector<HTMLElement>(`.chat-message-row[data-message-id="${CSS.escape(messageId)}"]`)
+      ?.querySelector<HTMLImageElement>('.chat-sticker img, img.chat-sticker, .chat-attachment-image img, img.chat-attachment-image, .chat-sticker-image') ?? null;
   }
 
   private jumpToMessage(messageId: string): void {
@@ -1491,11 +1579,21 @@ export class ChatView {
       const content = this.keyboardClipboard(event.target);
       if (!content) return;
       event.preventDefault();
+      if (window.getSelection()?.isCollapsed !== false) {
+        const id = document.activeElement?.closest<HTMLElement>('.chat-message-row')?.dataset.messageId;
+        const image = id && this.messageClipboardImage(id);
+        if (image) { void this.copyAttachmentImage(image); return; }
+      }
       void this.copyContent(content, 'formatted');
     };
     const onCopy = (event: ClipboardEvent) => {
       if (event.defaultPrevented || !event.clipboardData) return;
       const content = this.keyboardClipboard(event.target);
+      if (content && window.getSelection()?.isCollapsed !== false) {
+        const id = document.activeElement?.closest<HTMLElement>('.chat-message-row')?.dataset.messageId;
+        const image = id && this.messageClipboardImage(id);
+        if (image) { event.preventDefault(); void this.copyAttachmentImage(image); return; }
+      }
       if (content) void this.copyContent(content, 'formatted', event);
     };
     document.addEventListener('keydown', onCopyKey);
@@ -1532,9 +1630,9 @@ export class ChatView {
 
     const focusFromInputShell = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
-      if (!input) return;
+      if (!input || e.defaultPrevented) return;
       if (this.isEditableTarget(target)) return;
-      if (target?.closest('button, .mention-dropup, #chat-attachment-tray, #chat-command-composer')) return;
+      if (target?.closest('button, select, summary, .mention-dropup, #chat-attachment-tray, #chat-command-composer')) return;
       requestAnimationFrame(() => this.focusChatInput());
     };
     inputContainer?.addEventListener('mousedown', focusFromInputShell);
@@ -1602,11 +1700,32 @@ export class ChatView {
 
     input?.addEventListener('input', () => {
       if (!isCurrentInput()) return;
+      if (!this.messageEdit && this.server.serverDetails?.protocol?.features.includes('chat-blocks')) {
+        const parsed = parseFencedMessageBlocks(input.value);
+        if (parsed.some(block => block.type === 'code') && this.currentChannelId) {
+          const existing = this.store.getBlockDraft(this.currentChannelId);
+          if (existing.length + parsed.length < 100) {
+            this.store.setBlockDraft(this.currentChannelId, [...existing, ...parsed]);
+            input.value = '';
+            this.persistDraft('');
+            this.renderComposerBlocks();
+            this.updateComposerCounter();
+            return;
+          }
+        }
+        const caret = input.selectionStart;
+        if (input.value.slice(0, caret).endsWith('```')) {
+          input.setRangeText('', caret - 3, caret, 'end');
+          this.addComposerBlock({ type: 'code', language: 'plaintext', code: '' });
+          return;
+        }
+      }
       if (charCounter) {
-        charCounter.innerText = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+        charCounter.innerText = `${input.value.length}/${this.messageLimitLabel}`;
       }
       autoResize();
       this.persistDraft(input.value);
+      this.updateComposerCounter();
       this.showCommandNotice('');
       this.updateMentionDropup(input);
       this.updateCommandDropup(input);
@@ -1633,7 +1752,7 @@ export class ChatView {
     if (input && draft.length > 0) {
       input.value = draft;
       if (charCounter) {
-        charCounter.innerText = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+        charCounter.innerText = `${input.value.length}/${this.messageLimitLabel}`;
       }
       autoResize();
       updateComposeLinkPreview();
@@ -1656,7 +1775,7 @@ export class ChatView {
       const text = edit?.content ?? this.store.getDraft(channelId);
       if (input.value !== text) {
         input.value = text;
-        if (charCounter) charCounter.textContent = `${text.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+        if (charCounter) charCounter.textContent = `${text.length}/${this.messageLimitLabel}`;
         autoResize();
       }
       displayedEdit = edit;
@@ -1677,19 +1796,32 @@ export class ChatView {
       }
     }));
 
-    const handleSend = (gesture: Event | boolean = false) => {
+    const handleSend = async (gesture: Event | boolean = false) => {
       if (!isCurrentInput() || !input || !this.currentChannelId) return;
+      if (this.blockSendPending) return;
       if (this.messageEdit) {
         void this.submitMessageEdit();
         return;
       }
       if (!serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
-      const text = input.value.trim();
+      const draftedBlocks = this.store.getBlockDraft(this.currentChannelId);
+      const blocks = draftedBlocks.length ? messageBlocksInput([
+        ...draftedBlocks, ...(input.value.trim() ? [{ type: 'text' as const, text: input.value }] : []),
+      ]) : undefined;
+      const text = blocks ? messageBlocksContent(blocks) : input.value.trim();
+      if (blocks && !this.server.serverDetails?.protocol?.features.includes('chat-blocks')) {
+        void showAlert({ message: t('chat.featureUpdateRequired'), variant: 'danger' });
+        return;
+      }
+      if (this.isMessageTooLong(text)) {
+        void showAlert({ message: t('chat.messageTooLong', { max: this.messageLengthLimit }), variant: 'danger' });
+        return;
+      }
       if (chatStore.getCommandDraft(this.currentChannelId)) {
         this.botChat?.focusComposer();
         return;
       }
-      const command = parseTypedCommand(input.value, chatStore.getCommands(), this.commandLocale);
+      const command = parseTypedCommand(blocks ? '' : input.value, chatStore.getCommands(), this.commandLocale);
       if (command.kind !== 'chat') {
         const denied = this.getBotCommandDeniedReason();
         if (denied) {
@@ -1718,27 +1850,71 @@ export class ChatView {
         .filter((p) => p.status === 'done' && p.meta)
         .map((p) => p.meta!.id);
 
-      if (!text && attachmentIds.length === 0) return;
+      if (!text && attachmentIds.length === 0 && !blocks?.some(block => block.type === 'reply')) return;
       const reply = chatStore.getReplyDraft(this.currentChannelId);
       if (reply?.deleted) {
         void showAlert({ message: t('chat.replyUnavailable'), variant: 'danger' });
         return;
       }
 
-      networkClient.send(MessageType.CHAT_SEND, {
+      const payload: ChatSendPayload = {
         channelId: this.currentChannelId,
         content: text,
+        blocks,
         attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
         replyToMessageId: reply?.messageId,
-      });
+        ...(this.server.serverDetails?.protocol?.features.includes('chat-delivery') ? { clientMessageId: crypto.randomUUID() } : {}),
+      };
+      if (new TextEncoder().encode(JSON.stringify({ type: MessageType.CHAT_SEND, payload, requestId: '0'.repeat(36) })).byteLength > LIMITS.WS_MAX_PAYLOAD_BYTES) {
+        void showAlert({ message: t('chat.messagePacketTooLarge'), variant: 'danger' });
+        return;
+      }
+      if (payload.clientMessageId) {
+        try {
+          this.queueMessage(payload, {
+            reply,
+            blocks: blocks ? [...draftedBlocks, ...(input.value.trim() ? [{ type: 'text' as const, text: input.value }] : [])] : undefined,
+            attachments: this.pending.flatMap(entry => entry.status === 'done' && entry.meta ? [entry.meta] : []),
+          });
+        } catch (error) {
+          console.warn('[ChatView] Unable to queue message', error);
+          void showAlert({ message: error instanceof Error ? error.message : t('chat.deliveryFailed'), variant: 'danger' });
+          return;
+        }
+      } else if (blocks) {
+        this.blockSendPending = true;
+        this.syncComposerPermissionState();
+        this.renderComposerBlocks();
+        const channelId = this.currentChannelId;
+        const store = this.store;
+        const originalBlocks = JSON.stringify(messageBlocksInput(store.getBlockDraft(channelId)));
+        const originalDraft = store.getDraft(channelId);
+        try {
+          await this.client.sendRequest<ChatMessage>(MessageType.CHAT_SEND, payload);
+          if (JSON.stringify(messageBlocksInput(store.getBlockDraft(channelId))) === originalBlocks) store.setBlockDraft(channelId, []);
+          if (store.getDraft(channelId) === originalDraft) store.clearDraft(channelId);
+          if (!isCurrentInput() || this.currentChannelId !== channelId) return;
+        } catch (error) {
+          console.warn('[ChatView] Block message was not acknowledged', error);
+          void showAlert({ message: error instanceof Error ? error.message : t('chat.editSaveFailed'), variant: 'danger' });
+          return;
+        } finally {
+          this.blockSendPending = false;
+          if (isCurrentInput()) {
+            this.syncComposerPermissionState();
+            this.renderComposerBlocks();
+          }
+        }
+      } else networkClient.send(MessageType.CHAT_SEND, payload);
 
+      this.store.setBlockDraft(this.currentChannelId, []);
       this.clearReply();
       this.clearPending();
       input.value = '';
       this.persistDraft('');
       input.style.height = 'auto';
       if (charCounter) {
-        charCounter.innerText = `0/${LIMITS.MAX_MESSAGE_LENGTH}`;
+        charCounter.innerText = `0/${this.messageLimitLabel}`;
       }
       this.closeMentionDropup();
       // Clear compose link preview
@@ -1803,6 +1979,10 @@ export class ChatView {
       const onCodeClick = () => {
         if (!isCurrentInput() || this.messageEdit) return;
         if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
+        if (this.server.serverDetails?.protocol?.features.includes('chat-blocks')) {
+          this.addComposerBlock({ type: 'code', language: 'plaintext', code: '' });
+          return;
+        }
         codeBlockModal.open({
           onSubmit: (language, code) => this.sendCodeBlock(language, code),
         });
@@ -1997,8 +2177,18 @@ export class ChatView {
     this.container.querySelector('#btn-cancel-message-edit')?.addEventListener('click', () => this.cancelMessageEdit());
 
     // Listen for new messages
-    const u1 = appEvents.on('server.updated', () => this.syncComposerPermissionState());
-    const u2 = appEvents.on('server.roles_updated', () => this.syncComposerPermissionState());
+    const refreshComposerSettings = () => {
+      if (input) {
+        if (this.messageLengthLimit > 0) input.maxLength = this.messageLengthLimit;
+        else input.removeAttribute('maxlength');
+      }
+      this.syncComposerPermissionState();
+      this.updateComposerCounter();
+      this.renderComposerBlocks();
+      if (input && (this.mentionActive || document.activeElement === input)) this.updateMentionDropup(input);
+    };
+    const u1 = appEvents.on('server.updated', refreshComposerSettings);
+    const u2 = appEvents.on('server.roles_updated', refreshComposerSettings);
     const u3 = appEvents.on('chat.message_added', (msg: ChatMessage) => {
       if (msg.channelId === this.currentChannelId) {
         // Sending a message always brings the author back to the end (#270).
@@ -2032,7 +2222,10 @@ export class ChatView {
         contextMenu.close();
         this.reactionPicker?.close();
         this.replaceMessageRow(msg);
-        this.renderReplyComposer();
+        if (this.store.getReplyDraft(msg.channelId)?.messageId === msg.id ||
+            this.store.getBlockDraft(msg.channelId).some(block => block.type === 'reply' && block.messageId === msg.id)) {
+          this.renderReplyComposer();
+        }
       }
     });
 
@@ -2090,7 +2283,7 @@ export class ChatView {
           this.syncComposerPermissionState();
           if (!this.messageEdit && input && (selected || wasSelected)) {
             input.value = store.getDraft(channelId);
-            if (charCounter) charCounter.textContent = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+            if (charCounter) charCounter.textContent = `${input.value.length}/${this.messageLimitLabel}`;
             if (!selected) autoResize();
           }
           if (selected && !this.messageEdit && composeLinkPreviewEl) composeLinkPreviewEl.style.display = 'none';
@@ -2167,6 +2360,10 @@ export class ChatView {
   }
 
   private updateMentionDropup(input: HTMLTextAreaElement): void {
+    if (!this.currentChannelId) {
+      this.closeMentionDropup();
+      return;
+    }
     const caret = input.selectionStart ?? input.value.length;
     const before = input.value.substring(0, caret);
     // A mention token is an "@" at start/after whitespace, followed by the
@@ -2180,7 +2377,7 @@ export class ChatView {
     const query = match[1].toLowerCase();
     this.mentionAtIndex = caret - match[1].length - 1;
 
-    const all = serverStore.getMentionableUsers();
+    const all = serverStore.getMentionableUsers(this.currentChannelId);
     const users = (query ? all.filter((u) => u.nickname.toLowerCase().includes(query)) : all)
       // Prioritize names that start with the query.
       .sort((a, b) => {
@@ -2282,7 +2479,7 @@ export class ChatView {
 
     const charCounter = document.getElementById('chat-char-counter');
     if (charCounter) {
-      charCounter.innerText = `${input.value.length}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+      charCounter.innerText = `${input.value.length}/${this.messageLimitLabel}`;
     }
     input.style.height = 'auto';
     input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
@@ -2602,7 +2799,10 @@ export class ChatView {
     const start = input.selectionStart ?? input.value.length;
     const end = input.selectionEnd ?? start;
     const next = input.value.slice(0, start) + text + input.value.slice(end);
-    if (next.length > LIMITS.MAX_MESSAGE_LENGTH) return;
+    if (this.isMessageTooLong(next)) {
+      void showAlert({ message: t('chat.messageTooLong', { max: this.messageLengthLimit }), variant: 'danger' });
+      return;
+    }
 
     input.value = next;
     const caret = start + text.length;
@@ -2611,11 +2811,7 @@ export class ChatView {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
-  /**
-   * Sends a code block as its own message (#391). The fence is plain text, so
-   * this goes out through the same path as any other message and needs no
-   * protocol change.
-   */
+  /** Legacy servers receive fenced code inserted in the draft, never auto-sent. */
   private sendCodeBlock(language: string, code: string): void {
     const channelId = this.currentChannelId;
     if (!this.isCurrentComposer() || this.messageEdit || !channelId) return;
@@ -2625,12 +2821,54 @@ export class ChatView {
     }
 
     const content = buildCodeMessage(language, code);
-    if (!code.trim() || content.length > LIMITS.MAX_MESSAGE_LENGTH) return;
+    if (!code.trim() || this.isMessageTooLong(content)) return;
 
     const reply = chatStore.getReplyDraft(channelId);
     if (reply?.deleted) { void showAlert({ message: t('chat.replyUnavailable'), variant: 'danger' }); return; }
-    networkClient.send(MessageType.CHAT_SEND, { channelId, content, replyToMessageId: reply?.messageId });
-    this.clearReply();
+    this.insertAtCaret(`${content}\n`);
+  }
+
+  private updateComposerCounter(): void {
+    const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
+    if (!input) return;
+    const blocks = this.currentChannelId && !this.messageEdit ? this.store.getBlockDraft(this.currentChannelId) : [];
+    const content = blocks.length ? messageBlocksContent([...blocks, { type: 'text', text: input.value }]) : input.value;
+    const counter = this.container.querySelector<HTMLElement>('#chat-char-counter');
+    if (counter) {
+      counter.textContent = `${content.length}/${this.messageLimitLabel}`;
+      counter.classList.toggle('code-char-count--over', this.isMessageTooLong(content));
+    }
+  }
+
+  private renderComposerBlocks(): void {
+    const root = this.container.querySelector<HTMLElement>('#chat-composer-blocks');
+    if (!root || !this.currentChannelId) return;
+    if (this.messageEdit) { root.hidden = true; return; }
+    renderMessageBlockComposer(root, this.store, this.currentChannelId, () => this.updateComposerCounter(),
+      this.blockSendPending || !this.isCurrentComposer() || !this.server.hasPermission(Permission.SEND_MESSAGES));
+    this.updateComposerCounter();
+  }
+
+  private addComposerBlock(block: ResolvedMessageBlock): void {
+    if (!this.currentChannelId || this.messageEdit || this.blockSendPending) return;
+    const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
+    if (!input || input.disabled || input.readOnly) return;
+    const blocks = [...this.store.getBlockDraft(this.currentChannelId)];
+    if (blocks.length >= 98) {
+      void showAlert({ message: t('chat.tooManyBlocks'), variant: 'danger' });
+      return;
+    }
+    const prefix = input.value.slice(0, input.selectionStart);
+    const suffix = input.value.slice(input.selectionEnd);
+    if (prefix) blocks.push({ type: 'text', text: prefix });
+    blocks.push(block);
+    this.store.setBlockDraft(this.currentChannelId, blocks);
+    input.value = suffix;
+    this.persistDraft(suffix);
+    this.renderComposerBlocks();
+    if (block.type === 'code') {
+      this.container.querySelector<HTMLTextAreaElement>('#chat-composer-blocks fieldset:last-child textarea')?.focus();
+    } else { input.focus(); input.setSelectionRange(0, 0); }
   }
 
   /**
@@ -2663,12 +2901,15 @@ export class ChatView {
 
       const meta = await uploadAttachment(channelId, file).promise;
       if (!current()) return;
-      client.send(MessageType.CHAT_SEND, {
+      const payload: ChatSendPayload = {
         channelId,
         content: stickerToken(meta.id),
         attachmentIds: [meta.id],
         replyToMessageId: reply?.messageId,
-      });
+      };
+      if (this.server.serverDetails?.protocol?.features.includes('chat-delivery')) {
+        this.queueMessage({ ...payload, clientMessageId: crypto.randomUUID() }, { reply, attachments: [meta] });
+      } else client.send(MessageType.CHAT_SEND, payload);
       if (store.getReplyDraft(channelId) === reply) store.setReplyDraft(channelId);
       this.renderReplyComposer();
     } catch (e) {

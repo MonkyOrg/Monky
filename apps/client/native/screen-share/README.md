@@ -113,7 +113,7 @@ Cada perfil negocia o nível H.264 necessário: pelo menos 5.1 para 1080p120,
 5.2 para 4K60 e 6 para 4K120. O overlay versionado do WebRTC e o patch de
 `h264-profile-level-id` acrescentam suporte real ao nível 6; os patches e
 licenças acompanham as fontes correspondentes. Cliente e servidor exigem
-protocolo 25. O teto de bitrate não é um piso: o controle de congestionamento
+protocolo 26. O teto de bitrate não é um piso: o controle de congestionamento
 continua ativo e diferentes perfis podem consumir upload adicional.
 
 Isso não torna todo encoder compatível com 4K120. No AMF instalado na RX 9070 XT
@@ -163,7 +163,7 @@ Um novo compartilhamento abre sua prévia no modo foco; atualizações de
 qualidade ou recuperação não desfazem a escolha posterior de sair do foco.
 O indicador **Normal / Captura de jogo** só aparece depois de observar frames,
 e acompanha o pipeline efetivo da prévia ou do espectador, não apenas a opção
-solicitada. A sinalização desse estado exige cliente e servidor no protocolo 24.
+solicitada. A sinalização desse estado exige cliente e servidor compatíveis com o protocolo 26.
 
 A opção **Pausar prévia quando o Monky estiver fora de foco**, ativa por padrão,
 controla somente a prévia local; perder foco não interrompe espectadores.

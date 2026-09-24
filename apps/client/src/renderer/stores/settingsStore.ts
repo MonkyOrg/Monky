@@ -136,6 +136,7 @@ export class SettingsStore {
   public overlayAutoOpenOnLeaveStage: boolean = false;
   public overlayMinimalistMode: boolean = false;
   public overlayHideSelf: boolean = false;
+  public overlayPreserveAspectRatio: boolean = true;
   public overlaySavedBounds: OverlayBounds | null = null;
 
   constructor() {
@@ -308,6 +309,7 @@ export class SettingsStore {
         if (typeof this.overlayHideSelf !== 'boolean') {
           this.overlayHideSelf = false;
         }
+        if (typeof this.overlayPreserveAspectRatio !== 'boolean') this.overlayPreserveAspectRatio = true;
         if (
           this.overlaySavedBounds &&
           (typeof this.overlaySavedBounds.width !== 'number' || typeof this.overlaySavedBounds.height !== 'number')
@@ -338,6 +340,7 @@ export class SettingsStore {
       autoOpenOnLeaveStage: this.overlayAutoOpenOnLeaveStage,
       minimalistMode: this.overlayMinimalistMode,
       hideSelf: this.overlayHideSelf,
+      preserveAspectRatio: this.overlayPreserveAspectRatio,
       bounds: this.overlaySavedBounds || undefined,
     };
   }
@@ -398,6 +401,9 @@ export class SettingsStore {
     }
     if (typeof config.hideSelf === 'boolean') {
       this.overlayHideSelf = config.hideSelf;
+    }
+    if (typeof config.preserveAspectRatio === 'boolean') {
+      this.overlayPreserveAspectRatio = config.preserveAspectRatio;
     }
     // Presence of the key (not truthiness) is what matters: resetting the size
     // sends `{ bounds: undefined }` on purpose, and that has to actually clear
@@ -633,6 +639,7 @@ export class SettingsStore {
         overlayAutoOpenOnLeaveStage: this.overlayAutoOpenOnLeaveStage,
         overlayMinimalistMode: this.overlayMinimalistMode,
         overlayHideSelf: this.overlayHideSelf,
+        overlayPreserveAspectRatio: this.overlayPreserveAspectRatio,
         overlaySavedBounds: this.overlaySavedBounds,
       }));
       appEvents.emit('settings.updated');

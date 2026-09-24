@@ -36,6 +36,8 @@ import {
   LIMITS,
   MessageType,
   PROTOCOL_VERSION,
+  negotiateProtocol,
+  type ProtocolAgreement,
   MemberKickPayload,
   MemberKickedPayload,
   Permission,
@@ -168,6 +170,7 @@ import { CoturnManager } from '../turn/CoturnManager';
 import { describeSfuPortProblem, SfuManager, SfuProducerClosedError } from '../sfu/SfuManager';
 import { checkSfuPreflight, formatSfuPreflightForLog } from '../sfu/SfuPreflight';
 import { Logger } from '../logger/Logger';
+import { RateLimiter } from '../security/RateLimiter';
 import { describeFailure, ServerResourceScope } from '../lifecycle/ServerResourceScope';
 import { BotInteractionHandler, BotInteractionSession } from './BotInteractionHandler';
 import { botVoiceJoinSchema, botVoiceChannelSchema, botVoiceSignalSchema } from '@monky/shared';
@@ -181,6 +184,7 @@ const BOT_LOCAL_ALLOWED_MESSAGES = new Set<MessageType>([
 ]);
 
 interface ClientSession {
+  protocol?: ProtocolAgreement;
   ws: WebSocket;
   messageQueue: Promise<void>;
   user?: UserSummary;
@@ -271,6 +275,10 @@ export class WebSocketServer {
     private permissionService: PermissionService,
     private roleService: RoleService,
     private coturnManager: CoturnManager,
+    // Ahead of the SFU manager because it has no default, and TypeScript
+    // requires every required parameter to come before the ones with an
+    // initialiser (#372).
+    private rateLimiter: RateLimiter,
     private sfuManager: SfuManager = new SfuManager(),
     private botService?: BotService,
     private commandRegistry: CommandRegistry = new CommandRegistry(),
@@ -326,7 +334,8 @@ export class WebSocketServer {
       localContextEnded: (context, cause) => this.botLocalExecution.contextEnded(context, cause),
       consumeLocalPreview: (bot, origin, contextId, requestId, result) =>
         this.botLocalExecution.consumePreview(bot, origin, contextId, requestId, result),
-    }, this.channelService, this.userService, this.commandRegistry, this.botSettings);
+    }, this.channelService, this.userService, this.commandRegistry, this.botSettings,
+      async () => (await this.serverRepo.getServer())?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH);
     this.botLocalExecution = new BotLocalExecutionService({
       isCurrent: (session) => this.isCurrentBotOperation(session, 'local_execution'),
       accessVersion: () => {
@@ -393,7 +402,7 @@ export class WebSocketServer {
       });
     }
     this.signalingService.setVoiceMembershipListener(() => this.voiceMembershipChanged());
-    this.wss = new WSServer({ server: this.server });
+    this.wss = new WSServer({ server: this.server, maxPayload: LIMITS.WS_MAX_PAYLOAD_BYTES });
     this.setupWss();
     this.startHeartbeat();
     this.sfuStartup = this.initSfuIfConfigured();
@@ -618,7 +627,28 @@ export class WebSocketServer {
 
     // Connect / Auth
     if (type === MessageType.AUTH_CONNECT) {
-      await this.handleAuthConnect(session, payload as AuthConnectPayload, requestId);
+      // Verificar a senha custa uma derivação scrypt, então deixar isso sem
+      // medida entregava de uma vez um laço infinito de adivinhação de senha e
+      // um jeito de manter o servidor ocupado (#372). Só a tentativa que falha
+      // gasta cota: quem entra normalmente não é penalizado, e várias pessoas
+      // atrás do mesmo IP público continuam reconectando depois de uma queda.
+      const release = this.rateLimiter.reserve(
+        `auth:${session.ip}`,
+        LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS,
+        LIMITS.RATE_LIMIT_AUTH_WINDOW_MS
+      );
+      if (!release) {
+        Logger.security(`Authentication rate limit reached for ${session.ip}`);
+        // Código próprio: o cliente traduz por código, e RATE_LIMITED já
+        // significa "flood de mensagens" para ele (#372).
+        this.sendError(session.ws, ProtocolErrorCode.AUTH_RATE_LIMITED, 'Muitas tentativas de conexão. Aguarde um minuto.', requestId);
+        return;
+      }
+      try {
+        await this.handleAuthConnect(session, payload as AuthConnectPayload, requestId);
+      } finally {
+        release();
+      }
       return;
     }
 
@@ -1084,6 +1114,11 @@ export class WebSocketServer {
     payload: AuthConnectPayload,
     requestId?: string
   ): Promise<void> {
+    if (!payload || typeof payload !== 'object') {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Dados de autenticação inválidos.', requestId);
+      return;
+    }
+    session.protocol = negotiateProtocol(payload.protocolVersion, payload.protocolOffer, payload.botToken ? 'bot' : 'client') ?? undefined;
     // Bot token auth: skip challenge-response, authenticate directly (#569).
     if (payload.botToken && this.botService) {
       await this.handleBotAuth(session, payload, requestId);
@@ -1091,8 +1126,16 @@ export class WebSocketServer {
     }
 
     const result = await this.authService.createChallenge(session.ws, payload);
+    if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
 
     if (!result.success || !result.nonce) {
+      // Aqui é onde a senha errada aparece: é esta tentativa que conta para o
+      // limite por IP (#372).
+      this.rateLimiter.checkLimit(
+        `auth:${session.ip}`,
+        LIMITS.RATE_LIMIT_MAX_AUTH_ATTEMPTS,
+        LIMITS.RATE_LIMIT_AUTH_WINDOW_MS
+      );
       this.sendError(
         session.ws,
         result.errorCode || ProtocolErrorCode.INTERNAL_ERROR,
@@ -1204,6 +1247,7 @@ export class WebSocketServer {
     const successPayload: AuthSuccessPayload = {
       server: {
         ...result.serverDetails,
+        protocol: session.protocol,
         serverVersion: this.serverVersion,
         // Told at login because it never changes while the process lives: it
         // depends on the host OS and on coturn being installed (#429).
@@ -1344,7 +1388,7 @@ export class WebSocketServer {
 
     // Incompatible peers must never perform TOFU binding. An already-bound bot
     // can still identify its obsolete protocol for the owner's persistent warning.
-    if (payload.protocolVersion !== PROTOCOL_VERSION) {
+    if (!session.protocol) {
       await this.botService.recordRejectedProtocol(payload.botToken, payload.publicKey, payload.protocolVersion);
       if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
       this.sendError(
@@ -1393,7 +1437,7 @@ export class WebSocketServer {
       if (this.closing || this.sessions.get(session.ws) !== session || session.ws.readyState !== WebSocket.OPEN) return;
     }
 
-    if (!await this.botService.recordCompatibleConnection(botRecord.id)) {
+    if (!await this.botService.recordCompatibleConnection(botRecord.id, payload.protocolVersion)) {
       this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'O vínculo do bot foi revogado.', requestId);
       return;
     }
@@ -1450,6 +1494,8 @@ export class WebSocketServer {
       .filter(([, state]) => visibleChannelIds.has(state.channelId)));
     const iceServers = await this.buildIceServersFor(botRecord.id, session);
     const serverDetails = {
+      protocol: session.protocol,
+      maxMessageLength: server?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
       id: server?.id ?? '',
       name: server?.name ?? '',
       serverVersion: this.serverVersion,
@@ -2023,13 +2069,22 @@ export class WebSocketServer {
     }
   }
 
-  private async handleChatSend(    session: ClientSession,
+  private async handleChatSend(
+    session: ClientSession,
     payload: ChatSendPayload,
     requestId?: string
   ): Promise<void> {
     if (!session.user) return;
 
     const bot = session.isBot && session.botId ? await this.botService?.findById(session.botId) : undefined;
+    if (payload.clientMessageId !== undefined && (session.isBot || !session.protocol?.features.includes('chat-delivery'))) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Confirmação de envio exige um cliente compatível atualizado.', requestId);
+      return;
+    }
+    if (payload.blocks !== undefined && (bot || !session.protocol?.features.includes('chat-blocks'))) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Blocos de mensagem exigem um cliente compatível atualizado.', requestId);
+      return;
+    }
     if (session.isBot && (!bot || !this.isCurrentSession(session))) {
       this.sendError(session.ws, ProtocolErrorCode.UNAUTHORIZED, 'Bot indisponível.', requestId);
       return;
@@ -2049,7 +2104,9 @@ export class WebSocketServer {
       payload.channelId,
       payload.content,
       payload.attachmentIds,
-      payload.replyToMessageId
+      payload.replyToMessageId,
+      payload.blocks,
+      payload.clientMessageId,
     );
     if (!result.success) {
       this.sendError(
@@ -2065,6 +2122,11 @@ export class WebSocketServer {
       return;
     }
 
+    // A retry acknowledges the original commit without notifying recipients twice.
+    if ('replayed' in result && result.replayed) {
+      this.send(session.ws, { type: MessageType.CHAT_MESSAGE, requestId, payload: result.message });
+      return;
+    }
     // Broadcast message to everyone allowed into this channel (#384).
     await this.broadcastToChannel(result.message.channelId, {
       type: MessageType.CHAT_MESSAGE,
@@ -2501,6 +2563,11 @@ export class WebSocketServer {
     payload: ServerUpdateSettingsPayload,
     requestId?: string
   ): Promise<void> {
+    if (payload.maxMessageLength !== undefined && !session.protocol?.features.includes('message-length-setting')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+        'Atualize o cliente e o servidor para configurar o limite de mensagens.', requestId);
+      return;
+    }
     // Admins have separate socket queues. Serialize settings across them so a
     // duplicate save cannot observe the old mode and evict the new call twice.
     const update = (this.settingsUpdateQueue ?? Promise.resolve()).then(() =>
@@ -2674,6 +2741,7 @@ export class WebSocketServer {
       iconUrl: result.iconUrl,
       attachmentStorage: result.attachmentStorage,
       maxUsers: result.maxUsers,
+      maxMessageLength: result.maxMessageLength,
       turnEnabled: result.turnEnabled,
       turnAvailability: CoturnManager.describeAvailability(),
     };

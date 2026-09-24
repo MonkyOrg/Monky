@@ -7,6 +7,9 @@ import {
   MessageType,
   ProtocolMessage,
   PROTOCOL_VERSION,
+  ProtocolErrorCode,
+  createProtocolOffer,
+  legacyProtocolFallback,
   RECONNECT_DELAYS_MS,
   ServerErrorPayload,
   serverShutdownSchema,
@@ -40,6 +43,7 @@ interface ClientIdentity {
 }
 
 interface PendingAuthRequest {
+  retriedProtocol?: boolean;
   requestId: string;
   resolve: (value: AuthSuccessPayload) => void;
   reject: (reason: Error) => void;
@@ -331,6 +335,7 @@ export class NetworkClient {
           MessageType.AUTH_CONNECT,
           {
             protocolVersion: PROTOCOL_VERSION,
+            protocolOffer: createProtocolOffer('client'),
             publicKey: identity.publicKey,
             nickname,
             password: password || '',
@@ -535,6 +540,17 @@ export class NetworkClient {
 
       if (type === MessageType.SERVER_ERROR) {
         const errorPayload = payload as ServerErrorPayload;
+        const fallback = errorPayload.code === ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED
+          ? legacyProtocolFallback(errorPayload.serverProtocolVersion, 'client') : null;
+        if (fallback !== null && !this.pendingAuth.retriedProtocol && this.lastConnectPayload) {
+          this.pendingAuth.retriedProtocol = true;
+          this.send(MessageType.AUTH_CONNECT, {
+            ...this.lastConnectPayload, protocolVersion: fallback,
+            protocolOffer: createProtocolOffer('client'), deviceId: getDeviceId(),
+            appearOffline: settingsStore.appearOffline || undefined,
+          }, requestId);
+          return;
+        }
         this.pendingAuth.reject(
           new Error(
             translateProtocolError(errorPayload.code, errorPayload.message, errorPayload.serverProtocolVersion)

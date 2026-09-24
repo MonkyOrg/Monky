@@ -9,8 +9,10 @@
       import { settingsStore } from '../../src/renderer/stores/settingsStore';
       import { appEvents } from '../../src/renderer/core/EventBus';
       import { t } from '../../src/renderer/i18n';
-      import { CameraEffectError } from '../../src/renderer/utils/cameraEffects';
-      window.cameraEffectsFixture = { videoService, cameraEffectsStore, CameraEffectsStore, CameraEffectsControl, settingsStore, appEvents, t, CameraEffectError };
+      import { CameraEffectError, DEFAULT_CAMERA_EFFECT_SETTINGS, applyChromaKey } from '../../src/renderer/utils/cameraEffects';
+      import { CameraGpuCompositor } from '../../src/renderer/core/cameraEffects/CameraGpuCompositor';
+      import { CameraCpuBackgroundBlur } from '../../src/renderer/core/cameraEffects/CameraCpuBackgroundBlur';
+      window.cameraEffectsFixture = { videoService, cameraEffectsStore, CameraEffectsStore, CameraEffectsControl, settingsStore, appEvents, t, CameraEffectError, CameraGpuCompositor, CameraCpuBackgroundBlur, DEFAULT_CAMERA_EFFECT_SETTINGS, applyChromaKey };
     </script>
   </body>
 </html>

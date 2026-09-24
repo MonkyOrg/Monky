@@ -1,6 +1,6 @@
 import { escapeHtml } from './html';
 import { EVERYONE_MENTION_TOKENS } from '@monky/shared';
-import { codeLanguageLabel, highlightCode, resolveCodeLanguage } from './codeHighlight';
+import { codeLanguageLabel, codeLineNumbers, highlightCode, resolveCodeLanguage } from './codeHighlight';
 import { t } from '../i18n';
 
 /**
@@ -40,7 +40,7 @@ export interface MarkdownOptions {
  * and handing it already-escaped text would show `&amp;lt;` in the message.
  * When the language is unknown the code is escaped by hand instead.
  */
-function renderCodeBlock(tag: string, code: string): string {
+export function renderCodeBlock(tag: string, code: string): string {
   const language = resolveCodeLanguage(tag);
   const highlighted = language ? highlightCode(code, language) : '';
   const body = highlighted || escapeHtml(code);
@@ -50,13 +50,14 @@ function renderCodeBlock(tag: string, code: string): string {
   return (
     `<div class="md-code">` +
     `<div class="md-code-header">` +
-    `<span class="md-code-lang">${escapeHtml(label)}</span>` +
+    `<span class="md-code-lang"><span class="material-symbols-outlined md-16" aria-hidden="true">code</span>${escapeHtml(label)}</span>` +
     `<button type="button" class="md-code-copy" title="${copyLabel}">` +
     `<span class="material-symbols-outlined md-14">content_copy</span>` +
     `<span class="md-code-copy-label">${copyLabel}</span>` +
     `</button>` +
     `</div>` +
-    `<pre class="md-codeblock"><code class="hljs${language ? ` language-${language}` : ''}">${body}</code></pre>` +
+    `<div class="md-code-content"><pre class="md-code-lines" aria-hidden="true">${codeLineNumbers(code)}</pre>` +
+    `<pre class="md-codeblock"><code class="hljs${language ? ` language-${language}` : ''}">${body}</code></pre></div>` +
     `</div>`
   );
 }
