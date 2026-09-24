@@ -335,7 +335,7 @@ export class ChatStore {
   public messageReply(message: ChatMessage): MessageReply {
     return {
       messageId: message.id,
-      createdAt: message.deletedAt ? undefined : message.createdAt,
+      ...(message.deletedAt ? {} : { createdAt: message.createdAt }),
       userNickname: message.deletedAt ? '' : message.userNickname,
       content: message.deletedAt ? '' : message.content.slice(0, 200),
       ...(message.isBot && !message.deletedAt

@@ -77,6 +77,23 @@ if (!process.versions.electron) {
   }).catch(async error => { console.error(error); await finish(1); });
 }
 
+async function captureScreenshot(window, filename) {
+  const image = await new Promise((resolve, reject) => {
+    const painted = (_event, _rect, frame) => {
+      clearTimeout(timeout);
+      if (frame.isEmpty()) reject(new Error(`Empty offscreen frame: ${filename}`));
+      else resolve(frame);
+    };
+    const timeout = setTimeout(() => {
+      window.webContents.removeListener('paint', painted);
+      reject(new Error(`Offscreen frame was not presented: ${filename}`));
+    }, 5000);
+    window.webContents.once('paint', painted);
+    window.webContents.invalidate();
+  });
+  fs.writeFileSync(path.join(output, filename), image.toPNG());
+}
+
 async function runNativeSmoke(window) {
   const evaluate = source => window.webContents.executeJavaScript(source, true);
   const fixture = source => evaluate(`window.messageEditingFixture.${source}`);
@@ -87,8 +104,10 @@ async function runNativeSmoke(window) {
     checks++;
   };
   const key = async (key, code, virtualKey, text, modifiers = 0) => {
+    // CDP bypasses Cocoa's native editing-command resolver.
+    const commands = process.platform === 'darwin' && modifiers === 4 && code === 'KeyZ' ? ['undo'] : [];
     await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
-      type: 'keyDown', key, code, modifiers, windowsVirtualKeyCode: virtualKey, nativeVirtualKeyCode: virtualKey,
+      type: 'keyDown', key, code, modifiers, commands, windowsVirtualKeyCode: virtualKey, nativeVirtualKeyCode: virtualKey,
       ...(text ? { text, unmodifiedText: text } : {}),
     });
     await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
@@ -159,7 +178,7 @@ async function runNativeSmoke(window) {
       await insert('Edited second line');
       current = await state();
       check(current.value === 'Edited first line\nEdited second line' && current.edits.length === 0, 'Native Shift+Enter inserts a newline without saving');
-      fs.writeFileSync(path.join(output, `message-editing-${locale}.png`), (await window.webContents.capturePage()).toPNG());
+      await captureScreenshot(window, `message-editing-${locale}.png`);
       await enter();
       await enter();
       current = await state();
@@ -418,28 +437,28 @@ async function runNativeSmoke(window) {
     const beforeIndent = (await fixture('referenceState()')).code;
     await key('Tab', 'Tab', 9);
     check((await fixture('referenceState()')).code !== beforeIndent, 'Inline code Tab uses the shared indentation behavior');
-    await key('z', 'KeyZ', 90, undefined, 2);
+    await key('z', 'KeyZ', 90, undefined, process.platform === 'darwin' ? 4 : 2);
     check((await fixture('referenceState()')).code === beforeIndent, 'Native Undo reverses inline code indentation');
     await escape();
     check(await evaluate(`document.activeElement === document.querySelector('.chat-code-header select')`),
       'Escape leaves code editing without a keyboard focus trap');
     await fixture('settle()');
-    fs.writeFileSync(path.join(output, 'chat-composer-reference.png'), (await window.webContents.capturePage()).toPNG());
+    await captureScreenshot(window, 'chat-composer-reference.png');
     window.setContentSize(460, 780);
     await fixture('settle()');
     layout = await fixture('referenceState()');
     check(!layout.overflow, 'The quote, language selector and footer fit a narrow chat without page overflow');
-    fs.writeFileSync(path.join(output, 'chat-composer-reference-narrow.png'), (await window.webContents.capturePage()).toPNG());
+    await captureScreenshot(window, 'chat-composer-reference-narrow.png');
     window.setContentSize(1050, 800);
     await fixture('settle()');
     checks += await fixture('deliveryChecks()');
     await fixture('settle()');
-    fs.writeFileSync(path.join(output, 'chat-delivery-reference.png'), (await window.webContents.capturePage()).toPNG());
+    await captureScreenshot(window, 'chat-delivery-reference.png');
     checks += await fixture('mediaDeliveryChecks()');
     return checks;
   } catch (error) {
     console.error(`Native edit attempt ${editAttempt}: ${JSON.stringify(await state())}`);
-    try { fs.writeFileSync(path.join(output, 'message-editing-failure.png'), (await window.webContents.capturePage()).toPNG()); }
+    try { await captureScreenshot(window, 'message-editing-failure.png'); }
     catch (captureError) { console.warn('Could not capture the failing fixture', captureError); }
     throw error;
   } finally {
