@@ -114,7 +114,11 @@ ownership for retry. Diagnostic queries during retirement return unavailability,
 not fabricated zero FPS.
 
 The configurable ceiling is 3840x2160/120 FPS/80 Mbps, without changing existing
-presets. Each profile negotiates its required H.264 level: at least 5.1 for
+presets, with **a maximum of 60 FPS at 3840 px wide or 2160 px high**.
+The client applies the same limit to dropdowns, typed values and saved
+preferences. The receiving contract and runtime remain compatible with profiles
+from older clients; the selection policy does not change the protocol.
+Each profile negotiates its required H.264 level: at least 5.1 for
 1080p120, 5.2 for 4K60 and 6 for 4K120. The versioned WebRTC overlay and
 `h264-profile-level-id` patch add actual Level 6 support; their patches and
 licenses accompany corresponding sources. Client and server require protocol
@@ -147,7 +151,7 @@ can prevent preparation or capture.
 ## Video, audio and preview demand
 
 Video uses NV12, H.264 Main profile, zero B-frames and a one-second GOP, with
-limits of 3840x2160, 120 FPS and 80000 kbps, subject to encoder support. The **Keep aspect ratio** switch
+limits of 3840x2160, 120 FPS (60 FPS at 4K) and 80000 kbps, subject to encoder support. The **Keep aspect ratio** switch
 in the picker applies only to the share being created. Off (default), it
 stretches the image to the requested resolution. On, it centers the entire
 image and adds black bars when aspect ratios differ, without cropping or

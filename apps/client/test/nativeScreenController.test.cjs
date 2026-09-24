@@ -11,6 +11,11 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 const shared = require('@monky/shared');
+const qualityLimits = {};
+const limitsSource = path.resolve(__dirname, '..', 'src', 'renderer', 'utils', 'qualityProfileLimits.ts');
+vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(limitsSource, 'utf8'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText}\n})`, { filename: limitsSource })(qualityLimits, require);
 const filename = path.resolve(__dirname, '..', 'src', 'renderer', 'core', 'webrtc', 'NativeScreenController.ts');
 const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
@@ -195,6 +200,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
       getScreenQuality: () => quality, getEffectiveDeafened: () => deafened, isScreenAudioMuted: () => muted,
     } },
     '../../utils/audioPreferences': { resolveAudioOutput: () => 'default' },
+    '../../utils/qualityProfileLimits': qualityLimits,
     '../../i18n': { t: key => key },
   };
   const exports = {};
@@ -479,9 +485,12 @@ for (const failure of [null, 'admission', 'retirement', 'cancelled']) {
 test('native profile alignment is explicit and unsupported ceilings are not silently clamped', t => {
   const f = fixture(t);
   assert.equal(f.nativeScreenProfile(profile(854, 480)).width, 852);
-  assert.deepEqual(f.nativeScreenProfile(profile(3840, 2160, 120)), {
-    width: 3840, height: 2160, fps: 120, maxBitrateKbps: 6000,
+  assert.deepEqual(f.nativeScreenProfile(profile(3840, 2160, 60)), {
+    width: 3840, height: 2160, fps: 60, maxBitrateKbps: 6000,
   });
+  assert.equal(f.nativeScreenProfile(profile(3840, 2160, 120)), null);
+  assert.equal(f.nativeScreenProfile(profile(3840, 1080, 61)), null);
+  assert.equal(f.nativeScreenProfile(profile(1920, 2160, 61)), null);
   assert.equal(f.nativeScreenProfile(profile(3844, 2160)), null);
   assert.equal(f.nativeScreenProfile(profile(1920, 1080, 121)), null);
 });
@@ -735,8 +744,8 @@ test('active native settings reject incompatible codecs and profiles before chan
   assert.equal(f.controller.settingsIssue(profile(), 'vp8'), 'codec');
   assert.equal(f.controller.settingsIssue(profile(), 'auto'), null);
   assert.equal(f.controller.settingsIssue(profile(), 'h264'), null);
-  assert.equal(f.controller.settingsIssue(profile(3840, 2160, 120), 'h264'), null);
-  assert.equal(f.controller.settingsIssue({ ...profile(3840, 2160, 120), screenBitrateKbps: 80000 }, 'h264'), null);
+  assert.equal(f.controller.settingsIssue(profile(3840, 2160, 120), 'h264'), 'profile');
+  assert.equal(f.controller.settingsIssue({ ...profile(3840, 2160, 60), screenBitrateKbps: 80000 }, 'h264'), null);
   assert.equal(f.controller.settingsIssue({ ...profile(), screenBitrateKbps: 80050 }, 'h264'), 'profile');
   assert.equal(f.controller.settingsIssue(profile(1920, 1080, 144), 'h264'), 'profile');
   assert.equal(f.controller.settingsIssue({ ...profile(), screenBitrateKbps: 1501 }, 'h264'), 'profile');

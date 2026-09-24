@@ -95,9 +95,12 @@ Chromium ou para outra fonte. A tentativa automática de **Captura de jogo**
 para **Normal**, quando necessária, usa somente a mesma janela e gera um aviso.
 
 Para até **3840×2160**, **120 FPS** e **80000 kbps**, use **Personalizado** em
-**Qualidade e compartilhamento**; os presets existentes não mudam.
-Os limites dependem do encoder: **4K/60** exige H.264 nível 5.2 e **4K/120**
-exige nível 6. Se o dispositivo não admitir o perfil, ele será recusado, sem
+**Qualidade e compartilhamento**; os presets existentes não mudam. **Em 4K,
+o máximo é 60 FPS**: atingir 3840 px de largura ou 2160 px de altura limita
+automaticamente o campo e a lista de FPS. Os valores digitados também respeitam
+esses tetos; valores acima deles são ajustados com um aviso visível.
+Os limites ainda dependem do encoder: **4K/60** exige H.264 nível 5.2.
+Se o dispositivo não admitir o perfil, ele será recusado, sem
 reduzir FPS silenciosamente; em uma troca de qualidade, o preflight mantém a
 fonte anterior enquanto verifica a nova configuração. Reserve banda para o
 jogo e para cada perfil transmitido. No seletor, **Manter proporção** encaixa a imagem no tamanho
@@ -508,8 +511,10 @@ Dispositivo, codec, rede, número de participantes e conteúdo afetam o resultad
 
 O perfil **Personalizado** abre listas com os valores mais usados — proporção
 (16:9, 16:10, 4:3 e 21:9), resolução (da mais baixa até 4K), FPS e bitrate. Cada
-lista tem a opção **Personalizado...**, que libera o campo numérico livre para
-quem quiser um valor fora da lista. Trocar a proporção mantém a resolução mais
+lista tem a opção **Personalizado...**, que libera um campo numérico para
+valores fora da lista, dentro dos mesmos limites: 3840×2160, 80000 kbps de vídeo
+e 120 FPS (60 FPS ao atingir 3840 px de largura ou 2160 px de altura).
+O áudio mantém seu limite próprio de 510 kbps. Trocar a proporção mantém a resolução mais
 próxima da que você já usava.
 
 ### Compartilhando a tela enquanto joga

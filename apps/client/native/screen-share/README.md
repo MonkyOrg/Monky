@@ -115,7 +115,11 @@ mas drena transações SFU/PCM já admitidas antes de invalidar seus callbacks;
 timeout retém o proprietário para retry. Consultas de diagnóstico durante essa
 retirada retornam indisponibilidade, sem inventar FPS zero.
 
-O teto configurável é 3840x2160/120 FPS/80 Mbps, sem mudar os presets existentes.
+O teto configurável é 3840x2160/120 FPS/80 Mbps, sem mudar os presets existentes,
+com **máximo de 60 FPS ao atingir 3840 px de largura ou 2160 px de altura**.
+O cliente aplica o mesmo limite nas listas, valores digitados e preferências
+salvas. O contrato de recepção e o runtime mantêm compatibilidade com perfis de
+clientes anteriores; a política de seleção não altera o protocolo.
 Cada perfil negocia o nível H.264 necessário: pelo menos 5.1 para 1080p120,
 5.2 para 4K60 e 6 para 4K120. O overlay versionado do WebRTC e o patch de
 `h264-profile-level-id` acrescentam suporte real ao nível 6; os patches e
@@ -148,7 +152,7 @@ e limite de sessões do encoder podem impedir o preparo ou a captura.
 ## Vídeo, áudio e demanda de prévia
 
 O vídeo usa NV12, perfil H.264 Main, zero B-frames e GOP de um segundo, com
-limites de 3840x2160, 120 FPS e 80000 kbps, sujeitos ao encoder. O switch **Manter proporção** no
+limites de 3840x2160, 120 FPS (60 FPS em 4K) e 80000 kbps, sujeitos ao encoder. O switch **Manter proporção** no
 seletor vale somente para o compartilhamento que está sendo criado. Desligado
 (padrão), estica a imagem para a resolução solicitada. Ligado, mantém a imagem
 inteira centralizada e acrescenta barras pretas quando as proporções diferem,

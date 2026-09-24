@@ -19,6 +19,7 @@ import {
   type AudioOutputCategory, type AudioOutputDevices, type NoiseSuppressionMode,
 } from '../utils/audioPreferences';
 import { autoEntryServerKey, restoreAutoEntryServerKeys, type AutoEntryServerAddress } from '../utils/autoEntry';
+import { normalizeCustomQualityProfile } from '../utils/qualityProfileLimits';
 
 /**
  * Chat-notification-sound mode for the 3-level configuration (#153).
@@ -236,6 +237,7 @@ export class SettingsStore {
         if (!this.customProfile || typeof this.customProfile !== 'object' || !this.customProfile.audioBitrateKbps) {
           this.customProfile = { ...DEFAULT_CUSTOM_PROFILE };
         }
+        this.limitCustomProfile();
         if (!this.customSounds || typeof this.customSounds !== 'object') {
           this.customSounds = {};
         }
@@ -606,8 +608,17 @@ export class SettingsStore {
     catch (error) { this.screenShareReceiver = previous; throw error; }
   }
 
+  private limitCustomProfile(): void {
+    const normalized = normalizeCustomQualityProfile(this.customProfile);
+    if (JSON.stringify(normalized) !== JSON.stringify(this.customProfile)) {
+      console.warn('[SettingsStore] Custom quality values adjusted to supported limits.');
+      this.customProfile = normalized;
+    }
+  }
+
   public save(): void {
     try {
+      this.limitCustomProfile();
       localStorage.setItem('monky_settings', JSON.stringify({
         qualityPreset: this.qualityPreset,
         preferredVideoCodec: this.preferredVideoCodec,
