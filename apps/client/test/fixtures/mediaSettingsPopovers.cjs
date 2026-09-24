@@ -13,12 +13,18 @@ async function runMediaSettingsPopoverSmoke() {
   let checks = 0;
   const check = (value, message) => { if (!value) throw new Error(message); checks++; };
   const wait = (ms = 40) => new Promise(resolve => setTimeout(resolve, ms));
-  const until = async (probe, message) => {
-    for (let attempt = 0; attempt < 300; attempt++) {
+  const until = async (probe, message, timeout = 12_000) => {
+    const deadline = performance.now() + timeout;
+    while (performance.now() < deadline) {
       if (probe()) return;
       await wait();
     }
-    throw new Error(message);
+    const state = video.getCameraState();
+    throw new Error(`${message}: ${JSON.stringify({
+      status: state.status, error: state.error?.message, mode: effects.snapshot.settings.mode,
+      image: !!effects.snapshot.image, preview: !!preview()?.srcObject, readyState: preview()?.readyState,
+      panelStatus: panel()?.querySelector('[role="status"]')?.textContent,
+    })}`);
   };
   const listenerCount = () => [...appEvents.listeners.values()].reduce((count, listeners) => count + listeners.size, 0);
   const original = {
@@ -521,7 +527,11 @@ async function runMediaSettingsPopoverSmoke() {
         check(panel() && !panel().textContent.includes(language.t('cameraEffects.errorImageMissing')),
           'The missing-image error clears after the image is saved');
         panel().querySelector('[data-camera-preview-toggle]').click();
-        await until(ready, 'A completed background preference can start a processed preview');
+        await until(() => {
+          const error = video.getCameraState().error;
+          if (error) throw new Error(`${mode}: processed preview failed: ${error.message}`, { cause: error });
+          return ready();
+        }, `${mode}: a completed background preference can start a processed preview`, 35_000);
         escape();
         await video.setCameraEffects({ mode: 'off' });
         await video.removeCameraBackgroundImage();
