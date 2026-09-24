@@ -30,6 +30,56 @@ const observation = (sessionId, completedCallbacks, observedAtSteadyUs) => ({
 });
 const reportMap = rows => new Map(rows.map(row => [row.id, row]));
 
+function endpointDiagnosticsFixture(snapshot) {
+  const { NativeScreenEndpoint } = require('../native/screen-share/runtime/nativeEndpoint.cjs');
+  const errors = [];
+  const endpoint = Object.assign(Object.create(NativeScreenEndpoint.prototype), {
+    abort: new AbortController(), mode: 'p2p', role: 'receive',
+    pipelineId: require('node:crypto').randomUUID(),
+    profile: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 2000 },
+    connections: new Map(), broker: {}, engine: { snapshot: () => snapshot },
+    onDiagnostic: error => errors.push(error),
+  });
+  return { endpoint, errors };
+}
+
+test('pending native diagnostics retire before stale stats errors can be reported', async () => {
+  const f = endpointDiagnosticsFixture({ state: 'ready', mf: { decoders: [] } });
+  let reject;
+  const pendingStats = new Promise((_, no) => { reject = no; });
+  f.endpoint.connections.set('viewer', {});
+  f.endpoint.broker = { getPeer: () => ({ status: 'open' }), getStats: () => pendingStats };
+  const work = f.endpoint.diagnostics();
+  f.endpoint.stopRequested = true;
+  reject(new Error('Stats owner was closed.'));
+  await assert.rejects(work, { name: 'AbortError' });
+  assert.deepEqual(f.errors, []);
+});
+
+test('native actor retirement makes decoder diagnostics unavailable without inventing counters', async () => {
+  for (const state of ['closing', 'closed']) {
+    const f = endpointDiagnosticsFixture({ state, ready: false, mf: null });
+    await assert.rejects(f.endpoint.diagnostics(), { name: 'AbortError' });
+    assert.deepEqual(f.errors, []);
+  }
+});
+
+test('unpublished startup decoder observations are unavailable, while active malformed snapshots report errors', async () => {
+  const starting = endpointDiagnosticsFixture({
+    state: 'starting', ready: false, mf: null, activeReceiverRoutes: 0, failure: null,
+  });
+  const result = await starting.endpoint.diagnostics();
+  assert.deepEqual(result.decoders, []);
+  assert.equal(result.readErrors, 1);
+  assert.deepEqual(starting.errors, []);
+  for (const mf of [null, {}, { decoders: 'malformed' }]) {
+    const active = endpointDiagnosticsFixture({ state: 'ready', ready: true, mf, activeReceiverRoutes: 1 });
+    active.endpoint.firstFrame = true;
+    assert.equal((await active.endpoint.diagnostics()).readErrors, 1);
+    assert.equal(active.errors.length, 1);
+  }
+});
+
 test('native RTC microseconds are normalized once and measured rates never come from the requested profile', () => {
   const sampler = new VideoDiagnosticsSampler(), target = {};
   const limits = { encodings: [{ maxBitrate: 2000000, maxFramerate: 30 }] };

@@ -71,7 +71,7 @@ export class BrowserScreenSubscription {
       } finally { this.cancelDiscovery = null; }
       if (!supported) {
         this.options.onUnavailable('unsupported');
-        throw new Error('This browser cannot receive the screen rendition in H.264 Main Level 5.1.');
+        throw new Error('This browser cannot decode the requested screen rendition in H.264 Main at its required level.');
       }
       if (this.stopping) throw new DOMException('Screen Watch was retired during codec discovery.', 'AbortError');
       this.started = true;
@@ -109,7 +109,8 @@ export class BrowserScreenSubscription {
       this.generation = signal.generation;
       if (call.mode === 'p2p') {
         this.p2p = new BrowserScreenP2p({
-          call, publisherSessionId, source, subscriptionId: this.subscriptionId,
+          call, publisherSessionId, source, profile: getScreenShareProfile(source.video, this.options.quality),
+          subscriptionId: this.subscriptionId,
           generation: signal.generation, muted: this.muted,
           send: control => this.options.send(this.envelope({ action: 'control', control })),
           onTrack: this.options.onTrack, onError: error => this.fail(error),

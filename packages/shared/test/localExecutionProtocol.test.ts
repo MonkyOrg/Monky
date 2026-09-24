@@ -49,7 +49,7 @@ const opus = Uint8Array.of(0xf8, 0xff, 0xfe);
 const dataSdp = 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=sctp-port:5000\r\n';
 
 test('the current protocol publishes dedicated control messages without adding WebSocket audio', () => {
-  assert.equal(PROTOCOL_VERSION, 24);
+  assert.equal(PROTOCOL_VERSION, 25);
   for (const name of [
     'BOT_LOCAL_SOURCE_REQUEST', 'BOT_LOCAL_SOURCE_RESULT', 'BOT_LOCAL_TASK_REQUEST', 'BOT_LOCAL_TASK_OFFER',
     'BOT_LOCAL_TASK_ACCEPT', 'BOT_LOCAL_TASK_CONTROL', 'BOT_LOCAL_TASK_EVENT', 'BOT_LOCAL_MEDIA_SIGNAL',

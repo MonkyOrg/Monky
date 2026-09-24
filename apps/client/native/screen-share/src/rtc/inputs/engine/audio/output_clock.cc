@@ -1,5 +1,6 @@
 #include "output_clock.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace monky::native_rtc::engine::audio {
@@ -61,12 +62,18 @@ ClockCalibration OutputClock::Calibrate(std::uint64_t epoch, std::uint64_t probe
   const auto found = probes_.find(probe_id);
   Require(active_ && epoch == epoch_ && found != probes_.end(), "Audio calibration has no owned native probe");
   const auto& probe = found->second;
-  Require(Time(before) && Time(after) && after >= before && after - before <= 8000 &&
-          Time(rtc_now) && rtc_now >= probe.rtc_after_us &&
-          rtc_now - probe.rtc_after_us <= kMaximumAgeUs, "Clock calibration is stale or uncertain");
+  Require(Time(before) && Time(after) && after >= before &&
+          Time(rtc_now) && rtc_now >= probe.rtc_after_us, "Clock calibration has invalid or regressing timestamps");
+  if (after - before > 8000 || rtc_now - probe.rtc_after_us > kMaximumAgeUs) {
+    feedback_.reset();
+    throw AudioError(Failure::ClockObservationUnavailable, "Clock calibration is stale or uncertain");
+  }
   const auto uncertainty = (after - before + probe.rtc_after_us - probe.rtc_before_us + 1) / 2
       + kQuantizationUs;
-  Require(uncertainty <= 20000, "Clock calibration exceeds its measured uncertainty bound");
+  if (uncertainty > 20000) {
+    feedback_.reset();
+    throw AudioError(Failure::ClockObservationUnavailable, "Clock calibration exceeds its measured uncertainty bound");
+  }
   ClockCalibration result{epoch, probe_id,
       (probe.rtc_before_us + probe.rtc_after_us - before - after) / 2,
       uncertainty, probe.rtc_after_us};
@@ -93,7 +100,6 @@ void OutputClock::Feedback(const RendererPlayoutFeedback& input, std::int64_t rt
           input.clock_epoch && input.clock_epoch <= kMaxSafeInteger && input.clock_epoch >= clock_epoch_ &&
           Time(input.at_performance_us) && Time(rtc_now) &&
           rtc_now >= calibration_->measured_rtc_us &&
-          rtc_now - calibration_->measured_rtc_us <= kMaximumAgeUs &&
           input.feedback_age_us >= 0 && input.feedback_age_us <= kMaximumAgeUs &&
           input.output_clock_age_us >= 0 && input.output_clock_age_us <= kMaximumAgeUs &&
           input.confirmed_pcm_end <= mixed_cursor && mixed_cursor <= kMaxSafeInteger &&
@@ -102,8 +108,14 @@ void OutputClock::Feedback(const RendererPlayoutFeedback& input, std::int64_t rt
           input.estimated_playout_frame <= double(input.confirmed_pcm_end),
           "Physical audio feedback is invalid, stale, uncalibrated or beyond actual PCM");
   const auto observed = input.at_performance_us + calibration_->offset_us;
-  Require(Time(observed) && observed - rtc_now <= calibration_->uncertainty_us &&
-          rtc_now - observed <= kMaximumAgeUs, "Renderer feedback time has no current native correlation");
+  Require(Time(observed) && observed - rtc_now <= calibration_->uncertainty_us,
+          "Renderer feedback time has no current native correlation");
+  const auto delivery_age = (std::max)(std::int64_t{0}, rtc_now - observed);
+  if (rtc_now - calibration_->measured_rtc_us > kMaximumAgeUs ||
+      delivery_age + (std::max)(input.feedback_age_us, input.output_clock_age_us) > kMaximumAgeUs) {
+    feedback_.reset();
+    throw AudioError(Failure::ClockObservationUnavailable, "Physical audio feedback expired before native admission");
+  }
   if (feedback_ && feedback_->clock_epoch == input.clock_epoch) {
     Require(observed > feedback_->observation_rtc_us &&
             input.estimated_playout_frame >= feedback_->estimated_playout_frame &&

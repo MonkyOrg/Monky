@@ -282,6 +282,6 @@ test('capture waits for the first encoded packet before requesting lazy NVENC pa
 
 test('AMF declares input primaries and verifies the exact fixed option without relaxing H264 colour admission', () => {
   const host = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'host.cpp'), 'utf8');
-  assert.match(host, /obs_data_set_string\(encoderSettings_, "ffmpeg_opts", EncoderExtraOptions\(capability_\.encoder\)\)/u);
-  assert.match(host, /obs_data_get_string\(settings\.value, nvenc \? "opts" : "ffmpeg_opts"\), 32\) ==\s*EncoderExtraOptions\(capability_\.encoder\)/u);
+  assert.match(host, /const auto options = EncoderProfileOptions\(capability_\.encoder, arguments_\.video\);[\s\S]*obs_data_set_string\(encoderSettings_, "ffmpeg_opts", options\.c_str\(\)\)/u);
+  assert.match(host, /obs_data_get_string\(settings\.value, nvenc \? "opts" : "ffmpeg_opts"\), 64\) ==\s*EncoderProfileOptions\(capability_\.encoder, arguments_\.video\)/u);
 });

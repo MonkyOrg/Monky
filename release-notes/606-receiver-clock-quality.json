@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Melhorada a recuperação do áudio ao assistir e a troca de qualidade durante uma transmissão. Corrigido um metadado de cor emitido por alguns encoders AMD, mantendo a validação do vídeo. Diagnósticos não provocam mais erros durante a troca de instância.",
+  "en": "Improved audio recovery while watching and live quality changes. Corrected colour metadata emitted by some AMD encoders while preserving video validation. Diagnostics no longer report errors caused by instance retirement."
+}

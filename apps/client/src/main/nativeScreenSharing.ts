@@ -27,6 +27,7 @@ type RequestInput = Omit<Extract<RendererRequest, { type: 'signal' }>, 'requestI
   | Omit<Extract<RendererRequest, { type: 'rpc' }>, 'requestId' | 'callId'>
   | Omit<Extract<RendererRequest, { type: 'presentation-stop' }>, 'requestId' | 'callId'>;
 type SourceRecord = {
+  desktopSourceId: string;
   source: NativeScreenSource; publisher: NativeScreenPublisher; captureHub: NativePcmCaptureHub | null;
   monitor: NodeJS.Timeout | null;
   preview: NativeScreenPreviewBridge | null;
@@ -65,6 +66,13 @@ const nvencCapabilities = [
 ] as const;
 function nativeErrorDiagnostics(error: Error): NativeErrorDiagnostic[] {
   const message = error.message.slice(0, 8192);
+  const amf = /^AMF H264 requires level_idc=(\d{2}) for (\d{1,4})x(\d{1,4})@(\d{1,3}); selected adapter\/runtime reports MaxLevel=(\d{2})(?=$|[.;\s])/.exec(message);
+  if (amf) {
+    const [requiredLevel, width, height, fps, maximumLevel] = amf.slice(1).map(Number);
+    if (requiredLevel < 10 || requiredLevel > 62 || maximumLevel < 10 || maximumLevel > 62
+      || width < 2 || width > 3840 || height < 2 || height > 2160 || fps < 1 || fps > 120) return [];
+    return [{ kind: 'amf-h264-level', requiredLevel, maximumLevel, width, height, fps }];
+  }
   const color = /^External H264 must retain the admitted BT\.709 limited-range mode: fullRange=(absent|[01]), primaries=(absent|\d{1,3}), transfer=(absent|\d{1,3}), matrix=(absent|\d{1,3})(?=$|[;\s])/.exec(message);
   if (color) {
     const fields = color.slice(1).map(value => value === 'absent' ? null : Number(value));
@@ -123,7 +131,7 @@ const diagnosticProfile = ({ width, height, fps, maxBitrateKbps }: NativeScreenV
 const diagnosticState = (value: unknown): string => typeof value === 'string'
   && ['waiting', 'starting', 'running', 'stopping', 'closed', 'new', 'connecting', 'connected',
     'disconnected', 'failed', 'completed', 'opening', 'open', 'closing'].includes(value) ? value : 'other';
-export interface NativeScreenSharingIpc { dispose(): Promise<void> }
+export interface NativeScreenSharingIpc { freezeAdmissions(): void; prepareShutdown(): Promise<void>; dispose(): Promise<void> }
 
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const key = (publisher: string, share: string): string => `${publisher}\0${share}`;
@@ -147,6 +155,15 @@ function errorDetails(error: unknown): { message: string; code?: 'ERR_SCREEN_CAP
     ...(code ? { code } : {}) };
 }
 function failureReason(error: unknown): NativeScreenFailure {
+  const pending: unknown[] = [error], seen = new Set<unknown>();
+  while (pending.length && seen.size < 12) {
+    const current = pending.shift();
+    if (seen.has(current)) continue;
+    seen.add(current);
+    if (record(current) && current.code === 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED') return 'unsupported';
+    if (current instanceof AggregateError) pending.push(...current.errors.slice(0, 8));
+    if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
+  }
   const code = record(error) && typeof error.code === 'string' ? error.code : '';
   if (code === 'ERR_SCREEN_CAPTURE_SOURCE_LOST') return 'source-unavailable';
   if (code.includes('CAPTURE')) return 'capture-failed';
@@ -263,6 +280,11 @@ class NativeScreenSharingService {
   private runtime: NativeScreenRuntime | null = null;
   private availability: Promise<NativeScreenCapabilities> | null = null;
   private disposed = false;
+  private disposal: Promise<void> | null = null;
+  private shutdownRequested = false;
+  private admissionsFrozen = false;
+  private shutdownPreparation: Promise<void> | null = null;
+  private readonly shutdownCalls = new Set<string>();
   private readonly loggedErrors = new WeakSet<object>();
   private readonly recentFailures = new Map<string, number>();
   private logSinkFailureReported = false;
@@ -293,9 +315,12 @@ class NativeScreenSharingService {
   }
 
   logFailure(operation: string, error: unknown, input?: unknown, context: DiagnosticData = {}): void {
-    if (error instanceof Error && error.name === 'AbortError') return;
-    if (record(error) && this.loggedErrors.has(error)) return;
     const command = nativeScreenCommandSchema.safeParse(input);
+    if (error instanceof Error && error.name === 'AbortError') {
+      if (command.success) this.log('command-cancelled', { ...context, action: command.data.action }, 'WARN');
+      return;
+    }
+    if (record(error) && this.loggedErrors.has(error)) return;
     const pending: unknown[] = [error], seen = new Set<unknown>(), codes = new Set<string>();
     const diagnostics = new Map<string, NativeErrorDiagnostic>();
     while (pending.length && seen.size < 12) {
@@ -480,13 +505,15 @@ class NativeScreenSharingService {
   }
 
   private current(call: CallRecord): void {
-    if (call.stopping || this.calls.get(call.config.callId) !== call || !this.hasFrame(call)) throw cancelled();
+    if (this.shutdownRequested || this.disposal || call.stopping || this.calls.get(call.config.callId) !== call || !this.hasFrame(call)) throw cancelled();
   }
 
   async invoke(value: unknown): Promise<NativeScreenCommandResult> {
     const command = nativeScreenCommandSchema.parse(value);
+    if (this.admissionsFrozen && ['source-add', 'watch', 'preview-start'].includes(command.action)) throw cancelled();
     if (command.action === 'capabilities') return { kind: 'capabilities', capabilities: await this.capabilities() };
     if (command.action === 'join') {
+      if (this.admissionsFrozen || this.shutdownRequested || this.disposal) throw cancelled();
       const { action: _action, ...config } = command;
       const previous = this.calls.get(config.callId);
       if (previous) {
@@ -506,8 +533,10 @@ class NativeScreenSharingService {
       return { kind: 'ok' };
     }
     // Closing is idempotent even if the renderer lost the join acknowledgement.
-    if ((command.action === 'leave' || command.action === 'leave-local') && !this.calls.has(command.callId))
+    if ((command.action === 'leave' || command.action === 'leave-local') && !this.calls.has(command.callId)) {
+      if (this.shutdownRequested && !this.shutdownCalls.has(command.callId)) throw cancelled();
       return { kind: 'ok' };
+    }
     const call = this.callFor(command.callId);
     if (command.action === 'leave' || command.action === 'leave-local') {
       if (command.action === 'leave-local') {
@@ -621,8 +650,15 @@ class NativeScreenSharingService {
         const owner = publisher?.publisher ?? receiver?.subscription;
         if (!owner || (publisher?.source.instanceId ?? receiver?.source.instanceId) !== command.sourceInstanceId
           || command.presentationId !== receiver?.subscription.presentationId) throw cancelled();
+        const assertCurrentOwner = (): void => {
+          this.current(call);
+          if (owner.snapshot().stopping
+            || (publisher ? call.sources.get(command.shareId) !== publisher
+              : call.subscriptions.get(key(command.publisherSessionId, command.shareId)) !== receiver)) throw cancelled();
+        };
+        assertCurrentOwner();
         const endpoints = await owner.diagnostics();
-        this.current(call);
+        assertCurrentOwner();
         return { kind: 'diagnostics', sourceInstanceId: command.sourceInstanceId,
           presentationId: receiver?.subscription.presentationId ?? null, viewers: publisher?.publisher.snapshot().viewers ?? null, endpoints };
       }
@@ -661,7 +697,14 @@ class NativeScreenSharingService {
     const diagnostic = { ...this.context(call, command.shareId), captureKind: command.captureKind ?? 'window',
       video: diagnosticProfile(command.video), audio: command.audio, preserveAspectRatio: command.preserveAspectRatio ?? false };
     this.log('source-admission', diagnostic);
-    if (call.sources.has(command.shareId) || call.sourceSelections.has(command.shareId)
+    const previous = call.sources.get(command.shareId);
+    const replacement = command.replacesSourceInstanceId === undefined ? undefined : previous;
+    if (command.replacesSourceInstanceId !== undefined && (!replacement
+      || replacement.source.instanceId !== command.replacesSourceInstanceId
+      || replacement.desktopSourceId !== command.desktopSourceId || replacement.source.audio !== command.audio
+      || command.replacesAudioShareId !== undefined))
+      throw new Error('Quality replacement must name the exact existing source instance and selected capture.');
+    if ((previous && !replacement) || call.sourceSelections.has(command.shareId)
       || call.sources.size + call.sourceSelections.size >= 3)
       throw new Error('Native screen source already exists or exceeds the two-share plus pending-replacement limit.');
     const replacedAudio = command.replacesAudioShareId === undefined ? null : call.sources.get(command.replacesAudioShareId);
@@ -670,7 +713,7 @@ class NativeScreenSharingService {
     const replacedAudioInstanceId = replacedAudio?.source.instanceId;
     if (command.audio && [...this.calls.values()].some(owner =>
       [...owner.sources.values()].some(entry => entry.source.audio
-        && (owner !== call || entry.source.shareId !== command.replacesAudioShareId))
+        && entry !== replacement && (owner !== call || entry.source.shareId !== command.replacesAudioShareId))
       || [...owner.sourceSelections.values()].some(entry => entry.audio)))
       throw new Error('Only one shared source can reserve capture audio at a time.');
     let finish!: () => void;
@@ -734,6 +777,11 @@ class NativeScreenSharingService {
         backend: proof.encoderId === 'obs_nvenc_h264_tex' ? 'libobs-nvenc' : 'libobs-amf' });
       this.log('preflight-ready', { ...diagnostic, encoder: proof.encoderId,
         backend: proof.encoderId === 'obs_nvenc_h264_tex' ? 'libobs-nvenc' : 'libobs-amf' });
+      if (replacement) {
+        stage = 'source-retirement';
+        await this.retireSource(call, command.shareId, replacement);
+        assertCurrent();
+      }
       stage = 'publisher-creation';
       const source: NativeScreenSource = {
         shareId: command.shareId, instanceId: randomUUID(), video: command.video, audio: command.audio,
@@ -816,7 +864,8 @@ class NativeScreenSharingService {
           });
         },
       });
-      const entry: SourceRecord = { source, publisher, captureHub, monitor: null, preview: null, previewMode: null };
+      const entry: SourceRecord = { desktopSourceId: command.desktopSourceId,
+        source, publisher, captureHub, monitor: null, preview: null, previewMode: null };
       call.sources.set(source.shareId, entry);
       // An announcement owns its exact target even without a capture pipeline.
       entry.monitor = setInterval(() => {
@@ -856,6 +905,10 @@ class NativeScreenSharingService {
       if (call.sourceSelections.get(shareId) === selection) call.sourceSelections.delete(shareId);
     }
     if (!entry) return;
+    await this.retireSource(call, shareId, entry);
+  }
+
+  private async retireSource(call: CallRecord, shareId: string, entry: SourceRecord): Promise<void> {
     this.log('source-retirement', this.context(call, shareId));
     if (entry.monitor) clearInterval(entry.monitor);
     entry.monitor = null;
@@ -1071,6 +1124,17 @@ class NativeScreenSharingService {
       this.log('call-retirement-result', { ...this.context(call), retained: this.calls.has(call.config.callId),
         remoteAcknowledged: !call.remoteUnavailable, failures: errors.length,
         sources: call.sources.size, selections: call.sourceSelections.size, subscriptions: call.subscriptions.size });
+      for (const [shareId, source] of call.sources) {
+        const publisher = source.publisher.snapshot(), pcm = source.captureHub?.getStats();
+        this.log('retained-source-owner', { ...this.context(call, shareId),
+          phase: publisher.closed ? 'source-retirement' : 'publisher-retirement',
+          publisherClosed: publisher.closed, previewRetained: source.preview !== null,
+          pcmSubscriptions: pcm?.subscriptions, pcmCaptureClosed: pcm?.captureClosed }, 'WARN');
+      }
+      for (const entry of call.subscriptions.values())
+        this.log('retained-subscription-owner', { ...this.context(call, entry.source.shareId),
+          presentation: diagnosticId(entry.subscription.presentationId), phase: 'subscription-retirement',
+          closed: entry.subscription.snapshot().closed }, 'WARN');
       if (errors.length) throw new AggregateError(errors, 'Native screen call shutdown reported failures.');
       if (call.sources.size || call.sourceSelections.size || call.subscriptions.size)
         throw new Error('A native screen call retained media resources.');
@@ -1105,11 +1169,47 @@ class NativeScreenSharingService {
     return this.closeCalls();
   }
 
-  async dispose(): Promise<void> {
-    await this.closeCalls();
-    if (this.requests.size) throw new Error('Native screen IPC still owns pending requests.');
-    this.disposed = true;
-    this.recentFailures.clear();
+  freezeAdmissions(): void {
+    this.admissionsFrozen = true;
+    for (const call of this.calls.values()) this.shutdownCalls.add(call.config.callId);
+  }
+
+  prepareShutdown(): Promise<void> {
+    this.freezeAdmissions();
+    this.shutdownRequested = true;
+    if (this.shutdownPreparation) return this.shutdownPreparation;
+    const calls = [...this.calls.values()];
+    for (const call of calls) this.shutdownCalls.add(call.config.callId);
+    const work = Promise.allSettled(calls.map(async call => {
+      try { await this.closeCall(call); }
+      catch (error) {
+        // Match leave-local: remote loss is observable, but only the original
+        // owners' local retirement proofs can release the call slot.
+        if (!call.remoteUnavailable || this.calls.has(call.config.callId)) throw error;
+        this.logFailure('shutdown-remote-retirement', error, undefined, this.context(call));
+        this.log('shutdown-locally-retired', { ...this.context(call), remoteAcknowledged: false }, 'WARN');
+      }
+    })).then(results => {
+      const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (errors.length) throw new AggregateError(errors, 'Native screen shutdown preparation failed.');
+      if (this.calls.size || this.requests.size) throw new Error('Native shutdown preparation retained owners or requests.');
+    });
+    this.shutdownPreparation = work;
+    void work.catch(() => { if (this.shutdownPreparation === work) this.shutdownPreparation = null; });
+    return work;
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
+    const work = Promise.resolve().then(async () => {
+      await this.closeCalls();
+      if (this.requests.size) throw new Error('Native screen IPC still owns pending requests.');
+      this.disposed = true;
+      this.recentFailures.clear();
+    });
+    this.disposal = work;
+    void work.catch(() => { if (this.disposal === work) this.disposal = null; });
+    return work;
   }
 }
 
@@ -1171,6 +1271,8 @@ export function setupNativeScreenSharingIpc(
   contents.on('render-process-gone', cleanup);
   contents.on('destroyed', cleanup);
   return {
+    freezeAdmissions: () => service.freezeAdmissions(),
+    prepareShutdown: () => service.prepareShutdown(),
     async dispose() {
       await service.dispose();
       if (focusUpdate) clearImmediate(focusUpdate);

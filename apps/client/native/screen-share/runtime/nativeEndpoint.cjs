@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { randomBytes } = require('node:crypto');
 const {
-  getScreenShareProfile, messageReferenceSchema, nativeScreenSourceSchema, nativeScreenP2pControlSchema,
+  getScreenShareProfile, getScreenH264ProfileLevelId, messageReferenceSchema, nativeScreenSourceSchema, nativeScreenP2pControlSchema,
   nativeScreenRenditionSchema, nativeScreenEndpointDiagnosticsSchema, screenShareProfileKey,
 } = require('@monky/shared');
 const { CaptureBridge } = require('./captureBridge.cjs');
@@ -79,6 +79,7 @@ class NativeScreenEndpoint {
     this.assertSourceCurrent = options.assertSourceCurrent ?? (() => {});
     this.onPreview = options.onPreview ?? null;
     this.pending = new Set();
+    this.demandWork = new Set();
     this.connections = new Map();
     this.peerReadiness = new Map();
     this.pendingControlBytes = 0;
@@ -90,20 +91,23 @@ class NativeScreenEndpoint {
     this.demand = 0;
     this.previewDemand = false;
     this.closing = false;
+    this.stopRequested = false;
     this.nativeClosed = false;
     this.closed = false;
     this.abort = new AbortController();
     this.captureState = 'waiting';
     this.captureMode = null;
     this.engine = runtime.rtc.createEngine({
-      maxResources: 64, maxDecodedFrames: 16, maximumH264Level: 51, requireAudio: source.audio,
+      maxResources: 64, maxDecodedFrames: 16,
+      maximumH264Level: role === 'publish' ? Number.parseInt(getScreenH264ProfileLevelId(profile).slice(-2), 16) : 60,
+      requireAudio: source.audio,
       videoInput: role === 'publish' ? 'encoded-h264' : 'nv12',
     }, event => {
       if (!this.transport) { this.early.push(event); return; }
       this.track(this.dispatch(event));
     });
     this.commands = new NativeRtcCommands(this.engine);
-    endpointOwners.set(this, { engine: this.engine, commands: this.commands, locallyRetired: false });
+    endpointOwners.set(this, { engine: this.engine, commands: this.commands, locallyRetired: false, fullyRetired: false });
     this.track(this.engine.ready);
     try {
       this.routes = new NativeScreenRoutes({ maximumPeers: 64, maximumReceivers: 64 });
@@ -172,7 +176,7 @@ class NativeScreenEndpoint {
 
   report(value, context) {
     const error = value instanceof Error ? value : new Error(String(value));
-    if (this.closing && error.name === 'AbortError') return;
+    if ((this.closing || this.stopRequested) && error.name === 'AbortError') return;
     if (this.reported.has(error)) return;
     this.reported.add(error);
     if (this.errors.length < 32) this.errors.push(error);
@@ -226,12 +230,13 @@ class NativeScreenEndpoint {
   }
 
   async startAudioSource() {
+    this.assertDemandCurrent();
     this.pcm = new NativePcmCaptureBridge(this.engine, this.commands, this.audio.captureModule,
       error => this.report(error), { captureHub: this.audio.captureHub ?? null });
     const selection = this.target.kind === 'monitor' ? { excludePid: process.pid }
       : { includeWindowId: this.target.hwnd, expectedProcessId: this.target.expectedProcessId };
     const captured = await this.pcm.start(selection, this.source.instanceId, this.abort.signal);
-    this.abort.signal.throwIfAborted();
+    this.assertDemandCurrent();
     // A quiet application can legitimately have no packet yet. Publish its
     // disabled source and let the first real capture packet establish its epoch.
     this.pcm.arm();
@@ -276,10 +281,11 @@ class NativeScreenEndpoint {
 
   refreshCapture() {
     if (!this.flow) return;
-    this.flow.setDemand(!this.closing && this.demand > 0
+    const stopping = this.stopRequested || this.closing;
+    this.flow.setDemand(!stopping && this.demand > 0
       && (this.mode === 'sfu' ? this.sfuPublicationRequested === true : this.broker.sourceDemand(this.sourceId) > 0));
-    this.flow.setConnected(!this.closing && this.connected());
-    if (!this.closing && (this.previewDemand || (this.flow.demand && this.flow.connected)) && !this.captureWork) {
+    this.flow.setConnected(!stopping && this.connected());
+    if (!stopping && (this.previewDemand || (this.flow.demand && this.flow.connected)) && !this.captureWork) {
       this.captureWork = this.startCapture();
       this.track(this.captureWork);
     }
@@ -291,29 +297,44 @@ class NativeScreenEndpoint {
     assert.equal(typeof preview, 'boolean');
     assert.ok(count > 0 || !preview || !this.publicationWork,
       'A network publication must retire before a local-only preview replaces it.');
+    if (count === 0 && !preview) return this.close();
+    this.assertDemandCurrent();
+    const work = this.applyDemand(count, preview);
+    this.demandWork.add(work);
+    const remove = () => this.demandWork.delete(work);
+    void work.then(remove, remove);
+    return work;
+  }
+
+  assertDemandCurrent() {
+    if (this.stopRequested || this.closing) throw cancelled();
+    this.abort.signal.throwIfAborted();
+  }
+
+  async applyDemand(count, preview) {
     this.demand = count;
     this.previewDemand = preview;
     this.refreshCapture();
-    if (count === 0 && !preview) { await this.close(); return; }
     await this.ready;
-    this.abort.signal.throwIfAborted();
+    this.assertDemandCurrent();
     if (count === 0) { this.refreshCapture(); return; }
     if (!this.publicationWork) {
       this.publicationWork = this.track((async () => {
         this.publication = await this.transport.addSource(this.sourceDescription, this.abort.signal);
-        this.abort.signal.throwIfAborted();
+        this.assertDemandCurrent();
         await this.commands.request('source.setEnabled', this.sourceId, { enabled: true });
       })());
     }
     await this.publicationWork;
-    this.abort.signal.throwIfAborted();
+    this.assertDemandCurrent();
     if (this.audio) {
       if (!this.audioStartWork) this.audioStartWork = this.track(this.startAudioSource());
       await this.audioStartWork;
-      this.abort.signal.throwIfAborted();
+      this.assertDemandCurrent();
     }
     if (this.mode === 'sfu') {
       await this.broker.setProducerEnabled(this.publication.producerId, count > 0);
+      this.assertDemandCurrent();
       this.sfuPublicationRequested = true;
       if (this.audioPublication) await this.broker.syncAudioProducer(this.audioPublication.producerId);
     }
@@ -354,6 +375,11 @@ class NativeScreenEndpoint {
   async stopCaptureHost(host) {
     try { await host?.stop(); }
     catch (error) {
+      if (error.code === 'ERR_SCREEN_CAPTURE_SOURCE_LOST' && host.snapshot().nativeClosed) {
+        // The source disappeared, but the bridge proved complete native retirement.
+        this.report(error);
+        return;
+      }
       if (host !== this.recoveringHost || !gameStartupFailures.has(error.code) || !host.snapshot().nativeClosed) throw error;
     }
   }
@@ -391,7 +417,7 @@ class NativeScreenEndpoint {
         }
         this.flow.setCapturePaused(this.isSourcePaused());
         const result = this.flow.packet(frame);
-        if (this.previewDemand && result !== false && !this.isSourcePaused()) {
+        if (!this.stopRequested && this.previewDemand && result !== false && !this.isSourcePaused()) {
           try { this.onPreview?.(frame); }
           catch (error) { this.onDiagnostic(error); }
         }
@@ -551,6 +577,7 @@ class NativeScreenEndpoint {
 
   async readDiagnostics() {
     this.abort.signal.throwIfAborted();
+    if (this.stopRequested || this.closing) throw cancelled();
     const requests = this.mode === 'p2p'
       ? [...this.connections.keys()].filter(remote => this.broker.getPeer(remote)?.status === 'open')
         .map(remote => this.broker.getStats(remote))
@@ -560,7 +587,12 @@ class NativeScreenEndpoint {
         .map(id => this.broker.getStats(id));
     const rtp = [];
     let readErrors = 0, decoders = [];
-    for (const result of await Promise.allSettled(requests)) {
+    const results = await Promise.allSettled(requests);
+    this.abort.signal.throwIfAborted();
+    if (this.stopRequested || this.closing) throw cancelled();
+    const snapshot = this.role === 'receive' ? this.engine.snapshot() : null;
+    if (snapshot?.state === 'closing' || snapshot?.state === 'closed') throw cancelled();
+    for (const result of results) {
       try {
         if (result.status === 'rejected') throw result.reason;
         rtp.push({ id: result.value.id, reports: rtpReports(result.value.reports) });
@@ -568,7 +600,12 @@ class NativeScreenEndpoint {
     }
     this.abort.signal.throwIfAborted();
     if (this.role === 'receive') {
-      try { decoders = decoderObservations(this.engine.snapshot().mf); }
+      try {
+        // The actor publishes its first control snapshot after ready; no worker exists yet.
+        if (snapshot?.mf === null && snapshot.failure === null && snapshot.activeReceiverRoutes === 0
+          && !this.firstFrame && (snapshot.state === 'starting' || snapshot.state === 'ready')) readErrors++;
+        else decoders = decoderObservations(snapshot?.mf);
+      }
       catch (error) { readErrors++; this.onDiagnostic(error); }
     }
     return nativeScreenEndpointDiagnosticsSchema.parse({
@@ -591,7 +628,27 @@ class NativeScreenEndpoint {
   }
 
   close() {
+    if (endpointOwners.get(this).fullyRetired) return Promise.resolve(this.snapshot());
     if (this.closeWork) return this.closeWork;
+    this.stopRequested = true;
+    this.presentation?.stopAccepting();
+    this.pcm?.stopAccepting();
+    this.refreshCapture();
+    // Cancelling a native produce while its signaling callback is awaiting RPC
+    // invalidates respond() and destroys its transport. Drain admitted demand
+    // first; no new phase or media input can start after the stop request.
+    const admitted = [...this.demandWork];
+    if (this.pcm?.packetTail) admitted.push(this.pcm.packetTail);
+    const work = this.mode === 'sfu' && admitted.length > 0
+      ? within(Promise.allSettled(admitted), 15000,
+        'Native SFU admission is still pending; endpoint ownership is retained.').then(() => this.beginClose())
+      : this.beginClose();
+    this.closeWork = work;
+    void work.catch(() => { if (this.closeWork === work) this.closeWork = null; });
+    return work;
+  }
+
+  beginClose() {
     this.closing = true;
     this.demand = 0;
     this.previewDemand = false;
@@ -602,10 +659,7 @@ class NativeScreenEndpoint {
     for (const ready of this.peerReadiness.values()) ready.reject(cancelled());
     this.pcm?.stopAccepting();
     this.pcm?.beginCaptureStop();
-    const work = this.retire();
-    this.closeWork = work;
-    void work.catch(() => { if (!this.closed && this.closeWork === work) this.closeWork = null; });
-    return work;
+    return this.retire();
   }
 
   async retire() {
@@ -643,10 +697,12 @@ class NativeScreenEndpoint {
     assert.equal(this.pcm?.getStats().outstanding ?? 0, 0);
     if (this.pcm?.capture) assert.equal(this.pcm.getStats().subscription.detached, true);
     this.nativeClosed = true;
-    endpointOwners.get(this).locallyRetired = operationsRetired;
     this.captureState = 'closed';
-    this.closed = transportRetired && operationsRetired;
     if (operationsRetired) await collect(this.removeOwnedDirectory());
+    const locallyRetired = operationsRetired && (!this.directoryCreated || this.directoryRemoved === true);
+    endpointOwners.get(this).locallyRetired = locallyRetired;
+    this.closed = transportRetired && locallyRetired;
+    endpointOwners.get(this).fullyRetired = this.closed;
     if (errors.length) throw new AggregateError([...new Set(errors)], 'Native screen retirement reported failures.');
     this.observe({ type: 'closed' });
     return this.snapshot();

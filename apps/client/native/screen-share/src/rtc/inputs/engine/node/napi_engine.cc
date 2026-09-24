@@ -42,7 +42,7 @@
 static_assert(_MSVC_LANG >= 202002L);
 static_assert(sizeof(void*) == 8);
 static_assert(MONKY_ENGINE_ABI_VERSION == 2u);
-static_assert(MONKY_ENGINE_CONTRACT_REVISION == 7u);
+static_assert(MONKY_ENGINE_CONTRACT_REVISION == 8u);
 static_assert(std::endian::native == std::endian::little);
 static_assert(sizeof(MonkyEngineError) == 608);
 static_assert(sizeof(MonkyEngineOptions) == 32);
@@ -1975,8 +1975,8 @@ void ProcessEvent(napi_env env, const StateOwner& state, const QueuedEvent& even
         } else if (kind == "rate" || kind == "encoder-closed") {
           Id(env, Get(env, data, "encoderId"));
           Id(env, Get(env, data, "requestedBitrateBps"), true);
-          if (Id(env, Get(env, data, "bitrateBps"), true) > 20000000 ||
-              Id(env, Get(env, data, "bitrateCeilingBps")) != 20000000 ||
+          if (Id(env, Get(env, data, "bitrateBps"), true) > 80000000 ||
+              Id(env, Get(env, data, "bitrateCeilingBps")) != 80000000 ||
               Type(env, Get(env, data, "fpsApplied")) != napi_null)
             ContractFailure(env, "Encoded rate feedback exceeds its ceiling or fabricates applied FPS");
           Boolean(env, Get(env, data, "paused"), "Encoded pause must be boolean");
@@ -2725,7 +2725,7 @@ MonkyEngineOptions Options(napi_env env, napi_value object, bool& encoded) {
   options.max_pending_operations = Option(env, object, "maxPendingOperations", 64);
   options.max_decoded_frames = Option(env, object, "maxDecodedFrames", 16);
   options.operation_timeout_ms = Option(env, object, "operationTimeoutMs", 12000);
-  options.maximum_h264_level = Option(env, object, "maximumH264Level", 52);
+  options.maximum_h264_level = Option(env, object, "maximumH264Level", 60);
   if (Has(env, object, "videoInput")) {
     const auto input = String(env, Get(env, object, "videoInput"), 1, 16, "videoInput must be nv12 or encoded-h264");
     if (input != "nv12" && input != "encoded-h264") Invalid(env, "videoInput must be nv12 or encoded-h264");
@@ -2735,9 +2735,9 @@ MonkyEngineOptions Options(napi_env env, napi_value object, bool& encoded) {
       options.max_decoded_frames > 64 || options.operation_timeout_ms < 100 ||
       options.operation_timeout_ms > 60000)
     Invalid(env, "Engine limits exceed the bounded native contract", true);
-  constexpr std::array<uint32_t, 8> levels{31, 32, 40, 41, 42, 50, 51, 52};
+  constexpr std::array<uint32_t, 9> levels{31, 32, 40, 41, 42, 50, 51, 52, 60};
   if (std::find(levels.begin(), levels.end(), options.maximum_h264_level) == levels.end()) {
-    Invalid(env, "maximumH264Level must be 31, 32, 40, 41, 42, 50, 51 or 52", true);
+    Invalid(env, "maximumH264Level must be 31, 32, 40, 41, 42, 50, 51, 52 or 60", true);
   }
   if (Has(env, object, "requireAudio")) {
     auto audio = Get(env, object, "requireAudio");

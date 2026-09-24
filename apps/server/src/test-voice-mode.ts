@@ -14,7 +14,7 @@ test('SFU advertises legacy and native Main H264 profiles with distinct RTX and 
   t.after(() => sfu.close());
   const { codecs = [] } = await sfu.getRouterRtpCapabilities('h264-profiles');
   const h264 = codecs.filter((codec) => codec.mimeType.toLowerCase() === 'video/h264');
-  assert.deepEqual(h264.map((codec) => codec.parameters?.['profile-level-id']), ['42e01f', '42001f', '4d0033']);
+  assert.deepEqual(h264.map((codec) => codec.parameters?.['profile-level-id']), ['42e01f', '42001f', '4d003c']);
   assert.equal(new Set(h264.map((codec) => codec.preferredPayloadType)).size, 3);
   for (const codec of h264) {
     assert.equal(codec.parameters?.['packetization-mode'], 1);

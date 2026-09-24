@@ -62,6 +62,8 @@ export function buildCliPackageJson(serverPkg, sharedPkg, version) {
     ...sharedPkg.dependencies,
     ...serverPkg.dependencies,
     '@monky/shared': sharedPkg.version,
+    'h264-profile-level-id': '2.3.3',
+    debug: '^4.4.3',
   };
   return {
     name: serverPkg.name,
@@ -77,8 +79,19 @@ export function buildCliPackageJson(serverPkg, sharedPkg, version) {
     // supports-color) declare `>=22`, so the CLI cannot honestly claim Node 20.
     engines: { node: '>=22' },
     dependencies,
-    bundleDependencies: ['@monky/shared'],
+    bundleDependencies: ['@monky/shared', 'h264-profile-level-id'],
   };
+}
+
+export function bundleH264Dependency(staging, dependencyRoot) {
+  const require = createRequire(import.meta.url);
+  const source = dependencyRoot ?? path.dirname(require.resolve('h264-profile-level-id/package.json'));
+  const manifest = readJson(path.join(source, 'package.json'));
+  const h264 = require(path.join(source, 'lib', 'index.js'));
+  if (manifest.version !== '2.3.3' || h264.parseProfileLevelId('4d003c')?.level !== 60) {
+    throw new Error('CLI packaging requires the maintained H264 Level 6 dependency patch. Run npm install.');
+  }
+  fs.cpSync(source, path.join(staging, 'node_modules', 'h264-profile-level-id'), { recursive: true });
 }
 
 function main() {
@@ -127,6 +140,7 @@ function main() {
     path.join(staging, 'package.json'),
     JSON.stringify(buildCliPackageJson(serverPkg, sharedPkg, version), null, 2) + '\n'
   );
+  bundleH264Dependency(staging);
 
   // The CLI reference lives in the documentation site, which is also what the
   // published package shows on npm.

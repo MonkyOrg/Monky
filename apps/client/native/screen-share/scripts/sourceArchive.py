@@ -23,6 +23,15 @@ def main():
     entries = Path(args.list).read_text(encoding="utf-8").splitlines()
     members = [(safe_member(value), value.endswith("/")) for value in entries]
     extra = ["SOURCE-MANIFEST.json", "SOURCE-README.md", "SOURCE-README.en.md"]
+    patches = metadata / "SOURCE-PATCHES"
+    if patches.exists():
+        if patches.is_symlink() or not patches.is_dir():
+            raise ValueError("Maintained source patch root must be a real directory.")
+        for filename in sorted(patches.rglob("*")):
+            if filename.is_symlink() or not (filename.is_dir() or filename.is_file()):
+                raise ValueError("Maintained source patches contain an alias or unsupported file type.")
+            if filename.is_file():
+                extra.append(safe_member(filename.relative_to(metadata).as_posix()))
 
     def public_metadata(info):
         info.uid = info.gid = 0

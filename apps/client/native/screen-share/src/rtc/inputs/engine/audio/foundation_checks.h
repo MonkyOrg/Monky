@@ -828,10 +828,10 @@ void RunAudioFoundationChecks(Check&& check) {
     rejects([&] { clock.Probe({1, 1, 1000000, 1020001}); }, Failure::Clock);
     clock.Probe({1, 1, 1000000, 1000000});
     rejects([&] { clock.Probe({1, 1, 1000000, 1000000}); }, Failure::Clock);
-    rejects([&] { clock.Calibrate(1, 1, 2000000, 2008001, 1001000); }, Failure::Clock);
+    rejects([&] { clock.Calibrate(1, 1, 2000000, 2008001, 1001000); }, Failure::ClockObservationUnavailable);
     rejects([&] { clock.Calibrate(1, 1, 2001000, 2000000, 1001000); }, Failure::Clock);
     rejects([&] { clock.Calibrate(1, 1, 2000000, 2001000, 999999); }, Failure::Clock);
-    rejects([&] { clock.Calibrate(1, 1, 2000000, 2001000, 1200001); }, Failure::Clock);
+    rejects([&] { clock.Calibrate(1, 1, 2000000, 2001000, 1200001); }, Failure::ClockObservationUnavailable);
     const auto calibration = clock.Calibrate(1, 1, 2000000, 2001000, 1001000);
     check(calibration.offset_us == -1000500 && calibration.uncertainty_us == 16500,
           "Output clock lost its real paired-clock offset/RTC quantization bound");
@@ -894,6 +894,33 @@ void RunAudioFoundationChecks(Check&& check) {
     rejects([&] { clock.Probe({2, 17, 2000000, 2000000}); }, Failure::Clock);
     clock.Probe({2, 17, 2200001, 2200001});
     check(!clock.Read(2), "A fresh probe fabricated physical feedback");
+  }
+  {
+    OutputClock clock;
+    clock.Begin(1);
+    clock.Probe({1, 1, 1000000, 1000000});
+    clock.Calibrate(1, 1, 2000000, 2000000, 1000000);
+    RendererPlayoutFeedback feedback{1, 1, 1, true, 2001000, 0, 0, 0., 960};
+    clock.Feedback(feedback, 1001000, 960);
+    feedback.at_performance_us = 2002000;
+    rejects([&] { clock.Feedback(feedback, 1200001, 960); }, Failure::ClockObservationUnavailable);
+    check(!clock.Read(1), "Expired calibration must withdraw physical measurement, not retain a stale cursor");
+    clock.Probe({1, 2, 1201000, 1201000});
+    clock.Calibrate(1, 2, 2201000, 2201000, 1201000);
+    feedback.calibration_id = 2;
+    feedback.at_performance_us = 2202000;
+    feedback.feedback_age_us = 199000;
+    clock.Feedback(feedback, 1203000, 960);
+    feedback.at_performance_us++;
+    rejects([&] { clock.Feedback(feedback, 1203002, 960); }, Failure::ClockObservationUnavailable);
+    check(!clock.Read(1), "Delivery plus render age above 200 ms must withdraw only the physical observation");
+    feedback.feedback_age_us = 0;
+    feedback.at_performance_us = 2204000;
+    clock.Feedback(feedback, 1204000, 960);
+    check(clock.Read(1) && clock.Read(1)->epoch == 1,
+          "Fresh feedback must resume under the same output epoch without recreating video/audio");
+    feedback.estimated_playout_frame = 961;
+    rejects([&] { clock.Feedback(feedback, 1204000, 960); }, Failure::Clock);
   }
 }
 

@@ -52,6 +52,9 @@ test('the source archiver preserves a real file inventory without local-account 
     fs.writeFileSync(path.join(directory, 'members.txt'), entries.join('\n') + '\n');
     for (const filename of ['SOURCE-MANIFEST.json', 'SOURCE-README.md', 'SOURCE-README.en.md'])
       fs.writeFileSync(path.join(directory, 'metadata', filename), filename);
+    const maintained = path.join('SOURCE-PATCHES', 'webrtc', 'api', 'video_codecs', 'h264_profile_level_id.h');
+    fs.mkdirSync(path.dirname(path.join(directory, 'metadata', maintained)), { recursive: true });
+    fs.writeFileSync(path.join(directory, 'metadata', maintained), 'Maintained licensed Level6 fixture\n');
     const result = spawnSync(python, [
       '-I', path.resolve(__dirname, '..', 'scripts', 'sourceArchive.py'),
       `--root=${path.join(directory, 'input')}`, `--list=${path.join(directory, 'members.txt')}`,
@@ -70,6 +73,8 @@ test('the source archiver preserves a real file inventory without local-account 
     assert.equal(extraction.status, 0, extraction.stdout + extraction.stderr);
     for (const name of ['source file.cpp', unicodeName])
       assert.deepEqual(fs.readFileSync(path.join(extracted, name)), fs.readFileSync(path.join(directory, 'input', name)));
+    assert.deepEqual(fs.readFileSync(path.join(extracted, maintained)),
+      fs.readFileSync(path.join(directory, 'metadata', maintained)));
     const extractedSdk = path.join(extracted, 'rtc', 'webrtc', 'src');
     const checkout = spawnSync('git', ['-C', extractedSdk, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
     assert.equal(checkout.status, 0, checkout.stderr);

@@ -237,6 +237,42 @@ test('one private port connects selected output, native configuration, clock cal
   assert.deepEqual(f.errors, []);
 });
 
+for (const method of ['probe', 'calibrate']) test(`real output retirement cancels its pending ${method} without a terminal audio error`, async t => {
+  const f = fixture(t), gate = deferred();
+  await f.main.start(config(1));
+  const control = f.main.controls[method];
+  let entered = false;
+  f.main.controls[method] = async data => { entered = true; await gate.promise; return control(data); };
+  const [id, timer] = [...f.timers][0];
+  f.timers.delete(id);
+  timer.callback();
+  await until(() => entered);
+  try {
+    await f.main.stop(1);
+    await delay(5);
+    assert.deepEqual(f.errors, []);
+    assert.deepEqual(f.receiver.getStats(), { sessions: [], errors: [] });
+    assert.equal(f.contexts[0].state, 'closed');
+    assert.equal(f.timers.size, 0);
+    f.main.controls[method] = control;
+    await f.main.start(config(2));
+    assert.equal(f.main.getStats().current.ready, true);
+  } finally { gate.resolve(); }
+  await delay(5);
+  assert.deepEqual(f.errors, []);
+});
+
+test('a genuinely failing active periodic probe remains a terminal audio error', async t => {
+  const f = fixture(t);
+  await f.main.start(config(1));
+  f.main.controls.probe = async () => { throw new Error('Active native probe failed.'); };
+  const [id, timer] = [...f.timers][0];
+  f.timers.delete(id);
+  timer.callback();
+  await until(() => f.errors.length > 0);
+  assert.match(f.errors[0].message, /Active native probe failed/);
+});
+
 test('actual ports carry only worklet-earned PCM credits and transfer a copied packet into the worklet', async t => {
   const f = fixture(t);
   await f.main.start(config(1));

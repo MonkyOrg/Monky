@@ -1,6 +1,6 @@
 {
   "abiVersion": 2,
-  "contractRevision": 7,
+  "contractRevision": 8,
   "audioExtensionVersion": 1,
   "requiredCompiledCapabilities": {
     "inputLeaseCorrelation": true,
@@ -28,9 +28,9 @@
   "presentationStage": "shared-nv12-export-only-runtime-unqualified",
   "node": {
     "module": "monky_screen_rtc.node",
-    "capabilities": "() -> actual DLL implementation surface, unchanged; no hardware/device probe; revision7 adds externally encoded H264 while retaining expected-epoch admission and owner-scoped audio, stereo and retirement guarantees",
-    "createEngine": "(options, onEvent) -> engine; await engine.ready; loader and addon require DLL-advertised ABI2/contractRevision7/audioExtensionVersion1, audioAvailable and requiredCompiledCapabilities BEFORE native creation",
-    "options": "{maxResources?:32 (1..64),maxPendingOperations?:64 (1..128),maxDecodedFrames?:16 (1..64),operationTimeoutMs?:12000 (100..60000),maximumH264Level?:52 (31|32|40|41|42|50|51|52),requireAudio?:false}; unknown options reject before creation; requireAudio means compiled support, never hardware qualification",
+    "capabilities": "() -> actual DLL implementation surface; no hardware/device probe; revision8 adds H264 Level6 and an 80Mbps ceiling with profile-dependent negotiation, retaining expected-epoch admission and owner-scoped audio, stereo and retirement guarantees",
+    "createEngine": "(options, onEvent) -> engine; await engine.ready; loader and addon require DLL-advertised ABI2/contractRevision8/audioExtensionVersion1, audioAvailable and requiredCompiledCapabilities BEFORE native creation",
+    "options": "{maxResources?:32 (1..64),maxPendingOperations?:64 (1..128),maxDecodedFrames?:16 (1..64),operationTimeoutMs?:12000 (100..60000),maximumH264Level?:52 (31|32|40|41|42|50|51|52|60),requireAudio?:false}; unknown options reject before creation; requireAudio means compiled support, never hardware qualification",
     "request": "engine.request(requestId, operation, targetId, data) -> Promise<result>",
     "respond": "engine.respond(callbackId, {ok:true,data} | {ok:false,error:{code,message}})",
     "cancel": "engine.cancel(requestId)",

@@ -45,7 +45,7 @@ void RequireSingleLayer(const webrtc::SimulcastStream& layer,
 bool IsSupportedLevel(std::uint8_t level) {
   switch (level) {
     case 31: case 32: case 40: case 41:
-    case 42: case 50: case 51: case 52: return true;
+    case 42: case 50: case 51: case 52: case 60: return true;
     default: return false;
   }
 }
@@ -392,6 +392,7 @@ AccessUnitInfo InspectAccessUnit(std::span<const std::uint8_t> bytes) {
 void ValidateSps(const sv::H264Sps& sps, NegotiatedH264 negotiated,
                  std::uint32_t maximum_width, std::uint32_t maximum_height) {
   if (!sps.progressive || sps.width < 16 || sps.height < 16 ||
+      sps.width > 3840 || sps.height > 2160 ||
       sps.width > maximum_width || sps.height > maximum_height ||
       ((sps.width | sps.height | sps.cropLeft | sps.cropTop) & 1) ||
       !IsSupportedLevel(sps.levelIdc) || sps.levelIdc > negotiated.level ||

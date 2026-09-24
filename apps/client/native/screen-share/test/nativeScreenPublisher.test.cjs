@@ -12,6 +12,30 @@ const deferred = () => {
 };
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('publisher Retry does not replay an old signaling error after every pipeline retired', async () => {
+  const f = fixture();
+  await f.publisher.receive(f.watch('viewer'));
+  const send = f.publisher.send;
+  f.publisher.send = async message => {
+    if (message.action === 'closed') throw new Error('Remote disconnect during shutdown');
+    await send(message);
+  };
+  await assert.rejects(f.publisher.close(), /shutdown failures/);
+  assert.equal(f.publisher.snapshot().closed, true);
+  assert.equal(f.endpoints[0].closed, true);
+  await f.publisher.close();
+});
+
+test('AMF level refusal tells the viewer unsupported rather than a connection failure', async () => {
+  const f = fixture();
+  await f.publisher.receive(f.watch('viewer'));
+  f.endpoints[0].options.onError(Object.assign(new Error('AMF MaxLevel=52; requiredLevel=60'),
+    { code: 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' }));
+  await tick(); await tick();
+  assert.equal(f.sent.find(value => value.action === 'closed').reason, 'unsupported');
+  await f.publisher.close();
+});
+
 function fixture({ readiness, mode = 'p2p', closeGate } = {}) {
   const endpoints = [], sent = [], errors = [], previews = [];
   const source = { shareId: 'owned-screen', instanceId: randomUUID(), audio: false,
@@ -372,11 +396,16 @@ for (const mode of ['p2p', 'sfu']) {
     await f.publisher.receive(f.watch('first'));
     await f.publisher.receive(f.watch('second'));
     const failure = new Error('Owned native engine failed to close.');
+    const demand = f.endpoints[0].setDemand;
     f.endpoints[0].setDemand = async () => { throw failure; };
     await assert.rejects(f.publisher.close(), error => error instanceof AggregateError &&
       error.errors.includes(failure));
     assert.equal(f.publisher.snapshot().closed, false);
     assert.equal(f.publisher.snapshot().pipelines.length, 1);
+    f.endpoints[0].setDemand = demand;
+    await f.publisher.close();
+    assert.equal(f.publisher.snapshot().closed, true);
+    assert.equal(f.publisher.snapshot().pipelines.length, 0);
   });
 }
 

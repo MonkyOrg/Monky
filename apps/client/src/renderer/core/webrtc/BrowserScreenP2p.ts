@@ -1,5 +1,6 @@
 import {
   nativeScreenP2pControlSchema, type NativeScreenCall, type NativeScreenP2pControl, type NativeScreenSource,
+  type NativeScreenVideoProfile,
 } from '@monky/shared';
 import { withBrowserScreenReceiveParameters } from './browserScreenCodecs';
 
@@ -15,6 +16,7 @@ export interface BrowserScreenP2pOptions {
   call: NativeScreenCall;
   publisherSessionId: string;
   source: NativeScreenSource;
+  profile: Readonly<NativeScreenVideoProfile>;
   subscriptionId: string;
   generation: number;
   muted: boolean;
@@ -185,7 +187,7 @@ export class BrowserScreenP2p {
         this.current();
         this.localDescriptionTurn = control.turn;
         await this.peer.setLocalDescription({ type: 'answer',
-          sdp: withBrowserScreenReceiveParameters(answer.sdp ?? '', this.options.source.audio) });
+          sdp: withBrowserScreenReceiveParameters(answer.sdp ?? '', this.options.source.audio, this.options.profile) });
         this.current();
         if (!this.peer.localDescription?.sdp) throw new Error('The browser did not produce a screen answer.');
         await this.send({ type: 'answer', turn: control.turn, sdp: this.peer.localDescription.sdp });

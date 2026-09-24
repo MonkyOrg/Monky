@@ -6,7 +6,7 @@ const path = require('node:path');
 const http = require('node:http');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
-const { randomUUID, randomBytes } = require('node:crypto');
+const { randomUUID, randomBytes, createHash } = require('node:crypto');
 const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { setTimeout: delay } = require('node:timers/promises');
@@ -34,6 +34,31 @@ const gameFallback = process.argv.includes('--game-fallback');
 const publisherStop = process.argv.includes('--publisher-stop');
 const sourceResize = process.argv.includes('--source-resize');
 const sourceReplacement = process.argv.includes('--source-replacement');
+const fourK120 = process.argv.includes('--4k') || process.argv.includes('--screen-profile=4k120');
+const fourK60 = process.argv.includes('--4k60');
+assert.ok(!(fourK120 && fourK60), 'Choose either explicit 4K120 or 4K60, never a silent downgrade.');
+const fourK = fourK120 || fourK60;
+const sourceQualityChanges = process.argv.includes('--source-quality-changes') || fourK;
+const strictMediaErrors = sourceQualityChanges || (browserReceiver && !unsupportedBrowserCodec);
+const observeSourceClosure = browserReceiver && !sourceQualityChanges && !sourceReplacement && !unsupportedBrowserCodec;
+const clockFeedbackStall = process.argv.includes('--clock-feedback-stall');
+const cadenceDiagnostics = process.argv.includes('--cadence-diagnostics');
+const closeAppActive = process.argv.includes('--close-app-active');
+const sampleSeconds = Number(process.argv.find(value => value.startsWith('--sample-seconds='))?.slice('--sample-seconds='.length) ?? 3);
+assert.ok(Number.isFinite(sampleSeconds) && sampleSeconds >= 3 && sampleSeconds <= 30,
+  'Cadence intervals must be explicit and between 3 and 30 seconds.');
+assert.ok(!closeAppActive || (!sourceQualityChanges && !sourceReplacement && !serverLoss && !sessionNavigation
+  && !incompatibleViewer && !unsupportedBrowserCodec && !windowLifecycle && !idleSourceClose && !overlayEnabled),
+  'Active app-close regression requires one owned call without competing lifecycle scenarios.');
+const minimum120Fps = Number(process.argv.find(value => value.startsWith('--min-fps='))?.slice('--min-fps='.length) ?? 100);
+assert.ok(Number.isFinite(minimum120Fps) && minimum120Fps >= 100 && minimum120Fps <= 120,
+  'The 120 FPS presentation threshold must stay between 100 and 120 FPS.');
+assert.ok(!sourceQualityChanges || (!browserReceiver && (mode === 'sfu' || fourK) && audioEnabled
+  && !sourceReplacement && !gameFallback && !unsupportedBrowserCodec && !incompatibleViewer
+  && !idleSourceClose && !admissionRecovery && !publisherStop && !windowLifecycle && !serverLoss
+  && !sessionNavigation && !overlayEnabled && !sourceResize && !debugPublisher),
+'Source quality changes require an audio-enabled native SFU receiver and the owned Normal window, without other scenarios.');
+assert.ok(!clockFeedbackStall || sourceQualityChanges, 'Clock stall requires the owned native source-quality scenario.');
 assert.ok(!sourceReplacement || (browserReceiver && mode === 'sfu' && audioEnabled
   && !gameFallback && !unsupportedBrowserCodec && !incompatibleViewer && !idleSourceClose
   && !admissionRecovery && !publisherStop && !windowLifecycle && !serverLoss && !sessionNavigation
@@ -42,12 +67,15 @@ assert.ok(!sourceReplacement || (browserReceiver && mode === 'sfu' && audioEnabl
 assert.ok(!unsupportedBrowserCodec || (browserReceiver && mode === 'p2p'), 'The unsupported-codec case requires a browser P2P receiver.');
 assert.ok(!incompatibleViewer || (!browserReceiver && mode === 'p2p'), 'Mixed compatibility requires a native primary P2P receiver.');
 const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbols='))?.slice('--debug-symbols='.length);
-const report = { mode, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement,
+const report = { mode, fourK, fourK60, fourK120, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement, sourceQualityChanges, clockFeedbackStall, cadenceDiagnostics, closeAppActive, sampleSeconds,
   normalMain: true, normalPreload: true, ownedSyntheticSource: true,
   qaFocusHooks: 'owned parent IPC only; normal Main and preload checks unchanged',
   capabilityOverride: browserReceiver ? 'viewer.receive=false (real Chromium receiver, not a macOS hardware test)' : null,
   recordedMedia: false, phases: [] };
 const clients = [], roots = [], failures = [], sourceOwners = [];
+const cadenceFailures = [];
+const expectedWindowClosures = new Map(), shutdownDialogs = [];
+const shutdownErrors = [];
 let server, otherServer, vite, source;
 let debuggerProcess, debuggerExited;
 let incompatibleSessionId = null;
@@ -59,10 +87,32 @@ function processAlive(pid) {
   catch (error) { if (error.code === 'ESRCH') return false; throw error; }
 }
 
+function expectedSourceCloseLog(entry, label, closure) {
+  const timestamp = Date.parse(entry.timestamp);
+  if (label !== 'publisher' || !closure?.verified || !Number.isFinite(timestamp)
+    || timestamp < Date.parse(closure.startedAt) || timestamp > Date.parse(closure.finishedAt)) return null;
+  const data = entry.data;
+  if (['Native screen publisher failed', 'Native screen source-monitor failed'].includes(entry.message)
+    && data?.source === closure.diagnosticSource && data.call === closure.diagnosticCall
+    && (!data.pipeline || closure.diagnosticPipelines.includes(data.pipeline))
+    && data.error === 'operation-failed' && data.nativeCodes?.length === 1
+    && data.nativeCodes[0] === 'ERR_SCREEN_CAPTURE_SOURCE_LOST') return 'native';
+  if (entry.message === 'Native screen operation failed'
+    && data?.error === closure.nativeError.message) return 'renderer';
+  return null;
+}
+
 async function startSyntheticSource(label) {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require('electron'), [path.join(clientRoot, 'native', 'screen-share', 'test', 'nativeAvSource.cjs'),
+  let sourceFile = path.join(clientRoot, 'native', 'screen-share', 'test', 'nativeAvSource.cjs');
+  if (fourK) {
+    const wrapper = path.join(artifacts, `${label}-4k.cjs`);
+    await fs.writeFile(wrapper, `(${fourKSourceFixture.toString()})(${JSON.stringify({ sourceFile, ownerPid: process.pid })});\n`,
+      { flag: 'wx' });
+    sourceFile = wrapper;
+  }
+  const child = spawn(require('electron'), [sourceFile,
     `--profile=${path.join(artifacts, `${label}-profile`)}`, ...(gameFallback ? ['--software-rendering'] : [])],
   { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   const owner = { child, label, stopping: false, exited: null, ready: null };
@@ -81,7 +131,34 @@ async function startSyntheticSource(label) {
   assert.equal(ready.softwareRendering, gameFallback);
   assert.ok(Number.isSafeInteger(ready.hwnd) && ready.hwnd > 0, 'The source child did not prove its own HWND.');
   owner.ready = ready;
+  if (fourK) report.synthetic4kSource = ready;
   return owner;
+}
+
+function fourKSourceFixture({ sourceFile, ownerPid }) {
+  const assert = require('node:assert/strict');
+  const { app, BrowserWindow } = require('electron');
+  assert.equal(process.ppid, ownerPid);
+  const send = process.send.bind(process);
+  process.send = (message, ...args) => {
+    if (message.type !== 'ready') return send(message, ...args);
+    void (async () => {
+      const windows = BrowserWindow.getAllWindows();
+      assert.equal(windows.length, 1);
+      const window = windows[0];
+      window.setMaximumSize(4096, 2304);
+      window.setContentSize(3840, 2160);
+      const canvas = await window.webContents.executeJavaScript(`(() => {
+        const canvas = document.getElementById('source');
+        canvas.width = 3840; canvas.height = 2160;
+        canvas.getContext('2d').setTransform(3840 / 800, 0, 0, 2160 / 600, 0, 0);
+        return { width: canvas.width, height: canvas.height, innerWidth, innerHeight, devicePixelRatio };
+      })()`);
+      send({ ...message, canvas, contentSize: window.getContentSize(), bounds: window.getBounds() }, ...args);
+    })().catch(error => { console.error(error); app.exit(1); });
+    return true;
+  };
+  require(sourceFile);
 }
 
 async function sourceCommand(command, dimensions = {}, child = source) {
@@ -121,11 +198,11 @@ async function startLoopbackServer(instance, port) {
   assert.equal(instance.httpServer.address().address, '127.0.0.1');
 }
 
-function mainFixture({ clientRoot, origin, ownerPid }) {
+function mainFixture({ clientRoot, origin, ownerPid, clockFeedbackStall, fourK, cadenceDiagnostics, closeAppActive, observeSourceClosure }) {
   const assert = require('node:assert/strict');
   const fs = require('node:fs');
   const path = require('node:path');
-  const { app, BrowserWindow } = require('electron');
+  const { app, BrowserWindow, dialog } = require('electron');
   assert.equal(process.ppid, ownerPid);
   assert.equal(process.connected, true);
   const envelope = JSON.parse(fs.readFileSync(process.env.MONKY_QA_CONFIG, 'utf8'));
@@ -136,17 +213,86 @@ function mainFixture({ clientRoot, origin, ownerPid }) {
   app.setAppPath(clientRoot);
   app.setName(metadata.productName ?? metadata.name);
   app.setVersion(metadata.version);
+  const endpoints = new Set();
+  let assertEndpointLocallyClosed;
+  if (fourK || cadenceDiagnostics || observeSourceClosure) {
+    const runtime = require(path.join(clientRoot, 'native', 'screen-share', 'index.cjs'));
+    assertEndpointLocallyClosed = require(path.join(clientRoot, 'native', 'screen-share', 'runtime', 'nativeEndpoint.cjs'))
+      .assertNativeScreenEndpointLocallyClosed;
+    const Endpoint = runtime.NativeScreenEndpoint;
+    runtime.NativeScreenEndpoint = class extends Endpoint {
+      constructor(options) { super(options); endpoints.add(this); }
+    };
+  }
+  let rootCloseRequested = false;
+  if (closeAppActive) {
+    const show = dialog.showMessageBox;
+    dialog.showMessageBox = function (...args) {
+      if (rootCloseRequested) process.send({ type: 'qa-shutdown-dialog', runId: envelope.config.runId,
+        options: { title: args.at(-1)?.title, buttons: args.at(-1)?.buttons } });
+      return Reflect.apply(show, this, args);
+    };
+    const logError = console.error;
+    const details = (value, depth = 0) => {
+      if (!(value instanceof Error)) return typeof value === 'string' ? value.slice(0, 2048) : null;
+      return { name: value.name, message: value.message, code: value.code, stack: value.stack,
+        ...(depth < 8 ? { cause: value.cause ? details(value.cause, depth + 1) : null,
+          errors: value instanceof AggregateError ? value.errors.slice(0, 16).map(error => details(error, depth + 1)) : [] } : {}) };
+    };
+    console.error = function (...args) {
+      if (rootCloseRequested && process.connected)
+        process.send({ type: 'qa-shutdown-error', runId: envelope.config.runId, details: args.map(value => details(value)) });
+      return Reflect.apply(logError, this, args);
+    };
+  }
   const message = input => {
-    if (!input || input.runId !== envelope.config.runId || !['qa-focus', 'qa-blur', 'qa-focus-state'].includes(input.type)) return;
+    if (!input || input.runId !== envelope.config.runId
+      || !['qa-focus', 'qa-blur', 'qa-focus-state', ...(clockFeedbackStall ? ['qa-clock-stall'] : []),
+        ...(fourK || cadenceDiagnostics ? ['qa-native-snapshots'] : []),
+        ...(observeSourceClosure ? ['qa-native-retired'] : []),
+        ...(closeAppActive ? ['qa-root-close'] : [])].includes(input.type)) return;
     try {
       assert.equal(typeof input.id, 'string');
       assert.equal(input.value, undefined);
       assert.equal(process.connected, true);
       assert.equal(process.ppid, ownerPid);
+      if (input.type === 'qa-native-retired') {
+        const value = [...endpoints].map(endpoint => {
+          const snapshot = endpoint.snapshot();
+          const retired = snapshot.closed && snapshot.nativeClosed;
+          if (retired) assertEndpointLocallyClosed(endpoint);
+          return { ...snapshot, source: endpoint.source, localRetirementProven: retired };
+        });
+        process.send({ type: 'qa-response', id: input.id, value });
+        return;
+      }
+      if (input.type === 'qa-native-snapshots') {
+        void Promise.all([...endpoints].filter(endpoint => !endpoint.stopRequested && !endpoint.closed).map(async endpoint => {
+          const readStartedAtMs = performance.now();
+          const value = cadenceDiagnostics ? await endpoint.stats() : { ...endpoint.snapshot(), rtc: endpoint.engine.snapshot() };
+          return { ...value, readStartedAtMs, readCompletedAtMs: performance.now() };
+        })).then(value => process.send({ type: 'qa-response', id: input.id, value }),
+          error => process.send({ type: 'qa-response', id: input.id, error: error.stack ?? String(error) }));
+        return;
+      }
       const windows = BrowserWindow.getAllWindows().filter(candidate => !candidate.isDestroyed());
       const window = windows.find(candidate => candidate.webContents.getURL().startsWith(`${origin}/`)
         && new URL(candidate.webContents.getURL()).searchParams.get('overlay') !== '1');
       assert.ok(window, 'The owned normal Main window is unavailable.');
+      if (input.type === 'qa-root-close') {
+        assert.equal(rootCloseRequested, false);
+        rootCloseRequested = true;
+        process.send({ type: 'qa-response', id: input.id, value: { pid: process.pid, windowId: window.id,
+          operation: 'BrowserWindow.close' } });
+        setImmediate(() => window.close());
+        return;
+      }
+      if (input.type === 'qa-clock-stall') {
+        const before = performance.now();
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 350);
+        process.send({ type: 'qa-response', id: input.id, value: { pid: process.pid, blockedMs: performance.now() - before } });
+        return;
+      }
       if (input.type === 'qa-focus') {
         if (window.isMinimized()) window.restore();
         window.show();
@@ -308,9 +454,11 @@ async function connectCdp(port, expectedOrigin, runId, diagnostics, overlayParen
   const requests = new Map();
   socket.on('message', raw => {
     const value = JSON.parse(raw.toString());
-    if (value.method === 'Runtime.exceptionThrown') diagnostics.push(value.params.exceptionDetails);
+    if (value.method === 'Runtime.exceptionThrown')
+      diagnostics.push({ ...value.params.exceptionDetails, timestamp: value.params.timestamp });
     if (value.method === 'Runtime.consoleAPICalled' && ['error', 'warning'].includes(value.params.type))
-      diagnostics.push({ type: value.params.type, args: value.params.args.map(arg => arg.description ?? arg.value) });
+      diagnostics.push({ type: value.params.type, timestamp: value.params.timestamp,
+        args: value.params.args.map(arg => arg.description ?? arg.value) });
     const request = requests.get(value.id);
     if (!request) return;
     requests.delete(value.id);
@@ -386,7 +534,7 @@ async function previewPixels(client, state, name) {
   return pixels;
 }
 
-async function setupRenderer({ port, password, nickname, browserReceiver, audioEnabled, preserveAspectRatio, gameFallback }) {
+async function setupRenderer({ port, password, nickname, browserReceiver, audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60 }) {
   const [{ openServerSession, joinCallOnSession, leaveCurrentCall }, { sessionManager }, { webRtcManager },
     { videoService }, { voiceStore }, { settingsStore }, { stopLocalScreenShares },
     { screenAudioService }, { setLanguage, t }, { appEvents }, { QUALITY_PRESETS }, { overlayBridgeService }] = await Promise.all([
@@ -400,6 +548,12 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   settingsStore.qualityPreset = 'CUSTOM';
   settingsStore.customProfile = { ...QUALITY_PRESETS.ULTRA, screenWidth: 1920, screenHeight: 1080,
     screenFps: 120, screenBitrateKbps: 20000, audioBitrateKbps: 128 };
+  if (sourceQualityChanges) Object.assign(settingsStore.customProfile, {
+    screenWidth: 1280, screenHeight: 720, screenFps: 30, screenBitrateKbps: 2000,
+  });
+  if (fourK) Object.assign(settingsStore.customProfile, {
+    screenWidth: 3840, screenHeight: 2160, screenFps: fourK60 ? 60 : 120, screenBitrateKbps: 80000,
+  });
   settingsStore.preferredVideoCodec = 'h264';
   settingsStore.screenShareTelemetryEnabled = true;
   settingsStore.screenShareTelemetryMode = 'complete';
@@ -418,18 +572,22 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   await joinCallOnSession(session.key, channel.id);
   document.querySelector(`[data-channel-id="${channel.id}"][data-channel-type="VOICE"]`)?.click();
   const nativeErrors = [];
+  const nativeErrorEvents = [];
+  const unbindNativeErrors = window.api.onNativeScreenEvent(event => {
+    if (event.type === 'error') nativeErrorEvents.push({ ...event, observedAt: new Date().toISOString() });
+  });
   const captureFallbacks = [];
   const unbindFallback = appEvents.on('native_screen.capture_fallback', event => {
     captureFallbacks.push({ ...event, at: performance.now() });
   });
-  const fallbackToasts = [], seenToasts = new WeakSet(), toastChecks = new Set();
+  const fallbackToasts = [], sourceStoppingToasts = [], seenToasts = new WeakSet(), toastChecks = new Set();
   const toastObserver = new MutationObserver(() => {
     for (const toast of document.querySelectorAll('.chat-copy-toast[role="status"]')) {
       const label = toast.querySelector('.chat-copy-toast-label')?.textContent;
-      if (label !== t('screenShare.gameFallback') || seenToasts.has(toast)) continue;
+      if (![t('screenShare.gameFallback'), t('screenShare.sourceStopping')].includes(label) || seenToasts.has(toast)) continue;
       seenToasts.add(toast);
       const entry = { label, at: performance.now(), visible: false };
-      fallbackToasts.push(entry);
+      (label === t('screenShare.gameFallback') ? fallbackToasts : sourceStoppingToasts).push(entry);
       const check = setTimeout(() => {
         toastChecks.delete(check);
         const rect = toast.getBoundingClientRect();
@@ -443,6 +601,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   toastObserver.observe(document.body, { childList: true, subtree: true });
   let measuredScreenContext = null;
   let measuredDummyTrack = null;
+  let watchActions = 0;
   const unbind = appEvents.on('native_screen.source_failed', event => nativeErrors.push(event));
   const sharing = () => session.participants.getInVoiceChannel(channel.id)
     .find(value => value.user.sessionId !== auth.currentUser.sessionId && value.voiceState.nativeScreenShares?.length);
@@ -458,6 +617,56 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
     return matches[0];
   };
   window.nativeAppSmoke = {
+    async rejectUnsupported4k120() {
+      if (!fourK60) throw new Error('The negative 4K120 test requires explicit 4K60 mode.');
+      const before = videoService.getNativeScreenCaptures()[0]?.source;
+      if (before?.video.width !== 3840 || before.video.fps !== 60)
+        throw new Error('The rejection must preserve a live 4K60 source.');
+      const errorsBefore = nativeErrors.length, startedAt = new Date().toISOString();
+      let rejection;
+      try {
+        await window.nativeAppSmoke.changeSourceQuality([
+          { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 },
+        ]);
+      } catch (error) { rejection = error instanceof Error ? error.message : String(error); }
+      if (!rejection) throw new Error('4K120 unexpectedly succeeded instead of rejecting the unsupported AMF level.');
+      const deadline = performance.now() + 5000;
+      while (!document.querySelector('.dialog-card .dialog-message') && performance.now() < deadline)
+        await new Promise(resolve => setTimeout(resolve, 25));
+      const notification = document.querySelector('.dialog-card .dialog-message')?.textContent;
+      if (!notification) throw new Error('The unsupported quality did not notify the user.');
+      document.querySelector('.dialog-card button[data-action="confirm"]')?.click();
+      await new Promise(resolve => setTimeout(resolve, 250));
+      return { startedAt, finishedAt: new Date().toISOString(), rejected: true, error: rejection,
+        notification, events: nativeErrors.slice(errorsBefore), before,
+        after: videoService.getNativeScreenCaptures()[0]?.source };
+    },
+    async changeSourceQuality(profiles) {
+      if (!sourceQualityChanges || !Array.isArray(profiles) || !profiles.length || profiles.length > 4)
+        throw new Error('Quality changes require the explicitly owned sender scenario.');
+      const capture = videoService.getNativeScreenCaptures()[0];
+      if (!capture) throw new Error('The owned audible source must already be running.');
+      const call = webRtcManager['nativeScreens']['call'];
+      const before = { ...capture.source };
+      for (const video of profiles) {
+        const next = { ...settingsStore.customProfile, screenWidth: video.width, screenHeight: video.height,
+          screenFps: video.fps, screenBitrateKbps: video.maxBitrateKbps };
+        webRtcManager.assertScreenSharingSettings(next);
+        settingsStore.customProfile = next;
+        settingsStore.save();
+        webRtcManager.setQualityPreset('CUSTOM');
+      }
+      // The real settings entry point queues asynchronous per-source mutations.
+      // Do not await between user choices: the last task must serialize all of them.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const pending = call?.sourceTasks.get(capture.source.shareId);
+      if (!pending) throw new Error('The live settings changes did not enter the real source mutation queue.');
+      await pending;
+      const after = videoService.getNativeScreenCaptures()[0]?.source;
+      if (!after || webRtcManager['nativeScreens']['call'] !== call || after.shareId !== before.shareId)
+        throw new Error('Live settings replaced the call or consent identity.');
+      return { before, after, queuedChoices: profiles.length, callId: call.config.callId };
+    },
     async share(ownedHwnd, expectedFailure = false, replace = false) {
       const wait = async (condition, message) => {
         const deadline = performance.now() + 20000;
@@ -582,6 +791,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
           refreshed: true, keyboardSelection: true, gameGuideChecked: gameFallback, ownedHwnd, replace } };
     },
     watch() {
+      watchActions++;
       const button = document.querySelector('.stage-watch-btn');
       if (!(button instanceof HTMLButtonElement)) throw new Error('The real Watch control is missing.');
       button.click();
@@ -641,11 +851,14 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       const remote = sharing(), video = watchedVideo();
       return {
         self: auth.currentUser.sessionId, channelId: voiceStore.currentVoiceChannelId,
+        watchActions, localSources: videoService.getNativeScreenCaptures().map(capture => capture.source),
         sources: remote?.voiceState.nativeScreenShares ?? [],
         watches: voiceStore.getScreenWatchers(), watchButton: !!document.querySelector('.stage-watch-btn'),
         video: video ? { width: video.videoWidth, height: video.videoHeight, readyState: video.readyState,
           frames: video.getVideoPlaybackQuality().totalVideoFrames, at: performance.now() } : null,
         errors: [...nativeErrors],
+        nativeErrorEvents: [...nativeErrorEvents],
+        sourceStoppingToasts: [...sourceStoppingToasts],
         dialog: document.querySelector('.dialog-card .dialog-message')?.textContent ?? null,
         captureFallbacks: [...captureFallbacks],
         fallbackToasts: [...fallbackToasts],
@@ -670,6 +883,8 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         screenOutputContext: webRtcManager['mediaRouter']['audioContexts'].get('screen')?.state ?? null,
         measuredScreenContext: measuredScreenContext?.state ?? null,
         watchStates: [...(webRtcManager['nativeScreens']['call']?.presentations.values() ?? [])].map(entry => entry.state),
+        presentations: [...(webRtcManager['nativeScreens']['call']?.presentations.values() ?? [])]
+          .map(entry => ({ source: entry.source, presentationId: entry.presentationId, stopping: entry.stopping })),
         overlay: {
           open: overlayBridgeService.getIsOpen(), connection: overlayBridgeService['localPeerConnection']?.connectionState ?? null,
           carryingScreen: overlayBridgeService['videoSenders'].some(sender =>
@@ -824,6 +1039,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       for (const check of toastChecks) clearTimeout(check);
       toastChecks.clear();
       unbindFallback();
+      unbindNativeErrors();
       unbind();
       await overlayBridgeService.deactivate();
       await stopLocalScreenShares(screenAudioService);
@@ -837,6 +1053,267 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
     capabilities: await webRtcManager.getNativeScreenCapabilities(), profile: videoService.getProfile(),
     previewPauseWhenUnfocused: initialPreviewPauseWhenUnfocused,
     browserVideoCapabilities: browserReceiver ? RTCRtpReceiver.getCapabilities('video') : null };
+}
+
+async function exerciseSourceQualityChanges(publisher, viewer) {
+  const ladder = fourK ? [
+    { width: 3840, height: 2160, fps: fourK60 ? 60 : 120, maxBitrateKbps: 80000 },
+    { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 6000 },
+    { width: 3840, height: 2160, fps: fourK60 ? 60 : 120, maxBitrateKbps: 80000 },
+  ] : [
+    { width: 1280, height: 720, fps: 30, maxBitrateKbps: 2000 },
+    { width: 1920, height: 1080, fps: 30, maxBitrateKbps: 3000 },
+    { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 3000 },
+    { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 },
+  ];
+  const observations = new Map(), retiredCapturePids = new Set(), performanceFailures = [];
+  const observe = stats => {
+    for (const owner of stats.publishers) {
+      let record = observations.get(owner.source.instanceId);
+      if (!record) {
+        record = { source: owner.source, capturePids: new Set(), retiredPids: new Set() };
+        observations.set(owner.source.instanceId, record);
+      }
+      for (const pipeline of owner.pipelines) {
+        const pid = pipeline.endpoint.capturePid;
+        if (Number.isSafeInteger(pid) && pid > 0) record.capturePids.add(pid);
+      }
+    }
+    report.sourceQualityChanges.observedSources = [...observations.values()]
+      .map(entry => ({ source: entry.source, capturePids: [...entry.capturePids] }));
+  };
+  const output = stats => {
+    assert.equal(stats.subscriptions.length, 1, 'The native receiver must own exactly one watched subscription.');
+    return stats.subscriptions[0].endpoint.audioOutput;
+  };
+  const initialState = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+  const publisherCall = (await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).mainCall;
+  const viewerCall = initialState.mainCall, shareId = report.published.source.shareId;
+  let current = report.published.source;
+  let expectedPublisherEvents = [];
+  report.sourceQualityChanges = { ladder, measurements: [], changes: [], nativeReceiverRequired: true,
+    initialShareId: shareId, publisherCall, viewerCall, minimum120Fps };
+  const ready = async () => {
+    await until(async () => {
+      const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+      assert.deepEqual(state.errors, []);
+      const stats = await viewer.cdp.evaluate('nativeAppSmoke.stats()');
+      if (stats?.subscriptions.length !== 1 || !stats.subscriptions[0].endpoint?.audioOutput) return false;
+      const presentation = state.presentations.find(entry => !entry.stopping && entry.source.instanceId === current.instanceId);
+      if (!presentation || stats.subscriptions[0].presentationId !== presentation.presentationId) return false;
+      const audio = output(stats);
+      return state.sources[0]?.instanceId === current.instanceId && state.video?.width === current.video.width
+        && state.video.height === current.video.height && state.video.frames >= 30
+        && state.watchStates[0]?.state === 'playing' && audio?.ready && audio.pcmSignal?.nonzeroFrames > 4800;
+    }, 'Same-share quality replacement did not automatically resume native video and PCM.', 45000);
+  };
+  const measure = async label => {
+    await ready();
+    await delay(500);
+    const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+    const audioBefore = output(await viewer.cdp.evaluate('nativeAppSmoke.stats()'));
+    await delay(3000);
+    const after = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+    const evidence = await collectEvidence(`sourceQuality-${label}`, publisher, viewer);
+    observe(evidence.publisherStats);
+    const audioAfter = output(evidence.receiverStats);
+    const frames = audioAfter.pcmSignal.frames - audioBefore.pcmSignal.frames;
+    const pcm = { frames, nonzeroFrames: audioAfter.pcmSignal.nonzeroFrames - audioBefore.pcmSignal.nonzeroFrames,
+      leftRms: Math.sqrt((audioAfter.pcmSignal.leftSquareSum - audioBefore.pcmSignal.leftSquareSum) / frames),
+      rightRms: Math.sqrt((audioAfter.pcmSignal.rightSquareSum - audioBefore.pcmSignal.rightSquareSum) / frames) };
+    assert.equal(audioAfter.epoch, audioBefore.epoch);
+    assert.ok(frames > 4800 && pcm.nonzeroFrames > 4800 && pcm.leftRms > 1e-5 && pcm.rightRms > 1e-5,
+      `The replacement lost real native stereo PCM: ${JSON.stringify(pcm)}`);
+    assert.equal(evidence.publisherStats.publishers.length, 1);
+    const owner = evidence.publisherStats.publishers[0];
+    assert.deepEqual(owner.source, current);
+    assert.equal(owner.viewers, 1);
+    assert.equal(owner.pipelines.length, 1);
+    const endpoint = owner.pipelines[0].endpoint;
+    assert.ok(endpoint.audioInput.submitted > 0);
+    assert.deepEqual(endpoint.audioInput.errors, []);
+    assert.deepEqual(endpoint.errors, []);
+    assert.deepEqual(audioAfter.errors, []);
+    assert.equal(evidence.receiverState.browserWatches, 0);
+    assert.equal(evidence.receiverDiagnostics.backend, 'native');
+    assert.deepEqual(evidence.receiverDiagnostics.source, current);
+    assert.deepEqual(evidence.receiverStats.subscriptions[0].endpoint.profile, current.video);
+    assert.equal(evidence.receiverState.watchActions, 1, 'Quality must not require another Watch click.');
+    assert.deepEqual(evidence.receiverState.watches, initialState.watches);
+    assert.equal(evidence.publisherState.mainCall, publisherCall);
+    assert.equal(evidence.receiverState.mainCall, viewerCall);
+    assert.equal(evidence.publisherState.screenAudioShareId, shareId);
+    assert.deepEqual(evidence.publisherState.localScreenShareIds, [shareId]);
+    assert.deepEqual(evidence.publisherState.errors, expectedPublisherEvents);
+    assert.deepEqual(evidence.receiverState.errors, []);
+    assert.equal(evidence.publisherState.dialog, null);
+    assert.equal(evidence.receiverState.dialog, null);
+    const fps = (after.video.frames - before.video.frames) * 1000 / (after.video.at - before.video.at);
+    const measurement = { label, source: current, fps, pcm, audioEpoch: audioAfter.epoch, capturePid: endpoint.capturePid };
+    report.sourceQualityChanges.measurements.push(measurement);
+    if (fourK) {
+      const native = { sender: await publisher.child.call('qa-native-snapshots'),
+        receiver: await viewer.child.call('qa-native-snapshots') };
+      await fs.writeFile(path.join(artifacts, `native4k-${label}.json`), JSON.stringify(native, null, 2) + '\n', { flag: 'wx' });
+      const expectedLevel = current.video.width === 3840 ? current.video.fps === 120 ? '3c' : '34' : '33';
+      const minimumSourceLevel = current.video.width === 3840 ? expectedLevel : '2a';
+      measurement.nativeVideo = { maximumSourceLevel: expectedLevel, minimumSourceLevel, rtp: [], decoder: null };
+      for (const [role, diagnostics] of [['sender', evidence.senderDiagnostics], ['receiver', evidence.receiverDiagnostics]]) {
+        const rows = diagnostics.endpoints.flatMap(entry => {
+          assert.equal(entry.readErrors, 0);
+          return entry.rtp.flatMap(value => value.reports);
+        });
+        const video = rows.find(row => row.type === (role === 'sender' ? 'outbound-rtp' : 'inbound-rtp')
+          && row.kind === 'video' && row.frameWidth === current.video.width && row.frameHeight === current.video.height);
+        assert.ok(video, `Actual ${role} RTP dimensions did not prove ${current.video.width}x${current.video.height}.`);
+        if (role === 'sender') assert.ok(video.bytesSent > 0 && video.framesSent > 0);
+        else assert.ok(video.packetsReceived > 0 && video.bytesReceived > 0);
+        const codec = rows.find(row => row.type === 'codec' && row.id === video.codecId);
+        assert.ok(codec && /video\/h264/i.test(codec.mimeType));
+        const negotiated = /(?:^|;)profile-level-id=4d[0-9a-f]{2}([0-9a-f]{2})(?:;|$)/i.exec(codec.sdpFmtpLine);
+        assert.ok(negotiated && parseInt(negotiated[1], 16) >= parseInt(expectedLevel, 16),
+          'Negotiated Main profile must admit the actual SPS level, not falsely advertise a lower ceiling.');
+        if (negotiated[1].toLowerCase() !== expectedLevel)
+          assert.match(codec.sdpFmtpLine, /(?:^|;)level-asymmetry-allowed=1(?:;|$)/);
+        measurement.nativeVideo.rtp.push({ role, video, codec });
+      }
+      const receiver = native.receiver.find(entry => entry.role === 'receive'
+        && entry.pipelineId === evidence.receiverStats.subscriptions[0].endpoint.pipelineId);
+      const decoder = receiver?.rtc.mf?.decoders.find(entry => entry.core?.gpuFrames > 0);
+      assert.ok(decoder, 'The actual MF decoder did not prove decoded GPU frames.');
+      measurement.nativeVideo.decoder = decoder.core;
+      assert.equal(decoder.core.configured.width, current.video.width);
+      assert.equal(decoder.core.configured.height, current.video.height);
+      const actualSps = /^4d[0-9a-f]{2}([0-9a-f]{2})$/i.exec(decoder.core.configured.profileLevelId);
+      assert.ok(actualSps && parseInt(actualSps[1], 16) >= parseInt(minimumSourceLevel, 16)
+        && parseInt(actualSps[1], 16) <= parseInt(expectedLevel, 16),
+      'Actual Main SPS must support the resolution/rate and stay within the source level ceiling.');
+      assert.equal(decoder.core.errors, 0);
+      assert.equal(decoder.core.spsVerified, true);
+    }
+    try {
+      if (current.video.fps === 120) assert.ok(fps >= minimum120Fps,
+        `Native ${label} presentation reached ${fps.toFixed(2)} FPS; minimum is ${minimum120Fps}.`);
+      else {
+        const min = current.video.fps === 60 ? 50 : 25, max = current.video.fps === 60 ? 65 : 35;
+        assert.ok(fps >= min && fps <= max, `Native ${label} presentation reached ${fps.toFixed(2)} FPS; expected ${min}-${max}.`);
+      }
+    } catch (error) {
+      // Complete the ladder and cleanup, but never turn a missed threshold into success.
+      performanceFailures.push(error);
+      report.sourceQualityChanges.performanceFailures = performanceFailures.map(value => value.message);
+    }
+    return evidence;
+  };
+  const change = async (profiles, label) => {
+    phase(`changing-source-quality-${label}`);
+    const before = current, previousInstances = new Set(observations.keys());
+    let settled = false;
+    const changing = publisher.cdp.evaluate(`nativeAppSmoke.changeSourceQuality(${JSON.stringify(profiles)})`)
+      .finally(() => { settled = true; });
+    void changing.catch(() => {});
+    while (!settled) {
+      observe(await publisher.cdp.evaluate('nativeAppSmoke.stats()'));
+      await delay(40);
+    }
+    const changed = await changing;
+    current = changed.after;
+    assert.equal(current.shareId, before.shareId);
+    assert.notEqual(current.instanceId, before.instanceId);
+    assert.equal(current.audio, true);
+    assert.deepEqual(current.video, profiles.at(-1));
+    await ready();
+    observe(await publisher.cdp.evaluate('nativeAppSmoke.stats()'));
+    const admitted = [...observations.values()].filter(entry => !previousInstances.has(entry.source.instanceId));
+    assert.deepEqual(admitted.map(entry => entry.source.video), profiles, 'Every queued quality must cross real serialized admission.');
+    for (const entry of observations.values()) {
+      if (entry.source.instanceId === current.instanceId) continue;
+      for (const pid of entry.capturePids) {
+        // Windows may reuse a PID after this exact source's exit was already proved.
+        if (entry.retiredPids.has(pid)) continue;
+        await until(() => !processAlive(pid), `Quality replacement retained capture host ${pid}.`);
+        entry.retiredPids.add(pid);
+        retiredCapturePids.add(pid);
+      }
+    }
+    report.sourceQualityChanges.changes.push({ label, before, after: current, queuedChoices: changed.queuedChoices,
+      admitted: admitted.map(entry => ({ source: entry.source, capturePids: [...entry.capturePids] })) });
+  };
+  const initialLabel = fourK ? `4k${fourK60 ? 60 : 120}-80000` : '720p30-2000';
+  phase(`measuring-initial-${initialLabel}-native-quality`);
+  await measure(initialLabel);
+  for (const [index, profile] of ladder.slice(1).entries()) {
+    await change([profile], String(index + 1));
+    await measure(`step-${index + 1}`);
+  }
+  if (!fourK) {
+    await change(ladder, 'rapid-consecutive');
+    await measure('rapid-final');
+  }
+  if (fourK60) {
+    phase('rejecting-unsupported-4k120-with-live-4k60');
+    const before = await collectEvidence('unsupported4k120Before', publisher, viewer);
+    const rejection = await publisher.cdp.evaluate('nativeAppSmoke.rejectUnsupported4k120()');
+    report.sourceQualityChanges.unsupported4k120 = rejection;
+    assert.match(rejection.error, /AMF H264 requires level_idc=60.*3840x2160@120.*MaxLevel=52/);
+    assert.match(rejection.error, /unsupported; no lower-level or software fallback/);
+    assert.deepEqual(rejection.before, current);
+    assert.deepEqual(rejection.after, current);
+    assert.equal(rejection.events.length, 1, 'A single unsupported request must not cascade into repeated source failures.');
+    assert.ok(['unsupported', 'runtime'].includes(rejection.events[0].reason));
+    assert.equal(rejection.events[0].shareId, undefined, 'Expected admission rejection must not mark the live source failed.');
+    expectedPublisherEvents = rejection.events;
+    const after = await measure('rejected-4k120-preserved-4k60');
+    assert.equal(after.receiverStats.subscriptions[0].subscriptionId, before.receiverStats.subscriptions[0].subscriptionId);
+    assert.equal(after.receiverStats.subscriptions[0].endpoint.pipelineId, before.receiverStats.subscriptions[0].endpoint.pipelineId);
+    assert.equal(output(after.receiverStats).activeEpoch, output(before.receiverStats).activeEpoch);
+    assert.equal(after.publisherStats.publishers[0].pipelines[0].endpoint.capturePid,
+      before.publisherStats.publishers[0].pipelines[0].endpoint.capturePid);
+    rejection.preservationVerified = true;
+  }
+  if (clockFeedbackStall) {
+    phase('stalling-only-owned-receiver-main-350ms');
+    const before = await collectEvidence('qualityClockBefore', publisher, viewer), audioBefore = output(before.receiverStats);
+    const stalled = await viewer.child.call('qa-clock-stall');
+    assert.equal(stalled.pid, viewer.child.child.pid);
+    assert.ok(stalled.blockedMs >= 350);
+    report.sourceQualityChanges.clockStall = { ...stalled, before: audioBefore, after: null };
+    await until(async () => {
+      const stats = await viewer.cdp.evaluate('nativeAppSmoke.stats()'), audio = output(stats);
+      assert.equal(audio.activeEpoch, audioBefore.activeEpoch, 'A queue stall replaced the native output epoch.');
+      assert.deepEqual(audio.errors, []);
+      return audio.ready && audio.pcmSignal.frames > audioBefore.pcmSignal.frames + 4800
+        && audio.rejectedClockObservations > audioBefore.rejectedClockObservations;
+    }, 'The controlled stall did not demonstrate rejected stale clock feedback and same-epoch PCM recovery.', 10000);
+    const recovered = await collectEvidence('qualityClockRecovered', publisher, viewer), audioAfter = output(recovered.receiverStats);
+    assert.equal(recovered.receiverStats.subscriptions[0].subscriptionId, before.receiverStats.subscriptions[0].subscriptionId);
+    assert.equal(recovered.receiverStats.subscriptions[0].endpoint.pipelineId, before.receiverStats.subscriptions[0].endpoint.pipelineId);
+    report.sourceQualityChanges.clockStall = { ...stalled, before: audioBefore, after: audioAfter };
+    assert.equal(recovered.receiverState.sources[0].instanceId, current.instanceId);
+    assert.deepEqual(recovered.receiverState.errors, []);
+    assert.deepEqual(recovered.publisherState.errors, expectedPublisherEvents);
+  }
+  phase('stopping-quality-scenario-through-real-ui');
+  await publisher.cdp.evaluate('nativeAppSmoke.stopSharing()');
+  await until(async () => {
+    const local = await publisher.cdp.evaluate('nativeAppSmoke.stats()');
+    const remote = await viewer.cdp.evaluate('nativeAppSmoke.stats()');
+    const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+    return local.publishers.length === 0 && remote.subscriptions.length === 0 && state.sources.length === 0;
+  }, 'Final quality Stop retained its publisher or native receiver.');
+  for (const entry of observations.values()) for (const pid of entry.capturePids) {
+    if (entry.retiredPids.has(pid)) continue;
+    await until(() => !processAlive(pid), `Final quality Stop retained capture host ${pid}.`);
+    entry.retiredPids.add(pid);
+    retiredCapturePids.add(pid);
+  }
+  const retired = await collectEvidence('sourceQualityRetired', publisher, viewer);
+  assert.deepEqual(retired.sfuScreenProducers, []);
+  assert.deepEqual(retired.publisherState.errors, expectedPublisherEvents);
+  assert.deepEqual(retired.receiverState.errors, []);
+  report.sourceQualityChanges.retiredCapturePids = [...retiredCapturePids];
+  report.sourceQualityChanges.performanceFailures = performanceFailures.map(error => error.message);
+  if (performanceFailures.length) throw new AggregateError(performanceFailures, 'Native quality presentation thresholds failed.');
 }
 
 async function run() {
@@ -889,7 +1366,8 @@ async function run() {
   const { isolatedEnvironment } = await import(pathToFileURL(path.join(repo, 'scripts', 'qa.js')));
   const { startOwnedProcess } = await import(pathToFileURL(path.join(repo, 'scripts', 'qa', 'process.js')));
   const mainFixtureFile = path.join(artifacts, 'main-fixture.cjs');
-  await fs.writeFile(mainFixtureFile, `(${mainFixture.toString()})(${JSON.stringify({ clientRoot, origin, ownerPid: process.pid })});\n`,
+  await fs.writeFile(mainFixtureFile, `(${mainFixture.toString()})(${JSON.stringify({
+    clientRoot, origin, ownerPid: process.pid, clockFeedbackStall, fourK, cadenceDiagnostics, closeAppActive, observeSourceClosure })});\n`,
     { flag: 'wx' });
   const allowed = path.join(repo, '.qa', 'runs');
   await fs.mkdir(allowed, { recursive: true });
@@ -908,7 +1386,17 @@ async function run() {
       `--remote-debugging-port=${debugPort}`, '--remote-debugging-address=127.0.0.1', '--allow-loopback-in-peer-connection'], {
       cwd: clientRoot, runId, label: `Native Monky ${label}`, timeoutMs: 60000,
       env: isolatedEnvironment(profile, { MONKY_QA_CONFIG: configFile, VITE_DEV_SERVER_URL: origin }),
-      onFailure: error => failures.push(error),
+      onFailure: error => {
+        const expected = expectedWindowClosures.get(label);
+        if (expected) expected.push(error);
+        else failures.push(error);
+      },
+      onMessage: message => {
+        if (message.type === 'qa-shutdown-dialog' && message.runId === runId)
+          shutdownDialogs.push({ label, ...message.options });
+        if (message.type === 'qa-shutdown-error' && message.runId === runId)
+          shutdownErrors.push({ label, details: message.details });
+      },
     });
     const owned = { child, profile, label, debugPort, runId, cdp: null, overlayCdp: null, diagnostics: [] };
     clients.push(owned);
@@ -922,7 +1410,7 @@ async function run() {
     await owned.cdp.evaluate(`globalThis.monkyAppSharedPath = ${JSON.stringify(path.join(repo, 'packages', 'shared', 'src', 'index.ts').replaceAll('\\', '/'))}`);
     owned.identity = await owned.cdp.evaluate(`(${setupRenderer.toString()})(${JSON.stringify({
       port, password, nickname: config.nickname, browserReceiver: label === 'incompatible' || browserReceiver && label === 'viewer',
-      audioEnabled, preserveAspectRatio, gameFallback,
+      audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60,
     })})`);
     report[`${label}Setup`] = owned.identity;
     if (label === 'incompatible') incompatibleSessionId = owned.identity.sessionId;
@@ -951,8 +1439,8 @@ async function run() {
   const waitForLocalPreview = () => until(async () => {
     const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
     assert.deepEqual(state.errors, []);
-    return state.previewState === 'playing' && state.video?.width === 1920
-      && state.video.height === 1080 && state.video.frames >= 15;
+    return state.previewState === 'playing' && state.video?.width === report.published.source.video.width
+      && state.video.height === report.published.source.video.height && state.video.frames >= 15;
   }, 'The owned local preview did not display actual source frames without remote demand.', gameFallback ? 75000 : 30000);
   const waitForPausedPreview = () => until(async () => {
     const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
@@ -1099,8 +1587,15 @@ async function run() {
   await until(async () => {
     const value = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
     assert.deepEqual(value.errors, []);
-    return value.video?.width === 1920 && value.video.height === 1080 && value.video.frames >= 30;
+    const failed = value.watchStates.find(watch => watch.state === 'unavailable');
+    assert.ok(!failed, `The actual receiver rejected Watch: ${failed?.reason}. See persisted SCREEN_SHARE diagnostics.`);
+    return value.video?.width === report.published.source.video.width
+      && value.video.height === report.published.source.video.height && value.video.frames >= 30;
   }, 'Native frames did not reach the normal Monky stage.', 45000);
+  if (sourceQualityChanges) {
+    await exerciseSourceQualityChanges(publisher, viewer);
+    return;
+  }
   if (sourceReplacement) {
     phase('measuring-owned-audio-before-direct-replacement');
     await until(() => viewer.cdp.evaluate('nativeAppSmoke.browserAudioReady()'), 'Initial browser screen audio did not start.');
@@ -1271,9 +1766,17 @@ async function run() {
     }
     report.windowLifecyclePreserved = true;
   }
+  const cadenceRead = async name => {
+    const evidence = await collectEvidence(name, publisher, viewer);
+    const native = await publisher.child.call('qa-native-snapshots');
+    report[`${name}Native`] = native;
+    await fs.writeFile(path.join(artifacts, `${name}-native.json`), JSON.stringify(native, null, 2) + '\n', { flag: 'wx' });
+    return evidence;
+  };
+  if (cadenceDiagnostics) await cadenceRead('cadenceBefore');
   const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
   assert.ok(before.video, `The receiver has no video before the FPS interval: ${JSON.stringify(before.watchStates)}`);
-  await delay(3000);
+  await delay(sampleSeconds * 1000);
   const after = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
   assert.ok(after.video, `The receiver lost video during the FPS interval: ${JSON.stringify(after.watchStates)}`);
   report.stage = { ...after, fps: (after.video.frames - before.video.frames) * 1000 / (after.video.at - before.video.at) };
@@ -1283,10 +1786,38 @@ async function run() {
   report.receiving = sourceRate.receiverStats;
   report.senderDiagnostics = sourceRate.senderDiagnostics;
   report.receiverDiagnostics = sourceRate.receiverDiagnostics;
+  if (cadenceDiagnostics) await cadenceRead('cadenceAfter');
   assert.equal(sourceRate.publisherState.previewPauseWhenUnfocused, false);
   assert.ok(sourceRate.receiverState.captureModes.some(value => value.mode === 'normal' && value.tileKey === publishedTileKey),
     'The spectator did not display the actual capture method for the selected source.');
-  assert.ok(report.stage.fps >= 100, `Normal-app presentation reached ${report.stage.fps.toFixed(2)} FPS.`);
+  if (report.stage.fps < minimum120Fps) {
+    cadenceFailures.push(new Error(`Normal-app presentation reached ${report.stage.fps.toFixed(2)} FPS; minimum is ${minimum120Fps}.`));
+    report.cadenceFailures = cadenceFailures.map(error => error.message);
+  }
+  if (closeAppActive) {
+    phase('closing-real-main-window-with-active-share-and-viewer');
+    assert.equal(sourceRate.publisherStats.publishers.length, 1);
+    assert.equal(sourceRate.publisherStats.publishers[0].viewers, 1);
+    const capturePids = sourceRate.publisherStats.publishers[0].pipelines.map(value => value.endpoint.capturePid);
+    const closureNotifications = [];
+    expectedWindowClosures.set(publisher.label, closureNotifications);
+    report.activeWindowClose = { before: sourceRate.publisherStats,
+      request: await publisher.child.call('qa-root-close'), shutdownDialogs, shutdownErrors, capturePids };
+    const closed = await within(publisher.child.closed, 20000, 'BrowserWindow.close did not complete real Main shutdown.');
+    report.activeWindowClose.processExit = closed;
+    assert.equal(closed.code, 0);
+    assert.equal(closed.signal, null);
+    assert.equal(shutdownDialogs.length, 0, 'Real Main shutdown displayed a Keep open/retry dialog.');
+    assert.equal(closureNotifications.length, 1, 'Only the supervisor notification for the requested process exit is expected.');
+    report.activeWindowClose.supervisorNotifications = closureNotifications.map(error => error.message);
+    await until(async () => {
+      const state = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+      return state.sources.length === 0 && state.browserWatches === 0 && !state.video;
+    }, 'Real Main window close retained the spectator media.');
+    for (const pid of capturePids) await until(() => !processAlive(pid), `Real Main close retained capture host ${pid}.`);
+    report.activeWindowClose.nativeCaptureRetired = true;
+    return;
+  }
   report.localCompositorPixels = await previewPixels(publisher, 'playing', 'preview-playing');
   const observedTelemetry = async (client, width, height) => {
     let telemetry;
@@ -1352,7 +1883,7 @@ async function run() {
     assert.equal(retained.pipelineId, pipeline.pipelineId);
     assert.equal(retained.endpoint.capturePid, pipeline.endpoint.capturePid, 'An incompatible viewer restarted the shared capture.');
     assert.equal(after.watchStates[0].state, 'playing');
-    assert.ok(fps >= 100, `A rejected viewer interrupted compatible playback (${fps.toFixed(2)} FPS).`);
+    assert.ok(fps >= minimum120Fps, `A rejected viewer interrupted compatible playback (${fps.toFixed(2)} FPS).`);
     assert.deepEqual(isolated.publisherState.errors, [], 'A viewer-only rejection was reported as a source failure.');
     Object.assign(report.incompatibleViewerIsolation, { pipelinePreserved: true, capturePreserved: true });
   }
@@ -1631,7 +2162,25 @@ async function run() {
   }
 
   phase('closing-the-owned-shared-window');
+  const sourceCloseBefore = observeSourceClosure ? await collectEvidence('ownedSourceCloseBefore', publisher, viewer) : null;
+  let closure;
+  if (sourceCloseBefore) {
+    const owners = sourceCloseBefore.publisherStats.publishers;
+    assert.equal(owners.length, 1);
+    assert.deepEqual(sourceCloseBefore.publisherState.errors, []);
+    assert.deepEqual(sourceCloseBefore.publisherState.nativeErrorEvents, []);
+    assert.deepEqual(sourceCloseBefore.publisherState.sourceStoppingToasts, []);
+    const diagnosticId = value => createHash('sha256').update(value).digest('hex').slice(0, 16);
+    closure = report.expectedOwnedSourceClose = { startedAt: new Date().toISOString(),
+      command: 'close-source', hwnd: sourceReady.hwnd, sourcePid: source.pid, source: owners[0].source,
+      diagnosticSource: diagnosticId(owners[0].source.shareId),
+      diagnosticCall: diagnosticId(sourceCloseBefore.publisherState.mainCall),
+      diagnosticPipelines: owners[0].pipelines.map(value => diagnosticId(value.pipelineId)),
+      pipelines: owners[0].pipelines.map(value => ({ pipelineId: value.pipelineId, capturePid: value.endpoint.capturePid })),
+      verified: false };
+  }
   const id = randomUUID(), response = once(source, 'message');
+  if (closure) closure.commandId = id;
   source.send({ type: 'source-command', id, command: 'close-source' });
   const [closed] = await within(response, 10000, 'Owned source did not close.');
   assert.equal(closed.id, id); assert.equal(closed.ok, true);
@@ -1639,13 +2188,72 @@ async function run() {
     'Closing the shared window did not remove its real advertisement.');
   await until(async () => (await publisher.cdp.evaluate('nativeAppSmoke.stats()')).publishers.length === 0,
     'Closing the source retained its publisher owner.');
+  if (closure) {
+    await until(async () => {
+      const snapshots = await publisher.child.call('qa-native-retired');
+      const retired = closure.pipelines.map(pipeline => snapshots.find(endpoint => endpoint.pipelineId === pipeline.pipelineId
+        && endpoint.source.instanceId === closure.source.instanceId && endpoint.source.shareId === closure.source.shareId));
+      if (retired.some(endpoint => !endpoint?.localRetirementProven)) return false;
+      closure.retiredEndpoints = retired;
+      for (const [index, endpoint] of retired.entries()) {
+        const capture = endpoint.captureRetirement;
+        assert.equal(capture.nativeClosed, true);
+        assert.equal(capture.closed, true);
+        assert.equal(capture.forcedTermination, false);
+        if (capture.failure) {
+          assert.equal(capture.failure.error.code, 'ERR_SCREEN_CAPTURE_SOURCE_LOST');
+          assert.equal(capture.failure.hwnd, closure.hwnd);
+          assert.equal(capture.failure.processId, closure.sourcePid);
+        }
+        assert.deepEqual(capture.exit, { code: capture.failure ? 1 : 0, signal: null });
+        assert.deepEqual(capture.processExit, capture.exit);
+        assert.deepEqual(capture.outputEof, { stdout: true, stderr: true });
+        assert.equal(capture.live.eof, true);
+        assert.equal(capture.helperProcessId, closure.pipelines[index].capturePid);
+        assert.equal(processAlive(capture.helperProcessId), false);
+      }
+      return true;
+    }, 'The exact closed source did not prove native retirement and original capture-host exit.');
+    await until(async () => {
+      const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
+      assert.equal(state.dialog, null, 'Closing the source may show its documented toast, never a modal.');
+      return state.sourceStoppingToasts.length === 1 && state.sourceStoppingToasts[0].visible;
+    }, 'The source-close notification was not a single visible documented toast.');
+    const after = await collectEvidence('ownedSourceCloseAfter', publisher, viewer);
+    assert.equal(after.publisherState.errors.length, 1);
+    assert.equal(after.publisherState.errors[0].reason, 'source-unavailable');
+    assert.equal(after.publisherState.errors[0].shareId, closure.source.shareId);
+    assert.equal(after.publisherState.nativeErrorEvents.length, 1);
+    closure.nativeError = after.publisherState.nativeErrorEvents[0];
+    assert.equal(createHash('sha256').update(closure.nativeError.callId).digest('hex').slice(0, 16), closure.diagnosticCall);
+    assert.equal(closure.nativeError.shareId, closure.source.shareId);
+    assert.equal(closure.nativeError.sourceInstanceId, closure.source.instanceId);
+    assert.equal(closure.nativeError.reason, 'source-unavailable');
+    assert.ok(closure.nativeError.observedAt >= closure.startedAt);
+    assert.equal(after.publisherState.dialog, null);
+    assert.equal(after.receiverState.dialog, null);
+    assert.deepEqual(after.receiverState.errors, []);
+    assert.deepEqual(after.receiverState.sources, []);
+    assert.deepEqual(after.publisherStats.publishers, []);
+    assert.deepEqual(after.receiverStats.subscriptions, []);
+    assert.equal(after.receiverState.browserWatches, 0);
+    assert.deepEqual(after.sfuScreenProducers, []);
+    closure.finishedAt = new Date().toISOString();
+    closure.verified = true;
+  }
 }
 
 const deadline = setTimeout(() => { failures.push(new Error('Native app smoke exceeded its global deadline.')); }, 240000);
 void run().catch(error => { failures.push(error); console.error(error); }).finally(async () => {
+  failures.push(...cadenceFailures);
   phase('closing-owned-applications');
   for (const client of [...clients].reverse()) {
     report[`${client.label}Diagnostics`] = client.diagnostics;
+    if (strictMediaErrors) {
+      const errors = client.diagnostics.filter(entry => entry.type === 'error' || typeof entry.exceptionId === 'number');
+      report[`${client.label}RendererErrors`] = errors;
+      if (errors.length) failures.push(new Error(`${client.label} reported ${errors.length} renderer errors during live quality changes.`));
+    }
     if (client.cdp && !client.child.isClosed()) {
       try {
         report[`${client.label}Final`] = await client.cdp.evaluate('window.nativeAppSmoke?.snapshot()');
@@ -1658,12 +2266,32 @@ void run().catch(error => { failures.push(error); console.error(error); }).final
         if (!file.endsWith('.jsonl')) continue;
         const destination = path.join(artifacts, `${client.label}-${file}`);
         await fs.copyFile(path.join(logs, file), destination);
-        if (sourceReplacement) {
+        if (sourceReplacement || strictMediaErrors) {
           const errors = (await fs.readFile(destination, 'utf8')).split(/\r?\n/).filter(Boolean)
             .map(line => JSON.parse(line)).filter(entry => entry.category === 'SCREEN_SHARE' && entry.level === 'ERROR');
           (report[`${client.label}ScreenErrors`] ??= []).push(...errors);
-          if (errors.length) failures.push(new Error(`${client.label} logged ${errors.length} screen lifecycle errors: `
-            + errors.map(entry => entry.data?.error ?? entry.message).join(' / ')));
+          const rejection = report.sourceQualityChanges.unsupported4k120;
+          const expected = errors.filter(entry => fourK60 && client.label === 'publisher' && rejection?.preservationVerified
+            && entry.timestamp >= rejection.startedAt && entry.timestamp <= rejection.finishedAt
+            && ((['Native screen preflight failed', 'Native screen source-admission failed'].includes(entry.message)
+              && entry.data?.stage === 'preflight'
+              && entry.data?.nativeCodes?.length === 1
+              && entry.data.nativeCodes[0] === 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED'
+              && entry.data.video?.width === 3840 && entry.data.video?.fps === 120)
+              || (entry.message === 'Native screen operation failed' && entry.data?.error === rejection.error)));
+          (report[`${client.label}ExpectedPreflightErrors`] ??= []).push(...expected);
+          const sourceCloseExpected = report[`${client.label}ExpectedSourceCloseErrors`] ??= [];
+          const sourceClose = [];
+          for (const entry of errors) {
+            const kind = expectedSourceCloseLog(entry, client.label, report.expectedOwnedSourceClose);
+            if (kind && !sourceCloseExpected.some(value => value.kind === kind)) {
+              sourceCloseExpected.push({ kind, entry });
+              sourceClose.push(entry);
+            }
+          }
+          const unexpected = errors.filter(entry => !expected.includes(entry) && !sourceClose.includes(entry));
+          if (unexpected.length) failures.push(new Error(`${client.label} logged ${unexpected.length} unexpected screen lifecycle errors: `
+            + unexpected.map(entry => entry.data?.error ?? entry.message).join(' / ')));
         }
       }
     } catch (error) {
@@ -1683,9 +2311,20 @@ void run().catch(error => { failures.push(error); console.error(error); }).final
   report.ownedProcessClosure = clients.map(client => ({
     role: client.label, pid: client.child.child.pid, closed: client.child.isClosed(),
   }));
+  if (report.expectedOwnedSourceClose?.verified
+    && (report.publisherExpectedSourceCloseErrors?.length !== 2
+      || !report.publisherExpectedSourceCloseErrors.some(value => value.kind === 'native')
+      || !report.publisherExpectedSourceCloseErrors.some(value => value.kind === 'renderer'))) {
+    failures.push(new Error('Owned source-close proof requires its one exact native diagnostic and corresponding renderer diagnostic.'));
+  }
+  if (fourK60 && report.sourceQualityChanges.unsupported4k120?.preservationVerified
+    && !report.publisherExpectedPreflightErrors?.some(entry =>
+      entry.data?.nativeCodes?.includes('ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED'))) {
+    failures.push(new Error('The preserved-source negative test lacks its explicit typed AMF preflight rejection log.'));
+  }
   for (const owner of sourceOwners) {
     owner.stopping = true;
-    if (sourceReplacement && owner.ready && owner.child.connected && owner.child.exitCode === null) {
+    if ((sourceReplacement || sourceQualityChanges) && owner.ready && owner.child.connected && owner.child.exitCode === null) {
       try { await sourceCommand('tone-stop', {}, owner.child); }
       catch (error) { failures.push(error); }
     }
@@ -1696,6 +2335,16 @@ void run().catch(error => { failures.push(error); console.error(error); }).final
       assert.equal(processAlive(owner.child.pid), false);
       report.ownedProcessClosure.push({ role: owner.label, pid: owner.child.pid, closed: true, code });
     } catch (error) { failures.push(error); owner.child.kill('SIGKILL'); }
+  }
+  if (sourceQualityChanges) {
+    const capturePids = new Set(report.sourceQualityChanges.observedSources?.flatMap(entry => entry.capturePids) ?? []);
+    for (const pid of capturePids) {
+      try {
+        const closed = !processAlive(pid);
+        report.ownedProcessClosure.push({ role: 'quality-capture', pid, closed });
+        assert.equal(closed, true, `Owned quality capture host ${pid} survived application cleanup.`);
+      } catch (error) { failures.push(error); }
+    }
   }
   try { await server?.stop(); } catch (error) { failures.push(error); }
   try { await otherServer?.stop(); } catch (error) { failures.push(error); }

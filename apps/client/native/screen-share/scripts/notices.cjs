@@ -65,6 +65,8 @@ function generateNotices() {
     'WebRTC M140, patched libmediasoupclient and libsdptransform retain their upstream notices.',
     'The WebRTC notices are generated from the dependencies of the actual compiled GN target.',
     'Monky changes to the pinned SDK are maintained in src/rtc/inputs/sdk; the upstream source is unchanged.',
+    'The maintained H264 Level 6 SDP enum/parser/level table retains the original WebRTC BSD notices.',
+    'The ISC h264-profile-level-id dependency carries the corresponding Level 6 patch in patches/.',
     '',
     'Complete third-party legal texts, authors and patent notices are in licenses/.',
     'licenses/catalog.json records the exact source revisions and hashes of these legal files.',

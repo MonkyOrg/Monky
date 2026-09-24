@@ -71,11 +71,11 @@ test('receive adapter construction and imports are inert and require a genuine s
     callId: 'call', channelId: 'channel', isCurrent: () => true }), /same-engine/u);
 });
 
-test('SFU audio admits the actual encoded revision7 contract without weakening any audio or ownership capability', () => {
+test('SFU audio admits the actual encoded revision8 contract without weakening any audio or ownership capability', () => {
   const f = fixture();
   f.engine.respond = () => assert.fail('Capability admission must not open native media.');
   f.engine.cancel = () => assert.fail('Capability admission must not issue native operations.');
-  const capabilities = { abiVersion: 2, contractRevision: 7, audioExtensionVersion: 1,
+  const capabilities = { abiVersion: 2, contractRevision: 8, audioExtensionVersion: 1,
     audioAvailable: true, ...contract.requiredCompiledCapabilities };
   const options = {
     engine: f.engine, commands: f.commands, audio: f.adapter, callId: 'call', channelId: 'channel',
@@ -88,13 +88,13 @@ test('SFU audio admits the actual encoded revision7 contract without weakening a
     nativeCapabilities: capabilities,
   };
   assert.equal(new NativeSfuBroker(options).audioPublicationEnabled, true);
-  for (const revision of [6, 8]) assert.throws(() => new NativeSfuBroker({
+  for (const revision of [7, 9]) assert.throws(() => new NativeSfuBroker({
     ...options, nativeCapabilities: { ...capabilities, contractRevision: revision },
-  }), /revision7 capabilities/);
+  }), /revision8 capabilities/);
   for (const field of Object.keys(capabilities)) {
     const invalid = { ...capabilities };
     delete invalid[field];
-    assert.throws(() => new NativeSfuBroker({ ...options, nativeCapabilities: invalid }), /revision7 capabilities/);
+    assert.throws(() => new NativeSfuBroker({ ...options, nativeCapabilities: invalid }), /revision8 capabilities/);
   }
   assert.deepEqual(f.calls, []);
 });

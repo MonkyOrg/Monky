@@ -6,8 +6,8 @@ const path = require('node:path');
 function validateCapabilities(value) {
   assert.ok(value && typeof value === 'object' && !Array.isArray(value), 'Missing native encoded capabilities.');
   for (const [name, expected] of Object.entries({
-    abiVersion: 2, contractRevision: 7, externallyEncodedH264: true, encodedInputCopied: true,
-    encodedFeedback: true, encodedProfileLevelId: '4d0033', encodedBitrateCeilingBps: 20000000,
+    abiVersion: 2, contractRevision: 8, externallyEncodedH264: true, encodedInputCopied: true,
+    encodedFeedback: true, encodedProfileLevelId: '4d003c', encodedBitrateCeilingBps: 80000000,
     pairedCaptureClock: true, p2pReceiverRouting: true, inputLeaseCorrelation: true,
     decodedOutput: 'NV12_SHARED_NT_LEASE', runtimeQualified: false, hardwareExecutionObserved: null,
   })) assert.equal(Object.getOwnPropertyDescriptor(value, name)?.value, expected, `Native encoded capability mismatch: ${name}`);

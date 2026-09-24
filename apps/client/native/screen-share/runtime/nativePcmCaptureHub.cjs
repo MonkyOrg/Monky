@@ -107,6 +107,7 @@ class NativePcmCaptureHub {
   }
 
   #stopOwner(owner) {
+    if (owner.retired) return Promise.resolve();
     if (owner.stopping) return owner.stopping;
     const stopping = (async () => {
       await owner.handle.stop();
@@ -130,7 +131,7 @@ class NativePcmCaptureHub {
     this.#subscriptions.add(subscription);
     const ready = (async () => {
       const previous = this.#current;
-      if (previous?.stopping) await previous.stopping;
+      if (previous?.stopping && !previous.retired) await previous.stopping;
       if (this.#closed || subscription.stopping) throw cancelled();
       const owner = !this.#current || this.#current.retired ? this.#open() : this.#current;
       subscription.owner = owner;
@@ -185,7 +186,8 @@ class NativePcmCaptureHub {
   }
 
   async waitUntilIdle() {
-    if (this.#current?.stopping) await within(this.#current.stopping, 12000, 'Native PCM capture retirement remains pending.');
+    if (this.#current?.stopping && !this.#current.retired)
+      await within(this.#current.stopping, 12000, 'Native PCM capture retirement remains pending.');
     assert.equal(this.#subscriptions.size, 0);
     assert.ok(!this.#current || this.#current.retired);
   }

@@ -13,8 +13,9 @@ const { NativeRtcCommands } = require('../runtime/nativeRtcCommands.cjs');
 
 function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = false,
   target = { hwnd: 12345, expectedProcessId: 56789 }, captureEncoder = 'auto', captureModule, preserveAspectRatio,
+  video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 }, quality = 'source',
   captureRuntime = {}, captureDirectory = path.resolve(__dirname, 'modeled-capture') } = {}) {
-  let finish, closeCalls = 0;
+  let finish, closeCalls = 0, engineOptions;
   const errors = [], requests = [], states = [], diagnostics = [];
   const closing = new Promise(resolve => { finish = resolve; });
   const engine = {
@@ -35,11 +36,12 @@ function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = f
   const frame = { isDestroyed: () => false, postMessage() {}, url: 'file:///C:/modeled/index.html' };
   const webContents = Object.assign(new EventEmitter(), { isDestroyed: () => false, mainFrame: frame });
   const endpoint = new NativeScreenEndpoint({
-    runtime: { ...captureRuntime, rtc: { createEngine: () => engine } }, textures: { importSharedTexture() {}, sendSharedTexture() {} },
+    runtime: { ...captureRuntime, rtc: { createEngine: options => { engineOptions = options; return engine; } } },
+    textures: { importSharedTexture() {}, sendSharedTexture() {} },
     role, mode, sessionId: role === 'publish' ? 'publisher' : 'viewer', publisherSessionId: 'publisher', channelId: 'channel',
     pipelineId: randomUUID(), source: { shareId: 'screen', instanceId: randomUUID(), audio,
-      video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } },
-    quality: 'source', destination: { frame, presentationId: randomUUID() },
+      video },
+    quality, destination: { frame, presentationId: randomUUID() },
     target, captureEncoder, preserveAspectRatio, captureDirectory,
     ...(audio ? { audio: { sinkId: '', muted: true, volume: 0, maxBitrateBps: 128000,
       captureModule: captureModule ?? { createPacketCapture() { assert.fail('Preview-only demand cannot capture PCM.'); } },
@@ -50,8 +52,85 @@ function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = f
     send: async () => {}, onError: error => errors.push(error),
     onState: state => states.push(state), onDiagnostic: error => diagnostics.push(error),
   });
-  return { endpoint, engine, errors, requests, states, diagnostics, finish, closeCalls: () => closeCalls };
+  return { endpoint, engine, engineOptions, errors, requests, states, diagnostics, finish, closeCalls: () => closeCalls };
 }
+
+test('publisher fixes its H264 ceiling before engine startup and source creation, receiver keeps Main6', async () => {
+  for (const mode of ['p2p', 'sfu']) {
+    for (const [width, height, fps, level] of [[1920, 1080, 120, 51], [3840, 2160, 60, 52], [3840, 2160, 120, 60]]) {
+      for (const role of ['publish', 'receive']) {
+        const f = fixture({ mode, role, video: { width, height, fps, maxBitrateKbps: 80000 } });
+        try {
+          assert.deepEqual(f.requests, [], 'The codec ceiling must exist before any source can be allocated.');
+          assert.equal(f.engineOptions.maximumH264Level, role === 'publish' ? level : 60);
+          assert.equal(f.engineOptions.videoInput, role === 'publish' ? 'encoded-h264' : 'nv12');
+          await f.endpoint.ready;
+        } finally {
+          f.finish({ closed: true });
+          await f.endpoint.close();
+        }
+      }
+    }
+  }
+});
+
+test('a lower-quality rendition of a Main6 source starts its own Main5.1 factory', async () => {
+  for (const mode of ['p2p', 'sfu']) {
+    for (const quality of ['1080p60', '720p60', '480p30']) {
+      const f = fixture({ role: 'publish', mode, quality,
+        video: { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 } });
+      try {
+        assert.equal(f.engineOptions.maximumH264Level, 51);
+        assert.ok(f.endpoint.profile.width <= 1920 && f.endpoint.profile.fps <= 60);
+        await f.endpoint.ready;
+      } finally {
+        f.finish({ closed: true });
+        await f.endpoint.close();
+      }
+    }
+  }
+});
+
+test('SFU admission timeout retains its endpoint and retry waits for real closure', async t => {
+  const f = fixture({ role: 'publish', mode: 'sfu' });
+  await f.endpoint.ready;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  f.endpoint.demandWork.add(pending);
+  const stopping = assert.rejects(f.endpoint.close(), /admission is still pending/);
+  t.mock.timers.tick(15000);
+  await stopping;
+  assert.equal(f.closeCalls(), 0);
+  assert.equal(f.endpoint.closed, false);
+  assert.equal(f.endpoint.closing, false, 'The admitted callback still owns its original broker scope.');
+  await assert.rejects(f.endpoint.setDemand(1, false), { name: 'AbortError' });
+  finish();
+  f.endpoint.demandWork.delete(pending);
+  const retry = f.endpoint.close();
+  f.finish({ closed: true });
+  await retry;
+  assert.doesNotThrow(() => assertNativeScreenEndpointLocallyClosed(f.endpoint));
+});
+
+test('a genuine admitted failure during SFU drain remains visible instead of becoming cancellation', async () => {
+  const f = fixture({ role: 'publish', mode: 'sfu' });
+  await f.endpoint.ready;
+  let reject;
+  const admitted = new Promise((_resolve, fail) => { reject = fail; });
+  f.endpoint.transport.addSource = () => admitted;
+  const failure = Object.assign(new Error('Modeled active native admission failed'), { code: 'ERR_RTC_ADMISSION' });
+  const opening = assert.rejects(f.endpoint.setDemand(1, false), failure);
+  await new Promise(resolve => setImmediate(resolve));
+  const closing = f.endpoint.close();
+  reject(failure);
+  await opening;
+  f.finish({ closed: true });
+  await closing;
+  assert.deepEqual(f.errors, [failure]);
+  assert.equal(f.endpoint.snapshot().errors[0].code, failure.code);
+  assert.doesNotThrow(() => assertNativeScreenEndpointLocallyClosed(f.endpoint));
+});
 
 const captureFailure = (code = 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE') => Object.assign(new Error(code), { code });
 
@@ -146,7 +225,7 @@ test('capture fixtures canonicalize inherited temporary-directory aliases', asyn
 test('rejected Game Capture retires before one same-window Normal retry without replacing the engine or profile', async t => {
   const f = await captureFixture(t);
   f.endpoint.flow.feedback({ target: 1, data: { sourceId: 1, sequence: 1, kind: 'rate', bitrateBps: 3000000,
-    requestedFps: 0, paused: false, fpsApplied: null, keyframeConfirmed: false, bitrateCeilingBps: 20000000 } });
+    requestedFps: 0, paused: false, fpsApplied: null, keyframeConfirmed: false, bitrateCeilingBps: 80000000 } });
   await f.start();
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(f.hosts.map(host => host.source), [targets[1], { ...targets[1], kind: 'window' }]);
@@ -191,7 +270,7 @@ test('Normal retry failure is terminal and cannot recurse or hide behind the Gam
 for (const code of ['ERR_SCREEN_CAPTURE_SOURCE_LOST', 'ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION']) {
   test(`${code}: source loss and encoder failures do not authorize another capture method`, async t => {
     const error = captureFailure(code);
-    const f = await captureFixture(t, { failures: [error], expectCloseFailure: true });
+    const f = await captureFixture(t, { failures: [error], expectCloseFailure: code !== 'ERR_SCREEN_CAPTURE_SOURCE_LOST' });
     await assert.rejects(f.start(), error);
     assert.equal(f.hosts.length, 1);
     assert.equal(f.states.some(state => state.type === 'capture-fallback'), false);
@@ -309,7 +388,8 @@ for (const selected of targets) {
       } },
       transport: { async addAudioSource(value) { publications.push(value); return { sourceId: value.sourceId }; } },
     };
-    await NativeScreenEndpoint.prototype.startAudioSource.call(endpoint);
+    Object.setPrototypeOf(endpoint, NativeScreenEndpoint.prototype);
+    await endpoint.startAudioSource();
     assert.deepEqual(selections, [selected.kind === 'monitor' ? { excludePid: process.pid }
       : { includeWindowId: selected.hwnd, expectedProcessId: selected.expectedProcessId }]);
     assert.equal(publications[0].syncGroup, endpoint.source.instanceId);
@@ -376,6 +456,94 @@ test('public snapshots and a borrowed closed engine cannot forge local endpoint 
   assert.throws(() => assertNativeScreenEndpointLocallyClosed({
     engine, commands, closed: true, nativeClosed: true, snapshot: () => ({ closed: true, nativeClosed: true }),
   }), /original native screen endpoint/);
+});
+
+for (const mode of ['p2p', 'sfu']) {
+  for (const missing of [null, 'cancel-first', 'encoderReleased', 'exit', 'processExit', 'eof', 'liveEof', 'forcedTermination', 'closed']) {
+    test(`${mode}: source loss retires cleanly only with complete host proof (${missing ?? 'complete'})`, async () => {
+      const f = fixture({ role: 'publish', mode });
+      await f.endpoint.ready;
+      const directory = path.resolve(__dirname, 'modeled-capture'), runId = 'a'.repeat(32);
+      const host = new CaptureBridge({
+        host: { kind: 'verified-native-screen-capture-host', executable: path.join(directory, 'host.exe'), sha256: 'a'.repeat(64) },
+        runtime: { kind: 'verified-stock-obs-runtime', version: '32.1.1', stockDirectory: directory, binaryDirectory: directory },
+        runId, runDirectory: path.join(directory, `monky-screen-capture-${runId}`),
+        video: { width: 1920, height: 1080, fps: 120, bitrateKbps: 5000 },
+        onPacket() {}, onNotice() {}, onError: error => f.endpoint.report(error),
+      });
+      f.endpoint.host = host;
+      const failure = { code: 'ERR_SCREEN_CAPTURE_SOURCE_LOST', message: 'Selected window is no longer top-level' };
+      if (missing === 'cancel-first') {
+        f.endpoint.stopRequested = true;
+        host.fail(new DOMException('Source monitor already requested retirement.', 'AbortError'));
+      }
+      host.receiveLive({ type: 'closed', value: { kind: 'closed', runId, failure } });
+      Object.assign(host, {
+        prepareStarted: true, closed: true, exit: { code: 1, signal: null }, processExit: { code: 1, signal: null },
+        eof: { stdout: true, stderr: true }, liveEof: true, exited: Promise.resolve(),
+        failure: { type: 'error', error: failure, retirement: { outputStopped: true, callbacksQuiesced: true,
+          sourceReleased: true, encoderReleased: true, obsShutdownReturned: true }, observation: { outputPackets: 0 } },
+      });
+      host.liveFrames.closed = { packets: 0, failure };
+      if (missing === 'encoderReleased') host.failure.retirement.encoderReleased = false;
+      else if (missing === 'exit') host.exit.code = 0;
+      else if (missing === 'processExit') host.processExit.code = 0;
+      else if (missing === 'eof') host.eof.stdout = false;
+      else if (missing === 'liveEof') host.liveEof = false;
+      else if (missing === 'forcedTermination') host.forcedTermination = true;
+      else if (missing === 'closed') host.closed = false;
+      f.finish({ closed: true });
+      if (missing && missing !== 'cancel-first') {
+        await assert.rejects(f.endpoint.close(), /host did not prove retirement/);
+        assert.equal(host.snapshot().nativeClosed, false);
+        assert.throws(() => assertNativeScreenEndpointLocallyClosed(f.endpoint), /retains local media/);
+      } else {
+        await f.endpoint.close();
+        assert.equal(host.snapshot().nativeClosed, true);
+        assert.equal(f.endpoint.snapshot().closed, true);
+        assert.doesNotThrow(() => assertNativeScreenEndpointLocallyClosed(f.endpoint));
+        await f.endpoint.close();
+        assert.deepEqual(f.errors.map(error => error.code), [failure.code], 'Source loss remains reported exactly once.');
+        assert.equal(f.endpoint.snapshot().errors[0].code, failure.code);
+      }
+    });
+  }
+}
+
+test('owned-directory cleanup failure retains the endpoint and Retry drains it using the original engine proof', async t => {
+  const f = fixture();
+  await f.endpoint.ready;
+  f.endpoint.directoryCreated = true;
+  let attempts = 0;
+  t.mock.method(f.endpoint, 'removeOwnedDirectory', async () => {
+    if (++attempts === 1) throw new Error('Owned directory still in use');
+    f.endpoint.directoryRemoved = true;
+  });
+  const closing = assert.rejects(f.endpoint.close(), /retirement reported failures/);
+  f.finish({ closed: true });
+  await closing;
+  assert.equal(f.endpoint.snapshot().closed, false);
+  await f.endpoint.close();
+  assert.equal(attempts, 2);
+  assert.equal(f.closeCalls(), 1);
+  assert.equal(f.endpoint.snapshot().closed, true);
+});
+
+test('a reported shutdown error is not replayed after the original endpoint proves every owner retired', async t => {
+  const f = fixture({ role: 'publish' });
+  await f.endpoint.ready;
+  const closeFlow = f.endpoint.flow.close.bind(f.endpoint.flow);
+  t.mock.method(f.endpoint.flow, 'close', async () => {
+    await closeFlow();
+    throw new Error('Encoded flow reported its shutdown failure');
+  });
+  const closing = assert.rejects(f.endpoint.close(), /retirement reported failures/);
+  f.finish({ closed: true });
+  await closing;
+  assert.equal(f.endpoint.snapshot().closed, true);
+  assert.doesNotThrow(() => assertNativeScreenEndpointLocallyClosed(f.endpoint));
+  await f.endpoint.close();
+  assert.equal(f.closeCalls(), 1);
 });
 
 test('local retirement waits for its own native close and ignores writable success-shaped fields', async () => {

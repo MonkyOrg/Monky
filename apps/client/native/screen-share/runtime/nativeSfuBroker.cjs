@@ -220,7 +220,7 @@ function encoding(value, kind = 'video') {
 
 /**
  * One Main-side screen call instance; video-only unless explicitly configured
- * with a genuine NativeAudioReceiveAdapter, revision7 compiled capabilities,
+ * with a genuine NativeAudioReceiveAdapter, current compiled capabilities,
  * callId/connectionId/generation and dedicated isAudioWatchCurrent and
  * isAudioPublicationCurrent observers. No output selection/start is implicit.
  *
@@ -346,7 +346,7 @@ class NativeSfuBroker {
       && reference(callId) && reference(connectionId) && positiveId(generation) && audioCapabilities(nativeCapabilities)
       && typeof isAudioWatchCurrent === 'function' && typeof isAudioPublicationCurrent === 'function'
       && (rebindAudioSourceGroup === null || typeof rebindAudioSourceGroup === 'function')),
-    'CONFIG', 'Native SFU audio requires its genuine same-engine receive adapter, revision7 capabilities and dedicated audio authorization.');
+    'CONFIG', `Native SFU audio requires its genuine same-engine receive adapter, revision${nativeContract.contractRevision} capabilities and dedicated audio authorization.`);
     Object.defineProperties(this, {
       engine: { value: engine }, commands: { value: commands },
       scope: { value: Object.freeze({ channelId, publisherSessionId }) },

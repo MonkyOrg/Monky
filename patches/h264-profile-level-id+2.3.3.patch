@@ -1,0 +1,58 @@
+diff --git a/node_modules/h264-profile-level-id/lib/index.d.ts b/node_modules/h264-profile-level-id/lib/index.d.ts
+index 825483e..bae40a1 100644
+--- a/node_modules/h264-profile-level-id/lib/index.d.ts
++++ b/node_modules/h264-profile-level-id/lib/index.d.ts
+@@ -29,7 +29,8 @@ export declare enum Level {
+     L4_2 = 42,
+     L5 = 50,
+     L5_1 = 51,
+-    L5_2 = 52
++    L5_2 = 52,
++    L6 = 60
+ }
+ /**
+  * Represents a parsed h264 profile-level-id value.
+diff --git a/node_modules/h264-profile-level-id/lib/index.js b/node_modules/h264-profile-level-id/lib/index.js
+index df1042f..54d9b78 100644
+--- a/node_modules/h264-profile-level-id/lib/index.js
++++ b/node_modules/h264-profile-level-id/lib/index.js
+@@ -46,6 +46,7 @@ var Level;
+     Level[Level["L5"] = 50] = "L5";
+     Level[Level["L5_1"] = 51] = "L5_1";
+     Level[Level["L5_2"] = 52] = "L5_2";
++    Level[Level["L6"] = 60] = "L6";
+ })(Level || (exports.Level = Level = {}));
+ /**
+  * Represents a parsed h264 profile-level-id value.
+@@ -197,6 +198,11 @@ const LevelConstraints = [
+         max_macroblock_frame_size: 36864,
+         level: Level.L5_2,
+     },
++    {
++        max_macroblocks_per_second: 4177920,
++        max_macroblock_frame_size: 139264,
++        level: Level.L6,
++    },
+ ];
+ /**
+  * Parse profile level id that is represented as a string of 3 hex bytes.
+@@ -241,7 +247,8 @@ function parseProfileLevelId(str) {
+         case Level.L4_2:
+         case Level.L5:
+         case Level.L5_1:
+-        case Level.L5_2: {
++        case Level.L5_2:
++        case Level.L6: {
+             level = level_idc;
+             break;
+         }
+@@ -408,6 +415,9 @@ function levelToString(level) {
+         case Level.L5_2: {
+             return '5.2';
+         }
++        case Level.L6: {
++            return '6';
++        }
+         default: {
+             logger.warn(`levelToString() | unrecognized level ${level}`);
+             return undefined;

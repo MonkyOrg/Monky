@@ -10,7 +10,7 @@ class LiveSenderFlow {
     assert.ok(Number.isSafeInteger(sourceId) && sourceId > 0);
     assert.equal(typeof onError, 'function');
     assert.ok(Number.isInteger(initialBitrateKbps) && initialBitrateKbps >= 50 &&
-      initialBitrateKbps <= 20000 && initialBitrateKbps % 50 === 0);
+      initialBitrateKbps <= 80000 && initialBitrateKbps % 50 === 0);
     Object.assign(this, { engine, sourceId, onError, now });
     this.demand = false; this.connected = false; this.needsIdr = true; this.paused = false;
     this.capturePaused = false;
@@ -67,12 +67,12 @@ class LiveSenderFlow {
       return;
     }
     assert.ok(data.kind === 'rate' || data.kind === 'encoder-closed');
-    assert.equal(data.fpsApplied, null); assert.equal(data.bitrateCeilingBps, 20000000);
+    assert.equal(data.fpsApplied, null); assert.equal(data.bitrateCeilingBps, 80000000);
     assert.ok(Number.isFinite(data.requestedFps) && data.requestedFps >= 0 && data.requestedFps <= 0xffffffff,
       'RTC arrival-rate estimate is outside the finite uint32 bound.');
     this.peakRtcArrivalFps = Math.max(this.peakRtcArrivalFps ?? 0, data.requestedFps);
     assert.equal(typeof data.paused, 'boolean');
-    assert.ok(Number.isInteger(data.bitrateBps) && data.bitrateBps >= 0 && data.bitrateBps <= 20000000);
+    assert.ok(Number.isInteger(data.bitrateBps) && data.bitrateBps >= 0 && data.bitrateBps <= 80000000);
     if (data.kind === 'encoder-closed' && data.bitrateBps === 0 && !data.paused) {
       // A new codec is initialized by its first frame. No remaining encoder is
       // not a zero-rate network allocation; retain the applied setting for IDR bootstrap.
