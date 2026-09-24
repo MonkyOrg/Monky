@@ -1,4 +1,4 @@
-import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, VoiceRestrictions, hasPermission } from '@monky/shared';
+import { AttachmentStorageInfo, ChannelSummary, DEFAULT_PERMISSIONS, Permission, Role, ServerDetails, SlashCommand, TurnAvailability, UserRoleSummary, UserSummary, VoiceMode, VoiceRestrictions, canAccessChannel, hasPermission } from '@monky/shared';
 import { appEvents, EventBus } from '../core/EventBus';
 import { createActiveProxy } from '../core/activeProxy';
 import { clientLog } from '../core/ClientLogService';
@@ -79,17 +79,26 @@ export class ServerStore {
   }
 
   /**
-   * Returns users that can be mentioned in chat: everyone who has ever
-   * connected, online first, then alphabetically. Excludes the current user.
+   * Includes offline members, but only readers of the selected channel.
+   * Orders online members first, then alphabetically, excluding self.
    */
-  public getMentionableUsers(): UserSummary[] {
-    const list = Array.from(this.knownMembers.values()).filter((u) => u.id !== this.currentUser?.id);
+  public getMentionableUsers(channelId: string): UserSummary[] {
+    const list = Array.from(this.knownMembers.values()).filter((user) =>
+      user.id !== this.currentUser?.id && this.canUserReadChannel(user.id, channelId));
     return list.sort((a, b) => {
       const aOnline = a.status !== 'DISCONNECTED' ? 0 : 1;
       const bOnline = b.status !== 'DISCONNECTED' ? 0 : 1;
       if (aOnline !== bOnline) return aOnline - bOnline;
       return a.nickname.localeCompare(b.nickname);
     });
+  }
+
+  public canUserReadChannel(userId: string, channelId: string): boolean {
+    const channel = this.getChannel(channelId);
+    if (!channel || channel.type !== 'TEXT') return false;
+    const permissions = this.getUserPermissions(userId);
+    return hasPermission(permissions, Permission.READ_MESSAGES)
+      && canAccessChannel(channel, permissions, this.getUserRoleIds(userId));
   }
 
   /** Updates commands from a COMMANDS_LIST_RESPONSE message (#569). */
@@ -243,9 +252,11 @@ export class ServerStore {
     allowEveryoneMention?: boolean,
     allowMessageEdit?: boolean,
     voiceMode?: VoiceMode,
-    showRoleBadgesToEveryone?: boolean
+    showRoleBadgesToEveryone?: boolean,
+    maxMessageLength?: number,
   ): void {
     if (this.serverDetails) {
+      if (maxMessageLength !== undefined) this.serverDetails.maxMessageLength = maxMessageLength;
       this.serverDetails.name = name;
       this.serverDetails.hasPassword = hasPassword;
       if (allowSoundboard !== undefined) {

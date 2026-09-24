@@ -2039,7 +2039,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   await t.test('rejects incompatible bot protocols before authentication or TOFU binding', async () => {
     const rejected = await fixture.connect();
     const keys = identity();
-    for (const protocolVersion of [PROTOCOL_VERSION - 1, PROTOCOL_VERSION + 1, String(PROTOCOL_VERSION), undefined]) {
+    for (const protocolVersion of [MIN_BOT_PROTOCOL - 1, PROTOCOL_VERSION + 1, String(PROTOCOL_VERSION), undefined]) {
       const response = await rejected.request(MessageType.AUTH_CONNECT, {
         protocolVersion, nickname: 'Incompatible bot', publicKey: keys.publicKey, botToken: token,
       });
@@ -2078,10 +2078,10 @@ test('bot interactions over authenticated WebSockets', async (t) => {
     assert.deepEqual(await fixture.botService.getCompatibility(), {
       protocolVersion: PROTOCOL_VERSION, incompatibleBots: 0, uncheckedBots: 0,
     });
-    await fixture.botRepo.update(botId, { lastProtocolVersion: PROTOCOL_VERSION - 1 });
+    await fixture.botRepo.update(botId, { lastProtocolVersion: MIN_BOT_PROTOCOL - 1 });
     assert.equal((await fixture.botService.getCompatibility()).incompatibleBots, 1);
     const listed = (await fixture.botService.list()).find((item) => item.id === botId);
-    assert.equal(listed?.lastProtocolVersion, PROTOCOL_VERSION - 1);
+    assert.equal(listed?.lastProtocolVersion, MIN_BOT_PROTOCOL - 1);
     assert.equal(listed?.requiredProtocolVersion, PROTOCOL_VERSION);
     await fixture.botRepo.update(botId, { lastProtocolVersion: null });
     assert.equal((await fixture.botService.getCompatibility()).uncheckedBots, 1);
@@ -2092,7 +2092,7 @@ test('bot interactions over authenticated WebSockets', async (t) => {
   await t.test('an obsolete duplicate cannot mark a currently connected compatible bot as incompatible', async () => {
     const rejected = await fixture.connect();
     await rejected.error(MessageType.AUTH_CONNECT, {
-      protocolVersion: PROTOCOL_VERSION - 1, nickname: 'Obsolete duplicate',
+      protocolVersion: MIN_BOT_PROTOCOL - 1, nickname: 'Obsolete duplicate',
       publicKey: bot.keys.publicKey, botToken: token,
     }, ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED);
     assert.equal((await fixture.botRepo.findById(botId))?.lastProtocolVersion, PROTOCOL_VERSION);
@@ -4433,3 +4433,4 @@ test('local execution real voice mode change and bot removal cancel private task
     { state: 'cancelled', taskId: metadata.offer.taskId, cause: 'permission_revoked' });
   assert.deepEqual(f.wsServer['botLocalExecution'].counts, { tasks: 0, sources: 0, released: 0, previews: 0, retired: 0 });
 });
+import { MIN_BOT_PROTOCOL } from '@monky/shared';

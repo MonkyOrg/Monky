@@ -1,4 +1,5 @@
 import { LIMITS } from '@monky/shared';
+import { serverStore } from '../stores/serverStore';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { enableBackdropClose } from '../utils/modal';
@@ -16,6 +17,7 @@ interface CodeBlockModalOptions {
  * changes and clients that never open this dialog keep rendering the block.
  */
 export class CodeBlockModal {
+  private get limit(): number { return serverStore.serverDetails?.maxMessageLength ?? 2000; }
   private modalEl: HTMLElement | null = null;
   private unbind: Array<() => void> = [];
   // Kept between openings: people paste one language far more often than they
@@ -27,7 +29,7 @@ export class CodeBlockModal {
 
     const languageOptions = CODE_LANGUAGE_OPTIONS.map(
       (lang) =>
-        `<option value="${escapeHtml(lang.id)}" ${lang.id === this.lastLanguage ? 'selected' : ''}>${escapeHtml(lang.label)}</option>`
+        `<option value="${escapeHtml(lang.id)}" data-search-terms="${escapeHtml(lang.searchTerms ?? '')}" ${lang.id === this.lastLanguage ? 'selected' : ''}>${escapeHtml(lang.id === 'plaintext' ? t('chat.codeBlockPlain') : lang.label)}</option>`
     ).join('');
 
     this.modalEl = document.createElement('div');
@@ -44,7 +46,7 @@ export class CodeBlockModal {
         <form id="form-code-block">
           <div class="form-group">
             <label for="code-language">${t('chat.codeModalLanguage')}</label>
-            <select id="code-language" class="code-language-select">${languageOptions}</select>
+            <select id="code-language" class="code-language-select" data-search-placeholder="${t('chat.codeLanguageSearch')}" data-empty-label="${t('chat.codeLanguageNoResults')}">${languageOptions}</select>
           </div>
 
           <div class="form-group code-editor-field">
@@ -52,7 +54,7 @@ export class CodeBlockModal {
             <textarea id="code-body" class="code-textarea" rows="12" spellcheck="false" placeholder="${escapeHtml(t('chat.codeModalPlaceholder'))}"></textarea>
             <div class="code-modal-meta">
               <span class="code-modal-hint">${t('chat.codeModalHint')}</span>
-              <span id="code-char-counter" class="code-char-count">0/${LIMITS.MAX_MESSAGE_LENGTH}</span>
+              <span id="code-char-counter" class="code-char-count">0/${this.limit || '∞'}</span>
             </div>
           </div>
 
@@ -88,9 +90,9 @@ export class CodeBlockModal {
 
     const refresh = (): void => {
       const total = totalLength();
-      const tooLong = total > LIMITS.MAX_MESSAGE_LENGTH;
+      const tooLong = this.limit > 0 && total > this.limit;
       if (counter) {
-        counter.textContent = `${total}/${LIMITS.MAX_MESSAGE_LENGTH}`;
+        counter.textContent = `${total}/${this.limit || '∞'}`;
         counter.classList.toggle('code-char-count--over', tooLong);
       }
       if (btnSubmit) btnSubmit.disabled = tooLong || (textarea?.value.trim().length ?? 0) === 0;
@@ -106,10 +108,7 @@ export class CodeBlockModal {
       if (e.key !== 'Tab' || !textarea) return;
       e.preventDefault();
 
-      const edit = indentEdit(textarea.value, textarea.selectionStart, textarea.selectionEnd, e.shiftKey);
-      textarea.setSelectionRange(edit.from, edit.to);
-      replaceSelection(textarea, edit.text);
-      if (edit.reselect) textarea.setSelectionRange(edit.from, edit.from + edit.text.length);
+      indentCodeInput(textarea, e.shiftKey);
     };
     textarea?.addEventListener('keydown', onTab);
 
@@ -133,7 +132,7 @@ export class CodeBlockModal {
         this.showError(banner, t('chat.codeModalEmpty'));
         return;
       }
-      if (totalLength() > LIMITS.MAX_MESSAGE_LENGTH) return;
+      if (this.limit > 0 && totalLength() > this.limit) return;
 
       this.lastLanguage = select?.value ?? 'plaintext';
       options.onSubmit(this.lastLanguage, code);
@@ -234,4 +233,11 @@ function replaceSelection(el: HTMLTextAreaElement, text: string): void {
   el.value = value.slice(0, selectionStart) + text + value.slice(selectionEnd);
   el.setSelectionRange(selectionStart + text.length, selectionStart + text.length);
   el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+export function indentCodeInput(textarea: HTMLTextAreaElement, outdenting: boolean): void {
+  const edit = indentEdit(textarea.value, textarea.selectionStart, textarea.selectionEnd, outdenting);
+  textarea.setSelectionRange(edit.from, edit.to);
+  replaceSelection(textarea, edit.text);
+  if (edit.reselect) textarea.setSelectionRange(edit.from, edit.from + edit.text.length);
 }

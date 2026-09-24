@@ -385,10 +385,62 @@ async function runNativeSmoke(window) {
     await enter();
     await fixture('settle()');
     check((await state()).commands.length === 1, 'Normal native Enter command execution still works after message editing');
+    await fixture('prepare("en")');
+    checks += await fixture('compositionChecks()');
+    await fixture('referenceLayout(true)');
+    let layout = await fixture('referenceState()');
+    check(layout.placeholderOffset < 1 && layout.inputHeight <= 38, 'The empty placeholder line is centered with the footer buttons');
+    await fixture('referenceLayout()');
+    layout = await fixture('referenceState()');
+    check(layout.quoteHasTime && layout.highlighted && layout.numbers === '1\n2\n3\n4',
+      'Reference composer includes a compact dated quote, syntax highlighting and an isolated line-number gutter');
+    check(layout.codeHeight < 120 && layout.unified, 'Code is compact and shares the composer surface rather than a separate toolbar/card stack');
+    await click('.chat-code-header select');
+    await insert('ps1');
+    check(await fixture('languageOptions()') === 'PowerShell', 'Native search filters language aliases as well as display names');
+    await enter();
+    check((await fixture('referenceState()')).language === 'powershell', 'Enter selects the filtered language');
+    await click('.chat-code-header select');
+    await insert('no-such-language');
+    check(await fixture('languageOptions()') === '' && await evaluate(`document.querySelector('.monky-select-empty')?.textContent === 'No languages found'`),
+      'A search with no matches is explicit and does not change the selection');
+    await escape();
+    await click('.chat-code-header select');
+    await insert('java');
+    check(await fixture('languageOptions()') === 'Java|JavaScript', 'The searchable selector shows only matching languages');
+    await key('ArrowDown', 'ArrowDown', 40);
+    await enter();
+    check((await fixture('referenceState()')).language === 'javascript', 'Native arrows select among filtered results');
+    await click('.chat-code-header select');
+    await insert('power');
+    await enter();
+    await fixture('focusCode()');
+    const beforeIndent = (await fixture('referenceState()')).code;
+    await key('Tab', 'Tab', 9);
+    check((await fixture('referenceState()')).code !== beforeIndent, 'Inline code Tab uses the shared indentation behavior');
+    await key('z', 'KeyZ', 90, undefined, 2);
+    check((await fixture('referenceState()')).code === beforeIndent, 'Native Undo reverses inline code indentation');
+    await escape();
+    check(await evaluate(`document.activeElement === document.querySelector('.chat-code-header select')`),
+      'Escape leaves code editing without a keyboard focus trap');
+    await fixture('settle()');
+    fs.writeFileSync(path.join(output, 'chat-composer-reference.png'), (await window.webContents.capturePage()).toPNG());
+    window.setContentSize(460, 780);
+    await fixture('settle()');
+    layout = await fixture('referenceState()');
+    check(!layout.overflow, 'The quote, language selector and footer fit a narrow chat without page overflow');
+    fs.writeFileSync(path.join(output, 'chat-composer-reference-narrow.png'), (await window.webContents.capturePage()).toPNG());
+    window.setContentSize(1050, 800);
+    await fixture('settle()');
+    checks += await fixture('deliveryChecks()');
+    await fixture('settle()');
+    fs.writeFileSync(path.join(output, 'chat-delivery-reference.png'), (await window.webContents.capturePage()).toPNG());
+    checks += await fixture('mediaDeliveryChecks()');
     return checks;
   } catch (error) {
     console.error(`Native edit attempt ${editAttempt}: ${JSON.stringify(await state())}`);
-    fs.writeFileSync(path.join(output, 'message-editing-failure.png'), (await window.webContents.capturePage()).toPNG());
+    try { fs.writeFileSync(path.join(output, 'message-editing-failure.png'), (await window.webContents.capturePage()).toPNG()); }
+    catch (captureError) { console.warn('Could not capture the failing fixture', captureError); }
     throw error;
   } finally {
     await fixture('cleanup()');
@@ -396,9 +448,10 @@ async function runNativeSmoke(window) {
 }
 
 async function installFixture() {
-  const [{ ChatView }, { sessionManager }, chats, { appEvents }, routing, language] = await Promise.all([
+  const [{ ChatView }, { sessionManager }, chats, { appEvents }, routing, language, { selectEnhancer }] = await Promise.all([
     import('/views/ChatView.ts'), import('/core/SessionManager.ts'), import('/stores/chatStore.ts'),
     import('/core/EventBus.ts'), import('/core/sessionRouting.ts'), import('/i18n/index.ts'),
+    import('/core/SelectEnhancer.ts'),
   ]);
   const root = document.getElementById('app');
   root.style.cssText = 'height:100vh;width:100%;display:flex;flex-direction:column;';
@@ -421,7 +474,11 @@ async function installFixture() {
   document.addEventListener('input', inputListener);
   document.addEventListener('keydown', keyListener);
   sessionManager.install();
+  selectEnhancer.init();
   const offUpdate = appEvents.on('message.CHAT_MESSAGE_UPDATED', payload => chats.chatStore.updateMessage(payload.message));
+  const offMessage = appEvents.on('message.CHAT_MESSAGE', message => {
+    if (chats.chatStore.getOutgoing(message.id)) chats.chatStore.addMessage(message);
+  });
   const details = name => ({
     id: `editing-${name}`, name: `Editing ${name}`, createdAt: 1, maxUsers: 10, voiceStates: {}, allowMessageEdit: true,
     channels: ['chat', 'other'].map((id, position) => ({
@@ -432,7 +489,7 @@ async function installFixture() {
   });
   const create = name => {
     const session = sessionManager.create(`message-editing-${name}`, 49102, user.nickname);
-    const state = { name, session, status: 'CONNECTED', epoch: 1, edits: [], sent: [], commands: [] };
+    const state = { name, session, status: 'CONNECTED', epoch: 1, edits: [], sent: [], commands: [], deliveryRequests: [] };
     session.serverStore.setServerDetails(details(name), user);
     session.client.getStatus = () => state.status;
     session.client.ws = { readyState: WebSocket.OPEN, send() {}, close() {} };
@@ -441,6 +498,18 @@ async function installFixture() {
     session.client.send = (type, payload, requestId) => {
       if (type === 'CHAT_EDIT') state.edits.push({ payload, requestId, completed: false });
       if (type === 'CHAT_SEND') state.sent.push(payload);
+      if (type === 'CHAT_SEND' && payload.clientMessageId) {
+        const message = structuredClone(session.chatStore.getOutgoing(payload.clientMessageId).message);
+        state.deliveryRequests.push({ requestId, payload: structuredClone(payload), message });
+        if (!state.holdDeliveryAck) queueMicrotask(() => session.client.handleIncomingMessage({
+          type: 'CHAT_MESSAGE', requestId, payload: message,
+        }));
+      } else if (type === 'CHAT_SEND' && payload.blocks) {
+        state.blockRequest = { requestId, payload };
+        if (!state.holdBlockAck) queueMicrotask(() => session.client.handleIncomingMessage({
+          type: 'CHAT_MESSAGE', requestId, payload: { ...payload, id: `block-${state.sent.length}`, userId: user.id, userNickname: user.nickname, createdAt: Date.now(), isSystem: false },
+        }));
+      }
       if (type === 'COMMAND_INVOKE') {
         state.commands.push(payload);
         queueMicrotask(() => session.client.handleIncomingMessage({
@@ -451,7 +520,9 @@ async function installFixture() {
       }
     };
     const request = session.client.sendRequest.bind(session.client);
-    session.client.sendRequest = (type, ...args) => type === 'SELECTOR_LIST' ? Promise.resolve({ selectors: [] }) : request(type, ...args);
+    session.client.sendRequest = (type, ...args) => type === 'SELECTOR_LIST' ? Promise.resolve({ selectors: [] })
+      : type === 'CHAT_SEND' && args[0]?.clientMessageId && state.deliveryTimeout
+        ? request(type, args[0], args[1], state.deliveryTimeout) : request(type, ...args);
     states.set(name, state);
     seed(state);
     return state;
@@ -490,6 +561,329 @@ async function installFixture() {
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   };
   window.messageEditingFixture = {
+    async referenceLayout(empty = false) {
+      const store = active.session.chatStore;
+      const server = active.session.serverStore;
+      server.serverDetails.maxMessageLength = 16000;
+      server.serverDetails.protocol = { version: 25, minimumVersion: 24, features: ['chat-blocks', 'message-length-setting', 'chat-delivery'] };
+      store.clearDraft('chat');
+      store.setReplyDraft('chat');
+      const source = { ...reply, userId: 'qa-teammate', userNickname: 'QA Teammate', content: 'Podemos revisar o exemplo?', createdAt: new Date(2026, 3, 13, 14, 51).getTime() };
+      store.setHistory('chat', [source]);
+      store.setBlockDraft('chat', empty ? [] : [
+        { type: 'reply', messageId: source.id, reply: store.messageReply(source) },
+        { type: 'text', text: 'Segue o exemplo para revisão:' },
+        { type: 'code', language: 'powershell', code: '$name = "Monky"\nGet-Process |\n  Where-Object { $_.CPU -gt 10 }\nWrite-Output $name' },
+      ]);
+      view.render();
+      await settle();
+    },
+    referenceState() {
+      const input = find('#chat-message-input');
+      const style = getComputedStyle(input);
+      const rect = input.getBoundingClientRect();
+      const button = find('#btn-send-message').getBoundingClientRect();
+      const code = document.querySelector('.chat-code-input textarea');
+      return {
+        placeholderOffset: Math.abs(rect.top + parseFloat(style.paddingTop) + parseFloat(style.lineHeight) / 2 - (button.top + button.height / 2)),
+        inputHeight: rect.height, quoteHasTime: !!document.querySelector('.chat-composer-block .chat-quote time'),
+        highlighted: !!document.querySelector('.chat-code-input code .hljs-variable'),
+        numbers: document.querySelector('.chat-code-editor .md-code-lines')?.textContent,
+        codeHeight: code?.getBoundingClientRect().height,
+        unified: !!code?.closest('.chat-composer-surface'),
+        language: document.querySelector('.chat-code-header select')?.value, code: code?.value,
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      };
+    },
+    languageOptions() { return [...document.querySelectorAll('.monky-select-option')].map(option => option.textContent).join('|'); },
+    focusCode() {
+      const code = find('.chat-code-input textarea');
+      code.focus(); code.setSelectionRange(0, 0);
+    },
+    async deliveryChecks() {
+      let checks = 0;
+      const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+      const store = active.session.chatStore;
+      const client = active.session.client;
+      active.holdDeliveryAck = true;
+      find('#btn-send-message').click();
+      const first = active.deliveryRequests.at(-1);
+      check(first && document.querySelector(`[data-message-id="${first.message.id}"] [data-delivery="sending"]`),
+        'Sending creates a visible pending message for the complete reference composition');
+      check(store.getBlockDraft('chat').length === 0 && !find('#chat-message-input').readOnly,
+        'The immutable outbox preserves the message while the user can compose the next one');
+      client.handleIncomingMessage({ type: 'SERVER_ERROR', requestId: first.requestId, payload: { code: 'RATE_LIMITED', message: 'fixture' } });
+      await settle();
+      check(document.querySelector(`[data-message-id="${first.message.id}"] [data-delivery="failed"] button`),
+        'A server rejection displays failure and retry beside the same message');
+      check(store.getOutgoing(first.message.id).payload.blocks[2].code === first.payload.blocks[2].code,
+        'Failure preserves the exact code, text and reply ID, not a reconstructed draft');
+      view.setChannel('other');
+      view.setChannel('chat');
+      await settle();
+      const retry = find(`[data-message-id="${first.message.id}"] [data-retry-message]`);
+      const before = active.deliveryRequests.length;
+      retry.click(); retry.click();
+      check(active.deliveryRequests.length === before + 1 && store.getOutgoing(first.message.id).status === 'sending',
+        'Repeated retry clicks start exactly one attempt');
+      const retried = active.deliveryRequests.at(-1);
+      check(JSON.stringify(retried.payload) === JSON.stringify(first.payload) && retried.requestId !== first.requestId,
+        'Retry keeps the stable message ID and payload but correlates a new request');
+      client.handleIncomingMessage({ type: 'CHAT_MESSAGE', requestId: first.requestId, payload: first.message });
+      await settle();
+      client.rejectPendingRequests();
+      await settle();
+      check(!store.getOutgoing(first.message.id) && document.querySelectorAll(`.chat-message-row[data-message-id="${first.message.id}"]`).length === 1
+        && document.querySelector(`[data-message-id="${first.message.id}"] [data-delivery="sent"]`),
+        'A late original acknowledgement wins over a later retry failure without duplicating the row');
+      check(document.querySelector(`[data-message-id="${first.message.id}"] .md-code-lines`).textContent === '1\n2\n3\n4',
+        'The acknowledged message keeps syntax, numbers and its compact reply');
+      active.deliveryTimeout = 40;
+      const input = find('#chat-message-input');
+      input.value = 'Esta mensagem aguarda uma nova tentativa.';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      find('#btn-send-message').click();
+      const timedOut = active.deliveryRequests.at(-1);
+      await new Promise(resolve => setTimeout(resolve, 80));
+      await settle();
+      check(store.getOutgoing(timedOut.message.id)?.status === 'failed',
+        'An actual request timeout leaves a visible recoverable message rather than reporting sent');
+      active.deliveryTimeout = undefined;
+      active.holdDeliveryAck = false;
+      find(`[data-message-id="${timedOut.message.id}"] [data-retry-message]`).click();
+      await settle();
+      check(!store.getOutgoing(timedOut.message.id)
+        && document.querySelectorAll(`.chat-message-row[data-message-id="${timedOut.message.id}"]`).length === 1,
+        'Retry after timeout reconciles to one confirmed row');
+      active.holdDeliveryAck = true;
+      input.value = 'Exemplo de falha com botão para tentar novamente.';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      find('#btn-send-message').click();
+      client.rejectPendingRequests();
+      await settle();
+      return checks;
+    },
+    async mediaDeliveryChecks() {
+      const { stickerService } = await import('/core/StickerService.ts');
+      const { client, chatStore: store, serverStore: server } = active.session;
+      const saved = { xhr: window.XMLHttpRequest, request: client.sendRequest, base: client.getHttpBaseUrl,
+        toFile: stickerService.toFile, permissions: server.myPermissions, protocol: server.serverDetails.protocol };
+      let checks = 0;
+      let uploads = 0;
+      const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+      const row = id => find(`.chat-message-row[data-message-id="${id}"]`);
+      try {
+        client.getHttpBaseUrl = () => location.origin;
+        client.sendRequest = (type, ...args) => type === 'CHAT_REQUEST_UPLOAD_TOKEN'
+          ? Promise.resolve({ token: 'fixture-upload' }) : saved.request.call(client, type, ...args);
+        window.XMLHttpRequest = class {
+          upload = {};
+          open() {}
+          setRequestHeader() {}
+          send(file) {
+            uploads++;
+            this.status = 200;
+            this.response = { id: `fixture-file-${uploads}`, messageId: '', originalName: file.name,
+              sizeBytes: file.size, mimeType: file.type, kind: file.type === 'image/png' ? 'image' : 'file',
+              url: '/fixture-attachment', createdAt: Date.now() };
+            queueMicrotask(() => this.onload?.());
+          }
+        };
+        active.holdDeliveryAck = true;
+        const files = new DataTransfer();
+        files.items.add(new File(['Fixture content'], 'fixture.txt', { type: 'text/plain' }));
+        view.addFiles(files.files);
+        await settle();
+        check(view.pending.length === 1 && view.pending[0].status === 'done', 'The ordinary file upload completes before queuing');
+        find('#btn-send-message').click();
+        const fileRequest = active.deliveryRequests.at(-1);
+        check(fileRequest.payload.attachmentIds[0] === 'fixture-file-1'
+          && row(fileRequest.message.id).querySelector('.chat-attachments')
+          && view.pending.length === 0, 'Attachment-only messages retain their preview while awaiting server confirmation');
+        client.rejectPendingRequests();
+        await settle();
+        const before = active.deliveryRequests.length;
+        server.myPermissions = 0;
+        row(fileRequest.message.id).querySelector('[data-retry-message]').click();
+        check(active.deliveryRequests.length === before && store.getOutgoing(fileRequest.message.id).status === 'failed',
+          'Revoked permissions block retry without discarding the attachment');
+        find('.dialog-card [data-action="confirm"]').click();
+        server.myPermissions = saved.permissions;
+        server.serverDetails.protocol = { ...saved.protocol, features: saved.protocol.features.filter(feature => feature !== 'chat-delivery') };
+        row(fileRequest.message.id).querySelector('[data-retry-message]').click();
+        check(active.deliveryRequests.length === before, 'A server without the negotiated delivery feature cannot receive a retry');
+        find('.dialog-card [data-action="confirm"]').click();
+        server.serverDetails.protocol = saved.protocol;
+        active.holdDeliveryAck = false;
+        row(fileRequest.message.id).querySelector('[data-retry-message]').click();
+        await settle();
+        check(uploads === 1 && !store.getOutgoing(fileRequest.message.id)
+          && row(fileRequest.message.id).querySelector('.chat-attachments'), 'Retry confirms the same uploaded file without another upload');
+        stickerService.toFile = async () => new File(['Synthetic sticker'], 'fixture.png', { type: 'image/png' });
+        active.holdDeliveryAck = true;
+        await view.sendSticker({ name: 'fixture', filePath: 'fixture-sticker', sizeBytes: 17 });
+        const stickerRequest = active.deliveryRequests.at(-1);
+        check(stickerRequest.payload.attachmentIds[0] === 'fixture-file-2'
+          && row(stickerRequest.message.id).querySelector('.chat-sticker')
+          && row(stickerRequest.message.id).querySelector('[data-delivery="sending"]'), 'Stickers use the same visible pending acknowledgement path');
+        client.rejectPendingRequests();
+        await settle();
+        active.holdDeliveryAck = false;
+        row(stickerRequest.message.id).querySelector('[data-retry-message]').click();
+        await settle();
+        check(uploads === 2 && !store.getOutgoing(stickerRequest.message.id)
+          && row(stickerRequest.message.id).querySelector('[data-delivery="sent"]'), 'Sticker retry reuses its upload and confirms delivery');
+        return checks;
+      } finally {
+        window.XMLHttpRequest = saved.xhr;
+        client.sendRequest = saved.request;
+        client.getHttpBaseUrl = saved.base;
+        stickerService.toFile = saved.toFile;
+        server.myPermissions = saved.permissions;
+        server.serverDetails.protocol = saved.protocol;
+      }
+    },
+    async compositionChecks() {
+      let checks = 0;
+      const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+      const store = active.session.chatStore;
+      const server = active.session.serverStore;
+      store.setReplyDraft('chat', null);
+      server.serverDetails.maxMessageLength = 16000;
+      server.serverDetails.protocol = { version: 25, minimumVersion: 24, features: ['chat-blocks', 'message-length-setting'] };
+      appEvents.emit('server.updated', server.serverDetails);
+      const input = find('#chat-message-input');
+      const type = (element, text) => {
+        element.focus(); element.value = text; element.setSelectionRange(text.length, text.length);
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      const { Permission } = await import('/@id/@monky/shared');
+      const channel = server.getChannel('chat');
+      const roles = server.roles;
+      const assignments = server.userRoles;
+      const reader = { id: 'mention-reader', name: 'Reader', color: '#123456', position: 1,
+        permissions: Permission.READ_MESSAGES, isDefault: false, createdAt: 1 };
+      server.knownMembers.set('mention-allowed', { ...user, id: 'mention-allowed', nickname: 'Eligible' });
+      server.knownMembers.set('mention-outsider', { ...user, id: 'mention-outsider', nickname: 'Outsider' });
+      server.updateRoles([...roles, reader], [...assignments, { userId: 'mention-allowed', roleIds: [reader.id] }]);
+      server.updateChannel({ ...channel, isPrivate: true, allowedRoleIds: [reader.id] });
+      type(input, '@');
+      check(find('#mention-dropup').textContent.includes('Eligible') && !find('#mention-dropup').textContent.includes('Outsider'),
+        'Private channel autocomplete excludes members without access');
+      server.updateRoles(roles, assignments);
+      check(!find('#mention-dropup').textContent.includes('Eligible'), 'Revoking a role refreshes an already open mention list');
+      server.updateChannel(channel);
+      check(find('#mention-dropup').textContent.includes('Outsider'), 'Making the channel public refreshes mention suggestions immediately');
+      server.knownMembers.delete('mention-allowed');
+      server.knownMembers.delete('mention-outsider');
+      type(input, 'Before ');
+      find('#btn-code').click();
+      check(store.getBlockDraft('chat').map(block => block.type).join(',') === 'text,code', 'Code inserts at the caret without sending');
+      check(active.sent.length === 0, 'Creating inline code never sends a message');
+      const code = find('.chat-composer-block-code textarea');
+      type(code, 'const safe = "<img onerror=alert(1)>";');
+      const details = find('.chat-composer-block-code details');
+      details.open = false;
+      check(!details.open && code.value.includes('<img'), 'Code is editable and collapsible without losing text');
+      type(input, 'After');
+      find('[data-message-id="original"] [data-message-action="reply"]').click();
+      find('[data-message-id="reply-source"] [data-message-action="reply"]').click();
+      check(store.getBlockDraft('chat').filter(block => block.type === 'reply').length === 2, 'Multiple reference blocks coexist with text and code');
+      view.setChannel('other');
+      view.setChannel('chat');
+      check(store.getBlockDraft('chat').length === 5, 'All blocks survive channel navigation');
+      active.holdBlockAck = true;
+      find('#btn-send-message').click();
+      await settle();
+      check(find('#chat-message-input').readOnly, 'The composer is locked while waiting for the server acknowledgement');
+      check(store.getBlockDraft('chat').length === 5, 'Blocks remain recoverable before acknowledgement');
+      const request = active.blockRequest;
+      active.session.client.handleIncomingMessage({ type: 'SERVER_ERROR', requestId: request.requestId,
+        payload: { code: 'RATE_LIMITED', message: 'fixture' } });
+      await settle();
+      check(store.getBlockDraft('chat').length === 5 && !find('#chat-message-input').readOnly, 'A rejected send preserves every block and unlocks editing');
+      find('.dialog-card [data-action="confirm"]').click();
+      await settle();
+      active.holdBlockAck = false;
+      find('#btn-send-message').click();
+      await settle();
+      check(store.getBlockDraft('chat').length === 0, 'Only the acknowledged send clears the draft');
+      check(active.sent.at(-1).blocks.filter(block => block.type === 'reply').every(block => !('reply' in block)), 'Reference snapshots are never trusted in client input');
+      type(find('#chat-message-input'), '```');
+      check(store.getBlockDraft('chat')[0]?.type === 'code', 'Triple backticks create an inline code block');
+      store.setBlockDraft('chat', []);
+      view.renderComposerBlocks();
+      server.serverDetails.maxMessageLength = 0;
+      appEvents.emit('server.updated', server.serverDetails);
+      check(!find('#chat-message-input').hasAttribute('maxlength'), 'Unlimited messages remove the native maxlength');
+      check(find('#chat-char-counter').textContent.includes('∞'), 'The unlimited setting updates the counter immediately');
+      server.serverDetails.maxMessageLength = 123;
+      appEvents.emit('server.updated', server.serverDetails);
+      check(find('#chat-message-input').maxLength === 123, 'A live limit update changes the editor without reconnecting');
+      const { OverlayStageView } = await import('/views/OverlayStageView.ts');
+      const overlayRoot = document.createElement('div');
+      overlayRoot.style.cssText = 'position:fixed;left:0;top:0;width:600px;height:400px';
+      document.body.append(overlayRoot);
+      const overlay = new OverlayStageView(overlayRoot);
+      overlay.init();
+      try {
+        const config = { enabled: true, opacity: 0.9, layout: 'grid', preserveAspectRatio: true, showCamera: true, showScreen: true };
+        const participants = Array.from({ length: 3 }, (_, index) => ({
+          sessionId: `overlay-${index}`, userId: `overlay-${index}`, nickname: `Participant ${index}`,
+          isCameraOn: true, isScreenSharing: false, isMuted: false, isDeafened: false, isSpeaking: false,
+        }));
+        for (const layout of ['grid', 'horizontal', 'vertical', 'focus-speaker']) {
+          overlay.currentState = { config: {
+            ...config, layout: layout === 'focus-speaker' ? 'grid' : layout,
+            mode: 'cameras-only', focusActiveSpeaker: layout === 'focus-speaker',
+          }, participants, channelName: 'Isolated overlay' };
+          overlay.render();
+          await settle();
+          const grid = overlayRoot.querySelector('.overlay-cards-container');
+          check(getComputedStyle(grid).display === 'grid', `${layout} respects proportional grid sizing`);
+          for (const card of grid.querySelectorAll('.overlay-card')) {
+            const rect = card.getBoundingClientRect();
+            check(Math.abs(rect.width / rect.height - 16 / 9) < 0.03, `${layout} cards remain 16:9 in the actual DOM`);
+          }
+          overlay.currentState.config.preserveAspectRatio = false;
+          overlay.render();
+          check(!overlayRoot.querySelector('.overlay-cards-container').classList.contains('preserve-aspect'), 'Disabling aspect preservation restores the flexible layout');
+          overlay.currentState.config.preserveAspectRatio = true;
+          overlay.render();
+          check(overlayRoot.querySelector('.overlay-cards-container').classList.contains('preserve-aspect'), 'Aspect preservation can be restored without recreating the overlay');
+        }
+        overlayRoot.style.width = '350px';
+        overlayRoot.style.height = '240px';
+        await settle();
+        check(overlayRoot.querySelectorAll('.overlay-resize-hint').length === 8, 'All resize directions have a proximity hint');
+        overlay.isHovered = true; overlay.pointer = { x: 175, y: 120 }; overlay.applyHoverState();
+        check([...overlayRoot.querySelectorAll('.overlay-resize-hint')].every(hint => !hint.classList.contains('near-pointer')), 'Resize hints do not clutter the center');
+        const root = overlayRoot.querySelector('.overlay-stage-root');
+        const bounds = root.getBoundingClientRect();
+        const showHint = (x, y) => {
+          overlay.pointer = { x: bounds.left + x, y: bounds.top + y };
+          overlay.applyHoverState();
+          return [...root.querySelectorAll('.overlay-resize-hint.near-pointer')].map(hint => hint.dataset.direction).join(',');
+        };
+        for (const [direction, x, y, rotation] of [
+          ['nw', 1, 1, 180], ['ne', bounds.width - 1, 1, 270],
+          ['sw', 1, bounds.height - 1, 90], ['se', bounds.width - 1, bounds.height - 1, 0],
+        ]) {
+          check(showHint(x, y) === direction, `Only the ${direction} corner lights up near that corner`);
+          const hint = root.querySelector(`[data-direction="${direction}"]`);
+          check(hint.querySelector('path').getAttribute('transform') === `rotate(${rotation} 8 8)`, `${direction} grip points toward its own corner`);
+          check(getComputedStyle(hint).pointerEvents === 'none', 'Resize indicators never intercept native window resizing');
+        }
+        check(showHint(bounds.width * 0.35, bounds.height - 40) === 's', 'Bottom-center hint appears while approaching its central region');
+        check(showHint(bounds.width * 0.65, 40) === 'n', 'Top-center hint appears across its central region');
+        check(showHint(40, bounds.height * 0.35) === 'w', 'Left-center hint appears before reaching the edge');
+        check(showHint(bounds.width - 40, bounds.height * 0.65) === 'e', 'Right-center hint appears before reaching the edge');
+        overlay.isHovered = false;
+        overlay.applyHoverState();
+        check(!root.querySelector('.near-pointer'), 'Leaving the overlay clears the active resize hint');
+      } finally { overlay.destroy(); overlayRoot.remove(); document.body.classList.remove('overlay-window-mode'); }
+      return checks;
+    },
     async prepare(locale) {
       view?.destroy();
       for (const state of states.values()) {
@@ -642,7 +1036,9 @@ async function installFixture() {
     settle,
     cleanup() {
       view?.destroy();
+      selectEnhancer.dispose();
       offUpdate();
+      offMessage();
       sessionManager.removeAll();
       routing.setSessionEventRouter((_key, _event, emit) => emit());
       document.removeEventListener('input', inputListener);

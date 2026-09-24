@@ -701,7 +701,7 @@ class App {
     appEvents.on(`message.${MessageType.SERVER_SETTINGS_UPDATED}`, (payload: ServerSettingsUpdatedPayload) => {
       serverStore.updateServerMeta(payload.name, payload.hasPassword, payload.allowSoundboard, payload.iconUrl,
         payload.attachmentStorage, payload.maxUsers, payload.turnEnabled, payload.allowEveryoneMention,
-        payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone);
+        payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone, payload.maxMessageLength);
       serverStore.setTurnAvailability(payload.turnAvailability);
       const origin = currentEventOrigin();
       if (!origin) return;
@@ -799,7 +799,7 @@ class App {
       // appearing in the message body (#14).
       if (!message.isSystem) {
         const me = serverStore.currentUser;
-        if (me && message.userId !== me.id) {
+        if (me && message.userId !== me.id && serverStore.canUserReadChannel(me.id, message.channelId)) {
           const nick = (me.nickname || '').trim().toLowerCase();
           // `@todos` counts as a mention for everyone in the channel when the
           // server allows it (#464).

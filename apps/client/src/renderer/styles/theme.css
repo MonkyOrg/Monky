@@ -2706,6 +2706,9 @@ input:focus, textarea:focus, select:focus {
 }
 
 .chat-message-text .md-code-lang {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.3px;
@@ -2744,6 +2747,9 @@ input:focus, textarea:focus, select:focus {
 }
 
 .chat-message-text .md-codeblock {
+  min-width: 0;
+  flex: 1;
+  line-height: 20px;
   font-family: var(--font-mono);
   font-size: 12.5px;
   background: var(--bg-panel);
@@ -2755,6 +2761,20 @@ input:focus, textarea:focus, select:focus {
   white-space: pre;
   tab-size: 2;
 }
+
+.md-code-content { display: flex; min-width: 0; }
+.md-code-lines {
+  flex: none;
+  margin: 0;
+  padding: 8px 10px;
+  font: 12.5px/20px var(--font-mono);
+  color: var(--text-muted);
+  text-align: right;
+  white-space: pre;
+  border-right: 1px solid var(--border-color);
+}
+.chat-message-text .md-code-lines,
+.md-code-lines * { user-select: none; -webkit-user-select: none; pointer-events: none; }
 
 /*
  * Syntax colors for highlight.js output. A theme is written here instead of
@@ -4225,17 +4245,43 @@ input:focus, textarea:focus, select:focus {
   background-color: var(--text-muted);
 }
 
-.chat-input-wrapper {
-  display: flex;
-  align-items: center;
+.chat-composer-surface {
   background-color: var(--bg-input);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
-  padding: 4px 10px;
+  min-width: 0;
+  overflow: hidden;
 }
 
-.chat-input-wrapper:focus-within {
+.chat-composer-surface:focus-within {
+  border-bottom-color: var(--border-focus);
+  box-shadow: inset 0 -1px var(--border-focus);
+}
+
+.chat-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+}
+
+.chat-composer-surface:has(#chat-composer-blocks:not([hidden]), #chat-reply-composer:not([hidden])) .chat-input-wrapper {
+  display: grid;
+  grid-template-columns: 30px 30px 30px minmax(0, 1fr) auto auto;
+}
+.chat-composer-surface:has(#chat-composer-blocks:not([hidden]), #chat-reply-composer:not([hidden])) .chat-input-field {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  width: 100%;
+  margin-bottom: 6px;
+}
+.chat-composer-surface .chat-char-count { grid-column: 5; }
+.chat-composer-surface .chat-send-btn { grid-column: 6; }
+.chat-composer-surface[hidden] { display: none; }
+.chat-composer-surface .chat-attach-btn { min-width: 0; }
+.chat-input-container--editing .chat-composer-surface {
   border-color: var(--border-focus);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
 }
 
 .chat-input-wrapper--disabled {
@@ -4245,6 +4291,10 @@ input:focus, textarea:focus, select:focus {
 
 .chat-input-field {
   flex: 1;
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 36px;
+  height: 36px;
   background: transparent;
   border: none;
   padding: 8px 6px;
@@ -5369,6 +5419,7 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
   justify-content: center;
   z-index: 10050;
+  overflow: hidden;
 }
 
 .lightbox-toolbar {
@@ -5381,6 +5432,7 @@ input:focus, textarea:focus, select:focus {
   justify-content: space-between;
   gap: 18px;
   pointer-events: none;
+  z-index: 2;
 }
 
 .lightbox-meta,
@@ -5503,6 +5555,8 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   align-items: center;
   justify-content: center;
+  min-width: 0;
+  min-height: 0;
 }
 
 .lightbox-media-frame {
@@ -5512,6 +5566,18 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
   justify-content: center;
   overflow: hidden;
+}
+
+.lightbox-media-frame--image {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.lightbox-media-frame--image .lightbox-media--image {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
 }
 
 .lightbox-media {
@@ -9658,17 +9724,11 @@ body.overlay-window-mode #app {
   color: #ffffff;
 }
 
-/* Purely a visual cue sitting flush in a bottom corner: with the window
-   background fully transparent, the frameless resize edge is invisible and the
-   user has no idea where to grab to resize. It draws a diagonal resize grip in
-   the very corner to mimic the OS grip, and hops to whichever bottom corner
-   faces away from the screen edge (see `.dock-right`). It must not eat pointer
-   events, otherwise it would sit on top of the real (OS-handled) resize border
-   (#543). */
+/* Do not intercept the native frameless window's resize border. */
 .overlay-resize-hint {
   position: absolute;
-  right: 2px;
-  bottom: 2px;
+  width: 18px;
+  height: 18px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -9679,16 +9739,7 @@ body.overlay-window-mode #app {
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.9));
 }
 
-/* Docked against the right edge of the display, the window can only grow from
-   its left side, so the grip mirrors to the bottom-left corner (#543). */
-.overlay-stage-root.dock-right .overlay-resize-hint {
-  right: auto;
-  left: 2px;
-  transform: scaleX(-1);
-}
-
-.overlay-stage-root:hover .overlay-resize-hint,
-.overlay-stage-root.is-hovered .overlay-resize-hint {
+.overlay-resize-hint.near-pointer {
   opacity: 0.65;
 }
 
@@ -9712,7 +9763,31 @@ body.overlay-window-mode #app {
   min-height: 0;
   overflow: hidden;
   gap: 6px;
+  -webkit-app-region: drag;
 }
+
+.overlay-empty-state { -webkit-app-region: drag; }
+body.overlay-window-mode .overlay-cards-container.preserve-aspect {
+  display: grid;
+  align-content: center;
+  justify-content: center;
+}
+body.overlay-window-mode .overlay-cards-container.preserve-aspect .overlay-card {
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
+body.overlay-window-mode .overlay-cards-container.preserve-aspect .overlay-video-wrapper {
+  min-height: 0;
+  height: 0;
+}
+body.overlay-window-mode .overlay-cards-container.preserve-aspect .overlay-card.leaving {
+  width: var(--overlay-card-width);
+  height: var(--overlay-card-height);
+  margin: auto;
+}
+.overlay-cards-container.preserve-aspect video { object-fit: contain; }
 
 .overlay-cards-container.layout-grid {
   display: grid;
@@ -10064,3 +10139,166 @@ body.overlay-window-mode #app {
   overflow-wrap: anywhere;
   white-space: normal;
 }
+#chat-composer-blocks {
+  max-height: 45vh;
+  overflow-y: auto;
+  padding: 12px 12px 0;
+}
+.chat-composer-block {
+  position: relative;
+  min-width: 0;
+  margin: 0 0 10px;
+  padding: 0;
+  border: 0;
+}
+.chat-composer-block textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 36px;
+  resize: none;
+  padding: 8px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  line-height: 20px;
+}
+.chat-composer-block-text textarea { padding-right: 26px; }
+.chat-composer-block button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  padding: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.chat-composer-block button:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-card-hover); }
+.chat-composer-block button:focus-visible { outline: 2px solid var(--accent-primary); }
+.chat-composer-block-text > .chat-block-remove { position: absolute; top: 6px; right: 0; opacity: 0; }
+.chat-block-add-text {
+  position: absolute;
+  bottom: -9px;
+  right: 28px;
+  z-index: 1;
+  font-size: 10px;
+  opacity: 0;
+  pointer-events: none;
+}
+.chat-composer-block:is(:hover, :focus-within) .chat-block-add-text,
+.chat-composer-block:is(:hover, :focus-within) > .chat-block-remove {
+  opacity: 1;
+  pointer-events: auto;
+}
+.chat-composer-block-code {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.chat-code-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 2px 8px;
+  color: var(--text-secondary);
+  list-style: none;
+  cursor: pointer;
+}
+.chat-code-header::-webkit-details-marker { display: none; }
+.chat-code-header select {
+  width: auto;
+  max-width: min(240px, 65%);
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 0;
+  background-color: transparent;
+}
+.chat-code-header .chat-block-remove { margin-left: auto; }
+.chat-composer-block-code details[open] .chat-code-header { border-bottom: 1px solid var(--border-color); }
+.chat-composer-block-code details:not([open]) .chat-code-fold { transform: rotate(-90deg); }
+.chat-code-editor { display: flex; min-width: 0; }
+.chat-code-editor .md-code-lines { position: relative; overflow: hidden; max-height: 240px; }
+.chat-code-editor .md-code-lines span { display: block; }
+.chat-code-input { position: relative; flex: 1; min-width: 0; }
+.chat-code-input pre,
+.chat-code-input textarea {
+  margin: 0;
+  padding: 8px 10px;
+  font: 12.5px/20px var(--font-mono);
+  tab-size: 2;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.chat-code-input pre {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--text-primary);
+}
+.chat-code-input code { font: inherit; }
+.chat-code-input textarea {
+  position: relative;
+  min-height: 36px;
+  max-height: 240px;
+  color: transparent;
+  caret-color: var(--text-primary);
+  background: transparent;
+}
+.chat-code-input textarea::selection { background: color-mix(in srgb, var(--accent-primary) 35%, transparent); }
+.chat-quote {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 6px 0 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--text-muted);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  text-align: left;
+}
+.chat-composer-block .chat-quote { margin: 0; }
+.chat-quote-content { display: flex; flex-direction: column; gap: 3px; min-width: 0; max-width: 480px; }
+.chat-quote-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; }
+.chat-quote-heading strong { font-weight: 500; overflow-wrap: anywhere; }
+.chat-quote-heading time { color: var(--text-muted); white-space: nowrap; }
+.chat-quote-preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.chat-reply-reference > .chat-quote-content { white-space: normal; }
+.chat-reply-composer:not([hidden]) { padding: 12px 12px 0; }
+.chat-reply-composer .chat-quote { margin: 0; }
+.chat-delivery {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.chat-delivery--failed { color: var(--danger); }
+.chat-delivery button {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  text-decoration: underline;
+  font-size: 11px;
+  cursor: pointer;
+}
+.chat-delivery button:hover { background: var(--bg-card-hover); }
+.chat-delivery button:focus-visible { outline: 2px solid var(--accent-primary); }

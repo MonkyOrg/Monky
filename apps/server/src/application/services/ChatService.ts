@@ -8,6 +8,11 @@ import {
   attachmentCaptionSchema,
   hasEveryoneMention,
   messageContentSchema,
+  createMessageContentSchema,
+  messageBlocksSchema,
+  messageBlocksContent,
+  type MessageBlock,
+  type ResolvedMessageBlock,
   chatReactionSchema,
   type ChatReactionEventPayload,
   type MessageReaction,
@@ -48,11 +53,12 @@ export class ChatService {
     private serverRepo: IServerRepository,
     /**
      * Whether a user may see a channel (#464). Injected as a callback so the
-     * chat layer does not have to know about roles and permissions: `@todos`
+     * chat layer does not have to know about roles and permissions: mentions
      * must never ping people who cannot even see the private channel it was
      * written in.
      */
-    private canUserAccessChannel: (userId: string, channelId: string) => Promise<boolean>
+    private canUserAccessChannel: (userId: string, channelId: string) => Promise<boolean>,
+    private canUserReadMessages: (userId: string) => Promise<boolean>
   ) {}
 
   public async sendBotMessage(
@@ -66,8 +72,13 @@ export class ChatService {
     replyToMessageId?: string,
     localizations?: BotMessageLocalizations
   ): Promise<BotMessageResult> {
-    const parsed = messageContentSchema.safeParse(content);
+    const server = await this.serverRepo.getServer();
+    const parsed = createMessageContentSchema(server?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH).safeParse(content);
     const variants = botMessageLocalizationsSchema.optional().safeParse(localizations);
+    if (variants.success && variants.data && Object.values(variants.data).some(value =>
+      value !== undefined && !createMessageContentSchema(server?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH).safeParse(value).success)) {
+      return { success: false, errorCode: ProtocolErrorCode.MESSAGE_TOO_LONG, errorMessage: 'A tradução excede o limite de caracteres do servidor.' };
+    }
     if (!parsed.success || !variants.success || typeof channelId !== 'string' || !channelId || channelId.length > 128 ||
         (messageId !== undefined && (!messageId || messageId.length > 128))) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de bot inválida.' };
@@ -111,11 +122,21 @@ export class ChatService {
     return { success: true, message: { ...this.botMessage(persisted), reply: await this.resolveReply(persisted) } };
   }
 
-  private async isValidReply(channelId: string, messageId?: string): Promise<boolean> {
+  private async isValidReply(channelId: string, messageId?: string, allowDeleted = false): Promise<boolean> {
     if (messageId === undefined) return true;
     if (!messageReferenceSchema.safeParse(messageId).success) return false;
     const original = await this.messageRepo.findById(messageId);
-    return !!original && original.channelId === channelId && !original.isSystem && !original.deletedAt;
+    return !!original && original.channelId === channelId && !original.isSystem && (allowDeleted || !original.deletedAt);
+  }
+
+  private async resolveBlocks(record: MessageRecord): Promise<ResolvedMessageBlock[] | undefined> {
+    if (!record.blocks || record.deletedAt) return undefined;
+    return Promise.all(record.blocks.map(async (block): Promise<ResolvedMessageBlock> => {
+      if (block.type !== 'reply') return block;
+      const reply = await this.resolveReply({ ...record, replyToMessageId: block.messageId });
+      if (!reply) throw new Error('Missing resolved message reference');
+      return { ...block, reply };
+    }));
   }
 
   private async resolveReply(record: MessageRecord): Promise<MessageReply | undefined> {
@@ -129,6 +150,7 @@ export class ChatService {
     const attachments = await this.attachmentService.getForMessages([original.id]);
     return {
       messageId: original.id,
+      createdAt: original.createdAt,
       userNickname: original.botAuthor?.name ?? user?.nickname ?? 'Usuário Desconhecido',
       content: original.content.slice(0, 200),
       ...(original.botAuthor ? { isBot: true, localizations: botMessagePreviewLocalizations(original.localizations) } : {}),
@@ -198,13 +220,16 @@ export class ChatService {
     channelId: string,
     content: string,
     attachmentIds?: string[],
-    replyToMessageId?: string
+    replyToMessageId?: string,
+    rawBlocks?: unknown,
+    clientMessageId?: string,
   ): Promise<{
     success: boolean;
     errorCode?: ProtocolErrorCode;
     errorMessage?: string;
     message?: ChatMessage;
     mentionedUserIds?: string[];
+    replayed?: boolean;
   }> {
     // Check rate limit
     if (!this.rateLimiter.checkLimit(userId)) {
@@ -215,10 +240,46 @@ export class ChatService {
       };
     }
 
+    if (clientMessageId !== undefined && !messageReferenceSchema.safeParse(clientMessageId).success) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem inválido.' };
+    }
+    if (attachmentIds !== undefined && (!Array.isArray(attachmentIds) ||
+        attachmentIds.length > LIMITS.MAX_ATTACHMENTS_PER_MESSAGE ||
+        new Set(attachmentIds).size !== attachmentIds.length ||
+        attachmentIds.some(id => !messageReferenceSchema.safeParse(id).success))) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Anexos inválidos.' };
+    }
+    const channel = await this.channelRepo.findById(channelId);
+    if (!channel || channel.type !== 'TEXT' || !(await this.canUserAccessChannel(userId, channelId))) {
+      return { success: false, errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND, errorMessage: 'Canal de texto não encontrado' };
+    }
+    const replay = async (existing: MessageRecord) => {
+      if (existing.userId !== userId || existing.channelId !== channelId || existing.isSystem || existing.botAuthor) {
+        return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Identificador de mensagem já utilizado.' };
+      }
+      const [message] = await this.loadHistory(channelId, 1, undefined, existing.id);
+      return { success: true, message, replayed: true };
+    };
+    const existing = clientMessageId ? await this.messageRepo.findById(clientMessageId) : null;
+    if (existing) return replay(existing);
+
     // Validate content. Attachment messages may carry an empty caption; plain
     // text messages must be non-empty (#11).
     const hasAttachments = !!(attachmentIds && attachmentIds.length > 0);
-    const schema = hasAttachments ? attachmentCaptionSchema : messageContentSchema;
+    const parsedBlocks = messageBlocksSchema.optional().safeParse(rawBlocks);
+    if (!parsedBlocks.success) return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Blocos de mensagem inválidos.' };
+    const blocks = parsedBlocks.data;
+    if (blocks) {
+      content = messageBlocksContent(blocks);
+      replyToMessageId = blocks.find(block => block.type === 'reply')?.messageId;
+      for (const block of blocks) {
+        if (block.type === 'reply' && !(await this.isValidReply(channelId, block.messageId, true))) {
+          return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de referência indisponível.' };
+        }
+      }
+    }
+    const server = await this.serverRepo.getServer();
+    const schema = createMessageContentSchema(server?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH, hasAttachments || !!blocks?.some(block => block.type === 'reply'));
     const parseResult = schema.safeParse(content ?? '');
     if (!parseResult.success) {
       return {
@@ -228,17 +289,7 @@ export class ChatService {
       };
     }
 
-    // Check channel
-    const channel = await this.channelRepo.findById(channelId);
-    if (!channel || channel.type !== 'TEXT' || !(await this.canUserAccessChannel(userId, channelId))) {
-      return {
-        success: false,
-        errorCode: ProtocolErrorCode.CHANNEL_NOT_FOUND,
-        errorMessage: 'Canal de texto não encontrado',
-      };
-    }
-
-    if (!(await this.isValidReply(channelId, replyToMessageId))) {
+    if (!(await this.isValidReply(channelId, replyToMessageId, !!blocks))) {
       return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem de referência indisponível.' };
     }
 
@@ -253,22 +304,23 @@ export class ChatService {
 
     const now = Date.now();
     const messageRecord: MessageRecord = {
-      id: uuidv4(),
+      id: clientMessageId ?? uuidv4(),
       channelId,
       userId: user.id,
       content: parseResult.data,
+      blocks,
       replyToMessageId,
       createdAt: now,
       isSystem: false,
     };
 
-    await this.messageRepo.create(messageRecord);
-
-    const mentionedUserIds = await this.persistMentions(user.id, channelId, messageRecord);
-
-    const attachments = hasAttachments
-      ? await this.attachmentService.linkToMessage(attachmentIds!, messageRecord.id, user.id, channelId)
-      : [];
+    const mentions = await this.collectMentions(user.id, channelId, messageRecord);
+    const committed = await this.messageRepo.createChatMessage(messageRecord, attachmentIds ?? [], mentions);
+    if (!committed) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Anexo indisponível. Selecione o arquivo novamente.' };
+    }
+    if (!committed.created) return replay(committed.message);
+    const attachments = (await this.attachmentService.getForMessages([messageRecord.id])).get(messageRecord.id) ?? [];
 
     const chatMessage: ChatMessage = {
       id: messageRecord.id,
@@ -281,12 +333,13 @@ export class ChatService {
       isSystem: false,
       attachments: attachments.length > 0 ? attachments : undefined,
       reply: await this.resolveReply(messageRecord),
+      blocks: await this.resolveBlocks(messageRecord),
     };
 
     return {
       success: true,
       message: chatMessage,
-      mentionedUserIds,
+      mentionedUserIds: mentions.map(mention => mention.userId),
     };
   }
 
@@ -343,7 +396,7 @@ export class ChatService {
     // An attachment message may end up with an empty caption; a plain text
     // message may not be emptied by an edit — that is what deleting is for.
     const attachments = (await this.attachmentService.getForMessages([messageId])).get(messageId) ?? [];
-    const schema = attachments.length > 0 ? attachmentCaptionSchema : messageContentSchema;
+    const schema = createMessageContentSchema(server?.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH, attachments.length > 0);
     const parseResult = schema.safeParse(content ?? '');
     if (!parseResult.success) {
       return {
@@ -354,7 +407,9 @@ export class ChatService {
     }
 
     const editedAt = Date.now();
-    await this.messageRepo.updateContent(messageId, parseResult.data, editedAt);
+    const blocks: MessageBlock[] | undefined = existing.blocks
+      ? [...existing.blocks.filter(block => block.type === 'reply'), { type: 'text', text: parseResult.data }] : undefined;
+    await this.messageRepo.updateContent(messageId, parseResult.data, editedAt, blocks);
 
     const user = await this.userRepo.findById(existing.userId);
     return {
@@ -375,6 +430,7 @@ export class ChatService {
         deletedAt: null,
         reactions: (await this.getReactions([messageId])).get(messageId) ?? [],
         reply: await this.resolveReply(existing),
+        blocks: await this.resolveBlocks({ ...existing, blocks }),
       },
     };
   }
@@ -454,16 +510,16 @@ export class ChatService {
    * `@todos` / `@everyone` mentions everyone who can see the channel, when the
    * server allows it (#464).
    */
-  private async persistMentions(
+  private async collectMentions(
     authorId: string,
     channelId: string,
     message: MessageRecord
-  ): Promise<string[]> {
+  ): Promise<MentionRecord[]> {
     const lowerContent = message.content.toLowerCase();
     if (!lowerContent.includes('@')) return [];
 
     const allUsers = await this.userRepo.listAll();
-    const mentionedUserIds: string[] = [];
+    const mentions: MentionRecord[] = [];
 
     let mentionsEveryone = hasEveryoneMention(message.content);
     if (mentionsEveryone) {
@@ -474,16 +530,11 @@ export class ChatService {
     for (const candidate of allUsers) {
       if (candidate.id === authorId) continue;
 
-      let mentioned = false;
       const nickname = candidate.nickname.trim().toLowerCase();
-      if (nickname && lowerContent.includes('@' + nickname)) {
-        mentioned = true;
-      } else if (mentionsEveryone && (await this.canUserAccessChannel(candidate.id, channelId))) {
-        mentioned = true;
-      }
-      if (!mentioned) continue;
+      if (!mentionsEveryone && !(nickname && lowerContent.includes('@' + nickname))) continue;
+      if (!(await this.canUserReadMessages(candidate.id))
+        || !(await this.canUserAccessChannel(candidate.id, channelId))) continue;
 
-      mentionedUserIds.push(candidate.id);
       const mention: MentionRecord = {
         id: uuidv4(),
         userId: candidate.id,
@@ -491,10 +542,10 @@ export class ChatService {
         messageId: message.id,
         createdAt: message.createdAt,
       };
-      await this.mentionRepo.add(mention);
+      mentions.push(mention);
     }
 
-    return mentionedUserIds;
+    return mentions;
   }
 
   /** Clears unread mentions for a user in a channel when they open it (#14). */
@@ -545,6 +596,7 @@ export class ChatService {
         deletedAt: m.deletedAt ?? null,
         reactions: reactionsByMessage.get(m.id) ?? [],
         reply: await this.resolveReply(m),
+        blocks: await this.resolveBlocks(m),
       };
     }));
   }

@@ -183,7 +183,8 @@ export class BotInteractionHandler {
     private channelService: ChannelService,
     private userService: UserService,
     private registry: CommandRegistry,
-    private settings?: BotSettingsService
+    private settings?: BotSettingsService,
+    private messageLimit: () => Promise<number> = async () => LIMITS.MAX_MESSAGE_LENGTH,
   ) {}
 
   async autocomplete(session: BotInteractionSession, payload: unknown, requestId?: string): Promise<void> {
@@ -714,6 +715,11 @@ export class BotInteractionHandler {
     const parsed = commandResponseSchema.safeParse(payload);
     if (!parsed.success) {
       this.error(session, ProtocolErrorCode.BOT_INTERACTION_INVALID, requestId);
+      return;
+    }
+    const contentSchema = createMessageContentSchema(await this.messageLimit());
+    if (![parsed.data.content, ...Object.values(parsed.data.localizations ?? {})].every(content => contentSchema.safeParse(content).success)) {
+      this.error(session, ProtocolErrorCode.MESSAGE_TOO_LONG, requestId);
       return;
     }
     const invocation = this.findOwned(session, parsed.data.invocationId, 'bot', requestId);
@@ -1295,3 +1301,4 @@ export class BotInteractionHandler {
     this.transport.sendError(session.ws, code, message ?? 'Não foi possível processar a interação com o bot.', requestId);
   }
 }
+import { createMessageContentSchema } from '@monky/shared';

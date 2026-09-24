@@ -36,8 +36,8 @@ console.log('✔ Validações de Nickname passaram');
 // Test Message validation
 console.assert(isValidMessageContent('Olá mundo') === true, 'Mensagem normal válida');
 console.assert(isValidMessageContent('') === false, 'Mensagem vazia inválida');
-console.assert(isValidMessageContent('a'.repeat(2001)) === false, 'Mensagem acima de 2000 chars inválida');
-console.assert(isValidMessageContent('a'.repeat(2000)) === true, 'Mensagem de 2000 chars válida');
+assert.equal(isValidMessageContent('a'.repeat(16001)), false);
+assert.equal(isValidMessageContent('a'.repeat(16000)), true);
 console.log('✔ Validações de Mensagem passaram');
 
 // Test Quality Presets
@@ -48,7 +48,7 @@ console.assert(QUALITY_PRESETS.GAMING.name === 'Gaming Mode', 'Preset Gaming Mod
 console.log('✔ Presets de Qualidade verificados');
 
 // Test Protocol Version
-if (PROTOCOL_VERSION !== 24) throw new Error('Versão do protocolo deve ser 24');
+assert.equal(PROTOCOL_VERSION, 25);
 console.assert(LIMITS.SFU_DEFAULT_MIN_PORT === 40000, 'Porta mínima padrão SFU');
 console.assert(LIMITS.SFU_DEFAULT_MAX_PORT === 49151, 'Porta máxima padrão SFU');
 console.assert(

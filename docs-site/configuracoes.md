@@ -319,6 +319,31 @@ P2P ou SFU. Em caso de falha, a câmera é desligada e o erro é mostrado, sem
 voltar silenciosamente ao vídeo sem efeito. Desativar o efeito exige uma
 escolha explícita.
 
+O recorte usa **Robust Video Matting (RVM)**, que estima a cor e a transparência
+do primeiro plano e usa os frames anteriores para acompanhar o movimento.
+Desfoque, cor e imagem exigem GPU com WebGL2; se ela não estiver disponível,
+o efeito não é ativado e a câmera fica parada com uma mensagem de erro.
+Não há troca silenciosa por outro modelo. Chroma físico continua oferecendo
+composição CPU quando WebGL2 não está disponível. A resolução final segue seu perfil.
+O desfoque preserva o enquadramento e usa a máscara para evitar que as cores
+da pessoa se espalhem pelo fundo junto ao contorno. O recorte é automático:
+os antigos controles **Recorte da pessoa** e **Suavidade do recorte** não são
+aplicados ao RVM, evitando endurecer as transparências de cabelo e bordas.
+Seus valores legados permanecem salvos, sem alterar os demais ajustes.
+O modelo e o grafo somam cerca de 4,4 MB, além do runtime TensorFlow.js.
+As licenças e fontes estão disponíveis nas configurações. Isso não elimina as limitações
+de iluminação e enquadramento, nem garante recorte idêntico ao de outros apps.
+
+### Overlay da chamada
+
+**Manter proporção dos cards** preserva 16:9 ao redimensionar o overlay ou mudar
+o número de participantes. Desligue o switch para o layout livre anterior.
+Arraste também pela área livre e pelos cards, não só pelo cabeçalho; botões
+continuam clicáveis. Os oito indicadores de redimensionamento aparecem apenas
+perto do ponteiro, nos cantos e no meio das bordas. Apenas um fica ativo por vez:
+cantos mostram sua própria diagonal e bordas mostram a direção horizontal ou
+vertical correspondente, sem sobrepor o indicador do canto.
+
 ### Seletor de cores
 
 A cor da tela física do chroma key, a cor do fundo virtual e as cores dos

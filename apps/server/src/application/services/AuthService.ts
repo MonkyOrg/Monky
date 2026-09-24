@@ -6,6 +6,7 @@ import {
   AuthConnectPayload,
   LIMITS,
   PROTOCOL_VERSION,
+  negotiateProtocol,
   ProtocolErrorCode,
   ServerDetails,
   UserSummary,
@@ -116,7 +117,7 @@ export class AuthService {
     // The schema would flatten it into a generic BAD_REQUEST, and the client
     // then showed "invalid request" for what is really "one of you is outdated"
     // (#355).
-    if (payload?.protocolVersion !== PROTOCOL_VERSION) {
+    if (!negotiateProtocol(payload?.protocolVersion, payload?.protocolOffer, 'client')) {
       return {
         success: false,
         errorCode: ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
@@ -404,6 +405,7 @@ export class AuthService {
       name: server.name,
       createdAt: server.createdAt,
       maxUsers: server.maxUsers,
+      maxMessageLength: server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
       hasPassword: !!(server.passwordHash && server.passwordHash.length > 0),
       allowSoundboard: server.allowSoundboard !== false,
       allowEveryoneMention: server.allowEveryoneMention !== false,
@@ -472,6 +474,7 @@ export class AuthService {
   }
 
   public async updateServerSettings(payload: {
+    maxMessageLength?: number;
     name?: string;
     password?: string | null;
     allowSoundboard?: boolean;
@@ -485,6 +488,7 @@ export class AuthService {
     maxUsers?: number;
     turnEnabled?: boolean;
   }): Promise<{
+    maxMessageLength?: number;
     success: boolean;
     name?: string;
     hasPassword?: boolean;
@@ -505,6 +509,12 @@ export class AuthService {
     }
 
     const updates: Partial<ServerRecord> = {};
+    if (payload.maxMessageLength !== undefined) {
+      if (!Number.isSafeInteger(payload.maxMessageLength) || payload.maxMessageLength < 0) {
+        return { success: false, errorMessage: 'O limite de caracteres deve ser um inteiro positivo ou zero (sem limite).' };
+      }
+      updates.maxMessageLength = payload.maxMessageLength;
+    }
 
     if (payload.name && payload.name.trim().length >= 2) {
       updates.name = payload.name.trim();
@@ -635,6 +645,7 @@ export class AuthService {
       iconUrl: this.avatarStorage.getPublicUrl(updatedServer?.iconPath),
       attachmentStorage: await this.attachmentService.getStorageInfo(),
       maxUsers: updatedServer?.maxUsers ?? server.maxUsers,
+      maxMessageLength: updatedServer?.maxMessageLength ?? server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
       turnEnabled: Boolean(updatedServer?.turnEnabled),
     };
   }

@@ -447,6 +447,7 @@ export interface OverlayConfig {
   autoOpenOnLeaveStage?: boolean;
   minimalistMode?: boolean;
   hideSelf?: boolean;
+  preserveAspectRatio?: boolean;
   bounds?: OverlayBounds;
 }
 
@@ -832,6 +833,7 @@ export interface IpcEvents {
   // Eventos de Sobreposição (Overlay) (#169)
   'overlay:state-changed': [isOpen: boolean];
   'overlay:config-updated': [config: OverlayConfig];
+  'overlay:hover-changed': [hovered: boolean, point?: { x: number; y: number }];
   'overlay:signal-received': [signal: string];
   'overlay:sync-state-received': [state: OverlaySyncState];
   'overlay:close-requested': [];

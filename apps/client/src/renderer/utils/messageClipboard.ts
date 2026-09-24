@@ -103,7 +103,7 @@ function clipboardContent(clean: HTMLElement, markdown?: string): MessageClipboa
   const text = serializeChildren(clean, false);
   const original = markdown ?? serializeChildren(clean, true);
   clean.style.whiteSpace = 'pre-wrap';
-  if (original.length <= LIMITS.MAX_MESSAGE_LENGTH) {
+  if (original.length <= LIMITS.WS_MAX_PAYLOAD_BYTES) {
     clean.dataset.monkyClipboard = clipboardMarker;
     clean.dataset.monkyMarkdown = original;
   }
@@ -189,7 +189,7 @@ export function readMonkyClipboardMarkdown(data: DataTransfer): string | null {
   const sources = template.content.querySelectorAll(`[data-monky-clipboard="${clipboardMarker}"]`);
   if (sources.length !== 1) return null;
   const markdown = sources[0].getAttribute('data-monky-markdown');
-  if (!markdown || markdown.length > LIMITS.MAX_MESSAGE_LENGTH) return null;
+  if (!markdown || markdown.length > LIMITS.WS_MAX_PAYLOAD_BYTES) return null;
   // A rich editor may retain the outer metadata while copying only a fragment.
   // Never let stale metadata expand that selection back to the whole message.
   const plain = data.getData('text/plain').replace(/\r\n?/g, '\n');

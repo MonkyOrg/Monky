@@ -3,6 +3,7 @@ import { ChannelType, UserStatus, VoiceMode } from '@monky/shared';
 export type { VoiceRestrictions } from '@monky/shared';
 
 export interface ServerRecord {
+  maxMessageLength?: number;
   id: string;
   name: string;
   passwordHash: string;
@@ -63,6 +64,7 @@ export interface ChannelRecord {
 }
 
 export interface MessageRecord {
+  blocks?: import('@monky/shared').MessageBlock[];
   localizations?: import('@monky/shared').BotMessageLocalizations;
   replyToMessageId?: string;
   /** The owner backs the existing user FK; readers expose the bot's real ID. */

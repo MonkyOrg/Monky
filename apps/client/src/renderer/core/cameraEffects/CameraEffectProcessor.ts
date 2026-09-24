@@ -6,6 +6,10 @@ import {
 } from '../../utils/cameraEffects';
 import type { CameraEffectRequest, CameraEffectResponse } from './cameraEffectProtocol';
 
+declare const MediaStreamTrackProcessor: {
+  new(options: { track: MediaStreamTrack; maxBufferSize: number }): { readable: ReadableStream<VideoFrame> };
+} | undefined;
+
 interface PendingConfiguration {
   revision: number;
   resolve: (stream: MediaStream) => void;
@@ -49,6 +53,7 @@ function waitForVideo(video: HTMLVideoElement, signal: AbortSignal): Promise<voi
 export class CameraEffectProcessor {
   private worker: Worker | null = null;
   private video: HTMLVideoElement | null = null;
+  private reader: ReadableStreamDefaultReader<VideoFrame> | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private context: CanvasRenderingContext2D | null = null;
   private output: MediaStream | null = null;
@@ -108,13 +113,21 @@ export class CameraEffectProcessor {
     this.outputTrack = track;
     track.enabled = false;
     track.contentHint = 'motion';
-    this.video = document.createElement('video');
-    this.video.autoplay = true;
-    this.video.muted = true;
-    this.video.playsInline = true;
-    this.video.setAttribute('aria-hidden', 'true');
-    this.video.srcObject = this.source;
-    await Promise.all([this.video.play(), waitForVideo(this.video, this.abort.signal)]);
+    const sourceTrack = this.source.getVideoTracks()[0];
+    if (!sourceTrack) throw new CameraEffectError('camera');
+    if (typeof MediaStreamTrackProcessor === 'function') {
+      // Read capture frames directly: a hidden video's compositor callbacks can throttle to 1 FPS.
+      this.reader = new MediaStreamTrackProcessor({ track: sourceTrack, maxBufferSize: 1 }).readable.getReader();
+    } else {
+      console.warn('[CameraEffects] Direct camera frames unavailable; using video callback capture.');
+      this.video = document.createElement('video');
+      this.video.autoplay = true;
+      this.video.muted = true;
+      this.video.playsInline = true;
+      this.video.setAttribute('aria-hidden', 'true');
+      this.video.srcObject = this.source;
+      await Promise.all([this.video.play(), waitForVideo(this.video, this.abort.signal)]);
+    }
     if (this.stopped) throw cameraOperationCancelled();
     const stream = await this.update(snapshot);
     if (this.stopped) throw cameraOperationCancelled();
@@ -131,7 +144,7 @@ export class CameraEffectProcessor {
     const revision = this.revision;
     const operation = new Promise<MediaStream>((resolve, reject) => {
       this.pending = { revision, resolve, reject };
-      this.configurationTimeout = setTimeout(() => this.fail(new CameraEffectError('model')), 15000);
+      this.configurationTimeout = setTimeout(() => this.fail(new CameraEffectError('model')), 30000);
       try {
         this.send({
           type: 'configure', revision, settings: { ...snapshot.settings },
@@ -175,6 +188,12 @@ export class CameraEffectProcessor {
     this.output?.getTracks().forEach((track) => track.stop());
     this.output = null;
     this.outputTrack = null;
+    const reader = this.reader;
+    this.reader = null;
+    if (reader) {
+      void reader.cancel().catch(error => console.warn('[CameraEffects] Capture reader teardown failed:', error))
+        .finally(() => reader.releaseLock());
+    }
     if (this.video) {
       this.video.pause();
       this.video.srcObject = null;
@@ -207,7 +226,7 @@ export class CameraEffectProcessor {
       };
       worker.onerror = terminate;
       worker.onmessageerror = terminate;
-      timeout = setTimeout(terminate, 250);
+      timeout = setTimeout(terminate, 2000);
       try {
         worker.postMessage({ type: 'dispose' } satisfies CameraEffectRequest);
       } catch (error) {
@@ -264,27 +283,36 @@ export class CameraEffectProcessor {
   }
 
   private scheduleFrame(): void {
-    if (!this.active || this.stopped || !this.video || this.inFlightRevision !== null
+    if (!this.active || this.stopped || (!this.video && !this.reader) || this.inFlightRevision !== null
       || this.frameCallback !== null || this.animationFrame !== null) return;
+    if (this.reader) {
+      const revision = this.revision;
+      this.inFlightRevision = revision;
+      this.frameTimeout = setTimeout(() => this.fail(new CameraEffectError('processing', {
+        cause: new Error('Direct camera frame processing timed out'),
+      })), this.pending?.revision === revision ? 30000 : 8000);
+      void this.captureSourceFrame(this.reader, revision).catch((error: unknown) => {
+        this.completeFrame(revision);
+        if (revision === this.revision && !isCameraOperationCancelled(error)) {
+          this.fail(error instanceof CameraEffectError ? error : new CameraEffectError('processing', { cause: error }));
+        }
+      });
+      return;
+    }
+    if (!this.video) return;
     const frame = (now: number) => {
       this.frameCallback = null;
       this.animationFrame = null;
       if (!this.active || this.stopped || !this.video) return;
-      const interval = 1000 / this.targetFps;
-      const tolerance = Math.min(1, interval / 10);
-      if (now + tolerance < this.nextFrameAt || this.video.currentTime === this.lastVideoTime) {
+      if (this.video.currentTime === this.lastVideoTime || !this.admitFrame(now)) {
         this.scheduleFrame();
         return;
       }
-      // Keep cadence and tolerate sub-millisecond callback jitter without
-      // accidentally dropping every other frame at the camera's own FPS.
-      this.nextFrameAt = Number.isFinite(this.nextFrameAt)
-        ? this.nextFrameAt + (Math.floor(Math.max(0, now - this.nextFrameAt) / interval) + 1) * interval
-        : now + interval;
       this.lastVideoTime = this.video.currentTime;
       const revision = this.revision;
       this.inFlightRevision = revision;
-      this.frameTimeout = setTimeout(() => this.fail(new CameraEffectError('processing')), 8000);
+      this.frameTimeout = setTimeout(() => this.fail(new CameraEffectError('processing')),
+        this.pending?.revision === revision ? 30000 : 8000);
       void this.captureFrame(revision, now).catch((error: unknown) => {
         this.completeFrame(revision);
         if (revision === this.revision && !isCameraOperationCancelled(error)) {
@@ -299,14 +327,47 @@ export class CameraEffectProcessor {
     }
   }
 
+  private admitFrame(now: number): boolean {
+    const interval = 1000 / this.targetFps;
+    if (now + Math.min(1, interval / 10) < this.nextFrameAt) return false;
+    this.nextFrameAt = Number.isFinite(this.nextFrameAt)
+      ? this.nextFrameAt + (Math.floor(Math.max(0, now - this.nextFrameAt) / interval) + 1) * interval
+      : now + interval;
+    return true;
+  }
+
+  private async captureSourceFrame(reader: ReadableStreamDefaultReader<VideoFrame>, revision: number): Promise<void> {
+    const { value: frame, done } = await reader.read();
+    try {
+      if (this.stopped || !this.active || revision !== this.revision) {
+        this.completeFrame(revision);
+        return;
+      }
+      if (done || !frame) throw new CameraEffectError('camera');
+      const timestamp = performance.now();
+      // Capture cadence must not depend on jitter in main-thread delivery.
+      if (!this.admitFrame(frame.timestamp / 1000)) {
+        this.completeFrame(revision);
+        return;
+      }
+      await this.captureBitmap(frame, frame.displayWidth, frame.displayHeight, revision, timestamp);
+    } finally { frame?.close(); }
+  }
+
   private async captureFrame(revision: number, timestamp: number): Promise<void> {
     if (!this.video) throw cameraOperationCancelled();
+    await this.captureBitmap(this.video, this.video.videoWidth, this.video.videoHeight, revision, timestamp);
+  }
+
+  private async captureBitmap(
+    source: HTMLVideoElement | VideoFrame, width: number, height: number, revision: number, timestamp: number,
+  ): Promise<void> {
     const size = fitCameraEffectSize(
-      this.video.videoWidth, this.video.videoHeight,
+      width, height,
       this.limitQuality ? Math.min(this.profile.cameraWidth, CAMERA_EFFECT_LIMITS.maxWidth) : this.profile.cameraWidth,
       this.limitQuality ? Math.min(this.profile.cameraHeight, CAMERA_EFFECT_LIMITS.maxHeight) : this.profile.cameraHeight,
     );
-    const bitmap = await createImageBitmap(this.video, { resizeWidth: size.width, resizeHeight: size.height });
+    const bitmap = await createImageBitmap(source, { resizeWidth: size.width, resizeHeight: size.height });
     if (this.stopped || !this.active || revision !== this.revision) {
       bitmap.close();
       this.completeFrame(revision);
@@ -337,6 +398,7 @@ export class CameraEffectProcessor {
 
   private fail(error: CameraEffectError): void {
     if (this.stopped) return;
+    console.error('[CameraEffects] Processing stopped:', error, error.cause);
     const pending = this.pending;
     this.pending = null;
     pending?.reject(error);

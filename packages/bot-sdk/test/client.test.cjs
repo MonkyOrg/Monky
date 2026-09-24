@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { WebSocketServer } = require('ws');
+const { MIN_BOT_PROTOCOL } = require('@monky/shared');
 const {
   BotClient, BOT_CAPABILITIES, LIMITS, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, resolveBotSettingsValues,
   getCommandPresentation, localizeCommand,
@@ -1321,7 +1322,7 @@ test('a protocol mismatch can recover after the server is updated', { timeout: 1
         type: MessageType.SERVER_ERROR,
         payload: {
           code: ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
-          message: 'Update the server.', serverProtocolVersion: PROTOCOL_VERSION - 1,
+          message: 'Update the server.', serverProtocolVersion: MIN_BOT_PROTOCOL - 1,
         },
       }
       : { type: MessageType.AUTH_SUCCESS, payload: {} })),
@@ -1341,6 +1342,25 @@ const autocompleteOptions = [
   { name: 'count', description: 'Count', type: 'integer', min: 0, max: 10 },
   { name: 'enabled', description: 'Enabled', type: 'boolean' },
 ];
+
+test('new SDK reconnects using the known legacy bot contract without an update warning', async t => {
+  const offered = [];
+  const server = await makeServer(t, { authenticate: (ws, message) => {
+    offered.push(message.payload);
+    ws.send(JSON.stringify(offered.length === 1
+      ? { type: MessageType.SERVER_ERROR, payload: { code: ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED, serverProtocolVersion: 24 } }
+      : { type: MessageType.AUTH_SUCCESS, payload: {} }));
+  } });
+  const { bot, errors } = makeBot(t, server);
+  bot.command({ name: 'ping', description: 'Ping', handler() {} });
+  bot.connect();
+  await server.next(MessageType.COMMAND_REGISTER);
+  assert.deepEqual(offered.map(offer => offer.protocolVersion), [25, 24]);
+  assert.equal(offered[0].publicKey, offered[1].publicKey);
+  assert.equal(offered[0].botToken, offered[1].botToken);
+  assert.equal(offered[0].protocolOffer.features.includes('chat-blocks'), false);
+  assert.equal(errors.length, 0);
+});
 const soundDownloadRequest = { url: 'https://example.com/sound.mp3', fileName: 'sound.mp3', title: 'Sound' };
 
 function autocompleteRequest(query, options = {}) {
@@ -2011,7 +2031,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 24);
+  assert.equal(PROTOCOL_VERSION, 25);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();

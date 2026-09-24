@@ -347,6 +347,8 @@ export const en: CliTranslationMap = {
   'label.password': 'Server password',
   'label.hasPassword': 'Password protected',
   'label.maxUsers': 'Member limit',
+  'label.maxMessageLength': 'Characters per message (0 = unlimited)',
+  'config.invalidMessageLimit': 'Enter a non-negative integer; 0 removes the character limit.',
   'label.ownerUserId': 'Owner ID',
   'label.ownerNickname': 'Owner nickname',
   'label.allowSoundboard': 'Allow soundboard',

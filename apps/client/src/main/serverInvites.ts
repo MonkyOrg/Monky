@@ -1,5 +1,16 @@
 import { parseServerInviteLink, SERVER_INVITE_SCHEME, type ServerInviteResult } from '@monky/shared';
 
+export function registerServerInviteProtocol(application: {
+  isPackaged: boolean;
+  isDefaultProtocolClient(scheme: string): boolean;
+  setAsDefaultProtocolClient(scheme: string): boolean;
+}): void {
+  if (!application.isPackaged || application.isDefaultProtocolClient(SERVER_INVITE_SCHEME)) return;
+  if (!application.setAsDefaultProtocolClient(SERVER_INVITE_SCHEME)) {
+    console.warn('[Invites] Could not register the installed app for monky:// invitations.');
+  }
+}
+
 export class ServerInviteInbox {
   private pending: ServerInviteResult | null = null;
 

@@ -1,6 +1,8 @@
 import { LIMITS, type ServerDetails, type ServerUpdateSettingsPayload } from '@monky/shared';
 
 type ValidationError =
+  | 'serverSettings.messageLimitInvalid'
+  | 'chat.featureUpdateRequired'
   | 'serverSettings.nameInvalid'
   | 'serverSettings.passwordInvalid'
   | 'serverSettings.memberLimitInvalid'
@@ -17,6 +19,10 @@ export function serverSettingsValidationError(
   persisted: ServerDetails,
   registeredMembers?: number,
 ): ValidationError | null {
+  if (patch.maxMessageLength !== undefined) {
+    if (!persisted.protocol?.features.includes('message-length-setting')) return 'chat.featureUpdateRequired';
+    if (!Number.isSafeInteger(patch.maxMessageLength) || patch.maxMessageLength < 0) return 'serverSettings.messageLimitInvalid';
+  }
   if (patch.name !== undefined && (patch.name.trim().length < 2 || patch.name.trim().length > 50)) {
     return 'serverSettings.nameInvalid';
   }

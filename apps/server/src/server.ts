@@ -278,7 +278,8 @@ export class MonkyServer {
       rateLimiter,
       attachmentService,
       serverRepo,
-      (userId, channelId) => channelService.canUserAccessChannel(userId, channelId)
+      (userId, channelId) => channelService.canUserAccessChannel(userId, channelId),
+      userId => permissionService.checkPermission(userId, Permission.READ_MESSAGES)
     );
 
     let getOnlineUsers: () => Map<string, { user: UserSummary }> = () => new Map();

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
-import { MessageType, type ProtocolMessage, type ServerShutdownPayload } from '@monky/shared';
+import { MessageType, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, type ProtocolMessage, type ServerShutdownPayload } from '@monky/shared';
 import { NetworkClient, type ConnectionStatus } from '../src/renderer/core/NetworkClient';
 import { appEvents } from '../src/renderer/core/EventBus';
 import { setForegroundContext, setSessionEventRouter } from '../src/renderer/core/sessionRouting';
@@ -98,6 +98,36 @@ test('initial connection failure rejects without creating an automatic reconnect
   await setImmediate();
   assert.equal(f.client.getStatus(), 'DISCONNECTED');
   assert.equal(f.sockets.length, 1);
+});
+
+test('a current client retries the known legacy contract exactly once without changing identity', async context => {
+  const f = fixture(context);
+  const pending = f.connect();
+  const socket = f.lastSocket();
+  socket.open();
+  const request = socket.sent[0];
+  assert.equal(request.payload.protocolVersion, PROTOCOL_VERSION);
+  socket.receive({ type: MessageType.SERVER_ERROR, requestId: request.requestId,
+    payload: { code: 'PROTOCOL_VERSION_UNSUPPORTED', serverProtocolVersion: 24 } });
+  const retry = socket.sent.at(-1);
+  assert.equal(retry?.payload.protocolVersion, 24);
+  assert.equal(retry?.payload.publicKey, request.payload.publicKey);
+  assert.equal(retry?.payload.deviceId, request.payload.deviceId);
+  socket.receive({ type: MessageType.AUTH_SUCCESS, requestId: retry?.requestId, payload: {} });
+  await pending;
+  assert.equal(f.client.getStatus(), 'CONNECTED');
+  assert.equal(f.sockets.length, 1);
+});
+
+test('a current client never retries below the security floor', async context => {
+  const f = fixture(context);
+  const pending = assert.rejects(f.connect());
+  const socket = f.lastSocket();
+  socket.open();
+  socket.receive({ type: MessageType.SERVER_ERROR, requestId: socket.sent[0].requestId,
+    payload: { code: 'PROTOCOL_VERSION_UNSUPPORTED', serverProtocolVersion: MIN_CLIENT_PROTOCOL - 1 } });
+  await pending;
+  assert.equal(socket.sent.filter(message => message.type === MessageType.AUTH_CONNECT).length, 1);
 });
 
 test('only the original client recognizes correlated local voice leave acknowledgements', async context => {

@@ -312,6 +312,30 @@ If processing fails, the camera stops and reports the error rather than
 silently reverting to unprocessed video. Turning the effect off requires an
 explicit choice.
 
+Cutout uses **Robust Video Matting (RVM)**, estimating foreground color and
+transparency while using previous frames to follow motion. Blur, color and
+image effects require a WebGL2 GPU; if unavailable, the effect is not enabled
+and the camera stops with an error. There is no silent switch to another model.
+Physical chroma retains CPU composition when WebGL2 is unavailable.
+Final video resolution still follows your selected profile.
+Blur preserves framing and uses the mask to prevent foreground colors from
+spreading into the background near the contour. Matting is automatic: legacy
+**Person cutout threshold** and **Cutout edge softness** controls are not applied
+to RVM, preserving hair and edge transparency. Their saved values are retained
+without changing other preferences. The graph and weights total about 4.4 MB,
+in addition to the TensorFlow.js runtime. Licenses and sources are available in
+camera settings. Lighting and framing limitations
+still apply; this does not guarantee an identical cutout to other apps.
+
+### Call overlay
+
+**Preserve card aspect ratio** keeps cards at 16:9 as the overlay is resized
+or participants change. Turn the switch off for the previous free layout.
+Drag from empty areas and cards, not only the header; buttons remain clickable.
+Eight resize hints appear only near the pointer, at corners and edge midpoints.
+Only one is active at a time: corners show their own diagonal, and edges show
+the corresponding horizontal or vertical direction without overlapping a corner.
+
 ### Color picker
 
 The physical chroma-key screen color, virtual background color and role

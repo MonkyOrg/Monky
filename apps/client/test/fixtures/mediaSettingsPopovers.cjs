@@ -115,8 +115,7 @@ async function runMediaSettingsPopoverSmoke() {
   let releaseImage = null;
   const disposeTooltips = initTooltips();
   const helpKeys = {
-    blurRadius: 'cameraEffects.blurStrengthHelp', personThreshold: 'cameraEffects.personThresholdHelp',
-    edgeSoftness: 'cameraEffects.edgeSoftnessHelp', keyColor: 'cameraEffects.keyColorHelp',
+    blurRadius: 'cameraEffects.blurStrengthHelp', keyColor: 'cameraEffects.keyColorHelp',
     keyTolerance: 'cameraEffects.keyToleranceHelp', keySoftness: 'cameraEffects.keySoftnessHelp',
     spillReduction: 'cameraEffects.spillReductionHelp', backgroundSource: 'cameraEffects.chromaReplacementHelp',
     backgroundColor: 'cameraEffects.backgroundColorHelp', backgroundImage: 'cameraEffects.imageHelp',
@@ -478,6 +477,56 @@ async function runMediaSettingsPopoverSmoke() {
       && hidden.querySelector('#noise-suppression-description').textContent === nativeHint,
     'English helper copy describes built-in app processing and distinguishes the RNNoise default');
     escape();
+    let effectErrors = 0;
+    const offEffectError = appEvents.on('camera.effects_error', () => { effectErrors++; });
+    try {
+      video.stopCamera();
+      await video.setCameraEffects({ mode: 'off' });
+      await video.removeCameraBackgroundImage();
+      for (const mode of ['image', 'chroma']) {
+        await openCamera();
+        const currentPanel = panel();
+        currentPanel.querySelector(`[data-camera-mode="${mode}"]`).click();
+        await until(() => !currentPanel.querySelector('[data-camera-mode]').disabled, 'Camera mode selection settles');
+        if (mode === 'chroma') {
+          currentPanel.querySelector('[data-camera-background="image"]').click();
+          await until(() => !currentPanel.querySelector('[data-camera-mode]').disabled, 'Chroma image selection settles');
+        }
+        const beforeMissing = requests.length;
+        check(panel() === currentPanel && !preview().srcObject
+          && currentPanel.querySelector('[data-camera-preview-toggle]').disabled,
+        `${mode}: an absent background stops and blocks preview without dismissing its editor`);
+        check(!currentPanel.querySelector('[data-camera-pick-image]').disabled
+          && currentPanel.textContent.includes(language.t('cameraEffects.errorImageMissing')),
+        `${mode}: the localized prerequisite and image picker remain available`);
+        check(!video.getCameraState().publishing && video.getCameraState().stream === null && effectErrors === 0,
+          'Incomplete image preferences never publish raw camera or emit a global failure dialog');
+        escape();
+        effects.loaded = false;
+        cameraTrigger.click();
+        await until(() => effects.isLoaded && panel()?.querySelector('[data-camera-preview-toggle]').disabled,
+          'A cold reopen loads incomplete preferences without attempting capture');
+        await wait(150);
+        check(panel() && requests.length === beforeMissing && effectErrors === 0,
+          `${mode}: re-opening the quick panel stays usable without permission/capture/error loops`);
+        panel().querySelector('[data-camera-preview-toggle]').click();
+        check(requests.length === beforeMissing, 'The blocked preview toggle cannot acquire hardware');
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([blob], 'recovered-background.png', { type: 'image/png' }));
+        const file = panel().querySelector('input[type=file]');
+        file.files = transfer.files;
+        file.dispatchEvent(new Event('change', { bubbles: true }));
+        await until(() => effects.snapshot.image && !panel()?.querySelector('[data-camera-preview-toggle]').disabled,
+          'Choosing a background in the same panel unlocks preview');
+        check(panel() && !panel().textContent.includes(language.t('cameraEffects.errorImageMissing')),
+          'The missing-image error clears after the image is saved');
+        panel().querySelector('[data-camera-preview-toggle]').click();
+        await until(ready, 'A completed background preference can start a processed preview');
+        escape();
+        await video.setCameraEffects({ mode: 'off' });
+        await video.removeCameraBackgroundImage();
+      }
+    } finally { offEffectError(); }
     check(primaryActions === 0 && voice.isMuted && voice.isDeafened,
       'Quick arrows, previews, settings and device choices never activate mute, deafen or camera primary toggles');
     check(maxLiveCaptures === 1, 'All preview, device, image and permission races have at most one live hardware capture');

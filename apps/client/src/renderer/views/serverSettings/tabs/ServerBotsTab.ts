@@ -391,7 +391,7 @@ export class ServerBotsTab {
       const compatibilityWarning = bot.bound && bot.requiredProtocolVersion !== undefined
         ? bot.lastProtocolVersion == null
           ? t('bots.compatibilityUnchecked', { protocol: bot.requiredProtocolVersion })
-          : bot.lastProtocolVersion !== bot.requiredProtocolVersion
+          : (bot.protocolCompatible ?? (bot.lastProtocolVersion === bot.requiredProtocolVersion)) === false
             ? t('bots.compatibilityMismatch', {
               previous: bot.lastProtocolVersion, protocol: bot.requiredProtocolVersion,
             })

@@ -204,12 +204,32 @@ image share a transactional record. Persistence failure does not change the
 in-memory preference; corrupt data is not interpreted as consent to transmit
 the camera without an effect.
 
-Segmentation uses MediaPipe/Selfie Segmenter with bundled model and WASM assets,
-without a CDN or frames sent to an API. Segmentation, compositing and chroma key
-run in an `OffscreenCanvas` worker, with at most one frame in flight.
-The segmenter is created lazily once per worker and reused across blur, color,
-image and chroma transitions; it stays idle during chroma. Turning effects off
-or ending capture releases the worker and model. Resolution and frame cadence
+Automatic separation uses Robust Video Matting (RVM/MobileNetv3) and TensorFlow.js
+with bundled graph and weights, without a CDN or frames sent to an API.
+Inference, compositing and chroma key run in an `OffscreenCanvas` worker, with
+at most one frame in flight. `MediaStreamTrackProcessor` reads capture frames
+directly; the video-element fallback logs a warning when that API is unavailable.
+Chroma, compositing and separable blur use WebGL2 shaders without reading
+or looping over full-resolution video pixels in JavaScript. Blur excludes
+the person before filtering and normalizes by the available background
+weight without enlarging the image. This prevents foreground colors from
+bleeding into the contour or producing a second, displaced silhouette.
+RVM takes full-resolution RGB and maintains four recurrent states. Its internal
+ratio is `min(1, 480 / max(width, height))`; foreground RGB and alpha retain full
+resolution without CPU readback. Composition shares TensorFlow's WebGL2 context
+and restores its state. Native alpha is not thresholded or softened using legacy
+segmentation settings; those values remain stored but the UI explains they are
+not applied. AI effects fail explicitly without WebGL2. Physical chroma retains
+the Canvas2D fallback with a log warning; the AI model is never silently replaced.
+GPU context loss during processing stops the camera rather than publishing
+raw frames or silently switching backends.
+The model is loaded lazily and reused across blur, color and image modes.
+Reconfiguration or resolution changes reset temporal memory; during chroma
+the model stays idle without inference, retaining compiled shaders.
+The first frame has up to 30 seconds for initialization/compilation; subsequent
+frames have an 8-second watchdog. No frames are published during preparation.
+Turning effects off or ending capture releases the reader, tensors,
+textures, context and worker. Resolution and frame cadence
 follow the selected profile. The optional limiter, off by default, caps both at
 1280 × 720 and 30 FPS without upscaling a smaller capture or duplicating frames
 to compensate for capture or processing limitations.
@@ -283,15 +303,19 @@ in the order they were asked for.
 Payload validation uses **zod**, with the schemas in `packages/shared` — the very
 same ones the client uses to validate before sending.
 
-::: warning The protocol version is exact, not compatible
-`PROTOCOL_VERSION`, defined in `packages/shared/src/constants.ts`, must be
-**identical** on both sides. There is
-no negotiation and no compatibility mode: if the client sends a version different
-from the server's, authentication is refused.
+::: warning Negotiated compatibility, never an unrestricted downgrade
+Protocol 25 negotiates independent client and bot minimum versions, initially
+**24**, plus feature flags in `AUTH_CONNECT`/`AUTH_SUCCESS`. Version 24 peers
+retain their existing contract. Message blocks and message-limit settings are
+only enabled when negotiated. New clients and SDKs may retry authentication
+once using an old server's known version-24 contract. Versions below the floor
+are rejected; future versions must explicitly advertise a compatible range.
 
-That is why bumping the protocol is always a breaking change and forces a
-**major** release — there is even a CI check that fails the PR when this is not
-respected.
+Additive features need not raise the floor. Critical fixes or incompatible
+changes must raise `MIN_CLIENT_PROTOCOL` and/or `MIN_BOT_PROTOCOL` in
+`protocolCompatibility.ts`, update release metadata and test rejection before
+publication. The CI major-version policy for `PROTOCOL_VERSION` changes remains
+in effect.
 :::
 
 ### Identity authentication {#authentication-the-server-never-sees-a-password-of-yours}
@@ -362,7 +386,7 @@ they hold.
 | Protection | How |
 |---|---|
 | Message flood | Sliding window: 10 messages every 5 s |
-| Message size | 2000 characters |
+| Message size | 16,000 characters by default; configurable per server, `0` disables the character limit; WebSocket packets remain limited to 8 MiB |
 | Avatar | 5 MB, and the file must carry a PNG, JPEG or WebP signature |
 | Attachments | Per-file limit and a total server budget, both configurable |
 | Soundboard | Audio refused above ~4 MB |

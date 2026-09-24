@@ -5,10 +5,23 @@ import {
   isReleaseVersion,
   parseBotCompatibility,
   parseReleaseCompatibility,
+  releaseRequiresProtocolUpdate,
 } from '../src/releaseCompatibility.js';
 
 const version = '18.0.0-beta';
 const manifest = { schemaVersion: 1, version, protocolVersion: 16, botSdkVersion: version };
+
+test('release warnings follow the affected protocol floor, not every additive bump', () => {
+  const additive = parseReleaseCompatibility({ ...manifest, protocolVersion: 26, minimumClientProtocol: 24, minimumBotProtocol: 24 }, version);
+  assert.ok(additive);
+  assert.equal(releaseRequiresProtocolUpdate(additive, 'client'), false);
+  assert.equal(releaseRequiresProtocolUpdate(additive, 'bot'), false);
+  assert.equal(releaseRequiresProtocolUpdate({ ...additive, minimumBotProtocol: 26 }, 'bot'), true);
+  assert.equal(releaseRequiresProtocolUpdate({ ...additive, minimumBotProtocol: 26 }, 'client'), false);
+  for (const floor of [0, -1, 27, 1.2, '24', null]) {
+    assert.equal(parseReleaseCompatibility({ ...additive, minimumBotProtocol: floor }, version), null);
+  }
+});
 
 test('release compatibility validates exact release, SDK and protocol rather than assuming a SemVer change', () => {
   assert.deepEqual(parseReleaseCompatibility(manifest, version), manifest);

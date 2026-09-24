@@ -20,12 +20,12 @@ import { OverlayManager } from './overlayManager';
 import { HOME_MIN_HEIGHT, HOME_MIN_WIDTH } from './windowSizing';
 import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame, isBotScreenUrl } from './botScreenIsolation';
 import { resolveDevelopmentProfile } from './developmentProfile';
-import { bindDevelopmentQa, loadDevelopmentQa } from './developmentQa';
+import { bindDevelopmentQa, configureDevelopmentQaMedia, loadDevelopmentQa } from './developmentQa';
 import { CrashRecovery } from './crashRecovery';
 import type { LocalExecutionIpc } from './localExecution/ipc';
 import { initializeMainLanguage, mt } from './i18n';
 import { SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
-import { ServerInviteInbox } from './serverInvites';
+import { ServerInviteInbox, registerServerInviteProtocol } from './serverInvites';
 
 import fs from 'fs';
 
@@ -37,12 +37,7 @@ const developmentQa = loadDevelopmentQa({
   parentPid: process.ppid,
   supervised: typeof process.send === 'function',
 });
-if (developmentQa) {
-  // Prepared QA never opens physical capture devices, including after unmute.
-  app.commandLine.appendSwitch('use-fake-device-for-media-stream');
-  app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
-  if (developmentQa.smoke) app.commandLine.appendSwitch('mute-audio');
-}
+configureDevelopmentQaMedia(app.commandLine, developmentQa);
 
 const developmentProfile = resolveDevelopmentProfile({
   isPackaged: app.isPackaged,
@@ -496,6 +491,7 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
+    registerServerInviteProtocol(app);
     initializeMainLanguage(app.getPath('userData'), app.getPreferredSystemLanguages());
     getCrashRecovery();
     // TEST-ONLY (Bancada A): simulate the update install UX without a real

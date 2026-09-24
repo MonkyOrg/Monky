@@ -25,11 +25,31 @@ de cor ou imagem e chroma key de tela física na prévia. Os efeitos são locais
 e valem também para a chamada. Fechar a prévia não desliga uma câmera em uso;
 veja limites e cuidados nas [configurações](/configuracoes).
 
+Na prévia rápida, escolher **Imagem** sem um fundo definido mantém o painel
+aberto e mostra o aviso no próprio painel. A prévia fica desligada e seu switch
+bloqueado até você escolher uma imagem. Isso também vale para chroma key com
+substituição por imagem; nenhum vídeo sem o efeito é publicado como alternativa.
+
 Quem transmite aparece com selo **LIVE**. Clique no card para destacar ou use tela cheia.
 
 ## Chat
 
 Cada canal de texto tem histórico salvo no servidor, avatares, horários, formatação básica e limite anti-flood de 10 mensagens a cada 5 segundos.
+
+Em servidores compatíveis, suas mensagens mostram **Enviando**, **Enviada ao
+servidor** ou **Falha ao enviar** junto ao horário. A confirmação é de recebimento
+pelo servidor, não de leitura. Em caso de falha, **Tentar novamente** reenvia a
+mesma mensagem sem duplicá-la, inclusive quando a confirmação anterior se perdeu.
+Texto, respostas, código e anexos ficam preservados na fila da sessão, mesmo
+ao trocar de canal ou reconectar ao mesmo servidor e identidade. Essa fila é
+mantida em memória enquanto o aplicativo está aberto; ela não é um arquivo local
+permanente de mensagens.
+
+O limite padrão é de **16.000 caracteres**, configurável em **Configurações do
+servidor → Geral**. Desligar o switch remove o limite de caracteres, não a
+proteção de transporte de 8 MiB por pacote. O contador acompanha mudanças sem
+reconectar. Em servidores antigos, os controles não disponíveis indicam que é
+preciso atualizar, sem impedir o chat básico.
 
 Uma mensagem começada e não enviada fica guardada no canal onde você estava digitando. Ir para o palco de voz, abrir outro canal e voltar não apaga o texto — cada canal guarda o seu rascunho, que só some quando você envia a mensagem ou sai do servidor.
 
@@ -37,7 +57,7 @@ Ao passar o mouse sobre uma mensagem (ou chegar aos botões com `Tab`), uma barr
 
 `Ctrl+C` copia o texto selecionado com a formatação exibida, inclusive a produzida por Markdown. No macOS, use `Cmd` no lugar de `Ctrl`. Sem seleção, o atalho atua somente sobre a mensagem que está com foco, não sobre a conversa inteira. **Copiar mensagem** na barra usa formatação; em **Mais opções → Copiar mensagem**, escolha **Com formatação** ou **Sem formatação**. A cópia sem formatação está disponível apenas nesse submenu, sem atalho próprio. Uma seleção dentro da mensagem é respeitada também por esses botões. Use `→` ou `Enter` para abrir o submenu, `←` ou `Escape` para voltar, e `Tab` para sair.
 
-A cópia formatada oferece HTML para aplicativos de texto rico e Markdown para destinos textuais: por exemplo, um negrito pode ser colado como `**texto**` quando o destino não aceita HTML. **Sem formatação** oferece somente o texto visível, sem marcações Markdown nem HTML. Ao colar uma cópia formatada no Monky, a marcação continua editável; HTML externo não é inserido na interface. Os atalhos dos campos de edição continuam nativos. Mensagens só com anexos copiam os nomes dos arquivos, sem transferir os anexos.
+A cópia formatada oferece HTML para aplicativos de texto rico e Markdown para destinos textuais: por exemplo, um negrito pode ser colado como `**texto**` quando o destino não aceita HTML. **Sem formatação** oferece somente o texto visível, sem marcações Markdown nem HTML. Ao colar uma cópia formatada no Monky, a marcação continua editável; HTML externo não é inserido na interface. Os atalhos dos campos de edição continuam nativos. Mensagens somente com imagem ou figurinha copiam a imagem; outros anexos, ou a opção **Sem formatação**, copiam os nomes dos arquivos, sem transferir os anexos.
 
 Para copiar a **imagem**, e não o nome ou endereço do arquivo, use **Copiar imagem**
 nos controles do anexo ou no menu do botão direito. Isso também funciona no menu
@@ -47,11 +67,18 @@ tamanho original; imagens animadas são copiadas como um quadro estático.
 A cópia aceita até 50 MB e 64 megapixels e avisa se a imagem ou o clipboard
 estiverem indisponíveis, sem substituir a imagem por um link.
 
+Na visualização ampliada, role sobre a imagem para aproximar ou afastar:
+a imagem e seu container crescem juntos, sem um recorte fixo no centro.
+Quando ultrapassar a janela, arraste para explorar os detalhes. O duplo clique
+alterna entre o enquadramento inicial e o tamanho original, até o limite de
+8× do enquadramento inicial; setas navegam pelos
+anexos e `Escape` fecha o visualizador.
+
 **Responder** mantém uma referência à mensagem original, com autor e prévia. A resposta pode incluir texto, anexos, código ou figurinha; mensagens públicas de bots também podem receber respostas. Cancele pelo `×` no campo de composição ou com `Escape`. A referência acompanha o rascunho do canal. Clicar na prévia leva à mensagem original, carregando uma janela do histórico se necessário; **Voltar às mensagens recentes** retorna ao fim da conversa. A prévia acompanha edições e mostra **Mensagem apagada** se o original for excluído, sem preservar seu conteúdo. Mensagens privadas de bots não podem ser usadas como referência.
 
 ## Menções
 
-Digitar `@` no campo de mensagem abre a lista de membros: escolha alguém para inserir `@apelido`. Quem é mencionado recebe o destaque na mensagem, o badge no canal e o som de menção.
+Digitar `@` no campo de mensagem lista somente membros que podem ler o canal atual, incluindo quem está offline: escolha alguém para inserir `@apelido`. A lista acompanha alterações de cargos e privacidade. Menções digitadas manualmente também são verificadas pelo servidor; quem não tem acesso não recebe uma menção pendente. Quem é mencionado recebe o destaque na mensagem, o badge no canal e o som de menção.
 
 O primeiro item da lista é o `@todos` (ou `@everyone` — os dois tokens funcionam em qualquer idioma), que notifica todo mundo que enxerga aquele canal. Canais privados continuam privados: quem não tem acesso não é notificado.
 
@@ -68,13 +95,26 @@ e consentimento sem exigir programação.
 
 ## Blocos de código
 
-O botão `< >`, ao lado da carinha, abre uma janela para colar código. Escolha a linguagem na lista (ou deixe em *Texto simples*) e envie com o botão ou com `Ctrl+Enter`.
+O botão `< >` e três crases criam um bloco de código **dentro do rascunho**, sem
+enviar a mensagem. Busque e filtre a linguagem pelo nome ou abreviação (como
+`js` ou `ps1`), edite ou recolha o bloco e intercale
+texto e várias respostas na ordem desejada. Cada bloco pode ser removido.
+Código colado com cercas Markdown também vira bloco editável. Tudo é enviado
+junto; uma falha de envio mantém os blocos para tentar novamente.
 
-Dentro da janela o `Tab` indenta em vez de pular para o próximo campo, e `Shift+Tab` remove a indentação. Com várias linhas selecionadas, vale para todas de uma vez.
+No servidor antigo, o seletor de código ainda abre em janela, mas confirmar
+insere o código no rascunho em vez de enviá-lo imediatamente.
 
-No chat o código aparece em um bloco destacado, com o nome da linguagem no topo e um botão **Copiar** que leva o trecho para a área de transferência sem a formatação. O contador da janela já inclui as marcações do bloco, então ele mostra o tamanho real da mensagem que será enviada.
+O editor e a mensagem enviada exibem destaque de sintaxe e números de linha.
+No editor, `Tab` indenta, `Shift+Tab` remove a indentação, `Esc` devolve o foco ao
+seletor de linguagem e `Ctrl+Enter` envia a composição. No chat, o botão **Copiar**
+copia somente o código, sem os números e os controles.
+O contador inclui as cercas do texto de compatibilidade. As referências são
+validadas pelo servidor e mostram **Mensagem apagada** se a origem for excluída.
 
-Quem preferir digitar direto no campo de mensagem também pode: envolver o trecho em três crases (```` ``` ````) tem o mesmo efeito, e escrever a linguagem logo depois da primeira crase (por exemplo ```` ```python ````) liga o destaque de sintaxe.
+Em mensagens compostas só por imagem ou figurinha, **Copiar mensagem** e
+`Ctrl+C` sem seleção copiam a imagem, não seu nome. Mensagens que também contêm
+texto continuam oferecendo esse texto; **Copiar imagem** permanece disponível.
 
 ## Emojis e figurinhas
 

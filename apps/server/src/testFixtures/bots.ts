@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocket } from 'ws';
-import { BOT_CAPABILITIES, MessageType, PROTOCOL_VERSION, ProtocolErrorCode, type BotCapability, type UserSummary } from '@monky/shared';
+import { BOT_CAPABILITIES, MessageType, Permission, PROTOCOL_VERSION, ProtocolErrorCode, type BotCapability, type UserSummary } from '@monky/shared';
 import { AttachmentService } from '../application/services/AttachmentService';
 import { AuthService } from '../application/services/AuthService';
 import { BotService } from '../application/services/BotService';
@@ -192,7 +192,8 @@ export async function createFixture(options: {
   const httpServer = http.createServer();
   const chatService = new ChatService(
     messageRepo, channelRepo, userRepo, mentionRepo, avatars, rateLimiter, attachmentService, serverRepo,
-    (userId, channelId) => channelService.canUserAccessChannel(userId, channelId)
+    (userId, channelId) => channelService.canUserAccessChannel(userId, channelId),
+    userId => permissions.checkPermission(userId, Permission.READ_MESSAGES)
   );
   const signalingService = new SignalingService(channelRepo, new SqliteVoiceRestrictionRepository(db));
   const coturnManager = new CoturnManager(dataDir);

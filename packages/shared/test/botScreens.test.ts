@@ -6,17 +6,18 @@ import {
 } from '../src/botScreens.js';
 import { PROTOCOL_VERSION } from '../src/constants.js';
 import { authConnectSchema } from '../src/validators.js';
+import { negotiateProtocol } from '../src/protocolCompatibility.js';
 
-test('the current protocol requires clients and bots to update with the server', () => {
+test('authentication shape allows negotiation while the compatibility floor rejects obsolete peers', () => {
   const input = { nickname: 'Member', publicKey: 'ab'.repeat(32), protocolVersion: PROTOCOL_VERSION };
-  assert.equal(PROTOCOL_VERSION, 24);
-  assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: 22 }).success, false);
-  assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: 21 }).success, false);
-  assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: 19 }).success, false);
+  assert.equal(PROTOCOL_VERSION, 25);
   assert.equal(authConnectSchema.safeParse(input).success, true);
-  assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: 17 }).success, false);
-  assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: 18 }).success, false);
-  assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: 16 }).success, false);
+  for (const version of [16, 17, 18, 19, 21, 22, 23]) {
+    assert.equal(negotiateProtocol(version, undefined, 'client'), null);
+    assert.equal(negotiateProtocol(version, undefined, 'bot'), null);
+  }
+  assert.ok(negotiateProtocol(24, undefined, 'client'));
+  assert.ok(negotiateProtocol(24, undefined, 'bot'));
 });
 
 test('screen JSON is finite, bounded, cycle-safe and rejects executable values', () => {

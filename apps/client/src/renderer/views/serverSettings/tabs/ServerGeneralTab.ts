@@ -37,6 +37,17 @@ export class ServerGeneralTab {
     const iconSrc = s.iconUrl ? getAvatarUrl(s.iconUrl) : logoUrl;
 
     return `
+      <div data-settings-section="message-limit" data-settings-label="${escapeHtml(t('serverSettings.messageLimit'))}" class="form-group">
+        <label class="toggle-switch" aria-label="${t('serverSettings.messageLimit')}">
+          <input id="toggle-message-limit" type="checkbox" ${(s.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH) > 0 ? 'checked' : ''}
+            ${s.protocol?.features.includes('message-length-setting') ? '' : 'disabled'}>
+          <span class="toggle-slider"></span>
+        </label>
+        <label for="input-message-limit">${t('serverSettings.messageLimit')}</label>
+        <input id="input-message-limit" type="number" min="1" step="1" value="${s.maxMessageLength || LIMITS.MAX_MESSAGE_LENGTH}"
+          ${s.protocol?.features.includes('message-length-setting') && s.maxMessageLength !== 0 ? '' : 'disabled'}>
+        <small>${t(s.protocol?.features.includes('message-length-setting') ? 'serverSettings.messageLimitHint' : 'chat.featureUpdateRequired')}</small>
+      </div>
       <div data-settings-section="server-profile" data-settings-label="${escapeHtml(t('serverSettings.nameLabel'))}" style="display: flex; gap: 16px; align-items: center; padding: 14px; background: var(--bg-card); border-radius: var(--radius-md); margin-bottom: 16px; border: 1px solid var(--border-color);">
         <button type="button" id="server-icon-wrapper" class="settings-avatar-wrapper" style="border-radius: 12px; width: 64px; height: 64px; padding: 0; border: 0; flex-shrink: 0;" title="${t('serverSettings.iconTitle')}">
           <img id="server-icon-preview" class="settings-avatar-img" style="border-radius: 10px; width: 64px; height: 64px; object-fit: cover;" src="${iconSrc}" alt="${t('serverSettings.iconAlt')}">
@@ -134,6 +145,12 @@ export class ServerGeneralTab {
    * back a detach function so the modal does not leak the listener on close.
    */
   public attach(root: HTMLElement): () => void {
+    const messageToggle = root.querySelector<HTMLInputElement>('#toggle-message-limit');
+    const messageInput = root.querySelector<HTMLInputElement>('#input-message-limit');
+    const syncMessageLimit = () => {
+      if (messageInput && messageToggle) messageInput.disabled = !messageToggle.checked || messageToggle.disabled;
+    };
+    messageToggle?.addEventListener('change', syncMessageLimit);
     const toggle = root.querySelector('#checkbox-limit-members') as HTMLInputElement | null;
     const group = root.querySelector('#max-users-group') as HTMLElement | null;
 
@@ -157,6 +174,7 @@ export class ServerGeneralTab {
     const cleanupVersion = version ? bindVersionCopyButton(version) : undefined;
 
     return () => {
+      messageToggle?.removeEventListener('change', syncMessageLimit);
       if (toggle && group) toggle.removeEventListener('change', sync);
       cleanupCapacity();
       cleanupVersion?.();

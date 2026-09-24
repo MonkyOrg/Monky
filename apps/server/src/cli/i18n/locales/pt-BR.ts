@@ -347,6 +347,8 @@ export const ptBR = {
   'label.password': 'Senha do servidor',
   'label.hasPassword': 'Protegido por senha',
   'label.maxUsers': 'Limite de membros',
+  'label.maxMessageLength': 'Caracteres por mensagem (0 = sem limite)',
+  'config.invalidMessageLimit': 'Informe um inteiro não negativo; 0 remove o limite de caracteres.',
   'label.ownerUserId': 'ID do dono',
   'label.ownerNickname': 'Apelido do dono',
   'label.allowSoundboard': 'Permitir soundboard',

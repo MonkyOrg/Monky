@@ -16,6 +16,7 @@ export const CONFIG_KEYS = [
   'port',
   'icon',
   'maxUsers',
+  'maxMessageLength',
   'allowSoundboard',
   'allowEveryoneMention',
   'showRoleBadgesToEveryone',

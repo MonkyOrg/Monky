@@ -25,11 +25,30 @@ virtual backgrounds and physical-screen chroma key. Effects run locally and
 also apply to the call. Closing the preview does not stop a camera in use;
 see limitations and precautions in [settings](/en/configuracoes).
 
+In the quick preview, selecting **Image** without a background keeps the panel
+open and displays an inline warning. Preview stays off and its switch is disabled
+until you choose an image. This also applies to chroma key with an image
+replacement; unprocessed video is never published as a fallback.
+
 Whoever broadcasts shows a **LIVE** badge. Click the card to spotlight it or use fullscreen.
 
 ## Chat
 
 Each text channel has history saved on the server, avatars, timestamps, basic formatting and an anti-flood limit of 10 messages every 5 seconds.
+
+On compatible servers, your messages show **Sending**, **Sent to server**, or
+**Failed to send** beside their timestamp. Confirmation means the server received
+the message, not that someone read it. **Try again** retries the same message
+without duplicates, including when its earlier acknowledgement was lost.
+Text, replies, code and attachments remain in the session's outbox when switching
+channels or reconnecting to the same server and identity. The outbox is kept in
+memory while the application is open, not in a permanent local message archive.
+
+The default limit is **16,000 characters**, configurable under **Server settings
+→ General**. Turning the switch off removes the character limit, not the 8 MiB
+packet protection. The counter follows changes without reconnecting. On older
+servers, unavailable controls explain that an update is needed without blocking
+basic chat.
 
 A message you started but haven't sent stays with the channel you were typing in. Jumping to the voice stage, opening another channel and coming back does not wipe the text — each channel keeps its own draft, which only goes away when you send the message or leave the server.
 
@@ -37,7 +56,7 @@ Hover over a message (or reach its buttons with `Tab`) to reveal a floating tool
 
 `Ctrl+C` copies selected text with its displayed formatting, including Markdown rendering. On macOS, use `Cmd` instead of `Ctrl`. Without a selection, the shortcut acts only on the focused message, never the entire conversation. **Copy message** in the toolbar uses formatting; under **More options → Copy message**, choose **With formatting** or **Without formatting**. Plain copying is available only in this submenu, without a dedicated shortcut. Those buttons also respect a selection within the message. Use `→` or `Enter` to open the submenu, `←` or `Escape` to go back, and `Tab` to leave.
 
-Formatted copying provides HTML for rich-text applications and Markdown for text destinations: for example, bold text may paste as `**text**` when the destination does not accept HTML. **Without formatting** provides only visible text, without Markdown markers or HTML. Pasting a formatted copy into Monky keeps the markup editable; external HTML is never inserted into the interface. Editing fields keep their native shortcuts. Attachment-only messages copy file names, without transferring attachments.
+Formatted copying provides HTML for rich-text applications and Markdown for text destinations: for example, bold text may paste as `**text**` when the destination does not accept HTML. **Without formatting** provides only visible text, without Markdown markers or HTML. Pasting a formatted copy into Monky keeps the markup editable; external HTML is never inserted into the interface. Editing fields keep their native shortcuts. Image-only and sticker-only messages copy the image; other attachments, or **Without formatting**, copy file names without transferring attachments.
 
 To copy the **image**, rather than its file name or address, use **Copy image**
 in the attachment controls or its right-click menu. Sticker menus also offer
@@ -47,11 +66,17 @@ at its original size; animated images are copied as a static frame.
 Copying supports up to 50 MB and 64 megapixels and reports unavailable images
 or clipboard access instead of substituting a link.
 
+In the expanded viewer, scroll over the image to zoom in or out. The image
+and its container grow together instead of zooming inside a fixed crop.
+Once it exceeds the window, drag to explore the details. Double-click toggles
+between the initial fit and original size, up to 8× the initial fit; arrow keys navigate attachments
+and `Escape` closes the viewer.
+
 **Reply** keeps a reference to the original message with its author and preview. Replies support text, attachments, code and stickers; public bot messages can also receive replies. Cancel with the `×` in the composer or `Escape`. The reference stays with the channel draft. Clicking the preview jumps to the original, loading a history window if needed; **Back to latest messages** returns to recent conversation. Previews reflect edits and show **Message deleted** when the original is deleted, without retaining its content. Private bot messages cannot be referenced.
 
 ## Mentions
 
-Typing `@` in the message box opens the member list: pick someone to insert `@nickname`. Whoever is mentioned gets the highlight on the message, the channel badge and the mention sound.
+Typing `@` lists only members who can read the current channel, including offline members: pick someone to insert `@nickname`. Suggestions follow role and channel privacy changes. The server also checks manually typed mentions; members without access do not receive an unread mention. Whoever is mentioned gets the highlight on the message, the channel badge and the mention sound.
 
 The first entry on the list is `@everyone` (or `@todos` — both tokens work in any language), which notifies everybody who can see that channel. Private channels stay private: people without access are not notified.
 
@@ -68,13 +93,26 @@ requiring programming.
 
 ## Code blocks
 
-The `< >` button, next to the smiley, opens a window for pasting code. Pick the language from the list (or leave it on *Plain text*) and send it with the button or with `Ctrl+Enter`.
+The `< >` button and triple backticks create a code block **inside the draft**
+without sending. Search and filter languages by name or alias (such as `js` or
+`ps1`), edit or collapse a block, and interleave text
+and multiple replies in the desired order. Each block can be removed. Pasted
+Markdown fences also become editable blocks. Everything is sent together;
+a failed send preserves the blocks for retry.
 
-Inside the window `Tab` indents instead of jumping to the next field, and `Shift+Tab` removes the indentation. With several lines selected it applies to all of them at once.
+Older servers retain the code dialog, but confirming it inserts code into the
+draft rather than sending immediately.
 
-In the chat the code shows up in a highlighted block, with the language name on top and a **Copy** button that puts the snippet on the clipboard without any formatting. The window's counter already includes the block markers, so it shows the real size of the message that will be sent.
+The editor and sent message show syntax highlighting and line numbers. In the
+editor, `Tab` indents, `Shift+Tab` outdents, `Esc` focuses the language selector,
+and `Ctrl+Enter` sends the composition. **Copy** copies only the code, without
+line numbers or controls. The counter
+includes the compatibility text's fences. References are validated by the server
+and show **Message deleted** when their source is deleted.
 
-You can also type it straight into the message field: wrapping the snippet in three backticks (```` ``` ````) does the same, and writing the language right after the first backtick (for example ```` ```python ````) turns syntax highlighting on.
+For image- or sticker-only messages, **Copy message** and `Ctrl+C` without a
+selection copy the image instead of its file name. Messages containing text
+still offer that text; **Copy image** remains available separately.
 
 ## Emojis and stickers
 

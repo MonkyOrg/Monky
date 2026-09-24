@@ -20,6 +20,7 @@ const ERROR_KEYS: Record<ProtocolErrorCode, TranslationKey> = {
   [ProtocolErrorCode.AVATAR_INVALID_TYPE]: 'protocolError.avatarInvalidType',
   [ProtocolErrorCode.SERVER_FULL]: 'protocolError.serverFull',
   [ProtocolErrorCode.PROTOCOL_VERSION_UNSUPPORTED]: 'protocolError.protocolVersionUnsupported',
+  [ProtocolErrorCode.FEATURE_REQUIRES_UPDATE]: 'chat.featureUpdateRequired',
   [ProtocolErrorCode.INTERNAL_ERROR]: 'protocolError.internalError',
   [ProtocolErrorCode.UNAUTHORIZED]: 'protocolError.unauthorized',
   [ProtocolErrorCode.PERMISSION_DENIED]: 'protocolError.permissionDenied',

@@ -85,6 +85,19 @@ select optgroup {
   pointer-events: none;
 }
 
+.monky-select-popup .monky-select-search {
+  position: sticky;
+  top: -5px;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  min-width: 200px;
+  margin-bottom: 5px;
+  font-size: 13px;
+  background: var(--bg-input);
+}
+.monky-select-empty { padding: 12px; color: var(--text-muted); }
+
 .monky-select-option {
   position: relative;
   min-height: 34px;
