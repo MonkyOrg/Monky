@@ -12,6 +12,10 @@ import {
   type AudioPreviewResult, type SoundDownloadResult, type SoundboardDownloadPermit, type SoundboardDownloadAvailability,
 } from '@monky/shared';
 import { SoundboardDownloads } from './soundboardDownload';
+import { SoundboardFiles } from './soundboardFiles';
+import { setupSoundboardFilesIpc } from './soundboardFilesIpc';
+import { createSoundboardEncoder } from './soundboardEncoder';
+import type { LocalTools } from './localExecution/LocalTools';
 import { AudioPreviews } from './audioPreviews';
 import { createLocalExecutionService } from './localExecution/createService';
 import { setupLocalExecutionIpc, type LocalExecutionIpc } from './localExecution/ipc';
@@ -326,8 +330,9 @@ export function setupIpcHandlers(
   const overlayManager = options?.overlayManager || new OverlayManager(mainWindow);
   const soundDownloads = new SoundboardDownloads(path.join(app.getPath('userData'), 'soundboard-folder.json'));
   const audioPreviews = new AudioPreviews();
+  let soundboardTools: LocalTools | undefined;
   const localExecution = setupLocalExecutionIpc(mainWindow, (notifications) =>
-    createLocalExecutionService(mainWindow, app.getPath('userData'), notifications));
+    createLocalExecutionService(mainWindow, app.getPath('userData'), notifications, tools => { soundboardTools = tools; }));
   const nativeSources = new NativeDesktopSources({
     windows: listNativeWindows,
     windowState(hwnd) {
@@ -348,6 +353,14 @@ export function setupIpcHandlers(
   );
   const ownsSoundDownload = (event: Electron.IpcMainInvokeEvent): boolean =>
     event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
+  const soundboardEncoder = createSoundboardEncoder(async () => {
+    try { return await soundboardTools?.readyExecutable('ffmpeg') ?? null; }
+    catch (error: unknown) {
+      console.error('[soundboard] Could not verify the local FFmpeg installation.', error);
+      return null;
+    }
+  });
+  const disposeSoundboardFiles = setupSoundboardFilesIpc(mainWindow, new SoundboardFiles(soundDownloads, soundboardEncoder));
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
     if (!ownsSoundDownload(event)) throw new Error(mt('error.defaultSoundboardFolder'));
     try {
@@ -1342,6 +1355,7 @@ export function setupIpcHandlers(
   mainWindow.on('closed', () => {
     stopSoundDownloads();
     for (const channel of Object.values(SOUND_DOWNLOAD_IPC)) ipcMain.removeHandler(channel);
+    disposeSoundboardFiles();
     for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);
     clearAudioBufferAccumulator();
     // Recovery keeps Main alive after the renderer is retired (#454).

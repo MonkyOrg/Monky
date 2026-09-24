@@ -36,7 +36,7 @@
     "test:shortcuts": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && node --test dist-test/test/shortcuts.test.js && node test/shortcutWorkerSmoke.cjs",
     "package": "electron-builder --win --dir",
     "dist": "electron-builder --win",
-    "test:soundboard": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && node --test dist-test/test/audioPreferences.test.js dist-test/test/soundDownloads.test.js test/soundboardLimiter.test.cjs && node test/soundboardLimiterSmoke.cjs"
+    "test:soundboard": "tsc -p tsconfig.test.json && tsc -p tsconfig.electron.json && node --test dist-test/test/audioPreferences.test.js dist-test/test/soundDownloads.test.js dist-test/test/favorites.test.js test/soundboardLimiter.test.cjs test/soundboardFiles.test.cjs && node test/soundboardLimiterSmoke.cjs && node test/soundboardFilesDom.cjs"
   },
   "description": "Monky — P2P Self-Hosted Voice, Video and Chat",
   "author": "Murilo",

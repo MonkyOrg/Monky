@@ -47,3 +47,4 @@ export * from './protocolCompatibility.js';
 export * from './messageBlocks.js';
 export { releaseRequiresProtocolUpdate } from './releaseCompatibility.js';
 export { createMessageContentSchema } from './validators.js';
+export * from './soundboardEditing';

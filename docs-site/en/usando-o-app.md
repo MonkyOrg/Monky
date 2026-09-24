@@ -132,6 +132,53 @@ The folder stays on your machine: the image is uploaded to the server when you u
 
 ## Soundboard
 
+The modal and sidebar show each playing sound, elapsed/total time and **Stop
+sound playback**. Opening the modal does not play anything; closing it does
+not interrupt normal playback. Stopping your own sound also notifies the call;
+stopping someone else's sound only silences local playback.
+
+In the grid or list, open an audio file's **vertical three-dot** button to access
+**Edit**, **Rename audio** and **Delete audio**. **Edit** opens the trim and fade
+editor. In the list, the button is at the far right, after the shortcut.
+The menu supports keyboard navigation and closes with `Esc` or an
+outside click without starting playback. Renaming and deletion change the actual file in your operating system
+folder; deletion is permanent and requires confirmation. Favorites and shortcuts
+follow the change. Existing names are never overwritten. If an old folder is
+unauthorized, select it again using **Change folder**.
+
+The editor displays the actual audio waveform: drag the upper handles to set
+the trim start/end and the lower handles to adjust fade-in/fade-out. Times
+are displayed alongside; no numeric entry is needed. With the keyboard, use
+arrows for 0.01 s steps, `Shift` for 0.1 s and `Alt` for a single sample.
+`Home`/`End` move to the limits and `Esc` cancels a drag. Shortening a selection
+proportionally reduces fades that no longer fit, with a notice.
+Each handle pair stays aligned; handles only separate vertically when they are
+too close together, so neither covers the other.
+
+The **Edited result · Only for you** player plays the final segment with trim
+and fades applied, using the soundboard output, volume and limiter without
+broadcasting to the call. Use **Play/Pause**, **Back to start**, **Stop** and
+the position slider; a cursor follows playback on the waveform.
+Pausing keeps the position; returning to the start does not resume paused audio.
+Changing trim/fades resets the player so it cannot play a stale edit, and closing
+the editor releases playback. Changing the copy name does not interrupt audio.
+Only saving actions remain in the footer. **Save new audio** preserves the original and creates a 24-bit PCM
+WAV at 48 kHz, keeping mono/stereo. **Overwrite original** requires confirmation
+and retains the name, format, favorites and shortcuts. WAV requires no extra
+tool; for other formats, prepare FFmpeg in **Settings › Bot tools**. Without
+it, overwrite is blocked with an explanation, but saving a new WAV remains
+available. Replacement happens only after generating and validating the result;
+an external change to the original prevents overwrite. Re-encoding compressed
+formats may introduce slight padding at the beginning/end of the audio.
+
+The editor does not normalize or add other effects. `.mp3`, `.wav`, `.ogg`,
+`.m4a`, `.aac` and `.webm` inputs depend on decoder support, in mono or stereo.
+The editor imposes no artificial file-size or duration caps: files larger than
+3 MiB or longer than 120 seconds can be opened, played and saved. Actual capacity
+depends on available memory and the file format (WAV RIFF uses 32-bit sizes).
+The limit for sending soundboard clips to a call remains separate and does not
+restrict local editing. Unsupported formats and write failures display an error.
+
 Monky prepares a local soundboard folder automatically. Under **Settings › Soundboard**, check its path or choose another folder containing `.mp3`, `.wav` or `.ogg`; existing folder selections are preserved. In the call, play sounds from the soundboard button. Volume and local mute live in the same settings. The host can disable the soundboard for the whole server and, under **Server Settings › Roles**, grant the **Use soundboard** permission only to the desired roles.
 
 Use stars and the **All/Favorites** filter together with search to find sounds,

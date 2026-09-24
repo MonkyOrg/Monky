@@ -29,6 +29,7 @@ const commands = [
   ['node', 'apps/client/test/footerControlsSmoke.cjs'],
   ['npm', 'run', 'test:transport', '--workspace=apps/client'],
   ['npm', 'run', 'test:bot-marketplace', '--workspace=apps/client'],
+  ['npm', 'run', 'test:soundboard', '--workspace=apps/client'],
 ];
 
 function run(runCommand = spawnSync, platform = process.platform) {

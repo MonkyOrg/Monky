@@ -378,19 +378,31 @@ sending and permissions.
 
 **Control overly loud sounds** is off by default. Even while off, set the
 **Loudness ceiling** from **1 to 10**; the initial value is **6**.
-Enable the switch to apply the selected ceiling.
+Enable the switch to reveal the controls and apply the selected ceiling. Turning
+it off collapses the controls without clearing the saved value. Expansion and
+collapse are animated and respect the system's reduced-motion preference.
 A lower ceiling reduces excessively loud sounds more.
 Sounds below the ceiling keep their volume; quieter sounds are never boosted.
-The same switch and ceiling control are available directly in the **Soundboard
-modal**, below the volume controls, without opening settings. Both views share
+In the **Soundboard modal**, click **Soundboard settings** next to the volume
+control to expand an inline section below the volume without covering the sound
+list. It starts collapsed and preserves the **Loudness control** heading and
+explanation even while the limiter is disabled.
+Use **Limit loud sounds** to reveal the ceiling adjustment and meter.
+The section stays open when playing, stopping, searching or switching sounds,
+so you can adjust the ceiling while listening. Click the settings button again
+or press **Esc** inside the modal to collapse it; clicking sounds does not close
+settings. Changes are saved automatically. The button is blue only while the
+section is open and returns to its neutral color when collapsed, even if limiting
+remains enabled. The level stays in its tooltip. Collapsing the section gives
+the space back to the library. Both views share
 the preference and support keyboard operation.
 During playback, a marker on the bar shows loudness **before reduction**, on
 the same scale as the ceiling. The round slider thumb sets the ceiling;
 the moving marker and “Before limiting” value show the actual audio.
-Green means below the ceiling, yellow means within one level below it, and
-red means above it. The bands follow your chosen ceiling. Values above 10
-remain visible in the text even when the marker reaches the end of the bar.
-The colors help choose the cutoff; they do not diagnose distortion in a file.
+The bar uses a neutral scale without colored bands. Text indicates whether the
+sound is below, near or above the ceiling. Values above 10 remain visible in
+the text even when the marker reaches the end of the bar. The scale and the
+limiter's audio behavior are unchanged.
 
 The ceiling applies after mixing soundboard clips, including local library
 previews, and after your selected volume: simultaneous sounds also respect

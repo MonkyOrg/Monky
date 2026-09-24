@@ -1473,6 +1473,7 @@ async function runCameraEffectsSmoke(phase) {
     sampleVideo.cancelVideoFrameCallback(frameId);
     check(frames > 0 && frames <= 16, `Frame rate remains bounded, got ${frames} frames in 1.2 s`);
     const previousRaw = captures[0];
+    const previousWorkers = new Set(workers);
     await service.setCameraDevice('camera-fixture-b');
     output = service.getCameraStream();
     await replaceChain;
@@ -1488,7 +1489,9 @@ async function runCameraEffectsSmoke(phase) {
       }));
     await expectVideoPixel(0.9, 0.85, actual => near(actual, [17, 34, 221], 35),
       'Replacement continues transmitting the processed video', remoteVideo);
-    const worker = [...workers][0];
+    // Retired workers can still await their asynchronous disposal acknowledgement.
+    const worker = [...workers].find(candidate => !previousWorkers.has(candidate));
+    check(worker, 'Device switch creates a new processing worker for runtime failure injection');
     worker.dispatchEvent(new ErrorEvent('error', { message: 'Fixture worker failure', cancelable: true }));
     await until(() => workers.size === 0 && service.getCameraState().status === 'error', 'Runtime failure did not terminate processing');
     await replaceChain;

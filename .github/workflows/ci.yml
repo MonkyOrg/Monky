@@ -348,14 +348,17 @@ jobs:
       - name: Install FFmpeg for generated voice fixtures
         shell: bash
         run: |
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            if [ "$RUNNER_OS" = "Windows" ]; then
-              choco install ffmpeg --yes --no-progress --limit-output
-            else
-              brew install ffmpeg
-            fi
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # Homebrew's minimal formula omits libvorbis; use the complete codec set.
+            brew install ffmpeg-full
+            ffmpeg_bin="$(brew --prefix ffmpeg-full)/bin"
+            echo "$ffmpeg_bin" >> "$GITHUB_PATH"
+            export PATH="$ffmpeg_bin:$PATH"
+          elif ! command -v ffmpeg >/dev/null 2>&1; then
+            choco install ffmpeg --yes --no-progress --limit-output
           fi
           ffmpeg -hide_banner -version
+          ffmpeg -hide_banner -encoders | grep -E '^[[:space:]]*A[^[:space:]]*[[:space:]]+libvorbis[[:space:]]'
 
       - name: Prepare an isolated macOS test Keychain
         if: runner.os == 'macOS'

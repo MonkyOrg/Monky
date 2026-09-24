@@ -9,14 +9,18 @@ import { appEvents } from '../core/EventBus';
 import { clientLog } from '../core/ClientLogService';
 import { getLanguage, t, tCount } from '../i18n';
 import { captureShortcut, shortcutIdentity } from '../utils/keybind';
-import { showAlert, showConfirm } from './Dialog';
+import { showAlert, showConfirm, showConfirmWithText } from './Dialog';
+import { SoundboardPlayersBar } from './SoundboardPlayersBar';
+import { SoundboardEditor } from './SoundboardEditor';
+import { ContextMenu } from './ContextMenu';
+import { finishSoundboardMutation, soundboardFileValue, validateSoundboardName, SoundboardLibraryError } from '../core/SoundboardLibrary';
 import { enableBackdropClose } from '../utils/modal';
 import { matchesSearch as matchesSoundSearch } from '../utils/search';
 import { sortFavoritesFirst } from '../utils/favoriteOrder';
 import { FavoriteListMotion, type FavoriteMotionKind } from '../utils/favoriteMotion';
 import { renderFavoriteToggle, renderFavoritesFilter, updateFavoritesFilter } from './FavoritesControls';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
-import { bindSoundboardLimiterControls, renderSoundboardLimiterControls } from './SoundboardLimiterControls';
+import { bindSoundboardSettings, renderSoundboardSettings } from './SoundboardSettings';
 
 export class SoundboardModal {
   private modalEl: HTMLElement | null = null;
@@ -28,9 +32,15 @@ export class SoundboardModal {
   private changingFolder = false;
   private highlightTimers = new Set<ReturnType<typeof setTimeout>>();
   private readonly favoriteMotion = new FavoriteListMotion();
+  private readonly players = new SoundboardPlayersBar();
+  private readonly editor = new SoundboardEditor();
+  private readonly fileMenu = new ContextMenu();
+  private fileController = new AbortController();
+  private fileBusy = false;
 
   public async open(): Promise<void> {
     this.close();
+    this.fileController = new AbortController();
     const lifecycle = this.lifecycle;
     this.searchQuery = '';
 
@@ -57,6 +67,7 @@ export class SoundboardModal {
           <button id="modal-close" class="modal-close-btn">&times;</button>
         </div>
 
+        <div class="sb-modal-body">
         <!-- Quick Volume & Mute Toolbar -->
         <div style="padding: 10px 20px; background: var(--bg-secondary); border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; gap: 16px;">
           <!-- Folder select & Change -->
@@ -80,12 +91,17 @@ export class SoundboardModal {
               <input id="sb-slider-volume" class="sb-slider" type="range" min="0" max="100" value="${settingsStore.soundboardVolume}" style="--slider-progress: ${settingsStore.soundboardVolume}%; width: 80px;">
               <span id="sb-volume-label" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); min-width: 32px; text-align: right;">${settingsStore.soundboardVolume}%</span>
             </div>
+            <button id="sb-btn-settings" type="button" class="btn btn-icon sb-settings-trigger"
+              aria-controls="sb-settings-section" aria-expanded="false"
+              aria-label="${t('soundboard.quickSettings')}" title="${t('soundboard.quickSettings')}">
+              <span class="material-symbols-outlined md-18" aria-hidden="true">tune</span>
+            </button>
           </div>
         </div>
 
-        <div class="sb-limiter-toolbar">
-          ${renderSoundboardLimiterControls('soundboard-modal')}
-        </div>
+        ${renderSoundboardSettings()}
+        <div id="sb-modal-players" class="sb-modal-players" aria-label="${t('soundboard.playbackProgress')}"></div>
+        <p id="sb-file-status" class="sb-file-status" role="status" hidden></p>
 
         <!-- Search Bar & View Mode Switcher (#288, #326) -->
         <div style="padding: 10px 20px 6px; background: var(--bg-card); display: flex; flex-direction: column; gap: 6px;">
@@ -158,6 +174,7 @@ export class SoundboardModal {
           ${renderLoadingSkeleton('lines', 5)}
         </div>
 
+        </div>
         <!-- Footer -->
         <div class="modal-footer" style="padding: 12px 20px; border-top: 1px solid var(--border-color); background: var(--bg-card);">
           <div style="font-size: 11px; color: var(--text-muted); flex: 1;">
@@ -170,6 +187,8 @@ export class SoundboardModal {
 
     document.body.appendChild(this.modalEl);
     this.attachEvents();
+    const playersSlot = this.modalEl.querySelector<HTMLElement>('#sb-modal-players');
+    if (playersSlot) this.players.mount(playersSlot);
     this.setupPlaybackListeners();
     await soundboardService.loadSounds();
     if (lifecycle !== this.lifecycle) return;
@@ -267,6 +286,7 @@ export class SoundboardModal {
                     ${escapeHtml(s.name)}
                   </span>
                 </button>
+                ${this.renderFileMenu(s)}
                 
                 <!-- Shortcut Badge or Add Shortcut Button -->
                 <div style="padding: 4px 6px 8px; display: flex; align-items: center; justify-content: center;">
@@ -347,6 +367,7 @@ export class SoundboardModal {
                     </button>
                   `}
                 </div>
+                ${this.renderFileMenu(s)}
               </div>
             `;
           })
@@ -356,6 +377,7 @@ export class SoundboardModal {
   }
 
   private refreshGrid(animate: FavoriteMotionKind | false = false): void {
+    this.fileMenu.close();
     const modal = this.modalEl;
     if (!modal) return;
     const container = modal.querySelector<HTMLElement>('#sb-sounds-container');
@@ -375,7 +397,8 @@ export class SoundboardModal {
       return;
     }
     if (container) this.favoriteMotion.update(container, '.sb-sound-card, .sb-sound-row', () => {
-      const scrollTop = container.scrollTop;
+      const scroller = modal.querySelector<HTMLElement>('.sb-modal-body') ?? container;
+      const scrollTop = scroller.scrollTop;
       const focused = document.activeElement;
       const favoriteButtons = Array.from(container.querySelectorAll<HTMLButtonElement>('.favorite-toggle'));
       const focusedFavorite = focused instanceof HTMLButtonElement && favoriteButtons.includes(focused) ? focused : null;
@@ -396,7 +419,7 @@ export class SoundboardModal {
       container.innerHTML = this.renderSoundsGrid(sounds, currentPlayback.soundName);
       this.attachSoundClickEvents();
       this.updateActiveButtons();
-      container.scrollTop = scrollTop;
+      scroller.scrollTop = scrollTop;
       if (focusedKey) {
         const nextButtons = Array.from(container.querySelectorAll<HTMLButtonElement>('.favorite-toggle'));
         const next = nextButtons.find(button => button.dataset.favoriteKey === focusedKey)
@@ -406,6 +429,69 @@ export class SoundboardModal {
         next?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
       }
     }, animate);
+  }
+
+  private renderFileMenu(sound: SoundItem): string {
+    const label = escapeHtml(t('soundboard.moreActions', { name: sound.name }));
+    return `<button type="button" class="btn btn-icon sb-file-menu" data-file-menu
+      data-filepath="${escapeHtml(sound.filePath)}" title="${label}" aria-label="${label}"
+      aria-haspopup="menu" aria-expanded="false" ${this.fileBusy ? 'disabled' : ''}>
+      <span class="material-symbols-outlined md-18" aria-hidden="true">more_vert</span></button>`;
+  }
+
+  private fileStatus(message: string, error = false): void {
+    const status = this.modalEl?.querySelector<HTMLElement>('#sb-file-status');
+    if (status) {
+      status.hidden = false;
+      status.setAttribute('role', error ? 'alert' : 'status');
+      status.textContent = message;
+    }
+  }
+
+  private async fileAction(action: 'edit' | 'rename' | 'delete', sound: SoundItem): Promise<void> {
+    if (this.fileBusy) return;
+    const signal = this.fileController.signal;
+    const folder = settingsStore.soundboardFolderPath;
+    this.fileBusy = true;
+    this.modalEl?.querySelectorAll<HTMLButtonElement>('[data-file-menu]').forEach(button => { button.disabled = true; });
+    try {
+      if (action === 'edit') {
+        await this.editor.open(sound, folder, (fileName, overwritten) => {
+          if (!signal.aborted) this.fileStatus(t(overwritten ? 'soundboard.originalSaved' : 'soundboard.copySaved', { name: fileName }));
+        });
+        return;
+      }
+      if (action === 'rename') {
+        const result = await showConfirmWithText({
+          title: t('soundboard.rename'), message: t('soundboard.renameHelp'), confirmLabel: t('soundboard.rename'),
+          signal, textInput: {
+            label: t('soundboard.fileName'), value: sound.fileName.slice(0, -sound.ext.length), suffix: sound.ext,
+            maxLength: 110, validate: validateSoundboardName,
+          },
+        });
+        if (!result.confirmed || signal.aborted || folder !== settingsStore.soundboardFolderPath) return;
+        const saved = soundboardFileValue(await window.api.renameSoundboardFile({
+          folder, fileName: sound.fileName, newFileName: `${result.value}${sound.ext}`,
+        }));
+        const preferencesSaved = await finishSoundboardMutation(sound, saved);
+        if (!signal.aborted) this.fileStatus(t(preferencesSaved ? 'soundboard.fileRenamed' : 'soundboard.preferenceWarning'), !preferencesSaved);
+      } else if (action === 'delete') {
+        if (!await showConfirm({
+          title: t('soundboard.delete'), message: t('soundboard.deleteConfirm', { name: sound.fileName }),
+          confirmLabel: t('soundboard.delete'), variant: 'danger', signal,
+        }) || signal.aborted || folder !== settingsStore.soundboardFolderPath) return;
+        soundboardFileValue(await window.api.deleteSoundboardFile({ folder, fileName: sound.fileName }));
+        const preferencesSaved = await finishSoundboardMutation(sound, null);
+        if (!signal.aborted) this.fileStatus(t(preferencesSaved ? 'soundboard.fileDeleted' : 'soundboard.preferenceWarning'), !preferencesSaved);
+      }
+    } catch (error: unknown) {
+      if (!signal.aborted) this.fileStatus(error instanceof SoundboardLibraryError ? error.message : t('soundboard.fileError.io_failed'), true);
+    } finally {
+      if (!signal.aborted) {
+        this.fileBusy = false;
+        this.modalEl?.querySelectorAll<HTMLButtonElement>('[data-file-menu]').forEach(button => { button.disabled = false; });
+      }
+    }
   }
 
   private clearSearch(): void {
@@ -567,7 +653,7 @@ export class SoundboardModal {
 
   private attachEvents(): void {
     if (!this.modalEl) return;
-    this.unbindEvents.push(bindSoundboardLimiterControls(this.modalEl));
+    this.unbindEvents.push(bindSoundboardSettings(this.modalEl));
 
     const btnClose = this.modalEl.querySelector('#modal-close');
     const btnFooterClose = this.modalEl.querySelector('#sb-btn-close');
@@ -645,6 +731,31 @@ export class SoundboardModal {
     if (!this.modalEl) return;
     const container = this.modalEl.querySelector('#sb-sounds-container');
     if (!container) return;
+    container.querySelectorAll<HTMLButtonElement>('[data-file-menu]').forEach(button => {
+      const openMenu = () => {
+        if (this.fileBusy) return;
+        if (this.fileMenu.isOpenFor(button)) { this.fileMenu.close(); return; }
+        const sound = soundboardService.getSounds().find(item => item.filePath === button.dataset.filepath);
+        if (!sound) return;
+        const rect = button.getBoundingClientRect();
+        this.fileMenu.open(rect.left, rect.bottom, (['edit', 'rename', 'delete'] as const).map(action => ({
+          label: t(action === 'edit' ? 'common.edit' : `soundboard.${action}`),
+          icon: action === 'edit' ? 'content_cut' : action === 'rename' ? 'drive_file_rename_outline' : 'delete',
+          danger: action === 'delete',
+          onClick: () => { void this.fileAction(action, sound); },
+        })), button);
+      };
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        openMenu();
+      });
+      button.addEventListener('keydown', event => {
+        if (event.key !== 'ArrowDown') return;
+        event.preventDefault();
+        event.stopPropagation();
+        openMenu();
+      });
+    });
 
     container.querySelector('#sb-btn-clear-search')?.addEventListener('click', () => this.clearSearch());
     container.querySelector('#sb-show-all')?.addEventListener('click', () => {
@@ -687,7 +798,7 @@ export class SoundboardModal {
       };
       btn.addEventListener('click', event => {
         if (event.target instanceof Element
-          && event.target.closest('.favorite-toggle, .sb-btn-add-shortcut, .sb-shortcut-badge')) return;
+          && event.target.closest('.favorite-toggle, .sb-btn-add-shortcut, .sb-shortcut-badge, .sb-file-menu')) return;
         void play();
       });
       if (btn.tagName !== 'BUTTON') {
@@ -728,8 +839,6 @@ export class SoundboardModal {
   }
 
   private setupPlaybackListeners(): void {
-    // The progress bars themselves now live in the sidebar (#517); what is left
-    // here is keeping the grid in sync with what is playing.
     const onPlaybackStarted = () => this.updateActiveButtons();
 
     const onPlaybackEnded = () => {
@@ -840,6 +949,11 @@ export class SoundboardModal {
 
   public close(): void {
     this.lifecycle++;
+    this.fileMenu.close();
+    this.fileController.abort();
+    this.fileBusy = false;
+    this.editor.close();
+    this.players.unmount();
     this.favoriteMotion.cancel();
     this.changingFolder = false;
     for (const timer of this.highlightTimers) clearTimeout(timer);
