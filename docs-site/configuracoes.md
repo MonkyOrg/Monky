@@ -532,6 +532,11 @@ como padrão e **Captura de jogo** como escolha explícita. Trocar o método
 mantém a mesma janela e sua escolha de áudio. Selecionar outra janela volta ao
 padrão Normal, sem levar junto a escolha de Captura de jogo da janela anterior.
 
+A janela do próprio Monky pode ser compartilhada **somente sem áudio**, para
+evitar eco da chamada. Ao selecioná-la, o switch de áudio fica desligado e
+indisponível, com uma explicação. Ao selecionar outro aplicativo, sua escolha
+anterior de áudio é restaurada.
+
 Escolher o card de Captura de jogo não inicia a captura nem testa o aplicativo:
 é preciso confirmar em **Compartilhar**, **Trocar Fonte** ou **Adicionar tela**.
 Só ficam disponíveis os métodos informados pelo backend; compatibilidade com

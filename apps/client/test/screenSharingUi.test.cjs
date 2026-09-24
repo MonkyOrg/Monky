@@ -30,6 +30,71 @@ const chooseWindowMethod = (f, method, sourceId = 'window:101:0') => {
 };
 
 for (const language of ['pt-BR', 'en']) {
+  test(`own Monky window disables only its audio and preserves other source choices (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    f.sources[1].isOwnWindow = true;
+    f.sources[1].name = 'Renamed application window';
+    f.sources[2].name = 'Monky';
+    await f.picker.open();
+    chooseWindowMethod(f, 'window');
+    const audio = control(f, 'chk-share-audio');
+    const warning = control(f, 'share-audio-warning');
+    assert.equal(audio.checked, false);
+    assert.equal(audio.disabled, true);
+    assert.equal(warning.hidden, false);
+    assert.equal(warning.textContent, f.i18n.t('screenShare.ownWindowAudioUnavailable'));
+    assert.equal(audio.getAttribute('aria-describedby'), warning.id);
+    assert.equal(control(f, 'btn-share').disabled, false, 'Silent sharing must remain available.');
+    chooseWindowMethod(f, 'game');
+    assert.equal(audio.checked, false);
+    assert.equal(audio.disabled, true);
+    control(f, 'btn-refresh-sources').click();
+    await flush();
+    assert.equal(audio.checked, false);
+    assert.equal(audio.disabled, true);
+    control(f, 'share-tab-screen').click();
+    assert.equal(audio.checked, true);
+    assert.equal(audio.disabled, false);
+    chooseWindowMethod(f, 'window', f.sources[2].id);
+    assert.equal(audio.checked, true, 'A title matching Monky is not an ownership check.');
+    assert.equal(audio.disabled, false);
+    assert.equal(warning.hidden, true);
+    assert.equal(audio.getAttribute('aria-describedby'), null);
+    audio.checked = false;
+    change(audio);
+    chooseWindowMethod(f, 'window');
+    chooseWindowMethod(f, 'window', f.sources[2].id);
+    assert.equal(audio.checked, false, 'Explicit audio-off preference also survives visiting Monky.');
+    chooseWindowMethod(f, 'window');
+    control(f, 'btn-share').click();
+    await flush();
+    assert.equal(nativeStarts(f).length, 1);
+    assert.equal(nativeStarts(f)[0][2], false);
+    assert.equal(f.alerts.length, 0);
+  });
+
+  test(`own-window audio cannot be forced through a stale or modified switch (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    f.sources[1].isOwnWindow = true;
+    await f.picker.open();
+    chooseWindowMethod(f, 'window');
+    const audio = control(f, 'chk-share-audio');
+    audio.checked = true;
+    control(f, 'btn-share').click();
+    await flush();
+    assert.equal(nativeStarts(f).length, 0);
+    assert.equal(audio.checked, false);
+    assert.ok(f.alerts.at(-1).message.includes(f.i18n.t('screenShare.ownWindowAudioUnavailable')));
+    chooseWindowMethod(f, 'window', f.sources[2].id);
+    assert.equal(audio.checked, true);
+    control(f, 'btn-share').click();
+    await flush();
+    assert.equal(nativeStarts(f).length, 1);
+    assert.equal(nativeStarts(f)[0][2], true);
+  });
+
   test(`one window list has localized, accessible methods without claiming game detection (${language})`, async t => {
     const f = fixture(language);
     t.after(() => f.close());

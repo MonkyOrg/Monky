@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "Ao compartilhar a própria janela do Monky, o áudio fica desativado com uma explicação para evitar eco e falhas ao assistir. A janela continua disponível sem áudio, e o áudio dos outros aplicativos não muda.",
+  "en": "When sharing Monky's own window, audio is disabled with an explanation to prevent call feedback and viewing failures. The window can still be shared without audio, and other applications' audio is unaffected."
+}

@@ -622,6 +622,7 @@ export function setupIpcHandlers(
         id: nativeId ?? s.id,
         name: s.name,
         type: s.id.startsWith('screen:') ? 'screen' : 'window',
+        isOwnWindow: hwnd !== null && nativeByHwnd.get(hwnd)?.processId === process.pid,
         thumbnailDataUrl: s.thumbnail.toDataURL(),
         appIconDataUrl: electronIcon ?? macIcons.get(s.id) ?? null,
       };
@@ -663,6 +664,7 @@ export function setupIpcHandlers(
         id: nativeId,
         name: w.title,
         type: 'window',
+        isOwnWindow: w.processId === process.pid,
         thumbnailDataUrl: '',
         appIconDataUrl: extraIcons.get(w.processPath) ?? null,
       });

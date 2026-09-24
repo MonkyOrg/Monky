@@ -154,6 +154,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   const module = { exports: {} };
   load(module.exports, name => {
     if (name === 'electron') return electron;
+    if (name === './i18n') return { mt: key => key };
     if (name === '@monky/screen-share') return { ...runtime, NativeScreenEndpoint: Endpoint, CaptureBridge: Probe,
       loadRuntime: () => ({ capture: { captureKinds: ['window', 'monitor', 'game'],
         encoders: ['h264_texture_amf', 'obs_nvenc_h264_tex'], requiresHardwareProbe: true, hardwareQualified: false } }) };
@@ -561,6 +562,32 @@ test('static implemented capture kinds permit explicit preparation but are not h
     requiresSelectionProbe: true, captureKinds: ['window', 'monitor', 'game'], backend: null, reason: null });
   assert.equal(f.probes.length + f.captures.length + f.endpoints.length, 0);
 });
+
+for (const mode of ['p2p', 'sfu']) {
+  for (const captureKind of ['window', 'game']) {
+    test(`${mode}/${captureKind}: own-window audio is rejected before probing and does not poison the next share`, async t => {
+      const f = fixture(t);
+      f.config.mode = mode;
+      await f.join();
+      const target = { kind: captureKind, hwnd: 12345, expectedProcessId: process.pid,
+        expectedProcessCreationTime100ns: '123456789' };
+      f.replaceTarget(target);
+      await assert.rejects(f.addSource('own', { captureKind }), {
+        code: 'ERR_AUDIO_TARGET', message: 'screenShare.ownWindowAudioUnavailable',
+      });
+      assert.equal(f.probes.length, 0);
+      assert.equal(f.endpoints.length, 0);
+      assert.equal(f.captures.length, 0);
+      const silent = await f.addSource('own', { captureKind, audio: false });
+      assert.equal(silent.source.audio, false);
+      await f.command({ action: 'source-remove', shareId: 'own' });
+      f.replaceTarget({ ...target, expectedProcessId: process.pid + 1 });
+      const game = await f.addSource('game', { captureKind });
+      assert.equal(game.source.audio, true, 'Another application can share audio without leaving the call.');
+      assert.equal(f.captures.length, 0, 'Admission must not capture real audio.');
+    });
+  }
+}
 
 test('announcing a validated window with audio creates neither an encoder nor a PCM capture before Watch', async t => {
   const f = fixture(t);
