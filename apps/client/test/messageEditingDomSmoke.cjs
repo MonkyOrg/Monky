@@ -78,9 +78,14 @@ if (!process.versions.electron) {
 }
 
 async function captureScreenshot(window, filename) {
+  const expected = await window.webContents.executeJavaScript(
+    '({ width: Math.round(innerWidth * devicePixelRatio), height: Math.round(innerHeight * devicePixelRatio) })');
   const image = await new Promise((resolve, reject) => {
     const painted = (_event, _rect, frame) => {
+      const size = frame.getSize();
+      if (size.width !== expected.width || size.height !== expected.height) return;
       clearTimeout(timeout);
+      window.webContents.removeListener('paint', painted);
       if (frame.isEmpty()) reject(new Error(`Empty offscreen frame: ${filename}`));
       else resolve(frame);
     };
@@ -88,7 +93,7 @@ async function captureScreenshot(window, filename) {
       window.webContents.removeListener('paint', painted);
       reject(new Error(`Offscreen frame was not presented: ${filename}`));
     }, 5000);
-    window.webContents.once('paint', painted);
+    window.webContents.on('paint', painted);
     window.webContents.invalidate();
   });
   fs.writeFileSync(path.join(output, filename), image.toPNG());
@@ -98,6 +103,20 @@ async function runNativeSmoke(window) {
   const evaluate = source => window.webContents.executeJavaScript(source, true);
   const fixture = source => evaluate(`window.messageEditingFixture.${source}`);
   const state = () => fixture('state()');
+  const resize = async (width, height) => {
+    window.setContentSize(width, height);
+    await evaluate(`new Promise((resolve, reject) => {
+      const resized = () => {
+        if (innerWidth !== ${width} || innerHeight !== ${height}) return;
+        clearTimeout(timeout); removeEventListener('resize', resized); resolve();
+      };
+      const timeout = setTimeout(() => {
+        removeEventListener('resize', resized); reject(new Error('The requested viewport was not applied'));
+      }, 5000);
+      addEventListener('resize', resized); resized();
+    })`);
+    await fixture('settle()');
+  };
   let checks = 0;
   const check = (condition, message) => {
     if (!condition) throw new Error(message);
@@ -444,13 +463,11 @@ async function runNativeSmoke(window) {
       'Escape leaves code editing without a keyboard focus trap');
     await fixture('settle()');
     await captureScreenshot(window, 'chat-composer-reference.png');
-    window.setContentSize(460, 780);
-    await fixture('settle()');
+    await resize(460, 780);
     layout = await fixture('referenceState()');
-    check(!layout.overflow, 'The quote, language selector and footer fit a narrow chat without page overflow');
+    check(layout.width === 460 && !layout.overflow, 'The quote, language selector and footer fit a narrow chat without page overflow');
     await captureScreenshot(window, 'chat-composer-reference-narrow.png');
-    window.setContentSize(1050, 800);
-    await fixture('settle()');
+    await resize(1050, 800);
     checks += await fixture('deliveryChecks()');
     await fixture('settle()');
     await captureScreenshot(window, 'chat-delivery-reference.png');
@@ -604,6 +621,7 @@ async function installFixture() {
       const button = find('#btn-send-message').getBoundingClientRect();
       const code = document.querySelector('.chat-code-input textarea');
       return {
+        width: innerWidth,
         placeholderOffset: Math.abs(rect.top + parseFloat(style.paddingTop) + parseFloat(style.lineHeight) / 2 - (button.top + button.height / 2)),
         inputHeight: rect.height, quoteHasTime: !!document.querySelector('.chat-composer-block .chat-quote time'),
         highlighted: !!document.querySelector('.chat-code-input code .hljs-variable'),
