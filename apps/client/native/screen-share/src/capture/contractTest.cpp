@@ -16,7 +16,13 @@ static bool HandledFaultProbe() noexcept {
   return false;
 }
 
-static std::vector<std::uint8_t> ParameterSets(const VideoConfiguration& video) {
+struct TestSpsOptions {
+  bool vui = false, videoSignal = true, colourDescription = true, richVui = false;
+  std::uint8_t fullRange = 0, primaries = 0, transfer = 1, matrix = 1;
+  std::uint32_t id = 0, order = 0;
+};
+
+static std::vector<std::uint8_t> ParameterSets(const VideoConfiguration& video, TestSpsOptions options = {}) {
   std::vector<bool> bits;
   const auto number = [&](std::uint32_t value, unsigned count) {
     for (unsigned index = count; index > 0; --index) bits.push_back((value >> (index - 1)) & 1u);
@@ -27,12 +33,44 @@ static std::vector<std::uint8_t> ParameterSets(const VideoConfiguration& video) 
     for (auto copy = value; copy; copy >>= 1) ++width;
     number(0, width - 1); number(value, width);
   };
-  number(77, 8); number(0, 8); number(51, 8);
-  ue(0); ue(0); ue(0); ue(0); ue(1); number(0, 1);
+  number(77, 8); number(0, 8); number((std::max)(51u, RequiredCaptureH264Level(video)), 8);
+  ue(options.id); ue(0); ue(options.order);
+  if (options.order == 0) ue(0);
+  else if (options.order == 1) { number(0, 1); ue(0); ue(1); ue(2); ue(0); ue(1); }
+  ue(1); number(0, 1);
   const auto columns = (video.width + 15) / 16, rows = (video.height + 15) / 16;
   ue(columns - 1); ue(rows - 1); number(1, 1); number(1, 1); number(1, 1);
   ue(0); ue((columns * 16 - video.width) / 2); ue(0); ue((rows * 16 - video.height) / 2);
-  number(0, 1); number(1, 1);
+  number(options.vui, 1);
+  if (options.vui) {
+    number(options.richVui, 1);
+    if (options.richVui) { number(255, 8); number(1, 16); number(1, 16); }
+    number(options.richVui, 1);
+    if (options.richVui) number(1, 1);
+    number(options.videoSignal, 1);
+    if (options.videoSignal) {
+      number(5, 3); number(options.fullRange, 1); number(options.colourDescription, 1);
+      if (options.colourDescription) {
+        number(options.primaries, 8); number(options.transfer, 8); number(options.matrix, 8);
+      }
+    }
+    number(options.richVui, 1);
+    if (options.richVui) { ue(0); ue(0); }
+    number(options.richVui, 1);
+    if (options.richVui) { number(1, 32); number(60, 32); number(1, 1); }
+    for (unsigned hrd = 0; hrd < 2; ++hrd) {
+      number(options.richVui, 1);
+      if (options.richVui) {
+        ue(1); number(0, 4); number(0, 4);
+        for (unsigned cpb = 0; cpb < 2; ++cpb) { ue(cpb); ue(cpb); number(1, 1); }
+        number(23, 5); number(23, 5); number(23, 5); number(24, 5);
+      }
+    }
+    if (options.richVui) number(0, 1);
+    number(0, 1); number(options.richVui, 1);
+    if (options.richVui) { number(1, 1); ue(2); ue(1); ue(16); ue(16); ue(0); ue(1); }
+  }
+  number(1, 1);
   while (bits.size() % 8) bits.push_back(false);
   std::vector<std::uint8_t> result{0, 0, 1, 0x67};
   unsigned zeros = 0;
@@ -188,9 +226,12 @@ int main(int argc, char** argv) {
     };
     check(sizeof(Header) == 96 && offsetof(Header, pts) == 56);
     check(ParseFeedback("1 bitrate 20000").bitrateKbps == 20000);
+    check(ParseFeedback("1 bitrate 80000").bitrateKbps == 80000);
+    ValidateEncoderBitrateRange(80000, 50, 80000, 50);
+    rejects([&] { ValidateEncoderBitrateRange(80050, 50, 100000, 50); });
     check(ParseFeedback("2 idr 0").keyframe);
     for (const auto bad : {"0 bitrate 1000", "01 bitrate 1000", "1 bitrate 49", "1 bitrate 125",
-                          "1 bitrate 20050", "1 idr 1", "1 unknown 0", "1 bitrate 1000 extra"})
+                          "1 bitrate 80050", "1 idr 1", "1 unknown 0", "1 bitrate 1000 extra"})
       rejects([&] { ParseFeedback(bad); });
     CheckBudget(15, kQueueBytes - 1, 1, 1000, 1500); check(true);
     rejects([&] { CheckBudget(16, 0, 1, 1000, 1000); });
@@ -261,15 +302,185 @@ int main(int argc, char** argv) {
     check(sizeof(PacketStatistics) < 256);
     check(std::string(EncoderExtraOptions(EncoderKind::Amf)) == "InColorPrimaries=1");
     check(std::string(EncoderExtraOptions(EncoderKind::Nvenc)).empty());
-    for (const auto video : {VideoConfiguration{1920, 1080, 120, 5000}, {1920, 1080, 60, 5000},
+    check(EncoderProfileOptions(EncoderKind::Amf, {3840, 2160, 120, 20000}) == "InColorPrimaries=1 ProfileLevel=60");
+    check(EncoderProfileOptions(EncoderKind::Amf, {3840, 2160, 60, 20000}) == "InColorPrimaries=1 ProfileLevel=52");
+    check(EncoderProfileOptions(EncoderKind::Amf, {1920, 1080, 120, 5000}) == "InColorPrimaries=1 ProfileLevel=51");
+    check(EncoderProfileOptions(EncoderKind::Amf, {852, 480, 30, 1500}) == "InColorPrimaries=1 ProfileLevel=31");
+    check(EncoderProfileOptions(EncoderKind::Nvenc, {3840, 2160, 120, 20000}).empty());
+    check(RequiredCaptureH264Level({3840, 2160, 120, 20000}) == 60);
+    check(RequiredCaptureH264Level({3840, 2160, 60, 20000}) == 52);
+    check(RequiredCaptureH264Level({1920, 1080, 120, 20000}) == 51);
+    check(RequiredCaptureH264Level({1920, 1080, 120, 80000}) == 51);
+    check(RequiredCaptureH264Level({3840, 2160, 60, 80000}) == 52);
+    check(RequiredCaptureH264Level({3840, 2160, 120, 80000}) == 60);
+    ValidateAmfLevelCapability(52, {3840, 2160, 60, 80000});
+    ValidateAmfLevelCapability(60, {3840, 2160, 120, 80000});
+    ValidateAmfLevelCapability(51, {1920, 1080, 120, 80000});
+    for (const auto invalidMaximum : {-1, 0, 9, 63})
+      rejects([&] { ValidateAmfLevelCapability(invalidMaximum, {3840, 2160, 60, 80000}); });
+    try {
+      ValidateAmfLevelCapability(52, {3840, 2160, 120, 80000});
+      check(false);
+    } catch (const ContractError& error) {
+      check(error.code == "ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED" &&
+          std::string(error.what()).find("level_idc=60") != std::string::npos &&
+          std::string(error.what()).find("MaxLevel=52") != std::string::npos);
+    }
+    for (const auto video : {VideoConfiguration{3840, 2160, 120, 80000}, {3840, 2160, 60, 80000},
+                            {1920, 1080, 120, 5000}, {1920, 1080, 60, 5000},
                             {1280, 720, 60, 3000}, {852, 480, 30, 1500}}) {
       ValidateVideoConfiguration(video);
       const auto prefix = ParameterSets(video);
+      const auto normalize = [&](std::span<const std::uint8_t> bytes) {
+        return NormalizeAmfBt709(bytes, video, EncoderKind::Amf, true);
+      };
+      check(normalize(prefix).bytes.empty());
+      for (const bool richVui : {false, true})
+      for (std::uint32_t order = 0; order <= 2; ++order)
+      for (std::uint32_t id = 0; id <= 31; ++id) {
+        TestSpsOptions options;
+        options.vui = true; options.richVui = richVui; options.id = id; options.order = order;
+        const auto broken = ParameterSets(video, options);
+        options.primaries = 1;
+        const auto expected = ParameterSets(video, options);
+        const auto normalized = normalize(broken);
+        check(normalized.parameterSets == 1 && normalized.bytes == expected);
+        check(normalize(normalized.bytes).bytes.empty());
+        for (const auto encoder : {EncoderKind::Auto, EncoderKind::Nvenc})
+          check(NormalizeAmfBt709(broken, video, encoder, true).bytes.empty());
+        check(NormalizeAmfBt709(broken, video, EncoderKind::Amf, false).bytes.empty());
+      }
+      TestSpsOptions colour;
+      colour.vui = true;
+      const auto broken = ParameterSets(video, colour);
+      const abi::VideoInfo admittedVideo{nullptr, video.fps, 1, video.width, video.height, video.width, video.height,
+          abi::VideoFormat::Nv12, 0, true, abi::ColorSpace::Bt709, abi::Range::Partial, abi::Scale::Bicubic};
+      check(ExactVideoConfiguration(admittedVideo, video));
+      for (unsigned variant = 0; variant < 5; ++variant) {
+        auto unverified = admittedVideo;
+        if (variant == 0) unverified.output_format = static_cast<abi::VideoFormat>(0);
+        if (variant == 1) unverified.colorspace = static_cast<abi::ColorSpace>(0);
+        if (variant == 2) unverified.range = static_cast<abi::Range>(2);
+        if (variant == 3) unverified.gpu_conversion = false;
+        if (variant == 4) unverified.adapter = 1;
+        check(!ExactVideoConfiguration(unverified, video));
+        check(NormalizeAmfBt709(broken, video, EncoderKind::Amf,
+            ExactVideoConfiguration(unverified, video)).bytes.empty());
+      }
+      colour.primaries = 1;
+      const auto corrected = ParameterSets(video, colour);
+      for (const auto primaries : {1, 2, 5, 6, 9, 255}) {
+        colour.primaries = static_cast<std::uint8_t>(primaries);
+        check(normalize(ParameterSets(video, colour)).bytes.empty());
+      }
+      colour.primaries = 0;
+      colour.fullRange = 1;
+      check(normalize(ParameterSets(video, colour)).bytes.empty());
+      colour.fullRange = 0;
+      for (const auto other : {0, 2, 6, 16, 18, 255}) {
+        colour.transfer = static_cast<std::uint8_t>(other);
+        check(normalize(ParameterSets(video, colour)).bytes.empty());
+        colour.transfer = 1; colour.matrix = static_cast<std::uint8_t>(other);
+        check(normalize(ParameterSets(video, colour)).bytes.empty());
+        colour.matrix = 1;
+      }
+      colour.videoSignal = false;
+      check(normalize(ParameterSets(video, colour)).bytes.empty());
+      colour.videoSignal = true; colour.colourDescription = false;
+      check(normalize(ParameterSets(video, colour)).bytes.empty());
+
+      std::size_t spsEnd = 0;
+      VisitAnnexB(broken, [&](std::span<const std::uint8_t> nal, std::size_t, std::size_t end) {
+        if ((nal.front() & 0x1fu) == 7) spsEnd = end;
+      });
+      for (std::size_t length = 1; length < spsEnd; ++length)
+        rejects([&] { normalize(std::span(broken).first(length)); });
+      auto badSuffix = std::vector<std::uint8_t>(broken.begin(), broken.begin() + spsEnd);
+      badSuffix.push_back(0xff);
+      rejects([&] { normalize(badSuffix); });
+      for (const auto malformed : {std::vector<std::uint8_t>{0, 0, 1, 0x67, 0, 0, 3},
+                                {0, 0, 1, 0x67, 0, 0, 3, 4}, {0, 0, 1, 0x67, 0, 0, 2, 0x80},
+                                {0, 0, 1, 0xe7, 0x80}, {0, 0, 0, 2, 0x67, 0x80}, {0, 0, 1}})
+        rejects([&] { normalize(malformed); });
+      rejects([&] { normalize({}); });
+      rejects([&] { NormalizeAmfBt709(broken, {640, 480, 30, 1500}, EncoderKind::Amf, true); });
+      auto wrongProfile = broken;
+      wrongProfile[4] = 66;
+      rejects([&] { normalize(wrongProfile); });
+      auto wrongLevel = broken;
+      wrongLevel[6] = 61;
+      rejects([&] { normalize(wrongLevel); });
+      if (video.width == 3840 && video.fps == 120) {
+        wrongLevel[6] = 52;
+        rejects([&] { InspectAnnexB(wrongLevel, video); });
+        rejects([&] { normalize(wrongLevel); });
+      }
+      auto reservedConstraints = broken;
+      reservedConstraints[5] = 1;
+      rejects([&] { normalize(reservedConstraints); });
+
       PacketStatistics statistics(video);
       statistics.SetPrefix(prefix);
       const std::array<std::uint8_t, 5> idr{0, 0, 1, 0x65, 0xb8};
       const std::array<std::uint8_t, 5> delta{0, 0, 1, 0x41, 0xb8};
       const auto complete = CompleteH264Keyframe(idr, prefix, video);
+      // Both encoder extra_data and repeated in-band SPS are rewritten before fan-out.
+      auto inBand = broken;
+      const std::array<std::uint8_t, 9> sei{0, 0, 0, 1, 6, 5, 1, 0x42, 0x80};
+      inBand.insert(inBand.end(), sei.begin(), sei.end());
+      inBand.insert(inBand.end(), idr.begin(), idr.end());
+      inBand.insert(inBand.begin(), 0); // Exercise four-byte start code and trailing_zero_8bits.
+      inBand.push_back(0);
+      auto expectedInBand = corrected;
+      expectedInBand.insert(expectedInBand.end(), sei.begin(), sei.end());
+      expectedInBand.insert(expectedInBand.end(), idr.begin(), idr.end());
+      expectedInBand.insert(expectedInBand.begin(), 0);
+      expectedInBand.push_back(0);
+      const auto normalizedInBand = normalize(inBand);
+      check(normalizedInBand.bytes == expectedInBand && normalizedInBand.parameterSets == 1);
+      const std::array<std::uint8_t, 14> secondSlice{0, 0, 0, 1, 0x65, 0x4e, 0, 0, 3, 0, 0, 3, 1, 0x80};
+      auto multiSlice = inBand;
+      multiSlice.insert(multiSlice.end(), secondSlice.begin(), secondSlice.end());
+      auto expectedMultiSlice = expectedInBand;
+      expectedMultiSlice.insert(expectedMultiSlice.end(), secondSlice.begin(), secondSlice.end());
+      check(normalize(multiSlice).bytes == expectedMultiSlice && InspectAnnexB(expectedMultiSlice, video).idr);
+      auto mixedSps = corrected;
+      mixedSps.insert(mixedSps.end(), broken.begin(), broken.end());
+      auto expectedMixedSps = corrected;
+      expectedMixedSps.insert(expectedMixedSps.end(), corrected.begin(), corrected.end());
+      check(normalize(mixedSps).bytes == expectedMixedSps && normalize(mixedSps).parameterSets == 1);
+      const auto normalizedExtra = normalize(broken);
+      const auto delivered = CompleteH264Keyframe(normalizedInBand.bytes, normalizedExtra.bytes, video);
+      check(delivered == CompleteH264Keyframe(expectedInBand, corrected, video));
+      check(normalize(delivered).bytes.empty());
+      const auto twiceBroken = CompleteH264Keyframe(inBand, broken, video);
+      check(normalize(twiceBroken).bytes == delivered && normalize(twiceBroken).parameterSets == 2);
+      check(normalize(idr).bytes.empty() && normalize(delta).bytes.empty());
+      auto inBandDelta = broken;
+      inBandDelta.insert(inBandDelta.end(), delta.begin(), delta.end());
+      auto expectedDelta = corrected;
+      expectedDelta.insert(expectedDelta.end(), delta.begin(), delta.end());
+      check(normalize(inBandDelta).bytes == expectedDelta);
+      PacketStatistics colourStatistics(video);
+      colourStatistics.SetPrefix(normalizedExtra.bytes);
+      colourStatistics.Add({delivered, 0, -1, 1, video.fps, true, 1000});
+      colourStatistics.Add({normalize(inBandDelta).bytes, 1, 0, 1, video.fps, false, 1001});
+      check(colourStatistics.First()->pts == 0 && colourStatistics.First()->dts == -1 &&
+          colourStatistics.Last()->pts == 1 && colourStatistics.Last()->dts == 0 &&
+          colourStatistics.Last()->timebaseDenominator == video.fps &&
+          colourStatistics.Last()->observedAtQpc == 1001);
+      auto tooLarge = broken;
+      tooLarge.resize(kMaxPacketBytes + 1, 0x80);
+      rejects([&] { normalize(tooLarge); });
+      auto atLimit = inBand;
+      atLimit.resize(kMaxPacketBytes, 0x80);
+      check(normalize(atLimit).bytes.size() == kMaxPacketBytes);
+      rejects([&] { CompleteH264Keyframe(normalize(atLimit).bytes, corrected, video); });
+      auto excessiveNals = broken;
+      for (unsigned i = 0; i < 4094; ++i) excessiveNals.insert(excessiveNals.end(), sei.begin(), sei.end());
+      check(normalize(excessiveNals).parameterSets == 1);
+      excessiveNals.insert(excessiveNals.end(), sei.begin(), sei.end());
+      rejects([&] { normalize(excessiveNals); });
       const auto independent = InspectAnnexB(complete, video);
       check(independent.sps && independent.pps && independent.idr && independent.accessUnit);
       check(complete.size() == prefix.size() + idr.size() &&
@@ -316,7 +527,9 @@ int main(int argc, char** argv) {
         rejects([&] { CompleteH264Keyframe(idr, prefix, {1920, 1080, video.fps, 5000}); });
       }
     }
-    for (const auto invalidVideo : {VideoConfiguration{1919, 1080, 120, 5000}, {1920, 1081, 120, 5000},
+    for (const auto invalidVideo : {VideoConfiguration{3844, 2160, 120, 20000}, {3840, 2162, 120, 20000},
+                                   {3840, 2160, 121, 20000}, {3840, 2160, 120, 80050},
+                                   {1919, 1080, 120, 5000}, {1920, 1081, 120, 5000},
                                    {854, 480, 30, 1000}, {2, 2, 1, 50},
                                    {1920, 1080, 121, 5000}, {1920, 1080, 0, 5000}, {1920, 1080, 120, 5010}})
       rejects([&] { ValidateVideoConfiguration(invalidVideo); });

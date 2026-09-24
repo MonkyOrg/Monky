@@ -54,15 +54,45 @@ struct VideoConfiguration {
   ScaleMode scaleMode = ScaleMode::Stretch;
 };
 
+inline constexpr std::uint32_t kMaximumBitrateKbps = 80000;
+
 inline void ValidateVideoConfiguration(const VideoConfiguration& video) {
   Require(video.scaleMode == ScaleMode::Stretch || video.scaleMode == ScaleMode::Fit,
           "Unsupported capture scaling mode", "ERR_SCREEN_CAPTURE_VIDEO");
   // obs_reset_video aligns output width to four pixels; reject implicit resizing.
-  Require(video.width >= 4 && video.width <= 1920 && video.width % 4 == 0 &&
-      video.height >= 2 && video.height <= 1080 && video.height % 2 == 0 &&
+  Require(video.width >= 4 && video.width <= 3840 && video.width % 4 == 0 &&
+      video.height >= 2 && video.height <= 2160 && video.height % 2 == 0 &&
       video.fps > 0 && video.fps <= 120 &&
-      video.bitrateKbps >= 50 && video.bitrateKbps <= 20000 && video.bitrateKbps % 50 == 0,
+      video.bitrateKbps >= 50 && video.bitrateKbps <= kMaximumBitrateKbps && video.bitrateKbps % 50 == 0,
       "Unsupported native capture resolution, framerate or bitrate", "ERR_SCREEN_CAPTURE_VIDEO");
+}
+
+inline void ValidateEncoderBitrateRange(std::int64_t value, std::int64_t minimum,
+                                        std::int64_t maximum, std::int64_t step) {
+  Require(minimum >= 0 && step > 0 && value >= minimum && value <= maximum &&
+          value <= kMaximumBitrateKbps && (value - minimum) % step == 0,
+      ("Selected hardware encoder does not support " + std::to_string(value) +
+       " Kbps; property range=" + std::to_string(minimum) + ".." + std::to_string(maximum) +
+       ", step=" + std::to_string(step)).c_str(), "ERR_SCREEN_CAPTURE_SETTINGS");
+}
+
+inline std::uint32_t RequiredCaptureH264Level(const VideoConfiguration& video) {
+  ValidateVideoConfiguration(video);
+  struct Limit { std::uint32_t level, macroblocksPerSecond, frameMacroblocks, bitrateKbps; };
+  // ITU-T H.264 Table A-1, Main profile; the opt-in product ceiling is 80 Mbps.
+  constexpr Limit limits[] = {
+    {10, 1485, 99, 64}, {11, 3000, 396, 192}, {12, 6000, 396, 384}, {13, 11880, 396, 768},
+    {20, 11880, 396, 2000}, {21, 19800, 792, 4000}, {22, 20250, 1620, 4000}, {30, 40500, 1620, 10000},
+    {31, 108000, 3600, 14000}, {32, 216000, 5120, 20000}, {40, 245760, 8192, 20000},
+    {41, 245760, 8192, 50000}, {42, 522240, 8704, 50000}, {50, 589824, 22080, 135000},
+    {51, 983040, 36864, 240000}, {52, 2073600, 36864, 240000}, {60, 4177920, 139264, 240000},
+  };
+  const std::uint64_t columns = (video.width + 15) / 16, rows = (video.height + 15) / 16;
+  for (const auto limit : limits)
+    if (columns * rows <= limit.frameMacroblocks && columns * rows * video.fps <= limit.macroblocksPerSecond &&
+        columns * columns <= 8ull * limit.frameMacroblocks && rows * rows <= 8ull * limit.frameMacroblocks &&
+        video.bitrateKbps <= limit.bitrateKbps) return limit.level;
+  throw ContractError("ERR_SCREEN_CAPTURE_H264", "Selected rendition exceeds H264 Main Level 6");
 }
 
 inline bool ExactVideoConfiguration(const abi::VideoInfo& video, const VideoConfiguration& expected,
@@ -169,6 +199,13 @@ inline const char* EncoderId(EncoderKind kind) { return kind == EncoderKind::Nve
 inline const char* EncoderRateControl(EncoderKind kind) { return kind == EncoderKind::Nvenc ? "CBR" : "VBR_LAT"; }
 // OBS supplies the output colour description; AMF's input primaries otherwise default to undefined.
 inline const char* EncoderExtraOptions(EncoderKind kind) { return kind == EncoderKind::Nvenc ? "" : "InColorPrimaries=1"; }
+inline std::string EncoderProfileOptions(EncoderKind kind, const VideoConfiguration& video) {
+  if (kind == EncoderKind::Nvenc) return EncoderExtraOptions(kind);
+  // Pinned texture-amf.cpp applies ProfileLevel after its size-only level guess,
+  // and reads the property back before Init. Preserve the independent colour fix.
+  return std::string(EncoderExtraOptions(kind)) + " ProfileLevel=" +
+      std::to_string((std::max)(31u, RequiredCaptureH264Level(video)));
+}
 inline const char* SourceId(CaptureKind kind) {
   return kind == CaptureKind::Monitor ? "monitor_capture" : kind == CaptureKind::Game ? "game_capture" : "window_capture";
 }
@@ -252,13 +289,13 @@ inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
       else if (name == L"--pid") {
         bit = 16; value.processId = static_cast<std::uint32_t>(Decimal(text, UINT32_MAX));
       } else if (name == L"--width") {
-        bit = 32; value.video.width = static_cast<std::uint32_t>(Decimal(text, 1920));
+        bit = 32; value.video.width = static_cast<std::uint32_t>(Decimal(text, 3840));
       } else if (name == L"--height") {
-        bit = 64; value.video.height = static_cast<std::uint32_t>(Decimal(text, 1080));
+        bit = 64; value.video.height = static_cast<std::uint32_t>(Decimal(text, 2160));
       } else if (name == L"--fps") {
         bit = 128; value.video.fps = static_cast<std::uint32_t>(Decimal(text, 120));
       } else if (name == L"--bitrate") {
-        bit = 256; value.video.bitrateKbps = static_cast<std::uint32_t>(Decimal(text, 20000));
+        bit = 256; value.video.bitrateKbps = static_cast<std::uint32_t>(Decimal(text, kMaximumBitrateKbps));
       } else if (name == L"--kind") {
         bit = 512;
         Require(text == L"window" || text == L"monitor" || text == L"game", "Unknown capture kind");
@@ -553,7 +590,8 @@ inline void ValidateEncoderAdmission(bool registeredH264, bool passTexture, bool
 
 class BitReader {
  public:
-  explicit BitReader(std::span<const std::uint8_t> bytes) : bytes_(bytes) {}
+  explicit BitReader(std::span<const std::uint8_t> bytes, bool rbsp = false) : bytes_(bytes), rbsp_(rbsp) {}
+  std::size_t Position() const { return position_; }
   std::uint32_t Read(unsigned bits) {
     Require(bits <= 32, "H264 field exceeds32 bits", "ERR_SCREEN_CAPTURE_H264");
     std::uint32_t value = 0;
@@ -561,7 +599,7 @@ class BitReader {
       if (remaining_ == 0) {
         Require(offset_ < bytes_.size(), "Truncated H264 RBSP", "ERR_SCREEN_CAPTURE_H264");
         std::uint8_t next = bytes_[offset_++];
-        if (zeros_ >= 2 && next == 3) {
+        if (!rbsp_ && zeros_ >= 2 && next == 3) {
           Require(offset_ < bytes_.size() && bytes_[offset_] <= 3, "Invalid H264 emulation prevention",
                   "ERR_SCREEN_CAPTURE_H264");
           zeros_ = 0;
@@ -571,6 +609,7 @@ class BitReader {
         byte_ = next; remaining_ = 8;
       }
       --remaining_;
+      ++position_;
       value = (value << 1) | ((byte_ >> remaining_) & 1u);
     }
     return value;
@@ -585,17 +624,19 @@ class BitReader {
  private:
   std::span<const std::uint8_t> bytes_;
   std::size_t offset_ = 0;
+  std::size_t position_ = 0;
+  bool rbsp_ = false;
   unsigned remaining_ = 0, zeros_ = 0;
   std::uint8_t byte_ = 0;
 };
 
-inline void ValidateSps(std::span<const std::uint8_t> nal, const VideoConfiguration& video) {
-  Require(nal.size() >= 5, "Truncated SPS", "ERR_SCREEN_CAPTURE_H264");
-  BitReader bits(nal.subspan(1));
+inline void ReadSpsPicture(BitReader& bits, const VideoConfiguration& video) {
   Require(bits.Read(8) == 77, "Encoded SPS did not accept H264 main profile", "ERR_SCREEN_CAPTURE_H264");
-  bits.Read(8);
+  Require((bits.Read(8) & 3u) == 0, "Invalid SPS reserved constraint bits", "ERR_SCREEN_CAPTURE_H264");
   const auto level = bits.Read(8);
-  Require(level > 0 && level <= 51, "SPS exceeds the negotiated H264 level", "ERR_SCREEN_CAPTURE_H264");
+  Require(level >= RequiredCaptureH264Level(video) &&
+          level <= (std::max)(51u, RequiredCaptureH264Level(video)),
+          "SPS level cannot describe the selected rendition or exceeds its advertised Main level", "ERR_SCREEN_CAPTURE_H264");
   bits.Ue(31);
   bits.Ue(12);
   const auto order = bits.Ue(2);
@@ -616,6 +657,12 @@ inline void ValidateSps(std::span<const std::uint8_t> nal, const VideoConfigurat
           rows * 16 - cropY == video.height, "Encoded SPS dimensions differ from the selected rendition", "ERR_SCREEN_CAPTURE_H264");
 }
 
+inline void ValidateSps(std::span<const std::uint8_t> nal, const VideoConfiguration& video) {
+  Require(nal.size() >= 5, "Truncated SPS", "ERR_SCREEN_CAPTURE_H264");
+  BitReader bits(nal.subspan(1));
+  ReadSpsPicture(bits, video);
+}
+
 struct AnnexBInfo { bool sps = false, pps = false, accessUnit = false, idr = false; };
 
 inline std::size_t StartCodeBytes(std::span<const std::uint8_t> data, std::size_t i) {
@@ -624,10 +671,10 @@ inline std::size_t StartCodeBytes(std::span<const std::uint8_t> data, std::size_
   return 0;
 }
 
-inline AnnexBInfo InspectAnnexB(std::span<const std::uint8_t> bytes, const VideoConfiguration& video) {
+template <typename Visitor>
+inline void VisitAnnexB(std::span<const std::uint8_t> bytes, Visitor visit) {
   Require(!bytes.empty() && bytes.size() <= kMaxPacketBytes, "H264 buffer exceeds packet bound or is empty",
           "ERR_SCREEN_CAPTURE_H264");
-  AnnexBInfo result;
   std::size_t cursor = 0, units = 0;
   while (cursor < bytes.size() && StartCodeBytes(bytes, cursor) == 0) {
     Require(bytes[cursor++] == 0, "Expected Annex B start code, not AVCC", "ERR_SCREEN_CAPTURE_H264");
@@ -646,6 +693,15 @@ inline AnnexBInfo InspectAnnexB(std::span<const std::uint8_t> bytes, const Video
     const auto type = nal.front() & 0x1fu;
     Require(type >= 1 && type <= 12 && type != 2 && type != 3 && type != 4,
             "Unsupported H264 NAL type", "ERR_SCREEN_CAPTURE_H264");
+    visit(nal, begin, payloadEnd);
+    cursor = end;
+  }
+}
+
+inline AnnexBInfo InspectAnnexB(std::span<const std::uint8_t> bytes, const VideoConfiguration& video) {
+  AnnexBInfo result;
+  VisitAnnexB(bytes, [&](std::span<const std::uint8_t> nal, std::size_t, std::size_t) {
+    const auto type = nal.front() & 0x1fu;
     if (type == 7) { ValidateSps(nal, video); result.sps = true; }
     else if (type == 8) {
       BitReader bits(nal.subspan(1)); bits.Ue(255); bits.Ue(31); result.pps = true;
@@ -658,8 +714,113 @@ inline AnnexBInfo InspectAnnexB(std::span<const std::uint8_t> bytes, const Video
               "Packet must contain one H264 access unit beginning at macroblock0", "ERR_SCREEN_CAPTURE_H264");
       result.accessUnit = true; result.idr = type == 5;
     }
-    cursor = end;
+  });
+  return result;
+}
+
+struct AmfColorNormalization {
+  // Empty means no rewrite: callers retain the original, immutable OBS buffer.
+  std::vector<std::uint8_t> bytes;
+  std::size_t parameterSets = 0;
+};
+
+inline std::vector<std::uint8_t> H264SpsRbsp(std::span<const std::uint8_t> ebsp) {
+  std::vector<std::uint8_t> rbsp;
+  rbsp.reserve(ebsp.size());
+  unsigned zeros = 0;
+  for (std::size_t i = 0; i < ebsp.size(); ++i) {
+    const auto byte = ebsp[i];
+    if (zeros == 2) {
+      if (byte == 3) {
+        Require(i + 1 < ebsp.size() && ebsp[i + 1] <= 3,
+                "Invalid SPS emulation prevention", "ERR_SCREEN_CAPTURE_H264");
+        zeros = 0;
+        continue;
+      }
+      Require(byte > 3, "Unescaped SPS RBSP byte", "ERR_SCREEN_CAPTURE_H264");
+    }
+    rbsp.push_back(byte);
+    zeros = byte == 0 ? zeros + 1 : 0;
   }
+  return rbsp;
+}
+
+inline void ReadH264Hrd(BitReader& bits) {
+  const auto count = bits.Ue(31) + 1;
+  bits.Read(4); bits.Read(4);
+  for (std::uint32_t i = 0; i < count; ++i) { bits.Ue(); bits.Ue(); bits.Read(1); }
+  bits.Read(5); bits.Read(5); bits.Read(5); bits.Read(5);
+}
+
+inline std::optional<std::size_t> AmfReservedPrimariesBit(std::span<const std::uint8_t> rbsp,
+                                                        const VideoConfiguration& video) {
+  BitReader bits(rbsp, true);
+  ReadSpsPicture(bits, video);
+  std::optional<std::size_t> primariesBit;
+  if (bits.Read(1)) { // vui_parameters_present_flag
+    if (bits.Read(1) && bits.Read(8) == 255) { bits.Read(16); bits.Read(16); }
+    if (bits.Read(1)) bits.Read(1);
+    if (bits.Read(1)) {
+      bits.Read(3);
+      const bool fullRange = bits.Read(1) != 0;
+      if (bits.Read(1)) {
+        const auto position = bits.Position();
+        const auto primaries = bits.Read(8), transfer = bits.Read(8), matrix = bits.Read(8);
+        if (!fullRange && primaries == 0 && transfer == 1 && matrix == 1) primariesBit = position + 7;
+      }
+    }
+    if (bits.Read(1)) { bits.Ue(5); bits.Ue(5); }
+    if (bits.Read(1)) { bits.Read(32); bits.Read(32); bits.Read(1); }
+    const bool nalHrd = bits.Read(1) != 0;
+    if (nalHrd) ReadH264Hrd(bits);
+    const bool vclHrd = bits.Read(1) != 0;
+    if (vclHrd) ReadH264Hrd(bits);
+    if (nalHrd || vclHrd) bits.Read(1);
+    bits.Read(1);
+    if (bits.Read(1)) {
+      bits.Read(1); bits.Ue(16); bits.Ue(16); bits.Ue(16); bits.Ue(16); bits.Ue(16); bits.Ue(16);
+    }
+  }
+  Require(bits.Read(1) == 1, "Missing SPS RBSP stop bit", "ERR_SCREEN_CAPTURE_H264");
+  while (bits.Position() % 8)
+    Require(bits.Read(1) == 0, "Invalid SPS RBSP padding", "ERR_SCREEN_CAPTURE_H264");
+  Require(bits.Position() / 8 == rbsp.size(), "Unexpected SPS RBSP suffix", "ERR_SCREEN_CAPTURE_H264");
+  return primariesBit;
+}
+
+// GPUOpen-LibrariesAndSDKs/AMF#354 is a metadata defect, not a colour conversion.
+// Only our admitted texture encoder's NV12/709/limited pipeline supplies this
+// provenance; RTC/decoder colour admission is deliberately unchanged.
+inline AmfColorNormalization NormalizeAmfBt709(std::span<const std::uint8_t> bytes,
+    const VideoConfiguration& video, EncoderKind encoder, bool verifiedNv12Bt709Limited) {
+  AmfColorNormalization result;
+  if (encoder != EncoderKind::Amf || !verifiedNv12Bt709Limited) return result;
+  std::size_t copied = 0;
+  const auto append = [&](std::span<const std::uint8_t> part) {
+    Require(part.size() <= kMaxPacketBytes - result.bytes.size(),
+            "Normalized H264 exceeds the packet bound", "ERR_SCREEN_CAPTURE_BUFFER_LIMIT");
+    result.bytes.insert(result.bytes.end(), part.begin(), part.end());
+  };
+  VisitAnnexB(bytes, [&](std::span<const std::uint8_t> nal, std::size_t begin, std::size_t end) {
+    if ((nal.front() & 0x1fu) != 7) return;
+    auto rbsp = H264SpsRbsp(nal.subspan(1));
+    const auto bit = AmfReservedPrimariesBit(rbsp, video);
+    if (!bit) return;
+    rbsp[*bit / 8] |= static_cast<std::uint8_t>(1u << (7 - *bit % 8));
+    append(bytes.subspan(copied, begin + 1 - copied));
+    unsigned zeros = 0;
+    for (const auto byte : rbsp) {
+      if (zeros == 2 && byte <= 3) {
+        const std::uint8_t prevention = 3;
+        append({&prevention, 1}); zeros = 0;
+      }
+      append({&byte, 1});
+      zeros = byte == 0 ? zeros + 1 : 0;
+    }
+    copied = end;
+    ++result.parameterSets;
+  });
+  if (result.parameterSets) append(bytes.subspan(copied));
   return result;
 }
 

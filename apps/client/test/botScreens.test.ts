@@ -186,7 +186,7 @@ test('background voice snapshots notify global UI only after restoring the visib
     assert.equal(repaints, 2);
     assert.equal(b.botScreenStore.list('voice').length, 0);
   } finally {
-    off(); unbind(); voiceStore.reset(); sessionManager.removeAll();
+    off(); unbind(); voiceStore.reset(); await sessionManager.removeAll();
   }
 });
 
@@ -215,11 +215,11 @@ test('end of an unseen instance invalidates an in-flight room list before it can
     assert.equal(session.botScreenStore.get('game'), undefined);
     assert.equal(session.botScreenStore.isInvitationDismissed('game'), false);
   } finally {
-    unbind(); voiceStore.reset(); sessionManager.removeAll();
+    unbind(); voiceStore.reset(); await sessionManager.removeAll();
   }
 });
 
-test('voice-required commands authorize the originating device and bot room, not active text or account presence', (testContext) => {
+test('voice-required commands authorize the originating device and bot room, not active text or account presence', async (testContext) => {
   const a = sessionManager.create('command-a', 7800, 'alice');
   const b = sessionManager.create('command-b', 7800, 'alice');
   seed(a); seed(b);
@@ -251,6 +251,6 @@ test('voice-required commands authorize the originating device and bot room, not
     assert.equal(commandVoiceError(command, a.client, a.serverStore), ProtocolErrorCode.BOT_VOICE_REQUIRED);
     assert.equal(commandVoiceError({ ...command, voiceRequirement: undefined }, a.client, a.serverStore), undefined);
   } finally {
-    voiceStore.reset(); sessionManager.removeAll();
+    voiceStore.reset(); await sessionManager.removeAll();
   }
 });

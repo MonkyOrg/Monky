@@ -1,4 +1,5 @@
 #include "adapter_policy_probe.h"
+#include "h264_level_checks.h"
 #include "mf_rtc_internal.h"
 
 #include <cmath>
@@ -30,6 +31,7 @@ void Reject(Function&& function, const char* expected_code) {
 }
 
 void VerifyFormatsAndIdleOwnership() {
+  RunH264LevelChecks(Check);
   const mf::AdapterOptions options;
   auto bundle = mf::CreateFactoryBundle(options);
   const auto formats = bundle.encoder_factory->GetSupportedFormats();
@@ -47,11 +49,13 @@ void VerifyFormatsAndIdleOwnership() {
     Check(!policy::ParseFormat(invalid, 52), "Packetization mode zero was accepted");
   }
   for (const auto prefix : {"42e0", "4d00"}) {
-    for (const auto suffix : {"1f", "20", "28", "29", "2a", "32", "33", "34"}) {
+    for (const auto suffix : {"1f", "20", "28", "29", "2a", "32", "33", "34", "3c"}) {
       const webrtc::SdpVideoFormat format(
           "H264", {{"profile-level-id", std::string(prefix) + suffix},
                    {"packetization-mode", "1"}});
-      Check(policy::ParseFormat(format, 52).has_value(), "Qualified H264 level was rejected");
+      Check(policy::ParseFormat(format, 60).has_value(), "Supported H264 level was rejected");
+      if (std::string_view(suffix) == "3c")
+        Check(!policy::ParseFormat(format, 52), "A Level5.2 peer was mistaken for Level6 support");
     }
   }
   Check(!policy::ParseFormat(

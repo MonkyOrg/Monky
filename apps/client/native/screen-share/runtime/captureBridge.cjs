@@ -147,7 +147,7 @@ class CaptureBridge extends ObsHostBridge {
     assert.ok(verb === 'bitrate' || verb === 'idr');
     assert.ok(this.prepared && this.child && !this.stopping && !this.firstError && this.liveHello);
     assert.ok(this.liveSequence < Number.MAX_SAFE_INTEGER && this.liveRequests.size < 4, 'Capture feedback queue exceeded its bound.');
-    if (verb === 'bitrate') assert.ok(Number.isInteger(value) && value >= 50 && value <= 20000 && value % 50 === 0);
+    if (verb === 'bitrate') assert.ok(Number.isInteger(value) && value >= 50 && value <= 80000 && value % 50 === 0);
     else assert.equal(value, 0);
     const sequence = ++this.liveSequence, stream = this.child.stdio[4];
     assert.ok(stream.writableLength < 4096, 'Live feedback pipe is backpressured.');

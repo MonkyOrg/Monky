@@ -13,7 +13,7 @@ const {
 const MAXIMUM_PROFILE_VIEWERS = 16;
 const cancelled = () => new DOMException('The screen subscription was retired.', 'AbortError');
 const failureReason = error => error?.code === 'ERR_SCREEN_CAPACITY' ? 'capacity-exceeded'
-  : error?.code === 'ERR_RTC_ENCODED_FORMAT' ? 'unsupported'
+  : error?.code === 'ERR_RTC_ENCODED_FORMAT' || error?.code === 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' ? 'unsupported'
   : String(error?.code).includes('CAPTURE') ? 'capture-failed' : 'connection-failed';
 
 class NativeScreenPublisher {
@@ -296,6 +296,10 @@ class NativeScreenPublisher {
       }
       assert.equal(pipeline.endpoint.snapshot().closed, true);
     })();
+    const work = pipeline.closing;
+    void work.catch(() => {
+      if (pipeline.closing === work && !pipeline.endpoint.snapshot().closed) pipeline.closing = null;
+    });
     return pipeline.closing;
   }
 
@@ -342,13 +346,20 @@ class NativeScreenPublisher {
       if (errors.length) throw new AggregateError(errors, 'Native screen publisher reported shutdown failures.');
       assert.equal(this.pipelines.size, 0, 'A screen publisher retained a native pipeline.');
     })();
+    const work = this.closing;
+    void work.catch(() => {
+      if (this.closing === work) this.closing = null;
+    });
     return this.closing;
   }
 
-  diagnostics() {
-    assert.equal(this.closed, false, 'The screen publisher is retiring.');
-    return Promise.all([...this.pipelines.values()].filter(pipeline => pipeline.endpoint && !pipeline.closing)
-      .map(pipeline => pipeline.endpoint.diagnostics()));
+  async diagnostics() {
+    if (this.closed) throw cancelled();
+    const pipelines = [...this.pipelines.values()].filter(pipeline => pipeline.endpoint && !pipeline.closing);
+    const results = await Promise.all(pipelines.map(pipeline => pipeline.endpoint.diagnostics()));
+    if (this.closed || pipelines.some(pipeline => pipeline.closing || this.pipelines.get(pipeline.key) !== pipeline))
+      throw cancelled();
+    return results;
   }
 
   snapshot() {

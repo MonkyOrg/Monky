@@ -213,7 +213,11 @@ export class SessionManager {
     if (!session) return;
     clientLog.info('CONNECTION', `Removing session: ${key}`);
     const wasActive = this.activeKey === key;
-    session.localExecution.dispose();
+    void session.localExecution.dispose().catch((error: unknown) => {
+      clientLog.error('CONNECTION', 'Failed to dispose a removed session', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
     session.client.dispose();
     this.sessions.delete(key);
     // The disconnect above may have already handed the screen to another
@@ -228,18 +232,21 @@ export class SessionManager {
     emitOutsideRouting(() => appEvents.emit('session.connections_changed'));
   }
 
-  public removeAll(): void {
+  public async removeAll(): Promise<void> {
     clientLog.info('CONNECTION', `Removing all sessions (${this.sessions.size} active)`);
     // Background first: closing the visible one is what sends the user back to
     // the connection screen, so it has to be the last thing to happen.
-    for (const session of this.getBackground()) this.remove(session.key);
-    if (this.activeKey) this.remove(this.activeKey);
+    const active = this.getActive();
+    for (const session of [...this.getBackground(), ...(active ? [active] : [])]) {
+      await session.localExecution.dispose();
+      this.remove(session.key);
+    }
   }
 
-  public dispose(): void {
+  public async dispose(): Promise<void> {
     this.unbindLocalVoice?.();
     this.unbindLocalVoice = null;
-    this.removeAll();
+    await this.removeAll();
   }
 
   /** Points the global proxies at a session's bundle of state. */

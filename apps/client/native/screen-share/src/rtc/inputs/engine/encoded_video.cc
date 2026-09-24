@@ -2,6 +2,7 @@
 #include "capture_clock.h"
 #include "h264_bitstream.h"
 #include "mf_rtc_internal.h"
+#include "peer_support.h"
 
 #include "api\environment\environment_factory.h"
 #include "api\field_trials.h"
@@ -39,7 +40,14 @@ struct EncodedConfiguration {
   std::uint32_t width = 1920, height = 1080, fps = 120;
 };
 
-bool AcceptsEncodedFormat(const webrtc::SdpVideoFormat& format) {
+std::uint8_t MinimumEncodedLevel(const EncodedConfiguration& video) {
+  // Level5.1 covers every admitted bitrate (up to 80Mbps), even after feedback
+  // raises it. Only geometry/rate can require a higher level within this product.
+  return (std::max)(std::uint8_t{51},
+      sv::RequiredH264Level(video.width, video.height, video.fps, kEncodedBitrateCeiling));
+}
+
+std::optional<policy::NegotiatedH264> ParseEncodedFormat(const webrtc::SdpVideoFormat& format) {
   auto negotiated = format;
   const auto maximum = negotiated.parameters.find("max-recv-level");
   const bool extended = maximum != negotiated.parameters.end();
@@ -48,21 +56,27 @@ bool AcceptsEncodedFormat(const webrtc::SdpVideoFormat& format) {
     receive_level = maximum->second;
     negotiated.parameters.erase(maximum);
   }
-  auto parsed = policy::ParseFormat(negotiated, 52);
-  if (!parsed || parsed->profile != sv::H264Profile::Main) return false;
+  auto parsed = policy::ParseFormat(negotiated, kEncodedH264Level);
+  if (!parsed || parsed->profile != sv::H264Profile::Main) return std::nullopt;
   if (!receive_level.empty()) {
     if (receive_level.size() != 4 ||
         !std::all_of(receive_level.begin(), receive_level.end(), [](unsigned char c) {
           return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-        })) return false;
+        })) return std::nullopt;
     const auto default_level = parsed->level;
     negotiated.parameters["profile-level-id"] = "4d" + receive_level;
-    parsed = policy::ParseFormat(negotiated, 52);
-    if (!parsed || parsed->profile != sv::H264Profile::Main || parsed->level <= default_level) return false;
+    parsed = policy::ParseFormat(negotiated, kEncodedH264Level);
+    if (!parsed || parsed->profile != sv::H264Profile::Main || parsed->level <= default_level) return std::nullopt;
   } else if (extended) {
-    return false;
+    return std::nullopt;
   }
-  return parsed->level >= kEncodedH264Level;
+  return parsed;
+}
+
+bool AcceptsEncodedFormat(const webrtc::SdpVideoFormat& format,
+                          std::uint8_t minimum_level = kEncodedH264Level) {
+  const auto parsed = ParseEncodedFormat(format);
+  return parsed && parsed->level >= minimum_level;
 }
 
 EncodedConfiguration ParseConfiguration(const Json& options) {
@@ -71,9 +85,16 @@ EncodedConfiguration ParseConfiguration(const Json& options) {
         options.at(key) >= minimum && options.at(key) <= maximum, "Invalid encoded video configuration");
     return options.at(key).get<std::uint32_t>();
   };
-  EncodedConfiguration value{integer("width", 2, 1920), integer("height", 2, 1080), integer("fps", 1, 120)};
+  EncodedConfiguration value{integer("width", 2, 3840), integer("height", 2, 2160), integer("fps", 1, 120)};
   Require(value.width % 2 == 0 && value.height % 2 == 0, "H264 NV12 dimensions must be even");
   return value;
+}
+
+void ValidateEncodedLevel(const sv::H264Sps& sps, const EncodedConfiguration& video) {
+  if (sv::RequiredH264Level(sps.codedWidth, sps.codedHeight, video.fps, 64000) > sps.levelIdc ||
+      sps.levelIdc > MinimumEncodedLevel(video))
+    throw Error("ERR_RTC_ENCODED_LEVEL",
+        "Actual H264 SPS level must describe the source and fit its advertised level", MONKY_ENGINE_INVALID);
 }
 
 std::int64_t QpcNowUs() {
@@ -156,7 +177,8 @@ struct State : std::enable_shared_from_this<State> {
   explicit State(std::uint64_t source, std::string group, bool initially_enabled,
                  std::function<bool(std::string_view, Json)> event, EncodedConfiguration configuration = {})
       : id(source), sync_group(std::move(group)), video(configuration), enabled(initially_enabled), emit(std::move(event)),
-        stream(video.width, video.height, kEncodedH264Level, sv::H264Profile::Main, sv::H264LevelPolicy::Maximum) {}
+        stream(video.width, video.height, MinimumEncodedLevel(video), sv::H264Profile::Main,
+               sv::H264LevelPolicy::Maximum) {}
 
   bool Event(std::string_view type, Json data) noexcept {
     try {
@@ -198,13 +220,15 @@ struct State : std::enable_shared_from_this<State> {
       {"requestedFps", requested_fps}, {"fpsApplied", nullptr}, {"paused", paused},
       {"bitrateCeilingBps", kEncodedBitrateCeiling}, {"keyframeConfirmed", false}};
   }
-  void Rates(std::uint64_t encoder, std::uint64_t requested, double fps) {
+  void Rates(std::uint64_t encoder, std::uint64_t requested, double fps,
+             std::uint32_t ceiling = kEncodedBitrateCeiling) {
     Json data;
     {
       std::lock_guard lock(mutex);
       Require(rates.contains(encoder), "Rate update refers to a retired encoder");
       rates[encoder] = requested && fps > 0
-          ? static_cast<std::uint32_t>((std::min)(requested, std::uint64_t{kEncodedBitrateCeiling})) : 0;
+          ? static_cast<std::uint32_t>((std::min)({requested, std::uint64_t{ceiling},
+                                                 std::uint64_t{kEncodedBitrateCeiling}})) : 0;
       const bool was_paused = paused;
       data = RateData("rate", encoder, requested, fps);
       if (!was_paused && paused) {
@@ -260,7 +284,7 @@ struct State : std::enable_shared_from_this<State> {
     std::lock_guard lock(mutex);
     return {{"kind", "encoded-h264"}, {"width", video.width}, {"height", video.height}, {"requestedFps", video.fps},
       {"profileLevelId", stream.Verified() ? Json(stream.Sps().ProfileLevelId()) : Json(nullptr)},
-      {"maximumProfileLevelId", "4d0033"}, {"sourceId", id}, {"syncGroup", sync_group},
+      {"maximumProfileLevelId", "4d003c"}, {"sourceId", id}, {"syncGroup", sync_group},
       {"enabled", enabled.load()}, {"paused", paused}, {"closed", closed.load()}, {"failed", failed.load()},
       {"admitted", admitted}, {"published", published}, {"released", released},
       {"acceptedCodecCallbacks", accepted_callbacks}, {"explicitlyNotSent", not_sent},
@@ -306,6 +330,7 @@ struct Token {
   std::shared_ptr<State> owner;
   MonkyEngineEncodedFrame metadata{};
   std::vector<std::uint8_t> bytes;
+  std::uint8_t level = 0;
   std::uint64_t generation = 0;
   bool admitted = false;
   std::atomic<std::size_t> expected{0}, accepted{0}, refused{0};
@@ -472,17 +497,22 @@ class Track : public webrtc::VideoTrackSource {
 
 class Encoder final : public webrtc::VideoEncoder {
  public:
-  explicit Encoder(std::shared_ptr<State> state) : state_(std::move(state)) {}
+  explicit Encoder(std::shared_ptr<State> state, std::uint8_t negotiated_level = kEncodedH264Level)
+      : state_(std::move(state)), negotiated_level_(negotiated_level) {}
   ~Encoder() override { Release(); }
   int InitEncode(const webrtc::VideoCodec* codec, const Settings& settings) override {
     try {
       Require(codec && !state_->stopping.load(), "Encoded source is not available");
+      Require(codec->maxBitrate <= kEncodedBitrateCeiling / 1000 &&
+              codec->startBitrate <= kEncodedBitrateCeiling / 1000,
+          "External H264 bitrate exceeds the 80000Kbps product ceiling");
       mf::AdapterOptions options;
-      const auto setup = policy::MakeEncoderSetup(*codec, settings, {sv::H264Profile::Main, kEncodedH264Level}, options);
+      const auto setup = policy::MakeEncoderSetup(*codec, settings, {sv::H264Profile::Main, negotiated_level_}, options);
       Require(setup.core.width == state_->video.width && setup.core.height == state_->video.height &&
           codec->maxFramerate <= state_->video.fps,
           "RTC cannot resize or increase the framerate of already encoded H264");
       StopSession();
+      maximum_bitrate_ = (std::min)(setup.maximum_bitrate, kEncodedBitrateCeiling);
       {
         std::lock_guard lock(state_->mutex);
         Require(state_->rates.size() < 32, "Too many encoded RTC consumers", MONKY_ENGINE_QUEUE_FULL);
@@ -526,7 +556,7 @@ class Encoder final : public webrtc::VideoEncoder {
               "External H264 supports only L1T1 rate feedback");
       const auto requested = rates.bitrate.get_sum_bps();
       if (!requested || rates.framerate_fps == 0) needs_idr_ = true;
-      state_->Rates(session_, requested, rates.framerate_fps);
+      state_->Rates(session_, requested, rates.framerate_fps, maximum_bitrate_);
     } catch (const std::exception& error) { state_->Fail("ERR_RTC_ENCODED_RATES", error.what()); }
   }
   int32_t Encode(const webrtc::VideoFrame& frame,
@@ -539,6 +569,8 @@ class Encoder final : public webrtc::VideoEncoder {
         const auto found = state_->buffers.find(frame.video_frame_buffer().get());
         Require(found != state_->buffers.end() && (token = found->second.lock()),
             "External encoder received a foreign/raw native buffer");
+        Require(token->level <= negotiated_level_,
+            "Actual H264 SPS exceeds this receiver's negotiated level");
         if (state_->stopping.load() || !state_->enabled.load() || token->generation != state_->generation ||
             !state_->rates.at(session_)) {
           ++token->refused;
@@ -628,8 +660,10 @@ class Encoder final : public webrtc::VideoEncoder {
     if (const auto session = std::exchange(session_, 0)) state_->EncoderClosed(session);
   }
   const std::shared_ptr<State> state_;
+  const std::uint8_t negotiated_level_;
   Gate callbacks_;
   std::uint64_t session_ = 0, generation_ = 0;
+  std::uint32_t maximum_bitrate_ = kEncodedBitrateCeiling;
   bool needs_idr_ = true, requested_idr_ = false;
   Clock::time_point idr_at_{};
 };
@@ -637,6 +671,15 @@ class Encoder final : public webrtc::VideoEncoder {
 
 class EncodedVideoContext {
  public:
+  explicit EncodedVideoContext(std::uint8_t level) : maximum_level(level) {
+    Require(level == 51 || level == 52 || level == 60, "External H264 requires a Main5.1, Main5.2 or Main6 ceiling");
+  }
+  void ValidateSource(const EncodedConfiguration& video) const {
+    if (MinimumEncodedLevel(video) > maximum_level)
+      throw Error("ERR_RTC_ENCODED_LEVEL", "Encoded source exceeds the engine's fixed advertised H264 level",
+          MONKY_ENGINE_UNSUPPORTED);
+  }
+  const std::uint8_t maximum_level;
   std::mutex mutex;
   std::weak_ptr<State> source;
 };
@@ -646,7 +689,8 @@ class Factory final : public webrtc::VideoEncoderFactory {
  public:
   explicit Factory(std::shared_ptr<EncodedVideoContext> context) : context_(std::move(context)) {}
   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
-    auto formats = policy::SupportedFormats(kEncodedH264Level);
+    // WebRTC caches these formats before a source exists. Never change them after startup.
+    auto formats = policy::SupportedFormats(context_->maximum_level);
     std::erase_if(formats, [](const auto& format) {
       const auto parsed = policy::ParseFormat(format, kEncodedH264Level);
       Require(parsed.has_value(), "Internal H264 capability is invalid");
@@ -656,18 +700,24 @@ class Factory final : public webrtc::VideoEncoderFactory {
   }
   CodecSupport QueryCodecSupport(const webrtc::SdpVideoFormat& format,
                                  std::optional<std::string> scalability) const override {
-    return {AcceptsEncodedFormat(format) &&
+    std::lock_guard lock(context_->mutex);
+    const auto source = context_->source.lock();
+    const auto negotiated = ParseEncodedFormat(format);
+    return {negotiated && negotiated->level <= context_->maximum_level &&
+      AcceptsEncodedFormat(format, source ? MinimumEncodedLevel(source->video) : context_->maximum_level) &&
       (!scalability || *scalability == "L1T1"), false};
   }
   std::unique_ptr<webrtc::VideoEncoder> Create(const webrtc::Environment&,
                                               const webrtc::SdpVideoFormat& format) override {
     std::lock_guard lock(context_->mutex);
     auto source = context_->source.lock();
-    if (!source || source->stopping.load() || !QueryCodecSupport(format, std::nullopt).is_supported) {
-      RTC_LOG(LS_ERROR) << "External H264 requires a live source and a receiver supporting Main5.1 L1T1";
+    const auto negotiated = ParseEncodedFormat(format);
+    if (!source || source->stopping.load() || !negotiated || negotiated->level > context_->maximum_level ||
+        negotiated->level < MinimumEncodedLevel(source->video)) {
+      RTC_LOG(LS_ERROR) << "External H264 requires a live source and a receiver supporting its actual Main level L1T1";
       return nullptr;
     }
-    return std::make_unique<Encoder>(std::move(source));
+    return std::make_unique<Encoder>(std::move(source), negotiated->level);
   }
  private:
   const std::shared_ptr<EncodedVideoContext> context_;
@@ -694,7 +744,9 @@ class Source final : public VideoSource {
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> TrackSource() const override { return track_; }
   const std::string& SyncGroup() const override { return state_->sync_group; }
   bool Enabled() const override { return state_->enabled.load() && !state_->stopping.load() && !state_->failed.load(); }
-  bool AcceptsSendCodec(const webrtc::SdpVideoFormat& format) const override { return AcceptsEncodedFormat(format); }
+  bool AcceptsSendCodec(const webrtc::SdpVideoFormat& format) const override {
+    return AcceptsEncodedFormat(format, MinimumEncodedLevel(state_->video));
+  }
   void SetEnabled(bool enabled) override {
     std::deque<std::shared_ptr<Token>> discarded;
     {
@@ -742,8 +794,10 @@ class Source final : public VideoSource {
       throw Error("ERR_RTC_ENCODED_RECOVERY", "Encoded recovery requires a real IDR; no copy was admitted", MONKY_ENGINE_BUSY);
     auto parser = state_->stream;
     auto normalized = Normalize(parser, frame);
+    ValidateEncodedLevel(parser.Sps(), state_->video);
     Capacity(state_->retained.size(), state_->retained_bytes, normalized.data.size(), frame.timestamp_us, current_time());
     auto token = std::make_shared<Token>();
+    token->level = parser.Sps().levelIdc;
     token->owner = state_; token->metadata = frame; token->metadata.data = nullptr;
     token->bytes = std::move(normalized.data); token->generation = state_->generation;
     state_->retained.emplace(frame.frame_id, token);
@@ -879,8 +933,8 @@ void ValidateEncodedFrame(const MonkyEngineEncodedFrame& frame) {
       "Invalid bounded Annex B input metadata");
 }
 
-EncodedFactoryBundle CreateEncodedVideoFactory() {
-  auto context = std::make_shared<EncodedVideoContext>();
+EncodedFactoryBundle CreateEncodedVideoFactory(std::uint8_t maximum_level) {
+  auto context = std::make_shared<EncodedVideoContext>(maximum_level);
   auto field_trials = webrtc::FieldTrials::Create(
       "WebRTC-FrameDropper/Disabled/"
       "WebRTC-CongestionWindow/QueueSize:350,MinBitrate:30000,DropFrame:false/");
@@ -898,6 +952,7 @@ std::shared_ptr<VideoSource> CreateEncodedVideoSource(Host& host, std::uint64_t 
   const auto group = SyncGroup(options);
   const bool enabled = Boolean(options, "enabled");
   Require(context != nullptr, "The engine has no external-H264 factory");
+  context->ValidateSource(configuration);
   std::lock_guard lock(context->mutex);
   if (const auto previous = context->source.lock())
     Require(previous->closed.load(), "Previous encoded source still owns its copy/codec state", MONKY_ENGINE_BUSY);
@@ -936,7 +991,8 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
     try { operation(); } catch (const std::exception&) { rejected = true; }
     check(rejected, "Invalid encoded contract was accepted");
   };
-  for (const auto video : {EncodedConfiguration{1920, 1080, 120}, {1920, 1080, 60},
+  for (const auto video : {EncodedConfiguration{3840, 2160, 120}, {3840, 2160, 60},
+                           {1920, 1080, 120}, {1920, 1080, 60},
                            {1280, 720, 60}, {854, 480, 30}}) {
     const auto parsed = ParseConfiguration({{"width", video.width}, {"height", video.height}, {"fps", video.fps}});
     check(parsed.width == video.width && parsed.height == video.height && parsed.fps == video.fps,
@@ -948,8 +1004,9 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
         snapshot.at("requestedFps") == video.fps && snapshot.at("profileLevelId").is_null(),
         "Rendition stats must report their own configuration without inventing an observed SPS");
   }
-  for (const auto invalid : {Json{{"width", 1921}, {"height", 1080}, {"fps", 120}},
-                            Json{{"width", 1920}, {"height", 1081}, {"fps", 120}},
+  for (const auto invalid : {Json{{"width", 3844}, {"height", 2160}, {"fps", 120}},
+                            Json{{"width", 3840}, {"height", 2162}, {"fps", 120}},
+                            Json{{"width", 3840}, {"height", 2160}, {"fps", 121}},
                             Json{{"width", 1920}, {"height", 1080}, {"fps", 121}},
                             Json{{"width", 0}, {"height", 1080}, {"fps", 120}},
                             Json{{"width", 1919}, {"height", 1080}, {"fps", 120}},
@@ -958,6 +1015,20 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
                             Json{{"width", -2}, {"height", 1080}, {"fps", 120}},
                             Json{{"width", "1920"}, {"height", 1080}, {"fps", 120}}}) {
     rejects([&] { ParseConfiguration(invalid); });
+  }
+  {
+    sv::H264Sps sps;
+    sps.width = sps.codedWidth = 3840; sps.height = sps.codedHeight = 2160; sps.levelIdc = 52;
+    rejects([&] { ValidateEncodedLevel(sps, {3840, 2160, 120}); });
+    sps.levelIdc = 60;
+    ValidateEncodedLevel(sps, {3840, 2160, 120});
+    sps.codedWidth = sps.codedHeight = 4096;
+    rejects([&] { ValidateEncodedLevel(sps, {3840, 2160, 120}); });
+    sps.width = sps.codedWidth = 1920; sps.height = 1080; sps.codedHeight = 1088; sps.levelIdc = 51;
+    ValidateEncodedLevel(sps, {1920, 1080, 120});
+    sps.levelIdc = 60;
+    rejects([&] { ValidateEncodedLevel(sps, {1920, 1080, 120}); });
+    check(true, "4K120 requires Level6 while 1080p120 retains its actual Level5.1 SPS");
   }
   check(sizeof(MonkyEngineEncodedFrame) == 80 && alignof(MonkyEngineEncodedFrame) == 8,
       "Encoded C/POD layout drift");
@@ -975,12 +1046,20 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
     };
     auto input = frame;
     input.data = packet.data(); input.data_bytes = static_cast<std::uint32_t>(packet.size());
-    sv::H264Bitstream parser(1280, 720, kEncodedH264Level, sv::H264Profile::Main);
+    sv::H264Bitstream parser(1280, 720, kEncodedH264Level, sv::H264Profile::Main, sv::H264LevelPolicy::Maximum);
     const auto admitted = Normalize(parser, input);
     check(admitted.hasPicture && admitted.keyFrame && parser.Sps().colorPrimaries == 2 &&
         parser.Sps().transferCharacteristics == 2 && parser.Sps().matrixCoefficients == 2,
         "The actual external-input path rejected explicitly unspecified H264 colour");
     check(admitted.data == packet, "Colour compatibility must not rewrite encoded parameter sets");
+    {
+      State bounded(1, "source-sps-level", false, [](std::string_view, Json) { return true; }, {1280, 720, 60});
+      packet[7] = 60;
+      rejects([&] { Normalize(bounded.stream, input); });
+      packet[7] = 51;
+      check(Normalize(bounded.stream, input).hasPicture,
+          "Real SPS must fit the advertised source level without relabeling parameter sets");
+    }
     packet[14] = packet[15] = packet[16] = 0x60;
     bool rejected = false;
     try { Normalize(parser, input); }
@@ -1012,7 +1091,7 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
   rejects([&] { Capacity(0, 0, 1, 1010001, 1000000); });
   const std::array<std::uint8_t, 8> bad_order{0, 0, 1, 0x65, 0, 0, 1, 0x67};
   rejects([&] { ParameterOrder(bad_order); });
-  auto bundle = CreateEncodedVideoFactory();
+  auto bundle = CreateEncodedVideoFactory(kEncodedH264Level);
   const webrtc::RateControlSettings encoded_rates(*bundle.field_trials);
   check(bundle.field_trials->IsDisabled("WebRTC-FrameDropper") &&
       encoded_rates.UseCongestionWindow() && encoded_rates.UseCongestionWindowPushback() &&
@@ -1028,8 +1107,8 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
       default_rates.UseCongestionWindowDropFrameOnly(),
       "Encoded-only congestion policies must not change the raw-video defaults");
   const auto formats = bundle.encoder_factory->GetSupportedFormats();
-  check(formats.size() == 1 && formats[0].parameters.at("profile-level-id") == "4d0033",
-      "External encoder must advertise actual Main5.1 support without SDP rewriting");
+  check(formats.size() == 1 && formats[0].parameters.at("profile-level-id") == "4d003c",
+      "External encoder must advertise Main6 support without mislabeling a 4K120 stream");
   check(bundle.encoder_factory->QueryCodecSupport(formats[0], "L1T1").is_supported,
       "External H264 L1T1 support is missing");
   check(!bundle.encoder_factory->QueryCodecSupport(formats[0], "L1T2").is_supported,
@@ -1037,54 +1116,107 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
   {
     auto receive = formats[0];
     receive.parameters["profile-level-id"] = "4d001f";
-    check(!AcceptsEncodedFormat(receive), "A Level3.1-only receiver cannot accept the external Main5.1 stream");
-    receive.parameters["max-recv-level"] = "0033";
+    check(!AcceptsEncodedFormat(receive), "A Level3.1-only receiver cannot accept the external Main6 stream");
+    receive.parameters["max-recv-level"] = "003c";
     check(AcceptsEncodedFormat(receive) && bundle.encoder_factory->QueryCodecSupport(receive, "L1T1").is_supported,
-        "An explicit RFC6184 Main5.1 receive limit was ignored");
-    for (const auto* invalid : {"", "33", "xyz3", "001f", "002a", "8033"}) {
+        "An explicit RFC6184 Main6 receive limit was ignored");
+    for (const auto* invalid : {"", "3c", "xyz3", "001f", "002a", "0033", "0034", "003d", "8033"}) {
       receive.parameters["max-recv-level"] = invalid;
       check(!AcceptsEncodedFormat(receive), "Invalid or insufficient extended H264 receive level was accepted");
     }
-    receive.parameters["max-recv-level"] = "0033";
+    receive.parameters["max-recv-level"] = "003c";
     receive.parameters["profile-level-id"] = "42e01f";
     check(!AcceptsEncodedFormat(receive), "A Baseline receiver was mistaken for Main profile support");
     receive.parameters["profile-level-id"] = "4d0034";
     receive.parameters.erase("max-recv-level");
-    check(AcceptsEncodedFormat(receive), "A higher Main receive limit must include the unchanged Main5.1 stream");
+    check(!AcceptsEncodedFormat(receive), "Level5.2 is insufficient for a Main6 publication");
+    receive.parameters["profile-level-id"] = "4d003c";
+    check(AcceptsEncodedFormat(receive), "An explicit Main6 receiver must be admitted");
+    Json router{{"codecs", Json::array({Json{
+        {"kind", "video"}, {"mimeType", "video/H264"}, {"clockRate", 90000},
+        {"preferredPayloadType", 102},
+        {"parameters", {{"profile-level-id", "4d0034"}, {"packetization-mode", 1}}}}})}};
+    const auto accepts_4k120 = [](const auto& format) { return AcceptsEncodedFormat(format, 60); };
+    rejects([&] { peer_detail::SelectScreenSendCodec(router, accepts_4k120); });
+    router["codecs"][0]["parameters"]["profile-level-id"] = "4d003c";
+    check(peer_detail::SelectScreenSendCodec(router, accepts_4k120) == router["codecs"][0],
+        "SFU admission must select the router's exact compatible codec before publication");
     auto isolated = std::make_shared<State>(1, "codec-rejection-isolation", false,
         [](std::string_view, Json) { return true; });
-    auto context = std::make_shared<EncodedVideoContext>();
+    auto context = std::make_shared<EncodedVideoContext>(kEncodedH264Level);
     context->source = isolated;
     Factory factory(context);
     receive.parameters["profile-level-id"] = "4d001f";
     check(!factory.Create(webrtc::CreateEnvironment(), receive) && !isolated->failed.load(),
         "An incompatible receiver must not poison the shared source for other viewers");
   }
-  const auto verify_rate_estimate = [&](double fps, bool valid) {
+  for (const auto video : {EncodedConfiguration{1920, 1080, 120}, {3840, 2160, 60}, {3840, 2160, 120}}) {
+    const auto minimum = MinimumEncodedLevel(video);
+    const auto expected = video.width == 1920 ? 51 : video.fps == 60 ? 52 : 60;
+    check(minimum == expected, "Source minimum must reflect actual macroblocks/rate, with a Level5.1 floor");
+    auto isolated = std::make_shared<State>(1, "source-codec-level", false,
+        [](std::string_view, Json) { return true; }, video);
+    auto fixed = CreateEncodedVideoFactory(minimum);
+    auto context = fixed.context;
+    auto& factory = *fixed.encoder_factory;
+    const auto advertised = factory.GetSupportedFormats();
+    check(advertised.size() == 1 && ParseEncodedFormat(advertised[0])->level == minimum,
+        "Initial codec caches must receive the rendition level BEFORE any source exists");
+    check(factory.QueryCodecSupport(advertised[0], "L1T1").is_supported,
+        "Initial advertised codec must be supported before source creation");
+    context->ValidateSource(video);
+    context->source = isolated;
+    check(factory.GetSupportedFormats() == advertised, "Source creation must not change cached capabilities");
+    for (const auto candidate : {EncodedConfiguration{1920, 1080, 120},
+             EncodedConfiguration{3840, 2160, 60}, EncodedConfiguration{3840, 2160, 120}}) {
+      if (MinimumEncodedLevel(candidate) > minimum)
+        rejects([&] { context->ValidateSource(candidate); });
+      else context->ValidateSource(candidate);
+    }
+    for (const auto level : {std::uint8_t{51}, std::uint8_t{52}, std::uint8_t{60}}) {
+      auto receive = policy::SupportedFormats(level).back();
+      const bool accepted = level == minimum;
+      check(factory.QueryCodecSupport(receive, "L1T1").is_supported == accepted &&
+          static_cast<bool>(factory.Create(webrtc::CreateEnvironment(), receive)) == accepted,
+          "Negotiated encoder level must fit both the source and the fixed factory ceiling");
+      Json router{{"codecs", Json::array({Json{{"mimeType", "video/H264"},
+          {"parameters", receive.parameters}}})}};
+      const auto accepts = [&](const auto& format) { return AcceptsEncodedFormat(format, minimum); };
+      if (level >= minimum)
+        check(peer_detail::SelectScreenSendCodec(router, accepts) == router["codecs"][0],
+            "SFU router receive capability must cover the actual source level");
+      else rejects([&] { peer_detail::SelectScreenSendCodec(router, accepts); });
+    }
+    context->source.reset();
+    check(factory.GetSupportedFormats() == advertised, "Source retirement must not raise cached capabilities to Main6");
+  }
+  rejects([&] { CreateEncodedVideoFactory(50); });
+  rejects([&] { CreateEncodedVideoFactory(61); });
+  const auto verify_rate_estimate = [&](double fps, bool valid, std::uint32_t maximum_kbps = 20000) {
     std::vector<Json> feedback;
     auto rate_state = std::make_shared<State>(1, "cpu-rate-estimate", true,
         [&](std::string_view type, Json data) { data["type"] = type; feedback.push_back(std::move(data)); return true; });
-    Encoder encoder(rate_state);
+    Encoder encoder(rate_state, MinimumEncodedLevel(rate_state->video));
     check(!encoder.GetEncoderInfo().has_trusted_rate_controller,
         "The external encoder must not claim perfectly applied rate control");
     webrtc::VideoCodec codec;
     codec.codecType = webrtc::kVideoCodecH264;
     codec.width = 1920; codec.height = 1080; codec.maxFramerate = 120;
-    codec.startBitrate = 5000; codec.maxBitrate = 20000; codec.minBitrate = 64;
+    codec.startBitrate = 5000; codec.maxBitrate = maximum_kbps; codec.minBitrate = 64;
     codec.active = true; codec.mode = webrtc::VideoCodecMode::kScreensharing;
     codec.H264()->numberOfTemporalLayers = 1; codec.spatialLayers[0].numberOfTemporalLayers = 1;
     check(encoder.InitEncode(&codec, 4, 1200) == WEBRTC_VIDEO_CODEC_OK,
         "Device-free external rate-feedback encoder initialization failed");
     webrtc::VideoEncoder::RateControlParameters rates;
     rates.framerate_fps = fps;
-    check(rates.bitrate.SetBitrate(0, 0, 30000000), "Cannot set rate-estimate test allocation");
+    check(rates.bitrate.SetBitrate(0, 0, maximum_kbps * 1000 + 10000000), "Cannot set rate-estimate test allocation");
     encoder.SetRates(rates);
     check(rate_state->failed.load() != valid, "External H264 rate estimate validity was misclassified");
     if (valid) {
       const auto& event = feedback.back();
       check(event.at("type") == "source.encodedFeedback" && event.at("requestedFps") == fps &&
           event.at("fpsApplied").is_null(), "Arrival-rate feedback must remain explicit, not applied FPS");
-      check(event.at("bitrateBps") == (fps > 0 ? 20000000 : 0) &&
+      check(event.at("bitrateBps") == (fps > 0 ? maximum_kbps * 1000 : 0) &&
           rate_state->Snapshot().at("requestedFps") == 120,
           "Arrival estimates must preserve the bitrate ceiling and the120fps media configuration");
     } else {
@@ -1095,6 +1227,7 @@ void RunEncodedVideoChecks(const std::function<void(bool, const char*)>& check) 
     check(encoder.Release() == WEBRTC_VIDEO_CODEC_OK && rate_state->rates.empty(),
         "Rate-estimate checks must retire their actual encoder registration");
   };
+  verify_rate_estimate(120.0, true, 80000);
   for (const auto fps : {0.0, 120.0, 240.001, 1000.0,
                         static_cast<double>((std::numeric_limits<std::uint32_t>::max)())})
     verify_rate_estimate(fps, true);

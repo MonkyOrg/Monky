@@ -317,7 +317,7 @@ export function setupIpcHandlers(
   serverManager: ServerManager,
   trayManager?: TrayManager,
   options?: SetupIpcOptions
-): LocalExecutionIpc {
+): LocalExecutionIpc & { prepareShutdown(): Promise<void> } {
   const lanDiscovery = new LanDiscovery(mainWindow);
   globalInputHook.init(mainWindow);
   const overlayManager = options?.overlayManager || new OverlayManager(mainWindow);
@@ -1343,6 +1343,14 @@ export function setupIpcHandlers(
   });
   return {
     service: localExecution.service,
+    freezeAdmissions: () => {
+      localExecution.freezeAdmissions();
+      nativeScreenSharing.freezeAdmissions();
+    },
+    prepareShutdown: () => {
+      localExecution.freezeAdmissions();
+      return nativeScreenSharing.prepareShutdown();
+    },
     async dispose() {
       const results = await Promise.allSettled([nativeScreenSharing.dispose(), localExecution.dispose()]);
       const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);

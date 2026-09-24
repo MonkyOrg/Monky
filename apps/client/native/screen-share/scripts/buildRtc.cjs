@@ -51,6 +51,12 @@ function build(config) {
   const sdk = fs.realpathSync(config.webrtcRoot);
   assert.equal(execute('git', ['--no-pager', '-C', sdk, 'rev-parse', 'HEAD'], { env, capture: true }), revision,
     'WebRTC revision differs from the pinned native media toolchain.');
+  const level6 = JSON.parse(fs.readFileSync(path.join(source, 'level6-upstream.json'), 'utf8'));
+  assert.equal(level6.revision, revision);
+  for (const file of level6.files) {
+    assert.equal(digest(fs.readFileSync(path.join(sdk, ...file.path.split('/')))), file.sha256,
+      `The maintained Level6 overlay requires its exact upstream source: ${file.path}`);
+  }
 
   const key = digest(fs.realpathSync(root).toLowerCase()).slice(0, 6);
   const inputs = ownedDirectory(path.join(sdk, 'out', `ms${key}i`));

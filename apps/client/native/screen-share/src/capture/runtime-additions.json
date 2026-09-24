@@ -19,6 +19,121 @@
       "path": "include\\ffnvcodec\\nvEncodeAPI.h",
       "bytes": 302543,
       "sha256": "9425f03bc0357c9dcd3bdc6fcbce5c3401899a843b5ac6f9a8faa5cf561c9327"
+    },
+    {
+      "path": "include\\AMF\\core\\Factory.h",
+      "bytes": 6287,
+      "sha256": "52420cf65d68c2f5cdc408e7633e21e52650e8e2fab5442946edef7b7eee334a"
+    },
+    {
+      "path": "include\\AMF\\components\\VideoEncoderVCE.h",
+      "bytes": 31060,
+      "sha256": "b19261349e5d482a4eedcf9564ef47dce8c47e150b977bf17006f1516c32e953"
+    },
+    {
+      "path": "include\\AMF\\components\\ColorSpace.h",
+      "bytes": 7447,
+      "sha256": "af4f9883bd8e1ececfb0e597a5813f965101f760ecfebeaa4fb38a500e94725b"
+    },
+    {
+      "path": "include\\AMF\\components\\Component.h",
+      "bytes": 25837,
+      "sha256": "655f6934137f812e010394d3497f208b2702b51d9ba124493ae7cf7db5d59c28"
+    },
+    {
+      "path": "include\\AMF\\components\\ComponentCaps.h",
+      "bytes": 8592,
+      "sha256": "ffa71f73847daae84ca0f71a35b941fa9ce34dee0b448c5f7fa140ffc4115de6"
+    },
+    {
+      "path": "include\\AMF\\components\\PreAnalysis.h",
+      "bytes": 7899,
+      "sha256": "4e0dae852e16bdbc958e2ec0e0da9c689ddeb0371e6df47eba30737e90b95dc4"
+    },
+    {
+      "path": "include\\AMF\\core\\AudioBuffer.h",
+      "bytes": 12050,
+      "sha256": "15e7de3c9c6d31e322363d03680c89390a45cb663a74f389a985392bc69f57ba"
+    },
+    {
+      "path": "include\\AMF\\core\\Buffer.h",
+      "bytes": 10281,
+      "sha256": "38502411763a07f16815f9fbdb468b464ccdba24bb6a46e672fb74573e048461"
+    },
+    {
+      "path": "include\\AMF\\core\\Compute.h",
+      "bytes": 18877,
+      "sha256": "c5313ffa51d0e75ea18f81d5c260be4355416b60b8a1f16a532843d90acf889e"
+    },
+    {
+      "path": "include\\AMF\\core\\ComputeFactory.h",
+      "bytes": 8294,
+      "sha256": "a6ad4fecd999993ca5e1ae724bb4b0d1b446e3dac8f5735e5d0e8a550431518a"
+    },
+    {
+      "path": "include\\AMF\\core\\Context.h",
+      "bytes": 45107,
+      "sha256": "ca169626028bcf8a9becf92c61d6855aed882f975ce50308b9ca1c9f3548d7dc"
+    },
+    {
+      "path": "include\\AMF\\core\\Data.h",
+      "bytes": 9528,
+      "sha256": "76972e91e61d4cac3d7eae3bfd13d4775f7dfcb2789ff8a80baa7089b57c9816"
+    },
+    {
+      "path": "include\\AMF\\core\\Debug.h",
+      "bytes": 3395,
+      "sha256": "4f1efdd98958808ee825bd941815d0ae251cbcd827921b17abfcea052e7916d6"
+    },
+    {
+      "path": "include\\AMF\\core\\Interface.h",
+      "bytes": 8603,
+      "sha256": "570eab2840093cb85b77813af8756880ff789970646a438dfafcdad9e6b43c43"
+    },
+    {
+      "path": "include\\AMF\\core\\Plane.h",
+      "bytes": 5372,
+      "sha256": "34d7124acf31d9d72d34835755a28986e9caca23cf9108a2b3eb7d6114e16e4f"
+    },
+    {
+      "path": "include\\AMF\\core\\Platform.h",
+      "bytes": 17016,
+      "sha256": "006046be52f8a676eec26c41bee0506988e9294642015ba622616c2384f4dd75"
+    },
+    {
+      "path": "include\\AMF\\core\\PropertyStorage.h",
+      "bytes": 13256,
+      "sha256": "e9f63e7aba88c4db80e8e41692118b80632927b99ae3ae209d3e5434c27e7a37"
+    },
+    {
+      "path": "include\\AMF\\core\\PropertyStorageEx.h",
+      "bytes": 10456,
+      "sha256": "07d1be574477cadbf843496edf5bcf97993d71fd3d4a111e44af99c690f957aa"
+    },
+    {
+      "path": "include\\AMF\\core\\Result.h",
+      "bytes": 5785,
+      "sha256": "54d559da7fedcd5bc1af689b62d331b8dcf43a2ff546e7fa4de350d6fae40a74"
+    },
+    {
+      "path": "include\\AMF\\core\\Surface.h",
+      "bytes": 18178,
+      "sha256": "953508532bd9e51cb6c46631bfc6fc8456fd7fe5c95d06c4ee7abbe8e1c5ccfe"
+    },
+    {
+      "path": "include\\AMF\\core\\Trace.h",
+      "bytes": 10018,
+      "sha256": "c1a25239e7003cdc27d917604c9a26d3bb2e38d60bb1eaceeb50c75493a032be"
+    },
+    {
+      "path": "include\\AMF\\core\\Variant.h",
+      "bytes": 94105,
+      "sha256": "e6e8919ed4ffb963ab218ee1edcc30b2e5a2da5ea33e5693d9e9d9ef3f867229"
+    },
+    {
+      "path": "include\\AMF\\core\\Version.h",
+      "bytes": 2938,
+      "sha256": "5b2098f6d2ecfa086dda28ceecd8360d3dc0aae62b4accac240668440445c3c9"
     }
   ]
 }

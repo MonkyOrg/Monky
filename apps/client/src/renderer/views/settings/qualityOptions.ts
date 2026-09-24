@@ -87,6 +87,8 @@ export const VIDEO_BITRATE_OPTIONS = [
   250, 500, 800, 1200, 1500, 2000, 2500, 3500, 5000, 6000, 8000, 12000, 16000, 20000,
 ];
 
+export const SCREEN_BITRATE_OPTIONS = [...VIDEO_BITRATE_OPTIONS, 30000, 40000, 60000, 80000];
+
 export function formatResolution(option: ResolutionOption): string {
   return option.tag ? `${option.width}×${option.height} (${option.tag})` : `${option.width}×${option.height}`;
 }

@@ -86,7 +86,14 @@ class NativeAudioClockClient {
   refresh() {
     if (!this.started || this.stopped) return Promise.reject(aborted());
     if (!this.refreshWork) {
-      const work = this.measure();
+      const work = this.measure().catch(error => {
+        if (this.stopped || error?.code !== 'ERR_RTC_AUDIO_CLOCK_OBSERVATION') throw error;
+        this.stats.rejectedProbes++;
+        this.calibration = null;
+        this.lastRejectedProbe = { reason: 'native-observation-expired', message: error.message };
+        this.lastUnavailableReason = this.calibrationUnavailableReason = 'native-observation-expired';
+        return false;
+      });
       this.refreshWork = work;
       void work.then(
         () => { if (this.refreshWork === work) this.refreshWork = null; },

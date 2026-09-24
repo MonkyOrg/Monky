@@ -63,12 +63,13 @@ class NativeAudioOutputOwner {
   #engineClosed = false;
   #closed = deferred();
   #errors = [];
+  #lastClockRejection = null;
   #counts = {
     starts: 0, readyOutputs: 0, retiredOutputs: 0, grantAttempts: 0, acceptedGrants: 0,
     packets: 0, pcmFrames: 0, enqueuedPackets: 0, stalePackets: 0, stoppingPackets: 0,
     staleControls: 0, outputErrors: 0, staleOutputErrors: 0, probes: 0, expiredProbes: 0, calibrations: 0,
     outputInvalidations: 0, staleOutputInvalidations: 0,
-    availableFeedback: 0, unavailableFeedback: 0, errorCount: 0, observerErrors: 0,
+    availableFeedback: 0, unavailableFeedback: 0, rejectedClockObservations: 0, errorCount: 0, observerErrors: 0,
   };
 
   constructor(engine, commands, renderer, onError, { timeoutMs = 5000 } = {}) {
@@ -305,7 +306,10 @@ class NativeAudioOutputOwner {
       record.calibrationId = record.lastCalibrationId = calibration.calibrationId;
       this.#counts.calibrations++;
       return result;
-    } catch (error) { this.#fail(record, error, 'calibrate'); throw error; }
+    } catch (error) {
+      if (!this.#rejectClockObservation(record, error, 'calibrate')) this.#fail(record, error, 'calibrate');
+      throw error;
+    }
   }
 
   feedback(data) {
@@ -339,6 +343,7 @@ class NativeAudioOutputOwner {
       return true;
     } catch (error) {
       if (nativeFeedback) record.rejectedFeedback = nativeFeedback;
+      if (nativeFeedback && this.#rejectClockObservation(record, error, 'feedback')) return false;
       this.#fail(record, error, 'feedback');
       throw error;
     }
@@ -680,6 +685,13 @@ class NativeAudioOutputOwner {
     if (lateNative || lateRenderer) this.#stopRecord(record, record.abortReason);
   }
 
+  #rejectClockObservation(record, error, phase) {
+    if (record.stopping || error?.code !== 'ERR_RTC_AUDIO_CLOCK_OBSERVATION' || error.status !== 8) return false;
+    this.#counts.rejectedClockObservations++;
+    this.#lastClockRejection = { epoch: record.epoch, phase, code: error.code, message: error.message };
+    return true;
+  }
+
   #fail(record, value, phase) {
     const error = asError(value);
     this.#report(error, phase, record?.epoch ?? null);
@@ -727,6 +739,7 @@ class NativeAudioOutputOwner {
       enqueueUncertain: record?.enqueueUncertain ?? false, nextSequence: record?.nextSequence ?? 0,
       nextPlayoutFrame: record?.nextPlayoutFrame ?? 0, pendingProbes: record?.probes.size ?? 0,
       calibrationId: record?.calibrationId ?? null, errors: this.#errors.map(error => ({ ...error })),
+      lastClockRejection: this.#lastClockRejection ? { ...this.#lastClockRejection } : null,
       lastFeedback: record?.lastFeedback ? { ...record.lastFeedback } : null,
       rejectedFeedback: record?.rejectedFeedback ? { ...record.rejectedFeedback } : null,
       pcmSignal: signal ? {

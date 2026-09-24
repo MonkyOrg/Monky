@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  getScreenShareProfile, getScreenShareQualities, nativeScreenP2pControlSchema,
+  getScreenShareProfile, getScreenShareQualities, getScreenH264ProfileLevelId, nativeScreenP2pControlSchema,
   nativeScreenSignalSchema, nativeScreenSourcesSchema, nativeScreenVideoProfileSchema,
 } from '../src/index.js';
 
@@ -20,6 +20,19 @@ const publication = {
   ...envelope, type: 'publication', shareId: 'screen-one', publicationId: 1, publicationVersion: 1,
   metadataVersion: 1, trackId: 'track', mid: null, streamIds: ['screen-one'],
 };
+
+test('4K120 and 80 Mbps are explicit ceilings with honest per-rendition H264 levels', () => {
+  const maximum = { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 };
+  assert.deepEqual(nativeScreenVideoProfileSchema.parse(maximum), maximum);
+  assert.equal(getScreenH264ProfileLevelId(video), '4d0033');
+  assert.equal(getScreenH264ProfileLevelId({ ...maximum, fps: 30 }), '4d0033');
+  assert.equal(getScreenH264ProfileLevelId({ ...maximum, fps: 60 }), '4d0034');
+  assert.equal(getScreenH264ProfileLevelId(maximum), '4d003c');
+  assert.equal(getScreenH264ProfileLevelId(getScreenShareProfile(maximum, '1080p60')), '4d0033');
+  assert.deepEqual(getScreenShareProfile(maximum, 'source'), maximum);
+  for (const invalid of [{ width: 3844 }, { height: 2162 }, { fps: 121 }, { maxBitrateKbps: 80050 }])
+    assert.equal(nativeScreenVideoProfileSchema.safeParse({ ...maximum, ...invalid }).success, false);
+});
 
 test('quality changes actual encoder dimensions, cadence and bitrate, never upscales a source', () => {
   assert.deepEqual(getScreenShareProfile(video, 'source'), video);

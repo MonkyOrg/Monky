@@ -62,6 +62,9 @@ async function runElectronSmoke() {
   const transports = new Map();
   const producers = new Map();
   const consumers = new Map();
+  const consumerHistory = new Map();
+  const closedConsumerRequests = new Set();
+  const authenticatedSockets = new WeakSet();
   const allocations = [];
   const peers = Object.fromEntries(['A', 'B'].map(label => [label, {
     label, socket: null, state: null, auths: 0, joins: 0, leaves: 0, pings: 0,
@@ -160,6 +163,7 @@ async function runElectronSmoke() {
     if (type === M.AUTH_CONNECT) {
       assert.equal(payload.protocolVersion, PROTOCOL_VERSION);
       assert.equal(payload.nickname, peer.label);
+      authenticatedSockets.add(socket);
       peer.auths++;
       reply(M.AUTH_SUCCESS, {
         currentUser: peer.user, iceServers: [], voiceRestrictions: { serverMuted: false, serverDeafened: false },
@@ -198,6 +202,17 @@ async function runElectronSmoke() {
         Object.assign(peer.state, payload);
         broadcast(M.VOICE_STATE_CHANGED, { voiceState: peer.state });
       }
+      return;
+    }
+    if (type === M.SFU_CONSUMER_CLOSED) {
+      assert.ok(authenticatedSockets.has(socket) && peer.socket === socket, 'Authenticated current fixture socket');
+      const entry = consumerHistory.get(payload.consumerId);
+      assert.ok(entry && entry.peer === peer && payload.channelId === room, 'Owned fixture consumer');
+      // A producer/transport may already have retired this exact registered allocation.
+      entry.value.close();
+      assert.ok(entry.value.closed && !consumers.has(payload.consumerId), 'Consumer retirement completed');
+      closedConsumerRequests.add(payload.consumerId);
+      if (requestId) reply(M.SFU_CONSUMER_CLOSED, { channelId: room, consumerId: payload.consumerId });
       return;
     }
     assert.ok(peer.state && payload.channelId === room, `Voice admission before ${type}`);
@@ -264,7 +279,7 @@ async function runElectronSmoke() {
         const value = await ownedTransport(peer, payload.transportId, 'recv').consume({
           producerId: payload.producerId, rtpCapabilities: payload.rtpCapabilities, paused: false,
         });
-        trackAllocation(consumers, value, { peer });
+        consumerHistory.set(value.id, trackAllocation(consumers, value, { peer }));
         peer.created.consumers++;
         reply(M.SFU_CONSUMED, { channelId: room, id: value.id, producerId: payload.producerId,
           kind: value.kind, rtpParameters: value.rtpParameters,
@@ -425,6 +440,8 @@ async function runElectronSmoke() {
 
     stage('two microphone publication failures cannot be hidden by healthy reception');
     const joinsBeforeFault = peers.A.joins;
+    const retiredConsumer = [...consumers.values()].find(entry => entry.peer === peers.B);
+    check(!!retiredConsumer, 'B owns the consumer of A before microphone replacement');
     peers.A.failProduce = 2;
     await run(a, 'window.voiceRecovery.republishMic()');
     const failedMic = await snapshot(a);
@@ -435,6 +452,29 @@ async function runElectronSmoke() {
     check((await snapshot(a)).reconnecting, 'Second publication failure keeps the recovery indicator');
     await duplex();
     check(peers.A.joins === joinsBeforeFault, 'SFU recovery needs no manual voice re-admission');
+    await bounded();
+
+    stage('consumer closure authenticates ownership and acknowledges exact retired allocations');
+    check(retiredConsumer.value.closed && !consumers.has(retiredConsumer.value.id)
+      && closedConsumerRequests.has(retiredConsumer.value.id), 'Replacement retires the original consumer, including its close request');
+    const liveConsumer = [...consumers.values()].find(entry => entry.peer === peers.B);
+    check(!!liveConsumer, 'B owns a replacement consumer');
+    const closeMessage = consumerId => ({
+      type: M.SFU_CONSUMER_CLOSED, payload: { channelId: room, consumerId }, requestId: 'fixture-ownership-check',
+    });
+    await assert.rejects(handle(peers.A, peers.A.socket, closeMessage(liveConsumer.value.id)), /Owned fixture consumer/);
+    await assert.rejects(handle(peers.B, peers.B.socket, closeMessage('unregistered-consumer')), /Owned fixture consumer/);
+    await assert.rejects(handle(peers.B, peers.A.socket, closeMessage(liveConsumer.value.id)), /Authenticated current fixture socket/);
+    await assert.rejects(handle(peers.B, peers.B.socket, {
+      ...closeMessage(liveConsumer.value.id), payload: { channelId: 'other-room', consumerId: liveConsumer.value.id },
+    }), /Owned fixture consumer/);
+    check(!liveConsumer.value.closed && consumers.get(liveConsumer.value.id) === liveConsumer,
+      'Invalid close requests preserve the live registered consumer');
+    const closed = await run(b, `window.voiceRecovery.closeConsumer(${JSON.stringify(retiredConsumer.value.id)})`);
+    check(closed.channelId === room && closed.consumerId === retiredConsumer.value.id, 'Authenticated repeated close receives an exact correlated acknowledgement');
+    for (const { value } of transports.values()) {
+      check(!(await value.dump()).consumerIds.includes(retiredConsumer.value.id), 'No worker transport retains the retired consumer');
+    }
     await bounded();
 
     stage('failed consumer setup retries automatically');
@@ -530,6 +570,8 @@ async function runElectronSmoke() {
     await until(async () => (await router.dump()).transportIds.length === 0, 'worker releases all transports');
     check(transports.size === 0 && producers.size === 0 && consumers.size === 0, 'Fixture resource registries are empty');
     check(allocations.every(value => value.closed), 'Every allocated native mediasoup object is closed');
+    check([...closedConsumerRequests].every(id => consumerHistory.get(id).value.closed && !consumers.has(id)),
+      'Every acknowledged consumer close has a retired registered allocation');
     for (const window of windows) {
       const state = await snapshot(window);
       check(state.released && state.errors.length === 0, 'All observed Chromium media objects ended without unhandled errors');
@@ -700,6 +742,7 @@ async function setupRenderer({ port, label, room, M }) {
     join: () => connection.joinCallOnSession(session.key, room),
     initSfu: () => rtc.initSfuForCurrentChannel(),
     republishMic: () => rtc.setLocalAudioTrack(audio.getLocalAudioStream().getAudioTracks()[0]),
+    closeConsumer: consumerId => session.client.sendRequest(M.SFU_CONSUMER_CLOSED, { channelId: room, consumerId }),
     setPrivacy(muted, deafened) {
       voice.setDeafened(deafened);
       voice.setMuted(muted);
@@ -746,7 +789,7 @@ async function setupRenderer({ port, label, room, M }) {
     async cleanup() {
       connection.leaveCurrentCall();
       off.forEach(unsubscribe => unsubscribe());
-      sessionManager.removeAll();
+      await sessionManager.removeAll();
       audio.destroy();
       clearProbe();
       navigator.mediaDevices.getUserMedia = originalCapture;

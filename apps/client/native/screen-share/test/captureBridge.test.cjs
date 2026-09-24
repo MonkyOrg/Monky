@@ -86,7 +86,7 @@ test('original compressed admission is synchronous, preserves the bytes and cann
 
 test('invalid stock rate steps, foreign acknowledgements and excessive pending feedback fail explicitly', async () => {
   const f = fixture();
-  for (const value of [0, 49, 51, 20050, NaN]) assert.throws(() => f.bridge.setBitrate(value));
+  for (const value of [0, 49, 51, 80050, NaN]) assert.throws(() => f.bridge.setBitrate(value));
   assert.throws(() => f.acknowledge(99, 'idr'), /Unsolicited/);
   const retired = [];
   for (let index = 0; index < 4; index++) retired.push(assert.rejects(f.bridge.requestKeyFrame(), { name: 'AbortError' }));

@@ -1446,6 +1446,7 @@ test('optional request-ID exposure eagerly cancels only its matching native crea
     allocated = await next();
     return await held.promise;
   });
+
   const creating = f.broker.createTransport('send');
   await until(() => allocated);
   const closing = f.broker.close();
@@ -1455,6 +1456,91 @@ test('optional request-ID exposure eagerly cancels only its matching native crea
   await closing;
   assertEmpty(f);
 });
+
+for (const phase of ['connect', 'produce', 'initial-pause', 'enable', 'raw-source-gate']) {
+  test(`SFU endpoint retirement drains ${phase} with concurrent viewers before cancelling native requests`, { timeout: 5000 }, async () => {
+    const { NativeScreenEndpoint } = require('../runtime/nativeEndpoint.cjs');
+    const held = deferred();
+    let endpoint, allocated, rawGate = false;
+    const f = fixture({ isCurrent: () => !endpoint?.closing });
+    f.register();
+    const method = phase === 'connect' ? MessageType.SFU_CONNECT_WEBRTC_TRANSPORT
+      : phase === 'produce' ? MessageType.SFU_PRODUCE : MessageType.SFU_PRODUCER_SET_PAUSED;
+    f.rpcHooks.set(method, async (call, next) => {
+      const response = await next();
+      if (phase === 'raw-source-gate' && !rawGate) return response;
+      if (phase === 'initial-pause' && !call.payload.paused || phase === 'enable' && call.payload.paused) return response;
+      allocated = response;
+      await held.promise;
+      return response;
+    });
+    const respond = f.engine.respond;
+    f.engine.respond = (id, response) => {
+      const event = f.events.find(value => value.data.callbackId === id);
+      assert.equal(f.cancellations.includes(event.data.requestId), false,
+        'Native Respond checks the original cancellation token before accepting a callback response.');
+      return respond(id, response);
+    };
+    Object.assign(f.engine, {
+      ready: Promise.resolve(),
+      submitEncodedFrame() { assert.fail('The drain fixture must not submit media.'); },
+      submitFrame() { assert.fail('The drain fixture must not submit textures.'); },
+      releaseFrame() { assert.fail('The drain fixture must not own textures.'); },
+    });
+    f.nativeHooks.set('source.createEncodedVideo', async () => ({ sourceId: 1000 }));
+    endpoint = new NativeScreenEndpoint({
+      runtime: { rtc: { createEngine: () => f.engine } },
+      textures: { importSharedTexture() {}, sendSharedTexture() {} },
+      role: 'publish', mode: 'sfu', sessionId: OWNER, publisherSessionId: OWNER, channelId: CHANNEL,
+      pipelineId: require('node:crypto').randomUUID(),
+      source: { shareId: 'local-one', instanceId: require('node:crypto').randomUUID(), audio: false,
+        video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 12000 } },
+      quality: 'source', target: { hwnd: 12345, expectedProcessId: 56789 },
+      captureDirectory: require('node:path').resolve(__dirname, 'modeled-capture'),
+      rpc: async () => assert.fail('Only the wired broker model may issue RPCs.'),
+      onError: error => f.errors.push(error), onState() {}, onDiagnostic() {},
+    });
+    await endpoint.ready;
+    await endpoint.transport.close();
+    Object.assign(endpoint, {
+      sourceDescription: {},
+      broker: f.broker, commands: f.commands, abort: new AbortController(), peerReadiness: new Map(),
+      pending: new Set(), demandWork: new Set(), errors: [], reported: new WeakSet(),
+      closing: false, closed: false, demand: 0, previewDemand: false, stopRequested: false,
+      onError: error => f.errors.push(error),
+      refreshCapture() {},
+      transport: { addSource: () => f.broker.publish(1000, ENCODING) },
+      async retire() { await f.broker.close(); this.closed = true; },
+    });
+    let rejected;
+    if (phase === 'raw-source-gate') {
+      await endpoint.setDemand(1, false);
+      rawGate = true;
+      // PCM admits source.setEnabled independently from viewer demand work.
+      endpoint.pcm = { stopAccepting() {}, beginCaptureStop() {},
+        packetTail: f.commands.request('source.setEnabled', 1000, { enabled: true }) };
+      rejected = endpoint.pcm.packetTail;
+    } else {
+      rejected = Promise.all([1, 2].map(count => assert.rejects(endpoint.setDemand(count, false), { name: 'AbortError' })));
+    }
+    await until(() => allocated);
+    const duplicate = f.broker.handleNativeEvent(f.events.at(-1));
+    const closing = endpoint.close();
+    await assert.rejects(endpoint.setDemand(3, false), { name: 'AbortError' });
+    // Always release the RPC so a failing assertion cannot retain test work.
+    held.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.errors.some(error => hasCode(error, 'RESPOND')), false,
+      'Retirement must not cancel an original request while its server reply is still being delivered.');
+    await rejected;
+    await duplicate;
+    await closing;
+    assert.deepEqual(f.errors, []);
+    assert.equal(f.cancellations.length, 0);
+    assert.equal(f.calls(MessageType.SFU_PRODUCE).length, 1, 'Concurrent viewers must share the original publication.');
+    assertEmpty(f);
+  });
+}
 
 test('forged optional request-ID metadata cannot cancel a separate call operation', async () => {
   const f = fixture(), held = deferred(), callHeld = deferred();

@@ -1200,7 +1200,7 @@ export class VoiceStageView {
   }
 
   /**
-   * Ctrl+scroll zooms the focused screen share towards the pointer, dragging
+   * Scrolling zooms the focused screen share towards the pointer, dragging
    * pans the zoomed image and a double-click resets it (#271). Re-attached on
    * every render because the stage markup is rebuilt from scratch.
    */
@@ -1242,7 +1242,7 @@ export class VoiceStageView {
     apply();
 
     main.addEventListener('wheel', (e: WheelEvent) => {
-      if (!e.ctrlKey) return;
+      if (e.target instanceof Element && e.target.closest('.stage-card-controls')) return;
       e.preventDefault();
 
       const previous = this.focusZoom.scale;

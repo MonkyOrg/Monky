@@ -196,6 +196,25 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       verifyBadge(local.sessionId, first.id, null);
       check(card(remote.sessionId, remoteSource.shareId).classList.contains('stage-mini-card'), 'Remote status must also render in the mini strip');
       checkBadgeLayout();
+      const focusedCard = card(local.sessionId, first.id);
+      const focusedVideo = video(local.sessionId, first.id);
+      const bounds = focusedCard.getBoundingClientRect();
+      const scroll = (target, deltaY, ctrlKey = false) => {
+        const event = new WheelEvent('wheel', { deltaY, ctrlKey, bubbles: true, cancelable: true,
+          clientX: bounds.left + bounds.width / 2, clientY: bounds.top + bounds.height / 2 });
+        target.dispatchEvent(event);
+        return event;
+      };
+      check(scroll(focusedVideo, -100).defaultPrevented && stage.focusZoom.scale > 1
+        && focusedVideo.style.transform.includes('scale('), 'Ordinary scroll zooms the focused screen without Ctrl');
+      scroll(focusedVideo, 100);
+      check(stage.focusZoom.scale === 1 && focusedVideo.style.transform === '', 'Ordinary scroll restores the unzoomed image');
+      scroll(focusedVideo, -100, true);
+      check(stage.focusZoom.scale > 1, 'Ctrl+scroll remains compatible');
+      scroll(focusedVideo, 100);
+      const controls = focusedCard.querySelector('.stage-card-controls');
+      check(controls && !scroll(controls, -100).defaultPrevented && stage.focusZoom.scale === 1,
+        'Scrolling focused card controls must not zoom the picture');
       card(local.sessionId, first.id).click();
       check(focused().length === 0, 'The publisher can unfocus the automatic preview');
       const localVideo = video(local.sessionId, first.id);

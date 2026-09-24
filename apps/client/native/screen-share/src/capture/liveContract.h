@@ -77,13 +77,13 @@ inline Feedback ParseFeedback(std::string_view line) {
   value.sequence = Decimal(line.substr(0, first), kFeedbackCommands);
   Require(value.sequence > 0, "Live feedback sequence starts at1");
   const auto verb = line.substr(first + 1, second - first - 1);
-  const auto amount = Decimal(line.substr(second + 1), 20000);
+  const auto amount = Decimal(line.substr(second + 1), kMaximumBitrateKbps);
   if (verb == "idr") {
     Require(amount == 0, "IDR requests cannot supply fabricated frame IDs");
     value.keyframe = true;
   } else {
     Require(verb == "bitrate" && amount >= 50 && amount % 50 == 0,
-        "Stock AMF bitrate must be50..20000Kbps in50Kbps steps");
+        "Hardware bitrate must be50..80000Kbps in50Kbps steps");
     value.bitrateKbps = static_cast<std::uint32_t>(amount);
   }
   return value;

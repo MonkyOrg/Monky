@@ -338,7 +338,7 @@ async function setupHomeAutoEntrySmoke() {
   check(!sent.some(message => [MessageType.VOICE_JOIN, MessageType.VOICE_RECONNECT].includes(message.type)), 'startup never sends voice admission');
   equal(hostsStarted.length, 0, 'startup never starts a server process');
   const initialSockets = sockets.length;
-  sessions.removeAll();
+  await sessions.removeAll();
   app.connectionView.render();
   await app.autoEntryService.start();
   equal(sockets.length, initialSockets, 'logout, Home and repeated start do not reconnect');
@@ -350,12 +350,12 @@ async function setupHomeAutoEntrySmoke() {
     services.push(instance);
     return instance;
   };
-  const reset = (servers, enabled = true) => {
+  const reset = async (servers, enabled = true) => {
     for (const instance of services) instance.dispose();
     settingsModal.close();
     voice.voiceSessionKey = null;
     voice.currentVoiceChannelId = null;
-    sessions.removeAll();
+    await sessions.removeAll();
     connection.savedServers = servers;
     connection.createdServers = [];
     connection.savedNickname = 'Fixture';
@@ -391,12 +391,12 @@ async function setupHomeAutoEntrySmoke() {
     async connections() {
       const a = saved('a.test', 5201);
       const b = saved('b.test', 5202);
-      reset([a, b], false);
+      await reset([a, b], false);
       const baseline = sockets.length;
       await service().start();
       equal(sockets.length, baseline, 'migration/default-off opens no sockets');
       for (const prerequisite of ['identity', 'nickname', 'onboarding']) {
-        reset([a]);
+        await reset([a]);
         if (prerequisite === 'identity') connection.setIdentity(null);
         if (prerequisite === 'nickname') connection.savedNickname = 'x';
         if (prerequisite === 'onboarding') settings.onboardingCompleted = false;
@@ -404,11 +404,11 @@ async function setupHomeAutoEntrySmoke() {
         equal(sockets.length, baseline, `missing ${prerequisite} prevents automatic entry`);
         equal(notices.length, 1, 'missing prerequisites leave a Home notice');
       }
-      reset([{ ...a, serverId: undefined }]);
+      await reset([{ ...a, serverId: undefined }]);
       await service().start();
       equal(sockets.length, baseline, 'legacy servers need an authenticated logical identity before automatic entry');
       equal(notices.length, 1, 'legacy identity verification has a manual-entry hint');
-      reset([a, b], false);
+      await reset([a, b], false);
       await navigation.openServerSession(a.host, a.port, identity, 'Fixture', a.password);
       settings.setServerAutoEntry(b, true);
       gates.set(b.port, deferred());
@@ -426,12 +426,12 @@ async function setupHomeAutoEntrySmoke() {
       equal(voice.currentVoiceChannelId, 'voice-5201', 'voice stays on the existing server');
       equal(serverStore.serverDetails?.id, 'server-5201', 'background protocol events do not change active stores');
 
-      reset([a, { ...a, host: 'A.TEST' }]);
+      await reset([a, { ...a, host: 'A.TEST' }]);
       const aliasesStart = sockets.length;
       await service().start();
       equal(sockets.slice(aliasesStart).map(socket => socket.port), [a.port], 'canonical duplicate saved addresses never create rival sessions');
 
-      reset([{ ...a, serverId: 'previous-server-identity' }, b]);
+      await reset([{ ...a, serverId: 'previous-server-identity' }, b]);
       await service().start();
       equal(sessions.getAll().length, 0, 'unexpected server identity is disconnected without falling back to another saved server');
       check(!settings.isServerAutoEntryEnabled(a), 'changed server identity disables the preference');
@@ -439,7 +439,7 @@ async function setupHomeAutoEntrySmoke() {
       equal(notices.length, 1, 'server identity changes are reported');
 
       for (const failure of ['unavailable', 'password', 'protocol', 'hang']) {
-        reset([a, b]);
+        await reset([a, b]);
         connection.createdServers = [{ id: 'owned-fixture', name: 'Owned', port: a.port, createdAt: 1, lastStarted: 0, voiceChannel: 'Voice', textChannel: 'text' }];
         connection.savedServers[0] = { ...a, host: '127.0.0.1' };
         settings.setServerAutoEntry(connection.savedServers[0], true);
@@ -455,7 +455,7 @@ async function setupHomeAutoEntrySmoke() {
         equal(sockets.length - before, 1, `${failure}: no automatic failure/retry storm`);
         equal(hostsStarted.length, 0, `${failure}: owned stopped servers are never started silently`);
       }
-      reset([a, b]);
+      await reset([a, b]);
       settings.setServerAutoEntry(b, true);
       const existing = sessions.create(a.host, a.port, 'Fixture');
       existing.client.status = 'RECONNECTING';
@@ -466,7 +466,7 @@ async function setupHomeAutoEntrySmoke() {
       equal(existing.client.getStatus(), 'RECONNECTING', 'background entry preserves a recovering session');
 
       const alias = { ...b, serverId: a.serverId };
-      reset([a, alias]);
+      await reset([a, alias]);
       settings.setServerAutoEntry(alias, true);
       const pendingExisting = sessions.create(a.host, a.port, 'Fixture');
       pendingExisting.client.status = 'CONNECTING';
@@ -479,7 +479,7 @@ async function setupHomeAutoEntrySmoke() {
       const a = saved('cancel-a.test', 5301);
       const b = saved('cancel-b.test', 5302);
       const c = saved('cancel-c.test', 5303);
-      reset([a, b, c], false);
+      await reset([a, b, c], false);
       await navigation.openServerSession(a.host, a.port, identity, 'Fixture', a.password);
       settings.setServerAutoEntry(b, true);
       gates.set(b.port, deferred());
@@ -487,7 +487,7 @@ async function setupHomeAutoEntrySmoke() {
       const queue = service();
       const running = queue.start();
       await until(() => sockets.slice(before).some(socket => socket.port === b.port), 'background cancellation fixture did not connect');
-      sessions.removeAll();
+      await sessions.removeAll();
       await running;
       gates.get(b.port).resolve();
       await tick();
@@ -497,12 +497,12 @@ async function setupHomeAutoEntrySmoke() {
       home.render();
       equal(sockets.length - before, 1, 'Home does not restart a cancelled automatic entry');
 
-      reset([a, b]);
+      await reset([a, b]);
       gates.set(a.port, deferred());
       const initialCount = sockets.length;
       const initialPending = service().start();
       await until(() => sockets.length > initialCount, 'first pending cancellation fixture did not connect');
-      sessions.removeAll();
+      await sessions.removeAll();
       await initialPending;
       gates.get(a.port).resolve();
       await tick();
@@ -510,7 +510,7 @@ async function setupHomeAutoEntrySmoke() {
       equal(sessions.getAll().length, 0, 'first pending handshake does not leave a ghost session');
 
       for (const action of ['disable', 'remove', 'replace']) {
-        reset([a, b]);
+        await reset([a, b]);
         gates.set(a.port, deferred());
         const start = sockets.length;
         const pending = service().start();
@@ -526,7 +526,7 @@ async function setupHomeAutoEntrySmoke() {
         equal(settings.isServerAutoEntryEnabled(b), action === 'replace', `${action}: a replacement applies to the next launch only`);
       }
 
-      reset([a, b]);
+      await reset([a, b]);
       gates.set(a.port, deferred());
       const start = sockets.length;
       const automatic = service().start();
@@ -537,7 +537,7 @@ async function setupHomeAutoEntrySmoke() {
       equal(sockets.slice(start).filter(socket => socket.port === a.port).length, 1, 'manual entry reuses an in-flight automatic handshake');
 
       for (const firstAuth of ['manual', 'automatic']) {
-        reset([a, { ...b, serverId: a.serverId }], false);
+        await reset([a, { ...b, serverId: a.serverId }], false);
         settings.setServerAutoEntry(a, true);
         logicalServerIds.set(b.port, a.serverId);
         replaceDuplicateConnections = true;
@@ -569,7 +569,7 @@ async function setupHomeAutoEntrySmoke() {
         equal(notices.length, 0, 'manual takeover is not an automatic-entry failure');
       }
 
-      reset([a, b]);
+      await reset([a, b]);
       gates.set(a.port, deferred());
       const late = service().start();
       await until(() => navigation.getServerSessionForAddress(a.host, a.port)?.client.getStatus() === 'CONNECTING', 'late navigation fixture not pending');
@@ -583,7 +583,7 @@ async function setupHomeAutoEntrySmoke() {
       const a = saved('settings.test', 5401);
       a.name = 'Server " <fixture>';
       const b = saved('other-settings.test', 5402);
-      reset([a, b], false);
+      await reset([a, b], false);
       home.render();
       const homeInput = () => root.querySelector('[data-server-auto-entry]');
       equal(root.querySelectorAll('[data-server-auto-entry]').length, 1, 'Home has exactly one startup switch');
@@ -619,7 +619,7 @@ async function setupHomeAutoEntrySmoke() {
       equal(settings.autoEntryServerKeys.length, 1, 'only one destination is persisted');
       const current = localStorage.getItem('monky_settings');
       check(current.includes(JSON.stringify([a.host, a.port]).replaceAll('"', '\\"')), 'stored settings include the canonical server identity');
-      sessions.removeAll();
+      await sessions.removeAll();
       await tick();
       home.render();
       selectSavedServer(b);
@@ -631,7 +631,7 @@ async function setupHomeAutoEntrySmoke() {
       await home.submitJoinForm();
       check(settings.isServerAutoEntryEnabled(b) && !settings.isServerAutoEntryEnabled(a), 'a successful replacement is exclusive');
       equal(connection.savedServers.find(server => server.port === b.port)?.serverId, `server-${b.port}`, 'the saved replacement has an authenticated server identity');
-      sessions.removeAll();
+      await sessions.removeAll();
       await tick();
       home.render();
       selectSavedServer(a);
@@ -647,7 +647,7 @@ async function setupHomeAutoEntrySmoke() {
         equal(document.querySelector('.dialog-card .dialog-message')?.textContent, t('autoEntry.saveFailed'), 'post-auth persistence failures remain visible after Home is replaced');
       } finally { Storage.prototype.setItem = saveBeforeFailure; }
       document.querySelector('.dialog-card [data-action="confirm"]')?.click();
-      sessions.removeAll();
+      await sessions.removeAll();
       await tick();
       home.render();
       await settingsModal.open();
@@ -741,7 +741,7 @@ async function setupHomeAutoEntrySmoke() {
     },
     async transitions(reduced) {
       const server = saved('transition.test', 5601);
-      reset([server], false);
+      await reset([server], false);
       home.render();
       selectSavedServer(server);
       const mockRender = app.mainView.render;
@@ -848,7 +848,7 @@ async function setupHomeAutoEntrySmoke() {
         destroyRealMain();
         app.mainView.render = mockRender;
         app.mainView.destroy = mockDestroy;
-        sessions.removeAll();
+        await sessions.removeAll();
         await tick();
         home.render();
       }
@@ -869,10 +869,10 @@ async function setupHomeAutoEntrySmoke() {
       equal(settings.autoEntryServerKeys, [], 'a keyboard choice is not persisted before connection');
       equal(home.selectedSavedHost, keyboardHost, 'keyboard toggles do not navigate the Home card');
     },
-    cleanup() {
+    async cleanup() {
       for (const instance of services) instance.dispose();
       settingsModal.close();
-      sessions.removeAll();
+      await sessions.removeAll();
       home.dispose();
       equal(hostListeners.size, 0, 'disposing Home removes the hosted-server status listener');
       equal(home.previewControllers.size, 0, 'disposing Home clears outstanding previews');

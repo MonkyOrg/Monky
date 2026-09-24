@@ -35,6 +35,7 @@ class NativeScreenSubscription {
     this.playing = false;
     this.stopping = false;
     this.closed = false;
+    this.presentationRetired = false;
     this.generation = null;
     this.opening = null;
     this.consuming = null;
@@ -205,7 +206,10 @@ class NativeScreenSubscription {
         try { await this.send(this.envelope({ action: 'stop' })); }
         catch (error) { errors.push(error); }
       }
-      try { await this.retirePresentation(this.presentationId); }
+      try {
+        if (!this.presentationRetired) await this.retirePresentation(this.presentationId);
+        this.presentationRetired = true;
+      }
       catch (error) { errors.push(error); }
       if (this.endpoint) {
         try { await this.endpoint.close(); }
@@ -214,13 +218,14 @@ class NativeScreenSubscription {
           errors.push(new Error('The native screen receiver did not confirm complete retirement.'));
       }
       await within(Promise.allSettled([this.opening, this.consuming]), 15000, 'Screen subscription setup did not retire.');
-      retiredSubscriptions.add(this);
+      if (this.presentationRetired) retiredSubscriptions.add(this);
       this.producers.clear();
-      this.closed = !this.endpoint || this.endpoint.snapshot().closed;
+      this.closed = this.presentationRetired && (!this.endpoint || this.endpoint.snapshot().closed);
       if (this.closed) this.observe({ type: 'closed' });
       if (errors.length) throw new AggregateError(errors, 'Native screen subscription reported shutdown failures.');
     })();
-    void this.closing.catch(() => { if (!this.closed) this.closing = null; });
+    const work = this.closing;
+    void work.catch(() => { if (this.closing === work) this.closing = null; });
     return this.closing;
   }
 

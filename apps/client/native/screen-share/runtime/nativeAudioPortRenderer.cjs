@@ -123,8 +123,9 @@ class NativeAudioPortRenderer {
 
   retire() {
     if (this.retired) return;
-    if (this.sink.getStats().stopped !== true) throw new Error('Native audio cannot retire a live output context.');
-    this.port.close();
+    if (!this.stopping || !this.clock.stopped || this.sink.getStats().stopped !== true)
+      throw new Error('Native audio cannot retire a live output context.');
+    this.port.close(new DOMException('Native audio output was retired.', 'AbortError'));
     this.retired = true;
     this.onRetired(this);
   }

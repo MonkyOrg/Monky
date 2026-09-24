@@ -12,6 +12,7 @@ import type { ParticipantManager } from '../ParticipantManager';
 import { appEvents } from '../EventBus';
 import { emitOutsideRouting } from '../sessionRouting';
 import { clientLog } from '../ClientLogService';
+import { t } from '../../i18n';
 import { videoService, type NativeScreenCapture } from '../VideoService';
 import { settingsStore } from '../../stores/settingsStore';
 import { voiceStore } from '../../stores/voiceStore';
@@ -68,6 +69,7 @@ interface Source {
   readonly ready: Promise<NativeScreenSource>;
   descriptor: NativeScreenSource | null;
   removing: boolean;
+  reconfiguration?: { retired: boolean };
   retirement?: Promise<void>;
   previewState?: NativeScreenPreviewState;
   captureMode?: NativeScreenCaptureMode;
@@ -90,6 +92,7 @@ interface Call {
   readonly presentations: Map<string, Presentation>;
   readonly watchTasks: Map<string, Promise<void>>;
   readonly unbind: Array<() => void>;
+  readonly controls: Set<Promise<NativeScreenCommandResult>>;
   joining: Promise<void>;
   ready: Promise<void>;
   roster: string;
@@ -117,6 +120,7 @@ export class NativeScreenController {
   private retiring = new Set<Call>();
   private availability: Promise<NativeScreenCapabilities> | null = null;
   private sinkId = resolveAudioOutput(settingsStore, 'screen');
+  private shutdownRequested = false;
 
   constructor(
     private readonly context: () => NativeScreenCallContext | null,
@@ -139,7 +143,7 @@ export class NativeScreenController {
   }
 
   private current(call: Call): void {
-    if (call.stopping || this.call !== call || !call.context.isCurrent()) throw cancelled();
+    if (this.shutdownRequested || call.stopping || this.call !== call || !call.context.isCurrent()) throw cancelled();
   }
 
   private networkCurrent(call: Call): boolean {
@@ -157,14 +161,21 @@ export class NativeScreenController {
   }
 
   private async ok(call: Call, command: NativeScreenCommand): Promise<void> {
-    const result = await call.api.nativeScreenCommand(command);
+    this.current(call);
+    const work = call.api.nativeScreenCommand(command);
+    call.controls.add(work);
+    let result: NativeScreenCommandResult;
+    try { result = await work; }
+    finally { call.controls.delete(work); }
     if (result.kind !== 'ok') throw new Error(`Unexpected native screen response to ${command.action}.`);
   }
 
   private async ensureCall(): Promise<Call> {
+    if (this.shutdownRequested) throw cancelled();
     if (this.call && !this.call.context.isCurrent()) await this.close();
     if (!this.call) {
       await Promise.all([...this.retiring].map(call => this.retireCall(call)));
+      if (this.shutdownRequested) throw cancelled();
       // A concurrent source/Watch may have created the call while cleanup awaited.
       if (this.call) return this.ensureCall();
       const context = this.context();
@@ -184,7 +195,7 @@ export class NativeScreenController {
       };
       const call: Call = {
         config, context, api, connectionId: context.client.getConnectionId(), sources: new Map(), presentations: new Map(),
-        sourceTasks: new Map(), watchTasks: new Map(), unbind: [], joining: Promise.resolve(),
+        sourceTasks: new Map(), watchTasks: new Map(), unbind: [], controls: new Set(), joining: Promise.resolve(),
         ready: Promise.resolve(), roster: '', rosterTask: Promise.resolve(), stopping: false,
       };
       this.call = call;
@@ -332,6 +343,7 @@ export class NativeScreenController {
       const entry = call.sources.get(event.shareId), source = entry?.descriptor;
       if (!source || entry.removing || source.instanceId !== event.sourceInstanceId) return;
       if (event.type === 'state' && event.state === 'closed') {
+        if (entry.reconfiguration) { entry.reconfiguration.retired = true; return; }
         await this.releaseLocalPreview(call, entry);
         call.sources.delete(event.shareId);
         emitOutsideRouting(() => appEvents.emit('local.screen_ended_externally', event.shareId));
@@ -513,6 +525,44 @@ export class NativeScreenController {
         && capture.audioBitrateKbps === audioBitrateKbps) return;
       const isCurrentCapture = () => this.call === call && !call.stopping && call.context.isCurrent()
         && videoService.getNativeScreenCapture(shareId) === capture;
+      if (selected && previous?.descriptor && !previous.removing) {
+        const transition = { retired: false };
+        previous.reconfiguration = transition;
+        try {
+          const result = await call.api.nativeScreenCommand({
+            action: 'source-add', callId: call.config.callId, shareId,
+            replacesSourceInstanceId: previous.descriptor.instanceId,
+            desktopSourceId: capture.desktopSourceId, captureKind: capture.captureKind,
+            preserveAspectRatio: capture.preserveAspectRatio ?? false,
+            video, audio: capture.source.audio, audioBitrateKbps,
+          });
+          this.current(call);
+          if (!isCurrentCapture() || previous.removing || call.sources.get(shareId) !== previous) {
+            await this.removeCallSource(call, shareId);
+            return;
+          }
+          if (result.kind !== 'source') throw new Error('Native quality preparation returned no source descriptor.');
+          transition.retired = true;
+          await this.releaseLocalPreview(call, previous);
+          this.current(call);
+          if (!isCurrentCapture() || previous.removing || call.sources.get(shareId) !== previous) {
+            await this.removeCallSource(call, shareId);
+            return;
+          }
+          call.sources.set(shareId, { descriptor: result.source, ready: Promise.resolve(result.source), removing: false });
+          videoService.updateNativeScreenCapture({ ...capture, source: result.source, audioBitrateKbps });
+          try { await this.attachLocalPreview(shareId); }
+          catch (error) { this.report(error); }
+          call.context.announceSources();
+        } catch (error) {
+          if (transition.retired && isCurrentCapture())
+            emitOutsideRouting(() => appEvents.emit('local.screen_ended_externally', shareId));
+          throw error;
+        } finally {
+          if (previous.reconfiguration === transition) previous.reconfiguration = undefined;
+        }
+        return;
+      }
       const replace = async (nextVideo: NativeScreenVideoProfile, nextAudioBitrate: number): Promise<void> => {
         const source = await this.addCallSource(call, {
           ...capture, shareId, video: nextVideo, audioBitrateKbps: nextAudioBitrate, audio: capture.source.audio,
@@ -556,7 +606,7 @@ export class NativeScreenController {
     const captures = videoService.getNativeScreenCaptures();
     if (!captures.length) return;
     const video = nativeScreenProfile(profile);
-    if (!video) throw new Error('Native screen sharing supports up to 1920x1080 at 120 FPS and 20000 Kbps.');
+    if (!video) throw new Error(t('screenShare.nativeProfileChangeBlocked'));
     const call = await this.ensureCall();
     await Promise.all(captures.map(capture => this.refreshSource(call, capture.source.shareId,
       { video, audioBitrateKbps: profile.audioBitrateKbps })));
@@ -884,6 +934,11 @@ export class NativeScreenController {
     return entry.stoppingTask;
   }
 
+  public prepareShutdown(): Promise<void> {
+    this.shutdownRequested = true;
+    return this.close();
+  }
+
   public close(): Promise<void> {
     return this.call ? this.retireCall(this.call) : Promise.all([...this.retiring].map(call => this.retireCall(call))).then(() => {});
   }
@@ -895,6 +950,9 @@ export class NativeScreenController {
     this.retiring.add(call);
     call.retirement = (async () => {
       await Promise.allSettled([call.joining]);
+      // Stop producing controls first, but finish admitted commands before Main
+      // retires their call. Cleanup RPC replies use the independent event path.
+      while (call.controls.size) await Promise.allSettled([...call.controls]);
       let result: NativeScreenCommandResult;
       if (this.networkCurrent(call)) {
         try { result = await call.api.nativeScreenCommand({ action: 'leave', callId: call.config.callId }); }

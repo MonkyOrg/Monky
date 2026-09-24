@@ -93,6 +93,7 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
     captureKind: nativeScreenCaptureKindSchema.optional(),
     preserveAspectRatio: z.boolean().optional(),
     replacesAudioShareId: screenShareIdSchema.optional(),
+    replacesSourceInstanceId: uuid.optional(),
     video: nativeScreenVideoProfileSchema, audio: z.boolean(), audioBitrateKbps: nativeScreenAudioBitrateSchema,
   }).strict(),
   callScope.extend({ action: z.literal('source-remove'), shareId: screenShareIdSchema }).strict(),

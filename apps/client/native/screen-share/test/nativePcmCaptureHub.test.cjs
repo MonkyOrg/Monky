@@ -89,6 +89,43 @@ test('last detach waits for the actual capture closed promise, not the stop meth
   await f.hub.close();
 });
 
+test('Retry uses actual PCM closure instead of replaying a rejected stop forever', async () => {
+  const f = fixture();
+  const subscription = f.hub.subscribe(f.selection, () => {});
+  await subscription.ready;
+  const capture = f.captures[0], stop = capture.stop.bind(capture);
+  capture.stop = async () => {
+    await stop();
+    throw new Error('Stop reported an error after its owned capture closed');
+  };
+  await assert.rejects(f.hub.close(), /ownership did not retire/);
+  assert.equal(capture.closed, true);
+  assert.equal(subscription.getStats().detached, false);
+  await f.hub.close();
+  await f.hub.waitUntilIdle();
+  assert.equal(f.hub.getStats().closed, true);
+  assert.equal(capture.stops, 1, 'An already proven native closure needs no second stop request.');
+  assert.ok(f.errors.length > 0, 'The first stop failure must remain observable.');
+});
+
+test('a replacement rendition does not inherit a retired capture owner rejected stop', async () => {
+  const f = fixture();
+  const first = f.hub.subscribe(f.selection, () => {});
+  await first.ready;
+  const capture = f.captures[0], stop = capture.stop.bind(capture);
+  capture.stop = async () => { await stop(); throw new Error('Stop diagnostic after closure'); };
+  await assert.rejects(first.detach(), /Stop diagnostic/);
+  await first.detach();
+  await f.hub.waitUntilIdle();
+  const replacement = f.hub.subscribe(f.selection, () => {});
+  await replacement.ready;
+  assert.equal(f.captures.length, 2);
+  assert.equal(first.getStats().captureClosed, true);
+  assert.equal(replacement.getStats().captureClosed, false);
+  await replacement.detach();
+  await f.hub.close();
+});
+
 test('packet delivery waits for every subscriber admission, not just callback invocation', async () => {
   const f = fixture(), a = deferred(), b = deferred();
   const first = f.hub.subscribe(f.selection, event => event.type === 'packet' ? a.promise : undefined);

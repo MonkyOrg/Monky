@@ -218,7 +218,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     assert.equal(electron.app.listenerCount('browser-window-focus'), 0);
     assert.equal(electron.app.listenerCount('browser-window-blur'), 0);
   });
-  return { service, config, command, invoke, source, join, addSource, participants, watch, accepted,
+  return { service, config, command, invoke, reply, source, join, addSource, participants, watch, accepted,
     frame, contents, event, endpoints, sent, errors, selections, captures, directories, probes, removedDirectories, captureModule, logs, ports,
     replaceMonitor: value => { monitor = value; },
     allowProbeRetirement: () => { probeRetires = true; },
@@ -721,6 +721,31 @@ test('nested Game Capture failures preserve an actionable IPC code without chang
   assert.equal(shared.nativeScreenEventSchema.safeParse({ ...event, code: 'UNKNOWN' }).success, false);
 });
 
+test('AMF level rejection uses unsupported while retaining bounded required/maximum native measurements', async t => {
+  const message = 'AMF H264 requires level_idc=60 for 3840x2160@120; selected adapter/runtime reports MaxLevel=52.'
+    + ' This rendition is unsupported; no lower-level or software fallback was applied.';
+  const native = Object.assign(new Error(message), { code: 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' });
+  const failure = new AggregateError([native], 'PRIVATE_PATH_CREDENTIAL');
+  native.cause = failure;
+  const f = fixture(t, { probeFailure: failure });
+  await f.join();
+  await assert.rejects(f.addSource(), /MaxLevel=52/);
+  const diagnostic = f.logs.find(entry => entry.message === 'Native screen source-admission failed');
+  assert.deepEqual(diagnostic.data.nativeDiagnostics, [
+    { kind: 'amf-h264-level', requiredLevel: 60, maximumLevel: 52, width: 3840, height: 2160, fps: 120 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(diagnostic), /PRIVATE_PATH_CREDENTIAL/);
+  f.setProbeFailure(null);
+  const { source } = await f.addSource();
+  await f.command({ action: 'preview-start', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+  f.endpoints[0].options.onError(failure);
+  await tick(); await tick();
+  const event = f.sent.find(value => value.type === 'error' && value.shareId === source.shareId);
+  assert.equal(event.reason, 'unsupported');
+  assert.match(event.message, /level_idc=60.*MaxLevel=52/);
+});
+
 test('preparation failure before process creation still awaits the original bridge stop', async t => {
   const probeStop = deferred();
   const f = fixture(t, { probeFailureBeforeSpawn: new Error('Modeled pre-spawn failure'), probeStop });
@@ -845,6 +870,78 @@ test('native diagnostics are source-instance scoped and do not start capture whe
   assert.deepEqual(await f.command(query), { kind: 'diagnostics-retired' });
   assert.equal(f.errors.length, 0, 'A superseded metrics request must not become an IPC error.');
 });
+test('diagnostics of a mapped publisher awaiting real retirement are explicitly unavailable', async t => {
+  const f = fixture(t), gate = deferred();
+  await f.join();
+  const { source } = await f.addSource();
+  await f.command({ action: 'preview-start', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+  const endpoint = f.endpoints[0], close = endpoint.close.bind(endpoint);
+  let closing = false;
+  endpoint.close = async () => { closing = true; await gate.promise; return close(); };
+  const removing = f.command({ action: 'source-remove', shareId: source.shareId });
+  try {
+    await tick();
+    assert.equal(closing, true);
+    assert.deepEqual(await f.command({ action: 'diagnostics', publisherSessionId: f.config.sessionId,
+      shareId: source.shareId, sourceInstanceId: source.instanceId }), { kind: 'diagnostics-retired' });
+    assert.equal(f.errors.length, 0);
+  } finally { gate.resolve(); await removing; }
+});
+
+test('pending diagnostics cannot return an old source after same-share quality replacement', async t => {
+  const f = fixture(t), gate = deferred();
+  await f.join();
+  const { source } = await f.addSource();
+  await f.command({ action: 'preview-start', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+  const endpoint = f.endpoints[0], diagnostics = endpoint.diagnostics.bind(endpoint);
+  endpoint.diagnostics = async () => { await gate.promise; return diagnostics(); };
+  const query = { action: 'diagnostics', publisherSessionId: f.config.sessionId,
+    shareId: source.shareId, sourceInstanceId: source.instanceId };
+  const pending = f.command(query);
+  const fresh = (await f.addSource(source.shareId, {
+    replacesSourceInstanceId: source.instanceId, video: { ...video, fps: 30 },
+  })).source;
+  gate.resolve();
+  assert.deepEqual(await pending, { kind: 'diagnostics-retired' });
+  assert.equal((await f.command({ ...query, sourceInstanceId: fresh.instanceId })).kind, 'diagnostics');
+  assert.equal((await f.command({ action: 'stats' })).publishers[0].source.instanceId, fresh.instanceId);
+  assert.equal(f.errors.length, 0);
+});
+
+test('pending receive diagnostics cannot outlive Stop or contaminate a fresh Watch', async t => {
+  const f = fixture(t, { role: 'viewer' }), gate = deferred();
+  await f.join(); await f.participants();
+  const watched = await f.watch();
+  await f.accepted(f.sent.find(event => event.type === 'signal' && event.signal.action === 'watch').signal);
+  const endpoint = f.endpoints[0], diagnostics = endpoint.diagnostics.bind(endpoint);
+  endpoint.diagnostics = async () => { await gate.promise; return diagnostics(); };
+  const query = { action: 'diagnostics', publisherSessionId: 'publisher', shareId: f.source.shareId,
+    sourceInstanceId: f.source.instanceId, presentationId: watched.presentationId };
+  const pending = f.command(query);
+  await f.command({ action: 'stop', publisherSessionId: 'publisher', shareId: f.source.shareId,
+    presentationId: watched.presentationId });
+  const fresh = await f.watch();
+  gate.resolve();
+  assert.deepEqual(await pending, { kind: 'diagnostics-retired' });
+  assert.equal((await f.command({ ...query, presentationId: fresh.presentationId })).kind, 'diagnostics');
+  assert.equal((await f.command({ action: 'stats' })).subscriptions.length, 1);
+  assert.equal(f.errors.length, 0);
+});
+
+test('active diagnostic failures remain visible rather than becoming a retirement reply', async t => {
+  const f = fixture(t);
+  await f.join();
+  const { source } = await f.addSource();
+  await f.command({ action: 'preview-start', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+  f.endpoints[0].diagnostics = async () => { throw new Error('Malformed active native snapshot.'); };
+  await assert.rejects(f.command({ action: 'diagnostics', publisherSessionId: f.config.sessionId,
+    shareId: source.shareId, sourceInstanceId: source.instanceId }), /Malformed active native snapshot/);
+  assert.ok(f.logs.some(entry => entry.level === 'ERROR' && entry.data.action === 'diagnostics'));
+});
+
 test('Stop while capability discovery is pending prevents late source admission', async t => {
   const gpu = deferred(), f = fixture(t, { gpu });
   await f.join();
@@ -932,6 +1029,88 @@ test('audio replacement reserves only the exact same-call source and failed pref
   assert.equal(f.captures.length, 0);
   await f.command({ action: 'source-remove', shareId: 'new-audio' });
   await assert.rejects(f.addSource('unrelated-audio'), /reserve capture audio/);
+});
+
+test('same-share quality preflight preserves the running instance on failure and retires it only after acceptance', async t => {
+  const f = fixture(t);
+  await f.join();
+  let current = (await f.addSource()).source;
+  await f.command({ action: 'preview-start', shareId: current.shareId,
+    sourceInstanceId: current.instanceId, presentationId: randomUUID() });
+  const first = f.endpoints[0];
+  const selected = { width: 1280, height: 720, fps: 30, maxBitrateKbps: 3000 };
+  f.setProbeFailure(new Error('Modeled unsupported encoder profile'));
+  await assert.rejects(f.addSource(current.shareId, {
+    replacesSourceInstanceId: current.instanceId, video: selected,
+  }), /unsupported encoder profile/);
+  assert.equal(first.closed, false);
+  assert.equal(f.sent.some(event => event.state === 'closed' && event.sourceInstanceId === current.instanceId), false);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
+  f.setProbeFailure(null);
+  for (const nextVideo of [selected, { ...selected, fps: 120 }, { ...selected, fps: 120, maxBitrateKbps: 20000 }, video]) {
+    const old = current, endpoint = f.endpoints.at(-1);
+    current = (await f.addSource(old.shareId, { replacesSourceInstanceId: old.instanceId, video: nextVideo })).source;
+    assert.equal(current.shareId, old.shareId);
+    assert.notEqual(current.instanceId, old.instanceId);
+    assert.equal(current.audio, true);
+    assert.equal(endpoint.closed, true);
+    assert.deepEqual(current.video, nextVideo);
+    assert.equal(f.sent.filter(event => event.state === 'closed' && event.sourceInstanceId === old.instanceId).length, 1);
+    await f.command({ action: 'preview-start', shareId: current.shareId,
+      sourceInstanceId: current.instanceId, presentationId: randomUUID() });
+    assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
+  }
+  await assert.rejects(f.addSource(current.shareId, {
+    replacesSourceInstanceId: first.options.source.instanceId, video: selected,
+  }), /exact existing source/);
+  await assert.rejects(f.addSource(current.shareId, {
+    replacesSourceInstanceId: current.instanceId, desktopSourceId: monitorId, captureKind: 'monitor', video: selected,
+  }), /exact existing source/);
+  assert.equal(f.endpoints.at(-1).closed, false);
+});
+
+test('Stop during same-share quality preflight aborts the reservation before retiring the exact old source', async t => {
+  const gpu = deferred(), nextProbe = deferred(), f = fixture(t, { gpu });
+  await f.join();
+  gpu.resolve();
+  const old = (await f.addSource()).source;
+  await f.command({ action: 'preview-start', shareId: old.shareId,
+    sourceInstanceId: old.instanceId, presentationId: randomUUID() });
+  gpu.promise = nextProbe.promise;
+  const pending = assert.rejects(f.addSource(old.shareId, {
+    replacesSourceInstanceId: old.instanceId, video: { ...video, fps: 30 },
+  }), { name: 'AbortError' });
+  await tick();
+  assert.equal(f.endpoints[0].closed, false);
+  await f.command({ action: 'source-remove', shareId: old.shareId });
+  await pending;
+  nextProbe.resolve();
+  await tick();
+  assert.equal(f.endpoints[0].closed, true);
+  assert.equal(f.endpoints.length, 1);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
+  assert.equal(f.sent.filter(event => event.state === 'closed' && event.sourceInstanceId === old.instanceId).length, 1);
+});
+
+test('quality replacement with an unacknowledged old audio retirement cannot admit a second owner', async t => {
+  const f = fixture(t);
+  await f.join();
+  const old = (await f.addSource()).source;
+  await f.command({ action: 'preview-start', shareId: old.shareId,
+    sourceInstanceId: old.instanceId, presentationId: randomUUID() });
+  const endpoint = f.endpoints[0], hub = endpoint.options.audio.captureHub, close = hub.close.bind(hub);
+  hub.close = async () => { throw new Error('Modeled retained PCM owner'); };
+  await assert.rejects(f.addSource(old.shareId, {
+    replacesSourceInstanceId: old.instanceId, video: { ...video, fps: 30 },
+  }), /retirement reported failures/);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 1);
+  assert.equal(endpoint.closed, true);
+  assert.equal(hub.getStats().closed, false);
+  assert.equal(f.endpoints.length, 1);
+  hub.close = close;
+  await f.command({ action: 'source-remove', shareId: old.shareId });
+  assert.equal(hub.getStats().closed, true);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
 });
 
 test('replacement preview cannot activate PCM before the prior owner retires', async t => {
@@ -1054,6 +1233,261 @@ test('same-call game/window to monitor swaps retire PCM, reset selectors and rej
   assert.equal(active.size, 0);
   assert.equal(new Set(f.logs.filter(entry => entry.message === 'Native screen source-admitted')
     .map(entry => entry.data.call)).size, 1, 'All swaps remain in the original native call');
+});
+
+test('shutdown preparation keeps the real Main RPC bridge live until native retirement, then accepts only retired-call goodbye', async t => {
+  const f = fixture(t, { role: 'viewer' });
+  f.config.mode = 'sfu';
+  await f.join(); await f.participants(); await f.watch();
+  await f.accepted(f.sent.find(value => value.type === 'signal' && value.signal.action === 'watch').signal);
+  const endpoint = f.endpoints[0], close = endpoint.close.bind(endpoint), send = f.contents.send;
+  let pending;
+  f.contents.send = (channel, value) => {
+    if (value.type === 'rpc' && value.method === shared.MessageType.SFU_CLOSE_WEBRTC_TRANSPORT) {
+      pending = value;
+      f.sent.push(value);
+    } else send(channel, value);
+  };
+  endpoint.close = async () => {
+    await endpoint.options.rpc(shared.MessageType.SFU_CLOSE_WEBRTC_TRANSPORT,
+      { channelId: f.config.channelId, transportId: 'owned-transport' });
+    await close();
+  };
+  const preparing = f.service.prepareShutdown();
+  await tick();
+  assert.ok(pending);
+  assert.equal(endpoint.closed, false);
+  await assert.rejects(f.invoke({ ...f.config, callId: randomUUID(), action: 'join' }), { name: 'AbortError' });
+  await f.reply({ callId: pending.callId, requestId: pending.requestId, ok: true,
+    value: { channelId: f.config.channelId, transportId: 'owned-transport' } });
+  await preparing;
+  assert.equal(endpoint.closed, true);
+  assert.equal((await f.command({ action: 'leave' })).kind, 'ok');
+  assert.equal((await f.command({ action: 'leave-local' })).kind, 'ok');
+  await assert.rejects(f.invoke({ action: 'leave', callId: randomUUID() }), { name: 'AbortError' });
+  await assert.rejects(f.join(), { name: 'AbortError' });
+  await f.service.prepareShutdown();
+  assert.equal(f.logs.filter(entry => entry.message === 'Native screen call-retirement').length, 1);
+});
+
+test('native admission freeze retains control notifications and reply ownership until renderer quiescence', async t => {
+  const f = fixture(t);
+  await f.join(); await f.participants();
+  f.service.freezeAdmissions();
+  assert.equal((await f.command({ action: 'producer-remove', producerId: 'retiring-producer' })).kind, 'ok');
+  await f.participants();
+  await assert.rejects(f.addSource(), { name: 'AbortError' });
+  await assert.rejects(f.join(), { name: 'AbortError' });
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen command-cancelled'
+    && entry.data.action === 'source-add'));
+  assert.equal((await f.command({ action: 'leave' })).kind, 'ok');
+  await f.service.prepareShutdown();
+  assert.equal((await f.command({ action: 'leave' })).kind, 'ok');
+  await assert.rejects(f.invoke({ action: 'leave', callId: randomUUID() }), { name: 'AbortError' });
+});
+
+test('shutdown preparation retries retained owners without dropping the renderer or admitting new work', async t => {
+  const f = fixture(t, { role: 'viewer' });
+  await f.join(); await f.participants(); await f.watch();
+  await f.accepted(f.sent.find(value => value.type === 'signal' && value.signal.action === 'watch').signal);
+  const endpoint = f.endpoints[0], close = endpoint.close.bind(endpoint);
+  let retained = true;
+  endpoint.close = async () => {
+    if (retained) throw new Error('Original native owner has not retired');
+    await close();
+  };
+  await assert.rejects(f.service.prepareShutdown(), /preparation failed/);
+  assert.equal(endpoint.closed, false);
+  await assert.rejects(f.join(), { name: 'AbortError' });
+  retained = false;
+  await f.service.prepareShutdown();
+  assert.equal(endpoint.closed, true);
+  assert.equal((await f.command({ action: 'leave' })).kind, 'ok');
+});
+
+for (const initiallyRetained of [false, true]) {
+  test(`disconnection during shutdown requires original local closure proof (retained=${initiallyRetained})`, async t => {
+    const f = fixture(t, { role: 'viewer' });
+    await f.join(); await f.participants(); await f.watch();
+    await f.accepted(f.sent.find(value => value.type === 'signal' && value.signal.action === 'watch').signal);
+    const endpoint = f.endpoints[0], close = endpoint.close.bind(endpoint), send = f.contents.send;
+    let retained = initiallyRetained, pending;
+    endpoint.close = async () => {
+      if (retained) throw new Error('Original GPU/PCM ownership remains unresolved');
+      await close();
+    };
+    f.contents.send = (channel, value) => {
+      if (value.type === 'signal' && value.signal.action === 'stop') pending = value;
+      else send(channel, value);
+    };
+    const prepared = f.service.prepareShutdown().then(() => null, error => error);
+    await tick();
+    assert.ok(pending);
+    if (retained) {
+      await assert.rejects(f.command({ action: 'leave-local' }), /shutdown reported failures/);
+      assert.match((await prepared).message, /preparation failed/);
+      assert.equal(endpoint.closed, false);
+      retained = false;
+      await f.service.prepareShutdown();
+    } else {
+      const result = await f.command({ action: 'leave-local' });
+      assert.equal(result.kind, 'retired-with-errors');
+      assert.equal(await prepared, null);
+    }
+    assert.equal(endpoint.closed, true);
+    assert.ok(f.logs.some(entry => entry.message === 'Native screen shutdown-locally-retired'
+      && entry.data.remoteAcknowledged === false));
+  });
+}
+
+test('global application shutdown Retry retires the retained PCM subscriber after a failed stop with real closure', async t => {
+  let stopCalls = 0;
+  const closed = deferred();
+  const f = fixture(t, { packetCapture(_selection, onEvent) {
+    const ready = { type: 'ready', sessionId: randomUUID(), format: { sampleRate: 48000, channels: 2 } };
+    onEvent(ready);
+    return {
+      ready: Promise.resolve(ready), closed: closed.promise,
+      getStats: () => ({ state: stopCalls ? 'closed' : 'capturing' }),
+      async stop() {
+        stopCalls++;
+        closed.resolve();
+        throw new Error('PCM stop reported failure after the actual worker retired');
+      },
+    };
+  } });
+  await f.join(); await f.participants();
+  const source = (await f.addSource()).source;
+  await f.command({ action: 'signal', signal: {
+    fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+    subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+  } });
+  const hub = f.endpoints[0].options.audio.captureHub;
+  const subscription = hub.subscribe({ includeWindowId: 12345, expectedProcessId: 56789 }, () => {});
+  await subscription.ready;
+  await assert.rejects(f.service.dispose(), /cleanup did not finish/);
+  assert.equal(hub.getStats().closed, false);
+  assert.equal(hub.getStats().captureClosed, true);
+  await f.service.dispose();
+  assert.equal(hub.getStats().closed, true);
+  assert.equal(subscription.getStats().detached, true);
+  assert.equal(stopCalls, 1);
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen call-retirement-result' && entry.data.retained));
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen call-retirement-result' && !entry.data.retained));
+});
+
+test('global shutdown rejects a new call while its existing native owner is still draining', async t => {
+  const f = fixture(t), gate = deferred();
+  await f.join(); await f.participants();
+  const source = (await f.addSource()).source;
+  await f.command({ action: 'signal', signal: {
+    fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+    subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+  } });
+  const endpoint = f.endpoints[0], close = endpoint.close.bind(endpoint);
+  endpoint.close = async () => { await gate.promise; await close(); };
+  const closing = f.service.dispose();
+  await tick();
+  try {
+    await assert.rejects(f.invoke({ ...f.config, callId: randomUUID(), action: 'join' }), { name: 'AbortError' });
+    assert.equal(endpoint.closed, false);
+  } finally { gate.resolve(); await closing; }
+  assert.equal(endpoint.closed, true);
+});
+
+test('global shutdown keeps unresolved native ownership blocked across Retry and records its sanitized identity', async t => {
+  const f = fixture(t);
+  await f.join(); await f.participants();
+  const source = (await f.addSource()).source;
+  await f.command({ action: 'signal', signal: {
+    fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+    subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+  } });
+  const endpoint = f.endpoints[0], close = endpoint.close.bind(endpoint);
+  let released = false;
+  endpoint.close = async () => {
+    if (!released) throw new Error('Original native engine is still retained');
+    await close();
+  };
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(f.service.dispose(), /cleanup did not finish/);
+      assert.equal(endpoint.closed, false);
+    }
+    const owner = f.logs.find(entry => entry.message === 'Native screen retained-source-owner');
+    assert.equal(owner.data.phase, 'publisher-retirement');
+    assert.equal(owner.data.publisherClosed, false);
+    assert.match(owner.data.source, /^[a-f0-9]{16}$/);
+    assert.notEqual(owner.data.source, source.shareId);
+  } finally { released = true; await f.service.dispose(); }
+  assert.equal(endpoint.closed, true);
+});
+
+test('global shutdown aborts a pending selected-source probe without late media admission', async t => {
+  const gpu = deferred(), f = fixture(t, { gpu });
+  await f.join();
+  const pending = assert.rejects(f.addSource(), { name: 'AbortError' });
+  await tick();
+  await f.service.dispose();
+  await pending;
+  gpu.resolve();
+  await tick();
+  assert.equal(f.endpoints.length, 0);
+  assert.equal(f.probes[0].closed, true);
+  assert.equal(f.removedDirectories.length, 1);
+});
+
+test('global shutdown drains an in-flight quality replacement without admitting its new source', async t => {
+  const f = fixture(t), gate = deferred();
+  await f.join();
+  const old = (await f.addSource()).source;
+  await f.command({ action: 'preview-start', shareId: old.shareId,
+    sourceInstanceId: old.instanceId, presentationId: randomUUID() });
+  const prototype = f.probes[0].constructor.prototype, prepare = prototype.prepare;
+  t.mock.method(prototype, 'prepare', async function(target, signal) {
+    await prepare.call(this, target, signal);
+    await gate.promise;
+    signal.throwIfAborted();
+  });
+  const replacing = assert.rejects(f.addSource(old.shareId, {
+    replacesSourceInstanceId: old.instanceId, video: { ...video, fps: 60 },
+  }), { name: 'AbortError' });
+  await tick();
+  const stopping = f.service.dispose();
+  gate.resolve();
+  await Promise.all([stopping, replacing]);
+  assert.equal(f.endpoints.length, 1);
+  assert.equal(f.endpoints[0].closed, true);
+  assert.equal(f.probes.every(probe => probe.closed), true);
+  assert.equal(f.logs.filter(entry => entry.message === 'Native screen source-admitted').length, 1);
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen call-retirement-result' && !entry.data.retained));
+});
+
+test('global shutdown and a source-gone monitor share the same pending endpoint retirement', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = fixture(t), gate = deferred();
+  await f.join(); await f.participants();
+  const source = (await f.addSource()).source;
+  await f.command({ action: 'signal', signal: {
+    fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+    channelId: f.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+    subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
+  } });
+  const endpoint = f.endpoints[0], close = endpoint.close.bind(endpoint);
+  let stops = 0;
+  endpoint.close = async () => { stops++; await gate.promise; await close(); };
+  f.closeWindow();
+  t.mock.timers.tick(250);
+  const closing = f.service.dispose();
+  await tick();
+  assert.equal(endpoint.closed, false);
+  gate.resolve();
+  await closing;
+  assert.equal(endpoint.closed, true);
+  assert.equal(stops, 1);
 });
 
 test('cancelling pending audio admission releases only its own reservation', async t => {

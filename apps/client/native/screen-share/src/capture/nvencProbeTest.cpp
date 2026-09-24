@@ -54,9 +54,11 @@ struct Model {
   Enumeration<GUID> profiles{{NV_ENC_CODEC_PROFILE_AUTOSELECT_GUID, NV_ENC_H264_PROFILE_HIGH_GUID,
                              NV_ENC_H264_PROFILE_MAIN_GUID}};
   Enumeration<NV_ENC_BUFFER_FORMAT> formats{{NV_ENC_BUFFER_FORMAT_ARGB, NV_ENC_BUFFER_FORMAT_NV12}};
-  std::array<Capability, 3> caps{{
+  std::array<Capability, 4> caps{{
     {NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE, 1}, {NV_ENC_CAPS_WIDTH_MAX, 8192}, {NV_ENC_CAPS_HEIGHT_MAX, 8192},
+    {NV_ENC_CAPS_LEVEL_MAX, 60},
   }};
+  VideoConfiguration video{1920, 1080, 120, 5000};
   NVENCSTATUS createStatus = NV_ENC_SUCCESS, openStatus = NV_ENC_SUCCESS, destroyStatus = NV_ENC_SUCCESS;
   bool libraryAvailable = true, symbolAvailable = true, returnSession = true;
   bool sessionOnOpenFailure = false, releaseSucceeds = true;
@@ -192,7 +194,7 @@ void Run(const char* name, const std::function<void(Model&)>& configure = {},
   if (configure) configure(model);
   active = &model;
   bool failed = false;
-  try { ProbeNvencDevice(model.Device(), {1920, 1080, 120, 5000}, {&Load, &Resolve, &Release}); }
+  try { ProbeNvencDevice(model.Device(), model.video, {&Load, &Resolve, &Release}); }
   catch (const ContractError& error) {
     failed = true;
     Check(error.code == "ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE", "driver failure changed error category");
@@ -224,9 +226,14 @@ int main() {
             model.profiles.countCalls == 1 && model.profiles.listCalls == 1 &&
             model.formats.countCalls == 1 && model.formats.listCalls == 1, "enumeration was skipped or guessed");
       Check(model.queriedCaps == std::vector<NV_ENC_CAPS>{
-        NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE, NV_ENC_CAPS_WIDTH_MAX, NV_ENC_CAPS_HEIGHT_MAX},
+        NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE, NV_ENC_CAPS_WIDTH_MAX, NV_ENC_CAPS_HEIGHT_MAX, NV_ENC_CAPS_LEVEL_MAX},
         "capability queries were skipped or reordered");
     });
+    Run("4K120 Level6 device admission", [](Model& model) { model.video = {3840, 2160, 120, 80000}; });
+    Run("4K120 refuses Level5.2-only hardware", [](Model& model) {
+      model.video = {3840, 2160, 120, 80000}; model.caps[3].value = 52;
+    }, {"NV_ENC_CAPS_LEVEL_MAX", "value=52", "required=60"});
+    Run("1080p120 retains Level5.1 hardware admission", [](Model& model) { model.caps[3].value = 51; });
     Run("missing H264 is not a failed cap call", [](Model& model) { model.codecs.values.pop_back(); },
         {"nvEncGetEncodeGUIDs", "H264=0", "status=0"}, [](const Model& model) {
       Check(model.profiles.countCalls == 0 && model.formats.countCalls == 0 && model.queriedCaps.empty(),
@@ -283,9 +290,9 @@ int main() {
         {"nvEncGetEncodeProfileGUIDs", "Main=0"});
     Run("missing NV12 input", [](Model& model) { model.formats.values.pop_back(); },
         {"nvEncGetInputFormats", "NV12=0"});
-    for (unsigned index = 0; index < 3; ++index) {
+    for (unsigned index = 0; index < 4; ++index) {
       const auto name = index == 0 ? "NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE" :
-          index == 1 ? "NV_ENC_CAPS_WIDTH_MAX" : "NV_ENC_CAPS_HEIGHT_MAX";
+          index == 1 ? "NV_ENC_CAPS_WIDTH_MAX" : index == 2 ? "NV_ENC_CAPS_HEIGHT_MAX" : "NV_ENC_CAPS_LEVEL_MAX";
       Run("capability API status and returned value", [&](Model& model) {
         model.caps[index].status = NV_ENC_ERR_UNSUPPORTED_PARAM; model.caps[index].value = 73;
       }, {"nvEncGetEncodeCaps", name, "NV_ENC_ERR_UNSUPPORTED_PARAM", "status=12", "value=73",

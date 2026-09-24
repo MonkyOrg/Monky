@@ -22,9 +22,8 @@ import { bindBotScreenIsolation, installBotScreenRequestGuard, isBotScreenFrame,
 import { resolveDevelopmentProfile } from './developmentProfile';
 import { bindDevelopmentQa, loadDevelopmentQa } from './developmentQa';
 import { CrashRecovery } from './crashRecovery';
-import type { LocalExecutionIpc } from './localExecution/ipc';
 import { initializeMainLanguage, mt } from './i18n';
-import { SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
+import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, type ServerInviteResult } from '@monky/shared';
 import { ServerInviteInbox } from './serverInvites';
 
 import fs from 'fs';
@@ -95,7 +94,7 @@ let isShuttingDown = false;
 let isQuitting = false;
 /** Whether the renderer has already been asked to leave the call (#458). */
 let leaveAnnounced = false;
-let localExecution: LocalExecutionIpc | null = null;
+let localExecution: ReturnType<typeof setupIpcHandlers> | null = null;
 let localExecutionStopping = false;
 let localExecutionStopped = false;
 
@@ -132,56 +131,66 @@ app.once('will-quit', () => {
 });
 
 /**
- * How long the quit waits for the renderer to say goodbye to the servers.
+ * How long each renderer shutdown phase may retain the window.
  *
- * It only has to cover sending a frame on an already open socket, so the ack
- * normally arrives in a few milliseconds; this bound just guarantees that a
- * renderer which is wedged cannot hold the app open.
+ * Native preparation retains signaling; farewell follows verified native
+ * retirement. A missing acknowledgement must never authorize window closure.
  */
-const LEAVE_ANNOUNCE_TIMEOUT_MS = 1000;
+const LEAVE_ANNOUNCE_TIMEOUT_MS = 15000;
 
 /**
- * Asks the renderer to leave every call and disconnect before the process dies,
- * then quits (#458).
+ * Correlates each renderer phase independently, including retries (#458).
  *
- * Without this, closing the app just dropped the WebSocket: the server could not
- * tell that apart from a network blip, so the person stayed listed in the voice
- * channel and nobody heard them leave. Telling the server explicitly makes the
- * departure immediate and deliberate. A crash obviously cannot run this — that
- * case is covered on the server, which now takes a session out of voice as soon
- * as its socket dies.
+ * Native controls quiesce before Main drains owners. Only the later farewell
+ * disconnects sockets; an old native-phase acknowledgement cannot authorize it.
  */
-function announceLeaveThenQuit(): void {
-  if (leaveAnnounced) {
-    app.quit();
-    return;
+function requestRendererShutdown(phase: AppShutdownRequest['phase']): Promise<void> {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    return Promise.resolve();
   }
-  leaveAnnounced = true;
-
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    app.quit();
-    return;
-  }
-
-  let settled = false;
-  const finish = (): void => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    onLeaveComplete = null;
-    app.quit();
-  };
-
-  const timer = setTimeout(finish, LEAVE_ANNOUNCE_TIMEOUT_MS);
-  onLeaveComplete = finish;
-  mainWindow.webContents.send('app:before-quit');
+  const request: AppShutdownRequest = { requestId: ++shutdownRequestId, phase };
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      onLeaveComplete = null;
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => finish(new Error(`Renderer ${phase} did not acknowledge shutdown.`)), LEAVE_ANNOUNCE_TIMEOUT_MS);
+    onLeaveComplete = acknowledgement => {
+      if (typeof acknowledgement !== 'object' || acknowledgement === null
+        || !('requestId' in acknowledgement) || acknowledgement.requestId !== request.requestId
+        || !('phase' in acknowledgement) || acknowledgement.phase !== request.phase) {
+        console.warn('[LocalExecution] Rejected an expired or mismatched shutdown acknowledgement.');
+        return;
+      }
+      finish();
+    };
+    try { window.webContents.send(APP_SHUTDOWN_EVENT, request); }
+    catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+  });
 }
 
-/** Set only while a quit is waiting for the renderer's goodbye. */
-let onLeaveComplete: (() => void) | null = null;
+async function announceLeave(): Promise<void> {
+  if (leaveAnnounced) return;
+  await requestRendererShutdown('farewell');
+  leaveAnnounced = true;
+}
 
-ipcMain.handle('app:leave-complete', () => {
-  onLeaveComplete?.();
+/** Set only while a quit is waiting for its exact renderer phase. */
+let onLeaveComplete: ((request: unknown) => void) | null = null;
+let shutdownRequestId = 0;
+let rendererNativeRetired = false;
+
+ipcMain.handle(APP_SHUTDOWN_IPC.acknowledge, (event, request: unknown) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
+    || event.senderFrame !== mainWindow.webContents.mainFrame)
+    throw new Error('Shutdown acknowledgement belongs to a different renderer.');
+  onLeaveComplete?.(request);
 });
 
 function bindMainWindowNavigationGuards(): void {
@@ -239,17 +248,25 @@ function getCrashRecovery(): CrashRecovery {
 function stopLocalExecutionThenQuit(): void {
   if (!localExecution || localExecutionStopping) return;
   localExecutionStopping = true;
-  void localExecution.dispose().then(() => {
+  const owner = localExecution;
+  owner.freezeAdmissions();
+  void (async () => {
+    if (!rendererNativeRetired) {
+      await requestRendererShutdown('native');
+      rendererNativeRetired = true;
+    }
+    await owner.prepareShutdown();
+    await announceLeave();
+    await owner.dispose();
+  })().then(() => {
     localExecutionStopping = false;
     localExecutionStopped = true;
     app.quit();
   }, (error: unknown) => {
     console.error('[LocalExecution] Could not finish local task shutdown:', error);
-    localExecutionStopping = false;
     isQuitting = false;
-    leaveAnnounced = false;
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
-    void dialog.showMessageBox({
+    void Promise.resolve().then(() => dialog.showMessageBox({
       type: 'error',
       title: mt('localExecution.shutdownFailedTitle'),
       message: mt('localExecution.shutdownFailedMessage'),
@@ -257,9 +274,13 @@ function stopLocalExecutionThenQuit(): void {
       defaultId: 1,
       cancelId: 1,
       noLink: true,
-    }).then(({ response }) => {
+    })).then(({ response }) => {
+      localExecutionStopping = false;
       if (response === 0) quitApplication();
+      else { isQuitting = false; }
     }).catch((dialogError: unknown) => {
+      localExecutionStopping = false;
+      isQuitting = false;
       console.error('[LocalExecution] Could not display the shutdown error:', dialogError);
     });
   });
@@ -353,6 +374,7 @@ function createWindow(deferShow = false): void {
     overlayManager,
   });
   localExecutionStopped = false;
+  rendererNativeRetired = false;
   setupUpdater(mainWindow);
 
   // A launch straight after an update install keeps the "finishing" splash up
@@ -442,11 +464,10 @@ function createWindow(deferShow = false): void {
       return;
     }
 
-    // Quitting from the tray or the menu: same rule, the goodbye needs a live
-    // renderer. Once it has been sent, the window is free to go.
-    if (!leaveAnnounced) {
+    // Tray/menu close must also preserve the renderer through every retirement phase.
+    if (!leaveAnnounced || (localExecution && !localExecutionStopped)) {
       event.preventDefault();
-      announceLeaveThenQuit();
+      quitApplication();
     }
   });
 
@@ -573,17 +594,18 @@ app.on('window-all-closed', () => {
 app.on('before-quit', (event) => {
   isQuitting = true;
 
-  // Say goodbye to the servers while the renderer is still alive, then quit for
-  // real on the second pass (#458).
-  if (!leaveAnnounced && mainWindow && !mainWindow.isDestroyed()) {
-    event.preventDefault();
-    announceLeaveThenQuit();
-    return;
-  }
-
   if (localExecution && !localExecutionStopped) {
     event.preventDefault();
     stopLocalExecutionThenQuit();
+    return;
+  }
+
+  if (!leaveAnnounced && mainWindow && !mainWindow.isDestroyed()) {
+    event.preventDefault();
+    void announceLeave().then(() => app.quit(), error => {
+      isQuitting = false;
+      console.error('[LocalExecution] Could not announce application shutdown:', error);
+    });
     return;
   }
 

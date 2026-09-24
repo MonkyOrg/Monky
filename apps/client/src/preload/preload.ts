@@ -4,7 +4,7 @@ import {
   createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
 } from '@monky/screen-share';
 import * as nativeAudioProtocol from '@monky/shared';
-import { NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
+import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
 import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
   ActionShortcutBinding,
@@ -193,8 +193,8 @@ export interface ElectronApi {
   onScreenAudioError: (cb: (errorMsg: string) => void) => () => void;
   updateTrayVoiceStatus: (status: TrayVoiceStatus) => Promise<void>;
   // Encerramento gracioso: sair das chamadas antes do processo morrer (#458)
-  onAppBeforeQuit: (cb: () => void) => () => void;
-  notifyLeaveComplete: () => Promise<void>;
+  onAppBeforeQuit: (cb: (request: AppShutdownRequest) => void) => () => void;
+  notifyLeaveComplete: (request: AppShutdownRequest) => Promise<void>;
   onTrayToggleMute: (cb: () => void) => () => void;
   onTrayToggleDeafen: (cb: () => void) => () => void;
   getAutoStart: () => Promise<boolean>;
@@ -481,13 +481,13 @@ const api: ElectronApi = {
   },
   updateTrayVoiceStatus: (status) => ipcRenderer.invoke('tray:update-voice-status', status),
   onAppBeforeQuit: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on('app:before-quit', listener);
+    const listener = (_event: Electron.IpcRendererEvent, request: AppShutdownRequest) => cb(request);
+    ipcRenderer.on(APP_SHUTDOWN_EVENT, listener);
     return () => {
-      ipcRenderer.removeListener('app:before-quit', listener);
+      ipcRenderer.removeListener(APP_SHUTDOWN_EVENT, listener);
     };
   },
-  notifyLeaveComplete: () => ipcRenderer.invoke('app:leave-complete'),
+  notifyLeaveComplete: request => ipcRenderer.invoke(APP_SHUTDOWN_IPC.acknowledge, request),
   onTrayToggleMute: (cb) => {
     const listener = () => cb();
     ipcRenderer.on('tray:toggle-mute', listener);

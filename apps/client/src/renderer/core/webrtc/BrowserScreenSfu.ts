@@ -1,6 +1,6 @@
 import { Device, type types as SfuTypes } from 'mediasoup-client';
 import {
-  MessageType, nativeScreenProducerSchema, screenShareProfileKey,
+  MessageType, nativeScreenProducerSchema, screenShareProfileKey, getScreenH264ProfileLevelId,
   type NativeScreenCall, type NativeScreenProducer, type NativeScreenRpcMethod, type NativeScreenSource,
   type NativeScreenVideoProfile, type SfuConsumedPayload, type SfuProducerClosedPayload,
   type SfuProducersListPayload, type SfuRouterRtpCapabilitiesPayload, type SfuWebRtcTransportCreatedPayload,
@@ -147,11 +147,13 @@ export class BrowserScreenSfu {
     const producer = entry.value;
     const selected = () => !this.stopping && this.producers.get(producer.producerId) === entry;
     const capabilities = structuredClone(this.device.rtpCapabilities);
+    const receiveLevel = getScreenH264ProfileLevelId(this.options.profile).slice(2);
     for (const codec of capabilities.codecs ?? []) {
       const profile = codec.parameters?.['profile-level-id'];
       if (codec.mimeType.toLowerCase() === 'video/h264' && typeof profile === 'string'
-        && /^4d[0-9a-f]{4}$/i.test(profile) && Number.parseInt(profile.slice(4), 16) < 51)
-        codec.parameters = { ...codec.parameters, 'max-recv-level': '0033' };
+        && /^4d[0-9a-f]{4}$/i.test(profile)
+        && Number.parseInt(profile.slice(4), 16) < Number.parseInt(receiveLevel.slice(2), 16))
+        codec.parameters = { ...codec.parameters, 'max-recv-level': receiveLevel };
     }
     const consumed = await rpc<ConsumerResponse | SfuProducerClosedPayload>(MessageType.SFU_CONSUME, {
       channelId: call.channelId, transportId: transport.id, producerId: producer.producerId,
