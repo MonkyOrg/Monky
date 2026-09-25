@@ -43,6 +43,11 @@ Runtime data, real `.env` files, `.keys` and authenticated registrations are not
 release material. Local dependencies other than SDK/shared must declare their
 own publication files in `package.files`.
 
+The packager also declares transitive dependencies placed in a higher
+`node_modules` directory (hoisting), preserving versions and aliases. This allows
+offline upgrades with an empty npm cache even when the dependency layout changes
+between releases; a clean installation alone does not validate this scenario.
+
 Use `monky-bot-sdk build --version 1.1.0-beta --out release` to override the
 artifact version. `--skip-build` packages an existing compilation but still
 validates the entry and SDK. Do not put the tool in the compiler's own `build`
@@ -296,6 +301,12 @@ self-contained archive offline without running installation scripts. Use
 remain outside the installation. Installation is refused if configuration/runtime
 data is inside the installed package, to avoid deleting it during replacement.
 Transfers are bounded to 200 MiB and 60 seconds.
+
+If an older package fails with `ENOTCACHED` during an upgrade despite installing
+offline into an empty directory, the author must build a new release with the
+corrected packager. Updating only the SDK on the operator's machine does not fix
+the metadata in an already published `.tgz`. Do not remove `--offline` or enable
+scripts as a workaround.
 
 The CLI shows actual transferred bytes and a percentage when the source provides
 a valid total. Without a total it reports received bytes without inventing a

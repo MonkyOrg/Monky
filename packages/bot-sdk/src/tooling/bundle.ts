@@ -148,6 +148,7 @@ export function bundleDependencies(
   const locations = new Map<string, string>([[fs.realpathSync(sourceRoot), path.resolve(destinationRoot)]]);
   const rootModules = path.join(path.resolve(destinationRoot), 'node_modules');
   const moduleDirectories = new Map<string, string>();
+  const bundledByOwner = new Map<string, Map<string, string>>();
   const edges: Array<{ name: string; requester: string; destination: string }> = [];
   let packageCount = 0;
 
@@ -182,6 +183,11 @@ export function bundleDependencies(
     if (existing !== undefined && existing !== source) {
       throw new Error(`Conflicting dependency locations for "${name}" at ${destination}.`);
     }
+    const destinationModulesDirectory = path.dirname(name.startsWith('@') ? path.dirname(destination) : destination);
+    const owner = path.dirname(destinationModulesDirectory);
+    const bundled = bundledByOwner.get(owner) ?? new Map<string, string>();
+    bundled.set(name, spec);
+    bundledByOwner.set(owner, bundled);
     edges.push({ name, requester: requesterDestination, destination });
     if (copied.has(destination)) return spec;
     locations.set(source, destination);
@@ -241,7 +247,23 @@ export function bundleDependencies(
       throw new Error(`Bundled dependency "${name}" resolves to the wrong instance from ${requester}.`);
     }
   }
-  return { dependencies: Object.fromEntries(dependencies), packageCount };
+  // npm upgrades treat newly hoisted modules as registry dependencies unless
+  // their physical owner explicitly declares them in its bundle.
+  for (const [owner, bundled] of bundledByOwner) {
+    if (owner === path.resolve(destinationRoot)) continue;
+    const pkg = packageJson(owner);
+    const dependencies = { ...dependencyMap(pkg.dependencies, 'dependencies'), ...Object.fromEntries(bundled) };
+    fs.writeFileSync(path.join(owner, 'package.json'), JSON.stringify({
+      ...pkg, dependencies, bundleDependencies: Object.keys(dependencies),
+    }, null, 2) + '\n');
+  }
+  return {
+    dependencies: {
+      ...Object.fromEntries(dependencies),
+      ...Object.fromEntries(bundledByOwner.get(path.resolve(destinationRoot)) ?? []),
+    },
+    packageCount,
+  };
 }
 
 export function bundlePackage(

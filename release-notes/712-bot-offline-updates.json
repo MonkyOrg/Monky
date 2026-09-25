@@ -1,0 +1,5 @@
+{
+  "group": "correcoes",
+  "pt-BR": "O empacotador do SDK corrige falhas em atualizações offline de bots quando a disposição das dependências muda entre versões. Os bots precisam de uma nova release gerada com o empacotador corrigido.",
+  "en": "The SDK packager fixes offline bot updates when the dependency layout changes between versions. Bots need a new release built with the corrected packager."
+}
