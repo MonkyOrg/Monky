@@ -2,7 +2,8 @@
 .user-control-bar .user-quick-actions button,
 .user-control-bar .user-quick-actions button:active,
 .user-control-bar .user-media-bar button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
-.chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-code),
+.chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-format),
+.chat-format-toolbar > button,
 .voice-stage-container button,
 .voice-stage-container button:is(:hover, :active) {
   position: relative;
@@ -11,7 +12,8 @@
 
 .user-control-bar .user-quick-actions button,
 .user-control-bar .user-media-bar button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
-.chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-code),
+.chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-format),
+.chat-format-toolbar > button,
 .voice-stage-container button {
   transition: color 120ms ease-out, background-color 120ms ease-out;
 }
@@ -51,7 +53,8 @@
 @media (prefers-reduced-motion: reduce) {
   .user-control-bar .user-quick-actions button,
   .user-control-bar .user-media-bar button:is(#media-btn-camera, #media-btn-screen, #media-btn-soundboard),
-  .chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-code),
+  .chat-input-container .chat-input-wrapper > button:is(#btn-attach, #btn-emoji, #btn-format),
+  .chat-format-toolbar > button,
   .voice-stage-container button {
     transition: none;
   }

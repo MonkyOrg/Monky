@@ -114,7 +114,8 @@ if (!process.versions.electron) {
       }
     };
     await sampleHovers(['#bar-btn-mic', '#bar-btn-deafen', '#bar-btn-settings', '#media-btn-camera',
-      '#media-btn-screen', '#media-btn-soundboard', '#btn-attach', '#btn-emoji', '#btn-code']);
+      '#media-btn-screen', '#media-btn-soundboard', '#btn-attach', '#btn-emoji', '#btn-format',
+      '#btn-code', '.chat-format-toolbar [data-format="inline-code"]']);
     phase = 'native pointer';
     const point = await window.webContents.executeJavaScript('window.footerSmoke.pointerTarget()');
     window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
@@ -208,11 +209,13 @@ async function renderMotionSamples(samples) {
 
 async function setupFooterSmoke() {
   const [{ MainView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
-    { appEvents }, { networkClient }, { soundEffects }, { bindChatComposerMotion }, { sessionManager }] = await Promise.all([
+    { appEvents }, { networkClient }, { soundEffects }, { bindChatComposerMotion }, { sessionManager },
+    { renderFormattingToolbar }] = await Promise.all([
     import('/views/MainView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/serverStore.ts'), import('/core/EventBus.ts'),
     import('/core/NetworkClient.ts'), import('/core/SoundEffects.ts'), import('/views/FooterControlsMotion.ts'),
     import('/core/SessionManager.ts'),
+    import('/views/FormattingToolbar.ts'),
   ]);
   sessionManager.install();
   const session = sessionManager.create('footer.test', 7890, 'Footer');
@@ -242,10 +245,10 @@ async function setupFooterSmoke() {
   // of message-toolbar behavior and native file dialogs.
   const composer = document.createElement('section');
   composer.style.cssText = 'position:fixed;right:10px;top:10px;width:500px';
-  composer.innerHTML = `<div class="chat-input-container"><div class="chat-input-wrapper">
-    <button id="btn-attach" class="chat-attach-btn"><span class="material-symbols-outlined">add_circle</span></button>
+  composer.innerHTML = `<div class="chat-input-container">${renderFormattingToolbar()}<div class="chat-input-wrapper">
+    <button id="btn-attach" class="chat-attach-btn"><span class="material-symbols-outlined">attach_file</span></button>
     <button id="btn-emoji" class="chat-attach-btn"><span class="material-symbols-outlined">mood</span></button>
-    <button id="btn-code" class="chat-attach-btn"><span class="material-symbols-outlined">code</span></button>
+    <button id="btn-format" class="chat-attach-btn"><span class="material-symbols-outlined">format_size</span></button>
     <textarea class="chat-input-field"></textarea>
     <button id="btn-send-message" class="btn"><span class="material-symbols-outlined">send</span></button>
     </div></div>
@@ -253,6 +256,10 @@ async function setupFooterSmoke() {
       <button class="chat-attach-btn" data-message-action="emoji"><span class="material-symbols-outlined">add_reaction</span></button>
       <button data-message-action="reply"><span class="material-symbols-outlined">reply</span></button>
     </div>`;
+  const formatPanel = composer.querySelector('.chat-format-panel');
+  formatPanel.inert = false;
+  formatPanel.classList.add('is-open');
+  formatPanel.setAttribute('aria-hidden', 'false');
   document.body.append(composer);
   let offComposer = bindChatComposerMotion(composer);
   await document.fonts.ready;
@@ -294,7 +301,7 @@ async function setupFooterSmoke() {
   const footerButtons = () => [...root.querySelectorAll('.user-quick-actions button, .user-media-bar button')];
   const motionCount = () => footerButtons()
     .reduce((count, button) => count + animations(button).length, 0);
-  const composerButtons = () => [...composer.querySelectorAll('#btn-attach, #btn-emoji, #btn-code')];
+  const composerButtons = () => [...composer.querySelectorAll('#btn-attach, #btn-emoji, #btn-format, .chat-format-toolbar > button')];
   const composerMotionCount = () => composerButtons().reduce((count, button) => count + animations(button).length, 0);
   const controlAnimations = () => [...footerButtons(), ...composerButtons()].flatMap(animations);
   let pointerBounds;
@@ -386,12 +393,13 @@ async function setupFooterSmoke() {
       }
       const expected = {
         'media-btn-camera': 'camera', 'media-btn-screen': 'screen', 'media-btn-soundboard': 'music',
-        'btn-attach': 'attachment', 'btn-emoji': 'laugh', 'btn-code': 'code',
+        'btn-emoji': 'laugh',
         'stage-btn-camera': 'camera', 'stage-btn-screen': 'screen', 'stage-btn-soundboard': 'music',
         'stage-btn-overlay': 'overlay', 'stage-btn-stop-share': 'screen', 'btn-stage-quick-stop': 'stop',
         'stage-watch-btn': 'watch', 'stage-volume-btn': 'volume', 'stage-fullscreen-btn': 'fullscreen',
       }[button.id || button.classList[0]];
       if (expected) check(layer?.dataset.motion === expected, `${button.id}: its own function-specific artwork is present`);
+      if (button.dataset.format === 'inline-code') check(layer?.dataset.motion === 'code', 'Inline code retains its function-specific artwork');
       const sample = JSON.stringify([glyph(button), ...button.querySelectorAll('.control-motion-decoration svg *')]
         .map((element) => [getComputedStyle(element).transform, getComputedStyle(element).opacity]));
       if (previousSample) check(sample !== previousSample, `${button.id}: sampled frames show meaningful progression`);
@@ -536,11 +544,15 @@ async function setupFooterSmoke() {
         const inputBounds = rect(composer.querySelector('textarea'));
         enter(button);
         const hover = animations(button)[0];
-        check(hover?.effect.getTiming().duration === 760, `${button.id} has an expressive, finite hover`);
+        const replacesGlyph = ['mood', 'code'].includes(glyph(button).textContent.trim());
+        const duration = ['mood', 'code', 'attach_file', 'format_size'].includes(glyph(button).textContent.trim()) ? 760 : 480;
+        check(hover?.effect.getTiming().duration === duration, `${button.id || button.dataset.format} has a finite glyph-specific hover`);
         hover.pause();
         hover.currentTime = 80;
-        check(getComputedStyle(glyph(button)).opacity === '0' && !!button.querySelector('.control-motion-decoration'),
-          `${button.id} shows its animated icon parts`);
+        check(replacesGlyph
+          ? getComputedStyle(glyph(button)).opacity === '0' && !!button.querySelector('.control-motion-decoration')
+          : getComputedStyle(glyph(button)).opacity === '1' && getComputedStyle(glyph(button)).transform !== 'none',
+          `${button.id || button.dataset.format} animates its actual glyph or its dedicated icon parts`);
         check(rect(button) === bounds && rect(composer.querySelector('textarea')) === inputBounds,
           `${button.id} hover preserves hit box and composer layout`);
         let clicks = 0;
