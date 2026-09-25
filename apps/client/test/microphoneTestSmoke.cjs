@@ -264,8 +264,16 @@ async function runMicrophoneTestSmoke() {
     await wait();
     check(container.querySelector('#select-speaker').value === '',
       'Resetting all outputs also updates the general selector to system default');
+    captureMode = 'pending';
+    const sinksBeforeRestart = sinks.length;
     button.click();
-    await wait();
+    await waitFor(() => pendingCapture !== null, 'explicit restart requests a fresh microphone capture');
+    check(sinks.length === sinksBeforeRestart, 'a pending capture cannot reuse the previous output route');
+    captureMode = 'normal';
+    pendingCapture.resolve(capture());
+    pendingCapture = null;
+    await waitFor(() => sinks.length > sinksBeforeRestart
+      && status.textContent === t('settings.microphoneTestPlaying'), 'explicit restart finishes capture and output initialization');
     check(sinks.at(-1).id === '', 'explicit restart routes system-default output');
     navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
     await wait();
