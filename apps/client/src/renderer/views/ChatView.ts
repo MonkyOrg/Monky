@@ -26,6 +26,9 @@ import { initializeCustomVideoPlayers } from '../utils/videoPlayer';
 import { EmojiPicker } from './EmojiPicker';
 import { buildCodeMessage, codeBlockModal } from './CodeBlockModal';
 import { renderMessageBlockComposer } from './MessageBlockComposer';
+import { MarkdownInput } from './MarkdownInput';
+import { bindFormattingToolbar, renderFormattingToolbar } from './FormattingToolbar';
+import { bindEditorContextMenu } from './EditorContextMenu';
 import { bindChatComposerMotion } from './FooterControlsMotion';
 import { stickerService } from '../core/StickerService';
 import { settingsStore } from '../stores/settingsStore';
@@ -77,7 +80,7 @@ export class ChatView {
   private readonly client = getActiveNetworkClient();
   private readonly server = getActiveServerStore();
   private currentChannelId: string | null = null;
-  private composerInput: HTMLTextAreaElement | null = null;
+  private composerInput: MarkdownInput | null = null;
   private composerChannelId: string | null = null;
   private unbindEvents: Array<() => void> = [];
   /** Tracks whether the feed is following the end of the conversation (#270). */
@@ -198,20 +201,21 @@ export class ChatView {
           <div id="chat-command-notice" class="bot-error" role="alert" hidden></div>
           <div id="chat-command-composer" class="bot-command-composer" hidden></div>
           <div class="chat-composer-surface">
+          ${renderFormattingToolbar()}
           <div id="chat-reply-composer" class="chat-reply-composer" hidden></div>
           <div id="chat-composer-blocks" aria-label="${t('chat.composerBlocks')}" hidden></div>
           <div class="chat-input-wrapper">
             <button id="btn-attach" type="button" class="chat-attach-btn" title="${t('chat.attachFile')}">
-              <span class="material-symbols-outlined md-22">add_circle</span>
+              <span class="material-symbols-outlined md-22">attach_file</span>
             </button>
             <input id="chat-file-input" type="file" multiple style="display: none;">
             <button id="btn-emoji" type="button" class="chat-attach-btn" title="${t('chat.emojiPickerTitle')}">
               <span class="material-symbols-outlined md-22">mood</span>
             </button>
-            <button id="btn-code" type="button" class="chat-attach-btn" title="${t('chat.codeBlockTitle')}">
-              <span class="material-symbols-outlined md-22">code</span>
+            <button id="btn-format" type="button" class="chat-attach-btn" title="${t('chat.formatting')}" aria-label="${t('chat.formatting')}" aria-expanded="false" aria-controls="chat-format-toolbar">
+              <span class="material-symbols-outlined md-22">format_size</span>
             </button>
-            <textarea id="chat-message-input" class="chat-input-field" rows="1" placeholder="${t('chat.inputPlaceholder', { channel: escapeHtml(channelName) })}" ${this.messageLengthLimit > 0 ? `maxlength="${this.messageLengthLimit}"` : ''}></textarea>
+            <monky-markdown-input id="chat-message-input" class="chat-input-field" placeholder="${t('chat.inputPlaceholder', { channel: escapeHtml(channelName) })}" ${this.messageLengthLimit > 0 ? `maxlength="${this.messageLengthLimit}"` : ''}></monky-markdown-input>
             <span id="chat-char-counter" class="chat-char-count">0/${this.messageLimitLabel}</span>
             <button type="button" id="btn-send-message" class="btn btn-primary chat-send-btn">
               <span class="material-symbols-outlined md-16" aria-hidden="true">send</span>
@@ -401,7 +405,8 @@ export class ChatView {
           onClick: () => { dismissToolbar(); item.onClick(); },
         });
         const items = this.buildMessageMenuItems(row.dataset.messageId ?? null).map((item) =>
-          'submenu' in item ? { ...item, submenu: item.submenu.map(dismissItem) } : dismissItem(item));
+          'submenu' in item ? { ...item, submenu: item.submenu.map(dismissItem),
+            onClick: item.onClick ? () => { dismissToolbar(); item.onClick?.(); } : undefined } : dismissItem(item));
         contextMenu.open(rect.right, rect.bottom, items, more);
       });
       row.querySelector<HTMLButtonElement>('[data-reply-target]')?.addEventListener('click', (event) => {
@@ -505,10 +510,13 @@ export class ChatView {
     const modifier = navigator.platform.startsWith('Mac') ? 'Cmd' : 'Ctrl';
     items.push({
       label: t('chat.copyMessage'), icon: 'content_copy',
+      onClick: () => { void this.copyMessage(message.id, 'formatted', selection); },
       submenu: [
         { label: t('chat.copyFormatted'), shortcut: `${modifier}+C`,
           onClick: () => { void this.copyMessage(message.id, 'formatted', selection); } },
-        { label: t('chat.copyPlain'),
+        { label: t('chat.copyMarkdown'),
+          onClick: () => { void this.copyMessage(message.id, 'markdown', selection); } },
+        { label: t('chat.copyPlain'), shortcut: `${modifier}+Shift+C`,
           onClick: () => { void this.copyMessage(message.id, 'plain', selection); } },
       ],
     });
@@ -593,7 +601,7 @@ export class ChatView {
         return;
       }
       const refocus = this.isCurrentComposer() && this.currentChannelId === channelId &&
-        (document.activeElement === this.composerInput ||
+        (this.composerInput?.hasFocus ||
           document.activeElement === this.container.querySelector('#btn-send-message'));
       store.updateMessage(result.message);
       store.finishMessageEdit(channelId, edit);
@@ -661,10 +669,41 @@ export class ChatView {
     if (!confirmed || !this.isCurrentComposer() || this.currentChannelId !== channelId ||
         this.client.getConnectionId() !== connectionId || this.client.getStatus() !== 'CONNECTED') return;
 
-    this.client.send(MessageType.CHAT_DELETE, {
-      channelId: message.channelId,
-      messageId,
-    });
+    try {
+      const result = await this.client.sendRequest<ChatMessageUpdatedPayload>(MessageType.CHAT_DELETE, {
+        channelId: message.channelId, messageId,
+      });
+      this.store.updateMessage(result.message);
+    } catch {
+      if (this.isCurrentSession()) void showAlert({ message: t('chat.deleteFailed'), variant: 'danger' });
+    }
+  }
+
+  private canUndoDeletion(message: ChatMessage): boolean {
+    return !!this.server.serverDetails?.protocol?.features.includes('message-delete-undo')
+      && !!message.deletedAt && (message.deleteUndoUntil ?? 0) > Date.now()
+      && message.deletedByUserId === this.server.currentUser?.id
+      && (message.userId === this.server.currentUser?.id || this.server.hasPermission(Permission.MANAGE_SERVER));
+  }
+
+  private async undoDeletion(messageId: string, button: HTMLButtonElement): Promise<void> {
+    if (!this.isCurrentComposer() || !this.currentChannelId) return;
+    const message = this.store.getMessages(this.currentChannelId).find(entry => entry.id === messageId);
+    if (!message || !this.canUndoDeletion(message) || button.disabled) return;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    const error = button.closest('.chat-message-body')?.querySelector<HTMLElement>('.chat-restore-error');
+    if (error) error.hidden = true;
+    try {
+      const result = await this.client.sendRequest<ChatMessageUpdatedPayload>(MessageType.CHAT_RESTORE, {
+        messageId, channelId: message.channelId, deletedAt: message.deletedAt, revision: message.revision,
+      });
+      this.store.updateMessage(result.message);
+    } catch {
+      if (error?.isConnected) { error.textContent = t('chat.undoDeleteFailed'); error.hidden = false; }
+    } finally {
+      if (button.isConnected) { button.disabled = !this.canUndoDeletion(message); button.removeAttribute('aria-busy'); }
+    }
   }
 
   /** Redraws one row in place after an edit or a deletion (#504). */
@@ -759,7 +798,7 @@ export class ChatView {
         this.botChat?.focusComposer();
         return;
       }
-      const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
+      const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
       if (!input) return;
       input.focus({ preventScroll: true });
       const caret = input.value.length;
@@ -780,7 +819,7 @@ export class ChatView {
 
   private syncComposerPermissionState(): void {
     if (!this.isCurrentComposer()) return;
-    const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
+    const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
     const inputWrapper = this.container.querySelector('.chat-input-wrapper') as HTMLElement | null;
     const permissionBanner = this.container.querySelector('#chat-send-permission-banner') as HTMLElement | null;
     const btnSend = this.container.querySelector('#btn-send-message') as HTMLButtonElement | null;
@@ -870,10 +909,10 @@ export class ChatView {
     }
 
     if (btnCode) {
-      btnCode.style.display = edit ? 'none' : '';
-      btnCode.disabled = !!edit || locked;
+      btnCode.disabled = readOnly;
       btnCode.setAttribute('aria-disabled', btnCode.disabled ? 'true' : 'false');
     }
+    this.container.querySelectorAll<HTMLButtonElement>('#btn-format, [data-format]').forEach(button => { button.disabled = readOnly; });
 
     if (readOnly) {
       this.closeMentionDropup();
@@ -893,7 +932,7 @@ export class ChatView {
           ? target.parentElement
           : null;
     if (!el) return false;
-    return !!el.closest('textarea, input, select, [contenteditable]:not([contenteditable="false"])');
+    return !!el.closest('textarea, input, select, monky-markdown-input, [contenteditable]:not([contenteditable="false"])');
   }
 
   private isUserMentioned(content: string, currentNickname: string): boolean {
@@ -958,7 +997,10 @@ export class ChatView {
             <div class="chat-message-deleted-text">
               <span class="material-symbols-outlined md-14">block</span>
               <span>${t('chat.messageDeleted')}</span>
+              ${this.canUndoDeletion(m) ? `<button type="button" class="chat-undo-delete" data-restore-message-id="${escapeHtml(m.id)}"
+                data-undo-until="${m.deleteUndoUntil}" aria-label="${t('chat.undoDelete')}">${t('chat.undoDeleteCountdown', { seconds: Math.ceil((m.deleteUndoUntil! - Date.now()) / 1000) })}</button>` : ''}
             </div>
+            <div class="chat-restore-error" role="alert" hidden></div>
           </div>
           ${isBot ? '</div>' : ''}
         </div>
@@ -1559,13 +1601,15 @@ export class ChatView {
     this.unbindEvents = [];
     this.unbindEvents.push(bindChatComposerMotion(this.container));
 
-    const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
+    const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
     const inputContainer = this.container.querySelector('.chat-input-container') as HTMLElement | null;
     const inputWrapper = this.container.querySelector('.chat-input-wrapper') as HTMLElement | null;
     const charCounter = document.getElementById('chat-char-counter');
     const btnSend = document.getElementById('btn-send-message');
     this.composerInput = input;
     this.composerChannelId = this.currentChannelId;
+    this.unbindEvents.push(bindFormattingToolbar(this.container));
+    this.unbindEvents.push(bindEditorContextMenu(this.container));
     const isCurrentInput = () => input === this.composerInput && this.isCurrentComposer();
     let displayedEdit = this.messageEdit;
     let displayedEditPending = displayedEdit?.pending;
@@ -1573,18 +1617,31 @@ export class ChatView {
     let displayedEditMessage = displayedEdit?.message;
 
     const messagesFeed = this.container.querySelector('#chat-messages-feed') as HTMLElement | null;
+    const restoreClick = (event: Event) => {
+      const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-restore-message-id]') : null;
+      if (button?.dataset.restoreMessageId) { event.stopPropagation(); void this.undoDeletion(button.dataset.restoreMessageId, button); }
+    };
+    messagesFeed?.addEventListener('click', restoreClick);
+    const undoTimer = setInterval(() => {
+      for (const button of this.container.querySelectorAll<HTMLButtonElement>('[data-undo-until]')) {
+        const remaining = Math.ceil((Number(button.dataset.undoUntil) - Date.now()) / 1000);
+        if (remaining <= 0) button.remove();
+        else button.textContent = t('chat.undoDeleteCountdown', { seconds: remaining });
+      }
+    }, 250);
+    this.unbindEvents.push(() => { clearInterval(undoTimer); messagesFeed?.removeEventListener('click', restoreClick); });
     const onCopyKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.altKey || event.shiftKey ||
+      if (event.defaultPrevented || event.isComposing || event.altKey ||
           !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'c') return;
       const content = this.keyboardClipboard(event.target);
       if (!content) return;
       event.preventDefault();
-      if (window.getSelection()?.isCollapsed !== false) {
+      if (!event.shiftKey && window.getSelection()?.isCollapsed !== false) {
         const id = document.activeElement?.closest<HTMLElement>('.chat-message-row')?.dataset.messageId;
         const image = id && this.messageClipboardImage(id);
         if (image) { void this.copyAttachmentImage(image); return; }
       }
-      void this.copyContent(content, 'formatted');
+      void this.copyContent(content, event.shiftKey ? 'plain' : 'formatted');
     };
     const onCopy = (event: ClipboardEvent) => {
       if (event.defaultPrevented || !event.clipboardData) return;
@@ -1604,11 +1661,11 @@ export class ChatView {
     });
     const commandDropup = this.container.querySelector<HTMLElement>('#command-dropup');
     const onCommandFocusOut = (event: FocusEvent) => {
-      if (event.relatedTarget === input || (event.relatedTarget instanceof Node && commandDropup?.contains(event.relatedTarget))) return;
+      if (event.relatedTarget instanceof Node && (input?.contains(event.relatedTarget) || commandDropup?.contains(event.relatedTarget))) return;
       this.closeCommandDropup();
     };
     const onOutsideCommand = (event: PointerEvent) => {
-      if (this.commandActive && event.target instanceof Node && event.target !== input && !commandDropup?.contains(event.target)) this.closeCommandDropup();
+      if (this.commandActive && event.target instanceof Node && !input?.contains(event.target) && !commandDropup?.contains(event.target)) this.closeCommandDropup();
     };
     commandDropup?.addEventListener('focusout', onCommandFocusOut);
     document.addEventListener('pointerdown', onOutsideCommand);
@@ -1624,8 +1681,7 @@ export class ChatView {
 
     const autoResize = () => {
       if (!input) return;
-      input.style.height = 'auto';
-      input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
+      input.refresh();
     };
 
     const focusFromInputShell = (e: MouseEvent) => {
@@ -1698,8 +1754,13 @@ export class ChatView {
       }).catch(() => { /* silent */ });
     };
 
-    input?.addEventListener('input', () => {
+    input?.addEventListener('input', event => {
       if (!isCurrentInput()) return;
+      if (event instanceof InputEvent && event.isComposing) {
+        this.persistDraft(input.value);
+        this.updateComposerCounter();
+        return;
+      }
       if (!this.messageEdit && this.server.serverDetails?.protocol?.features.includes('chat-blocks')) {
         const parsed = parseFencedMessageBlocks(input.value);
         if (parsed.some(block => block.type === 'code') && this.currentChannelId) {
@@ -1977,10 +2038,16 @@ export class ChatView {
     const btnCode = document.getElementById('btn-code');
     if (btnCode) {
       const onCodeClick = () => {
-        if (!isCurrentInput() || this.messageEdit) return;
+        if (!isCurrentInput() || !input || input.readOnly || input.disabled) return;
+        const selected = input.value.slice(input.selectionStart, input.selectionEnd);
+        if (this.messageEdit) {
+          input.insertText(`\`\`\`\n${selected}\n\`\`\``);
+          input.focus();
+          return;
+        }
         if (this.arePermissionsResolved() && !serverStore.hasPermission(Permission.SEND_MESSAGES)) return;
         if (this.server.serverDetails?.protocol?.features.includes('chat-blocks')) {
-          this.addComposerBlock({ type: 'code', language: 'plaintext', code: '' });
+          this.addComposerBlock({ type: 'code', language: 'plaintext', code: selected });
           return;
         }
         codeBlockModal.open({
@@ -1997,6 +2064,7 @@ export class ChatView {
     // Paste files/images directly into the message box.
     const onInputPaste = (e: ClipboardEvent) => {
       if (!input || !isCurrentInput() || e.defaultPrevented) return;
+      if (e.target instanceof HTMLTextAreaElement && e.target.closest('.chat-code-input')) return;
       const files = e.clipboardData?.files;
       if (files && files.length > 0) {
         if (!serverStore.hasPermission(Permission.ATTACH_FILES)) return;
@@ -2006,8 +2074,8 @@ export class ChatView {
       }
       if (e.clipboardData && pasteMonkyClipboard(input, e.clipboardData)) e.preventDefault();
     };
-    input?.addEventListener('paste', onInputPaste);
-    this.unbindEvents.push(() => input?.removeEventListener('paste', onInputPaste));
+    input?.addEventListener('paste', onInputPaste, true);
+    this.unbindEvents.push(() => input?.removeEventListener('paste', onInputPaste, true));
 
     // Global paste handler: Ctrl+V anywhere on the page uploads files when a
     // text channel is open (#181).
@@ -2146,7 +2214,7 @@ export class ChatView {
         e.preventDefault();
         handleSend(e.isTrusted);
       }
-    });
+    }, true);
 
     const onInputBlur = () => {
       if (!input?.isConnected) return;
@@ -2154,7 +2222,7 @@ export class ChatView {
       if (dropupBlurTimer) clearTimeout(dropupBlurTimer);
       dropupBlurTimer = setTimeout(() => {
         dropupBlurTimer = null;
-        if (!input.isConnected || document.activeElement === input) return;
+        if (!input.isConnected || input.hasFocus) return;
         this.closeMentionDropup();
         if (!this.container.querySelector('#command-dropup')?.contains(document.activeElement)) this.closeCommandDropup();
       }, 150);
@@ -2185,7 +2253,7 @@ export class ChatView {
       this.syncComposerPermissionState();
       this.updateComposerCounter();
       this.renderComposerBlocks();
-      if (input && (this.mentionActive || document.activeElement === input)) this.updateMentionDropup(input);
+      if (input && (this.mentionActive || input.hasFocus)) this.updateMentionDropup(input);
     };
     const u1 = appEvents.on('server.updated', refreshComposerSettings);
     const u2 = appEvents.on('server.roles_updated', refreshComposerSettings);
@@ -2359,7 +2427,7 @@ export class ChatView {
     }
   }
 
-  private updateMentionDropup(input: HTMLTextAreaElement): void {
+  private updateMentionDropup(input: MarkdownInput): void {
     if (!this.currentChannelId) {
       this.closeMentionDropup();
       return;
@@ -2461,7 +2529,7 @@ export class ChatView {
   }
 
   private applyMention(index: number): void {
-    const input = document.getElementById('chat-message-input') as HTMLTextAreaElement | null;
+    const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
     const candidate = this.mentionMatches[index];
     if (!input || !candidate || this.mentionAtIndex < 0) {
       this.closeMentionDropup();
@@ -2481,8 +2549,7 @@ export class ChatView {
     if (charCounter) {
       charCounter.innerText = `${input.value.length}/${this.messageLimitLabel}`;
     }
-    input.style.height = 'auto';
-    input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
+    input.refresh();
     this.persistDraft(input.value);
   }
 
@@ -2549,7 +2616,7 @@ export class ChatView {
     return command ? this.getVoiceCommandDeniedReason(command) : undefined;
   }
 
-  private updateCommandDropup(input: HTMLTextAreaElement): void {
+  private updateCommandDropup(input: MarkdownInput): void {
     if (this.messageEdit || (this.currentChannelId && chatStore.getCommandDraft(this.currentChannelId))) {
       this.closeCommandDropup();
       return;
@@ -2619,7 +2686,7 @@ export class ChatView {
         void botSettingsModal.open(botId);
       });
     });
-    const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
+    const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
     if (this.commandGroups.length === 0) {
       for (const attribute of ['role', 'aria-expanded', 'aria-controls', 'aria-autocomplete', 'aria-activedescendant']) {
         input?.removeAttribute(attribute);
@@ -2691,7 +2758,7 @@ export class ChatView {
       this.renderCommandDropup();
       return;
     }
-    const input = document.getElementById('chat-message-input') as HTMLTextAreaElement | null;
+    const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
     const cmd = this.commandMatches[index];
     if (!input || !cmd) {
       this.closeCommandDropup();
@@ -2724,11 +2791,11 @@ export class ChatView {
     const channelId = this.currentChannelId;
     const view = this.botChat;
     const selection = this.commandSelection;
-    const sourceText = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input')?.value;
+    const sourceText = this.container.querySelector<MarkdownInput>('#chat-message-input')?.value;
     const current = () => view !== null && this.botChat === view && this.currentChannelId === channelId &&
       getActiveChatStore() === store && client.getConnectionId() === connectionId &&
       !this.messageEdit && selection === this.commandSelection && client.getStatus() === 'CONNECTED' &&
-      this.container.querySelector<HTMLTextAreaElement>('#chat-message-input')?.value === sourceText;
+      this.container.querySelector<MarkdownInput>('#chat-message-input')?.value === sourceText;
     if (!window.api?.soundDownloadAvailability) {
       this.showCommandNotice(t('botChat.downloadDesktopOnly'));
       return;
@@ -2793,7 +2860,7 @@ export class ChatView {
    */
   private insertAtCaret(text: string): void {
     if (!this.isCurrentComposer()) return;
-    const input = this.container.querySelector('#chat-message-input') as HTMLTextAreaElement | null;
+    const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
     if (!input || input.readOnly) return;
 
     const start = input.selectionStart ?? input.value.length;
@@ -2829,7 +2896,7 @@ export class ChatView {
   }
 
   private updateComposerCounter(): void {
-    const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
+    const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
     if (!input) return;
     const blocks = this.currentChannelId && !this.messageEdit ? this.store.getBlockDraft(this.currentChannelId) : [];
     const content = blocks.length ? messageBlocksContent([...blocks, { type: 'text', text: input.value }]) : input.value;
@@ -2851,7 +2918,7 @@ export class ChatView {
 
   private addComposerBlock(block: ResolvedMessageBlock): void {
     if (!this.currentChannelId || this.messageEdit || this.blockSendPending) return;
-    const input = this.container.querySelector<HTMLTextAreaElement>('#chat-message-input');
+    const input = this.container.querySelector<MarkdownInput>('#chat-message-input');
     if (!input || input.disabled || input.readOnly) return;
     const blocks = [...this.store.getBlockDraft(this.currentChannelId)];
     if (blocks.length >= 98) {
@@ -3104,6 +3171,7 @@ export class ChatView {
     this.closeCommandDropup();
     this.unbindEvents.forEach((u) => u());
     this.unbindEvents = [];
+    this.container.querySelectorAll<MarkdownInput>('monky-markdown-input').forEach(input => input.destroy());
     this.composerInput = null;
     this.composerChannelId = null;
   }

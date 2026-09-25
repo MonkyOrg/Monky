@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { Permission, type ServerDetails } from '@monky/shared';
+import { Permission, PROTOCOL_VERSION, MIN_CLIENT_PROTOCOL, type ServerDetails } from '@monky/shared';
 import { ServerSettingsOperations } from '../src/renderer/views/serverSettings/ServerSettingsOperations';
 import { serverSettingsValidationError } from '../src/renderer/views/serverSettings/serverSettingsValidation';
 
@@ -140,6 +140,17 @@ function server(overrides: Partial<ServerDetails> = {}): ServerDetails {
     ...overrides,
   };
 }
+
+test('deletion undo settings require negotiated support and an integer window from one second to one day', () => {
+  assert.equal(serverSettingsValidationError({ messageDeleteUndoSeconds: 60 }, server()), 'chat.featureUpdateRequired');
+  const supported = server({ protocol: { version: PROTOCOL_VERSION, minimumVersion: MIN_CLIENT_PROTOCOL, features: ['message-delete-undo'] } });
+  for (const value of [0, -1, 1.2, 86401, NaN, Infinity]) {
+    assert.equal(serverSettingsValidationError({ messageDeleteUndoSeconds: value }, supported), 'serverSettings.deleteUndoInvalid');
+  }
+  for (const value of [1, 60, 86400]) {
+    assert.equal(serverSettingsValidationError({ messageDeleteUndoSeconds: value }, supported), null);
+  }
+});
 
 test('per-field validation uses current persisted prerequisites and does not resubmit unrelated settings', () => {
   const s = server();

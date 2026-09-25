@@ -2614,6 +2614,7 @@ input:focus, textarea:focus, select:focus {
 
 .chat-message-text {
   font-size: 14px;
+  line-height: 1.4;
   color: var(--text-primary);
   word-break: break-word;
   white-space: pre-wrap;
@@ -3122,8 +3123,9 @@ input:focus, textarea:focus, select:focus {
   margin: 0;
 }
 .chat-message-text .md-p + .md-p {
-  margin-top: 4px;
+  margin-top: 0;
 }
+.md-blank-line { margin: 0; min-height: 1.4em; }
 
 .chat-message-text .md-h {
   margin: 6px 0 4px;
@@ -3137,15 +3139,15 @@ input:focus, textarea:focus, select:focus {
 .chat-message-text .md-h5 { font-size: 13.5px; text-transform: uppercase; letter-spacing: 0.3px; }
 .chat-message-text .md-h6 { font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text-muted); }
 
-.chat-message-text .md-ul,
-.chat-message-text .md-ol {
+:is(.chat-message-text, .chat-quote-preview) .md-ul,
+:is(.chat-message-text, .chat-quote-preview) .md-ol {
   margin: 4px 0;
   padding-left: 22px;
 }
-.chat-message-text .md-ul { list-style: disc; }
-.chat-message-text .md-ol { list-style: decimal; }
-.chat-message-text .md-ul li,
-.chat-message-text .md-ol li {
+:is(.chat-message-text, .chat-quote-preview) .md-ul { list-style: disc; }
+:is(.chat-message-text, .chat-quote-preview) .md-ol { list-style: decimal; }
+:is(.chat-message-text, .chat-quote-preview) .md-ul li,
+:is(.chat-message-text, .chat-quote-preview) .md-ol li {
   margin: 2px 0;
 }
 
@@ -4270,11 +4272,11 @@ input:focus, textarea:focus, select:focus {
   padding: 6px 10px;
 }
 
-.chat-composer-surface:has(#chat-composer-blocks:not([hidden]), #chat-reply-composer:not([hidden])) .chat-input-wrapper {
+.chat-composer-surface:has(#chat-composer-blocks:not([hidden]), #chat-reply-composer:not([hidden]), .md-editor-code-widget) .chat-input-wrapper {
   display: grid;
   grid-template-columns: 30px 30px 30px minmax(0, 1fr) auto auto;
 }
-.chat-composer-surface:has(#chat-composer-blocks:not([hidden]), #chat-reply-composer:not([hidden])) .chat-input-field {
+.chat-composer-surface:has(#chat-composer-blocks:not([hidden]), #chat-reply-composer:not([hidden]), .md-editor-code-widget) .chat-input-field {
   grid-column: 1 / -1;
   grid-row: 1;
   width: 100%;

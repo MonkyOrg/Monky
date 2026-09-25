@@ -161,6 +161,10 @@ export interface ChatMessage {
    * would silently rewrite the conversation for everyone reading it.
    */
   deletedAt?: number | null;
+  /** Monotonic server revision prevents delayed edit/delete events undoing a restoration. */
+  revision?: number;
+  deletedByUserId?: string | null;
+  deleteUndoUntil?: number | null;
   /**
    * True when this message is only visible to the invoking user (#569).
    * Ephemeral messages are not persisted and disappear on reconnect.
@@ -328,6 +332,7 @@ export interface ServerDetails {
    * allowed: this switch is about rewriting history, not about taking it back.
    */
   allowMessageEdit?: boolean;
+  messageDeleteUndoSeconds?: number;
   /**
    * Whether role badges in the member list are visible to everyone (#530).
    * When false, each badge is only rendered for members holding that role.

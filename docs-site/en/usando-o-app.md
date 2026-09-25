@@ -46,17 +46,31 @@ memory while the application is open, not in a permanent local message archive.
 
 The default limit is **16,000 characters**, configurable under **Server settings
 → General**. Turning the switch off removes the character limit, not the 8 MiB
-packet protection. The counter follows changes without reconnecting. On older
-servers, unavailable controls explain that an update is needed without blocking
-basic chat.
+packet protection. The counter follows changes without reconnecting. On compatible
+servers, controls for features that were not negotiated explain that an update
+is needed.
 
 A message you started but haven't sent stays with the channel you were typing in. Jumping to the voice stage, opening another channel and coming back does not wipe the text — each channel keeps its own draft, which only goes away when you send the message or leave the server.
 
 Hover over a message (or reach its buttons with `Tab`) to reveal a floating toolbar with **Emoji**, **Reply**, **Copy message** and **More options**. The three-dot menu displays full action names; **Edit message** is only available to the author when the server permits editing, and **Delete message** to the author or moderators. Navigate menus with arrow keys and close them with `Escape`.
 
-`Ctrl+C` copies selected text with its displayed formatting, including Markdown rendering. On macOS, use `Cmd` instead of `Ctrl`. Without a selection, the shortcut acts only on the focused message, never the entire conversation. **Copy message** in the toolbar uses formatting; under **More options → Copy message**, choose **With formatting** or **Without formatting**. Plain copying is available only in this submenu, without a dedicated shortcut. Those buttons also respect a selection within the message. Use `→` or `Enter` to open the submenu, `←` or `Escape` to go back, and `Tab` to leave.
+After deleting a message, **Undo** restores the same message, including its blocks, attachments and reactions, for **60 seconds** by default. Switching channels or reconnecting does not cancel the server-controlled time window. Only the person who deleted it can undo; restoring someone else's message still requires moderation permission. Authors cannot reverse a moderator's deletion. Reply references show the restored message again without creating another message or repeating mention notifications.
 
-Formatted copying provides HTML for rich-text applications and Markdown for text destinations: for example, bold text may paste as `**text**` when the destination does not accept HTML. **Without formatting** provides only visible text, without Markdown markers or HTML. Pasting a formatted copy into Monky keeps the markup editable; external HTML is never inserted into the interface. Editing fields keep their native shortcuts. Image-only and sticker-only messages copy the image; other attachments, or **Without formatting**, copy file names without transferring attachments.
+Use **Server settings → Notifications → Deletion undo window (seconds)**, or the CLI key `messageDeleteUndoSeconds`, to set **1 to 86,400 seconds**. Changes apply only to future deletions. Restoration is no longer possible once the deadline expires. Content is kept in a private temporary server backup during the window and removed in the next periodic cleanup after expiry. This feature requires both client and server to support protocol **27**; earlier clients cannot apply restorations.
+
+`Ctrl+C` copies selected text with its displayed formatting; `Ctrl+Shift+C` copies the same text without formatting. On macOS, use `Cmd` instead of `Ctrl`. Without a selection, the shortcut acts only on the focused message, never the entire conversation. **Copy message**, both in the toolbar and under **More options**, defaults to formatted copying, just like `Ctrl+C`. Those buttons also respect a selection within the message. In the menu, clicking the label, `Enter` or `Space` performs that copy; hovering, clicking the arrow or pressing `→` opens **Copy with formatting**, **Copy Markdown** and **Copy without formatting**. Use `←` or `Escape` to go back and `Tab` to leave.
+
+Formatted copying provides HTML for rich-text applications and visible text for plain-text destinations, without adding markers such as `**`. **Copy Markdown** explicitly copies the original markup. **Copy without formatting** provides only visible text, without Markdown or HTML. Pasting a formatted copy into Monky restores its editable markup; external HTML is never inserted into the interface. Image-only and sticker-only messages copy the image; other attachments, or **Copy without formatting**, copy file names without transferring attachments.
+
+The message field previews Markdown as you type and when editing an existing message. Headings, bold, italic, strike, quotes, and code are displayed with formatting; markers appear dimmed around the cursor and disappear elsewhere. Code blocks use the same editor for composition and editing, with a language selector, line numbers and syntax highlighting, without showing the surrounding backticks. The original text is preserved for sending and editing. Reply previews also render formatting, including code and list markers. Numbered lists retain the first number you entered, such as `4. item`.
+
+Addresses starting with `http://`, `https://` or `www.` are recognized as links while typing and become clickable in the sent message. This does not insert markup into the draft, change links created through the form, or apply inside code. Addresses starting with `www.` open over HTTPS; surrounding punctuation is not included in the link.
+
+Right-click the message field for **Cut**, **Copy**, **Paste**, **Paste as plain text** and **Select all**, with their corresponding shortcuts. Unavailable actions are disabled. Right-click a link in the editor for **Copy link** (its address), **Open link** in the browser, **Edit link** using the same form, or **Remove link** while keeping the text. Removing an automatic link keeps its visible address without linking it again, including after sending; undo restores the link. These menus work when composing and editing messages.
+
+Clicking outside closes the menu, including clicks inside the message field or code editor. **Cut**, **Copy** and **Copy link** display brief confirmation feedback. In the link form, addresses such as `www.google.com` or `example.com` automatically use HTTPS when the scheme is omitted; an explicit `http://` is preserved.
+
+**Formatting options**, beside the emoji button, opens an inline toolbar. **Bold**, **italic**, and **strike** are toggles: without a selection, they enable or disable the effect for subsequent typing; with a selection, they change formatting without inserting placeholder text. `Ctrl+B` and `Ctrl+I` also work. Dividers group these controls and the lists. Lists and quotes can format existing lines or start in an empty field, with the caret after their marker. The link button opens a non-modal form above the button with **Text to display** and **Address**, prefilling the first field from the selection. Errors appear only after attempting to insert; `Escape` or clicking outside closes the form. `Escape` collapses the toolbar. The paperclip opens attachments. `Enter` sends or saves; `Shift+Enter` inserts a line and continues lists. Inside the code editor, `Enter` inserts a line and `Ctrl+Enter` (`Cmd+Enter` on macOS) sends or saves. Blank lines between passages are preserved in sent messages and copied text, just as in the preview.
 
 To copy the **image**, rather than its file name or address, use **Copy image**
 in the attachment controls or its right-click menu. Sticker menus also offer
@@ -93,7 +107,7 @@ requiring programming.
 
 ## Code blocks
 
-The `< >` button and triple backticks create a code block **inside the draft**
+**Formatting options → Send a code block** and triple backticks create a code block **inside the draft**
 without sending. Search and filter languages by name or alias (such as `js` or
 `ps1`), edit or collapse a block, and interleave text
 and multiple replies in the desired order. Each block can be removed. Pasted

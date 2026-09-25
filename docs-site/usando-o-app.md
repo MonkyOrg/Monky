@@ -48,16 +48,30 @@ permanente de mensagens.
 O limite padrão é de **16.000 caracteres**, configurável em **Configurações do
 servidor → Geral**. Desligar o switch remove o limite de caracteres, não a
 proteção de transporte de 8 MiB por pacote. O contador acompanha mudanças sem
-reconectar. Em servidores antigos, os controles não disponíveis indicam que é
-preciso atualizar, sem impedir o chat básico.
+reconectar. Em servidores compatíveis, os controles de recursos não negociados
+indicam que é preciso atualizar.
 
 Uma mensagem começada e não enviada fica guardada no canal onde você estava digitando. Ir para o palco de voz, abrir outro canal e voltar não apaga o texto — cada canal guarda o seu rascunho, que só some quando você envia a mensagem ou sai do servidor.
 
 Ao passar o mouse sobre uma mensagem (ou chegar aos botões com `Tab`), uma barra flutuante oferece **Emoji**, **Responder**, **Copiar mensagem** e **Mais opções**. O menu de três pontos mostra os nomes completos; **Editar mensagem** aparece apenas para o autor, se o servidor permitir, e **Apagar mensagem** para o autor ou moderadores. Use as setas para navegar no menu e `Escape` para fechá-lo.
 
-`Ctrl+C` copia o texto selecionado com a formatação exibida, inclusive a produzida por Markdown. No macOS, use `Cmd` no lugar de `Ctrl`. Sem seleção, o atalho atua somente sobre a mensagem que está com foco, não sobre a conversa inteira. **Copiar mensagem** na barra usa formatação; em **Mais opções → Copiar mensagem**, escolha **Com formatação** ou **Sem formatação**. A cópia sem formatação está disponível apenas nesse submenu, sem atalho próprio. Uma seleção dentro da mensagem é respeitada também por esses botões. Use `→` ou `Enter` para abrir o submenu, `←` ou `Escape` para voltar, e `Tab` para sair.
+Depois de apagar, **Desfazer** restaura a mesma mensagem, com seus blocos, anexos e reações, durante **60 segundos** por padrão. O prazo continua ao trocar de canal ou reconectar e é controlado pelo servidor. Só quem apagou pode desfazer; para mensagens de outra pessoa, essa pessoa ainda precisa ter permissão de moderação. O autor não pode reverter uma exclusão feita por um moderador. As referências de respostas voltam a mostrar a mensagem restaurada, sem enviar uma nova mensagem nem repetir notificações de menção.
 
-A cópia formatada oferece HTML para aplicativos de texto rico e Markdown para destinos textuais: por exemplo, um negrito pode ser colado como `**texto**` quando o destino não aceita HTML. **Sem formatação** oferece somente o texto visível, sem marcações Markdown nem HTML. Ao colar uma cópia formatada no Monky, a marcação continua editável; HTML externo não é inserido na interface. Os atalhos dos campos de edição continuam nativos. Mensagens somente com imagem ou figurinha copiam a imagem; outros anexos, ou a opção **Sem formatação**, copiam os nomes dos arquivos, sem transferir os anexos.
+Configure **Configurações do servidor → Notificações → Prazo para desfazer exclusões (segundos)**, ou a chave `messageDeleteUndoSeconds` no CLI, entre **1 e 86.400 segundos**. Mudanças valem somente para novas exclusões. Ao vencer o prazo, não é mais possível restaurar. O conteúdo fica em um backup temporário privado do servidor durante a janela e é removido na próxima limpeza periódica após o vencimento. Este recurso requer cliente e servidor atualizados para o protocolo **27**; clientes anteriores não interpretam restaurações.
+
+`Ctrl+C` copia o texto selecionado com a formatação exibida; `Ctrl+Shift+C` copia o mesmo texto sem formatação. No macOS, use `Cmd` no lugar de `Ctrl`. Sem seleção, o atalho atua somente sobre a mensagem que está com foco, não sobre a conversa inteira. **Copiar mensagem**, tanto na barra quanto em **Mais opções**, copia com formatação por padrão, como `Ctrl+C`. Uma seleção dentro da mensagem é respeitada também por esses botões. No menu, clicar no texto, `Enter` ou `Espaço` executa essa cópia; passar o mouse, clicar na seta ou usar `→` abre as opções **Copiar com formatação**, **Copiar Markdown** e **Copiar sem formatação**. Use `←` ou `Escape` para voltar e `Tab` para sair.
+
+A cópia formatada oferece HTML para aplicativos de texto rico e texto visível para destinos textuais, sem acrescentar marcadores como `**`. **Copiar Markdown** é a opção explícita para obter a marcação original. **Copiar sem formatação** oferece somente o texto visível, sem Markdown nem HTML. Ao colar uma cópia formatada no Monky, a marcação é recuperada e continua editável; HTML externo não é inserido na interface. Mensagens somente com imagem ou figurinha copiam a imagem; outros anexos, ou a opção **Copiar sem formatação**, copiam os nomes dos arquivos, sem transferir os anexos.
+
+O campo de mensagem exibe Markdown enquanto você digita e também ao editar uma mensagem. Títulos, negrito, itálico, tachado, citações e código aparecem formatados; os marcadores ficam discretos no trecho onde está o cursor e somem nos demais trechos. Blocos de código usam o mesmo editor na composição e na edição, com seletor de linguagem, numeração das linhas e realce de sintaxe, sem mostrar as crases delimitadoras. O texto original é preservado para envio e edição. As prévias de respostas também mostram a formatação, inclusive o código e os marcadores das listas. Listas numeradas preservam o primeiro número informado, como `4. item`.
+
+Endereços começados por `http://`, `https://` ou `www.` são reconhecidos como links enquanto você digita e ficam clicáveis na mensagem enviada. Isso não insere marcação no rascunho, não altera links criados pelo formulário e não se aplica dentro de código. Endereços `www.` usam HTTPS ao abrir; pontuação ao redor não entra no link.
+
+No campo de mensagem, o botão direito abre **Recortar**, **Copiar**, **Colar**, **Colar como texto sem formatação** e **Selecionar tudo**, com os atalhos correspondentes. Ações indisponíveis ficam desabilitadas. Sobre um link no editor, o menu oferece **Copiar link** (o endereço), **Abrir link** no navegador, **Editar link** pelo mesmo formulário e **Remover link**, mantendo o texto. Ao remover um link automático, o endereço continua visível mas deixa de ser link, inclusive depois de enviar; desfazer restaura o link. Esses menus funcionam na composição e na edição de mensagens.
+
+Clicar fora fecha o menu, inclusive no próprio campo de mensagem ou de código. **Recortar**, **Copiar** e **Copiar link** exibem uma confirmação breve. No formulário de link, endereços como `www.google.com` ou `exemplo.com` usam HTTPS automaticamente quando o protocolo é omitido; `http://` explícito é preservado.
+
+O botão **Opções de formatação**, ao lado do emoji, abre uma barra dentro do campo. **Negrito**, **itálico** e **tachado** funcionam como toggles: sem seleção, ligam ou desligam o efeito para o que você digitar; com seleção, alteram a formatação sem inserir texto de exemplo. `Ctrl+B` e `Ctrl+I` também funcionam. Separadores agrupam esses controles e as listas. Listas e citações podem formatar linhas existentes ou começar no campo vazio, com o cursor após o marcador. O botão de link abre um formulário acima do botão, sem modal, com os campos **Texto para exibir** e **Endereço**, preenchendo o primeiro com a seleção. Erros aparecem apenas depois de tentar inserir; `Escape` ou clicar fora fecha o formulário. `Escape` recolhe a barra. O clipe abre os anexos. `Enter` envia ou salva; `Shift+Enter` cria uma linha e continua listas. No editor de código, `Enter` cria uma linha e `Ctrl+Enter` (`Cmd+Enter` no macOS) envia ou salva. As linhas em branco entre trechos são preservadas na mensagem enviada e na cópia, como na prévia.
 
 Para copiar a **imagem**, e não o nome ou endereço do arquivo, use **Copiar imagem**
 nos controles do anexo ou no menu do botão direito. Isso também funciona no menu
@@ -95,7 +109,7 @@ e consentimento sem exigir programação.
 
 ## Blocos de código
 
-O botão `< >` e três crases criam um bloco de código **dentro do rascunho**, sem
+**Opções de formatação → Enviar bloco de código** e três crases criam um bloco de código **dentro do rascunho**, sem
 enviar a mensagem. Busque e filtre a linguagem pelo nome ou abreviação (como
 `js` ou `ps1`), edite ou recolha o bloco e intercale
 texto e várias respostas na ordem desejada. Cada bloco pode ser removido.

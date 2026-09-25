@@ -410,6 +410,7 @@ export class AuthService {
       allowSoundboard: server.allowSoundboard !== false,
       allowEveryoneMention: server.allowEveryoneMention !== false,
       allowMessageEdit: server.allowMessageEdit !== false,
+      messageDeleteUndoSeconds: server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
       showRoleBadgesToEveryone: server.showRoleBadgesToEveryone !== false,
       voiceMode: server.voiceMode || 'p2p',
       hostSpecs: CapacityEstimator.getHostSpecs(),
@@ -480,6 +481,7 @@ export class AuthService {
     allowSoundboard?: boolean;
     allowEveryoneMention?: boolean;
     allowMessageEdit?: boolean;
+    messageDeleteUndoSeconds?: number;
     showRoleBadgesToEveryone?: boolean;
     voiceMode?: VoiceMode;
     iconBase64?: string | null;
@@ -495,6 +497,7 @@ export class AuthService {
     allowSoundboard?: boolean;
     allowEveryoneMention?: boolean;
     allowMessageEdit?: boolean;
+    messageDeleteUndoSeconds?: number;
     showRoleBadgesToEveryone?: boolean;
     voiceMode?: VoiceMode;
     iconUrl?: string | null;
@@ -509,6 +512,13 @@ export class AuthService {
     }
 
     const updates: Partial<ServerRecord> = {};
+    if (payload.messageDeleteUndoSeconds !== undefined) {
+      if (!Number.isSafeInteger(payload.messageDeleteUndoSeconds) || payload.messageDeleteUndoSeconds < 1
+        || payload.messageDeleteUndoSeconds > LIMITS.MAX_MESSAGE_DELETE_UNDO_SECONDS) {
+        return { success: false, errorMessage: 'O prazo para desfazer deve ser um inteiro entre 1 e 86400 segundos.' };
+      }
+      updates.messageDeleteUndoSeconds = payload.messageDeleteUndoSeconds;
+    }
     if (payload.maxMessageLength !== undefined) {
       if (!Number.isSafeInteger(payload.maxMessageLength) || payload.maxMessageLength < 0) {
         return { success: false, errorMessage: 'O limite de caracteres deve ser um inteiro positivo ou zero (sem limite).' };
@@ -640,6 +650,7 @@ export class AuthService {
       allowSoundboard: updatedServer?.allowSoundboard !== false,
       allowEveryoneMention: updatedServer?.allowEveryoneMention !== false,
       allowMessageEdit: updatedServer?.allowMessageEdit !== false,
+      messageDeleteUndoSeconds: updatedServer?.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
       showRoleBadgesToEveryone: updatedServer?.showRoleBadgesToEveryone !== false,
       voiceMode: updatedServer?.voiceMode || 'p2p',
       iconUrl: this.avatarStorage.getPublicUrl(updatedServer?.iconPath),

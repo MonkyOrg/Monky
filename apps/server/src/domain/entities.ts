@@ -14,6 +14,7 @@ export interface ServerRecord {
   /** Whether `@todos` / `@everyone` pings the whole channel (#464). */
   allowEveryoneMention?: boolean;
   allowMessageEdit?: boolean;
+  messageDeleteUndoSeconds?: number;
   /**
    * Whether role badges in the member list are shown to everyone (#530).
    * When off, a badge is only visible to members who hold that same role.
@@ -80,6 +81,9 @@ export interface MessageRecord {
   editedAt?: number | null;
   /** Set when the message was deleted; its content is blanked at the same time (#504). */
   deletedAt?: number | null;
+  revision?: number;
+  deletedByUserId?: string | null;
+  deleteUndoUntil?: number | null;
 }
 
 export interface MentionRecord {

@@ -254,6 +254,7 @@ export class ServerStore {
     voiceMode?: VoiceMode,
     showRoleBadgesToEveryone?: boolean,
     maxMessageLength?: number,
+    messageDeleteUndoSeconds?: number,
   ): void {
     if (this.serverDetails) {
       if (maxMessageLength !== undefined) this.serverDetails.maxMessageLength = maxMessageLength;
@@ -280,6 +281,7 @@ export class ServerStore {
       if (allowMessageEdit !== undefined) {
         this.serverDetails.allowMessageEdit = allowMessageEdit;
       }
+      if (messageDeleteUndoSeconds !== undefined) this.serverDetails.messageDeleteUndoSeconds = messageDeleteUndoSeconds;
       if (voiceMode !== undefined) {
         this.serverDetails.voiceMode = voiceMode;
       }

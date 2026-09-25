@@ -76,7 +76,9 @@ export interface IMessageRepository {
   /** Rewrites the content of a message and stamps it as edited (#504). */
   updateContent(messageId: string, content: string, editedAt: number, blocks?: import('@monky/shared').MessageBlock[]): Promise<void>;
   /** Blanks a message's content and stamps it as deleted, keeping the row (#504). */
-  markDeleted(messageId: string, deletedAt: number): Promise<void>;
+  markDeleted(messageId: string, deletedAt: number, actorId?: string, undoUntil?: number): Promise<void>;
+  restoreDeleted(messageId: string, actorId: string, deletedAt: number, revision: number, now: number): Promise<boolean>;
+  purgeExpiredDeletions(now: number): Promise<void>;
   deleteByChannel(channelId: string): Promise<void>;
   countAll(): Promise<number>;
 }

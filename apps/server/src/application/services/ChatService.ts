@@ -411,28 +411,10 @@ export class ChatService {
       ? [...existing.blocks.filter(block => block.type === 'reply'), { type: 'text', text: parseResult.data }] : undefined;
     await this.messageRepo.updateContent(messageId, parseResult.data, editedAt, blocks);
 
-    const user = await this.userRepo.findById(existing.userId);
-    return {
-      success: true,
-      message: {
-        id: existing.id,
-        channelId: existing.channelId,
-        userId: existing.userId,
-        userNickname: existing.botAuthor?.name ?? user?.nickname ?? 'Usuário Desconhecido',
-        userAvatarUrl: this.avatarStorage.getPublicUrl(existing.botAuthor?.avatarPath ?? user?.avatarPath),
-        isBot: !!existing.botAuthor,
-        botCommand: existing.botCommand,
-        content: parseResult.data,
-        createdAt: existing.createdAt,
-        isSystem: false,
-        attachments: attachments.length > 0 ? attachments : undefined,
-        editedAt,
-        deletedAt: null,
-        reactions: (await this.getReactions([messageId])).get(messageId) ?? [],
-        reply: await this.resolveReply(existing),
-        blocks: await this.resolveBlocks({ ...existing, blocks }),
-      },
-    };
+    const [message] = await this.loadHistory(channelId, 1, undefined, messageId);
+    if (!message || message.deletedAt) return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST,
+      errorMessage: 'Essa mensagem não pode ser editada.' };
+    return { success: true, message };
   }
 
   /**
@@ -475,29 +457,43 @@ export class ChatService {
 
     // Already deleted: report success so a double click (or two moderators at
     // once) settles on the same state instead of raising an error.
-    const deletedAt = existing.deletedAt ?? Date.now();
     if (!existing.deletedAt) {
-      await this.messageRepo.markDeleted(messageId, deletedAt);
+      const server = await this.serverRepo.getServer();
+      const deletedAt = Date.now();
+      await this.messageRepo.markDeleted(messageId, deletedAt, userId,
+        deletedAt + (server?.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS) * 1000);
     }
 
-    const user = await this.userRepo.findById(existing.userId);
-    return {
-      success: true,
-      message: {
-        id: existing.id,
-        channelId: existing.channelId,
-        userId: existing.userId,
-        userNickname: existing.botAuthor?.name ?? user?.nickname ?? 'Usuário Desconhecido',
-        userAvatarUrl: this.avatarStorage.getPublicUrl(existing.botAuthor?.avatarPath ?? user?.avatarPath),
-        isBot: !!existing.botAuthor,
-        botCommand: existing.botCommand,
-        content: '',
-        createdAt: existing.createdAt,
-        isSystem: false,
-        editedAt: existing.editedAt ?? null,
-        deletedAt,
-      },
-    };
+    const [message] = await this.loadHistory(channelId, 1, undefined, messageId);
+    return { success: true, message };
+  }
+
+  public async restoreMessage(
+    userId: string, channelId: string, messageId: string, deletedAt: number, revision: number, canModerate: boolean,
+  ): Promise<BotMessageResult> {
+    if (!messageReferenceSchema.safeParse(messageId).success || !messageReferenceSchema.safeParse(channelId).success
+      || !Number.isSafeInteger(deletedAt) || !Number.isSafeInteger(revision) || deletedAt <= 0 || revision < 1) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Restauração inválida.' };
+    }
+    const existing = await this.messageRepo.findById(messageId);
+    if (!existing || existing.channelId !== channelId || existing.isSystem
+      || !(await this.canUserAccessChannel(userId, channelId)) || !(await this.canUserReadMessages(userId))) {
+      return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem indisponível.' };
+    }
+    if (existing.deletedByUserId !== userId || (existing.userId !== userId && !canModerate)) {
+      return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED,
+        errorMessage: 'Somente quem fez a exclusão pode desfazê-la, mantendo a permissão original.' };
+    }
+    const restored = await this.messageRepo.restoreDeleted(messageId, userId, deletedAt, revision, Date.now());
+    if (!restored) return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST,
+      errorMessage: 'O prazo para desfazer expirou ou a mensagem já mudou.' };
+    const [message] = await this.loadHistory(channelId, 1, undefined, messageId);
+    if (!message) return { success: false, errorCode: ProtocolErrorCode.BAD_REQUEST, errorMessage: 'Mensagem indisponível.' };
+    return { success: true, message };
+  }
+
+  public async expireDeletedMessages(): Promise<void> {
+    await this.messageRepo.purgeExpiredDeletions(Date.now());
   }
 
   /**
@@ -594,6 +590,9 @@ export class ChatService {
         attachments: attachments && attachments.length > 0 ? attachments : undefined,
         editedAt: m.editedAt ?? null,
         deletedAt: m.deletedAt ?? null,
+        revision: m.revision ?? 0,
+        deletedByUserId: m.deletedByUserId,
+        deleteUndoUntil: m.deleteUndoUntil,
         reactions: reactionsByMessage.get(m.id) ?? [],
         reply: await this.resolveReply(m),
         blocks: await this.resolveBlocks(m),

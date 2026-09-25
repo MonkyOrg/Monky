@@ -78,25 +78,8 @@ if (!process.versions.electron) {
 }
 
 async function captureScreenshot(window, filename) {
-  const expected = await window.webContents.executeJavaScript(
-    '({ width: Math.round(innerWidth * devicePixelRatio), height: Math.round(innerHeight * devicePixelRatio) })');
-  const image = await new Promise((resolve, reject) => {
-    const painted = (_event, _rect, frame) => {
-      const size = frame.getSize();
-      if (size.width !== expected.width || size.height !== expected.height) return;
-      clearTimeout(timeout);
-      window.webContents.removeListener('paint', painted);
-      if (frame.isEmpty()) reject(new Error(`Empty offscreen frame: ${filename}`));
-      else resolve(frame);
-    };
-    const timeout = setTimeout(() => {
-      window.webContents.removeListener('paint', painted);
-      reject(new Error(`Offscreen frame was not presented: ${filename}`));
-    }, 5000);
-    window.webContents.on('paint', painted);
-    window.webContents.invalidate();
-  });
-  fs.writeFileSync(path.join(output, filename), image.toPNG());
+  const { data } = await window.webContents.debugger.sendCommand('Page.captureScreenshot', { format: 'png' });
+  fs.writeFileSync(path.join(output, filename), Buffer.from(data, 'base64'));
 }
 
 async function runNativeSmoke(window) {
@@ -138,7 +121,8 @@ async function runNativeSmoke(window) {
   const insert = text => window.webContents.debugger.sendCommand('Input.insertText', { text });
   const replace = async text => {
     await fixture('selectText()');
-    await insert(text);
+    if (text) await insert(text);
+    else await key('Backspace', 'Backspace', 8);
   };
   const click = async selector => {
     const point = await fixture(`point(${JSON.stringify(selector)})`);
@@ -178,6 +162,7 @@ async function runNativeSmoke(window) {
     console.log('Validating staged composer locale map; run without --locale-map after integration.');
   }
   try {
+    if (process.argv.includes('--markdown-preview')) return await runLiveMarkdownSmoke(window);
     for (const locale of ['pt-BR', 'en']) {
       await fixture(`prepare(${JSON.stringify(locale)})`);
       const draft = '\nDraft waiting to be sent\nSecond draft line';
@@ -191,7 +176,7 @@ async function runNativeSmoke(window) {
       check(current.editLabel === (locale === 'en' ? 'Editing message' : 'Editando mensagem'), 'Edit mode is visibly localized');
       check(current.description.includes('chat-edit-hint') && current.hint.includes('Shift+Enter'), 'The textarea exposes accessible multiline keyboard guidance');
       check(current.originalVisible && current.message === '\nOriginal line\nSecond line', 'The original row stays visible and unchanged before acknowledgement');
-      check(current.attachHidden && current.codeHidden, 'Actions which publish separate messages are unavailable during text editing');
+      check(current.attachHidden && !current.codeDisabled, 'Attachments remain unavailable while code formatting edits the existing message');
       await replace('Edited first line');
       await enter(true);
       await insert('Edited second line');
@@ -226,6 +211,7 @@ async function runNativeSmoke(window) {
       await replace('This edit is cancelled');
       await key('Tab', 'Tab', 9, '\t');
       check((await state()).focus === 'btn-send-message', 'Native Tab reaches Save from the textarea');
+      await key('Tab', 'Tab', 9, '\t', 8);
       await key('Tab', 'Tab', 9, '\t', 8);
       await key('Tab', 'Tab', 9, '\t', 8);
       await key('Tab', 'Tab', 9, '\t', 8);
@@ -331,6 +317,18 @@ async function runNativeSmoke(window) {
     await fixture('setEditPermission(true)');
     await fixture('removeSendPermission()');
     check(!(await state()).saveDisabled, 'Author editing retains its existing independent permission policy even without SEND_MESSAGES');
+    await fixture('selectText()');
+    await click('#btn-format');
+    await evaluate(`Promise.all(document.querySelector('.chat-format-panel').getAnimations().map(animation => animation.finished))`);
+    await click('[data-format="code"]');
+    current = await state();
+    check(current.editing && current.value === '```\nRetained when editing is disabled\n```'
+      && current.sent.length === 0 && current.edits.length === 0,
+    'Code formatting during editing neither requires new-message permission nor sends another message');
+    await key('z', 'KeyZ', 90, undefined, process.platform === 'darwin' ? 4 : 2);
+    await fixture('settle()');
+    check((await state()).value === 'Retained when editing is disabled',
+      'Undo isolates toolbar formatting from the preceding native typing');
     await enter();
     await fixture('replyEdit("a")');
     await fixture('settle()');
@@ -472,6 +470,7 @@ async function runNativeSmoke(window) {
     await fixture('settle()');
     await captureScreenshot(window, 'chat-delivery-reference.png');
     checks += await fixture('mediaDeliveryChecks()');
+    checks += await runLiveMarkdownSmoke(window);
     return checks;
   } catch (error) {
     console.error(`Native edit attempt ${editAttempt}: ${JSON.stringify(await state())}`);
@@ -481,6 +480,692 @@ async function runNativeSmoke(window) {
   } finally {
     await fixture('cleanup()');
   }
+}
+
+async function runLiveMarkdownSmoke(window) {
+  const evaluate = source => window.webContents.executeJavaScript(source, true);
+  const fixture = source => evaluate(`window.messageEditingFixture.${source}`);
+  const nativeCaretHeight = async () => {
+    const rectangle = await evaluate(`(() => {
+      const input=document.getElementById('chat-message-input');
+      const line=input.querySelector('.cm-line').getBoundingClientRect();
+      const caret=window.getSelection().getRangeAt(0).getBoundingClientRect();
+      return {x:Math.floor(caret.height ? caret.left : line.left),y:Math.floor(line.top),width:2,height:Math.ceil(line.height)+2};
+    })()`);
+    const pixels = async () => {
+      const {data}=await window.webContents.debugger.sendCommand('Page.captureScreenshot',{format:'png'});
+      return require('electron').nativeImage.createFromBuffer(Buffer.from(data,'base64')).crop(rectangle).getBitmap();
+    };
+    await evaluate(`document.getElementById('chat-message-input').blur()`);
+    await fixture('settle()');
+    const before = await pixels();
+    await evaluate(`document.getElementById('chat-message-input').focus()`);
+    await fixture('settle()');
+    const after = await pixels();
+    const rows = [];
+    for (let y=0;y<rectangle.height;y++) {
+      if ([0,1].some(x => [0,1,2].some(channel => {
+        const offset=(y*2+x)*4+channel;
+        return Math.abs(after[offset]-before[offset])>100;
+      }))) rows.push(y);
+    }
+    return rows.length ? rows.at(-1)-rows[0]+1 : 0;
+  };
+  const key = async (key, code, keyCode, modifiers = 0) => {
+    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, modifiers,
+    });
+    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, modifiers,
+    });
+    await fixture('settle()');
+  };
+  const insert = async text => {
+    await window.webContents.debugger.sendCommand('Input.insertText', { text });
+    await fixture('settle()');
+  };
+  const click = async selector => {
+    const point = await fixture(`point(${JSON.stringify(selector)})`);
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
+    await fixture('settle()');
+  };
+  const draft = async (text, from = 0, to = text.length) => {
+    await evaluate(`(() => {
+      const input = document.getElementById('chat-message-input');
+      input.value = ${JSON.stringify(text)}; input.focus(); input.setSelectionRange(${from}, ${to});
+      input.dispatchEvent(new Event('input', {bubbles:true}));
+    })()`);
+    await fixture('settle()');
+  };
+  let checks = 0;
+  const check = (value, message) => { if (!value) throw new Error(message); checks++; };
+  for (const locale of ['pt-BR', 'en']) {
+    await fixture(`prepare(${JSON.stringify(locale)})`);
+    await draft('', 0, 0);
+    const [initialWidth, initialHeight] = window.getContentSize();
+    const originalPlaceholder = await evaluate(`document.getElementById('chat-message-input').placeholder`);
+    window.setContentSize(450, initialHeight);
+    await evaluate(`document.getElementById('chat-message-input').placeholder=${JSON.stringify(originalPlaceholder.repeat(4))}`);
+    await fixture('settle()');
+    const emptyCaret = await evaluate(`(() => {
+      const input=document.getElementById('chat-message-input');
+      return {
+        placeholder:input.querySelector('.cm-placeholder').getBoundingClientRect().height,
+        nativeCaret:getComputedStyle(input.querySelector('.cm-line')).caretColor,
+        lineHeight:parseFloat(getComputedStyle(input.querySelector('.cm-line')).lineHeight)};
+    })()`);
+    emptyCaret.height = await nativeCaretHeight();
+    check(emptyCaret.placeholder > emptyCaret.lineHeight * 2 && emptyCaret.height > 0
+      && emptyCaret.height <= emptyCaret.lineHeight + 1,
+    `A wrapped placeholder keeps a single-line caret: ${JSON.stringify(emptyCaret)}`);
+    check(emptyCaret.nativeCaret !== 'rgba(0, 0, 0, 0)', 'The native caret is visible rather than hidden behind a replacement cursor');
+    await captureScreenshot(window, `markdown-placeholder-caret-${locale}.png`);
+    await insert('x');
+    const typedCaretHeight = await nativeCaretHeight();
+    check(typedCaretHeight > 0 && typedCaretHeight <= emptyCaret.lineHeight + 1,
+      `The native caret stays visible and single-line before and after typing: empty=${emptyCaret.height}, typed=${typedCaretHeight}`);
+    window.setContentSize(initialWidth, initialHeight);
+    await evaluate(`document.getElementById('chat-message-input').placeholder=${JSON.stringify(originalPlaceholder)}`);
+    await draft('', 0, 0);
+    const source = '# Heading\n\nA **bold** and *italic* with ~~strike~~ and `inline`.\n\n> Quote\n\n4. Four\n5. Five\n\n```js\nconst answer = 42;\n```';
+    await insert(source);
+    let result = await evaluate(`(() => {
+      const input = document.getElementById('chat-message-input');
+      return {value:input.value, heading:!!input.querySelector('.md-editor-h1'), bold:input.querySelector('strong')?.textContent,
+        italic:!!input.querySelector('em'), strike:!!input.querySelector('del'), code:!!input.querySelector('.hljs-keyword'),
+        marker: input.querySelector('.md-editor-h1')?.textContent, scripts:input.querySelectorAll('script,img:not(.cm-widgetBuffer)').length,
+        attach:document.querySelector('#btn-attach > span').textContent.trim(), open:document.getElementById('btn-format').getAttribute('aria-expanded')};
+    })()`);
+    check(result.value === source, 'Live rendering never rewrites the Markdown source');
+    check(result.heading && result.bold === 'bold' && result.italic && result.strike && result.code, 'Headings, emphasis, strike and code are rendered while composing');
+    check(!result.marker.includes('#') && result.marker.replace(/[\u200b\ufeff]/g, '') === 'Heading' && !result.scripts,
+      `Inactive syntax is hidden without mounting user HTML: ${JSON.stringify(result)}`);
+    check(result.attach === 'attach_file' && result.open === 'false', 'Paperclip replaces plus and formatting starts collapsed');
+    await evaluate(`document.getElementById('chat-message-input').setSelectionRange(4,4)`);
+    await fixture('settle()');
+    check(await evaluate(`(() => { const marker=document.querySelector('.md-editor-h1 .md-editor-syntax');
+      return marker?.textContent === '# ' && Number(getComputedStyle(marker).opacity) < 1; })()`),
+    'Moving the real editor selection into a heading reveals dimmed syntax');
+    await draft('selected');
+    await click('#btn-format');
+    await evaluate(`Promise.all(document.querySelector('.chat-format-panel').getAnimations().map(animation => animation.finished))`);
+    await click('[data-format="bold"]');
+    check((await fixture('state()')).value === '**selected**', 'Bold formats the selected text, not the entire draft');
+    await key('z', 'KeyZ', 90, process.platform === 'darwin' ? 4 : 2);
+    check((await fixture('state()')).value === 'selected', 'Native Undo reverses a formatting transaction');
+    await draft('selected');
+    await click('[data-format="italic"]');
+    check((await fixture('state()')).value === '*selected*', 'Italic preserves and formats the selection');
+    await draft('selected');
+    await click('[data-format="strike"]');
+    check((await fixture('state()')).value === '~~selected~~', 'Strike preserves and formats the selection');
+    for (const [format, tag] of [['bold', 'strong'], ['italic', 'em'], ['strike', 'del']]) {
+      await draft('', 0, 0);
+      await click(`[data-format="${format}"]`);
+      check((await fixture('state()')).value === '' && await evaluate(`document.querySelector('[data-format="${format}"]').getAttribute('aria-pressed') === 'true'`),
+        `${format} toggles typing without inserting placeholder text`);
+      await insert('alpha');
+      await insert(' ');
+      await insert('beta');
+      await click(`[data-format="${format}"]`);
+      await insert('plain');
+      const formatted = await evaluate(`(async () => {
+        const {renderMarkdown}=await import('/utils/markdown.ts');
+        const template=document.createElement('template'); template.innerHTML=renderMarkdown(document.getElementById('chat-message-input').value);
+        return {text:template.content.textContent, styled:[...template.content.querySelectorAll('${tag}')].map(node=>node.textContent).join(''),
+          pressed:document.querySelector('[data-format="${format}"]').getAttribute('aria-pressed')};
+      })()`);
+      check(formatted.text === 'alpha betaplain' && formatted.styled === 'alphabeta' && formatted.pressed === 'false',
+        `${format} persists through typing and spaces, then stops without changing existing text: ${JSON.stringify(formatted)}`);
+      await key('z', 'KeyZ', 90, process.platform === 'darwin' ? 4 : 2);
+      check(!(await fixture('state()')).value.includes('plain') && (await fixture('state()')).value.includes('beta'),
+        'Undo after switching typing style does not discard preceding formatted typing');
+    }
+    await draft('', 0, 0);
+    await click('[data-format="bold"]');
+    await click('[data-format="italic"]');
+    await insert('combined');
+    check((await fixture('state()')).value === '**_combined_**', 'Typing toggles compose without ambiguous Markdown delimiters');
+    await key('Enter', 'Enter', 13, 8);
+    await key('Enter', 'Enter', 13, 8);
+    await insert('next');
+    check((await fixture('state()')).value === '**_combined_**\n\n**_next_**',
+      'Enabled formatting continues after blank lines without unbalanced delimiters');
+    check(await evaluate(`document.querySelectorAll('.chat-format-toolbar [role="separator"]').length === 2`),
+      'Emphasis and list controls have separate visual groups');
+    await draft('selected');
+    await click('[data-format="inline-code"]');
+    check((await fixture('state()')).value === '`selected`', 'Inline code remains distinct from a code block');
+    await draft('one\ntwo');
+    await click('[data-format="bullet"]');
+    check((await fixture('state()')).value === '- one\n- two', 'Bullet formatting handles multiple selected lines');
+    check(await evaluate(`document.querySelectorAll('.md-editor-bullet').length === 2
+      && [...document.querySelectorAll('.md-editor-bullet')].every(marker=>marker.textContent==='\\u2022')`),
+      'Bullets are rendered as visible dots, not raw hyphens');
+    await draft('', 0, 0);
+    await click('[data-format="bullet"]');
+    await insert('item');
+    check((await fixture('state()')).value === '- item', 'Starting an empty bullet list keeps its marker when typing');
+    await draft('one\ntwo');
+    await click('[data-format="numbered"]');
+    check((await fixture('state()')).value === '1. one\n2. two', 'Numbered formatting handles multiple selected lines');
+    await draft('one\ntwo', 0, 4);
+    await click('[data-format="bullet"]');
+    check((await fixture('state()')).value === '- one\ntwo', 'Line formatting excludes a following line outside the selected range');
+    await draft('# Heading');
+    await click('[data-format="heading"]');
+    await click('.floating-context-menu [role="menuitem"]:nth-child(3)');
+    check((await fixture('state()')).value === '### Heading', 'Changing heading level does not remove the existing heading');
+    await click('[data-format="heading"]');
+    await click('.floating-context-menu [role="menuitem"]:nth-child(3)');
+    check((await fixture('state()')).value === 'Heading', 'Selecting the same heading level toggles it off');
+    await draft('', 0, 0);
+    await click('[data-format="separator"]');
+    await evaluate(`document.getElementById('chat-message-input').blur()`);
+    await fixture('settle()');
+    check(await evaluate(`document.getElementById('chat-message-input').value === '\\n\\n---\\n\\n'
+      && !!document.querySelector('.md-editor-separator') && !document.querySelector('.md-editor-separator').textContent.includes('---')
+      && getComputedStyle(document.querySelector('.md-editor-separator')).backgroundImage !== 'none'
+      && document.querySelector('.md-editor-separator').getBoundingClientRect().height >= 16`),
+    'Separators preview as horizontal rules while preserving their source');
+    check(await evaluate(`(async () => {
+      const {renderMarkdown}=await import('/utils/markdown.ts');
+      const rendered=document.createElement('div'); rendered.className='chat-message-text'; rendered.innerHTML=renderMarkdown('---');
+      document.body.appendChild(rendered);
+      const rule=getComputedStyle(rendered.querySelector('hr'));
+      const editor=document.querySelector('.md-editor-separator');
+      const height=parseFloat(rule.marginTop)+parseFloat(rule.borderTopWidth)+parseFloat(rule.marginBottom);
+      const equal=Math.abs(editor.getBoundingClientRect().height-height)<1
+        && getComputedStyle(editor).backgroundImage.includes(rule.borderTopColor)
+        && getComputedStyle(editor).backgroundSize === '100% 1px';
+      rendered.remove(); return equal;
+    })()`), 'The divider uses the sent-message color, one-pixel stroke and exact vertical spacing');
+    const dividerMessage = 'Before\n\n---\n\nAfter';
+    await draft(dividerMessage, dividerMessage.length, dividerMessage.length);
+    check(await evaluate(`(async () => {
+      const {renderMarkdown}=await import('/utils/markdown.ts');
+      const input=document.getElementById('chat-message-input');
+      const sent=document.createElement('div'); sent.className='chat-message-text'; sent.innerHTML=renderMarkdown(input.value);
+      sent.style.width=input.getBoundingClientRect().width+'px'; document.body.appendChild(sent);
+      const editorLines=[...input.querySelectorAll('.cm-line')];
+      const sentGap=sent.lastElementChild.getBoundingClientRect().top-sent.firstElementChild.getBoundingClientRect().top;
+      const editorGap=editorLines.at(-1).getBoundingClientRect().top-editorLines[0].getBoundingClientRect().top;
+      sent.remove(); return Math.abs(sentGap-editorGap)<1;
+    })()`), 'The same text and blank lines surrounding a divider have identical vertical spacing before and after sending');
+    await captureScreenshot(window, `markdown-divider-${locale}.png`);
+    await draft('quoted');
+    await click('[data-format="quote"]');
+    check((await fixture('state()')).value === '> quoted', 'Quote formatting applies to the current line');
+    await draft('', 0, 0);
+    await click('[data-format="quote"]');
+    await insert('quotation');
+    check((await fixture('state()')).value === '> quotation', 'A new quote places the caret after its marker without selecting or overwriting it');
+    await draft('@e', 2, 2);
+    await click('[data-mention-index="0"]');
+    await insert('continues');
+    check((await fixture('state()')).value === '@everyone continues', 'Typing after choosing a mention preserves the complete mention');
+    await draft('Monky');
+    await click('[data-format="link"]');
+    check(await evaluate(`document.querySelectorAll('[data-link-input]').length === 2
+      && document.querySelector('[data-link-input]').value === 'Monky'
+      && document.activeElement === document.querySelectorAll('[data-link-input]')[1]
+      && !document.querySelector('.modal-backdrop') && !document.querySelector('.chat-link-popover [aria-invalid="true"]')
+      && document.querySelector('.chat-link-popover').getBoundingClientRect().bottom <= document.querySelector('[data-format="link"]').getBoundingClientRect().top`),
+      'The link form opens above its anchor without a modal or premature validation');
+    await insert('javascript:alert(1)');
+    check(await evaluate(`!document.querySelector('.chat-link-popover [aria-invalid="true"]')`), 'Typing does not show errors before the first submit');
+    await click('.chat-link-popover [data-action="confirm"]');
+    check(await evaluate(`document.querySelectorAll('.chat-link-popover [aria-invalid="true"]').length === 1`), 'Invalid link protocols show feedback on submit without inserting a link');
+    await evaluate(`document.activeElement.select()`);
+    await insert('www.google.com');
+    await click('.chat-link-popover [data-action="confirm"]');
+    check((await fixture('state()')).value === '[Monky](https://www.google.com/)', 'The link form accepts www addresses without a scheme and defaults to HTTPS');
+    check(await evaluate(`(async () => {
+      const {normalizeEditorLinkAddress:normalize}=await import('/views/LinkPopover.ts');
+      return normalize('example.com/docs?q=1#part')==='https://example.com/docs?q=1#part'
+        && normalize('example.com/?next=https://other.example/')==='https://example.com/?next=https://other.example/'
+        && normalize('example.com:8443/a b')==='https://example.com:8443/a%20b'
+        && normalize('http://example.com/')==='http://example.com/'
+        && ['javascript:alert(1)','data:text/html,test','file:///tmp/test','ftp://example.com','custom.example://path',
+          'not-address','//example.com','www.','user@example.com'].every(value=>normalize(value)===null);
+    })()`), 'Address normalization preserves HTTP, ports, paths and fragments without accepting unsafe schemes or invalid hostnames');
+    await draft('', 0, 0);
+    await click('[data-format="link"]');
+    check(await evaluate(`document.querySelector('[data-link-input]').value === ''
+      && document.activeElement === document.querySelector('[data-link-input]')`),
+      'Without a selection the link dialog starts with an empty display-text field');
+    await insert('Label [detail]');
+    await click('.chat-link-popover label + label [data-link-input]');
+    await insert('https://example.invalid/a(b)');
+    await click('.chat-link-popover [data-action="confirm"]');
+    await evaluate(`document.getElementById('chat-message-input').blur()`);
+    await fixture('settle()');
+    check(await evaluate(`(async () => {
+      const {markdownMessageClipboard}=await import('/utils/messageClipboard.ts');
+      const input=document.getElementById('chat-message-input');
+      return markdownMessageClipboard(input.value).text === 'Label [detail]'
+        && input.querySelector('.md-editor-link').textContent.replace(/[\\u200b\\ufeff]/g,'') === 'Label [detail]'
+        && input.value.includes('/a%28b%29');
+    })()`), 'Link labels and addresses with brackets render identically in the editor and sent message');
+    await draft('one', 3, 3);
+    await key('Enter', 'Enter', 13, 8);
+    await key('Enter', 'Enter', 13, 8);
+    await key('Enter', 'Enter', 13, 8);
+    await insert('two');
+    check((await fixture('state()')).value === 'one\n\n\ntwo', 'Native Shift+Enter preserves each authored blank line');
+    const spacing = await evaluate(`(async () => {
+      const {renderMarkdown}=await import('/utils/markdown.ts');
+      const {markdownMessageClipboard}=await import('/utils/messageClipboard.ts');
+      const value=document.getElementById('chat-message-input').value;
+      const rendered=document.createElement('div'); rendered.className='chat-message-text'; rendered.innerHTML=renderMarkdown(value);
+      document.body.appendChild(rendered);
+      const lines=[...rendered.querySelectorAll('.md-blank-line')];
+      const editorLines=[...document.querySelectorAll('#chat-message-input .cm-line')];
+      const renderedGap=rendered.lastElementChild.getBoundingClientRect().top-rendered.firstElementChild.getBoundingClientRect().top;
+      const editorGap=editorLines.at(-1).getBoundingClientRect().top-editorLines[0].getBoundingClientRect().top;
+      const valid=lines.length===2 && lines.every(line=>line.getBoundingClientRect().height>=19)
+        && Math.abs(renderedGap-editorGap)<1 && markdownMessageClipboard(value).text===value;
+      rendered.remove(); return {valid,renderedGap,editorGap};
+    })()`);
+    check(spacing.valid, `Sent-message rendering and both clipboard representations preserve the same visible blank lines: ${JSON.stringify(spacing)}`);
+    await draft('4. Four', 7, 7);
+    await key('Enter', 'Enter', 13, 8);
+    check((await fixture('state()')).value === '4. Four\n5. ', 'Native Shift+Enter continues the authored numbered list');
+    result = await evaluate(`(async () => {
+      const {renderMarkdown}=await import('/utils/markdown.ts');
+      const {renderReplyPreview}=await import('/utils/messageReply.ts');
+      const template=document.createElement('template');
+      template.innerHTML=renderMarkdown('4. Four\\n5. Five');
+      const preview=document.createElement('div');
+      preview.innerHTML=renderReplyPreview({messageId:'fixture',userId:'fixture',userNickname:'Author',content:'**Reply**\\n\\n\`\`\`js\\nconst a = 1;\\n\`\`\`',createdAt:1});
+      return {start:template.content.querySelector('ol').start,items:template.content.querySelectorAll('li').length,
+        replyBold:preview.querySelector('strong:not(.chat-quote-heading strong)')?.textContent,
+        replyCode:!!preview.querySelector('.hljs-keyword'), replyButtons:preview.querySelectorAll('button,a').length};
+    })()`);
+    check(result.start === 4 && result.items === 2, 'Published lists preserve the authored start number');
+    check(result.replyBold === 'Reply' && result.replyCode && result.replyButtons === 0, 'Replies render emphasis and highlighted code without nested interactive controls');
+    for (const start of [0, 2, 99]) {
+      check(await evaluate(`(async () => {
+        const {renderMarkdown}=await import('/utils/markdown.ts');
+        const template=document.createElement('template'); template.innerHTML=renderMarkdown('${start}. Item\\n${start + 1}. Next');
+        return template.content.querySelector('ol')?.start === ${start};
+      })()`), `Published lists retain their explicit starting number ${start}`);
+    }
+    await draft('composition', 11, 11);
+    const sentBeforeComposition = (await fixture('state()')).sent.length;
+    await window.webContents.debugger.sendCommand('Input.imeSetComposition', { text: '漢', selectionStart: 1, selectionEnd: 1 });
+    await key('Enter', 'Enter', 13);
+    check((await fixture('state()')).sent.length === sentBeforeComposition, 'Enter during native IME composition does not submit a message');
+    await insert('漢');
+    check((await fixture('state()')).value === 'composition漢', 'Native composition commits once without corrupting the Markdown document');
+    await evaluate(`(() => { const input=document.getElementById('chat-message-input'); input.readOnly=true; })()`);
+    await insert('blocked');
+    check((await fixture('state()')).value === 'composition漢', 'Read-only Markdown input blocks native edits');
+    await evaluate(`document.getElementById('chat-message-input').readOnly=false`);
+    await draft('', 0, 0);
+    await click('[data-format="bold"]');
+    await window.webContents.debugger.sendCommand('Input.imeSetComposition', { text: '漢', selectionStart: 1, selectionEnd: 1 });
+    await insert('漢');
+    check((await fixture('state()')).value === '**漢**', 'IME composition honors the active typing toggle without duplicate characters');
+    await key('z', 'KeyZ', 90, process.platform === 'darwin' ? 4 : 2);
+    check((await fixture('state()')).value === '', 'Undo removes one formatted IME composition without leaving markers');
+    await draft('', 0, 0);
+    await evaluate(`document.getElementById('chat-message-input').maxLength=5`);
+    await insert('12345');
+    await insert('6');
+    check((await fixture('state()')).value === '12345', 'The editor enforces the configured character limit on native input');
+    await evaluate(`document.getElementById('chat-message-input').removeAttribute('maxlength')`);
+    await draft('<img src=x onerror=alert(1)>');
+    check(await evaluate(`!document.getElementById('chat-message-input').querySelector('img')`), 'Live Markdown never interprets raw HTML as executable markup');
+    check(await evaluate(`!document.querySelector('.chat-block-add-text')`), 'The redundant Add text buttons are absent');
+    await key('Escape', 'Escape', 27);
+    check(await evaluate(`document.getElementById('btn-format').getAttribute('aria-expanded')==='false'`), 'Escape collapses formatting before changing message-edit state');
+    await draft(source, source.length, source.length);
+    await click('#btn-format');
+    await evaluate(`document.getElementById('chat-message-input').blur()`);
+    await fixture('settle()');
+    await evaluate(`Promise.all(document.querySelector('.chat-format-panel').getAnimations().map(animation => animation.finished))`);
+    check(await evaluate(`(() => {
+      const input=document.getElementById('chat-message-input');
+      return getComputedStyle(input.querySelector('.cm-scroller')).fontFamily === getComputedStyle(input).fontFamily
+        && getComputedStyle(input.querySelector('.md-editor-quote')).paddingLeft === '10px'
+        && getComputedStyle(input.querySelector('.cm-content')).caretColor === getComputedStyle(input).color
+        && getComputedStyle(input.querySelector('.cm-editor')).outlineStyle === 'none'
+        && getComputedStyle(input.querySelector('.cm-content')).backgroundColor === 'rgba(0, 0, 0, 0)';
+    })()`), 'Live preview retains the app font and quote indentation rather than CodeMirror defaults');
+    await captureScreenshot(window, `markdown-composer-${locale}.png`);
+    const [width, height] = window.getContentSize();
+    window.setContentSize(450, height);
+    await fixture('settle()');
+    check(await evaluate(`(() => {
+      const surface=document.querySelector('.chat-composer-surface');
+      return surface.scrollWidth <= surface.clientWidth + 1;
+    })()`), 'The composer and formatting toolbar fit a narrow window without horizontal overflow');
+    await captureScreenshot(window, `markdown-composer-narrow-${locale}.png`);
+    window.setContentSize(width, height);
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+    });
+    check(await evaluate(`getComputedStyle(document.querySelector('.chat-format-panel')).transitionDuration === '0s'`),
+      'Formatting panel respects reduced motion');
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [] });
+    await fixture(`setReplyContent('2. First\\n3. Second\\n4. Third')`);
+    check(await evaluate(`(() => {
+      const list=document.querySelector('#chat-reply-composer .md-ol');
+      return list?.start===2 && getComputedStyle(list).listStyleType==='decimal'
+        && parseFloat(getComputedStyle(list).paddingLeft)>=20 && list.querySelectorAll('li').length===3;
+    })()`), 'Reply previews preserve ordered-list numbers and their visible marker gutter');
+    await captureScreenshot(window, `markdown-reply-list-${locale}.png`);
+    await fixture(`setReplyContent('- First\\n- Second')`);
+    check(await evaluate(`getComputedStyle(document.querySelector('#chat-reply-composer .md-ul')).listStyleType === 'disc'`),
+      'Reply previews also render bullet markers');
+    const codeMessage = 'Before\n\n```js\nconst answer = 42;\nconsole.log(answer);\n```\n\nAfter';
+    await fixture(`beginCodeEdit(${JSON.stringify(codeMessage)})`);
+    check((await fixture('state()')).editing && (await fixture('state()')).value === codeMessage,
+      'Editing a message with code retains the entire original Markdown');
+    check(await evaluate(`(() => {
+      const input=document.getElementById('chat-message-input');
+      const block=input.querySelector('.md-editor-code-widget');
+      return block.querySelector('select').value==='javascript'
+        && block.querySelector('textarea').value==='const answer = 42;\\nconsole.log(answer);'
+        && block.querySelector('.md-code-lines').textContent==='1\\n2'
+        && !block.textContent.includes('\`\`\`') && !!block.querySelector('.hljs-keyword');
+    })()`), 'Existing code edits use the composition textarea, language dropdown and gutter without visible fences');
+    for (const viewportWidth of [2000, 450]) {
+      window.setContentSize(viewportWidth, height);
+      await fixture('settle()');
+      const layout = await evaluate(`(() => {
+        const wrapper=document.querySelector('.chat-input-wrapper');
+        const input=document.getElementById('chat-message-input');
+        const content=input.querySelector('.cm-content').getBoundingClientRect();
+        const code=input.querySelector('.md-editor-code-widget').getBoundingClientRect();
+        const save=document.getElementById('btn-send-message').getBoundingClientRect();
+        const counter=document.getElementById('chat-char-counter').getBoundingClientRect();
+        return {
+          codeWidth:code.width, availableWidth:content.width,
+          rightGap:wrapper.getBoundingClientRect().right-save.right,
+          padding:parseFloat(getComputedStyle(wrapper).paddingRight),
+          counterBeforeSave:counter.right<=save.left && Math.abs(counter.top+counter.height/2-save.top-save.height/2)<2,
+          controlsBelow:save.top>=input.getBoundingClientRect().bottom,
+          overflow:wrapper.scrollWidth> wrapper.clientWidth+1
+        };
+      })()`);
+      check(Math.abs(layout.codeWidth-layout.availableWidth)<2 && Math.abs(layout.rightGap-layout.padding)<2
+        && layout.counterBeforeSave && layout.controlsBelow && !layout.overflow,
+      `Code editing uses the full width and keeps Save/count at the bottom right (${viewportWidth}px): ${JSON.stringify(layout)}`);
+      await captureScreenshot(window, `markdown-code-layout-${viewportWidth}-${locale}.png`);
+    }
+    window.setContentSize(width, height);
+    await fixture('settle()');
+    await captureScreenshot(window, `markdown-existing-code-edit-${locale}.png`);
+    await evaluate(`(() => { const input=document.querySelector('.md-editor-code-widget textarea'); input.focus(); const end=input.value.indexOf('\\n'); input.setSelectionRange(end,end); })()`);
+    await insert(' // edited');
+    check((await fixture('state()')).value.includes('const answer = 42; // edited'),
+      'The framed code remains directly editable through native typing');
+    await key('z', 'KeyZ', 90, process.platform === 'darwin' ? 4 : 2);
+    check((await fixture('state()')).value === codeMessage, 'Undo inside a code block restores its exact original source');
+    await insert(' // edited');
+    await evaluate(`(() => { const input=document.getElementById('chat-message-input');
+      const from=input.value.indexOf('const answer'); input.setSelectionRange(from,from+'const answer = 42;'.length); })()`);
+    await fixture('settle()');
+    check(await evaluate(`document.activeElement instanceof HTMLTextAreaElement
+      && document.activeElement.value.slice(document.activeElement.selectionStart,document.activeElement.selectionEnd)==='const answer = 42;'`),
+      'Code selections use the same native textarea as composition');
+    await captureScreenshot(window, `markdown-selected-code-${locale}.png`);
+    await click('#btn-send-message');
+    await fixture('replyEdit("a")');
+    await fixture('settle()');
+    check(!(await fixture('state()')).editing
+      && (await fixture('state()')).message.includes('const answer = 42; // edited'),
+      'Saving an existing code message preserves its edited code and surrounding text');
+    for (const text of ['```js\n```', '```js\n\n```', '```js\nconst open = 1;', '```js\nconst a = 1;\n```\n\n```py\nprint(2)\n```\n\nAfter']) {
+      await draft(text, 0, 0);
+      await evaluate(`document.getElementById('chat-message-input').blur()`);
+      await fixture('settle()');
+      check(await evaluate(`(() => {
+        const input=document.getElementById('chat-message-input');
+        return input.value === ${JSON.stringify(text)} && !!input.querySelector('.md-editor-code-widget select')
+          && [...input.querySelectorAll('.md-editor-code-widget')].every(line=>line.getBoundingClientRect().width<=input.clientWidth+1);
+      })()`), 'Empty, unfinished and multiple code blocks retain source and bounded rendering');
+    }
+    await draft('', 0, 0);
+    await insert('https://');
+    check(await evaluate(`!document.querySelector('#chat-message-input .md-editor-link')`),
+      'An incomplete URL stays plain text until it has a valid address');
+    await insert('example.invalid?q=1&lang=pt');
+    const automaticSource = 'https://example.invalid?q=1&lang=pt';
+    check((await fixture('state()')).value === automaticSource && await evaluate(`document.querySelector('#chat-message-input .md-editor-link')?.textContent===${JSON.stringify(automaticSource)}`),
+      'Typing a URL recognizes a link without rewriting the draft or moving its caret');
+    await key('z', 'KeyZ', 90, process.platform === 'darwin' ? 4 : 2);
+    check((await fixture('state()')).value === '' || (await fixture('state()')).value === 'https://',
+      'Automatic recognition adds no extra undo transaction');
+    const autoLinks = 'Veja **https://example.invalid/a(b)** e www.example.invalid.\n\n`https://code.invalid`\n\n```js\nhttps://block.invalid\n```\n\n[Manual](https://manual.invalid)';
+    await draft(autoLinks, 0, 0);
+    await evaluate(`document.getElementById('chat-message-input').blur()`);
+    await fixture('settle()');
+    check(await evaluate(`(async () => {
+      const {renderMarkdown}=await import('/utils/markdown.ts');
+      const input=document.getElementById('chat-message-input');
+      const template=document.createElement('template');template.innerHTML=renderMarkdown(input.value);
+      return input.value===${JSON.stringify(autoLinks)}
+        && JSON.stringify([...input.querySelectorAll('.md-editor-link')].map(link=>link.textContent))===JSON.stringify(['https://example.invalid/a(b)','www.example.invalid','Manual'])
+        && template.content.querySelectorAll('a').length===3
+        && !!template.content.querySelector('strong > a')
+        && !template.content.querySelector('code a');
+    })()`), 'Automatic links preserve bold, manual links and code with the same rendering after sending');
+    await captureScreenshot(window, `markdown-automatic-links-${locale}.png`);
+    checks += await runEditorContextSmoke(window, locale);
+    await fixture('deletedUndo(60000)');
+    check(await evaluate(`!!document.querySelector('[data-restore-message-id="original"]')`), 'An acknowledged deletion offers a timed undo action');
+    await fixture('setChannel("other")');
+    await fixture('setChannel("chat")');
+    check(await evaluate(`!!document.querySelector('[data-restore-message-id="original"]')`), 'Changing channels does not discard the server undo deadline');
+    await click('[data-restore-message-id="original"]');
+    check((await fixture('state()')).message === '\nOriginal line\nSecond line', 'Undo restores the original row after a channel round trip');
+    await fixture('deletedUndo(400)');
+    await evaluate(`new Promise(resolve=>setTimeout(resolve,700))`);
+    check(await evaluate(`!document.querySelector('[data-restore-message-id="original"]')`), 'The undo control disappears when its time window ends');
+  }
+  return checks;
+}
+
+async function runEditorContextSmoke(window, locale) {
+  const evaluate = code => window.webContents.executeJavaScript(code, true);
+  const settle = () => evaluate('window.messageEditingFixture.settle()');
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  let checks = 0;
+  const draft = async (text, from = 0, to = text.length) => {
+    await evaluate(`(() => { const input=document.getElementById('chat-message-input');
+      input.value=${JSON.stringify(text)};input.focus();input.setSelectionRange(${from},${to});
+      input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+    await settle();
+  };
+  const click = async (selector, button = 'left') => {
+    const point = await evaluate(`window.messageEditingFixture.point(${JSON.stringify(selector)})`);
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', button, clickCount: 1, ...point });
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', button, clickCount: 1, ...point });
+    await settle();
+  };
+  const key = async (key, code, keyCode, modifiers = 0) => {
+    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, modifiers });
+    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, modifiers });
+    await settle();
+  };
+  const item = index => `.floating-context-menu button:nth-child(${index})`;
+  const link = '#chat-message-input .md-editor-link';
+  const context = async () => {
+    const point = await evaluate(`(() => { const selection=window.getSelection();
+      if(!selection?.rangeCount || selection.isCollapsed) return null;
+      const rect=selection.getRangeAt(0).getBoundingClientRect();
+      return rect.width?{x:rect.left+rect.width/2,y:rect.top+rect.height/2}:null; })()`);
+    if (!point) return click('#chat-message-input .cm-content', 'right');
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type:'mousePressed',button:'right',clickCount:1,...point });
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type:'mouseReleased',button:'right',clickCount:1,...point });
+    await settle();
+  };
+  const value = () => evaluate(`document.getElementById('chat-message-input').value`);
+  await evaluate(`(() => {
+    const state=window.editorMenuTest={commands:[],copied:[],opened:[],oldApi:window.api,
+      oldClipboard:Object.getOwnPropertyDescriptor(navigator,'clipboard')};
+    Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>state.copied.push(text)}});
+    window.api={...window.api,
+      editorCommand:async command=>{
+        const active=document.activeElement;
+        const input=active instanceof HTMLTextAreaElement?active:active.closest('monky-markdown-input');
+        state.commands.push({command,from:input.selectionStart,to:input.selectionEnd,value:input.value,code:input instanceof HTMLTextAreaElement});
+        return {success:!state.failCommand};
+      },
+      openExternal:async url=>{state.opened.push(url);return {success:true};}
+    };
+  })()`);
+  try {
+    await draft('', 0, 0);
+    await context();
+    check(await evaluate(`JSON.stringify([...document.querySelectorAll('.floating-context-menu button')].map(b=>b.disabled))==='[true,true,false,false,true]'`),
+      'An empty editor disables Cut, Copy and Select all, but allows both paste modes');
+    check(await evaluate(`document.activeElement===document.querySelector(${JSON.stringify(item(3))})`),
+      'The menu focuses its first enabled action');
+    await captureScreenshot(window, `editor-text-menu-${locale}.png`);
+    await key('End', 'End', 35);
+    check(await evaluate(`document.activeElement===document.querySelector(${JSON.stringify(item(4))})`),
+      'Keyboard menu navigation skips disabled actions');
+    await key('Escape', 'Escape', 27);
+    check(await evaluate(`!document.querySelector('.floating-context-menu') && document.getElementById('chat-message-input').contains(document.activeElement)`),
+      'Escape closes the menu and returns focus to the editor');
+    await context();
+    const outsideInputPoint = await evaluate(`(() => {const rect=document.querySelector('#chat-message-input .cm-content').getBoundingClientRect();
+      return {x:rect.left+3,y:rect.top+rect.height/2};})()`);
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {type:'mousePressed',button:'left',clickCount:1,...outsideInputPoint});
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {type:'mouseReleased',button:'left',clickCount:1,...outsideInputPoint});
+    await settle();
+    check(await evaluate(`!document.querySelector('.floating-context-menu') && document.getElementById('chat-message-input').contains(document.activeElement)`),
+      'Clicking the editor outside its context menu dismisses the menu without swallowing the input click');
+    for (const [index, command] of ['cut','copy','paste','pasteAndMatchStyle','selectAll'].entries()) {
+      await draft('ABCDE', 1, 4);
+      await context();
+      await click(item(index+1));
+      check(await evaluate(`(() => {const last=window.editorMenuTest.commands.at(-1);
+        return last.command===${JSON.stringify(command)} && last.value==='ABCDE' && last.from===1 && last.to===4;})()`),
+      `${command} restores the original input and selection before invoking the native editing command`);
+      if (command === 'copy' || command === 'cut') {
+        const toast = command === 'cut' ? (locale === 'en' ? 'Cut!' : 'Recortado!') : (locale === 'en' ? 'Copied!' : 'Copiado!');
+        check(await evaluate(`document.querySelector('.chat-copy-toast-label')?.textContent===${JSON.stringify(toast)}`),
+          `${command} shows localized toast feedback only after the native command is accepted`);
+      }
+      if (command === 'selectAll') {
+        window.webContents.selectAll();
+        await settle();
+        check(await evaluate(`(() => {const input=document.getElementById('chat-message-input');return input.selectionStart===0 && input.selectionEnd===5;})()`),
+          'The native Select all operation selects only the focused editor');
+      }
+    }
+    await draft('ABCDE',1,4);
+    await evaluate(`window.editorMenuTest.failCommand=true`);
+    await context();
+    await click(item(2));
+    check(await evaluate(`!document.querySelector('.chat-copy-toast') && !!document.querySelector('.dialog-card')`),
+      'A rejected native copy reports failure instead of displaying a success toast');
+    await click('.dialog-card [data-action="confirm"]');
+    await evaluate(`window.editorMenuTest.failCommand=false`);
+    const original = 'Before [Monky](https://example.invalid/a) after';
+    await draft(original, 0, 0);
+    await click(link, 'right');
+    check(await evaluate(`document.querySelectorAll('.floating-context-menu button').length===4`), 'A link opens its dedicated four-action menu');
+    await captureScreenshot(window, `editor-link-menu-${locale}.png`);
+    await click(item(1));
+    check(await evaluate(`window.editorMenuTest.copied.at(-1)==='https://example.invalid/a'`) && await value()===original,
+      'Copy link copies the address, not the label, without changing the message');
+    check(await evaluate(`document.querySelector('.chat-copy-toast-label')?.textContent===${JSON.stringify(locale === 'en' ? 'Copied!' : 'Copiado!')}`),
+      'Copy link also shows the localized copy toast');
+    await click(link, 'right');
+    await click(item(2));
+    check(await evaluate(`window.editorMenuTest.opened.at(-1)==='https://example.invalid/a'`), 'Open link uses the existing external-browser bridge');
+    await click(link, 'right');
+    await click(item(3));
+    check(await evaluate(`(() => { const inputs=[...document.querySelectorAll('[data-link-input]')];
+      return inputs.length===2 && inputs[0].value==='Monky' && inputs[1].value==='https://example.invalid/a'
+        && !document.querySelector('.chat-link-popover [aria-invalid="true"]'); })()`),
+      'Edit link reuses the non-modal form with its label and address and no initial errors');
+    await evaluate(`(() => {const inputs=document.querySelectorAll('[data-link-input]');
+      inputs[0].value='Updated';inputs[1].value='other.invalid/path';})()`);
+    await click('.chat-link-popover [type="submit"]');
+    const edited = 'Before [Updated](https://other.invalid/path) after';
+    check(await value()===edited, 'Editing changes only the clicked link and keeps surrounding text');
+    await click(link, 'right');
+    await click(item(3));
+    await click('#chat-message-input .cm-content');
+    check(await evaluate(`!document.querySelector('.chat-link-popover')`) && await value()===edited,
+      'Clicking the message input closes the link dropup without changing the draft');
+    await click(link, 'right');
+    await click(item(4));
+    check(await value()==='Before Updated after', 'Remove link keeps the display text');
+    await key('z', 'KeyZ', 90, process.platform==='darwin'?4:2);
+    check(await value()===edited, 'Undo restores the removed link in one transaction');
+    for (const url of ['https://example.invalid/a(b)', 'www.example.invalid']) {
+      await draft(url, 0, 0);
+      await click(link, 'right');
+      await click(item(4));
+      check(await evaluate(`(async () => {
+        const {renderMarkdown}=await import('/utils/markdown.ts');
+        const input=document.getElementById('chat-message-input'); const node=document.createElement('div');node.innerHTML=renderMarkdown(input.value);
+        return !input.querySelector('.md-editor-link') && !node.querySelector('a') && node.textContent===${JSON.stringify(url)}
+          && input.querySelector('.cm-content').textContent.replace(/[\\u200b\\ufeff]/g,'')===${JSON.stringify(url)};
+      })()`), 'Removing an automatic link keeps its visible URL without immediately relinking, including after sending');
+      await key('z', 'KeyZ', 90, process.platform==='darwin'?4:2);
+      check(await value()===url && await evaluate(`!!document.querySelector(${JSON.stringify(link)})`), 'Undo restores automatic link recognition');
+    }
+    await draft(original, 0, 0);
+    await evaluate(`document.getElementById('chat-message-input').readOnly=true`);
+    await click(link, 'right');
+    check(await evaluate(`JSON.stringify([...document.querySelectorAll('.floating-context-menu button')].map(b=>b.disabled))==='[false,false,true,true]'`),
+      'Read-only links allow opening and copying, not editing or removal');
+    await key('Escape','Escape',27);
+    await evaluate(`document.getElementById('chat-message-input').readOnly=false`);
+    await draft('```js\nconst keep = 1;\n```',0,0);
+    await evaluate(`(() => {const codeInput=document.querySelector('.md-editor-code-widget textarea');codeInput.focus();codeInput.select();})()`);
+    await click('.md-editor-code-widget textarea','right');
+    await click(item(2));
+    check(await evaluate(`window.editorMenuTest.commands.at(-1).code===true && window.editorMenuTest.commands.at(-1).value==='const keep = 1;'`),
+      'Code textareas use the text menu and keep native code selection semantics');
+    await click('.md-editor-code-widget textarea','right');
+    const codePoint = await evaluate(`(() => {const rect=document.querySelector('.md-editor-code-widget textarea').getBoundingClientRect();
+      return {x:rect.left+3,y:rect.top+rect.height/2};})()`);
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {type:'mousePressed',button:'left',clickCount:1,...codePoint});
+    await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {type:'mouseReleased',button:'left',clickCount:1,...codePoint});
+    await settle();
+    check(await evaluate(`!document.querySelector('.floating-context-menu') && document.activeElement.matches('.md-editor-code-widget textarea')`),
+      'Clicking a code textarea outside its context menu closes the menu and keeps the textarea editable');
+    await evaluate(`window.messageEditingFixture.beginCodeEdit(${JSON.stringify(original)})`);
+    await click(link,'right');
+    await click(item(4));
+    check(await value()==='Before Monky after', 'The same link menu also updates an existing message edit');
+    await click('#btn-cancel-message-edit');
+    await draft('ABCDE',1,4);
+    await evaluate(`void (window.api.editorCommand=()=>new Promise(resolve=>{window.editorMenuTest.resolveCommand=resolve}))`);
+    await context();
+    await click(item(2));
+    await evaluate(`window.messageEditingFixture.setChannel('other');window.editorMenuTest.resolveCommand({success:true})`);
+    await settle();
+    check(await evaluate(`!document.querySelector('.chat-copy-toast')`),
+      'A native copy completed after changing channels cannot display a stale success toast');
+    await evaluate(`window.messageEditingFixture.setChannel('chat')`);
+    await draft(original,0,0);
+    await click(link,'right');
+    await click(item(3));
+    await evaluate(`window.messageEditingFixture.setChannel('other')`);
+    check(await evaluate(`!document.querySelector('.chat-link-popover, .floating-context-menu')`),
+      'Changing channels closes context menus and pending link forms');
+    await evaluate(`window.messageEditingFixture.setChannel('chat')`);
+  } finally {
+    await evaluate(`(() => {
+      const state=window.editorMenuTest;window.api=state.oldApi;
+      if(state.oldClipboard) Object.defineProperty(navigator,'clipboard',state.oldClipboard);else delete navigator.clipboard;
+      delete window.editorMenuTest;
+    })()`);
+  }
+  return checks;
 }
 
 async function installFixture() {
@@ -507,8 +1192,8 @@ async function installFixture() {
     if (event.key === 'Enter') { trusted.enters++; if (event.shiftKey) trusted.newlines++; }
     if (event.key === 'Escape') trusted.escapes++;
   };
-  document.addEventListener('input', inputListener);
-  document.addEventListener('keydown', keyListener);
+  document.addEventListener('input', inputListener, true);
+  document.addEventListener('keydown', keyListener, true);
   sessionManager.install();
   selectEnhancer.init();
   const offUpdate = appEvents.on('message.CHAT_MESSAGE_UPDATED', payload => chats.chatStore.updateMessage(payload.message));
@@ -532,6 +1217,9 @@ async function installFixture() {
     session.client.getConnectionId = () => `${name}-${state.epoch}`;
     session.client.getCurrentServerUrl = () => session.key;
     session.client.send = (type, payload, requestId) => {
+      if (type === 'CHAT_RESTORE') queueMicrotask(() => session.client.handleIncomingMessage({
+        type: 'CHAT_MESSAGE_UPDATED', requestId, payload: { message: { ...original, revision: payload.revision + 1, deletedAt: null } },
+      }));
       if (type === 'CHAT_EDIT') state.edits.push({ payload, requestId, completed: false });
       if (type === 'CHAT_SEND') state.sent.push(payload);
       if (type === 'CHAT_SEND' && payload.clientMessageId) {
@@ -961,12 +1649,13 @@ async function installFixture() {
         editLabel: find('#chat-edit-label').textContent, hint: find('#chat-edit-hint').textContent,
         error: find('#chat-edit-error').textContent, description: input.getAttribute('aria-describedby') ?? '',
         replyId: store.getReplyDraft(channel)?.messageId, replyHidden: find('#chat-reply-composer').hidden,
-        readOnly: input.readOnly, focus: document.activeElement?.id,
+        readOnly: input.readOnly, focus: document.activeElement?.closest('monky-markdown-input')?.id ?? document.activeElement?.id,
         attachHidden: getComputedStyle(find('#btn-attach')).display === 'none',
         codeHidden: getComputedStyle(find('#btn-code')).display === 'none',
+        codeDisabled: find('#btn-code').disabled,
         trayHidden: getComputedStyle(find('#chat-attachment-tray')).display === 'none',
         inlineEditors: root.querySelectorAll('.chat-message-editor').length,
-        textareas: root.querySelectorAll('textarea').length,
+        textareas: root.querySelectorAll('textarea, monky-markdown-input').length,
         commandOpen: getComputedStyle(find('#command-dropup')).display !== 'none',
         commandSelected: !!store.getCommandDraft(channel),
       };
@@ -1023,6 +1712,24 @@ async function installFixture() {
         mimeType: 'text/plain', sizeBytes: 12, createdAt: 100, evicted: true,
       }] });
     },
+    async beginCodeEdit(content) {
+      active.session.chatStore.updateMessage({ ...original, content });
+      view.startEditingMessage(original.id);
+      await settle();
+    },
+    async deletedUndo(duration) {
+      const now = Date.now();
+      active.session.serverStore.serverDetails.protocol = { version: 27, minimumVersion: 27, features: ['message-delete-undo'] };
+      active.session.chatStore.updateMessage({ ...original, content: '', revision: now, deletedAt: now,
+        deletedByUserId: user.id, deleteUndoUntil: now + duration });
+      await settle();
+    },
+    async setReplyContent(content) {
+      const updated = { ...reply, content };
+      active.session.chatStore.updateMessage(updated);
+      view.startReply(updated.id);
+      await settle();
+    },
     trySecondEdit() { view.startEditingMessage('second'); },
     replaceHistory() { active.session.chatStore.setHistory('chat', [reply], 'reply-source'); },
     deleteOriginal() {
@@ -1078,8 +1785,8 @@ async function installFixture() {
       offMessage();
       await sessionManager.removeAll();
       routing.setSessionEventRouter((_key, _event, emit) => emit());
-      document.removeEventListener('input', inputListener);
-      document.removeEventListener('keydown', keyListener);
+      document.removeEventListener('input', inputListener, true);
+      document.removeEventListener('keydown', keyListener, true);
       document.getElementById('fixture-other-control')?.remove();
       root.innerHTML = '';
     },

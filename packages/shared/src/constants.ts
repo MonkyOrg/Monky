@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 26;
+export const PROTOCOL_VERSION = 27;
 
 /**
  * Default size of the floating overlay window (#169). Shared so the renderer can
@@ -9,6 +9,8 @@ export const OVERLAY_DEFAULT_WIDTH = 340;
 export const OVERLAY_DEFAULT_HEIGHT = 240;
 
 export const LIMITS = {
+  MESSAGE_DELETE_UNDO_SECONDS: 60,
+  MAX_MESSAGE_DELETE_UNDO_SECONDS: 86400,
   MAX_MESSAGE_LENGTH: 16000,
   MAX_AVATAR_SIZE: 5 * 1024 * 1024, // 5 MB
   MAX_USERS_DEFAULT: 20,

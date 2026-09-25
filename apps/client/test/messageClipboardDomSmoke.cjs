@@ -316,7 +316,7 @@ async function runSystemClipboardSmoke(sourceWindow) {
   const copyPlain = async () => {
     sourceWindow.webContents.focus();
     await click('[data-message-id="rich"] [data-message-action="more"]');
-    await click('.floating-context-menu:not(.floating-context-submenu) [aria-haspopup="menu"]');
+    await click('.floating-context-menu:not(.floating-context-submenu) [aria-haspopup="menu"] .context-menu-trailing');
     await click('.floating-context-submenu [role="menuitem"]:last-child');
   };
   const paste = async target => {
@@ -358,16 +358,16 @@ async function runSystemClipboardSmoke(sourceWindow) {
     check(rich.bold && rich.italic && rich.link === 'https://example.invalid/docs?a=1&b=2' && rich.types.includes('text/html'),
       'An independent editor receives real OS HTML and renders bold, italic and links without Monky code');
     const text = await paste('plain');
-    check(normalize(text.text) === expected.source,
-      `Formatted native copy preserves Markdown for external text destinations: ${JSON.stringify(text.text)}`);
-    check(normalize(await clipboard.readText()) === expected.source && (await clipboardFormats()).includes('text/html'),
-      'The real OS clipboard carries both Markdown text and semantic HTML');
+    check(normalize(text.text) === expected.expectedPlain,
+      `Formatted native copy gives visible text to plain destinations: ${JSON.stringify(text.text)}`);
+    check(normalize(await clipboard.readText()) === expected.expectedPlain && (await clipboardFormats()).includes('text/html'),
+      'The real OS clipboard carries visible text and semantic HTML');
 
     sourceWindow.webContents.focus();
     await dispatchKey(sourceWindow, 'C', 'KeyC', 67, modifier | 8);
     await fixture('settle()');
-    check(normalize(await clipboard.readText()) === expected.source && (await clipboardFormats()).includes('text/html'),
-      'The removed plain-copy shortcut leaves the current formatted system clipboard unchanged');
+    check(normalize(await clipboard.readText()) === expected.expectedPlain && !(await clipboardFormats()).includes('text/html'),
+      'Ctrl+Shift+C replaces rich data with visible plain text');
     await copyPlain();
     await until(async () => normalize(await clipboard.readText()) === expected.expectedPlain, 'plain-copy menu button write');
     const plainFormats = await clipboardFormats();
@@ -386,10 +386,10 @@ async function runSystemClipboardSmoke(sourceWindow) {
     const selected = (await fixture('state()')).selection;
     check(selected === 'bold' || selected === 'bold ', 'Native mouse selection remains local to the chosen word');
     await copy();
-    await until(async () => await clipboard.readText() === `**bold**${selected.slice(4)}`, 'formatted selection write');
+    await until(async () => await clipboard.readText() === selected, 'formatted selection write');
     const fragment = await paste('plain');
-    check(fragment.text === `**bold**${selected.slice(4)}`,
-      'Formatted external copying preserves only the native selected fragment and its Markdown emphasis');
+    check(fragment.text === selected,
+      'Formatted external copying preserves only the visible selected fragment without Markdown markers');
     const richFragment = await paste('rich');
     check(richFragment.bold && richFragment.text.trim() === 'bold',
       'The same partial selection stays formatted in the independent rich editor');
@@ -423,7 +423,14 @@ async function runSystemClipboardSmoke(sourceWindow) {
 
 async function runSmoke(window) {
   const evaluate = source => window.webContents.executeJavaScript(source, true);
-  const fixture = source => evaluate(`window.messageClipboardFixture.${source}`);
+  const fixture = async source => {
+    const result = await evaluate(`(async () => {
+      try { return {value:await eval(${JSON.stringify(`window.messageClipboardFixture.${source}`)})}; }
+      catch(error) { return {error:error.stack ?? String(error)}; }
+    })()`);
+    if (result.error) throw new Error(result.error);
+    return result.value;
+  };
   let checks = 0;
   const check = (condition, message) => {
     if (!condition) throw new Error(message);
@@ -442,10 +449,11 @@ async function runSmoke(window) {
   };
   const more = '[data-message-id="rich"] [data-message-action="more"]';
   const parentCopy = '.floating-context-menu:not(.floating-context-submenu) [aria-haspopup="menu"]';
+  const copyArrow = `${parentCopy} .context-menu-trailing`;
   const children = '.floating-context-submenu [role="menuitem"]';
   const copyPlain = async (messageId = 'rich') => {
     await click(`[data-message-id="${messageId}"] [data-message-action="more"]`);
-    await click(parentCopy);
+    await click(copyArrow);
     await click(`${children}:last-child`);
   };
 
@@ -453,12 +461,43 @@ async function runSmoke(window) {
   try {
     await fixture('prepare("en")');
     checks += await fixture('testHelpers()');
+    for (const sample of [
+      { source: '**bold**', from: 3, to: 5, text: 'ol', tag: 'strong' },
+      { source: '[Monky](https://example.invalid)', from: 1, to: 4, text: 'Mon', tag: 'a', href: 'https://example.invalid/' },
+      { source: '# Heading', from: 4, to: 7, text: 'adi', tag: 'h1' },
+      { source: '`code`', from: 1, to: 3, text: 'co', tag: 'code' },
+      { source: '**alpha** and **beta**', from: 4, to: 18, text: 'pha and be', tag: 'strong', count: 2 },
+    ]) {
+      await fixture(`preparePaste(${JSON.stringify(sample.source)}, ${sample.from}, ${sample.to})`);
+      await copy();
+      const copied = (await fixture('state()')).last;
+      const markup = await evaluate(`(() => {
+        const template=document.createElement('template'); template.innerHTML=${JSON.stringify(copied.html)};
+        return {count:template.content.querySelectorAll(${JSON.stringify(sample.tag)}).length,
+          href:template.content.querySelector('a')?.href};
+      })()`);
+      check(copied.kind === 'formatted' && copied.text === sample.text && markup.count === (sample.count ?? 1)
+        && (!sample.href || markup.href === sample.href), `Editor selection preserves its ${sample.tag} formatting and visible text`);
+      await key('C', 'KeyC', 67, 10);
+      const plain = (await fixture('state()')).last;
+      check(plain.kind === 'plain' && plain.text === sample.text && !plain.html,
+        'Editor Ctrl+Shift+C removes formatting without leaking Markdown delimiters');
+    }
     await fixture('preparePaste("Existing draft")');
     await click('[data-message-id="rich"] strong', 2);
     let state = await fixture('state()');
     const mouseSelection = state.selection;
     check(mouseSelection === 'bold' || mouseSelection === 'bold ',
       `Native mouse selection chooses the rendered word, including the platform's trailing space: ${JSON.stringify(mouseSelection)}`);
+    const afterMouseWrites = state.writes;
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'C', modifiers: [process.platform === 'darwin' ? 'meta' : 'control', 'shift'] });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'C', modifiers: [process.platform === 'darwin' ? 'meta' : 'control', 'shift'] });
+    await fixture('settle()');
+    state = await fixture('state()');
+    check(state.writes === afterMouseWrites + 1 && state.last.kind === 'plain' && state.last.text === mouseSelection,
+      `Ctrl+Shift+C copies a real mouse selection immediately after composing, without forcing row focus: ${JSON.stringify({
+        last: state.last, selection: state.selection, activeElement: state.activeElement, writes: state.writes, before: afterMouseWrites,
+      })}`);
     await copyPlain();
     state = await fixture('state()');
     check(state.last?.kind === 'plain' && state.last.text === mouseSelection,
@@ -468,7 +507,7 @@ async function runSmoke(window) {
     await fixture('select("[data-message-id=rich] strong", 1, 3)');
     await copy();
     state = await fixture('state()');
-    check(state.last.kind === 'formatted' && state.last.text === '**ol**', 'Native Ctrl+C preserves Markdown for only the selected substring, not the whole message');
+    check(state.last.kind === 'formatted' && state.last.text === 'ol', 'Native Ctrl+C copies only visible selected text without Markdown delimiters');
     check(state.last.html.includes('<strong>ol</strong>'), 'Partial selection retains the strong ancestor dropped by Range.cloneContents');
     check(state.last.types.join(',') === 'text/plain,text/html', 'Formatted copying supplies standard text/plain and text/html MIME flavors');
     check(state.toast === 'Copied!', 'A successful native copy retains localized accessible feedback');
@@ -480,23 +519,39 @@ async function runSmoke(window) {
     const beforeRemovedShortcuts = (await fixture('state()')).writes;
     await key('C', 'KeyC', 67, 10);
     await key('C', 'KeyC', 67, 12);
-    check((await fixture('state()')).writes === beforeRemovedShortcuts,
-      'Neither Ctrl+Shift+C nor Cmd+Shift+C invokes message copying');
+    check((await fixture('state()')).writes === beforeRemovedShortcuts + 2
+      && (await fixture('state()')).last.kind === 'plain',
+      'Ctrl+Shift+C and Cmd+Shift+C both copy the same selection without formatting');
+    const electronCopyStart = (await fixture('state()')).writes;
+    const electronInputs = [];
+    const recordElectronInput = (_event, input) => { if (input.key.toLowerCase() === 'c') electronInputs.push(input); };
+    window.webContents.on('before-input-event', recordElectronInput);
+    try {
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'C', modifiers: [process.platform === 'darwin' ? 'meta' : 'control', 'shift'] });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'C', modifiers: [process.platform === 'darwin' ? 'meta' : 'control', 'shift'] });
+      await fixture('settle()');
+      state = await fixture('state()');
+      check(electronInputs.some(input => input.type === 'keyDown' && input.shift && (input.control || input.meta))
+        && state.writes === electronCopyStart + 1 && state.last.kind === 'plain' && state.last.text === 'ol',
+      `Plain copy reaches the renderer through Electron keyboard handling, not only CDP: ${JSON.stringify({ electronInputs, writes:state.writes, before:electronCopyStart, last:state.last })}`);
+    } finally {
+      window.webContents.removeListener('before-input-event', recordElectronInput);
+    }
     await fixture('select("[data-message-id=rich] .chat-message-text")');
     await copy();
     state = await fixture('state()');
-    check(state.last.text.startsWith('# Heading\n\nA **bold**') && state.last.text.includes('```javascript\n' + state.code),
-      `Rendered selections preserve Markdown headings, emphasis and code for external text destinations: ${JSON.stringify(state.last.text)}`);
+    check(state.last.text === state.expectedPlain && state.last.text.includes(state.code),
+      `Rendered selections export visible headings, emphasis and literal code: ${JSON.stringify(state.last.text)}`);
     check(!/md-code-header|content_copy|chat-author|chat-timestamp/.test(state.last.html), 'Language headers, code buttons and message chrome never leak into the copy');
-    check(state.last.text.includes('~~strike~~') && state.last.text.includes('[Monky]'),
-      'Formatted text/plain retains markup for destinations that do not accept HTML');
+    check(!state.last.text.includes('~~strike~~') && !state.last.text.includes('[Monky]'),
+      'Formatted text/plain never includes presentation-only Markdown syntax');
     checks += await fixture('testRichDestination()');
     await copyPlain();
     check((await fixture('state()')).last.text === state.expectedPlain, 'Plain mode uses the same visible text for an entire rendered selection');
 
     await fixture('clearSelection(); window.messageClipboardFixture.focusRow("rich")');
     await copy();
-    check((await fixture('state()')).last.text === state.source, 'Without a selection, Ctrl+C copies the exact Markdown of only the keyboard-focused message');
+    check((await fixture('state()')).last.text === state.expectedPlain, 'Without a selection, Ctrl+C copies only the visible keyboard-focused message');
     await fixture('preparePaste("draft ", 6, 6)');
     const pasted = await fixture('pasteLast()');
     state = await fixture('state()');
@@ -507,7 +562,7 @@ async function runSmoke(window) {
     check(state.input === 'draft ', `Native Undo reverts the formatted paste without erasing the prior draft: ${JSON.stringify({
       input: state.input, historyInputType: state.historyInputType,
     })}`);
-    check(state.historyInputType === 'historyUndo', 'Undo uses the real trusted native editing history event');
+    check(state.historyInputType === 'historyUndo', 'Native Ctrl+Z updates the editor through its undo transaction');
     if (process.platform === 'darwin') await key('Z', 'KeyZ', 90, 12);
     else await key('y', 'KeyY', 89, 2);
     state = await fixture('state()');
@@ -516,24 +571,47 @@ async function runSmoke(window) {
 
     for (const locale of ['pt-BR', 'en']) {
       await fixture(`prepare(${JSON.stringify(locale)})`);
+      await click(more);
+      await click(more);
+      check((await fixture('state()')).menuCount === 0, 'The More options button still toggles its own menu closed');
       await fixture('select("[data-message-id=rich] strong", 1, 3)');
       await click(more);
       const before = (await fixture('state()')).writes;
+      await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', ...(await fixture(`point(${JSON.stringify(parentCopy)})`)),
+      });
+      await fixture('settle()');
+      state = await fixture('state()');
+      check(state.menuCount === 2 && state.writes === before, 'Hover opens the copy submenu without running the default action');
       await click(parentCopy);
       state = await fixture('state()');
-      check(state.writes === before && state.menuCount === 2, 'The Copy parent opens a submenu rather than copying immediately');
-      check(state.submenuLabels[0].includes(locale === 'en' ? 'With formatting' : 'Com formatação') &&
-        state.submenuLabels[1].includes(locale === 'en' ? 'Without formatting' : 'Sem formatação'), 'Both submenu choices are localized');
+      check(state.writes === before + 1 && state.menuCount === 0 && state.last.kind === 'formatted' && state.last.text === 'ol',
+        'Clicking Copy message performs the default Ctrl+C operation on the captured selection');
+      check(state.toolbarDismissed && state.toast === (locale === 'en' ? 'Copied!' : 'Copiado!'),
+        'The default copy dismisses the toolbar and displays the existing copy toast');
+      await click(more);
+      await click(copyArrow);
+      state = await fixture('state()');
+      check(state.writes === before + 1 && state.menuCount === 2, 'The arrow still opens the copy-mode submenu without copying');
+      check(state.submenuLabels[0].includes(locale === 'en' ? 'Copy with formatting' : 'Copiar com formatação') &&
+        state.submenuLabels[1].includes('Markdown') &&
+        state.submenuLabels[2].includes(locale === 'en' ? 'Copy without formatting' : 'Copiar sem formatação'), 'All three submenu choices are localized');
       check(state.submenuExpanded && state.submenuControlled && state.submenuLabels[0].includes('+C') &&
-        !state.submenuLabels[1].includes('+C'),
-        'The submenu exposes accessible navigation and a shortcut hint only for formatted copying');
+        !state.submenuLabels[1].includes('+C') && state.submenuLabels[2].includes('+Shift+C'),
+        'The submenu exposes accessible navigation and the matching rich/plain shortcuts');
       await click(`${children}:first-child`);
       state = await fixture('state()');
-      check(state.last.text === '**ol**' && state.last.kind === 'formatted', 'Pointer navigation preserves the selected fragment captured before the submenu takes focus');
+      check(state.last.text === 'ol' && state.last.kind === 'formatted', 'Pointer navigation preserves the selected fragment captured before the submenu takes focus');
       check(state.menuCount === 0 && state.toolbarDismissed && state.toast === (locale === 'en' ? 'Copied!' : 'Copiado!'),
         `A submenu choice closes both menus, dismisses the toolbar and retains existing copy feedback: ${JSON.stringify({
           menus: state.menuCount, dismissed: state.toolbarDismissed, toast: state.toast, locale,
         })}`);
+      await click(more);
+      await click(copyArrow);
+      await click(`${children}:nth-child(2)`);
+      state = await fixture('state()');
+      check(state.last.kind === 'plain' && state.last.text === '**ol**' && !state.last.html,
+        'The explicit Markdown choice exports source delimiters only, preserving the selected fragment');
 
       await fixture('clearSelection(); window.messageClipboardFixture.focusMore()');
       await enter();
@@ -543,10 +621,10 @@ async function runSmoke(window) {
       state = await fixture('state()');
       check(state.submenuFocus === 0, 'Keyboard Right opens Copy and focuses its first choice');
       await key('End', 'End', 35);
-      check((await fixture('state()')).submenuFocus === 1, 'End navigates within the submenu, not the parent menu');
+      check((await fixture('state()')).submenuFocus === 2, 'End navigates within the submenu, not the parent menu');
       await key('Home', 'Home', 36);
       await key('ArrowUp', 'ArrowUp', 38);
-      check((await fixture('state()')).submenuFocus === 1, 'Up wraps among the two copy modes');
+      check((await fixture('state()')).submenuFocus === 2, 'Up wraps among the three copy modes');
       await enter();
       state = await fixture('state()');
       check(state.last.kind === 'plain' && state.last.text === state.expectedPlain && !state.last.html,
@@ -557,7 +635,23 @@ async function runSmoke(window) {
       await key('ArrowDown', 'ArrowDown', 40);
       await key('ArrowDown', 'ArrowDown', 40);
       await key(' ', 'Space', 32, 0, ' ');
-      check((await fixture('state()')).submenuFocus === 0, 'Space opens a focused submenu using native button semantics');
+      state = await fixture('state()');
+      check(state.menuCount === 0 && state.last.kind === 'formatted' && state.last.text === state.expectedPlain,
+        'Space activates the default formatted copy using native button semantics');
+      await fixture('focusMore()');
+      await enter();
+      await key('ArrowDown', 'ArrowDown', 40);
+      await key('ArrowDown', 'ArrowDown', 40);
+      const beforeEnter = (await fixture('state()')).writes;
+      await enter();
+      state = await fixture('state()');
+      check(state.writes === beforeEnter + 1 && state.menuCount === 0 && state.last.kind === 'formatted' && state.last.text === state.expectedPlain,
+        'Enter also activates the default formatted copy of the entire message');
+      await fixture('focusMore()');
+      await enter();
+      await key('ArrowDown', 'ArrowDown', 40);
+      await key('ArrowDown', 'ArrowDown', 40);
+      await key('ArrowRight', 'ArrowRight', 39);
       await key('ArrowLeft', 'ArrowLeft', 37);
       state = await fixture('state()');
       check(state.menuCount === 1 && state.parentFocused, 'Left closes only the submenu and restores focus to Copy');
@@ -576,8 +670,8 @@ async function runSmoke(window) {
     await fixture('select("[data-message-id=rich] pre code", 6, 12)');
     await copy();
     state = await fixture('state()');
-    check(state.last.text === '```javascript\nsample\n```' && state.last.html.includes('<pre'),
-      'A formatted code selection contains only selected code with its Markdown fence and preformatted HTML');
+    check(state.last.text === 'sample' && state.last.html.includes('<pre'),
+      'A formatted code selection contains only literal selected code and preformatted HTML, never fences');
     await fixture('clearSelection()');
     await click('[data-message-id="rich"] .md-code-copy');
     state = await fixture('state()');
@@ -633,7 +727,7 @@ async function installFixture(systemClipboard = false) {
   root.style.cssText = 'height:100vh;width:100%;display:flex;flex-direction:column;';
   const code = 'const sample = "<tag>";\n  console.log(sample);';
   const source = '# Heading\n\nA **bold** and *italic* with ~~strike~~ and `x < y`.\n\n[Monky](https://example.invalid/docs?a=1&b=2)\n\n> A quote\n> Second line\n\n- First **item**\n- Second item\n\n1. One\n2. Two\n\n---\n\n```js\n' + code + '\n```';
-  const expectedPlain = 'Heading\n\nA bold and italic with strike and x < y.\n\nMonky\n\nA quote\nSecond line\n\nFirst item\nSecond item\n\nOne\nTwo\n\n' + code;
+  const expectedPlain = 'Heading\n\nA bold and italic with strike and x < y.\n\nMonky\n\nA quote\nSecond line\n\nFirst item\nSecond item\n\nOne\nTwo\n\n\n' + code;
   const user = { id: 'clipboard-author', clientId: 'clipboard-device', nickname: 'Author', status: 'ONLINE', joinedAt: 1 };
   const attachment = { id: 'file-one', messageId: 'files', kind: 'file', url: null, originalName: 'report **literal**.txt',
     mimeType: 'text/plain', sizeBytes: 4, createdAt: 1, evicted: true };
@@ -671,7 +765,7 @@ async function installFixture(systemClipboard = false) {
     if (!systemClipboard && event.isTrusted && !event.defaultPrevented) event.preventDefault();
   };
   const onInput = event => {
-    if (event.isTrusted && event instanceof InputEvent && event.target?.id === 'chat-message-input') {
+    if (event instanceof InputEvent && event.target?.id === 'chat-message-input') {
       historyInputType = event.inputType;
     }
   };
@@ -816,7 +910,7 @@ async function installFixture(systemClipboard = false) {
   const openMenu = (id = 'rich') => {
     clearSelection();
     find(`[data-message-id="${id}"] [data-message-action="more"]`).click();
-    find('.floating-context-menu [aria-haspopup="menu"]').click();
+    find('.floating-context-menu [aria-haspopup="menu"] .context-menu-trailing').click();
   };
   const prepare = async locale => {
     view?.destroy();
@@ -891,8 +985,9 @@ async function installFixture(systemClipboard = false) {
         const row = root.querySelector('[data-message-id="localized-bot"]');
         check(row.querySelector('.chat-message-text').textContent.includes(expected),
           `${locale}: the reader, not the invoker, selects the bot message`);
-        check(root.querySelector('[data-message-id="reader-reply"] .chat-reply-reference').textContent.includes(bot.localizations[locale]),
-          `${locale}: replies show the same localized source text`);
+        const replyPreview = root.querySelector('[data-message-id="reader-reply"] .chat-reply-reference');
+        check(replyPreview.textContent.includes(expected) && !!replyPreview.querySelector('.chat-quote-preview strong'),
+          `${locale}: replies render the same localized Markdown, not its raw delimiters`);
         check(root.querySelector('[data-message-id="reader-reply"] .chat-message-text').textContent.includes('User text is not translated'),
           `${locale}: human-authored text remains unchanged`);
         const copied = view.messageClipboard(bot.id);
@@ -1050,7 +1145,7 @@ async function installFixture(systemClipboard = false) {
       expect(full.text === expectedPlain, `Plain visible serialization differs: ${JSON.stringify(full.text)}`);
       expect(full.html.includes('<h1>Heading</h1>') && full.html.includes('<em>italic</em>') &&
         full.html.includes('<del>strike</del>') && full.html.includes('<blockquote>') && full.html.includes('<ul>') &&
-        full.html.includes('<ol>') && full.html.includes('<hr>') && full.html.includes('font-family: monospace'),
+        full.html.includes('<ol start="1">') && full.html.includes('<hr>') && full.html.includes('font-family: monospace'),
       'Formatted HTML retains semantic headings, emphasis, strike, quote, lists, separator and code');
       expect(clipboard.readMonkyClipboardMarkdown(makeData(full.text, full.html)) === source, 'Full-message source round-trips exactly through the HTML MIME metadata');
       expect(full.markdown === source && clipboard.readMonkyClipboardMarkdown(makeData(full.markdown, full.html)) === source,
@@ -1059,6 +1154,9 @@ async function installFixture(systemClipboard = false) {
       clipboard.setMessageClipboardData(nativePlain, full, 'plain');
       expect(nativePlain.getData('text/plain') === expectedPlain && nativePlain.types.join(',') === 'text/plain',
         'Plain native copy clears any previous HTML and exports only visible text');
+      clipboard.setMessageClipboardData(nativePlain, full, 'markdown');
+      expect(nativePlain.getData('text/plain') === source && nativePlain.types.join(',') === 'text/plain',
+        'Explicit Markdown native copy exports the exact source without stale rich formats');
       const whitespace = clipboard.markdownMessageClipboard('  two  spaces\tend  ');
       const whitespaceTemplate = document.createElement('template');
       whitespaceTemplate.innerHTML = whitespace.html;
@@ -1156,10 +1254,10 @@ async function installFixture(systemClipboard = false) {
       select('[data-message-id=rich] strong', 1, 3);
       const before = writes.length;
       for (const options of [
-        { ctrlKey: false }, { altKey: true }, { shiftKey: true }, { ctrlKey: false, metaKey: true, shiftKey: true },
+        { ctrlKey: false }, { altKey: true },
         { isComposing: true }, { key: 'v' }, { key: 'x' },
       ]) {
-        expect(!keyboard(document.activeElement, options), 'Unrelated modifiers, removed shortcuts, IME, paste and cut remain native');
+        expect(!keyboard(document.activeElement, options), 'Unrelated modifiers, IME, paste and cut remain native');
       }
       const external = document.createElement('button');
       external.textContent = 'Another dialog';
@@ -1181,7 +1279,7 @@ async function installFixture(systemClipboard = false) {
       expect(!keyboard(document.body) && writes.length === before, 'No focus and no selection never copies the entire feed or a hovered row');
       select('[data-message-id=rich] strong', 1, 3);
       const copied = copyEvent(document.activeElement);
-      expect(copied.prevented && copied.text === '**ol**' && copied.html.includes('<strong>ol</strong>'),
+      expect(copied.prevented && copied.text === 'ol' && copied.html.includes('<strong>ol</strong>'),
         'Native Edit/Copy events use the same formatted, selection-aware MIME serialization');
       const empty = new ClipboardEvent('copy', { bubbles: true, cancelable: true });
       document.activeElement.dispatchEvent(empty);
@@ -1264,7 +1362,7 @@ async function installFixture(systemClipboard = false) {
       const rightClick = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 500, clientY: 200 });
       row.dispatchEvent(rightClick);
       expect(rightClick.defaultPrevented, 'Right-click without a text selection still opens message actions');
-      find('.floating-context-menu [aria-haspopup="menu"]').click();
+      find('.floating-context-menu [aria-haspopup="menu"] .context-menu-trailing').click();
       find('.floating-context-submenu button:last-child').click();
       await settle();
       expect((await last()).kind === 'plain' && (await last()).text === expectedPlain && !document.querySelector('.floating-context-menu'),
@@ -1296,11 +1394,16 @@ async function installFixture(systemClipboard = false) {
       expect(!document.querySelector('.floating-context-menu'), 'Outside pointerdown closes parent and submenu');
       const anchor = find('[data-message-id="rich"] [data-message-action="more"]');
       contextMenu.open(innerWidth - 1, innerHeight - 1, view.buildMessageMenuItems('rich'), anchor);
-      find('.floating-context-menu [aria-haspopup="menu"]').click();
+      find('.floating-context-menu [aria-haspopup="menu"] .context-menu-trailing').click();
       const menus = [...document.querySelectorAll('.floating-context-menu')].map(menu => menu.getBoundingClientRect());
       expect(menus.every(rect => rect.left >= 11 && rect.top >= 11 && rect.right <= innerWidth - 11 && rect.bottom <= innerHeight - 11),
         'The nested menu flips left and stays within the viewport at the bottom-right corner');
       expect(menus[1].right <= menus[0].left + 1, 'A submenu near the right edge is placed to the left of its parent');
+      contextMenu.close();
+      contextMenu.open(40, 40, [{label:'Options', submenu:[{label:'Child', onClick:()=>{}}]}], anchor);
+      find('.floating-context-menu [aria-haspopup="menu"]').click();
+      expect(document.querySelectorAll('.floating-context-menu').length === 2,
+        'Submenus without a default action still open when their parent is clicked');
       contextMenu.close();
 
       for (let i = 0; i < 6; i++) {

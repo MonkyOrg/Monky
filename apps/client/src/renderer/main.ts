@@ -705,7 +705,7 @@ class App {
     appEvents.on(`message.${MessageType.SERVER_SETTINGS_UPDATED}`, (payload: ServerSettingsUpdatedPayload) => {
       serverStore.updateServerMeta(payload.name, payload.hasPassword, payload.allowSoundboard, payload.iconUrl,
         payload.attachmentStorage, payload.maxUsers, payload.turnEnabled, payload.allowEveryoneMention,
-        payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone, payload.maxMessageLength);
+        payload.allowMessageEdit, payload.voiceMode, payload.showRoleBadgesToEveryone, payload.maxMessageLength, payload.messageDeleteUndoSeconds);
       serverStore.setTurnAvailability(payload.turnAvailability);
       const origin = currentEventOrigin();
       if (!origin) return;

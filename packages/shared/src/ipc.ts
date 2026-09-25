@@ -36,6 +36,10 @@ export interface RendererBootstrapFailure {
   stack?: string;
 }
 
+export const EDITOR_COMMANDS = ['cut', 'copy', 'paste', 'pasteAndMatchStyle', 'selectAll'] as const;
+export type EditorCommand = typeof EDITOR_COMMANDS[number];
+export const EDITOR_COMMAND_IPC = 'editor:command' satisfies keyof IpcInvokeChannels;
+
 export interface AppShutdownRequest {
   requestId: number;
   phase: 'native' | 'farewell';
@@ -679,6 +683,7 @@ export const NATIVE_SCREEN_EVENT = 'native-screen:event' satisfies keyof IpcEven
  * Mapeamento de Canais Bidirecionais (Invoke / Handle)
  */
 export interface IpcInvokeChannels {
+  'editor:command': { args: [command: EditorCommand]; returnType: { success: boolean } };
   'native-screen:invoke': { args: [command: NativeScreenCommand]; returnType: NativeScreenCommandResult };
   'native-screen:reply': { args: [reply: NativeScreenReply]; returnType: void };
   'server-invite:take': { args: []; returnType: ServerInviteResult | null };

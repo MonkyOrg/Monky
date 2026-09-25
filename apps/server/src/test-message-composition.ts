@@ -1,12 +1,117 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID, sign } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   LIMITS, MIN_CLIENT_PROTOCOL, MIN_BOT_PROTOCOL, MessageType, ProtocolErrorCode,
   PROTOCOL_VERSION, Permission, createProtocolOffer, negotiateProtocol, messageBlocksContent,
 } from '@monky/shared';
 import { createFixture, identity, record, records, text } from './testFixtures/bots';
-import { SqliteMentionRepository } from './infrastructure/database/SqliteRepositories';
+import { SqliteMentionRepository, SqliteMessageRepository } from './infrastructure/database/SqliteRepositories';
+import { DatabaseConnection } from './infrastructure/database/DatabaseConnection';
+
+test('a pending deletion survives closing and reopening the database with its original deadline and code blocks', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'monky-delete-undo-'));
+  const filename = path.join(root, 'server.db');
+  let database = await DatabaseConnection.create(filename);
+  t.after(() => { database.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  database.getDb().exec(`
+    INSERT INTO server_meta (id,name,password_hash,created_at) VALUES ('server','Test','',1);
+    INSERT INTO users (id,client_id,nickname,created_at,last_seen_at) VALUES ('author','device','Author',1,1);
+    INSERT INTO channels (id,server_id,name,type,created_at) VALUES ('chat','server','chat','TEXT',1);
+  `);
+  const blocks = [{ type: 'code' as const, language: 'javascript', code: 'const original = 1;' }];
+  let repository = new SqliteMessageRepository(database.getDb());
+  await repository.create({ id: 'message', userId: 'author', channelId: 'chat', isSystem: false,
+    createdAt: 1, content: messageBlocksContent(blocks), blocks });
+  await repository.markDeleted('message', 1000, 'author', 61000);
+  database.close();
+  database = await DatabaseConnection.create(filename);
+  repository = new SqliteMessageRepository(database.getDb());
+  assert.equal((await repository.findById('message'))?.content, '');
+  assert.equal((await repository.findById('message'))?.deleteUndoUntil, 61000);
+  assert.equal(await repository.restoreDeleted('message', 'author', 1000, 1, 60999), true);
+  assert.deepEqual((await repository.findById('message'))?.blocks, blocks);
+  await repository.markDeleted('message', 70000, 'author', 130000);
+  assert.equal(await repository.restoreDeleted('message', 'author', 70000, 3, 130000), false);
+  await repository.purgeExpiredDeletions(130000);
+  assert.deepEqual(database.getDb().prepare('SELECT * FROM message_deletion_backups').all(), []);
+});
+
+test('timed deletion restores the same message, attachments, reactions and references across reconnects', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Undo owner');
+  const other = await f.human('Undo reader');
+  const server = record(owner.auth.payload.server);
+  const channelId = text(records(server.channels).find(channel => channel.type === 'TEXT')?.id);
+  assert.equal(server.messageDeleteUndoSeconds, 60);
+  const attachmentId = randomUUID();
+  await f.attachmentRepo.create({
+    id: attachmentId, messageId: null, channelId, userId: owner.id, kind: 'file', filename: 'undo.txt',
+    originalName: 'undo.txt', mimeType: 'text/plain', sizeBytes: 10, width: null, height: null,
+    durationMs: null, evicted: false, createdAt: Date.now(),
+  });
+  const sent = await owner.peer.request(MessageType.CHAT_SEND, { channelId, content: '**Keep**', attachmentIds: [attachmentId] });
+  const messageId = text(sent.payload.id);
+  await other.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Reply', replyToMessageId: messageId });
+  await other.peer.request(MessageType.CHAT_REACTION_ADD, { channelId, messageId, emoji: '👍' });
+  const deletion = record((await owner.peer.request(MessageType.CHAT_DELETE, { channelId, messageId })).payload.message);
+  assert.equal(deletion.content, '');
+  assert.equal(deletion.attachments, undefined);
+  assert.equal(Number(deletion.deleteUndoUntil) - Number(deletion.deletedAt), 60000);
+  assert.equal((await f.messageRepo.findById(messageId))?.content, '');
+  assert.ok(!(await f.attachmentRepo.listOldestActive(100)).some(entry => entry.id === attachmentId),
+    'Pending undo attachments are protected from storage eviction');
+  const request = { channelId, messageId, deletedAt: deletion.deletedAt, revision: deletion.revision };
+  await other.peer.error(MessageType.CHAT_RESTORE, request, ProtocolErrorCode.PERMISSION_DENIED);
+  await owner.peer.close();
+  const reconnected = await f.human('Undo owner', owner.keys, owner.deviceId);
+  const history = await f.chatService.loadHistory(channelId);
+  assert.equal(history.find(entry => entry.id === messageId)?.deleteUndoUntil, deletion.deleteUndoUntil);
+  const restored = record((await reconnected.peer.request(MessageType.CHAT_RESTORE, request)).payload.message);
+  assert.equal(restored.id, messageId);
+  assert.equal(restored.createdAt, sent.payload.createdAt);
+  assert.equal(restored.content, sent.payload.content);
+  assert.deepEqual(restored.attachments, sent.payload.attachments);
+  assert.equal(records(restored.reactions).length, 1);
+  assert.equal((await f.chatService.loadHistory(channelId)).find(entry => entry.reply)?.reply?.content, '**Keep**');
+  const secondDeletion = record((await reconnected.peer.request(MessageType.CHAT_DELETE, { channelId, messageId })).payload.message);
+  assert.ok(Number(secondDeletion.revision) > Number(deletion.revision));
+  await reconnected.peer.error(MessageType.CHAT_RESTORE, request, ProtocolErrorCode.BAD_REQUEST);
+});
+
+test('undo settings validate, affect only new deletions, and the server rejects the exact expiry boundary', async t => {
+  const f = await createFixture();
+  t.after(() => f.dispose());
+  const owner = await f.human('Undo admin');
+  const author = await f.human('Undo author');
+  const channelId = text(records(record(owner.auth.payload.server).channels).find(channel => channel.type === 'TEXT')?.id);
+  for (const value of [0, -1, 1.2, 86401, NaN]) {
+    assert.equal((await f.authService.updateServerSettings({ messageDeleteUndoSeconds: value })).success, false);
+  }
+  await author.peer.error(MessageType.SERVER_UPDATE_SETTINGS, { messageDeleteUndoSeconds: 5 }, ProtocolErrorCode.PERMISSION_DENIED);
+  const sent = await author.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Moderated' });
+  const messageId = text(sent.payload.id);
+  const deletion = record((await owner.peer.request(MessageType.CHAT_DELETE, { channelId, messageId })).payload.message);
+  await owner.peer.request(MessageType.SERVER_UPDATE_SETTINGS, { messageDeleteUndoSeconds: 1 });
+  assert.equal((await f.serverRepo.getServer())?.messageDeleteUndoSeconds, 1);
+  const repeated = record((await owner.peer.request(MessageType.CHAT_DELETE, { channelId, messageId })).payload.message);
+  assert.equal(repeated.deleteUndoUntil, deletion.deleteUndoUntil, 'A repeated delete does not extend or shorten its window');
+  const denied = await f.chatService.restoreMessage(owner.id, channelId, messageId, Number(deletion.deletedAt), Number(deletion.revision), false);
+  assert.equal(denied.success, false, 'A former moderator cannot restore another author without moderation permission');
+  const now = t.mock.method(Date, 'now', () => Number(deletion.deleteUndoUntil));
+  const expired = await f.chatService.restoreMessage(owner.id, channelId, messageId, Number(deletion.deletedAt), Number(deletion.revision), true);
+  assert.equal(expired.success, false, 'Expiry is enforced at the deadline, not when the cleanup timer runs');
+  await f.chatService.expireDeletedMessages();
+  assert.deepEqual(f.database.getDb().prepare('SELECT message_id FROM message_deletion_backups').all(), []);
+  now.mock.restore();
+  const next = await author.peer.request(MessageType.CHAT_SEND, { channelId, content: 'Short window' });
+  const nextDeletion = record((await author.peer.request(MessageType.CHAT_DELETE, { channelId, messageId: next.payload.id })).payload.message);
+  assert.equal(Number(nextDeletion.deleteUndoUntil) - Number(nextDeletion.deletedAt), 1000);
+});
 
 test('delivery retries, concurrent requests and reconnects acknowledge one durable message without duplicate mentions or broadcasts', async (t) => {
   const f = await createFixture();

@@ -2285,7 +2285,7 @@ async function runMessageToolbarPointerSmoke(window) {
     await move(`${row} .chat-message-text`);
     await check(visible, 'Hovering the message again restores actions');
     await click(action('reply'));
-    await check(`!(${visible}) && document.activeElement.id === 'chat-message-input'`,
+    await check(`!(${visible}) && document.querySelector('#chat-message-input').contains(document.activeElement)`,
       'Reply immediately hides actions and focuses the composer');
     await leave();
     await move(`${row} .chat-message-text`);
@@ -2326,7 +2326,7 @@ async function runMessageToolbarPointerSmoke(window) {
     await click(action('more'));
     await evaluate(`Array.from(document.querySelectorAll('.floating-context-menu button'))
       .find(button => button.textContent.includes('content_copy')).id = 'toolbar-menu-copy'`);
-    await click('#toolbar-menu-copy');
+    await click('#toolbar-menu-copy .context-menu-trailing');
     await click('.floating-context-submenu button:first-child');
     await check(`!(${visible}) && !document.querySelector('.floating-context-menu')`,
       'Selecting a submenu action also dismisses the toolbar');
@@ -3462,8 +3462,8 @@ async function runDomSmoke() {
     const menuCopy = [...document.querySelectorAll('.floating-context-menu [role="menuitem"]')]
       .find((button) => button.textContent.includes('Copy message'));
     check(!!menuCopy, 'Message menu must expose its localized copy action');
-    menuCopy.click();
-    check(!!document.querySelector('.floating-context-submenu'), 'Copy exposes both formatting modes');
+    menuCopy.querySelector('.context-menu-trailing').click();
+    check(document.querySelectorAll('.floating-context-submenu button').length === 3, 'The Copy arrow exposes all three formatting modes');
     find('.floating-context-submenu button').click();
     await Promise.resolve();
     check(!document.querySelector('.floating-context-menu'), 'Copy from menu must close the menu');
@@ -3725,7 +3725,7 @@ async function runDomSmoke() {
     configure.focus();
     check(document.activeElement === configure && configure.tagName === 'BUTTON', 'Configuration action is keyboard focusable');
     configure.click();
-    check(configuredBot === pendingBot.botId && document.activeElement === find('#chat-message-input'),
+    check(configuredBot === pendingBot.botId && find('#chat-message-input').contains(document.activeElement),
       'Configuration opens the correct bot and preserves composer return focus');
     store.setCommandBots([{ ...pendingBot, canManage: false }]);
     type(find('#chat-message-input'), '/');

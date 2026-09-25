@@ -348,6 +348,8 @@ export const ptBR = {
   'label.hasPassword': 'Protegido por senha',
   'label.maxUsers': 'Limite de membros',
   'label.maxMessageLength': 'Caracteres por mensagem (0 = sem limite)',
+  'label.messageDeleteUndoSeconds': 'Prazo para desfazer exclusões (segundos)',
+  'config.invalidDeleteUndo': 'Informe um número inteiro entre 1 e 86400 segundos.',
   'config.invalidMessageLimit': 'Informe um inteiro não negativo; 0 remove o limite de caracteres.',
   'label.ownerUserId': 'ID do dono',
   'label.ownerNickname': 'Apelido do dono',
