@@ -30,6 +30,145 @@ const chooseWindowMethod = (f, method, sourceId = 'window:101:0') => {
 };
 
 for (const language of ['pt-BR', 'en']) {
+  test(`minimized sources gain icons without presenting a cached image as a current preview (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    const preview = deferred();
+    f.controls.sources = async () => [{ ...f.sources[1], thumbnailState: 'unavailable' }];
+    f.controls.previews = () => preview.promise;
+    await f.picker.open();
+    const card = chooseWindowMethod(f, 'window');
+    assert.ok(card.querySelector('.source-thumbnail--minimized'));
+    assert.equal(card.querySelector('.skeleton'), null);
+    preview.resolve([{ id: f.sources[1].id, thumbnailDataUrl: 'old-frame', appIconDataUrl: 'application-icon' }]);
+    await flush();
+    assert.ok(card.querySelector('.source-thumbnail--minimized'));
+    assert.equal(card.querySelector('img.source-thumbnail'), null);
+    assert.equal(card.querySelector('img.source-app-icon').getAttribute('src'), 'application-icon');
+    assert.equal(control(f, 'btn-share').disabled, false);
+  });
+
+  test(`sources are selectable before previews; independent batches preserve focus and selection (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    const windows = deferred(), screens = deferred(), requests = [], options = [];
+    f.controls.sources = async input => {
+      options.push(input);
+      return f.sources.map(source => ({ ...source, thumbnailState: 'pending' }));
+    };
+    f.controls.previews = input => {
+      requests.push(input);
+      return input.type === 'window' ? windows.promise : screens.promise;
+    };
+    await f.picker.open();
+    assert.equal(options[0].metadataOnly, true);
+    assert.equal(options[0].refresh, false);
+    assert.equal(requests.length, 2);
+    assert.equal(control(f, 'share-sources-panel').getAttribute('aria-busy'), 'false');
+    assert.equal(f.document.querySelectorAll('.source-thumbnail--loading').length, 2);
+    const card = chooseWindowMethod(f, 'game');
+    card.focus();
+    assert.equal(control(f, 'btn-share').disabled, false);
+    const preview = { id: f.sources[1].id, thumbnailDataUrl: 'data:image/png;base64,cHJldmlldw==', appIconDataUrl: null };
+    screens.resolve([{ id: MONITOR_SOURCE_ID, thumbnailDataUrl: preview.thumbnailDataUrl, appIconDataUrl: null }]);
+    await flush();
+    assert.equal(card.querySelector('.source-thumbnail--loading').getAttribute('aria-label'), f.i18n.t('screenShare.previewLoading'));
+    assert.equal(card.querySelector('.source-thumbnail--loading').textContent.trim(), '');
+    windows.resolve([preview, { ...preview, id: 'window:999:stale' }]);
+    await flush();
+    assert.equal(f.document.activeElement, card);
+    assert.equal(f.document.querySelector(`[data-source-id="${preview.id}"]`), card);
+    assert.equal(card.querySelector('img.source-thumbnail').getAttribute('src'), preview.thumbnailDataUrl);
+    assert.equal(f.picker.selectedSourceId, preview.id);
+    assert.equal(f.picker.windowCaptureMethod, 'game');
+    assert.equal(f.document.querySelector('[data-source-id="window:999:stale"]'), null);
+    assert.equal(f.document.querySelectorAll('.source-thumbnail--loading').length, 0);
+    assert.ok(f.document.querySelector('[data-source-id="window:202:0"] .source-thumbnail--minimized'));
+    control(f, 'share-tab-screen').click();
+    assert.ok(f.document.querySelector('img.source-thumbnail'));
+  });
+
+  test(`preview errors are localized without removing sources or blocking sharing (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    f.controls.sources = async () => f.sources.map(source => ({ ...source, thumbnailState: 'pending' }));
+    f.controls.previews = async () => { throw new Error('Preview capture failed'); };
+    await f.picker.open();
+    await flush();
+    const card = chooseWindowMethod(f, 'window');
+    assert.equal(control(f, 'btn-share').disabled, false);
+    assert.equal(control(f, 'share-preview-error').hidden, false);
+    assert.equal(control(f, 'share-preview-error').textContent, f.i18n.t('screenShare.previewsFailed'));
+    assert.ok(card.querySelector('.source-thumbnail--minimized'));
+    assert.equal(f.document.querySelectorAll('.source-thumbnail--loading').length, 0);
+    assert.equal(f.warnings.filter(row => row[0] === '[ScreenShare] Could not load source previews').length, 2);
+    control(f, 'btn-share').click();
+    await flush();
+    assert.equal(nativeStarts(f).length, 1);
+  });
+
+  test(`refresh and reopening discard stale preview responses (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    const old = deferred(), latest = deferred(), options = [];
+    let current = old;
+    f.controls.sources = async input => {
+      options.push(input);
+      return [{ ...f.sources[1], thumbnailState: 'pending' }];
+    };
+    f.controls.previews = () => current.promise;
+    await f.picker.open();
+    current = latest;
+    control(f, 'btn-refresh-sources').click();
+    await flush();
+    assert.equal(options[1].refresh, true);
+    const card = chooseWindowMethod(f, 'window');
+    old.resolve([{ id: f.sources[1].id, thumbnailDataUrl: 'stale', appIconDataUrl: null }]);
+    await flush();
+    assert.ok(card.querySelector('.source-thumbnail--loading'));
+    f.picker.close();
+    f.controls.sources = async () => [{ ...f.sources[1], thumbnailDataUrl: 'current', thumbnailState: 'ready' }];
+    f.controls.previews = async () => [];
+    await f.picker.open();
+    latest.resolve([{ id: f.sources[1].id, thumbnailDataUrl: 'obsolete', appIconDataUrl: null }]);
+    await flush();
+    assert.equal(f.document.querySelector('img.source-thumbnail').getAttribute('src'), 'current');
+  });
+
+  test(`picker keeps encoding preferences in settings and surfaces admission failures (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    f.settingsStore.screenEncodingStrategy = 'manual';
+    f.settingsStore.screenEncodingMode = 'software';
+    f.settingsStore.preferredScreenCodec = 'av1';
+    const preferences = () => JSON.stringify([
+      f.settingsStore.screenEncodingStrategy, f.settingsStore.screenEncodingMode,
+      f.settingsStore.preferredScreenCodec, f.settingsStore.preferredVideoCodec,
+    ]);
+    const saved = preferences();
+    let probes = 0;
+    f.controls.encoding = async () => { probes++; throw new Error('No settings probe belongs in the picker'); };
+    f.controls.start = async () => { throw new Error('Selected encoder unavailable for this profile'); };
+    await f.picker.open();
+    assert.equal(f.document.querySelector('[data-settings-section="screen-encoding"]'), null);
+    assert.equal(f.document.querySelector('#screen-encoding-automatic, #screen-encoding-manual, #select-video-codec'), null);
+    chooseWindowMethod(f, 'window');
+    assert.equal(control(f, 'btn-share').disabled, false);
+    control(f, 'btn-share').click();
+    await flush();
+    assert.equal(nativeStarts(f).length, 1);
+    assert.match(f.alerts.at(-1).message, /Selected encoder unavailable for this profile/);
+    assert.equal(control(f, 'btn-share').disabled, false);
+    assert.equal(f.picker.selectedSourceId, 'window:101:0');
+    assert.equal(probes, 0);
+    assert.equal(preferences(), saved);
+    assert.equal(f.saves, 0);
+    f.picker.close();
+    f.mountQuality();
+    assert.ok(control(f, 'screen-encoding-manual'));
+    assert.ok(control(f, 'select-video-codec'));
+  });
+
   test(`own Monky window disables only its audio and preserves other source choices (${language})`, async t => {
     const f = fixture(language);
     t.after(() => f.close());
@@ -175,18 +314,22 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(nativeStarts(f).length, 0);
   });
 
-  test(`quality offers only Automatic/H264 and disabled AV1, with an isolated preview switch (${language})`, t => {
+  test(`quality groups Automatic/Manual encoding and H264/AV1 with an isolated preview switch (${language})`, t => {
     const f = fixture(language);
     t.after(() => f.close());
     const root = f.mountQuality();
     const codec = control(f, 'select-video-codec');
-    assert.deepEqual(codec.querySelectorAll('option').map(option => option.value), ['auto', 'h264', 'av1']);
+    assert.deepEqual(codec.querySelectorAll('option').map(option => option.value), ['h264', 'av1']);
     const av1 = codec.querySelector('option[value="av1"]');
-    assert.equal(av1.disabled, true);
-    assert.ok(av1.textContent.includes(f.i18n.t('screenShare.comingSoon')));
-    assert.equal(codec.querySelector('option[value="auto"]').disabled, false);
+    assert.equal(av1.disabled, false);
+    assert.equal(av1.textContent.includes(f.i18n.t('screenShare.comingSoon')), false);
+    assert.equal(codec.disabled, true);
     assert.equal(codec.querySelector('option[value="h264"]').disabled, false);
-    assert.ok(codec.querySelector('option[value="auto"]').textContent.includes('H.264'));
+    assert.equal(root.querySelectorAll('#select-video-codec').length, 1);
+    assert.ok(codec.closest('[data-settings-section="screen-encoding"]'));
+    assert.equal(control(f, 'screen-codec-description').textContent.trim(), f.i18n.t('settings.videoCodecDesc'));
+    for (const id of ['screen-encoding-status', 'screen-encoding-apply'])
+      assert.ok(control(f, id).classList.contains('audio-device-status'));
     assert.equal(f.saves, 0);
     const preview = control(f, 'checkbox-screen-preview-focus');
     assert.ok(preview.closest('.toggle-switch'), 'No isolated native checkbox is exposed');
@@ -207,7 +350,8 @@ for (const language of ['pt-BR', 'en']) {
       profile: f.settingsStore.customProfile, preset: f.settingsStore.qualityPreset,
       codec: f.settingsStore.preferredVideoCodec, telemetry: f.settingsStore.screenShareTelemetryEnabled,
     }), before);
-    assert.equal(f.traces.length, 0, 'Preview preference changes do not touch capture, quality, camera or transport');
+    assert.equal(f.traces.filter(trace => trace[0] !== 'cancel-encoding').length, 0,
+      'Preview preference changes do not touch capture, quality, camera or transport');
     const preset = control(f, 'select-preset');
     preset.value = 'CUSTOM';
     change(preset);
@@ -518,7 +662,7 @@ for (const [tab, kind, sourceId] of [
     assert.equal(control(f, 'share-capture-info').hidden, true);
     assert.equal(nativeStarts(f).length, 0);
     await f.picker.startSharing('replace');
-    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, '', kind, false]]);
+    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, '', kind, true]]);
     const restores = f.traces.filter(value => value[0] === 'prepare-window');
     assert.deepEqual(restores, kind === 'monitor' ? [] : [['prepare-window', sourceId]]);
     assert.equal(f.capabilities.capture, false, 'The UI must not upgrade Main capabilities by itself');
@@ -584,7 +728,7 @@ for (const [tab, kind, sourceId] of [
     assert.equal(control(f, 'btn-share-add').disabled, false);
     assert.equal(control(f, 'btn-share-add').getAttribute('aria-describedby'), kind === 'game' ? 'share-game-tip' : null);
     await f.picker.startSharing('add');
-    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, 'data:image/png;base64,selected', kind, false]]);
+    assert.deepEqual(nativeStarts(f), [['native-start', sourceId, true, 'data:image/png;base64,selected', kind, true]]);
     assert.equal(f.traces.filter(value => value[0] === 'prepare-window').length, kind === 'monitor' ? 0 : 1);
     assert.equal(f.voiceStore.screenShareIds.length, 2);
     assert.ok(f.voiceStore.screenShareIds.includes(previous.id));
@@ -829,7 +973,7 @@ test('Game Capture requires explicit confirmation and is never inherited by a di
   assert.equal(f.traces.length, 0);
   control(f, 'btn-share').click();
   await flush();
-  assert.deepEqual(nativeStarts(f), [['native-start', 'window:202:0', true, '', 'game', false]]);
+  assert.deepEqual(nativeStarts(f), [['native-start', 'window:202:0', true, '', 'game', true]]);
 });
 
 test('changing method cannot retain a window removed from the current source set or switch to another one', async t => {
@@ -900,12 +1044,12 @@ for (const language of ['pt-BR', 'en']) {
     audio.checked = false;
     change(audio);
     const aspect = control(f, 'chk-preserve-aspect-ratio');
-    assert.equal(aspect.checked, false);
+    assert.equal(aspect.checked, true);
     assert.equal(aspect.getAttribute('role'), 'switch');
     assert.equal(aspect.getAttribute('aria-labelledby'), 'share-aspect-label');
     assert.equal(aspect.getAttribute('aria-describedby'), 'share-aspect-description');
     assert.ok(aspect.closest('.toggle-switch'));
-    aspect.checked = true;
+    aspect.checked = false;
     const refresh = control(f, 'btn-refresh-sources');
     assert.equal(refresh.tagName, 'BUTTON');
     assert.equal(refresh.type, 'button');
@@ -941,7 +1085,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(control(f, 'share-method-game').getAttribute('aria-pressed'), 'true');
     assert.equal(f.document.querySelector(`[data-source-id="${selected}"]`).getAttribute('aria-pressed'), 'true');
     assert.equal(control(f, 'chk-preserve-aspect-ratio'), aspect);
-    assert.equal(aspect.checked, true);
+    assert.equal(aspect.checked, false);
     assert.equal(audio.checked, false);
     assert.equal(f.settingsStore.qualityPreset, 'CUSTOM');
     assert.deepEqual(f.settingsStore.customProfile, profile);
@@ -954,7 +1098,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(control(f, 'btn-share').disabled, true);
     assert.equal(control(f, 'share-window-methods').hidden, true);
     assert.ok(f.document.querySelectorAll('.source-item').every(card => card.getAttribute('aria-pressed') === 'false'));
-    assert.equal(aspect.checked, true);
+    assert.equal(aspect.checked, false);
     assert.equal(audio.checked, false);
     assert.equal(f.saves, 0);
     assert.equal(f.traces.length, 0, 'Refreshing sources must not prepare or capture a window');
@@ -1022,14 +1166,14 @@ test('closing a refreshing picker retires its listeners and rejects detached ref
   assert.equal(f.enumerations, count);
   assert.equal(f.picker.selectedSourceId, null);
   assert.equal(f.picker.windowCaptureMethod, 'window');
-  assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, false);
+  assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, true);
   assert.equal(f.document.querySelector('[role="alert"]'), null);
   assert.equal(f.alerts.length, 0);
 });
 
 for (const kind of ['window', 'game', 'monitor']) {
   for (const preserveAspectRatio of [false, true]) {
-    test(`${kind} sends per-share preserveAspectRatio=${preserveAspectRatio} and a new picker defaults to stretch`, async t => {
+    test(`${kind} sends per-share preserveAspectRatio=${preserveAspectRatio} and a new picker defaults to fit`, async t => {
       const f = fixture();
       t.after(() => f.close());
       await f.picker.open();
@@ -1039,7 +1183,7 @@ for (const kind of ['window', 'game', 'monitor']) {
         f.document.querySelector(`[data-source-id="${sourceId}"]`).click();
       } else chooseWindowMethod(f, kind);
       const aspect = control(f, 'chk-preserve-aspect-ratio');
-      assert.equal(aspect.checked, false);
+      assert.equal(aspect.checked, true);
       aspect.checked = preserveAspectRatio;
       const pending = deferred();
       f.controls.sources = () => pending.promise;
@@ -1054,7 +1198,7 @@ for (const kind of ['window', 'game', 'monitor']) {
       assert.equal(f.saves, 0, 'Aspect ratio is not a global preference');
       f.controls.sources = async () => f.sources;
       await f.picker.open();
-      assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, false);
+      assert.equal(control(f, 'chk-preserve-aspect-ratio').checked, true);
       assert.equal(Object.hasOwn(f.settingsStore, 'preserveAspectRatio'), false);
     });
   }
@@ -1095,7 +1239,7 @@ for (const language of ['pt-BR', 'en']) {
     assert.equal(f.traces.length, 0, 'UI enumeration must not create capture thumbnails or probe hardware');
     key(cards[0], ' ');
     await f.picker.startSharing('replace');
-    assert.deepEqual(nativeStarts(f), [['native-start', sources[0].id, true, sources[0].thumbnailDataUrl, 'monitor', false]]);
+    assert.deepEqual(nativeStarts(f), [['native-start', sources[0].id, true, sources[0].thumbnailDataUrl, 'monitor', true]]);
   });
 
   test(`unnumbered monitors and application windows retain escaped source names (${language})`, async t => {
@@ -1255,18 +1399,11 @@ test('capability/source generations, retries and close cleanup ignore late resul
   assert.equal(f.picker.eventController, null);
 });
 
-test('unavailable audio/codec/profile and application-wide Mac audio confirmation stay fail-closed', async t => {
+test('unavailable profile and application-wide Mac audio confirmation stay fail-closed', async t => {
   const f = fixture();
   t.after(() => f.close());
   await f.picker.open();
   f.document.querySelector('.source-item').click();
-  for (const codec of ['vp8', 'vp9', 'av1']) {
-    f.settingsStore.preferredVideoCodec = codec;
-    await f.picker.startSharing('replace');
-    assert.equal(control(f, 'btn-share').disabled, true);
-  }
-  assert.equal(nativeStarts(f).length, 0);
-  f.settingsStore.preferredVideoCodec = 'auto';
   f.settingsStore.qualityPreset = 'CUSTOM';
   f.settingsStore.customProfile.screenFps = 144;
   await f.picker.startSharing('replace');
@@ -1283,37 +1420,35 @@ test('unavailable audio/codec/profile and application-wide Mac audio confirmatio
 });
 
 for (const saved of ['vp8', 'vp9', 'av1']) {
-  test(`legacy ${saved} stays persisted until an explicit supported codec selection`, async t => {
+  test(`legacy camera ${saved} stays persisted independently of screen codec selection`, async t => {
     const f = fixture();
     t.after(() => f.close());
     f.settingsStore.preferredVideoCodec = saved;
+    f.settingsStore.screenEncodingStrategy = 'manual';
     const root = f.mountQuality();
     const codec = root.querySelector('#select-video-codec');
-    const notice = root.querySelector('#screen-codec-preference-notice');
     assert.equal(f.settingsStore.preferredVideoCodec, saved);
     assert.equal(f.saves, 0);
-    assert.equal(codec.value, saved === 'av1' ? 'av1' : '');
-    assert.equal(notice.hidden, false);
-    assert.ok(notice.textContent.includes(saved.toUpperCase()));
+    assert.equal(codec.value, 'h264');
     assert.equal(codec.querySelector('option[value="vp8"]'), null);
     assert.equal(codec.querySelector('option[value="vp9"]'), null);
     codec.value = 'av1';
     change(codec);
     assert.equal(f.settingsStore.preferredVideoCodec, saved);
-    assert.equal(f.saves, 0);
-    assert.equal(codec.value, saved === 'av1' ? 'av1' : '');
-    f.controls.settingsError = new Error('Active screen settings cannot change');
-    codec.value = 'h264';
-    change(codec);
-    assert.equal(f.settingsStore.preferredVideoCodec, saved);
-    assert.equal(f.saves, 0);
-    f.controls.settingsError = null;
+    assert.equal(f.saves, 1);
+    assert.equal(codec.value, 'av1');
+    assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
     codec.value = 'auto';
     change(codec);
-    await flush();
-    assert.equal(f.settingsStore.preferredVideoCodec, 'auto');
+    assert.equal(f.settingsStore.preferredVideoCodec, saved);
     assert.equal(f.saves, 1);
-    assert.equal(notice.hidden, true);
+    codec.value = 'h264';
+    change(codec);
+    await flush();
+    assert.equal(f.settingsStore.preferredVideoCodec, saved);
+    assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
+    assert.equal(f.saves, 2);
+    assert.equal(codec.querySelector('option[value="auto"]'), null);
     assert.equal(codec.querySelector('option[value=""]'), null);
   });
 }
@@ -1322,10 +1457,11 @@ test('a late codec error cannot open a dialog after quality settings cleanup', a
   const f = fixture();
   t.after(() => f.close());
   const gate = deferred();
-  f.controls.reapply = () => gate.promise;
+  f.controls.encoding = () => gate.promise;
+  f.settingsStore.screenEncodingStrategy = 'manual';
   f.mountQuality();
   const codec = control(f, 'select-video-codec');
-  codec.value = 'h264';
+  codec.value = 'av1';
   change(codec);
   assert.equal(f.saves, 1);
   f.quality.cleanup();
@@ -1562,7 +1698,8 @@ test('new capture/codec/preview copy has matching translations and placeholders'
   const en = f.load('i18n/locales/en').en;
   const pt = f.load('i18n/locales/pt-BR').ptBR;
   const relevant = key => key.startsWith('screenShare.') || key.startsWith('settings.codec')
-    || key.startsWith('settings.screenPreview') || key.startsWith('settings.videoCodec') || key.startsWith('stage.captureMode');
+    || key.startsWith('settings.screenPreview') || key.startsWith('settings.screenEncoding')
+    || key.startsWith('settings.videoCodec') || key.startsWith('stage.captureMode');
   assert.deepEqual(Object.keys(en).filter(relevant).sort(), Object.keys(pt).filter(relevant).sort());
   for (const key of Object.keys(en).filter(relevant)) {
     assert.deepEqual((en[key].match(/\{\w+\}/g) ?? []).sort(), (pt[key].match(/\{\w+\}/g) ?? []).sort(), key);
@@ -1580,4 +1717,218 @@ test('new capture/codec/preview copy has matching translations and placeholders'
     assert.equal(Object.hasOwn(locale, 'stage.captureModePending'), false);
     assert.equal(Object.hasOwn(locale, 'stage.captureModeUnconfirmed'), false);
   }
+});
+
+for (const language of ['en', 'pt-BR']) {
+  test(`Automatic resolves unavailable hardware to read-only Software without changing saved preferences (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    const gate = deferred();
+    let probes = 0;
+    f.controls.encoding = async () => { probes++; return gate.promise; };
+    f.mountQuality();
+    const hardware = control(f, 'screen-encoding-hardware');
+    const software = control(f, 'screen-encoding-software');
+    const status = control(f, 'screen-encoding-status');
+    assert.equal(status.getAttribute('aria-busy'), 'true');
+    assert.equal(hardware.getAttribute('aria-pressed'), 'false');
+    assert.equal(hardware.disabled, true);
+    gate.resolve({ selection: { mode: 'software', codec: 'h264', encoder: 'obs_x264' },
+      hardware: { available: false, reason: 'Unsupported test adapter/profile' }, fallback: true });
+    await flush();
+    assert.equal(hardware.hidden, false);
+    assert.equal(hardware.disabled, true);
+    assert.equal(hardware.getAttribute('aria-pressed'), 'false');
+    assert.equal(software.getAttribute('aria-pressed'), 'true');
+    assert.equal(f.settingsStore.screenEncodingMode, 'hardware');
+    assert.equal(f.settingsStore.screenEncodingStrategy, 'automatic');
+    assert.equal(software.disabled, true);
+    assert.equal(control(f, 'select-video-codec').disabled, true);
+    assert.equal(control(f, 'select-video-codec').value, 'h264');
+    assert.equal(f.settingsStore.preferredVideoCodec, 'auto');
+    assert.equal(f.saves, 0);
+    assert.match(status.textContent, /Unsupported test adapter\/profile/);
+    assert.equal(status.getAttribute('aria-busy'), 'false');
+    hardware.click();
+    await flush();
+    assert.equal(probes, 1, 'Rendering and clicking a disabled card cannot spawn probes.');
+  });
+
+  test(`encoding cards support keyboard selection and preserve explicit software (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    f.settingsStore.screenEncodingMode = 'software';
+    f.settingsStore.screenEncodingStrategy = 'manual';
+    f.mountQuality();
+    await flush();
+    const hardware = control(f, 'screen-encoding-hardware');
+    const software = control(f, 'screen-encoding-software');
+    assert.equal(software.getAttribute('aria-pressed'), 'true');
+    assert.equal(f.saves, 0, 'Hardware availability never replaces explicit Software.');
+    assert.equal(key(software, 'ArrowLeft').defaultPrevented, true);
+    await flush();
+    assert.equal(f.document.activeElement, hardware);
+    assert.equal(f.settingsStore.screenEncodingMode, 'hardware');
+    assert.equal(hardware.getAttribute('aria-pressed'), 'true');
+    assert.equal(key(hardware, 'End').defaultPrevented, true);
+    await flush();
+    assert.equal(f.settingsStore.screenEncodingMode, 'software');
+    const saved = f.saves;
+    f.quality.cleanup();
+    key(hardware, 'Enter');
+    assert.equal(f.saves, saved, 'Cleanup removes keyboard listeners.');
+  });
+}
+
+test('encoder runtime errors remain visible and closing discovery prevents late preference mutation', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  f.controls.encoding = async () => { throw new Error('Driver verification failed'); };
+  f.mountQuality();
+  await flush();
+  assert.equal(f.settingsStore.screenEncodingMode, 'hardware');
+  assert.equal(f.saves, 0);
+  assert.match(control(f, 'screen-encoding-status').textContent, /Driver verification failed/);
+  const gate = deferred();
+  f.controls.encoding = () => gate.promise;
+  control(f, 'screen-encoding-manual').click();
+  f.quality.cleanup();
+  const saves = f.saves;
+  gate.resolve({ selection: { mode: 'software', codec: 'h264', encoder: 'obs_x264' },
+    hardware: { available: false, reason: 'Unsupported' }, fallback: true });
+  await flush();
+  assert.equal(f.saves, saves);
+});
+
+test('encoder discovery follows screen codec and profile changes but ignores unrelated settings and renders', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const probes = [];
+  const original = f.controls.encoding;
+  f.controls.encoding = async input => { probes.push(input); return original(input); };
+  const root = f.mountQuality();
+  await flush();
+  assert.equal(probes.length, 1);
+  f.settingsStore.screenSharePreviewPauseWhenUnfocused = false;
+  f.settingsStore.save();
+  f.quality.renderHtml();
+  await flush();
+  assert.equal(probes.length, 1);
+  control(f, 'screen-encoding-manual').click();
+  await flush();
+  assert.equal(probes.length, 2);
+  const codec = root.querySelector('#select-video-codec');
+  codec.value = 'av1';
+  change(codec);
+  await flush();
+  assert.equal(probes.length, 3);
+  assert.equal(probes[2].codec, 'av1');
+  const preset = root.querySelector('#select-preset');
+  preset.value = 'HIGH';
+  change(preset);
+  await flush();
+  assert.equal(probes.length, 4);
+  assert.notDeepEqual(probes[3].video, probes[2].video);
+  f.quality.cleanup();
+  f.settingsStore.preferredScreenCodec = 'h264';
+  f.settingsStore.save();
+  await flush();
+  assert.equal(probes.length, 4, 'The settings subscription is removed with its view.');
+});
+
+for (const codec of ['h264', 'av1']) {
+  test(`Automatic displays resolved Hardware ${codec} and ignores synthetic edits of read-only controls`, async t => {
+    const f = fixture();
+    t.after(() => f.close());
+    f.controls.encoding = async () => ({ selection: { mode: 'hardware', codec, encoder: codec === 'av1' ? 'av1_texture_amf' : 'h264_texture_amf' },
+      hardware: { available: true, reason: null }, fallback: false });
+    f.mountQuality();
+    await flush();
+    const field = control(f, 'select-video-codec');
+    assert.equal(field.value, codec);
+    assert.equal(field.disabled, true);
+    assert.equal(control(f, 'screen-encoding-hardware').getAttribute('aria-pressed'), 'true');
+    control(f, 'screen-encoding-software').click();
+    field.value = codec === 'av1' ? 'h264' : 'av1';
+    change(field);
+    assert.equal(field.value, codec);
+    assert.equal(f.saves, 0);
+  });
+}
+
+test('Manual unsupported combination stays selected and unavailable; Automatic rediscovery is not pinned to old Software', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  f.settingsStore.screenEncodingStrategy = 'manual';
+  f.settingsStore.preferredScreenCodec = 'av1';
+  f.controls.encoding = async () => ({ selection: null, hardware: { available: false, reason: 'Manual AV1 unsupported' },
+    fallback: false, reason: 'Manual AV1 unsupported' });
+  f.mountQuality();
+  await flush();
+  assert.equal(control(f, 'screen-encoding-hardware').getAttribute('aria-pressed'), 'true');
+  assert.equal(control(f, 'screen-encoding-hardware').disabled, true);
+  assert.equal(control(f, 'select-video-codec').value, 'av1');
+  assert.match(control(f, 'screen-encoding-status').textContent, /Manual AV1 unsupported/);
+  assert.equal(f.saves, 0);
+  f.controls.encoding = async () => ({ selection: { mode: 'software', codec: 'h264', encoder: 'obs_x264' },
+    hardware: { available: false, reason: 'Hardware unsupported' }, fallback: true });
+  control(f, 'screen-encoding-automatic').click();
+  await flush();
+  assert.equal(control(f, 'screen-encoding-software').getAttribute('aria-pressed'), 'true');
+  assert.equal(f.settingsStore.screenEncodingMode, 'hardware');
+  f.quality.cleanup();
+  control(f, 'screen-encoding-automatic').closest('[data-settings-section="screen-encoding"]').parentElement.remove();
+  f.controls.encoding = async () => ({ selection: { mode: 'hardware', codec: 'av1', encoder: 'av1_texture_amf' },
+    hardware: { available: true, reason: null }, fallback: false });
+  f.mountQuality();
+  await flush();
+  assert.equal(control(f, 'screen-encoding-hardware').getAttribute('aria-pressed'), 'true');
+  assert.equal(control(f, 'select-video-codec').value, 'av1');
+  assert.equal(f.settingsStore.screenEncodingStrategy, 'automatic');
+});
+
+test('changing Automatic/Manual cancels stale discovery and late results never override the current selection', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const automatic = deferred(), manual = deferred();
+  f.controls.encoding = input => input.encodingStrategy === 'automatic' ? automatic.promise : manual.promise;
+  f.mountQuality();
+  assert.equal(key(control(f, 'screen-encoding-automatic'), 'ArrowRight').defaultPrevented, true);
+  assert.equal(f.settingsStore.screenEncodingStrategy, 'manual');
+  assert.ok(f.traces.some(trace => trace[0] === 'cancel-encoding'));
+  manual.resolve({ selection: { mode: 'hardware', codec: 'h264', encoder: 'h264_texture_amf' },
+    hardware: { available: true, reason: null }, fallback: false });
+  await flush();
+  automatic.resolve({ selection: { mode: 'software', codec: 'h264', encoder: 'obs_x264' },
+    hardware: { available: false, reason: 'Old unsupported result' }, fallback: true });
+  await flush();
+  assert.equal(control(f, 'screen-encoding-hardware').getAttribute('aria-pressed'), 'true');
+  assert.equal(control(f, 'select-video-codec').disabled, false);
+  assert.doesNotMatch(control(f, 'screen-encoding-status').textContent, /Old unsupported/);
+  assert.equal(f.saves, 1);
+});
+
+test('switching pending Manual to Automatic ignores late manual failures and keeps its resolved values read-only', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  f.settingsStore.screenEncodingStrategy = 'manual';
+  f.settingsStore.screenEncodingMode = 'software';
+  f.settingsStore.preferredScreenCodec = 'av1';
+  const manual = deferred();
+  f.controls.encoding = input => input.encodingStrategy === 'manual' ? manual.promise
+    : Promise.resolve({ selection: { mode: 'hardware', codec: 'h264', encoder: 'h264_texture_amf' },
+      hardware: { available: true, reason: null }, fallback: false });
+  f.mountQuality();
+  control(f, 'screen-encoding-automatic').click();
+  await flush();
+  manual.reject(new Error('Late Manual failure'));
+  await flush();
+  assert.equal(control(f, 'select-video-codec').value, 'h264');
+  assert.equal(control(f, 'select-video-codec').disabled, true);
+  assert.equal(control(f, 'screen-encoding-hardware').getAttribute('aria-pressed'), 'true');
+  assert.doesNotMatch(control(f, 'screen-encoding-status').textContent, /Late Manual failure/);
+  assert.equal(f.settingsStore.screenEncodingStrategy, 'automatic');
+  assert.equal(f.settingsStore.screenEncodingMode, 'software');
+  assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
+  assert.equal(f.saves, 1);
 });

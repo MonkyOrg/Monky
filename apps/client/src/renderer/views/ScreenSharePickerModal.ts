@@ -1,4 +1,4 @@
-import { type DesktopSource, type NativeScreenCapabilities, type NativeScreenCaptureKind } from '@monky/shared';
+import type { DesktopSource, NativeScreenCapabilities, NativeScreenCaptureKind } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
 import { screenAudioService } from '../core/ScreenAudioService';
@@ -6,7 +6,6 @@ import { captureScreenShareCall, notifyScreenShareState, stopLocalScreenShares }
 import { videoService } from '../core/VideoService';
 import { voiceStore, VoiceStore } from '../stores/voiceStore';
 import { webRtcManager } from '../core/WebRtcManager';
-import { settingsStore } from '../stores/settingsStore';
 import { setButtonLoading } from '../utils/buttonLoading';
 import { renderLoadingError, renderLoadingSkeleton } from '../utils/loadingSkeleton';
 import { showAlert, showConfirm } from './Dialog';
@@ -88,7 +87,6 @@ export class ScreenSharePickerModal {
       && (!audio || !this.selectedSource()?.isOwnWindow)
       && (!audio || (this.nativeCapabilities?.captureAudio === true
         && (!this.hasScreenAudio() || (mode === 'replace' && this.canReplaceScreenAudio()))))
-      && (settingsStore.preferredVideoCodec === 'auto' || settingsStore.preferredVideoCodec === 'h264')
       && nativeScreenProfile(videoService.getProfile()) !== null;
   }
 
@@ -109,8 +107,6 @@ export class ScreenSharePickerModal {
     if (audio && this.hasScreenAudio() && (mode === 'add' || !this.canReplaceScreenAudio()))
       return t('screenShare.audioAlreadySharing');
     if (audio && !capabilities.captureAudio) return t('screenShare.nativeAudioUnavailable');
-    if (settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264')
-      return t('screenShare.codecsSoon');
     return t('screenShare.nativeProfileChangeBlocked');
   }
 
@@ -309,6 +305,7 @@ export class ScreenSharePickerModal {
           </button>
         </div>
         <p id="share-method-reasons" class="share-method-reasons" role="status"></p>
+        <p id="share-preview-error" class="share-method-reasons" role="status" hidden></p>
 
         <div id="share-sources-panel" role="tabpanel" aria-labelledby="share-tab-${this.activeTab}" aria-busy="true" tabindex="0"></div>
         <button type="button" id="btn-game-capture-guide" class="btn game-capture-guide-trigger"
@@ -336,13 +333,13 @@ export class ScreenSharePickerModal {
         <div class="share-aspect-option">
           <div>
             <label id="share-aspect-label" for="chk-preserve-aspect-ratio">${escapeHtml(t('screenShare.preserveAspectRatio'))}</label>
-            <small id="share-aspect-description">${escapeHtml(t('screenShare.preserveAspectRatioDescription'))}</small>
+            <label class="toggle-switch">
+              <input id="chk-preserve-aspect-ratio" type="checkbox" role="switch" checked
+                aria-labelledby="share-aspect-label" aria-describedby="share-aspect-description">
+              <span class="toggle-slider"></span>
+            </label>
           </div>
-          <label class="toggle-switch">
-            <input id="chk-preserve-aspect-ratio" type="checkbox" role="switch"
-              aria-labelledby="share-aspect-label" aria-describedby="share-aspect-description">
-            <span class="toggle-slider"></span>
-          </label>
+          <div id="share-aspect-description" class="audio-device-status">${escapeHtml(t('screenShare.preserveAspectRatioDescription'))}</div>
         </div>
         <p id="share-capture-info" class="share-game-tip" role="status" hidden></p>
         <p id="share-audio-warning" class="share-game-tip" role="status" hidden></p>
@@ -382,7 +379,7 @@ export class ScreenSharePickerModal {
     if (this.modalEl === modal) await this.loadSources(modal);
   }
 
-  private async loadSources(modal: HTMLElement): Promise<void> {
+  private async loadSources(modal: HTMLElement, forceRefresh = false): Promise<void> {
     if (this.modalEl !== modal || this.isStarting) return;
     const request = ++this.sourceRequest;
     const isCurrent = (): boolean => this.modalEl === modal && this.sourceRequest === request;
@@ -390,6 +387,8 @@ export class ScreenSharePickerModal {
     const restoreRefreshFocus = document.activeElement === refresh;
     this.sourceState = { status: 'loading' };
     this.nativeCapabilities = null;
+    const previewError = modal.querySelector<HTMLElement>('#share-preview-error');
+    if (previewError) { previewError.hidden = true; previewError.textContent = ''; }
     this.renderSources();
     this.updateCaptureInfo();
     try {
@@ -405,11 +404,12 @@ export class ScreenSharePickerModal {
         return;
       }
       if (!window.api?.getDesktopSources) throw new Error('Desktop source enumeration is unavailable');
-      const sources = await window.api.getDesktopSources();
+      const sources = await window.api.getDesktopSources({ metadataOnly: true, refresh: forceRefresh });
       if (!isCurrent()) return;
       this.sourceState = { status: 'ready', sources };
       this.renderSources();
       this.updateCaptureInfo();
+      void this.loadSourcePreviews(modal, request);
     } catch (error: unknown) {
       if (!isCurrent()) return;
       console.error('[ScreenShare] Could not load capture sources', error);
@@ -419,6 +419,71 @@ export class ScreenSharePickerModal {
     } finally {
       if (isCurrent() && restoreRefreshFocus && document.activeElement === document.body) refresh?.focus();
     }
+  }
+
+  private async loadSourcePreviews(modal: HTMLElement, request: number): Promise<void> {
+    if (this.sourceState.status !== 'ready') return;
+    const sources = this.sourceState.sources;
+    const isCurrent = (): boolean => this.modalEl === modal && this.sourceRequest === request
+      && this.sourceState.status === 'ready' && !this.isStarting;
+    await Promise.all(SOURCE_TABS.map(async ({ id: type }) => {
+      const pending = sources.filter(source => source.type === type && source.thumbnailState !== undefined
+        && (source.thumbnailState === 'pending' || (type === 'window' && !source.appIconDataUrl)));
+      if (!pending.length) return;
+      try {
+        const previews = await Promise.all(Array.from({ length: Math.ceil(pending.length / 256) }, (_, index) =>
+          window.api.getDesktopSourcePreviews({ type, sourceIds: pending.slice(index * 256, (index + 1) * 256).map(source => source.id) })));
+        if (!isCurrent()) return;
+        const byId = new Map(previews.flat().map(preview => [preview.id, preview]));
+        for (const source of pending) {
+          const preview = byId.get(source.id);
+          source.appIconDataUrl = preview?.appIconDataUrl ?? source.appIconDataUrl;
+          if (source.thumbnailState !== 'unavailable') {
+            source.thumbnailDataUrl = preview?.thumbnailDataUrl ?? source.thumbnailDataUrl;
+            source.thumbnailState = source.thumbnailDataUrl ? 'ready' : 'unavailable';
+          }
+        }
+      } catch (error) {
+        if (!isCurrent()) return;
+        console.error('[ScreenShare] Could not load source previews', error);
+        for (const source of pending) source.thumbnailState = 'unavailable';
+        const note = modal.querySelector<HTMLElement>('#share-preview-error');
+        if (note) { note.textContent = t('screenShare.previewsFailed'); note.hidden = false; }
+      }
+      if (!isCurrent()) return;
+      const updated = new Map(pending.map(source => [source.id, source]));
+      modal.querySelectorAll<HTMLElement>('.source-item').forEach(item => {
+        const source = updated.get(item.dataset.sourceId ?? '');
+        if (!source) return;
+        const preview = item.querySelector<HTMLElement>('.source-preview');
+        if (preview) preview.innerHTML = this.renderSourcePreview(source);
+        const icon = item.querySelector<HTMLElement>('.source-icon');
+        if (icon) icon.innerHTML = this.renderSourceIcon(source);
+      });
+    }));
+  }
+
+  private sourceName(source: DesktopSource): string {
+    return source.type === 'screen' && source.displayNumber !== undefined
+      ? t('screenShare.screenNumber', { number: source.displayNumber }) : source.name;
+  }
+
+  private renderSourcePreview(source: DesktopSource): string {
+    if (source.thumbnailDataUrl)
+      return `<img class="source-thumbnail" src="${escapeHtml(source.thumbnailDataUrl)}" alt="${escapeHtml(this.sourceName(source))}">`;
+    if (source.thumbnailState === 'pending')
+      return `<div class="source-thumbnail source-thumbnail--loading skeleton" role="status"
+        aria-label="${escapeHtml(t('screenShare.previewLoading'))}"></div>`;
+    return `<div class="source-thumbnail source-thumbnail--minimized">
+      <span class="material-symbols-outlined">${source.type === 'screen' ? 'desktop_windows' : 'web_asset'}</span>
+      <span class="source-thumbnail-label">${escapeHtml(t('screenShare.previewUnavailable'))}</span>
+    </div>`;
+  }
+
+  private renderSourceIcon(source: DesktopSource): string {
+    return source.appIconDataUrl
+      ? `<img class="source-app-icon" src="${escapeHtml(source.appIconDataUrl)}" alt="">`
+      : `<span class="material-symbols-outlined source-app-icon-fallback">${source.type === 'screen' ? 'desktop_windows' : 'web_asset'}</span>`;
   }
 
   private renderSources(): void {
@@ -454,21 +519,13 @@ export class ScreenSharePickerModal {
     panel.innerHTML = `
       <div class="screen-sources-grid">
         ${available.map((s) => {
-          const name = escapeHtml(s.type === 'screen' && s.displayNumber !== undefined
-            ? t('screenShare.screenNumber', { number: s.displayNumber }) : s.name);
+          const name = escapeHtml(this.sourceName(s));
           return `
           <div class="source-item ${this.selectedSourceId === s.id ? 'selected' : ''}" data-source-id="${escapeHtml(s.id)}"
             role="button" tabindex="0" aria-label="${name}" aria-pressed="${this.selectedSourceId === s.id}">
-            ${s.thumbnailDataUrl
-              ? `<img class="source-thumbnail" src="${escapeHtml(s.thumbnailDataUrl)}" alt="${name}">`
-              : `<div class="source-thumbnail source-thumbnail--minimized">
-                  <span class="material-symbols-outlined">${s.type === 'screen' ? 'desktop_windows' : 'web_asset'}</span>
-                  <span class="source-thumbnail-label">${t('screenShare.previewUnavailable')}</span>
-                </div>`}
+            <div class="source-preview">${this.renderSourcePreview(s)}</div>
             <div class="source-name" title="${name}">
-              ${s.appIconDataUrl
-                ? `<img class="source-app-icon" src="${escapeHtml(s.appIconDataUrl)}" alt="">`
-                : `<span class="material-symbols-outlined source-app-icon-fallback">${s.type === 'screen' ? 'desktop_windows' : 'web_asset'}</span>`}
+              <span class="source-icon">${this.renderSourceIcon(s)}</span>
               ${name}
             </div>
           </div>
@@ -520,7 +577,7 @@ export class ScreenSharePickerModal {
     modal.querySelector('#btn-share')?.addEventListener('click', () => { void this.startSharing('replace'); }, options);
     modal.querySelector('#btn-share-add')?.addEventListener('click', () => { void this.startSharing('add'); }, options);
     modal.querySelector('#btn-refresh-sources')?.addEventListener('click', () => {
-      if (!this.isStarting && this.sourceState.status !== 'loading') void this.loadSources(modal);
+      if (!this.isStarting && this.sourceState.status !== 'loading') void this.loadSources(modal, true);
     }, options);
     const guide = modal.querySelector<HTMLButtonElement>('#btn-game-capture-guide');
     guide?.addEventListener('click', () => {
@@ -572,7 +629,7 @@ export class ScreenSharePickerModal {
     };
     panel?.addEventListener('click', event => {
       if (event.target instanceof Element && event.target.closest('[data-loading-retry]')) {
-        if (!this.isStarting) void this.loadSources(modal);
+        if (!this.isStarting) void this.loadSources(modal, true);
         return;
       }
       this.selectSource(sourceId(event));
@@ -613,7 +670,7 @@ export class ScreenSharePickerModal {
     const tab = this.activeTab;
     const captureKind = this.captureKind(tab);
     const shareAudio = modal.querySelector<HTMLInputElement>('#chk-share-audio')?.checked ?? false;
-    const preserveAspectRatio = modal.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio')?.checked ?? false;
+    const preserveAspectRatio = modal.querySelector<HTMLInputElement>('#chk-preserve-aspect-ratio')?.checked ?? true;
     const call = captureScreenShareCall();
     let stream: MediaStream | null = null;
     let published = false;

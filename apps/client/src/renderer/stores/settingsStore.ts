@@ -12,6 +12,8 @@ import {
   normalizeBotLocale,
   type BotFormValues,
   type BotLocale,
+  type ScreenEncodingMode,
+  type ScreenCodec, type ScreenEncodingStrategy,
 } from '@monky/shared';
 import { appEvents } from '../core/EventBus';
 import {
@@ -59,6 +61,9 @@ function restoreBotLocalePreferences(value: unknown): Record<string, BotLocale> 
 export class SettingsStore {
   public qualityPreset: QualityPresetType = 'NORMAL';
   public preferredVideoCodec: 'auto' | 'av1' | 'vp9' | 'vp8' | 'h264' = 'auto';
+  public screenEncodingMode: ScreenEncodingMode = 'hardware';
+  public screenEncodingStrategy: ScreenEncodingStrategy = 'automatic';
+  public preferredScreenCodec: ScreenCodec = 'h264';
   public customProfile: QualityProfile = { ...DEFAULT_CUSTOM_PROFILE };
   public inputMode: 'voice_activity' | 'push_to_talk' = 'voice_activity'; // #186
   public pttKey: PttKeyBinding = { code: 'KeyV', display: 'V', keyType: 'keyboard', keyCode: 47 };
@@ -147,6 +152,9 @@ export class SettingsStore {
   }
 
   public load(notify = true): void {
+    this.screenEncodingMode = 'hardware';
+    this.screenEncodingStrategy = 'automatic';
+    this.preferredScreenCodec = 'h264';
     this.screenShareReceiver = this.nativeScreenReceiverComingSoon ? 'chromium' : 'native';
     this.soundboardLimiterEnabled = false;
     this.soundboardLoudnessLimit = 6;
@@ -163,6 +171,12 @@ export class SettingsStore {
           throw new TypeError('Saved settings must be an object');
         }
         Object.assign(this, parsed);
+        this.screenEncodingMode = parsed.screenEncodingMode === 'software' ? 'software' : 'hardware';
+        this.preferredScreenCodec = parsed.preferredScreenCodec === 'av1' ? 'av1' : 'h264';
+        this.screenEncodingStrategy = parsed.screenEncodingStrategy === 'manual' ? 'manual'
+          : parsed.screenEncodingStrategy === undefined
+            && (parsed.screenEncodingMode === 'software' || parsed.preferredScreenCodec === 'h264'
+              || parsed.preferredScreenCodec === 'av1') ? 'manual' : 'automatic';
         if (parsed.screenShareReceiver !== undefined && parsed.screenShareReceiver !== 'native'
           && parsed.screenShareReceiver !== 'chromium') {
           console.warn('[Settings] Invalid screen receiver preference; restoring the platform default.');
@@ -622,6 +636,9 @@ export class SettingsStore {
       localStorage.setItem('monky_settings', JSON.stringify({
         qualityPreset: this.qualityPreset,
         preferredVideoCodec: this.preferredVideoCodec,
+        screenEncodingMode: this.screenEncodingMode,
+        screenEncodingStrategy: this.screenEncodingStrategy,
+        preferredScreenCodec: this.preferredScreenCodec,
         vadSensitivity: this.vadSensitivity,
         selectedMicrophoneId: this.selectedMicrophoneId,
         selectedSpeakerId: this.selectedSpeakerId,

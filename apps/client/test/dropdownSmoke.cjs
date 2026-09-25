@@ -89,7 +89,7 @@ if (!process.versions.electron) {
     await wait();
     assert(await evaluate(`(() => {
       const select = document.querySelector('#select-video-codec');
-      return select.value === 'h264' && select.dataset.inputs === '1' && select.dataset.changes === '1' && document.activeElement === select;
+      return select.value === 'av1' && select.dataset.inputs === '1' && select.dataset.changes === '1' && document.activeElement === select;
     })()`), 'Trusted pointer commits exactly once and keeps focus on original select');
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
@@ -98,7 +98,7 @@ if (!process.versions.electron) {
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
     await wait();
-    assert(await evaluate(`document.querySelector('#select-video-codec').value === 'auto' && !document.querySelector('.monky-select-popup')`), 'Trusted keyboard selects without native picker');
+    assert(await evaluate(`document.querySelector('#select-video-codec').value === 'h264' && !document.querySelector('.monky-select-popup')`), 'Trusted keyboard selects without native picker');
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
     await wait();
@@ -382,9 +382,15 @@ async function runDropdownSmoke() {
     rtc.reapplyCodecPreferences = originals.reapply;
   }
   // Keep a real settings fixture for trusted-input checks and the screenshot.
-  fixture.innerHTML = quality.renderHtml();
+  const strategy = settings.screenEncodingStrategy;
+  try {
+    settings.screenEncodingStrategy = 'manual';
+    fixture.innerHTML = quality.renderHtml();
+  } finally { settings.screenEncodingStrategy = strategy; }
   const codec = fixture.querySelector('#select-video-codec');
-  codec.value = 'auto';
+  check(!codec.disabled && [...codec.options].map(option => option.value).join(',') === 'h264,av1',
+    'Trusted codec input uses the editable Manual H.264/AV1 control, not read-only Automatic mode');
+  codec.value = 'h264';
   fixture.insertAdjacentHTML('beforeend', '<button type="button" class="btn btn-secondary">Next control</button>');
   service.init();
   return checks;

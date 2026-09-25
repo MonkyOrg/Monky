@@ -12,7 +12,7 @@ function verifySourceInputs() {
   const bin = path.join(root, 'bin', 'win32-x64');
   const rtc = JSON.parse(fs.readFileSync(path.join(bin, 'rtc-build.json'), 'utf8'));
   const capture = JSON.parse(fs.readFileSync(path.join(bin, 'capture-build.json'), 'utf8'));
-  assert.equal(capture.schemaVersion, 4, 'Rebuild capture for scaling and pinned hook storage.');
+  assert.equal(capture.schemaVersion, 5, 'Rebuild capture for hardware/software H264 and AV1.');
   verify(path.join(root, 'scripts', 'captureSourceBindings.cjs'), capture.sourceBindingRecipe);
   for (const [directory, records] of [
     [path.join(root, 'src', 'rtc'), rtc.sourceFiles],
@@ -38,6 +38,9 @@ function verifyLegalFiles(directory) {
   assert.equal(catalog.obsRevision, '7272af1375b38bc3cf4e0f98a5d999e8b76e9309');
   assert.ok(Array.isArray(catalog.files) && catalog.files.length >= 40, 'Native third-party notices are incomplete.');
   for (const record of catalog.files) verifiedFile(directory, record);
+  const libraries = JSON.parse(fs.readFileSync(path.join(directory, 'licenses', 'webrtc', 'libraries.json'), 'utf8'));
+  for (const name of ['libaom', 'dav1d'])
+    assert.ok(libraries.includes(name), `Missing compiled AV1 dependency notices: ${name}`);
   for (const name of ['LICENSE', 'LICENSE-MIT'])
     assert.deepEqual(fs.readFileSync(path.join(directory, name)), fs.readFileSync(path.join(root, name)));
   const notice = fs.readFileSync(path.join(directory, 'THIRD_PARTY_NOTICES'), 'utf8');

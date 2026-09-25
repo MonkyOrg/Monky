@@ -6,7 +6,7 @@ const { EventEmitter } = require('node:events');
 const { randomUUID } = require('node:crypto');
 const { NATIVE_SCREEN_PREVIEW_IPC, nativeScreenPreviewPacketSchema } = require('@monky/shared');
 const { NativeScreenPreviewBridge, MAX_PACKETS, MAX_BYTES } = require('../runtime/nativeScreenPreviewBridge.cjs');
-const { EncodedPreviewRenderer, h264Codec } = require('../runtime/encodedPreviewRenderer.cjs');
+const { EncodedPreviewRenderer, h264Codec, av1Codec } = require('../runtime/encodedPreviewRenderer.cjs');
 const { createNativeScreenPresentation } = require('../runtime/nativePresentationRenderer.cjs');
 const { within } = require('../runtime/nativeDeadline.cjs');
 const fs = require('node:fs');
@@ -69,6 +69,29 @@ test('local preview derives its codec from the original Annex-B SPS', () => {
   assert.equal(h264Codec(sps), 'avc1.4d0033');
   assert.equal(h264Codec(sps.subarray(1)), 'avc1.4d0033');
   assert.throws(() => h264Codec(new Uint8Array([0, 0, 1, 0x65, 1, 2, 3, 4, 5])), /original H.264 SPS/);
+});
+
+const av1Sequence = Buffer.from('12000a0d00000024c6a7df0068808080800', 'hex');
+test('AV1 preview derives profile, level and tier from the encoded sequence', () => {
+  assert.equal(av1Codec(av1Sequence), 'av01.0.04M.08');
+  assert.throws(() => av1Codec(av1Sequence.subarray(0, 8)), /OBU exceeds/);
+  assert.throws(() => av1Codec(Buffer.from([0x0a, 0xff])), /Truncated/);
+  assert.throws(() => av1Codec(Buffer.from([0x88, 0])), /Invalid/);
+  const highProfile = Buffer.from(av1Sequence); highProfile[4] |= 0x20;
+  assert.throws(() => av1Codec(highProfile), /profile/);
+});
+
+test('AV1 preview passes the actual encoded codec to WebCodecs', async () => {
+  const platform = decoderPlatform(), port = new Port(), errors = [];
+  const renderer = new EncodedPreviewRenderer({ acceptFrame() { assert.fail('No real frame was decoded.'); } },
+    error => errors.push(error), platform);
+  renderer.attach(port);
+  port.receive({ ...packet(), codec: 'av1', data: av1Sequence });
+  await renderer.tail;
+  assert.equal(platform.decoders[0].config.codec, 'av01.0.04M.08');
+  assert.equal(platform.decoders[0].chunks.length, 1);
+  assert.deepEqual(errors, []);
+  await renderer.stop();
 });
 
 test('preview accepts ordinary IPC buffers without requiring browser SharedArrayBuffer access', () => {

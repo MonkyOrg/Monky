@@ -2700,7 +2700,7 @@ uint32_t Option(napi_env env, napi_value options, const char* name, uint32_t fal
                                        "Numeric engine options must be positive uint32 safe integers"));
 }
 
-MonkyEngineOptions Options(napi_env env, napi_value object, bool& encoded) {
+MonkyEngineOptions Options(napi_env env, napi_value object, bool& encoded, bool& av1) {
   Record(env, object, "options must be an object");
   constexpr std::array<const char*, 7> names{
       "maxResources", "maxPendingOperations", "maxDecodedFrames",
@@ -2727,9 +2727,11 @@ MonkyEngineOptions Options(napi_env env, napi_value object, bool& encoded) {
   options.operation_timeout_ms = Option(env, object, "operationTimeoutMs", 12000);
   options.maximum_h264_level = Option(env, object, "maximumH264Level", 60);
   if (Has(env, object, "videoInput")) {
-    const auto input = String(env, Get(env, object, "videoInput"), 1, 16, "videoInput must be nv12 or encoded-h264");
-    if (input != "nv12" && input != "encoded-h264") Invalid(env, "videoInput must be nv12 or encoded-h264");
-    encoded = input == "encoded-h264";
+    const auto input = String(env, Get(env, object, "videoInput"), 1, 16, "Invalid videoInput");
+    if (input != "nv12" && input != "encoded-h264" && input != "encoded-av1")
+      Invalid(env, "videoInput must be nv12, encoded-h264 or encoded-av1");
+    av1 = input == "encoded-av1";
+    encoded = input != "nv12";
   }
   if (options.max_resources > 64 || options.max_pending_operations > 128 ||
       options.max_decoded_frames > 64 || options.operation_timeout_ms < 100 ||
@@ -2812,8 +2814,8 @@ napi_value CreateEngine(napi_env env, napi_callback_info info) {
     Arguments<2> args(env, info);
     // Inert DLL negotiation precedes option getters, async state and creation.
     RequireContract(env);
-    bool encoded = false;
-    const auto options = Options(env, args.values[0], encoded);
+    bool encoded = false, av1 = false;
+    const auto options = Options(env, args.values[0], encoded, av1);
     if (Type(env, args.values[1]) != napi_function) Invalid(env, "onEvent must be a function");
     auto state = std::make_shared<State>(env, options);
     try {
@@ -2825,7 +2827,8 @@ napi_value CreateEngine(napi_env env, napi_callback_info info) {
       callbacks.user = state.get();
       MonkyEngineError error = EmptyError();
       MonkyRtcEngine* engine = nullptr;
-      const auto status = encoded ? monky_rtc_engine_create_encoded(&options, &callbacks, &engine, &error)
+      const auto status = av1 ? monky_rtc_engine_create_encoded_av1(&options, &callbacks, &engine, &error)
+          : encoded ? monky_rtc_engine_create_encoded(&options, &callbacks, &engine, &error)
                                   : monky_rtc_engine_create(&options, &callbacks, &engine, &error);
       {
         std::lock_guard lock(state->native_mutex);

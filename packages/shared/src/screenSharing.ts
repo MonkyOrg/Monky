@@ -9,6 +9,31 @@ export const screenShareIdSchema = z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/);
 export const screenShareQualitySchema = z.enum(['source', '1080p60', '720p60', '480p30']);
 export type ScreenShareQuality = z.infer<typeof screenShareQualitySchema>;
 
+export const screenEncodingModeSchema = z.enum(['hardware', 'software']);
+export type ScreenEncodingMode = z.infer<typeof screenEncodingModeSchema>;
+export const screenEncodingStrategySchema = z.enum(['automatic', 'manual']);
+export type ScreenEncodingStrategy = z.infer<typeof screenEncodingStrategySchema>;
+export const screenCodecSchema = z.enum(['h264', 'av1']);
+export type ScreenCodec = z.infer<typeof screenCodecSchema>;
+export const screenCodecPreferenceSchema = z.enum(['auto', 'h264', 'av1']);
+export type ScreenCodecPreference = z.infer<typeof screenCodecPreferenceSchema>;
+export const screenEncoderSchema = z.enum([
+  'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264',
+  'av1_texture_amf', 'obs_nvenc_av1_tex', 'monky_aom_av1',
+]);
+export type ScreenEncoder = z.infer<typeof screenEncoderSchema>;
+export interface ScreenEncodingSelection {
+  mode: ScreenEncodingMode;
+  codec: ScreenCodec;
+  encoder: ScreenEncoder;
+}
+export interface ScreenEncodingAvailability {
+  selection: ScreenEncodingSelection | null;
+  hardware: { available: boolean; reason: string | null; error?: boolean };
+  fallback: boolean;
+  reason?: string;
+}
+
 export const nativeScreenCaptureModeSchema = z.enum(['normal', 'game']);
 export type NativeScreenCaptureMode = z.infer<typeof nativeScreenCaptureModeSchema>;
 export const nativeScreenCaptureStatusSchema = z.object({
@@ -37,6 +62,29 @@ export function getScreenH264ProfileLevelId(profile: Readonly<NativeScreenVideoP
   return macroblocksPerSecond <= 983040 ? '4d0033' : macroblocksPerSecond <= 2073600 ? '4d0034' : '4d003c';
 }
 
+/** Annex A lower bound for Main-tier, single-layer video; not proof of an encoder's actual sequence level. */
+export function getScreenAv1MinimumLevelIndex(profile: Readonly<NativeScreenVideoProfile>): number {
+  const video = nativeScreenVideoProfileSchema.parse(profile);
+  // https://aomediacodec.github.io/av1-spec/#levels
+  const levels = [
+    [0, 147456, 2048, 1152, 4423680, 1500],
+    [1, 278784, 2816, 1584, 8363520, 3000],
+    [4, 665856, 4352, 2448, 19975680, 6000],
+    [5, 1065024, 5504, 3096, 31950720, 10000],
+    [8, 2359296, 6144, 3456, 70778880, 12000],
+    [9, 2359296, 6144, 3456, 141557760, 20000],
+    [12, 8912896, 8192, 4352, 267386880, 30000],
+    [13, 8912896, 8192, 4352, 534773760, 40000],
+    [14, 8912896, 8192, 4352, 1069547520, 60000],
+    [17, 35651584, 16384, 8704, 2139095040, 100000],
+  ] as const;
+  const pixels = video.width * video.height;
+  const level = levels.find(([, size, width, height, rate, bitrate]) => pixels <= size
+    && video.width <= width && video.height <= height && pixels * video.fps <= rate && video.maxBitrateKbps <= bitrate);
+  if (!level) throw new Error('The selected screen profile exceeds the supported AV1 level bounds.');
+  return level[0];
+}
+
 export const nativeScreenRenditionSchema = z.object({
   sourceInstanceId: z.string().uuid(),
   pipelineId: z.string().uuid(),
@@ -49,6 +97,8 @@ export const nativeScreenSourceSchema = z.object({
   instanceId: z.string().uuid(),
   video: nativeScreenVideoProfileSchema,
   audio: z.boolean(),
+  /** Absent on legacy descriptors: H.264. Codec is independent of rendition geometry. */
+  codec: screenCodecSchema.optional(),
 }).strict();
 export type NativeScreenSource = z.infer<typeof nativeScreenSourceSchema>;
 export const nativeScreenSourcesSchema = z.array(nativeScreenSourceSchema).max(2)
@@ -62,14 +112,15 @@ const qualityLimits: Readonly<Record<Exclude<ScreenShareQuality, 'source'>, Nati
 };
 
 export function getScreenShareProfile(
-  source: Readonly<NativeScreenVideoProfile>, quality: ScreenShareQuality,
+  source: Readonly<NativeScreenVideoProfile>, quality: ScreenShareQuality, codec: ScreenCodec = 'h264',
 ): Readonly<NativeScreenVideoProfile> {
   const maximum = nativeScreenVideoProfileSchema.parse(source);
   const selected = screenShareQualitySchema.parse(quality);
-  if (selected === 'source') return Object.freeze(maximum);
-  const limit = qualityLimits[selected];
+  // AMF AV1 otherwise pads four-pixel-aligned widths without signaling the intended visible width.
+  const alignment = screenCodecSchema.parse(codec) === 'av1' ? 8 : 4;
+  const limit = selected === 'source' ? maximum : qualityLimits[selected];
   return Object.freeze({
-    width: Math.min(maximum.width, limit.width),
+    width: Math.max(alignment, Math.floor(Math.min(maximum.width, limit.width) / alignment) * alignment),
     height: Math.min(maximum.height, limit.height),
     fps: Math.min(maximum.fps, limit.fps),
     maxBitrateKbps: Math.min(maximum.maxBitrateKbps, limit.maxBitrateKbps),
@@ -80,12 +131,12 @@ export function screenShareProfileKey(profile: Readonly<NativeScreenVideoProfile
   return `${profile.width}x${profile.height}@${profile.fps}:${profile.maxBitrateKbps}`;
 }
 
-export function getScreenShareQualities(source: Readonly<NativeScreenVideoProfile>): {
+export function getScreenShareQualities(source: Readonly<NativeScreenVideoProfile>, codec: ScreenCodec = 'h264'): {
   quality: ScreenShareQuality; profile: Readonly<NativeScreenVideoProfile>;
 }[] {
   const seen = new Set<string>();
   return screenShareQualitySchema.options.flatMap(quality => {
-    const profile = getScreenShareProfile(source, quality);
+    const profile = getScreenShareProfile(source, quality, codec);
     const key = screenShareProfileKey(profile);
     if (seen.has(key)) return [];
     seen.add(key);

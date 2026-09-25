@@ -34,15 +34,19 @@ inline void ValidateAmfLevelCapability(std::int64_t maximum, const VideoConfigur
 inline std::string CapabilityJson(const EncoderCapability& capability) {
   if (!capability.verified) return "null";
   Require(capability.encoder != EncoderKind::Auto && capability.adapterIndex == 0 &&
-          capability.vendorId == (capability.encoder == EncoderKind::Nvenc ? 0x10deu : 0x1002u),
+          (IsSoftware(capability.encoder) ||
+          capability.vendorId == (IsNvenc(capability.encoder) ? 0x10deu : 0x1002u)),
           "Verified encoder capability has inconsistent device identity", "ERR_SCREEN_CAPTURE_DEVICE");
   return "{\"encoderId\":" + JsonString(EncoderId(capability.encoder)) +
-      ",\"codec\":\"h264\",\"adapterIndex\":" + std::to_string(capability.adapterIndex) +
+      ",\"codec\":" + JsonString(EncoderCodec(capability.encoder)) +
+      ",\"adapterIndex\":" + std::to_string(capability.adapterIndex) +
       ",\"adapterLuid\":" + JsonString(std::to_string(capability.adapterLuid)) +
       ",\"vendorId\":" + std::to_string(capability.vendorId) +
       ",\"deviceId\":" + std::to_string(capability.deviceId) +
-      ",\"probe\":" + JsonString(capability.encoder == EncoderKind::Nvenc ? "nvenc-d3d11-session" : "obs-amf-test") +
-      ",\"probeVerified\":true,\"textureInput\":true,\"dynamicBitrate\":true}";
+      ",\"probe\":" + JsonString(IsSoftware(capability.encoder) ? "software-encoder" :
+          IsNvenc(capability.encoder) ? "nvenc-d3d11-session" : "obs-amf-test") +
+      ",\"probeVerified\":true,\"textureInput\":" + Boolean(!IsSoftware(capability.encoder)) +
+      ",\"dynamicBitrate\":true}";
 }
 
 inline std::string TargetJson(const Arguments& arguments, const Common& common) {

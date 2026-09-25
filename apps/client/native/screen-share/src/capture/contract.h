@@ -1,6 +1,7 @@
 #pragma once
 
 #include "abi.h"
+#include "../rtc/inputs/native_core/av1_obu.h"
 
 #include <algorithm>
 #include <array>
@@ -194,12 +195,33 @@ enum class CaptureKind { Window, Monitor, Game };
 inline const char* KindName(CaptureKind kind) {
   return kind == CaptureKind::Monitor ? "monitor" : kind == CaptureKind::Game ? "game" : "window";
 }
-enum class EncoderKind { Auto, Amf, Nvenc };
-inline const char* EncoderId(EncoderKind kind) { return kind == EncoderKind::Nvenc ? kNvencEncoderId : kEncoderId; }
-inline const char* EncoderRateControl(EncoderKind kind) { return kind == EncoderKind::Nvenc ? "CBR" : "VBR_LAT"; }
+enum class EncoderKind { Auto, Amf, Nvenc, X264, AmfAv1, NvencAv1, AomAv1 };
+inline bool IsAv1(EncoderKind kind) {
+  return kind == EncoderKind::AmfAv1 || kind == EncoderKind::NvencAv1 || kind == EncoderKind::AomAv1;
+}
+inline bool IsSoftware(EncoderKind kind) { return kind == EncoderKind::X264 || kind == EncoderKind::AomAv1; }
+inline bool IsNvenc(EncoderKind kind) { return kind == EncoderKind::Nvenc || kind == EncoderKind::NvencAv1; }
+inline bool IsAmf(EncoderKind kind) { return kind == EncoderKind::Amf || kind == EncoderKind::AmfAv1; }
+inline const char* EncoderCodec(EncoderKind kind) { return IsAv1(kind) ? "av1" : "h264"; }
+inline const char* EncoderId(EncoderKind kind) {
+  switch (kind) {
+    case EncoderKind::Nvenc: return kNvencEncoderId;
+    case EncoderKind::X264: return "obs_x264";
+    case EncoderKind::AmfAv1: return "av1_texture_amf";
+    case EncoderKind::NvencAv1: return "obs_nvenc_av1_tex";
+    case EncoderKind::AomAv1: return "monky_aom_av1";
+    default: return kEncoderId;
+  }
+}
+inline const char* EncoderRateControl(EncoderKind kind) {
+  return kind == EncoderKind::Amf ? "VBR_LAT" : "CBR";
+}
 // OBS supplies the output colour description; AMF's input primaries otherwise default to undefined.
 inline const char* EncoderExtraOptions(EncoderKind kind) { return kind == EncoderKind::Nvenc ? "" : "InColorPrimaries=1"; }
 inline std::string EncoderProfileOptions(EncoderKind kind, const VideoConfiguration& video) {
+  if (kind == EncoderKind::AmfAv1)
+    return "Av1EncodingLatencyMode=3 Av1InputColorProfile=1 Av1InputColorTransferChar=1 Av1InputColorPrimaries=1";
+  if (kind == EncoderKind::NvencAv1) return "";
   if (kind == EncoderKind::Nvenc) return EncoderExtraOptions(kind);
   // Pinned texture-amf.cpp applies ProfileLevel after its size-only level guess,
   // and reads the property back before Init. Preserve the independent colour fix.
@@ -306,9 +328,14 @@ inline Arguments ParseArguments(std::span<const std::wstring_view> input) {
         Require(value.expectedCreation > 0, "Expected process creation time is zero");
       } else if (name == L"--encoder") {
         bit = 2048;
-        Require(text == L"auto" || text == L"h264_texture_amf" || text == L"obs_nvenc_h264_tex",
-                "Only admitted hardware H264 encoders may be requested", "ERR_SCREEN_CAPTURE_ENCODER_UNAVAILABLE");
-        value.encoder = text == L"auto" ? EncoderKind::Auto : text == L"h264_texture_amf" ? EncoderKind::Amf : EncoderKind::Nvenc;
+        if (text == L"auto") value.encoder = EncoderKind::Auto;
+        else if (text == L"h264_texture_amf") value.encoder = EncoderKind::Amf;
+        else if (text == L"obs_nvenc_h264_tex") value.encoder = EncoderKind::Nvenc;
+        else if (text == L"obs_x264") value.encoder = EncoderKind::X264;
+        else if (text == L"av1_texture_amf") value.encoder = EncoderKind::AmfAv1;
+        else if (text == L"obs_nvenc_av1_tex") value.encoder = EncoderKind::NvencAv1;
+        else if (text == L"monky_aom_av1") value.encoder = EncoderKind::AomAv1;
+        else throw ContractError("ERR_SCREEN_CAPTURE_ENCODER_UNAVAILABLE", "Unknown screen encoder");
       } else if (name == L"--monitor-id") { bit = 4096; value.monitor.deviceId = text;
       } else if (name == L"--monitor-name") { bit = 8192; value.monitor.deviceName = text;
       } else if (name == L"--monitor-x" || name == L"--monitor-y") {
@@ -580,9 +607,11 @@ inline void ValidateHookEvidence(const SourceKey& selected, const SourceKey& obs
 inline void ValidateEncoderAdmission(bool registeredH264, bool passTexture, bool matchingDevice, bool nv12Textures,
                                      bool initializationError, bool rejectedSetting,
                                      EncoderKind encoder = EncoderKind::Amf, bool verifiedProbe = true) {
-  Require(encoder != EncoderKind::Auto && registeredH264 && passTexture && matchingDevice && nv12Textures && verifiedProbe,
-          "Pinned hardware H264 texture encoder, verified capability probe or matching NV12 device is unavailable",
-          encoder == EncoderKind::Nvenc ? "ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE" : "ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE");
+  Require(encoder != EncoderKind::Auto && registeredH264 && matchingDevice && verifiedProbe &&
+          (IsSoftware(encoder) ? !passTexture : passTexture && nv12Textures),
+          "Selected encoder, capability probe or capture device is unavailable",
+          IsSoftware(encoder) ? "ERR_SCREEN_CAPTURE_SOFTWARE_UNAVAILABLE" :
+          IsNvenc(encoder) ? "ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE" : "ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE");
   Require(!initializationError && !rejectedSetting,
           "Stock encoder initialization error, reroute or rejected setting invalidates capture",
           "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
@@ -856,12 +885,19 @@ struct Packet {
 
 class PacketStatistics {
  public:
-  explicit PacketStatistics(VideoConfiguration video) : video_(video) { ValidateVideoConfiguration(video_); }
+  explicit PacketStatistics(VideoConfiguration video, bool av1 = false) : video_(video), av1_(av1) {
+    ValidateVideoConfiguration(video_);
+  }
   void SetPrefix(std::span<const std::uint8_t> prefix) {
     Require(!prefixValid_ && count_ == 0, "Encoder extra data may be installed exactly once before output");
-    const auto info = InspectAnnexB(prefix, video_);
-    Require(info.sps && info.pps && !info.accessUnit, "Extra data must contain Annex B SPS/PPS, not access units",
-            "ERR_SCREEN_CAPTURE_H264");
+    if (av1_) {
+      const auto info = screen_video::InspectAv1(prefix);
+      Require(info.sequence && !info.picture, "AV1 extra data requires a sequence header", "ERR_SCREEN_CAPTURE_AV1");
+    } else {
+      const auto info = InspectAnnexB(prefix, video_);
+      Require(info.sps && info.pps && !info.accessUnit, "Extra data must contain Annex B SPS/PPS, not access units",
+              "ERR_SCREEN_CAPTURE_H264");
+    }
     prefixValid_ = true;
   }
   void Add(const PacketInput& input) {
@@ -874,9 +910,15 @@ class PacketStatistics {
             "Invalid encoded packet timebase or observation clock", "ERR_SCREEN_CAPTURE_TIMESTAMP");
     Require(static_cast<std::uint64_t>(input.timebaseNumerator) * video_.fps == input.timebaseDenominator,
         "Encoder timebase differs from the selected rendition", "ERR_SCREEN_CAPTURE_TIMESTAMP");
-    const auto info = InspectAnnexB(input.bytes, video_);
-    Require(info.accessUnit && info.idr == input.keyframe, "Packet is not a matching H264 AU/keyframe",
-            "ERR_SCREEN_CAPTURE_H264");
+    if (av1_) {
+      const auto info = screen_video::InspectAv1(input.bytes);
+      Require(info.picture && info.keyframe == input.keyframe && (!input.keyframe || info.sequence),
+              "AV1 keyframes require their sequence header and matching frame type", "ERR_SCREEN_CAPTURE_AV1");
+    } else {
+      const auto info = InspectAnnexB(input.bytes, video_);
+      Require(info.accessUnit && info.idr == input.keyframe, "Packet is not a matching H264 AU/keyframe",
+              "ERR_SCREEN_CAPTURE_H264");
+    }
     if (!last_) Require(input.keyframe, "Output must begin with an IDR access unit", "ERR_SCREEN_CAPTURE_H264");
     else {
       const auto& previous = *last_;
@@ -903,6 +945,7 @@ class PacketStatistics {
   std::uint64_t Keyframes() const { return keyframes_; }
  private:
   const VideoConfiguration video_;
+  const bool av1_;
   bool prefixValid_ = false;
   std::optional<Packet> first_, last_;
   std::uint64_t count_ = 0, outputBytes_ = 0, keyframes_ = 0;
@@ -967,7 +1010,7 @@ inline std::wstring CaptureDataCacheDirectory(std::wstring_view runDirectory, st
 inline ModuleIdentity ExpectedModuleIdentity(std::string_view name, std::string_view windowsBinaryPath,
                                              std::string_view windowsDataPath, std::string_view windowsConfigRoot,
                                              std::string_view captureDataDigest = {}) {
-  Require(name == "win-capture" || name == "obs-ffmpeg" || name == "obs-nvenc", "Only required pinned modules are admitted",
+  Require(name == "win-capture" || name == "obs-ffmpeg" || name == "obs-nvenc" || name == "obs-x264", "Only required pinned modules are admitted",
           "ERR_SCREEN_CAPTURE_MODULE_PATH");
   ModuleIdentity value{ObsApiPath(windowsBinaryPath), ObsApiPath(windowsDataPath), std::string(name) + ".dll",
                        std::string(name), ObsApiPath(windowsConfigRoot)};
@@ -1134,7 +1177,7 @@ inline std::string ConfigurationJson(Method method, const VideoConfiguration& vi
       "\"initialBitrateKbps\":" + std::to_string(video.bitrateKbps) +
       ",\"scaleMode\":" + JsonString(ScaleModeName(video.scaleMode)) +
       ",\"rateControl\":" + JsonString(EncoderRateControl(encoder)) +
-      ",\"codec\":\"h264\",\"encoderId\":" + JsonString(EncoderId(encoder)) +
+      ",\"codec\":" + JsonString(EncoderCodec(encoder)) + ",\"encoderId\":" + JsonString(EncoderId(encoder)) +
       ",\"profile\":\"main\",\"bFrames\":0,\"keyframeIntervalSeconds\":1}";
 }
 

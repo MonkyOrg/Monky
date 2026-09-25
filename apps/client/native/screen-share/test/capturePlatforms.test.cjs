@@ -26,9 +26,10 @@ const retirement = { outputStopped: true, callbacksQuiesced: true, sourceRelease
   encoderReleased: true, obsShutdownReturned: true };
 
 function capability(encoder) {
-  return { encoderId: encoder, codec: 'h264', adapterIndex: 0, adapterLuid: '456',
-    vendorId: protocol.ENCODERS[encoder].vendorId, deviceId: 123,
-    probe: protocol.ENCODERS[encoder].probe, probeVerified: true, textureInput: true, dynamicBitrate: true };
+  const selected = protocol.ENCODERS[encoder];
+  return { encoderId: encoder, codec: selected.codec, adapterIndex: 0, adapterLuid: '456',
+    vendorId: selected.vendorId ?? 0x8086, deviceId: 123,
+    probe: selected.probe, probeVerified: true, textureInput: selected.mode === 'hardware', dynamicBitrate: true };
 }
 
 function message(target, encoder, type = 'prepared', selectedVideo = video) {
@@ -93,7 +94,7 @@ test('targets bind exact windows/process births and monitor device interfaces/ph
   assert.equal(argumentsForMonitor.some(value => /(?:hwnd|pid|primary|index)=/u.test(value)), false);
 });
 
-test('H264 encoder schemas cannot be relabelled or enabled from a vendor label without a probe', () => {
+test('codec and encoding-mode schemas cannot be relabelled or enabled without a probe', () => {
   for (const target of [windowTarget, monitorTarget, gameTarget])
     for (const encoder of Object.keys(protocol.ENCODERS)) {
       const prepared = message(target, encoder), ready = message(target, encoder, 'ready');
@@ -102,9 +103,10 @@ test('H264 encoder schemas cannot be relabelled or enabled from a vendor label w
       protocol.validateProgress(prepared, ready);
       for (const corrupt of [
         value => { value.capability.probeVerified = false; },
-        value => { value.capability.textureInput = false; },
+        value => { value.capability.textureInput = !value.capability.textureInput; },
         value => { value.capability.dynamicBitrate = false; },
-        value => { value.capability.vendorId = 0x8086; },
+        value => { value.capability.vendorId = protocol.ENCODERS[encoder].mode === 'hardware' ? 0x8086 : -1; },
+        value => { value.capability.codec = value.capability.codec === 'av1' ? 'h264' : 'av1'; },
         value => { value.capability.adapterIndex = 1; },
         value => { value.capability.probe = 'vendor-name'; },
         value => { value.capability.hardwareQualified = true; },
@@ -193,7 +195,7 @@ test('bridge preserves discriminated targets and only reports hardware-session c
       await bridge.prepare(target);
       assert.deepEqual(bridge.source, target);
       assert.deepEqual(bridge.getCapabilities(), { ...capability('obs_nvenc_h264_tex'),
-        hardwareSessionConfirmed: false, hardwareQualified: false });
+        mode: 'hardware', hardwareSessionConfirmed: false, hardwareQualified: false });
       const foreign = target.kind === 'monitor'
         ? { ...target, bounds: { ...target.bounds, x: 0 } } : { ...target, kind: target.kind === 'game' ? 'window' : 'game' };
       await assert.rejects(bridge.start(foreign));

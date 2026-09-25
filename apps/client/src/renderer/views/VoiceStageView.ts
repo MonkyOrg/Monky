@@ -1078,7 +1078,7 @@ export class VoiceStageView {
       </button>
       <div class="stage-quality-menu" hidden role="group" aria-label="${t('stage.screenQuality')}"
         data-session-id="${escapeHtml(sessionId)}" data-share-id="${escapeHtml(source.shareId)}">
-        ${getScreenShareQualities(source.video).map(({ quality, profile }) => `
+        ${getScreenShareQualities(source.video, source.codec).map(({ quality, profile }) => `
           <button type="button" data-screen-quality="${quality}" aria-pressed="${selected === quality}">
             ${quality === 'source' ? `<strong>${t('stage.screenQualitySource')}</strong>` : ''}
             <span>${t('stage.screenQualityOption', {

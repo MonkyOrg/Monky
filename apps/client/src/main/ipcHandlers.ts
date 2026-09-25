@@ -9,6 +9,7 @@ import { LanDiscovery } from './lanDiscovery';
 import { globalInputHook } from './globalInputHookProcess';
 import {
   AUDIO_PREVIEW_IPC, LIMITS, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS,
+  DESKTOP_SOURCES_IPC, desktopSourcesOptionsSchema, desktopSourcePreviewsRequestSchema,
   type AudioPreviewResult, type SoundDownloadResult, type SoundboardDownloadPermit, type SoundboardDownloadAvailability,
 } from '@monky/shared';
 import { SoundboardDownloads } from './soundboardDownload';
@@ -22,6 +23,7 @@ import { createLocalExecutionService } from './localExecution/createService';
 import { setupLocalExecutionIpc, type LocalExecutionIpc } from './localExecution/ipc';
 import { setupNativeScreenSharingIpc } from './nativeScreenSharing';
 import { NativeDesktopSources, nativeWindowIdFromSourceId, nativeMonitorDesktopSources, isGhostWindow } from './nativeWindows';
+import { DesktopSourcePreviews } from './desktopSourcePreviews';
 import type { NativeWindowInfo, NativeMonitorInfo, NativeWindowState } from '@monky/screen-audio';
 import { exportIdentity, getClientId, getIdentity, hasIdentity, importIdentity, signChallenge } from './identityService';
 import { BACKUP_ENVELOPE_PREFIX, openEnvelope, sealEnvelope } from './secretEnvelope';
@@ -603,20 +605,20 @@ export function setupIpcHandlers(
     return await ensureScreenRecordingPermission(mainWindow);
   });
 
-  ipcMain.handle('screen-share:get-sources', async () => {
-    const nativeWindowSources = process.platform === 'win32' ? nativeSources.listWindows() : [];
+  async function enumerateDesktopSources(metadataOnly: boolean, type?: DesktopSource['type']): Promise<DesktopSource[]> {
+    const nativeWindowSources = process.platform === 'win32' && type !== 'screen' ? nativeSources.listWindows() : [];
     const nativeWindows = nativeWindowSources.map(source => source.window);
     const nativeIdsByHwnd = new Map(nativeWindowSources.map(source => [source.window.hwnd, source.id]));
     const sources = await desktopCapturer.getSources({
-      types: ['screen', 'window'],
-      thumbnailSize: { width: 320, height: 180 },
-      fetchWindowIcons: true,
+      types: type ? [type] : ['screen', 'window'],
+      thumbnailSize: metadataOnly ? { width: 0, height: 0 } : { width: 320, height: 180 },
+      fetchWindowIcons: !metadataOnly,
     });
 
     const nativeByHwnd = new Map<number, NativeWindowInfo>();
     for (const w of nativeWindows) nativeByHwnd.set(w.hwnd, w);
 
-    const macIcons = await resolveMacAppIcons(sources.map((s) => s.id));
+    const macIcons = metadataOnly ? new Map<string, string>() : await resolveMacAppIcons(sources.map((s) => s.id));
 
     // 1) Remove os overlays/tool windows que o capturador WGC passou a vazar. Sem
     //    No Windows, so oferecemos identidades nativas verificaveis; em outras
@@ -638,16 +640,19 @@ export function setupIpcHandlers(
         name: s.name,
         type: s.id.startsWith('screen:') ? 'screen' : 'window',
         isOwnWindow: hwnd !== null && nativeByHwnd.get(hwnd)?.processId === process.pid,
-        thumbnailDataUrl: s.thumbnail.toDataURL(),
+        thumbnailDataUrl: metadataOnly || s.thumbnail.isEmpty() ? '' : s.thumbnail.toDataURL(),
         appIconDataUrl: electronIcon ?? macIcons.get(s.id) ?? null,
+        thumbnailState: metadataOnly ? 'pending' : s.thumbnail.isEmpty() ? 'unavailable' : 'ready',
       };
     });
 
-    if (process.platform === 'win32') {
+    if (process.platform === 'win32' && type !== 'window') {
       try {
         result.push(...nativeMonitorDesktopSources(nativeSources.listMonitors(), sources, screen.getAllDisplays(),
           bounds => screen.screenToDipRect(null, bounds),
-          message => console.warn('[ScreenShare:Main]', message)));
+          message => console.warn('[ScreenShare:Main]', message), !metadataOnly)
+          .map(source => ({ ...source, thumbnailState: metadataOnly ? 'pending' as const
+            : source.thumbnailDataUrl ? 'ready' as const : 'unavailable' as const })));
       } catch (error) {
         console.warn('[ScreenShare:Main] Native monitor identity enumeration failed:', error);
       }
@@ -671,7 +676,8 @@ export function setupIpcHandlers(
         w.width >= 240 &&
         w.height >= 160,
     );
-    const extraIcons = await resolveWindowsAppIcons(minimizedExtras.map((w) => w.processPath));
+    const extraIcons = metadataOnly ? new Map<string, string>()
+      : await resolveWindowsAppIcons(minimizedExtras.map((w) => w.processPath));
     for (const w of minimizedExtras) {
       const nativeId = nativeIdsByHwnd.get(w.hwnd);
       if (!nativeId) throw new Error('Minimized window selection lost its enumerated identity.');
@@ -682,10 +688,37 @@ export function setupIpcHandlers(
         isOwnWindow: w.processId === process.pid,
         thumbnailDataUrl: '',
         appIconDataUrl: extraIcons.get(w.processPath) ?? null,
+        thumbnailState: 'unavailable',
       });
     }
 
-    return result;
+    return result.filter(source => {
+      if (process.platform !== 'win32') return true;
+      try {
+        nativeSources.resolve(source.id, source.type === 'screen' ? 'monitor' : 'window');
+        return true;
+      } catch (error) {
+        console.warn('[ScreenShare:Main] Source changed during enumeration:', error);
+        return false;
+      }
+    });
+  }
+
+  const sourcePreviews = new DesktopSourcePreviews(type => enumerateDesktopSources(false, type));
+  ipcMain.handle(DESKTOP_SOURCES_IPC.list, async (_event, input: unknown) => {
+    const options = desktopSourcesOptionsSchema.parse(input === undefined ? {} : input);
+    if (options.refresh) sourcePreviews.clear();
+    const sources = await enumerateDesktopSources(options.metadataOnly === true);
+    return options.metadataOnly ? sources.map(source => {
+      const cached = sourcePreviews.cached(source.id);
+      if (!cached) return source;
+      return source.thumbnailState === 'unavailable' ? { ...source, appIconDataUrl: cached.appIconDataUrl }
+        : { ...source, ...cached, thumbnailState: cached.thumbnailDataUrl ? 'ready' as const : 'unavailable' as const };
+    }) : sources;
+  });
+  ipcMain.handle(DESKTOP_SOURCES_IPC.previews, async (_event, input: unknown) => {
+    const request = desktopSourcePreviewsRequestSchema.parse(input);
+    return sourcePreviews.get(request);
   });
 
   // Restaura uma janela minimizada antes da captura (#560). O capturador WGC nao
@@ -1376,6 +1409,7 @@ export function setupIpcHandlers(
     },
     prepareShutdown: () => {
       localExecution.freezeAdmissions();
+      sourcePreviews.clear();
       return nativeScreenSharing.prepareShutdown();
     },
     async dispose() {

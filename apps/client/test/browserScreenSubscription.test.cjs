@@ -24,7 +24,7 @@ const answer = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 98', 'a=rtpmap:98 H264/90000
   'm=audio 9 UDP/TLS/RTP/SAVPF 111', 'a=rtpmap:111 opus/48000/2', 'a=fmtp:111 minptime=10;useinbandfec=1', ''].join('\r\n');
 
 function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = true, capabilityGate, transportGate,
-  sourceVideo = video } = {}) {
+  sourceVideo = video, sourceCodec, availableCodecs = codecs, negotiatedAv1Level = 5, quality = 'source' } = {}) {
   const sent = [], rpc = [], peers = [], transports = [], tracks = [], admitted = [], states = [], errors = [], probes = [], modes = [];
   const availableProducers = new Map();
   let closeFailures = 0;
@@ -39,7 +39,10 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
     remoteGate = null;
     constructor(config) { this.config = config; peers.push(this); }
     async setRemoteDescription(value) { if (this.remoteGate) await this.remoteGate.promise; this.remoteDescription = value; }
-    async createAnswer() { return { type: 'answer', sdp: answer }; }
+    async createAnswer() { return { type: 'answer',
+      sdp: sourceCodec === 'av1' ? answer.replace('H264/90000', 'AV1/90000')
+        .replace('level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f',
+          `profile=0;level-idx=${negotiatedAv1Level};tier=0`) : answer }; }
     async setLocalDescription(value) { this.localDescription = value; }
     async addIceCandidate(value) { (this.ice ??= []).push(value); }
     getReceivers() { return this.receivers; }
@@ -84,13 +87,14 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
   }
   class Device {
     rtpCapabilities = { codecs: [{ mimeType: 'video/H264', kind: 'video', clockRate: 90000,
-      parameters: { 'profile-level-id': '4d001f', 'packetization-mode': 1 } }] };
+      parameters: { 'profile-level-id': '4d001f', 'packetization-mode': 1 } },
+    { mimeType: 'video/AV1', kind: 'video', clockRate: 90000, parameters: { profile: 0, 'level-idx': negotiatedAv1Level } }] };
     async load() {}
     createRecvTransport(options) { return new Transport(options); }
   }
   const context = vm.createContext({
     console, crypto, DOMException, TextEncoder, setTimeout, clearTimeout, structuredClone,
-    RTCPeerConnection: Peer, RTCRtpReceiver: { getCapabilities: () => ({ codecs }) },
+    RTCPeerConnection: Peer, RTCRtpReceiver: { getCapabilities: () => ({ codecs: availableCodecs }) },
     navigator: { mediaCapabilities: { decodingInfo: async config => {
       probes.push(config);
       if (capabilityGate) await capabilityGate.promise;
@@ -112,12 +116,14 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
     vm.runInContext(`(function(exports, require) {${code}\n})`, context, { filename })(exports, load);
     return exports;
   };
-  const source = { shareId: 'one', instanceId: randomUUID(), video: sourceVideo, audio };
+  const source = { shareId: 'one', instanceId: randomUUID(),
+    video: shared.getScreenShareProfile(sourceVideo, 'source', sourceCodec), audio,
+    ...(sourceCodec ? { codec: sourceCodec } : {}) };
   const call = { callId: randomUUID(), sessionId: leader ? 'a-viewer' : 'z-viewer', channelId: 'room', mode,
     iceServers: [{ urls: ['stun:example.invalid'] }] };
   const publisherSessionId = 'm-publisher';
   const sub = new (load('./BrowserScreenSubscription').BrowserScreenSubscription)({
-    call, publisherSessionId, source, quality: 'source', muted: false,
+    call, publisherSessionId, source, quality, muted: false,
     send: async signal => { sent.push(shared.nativeScreenSignalSchema.parse(signal)); },
     rpc: async (method, payload) => {
       rpc.push({ method, payload });
@@ -132,7 +138,10 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
         case shared.MessageType.SFU_CONSUME: {
           const producer = availableProducers.get(payload.producerId);
           assert.ok(producer);
-          return { ...producer, id: `consumer-${producer.producerId}`, rtpParameters: {} };
+          return { ...producer, id: `consumer-${producer.producerId}`,
+            rtpParameters: { codecs: [{ mimeType: producer.kind === 'audio' ? 'audio/opus'
+              : sourceCodec === 'av1' ? 'video/AV1' : 'video/H264',
+            ...(sourceCodec === 'av1' ? { parameters: { profile: 0, 'level-idx': negotiatedAv1Level } } : {}) }] } };
         }
         case shared.MessageType.SFU_CLOSE_WEBRTC_TRANSPORT:
           if (closeFailures-- > 0) throw new Error('The server did not acknowledge transport retirement.');
@@ -155,7 +164,7 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
     protocol: 'monky-native-screen-p2p', version: audio ? 2 : 1, callId: source.instanceId,
     channelId: call.channelId, connectionId: sub.subscriptionId, generation: 1, ...data,
   } });
-  const accepted = signal({ action: 'accepted', backend: 'browser', quality: 'source', generation: 1 });
+  const accepted = signal({ action: 'accepted', backend: 'browser', quality, generation: 1 });
   const publication = (kind, extra = {}) => control({
     type: 'publication', shareId: source.shareId, publicationId: kind === 'audio' ? 2 : 1,
     publicationVersion: 1, metadataVersion: 1, trackId: `${kind}-track`, mid: kind === 'audio' ? '1' : '0',
@@ -164,7 +173,8 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
   const producer = (kind, pipelineId = 'cb54a93e-7e32-41f2-a755-90e3d9459c94') => {
     const value = { channelId: call.channelId, producerId: `${kind}-${pipelineId}`, producerSessionId: publisherSessionId,
       kind, appData: { mediaType: kind === 'audio' ? 'screen_audio' : 'screen_video', shareId: source.shareId,
-        nativeScreen: { sourceInstanceId: source.instanceId, pipelineId, video: sourceVideo } } };
+        nativeScreen: { sourceInstanceId: source.instanceId, pipelineId,
+          video: shared.getScreenShareProfile(source.video, quality, source.codec) } } };
     availableProducers.set(value.producerId, value);
     return value;
   };
@@ -181,6 +191,18 @@ function fixture(t, { mode = 'p2p', leader = true, audio = true, supported = tru
 }
 
 for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: browser AV1 reduced rendition probes and consumes the exact aligned width`, async t => {
+    const f = fixture(t, { mode, sourceCodec: 'av1', quality: '480p30',
+      availableCodecs: [{ mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=0' }] });
+    const producer = f.producer('video');
+    assert.equal(producer.appData.nativeScreen.video.width, 848);
+    await f.open();
+    if (mode === 'p2p') await f.turn();
+    else assert.equal(f.transports[0].consumers.length, 1);
+    assert.equal(f.probes[0].video.width, 848);
+    assert.equal(f.probes[0].video.height, 480);
+    assert.deepEqual(f.states, []);
+  });
   test(`${mode}: browser spectators receive the confirmed mode without renegotiating their media`, async t => {
     const f = fixture(t, { mode });
     await f.sub.start();
@@ -422,4 +444,77 @@ test('browser SFU teardown retains failed remote obligations for Retry while ret
   await f.sub.close(true);
   assert.equal(f.rpc.filter(value => value.method === shared.MessageType.SFU_CLOSE_WEBRTC_TRANSPORT).length, 2);
   assert.equal(f.sent.filter(value => value.action === 'stop').length, 1);
+});
+
+for (const mode of ['p2p', 'sfu']) {
+  test(`${mode}: AV1 receiving probes AV1 instead of claiming H264 implies support`, async t => {
+    const f = fixture(t, { mode, sourceCodec: 'av1',
+      sourceVideo: { width: 852, height: 480, fps: 30, maxBitrateKbps: 1500 },
+      availableCodecs: [...codecs, { mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=0' }] });
+    if (mode === 'sfu') f.producer('video');
+    await f.open();
+    assert.equal(f.probes[0].video.contentType, 'video/AV1;profile=0;level-idx=4;tier=0');
+    assert.equal(f.sent[0].action, 'watch');
+    if (mode === 'p2p') await f.turn();
+    if (mode === 'sfu') {
+      const consumed = f.rpc.find(value => value.method === shared.MessageType.SFU_CONSUME);
+      assert.deepEqual(consumed.payload.rtpCapabilities.codecs.map(codec => codec.mimeType), ['video/AV1']);
+      assert.equal(consumed.payload.rtpCapabilities.codecs[0].parameters['max-recv-level'], undefined);
+    }
+  });
+  test(`${mode}: H264-only receiver explicitly rejects AV1 before media allocation`, async t => {
+    const f = fixture(t, { mode, sourceCodec: 'av1' });
+    await assert.rejects(f.sub.start(), /AV1.*Select H.264/);
+    assert.deepEqual(f.states, ['unsupported']);
+    assert.equal(f.sent.length + f.peers.length + f.transports.length + f.probes.length, 0);
+  });
+  test(`${mode}: default AV1 level 3.1 is not advertised as supporting 1080p120`, async t => {
+    const f = fixture(t, { mode, sourceCodec: 'av1',
+      availableCodecs: [{ mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=0;level-idx=5;tier=0' }] });
+    await assert.rejects(f.sub.start(), /AV1.*Select H.264/);
+    assert.deepEqual(f.states, ['unsupported']);
+    assert.equal(f.sent.length + f.peers.length + f.transports.length + f.probes.length, 0);
+  });
+  test(`${mode}: insufficient negotiated AV1 level is rejected even when the capability API claims a higher level`, async t => {
+    const f = fixture(t, { mode, sourceCodec: 'av1',
+      availableCodecs: [{ mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=0;level-idx=23;tier=0' }] });
+    if (mode === 'sfu') {
+      f.producer('video');
+      await assert.rejects(f.open(), /AV1 receive level is insufficient/);
+    } else {
+      await f.open();
+      await assert.rejects(f.turn(), /AV1 receive level is insufficient/);
+    }
+    assert.ok(f.states.includes('unsupported'));
+  });
+  test(`${mode}: explicitly sufficient AV1 API and negotiated levels admit the requested high rendition`, async t => {
+    const f = fixture(t, { mode, sourceCodec: 'av1', negotiatedAv1Level: 23,
+      availableCodecs: [{ mimeType: 'video/AV1', clockRate: 90000, sdpFmtpLine: 'profile=0;level-idx=23;tier=0' }] });
+    if (mode === 'sfu') f.producer('video');
+    await f.open();
+    if (mode === 'p2p') await f.turn();
+    assert.equal(f.probes[0].video.contentType, 'video/AV1;profile=0;level-idx=12;tier=0');
+    assert.deepEqual(f.states, []);
+  });
+}
+
+test('P2P screen answers cannot silently negotiate a different codec than the source descriptor', t => {
+  const f = fixture(t);
+  const { assertBrowserScreenCodec } = f.load('./browserScreenCodecs');
+  assert.doesNotThrow(() => assertBrowserScreenCodec(answer, 'h264'));
+  assert.throws(() => assertBrowserScreenCodec(answer, 'av1'), /does not match/);
+  const av1 = answer.replace('H264/90000', 'AV1/90000');
+  assert.doesNotThrow(() => assertBrowserScreenCodec(av1, 'av1'));
+  assert.throws(() => assertBrowserScreenCodec(av1, 'h264'), /does not match/);
+  assert.throws(() => assertBrowserScreenCodec(av1, 'av1', video), /level is insufficient/);
+  assert.doesNotThrow(() => assertBrowserScreenCodec(av1, 'av1',
+    { width: 852, height: 480, fps: 30, maxBitrateKbps: 1500 }));
+  const { supportsBrowserAv1Level } = f.load('./browserScreenCodecs');
+  assert.equal(supportsBrowserAv1Level(video, { 'level-idx': 23 }), true);
+  for (const level of [5, '5', -1, 24, 31, 'invalid', null])
+    assert.equal(supportsBrowserAv1Level(video, { 'level-idx': level }), false);
+  for (const profile of [-1, 3, 'invalid', null])
+    assert.equal(supportsBrowserAv1Level(video, { profile, 'level-idx': 23 }), false);
+  for (const tier of [-1, 2, 'invalid', null])
+    assert.equal(supportsBrowserAv1Level(video, { tier, 'level-idx': 23 }), false);
 });

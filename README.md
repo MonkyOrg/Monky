@@ -108,15 +108,59 @@ O seletor de compartilhamento tem duas abas: **Telas** e **Janelas**.
 Após selecionar uma janela, escolha **Captura de janela (WGC)** (padrão)
 ou **Captura de jogo (hook)** e confirme. São métodos da mesma janela,
 não listas separadas nem detecção automática de jogos.
+A lista aparece antes das miniaturas: cada prévia pendente tem um skeleton,
+sem impedir a seleção ou o compartilhamento. Telas e janelas carregam suas
+prévias independentemente. Um cache de até 10 segundos, somente em memória
+e limitado a 8 MiB/256 imagens, acelera reaberturas; **Atualizar** o invalida
+e enumera novamente as identidades. Uma falha na prévia não bloqueia uma fonte
+válida nem substitui a verificação da janela antes de compartilhar.
+**Preservar proporção** inicia ligado em cada novo seletor: encaixa a janela
+inteira no quadro do vídeo sem distorção, adicionando bordas quando necessário.
+Desligado, estica a janela para preencher esse quadro. A escolha vale apenas para
+o compartilhamento atual e é mantida ao mudar a qualidade ou reconectar; não altera
+a resolução da janela nem do monitor.
 
 Para captura nativa de **janela, monitor ou Game Capture** no Windows x64,
 siga o [guia do módulo](apps/client/native/screen-share/README.md): recompilação
 dos addons para o Electron fixado, preparo libobs/WebRTC e pré-requisitos
-Python 3.11/MSVC/SDK são etapas distintas. O vídeo é H.264 por AMD AMF ou
-NVIDIA NVENC; AV1 está indisponível. A fonte escolhida passa por um probe após
-confirmação, sem fallback automático para Chromium/software e sem garantia
-de compatibilidade pela marca da GPU. `npm ci` e `npm run build` sozinhos não
-preparam esse runtime.
+Python 3.11/MSVC/SDK são etapas distintas. A captura continua no libobs nos modos
+de codificação **Hardware** (recomendado, AMD AMF/NVIDIA NVENC) e **Software** (CPU).
+Somente em **Configurações → Qualidade e compartilhamento → Codificação e codec de tela**,
+o modo **Automático** (padrão) controla
+todo o grupo: tenta Hardware + AV1, Hardware + H.264 e depois Software + H.264.
+Os campos de codificação e codec ficam somente leitura e mostram o resultado
+real da verificação. O fallback é informado, mas não altera o modo Automático nem
+as escolhas manuais salvas; uma nova abertura volta a verificar o hardware.
+**Manual** permite escolher exatamente Hardware/Software e H.264/AV1, sem opção
+de codec Automático e sem substituir uma combinação indisponível. Hardware
+incompatível permanece visível e desabilitado com o motivo. Preferências explícitas
+anteriores de Software ou codec são migradas para Manual. As escolhas de tela
+continuam independentes da câmera. Erros reais de driver/runtime são exibidos,
+sem troca silenciosa de modo.
+
+A disponibilidade é verificada para o codec e a qualidade escolhidos sem capturar
+uma fonte; a confirmação então verifica a fonte exata selecionada.
+O seletor de compartilhamento usa as preferências salvas, sem repetir os controles
+de modo, codificação e codec; uma falha na verificação impede o início e informa o motivo.
+Não há troca de modo durante a transmissão, captura alternativa pelo Chromium ou
+garantia de compatibilidade pela marca da GPU. Receptores sem o codec escolhido
+informam a incompatibilidade; selecione H.264 no transmissor para atendê-los.
+No navegador, AV1 também exige nível de recepção anunciado e negociado compatível
+com a qualidade escolhida; suporte genérico a AV1 não garante 1080p/4K.
+AV1 alinha a largura para baixo em múltiplos de oito antes da captura (852 vira 848),
+mantendo as dimensões anunciadas iguais às codificadas; H.264 mantém múltiplos de quatro.
+O servidor não transcodifica. O SFU anuncia AV1 perfil 0, tier 0 e level-index 23
+para encaminhamento, não decodificação; o transmissor ainda respeita o nível negociado
+por cada receptor. Cliente e servidor exigem protocolo 28 para os
+metadados de codec de tela; clientes antigos não são anunciados como compatíveis.
+Para verificar o aplicativo isolado com uma janela sintética própria, execute
+`node apps\client\test\nativeScreenAppSmoke.cjs --screen-codec=av1 --native-1080p60 --video-only --sample-seconds=10 --cadence-diagnostics --artifacts=<novo-diretorio-absoluto>`.
+Os codecs são `auto`, `h264` e `av1`; omita `--native-1080p60` para o cenário nativo
+1080p120. O smoke também preserva a proporção por padrão (`--preserve-aspect-ratio`
+continua válido); use `--stretch` para verificar o OFF explícito. No cenário
+1080p120, o mínimo continua em 100 FPS apresentados. Amostras de oito segundos
+ou mais incluem três segundos de aquecimento. Execute os cenários de GPU sequencialmente.
+`npm ci` e `npm run build` sozinhos não preparam esse runtime.
 No primeiro preparo, ou se mudarem as fontes de `screen-audio` ou o Electron,
 siga `buildScreenAudio.cjs` no guia: ele usa o `node-gyp` local e o mesmo
 seletor VS2022/MSVC/SDK, depois de `prepare:native-screen`. Esse preparo compila

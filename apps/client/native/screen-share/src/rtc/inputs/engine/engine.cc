@@ -3,6 +3,9 @@
 #include "operation_completion.h"
 #include "capture_clock.h"
 #include "encoded_video.h"
+#include "cpu_frame_upload.h"
+#include "screen_decoder_factory.h"
+#include "api/field_trials.h"
 #include "encoder_diagnostics.h"
 #include "decoder_diagnostics.h"
 #include "receive_routes.h"
@@ -31,7 +34,7 @@ namespace monky::native_rtc::engine {
 namespace {
 
 constexpr char kCapabilities[] =
-   R"({"abiVersion":2,"contractRevision":8,"audioExtensionVersion":1,"inputLeaseCorrelation":true,"pairedCaptureClock":true,"p2pReceiverRouting":true,"pcmTrackInput":true,"creditAudioPlayout":true,"calibratedAudioOutputClock":true,"perShareAvGroups":true,"sfuExplicitStreamId":true,"audioOutputInvalidation":true,"opusStereoNegotiation":true,"audioPreAdmissionRetry":true,"ownerScopedAudioOutput":true,"audioOutputEpochAdmission":true,"externallyEncodedH264":true,"encodedInputCopied":true,"encodedFeedback":true,"encodedProfileLevelId":"4d003c","encodedBitrateCeilingBps":80000000,"encodedInputMaximumBytes":4194304,"availabilityScope":"compiled-implementation-not-device-probe","videoAvailable":true,"p2pAvailable":true,"sfuAvailable":true,"audioAvailable":true,"audioRuntimeQualified":false,"captureAvailable":false,"presentationAvailable":true,"presentationStage":"shared-nv12-export-only-runtime-unqualified","presentationRuntimeQualified":false,"runtimeQualified":false,"hardwareExecutionObserved":null,"inputFormat":"NV12_SHARED_NT_KEY0","inputTimebase":"qpc-system-relative-us","encodedInputFormat":"H264_ANNEX_B","decodedOutput":"NV12_SHARED_NT_LEASE","decodedTimestampSemantics":"rtc-render-deadline-or-immediate-us","audioInputFormat":"FLOAT32LE_ORIGINAL_PACKET","audioPlayoutFormat":"FLOAT32_STEREO_48000_480","codecs":["H264-constrained-baseline","H264-main","Opus-48000-2"],"scalabilityModes":["L1T1"]})";
+   R"({"abiVersion":2,"contractRevision":8,"audioExtensionVersion":1,"inputLeaseCorrelation":true,"pairedCaptureClock":true,"p2pReceiverRouting":true,"pcmTrackInput":true,"creditAudioPlayout":true,"calibratedAudioOutputClock":true,"perShareAvGroups":true,"sfuExplicitStreamId":true,"audioOutputInvalidation":true,"opusStereoNegotiation":true,"audioPreAdmissionRetry":true,"ownerScopedAudioOutput":true,"audioOutputEpochAdmission":true,"externallyEncodedH264":true,"externallyEncodedAV1":true,"encodedInputCopied":true,"encodedFeedback":true,"encodedProfileLevelId":"4d003c","encodedBitrateCeilingBps":80000000,"encodedInputMaximumBytes":4194304,"availabilityScope":"compiled-implementation-not-device-probe","videoAvailable":true,"p2pAvailable":true,"sfuAvailable":true,"audioAvailable":true,"audioRuntimeQualified":false,"captureAvailable":false,"presentationAvailable":true,"presentationStage":"shared-nv12-export-only-runtime-unqualified","presentationRuntimeQualified":false,"runtimeQualified":false,"hardwareExecutionObserved":null,"inputFormat":"NV12_SHARED_NT_KEY0","inputTimebase":"qpc-system-relative-us","encodedInputFormat":"H264_ANNEX_B","encodedInputFormats":["H264_ANNEX_B","AV1_OBU"],"decodedOutput":"NV12_SHARED_NT_LEASE","decodedTimestampSemantics":"rtc-render-deadline-or-immediate-us","audioInputFormat":"FLOAT32LE_ORIGINAL_PACKET","audioPlayoutFormat":"FLOAT32_STEREO_48000_480","codecs":["H264-constrained-baseline","H264-main","Opus-48000-2","AV1-main"],"scalabilityModes":["L1T1"]})";
 static_assert(MONKY_ENGINE_ABI_VERSION == 2 && MONKY_ENGINE_CONTRACT_REVISION == 8);
 
 Json ErrorJson(const Error& error) {
@@ -136,8 +139,8 @@ struct Frame {
 
 class Engine final : public Host, public std::enable_shared_from_this<Engine> {
  public:
-  Engine(MonkyEngineOptions options, MonkyEngineCallbacks callbacks, bool encoded_input = false)
-      : options_(options), encoded_input_(encoded_input), callbacks_(callbacks), resources_(options.max_resources),
+  Engine(MonkyEngineOptions options, MonkyEngineCallbacks callbacks, bool encoded_input = false, bool av1 = false)
+      : options_(options), encoded_input_(encoded_input), av1_(av1), callbacks_(callbacks), resources_(options.max_resources),
         receive_routes_(std::size_t(options.max_resources) * receiver_policy::kMaxReceiverHistory) {}
   ~Engine() override {
     if (actor_.joinable()) actor_.join();
@@ -353,12 +356,6 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     try {
       auto context = MfContext();
       if (!context) return;
-      auto gpu = context->GetDecodedFrame(input.video_frame_buffer());
-      if (!gpu) {
-        Emit("error", route.target, {{"code", "ERR_RTC_GPU_OUTPUT"}, {"message", "Non-native decoded output rejected"},
-                              {"status", MONKY_ENGINE_UNSUPPORTED}, {"hresult", 0}, {"terminal", false}});
-        return;
-      }
       const auto id = AllocateHandle();
       std::shared_ptr<presentation::Exporter> exporter;
       {
@@ -373,6 +370,10 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
         frames_.emplace(id, Frame{route, nullptr, false, false});
       }
       try {
+        auto gpu = context->GetDecodedFrame(input.video_frame_buffer());
+        if (!gpu && input.video_frame_buffer()->type() == webrtc::VideoFrameBuffer::Type::kI420)
+          gpu = cpu_frame_upload_.Upload(input);
+        if (!gpu) throw Error("ERR_RTC_GPU_OUTPUT", "Unsupported decoded output", MONKY_ENGINE_UNSUPPORTED);
         if (!exporter->Submit(id, route, input.timestamp_us(), std::move(gpu))) {
           std::lock_guard lock(mutex_);
           frames_.erase(id);
@@ -495,7 +496,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
   void SubmitEncoded(std::uint64_t source_id, const MonkyEngineEncodedFrame& input) {
     SafeId(source_id);
     if (!encoded_input_)
-      throw Error("ERR_RTC_INPUT_MODE", "External H264 requires explicit encoded engine creation", MONKY_ENGINE_UNSUPPORTED);
+      throw Error("ERR_RTC_INPUT_MODE", "Encoded input requires explicit encoded engine creation", MONKY_ENGINE_UNSUPPORTED);
     ValidateEncodedFrame(input);
     std::shared_ptr<VideoSource> source;
     {
@@ -569,7 +570,7 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
                   {"closed", done_}, {"ready", ready_ && !closing_}, {"resources", resources_.Size()},
                   {"pendingOperations", operations_.size()}, {"pendingServerRequests", replies_.size()},
                   {"contractRevision", MONKY_ENGINE_CONTRACT_REVISION},
-                  {"videoInput", encoded_input_ ? "encoded-h264" : "nv12"},
+                  {"videoInput", encoded_input_ ? (av1_ ? "encoded-av1" : "encoded-h264") : "nv12"},
                   {"activeReceiverRoutes", receive_routes_.Size()},
                   {"decodedFrames", frames_.size()}, {"droppedFrames", dropped_frames_.load()},
                   {"rejectedEvents", rejected_events_.load()},
@@ -749,9 +750,11 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
     options.maximum_native_buffers = 256;
     options.operation_timeout = Timeout();
     auto bundle = mf::CreateFactoryBundle(options);
-    std::unique_ptr<webrtc::FieldTrialsView> video_field_trials;
+    bundle.decoder_factory = std::make_unique<ScreenDecoderFactory>(std::move(bundle.decoder_factory), encoded_input_, av1_);
+    std::unique_ptr<webrtc::FieldTrialsView> video_field_trials =
+        webrtc::FieldTrials::Create("WebRTC-Dav1dDecoder-CropToRenderResolution/Enabled/");
     if (encoded_input_) {
-      auto external = CreateEncodedVideoFactory(options.maximum_h264_level);
+      auto external = CreateEncodedVideoFactory(options.maximum_h264_level, av1_);
       encoded_context_ = std::move(external.context);
       bundle.encoder_factory = std::move(external.encoder_factory);
       video_field_trials = std::move(external.field_trials);
@@ -1231,6 +1234,8 @@ class Engine final : public Host, public std::enable_shared_from_this<Engine> {
 
   const MonkyEngineOptions options_;
   const bool encoded_input_;
+  const bool av1_;
+  CpuFrameUpload cpu_frame_upload_;
   mutable std::mutex mutex_;
   std::condition_variable wake_;
   std::mutex callback_mutex_, join_mutex_;
@@ -1344,9 +1349,9 @@ extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_request(
     const char* json, uint32_t bytes, MonkyEngineError* error) noexcept {
   return Boundary(error, [&] { State(engine).Request(id, rtc::Bytes(name, name_bytes, 64), target, rtc::Parse(json, bytes)); });
 }
-extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_create_encoded(
+static MonkyEngineStatus CreateEncodedEngine(
     const MonkyEngineOptions* options, const MonkyEngineCallbacks* callbacks,
-    MonkyRtcEngine** engine, MonkyEngineError* error) noexcept {
+    MonkyRtcEngine** engine, MonkyEngineError* error, bool av1) noexcept {
   if (engine) *engine = nullptr;
   return Boundary(error, [&] {
     if (!engine || !options || !callbacks || callbacks->struct_size != sizeof(*callbacks) ||
@@ -1358,10 +1363,20 @@ extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_create_en
           "External H264 engine requires at least Main Level 5.1; its fixed ceiling must cover the source",
           MONKY_ENGINE_UNSUPPORTED);
     auto result = std::make_unique<MonkyRtcEngine>();
-    result->state = std::make_shared<rtc::Engine>(*options, *callbacks, true);
+    result->state = std::make_shared<rtc::Engine>(*options, *callbacks, true, av1);
     result->state->Start();
     *engine = result.release();
   });
+}
+extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_create_encoded(
+    const MonkyEngineOptions* options, const MonkyEngineCallbacks* callbacks,
+    MonkyRtcEngine** engine, MonkyEngineError* error) noexcept {
+  return CreateEncodedEngine(options, callbacks, engine, error, false);
+}
+extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_create_encoded_av1(
+    const MonkyEngineOptions* options, const MonkyEngineCallbacks* callbacks,
+    MonkyRtcEngine** engine, MonkyEngineError* error) noexcept {
+  return CreateEncodedEngine(options, callbacks, engine, error, true);
 }
 extern "C" MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_respond(
     MonkyRtcEngine* engine, uint64_t id, const char* json, uint32_t bytes, MonkyEngineError* error) noexcept {

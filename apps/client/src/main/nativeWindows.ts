@@ -44,6 +44,7 @@ export function nativeMonitorDesktopSources(
   displays: readonly Pick<Display, 'id' | 'bounds'>[],
   toDipRect: (bounds: Rectangle) => Rectangle,
   warn: (message: string) => void,
+  thumbnails = true,
 ): DesktopSource[] {
   return [...monitors].sort((a, b) => a.monitor.deviceName.localeCompare(b.monitor.deviceName, 'en', { numeric: true }))
     .map(({ id, monitor }, index) => {
@@ -54,8 +55,8 @@ export function nativeMonitorDesktopSources(
         ? previews.filter(source => source.id.startsWith('screen:') && source.display_id === String(matches[0].id))
         : [];
       let thumbnailDataUrl = '';
-      if (images.length === 1 && !images[0].thumbnail.isEmpty()) thumbnailDataUrl = images[0].thumbnail.toDataURL();
-      else warn(`Native monitor preview unavailable for ${monitor.deviceName}: `
+      if (thumbnails && images.length === 1 && !images[0].thumbnail.isEmpty()) thumbnailDataUrl = images[0].thumbnail.toDataURL();
+      else if (thumbnails) warn(`Native monitor preview unavailable for ${monitor.deviceName}: `
         + `${matches.length} matching displays, ${images.length} matching images; an unambiguous, nonempty thumbnail is required.`);
       return { id, name: monitor.name, displayNumber: index + 1, type: 'screen', thumbnailDataUrl, appIconDataUrl: null };
     });

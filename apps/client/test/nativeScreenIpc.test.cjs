@@ -19,6 +19,11 @@ const compiled = ts.transpileModule(fs.readFileSync(sourceFile, 'utf8'), {
 }).outputText;
 const load = vm.runInThisContext(`(function(exports, require, module, __filename, __dirname, console, process) { ${compiled}\n})`,
   { filename: sourceFile });
+const policySource = path.join(path.dirname(sourceFile), 'screenEncodingPolicy.ts');
+const policy = { exports: {} };
+vm.runInThisContext(`(function(exports, require) { ${ts.transpileModule(fs.readFileSync(policySource, 'utf8'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText}\n})`, { filename: policySource })(policy.exports, require);
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => {
   let resolve;
@@ -42,11 +47,134 @@ const monitorTarget = {
 };
 const monitorId = `native-monitor:${'a'.repeat(64)}`;
 
+test('encoding policy prefers initialized hardware AV1, then H264, then visible software H264', async () => {
+  const compiled = ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264', 'monky_aom_av1'];
+  for (const accepted of ['obs_nvenc_av1_tex', 'obs_nvenc_h264_tex', 'obs_x264']) {
+    const tried = [];
+    const selected = await policy.exports.selectScreenEncoding('automatic', 'software', 'av1', compiled, async value => {
+      tried.push(value.encoder);
+      if (value.encoder !== accepted) throw Object.assign(new Error('Unsupported selected adapter/profile'),
+        { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+    });
+    assert.equal(selected.selection.encoder, accepted);
+    assert.equal(selected.selection.codec, accepted.includes('av1') ? 'av1' : 'h264');
+    assert.equal(selected.fallback, accepted === 'obs_x264');
+    assert.equal(selected.hardware.available, accepted !== 'obs_x264');
+    assert.deepEqual(tried, compiled.slice(0, compiled.indexOf(accepted) + 1));
+  }
+});
+
+test('manual software remains software and manual hardware AV1 never switches mode or codec', async () => {
+  const compiled = ['obs_nvenc_av1_tex', 'obs_nvenc_h264_tex', 'obs_x264', 'monky_aom_av1'];
+  for (const codec of ['h264', 'av1']) {
+    const tried = [];
+    const result = await policy.exports.selectScreenEncoding('manual', 'software', codec, compiled,
+      async selection => { tried.push(selection.encoder); }, false);
+    assert.equal(result.selection.mode, 'software');
+    assert.equal(result.selection.codec, codec === 'av1' ? 'av1' : 'h264');
+    assert.equal(result.fallback, false);
+    assert.deepEqual(tried, [codec === 'av1' ? 'monky_aom_av1' : 'obs_x264']);
+  }
+  const tried = [];
+  const result = await policy.exports.selectScreenEncoding('manual', 'hardware', 'av1', compiled, async selection => {
+    tried.push(selection.encoder);
+    if (selection.mode === 'hardware')
+      throw Object.assign(new Error('AV1 unsupported'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+  });
+  assert.deepEqual(tried, ['obs_nvenc_av1_tex']);
+  assert.equal(result.selection, null);
+  assert.equal(result.fallback, false);
+  assert.match(result.reason, /AV1 unsupported/);
+});
+
+test('proven AMF MaxLevel insufficiency permits visible software fallback after hardware candidates are exhausted', async () => {
+  const message = 'AMF H264 requires level_idc=60 for 3840x2160@120; selected adapter/runtime reports MaxLevel=52.';
+  const unsupported = Object.assign(new Error(message), { code: 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' });
+  assert.equal(policy.exports.isUnsupportedScreenEncoder(unsupported), true);
+  for (const strategy of ['automatic', 'manual']) {
+    const tried = [];
+    const result = await policy.exports.selectScreenEncoding(strategy, 'hardware', 'h264',
+      ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'], async selection => {
+        tried.push(selection.encoder);
+        if (selection.encoder === 'av1_texture_amf')
+          throw Object.assign(new Error('AV1 unsupported'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+        if (selection.encoder === 'h264_texture_amf') throw unsupported;
+      });
+    assert.deepEqual(tried, strategy === 'automatic'
+      ? ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'] : ['h264_texture_amf']);
+    assert.deepEqual(result.selection, strategy === 'automatic' ? { mode: 'software', codec: 'h264', encoder: 'obs_x264' } : null);
+    assert.deepEqual(result.hardware, { available: false, reason: message });
+    assert.equal(result.fallback, strategy === 'automatic');
+  }
+});
+
+test('missing or invalid AMF capability and unconfirmed teardown cannot masquerade as an unsupported level', async () => {
+  const unsupported = Object.assign(new Error('AMF MaxLevel=52 is insufficient'), { code: 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' });
+  const errors = [
+    Object.assign(new Error('AMF MaxLevel capability was missing'), { code: 'ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE' }),
+    Object.assign(new Error('AMF returned invalid MaxLevel=0'), { code: 'ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE' }),
+    Object.assign(new AggregateError([unsupported, new Error('AMF retirement failed')], 'Retirement is unconfirmed'),
+      { code: 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' }),
+  ];
+  for (const error of errors) {
+    assert.equal(policy.exports.isUnsupportedScreenEncoder(error), false);
+    const tried = [];
+    await assert.rejects(policy.exports.selectScreenEncoding('manual', 'hardware', 'h264', ['h264_texture_amf', 'obs_x264'],
+      async selection => { tried.push(selection.encoder); throw error; }), failure => failure === error);
+    assert.deepEqual(tried, ['h264_texture_amf']);
+  }
+});
+
+test('driver, runtime, timeout, cancellation and retirement failures never silently select software', async () => {
+  const compiled = ['obs_nvenc_av1_tex', 'obs_nvenc_h264_tex', 'obs_x264'];
+  for (const error of [new Error('Driver crashed'), Object.assign(new Error('Timeout'), { code: 'ERR_TIMEOUT' }),
+    new DOMException('Cancelled', 'AbortError'), new AggregateError([
+      Object.assign(new Error('Unsupported'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' }),
+      new Error('Native retirement failed'),
+    ])]) {
+    const tried = [];
+    await assert.rejects(policy.exports.selectScreenEncoding('automatic', 'hardware', 'auto', compiled, async selection => {
+      tried.push(selection.encoder); throw error;
+    }), failure => failure === error);
+    assert.deepEqual(tried, ['obs_nvenc_av1_tex']);
+  }
+});
+
+test('explicit software is usable despite a visibly reported hardware driver error', async () => {
+  const result = await policy.exports.selectScreenEncoding('manual', 'software', 'h264', ['obs_nvenc_h264_tex', 'obs_x264'],
+    async selection => { if (selection.mode === 'hardware') throw new Error('Driver initialization failed'); });
+  assert.equal(result.selection.encoder, 'obs_x264');
+  assert.equal(result.hardware.error, true);
+  assert.match(result.hardware.reason, /Driver initialization failed/);
+  assert.equal(result.fallback, false);
+});
+
+test('Manual rejects Auto codec and unavailable software AV1 never probes H264 or hardware during admission', async () => {
+  const compiled = ['av1_texture_amf', 'monky_aom_av1', 'obs_x264'];
+  await assert.rejects(policy.exports.selectScreenEncoding('manual', 'software', 'auto', compiled, async () => {
+    assert.fail('Invalid Manual requests must not start discovery');
+  }), /exact codec/);
+  for (const encoders of [compiled, ['av1_texture_amf', 'obs_x264']]) {
+    const tried = [];
+    const result = await policy.exports.selectScreenEncoding('manual', 'software', 'av1', encoders, async selection => {
+      tried.push(selection.encoder);
+      throw Object.assign(new Error('Software AV1 unsupported for this profile'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+    }, false);
+    assert.equal(result.selection, null);
+    assert.equal(result.fallback, false);
+    assert.deepEqual(tried, encoders.includes('monky_aom_av1') ? ['monky_aom_av1'] : []);
+  }
+});
+
 function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   encoder = 'h264_texture_amf', probeFailure, probeFailureBeforeSpawn, probeStop,
-  probeVerified = true, probeRetires = true, probeStopReportsFailure = false, logger, packetCapture } = {}) {
+  probeVerified = true, probeRetires = true, probeStopReportsFailure = false, logger, packetCapture,
+  compiledEncoders = [encoder],
+  encodingProbe } = {}) {
   const handlers = new Map(), sent = [], endpoints = [], selections = [], errors = [], captures = [], directories = [];
-  const probes = [], removedDirectories = [], logs = [], ports = [];
+  const probes = [], removedDirectories = [], logs = [], ports = [], encodingProbes = [];
+  const encoderMode = id => ['obs_x264', 'monky_aom_av1'].includes(id) ? 'software' : 'hardware';
+  const encoderCodec = id => id.includes('av1') ? 'av1' : 'h264';
   let target = { kind: 'window', hwnd: 12345, expectedProcessId: 56789,
     expectedProcessCreationTime100ns: '123456789' }, frameDestroyed = false, contentDestroyed = false;
   let windowOpen = true, windowPaused = false, creationTime = '123456789';
@@ -95,10 +223,12 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     start() { assert.fail('Source admission cannot start capture or inject a game.'); }
     getCapabilities() {
       return this.prepared ? {
-        encoderId: encoder, codec: 'h264', adapterIndex: 0, adapterLuid: '00000000:00000001',
-        vendorId: encoder === 'obs_nvenc_h264_tex' ? 0x10de : 0x1002, deviceId: 1,
+        encoderId: this.options.encoder, codec: encoderCodec(this.options.encoder), mode: encoderMode(this.options.encoder),
+        adapterIndex: 0, adapterLuid: '00000000:00000001',
+        vendorId: this.options.encoder === 'obs_nvenc_h264_tex' ? 0x10de : 0x1002, deviceId: 1,
         probe: encoder === 'obs_nvenc_h264_tex' ? 'nvenc-d3d11-session' : 'obs-amf-test',
-        probeVerified, textureInput: true, dynamicBitrate: true, hardwareSessionConfirmed: false, hardwareQualified: false,
+        probeVerified, textureInput: encoderMode(this.options.encoder) === 'hardware', dynamicBitrate: true,
+        hardwareSessionConfirmed: false, hardwareQualified: false,
       } : null;
     }
     async stop() {
@@ -127,7 +257,8 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     async removeRemoteProducer() {}
     async setAudioPreferences(preferences) { this.preferences = preferences; }
     async diagnostics() {
-      return { pipelineId: this.options.pipelineId, profile: shared.getScreenShareProfile(this.options.source.video, this.options.quality),
+      return { pipelineId: this.options.pipelineId,
+        profile: shared.getScreenShareProfile(this.options.source.video, this.options.quality, this.options.source.codec),
         readErrors: 0, rtp: [], decoders: [] };
     }
     async close() {
@@ -155,9 +286,19 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   load(module.exports, name => {
     if (name === 'electron') return electron;
     if (name === './i18n') return { mt: key => key };
+    if (name === './screenEncodingPolicy') return policy.exports;
     if (name === '@monky/screen-share') return { ...runtime, NativeScreenEndpoint: Endpoint, CaptureBridge: Probe,
+      probeCaptureCapabilities: async (options, signal) => {
+        signal.throwIfAborted();
+        encodingProbes.push(options);
+        if (encodingProbe) await encodingProbe(options, signal);
+        else if (options.encoder !== encoder) throw Object.assign(new Error('Encoder is unsupported by this adapter.'),
+          { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+        return { encoderId: options.encoder, codec: encoderCodec(options.encoder), mode: encoderMode(options.encoder),
+          encoderInitialized: true, sourceCaptured: false, hardwareQualified: false, hardwareSessionConfirmed: false };
+      },
       loadRuntime: () => ({ capture: { captureKinds: ['window', 'monitor', 'game'],
-        encoders: ['h264_texture_amf', 'obs_nvenc_h264_tex'], requiresHardwareProbe: true, hardwareQualified: false } }) };
+        encoders: compiledEncoders, requiresHardwareProbe: true, hardwareQualified: false } }) };
     if (name === '@monky/screen-audio') return captureModule;
     if (name === 'node:fs/promises') return {
       async mkdir(filename) { directories.push(filename); if (directory) await directory.promise; },
@@ -196,7 +337,9 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
   const source = { shareId: 'screen-one', instanceId: randomUUID(), video, audio: true };
   const join = () => invoke({ ...config, action: 'join' });
   const addSource = (shareId = source.shareId, changes = {}) => command({
-    action: 'source-add', shareId, desktopSourceId: 'window:12345:0', video, audio: true, audioBitrateKbps: 128, ...changes,
+    action: 'source-add', shareId, desktopSourceId: 'window:12345:0', video, audio: true, audioBitrateKbps: 128,
+    encodingStrategy: changes.codec && changes.codec !== 'auto' || changes.encodingMode === 'software' ? 'manual' : 'automatic',
+    ...changes,
   });
   const participants = () => command({ action: 'participants', participants: [
     { sessionId: 'publisher', nativeScreenShares: [source] }, { sessionId: 'viewer', nativeScreenShares: [] },
@@ -220,7 +363,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
     assert.equal(electron.app.listenerCount('browser-window-blur'), 0);
   });
   return { service, config, command, invoke, reply, source, join, addSource, participants, watch, accepted,
-    frame, contents, event, endpoints, sent, errors, selections, captures, directories, probes, removedDirectories, captureModule, logs, ports,
+    frame, contents, event, endpoints, sent, errors, selections, captures, directories, probes, removedDirectories, captureModule, logs, ports, encodingProbes,
     replaceMonitor: value => { monitor = value; },
     allowProbeRetirement: () => { probeRetires = true; },
     setProbeFailure: value => { probeFailure = value; },
@@ -303,7 +446,7 @@ test('failed preflight before source creation persists only selected diagnostics
   assert.match(text, /ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE/);
   assert.match(text, /call-retirement-result/);
   assert.doesNotMatch(text, /TURN-password|private\.example|password|stack|desktopSourceId/);
-  assert.equal(f.removedDirectories.length, 1);
+  assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
 });
 
 test('disabled persistent logging writes no lifecycle events and does not replay them when reenabled', async t => {
@@ -540,7 +683,7 @@ test('a failed diagnostic sink cannot bypass native ownership guards or prevent 
   await assert.rejects(f.addSource(), /already exists/);
   await f.command({ action: 'source-remove', shareId: source.shareId });
   await f.command({ action: 'leave' });
-  assert.equal(f.removedDirectories.length, 1);
+  assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
   assert.equal((await f.command({ action: 'leave' })).kind, 'ok');
   assert.equal(f.errors.filter(values => values[0] === '[NativeScreen] Persistent diagnostic sink failed; media ownership is unchanged.').length, 1);
   assert.equal(f.errors.some(values => values.some(value => value instanceof Error && value.message === 'modeled disk failure')), false);
@@ -603,8 +746,8 @@ test('announcing a validated window with audio creates neither an encoder nor a 
   assert.deepEqual(f.probes[0].target, { kind: 'window', hwnd: 12345, expectedProcessId: 56789,
     expectedProcessCreationTime100ns: '123456789' });
   assert.equal(f.probes[0].options.video.bitrateKbps, video.maxBitrateKbps);
-  assert.equal(f.probes[0].options.video.scaleMode, 'stretch');
-  assert.equal(f.removedDirectories.length, 1);
+  assert.equal(f.probes[0].options.video.scaleMode, 'fit');
+  assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
   const stats = await f.command({ action: 'stats' });
   assert.equal(stats.publishers.length, 1);
   assert.equal(stats.publishers[0].pipelines.length, 0);
@@ -628,35 +771,37 @@ for (const encoder of ['h264_texture_amf', 'obs_nvenc_h264_tex']) {
       subscriptionId: randomUUID(), action: 'watch', quality: 'source', backend: 'native',
     } });
     assert.equal(f.endpoints[0].options.captureEncoder, encoder);
-    assert.equal(f.endpoints[0].options.preserveAspectRatio, false);
+    assert.equal(f.endpoints[0].options.preserveAspectRatio, true);
     assert.equal(f.probes[0].closed, true);
   });
 }
 
 for (const captureKind of ['window', 'monitor', 'game']) {
-  test(`${captureKind}: preview retains the exact target/audio selector without starting PCM`, async t => {
-    const f = fixture(t);
-    await f.join();
-    const { source } = await f.addSource('selected', {
-      captureKind, preserveAspectRatio: true,
-      desktopSourceId: captureKind === 'monitor' ? monitorId : `window:12345:${'b'.repeat(64)}`,
+  for (const preserveAspectRatio of [undefined, false, true]) {
+    test(`${captureKind}: preview retains target/audio and aspect-ratio=${preserveAspectRatio ?? 'default fit'} without starting PCM`, async t => {
+      const f = fixture(t);
+      await f.join();
+      const { source } = await f.addSource('selected', {
+        captureKind, preserveAspectRatio,
+        desktopSourceId: captureKind === 'monitor' ? monitorId : `window:12345:${'b'.repeat(64)}`,
+      });
+      assert.equal(f.probes[0].target.kind, captureKind);
+      assert.equal(f.probes[0].options.video.scaleMode, preserveAspectRatio === false ? 'stretch' : 'fit');
+      assert.equal(Object.hasOwn(source, 'preserveAspectRatio'), false, 'Scaling is local publisher policy, not a wire field.');
+      await f.command({ action: 'preview-start', shareId: source.shareId,
+        sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+      assert.equal(f.endpoints.length, 1);
+      const endpoint = f.endpoints[0];
+      assert.equal(endpoint.options.preserveAspectRatio, preserveAspectRatio ?? true);
+      assert.equal(endpoint.previewDemand, true); assert.equal(endpoint.demand, 0);
+      assert.deepEqual(endpoint.options.target, f.probes[0].target);
+      assert.equal(endpoint.options.audio.captureModule.createPacketCapture, f.captureModule.createPacketCapture);
+      assert.ok(runtime.NativePcmCaptureHub.matches(endpoint.options.audio.captureHub, endpoint.options.audio.captureModule,
+        captureKind === 'monitor' ? { excludePid: process.pid } : { includeWindowId: 12345, expectedProcessId: 56789 }));
+      assert.equal(endpoint.options.audio.captureHub.getStats().captureStarts, 0);
+      assert.equal(f.captures.length, 0);
     });
-    assert.equal(f.probes[0].target.kind, captureKind);
-    assert.equal(f.probes[0].options.video.scaleMode, 'fit');
-    assert.equal(Object.hasOwn(source, 'preserveAspectRatio'), false, 'Scaling is local publisher policy, not a wire field.');
-    await f.command({ action: 'preview-start', shareId: source.shareId,
-      sourceInstanceId: source.instanceId, presentationId: randomUUID() });
-    assert.equal(f.endpoints.length, 1);
-    const endpoint = f.endpoints[0];
-    assert.equal(endpoint.options.preserveAspectRatio, true);
-    assert.equal(endpoint.previewDemand, true); assert.equal(endpoint.demand, 0);
-    assert.deepEqual(endpoint.options.target, f.probes[0].target);
-    assert.equal(endpoint.options.audio.captureModule.createPacketCapture, f.captureModule.createPacketCapture);
-    assert.ok(runtime.NativePcmCaptureHub.matches(endpoint.options.audio.captureHub, endpoint.options.audio.captureModule,
-      captureKind === 'monitor' ? { excludePid: process.pid } : { includeWindowId: 12345, expectedProcessId: 56789 }));
-    assert.equal(endpoint.options.audio.captureHub.getStats().captureStarts, 0);
-    assert.equal(f.captures.length, 0);
-  });
+  }
 }
 
 test('a source kind cannot substitute another target identity before probing', async t => {
@@ -673,11 +818,11 @@ test('a source kind cannot substitute another target identity before probing', a
 test('an unverified probe cannot announce a source or turn static kinds into capture availability', async t => {
   const f = fixture(t, { probeVerified: false });
   await f.join();
-  await assert.rejects(f.addSource(), /verified, capture-free hardware probe/);
+  await assert.rejects(f.addSource(), /verified, capture-free encoder probe/);
   const { capabilities } = await f.invoke({ action: 'capabilities' });
   assert.equal(capabilities.capture, false); assert.equal(capabilities.backend, null);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
-  assert.equal(f.probes[0].closed, true); assert.equal(f.removedDirectories.length, 1);
+  assert.equal(f.probes[0].closed, true); assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
 });
 
 test('encoder probe rejection does not substitute WGC for Game or publish a success-shaped source', async t => {
@@ -700,7 +845,7 @@ test('monitor Stop then rejected window releases its audio reservation and permi
   f.setProbeFailure(failure);
   await assert.rejects(f.addSource('rejected-window'), error => error === failure);
   assert.equal(f.probes[1].closed, true);
-  assert.equal(f.removedDirectories.length, 2);
+  assert.equal(f.removedDirectories.length, f.encodingProbes.length + 2);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
   f.setProbeFailure(null);
   assert.equal((await f.addSource('retry-window')).kind, 'source');
@@ -785,12 +930,12 @@ test('preparation failure before process creation still awaits the original brid
   assert.equal(f.probes[0].child, undefined);
   assert.equal(f.probes[0].stopCalls, 1);
   assert.equal(settled, false);
-  assert.equal(f.removedDirectories.length, 0);
+  assert.equal(f.removedDirectories.length, f.encodingProbes.length);
   await assert.rejects(f.addSource('another'), /reserve capture audio/);
   probeStop.resolve();
   await rejected;
   assert.equal(f.probes[0].closed, true);
-  assert.equal(f.removedDirectories.length, 1);
+  assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
   assert.equal(f.captures.length + f.endpoints.length, 0);
 });
@@ -803,7 +948,7 @@ test('Stop aborts an in-flight selected-source probe and waits for its owned pro
   assert.equal(f.probes.length, 1); assert.equal(f.probes[0].closed, false);
   await f.command({ action: 'source-remove', shareId: f.source.shareId });
   await rejected;
-  assert.equal(f.probes[0].closed, true); assert.equal(f.removedDirectories.length, 1);
+  assert.equal(f.probes[0].closed, true); assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
   assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
   assert.equal(f.endpoints.length + f.captures.length, 0);
 });
@@ -813,13 +958,13 @@ test('a resolved nativeClosed snapshot without the original child exit retains s
   await f.join();
   await assert.rejects(f.addSource(), /original selected-source probe.*retirement/);
   assert.equal(f.probes[0].snapshot().nativeClosed, true);
-  assert.equal(f.probes[0].closed, false); assert.equal(f.removedDirectories.length, 0);
+  assert.equal(f.probes[0].closed, false); assert.equal(f.removedDirectories.length, f.encodingProbes.length);
   await assert.rejects(f.addSource(), /already exists/);
   await assert.rejects(f.addSource('another'), /reserve capture audio/);
   await assert.rejects(f.command({ action: 'source-remove', shareId: f.source.shareId }), /original selected-source probe/);
   f.allowProbeRetirement();
   await f.command({ action: 'source-remove', shareId: f.source.shareId });
-  assert.equal(f.probes[0].closed, true); assert.equal(f.removedDirectories.length, 1);
+  assert.equal(f.probes[0].closed, true); assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
   assert.equal((await f.addSource()).kind, 'source');
 });
 
@@ -1464,7 +1609,7 @@ test('global shutdown aborts a pending selected-source probe without late media 
   await tick();
   assert.equal(f.endpoints.length, 0);
   assert.equal(f.probes[0].closed, true);
-  assert.equal(f.removedDirectories.length, 1);
+  assert.equal(f.removedDirectories.length, f.encodingProbes.length + 1);
 });
 
 test('global shutdown drains an in-flight quality replacement without admitting its new source', async t => {
@@ -1747,4 +1892,186 @@ test('disconnected leave surfaces the missing remote acknowledgement but release
   assert.equal(f.endpoints[0].closed, true);
   await assert.rejects(f.command({ action: 'stats' }), { name: 'AbortError' });
   await f.invoke({ ...f.config, callId: randomUUID(), action: 'join' });
+});
+
+test('automatic discovery disregards stale manual fields and falls back without announcing capture', async t => {
+  const f = fixture(t, { encoder: 'obs_x264', compiledEncoders: ['obs_nvenc_av1_tex', 'obs_x264'] });
+  await f.invoke({ action: 'capabilities' });
+  assert.equal(f.encodingProbes.length, 0, 'The existing capability command remains a lightweight file check.');
+  const result = await f.invoke({ action: 'probe-encoding', probeId: randomUUID(), video, codec: 'av1', encodingMode: 'hardware' });
+  assert.equal(result.kind, 'encoding');
+  assert.equal(result.availability.selection.encoder, 'obs_x264');
+  assert.equal(result.availability.selection.codec, 'h264');
+  assert.equal(result.availability.fallback, true);
+  assert.equal(result.availability.hardware.available, false);
+  assert.match(result.availability.hardware.reason, /unsupported/);
+  assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), ['obs_nvenc_av1_tex', 'obs_x264']);
+  assert.equal(f.selections.length + f.probes.length + f.captures.length + f.endpoints.length, 0);
+  assert.equal(f.removedDirectories.length, 2);
+  assert.equal((await f.invoke({ action: 'capabilities' })).capabilities.capture, false);
+});
+
+test('main independently admits explicit software AV1 and reports software instead of a hardware backend', async t => {
+  const f = fixture(t, { encoder: 'monky_aom_av1' });
+  await f.join();
+  const result = await f.addSource('av1-software', { encodingMode: 'software', codec: 'av1' });
+  assert.equal(result.source.codec, 'av1');
+  assert.equal(result.encoding.selection.mode, 'software');
+  assert.equal(result.encoding.fallback, false);
+  assert.equal(f.probes[0].options.encoder, 'monky_aom_av1');
+  assert.equal(f.probes[0].options.video.width, video.width);
+  assert.equal((await f.invoke({ action: 'capabilities' })).capabilities.backend, 'libobs-software');
+  assert.equal(f.captures.length + f.endpoints.length, 0);
+});
+
+test('main exposes proven AMF level fallback in discovery and independently admits Software H264', async t => {
+  const message = 'AMF H264 requires level_idc=60 for 3840x2160@120; selected adapter/runtime reports MaxLevel=52.';
+  const f = fixture(t, { encoder: 'obs_x264', compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'],
+    encodingProbe: async options => {
+      if (options.encoder === 'av1_texture_amf')
+        throw Object.assign(new Error('AV1 unsupported'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+      if (options.encoder === 'h264_texture_amf')
+        throw Object.assign(new Error(message), { code: 'ERR_SCREEN_CAPTURE_AMF_LEVEL_UNSUPPORTED' });
+    } });
+  const requested = { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 };
+  const discovery = await f.invoke({ action: 'probe-encoding', probeId: randomUUID(),
+    video: requested, codec: 'auto', encodingMode: 'hardware' });
+  assert.deepEqual(discovery.availability.hardware, { available: false, reason: message });
+  assert.equal(discovery.availability.fallback, true);
+  assert.equal(discovery.availability.selection.mode, 'software');
+  assert.equal(f.probes.length, 0);
+  await f.join();
+  const result = await f.addSource('amf-level-fallback', { video: requested, codec: 'auto', encodingMode: 'hardware' });
+  assert.equal(result.encoding.hardware.available, false);
+  assert.equal(result.encoding.fallback, true);
+  assert.equal(result.encoding.selection.encoder, 'obs_x264');
+  assert.equal(result.source.codec, 'h264');
+  assert.equal(f.probes[0].options.encoder, 'obs_x264');
+  assert.equal((await f.invoke({ action: 'capabilities' })).capabilities.backend, 'libobs-software');
+});
+
+for (const [mode, encoder] of [['hardware', 'av1_texture_amf'], ['software', 'monky_aom_av1']]) {
+  test(`Main Manual ${mode} AV1 rejects unsupported discovery and source admission without substitution`, async t => {
+    const f = fixture(t, { encoder: 'obs_x264', compiledEncoders: [encoder, 'obs_x264'] });
+    const selection = { encodingStrategy: 'manual', encodingMode: mode, codec: 'av1' };
+    const result = await f.invoke({ action: 'probe-encoding', probeId: randomUUID(), video, ...selection });
+    assert.equal(result.availability.selection, null);
+    assert.equal(result.availability.fallback, false);
+    await f.join();
+    await assert.rejects(f.addSource('unavailable-manual', selection));
+    assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), [encoder, encoder]);
+    assert.equal(f.probes.length, 0, 'No selected-source preflight may follow an unavailable exact selection.');
+    assert.equal(f.endpoints.length, 0);
+    assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
+    assert.equal(f.removedDirectories.length, f.encodingProbes.length);
+  });
+}
+
+test('Main Automatic source admission ignores dormant manual preferences and independently rediscovers hardware', async t => {
+  const f = fixture(t, { encoder: 'av1_texture_amf', compiledEncoders: ['av1_texture_amf', 'obs_x264'] });
+  await f.join();
+  const result = await f.addSource('automatic-av1', {
+    encodingStrategy: 'automatic', encodingMode: 'software', codec: 'h264',
+  });
+  assert.equal(result.source.codec, 'av1');
+  assert.equal(result.encoding.selection.mode, 'hardware');
+  assert.equal(f.probes[0].options.encoder, 'av1_texture_amf');
+  assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), ['av1_texture_amf']);
+});
+
+test('every publishing rendition and native receive endpoint retain the admitted AV1 source codec', async t => {
+  const publisher = fixture(t, { encoder: 'monky_aom_av1' });
+  await publisher.join(); await publisher.participants();
+  const { source } = await publisher.addSource('av1-renditions', { encodingMode: 'software', codec: 'av1' });
+  for (const quality of ['source', '1080p60', '720p60', '480p30']) {
+    await publisher.command({ action: 'signal', signal: {
+      fromSessionId: 'viewer', targetSessionId: 'publisher', publisherSessionId: 'publisher',
+      channelId: publisher.config.channelId, shareId: source.shareId, sourceInstanceId: source.instanceId,
+      subscriptionId: randomUUID(), action: 'watch', quality, backend: 'native',
+    } });
+  }
+  assert.ok(publisher.endpoints.length >= 4);
+  for (const endpoint of publisher.endpoints) {
+    assert.equal(endpoint.options.source.codec, 'av1');
+    assert.equal(endpoint.options.captureEncoder, 'monky_aom_av1');
+  }
+  const pipelines = publisher.logs.filter(entry => entry.message === 'Native screen pipeline-create');
+  assert.ok(pipelines.some(entry => entry.data.quality === '480p30'));
+  for (const { data } of pipelines)
+    assert.deepEqual(data.video, shared.getScreenShareProfile(source.video, data.quality, 'av1'));
+  const receiver = fixture(t, { role: 'viewer' });
+  receiver.source.codec = 'av1';
+  await receiver.join(); await receiver.participants(); await receiver.watch();
+  await receiver.accepted(receiver.sent.find(event => event.type === 'signal' && event.signal.action === 'watch').signal);
+  assert.equal(receiver.endpoints[0].options.source.codec, 'av1');
+});
+
+for (const [encoder, mode] of [['av1_texture_amf', 'hardware'], ['monky_aom_av1', 'software']]) {
+  test(`main aligns ${mode} AV1 source-free probes, selected-source probes and source announcements identically`, async t => {
+    const f = fixture(t, { encoder });
+    const requested = { width: 852, height: 480, fps: 30, maxBitrateKbps: 1500 };
+    await f.invoke({ action: 'probe-encoding', probeId: randomUUID(), video: requested, codec: 'av1',
+      encodingMode: mode, encodingStrategy: 'manual' });
+    await f.join();
+    const result = await f.addSource('aligned', { video: requested, encodingMode: mode, codec: 'av1' });
+    assert.equal(f.encodingProbes.length, 2);
+    assert.ok(f.encodingProbes.every(probe => probe.video.width === 848));
+    assert.equal(f.probes[0].options.video.width, 848);
+    assert.deepEqual(result.source.video, { ...requested, width: 848 });
+    assert.equal(requested.width, 852, 'Admission does not mutate the caller preference.');
+  });
+}
+
+test('automatic candidate probing aligns AV1 but keeps the original H264 width when AV1 is unsupported', async t => {
+  const f = fixture(t, { compiledEncoders: ['av1_texture_amf', 'h264_texture_amf'] });
+  await f.join();
+  const result = await f.addSource('auto-alignment', { video: { ...video, width: 852 }, codec: 'auto' });
+  assert.deepEqual(f.encodingProbes.map(probe => [probe.encoder, probe.video.width]),
+    [['av1_texture_amf', 848], ['h264_texture_amf', 852]]);
+  assert.equal(f.probes[0].options.video.width, 852);
+  assert.equal(result.source.video.width, 852);
+  assert.equal(result.source.codec, 'h264');
+});
+
+test('explicit quality replacement realigns the new codec before retiring and announcing its source', async t => {
+  const f = fixture(t, { encoder: 'monky_aom_av1', compiledEncoders: ['obs_x264', 'monky_aom_av1'],
+    encodingProbe: async () => {} });
+  const requested = { ...video, width: 852 };
+  await f.join();
+  const original = await f.addSource('reconfigured', { video: requested, codec: 'h264', encodingMode: 'software' });
+  const replacement = await f.addSource('reconfigured', { video: requested, codec: 'av1', encodingMode: 'software',
+    replacesSourceInstanceId: original.source.instanceId });
+  assert.deepEqual(f.probes.map(probe => probe.options.video.width), [852, 848]);
+  assert.equal(original.source.video.width, 852);
+  assert.equal(replacement.source.video.width, 848);
+  assert.equal(replacement.source.codec, 'av1');
+  assert.notEqual(original.source.instanceId, replacement.source.instanceId);
+});
+
+test('main refuses untrusted encoder selection and preserves real initialization errors without fallback', async t => {
+  const f = fixture(t, { compiledEncoders: ['obs_nvenc_av1_tex', 'obs_x264'],
+    encodingProbe: async () => { throw Object.assign(new Error('Driver failed'), { code: 'ERR_DRIVER_FAILED' }); } });
+  await f.join();
+  for (const change of [{ encodingMode: 'browser' }, { codec: 'vp8' }, { captureEncoder: 'obs_x264' }])
+    await assert.rejects(f.addSource('invalid', change));
+  assert.equal(f.encodingProbes.length, 0);
+  await assert.rejects(f.addSource('valid', { encodingMode: 'hardware', codec: 'auto' }), /Driver failed/);
+  assert.deepEqual(f.encodingProbes.map(probe => probe.encoder), ['obs_nvenc_av1_tex']);
+  assert.equal(f.probes.length + f.endpoints.length, 0);
+});
+
+test('closing encoder discovery aborts only its owned request and awaits native retirement', async t => {
+  const started = deferred();
+  const f = fixture(t, { encodingProbe: async (_options, signal) => {
+    started.resolve();
+    await new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  } });
+  const probeId = randomUUID();
+  const pending = f.invoke({ action: 'probe-encoding', probeId, video, codec: 'h264', encodingMode: 'hardware' });
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  await started.promise;
+  await f.invoke({ action: 'cancel-encoding-probe', probeId });
+  await rejected;
+  assert.equal(f.removedDirectories.length, 1);
+  assert.equal(f.probes.length + f.endpoints.length, 0);
 });

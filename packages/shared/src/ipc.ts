@@ -3,6 +3,7 @@
  * Define as mensagens e eventos trafegados entre o Main Process e o Renderer Process.
  */
 
+import { z } from 'zod';
 import type { ClientLogConfig, ClientLogEntry, LogEntry } from './logging.js';
 import type { DevelopmentQaConfig, DevelopmentQaReport } from './developmentQa.js';
 import type { SoundDownloadFailureReason, SoundDownloadRequest, SoundDownloadResult } from './soundDownloads.js';
@@ -80,7 +81,25 @@ export interface DesktopSource {
   displayNumber?: number;
   thumbnailDataUrl: string;
   appIconDataUrl: string | null;
+  thumbnailState?: 'pending' | 'ready' | 'unavailable';
 }
+
+export const desktopSourcesOptionsSchema = z.object({
+  metadataOnly: z.boolean().optional(),
+  refresh: z.boolean().optional(),
+}).strict();
+export type DesktopSourcesOptions = z.infer<typeof desktopSourcesOptionsSchema>;
+export const desktopSourcePreviewsRequestSchema = z.object({
+  type: z.enum(['screen', 'window']),
+  sourceIds: z.array(z.string().min(1).max(512)).max(256)
+    .refine(ids => new Set(ids).size === ids.length, 'Source identities must be unique'),
+}).strict();
+export type DesktopSourcePreviewsRequest = z.infer<typeof desktopSourcePreviewsRequestSchema>;
+export type DesktopSourcePreview = Pick<DesktopSource, 'id' | 'thumbnailDataUrl' | 'appIconDataUrl'>;
+export const DESKTOP_SOURCES_IPC = {
+  list: 'screen-share:get-sources',
+  previews: 'screen-share:get-previews',
+} as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export interface ImageSelectionResult {
   fileName: string;
@@ -755,7 +774,8 @@ export interface IpcInvokeChannels {
 
   // Captura de Tela
   'screen-share:ensure-permission': { args: []; returnType: boolean };
-  'screen-share:get-sources': { args: []; returnType: DesktopSource[] };
+  'screen-share:get-sources': { args: [options?: DesktopSourcesOptions]; returnType: DesktopSource[] };
+  'screen-share:get-previews': { args: [request: DesktopSourcePreviewsRequest]; returnType: DesktopSourcePreview[] };
   'screen-share:prepare-window': { args: [string]; returnType: boolean };
 
   // Diálogos Nativos

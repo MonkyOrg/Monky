@@ -108,14 +108,55 @@ The screen-sharing picker has two tabs: **Screens** and **Windows**.
 After selecting a window, choose **Window Capture (WGC)** (default)
 or **Game Capture (hook)** and confirm. These are methods for the same window,
 not separate lists or automatic game detection.
+The list appears before its thumbnails: each pending preview has a skeleton,
+without blocking selection or sharing. Screen and window previews load
+independently. A memory-only cache, lasting up to 10 seconds and bounded to
+8 MiB/256 images, speeds up reopening; **Refresh** invalidates it and enumerates
+source identities again. Preview failures do not block valid sources or bypass
+window verification before sharing.
+**Keep aspect ratio** starts enabled in every new picker: it fits the whole
+window into the video frame without distortion, adding borders when needed.
+Turning it off stretches the window to fill that frame. This per-share choice
+survives quality changes and reconnection; it does not resize the window or monitor.
 
 For native **window, monitor or Game Capture** on Windows x64, follow the
 [module guide](apps/client/native/screen-share/README.en.md): rebuilding addons
 for the pinned Electron, preparing libobs/WebRTC and meeting Python 3.11/MSVC/SDK
-prerequisites are separate steps. Video uses H.264 through AMD AMF or NVIDIA
-NVENC; AV1 is unavailable. The selected source is probed after confirmation,
-with no automatic Chromium/software fallback and no compatibility guarantee
-based on GPU brand. `npm ci` and `npm run build` alone do not prepare this runtime.
+prerequisites are separate steps. Capture remains libobs in both **Hardware**
+(recommended, AMD AMF/NVIDIA NVENC) and **Software** (CPU) encoding modes.
+Only in **Settings → Quality & sharing → Screen encoding and codec**,
+**Automatic** (the default) controls the whole group:
+Hardware + AV1, Hardware + H.264, then Software + H.264. Read-only encoding and
+codec fields show the verified result. Fallback is reported without changing
+Automatic mode or saved manual choices; reopening checks hardware again.
+**Manual** selects exactly Hardware/Software and H.264/AV1, with no Automatic
+codec option and no substitution for an unavailable combination. Unsupported
+hardware remains visibly disabled with its reason. Earlier explicit Software or
+codec preferences migrate to Manual. Screen choices remain independent of the
+camera. Real driver/runtime errors are reported rather than silently changing modes.
+
+Encoder availability is checked for the selected codec and quality without
+capturing a source; confirmation then probes the exact selected source.
+The screen-share picker uses saved preferences without repeating mode, encoding
+and codec controls; a failed verification blocks startup and reports the reason.
+There is no mid-stream mode switch, Chromium capture fallback or GPU-brand
+compatibility guarantee. Receivers without the chosen codec report incompatibility;
+select H.264 on the publisher for them. Browser AV1 admission also checks the
+advertised and negotiated receive level for the selected quality; generic AV1
+support is not a promise of 1080p/4K support. AV1 widths are aligned down to eight
+pixels before capture (for example, 852 becomes 848), keeping announced and encoded
+dimensions identical; H.264 retains four-pixel alignment. The server does not transcode.
+Its SFU advertises AV1 profile 0, tier 0, level-index 23 for forwarding, not decoding;
+the sender must still respect each receiver's negotiated level.
+For isolated full-app checks with an owned synthetic window, run
+`node apps\client\test\nativeScreenAppSmoke.cjs --screen-codec=av1 --native-1080p60 --video-only --sample-seconds=10 --cadence-diagnostics --artifacts=<new-absolute-directory>`.
+Codec choices are `auto`, `h264`, and `av1`; omit `--native-1080p60` for the native
+1080p120 scenario. The smoke also preserves aspect ratio by default
+(`--preserve-aspect-ratio` remains accepted); use `--stretch` to verify explicit OFF.
+The 1080p120 minimum remains 100 presented FPS. Samples of eight seconds
+or longer include a three-second warm-up. Run GPU scenarios sequentially.
+Client/server protocol 28 is required for screen codec metadata; older clients
+are not advertised as compatible. `npm ci` and `npm run build` alone do not prepare this runtime.
 On first setup, or when `screen-audio` sources or Electron change, follow the
 guide's `buildScreenAudio.cjs`: it uses local `node-gyp` and the same VS2022/MSVC/SDK
 selector, after `prepare:native-screen`. Preparation builds `screen-share`

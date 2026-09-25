@@ -254,6 +254,59 @@ async function runLoadingSmoke(language) {
     check(panel().textContent.includes(t('screenShare.noWindows')), 'empty results use the existing localized message');
     picker.close();
 
+    const previewSourceId = 'window:987:0';
+    let previewWork = deferred();
+    let requestedPreviews = 0;
+    const previewData = 'data:image/svg+xml,' + encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90"><rect width="160" height="90" fill="#28a"/></svg>');
+    window.api.getDesktopSourcePreviews = input => {
+      check(input.type === 'window' && input.sourceIds.length === 1 && input.sourceIds[0] === previewSourceId,
+        'Preview requests retain the exact selected source identities.');
+      requestedPreviews++;
+      return previewWork.promise;
+    };
+    window.api.getDesktopSources = options => {
+      check(options.metadataOnly === true, 'Initial picker enumeration excludes expensive thumbnails.');
+      enumerations++;
+      return Promise.resolve([{ ...source(previewSourceId, 'window'), thumbnailState: 'pending' }]);
+    };
+    await picker.open();
+    const sourceCard = panel().querySelector('.source-item');
+    const initialPreview = sourceCard.querySelector('.source-thumbnail--loading');
+    check(requestedPreviews === 1 && panel().getAttribute('aria-busy') === 'false',
+      'The complete selectable list renders without awaiting its preview batch.');
+    check(initialPreview.getAttribute('aria-label') === t('screenShare.previewLoading'),
+      'Each pending thumbnail has a localized loading announcement.');
+    check(initialPreview.textContent.trim() === '',
+      'Loading thumbnails display only a skeleton, never visible loading text.');
+    await new Promise(requestAnimationFrame);
+    check(initialPreview.getBoundingClientRect().height === 110
+      && getComputedStyle(initialPreview, '::after').animationName !== 'none',
+    'A real source card paints the standard animated thumbnail skeleton.');
+    sourceCard.click();
+    sourceCard.focus();
+    check(!document.querySelector('#btn-share').disabled, 'Sharing does not depend on thumbnail availability.');
+    previewWork.resolve([{ id: previewSourceId, thumbnailDataUrl: previewData, appIconDataUrl: null }]);
+    await flush();
+    const image = sourceCard.querySelector('img.source-thumbnail');
+    await image.decode();
+    check(panel().querySelector('.source-item') === sourceCard && document.activeElement === sourceCard
+      && image.naturalWidth === 160 && image.getBoundingClientRect().height === 110
+      && !sourceCard.querySelector('.skeleton') && picker.selectedSourceId === previewSourceId,
+    'Decoded thumbnails replace only placeholders, retaining card dimensions, focus and selection.');
+    picker.close();
+    previewWork = deferred();
+    await picker.open();
+    const reopenedCard = panel().querySelector('.source-item');
+    previewWork.reject(new Error('Synthetic preview failure'));
+    await flush();
+    reopenedCard.click();
+    check(!document.querySelector('#btn-share').disabled && !reopenedCard.querySelector('.skeleton')
+      && reopenedCard.querySelector('.source-thumbnail--minimized')
+      && document.querySelector('#share-preview-error').textContent === t('screenShare.previewsFailed'),
+    'Preview failure is explicit and localized without disabling a valid source.');
+    picker.close();
+
     delete window.api.getDesktopSources;
     await picker.open();
     check(panel().querySelector('[role="alert"]'), 'an unavailable API is not mistaken for an empty desktop');

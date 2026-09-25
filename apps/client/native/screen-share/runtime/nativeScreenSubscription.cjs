@@ -25,7 +25,7 @@ class NativeScreenSubscription {
       retirePresentation, send, onError, onState });
     this.source = Object.freeze(nativeScreenSourceSchema.parse(source));
     this.quality = screenShareQualitySchema.parse(quality);
-    this.profile = getScreenShareProfile(this.source.video, this.quality);
+    this.profile = getScreenShareProfile(this.source.video, this.quality, this.source.codec);
     this.iceServers = structuredClone(iceServers);
     this.subscriptionId = randomUUID();
     this.presentationId = presentationId;

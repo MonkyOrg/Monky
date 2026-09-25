@@ -11,6 +11,8 @@
 #include "platformContract.h"
 #include "nvencProbe.h"
 #include "amfProbe.h"
+#include "softwareAv1.h"
+#include "../rtc/inputs/abi/monky_av1.h"
 #include <runtime-pins.h>
 #include "liveNative.h"
 
@@ -295,8 +297,6 @@ Target BindTarget(const Arguments& arguments) {
   value.executable = ExecutableBasename(value.process.Get());
   Require(arguments.kind != CaptureKind::Game || (value.pid != GetCurrentProcessId() && !SameOrdinal(value.className, L"dwm")),
           "Game Capture cannot bind the compositor or capture helper", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
-  Require(value.className != L"ApplicationFrameWindow" && value.className != L"WinUIDesktopWin32WindowClass",
-      "Stock UWP child-window remapping cannot bind this exact selected HWND safely", "ERR_SCREEN_CAPTURE_SOURCE_IDENTITY");
   value.key = {Utf8(value.title), Utf8(value.className), Utf8(value.executable)};
   ValidateKey(value.key);
   value.VerifyUnique();
@@ -504,6 +504,7 @@ Function Symbol(HMODULE module, const char* name) {
 
 struct Libraries {
   abi::Api api;
+  decltype(&MonkyAv1Validate) validateAv1 = nullptr;
   // Retain every explicit image reference, search cookie, and input lock until
   // process exit. obs_shutdown alone is not evidence of driver/hook GPU drain.
   std::vector<HMODULE> images;
@@ -596,6 +597,16 @@ struct Libraries {
     cookie = AddDllDirectory((arguments.runtime + L"\\bin\\64bit").c_str());
     Require(cookie != nullptr, "Cannot add private stock dependency directory", "ERR_SCREEN_CAPTURE_DLL_SEARCH");
     const auto core = LoadImage(arguments, L"bin\\64bit\\obs.dll");
+    if (IsAv1(arguments.encoder)) {
+      const auto image = HostImagePath();
+      const auto path = image.substr(0, image.find_last_of(L'\\') + 1) + L"monky_av1.dll";
+      inputs.push_back(OpenPinned(path, kAv1Runtime, Sha256{}));
+      const auto av1 = LoadLibraryExW(path.c_str(), nullptr,
+          LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+      Require(av1 != nullptr, "Cannot load verified AV1 runtime", "ERR_SCREEN_CAPTURE_LIBRARY_LOAD");
+      images.push_back(av1);
+      validateAv1 = Symbol<decltype(validateAv1)>(av1, "MonkyAv1Validate");
+    }
     LoadImage(arguments, L"bin\\64bit\\libobs-d3d11.dll");
     LoadImage(arguments, L"bin\\64bit\\libobs-winrt.dll");
 #define LOAD_API(name) api.name = Symbol<decltype(api.name)>(core, #name)
@@ -680,7 +691,7 @@ class Host {
  public:
   Host(Arguments arguments, Parent parent, std::unique_ptr<OwnedRun> run)
       : arguments_(std::move(arguments)), parent_(std::move(parent)), run_(std::move(run)),
-        buffer_(arguments_.video), processStarted_(GetTickCount64()) {
+        buffer_(arguments_.video, IsAv1(arguments_.encoder)), processStarted_(GetTickCount64()) {
     if (arguments_.encoder != EncoderKind::Auto) capability_.encoder = arguments_.encoder;
     common_ = {arguments_.runId, GetCurrentProcessId(), arguments_.processId, arguments_.hwnd,
         arguments_.expectedCreation, Qpc(), QpcFrequency()};
@@ -869,6 +880,7 @@ class Host {
         delivered.size = normalizedPacket.bytes.size();
       }
       std::vector<std::uint8_t> independentKeyframe;
+      std::vector<std::uint8_t> av1Sequence;
       AmfColorNormalization normalizedParameters;
       std::span<const std::uint8_t> parameterSets;
       if (packet->keyframe) {
@@ -882,7 +894,27 @@ class Host {
             host.capability_.encoder, host.amfColorNormalizationAllowed_);
         if (!normalizedParameters.bytes.empty()) parameterSets = normalizedParameters.bytes;
         // Preview may have consumed the first headers before a viewer joins.
-        independentKeyframe = CompleteH264Keyframe({delivered.data, delivered.size}, parameterSets, host.arguments_.video);
+        if (IsAv1(host.capability_.encoder)) {
+          const auto picture = monky::screen_video::InspectAv1({delivered.data, delivered.size});
+          if (picture.sequence) {
+            av1Sequence = picture.sequence_header;
+            parameterSets = av1Sequence;
+          }
+          char error[512]{};
+          const bool validated = host.libraries_.validateAv1 &&
+              host.libraries_.validateAv1(parameterSets.data(), parameterSets.size(),
+                  host.arguments_.video.width, host.arguments_.video.height, error, sizeof(error));
+          Require(validated, error[0] ? error : "AV1 sequence validation is unavailable", "ERR_SCREEN_CAPTURE_AV1");
+          const auto header = monky::screen_video::InspectAv1(parameterSets);
+          Require(header.sequence && !header.picture && picture.picture && picture.keyframe,
+                  "AV1 keyframe requires a valid sequence header", "ERR_SCREEN_CAPTURE_AV1");
+          if (!picture.sequence) independentKeyframe.assign(parameterSets.begin(), parameterSets.end());
+          Require(independentKeyframe.size() <= kMaxPacketBytes - delivered.size,
+                  "AV1 keyframe exceeds packet bound", "ERR_SCREEN_CAPTURE_AV1");
+          independentKeyframe.insert(independentKeyframe.end(), delivered.data, delivered.data + delivered.size);
+        } else {
+          independentKeyframe = CompleteH264Keyframe({delivered.data, delivered.size}, parameterSets, host.arguments_.video);
+        }
         delivered.data = independentKeyframe.data();
         delivered.size = independentKeyframe.size();
       }
@@ -1096,8 +1128,9 @@ class Host {
       DXGI_ADAPTER_DESC1 description{};
       Require(SUCCEEDED(adapter->GetDesc1(&description)), "Cannot inspect DXGI adapter", "ERR_SCREEN_CAPTURE_DEVICE");
       if (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-      const auto kind = description.VendorId == 0x1002 ? EncoderKind::Amf :
-          description.VendorId == 0x10de ? EncoderKind::Nvenc : EncoderKind::Auto;
+      const auto kind = IsSoftware(arguments_.encoder) ? arguments_.encoder :
+          description.VendorId == 0x1002 ? (IsAv1(arguments_.encoder) ? EncoderKind::AmfAv1 : EncoderKind::Amf) :
+          description.VendorId == 0x10de ? (IsAv1(arguments_.encoder) ? EncoderKind::NvencAv1 : EncoderKind::Nvenc) : EncoderKind::Auto;
       if (kind == EncoderKind::Auto || (arguments_.encoder != EncoderKind::Auto && arguments_.encoder != kind)) continue;
       capability_.encoder = kind;
       capability_.adapterIndex = index;
@@ -1107,8 +1140,8 @@ class Host {
           description.AdapterLuid.LowPart;
       return;
     }
-    throw ContractError("ERR_SCREEN_CAPTURE_ENCODER_UNAVAILABLE",
-        "The pinned OBS texture encoders require matching AMD/NVIDIA adapter 0; cross-adapter and software fallback are disabled");
+    throw ContractError(IsSoftware(arguments_.encoder) ? "ERR_SCREEN_CAPTURE_DEVICE" : "ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED",
+        "The selected encoder is not supported on capture adapter 0; cross-adapter or unrequested software fallback is forbidden");
   }
   void CheckDevice() {
     GraphicsScope graphics(api());
@@ -1127,11 +1160,11 @@ class Host {
         capability_.adapterLuid == luid;
     Require(matchingDevice_, "OBS selected a different D3D11 device; adapter/software fallback is forbidden",
             "ERR_SCREEN_CAPTURE_DEVICE");
-    if (capability_.encoder == EncoderKind::Nvenc) {
-      ProbeNvencDevice(device, arguments_.video);
+    if (IsNvenc(capability_.encoder)) {
+      ProbeNvencDevice(device, arguments_.video, {}, IsAv1(capability_.encoder));
       nvencProbeVerified_ = true;
-    } else if (capability_.encoder == EncoderKind::Amf) {
-      AppendLog(ProbeAmfDevice(device, arguments_.video));
+    } else if (IsAmf(capability_.encoder)) {
+      AppendLog(ProbeAmfDevice(device, arguments_.video, IsAv1(capability_.encoder)));
     }
     AppendLog("{\"schemaVersion\":1,\"kind\":\"screen-capture-device\",\"encoderId\":" + JsonString(SelectedEncoder()) +
         ",\"adapterIndex\":" + std::to_string(capability_.adapterIndex) + ",\"vendorId\":" + std::to_string(description.VendorId) +
@@ -1287,24 +1320,43 @@ class Host {
   }
   void EncoderSettings() {
     const auto* codec = api().obs_get_encoder_codec(SelectedEncoder());
-    ValidateEncoderAdmission(codec && std::strcmp(codec, "h264") == 0 &&
+    Require(codec || IsSoftware(capability_.encoder), "The selected hardware codec is not registered for this GPU",
+            "ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED");
+    ValidateEncoderAdmission(codec && std::strcmp(codec, EncoderCodec(capability_.encoder)) == 0 &&
         api().obs_get_encoder_type(SelectedEncoder()) == abi::EncoderType::Video,
         (api().obs_get_encoder_caps(SelectedEncoder()) & abi::kPassTexture) != 0, matchingDevice_, api().obs_nv12_tex_active(),
-        failed_.load(), false, capability_.encoder, capability_.encoder == EncoderKind::Amf || nvencProbeVerified_);
+        failed_.load(), false, capability_.encoder, !IsNvenc(capability_.encoder) || nvencProbeVerified_);
     Require((api().obs_get_encoder_caps(SelectedEncoder()) & abi::kDynamicBitrate) != 0,
             "Hardware encoder registration does not support live bitrate feedback", "ERR_SCREEN_CAPTURE_SETTINGS");
     encoderSettings_ = api().obs_encoder_defaults(SelectedEncoder());
     Require(encoderSettings_, "Cannot obtain pinned hardware encoder defaults", "ERR_SCREEN_CAPTURE_SETTINGS");
     PropertiesRef properties(api(), api().obs_get_encoder_properties(SelectedEncoder()));
     SetString(properties.value, encoderSettings_, "rate_control", EncoderRateControl(capability_.encoder));
-    SetString(properties.value, encoderSettings_, "profile", "main");
-    SetString(properties.value, encoderSettings_, "preset", capability_.encoder == EncoderKind::Nvenc ? "p4" : "balanced");
     SetInteger(properties.value, encoderSettings_, "bitrate", arguments_.video.bitrateKbps);
+    SetInteger(properties.value, encoderSettings_, "keyint_sec", 1);
+    if (IsSoftware(capability_.encoder)) {
+      if (capability_.encoder == EncoderKind::X264) {
+        SetString(properties.value, encoderSettings_, "profile", "main");
+        SetString(properties.value, encoderSettings_, "preset", "veryfast");
+        SetString(properties.value, encoderSettings_, "tune", "zerolatency");
+        const auto level = (std::max)(51u, RequiredCaptureH264Level(arguments_.video));
+        const auto options = "bframes=0 scenecut=0 open-gop=0 level=" +
+            std::to_string(level / 10) + "." + std::to_string(level % 10);
+        Property(properties.value, "x264opts", abi::PropertyType::Text);
+        api().obs_data_set_string(encoderSettings_, "x264opts", options.c_str());
+      }
+      api().obs_properties_apply_settings(properties.value, encoderSettings_);
+      capability_.verified = true;
+      return;
+    }
+    if (api().obs_properties_get(properties.value, "profile"))
+      SetString(properties.value, encoderSettings_, "profile", "main");
+    SetString(properties.value, encoderSettings_, "preset", IsNvenc(capability_.encoder) ? "p4" : "balanced");
     if (api().obs_properties_get(properties.value, "bf")) SetInteger(properties.value, encoderSettings_, "bf", 0);
-    else Require(capability_.encoder == EncoderKind::Nvenc && api().obs_data_get_int(encoderSettings_, "bf") == 0,
+    else Require((IsNvenc(capability_.encoder) || IsAv1(capability_.encoder)) && api().obs_data_get_int(encoderSettings_, "bf") == 0,
                  "Missing B-frame control did not explicitly default to zero", "ERR_SCREEN_CAPTURE_SETTINGS");
     SetInteger(properties.value, encoderSettings_, "keyint_sec", 1);
-    if (capability_.encoder == EncoderKind::Nvenc) {
+    if (IsNvenc(capability_.encoder)) {
       SetString(properties.value, encoderSettings_, "tune", "ull");
       SetString(properties.value, encoderSettings_, "multipass", "disabled");
       SetBoolean(properties.value, encoderSettings_, "lookahead", false);
@@ -1328,16 +1380,28 @@ class Host {
   }
   void CheckEncoderSettings() {
     DataRef settings(api(), api().obs_encoder_get_settings(encoder_));
-    const bool nvenc = capability_.encoder == EncoderKind::Nvenc;
+    if (IsSoftware(capability_.encoder)) {
+      Require(BoundedString(api().obs_data_get_string(settings.value, "rate_control"), 32) == "CBR" &&
+          api().obs_data_get_int(settings.value, "bitrate") == (live_ ? live_->Bitrate() : arguments_.video.bitrateKbps) &&
+          api().obs_data_get_int(settings.value, "keyint_sec") == 1,
+          "Encoder changed the selected real-time rate settings", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
+      if (capability_.encoder == EncoderKind::X264)
+        Require(BoundedString(api().obs_data_get_string(settings.value, "profile"), 32) == "main" &&
+            BoundedString(api().obs_data_get_string(settings.value, "preset"), 32) == "veryfast" &&
+            BoundedString(api().obs_data_get_string(settings.value, "tune"), 32) == "zerolatency",
+            "Software H264 changed its selected latency settings", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
+      return;
+    }
+    const bool nvenc = IsNvenc(capability_.encoder);
     Require(BoundedString(api().obs_data_get_string(settings.value, "rate_control"), 32) == EncoderRateControl(capability_.encoder) &&
         BoundedString(api().obs_data_get_string(settings.value, "profile"), 32) == "main" &&
         BoundedString(api().obs_data_get_string(settings.value, "preset"), 32) == (nvenc ? "p4" : "balanced") &&
-        BoundedString(api().obs_data_get_string(settings.value, nvenc ? "opts" : "ffmpeg_opts"), 64) ==
+        BoundedString(api().obs_data_get_string(settings.value, nvenc ? "opts" : "ffmpeg_opts"), 512) ==
             EncoderProfileOptions(capability_.encoder, arguments_.video) &&
         api().obs_data_get_int(settings.value, "bitrate") == (live_ ? live_->Bitrate() : arguments_.video.bitrateKbps) &&
         api().obs_data_get_int(settings.value, "bf") == 0 &&
         api().obs_data_get_int(settings.value, "keyint_sec") == 1,
-        "Hardware initialization changed or rejected the selected H264 schema", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
+        "Hardware initialization changed or rejected the selected codec settings", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
     if (nvenc) {
       Require(BoundedString(api().obs_data_get_string(settings.value, "tune"), 32) == "ull" &&
               BoundedString(api().obs_data_get_string(settings.value, "multipass"), 32) == "disabled" &&
@@ -1397,9 +1461,11 @@ class Host {
     const bool captureModule = name == "win-capture";
     const bool nvenc = name == "obs-nvenc";
     const auto* binary = captureModule ? L"obs-plugins\\64bit\\win-capture.dll" :
-        nvenc ? L"obs-plugins\\64bit\\obs-nvenc.dll" : L"obs-plugins\\64bit\\obs-ffmpeg.dll";
+        nvenc ? L"obs-plugins\\64bit\\obs-nvenc.dll" :
+        name == "obs-x264" ? L"obs-plugins\\64bit\\obs-x264.dll" : L"obs-plugins\\64bit\\obs-ffmpeg.dll";
     const auto* data = captureModule ? L"data\\obs-plugins\\win-capture" :
-        nvenc ? L"data\\obs-plugins\\obs-nvenc" : L"data\\obs-plugins\\obs-ffmpeg";
+        nvenc ? L"data\\obs-plugins\\obs-nvenc" :
+        name == "obs-x264" ? L"data\\obs-plugins\\obs-x264" : L"data\\obs-plugins\\obs-ffmpeg";
     const auto binaryPath = captureModule ? CaptureModulePath() : arguments_.runtime + L"\\" + binary;
     const auto dataPath = (captureModule ? libraries_.captureDataDirectory : run_->directory) + L"\\" + data;
     const auto configRoot = run_->directory + L"\\config";
@@ -1497,7 +1563,12 @@ class Host {
       }
       sourcePlatformVerified_ = true;
     }
-    LoadModule(capability_.encoder == EncoderKind::Nvenc ? "obs-nvenc" : "obs-ffmpeg");
+    if (capability_.encoder == EncoderKind::AomAv1) {
+      const auto image = HostImagePath();
+      const auto path = image.substr(0, image.find_last_of(L'\\') + 1) + L"monky_av1.dll";
+      RegisterSoftwareAv1(GetModuleHandleW(L"obs.dll"), GetModuleHandleW(path.c_str()));
+    } else LoadModule(capability_.encoder == EncoderKind::X264 ? "obs-x264" :
+        IsNvenc(capability_.encoder) ? "obs-nvenc" : "obs-ffmpeg");
     if (!PreparationStep()) return;
     BeginStage(NativeStage::ModulesPostLoad);
     api().obs_post_load_modules();
@@ -1510,7 +1581,7 @@ class Host {
     info.flags = abi::kVideoEncoded;
     info.get_name = OutputName; info.create = OutputCreate; info.destroy = OutputDestroy;
     info.start = OutputStart; info.stop = OutputStop; info.encoded_packet = EncodedPacket;
-    info.encoded_video_codecs = "h264";
+    info.encoded_video_codecs = EncoderCodec(capability_.encoder);
     BeginStage(NativeStage::OutputRegistration);
     api().obs_register_output_s(&info, sizeof(info));
     EndStage();
@@ -1598,15 +1669,15 @@ class Host {
   void CreateEncoderOutput() {
     Require(!encoder_ && !output_ && mainCanvas_ && canvasVideo_, "Encoder requires one explicit canvas binding",
             "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
-    encoder_ = api().obs_video_encoder_create(SelectedEncoder(), "Monky explicitly selected hardware H264 encoder", encoderSettings_, nullptr);
-    Require(encoder_, "Cannot create pinned hardware H264 encoder object", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
+    encoder_ = api().obs_video_encoder_create(SelectedEncoder(), "Monky explicitly selected screen encoder", encoderSettings_, nullptr);
+    Require(encoder_, "Cannot create pinned screen encoder object", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
     api().obs_encoder_set_video(encoder_, canvasVideo_);
     Require(api().obs_encoder_video(encoder_) == canvasVideo_, "Encoder rejected the explicit main canvas video",
         "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
     output_ = api().obs_output_create("monky_screen_h264_pipe", "Monky compressed in-memory output", nullptr, nullptr);
     Require(output_, "Cannot create video-only custom output", "ERR_SCREEN_CAPTURE_OUTPUT");
     api().obs_output_set_video_encoder(output_, encoder_);
-    Require(api().obs_output_get_video_encoder(output_) == encoder_, "Output did not bind the selected hardware encoder",
+    Require(api().obs_output_get_video_encoder(output_) == encoder_, "Output did not bind the selected encoder",
         "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
   }
   void InitializeEncoder() {
@@ -1614,22 +1685,23 @@ class Host {
             api().obs_output_can_begin_data_capture(output_, abi::kVideoEncoded),
             "Custom output cannot initialize encoded video", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
     strictEncoderWarnings_.store(true);
-    const auto refusal = "Hardware H264 encoder refused " + std::to_string(arguments_.video.width) + "x" +
+    const auto refusal = std::string(SelectedEncoder()) + " refused " + std::to_string(arguments_.video.width) + "x" +
         std::to_string(arguments_.video.height) + "@" + std::to_string(arguments_.video.fps) +
         " at " + std::to_string(arguments_.video.bitrateKbps) + " Kbps" +
-        "; required Main level_idc=" + std::to_string(RequiredCaptureH264Level(arguments_.video)) +
-        ". Select a lower capture profile or a capable GPU/driver.";
+        (IsAv1(capability_.encoder) ? "; AV1 Main 8-bit L1T1" :
+            "; required H264 Main level_idc=" + std::to_string(RequiredCaptureH264Level(arguments_.video))) +
+        ". Select a lower capture profile or check the selected encoder and driver.";
     Require(api().obs_output_initialize_encoders(output_, abi::kVideoEncoded),
             refusal.c_str(), "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
     CheckFailure();
     const auto* encoderError = api().obs_encoder_get_last_error(encoder_);
-    Require(!encoderError || !*encoderError, "Hardware texture initialization reported an encoder error or reroute",
+    Require(!encoderError || !*encoderError, "Encoder initialization reported an error or reroute",
             "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
     CheckEncoderSettings();
     // Pinned AMF skips its first update; consume it before any capture/feedback.
     if (capability_.encoder == EncoderKind::Amf) api().obs_encoder_update(encoder_, encoderSettings_);
     CheckFailure();
-    ValidateEncoderAdmission(true, true, matchingDevice_, api().obs_nv12_tex_active(), failed_.load(), false,
+    ValidateEncoderAdmission(true, !IsSoftware(capability_.encoder), matchingDevice_, api().obs_nv12_tex_active(), failed_.load(), false,
         capability_.encoder, capability_.verified);
     Require(BoundedString(api().obs_encoder_get_id(encoder_), 128) == SelectedEncoder(),
             "Configured hardware encoder registration identity changed", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
@@ -1664,7 +1736,7 @@ class Host {
     CreateEncoderOutput();
     const bool started = api().obs_output_start(output_);
     CheckFailure();
-    Require(started, "Hardware H264 custom output failed to start", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
+    Require(started, "Encoded screen output failed to start", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
     Require(api().obs_encoder_video(encoder_) == canvasVideo_ && api().obs_output_get_video_encoder(output_) == encoder_,
         "Output initialization changed the admitted canvas/encoder binding", "ERR_SCREEN_CAPTURE_ENCODER_INITIALIZATION");
   }

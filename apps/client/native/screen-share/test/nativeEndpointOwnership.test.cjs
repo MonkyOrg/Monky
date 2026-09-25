@@ -320,10 +320,10 @@ test('fallback revalidates the exact selected window after retirement before sta
   assert.equal(f.states.some(state => state.type === 'capture-fallback'), false);
 });
 
-for (const selected of targets) {
-  test(`${selected.kind}: endpoint retains immutable exact target/encoder and preview never starts requested audio`, async t => {
+for (const selected of targets) for (const preserveAspectRatio of [undefined, false, true]) {
+  test(`${selected.kind}/${preserveAspectRatio}: endpoint retains immutable exact target/encoder and preview never starts requested audio`, async t => {
     const target = structuredClone(selected);
-    const f = fixture({ role: 'publish', target, captureEncoder: 'obs_nvenc_h264_tex', audio: true, preserveAspectRatio: true });
+    const f = fixture({ role: 'publish', target, captureEncoder: 'obs_nvenc_h264_tex', audio: true, preserveAspectRatio });
     t.after(async () => {
       const closing = f.endpoint.close(); f.finish({ closed: true }); await closing;
       assert.doesNotThrow(() => assertNativeScreenEndpointLocallyClosed(f.endpoint));
@@ -336,7 +336,7 @@ for (const selected of targets) {
     assert.equal(Object.isFrozen(f.endpoint.target), true);
     if (selected.kind === 'monitor') assert.equal(Object.isFrozen(f.endpoint.target.bounds), true);
     assert.equal(f.endpoint.captureEncoder, 'obs_nvenc_h264_tex');
-    assert.equal(f.endpoint.preserveAspectRatio, true);
+    assert.equal(f.endpoint.preserveAspectRatio, preserveAspectRatio ?? true);
     await f.endpoint.setDemand(0, true);
     assert.equal(f.endpoint.pcm, undefined);
     assert.equal(f.endpoint.audioStartWork, undefined);
@@ -404,7 +404,7 @@ for (const selected of targets) {
 for (const mode of ['p2p', 'sfu']) {
   test(`${mode}: preview-only demand allocates no transport, publication or network frame`, async t => {
     const f = fixture({ role: 'publish', mode });
-    assert.equal(f.endpoint.preserveAspectRatio, false);
+    assert.equal(f.endpoint.preserveAspectRatio, true);
     let captures = 0;
     t.mock.method(f.endpoint, 'startCapture', async () => { captures++; });
     await f.endpoint.ready;

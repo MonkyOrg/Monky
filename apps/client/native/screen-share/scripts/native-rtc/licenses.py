@@ -45,9 +45,10 @@ def main():
 
     destination = Path(args.licenses).resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    builder = NativeLicenseBuilder([args.output], [args.root_target + ":monky_screen_rtc"])
+    targets = [args.root_target + ":monky_screen_rtc", args.root_target + ":monky_av1"]
+    builder = NativeLicenseBuilder([args.output], targets)
     builder.generate_license_text(str(destination))
-    libraries = sorted(builder._get_third_party_libraries(args.output, args.root_target + ":monky_screen_rtc"))
+    libraries = sorted(set().union(*(builder._get_third_party_libraries(args.output, target) for target in targets)))
     (destination / "libraries.json").write_text(json.dumps(libraries, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"nativeRtcLicenses": libraries}))
 

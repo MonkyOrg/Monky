@@ -19,7 +19,8 @@ const MEDIA_CODECS: RouterRtpCodecCapability[] = [
     kind: 'video',
     mimeType: 'video/AV1',
     clockRate: 90000,
-    parameters: {},
+    // The router forwards AV1 without decoding; each receiver still negotiates its own actual level.
+    parameters: { profile: 0, tier: 0, 'level-idx': 23 },
   },
   {
     kind: 'video',

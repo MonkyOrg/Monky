@@ -9,7 +9,7 @@ import { BotLocalExecutionService } from './application/services/BotLocalExecuti
 import { SfuManager } from './infrastructure/sfu/SfuManager';
 import type { ChannelRecord, ServerRecord, VoiceRestrictions } from './domain/entities';
 
-test('SFU advertises legacy and native Main H264 profiles with distinct RTX and preserves their order', async (t) => {
+test('SFU advertises AV1 forwarding limits and preserves legacy/native H264 profiles, RTX and codec order', async (t) => {
   const sfu = new SfuManager({ listenIp: '127.0.0.1', announcedIp: '127.0.0.1' });
   t.after(() => sfu.close());
   const { codecs = [] } = await sfu.getRouterRtpCapabilities('h264-profiles');
@@ -24,6 +24,11 @@ test('SFU advertises legacy and native Main H264 profiles with distinct RTX and 
   }
   assert.deepEqual(codecs.filter((codec) => !/\/(h264|rtx)$/i.test(codec.mimeType))
     .map((codec) => codec.mimeType.toLowerCase()), ['audio/opus', 'video/av1', 'video/vp9', 'video/vp8']);
+  const av1 = codecs.filter((codec) => codec.mimeType.toLowerCase() === 'video/av1');
+  assert.equal(av1.length, 1, 'Extending forwarding limits does not register a duplicate AV1 codec.');
+  assert.deepEqual(av1[0].parameters, { profile: 0, tier: 0, 'level-idx': 23 });
+  assert.equal(codecs.filter((repair) => repair.mimeType.toLowerCase() === 'video/rtx'
+    && repair.parameters?.['apt'] === av1[0].preferredPayloadType).length, 1);
 });
 
 function fixture(restricted = true) {

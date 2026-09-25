@@ -410,12 +410,10 @@ export class WebRtcManager {
   public async startNativeScreenShare(
     desktopSourceId: string, audio: boolean, thumbnail: string, isWanted: () => boolean,
     captureKind: NativeScreenCaptureKind = 'window',
-    preserveAspectRatio = false,
+    preserveAspectRatio = true,
     audioReplacement?: { shareId?: string; retirePrevious: () => Promise<void> },
   ): Promise<MediaStream> {
     if (this.voiceReconnectSuspended) throw new Error(t('screenCodec.reconnecting'));
-    if (settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264')
-      throw new Error(t('screenShare.codecsSoon'));
     const profile = videoService.getProfile();
     const video = nativeScreenProfile(profile);
     const capabilities = await this.nativeScreens.capabilities();
@@ -470,7 +468,7 @@ export class WebRtcManager {
     });
   }
 
-  public assertScreenSharingSettings(profile: QualityProfile, codec = settingsStore.preferredVideoCodec): void {
+  public assertScreenSharingSettings(profile: QualityProfile, codec = settingsStore.preferredScreenCodec): void {
     const issue = this.nativeScreens.settingsIssue(profile, codec);
     if (issue) throw new Error(t(issue === 'codec' ? 'screenShare.nativeCodecChangeBlocked' : 'screenShare.nativeProfileChangeBlocked'));
   }

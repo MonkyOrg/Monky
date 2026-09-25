@@ -3,7 +3,8 @@ import { MessageType } from './protocol.js';
 import {
   nativeScreenFailureSchema, nativeScreenRenditionSchema, nativeScreenSignalSchema, nativeScreenCaptureModeSchema,
   nativeScreenSourcesSchema, nativeScreenVideoProfileSchema, screenShareIdSchema, screenShareQualitySchema,
-  type NativeScreenSource,
+  screenEncodingModeSchema, screenEncodingStrategySchema, screenCodecPreferenceSchema, screenCodecSchema,
+  type NativeScreenSource, type ScreenEncodingAvailability,
 } from './screenSharing.js';
 
 const reference = z.string().min(1).max(128).refine(value => !value.includes('\0')
@@ -80,6 +81,12 @@ export type NativeScreenCaptureKind = z.infer<typeof nativeScreenCaptureKindSche
 
 export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('capabilities') }).strict(),
+  z.object({
+    action: z.literal('probe-encoding'), video: nativeScreenVideoProfileSchema,
+    probeId: uuid, encodingMode: screenEncodingModeSchema, codec: screenCodecPreferenceSchema,
+    encodingStrategy: screenEncodingStrategySchema.default('automatic'),
+  }).strict(),
+  z.object({ action: z.literal('cancel-encoding-probe'), probeId: uuid }).strict(),
   nativeScreenCallSchema.extend({ action: z.literal('join') }).strict(),
   callScope.extend({ action: z.literal('leave') }).strict(),
   callScope.extend({ action: z.literal('leave-local') }).strict(),
@@ -91,10 +98,12 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('source-add'), shareId: screenShareIdSchema,
     desktopSourceId: z.string().regex(/^(?:window:[1-9][0-9]{0,15}:(?:[0-9]{1,10}|[a-f0-9]{64})|screen:[0-9]{1,16}:[0-9]{1,10}|native-monitor:[a-f0-9]{64})$/),
     captureKind: nativeScreenCaptureKindSchema.optional(),
-    preserveAspectRatio: z.boolean().optional(),
+    preserveAspectRatio: z.boolean().default(true),
     replacesAudioShareId: screenShareIdSchema.optional(),
     replacesSourceInstanceId: uuid.optional(),
     video: nativeScreenVideoProfileSchema, audio: z.boolean(), audioBitrateKbps: nativeScreenAudioBitrateSchema,
+    encodingMode: screenEncodingModeSchema.optional(), codec: screenCodecPreferenceSchema.optional(),
+    encodingStrategy: screenEncodingStrategySchema.default('automatic'),
   }).strict(),
   callScope.extend({ action: z.literal('source-remove'), shareId: screenShareIdSchema }).strict(),
   callScope.extend({
@@ -122,8 +131,12 @@ export const nativeScreenCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('diagnostics'), publisherSessionId: reference, shareId: screenShareIdSchema,
     sourceInstanceId: uuid, presentationId: uuid.optional(),
   }).strict(),
-]);
-export type NativeScreenCommand = z.infer<typeof nativeScreenCommandSchema>;
+]).superRefine((command, context) => {
+  if ((command.action === 'source-add' || command.action === 'probe-encoding') && command.encodingStrategy === 'manual'
+    && (!command.encodingMode || !command.codec || command.codec === 'auto'))
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Manual encoding requires an exact encoding mode and H264 or AV1 codec.' });
+});
+export type NativeScreenCommand = z.input<typeof nativeScreenCommandSchema>;
 
 export interface NativeScreenCapabilities {
   capture: boolean;
@@ -133,7 +146,7 @@ export interface NativeScreenCapabilities {
   requiresSelectionProbe?: boolean;
   /** Selectable implementations; file presence alone does not establish hardware availability. */
   captureKinds?: readonly NativeScreenCaptureKind[];
-  backend: 'libobs-amf' | 'libobs-nvenc' | null;
+  backend: 'libobs-amf' | 'libobs-nvenc' | 'libobs-software' | null;
   reason: 'platform' | 'runtime' | 'encoder' | null;
 }
 
@@ -186,8 +199,9 @@ export type NativeScreenCommandResult =
   | { kind: 'diagnostics-retired' }
   | { kind: 'retired-with-errors'; remoteAcknowledged: boolean; error: string }
   | { kind: 'capabilities'; capabilities: NativeScreenCapabilities }
+  | { kind: 'encoding'; availability: ScreenEncodingAvailability }
   /** Armed source metadata, not evidence of active capture or native READY. */
-  | { kind: 'source'; source: NativeScreenSource }
+  | { kind: 'source'; source: NativeScreenSource; encoding?: ScreenEncodingAvailability }
   | { kind: 'subscription'; subscriptionId: string; presentationId: string }
   | { kind: 'diagnostics'; sourceInstanceId: string; presentationId: string | null; viewers: number | null;
     endpoints: readonly NativeScreenEndpointDiagnostics[] }
@@ -248,6 +262,7 @@ export type NativeScreenPreviewInfo = z.infer<typeof nativeScreenPreviewInfoSche
 export const nativeScreenPreviewPacketSchema = z.object({
   type: z.literal('packet'), sequence: z.number().int().positive().safe(),
   pipelineId: uuid, video: nativeScreenVideoProfileSchema,
+  codec: screenCodecSchema.optional(),
   timestampUs: z.number().int().positive().safe(), keyframe: z.boolean(),
   data: z.instanceof(Uint8Array).refine(value => value.byteLength > 0 && value.byteLength <= 4 * 1024 * 1024
     && value.buffer instanceof ArrayBuffer),

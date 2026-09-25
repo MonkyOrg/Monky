@@ -69,7 +69,7 @@ class NativeScreenPublisher {
   async pipelineFor(viewer, quality = viewer.quality) {
     const current = () => viewer ? this.current(viewer) : !this.closed && this.previewEnabled;
     if (!current()) throw cancelled();
-    const key = screenShareProfileKey(getScreenShareProfile(this.source.video, quality));
+    const key = screenShareProfileKey(getScreenShareProfile(this.source.video, quality, this.source.codec));
     const local = this.previewPipeline;
     if (viewer && local && local.key !== key && local.viewers.size === 0) {
       await this.retirePipeline(local);
@@ -113,7 +113,7 @@ class NativeScreenPublisher {
         },
         onPreview: frame => {
           if (this.previewEnabled && this.previewPipeline === pipeline && !pipeline.closing)
-            this.onPreview?.({ frame, pipelineId: pipeline.id, video: getScreenShareProfile(this.source.video, pipeline.quality),
+            this.onPreview?.({ frame, pipelineId: pipeline.id, video: getScreenShareProfile(this.source.video, pipeline.quality, this.source.codec),
               captureMode: pipeline.capture?.ready ? pipeline.capture.mode : null });
         },
       });
