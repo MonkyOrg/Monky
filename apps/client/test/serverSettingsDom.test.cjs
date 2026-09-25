@@ -137,6 +137,7 @@ async function runRegression(language) {
     iconUrl: 'data:image/png;base64,AA==', voiceMode: 'p2p', turnEnabled: false,
     turnAvailability: { supported: false, reason: 'not-installed', autoInstallable: true },
     allowSoundboard: true, allowEveryoneMention: true, allowMessageEdit: true, showRoleBadgesToEveryone: true,
+    messageDeleteUndoSeconds: 60, protocol: { version: 27, minimumVersion: 27, features: ['message-delete-undo'] },
     channels: [], members: [member('admin'), member('bob')], knownMembers: [member('admin'), member('bob')],
     voiceStates: {}, roles: [role], userRoles: [], ownerId: 'admin', myPermissions: 0xFFFFFFFF,
     attachmentStorage: { usedBytes: 0, maxFileBytes: 25 * 1024 * 1024, maxTotalBytes: 100 * 1024 * 1024 },
@@ -164,7 +165,7 @@ async function runRegression(language) {
     let result = {};
     if (type === 'SERVER_UPDATE_SETTINGS') {
       const s = store.serverDetails;
-      for (const key of ['name', 'maxUsers', 'allowSoundboard', 'allowEveryoneMention', 'allowMessageEdit', 'showRoleBadgesToEveryone', 'turnEnabled', 'voiceMode']) {
+      for (const key of ['name', 'maxUsers', 'allowSoundboard', 'allowEveryoneMention', 'allowMessageEdit', 'showRoleBadgesToEveryone', 'turnEnabled', 'voiceMode', 'messageDeleteUndoSeconds']) {
         if (payload[key] !== undefined) s[key] = payload[key];
       }
       if (payload.voiceMode === 'sfu') s.turnEnabled = false;
@@ -294,6 +295,25 @@ async function runRegression(language) {
   acknowledge('SERVER_UPDATE_SETTINGS');
   await flush();
   check(!field('#server-settings-banner').classList.contains('show'), 'Correcting a rejected field clears its error');
+  tab('notifications');
+  check(field('#input-delete-undo').value === '60' && !field('#input-delete-undo').disabled, 'Undo starts at the persisted server default');
+  change('#input-delete-undo', '90');
+  await flush();
+  check(pendingRequest('SERVER_UPDATE_SETTINGS').payload.messageDeleteUndoSeconds === 90 && locked(), 'Changing the undo window applies immediately with an acknowledgement guard');
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  const beforeInvalidUndo = requests.length;
+  change('#input-delete-undo', '0');
+  await flush();
+  check(requests.length === beforeInvalidUndo && field('#input-delete-undo').value === '90', 'Invalid undo windows restore the acknowledged value without sending');
+  change('#input-delete-undo', '120');
+  await flush();
+  acknowledge('SERVER_UPDATE_SETTINGS');
+  await flush();
+  store.serverDetails.messageDeleteUndoSeconds = 30;
+  appEvents.emit('server.updated');
+  await flush();
+  check(field('#input-delete-undo').value === '30', 'An external administrator update synchronizes the visible undo window');
   tab('general');
   change('#checkbox-limit-members', true);
   await flush();

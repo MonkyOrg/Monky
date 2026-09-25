@@ -226,6 +226,9 @@ export class ServerSettingsModal {
       () => String(details()?.allowEveryoneMention !== false), (value) => ({ allowEveryoneMention: value === 'true' }));
     this.bindSetting('#checkbox-allow-message-edit', 'messageEdit', 'serverSettings.allowMessageEdit',
       () => String(details()?.allowMessageEdit !== false), (value) => ({ allowMessageEdit: value === 'true' }));
+    this.bindSetting('#input-delete-undo', 'deleteUndo', 'serverSettings.deleteUndo',
+      () => String(details()?.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS),
+      value => ({ messageDeleteUndoSeconds: Number(value) }));
     this.bindSetting('#checkbox-show-role-badges', 'roleBadges', 'roles.badgeVisibility',
       () => String(details()?.showRoleBadgesToEveryone !== false), (value) => ({ showRoleBadgesToEveryone: value === 'true' }));
     this.bindSetting('#checkbox-turn-enabled', 'turn', 'serverSettings.turnEnabled',

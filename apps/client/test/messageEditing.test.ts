@@ -16,6 +16,27 @@ function createStore() {
   return store;
 }
 
+test('restoration revisions refresh replies and cannot be rolled back by late edits or history', () => {
+  const store = createStore();
+  const original = { ...message, revision: 0 };
+  store.setHistory('chat', [original, { ...message, id: 'reply', reply: store.messageReply(original) }]);
+  store.setReplyDraft('chat', original);
+  const deleted = { ...original, content: '', deletedAt: 100, revision: 1, deletedByUserId: 'author', deleteUndoUntil: 60100 };
+  store.updateMessage(deleted);
+  assert.equal(store.getReplyDraft('chat')?.deleted, true);
+  const restored = { ...original, revision: 2, deletedAt: null };
+  store.updateMessage(restored);
+  assert.equal(store.getMessages('chat')[0].content, original.content);
+  assert.equal(store.getReplyDraft('chat')?.deleted, false);
+  assert.equal(store.getMessages('chat').find(entry => entry.id === 'reply')?.reply?.deleted, false);
+  store.updateMessage(deleted);
+  store.setHistory('chat', [deleted]);
+  assert.equal(store.getMessages('chat')[0].revision, 2);
+  store.updateMessage({ ...deleted, revision: 3 });
+  store.updateMessage(restored);
+  assert.equal(store.getMessages('chat')[0].deletedAt, 100);
+});
+
 test('outgoing messages survive failures/history and reconcile exactly once, including late acknowledgements', () => {
   const store = createStore();
   const pending = { ...message, id: 'outgoing', createdAt: 200, content: 'Unconfirmed' };

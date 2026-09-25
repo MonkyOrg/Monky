@@ -170,8 +170,13 @@ export class ChatStore {
     if (aroundMessageId) this.historicalChannels.add(channelId);
     else this.historicalChannels.delete(channelId);
     const edit = this.messageEdits.get(channelId);
-    const publicHistory = msgs.filter((message) => !message.isEphemeral).map((message) =>
-      edit?.message.id === message.id && edit.message.deletedAt && !message.deletedAt ? edit.message : message);
+    const known = new Map((this.messages.get(channelId) ?? []).map(message => [message.id, message]));
+    const publicHistory = msgs.filter((message) => !message.isEphemeral).map(message => {
+      const previous = known.get(message.id) ?? (edit?.message.id === message.id ? edit.message : undefined);
+      if (previous?.revision !== undefined && previous.revision > (message.revision ?? -1)) return previous;
+      if (previous?.deletedAt && !message.deletedAt && (message.revision ?? 0) <= (previous.revision ?? 0)) return previous;
+      return message;
+    });
     const publicIds = new Set(publicHistory.map((message) => message.id));
     const privateMessages = new Map((this.ephemeralMessages.get(channelId) ?? [])
       .filter((message) => !publicIds.has(message.id))
@@ -203,7 +208,7 @@ export class ChatStore {
       .slice(-ChatStore.MAX_MESSAGES_PER_CHANNEL);
     this.messages.set(channelId, trimmed);
     const editingId = this.messageEdits.get(channelId)?.message.id;
-    const editedMessage = editingId ? msgs.find((message) => message.id === editingId) : undefined;
+    const editedMessage = editingId ? publicHistory.find((message) => message.id === editingId) : undefined;
     if (editedMessage) this.refreshMessageEdit(editedMessage);
     for (const message of trimmed) this.recordBotResponse(message);
     this.bus.emit('chat.history_loaded', { channelId, messages: this.getMessages(channelId), aroundMessageId });
@@ -287,9 +292,11 @@ export class ChatStore {
       ? privateMessages : this.messages.get(message.channelId) ?? [];
     const index = list.findIndex((entry) => entry.id === message.id);
     const edit = this.messageEdits.get(message.channelId);
-    // A late edit ACK cannot resurrect a deleted original or discard its
-    // recoverable composer text. Deletion is irreversible in the protocol.
-    if (!message.deletedAt && (list[index]?.deletedAt || (edit?.message.id === message.id && edit.message.deletedAt))) return;
+    const previousState = list[index] ?? (edit?.message.id === message.id ? edit.message : undefined);
+    if (previousState?.revision !== undefined && (message.revision ?? -1) < previousState.revision) return;
+    // Only a newer server revision can restore a deletion; a delayed edit ACK cannot.
+    if (!message.deletedAt && previousState?.deletedAt
+      && (message.revision === undefined || message.revision <= (previousState.revision ?? 0))) return;
     this.refreshMessageEdit(message);
     const reply = this.messageReply(message);
     let updatesBlockDraft = false;

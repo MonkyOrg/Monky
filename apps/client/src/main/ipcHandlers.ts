@@ -14,6 +14,7 @@ import {
 import { SoundboardDownloads } from './soundboardDownload';
 import { SoundboardFiles } from './soundboardFiles';
 import { setupSoundboardFilesIpc } from './soundboardFilesIpc';
+import { setupEditorCommands } from './editorCommands';
 import { createSoundboardEncoder } from './soundboardEncoder';
 import type { LocalTools } from './localExecution/LocalTools';
 import { AudioPreviews } from './audioPreviews';
@@ -361,6 +362,7 @@ export function setupIpcHandlers(
     }
   });
   const disposeSoundboardFiles = setupSoundboardFilesIpc(mainWindow, new SoundboardFiles(soundDownloads, soundboardEncoder));
+  const disposeEditorCommands = setupEditorCommands(mainWindow);
   ipcMain.handle(SOUND_DOWNLOAD_IPC.defaultFolder, async (event): Promise<string | null> => {
     if (!ownsSoundDownload(event)) throw new Error(mt('error.defaultSoundboardFolder'));
     try {
@@ -1356,6 +1358,7 @@ export function setupIpcHandlers(
     stopSoundDownloads();
     for (const channel of Object.values(SOUND_DOWNLOAD_IPC)) ipcMain.removeHandler(channel);
     disposeSoundboardFiles();
+    disposeEditorCommands();
     for (const channel of Object.values(AUDIO_PREVIEW_IPC)) ipcMain.removeHandler(channel);
     clearAudioBufferAccumulator();
     // Recovery keeps Main alive after the renderer is retired (#454).

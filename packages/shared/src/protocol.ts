@@ -111,6 +111,7 @@ export enum MessageType {
   CHAT_EDIT = 'CHAT_EDIT',
   /** Client -> server: delete a message (own, or anyone's with MANAGE_SERVER) (#504). */
   CHAT_DELETE = 'CHAT_DELETE',
+  CHAT_RESTORE = 'CHAT_RESTORE',
   CHAT_REQUEST_UPLOAD_TOKEN = 'CHAT_REQUEST_UPLOAD_TOKEN',
   CHANNEL_CREATE = 'CHANNEL_CREATE',
   CHANNEL_UPDATE = 'CHANNEL_UPDATE',
@@ -424,6 +425,7 @@ export interface ServerUpdateSettingsPayload {
   allowEveryoneMention?: boolean;
   /** Enables or disables editing of already-sent messages (#504). */
   allowMessageEdit?: boolean;
+  messageDeleteUndoSeconds?: number;
   /** Shows role badges to every member, or only to who holds the role (#530). */
   showRoleBadgesToEveryone?: boolean;
   iconBase64?: string | null; // Data URL, pure base64, or null to remove
@@ -479,6 +481,11 @@ export interface ChatEditPayload {
 export interface ChatDeletePayload {
   channelId: string;
   messageId: string;
+}
+
+export interface ChatRestorePayload extends ChatDeletePayload {
+  deletedAt: number;
+  revision: number;
 }
 
 export interface SoundboardPlayPayload {
@@ -637,6 +644,7 @@ export interface ServerSettingsUpdatedPayload {
   allowEveryoneMention?: boolean;
   /** Current state of the message-editing switch (#504). */
   allowMessageEdit?: boolean;
+  messageDeleteUndoSeconds?: number;
   /** Current state of the role badge visibility switch (#530). */
   showRoleBadgesToEveryone?: boolean;
   /** Current state of the voice/video topology mode ('p2p' | 'sfu') (#515). */

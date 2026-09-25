@@ -62,7 +62,7 @@ function isFile(candidate) {
   return existsSync(candidate) && statSync(candidate).isFile();
 }
 
-function findCmake() {
+export function findCmake() {
   if (process.env.MONKY_LIGHT_CMAKE) {
     const explicit = path.resolve(process.env.MONKY_LIGHT_CMAKE);
     if (!isFile(explicit)) throw new Error(`MONKY_LIGHT_CMAKE is not a file: ${explicit}`);

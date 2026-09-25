@@ -1,7 +1,7 @@
 import { LIMITS } from '@monky/shared';
 import { renderMarkdown } from './markdown';
 
-export type MessageCopyMode = 'formatted' | 'plain';
+export type MessageCopyMode = 'formatted' | 'markdown' | 'plain';
 
 export interface MessageClipboardContent {
   text: string;
@@ -45,7 +45,7 @@ function copySafeNodes(source: Node, target: Node): void {
       element.style.fontFamily = 'monospace';
     }
     if (child.tagName === 'PRE') element.style.whiteSpace = 'pre-wrap';
-    if (child.tagName === 'OL' && /^[1-9]\d{0,5}$/.test(child.getAttribute('start') ?? '')) {
+    if (child.tagName === 'OL' && /^\d{1,9}$/.test(child.getAttribute('start') ?? '')) {
       element.setAttribute('start', child.getAttribute('start') ?? '1');
     }
     copySafeNodes(child, element);
@@ -56,15 +56,17 @@ function copySafeNodes(source: Node, target: Node): void {
 function serializeChildren(node: Node, markdown: boolean): string {
   let result = '';
   let previousBlock = false;
+  let hasContent = false;
   for (const child of node.childNodes) {
     const text = serializeNode(child, markdown);
-    if (!text) continue;
+    const blankLine = child instanceof Element && child.tagName === 'P'
+      && child.childNodes.length === 1 && child.firstChild instanceof Element && child.firstChild.tagName === 'BR';
+    if (!text && !blankLine) continue;
     const block = child instanceof Element && blockTags.has(child.tagName);
-    if (result && (previousBlock || block)) {
-      result += node instanceof Element && ['UL', 'OL'].includes(node.tagName) ? '\n' : '\n\n';
-    }
-    result += text;
+    if (hasContent && (previousBlock || block)) result += '\n';
+    result += blankLine ? '' : text;
     previousBlock = block;
+    hasContent = true;
   }
   return result;
 }
@@ -166,16 +168,17 @@ export function selectedMessageClipboard(feed: HTMLElement, selection: Selection
 }
 
 export function writeMessageClipboard(content: MessageClipboardContent, mode: MessageCopyMode): Promise<void> {
+  if (mode === 'markdown') return navigator.clipboard.writeText(content.markdown ?? content.text);
   if (mode === 'plain' || !content.html) return navigator.clipboard.writeText(content.text);
   return navigator.clipboard.write([new ClipboardItem({
-    'text/plain': new Blob([content.markdown ?? content.text], { type: 'text/plain' }),
+    'text/plain': new Blob([content.text], { type: 'text/plain' }),
     'text/html': new Blob([content.html], { type: 'text/html' }),
   })]);
 }
 
 export function setMessageClipboardData(data: DataTransfer, content: MessageClipboardContent, mode: MessageCopyMode = 'formatted'): void {
   data.clearData();
-  data.setData('text/plain', mode === 'formatted' ? content.markdown ?? content.text : content.text);
+  data.setData('text/plain', mode === 'markdown' ? content.markdown ?? content.text : content.text);
   if (mode === 'formatted' && content.html) data.setData('text/html', content.html);
 }
 
@@ -196,14 +199,23 @@ export function readMonkyClipboardMarkdown(data: DataTransfer): string | null {
   return markdown === plain || markdownMessageClipboard(markdown).text === plain ? markdown : null;
 }
 
-export function pasteMonkyClipboard(input: HTMLTextAreaElement, data: DataTransfer): boolean {
-  if (input.readOnly || input.disabled || document.activeElement !== input) return false;
+type ClipboardInput = HTMLElement & Pick<HTMLTextAreaElement,
+  'readOnly' | 'disabled' | 'value' | 'maxLength' | 'selectionStart' | 'selectionEnd' | 'setRangeText'>;
+
+export function pasteMonkyClipboard(input: ClipboardInput, data: DataTransfer): boolean {
+  if (input.readOnly || input.disabled || !input.contains(document.activeElement)) return false;
   const markdown = readMonkyClipboardMarkdown(data);
   if (markdown === null) return false;
   const available = input.maxLength < 0 ? markdown.length
     : Math.max(0, input.maxLength - input.value.length + input.selectionEnd - input.selectionStart);
   const text = markdown.slice(0, available);
   if (!text) return true;
+  if (!(input instanceof HTMLTextAreaElement)) {
+    // Controlled editors own their undo history; do not mutate their DOM with execCommand.
+    input.setRangeText(text, input.selectionStart, input.selectionEnd, 'end');
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: text }));
+    return true;
+  }
   try {
     if (document.execCommand('insertText', false, text)) return true;
   } catch {

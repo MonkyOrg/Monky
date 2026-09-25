@@ -17,6 +17,7 @@ export const CONFIG_KEYS = [
   'icon',
   'maxUsers',
   'maxMessageLength',
+  'messageDeleteUndoSeconds',
   'allowSoundboard',
   'allowEveryoneMention',
   'showRoleBadgesToEveryone',

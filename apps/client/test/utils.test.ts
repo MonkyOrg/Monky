@@ -114,6 +114,33 @@ function runTests() {
 
   const bareUrlTest = renderMarkdown('Visite https://monky.chat hoje');
   assert(bareUrlTest.includes('<a href="https://monky.chat" class="md-link" data-external-link="https://monky.chat">https://monky.chat</a>'), 'URLs soltas transformadas em link seguro');
+  for (const [source, url, label] of [
+    ['(https://monky.chat/docs).', 'https://monky.chat/docs', 'https://monky.chat/docs'],
+    ['www.monky.chat', 'https://www.monky.chat', 'www.monky.chat'],
+    ['https://monky.chat?q=1&lang=pt', 'https://monky.chat?q=1&amp;lang=pt', 'https://monky.chat?q=1&amp;lang=pt'],
+    ['https://monky.chat/a(b)', 'https://monky.chat/a(b)', 'https://monky.chat/a(b)'],
+    ['**https://monky.chat**', 'https://monky.chat', 'https://monky.chat'],
+    ['Primeira linha\nhttps://monky.chat', 'https://monky.chat', 'https://monky.chat'],
+  ]) {
+    assert(renderMarkdown(source).includes(`<a href="${url}" class="md-link" data-external-link="${url}">${label}</a>`),
+      `Link automático preserva endereço e rótulo: ${source}`);
+  }
+  assert(renderMarkdown('**https://monky.chat**').includes('<strong><a'), 'Link automático preserva a formatação ao redor');
+  for (const source of ['`https://monky.chat`', '```\nhttps://monky.chat\n```', 'https://', 'www.', 'javascript:alert(1)', 'file:///tmp/test']) {
+    assert(!renderMarkdown(source).includes('<a '), `Código, URL incompleta e protocolo não permitido permanecem texto: ${source}`);
+  }
+  assert((renderMarkdown('[https://monky.chat](https://example.invalid)').match(/<a /g) ?? []).length === 1,
+    'Links criados pelo formulário não ganham links aninhados');
+  for (const [source, visible] of [
+    ['https\\://monky.chat', 'https://monky.chat'],
+    ['www\\.monky.chat', 'www.monky.chat'],
+    ['**https\\://monky.chat**', 'https://monky.chat'],
+  ]) {
+    const rendered = renderMarkdown(source);
+    assert(!rendered.includes('<a ') && rendered.includes(visible) && !rendered.includes('\\'),
+      'Remover link mantém o endereço visível sem recriar o link');
+  }
+  assert(renderMarkdown('`https\\://monky.chat`').includes('https\\://monky.chat'), 'Escapes dentro de código permanecem literais');
 
   // Menções
   const mentionTest = renderMarkdown('Olá @Murilo!', { currentNickname: 'Murilo' });

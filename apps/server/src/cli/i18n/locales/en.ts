@@ -348,6 +348,8 @@ export const en: CliTranslationMap = {
   'label.hasPassword': 'Password protected',
   'label.maxUsers': 'Member limit',
   'label.maxMessageLength': 'Characters per message (0 = unlimited)',
+  'label.messageDeleteUndoSeconds': 'Deletion undo window (seconds)',
+  'config.invalidDeleteUndo': 'Enter a whole number between 1 and 86400 seconds.',
   'config.invalidMessageLimit': 'Enter a non-negative integer; 0 removes the character limit.',
   'label.ownerUserId': 'Owner ID',
   'label.ownerNickname': 'Owner nickname',

@@ -21,6 +21,7 @@ import {
   ChannelUpdatePayload,
   ChannelUpdatedPayload,
   ChatDeletePayload,
+  ChatRestorePayload,
   ChatEditPayload,
   ChatHistoryPayload,
   ChatLoadHistoryPayload,
@@ -726,6 +727,15 @@ export class WebSocketServer {
       case MessageType.CHAT_DELETE:
         if (!(await this.requireChannelAccess(session, (payload as ChatDeletePayload)?.channelId, requestId))) return;
         await this.handleChatDelete(session, payload as ChatDeletePayload, requestId);
+        break;
+
+      case MessageType.CHAT_RESTORE:
+        if (!session.protocol?.features.includes('message-delete-undo')) {
+          this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE, 'Atualize para desfazer exclusões.', requestId);
+          return;
+        }
+        if (!(await this.requireChannelAccess(session, (payload as ChatRestorePayload)?.channelId, requestId))) return;
+        await this.handleChatRestore(session, payload as ChatRestorePayload, requestId);
         break;
 
       case MessageType.CHAT_MENTIONS_READ:
@@ -2224,6 +2234,19 @@ export class WebSocketServer {
   }
 
   /** Sends the new state of an edited/deleted message to the channel (#504). */
+  private async handleChatRestore(session: ClientSession, payload: ChatRestorePayload, requestId?: string): Promise<void> {
+    if (!session.user || !payload) return;
+    const canModerate = await this.permissionService.checkPermission(session.user.id, Permission.MANAGE_SERVER);
+    if (!this.isCurrentSession(session)) return;
+    const result = await this.chatService.restoreMessage(session.user.id, payload.channelId, payload.messageId,
+      payload.deletedAt, payload.revision, canModerate);
+    if (!result.success) {
+      this.sendError(session.ws, result.errorCode, result.errorMessage, requestId);
+      return;
+    }
+    await this.broadcastChatMessageUpdated(result.message, requestId);
+  }
+
   private async broadcastChatMessageUpdated(message: ChatMessage, requestId?: string): Promise<void> {
     const updatedPayload: ChatMessageUpdatedPayload = { message };
     await this.broadcastToChannel(message.channelId, {
@@ -2563,6 +2586,11 @@ export class WebSocketServer {
     payload: ServerUpdateSettingsPayload,
     requestId?: string
   ): Promise<void> {
+    if (payload.messageDeleteUndoSeconds !== undefined && !session.protocol?.features.includes('message-delete-undo')) {
+      this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
+        'Atualize o cliente e o servidor para configurar o prazo de exclusão.', requestId);
+      return;
+    }
     if (payload.maxMessageLength !== undefined && !session.protocol?.features.includes('message-length-setting')) {
       this.sendError(session.ws, ProtocolErrorCode.FEATURE_REQUIRES_UPDATE,
         'Atualize o cliente e o servidor para configurar o limite de mensagens.', requestId);
@@ -2735,6 +2763,7 @@ export class WebSocketServer {
       allowSoundboard: result.allowSoundboard,
       allowEveryoneMention: result.allowEveryoneMention,
       allowMessageEdit: result.allowMessageEdit,
+      messageDeleteUndoSeconds: result.messageDeleteUndoSeconds,
       showRoleBadgesToEveryone: result.showRoleBadgesToEveryone,
       voiceMode: result.voiceMode,
       voiceTransition,
@@ -4429,7 +4458,11 @@ export class WebSocketServer {
   }
 
   private startHeartbeat(): void {
+    const expire = () => { void this.chatService.expireDeletedMessages()
+      .catch(error => Logger.error('DATABASE', 'Failed to expire message deletion backups.', error)); };
+    expire();
     this.heartbeatTimer = setInterval(() => {
+      expire();
       for (const [ws, session] of this.sessions.entries()) {
         if (!session.isAlive) {
           Logger.warn('NETWORK', `Terminating dead socket for ${session.user?.nickname || session.ip}`);

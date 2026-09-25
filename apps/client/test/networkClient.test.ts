@@ -100,16 +100,16 @@ test('initial connection failure rejects without creating an automatic reconnect
   assert.equal(f.sockets.length, 1);
 });
 
-for (const serverProtocolVersion of [24, 25]) {
-  test(`native protocol 26 never falls back to incompatible server protocol ${serverProtocolVersion}`, async context => {
+for (const serverProtocolVersion of [24, 25, 26]) {
+  test(`message restoration protocol 27 never falls back to incompatible server protocol ${serverProtocolVersion}`, async context => {
     const f = fixture(context);
     const pending = assert.rejects(f.connect());
     const socket = f.lastSocket();
     socket.open();
     const request = socket.sent[0];
-    assert.equal(request.payload.protocolVersion, 26);
+    assert.equal(request.payload.protocolVersion, 27);
     assert.equal(request.payload.protocolVersion, PROTOCOL_VERSION);
-    assert.equal(request.payload.protocolOffer.minimumVersion, 26);
+    assert.equal(request.payload.protocolOffer.minimumVersion, 27);
     socket.receive({ type: MessageType.SERVER_ERROR, requestId: request.requestId,
       payload: { code: 'PROTOCOL_VERSION_UNSUPPORTED', serverProtocolVersion } });
     await pending;

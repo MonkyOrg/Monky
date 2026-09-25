@@ -1,0 +1,5 @@
+{
+  "group": "outros",
+  "pt-BR": "Atualize o Monky e o servidor juntos: desfazer exclusões usa um novo protocolo que clientes anteriores não interpretam. A versão mínima dos bots permanece a mesma.",
+  "en": "Update Monky and the server together: deletion undo uses a new protocol that older clients cannot interpret. The minimum supported bot version is unchanged."
+}

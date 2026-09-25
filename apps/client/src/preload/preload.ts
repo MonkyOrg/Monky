@@ -4,7 +4,7 @@ import {
   createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
 } from '@monky/screen-share';
 import * as nativeAudioProtocol from '@monky/shared';
-import { SOUNDBOARD_FILES_IPC, type IpcInvokeChannels } from '@monky/shared';
+import { SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
 import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
@@ -188,6 +188,7 @@ export interface ElectronApi {
   onUpdateDownloaded: (cb: (info: { manual: boolean }) => void) => () => void;
   onUpdateError: (cb: (message: string) => void) => () => void;
   openExternal: (url: string) => Promise<{ success: boolean }>;
+  editorCommand: (command: EditorCommand) => Promise<{ success: boolean }>;
   fetchLinkPreview: (url: string) => Promise<LinkPreviewData | null>;
   downloadFile: (url: string, fileName: string) => Promise<{ success: boolean; error?: string }>;
   probeServer: (host: string, port: number) => Promise<ServerProbeResult>;
@@ -470,6 +471,7 @@ const api: ElectronApi = {
     };
   },
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
+  editorCommand: (command) => ipcRenderer.invoke(EDITOR_COMMAND_IPC, command),
   fetchLinkPreview: (url) => ipcRenderer.invoke('link-preview:fetch', url),
   downloadFile: (url, fileName) => ipcRenderer.invoke('app:download-file', url, fileName),
   probeServer: (host, port) => ipcRenderer.invoke('net:probe-server', host, port),

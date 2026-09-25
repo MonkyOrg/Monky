@@ -2,6 +2,46 @@ import { escapeHtml } from './html';
 import { EVERYONE_MENTION_TOKENS } from '@monky/shared';
 import { codeLanguageLabel, codeLineNumbers, highlightCode, resolveCodeLanguage } from './codeHighlight';
 import { t } from '../i18n';
+import { parser, Strikethrough } from '@lezer/markdown';
+
+const inlineParser = parser.configure(Strikethrough);
+
+export function findAutomaticLinks(text: string, tree = inlineParser.parse(text)): { from: number; to: number; url: string }[] {
+  const excluded: { from: number; to: number }[] = [];
+  tree.iterate({ enter: node => {
+    if (['Link', 'Image', 'InlineCode', 'FencedCode', 'CodeBlock', 'Autolink'].includes(node.name)) {
+      excluded.push({ from: node.from, to: node.to });
+      return false;
+    }
+  } });
+  const links: { from: number; to: number; url: string }[] = [];
+  for (const match of text.matchAll(/(?:https?:\/\/|www\.)[^\s<>"'`\u0000]+/gi)) {
+    const from = match.index;
+    if (from > 0 && /[\p{L}\p{N}_@/]/u.test(text[from - 1])) continue;
+    let display = match[0];
+    const pairs: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+    const balance: Record<string, number> = {};
+    for (const [close, open] of Object.entries(pairs)) {
+      balance[close] = display.split(close).length - display.split(open).length;
+    }
+    while (display) {
+      const last = display.at(-1)!;
+      if (/[.,!?;:*_~]/.test(last)) display = display.slice(0, -1);
+      else if (balance[last] > 0) { balance[last]--; display = display.slice(0, -1); }
+      else break;
+    }
+    const to = from + display.length;
+    if (excluded.some(range => from < range.to && to > range.from)) continue;
+    const www = /^www\./i.test(display);
+    const url = www ? `https://${display}` : display;
+    try {
+      const parsed = new URL(url);
+      if (www && !/^www\.[^.]+\..+$/i.test(parsed.hostname)) continue;
+      links.push({ from, to, url });
+    } catch { /* Incomplete URLs remain editable text. */ }
+  }
+  return links;
+}
 
 /**
  * Renders a small, safe subset of Markdown for chat messages.
@@ -27,6 +67,7 @@ import { t } from '../i18n';
  *   newlines              -> <br> (inside paragraphs/quotes)
  */
 export interface MarkdownOptions {
+  interactive?: boolean;
   currentNickname?: string;
   knownNicknames?: string[];
   /** Highlight `@todos` / `@everyone` as a mention aimed at the reader (#464). */
@@ -40,7 +81,7 @@ export interface MarkdownOptions {
  * and handing it already-escaped text would show `&amp;lt;` in the message.
  * When the language is unknown the code is escaped by hand instead.
  */
-export function renderCodeBlock(tag: string, code: string): string {
+export function renderCodeBlock(tag: string, code: string, interactive = true): string {
   const language = resolveCodeLanguage(tag);
   const highlighted = language ? highlightCode(code, language) : '';
   const body = highlighted || escapeHtml(code);
@@ -51,10 +92,10 @@ export function renderCodeBlock(tag: string, code: string): string {
     `<div class="md-code">` +
     `<div class="md-code-header">` +
     `<span class="md-code-lang"><span class="material-symbols-outlined md-16" aria-hidden="true">code</span>${escapeHtml(label)}</span>` +
-    `<button type="button" class="md-code-copy" title="${copyLabel}">` +
+    (interactive ? `<button type="button" class="md-code-copy" title="${copyLabel}">` +
     `<span class="material-symbols-outlined md-14">content_copy</span>` +
     `<span class="md-code-copy-label">${copyLabel}</span>` +
-    `</button>` +
+    `</button>` : '') +
     `</div>` +
     `<div class="md-code-content"><pre class="md-code-lines" aria-hidden="true">${codeLineNumbers(code)}</pre>` +
     `<pre class="md-codeblock"><code class="hljs${language ? ` language-${language}` : ''}">${body}</code></pre></div>` +
@@ -65,18 +106,26 @@ export function renderCodeBlock(tag: string, code: string): string {
 export function renderMarkdown(raw: string, options?: MarkdownOptions): string {
   if (!raw) return '';
 
+  const automaticLinks: string[] = [];
+  let text = raw;
+  for (const link of findAutomaticLinks(raw).reverse()) {
+    const url = escapeHtml(link.url);
+    const index = automaticLinks.push(`<a href="${url}" class="md-link" data-external-link="${url}">${escapeHtml(raw.slice(link.from, link.to))}</a>`) - 1;
+    text = text.slice(0, link.from) + `\u0000AL${index}\u0000` + text.slice(link.to);
+  }
+
   // 1. Fenced code blocks are pulled out before anything else, while the source
   //    is still raw — the highlighter needs the original text, and the
   //    placeholders left behind survive the escaping pass untouched.
   const codeBlocks: string[] = [];
   const stash = (tag: string, code: string): string => {
-    const idx = codeBlocks.push(renderCodeBlock(tag, code)) - 1;
+    const idx = codeBlocks.push(renderCodeBlock(tag, code, options?.interactive !== false)) - 1;
     return `\u0000CB${idx}\u0000`;
   };
 
   //    A language tag only counts on a fence that opens its own line, so a
   //    single-line ```snippet``` keeps behaving as an untagged block.
-  let text = raw.replace(/```([A-Za-z0-9+#._-]*)[ \t]*\r?\n([\s\S]*?)```/g, (_m, tag: string, code: string) =>
+  text = text.replace(/```([A-Za-z0-9+#._-]*)[ \t]*\r?\n([\s\S]*?)```/g, (_m, tag: string, code: string) =>
     stash(tag, code.replace(/\r?\n$/, ''))
   );
   text = text.replace(/```([\s\S]*?)```/g, (_m, code: string) => stash('', code.replace(/^\r?\n/, '').replace(/\r?\n$/, '')));
@@ -95,21 +144,24 @@ export function renderMarkdown(raw: string, options?: MarkdownOptions): string {
   const applyInline = (s: string): string => {
     const links: string[] = [];
     // Links: [label](url) - only http/https.
-    s = s.replace(/\[([^\]]+?)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, url) => {
-      const idx = links.push(`<a href="${url}" class="md-link" data-external-link="${url}">${label}</a>`) - 1;
+    s = s.replace(/\[((?:\\.|[^\]\\])+?)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label: string, url: string) => {
+      const display = label.replace(/\\([\\[\]])/g, '$1');
+      const idx = links.push(`<a href="${url}" class="md-link" data-external-link="${url}">${display}</a>`) - 1;
       return `\u0000LK${idx}\u0000`;
     });
-    // Bare URLs (not already inside an anchor from the rule above).
-    s = s.replace(/(^|[\s])(https?:\/\/[^\s<]+)/g, (_m, pre, url) => {
-      const idx = links.push(`<a href="${url}" class="md-link" data-external-link="${url}">${url}</a>`) - 1;
-      return `${pre}\u0000LK${idx}\u0000`;
-    });
-
-    // Emphasis. Order matters: bold before italic.
-    s = s.replace(/\*\*([^\n]+?)\*\*/g, '<strong>$1</strong>');
-    s = s.replace(/~~([^\n]+?)~~/g, '<del>$1</del>');
-    s = s.replace(/(^|[^\w*])\*([^\s*][^*\n]*?)\*(?![\w*])/g, '$1<em>$2</em>');
-    s = s.replace(/(^|[^\w_])_([^\s_][^_\n]*?)_(?![\w_])/g, '$1<em>$2</em>');
+    // Use the editor's parser so nested/toggled emphasis has the same meaning after sending.
+    const replacements: { from: number; to: number; html: string }[] = [];
+    inlineParser.parse(s).iterate({ enter: node => {
+      if (node.name === 'Escape') replacements.push({ from: node.from, to: node.from + 1, html: '' });
+      const tag = node.name === 'StrongEmphasis' ? 'strong' : node.name === 'Emphasis' ? 'em'
+        : node.name === 'Strikethrough' ? 'del' : null;
+      const open = node.node.firstChild, close = node.node.lastChild;
+      if (tag && open && close) replacements.push(
+        { from: open.from, to: open.to, html: `<${tag}>` }, { from: close.from, to: close.to, html: `</${tag}>` });
+    } });
+    for (const replacement of replacements.sort((a, b) => b.from - a.from)) {
+      s = s.slice(0, replacement.from) + replacement.html + s.slice(replacement.to);
+    }
 
     // Mentions (@nickname)
     if (options?.everyoneMentionEnabled) {
@@ -138,6 +190,7 @@ export function renderMarkdown(raw: string, options?: MarkdownOptions): string {
 
     // Restore link placeholders
     s = s.replace(/\u0000LK(\d+)\u0000/g, (_m, idx) => links[Number(idx)]);
+    s = s.replace(/\u0000AL(\d+)\u0000/g, (_m, idx) => automaticLinks[Number(idx)]);
 
     return s;
   };
@@ -171,6 +224,7 @@ export function renderMarkdown(raw: string, options?: MarkdownOptions): string {
     // Blank line ends the current paragraph.
     if (trimmed === '') {
       flushParagraph();
+      out.push('<p class="md-p md-blank-line"><br></p>');
       i++;
       continue;
     }
@@ -226,7 +280,8 @@ export function renderMarkdown(raw: string, options?: MarkdownOptions): string {
         items.push(`<li>${applyInline(lines[i].trim().replace(/^\d+\.\s+/, ''))}</li>`);
         i++;
       }
-      out.push(`<ol class="md-ol">${items.join('')}</ol>`);
+      const start = trimmed.match(/^(\d+)\./)?.[1] ?? '1';
+      out.push(`<ol class="md-ol" start="${escapeHtml(start)}">${items.join('')}</ol>`);
       continue;
     }
 
@@ -241,6 +296,9 @@ export function renderMarkdown(raw: string, options?: MarkdownOptions): string {
   // 5. Restore placeholders (inline code, plus any code block left inline).
   html = html.replace(/\u0000IC(\d+)\u0000/g, (_m, idx) => inlineCodes[Number(idx)]);
   html = html.replace(/\u0000CB(\d+)\u0000/g, (_m, idx) => codeBlocks[Number(idx)]);
+  if (options?.interactive === false) {
+    html = html.replace(/<a\b[^>]*>/g, '<span class="md-link">').replace(/<\/a>/g, '</span>');
+  }
 
   return html;
 }

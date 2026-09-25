@@ -1,6 +1,7 @@
 import { LIMITS, type ServerDetails, type ServerUpdateSettingsPayload } from '@monky/shared';
 
 type ValidationError =
+  | 'serverSettings.deleteUndoInvalid'
   | 'serverSettings.messageLimitInvalid'
   | 'chat.featureUpdateRequired'
   | 'serverSettings.nameInvalid'
@@ -19,6 +20,11 @@ export function serverSettingsValidationError(
   persisted: ServerDetails,
   registeredMembers?: number,
 ): ValidationError | null {
+  if (patch.messageDeleteUndoSeconds !== undefined) {
+    if (!persisted.protocol?.features.includes('message-delete-undo')) return 'chat.featureUpdateRequired';
+    if (!Number.isSafeInteger(patch.messageDeleteUndoSeconds) || patch.messageDeleteUndoSeconds < 1
+      || patch.messageDeleteUndoSeconds > LIMITS.MAX_MESSAGE_DELETE_UNDO_SECONDS) return 'serverSettings.deleteUndoInvalid';
+  }
   if (patch.maxMessageLength !== undefined) {
     if (!persisted.protocol?.features.includes('message-length-setting')) return 'chat.featureUpdateRequired';
     if (!Number.isSafeInteger(patch.maxMessageLength) || patch.maxMessageLength < 0) return 'serverSettings.messageLimitInvalid';

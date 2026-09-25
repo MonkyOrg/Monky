@@ -52,12 +52,15 @@ function buildDialog(params: {
   checkboxLabel?: string;
   checkboxHint?: string;
   textInput?: DialogTextInput;
+  textInputs?: DialogTextInput[];
+  focusInput?: number;
   signal?: AbortSignal;
   requireUserGesture?: boolean;
-  onResolve: (confirmed: boolean, checked: boolean, value: string) => void;
+  onResolve: (confirmed: boolean, checked: boolean, value: string, values: string[]) => void;
 }): void {
+  const fields = params.textInputs ?? (params.textInput ? [params.textInput] : []);
   if (params.signal?.aborted) {
-    params.onResolve(false, false, params.textInput?.value ?? '');
+    params.onResolve(false, false, fields[0]?.value ?? '', fields.map(field => field.value));
     return;
   }
   const { icon, color } = VARIANT_ICON[params.variant];
@@ -74,18 +77,18 @@ function buildDialog(params: {
           <span>${escapeHtml(params.title)}</span>
         </div>
       </div>
-      <div class="dialog-message" style="white-space: pre-line;">${escapeHtml(params.message)}</div>
-      ${params.textInput ? `<div class="dialog-text-field">
-        <label for="${inputId}">${escapeHtml(params.textInput.label)}</label>
+      ${params.message ? `<div class="dialog-message" style="white-space: pre-line;">${escapeHtml(params.message)}</div>` : ''}
+      ${fields.map((field, index) => `<div class="dialog-text-field">
+        <label for="${inputId}-${index}">${escapeHtml(field.label)}</label>
         <div class="dialog-text-input-row">
-          <input class="input-field" type="text" id="${inputId}" data-dialog-input autocomplete="off" spellcheck="false"
-            value="${escapeHtml(params.textInput.value)}" ${params.textInput.maxLength !== undefined ? `maxlength="${params.textInput.maxLength}"` : ''}
-            aria-describedby="${inputId}-hint ${inputId}-error">
-          ${params.textInput.suffix ? `<span class="dialog-text-suffix" aria-hidden="true">${escapeHtml(params.textInput.suffix)}</span>` : ''}
+          <input class="input-field" type="text" id="${inputId}-${index}" data-dialog-input autocomplete="off" spellcheck="false"
+            value="${escapeHtml(field.value)}" ${field.maxLength !== undefined ? `maxlength="${field.maxLength}"` : ''}
+            aria-describedby="${inputId}-${index}-hint ${inputId}-${index}-error">
+          ${field.suffix ? `<span class="dialog-text-suffix" aria-hidden="true">${escapeHtml(field.suffix)}</span>` : ''}
         </div>
-        <small id="${inputId}-hint">${escapeHtml(params.textInput.hint ?? '')}</small>
-        <p class="dialog-input-error" id="${inputId}-error" data-dialog-input-error role="alert" hidden></p>
-      </div>` : ''}
+        <small id="${inputId}-${index}-hint">${escapeHtml(field.hint ?? '')}</small>
+        <p class="dialog-input-error" id="${inputId}-${index}-error" data-dialog-input-error role="alert" hidden></p>
+      </div>`).join('')}
       ${
         params.checkboxLabel
           ? `<div class="dialog-checkbox">
@@ -110,24 +113,27 @@ function buildDialog(params: {
   `;
 
   const checkbox = backdrop.querySelector('[data-action="remember"]') as HTMLInputElement | null;
-  const input = backdrop.querySelector<HTMLInputElement>('[data-dialog-input]');
-  const inputError = backdrop.querySelector<HTMLElement>('[data-dialog-input-error]');
+  const inputs = [...backdrop.querySelectorAll<HTMLInputElement>('[data-dialog-input]')];
+  const errors = [...backdrop.querySelectorAll<HTMLElement>('[data-dialog-input-error]')];
+  const input = inputs[params.focusInput ?? 0];
   const confirmButton = backdrop.querySelector<HTMLButtonElement>('[data-action="confirm"]');
   const validateInput = (): boolean => {
-    const error = input ? params.textInput?.validate?.(input.value) : undefined;
-    if (inputError) {
-      inputError.textContent = error ?? '';
-      inputError.hidden = !error;
-    }
-    if (input) input.setAttribute('aria-invalid', String(!!error));
-    if (confirmButton) confirmButton.disabled = !!error;
-    return !error;
+    let valid = true;
+    inputs.forEach((field, index) => {
+      const error = fields[index].validate?.(field.value);
+      errors[index].textContent = error ?? '';
+      errors[index].hidden = !error;
+      field.setAttribute('aria-invalid', String(!!error));
+      if (error) valid = false;
+    });
+    if (confirmButton) confirmButton.disabled = !valid;
+    return valid;
   };
 
   let settled = false;
   const settle = (confirmed: boolean): void => {
     if (settled) return;
-    if (confirmed && !validateInput()) { input?.focus(); return; }
+    if (confirmed && !validateInput()) { inputs.find(field => field.getAttribute('aria-invalid') === 'true')?.focus(); return; }
     settled = true;
     const checked = !!checkbox?.checked;
     document.removeEventListener('keydown', onKeyDown, true);
@@ -136,7 +142,7 @@ function buildDialog(params: {
     if (previousFocus instanceof HTMLElement && previousFocus.isConnected && !document.querySelector('.modal-backdrop')) {
       previousFocus.focus();
     }
-    params.onResolve(confirmed, checked, input?.value ?? '');
+    params.onResolve(confirmed, checked, inputs[0]?.value ?? '', inputs.map(field => field.value));
   };
 
   const onAbort = (): void => settle(false);
@@ -181,7 +187,7 @@ function buildDialog(params: {
   });
   document.addEventListener('keydown', onKeyDown, true);
   params.signal?.addEventListener('abort', onAbort, { once: true });
-  input?.addEventListener('input', validateInput);
+  inputs.forEach(field => field.addEventListener('input', validateInput));
 
   document.body.appendChild(backdrop);
   if (params.signal?.aborted) { settle(false); return; }
@@ -269,4 +275,15 @@ export function showConfirmWithText(
       onResolve: (confirmed, checked, value) => resolve({ confirmed, checked, value }),
     });
   });
+}
+
+export function showTextForm(options: {
+  title: string; fields: DialogTextInput[]; focusInput?: number; signal?: AbortSignal;
+}): Promise<string[] | null> {
+  return new Promise(resolve => buildDialog({
+    title: options.title, message: '', variant: 'info', showCancel: true,
+    confirmLabel: t('common.confirm'), cancelLabel: t('common.cancel'), confirmClass: 'btn-primary',
+    textInputs: options.fields, focusInput: options.focusInput, signal: options.signal,
+    onResolve: (confirmed, _checked, _value, values) => resolve(confirmed ? values : null),
+  }));
 }

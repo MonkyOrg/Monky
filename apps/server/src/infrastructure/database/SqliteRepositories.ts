@@ -33,7 +33,7 @@ export class SqliteServerRepository implements IServerRepository {
   }
 
   async getServer(): Promise<ServerRecord | null> {
-    const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
+    const row = this.db.prepare('SELECT id, name, password_hash as passwordHash, created_at as createdAt, max_users as maxUsers, max_message_length as maxMessageLength, message_delete_undo_seconds as messageDeleteUndoSeconds, owner_user_id as ownerUserId, allow_soundboard as allowSoundboard, allow_everyone_mention as allowEveryoneMention, allow_message_edit as allowMessageEdit, show_role_badges_to_everyone as showRoleBadgesToEveryone, voice_mode as voiceMode, icon_path as iconPath, max_attachment_file_bytes as maxAttachmentFileBytes, max_attachment_storage_bytes as maxAttachmentStorageBytes, turn_enabled as turnEnabled, turn_secret as turnSecret, max_bots as maxBots FROM server_meta LIMIT 1').get() as ServerRecord | undefined;
     if (!row) return null;
     return {
       id: row.id,
@@ -42,6 +42,7 @@ export class SqliteServerRepository implements IServerRepository {
       createdAt: row.createdAt,
       maxUsers: row.maxUsers,
       maxMessageLength: row.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
+      messageDeleteUndoSeconds: row.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS,
       ownerUserId: row.ownerUserId ?? null,
       allowSoundboard: row.allowSoundboard !== undefined ? Boolean(row.allowSoundboard) : true,
       allowEveryoneMention: row.allowEveryoneMention !== undefined ? Boolean(row.allowEveryoneMention) : true,
@@ -59,7 +60,7 @@ export class SqliteServerRepository implements IServerRepository {
 
   async createServer(server: ServerRecord): Promise<void> {
     this.db.prepare(
-      'INSERT INTO server_meta (id, name, password_hash, created_at, max_users, owner_user_id, allow_soundboard, allow_everyone_mention, show_role_badges_to_everyone, voice_mode, icon_path, max_message_length) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO server_meta (id, name, password_hash, created_at, max_users, owner_user_id, allow_soundboard, allow_everyone_mention, show_role_badges_to_everyone, voice_mode, icon_path, max_message_length, message_delete_undo_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(
       server.id,
       server.name,
@@ -72,13 +73,18 @@ export class SqliteServerRepository implements IServerRepository {
       server.showRoleBadgesToEveryone !== false ? 1 : 0,
       server.voiceMode || 'p2p',
       server.iconPath || null,
-      server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH
+      server.maxMessageLength ?? LIMITS.MAX_MESSAGE_LENGTH,
+      server.messageDeleteUndoSeconds ?? LIMITS.MESSAGE_DELETE_UNDO_SECONDS
     );
   }
 
   async updateServer(server: Partial<ServerRecord>): Promise<void> {
     const fields: string[] = [];
     const values: any[] = [];
+    if (server.messageDeleteUndoSeconds !== undefined) {
+      fields.push('message_delete_undo_seconds = ?');
+      values.push(server.messageDeleteUndoSeconds);
+    }
     if (server.maxMessageLength !== undefined) {
       fields.push('max_message_length = ?');
       values.push(server.maxMessageLength);
@@ -392,6 +398,9 @@ export class SqliteChannelRepository implements IChannelRepository {
 }
 
 interface SqliteMessageRow {
+  revision: number;
+  deletedByUserId: string | null;
+  deleteUndoUntil: number | null;
   blocksJson: string | null;
   botLocalizationsJson: string | null;
   replyToMessageId: string | null;
@@ -411,7 +420,7 @@ interface SqliteMessageRow {
 
 /** Columns every message read shares, so the three queries cannot drift (#504). */
 const MESSAGE_COLUMNS =
-  'id, channel_id as channelId, user_id as userId, content, blocks_json as blocksJson, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId, bot_localizations_json as botLocalizationsJson';
+  'id, channel_id as channelId, user_id as userId, content, blocks_json as blocksJson, created_at as createdAt, is_system as isSystem, edited_at as editedAt, deleted_at as deletedAt, revision, deleted_by_user_id as deletedByUserId, delete_undo_until as deleteUndoUntil, author_bot_id as authorBotId, author_bot_name as authorBotName, author_bot_avatar_path as authorBotAvatarPath, bot_command_json as botCommandJson, reply_to_message_id as replyToMessageId, bot_localizations_json as botLocalizationsJson';
 
 function toMessageRecord(r: SqliteMessageRow): MessageRecord {
   if (r.authorBotId && !r.authorBotName) throw new Error('Stored bot message is missing its author name.');
@@ -432,6 +441,9 @@ function toMessageRecord(r: SqliteMessageRow): MessageRecord {
     isSystem: Boolean(r.isSystem),
     editedAt: r.editedAt ?? null,
     deletedAt: r.deletedAt ?? null,
+    revision: r.revision,
+    deletedByUserId: r.deletedByUserId,
+    deleteUndoUntil: r.deleteUndoUntil,
   };
 }
 
@@ -469,6 +481,7 @@ export class SqliteMessageRepository implements IMessageRepository {
     return this.db.prepare(`SELECT r.message_id AS messageId, r.user_id AS userId, COALESCE(u.nickname, b.name) AS userNickname, r.emoji
       FROM message_reactions r LEFT JOIN users u ON u.id = r.user_id LEFT JOIN bots b ON b.id = r.user_id
       WHERE r.message_id IN (${messageIds.map(() => '?').join(',')})
+        AND EXISTS (SELECT 1 FROM messages m WHERE m.id = r.message_id AND m.deleted_at IS NULL)
       ORDER BY r.emoji, u.nickname, r.user_id`).all(...messageIds) as import('../../domain/entities').MessageReactionRecord[];
   }
 
@@ -553,14 +566,45 @@ export class SqliteMessageRepository implements IMessageRepository {
   }
 
   async updateContent(messageId: string, content: string, editedAt: number, blocks?: MessageBlock[]): Promise<void> {
-    this.db.prepare('UPDATE messages SET content = ?, blocks_json = ?, bot_localizations_json = NULL, edited_at = ? WHERE id = ?')
+    this.db.prepare('UPDATE messages SET content = ?, blocks_json = ?, bot_localizations_json = NULL, edited_at = ?, revision = revision + 1 WHERE id = ? AND deleted_at IS NULL')
       .run(content, blocks ? JSON.stringify(blocks) : null, editedAt, messageId);
   }
 
-  async markDeleted(messageId: string, deletedAt: number): Promise<void> {
-    // The content goes with the deletion: keeping it would leave the text one
-    // query away from anyone with access to the database file (#504).
-    this.db.prepare("UPDATE messages SET content = '', blocks_json = NULL, bot_localizations_json = NULL, deleted_at = ? WHERE id = ?").run(deletedAt, messageId);
+  async markDeleted(messageId: string, deletedAt: number, actorId?: string, undoUntil?: number): Promise<void> {
+    this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT deleted_at FROM messages WHERE id = ?').get(messageId) as { deleted_at: number | null } | undefined;
+      if (!existing || existing.deleted_at !== null) return;
+      if (actorId && undoUntil && undoUntil > deletedAt) {
+        this.db.prepare(`INSERT INTO message_deletion_backups (message_id, deleted_at, expires_at, content, blocks_json, bot_localizations_json)
+          SELECT id, ?, ?, content, blocks_json, bot_localizations_json FROM messages WHERE id = ?`).run(deletedAt, undoUntil, messageId);
+      }
+      this.db.prepare(`UPDATE messages SET content = '', blocks_json = NULL, bot_localizations_json = NULL,
+        deleted_at = ?, deleted_by_user_id = ?, delete_undo_until = ?, revision = revision + 1 WHERE id = ?`)
+        .run(deletedAt, actorId ?? null, undoUntil ?? null, messageId);
+    })();
+  }
+
+  async restoreDeleted(messageId: string, actorId: string, deletedAt: number, revision: number, now: number): Promise<boolean> {
+    return this.db.transaction(() => {
+      const backup = this.db.prepare(`SELECT b.content, b.blocks_json, b.bot_localizations_json
+        FROM message_deletion_backups b JOIN messages m ON m.id = b.message_id
+        WHERE m.id = ? AND m.deleted_by_user_id = ? AND m.deleted_at = ? AND m.revision = ?
+          AND b.deleted_at = m.deleted_at AND b.expires_at > ?`)
+        .get(messageId, actorId, deletedAt, revision, now) as { content: string; blocks_json: string | null; bot_localizations_json: string | null } | undefined;
+      if (!backup) return false;
+      this.db.prepare(`UPDATE messages SET content = ?, blocks_json = ?, bot_localizations_json = ?,
+        deleted_at = NULL, deleted_by_user_id = NULL, delete_undo_until = NULL, revision = revision + 1 WHERE id = ?`)
+        .run(backup.content, backup.blocks_json, backup.bot_localizations_json, messageId);
+      this.db.prepare('DELETE FROM message_deletion_backups WHERE message_id = ?').run(messageId);
+      return true;
+    })();
+  }
+
+  async purgeExpiredDeletions(now: number): Promise<void> {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM message_reactions WHERE message_id IN (SELECT message_id FROM message_deletion_backups WHERE expires_at <= ?)').run(now);
+      this.db.prepare('DELETE FROM message_deletion_backups WHERE expires_at <= ?').run(now);
+    })();
   }
 
   async deleteByChannel(channelId: string): Promise<void> {
@@ -692,8 +736,10 @@ export class SqliteAttachmentRepository implements IAttachmentRepository {
 
   async listOldestActive(limit: number): Promise<AttachmentRecord[]> {
     const rows = this.db
-      .prepare(`${SqliteAttachmentRepository.SELECT} WHERE evicted = 0 ORDER BY created_at ASC LIMIT ?`)
-      .all(limit) as SqliteAttachmentRow[];
+      .prepare(`${SqliteAttachmentRepository.SELECT} WHERE evicted = 0
+        AND NOT EXISTS (SELECT 1 FROM message_deletion_backups b WHERE b.message_id = message_attachments.message_id AND b.expires_at > ?)
+        ORDER BY created_at ASC LIMIT ?`)
+      .all(Date.now(), limit) as SqliteAttachmentRow[];
     return rows.map((r) => this.map(r));
   }
 

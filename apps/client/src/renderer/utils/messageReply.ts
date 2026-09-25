@@ -2,6 +2,7 @@ import { getMessageText, type MessageReply } from '@monky/shared';
 import { getLanguage, t } from '../i18n';
 import { escapeHtml } from './html';
 import { extractStickerIds, stripStickerTokens } from './stickers';
+import { renderMarkdown } from './markdown';
 
 export function formatMessageTime(timestamp: number): string {
   const date = new Date(timestamp);
@@ -16,6 +17,6 @@ export function renderReplyPreview(reply: MessageReply): string {
     ? `<time>${escapeHtml(formatMessageTime(reply.createdAt))}</time>` : '';
   return `<span class="chat-quote-content">
     ${reply.deleted ? '' : `<span class="chat-quote-heading"><strong>${escapeHtml(reply.userNickname)}</strong>${time}</span>`}
-    <span class="chat-quote-preview">${escapeHtml(preview)}</span>
+    <span class="chat-quote-preview">${reply.deleted ? escapeHtml(preview) : renderMarkdown(preview, { interactive: false })}</span>
   </span>`;
 }
