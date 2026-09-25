@@ -133,6 +133,8 @@ As versões das ferramentas vêm de `buildTools` em `dependencies.json`; o cache
 contém os arquivos de download, que continuam sujeitos à validação por hash.
 O código fixado de `FieldTrials` também usa esse cache: falhas de transporte
 têm até três tentativas, e somente conteúdo com o SHA-256 esperado é aceito.
+O download usa uma revisão imutável do espelho WebRTC no GitHub, com o mesmo
+blob Git e os mesmos bytes qualificados da origem Google registrada no manifesto.
 Os testes de scripts exercitam o download real do CMake contra um servidor local,
 incluindo falhas HTTP, cache corrompido e rejeição de conteúdo diferente.
 

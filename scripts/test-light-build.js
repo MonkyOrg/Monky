@@ -108,3 +108,12 @@ test('pinned downloads retry transport errors, verify content and reuse only val
   assert.equal(fs.existsSync(destination), false);
   assert.equal(fs.existsSync(`${destination}.partial`), false);
 });
+
+test('the FieldTrials mirror preserves the qualified source bytes and upstream provenance', () => {
+  const { webrtc } = JSON.parse(fs.readFileSync(new URL('../apps/light/dependencies.json', import.meta.url), 'utf8'));
+  assert.equal(webrtc.fieldTrials.gitBlob, 'fc896e1258acdfa2a98fe9aa5c3c872a41b67750');
+  assert.equal(webrtc.fieldTrials.sha256, 'b5f82993430c8a1365e5416036b8a2f5dfaa6bf2709e2e2764812927fe358b3c');
+  assert.match(webrtc.fieldTrials.url, /^https:\/\/raw\.githubusercontent\.com\/webrtc-mirror\/webrtc\/[a-f0-9]{40}\/api\/field_trials\.cc$/);
+  assert.equal(webrtc.fieldTrials.upstreamUrl,
+    `https://webrtc.googlesource.com/src/+show/${webrtc.revision}/api/field_trials.cc?format=TEXT`);
+});

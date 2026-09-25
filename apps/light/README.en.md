@@ -132,6 +132,8 @@ Tool versions come from `buildTools` in `dependencies.json`; the cache contains
 downloaded archives, which remain subject to hash validation.
 The pinned `FieldTrials` source also uses this cache: transport failures receive
 up to three attempts, and only content with the expected SHA-256 is accepted.
+The download uses an immutable revision of the WebRTC GitHub mirror, with the same
+Git blob and qualified bytes as the Google origin recorded in the manifest.
 Script tests exercise CMake's actual downloader against a local server,
 including HTTP failures, corrupt cache entries and rejection of mismatched content.
 
