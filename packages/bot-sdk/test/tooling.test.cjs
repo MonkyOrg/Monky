@@ -437,6 +437,48 @@ test('build compiles the bot and emits an offline-installable ESM package with a
   assert.equal(botEntryPath(loadBotProject(packageRoot)), path.join(packageRoot, 'dist', 'index.js'));
 });
 
+for (const nested of [false, true]) {
+  test(`offline global upgrades preserve dependencies hoisted into ${nested ? 'nested packages' : 'the bot root'}`,
+    { timeout: 120000 }, (t) => {
+      const f = fixture(t);
+      const name = nested ? 'container' : 'consumer';
+      botAt(f.source, { dependencies: { '@monky/bot-sdk': '*', [name]: '*' } });
+      const owner = nested ? path.join(f.source, 'node_modules', name) : f.source;
+      if (nested) {
+        moduleAt(owner, name, '1.0.0', { dependencies: { consumer: '*' } }, 'module.exports = require("consumer");');
+      }
+      const consumer = path.join(owner, 'node_modules', 'consumer');
+      moduleAt(consumer, 'consumer', '1.0.0', { dependencies: { '@fixture/alias': 'npm:@fixture/leaf@1.0.0' } },
+        'module.exports = require("@fixture/alias");');
+      const nestedLeaf = path.join(consumer, 'node_modules', '@fixture', 'alias');
+      moduleAt(nestedLeaf, '@fixture/leaf', '1.0.0');
+      const previous = buildBotPackage({ root: f.source, out: f.output, skipBuild: true });
+
+      const hoistedLeaf = path.join(owner, 'node_modules', '@fixture', 'alias');
+      fs.mkdirSync(path.dirname(hoistedLeaf), { recursive: true });
+      fs.renameSync(nestedLeaf, hoistedLeaf);
+      const next = buildBotPackage({ root: f.source, out: f.output, version: '1.2.4', skipBuild: true });
+      const prefix = path.join(f.root, 'global prefix');
+      for (const [index, release] of [previous, next].entries()) {
+        runNpm(['install', '-g', '--prefix', prefix, '--cache', path.join(f.root, `empty cache ${index}`),
+          '--offline', '--ignore-scripts', '--no-audit', '--no-fund', release.file], { cwd: f.root });
+      }
+      const globalRoot = process.platform === 'win32' ? path.join(prefix, 'node_modules')
+        : path.join(prefix, 'lib', 'node_modules');
+      const packageRoot = path.join(globalRoot, '@fixture', 'sound-bot');
+      const installed = createRequire(path.join(packageRoot, 'package.json'));
+      const ownerRoot = nested ? path.join(packageRoot, 'node_modules', name) : packageRoot;
+      const fromOwner = createRequire(path.join(ownerRoot, 'package.json'));
+      const metadata = fromOwner('./package.json');
+      assert.equal(installed('./package.json').version, '1.2.4');
+      assert.equal(installed(name), '1.0.0');
+      assert.equal(fromOwner.resolve('@fixture/alias'),
+        path.join(ownerRoot, 'node_modules', '@fixture', 'alias', 'index.js'));
+      assert.equal(metadata.dependencies['@fixture/alias'], 'npm:@fixture/leaf@1.0.0');
+      assert.ok(metadata.bundleDependencies.includes('@fixture/alias'));
+    });
+}
+
 test('private files inside a runtime directory, compiler recursion and incompatible SDKs fail explicitly', (t) => {
   const f = fixture(t);
   botAt(f.source);

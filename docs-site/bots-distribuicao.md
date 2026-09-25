@@ -43,6 +43,11 @@ Dados de execução, `.env` real, `.keys` e registros autenticados não são mat
 de release. Dependências locais além de SDK/shared devem declarar seus próprios
 arquivos de publicação em `package.files`.
 
+O empacotador declara também as dependências transitivas que ficam em um
+`node_modules` superior (hoisting), preservando versões e aliases. Isso permite
+atualizar offline com cache npm vazio mesmo quando a disposição das dependências
+muda entre releases; uma instalação limpa, sozinha, não valida esse cenário.
+
 Use `monky-bot-sdk build --version 1.1.0-beta --out release` para definir a versão
 do artefato. `--skip-build` permite empacotar uma compilação já existente, mas
 nunca substitui a validação da entrada e do SDK. Não coloque a ferramenta no
@@ -306,6 +311,11 @@ interativo. Arquivos de configuração e identidade permanecem fora da instalaç
 Se o diretório de configuração ou de dados estiver dentro do pacote instalado,
 a atualização é bloqueada para não apagá-los; mova o perfil para fora do pacote
 antes de atualizar. O limite de transferência é 200 MiB e 60 segundos.
+
+Se um pacote antigo falhar com `ENOTCACHED` ao atualizar, apesar de instalar
+offline em uma pasta vazia, o autor deve gerar uma nova release com o empacotador
+corrigido. Atualizar apenas o SDK da máquina do operador não corrige os metadados
+do `.tgz` já publicado. Não remova `--offline` nem habilite scripts como solução.
 
 O CLI mostra bytes realmente transferidos e porcentagem quando a origem informa
 um tamanho válido. Sem tamanho, informa os bytes recebidos sem inventar uma
