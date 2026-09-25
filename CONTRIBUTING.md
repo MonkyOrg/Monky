@@ -288,6 +288,10 @@ sozinho:
 | qualquer tipo com `!` (`feat!:`, `fix!:`, …), `major:`, ou `BREAKING CHANGE:` no corpo | **major** — `X.0.0` |
 | qualquer outra coisa (`fix:`, `docs:`, `chore:`, `refactor:`…) | **patch** — `1.0.X` |
 
+Com escopo, prefira a forma convencional `feat(chat)!:`. O cálculo também aceita
+o marcador antes do escopo (`feat!(chat):`) em mensagens existentes, inclusive nos
+itens de squash, para não perder uma mudança incompatível nem seu `BREAKING CHANGE`.
+
 Repare que **patch é o padrão**: todo merge na `main` publica alguma versão, nem
 que seja um commit de documentação.
 
