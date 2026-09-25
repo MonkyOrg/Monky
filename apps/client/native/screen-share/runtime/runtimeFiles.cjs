@@ -25,7 +25,7 @@ function loadCaptureRuntime(directory = path.resolve(__dirname, '..', 'bin', 'wi
   assert.equal(process.platform, 'win32', 'Native screen capture requires Windows.');
   assert.equal(process.arch, 'x64', 'Native screen capture requires x64.');
   const capture = JSON.parse(fs.readFileSync(path.join(directory, 'capture-build.json'), 'utf8'));
-  assert.equal(capture.schemaVersion, 4, 'Rebuild native capture for scaling and pinned hook storage.');
+  assert.equal(capture.schemaVersion, 5, 'Rebuild native capture for hardware/software H264 and AV1.');
   assert.equal(capture.obsVersion, '32.1.1');
   assert.equal(capture.obsRevision, '7272af1375b38bc3cf4e0f98a5d999e8b76e9309');
   assert.equal(capture.host.path, 'monky-screen-capture.exe');
@@ -37,6 +37,8 @@ function loadCaptureRuntime(directory = path.resolve(__dirname, '..', 'bin', 'wi
       assert.ok(capture.crt.files.some(file => file.path === relative), `Missing app-local CRT: ${relative}`);
   for (const file of capture.crt.files) verifiedFile(directory, file);
   const executable = verifiedFile(directory, capture.host);
+  assert.equal(capture.av1Runtime?.path, 'monky_av1.dll');
+  verifiedFile(directory, capture.av1Runtime);
   verifiedFile(directory, capture.module);
   const stockDirectory = path.join(directory, 'obs');
   assert.ok(Array.isArray(capture.runtime) && capture.runtime.length > 0 && capture.runtime.length <= 256);
@@ -53,7 +55,8 @@ function loadCaptureRuntime(directory = path.resolve(__dirname, '..', 'bin', 'wi
       .map(name => path.join('data', 'obs-plugins', 'win-capture', name)))])
     assert.ok(capture.runtime.some(file => file.path === relative), `Missing pinned capture dependency: ${relative}`);
   assert.deepEqual(capture.configuration, {
-    captureKinds: ['window', 'monitor', 'game'], encoders: ['h264_texture_amf', 'obs_nvenc_h264_tex'],
+    captureKinds: ['window', 'monitor', 'game'],
+    encoders: ['h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264', 'av1_texture_amf', 'obs_nvenc_av1_tex', 'monky_aom_av1'],
     encoderProbe: 'source-free-hardware-initialization',
     gameCaptureStartup: 'explicit-game-target-only', compatibilityUpdater: false,
     globalVulkanHook: false, hardwareQualified: false, scaleModes: ['stretch', 'fit'],
@@ -75,8 +78,8 @@ function loadRuntime(directory = path.resolve(__dirname, '..', 'bin', 'win32-x64
   const rtcBuild = JSON.parse(fs.readFileSync(path.join(directory, 'rtc-build.json'), 'utf8'));
   assert.equal(rtcBuild.schemaVersion, 1);
   assert.equal(rtcBuild.webrtcRevision, '36ea4535a500ac137dbf1f577ce40dc1aaa774ef');
-  assert.ok(Array.isArray(rtcBuild.binaries) && rtcBuild.binaries.length === 2);
-  for (const name of ['monky_screen_rtc.dll', 'monky_screen_rtc.node']) {
+  assert.ok(Array.isArray(rtcBuild.binaries) && rtcBuild.binaries.length === 3);
+  for (const name of ['monky_screen_rtc.dll', 'monky_screen_rtc.node', 'monky_av1.dll']) {
     const file = rtcBuild.binaries.find(binary => binary.name === name);
     assert.ok(file); verifiedFile(directory, { ...file, path: name });
   }

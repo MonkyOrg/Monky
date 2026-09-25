@@ -11,7 +11,8 @@ type PacketCaptureSelection = Pick<import('@monky/screen-audio').PacketCaptureOp
 
 export type { NativeScreenAudioPreferences } from '@monky/shared';
 
-export type NativeScreenCaptureEncoder = 'auto' | 'h264_texture_amf' | 'obs_nvenc_h264_tex';
+export type NativeScreenCaptureEncoder = 'auto' | 'h264_texture_amf' | 'obs_nvenc_h264_tex'
+  | 'obs_x264' | 'av1_texture_amf' | 'obs_nvenc_av1_tex' | 'monky_aom_av1';
 export type NativeScreenCaptureTarget =
   | { kind: 'window' | 'game'; hwnd: number; expectedProcessId: number; expectedProcessCreationTime100ns: string }
   | { kind: 'monitor'; deviceId: string; deviceName: string; bounds: { x: number; y: number; width: number; height: number } };
@@ -24,14 +25,15 @@ export function validateCaptureTarget(target: unknown): NativeScreenCaptureTarge
 
 export interface NativeScreenCaptureCapability {
   readonly encoderId: Exclude<NativeScreenCaptureEncoder, 'auto'>;
-  readonly codec: 'h264';
+  readonly codec: 'h264' | 'av1';
+  readonly mode: 'hardware' | 'software';
   readonly adapterIndex: 0;
   readonly adapterLuid: string;
   readonly vendorId: number;
   readonly deviceId: number;
-  readonly probe: 'obs-amf-test' | 'nvenc-d3d11-session';
+  readonly probe: 'obs-amf-test' | 'nvenc-d3d11-session' | 'software-encoder';
   readonly probeVerified: true;
-  readonly textureInput: true;
+  readonly textureInput: boolean;
   readonly dynamicBitrate: true;
   readonly hardwareSessionConfirmed: boolean;
   readonly hardwareQualified: false;
@@ -60,7 +62,7 @@ export interface NativeScreenCaptureProbeResult extends NativeScreenCaptureCapab
 }
 
 /**
- * Performs real source-free hardware initialization, not a static capability lookup.
+ * Performs real source-free initialization of the selected encoder, not a static capability lookup.
  * Resolves only after native retirement and child exit; does not prove source/game compatibility
  * or encoded frames. The caller owns cleanup of the private nonce-bound run directory.
  */
@@ -223,7 +225,7 @@ export class NativeScreenEndpoint {
   close(): Promise<NativeScreenEndpointSnapshot>;
 }
 
-export interface NativeScreenPreviewFrame { data: Uint8Array; timestampUs: number; keyframe: boolean }
+export interface NativeScreenPreviewFrame { data: Uint8Array; timestampUs: number; keyframe: boolean; codec?: 'av1' }
 type PublisherEndpointOptions = Pick<NativeScreenEndpointOptions, 'source' | 'quality' | 'pipelineId' | 'send' | 'onError' | 'onState' | 'onPreview'>;
 type SubscriptionEndpointOptions = PublisherEndpointOptions & { presentationId: string };
 export interface NativeScreenPublisherOptions {

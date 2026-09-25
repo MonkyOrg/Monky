@@ -18,17 +18,25 @@ if (!process.versions.electron) {
   child.once('exit', code => { clearTimeout(timeout); process.exitCode = code ?? 1; });
   return;
 }
-const { app, BrowserWindow, sharedTexture } = require('electron');
+const { app, BrowserWindow, sharedTexture, MessageChannelMain } = require('electron');
 const { getScreenShareProfile } = require('@monky/shared');
 const moduleDirectory = process.argv.find(value => value.startsWith('--module='))?.slice('--module='.length)
   ?? path.resolve(__dirname, '..');
 assert.ok(path.isAbsolute(moduleDirectory), 'The native module under test must have an absolute path.');
-const { loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription } = require(moduleDirectory);
+const { loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription,
+  NativeScreenPreviewBridge } = require(moduleDirectory);
 const { within } = require('../runtime/nativeDeadline.cjs');
 const { createSfuFixture } = require('./sfuFixture.cjs');
 
 const directory = process.argv.find(value => value.startsWith('--artifacts='))?.slice('--artifacts='.length);
 const mode = process.argv.find(value => value.startsWith('--mode='))?.slice('--mode='.length) ?? 'p2p';
+const encoder = process.argv.find(value => value.startsWith('--encoder='))?.slice('--encoder='.length) ?? 'auto';
+const selectedQuality = process.argv.find(value => value.startsWith('--quality='))?.slice('--quality='.length);
+assert.ok(['auto', 'obs_x264', 'monky_aom_av1', 'av1_texture_amf', 'obs_nvenc_av1_tex',
+  'h264_texture_amf', 'obs_nvenc_h264_tex'].includes(encoder));
+assert.ok(selectedQuality === undefined || ['source', '1080p60', '720p60', '480p30'].includes(selectedQuality));
+const codec = ['monky_aom_av1', 'av1_texture_amf', 'obs_nvenc_av1_tex'].includes(encoder) ? 'av1' : 'h264';
+const previewOnly = process.argv.includes('--preview-only');
 assert.ok(['p2p', 'sfu'].includes(mode));
 assert.ok(directory && path.isAbsolute(directory), 'An explicit isolated smoke-artifact directory is required.');
 assert.equal(fs.existsSync(directory), false, 'Never reuse a smoke profile or capture owner.');
@@ -39,7 +47,7 @@ app.setPath('userData', profile); app.setPath('sessionData', profile);
 app.setName('MonkyNativeCaptureSmoke');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 const failures = [];
-const report = { mode, moduleDirectory, profiles: [], errors: [], personalWindowsCaptured: false, videoRecorded: false };
+const report = { mode, encoder, codec, moduleDirectory, profiles: [], errors: [], personalWindowsCaptured: false, videoRecorded: false };
 const progress = () => fs.writeFileSync(path.join(directory, 'progress.json'), JSON.stringify(report, null, 2) + '\n');
 const fail = value => {
   const error = value instanceof Error ? value : new Error(String(value));
@@ -70,6 +78,63 @@ async function videoRtp(peer, type) {
   const bytes = rows[0][type === 'outbound-rtp' ? 'bytesSent' : 'bytesReceived'];
   assert.ok(Number.isSafeInteger(bytes) && bytes >= 0, `Missing native media-byte counter: ${JSON.stringify(rows[0])}`);
   return { id: rows[0].id, bytes };
+}
+
+function assertPixels(pixels, video) {
+  assert.equal(pixels.width, video.width); assert.equal(pixels.height, video.height);
+  const { top, bottom, left, right, center } = pixels;
+  assert.ok(top[0] > 180 && top[1] < 70 && top[2] < 70, 'Stretch lost the original top red band.');
+  assert.ok(bottom[2] > 180 && bottom[0] < 70 && bottom[1] < 70, 'Stretch lost the original bottom blue band.');
+  for (const edge of [left, right])
+    assert.ok(edge[0] > 180 && edge[1] < 70 && edge[2] > 180, 'Encoded letterboxing remained at a side edge.');
+  assert.ok(center.slice(0, 3).every(value => value > 180), 'The central source geometry was lost.');
+}
+
+async function runPreview(runtime) {
+  const instanceId = randomUUID(), pipelineId = randomUUID(), presentationId = randomUUID();
+  const source = { shareId: 'own-preview', instanceId, codec, audio: false,
+    video: { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 12000 } };
+  const quality = selectedQuality ?? '480p30', video = getScreenShareProfile(source.video, quality, codec);
+  await playbackWindow.webContents.executeJavaScript(`nativeCaptureSmoke.start(${JSON.stringify(presentationId)}, true)`);
+  const bridge = new NativeScreenPreviewBridge({
+    frame: playbackWindow.webContents.mainFrame,
+    info: { callId: instanceId, shareId: source.shareId, sourceInstanceId: instanceId, presentationId },
+    createMessageChannel: () => new MessageChannelMain(), onState() {}, onError: fail,
+  });
+  const endpoint = new NativeScreenEndpoint({
+    runtime, textures: sharedTexture, mode: 'p2p', role: 'publish', sessionId: 'smoke-preview',
+    publisherSessionId: 'smoke-preview', channelId: instanceId, pipelineId, source, quality,
+    captureEncoder: encoder, captureDirectory: directory, preserveAspectRatio: false,
+    target: { hwnd: Number(sourceWindow.getNativeWindowHandle().readBigUInt64LE()), expectedProcessId: process.pid },
+    send: async () => assert.fail('Local preview must not publish network media.'),
+    onError: fail, onState() {}, onDiagnostic: error => console.warn(error),
+    onPreview: frame => bridge.offer(frame, pipelineId, video),
+  });
+  try {
+    await endpoint.ready;
+    await endpoint.setDemand(0, true);
+    const sample = () => playbackWindow.webContents.executeJavaScript('nativeCaptureSmoke.sample()');
+    const first = await waitFor(async () => {
+      const value = await sample();
+      return value.pixels && value.playback.counters.presentedFrames >= 5 ? value : null;
+    }, 'The real WebCodecs preview did not present encoded pixels.');
+    assert.deepEqual(first.errors, []); assertPixels(first.pixels, video);
+    const before = await sample(); await delay(3000); const after = await sample();
+    const fps = (after.playback.counters.presentedFrames - before.playback.counters.presentedFrames) *
+      1000 / (after.sampledAtMs - before.sampledAtMs);
+    assert.deepEqual(after.errors, []);
+    assert.ok(fps >= video.fps * .85, `Preview only sustained ${fps.toFixed(2)} of ${video.fps} FPS.`);
+    assert.equal(endpoint.flow.snapshot().admitted, 0, 'A local-only preview admitted network input.');
+    report.preview = { codec, encoder, video, pixels: first.pixels, presentedFps: fps };
+  } finally {
+    bridge.close();
+    await playbackWindow.webContents.executeJavaScript('nativeCaptureSmoke.stop()');
+    await endpoint.close();
+    assert.equal(endpoint.snapshot().nativeClosed, true);
+    assert.equal(fs.existsSync(endpoint.runDirectory), false);
+  }
+  if (failures.length) throw new AggregateError(failures, 'Owned preview reported failures.');
+  console.log(JSON.stringify({ ...report.preview, nativeClosed: true }));
 }
 
 async function runDemandControllers(runtime) {
@@ -107,7 +172,7 @@ async function runDemandControllers(runtime) {
     sessionId: 'publisher', channelId, mode, source, iceServers: [], send, onError: fail, onState() {},
     createEndpoint(options) {
       const endpoint = new NativeScreenEndpoint({
-        ...common, ...options, role: 'publish', sessionId: 'publisher', captureDirectory: directory,
+        ...common, ...options, role: 'publish', sessionId: 'publisher', captureDirectory: directory, preserveAspectRatio: false,
         target: { hwnd: Number(sourceWindow.getNativeWindowHandle().readBigUInt64LE()), expectedProcessId: process.pid },
         rpc: sfu?.rpc('publisher'),
       });
@@ -207,8 +272,9 @@ async function runDemandControllers(runtime) {
 async function runProfile(runtime, quality, sourceLoss = false) {
   const runId = randomUUID();
   const source = { shareId: 'own-source', instanceId: runId, audio: false,
+    codec,
     video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } };
-  const video = getScreenShareProfile(source.video, quality);
+  const video = getScreenShareProfile(source.video, quality, codec);
   const sfu = mode === 'sfu' ? await createSfuFixture(runId) : null;
   activeSfu = sfu;
   const destination = { frame: playbackWindow.webContents.mainFrame, presentationId: `screen-${runId}` };
@@ -222,17 +288,24 @@ async function runProfile(runtime, quality, sourceLoss = false) {
     (result.expectedSourceErrors ??= []).push({ code: error.code, message: error.message });
   };
   const common = {
-    runtime, textures: sharedTexture, mode, publisherSessionId: 'smoke-sender', channelId: runId,
+    runtime, textures: sharedTexture, mode, publisherSessionId: 'smoke-sender', channelId: runId, captureEncoder: encoder,
     source, quality, onError: mediaError, onState() {},
     onDiagnostic: error => console.warn('Native diagnostic:', error.message),
   };
   const deliver = (other, from, control) => {
     const copied = structuredClone(control);
+    const recordCodecs = value => {
+      if (typeof value === 'string' && value.startsWith('v=0')) {
+        (result.signalingCodecs ??= []).push({ from, lines: value.split(/\r?\n/u)
+          .filter(line => /^(m=video|a=(rtpmap:|fmtp:|sendonly|recvonly|sendrecv))/u.test(line)) });
+      } else if (value && typeof value === 'object') for (const field of Object.values(value)) recordCodecs(field);
+    };
+    recordCodecs(copied);
     queueMicrotask(() => { if (!other.closing) other.track(other.receiveControl(from, copied)); });
     return Promise.resolve();
   };
   sender = new NativeScreenEndpoint({
-    ...common, role: 'publish', sessionId: 'smoke-sender', pipelineId: randomUUID(), captureDirectory: directory,
+    ...common, role: 'publish', sessionId: 'smoke-sender', pipelineId: randomUUID(), captureDirectory: directory, preserveAspectRatio: false,
     target: { hwnd: Number(sourceWindow.getNativeWindowHandle().readBigUInt64LE()), expectedProcessId: process.pid },
     send: (_remote, control) => deliver(receiver, 'smoke-sender', control),
     rpc: sfu?.rpc('smoke-sender'),
@@ -266,13 +339,7 @@ async function runProfile(runtime, quality, sourceLoss = false) {
       return value.pixels && value.playback.counters.presentedFrames >= 5 ? value : null;
     }, 'The native decoded texture did not reach the actual Electron player.');
     assert.deepEqual(first.errors, []);
-    assert.equal(first.pixels.width, video.width); assert.equal(first.pixels.height, video.height);
-    const { top, bottom, left, right, center } = first.pixels;
-    assert.ok(top[0] > 180 && top[1] < 70 && top[2] < 70, 'Stretch lost the original top red band.');
-    assert.ok(bottom[2] > 180 && bottom[0] < 70 && bottom[1] < 70, 'Stretch lost the original bottom blue band.');
-    for (const edge of [left, right])
-      assert.ok(edge[0] > 180 && edge[1] < 70 && edge[2] > 180, 'Encoded letterboxing remained at a side edge.');
-    assert.ok(center.slice(0, 3).every(value => value > 180), 'The central source geometry was lost.');
+    assertPixels(first.pixels, video);
     result.pixels = first.pixels;
     phase('measuring-presentation');
     await delay(1000);
@@ -333,7 +400,9 @@ async function runProfile(runtime, quality, sourceLoss = false) {
       || (error instanceof AggregateError && error.errors.length > 0 && error.errors.every(expected));
     const rejected = outcomes.filter(value => value.status === 'rejected').map(value => value.reason);
     const errors = rejected.filter(error => !result.expectingSourceLoss || !expected(error));
-    if (result.expectingSourceLoss) assert.ok(rejected.some(expected), 'The original native source failure was swallowed.');
+    if (result.expectingSourceLoss)
+      assert.ok(result.expectedSourceErrors?.some(error => error.code === 'ERR_SCREEN_CAPTURE_SOURCE_LOST'),
+        'The original native source failure was not reported.');
     result.retirement = sender.snapshot();
     result.nativeClosed = errors.length === 0 && sender.snapshot().nativeClosed && receiver.snapshot().nativeClosed;
     result.cleanupErrors = errors.map(error => error.stack ?? String(error)); progress();
@@ -367,9 +436,12 @@ app.whenReady().then(async () => {
     sourceWindow.setTitle(`Monky owned capture source ${process.pid}`);
     playbackWindow.setTitle(`Monky owned playback ${process.pid}`);
     sourceWindow.showInactive(); playbackWindow.showInactive();
-    await runDemandControllers(runtime);
-    for (const quality of ['source', '1080p60', '720p60', '480p30'])
-      await runProfile(runtime, quality, quality === '480p30');
+    if (previewOnly) await runPreview(runtime);
+    else {
+      if (!selectedQuality) await runDemandControllers(runtime);
+      for (const quality of selectedQuality ? [selectedQuality] : ['source', '1080p60', '720p60', '480p30'])
+        await runProfile(runtime, quality, quality === '480p30');
+    }
   } catch (error) {
     report.errors.push(error.stack ?? String(error)); console.error(error); process.exitCode = 1;
   } finally {

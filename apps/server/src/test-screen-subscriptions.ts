@@ -775,14 +775,17 @@ test('screen Watch signaling is typed, bounded, authenticated and restricted to 
   f.manager.close();
 });
 
-for (const backend of ['native', 'browser'] as const) test(`${backend} screen signaling requires an authenticated Watch and matching accepted generation`, async () => {
+for (const backend of ['native', 'browser'] as const)
+for (const codec of ['h264', 'av1'] as const)
+test(`${backend}/${codec} screen signaling preserves codec and requires authenticated Watch with matching generation`, async () => {
   const f = await signalingFixture();
   const [viewer, other, publisher] = f.clients;
   const source = {
-    shareId: 'one', instanceId: 'd54bc6e3-e54e-4127-bb03-a2972b65b2f6', audio: false,
+    shareId: 'one', instanceId: 'd54bc6e3-e54e-4127-bb03-a2972b65b2f6', audio: false, codec,
     video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 },
   };
   f.service.updateVoiceState('publisher', { nativeScreenShares: [source] });
+  assert.equal(f.service.getVoiceState('publisher')?.nativeScreenShares?.[0].codec, codec);
   const scope = {
     fromSessionId: 'viewer-a', targetSessionId: 'publisher', publisherSessionId: 'publisher',
     channelId: 'room', shareId: source.shareId, sourceInstanceId: source.instanceId,
@@ -941,5 +944,29 @@ test('screen SFU WebSocket controls reject malformed payloads, require call memb
   });
   assert.equal((f.sent.at(-1)?.payload as { code: ProtocolErrorCode }).code, ProtocolErrorCode.PERMISSION_DENIED);
   assert.equal(f.created.length, 1);
+  f.manager.close();
+});
+
+for (const codec of ['h264', 'av1'] as const)
+test(`${codec}: SFU admits only the codec-aligned announced 480p rendition`, async () => {
+  const f = await signalingFixture();
+  const publisher = f.clients[2];
+  const instanceId = 'd3ff5c19-0f2e-41ca-8b46-389be057c88b';
+  const pipelineId = 'cc7b7233-f39c-41f9-aa8d-6717a494c8e5';
+  const video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 };
+  f.service.updateVoiceState('publisher', { nativeScreenShares: [{ shareId: 'one', instanceId, audio: false, video, codec }] });
+  const transportId = f.addSender('publisher', 'screen', pipelineId);
+  const width = codec === 'av1' ? 848 : 852;
+  const rendition = { width, height: 480, fps: 30, maxBitrateKbps: 1500 };
+  const nativeScreen = { sourceInstanceId: instanceId, pipelineId, video: rendition };
+  const payload = { channelId: 'room', transportId, kind: 'video', rtpParameters: { codecs: [] },
+    appData: { mediaType: 'screen_video', shareId: 'one', nativeScreen } };
+  await f.server['handleMessage'](publisher, { type: MessageType.SFU_PRODUCE,
+    payload: { ...payload, appData: { ...payload.appData,
+      nativeScreen: { ...nativeScreen, video: { ...rendition, width: codec === 'av1' ? 852 : 848 } } } } });
+  assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+  assert.equal(f.produced.length, 0);
+  await f.server['handleMessage'](publisher, { type: MessageType.SFU_PRODUCE, payload });
+  assert.equal(f.produced.length, 1);
   f.manager.close();
 });

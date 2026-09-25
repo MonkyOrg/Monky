@@ -63,6 +63,7 @@ class NativeScreenPreviewBridge {
       this.pending.set(sequence, { pipelineId, bytes });
       this.bytes += bytes;
       this.port.postMessage({ type: 'packet', sequence, pipelineId, video,
+        ...(frame.codec === 'av1' ? { codec: 'av1' } : {}),
         timestampUs: frame.timestampUs, keyframe: frame.keyframe, data: frame.data });
       this.needsKeyframe = false;
     } catch (error) { this.fail(error); }

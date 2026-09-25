@@ -1,6 +1,7 @@
 #pragma once
 #include <AMF/core/Factory.h>
 #include <AMF/components/VideoEncoderVCE.h>
+#include <AMF/components/VideoEncoderAV1.h>
 #include <d3d11.h>
 #include <cstring>
 #include <exception>
@@ -8,11 +9,12 @@
 
 namespace monky::screen_capture {
 
-inline std::string ProbeAmfDevice(ID3D11Device* device, const VideoConfiguration& video) {
+inline std::string ProbeAmfDevice(ID3D11Device* device, const VideoConfiguration& video, bool av1 = false) {
   constexpr auto errorCode = "ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE";
   Require(device != nullptr, "Invalid AMF probe device", errorCode);
   const auto required = (std::max)(31u, RequiredCaptureH264Level(video));
-  std::string evidence = "AMF H264 source-free probe requiredLevel=" + std::to_string(required);
+  std::string evidence = av1 ? "AMF AV1 source-free probe" :
+      "AMF H264 source-free probe requiredLevel=" + std::to_string(required);
   const auto fail = [&](const std::string& operation, AMF_RESULT result) {
     throw ContractError(errorCode, evidence + "; " + operation + " status=" + std::to_string(result));
   };
@@ -38,16 +40,31 @@ inline std::string ProbeAmfDevice(ID3D11Device* device, const VideoConfiguration
     check(factory->CreateContext(&context), "CreateContext");
     Require(context != nullptr, "AMF returned no context", errorCode);
     check(context->InitDX11(device, amf::AMF_DX11_1), "InitDX11(selected OBS device)");
-    check(factory->CreateComponent(context, AMFVideoEncoderVCE_AVC, &encoder), "CreateComponent(H264)");
-    Require(encoder != nullptr, "AMF returned no H264 component", errorCode);
-    check(encoder->SetProperty(AMF_VIDEO_ENCODER_FRAMESIZE,
+    const auto created = factory->CreateComponent(context, av1 ? AMFVideoEncoder_AV1 : AMFVideoEncoderVCE_AVC, &encoder);
+    if (created == AMF_NOT_SUPPORTED || created == AMF_NOT_FOUND)
+      throw ContractError("ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED", evidence + "; selected codec is not supported by this GPU");
+    check(created, av1 ? "CreateComponent(AV1)" : "CreateComponent(H264)");
+    Require(encoder != nullptr, "AMF returned no selected codec component", errorCode);
+    check(encoder->SetProperty(av1 ? AMF_VIDEO_ENCODER_AV1_FRAMESIZE : AMF_VIDEO_ENCODER_FRAMESIZE,
         AMFConstructSize(video.width, video.height)), "SetProperty(FrameSize)");
-    check(encoder->SetProperty(AMF_VIDEO_ENCODER_USAGE,
+    check(encoder->SetProperty(av1 ? AMF_VIDEO_ENCODER_AV1_USAGE : AMF_VIDEO_ENCODER_USAGE,
         amf_int64{AMF_VIDEO_ENCODER_USAGE_TRANSCODING}), "SetProperty(Usage)");
-    check(encoder->SetProperty(AMF_VIDEO_ENCODER_PROFILE,
-        amf_int64{AMF_VIDEO_ENCODER_PROFILE_MAIN}), "SetProperty(Profile)");
+    check(encoder->SetProperty(av1 ? AMF_VIDEO_ENCODER_AV1_PROFILE : AMF_VIDEO_ENCODER_PROFILE,
+        amf_int64{av1 ? AMF_VIDEO_ENCODER_AV1_PROFILE_MAIN : AMF_VIDEO_ENCODER_PROFILE_MAIN}), "SetProperty(Profile)");
     check(encoder->GetCaps(&caps), "GetCaps");
-    Require(caps != nullptr, "AMF returned no H264 capabilities", errorCode);
+    Require(caps != nullptr, "AMF returned no selected codec capabilities", errorCode);
+    if (av1) {
+      check(encoder->SetProperty(AMF_VIDEO_ENCODER_AV1_ENCODING_LATENCY_MODE,
+          amf_int64{AMF_VIDEO_ENCODER_AV1_ENCODING_LATENCY_MODE_LOWEST_LATENCY}), "SetProperty(AV1 latency)");
+      amf::AMFVariant profile, latency;
+      check(encoder->GetProperty(AMF_VIDEO_ENCODER_AV1_PROFILE, &profile), "GetProperty(AV1 profile)");
+      check(encoder->GetProperty(AMF_VIDEO_ENCODER_AV1_ENCODING_LATENCY_MODE, &latency), "GetProperty(AV1 latency)");
+      Require(profile.type == amf::AMF_VARIANT_INT64 && profile.int64Value == AMF_VIDEO_ENCODER_AV1_PROFILE_MAIN &&
+          latency.type == amf::AMF_VARIANT_INT64 &&
+          latency.int64Value == AMF_VIDEO_ENCODER_AV1_ENCODING_LATENCY_MODE_LOWEST_LATENCY,
+          "AMF changed the explicit AV1 Main low-latency configuration", errorCode);
+      evidence += " profile=main latency=lowest sourceCaptured=false framesSubmitted=0";
+    } else {
     amf::AMFVariant maximum;
     const auto observed = caps->GetProperty(AMF_VIDEO_ENCODER_CAP_MAX_LEVEL, &maximum);
     if (observed == AMF_OK) {
@@ -67,13 +84,12 @@ inline std::string ProbeAmfDevice(ID3D11Device* device, const VideoConfiguration
             "AMF changed the explicitly required H264 level; fallback is forbidden", errorCode);
     evidence += " ProfileLevelReadback=" + std::to_string(actual.int64Value) +
         " sourceCaptured=false framesSubmitted=0";
+    }
   } catch (...) { failure = std::current_exception(); }
   const auto cleanupFailure = [&](const std::string& detail) {
     if (failure) {
       try { std::rethrow_exception(failure); }
-      catch (const ContractError& error) {
-        failure = std::make_exception_ptr(ContractError(error.code, std::string(error.what()) + "; " + detail));
-      } catch (const std::exception& error) {
+      catch (const std::exception& error) {
         failure = std::make_exception_ptr(ContractError(errorCode, std::string(error.what()) + "; " + detail));
       } catch (...) {
         failure = std::make_exception_ptr(ContractError(errorCode, evidence + "; unknown probe failure; " + detail));

@@ -10,8 +10,12 @@ const CONFIGURATION = Object.freeze({
   bFrames: 0, keyframeIntervalSeconds: 1,
 });
 const ENCODERS = Object.freeze({
-  h264_texture_amf: Object.freeze({ rateControl: 'VBR_LAT', vendorId: 0x1002, probe: 'obs-amf-test' }),
-  obs_nvenc_h264_tex: Object.freeze({ rateControl: 'CBR', vendorId: 0x10de, probe: 'nvenc-d3d11-session' }),
+  h264_texture_amf: Object.freeze({ codec: 'h264', mode: 'hardware', rateControl: 'VBR_LAT', vendorId: 0x1002, probe: 'obs-amf-test' }),
+  obs_nvenc_h264_tex: Object.freeze({ codec: 'h264', mode: 'hardware', rateControl: 'CBR', vendorId: 0x10de, probe: 'nvenc-d3d11-session' }),
+  obs_x264: Object.freeze({ codec: 'h264', mode: 'software', rateControl: 'CBR', probe: 'software-encoder' }),
+  av1_texture_amf: Object.freeze({ codec: 'av1', mode: 'hardware', rateControl: 'CBR', vendorId: 0x1002, probe: 'obs-amf-test' }),
+  obs_nvenc_av1_tex: Object.freeze({ codec: 'av1', mode: 'hardware', rateControl: 'CBR', vendorId: 0x10de, probe: 'nvenc-d3d11-session' }),
+  monky_aom_av1: Object.freeze({ codec: 'av1', mode: 'software', rateControl: 'CBR', probe: 'software-encoder' }),
 });
 const commonKeys = ['schemaVersion', 'type', 'runId', 'sequence', 'helperProcessId', 'hwnd', 'processId',
   'processCreationTime100ns', 'qpc', 'qpcFrequency', 'configuration', 'observation', 'sourceKey', 'hookedKey'];
@@ -63,7 +67,7 @@ function cloneSource(source) {
 
 function validateEncoder(encoder) {
   assert.ok(typeof encoder === 'string' && (encoder === 'auto' || Object.hasOwn(ENCODERS, encoder)),
-    'Unsupported H264 hardware encoder.');
+    'Unsupported screen encoder.');
   return encoder;
 }
 
@@ -97,7 +101,7 @@ function configuration(video, encoder = 'h264_texture_amf', kind = 'window') {
   validateVideo(video);
   assert.ok(typeof encoder === 'string' && Object.hasOwn(ENCODERS, encoder));
   assert.ok(['window', 'monitor', 'game'].includes(kind));
-  return { ...CONFIGURATION, scaleMode: video.scaleMode ?? 'stretch', encoderId: encoder, rateControl: ENCODERS[encoder].rateControl,
+  return { ...CONFIGURATION, codec: ENCODERS[encoder].codec, scaleMode: video.scaleMode ?? 'stretch', encoderId: encoder, rateControl: ENCODERS[encoder].rateControl,
     method: kind === 'game' ? 'game-hook' : 'wgc', width: video.width, height: video.height,
     fpsNumerator: video.fps, initialBitrateKbps: video.bitrateKbps };
 }
@@ -106,13 +110,14 @@ function validateCapability(value, encoder) {
   exact(value, ['encoderId', 'codec', 'adapterIndex', 'adapterLuid', 'vendorId', 'deviceId',
     'probe', 'probeVerified', 'textureInput', 'dynamicBitrate'], 'verified hardware capability');
   assert.equal(value.encoderId, encoder);
-  assert.equal(value.codec, 'h264');
+  assert.equal(value.codec, ENCODERS[encoder].codec);
   assert.equal(value.adapterIndex, 0, 'Pinned Windows texture encoders require the exact adapter 0.');
   integer(value.deviceId, 0, 0xffffffff);
   decimal(value.adapterLuid);
-  assert.equal(value.vendorId, ENCODERS[encoder].vendorId);
+  integer(value.vendorId, 0, 0xffffffff);
+  if (ENCODERS[encoder].mode === 'hardware') assert.equal(value.vendorId, ENCODERS[encoder].vendorId);
   assert.equal(value.probe, ENCODERS[encoder].probe);
-  assert.equal(value.probeVerified, true); assert.equal(value.textureInput, true);
+  assert.equal(value.probeVerified, true); assert.equal(value.textureInput, ENCODERS[encoder].mode === 'hardware');
   assert.equal(value.dynamicBitrate, true);
   return value;
 }

@@ -87,6 +87,53 @@ static std::vector<std::uint8_t> ParameterSets(const VideoConfiguration& video, 
 
 int main(int argc, char** argv) {
   try {
+    if ((argc == 4 || argc == 5) && std::string_view(argv[1]) == "--window-fixture") {
+      const std::string className = argv[2], nonce = argv[3];
+      Require(className == "WinUIDesktopWin32WindowClass" || className == "ApplicationFrameWindow",
+          "Unexpected fixture window class");
+      Require(nonce.size() == 32 && std::all_of(nonce.begin(), nonce.end(),
+          [](char value) { return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f'); }),
+          "Window fixture requires a private nonce");
+      const std::wstring wideClass(className.begin(), className.end());
+      const std::wstring title = L"Monky owned window fixture " + std::wstring(nonce.begin(), nonce.end());
+      const auto parent = argc == 5 ? reinterpret_cast<HWND>(static_cast<std::uintptr_t>(std::stoull(argv[4]))) : nullptr;
+      Require(!parent || IsWindow(parent), "Foreign fixture parent must exist");
+      WNDCLASSW windowClass{};
+      windowClass.lpfnWndProc = DefWindowProcW; windowClass.hInstance = GetModuleHandleW(nullptr);
+      windowClass.lpszClassName = wideClass.c_str();
+      Require(RegisterClassW(&windowClass) != 0, "Cannot register fixture window class");
+      const auto window = CreateWindowExW(0, wideClass.c_str(), title.c_str(),
+          WS_VISIBLE | (parent ? WS_CHILD : WS_OVERLAPPEDWINDOW),
+          parent ? 0 : CW_USEDEFAULT, parent ? 0 : CW_USEDEFAULT, 640, 480,
+          parent, nullptr, windowClass.hInstance, nullptr);
+      Require(window != nullptr, "Cannot create owned window fixture");
+      Require(CreateWindowExW(0, L"Static", L"Owned same-process child", WS_CHILD | WS_VISIBLE,
+          0, 0, 100, 100, window, nullptr, windowClass.hInstance, nullptr) != nullptr,
+          "Cannot create same-process child fixture");
+      FILETIME created{}, exited{}, kernel{}, user{};
+      Require(GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user) != 0,
+          "Cannot read fixture process identity");
+      const auto creation = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+      std::cout << "{\"hwnd\":" << reinterpret_cast<std::uintptr_t>(window)
+                << ",\"expectedProcessId\":" << GetCurrentProcessId()
+                << ",\"expectedProcessCreationTime100ns\":\"" << creation << "\"}\n" << std::flush;
+      const auto deadline = GetTickCount64() + 60000;
+      while (IsWindow(window)) {
+        Require(GetTickCount64() < deadline, "Window fixture owner did not close its pipe");
+        DWORD available = 0;
+        if (!PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE), nullptr, 0, nullptr, &available, nullptr)) {
+          Require(GetLastError() == ERROR_BROKEN_PIPE, "Window fixture stdin failed");
+          break;
+        }
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+          TranslateMessage(&message); DispatchMessageW(&message);
+        }
+        Sleep(5);
+      }
+      if (IsWindow(window)) Require(DestroyWindow(window) != 0, "Cannot retire owned window fixture");
+      return 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--admission-probe") {
       std::cout << "{\"deviceFree\":true,\"synthetic\":true,\"messages\":[";
       for (unsigned variant = 0; variant < 4; ++variant) {

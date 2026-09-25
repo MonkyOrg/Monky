@@ -4,6 +4,16 @@
   "archiveSha256": "a4cc40a06d5a5dc158c792631b596a04b02d8fe99644a0f0bc3b12199dbce011",
   "files": [
     {
+      "path": "obs-plugins\\64bit\\obs-x264.dll",
+      "bytes": 36112,
+      "sha256": "97f15dd885d1e8766e7622311ed87d17a2d99ee081add0f57816d22eaa60b989"
+    },
+    {
+      "path": "data\\obs-plugins\\obs-x264\\locale\\en-US.ini",
+      "bytes": 516,
+      "sha256": "9d529dec00a97419d022d6459383388be4a4782b81fbe678c0995877c2bb31ec"
+    },
+    {
       "path": "obs-plugins\\64bit\\obs-nvenc.dll",
       "bytes": 76048,
       "sha256": "51bab18d74c0699201ada48db0df5ed6a0d51090612e0e5ebd847678cd608886"

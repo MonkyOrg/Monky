@@ -3585,7 +3585,7 @@ export class WebSocketServer {
       const source = this.signalingService.getVoiceState(sessionId)
         ?.nativeScreenShares?.find(value => value.shareId === shareId && value.instanceId === nativeScreen.sourceInstanceId);
       return !!source && (payload.kind !== 'audio' || source.audio)
-        && getScreenShareQualities(source.video).some(value =>
+        && getScreenShareQualities(source.video, source.codec).some(value =>
           screenShareProfileKey(value.profile) === screenShareProfileKey(nativeScreen.video));
     };
     if (!sourceIsCurrent()) {

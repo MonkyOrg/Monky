@@ -3,17 +3,28 @@
 [English](README.en.md)
 
 O Monky usa libobs para capturar e redimensionar a fonte escolhida, **AMD AMF
-ou NVIDIA NVENC para codificar H.264 em hardware** e WebRTC nativo para
+ou NVIDIA NVENC para codificar H.264/AV1 em hardware**, ou x264/libaom para
+codificação por software, e WebRTC nativo para
 transportar os frames **sem decodificar e recodificar o vídeo no transmissor**.
-No Windows, o receptor nativo usa Media Foundation e SharedTexture. Voz e
+No Windows, o receptor nativo usa Media Foundation para H.264 e dav1d para
+AV1, com apresentação SharedTexture. A decodificação AV1 é feita na CPU;
+a preferência Hardware/Software controla a codificação no transmissor. Voz e
 câmera continuam usando seus caminhos próprios.
 
-O backend de captura implementado é **Windows x64**. H.264 e Automático usam
-H.264; **AV1 está indisponível**, indicado como Em breve. Não há fallback
-automático para captura Chromium, encoder de software ou outra fonte.
+O backend de captura implementado é **Windows x64**. **Automático é o padrão
+recomendado** e prioriza Hardware: AV1, depois H.264 e, somente quando o probe
+confirma ausência de hardware compatível, H.264 por Software com aviso.
+Os campos de codificação e codec mostram a seleção efetiva como somente leitura.
+Em **Manual**, o usuário escolhe Hardware/Software e H.264/AV1 no mesmo grupo;
+a combinação é preservada e, se indisponível, bloqueada com motivo explícito,
+sem substituição silenciosa. Software + AV1 usa libaom.
+Ausência de suporte não é confundida com falha de
+driver, arquivos ou encerramento. Não há troca silenciosa para CPU durante a
+transmissão, transcodificação no servidor, nem fallback para captura Chromium.
+Intel/QSV não está implementado; Software continua usando a captura libobs.
 Se Captura de jogo não conseguir iniciar, há uma tentativa em **Normal** para
 a mesma janela, após comprovar o encerramento da tentativa anterior.
-A recepção Chromium continua disponível para perfis H.264 que o
+A recepção Chromium continua disponível para perfis H.264/AV1 que o
 dispositivo receptor consiga decodificar; isso não comprova capacidade de envio.
 Em **Configurações → Qualidade e compartilhamento → Recepção de tela**, Windows
 usa Nativo por padrão e Chromium somente por escolha explícita, nunca como
@@ -22,6 +33,14 @@ Chromium é o padrão e Nativo permanece desabilitado como Em breve. A preferên
 salva vale para o próximo Assistir/Tentar novamente, sem interromper a recepção
 ativa, alterar câmera/voz ou a captura. O aviso de limitações Chromium permanece
 visível nas configurações.
+
+AV1 usa Main, 8 bits, 4:2:0, BT.709 limitado e L1T1. As larguras dos perfis
+AV1 são alinhadas a oito pixels antes do probe e anúncio (480p usa 848×480),
+evitando padding visível do AMF; H.264 mantém seus perfis existentes. Um receptor
+sem o codec/nível necessário recebe um erro explícito para escolher H.264;
+Automático não promete transcodificação por espectador. O cabeçalho do keyframe
+real é a fonte de verdade, pois o extradata AMF anterior ao primeiro frame pode
+estar desatualizado.
 
 ## Fontes e verificação de disponibilidade
 
@@ -48,20 +67,30 @@ Minimizar ou ocultar uma janela/jogo é tratado como pausa, não como perda da
 identidade. Restaurar permite retomar os frames. Fechar ou substituir a
 janela/processo encerra o anúncio mesmo sem espectadores.
 
-A disponibilidade tem três níveis diferentes:
+Janelas WinUI (por exemplo, WhatsApp) não são bloqueadas apenas pela classe
+`WinUIDesktopWin32WindowClass`/`ApplicationFrameWindow`. A admissão exige que
+a lista de propriedades e o finder do OBS correspondam à janela selecionada,
+com título único e identidade HWND/PID/criação preservada. Se a enumeração
+redirecionar para um filho de outro processo, a seleção é recusada em vez de
+compartilhar esse filho implicitamente.
+
+A disponibilidade distingue arquivos, encoder e fonte:
 
 1. `loadCaptureRuntime()` verifica arquivos e hashes, sem abrir a GPU.
    `captureKinds` declara implementação, **não qualificação de hardware**.
    O Main informa `requiresSelectionProbe: true`; o seletor mostra o preparo
    pendente, sem testar uma fonte arbitrária em segundo plano.
-2. Depois da confirmação do usuário, o Main resolve a identidade selecionada
+2. `probeCaptureCapabilities()` inicializa o encoder escolhido com o perfil
+   solicitado, sem selecionar fonte ou capturar pixels. Confirma o encerramento
+   antes de disponibilizar Hardware/Software; registro do plugin não prova suporte.
+3. Depois da confirmação do usuário, o Main resolve a identidade selecionada
    e chama `CaptureBridge.prepare(target)`. Essa etapa abre gráficos OBS e
    verifica identidade, configuração e capacidade AMF/NVENC, mas não captura
    pixels da fonte nem inicia o encoder de produção. O Main encerra esse probe
    e comprova o fechamento do filho original antes de liberar sua reserva.
-3. Com demanda de prévia local ou de espectador, `start` cria a fonte e o
-   encoder. `READY` exige vínculo com a fonte e pacotes H.264 reais;
-   `hardwareSessionConfirmed` só então pode ser verdadeiro.
+4. Com demanda de prévia local ou de espectador, `start` cria a fonte e o
+   encoder. `READY` exige vínculo com a fonte e pacotes do codec escolhido;
+   `hardwareSessionConfirmed` só então pode ser verdadeiro, em modo Hardware.
    `hardwareQualified` permanece falso: uma sessão não qualifica todos os usos.
 
 SPS/PPS são exigidos e validados no primeiro pacote, antes de enviar qualquer
@@ -152,7 +181,7 @@ e limite de sessões do encoder podem impedir o preparo ou a captura.
 ## Vídeo, áudio e demanda de prévia
 
 O vídeo usa NV12, perfil H.264 Main, zero B-frames e GOP de um segundo, com
-limites de 3840x2160, 120 FPS (60 FPS em 4K) e 80000 kbps, sujeitos ao encoder. O switch **Manter proporção** no
+limites de 3840x2160, 120 FPS (60 FPS em 4K) e 80000 kbps, sujeitos ao encoder. O switch **Preservar proporção** no
 seletor vale somente para o compartilhamento que está sendo criado. Desligado
 (padrão), estica a imagem para a resolução solicitada. Ligado, mantém a imagem
 inteira centralizada e acrescenta barras pretas quando as proporções diferem,
@@ -483,6 +512,30 @@ sem abrir dispositivos. `test\nativeCaptureSmoke.cjs`, neste módulo, e
 `apps\client\test\nativeScreenAppSmoke.cjs` exercitam mídia real em janelas
 sintéticas próprias; exigem o hardware qualificado e um diretório novo de
 artefatos via `--artifacts=<caminho_absoluto>`.
+
+`nativeCaptureSmoke.cjs` aceita `--encoder=h264_texture_amf`,
+`obs_nvenc_h264_tex`, `obs_x264`, `av1_texture_amf`, `obs_nvenc_av1_tex`
+ou `monky_aom_av1`; o padrão `auto` mantém o ensaio H.264 por hardware.
+Use `--quality=480p30`, `720p60` ou `1080p60` para um único perfil,
+`--mode=sfu` para encaminhamento mediasoup real, ou `--preview-only`
+para validar captura e prévia WebCodecs sem admissão de rede.
+Software também usa captura libobs/D3D11; não exige um encoder na GPU.
+Os ensaios verificam pixels, cadência e encerramento dos recursos.
+
+`test\nativeWindowIdentitySmoke.cjs --artifacts=<caminho_absoluto>` usa o
+`capture-contract-test.exe` gerado pelo build para criar janelas próprias
+WinUI/ApplicationFrameWindow. Verifica captura WGC real com filhos do mesmo
+processo e recusa títulos duplicados, remapeamento para filhos de outro
+processo e identidade de processo alterada. Não captura janelas pessoais
+nem grava vídeo; `--contracts=<executável_absoluto>` permite outro diretório
+de build.
+
+Novos compartilhamentos preservam a proporção por padrão, incluindo a API
+`NativeScreenEndpoint`; `preserveAspectRatio: false` seleciona o esticamento
+explicitamente. O protocolo de baixo nível mantém seu padrão histórico
+`scaleMode: stretch`. O ensaio do aplicativo valida o padrão com bordas;
+`--stretch` exercita a opção desligada. `nativeCaptureSmoke.cjs` escolhe
+explicitamente o esticamento para suas verificações de pixels nas bordas.
 
 Os ensaios do aplicativo cobrem P2P/SFU, receptor Chromium, áudio, qualidade,
 prévia local, Assistir/Parar, fullscreen, overlay, troca de servidor e queda

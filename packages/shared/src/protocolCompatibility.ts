@@ -4,9 +4,9 @@ import { PROTOCOL_VERSION } from './constants.js';
 // Raise the affected floor for security or wire-breaking changes; additive
 // features only raise PROTOCOL_VERSION and are negotiated independently.
 // Protocol 26 introduced the native 4K/80 Mbps bounds and H.264 negotiation.
-// Protocol 27 adds reversible deletions and monotonic message revisions;
-// older clients treat tombstones as permanent and cannot apply restorations.
-export const MIN_CLIENT_PROTOCOL = 27;
+// Protocol 28 adds screen codec metadata to strict source/signaling schemas.
+// Older clients cannot safely decode AV1 or accept those descriptors.
+export const MIN_CLIENT_PROTOCOL = 28;
 export const MIN_BOT_PROTOCOL = 24;
 export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];

@@ -8,6 +8,7 @@
 #include "receiver_policy_checks.h"
 #include "capture_clock_checks.h"
 #include "encoded_video.h"
+#include "av1_encoder_checks.h"
 #include "node\input_leases_checks.h"
 #include "node\event_queue_checks.h"
 #include "audio\foundation_checks.h"
@@ -191,6 +192,7 @@ int main() {
     group("receiverLifecycle", [] { rtc::receiver_policy::RunReceiverPolicyChecks(Check); });
     group("captureClock", [] { rtc::RunCaptureClockChecks(Check); });
     group("externalH264", [] { rtc::RunEncodedVideoChecks(Check); });
+    group("softwareAV1", [] { rtc::RunAv1EncoderChecks(Check); });
     group("peerStartupBitrate", [] {
       const auto value = rtc::peer_detail::StartupBitrate({{"startBitrateBps", 5000000u}, {"maxBitrateBps", 20000000u}});
       Check(value.start_bitrate_bps == 5000000 && value.max_bitrate_bps == 20000000 &&

@@ -24,6 +24,8 @@ const clientRoot = path.join(repo, 'apps', 'client');
 const artifacts = process.argv.find(value => value.startsWith('--artifacts='))?.slice('--artifacts='.length);
 assert.ok(artifacts && path.isAbsolute(artifacts), 'Choose a new, absolute directory for the test report.');
 const mode = process.argv.includes('--sfu') ? 'sfu' : 'p2p';
+const screenCodec = process.argv.find(value => value.startsWith('--screen-codec='))?.slice('--screen-codec='.length) ?? 'auto';
+assert.ok(['h264', 'av1', 'auto'].includes(screenCodec), 'Screen codec must be h264, av1 or auto.');
 const browserReceiver = process.argv.includes('--browser-receiver');
 const audioEnabled = !process.argv.includes('--video-only');
 const debugPublisher = process.argv.includes('--debug-publisher');
@@ -35,7 +37,9 @@ const serverLoss = process.argv.includes('--server-loss');
 const windowLifecycle = process.argv.includes('--window-lifecycle');
 const idleSourceClose = process.argv.includes('--idle-source-close');
 const admissionRecovery = process.argv.includes('--admission-recovery');
-const preserveAspectRatio = process.argv.includes('--preserve-aspect-ratio');
+assert.ok(!(process.argv.includes('--preserve-aspect-ratio') && process.argv.includes('--stretch')),
+  'Choose either --preserve-aspect-ratio or --stretch, not both.');
+const preserveAspectRatio = !process.argv.includes('--stretch');
 const gameFallback = process.argv.includes('--game-fallback');
 const publisherStop = process.argv.includes('--publisher-stop');
 const sourceResize = process.argv.includes('--source-resize');
@@ -44,11 +48,13 @@ const fourK120 = process.argv.includes('--4k') || process.argv.includes('--scree
 const fourK60 = process.argv.includes('--4k60');
 assert.ok(!(fourK120 && fourK60), 'Choose either explicit 4K120 or 4K60, never a silent downgrade.');
 const fourK = fourK120 || fourK60;
-const fullHd60 = process.argv.includes('--1080p60');
-assert.ok(!fullHd60 || (browserReceiver && audioEnabled && !fourK
+const nativeFullHd60 = process.argv.includes('--native-1080p60');
+assert.ok(!(nativeFullHd60 && process.argv.includes('--1080p60')), 'Choose one explicit 1080p60 receiver scenario.');
+const fullHd60 = process.argv.includes('--1080p60') || nativeFullHd60;
+assert.ok(!fullHd60 || ((nativeFullHd60 ? !browserReceiver : browserReceiver && audioEnabled) && !fourK
   && !process.argv.includes('--source-quality-changes') && !sourceReplacement
   && !incompatibleViewer && !unsupportedBrowserCodec),
-  'Explicit 1080p60 requires the audio-enabled browser receiver, without a competing source profile.');
+  'Use --1080p60 with the audio-enabled browser receiver or --native-1080p60 with native reception, without competing profiles.');
 const sourceQualityChanges = process.argv.includes('--source-quality-changes') || fourK;
 const strictMediaErrors = sourceQualityChanges || (browserReceiver && !unsupportedBrowserCodec);
 const observeSourceClosure = browserReceiver && !sourceQualityChanges && !sourceReplacement && !unsupportedBrowserCodec;
@@ -82,6 +88,7 @@ const minimum120Fps = Number(process.argv.find(value => value.startsWith('--min-
 assert.ok(Number.isFinite(minimum120Fps) && minimum120Fps >= 100 && minimum120Fps <= 120,
   'The 120 FPS presentation threshold must stay between 100 and 120 FPS.');
 const minimumPresentationFps = fullHd60 ? 50 : minimum120Fps;
+const warmupSeconds = sampleSeconds >= 8 ? 3 : 0;
 assert.ok(!sourceQualityChanges || (!browserReceiver && (mode === 'sfu' || fourK) && audioEnabled
   && !sourceReplacement && !gameFallback && !unsupportedBrowserCodec && !incompatibleViewer
   && !idleSourceClose && !admissionRecovery && !publisherStop && !windowLifecycle && !serverLoss
@@ -96,7 +103,7 @@ assert.ok(!sourceReplacement || (browserReceiver && mode === 'sfu' && audioEnabl
 assert.ok(!unsupportedBrowserCodec || (browserReceiver && mode === 'p2p'), 'The unsupported-codec case requires a browser P2P receiver.');
 assert.ok(!incompatibleViewer || (!browserReceiver && mode === 'p2p'), 'Mixed compatibility requires a native primary P2P receiver.');
 const debugSymbols = process.argv.find(value => value.startsWith('--debug-symbols='))?.slice('--debug-symbols='.length);
-const report = { mode, fourK, fourK60, fourK120, fullHd60, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement, sourceQualityChanges, clockFeedbackStall, cadenceDiagnostics, cadenceFollowup, chromiumReceiveLog, closeAppActive, sampleSeconds,
+const report = { mode, screenCodec, fourK, fourK60, fourK120, fullHd60, nativeFullHd60, browserReceiver, audioEnabled, unsupportedBrowserCodec, incompatibleViewer, overlayEnabled, sessionNavigation, serverLoss, admissionRecovery, preserveAspectRatio, gameFallback, publisherStop, sourceResize, sourceReplacement, sourceQualityChanges, clockFeedbackStall, cadenceDiagnostics, cadenceFollowup, chromiumReceiveLog, closeAppActive, sampleSeconds, warmupSeconds,
   normalMain: true, normalPreload: true, ownedSyntheticSource: true,
   qaFocusHooks: 'owned parent IPC only; normal Main and preload checks unchanged',
   receiverSelection: browserReceiver ? 'explicit Chromium preference (not a macOS hardware test)' : 'native',
@@ -777,7 +784,7 @@ async function previewPixels(client, state, name) {
   return pixels;
 }
 
-async function setupRenderer({ port, password, nickname, browserReceiver, audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60, fullHd60 }) {
+async function setupRenderer({ port, password, nickname, browserReceiver, audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60, fullHd60, screenCodec }) {
   const [{ openServerSession, joinCallOnSession, leaveCurrentCall }, { sessionManager }, { webRtcManager },
     { videoService }, { voiceStore }, { settingsStore }, { stopLocalScreenShares },
     { screenAudioService }, { setLanguage, t }, { appEvents }, { QUALITY_PRESETS }, { overlayBridgeService }] = await Promise.all([
@@ -798,6 +805,9 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
     screenWidth: 3840, screenHeight: 2160, screenFps: fourK60 ? 60 : 120, screenBitrateKbps: 80000,
   });
   settingsStore.preferredVideoCodec = 'h264';
+  settingsStore.preferredScreenCodec = screenCodec === 'auto' ? 'h264' : screenCodec;
+  settingsStore.screenEncodingStrategy = screenCodec === 'auto' ? 'automatic' : 'manual';
+  if (settingsStore.screenEncodingMode !== 'hardware') throw new Error('The fresh application profile must default to Hardware encoding.');
   settingsStore.screenShareTelemetryEnabled = true;
   settingsStore.screenShareTelemetryMode = 'complete';
   const initialPreviewPauseWhenUnfocused = settingsStore.screenSharePreviewPauseWhenUnfocused;
@@ -915,6 +925,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
           await new Promise(resolve => setTimeout(resolve, 50));
         }
       };
+      const sourceListStarted = performance.now();
       const opening = !document.querySelector('#share-sources-panel');
       const previous = videoService.getNativeScreenCaptures()[0]?.source;
       if (replace && (!previous?.audio || voiceStore.screenAudioShareId !== previous.shareId))
@@ -927,6 +938,8 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       await wait(() => document.querySelector('#share-tab-window'), 'The real screen picker did not open.');
       await wait(() => document.querySelector('#share-sources-panel')?.getAttribute('aria-busy') === 'false',
         'The native source capabilities did not settle.');
+      const sourceListMs = performance.now() - sourceListStarted;
+      const pendingThumbnails = document.querySelectorAll('.source-thumbnail--loading').length;
       const capabilities = await webRtcManager.getNativeScreenCapabilities();
       const kinds = capabilities.captureKinds ?? (capabilities.capture ? ['window'] : []);
       if (document.querySelector('#share-tab-game'))
@@ -940,7 +953,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
           throw new Error('Capture methods must reflect actual native capabilities with an explicit unavailable reason.');
       }
       document.querySelector('#share-tab-window').click();
-      const { id: desktopSourceId } = ownedWindowSource(await window.api.getDesktopSources(), ownedHwnd);
+      const { id: desktopSourceId } = ownedWindowSource(await window.api.getDesktopSources({ metadataOnly: true }), ownedHwnd);
       const card = () => [...document.querySelectorAll('.source-item')].find(item => item.dataset.sourceId === desktopSourceId);
       await wait(card, 'The real picker did not enumerate the owned synthetic window.');
       card().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
@@ -985,7 +998,7 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       const aspectToggle = document.querySelector('.screen-share-picker-card #chk-preserve-aspect-ratio');
       if (!(aspectToggle instanceof HTMLInputElement) || aspectToggle.getAttribute('role') !== 'switch')
         throw new Error('The real aspect-ratio switch is missing.');
-      if (opening && aspectToggle.checked) throw new Error('A new picker retained another share aspect-ratio preference.');
+      if (opening && !aspectToggle.checked) throw new Error('A new picker must default to preserving the source aspect ratio.');
       if (aspectToggle.checked !== preserveAspectRatio) aspectToggle.closest('.toggle-switch').querySelector('.toggle-slider').click();
       if (aspectToggle.checked !== preserveAspectRatio) throw new Error('The aspect-ratio switch did not select the requested state.');
       const refresh = document.querySelector('.screen-share-picker-card #btn-refresh-sources');
@@ -1002,6 +1015,17 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
       const expectedBackend = capabilities.requiresSelectionProbe ? 'probe-pending' : capabilities.capture ? 'native' : 'unavailable';
       if (backend !== expectedBackend || backend === 'unavailable')
         throw new Error('The picker must distinguish verified capture from an explicit selection awaiting its native probe.');
+      if (document.querySelector('.screen-share-picker-card [data-settings-section="screen-encoding"], .screen-share-picker-card #select-video-codec'))
+        throw new Error('Encoding preferences belong in app settings, not the source picker.');
+      const automatic = screenCodec === 'auto';
+      const encoding = {
+        strategy: automatic ? 'automatic' : 'manual',
+        savedStrategy: settingsStore.screenEncodingStrategy,
+        savedMode: settingsStore.screenEncodingMode, savedCodec: settingsStore.preferredScreenCodec,
+      };
+      if (encoding.savedStrategy !== encoding.strategy
+        || !automatic && (encoding.savedMode !== 'hardware' || encoding.savedCodec !== screenCodec))
+        throw new Error('The picker changed the encoding preferences selected in app settings.');
       const confirm = document.querySelector('#btn-share');
       if (!(confirm instanceof HTMLButtonElement) || confirm.disabled) throw new Error('The real share confirmation is unavailable.');
       if (replace && !confirm.textContent.includes(t('screenShare.confirmSwitch')))
@@ -1022,13 +1046,19 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         return { error, desktopSourceId, audio: audioEnabled };
       }
       await wait(() => !document.querySelector('#share-sources-panel') && capture(), 'Picker confirmation did not announce its native source.');
+      if (!automatic && capture().source.codec !== encoding.savedCodec)
+        throw new Error('Main source admission did not preserve the explicit codec from app settings.');
+      if (settingsStore.screenEncodingStrategy !== encoding.savedStrategy
+        || settingsStore.screenEncodingMode !== encoding.savedMode || settingsStore.preferredScreenCodec !== encoding.savedCodec)
+        throw new Error('Sharing changed the saved encoding preferences.');
       if (replace && (capture().source.audio !== true || capture().source.shareId === previous.shareId
         || capture().source.instanceId === previous.instanceId || videoService.getNativeScreenCaptures().length !== 1
         || voiceStore.screenAudioShareId !== capture().source.shareId))
         throw new Error('Replace did not transfer the single audio owner to a fresh source instance.');
       return { source: capture().source, self: auth.currentUser.sessionId, desktopSourceId,
         picker: { backend, audio: audioEnabled, preserveAspectRatio, captureKind: gameFallback ? 'game' : 'window',
-          refreshed: true, keyboardSelection: true, gameGuideChecked: gameFallback, ownedHwnd, replace } };
+          refreshed: true, keyboardSelection: true, gameGuideChecked: gameFallback, ownedHwnd, replace, encoding,
+          sourceListMs, pendingThumbnails } };
     },
     watch() {
       watchActions++;
@@ -1118,6 +1148,8 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
         previewState: document.querySelector('[data-preview-state]')?.dataset.previewState ?? null,
         focused: document.hasFocus(),
         previewPauseWhenUnfocused: settingsStore.screenSharePreviewPauseWhenUnfocused,
+        screenEncodingMode: settingsStore.screenEncodingMode, preferredScreenCodec: settingsStore.preferredScreenCodec,
+        screenEncodingStrategy: settingsStore.screenEncodingStrategy,
         browserWatches: [...(webRtcManager['nativeScreens']['call']?.presentations.values() ?? [])]
           .filter(entry => entry.browser && !entry.stopping).length,
         screenOutputContext: webRtcManager['mediaRouter']['audioContexts'].get('screen')?.state ?? null,
@@ -1292,6 +1324,8 @@ async function setupRenderer({ port, password, nickname, browserReceiver, audioE
   return { sessionId: auth.currentUser.sessionId, channelId: channel.id,
     protocol: auth.server.protocol,
     capabilities: await webRtcManager.getNativeScreenCapabilities(), profile: videoService.getProfile(),
+    screenEncodingMode: settingsStore.screenEncodingMode, preferredScreenCodec: settingsStore.preferredScreenCodec,
+    screenEncodingStrategy: settingsStore.screenEncodingStrategy,
     previewPauseWhenUnfocused: initialPreviewPauseWhenUnfocused,
     browserVideoCapabilities: browserReceiver ? RTCRtpReceiver.getCapabilities('video') : null };
 }
@@ -1300,16 +1334,17 @@ function verifyExplicit1080p60(evidence) {
   assert.equal(evidence.publisherStats.publishers.length, 1);
   const owner = evidence.publisherStats.publishers[0];
   assert.deepEqual(owner.source.video, { width: 1920, height: 1080, fps: 60, maxBitrateKbps: 20000 });
-  assert.equal(owner.source.audio, true);
+  assert.equal(owner.source.audio, audioEnabled);
   assert.equal(owner.pipelines.length, 1);
   assert.deepEqual(owner.pipelines[0].endpoint.profile, owner.source.video);
-  const reports = evidence.browserStats.flatMap(entry => entry.reports);
+  const reports = browserReceiver ? evidence.browserStats.flatMap(entry => entry.reports)
+    : evidence.receiverDiagnostics.endpoints.flatMap(endpoint => endpoint.rtp.flatMap(entry => entry.reports));
   const rtp = reports.find(row => row.type === 'inbound-rtp' && (row.kind ?? row.mediaType) === 'video');
   assert.ok(rtp && rtp.packetsReceived > 0 && rtp.framesDecoded > 0);
   assert.equal(rtp.frameWidth, 1920);
   assert.equal(rtp.frameHeight, 1080);
   const codec = reports.find(row => row.type === 'codec' && row.id === rtp.codecId);
-  assert.equal(codec?.mimeType?.toLowerCase(), 'video/h264');
+  assert.equal(codec?.mimeType?.toLowerCase(), `video/${owner.source.codec ?? 'h264'}`);
   const decoded = evidence.receiverState.video;
   assert.equal(decoded?.width, 1920);
   assert.equal(decoded?.height, 1080);
@@ -1737,7 +1772,7 @@ async function run() {
     await owned.cdp.evaluate(`globalThis.monkyAppSharedPath = ${JSON.stringify(path.join(repo, 'packages', 'shared', 'src', 'index.ts').replaceAll('\\', '/'))}`);
     owned.identity = await owned.cdp.evaluate(`(${setupRenderer.toString()})(${JSON.stringify({
       port, password, nickname: config.nickname, browserReceiver: label === 'incompatible' || browserReceiver && label === 'viewer',
-      audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60, fullHd60,
+      audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60, fullHd60, screenCodec,
     })})`);
     report[`${label}Setup`] = owned.identity;
     if (report.protocolContracts.minimumClient !== undefined) {
@@ -1799,6 +1834,7 @@ async function run() {
 
   phase('previewing-an-owned-source-before-watch');
   report.published = await publisher.cdp.evaluate(`nativeAppSmoke.share(${JSON.stringify(sourceReady.hwnd)})`);
+  if (screenCodec !== 'auto') assert.equal(report.published.source.codec, screenCodec, 'Explicit codec selection was not preserved.');
   if (admissionRecovery) {
     assert.equal(report.published.desktopSourceId, report.admissionRejected.desktopSourceId);
     assert.equal((await publisher.cdp.evaluate('nativeAppSmoke.snapshot()')).mainCall, rejectedCallId,
@@ -2108,6 +2144,9 @@ async function run() {
     const native = await publisher.child.call('qa-native-snapshots');
     report[`${name}Native`] = native;
     await fs.writeFile(path.join(artifacts, `${name}-native.json`), JSON.stringify(native, null, 2) + '\n', { flag: 'wx' });
+    const receiverNative = await viewer.child.call('qa-native-snapshots');
+    report[`${name}ReceiverNative`] = receiverNative;
+    await fs.writeFile(path.join(artifacts, `${name}-receiver-native.json`), JSON.stringify(receiverNative, null, 2) + '\n', { flag: 'wx' });
     return evidence;
   };
   if (gpuTaskTrace) {
@@ -2119,9 +2158,25 @@ async function run() {
     viewer.mediaTraceActive = true;
     await viewer.cdp.evaluate(`performance.mark('qa-${videoOverlayCounterfactual ? 'D' : 'C'}-before-initial-evidence'); undefined`);
   }
-  if (cadenceDiagnostics) await cadenceRead('cadenceBefore');
+  if (warmupSeconds) {
+    phase(`warming-owned-presentation-${warmupSeconds}s`);
+    await delay(warmupSeconds * 1000);
+  }
+  const sampleBefore = cadenceDiagnostics ? await cadenceRead('cadenceBefore')
+    : await collectEvidence('steadySampleBefore', publisher, viewer);
+  if (cadenceDiagnostics) {
+    const proof = report.cadenceBeforeNative.find(endpoint => endpoint.role === 'publish')?.capture?.capability;
+    assert.equal(proof?.codec, report.published.source.codec);
+    assert.ok(['hardware', 'software'].includes(proof?.mode));
+    if (report.published.picker.encoding.strategy === 'manual')
+      assert.equal(proof.mode, report.published.picker.encoding.savedMode);
+    assert.equal(proof?.hardwareSessionConfirmed, proof.mode === 'hardware',
+      'The runtime must not report software encoding as a confirmed hardware session.');
+    report.resolvedEncoding = { ...report.published.picker.encoding, encoderId: proof.encoderId,
+      runtimeMode: proof.mode, runtimeCodec: proof.codec, hardwareSessionConfirmed: proof.hardwareSessionConfirmed };
+  }
   if (videoOverlayCounterfactual) report.viewerSystemBefore = await viewerSystemEvidence(viewer);
-  const before = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
+  const before = sampleBefore.receiverState;
   assert.ok(before.video, `The receiver has no video before the FPS interval: ${JSON.stringify(before.watchStates)}`);
   if (gpuTaskTrace) {
     await viewer.cdp.evaluate(`performance.mark('qa-${videoOverlayCounterfactual ? 'D' : 'C'}-passive-begin'); undefined`);
@@ -2253,8 +2308,22 @@ async function run() {
   report.localDecodedPixels = await publisher.cdp.evaluate('nativeAppSmoke.pixels()');
   assertScaling(report.localDecodedPixels);
   if (!browserReceiver) {
-    assert.match(report.receiverTelemetry.text, /Native decoder FPS \(MF\): [1-9][0-9]*/);
-    assert.ok(report.receiverDiagnostics.endpoints.some(endpoint => endpoint.decoders.length));
+    const reports = report.receiverDiagnostics.endpoints.flatMap(endpoint => endpoint.rtp.flatMap(entry => entry.reports));
+    const video = reports.find(row => row.type === 'inbound-rtp' && (row.kind ?? row.mediaType) === 'video');
+    const codec = reports.find(row => row.type === 'codec' && row.id === video?.codecId);
+    assert.equal(codec?.mimeType?.toLowerCase(), `video/${report.published.source.codec ?? 'h264'}`);
+    assert.ok(video.framesDecoded > 0);
+    if (report.published.source.codec === 'av1') {
+      assert.equal(video.decoderImplementation, 'dav1d');
+      assert.doesNotMatch(report.receiverTelemetry.text, /Native decoder FPS \(MF\): [0-9]/);
+      assert.ok(report.receiverDiagnostics.endpoints.every(endpoint => endpoint.decoders.length === 0),
+        'Software AV1 decoding must not fabricate Media Foundation hardware decoder observations.');
+    } else {
+      assert.match(report.receiverTelemetry.text, /Native decoder FPS \(MF\): [1-9][0-9]*/);
+      assert.ok(report.receiverDiagnostics.endpoints.some(endpoint => endpoint.decoders.length));
+    }
+    report.nativeDecoder = { codec: report.published.source.codec ?? 'h264', implementation: video.decoderImplementation,
+      framesDecoded: video.framesDecoded, mfObservations: report.receiverDiagnostics.endpoints.reduce((count, endpoint) => count + endpoint.decoders.length, 0) };
   }
   if (incompatibleViewer) {
     phase('isolating-an-incompatible-second-viewer');
@@ -2374,15 +2443,16 @@ async function run() {
   await viewer.cdp.evaluate('nativeAppSmoke.fullscreen()');
   await until(async () => (await viewer.cdp.evaluate('nativeAppSmoke.snapshot()')).fullscreen, 'Normal fullscreen did not open.');
   phase('changing-real-quality');
+  const reducedProfile = protocolContracts.getScreenShareProfile(report.published.source.video, '480p30', report.published.source.codec);
   await viewer.cdp.evaluate('nativeAppSmoke.quality("480p30")');
   await until(async () => {
     const value = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
-    return value.video?.width === 852 && value.video.height === 480 && value.video.frames >= 15;
+    return value.video?.width === reducedProfile.width && value.video.height === reducedProfile.height && value.video.frames >= 15;
   }, 'The normal quality control did not change actual decoded dimensions.');
   report.reduced = await viewer.cdp.evaluate('nativeAppSmoke.stats()');
   await until(async () => {
     const state = await publisher.cdp.evaluate('nativeAppSmoke.snapshot()');
-    return state.previewState === 'playing' && state.video?.width === 852 && state.video.height === 480;
+    return state.previewState === 'playing' && state.video?.width === reducedProfile.width && state.video.height === reducedProfile.height;
   }, 'The local preview did not follow the actual active rendition.');
   const reducedBefore = await viewer.cdp.evaluate('nativeAppSmoke.snapshot()');
   await delay(2500);
@@ -2405,8 +2475,8 @@ async function run() {
   } else assert.equal(report.reduced.subscriptions[0].endpoint.profile.fps, 30);
   assert.ok(report.reducedFps >= 25 && report.reducedFps <= 35, 'Quality did not change actual presentation cadence.');
   assert.equal(reducedAfter.fullscreen, true, 'A quality change destroyed the fullscreen card.');
-  report.reducedSenderTelemetry = await observedTelemetry(publisher, 852, 480);
-  report.reducedReceiverTelemetry = await observedTelemetry(viewer, 852, 480);
+  report.reducedSenderTelemetry = await observedTelemetry(publisher, reducedProfile.width, reducedProfile.height);
+  report.reducedReceiverTelemetry = await observedTelemetry(viewer, reducedProfile.width, reducedProfile.height);
   report.reducedScaledPixels = await viewer.cdp.evaluate('nativeAppSmoke.pixels()');
   assertScaling(report.reducedScaledPixels);
   report.reducedLocalDecodedPixels = await publisher.cdp.evaluate('nativeAppSmoke.pixels()');
@@ -2571,10 +2641,12 @@ async function run() {
     assert.deepEqual(active.receiverState.errors, []);
     assert.equal(active.publisherState.dialog, null);
     assert.equal(active.receiverState.dialog, null);
-    await until(() => viewer.cdp.evaluate('nativeAppSmoke.browserAudioReady()'), 'Restored source audio did not start.');
-    const signal = await viewer.cdp.evaluate('nativeAppSmoke.browserAudioSignal()');
-    assert.ok(signal.nonzeroFrames > 4800 && signal.leftRms > 0 && signal.rightRms > 0);
-    report.explicit1080p60.restoredAudio = signal;
+    if (browserReceiver && audioEnabled) {
+      await until(() => viewer.cdp.evaluate('nativeAppSmoke.browserAudioReady()'), 'Restored source audio did not start.');
+      const signal = await viewer.cdp.evaluate('nativeAppSmoke.browserAudioSignal()');
+      assert.ok(signal.nonzeroFrames > 4800 && signal.leftRms > 0 && signal.rightRms > 0);
+      report.explicit1080p60.restoredAudio = signal;
+    }
     await closeActiveWindow(publisher, viewer, active.publisherStats);
     return;
   }

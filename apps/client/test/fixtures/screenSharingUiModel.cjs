@@ -247,8 +247,25 @@ function fixture(language = 'en') {
     current: true, confirm: true, capturingAudio: false, settingsError: null,
     start: null, stop: null, reapply: async () => {},
     openExternal: async () => ({ success: true }),
+    encoding: async input => ({
+      selection: { mode: input.encodingStrategy === 'automatic' ? 'hardware' : input.encodingMode,
+        codec: input.encodingStrategy === 'automatic' ? 'av1' : input.codec,
+        encoder: input.encodingStrategy === 'automatic' ? 'av1_texture_amf'
+          : input.encodingMode === 'software' ? input.codec === 'av1' ? 'monky_aom_av1' : 'obs_x264'
+            : input.codec === 'av1' ? 'av1_texture_amf' : 'h264_texture_amf' },
+      hardware: { available: true, reason: null }, fallback: false,
+    }),
   };
   let saves = 0, enumerations = 0, cancelled = 0, sequence = 0;
+  const listeners = new Map();
+  const appEvents = {
+    on(event, listener) {
+      const handlers = listeners.get(event) ?? new Set();
+      handlers.add(listener); listeners.set(event, handlers);
+      return () => handlers.delete(listener);
+    },
+    emit(...value) { events.push(value); for (const listener of [...(listeners.get(value[0]) ?? [])]) listener(value[1]); },
+  };
   const settingsStore = {
     screenShareReceiver: 'native',
     get nativeScreenReceiverComingSoon() { return api.platform === 'darwin'; },
@@ -259,9 +276,10 @@ function fixture(language = 'en') {
       this.save();
     },
     qualityPreset: 'NORMAL', customProfile: { ...shared.QUALITY_PRESETS.NORMAL },
-    preferredVideoCodec: 'auto', screenSharePreviewPauseWhenUnfocused: true,
+    preferredVideoCodec: 'auto', preferredScreenCodec: 'h264', screenEncodingMode: 'hardware', screenEncodingStrategy: 'automatic',
+    screenSharePreviewPauseWhenUnfocused: true,
     screenShareTelemetryEnabled: false, screenShareTelemetryPosition: 'top-right', screenShareTelemetryMode: 'simple',
-    save() { saves++; events.push(['settings.updated']); },
+    save() { saves++; appEvents.emit('settings.updated'); },
   };
   const voiceStore = {
     screenShareIds: [], screenAudioShareId: null, camera: 'preserved-camera', voice: 'preserved-call',
@@ -330,13 +348,18 @@ function fixture(language = 'en') {
   const mediaQuery = new ModelElement(document);
   mediaQuery.matches = true;
   const api = {
-    platform: 'win32', nativeScreenCommand: async () => { throw new Error('Model must not perform native IPC'); },
-    getDesktopSources: () => { enumerations++; return controls.sources(); },
+    platform: 'win32', nativeScreenCommand: async command => {
+      if (command.action === 'probe-encoding') return { kind: 'encoding', availability: await controls.encoding(command) };
+      if (command.action === 'cancel-encoding-probe') { traces.push(['cancel-encoding', command.probeId]); return { kind: 'ok' }; }
+      throw new Error('Model must not perform other native IPC');
+    },
+    getDesktopSources: options => { enumerations++; return controls.sources(options); },
+    getDesktopSourcePreviews: request => controls.previews ? controls.previews(request) : Promise.resolve([]),
     prepareScreenShareWindow: async id => { traces.push(['prepare-window', id]); return false; },
     openExternal: url => { traces.push(['open-external', url]); return controls.openExternal(url); },
   };
   const stubs = {
-    'core/EventBus': { appEvents: { emit: (...value) => events.push(value) } },
+    'core/EventBus': { appEvents },
     'core/ScreenAudioService': { screenAudioService },
     'core/VideoService': { videoService },
     'core/WebRtcManager': { webRtcManager },
@@ -360,6 +383,7 @@ function fixture(language = 'en') {
   };
   const allowed = new Set([
     'views/ScreenSharePickerModal', 'views/GameCaptureGuideModal', 'views/CopyToast', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',
+    'views/ScreenEncodingControls', 'core/screenEncoding',
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
     'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits',
   ]);
@@ -378,7 +402,7 @@ function fixture(language = 'en') {
       localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
       navigator: { language, languages: [language] },
       Element: ModelElement, HTMLElement: ModelElement, HTMLButtonElement: ModelElement, HTMLInputElement: ModelElement,
-      Event, DOMException, Error, AbortController: Controller, MutationObserver: Observer, ResizeObserver: Observer,
+      Event, DOMException, Error, crypto, AbortController: Controller, MutationObserver: Observer, ResizeObserver: Observer,
       CSS: { escape: value => value }, getComputedStyle: () => ({ rowGap: '8', opacity: '1', marginTop: '0', marginBottom: '0' }),
       requestAnimationFrame: callback => setImmediate(callback), cancelAnimationFrame: clearImmediate,
       setTimeout, clearTimeout, console: { warn: (...value) => warnings.push(value), error: (...value) => warnings.push(value) },

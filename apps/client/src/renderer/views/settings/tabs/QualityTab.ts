@@ -8,6 +8,8 @@ import {
 } from '../../../utils/qualityProfileLimits';
 import { showAlert } from '../../Dialog';
 import { showInfoToast } from '../../CopyToast';
+import { ScreenEncodingControls } from '../../ScreenEncodingControls';
+import { nativeScreenProfile } from '../../../core/webrtc/NativeScreenController';
 import {
   ASPECT_RATIO_GROUPS,
   AUDIO_BITRATE_OPTIONS,
@@ -25,11 +27,8 @@ export class QualityTab {
   private eventController: AbortController | null = null;
   private customProfileController: AbortController | null = null;
   private clearQualityToast: (() => void) | null = null;
-
-  private codecSelection(): string {
-    const codec = settingsStore.preferredVideoCodec;
-    return codec === 'auto' || codec === 'h264' || codec === 'av1' ? codec : '';
-  }
+  private readonly encoding = new ScreenEncodingControls(() => nativeScreenProfile(
+    settingsStore.qualityPreset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[settingsStore.qualityPreset]));
 
   private settingsError(error: unknown): void {
     console.warn('[QualityTab] Could not apply screen sharing settings:', error);
@@ -37,8 +36,8 @@ export class QualityTab {
   }
 
   public renderHtml(): string {
-    const unavailableCodec = settingsStore.preferredVideoCodec !== 'auto' && settingsStore.preferredVideoCodec !== 'h264';
     return `
+      ${ScreenEncodingControls.html()}
       <div data-settings-section="screen-receiver" data-settings-label="${escapeHtml(t('settings.screenReceiverSection'))}" class="form-group">
         <label>${t('settings.screenReceiverSection')}</label>
         <div class="input-mode-cards" role="group" aria-label="${escapeHtml(t('settings.screenReceiverSection'))}" aria-describedby="screen-receiver-warning screen-receiver-apply">
@@ -82,26 +81,6 @@ export class QualityTab {
           <span class="material-symbols-outlined" style="font-size: 14px; vertical-align: middle;">bolt</span>
           ${t('settings.qualityInstantApply')}
         </small>
-      </div>
-
-      <!-- Preferred Video Codec -->
-      <div data-settings-section="video-codec" data-settings-label="${escapeHtml(t('settings.videoCodecSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
-        <label style="display: flex; align-items: center; gap: 6px;" for="select-video-codec">
-          <span class="material-symbols-outlined md-16" style="color: var(--accent-primary);">movie</span>
-          ${t('settings.videoCodecSection')}
-          <span class="material-symbols-outlined md-16" style="color: var(--text-muted); cursor: help;" title="${t('settings.videoCodecHelp')}">help</span>
-        </label>
-        <select id="select-video-codec" aria-describedby="screen-codec-description screen-codec-preference-notice">
-          ${this.codecSelection() === '' ? `<option value="" disabled selected>${escapeHtml(t('settings.codecSelectAvailable'))}</option>` : ''}
-          <option value="auto" ${settingsStore.preferredVideoCodec === 'auto' ? 'selected' : ''}>${t('settings.codecAuto')}</option>
-          <option value="h264" ${settingsStore.preferredVideoCodec === 'h264' ? 'selected' : ''}>${t('settings.codecH264')}</option>
-          <option value="av1" disabled ${settingsStore.preferredVideoCodec === 'av1' ? 'selected' : ''}>${t('settings.codecAv1')} · ${t('screenShare.comingSoon')}</option>
-        </select>
-        <small id="screen-codec-description" style="display: block; margin-top: 6px; color: var(--text-muted); font-size: 11px;">
-          ${t('settings.videoCodecDesc')}
-        </small>
-        <p id="screen-codec-preference-notice" role="status" ${unavailableCodec ? '' : 'hidden'}>${unavailableCodec
-          ? escapeHtml(t('settings.codecPreferenceUnavailable', { codec: settingsStore.preferredVideoCodec.toUpperCase() })) : ''}</p>
       </div>
 
       <div data-settings-section="screen-preview" data-settings-label="${escapeHtml(t('settings.screenPreviewSection'))}" class="form-group" style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-top: 14px;">
@@ -312,6 +291,7 @@ export class QualityTab {
   public attachEvents(container: HTMLElement): void {
     this.cleanup();
     this.eventController = new AbortController();
+    this.encoding.attach(container);
     const options = { signal: this.eventController.signal };
     const nativeReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-native');
     const chromiumReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-chromium');
@@ -373,6 +353,7 @@ export class QualityTab {
       settingsStore.qualityPreset = val;
       settingsStore.save();
       webRtcManager.setQualityPreset(val);
+      void this.encoding.refresh();
       this.customProfileController?.abort();
       this.customProfileController = null;
       this.clearQualityToast?.();
@@ -383,28 +364,6 @@ export class QualityTab {
           this.attachCustomProfileListeners(container);
         }
       }
-    }, options);
-
-    const selectCodec = container.querySelector<HTMLSelectElement>('#select-video-codec');
-    selectCodec?.addEventListener('change', () => {
-      const val = (['auto', 'h264'] as const).find(choice => choice === selectCodec.value);
-      if (!val) {
-        console.warn('[QualityTab] Invalid video codec:', selectCodec.value);
-        selectCodec.value = this.codecSelection();
-        this.settingsError(new Error(t('screenShare.codecsSoon')));
-        return;
-      }
-      const profile = settingsStore.qualityPreset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[settingsStore.qualityPreset];
-      try { webRtcManager.assertScreenSharingSettings(profile, val); }
-      catch (error) { selectCodec.value = this.codecSelection(); this.settingsError(error); return; }
-      settingsStore.preferredVideoCodec = val;
-      settingsStore.save();
-      selectCodec.querySelector('option[value=""]')?.remove();
-      const notice = container.querySelector<HTMLElement>('#screen-codec-preference-notice');
-      if (notice) { notice.hidden = true; notice.textContent = ''; }
-      void webRtcManager.reapplyCodecPreferences().catch(error => {
-        if (!options.signal.aborted) this.settingsError(error);
-      });
     }, options);
 
     if (settingsStore.qualityPreset === 'CUSTOM') {
@@ -463,6 +422,7 @@ export class QualityTab {
       }
       settingsStore.save();
       webRtcManager.setQualityPreset('CUSTOM');
+      void this.encoding.refresh();
       previousProfile = { ...settingsStore.customProfile };
       syncInputs();
       notify(adjusted ? 'settings.qualityValueAdjusted' : null);
@@ -570,6 +530,7 @@ export class QualityTab {
   }
 
   public cleanup(): void {
+    this.encoding.cleanup();
     this.clearQualityToast?.();
     this.clearQualityToast = null;
     this.eventController?.abort();

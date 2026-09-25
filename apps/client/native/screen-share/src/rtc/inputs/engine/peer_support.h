@@ -38,7 +38,8 @@ Json SelectScreenSendCodec(const Json& capabilities, Accepts accepts) {
   for (const auto& codec : capabilities.at("codecs")) {
     if (!codec.contains("mimeType") || !codec.at("mimeType").is_string()) continue;
     const auto mime = codec.at("mimeType").get<std::string>();
-    if (mime != "video/H264" && mime != "video/h264") continue;
+    const bool av1 = mime == "video/AV1" || mime == "video/av1";
+    if (!av1 && mime != "video/H264" && mime != "video/h264") continue;
     webrtc::CodecParameterMap parameters;
     if (codec.contains("parameters")) {
       for (const auto& [key, value] : codec.at("parameters").items()) {
@@ -47,7 +48,7 @@ Json SelectScreenSendCodec(const Json& capabilities, Accepts accepts) {
         else throw Error("ERR_RTC_ENCODED_FORMAT", "Invalid H264 router codec parameter", MONKY_ENGINE_INVALID);
       }
     }
-    if (accepts(webrtc::SdpVideoFormat("H264", parameters))) return codec;
+    if (accepts(webrtc::SdpVideoFormat(av1 ? "AV1" : "H264", parameters))) return codec;
   }
   throw Error("ERR_RTC_ENCODED_FORMAT",
       "The SFU router cannot receive this screen's actual H264 Main profile and required level",

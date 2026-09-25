@@ -9,7 +9,7 @@ const {
   nativeScreenRenditionSchema, nativeScreenEndpointDiagnosticsSchema, screenShareProfileKey,
 } = require('@monky/shared');
 const { CaptureBridge } = require('./captureBridge.cjs');
-const { cloneSource, validateEncoder } = require('./captureProtocol.cjs');
+const { cloneSource, validateEncoder, ENCODERS } = require('./captureProtocol.cjs');
 const { LiveSenderFlow } = require('./encodedSender.cjs');
 const { NativeRtcCommands, assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 const { NativeP2pBroker } = require('./nativeP2pBroker.cjs');
@@ -41,7 +41,7 @@ class NativeScreenEndpoint {
       assert.ok(!value.includes('\0') && Buffer.byteLength(value) <= 128);
     }
     const source = nativeScreenSourceSchema.parse(options.source);
-    const profile = getScreenShareProfile(source.video, options.quality);
+    const profile = getScreenShareProfile(source.video, options.quality, source.codec);
     const rendition = nativeScreenRenditionSchema.parse({ sourceInstanceId: source.instanceId, pipelineId, video: profile });
     assert.equal(role === 'publish', sessionId === publisherSessionId);
     const audio = options.audio ?? null;
@@ -64,6 +64,9 @@ class NativeScreenEndpoint {
     if (role === 'publish') {
       cloneSource(target);
       validateEncoder(options.captureEncoder ?? 'auto');
+      assert.equal(!options.captureEncoder || options.captureEncoder === 'auto' ? 'h264' :
+        ENCODERS[options.captureEncoder].codec, source.codec ?? 'h264',
+        'The selected capture encoder must match the announced screen codec.');
       if (options.preserveAspectRatio !== undefined) assert.equal(typeof options.preserveAspectRatio, 'boolean');
       assert.ok(path.isAbsolute(captureDirectory));
     } else assert.ok(destination && typeof destination.frame?.isDestroyed === 'function');
@@ -74,7 +77,7 @@ class NativeScreenEndpoint {
     this.audioVolume = audio?.volume ?? 1;
     this.target = target ? cloneSource(target) : null;
     this.captureEncoder = options.captureEncoder ?? 'auto';
-    this.preserveAspectRatio = options.preserveAspectRatio ?? false;
+    this.preserveAspectRatio = options.preserveAspectRatio ?? true;
     this.isSourcePaused = options.isSourcePaused ?? (() => false);
     this.assertSourceCurrent = options.assertSourceCurrent ?? (() => {});
     this.onPreview = options.onPreview ?? null;
@@ -101,7 +104,7 @@ class NativeScreenEndpoint {
       maxResources: 64, maxDecodedFrames: 16,
       maximumH264Level: role === 'publish' ? Number.parseInt(getScreenH264ProfileLevelId(profile).slice(-2), 16) : 60,
       requireAudio: source.audio,
-      videoInput: role === 'publish' ? 'encoded-h264' : 'nv12',
+      videoInput: role === 'publish' ? (source.codec === 'av1' ? 'encoded-av1' : 'encoded-h264') : 'nv12',
     }, event => {
       if (!this.transport) { this.early.push(event); return; }
       this.track(this.dispatch(event));

@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import {
   getScreenShareProfile, getScreenShareQualities, getScreenH264ProfileLevelId, nativeScreenP2pControlSchema,
   nativeScreenSignalSchema, nativeScreenSourcesSchema, nativeScreenVideoProfileSchema,
+  nativeScreenCommandSchema, nativeScreenPreviewPacketSchema,
+  getScreenAv1MinimumLevelIndex,
 } from '../src/index.js';
 
 const video = { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 };
@@ -34,6 +36,24 @@ test('4K120 and 80 Mbps are explicit ceilings with honest per-rendition H264 lev
     assert.equal(nativeScreenVideoProfileSchema.safeParse({ ...maximum, ...invalid }).success, false);
 });
 
+test('AV1 Main-tier level bounds account for dimensions, display rate and bitrate independently of H264', () => {
+  const cases = [
+    [852, 480, 30, 1500, 4],
+    [1280, 720, 30, 6000, 5],
+    [1280, 720, 60, 6000, 8],
+    [1920, 1080, 30, 12000, 8],
+    [1920, 1080, 60, 20000, 9],
+    [1920, 1080, 120, 20000, 12],
+    [3840, 2160, 30, 30000, 12],
+    [3840, 2160, 60, 40000, 13],
+    [3840, 2160, 120, 60000, 14],
+    [3840, 2160, 120, 80000, 17],
+    [852, 480, 30, 20000, 9],
+  ];
+  for (const [width, height, fps, maxBitrateKbps, level] of cases)
+    assert.equal(getScreenAv1MinimumLevelIndex({ width, height, fps, maxBitrateKbps }), level);
+});
+
 test('quality changes actual encoder dimensions, cadence and bitrate, never upscales a source', () => {
   assert.deepEqual(getScreenShareProfile(video, 'source'), video);
   assert.deepEqual(getScreenShareQualities(video).map(value => value.profile), [
@@ -53,11 +73,72 @@ test('quality changes actual encoder dimensions, cadence and bitrate, never upsc
 test('source descriptors are bounded and cannot alias two source instances', () => {
   const source = { shareId: 'screen-one', instanceId, video, audio: false };
   assert.deepEqual(nativeScreenSourcesSchema.parse([source]), [source]);
+  for (const codec of ['h264', 'av1']) {
+    assert.equal(nativeScreenSourcesSchema.parse([{ ...source, codec }])[0].codec, codec);
+  }
+  assert.equal(nativeScreenSourcesSchema.safeParse([{ ...source, codec: 'vp9' }]).success, false);
   for (const sources of [
     [source, source], [source, { ...source, shareId: 'other' }],
     [{ ...source, windowHandle: 1 }], [{ ...source, audio: 'true' }],
     [{ ...source, instanceId: 'old-call' }],
   ]) assert.equal(nativeScreenSourcesSchema.safeParse(sources).success, false);
+});
+
+test('AV1 widths align before encoding and announcements while H264 retains four-pixel alignment', () => {
+  const narrow = { width: 852, height: 480, fps: 30, maxBitrateKbps: 1500 };
+  assert.deepEqual(getScreenShareProfile(narrow, 'source'), narrow);
+  assert.deepEqual(getScreenShareProfile(narrow, 'source', 'h264'), narrow);
+  assert.deepEqual(getScreenShareProfile(narrow, 'source', 'av1'), { ...narrow, width: 848 });
+  assert.deepEqual(getScreenShareProfile(video, '480p30', 'av1'), { ...narrow, width: 848 });
+  assert.deepEqual(getScreenShareQualities(video, 'av1').map(({ profile }) => profile.width), [1920, 1920, 1280, 848]);
+  assert.deepEqual(getScreenShareQualities(narrow, 'av1'), [{ quality: 'source', profile: { ...narrow, width: 848 } }]);
+  for (const width of [4, 8, 12, 16, 20, 852, 856, 1916, 1920, 3840]) {
+    const profile = getScreenShareProfile({ ...video, width }, 'source', 'av1');
+    assert.equal(profile.width, Math.max(8, Math.floor(width / 8) * 8));
+    assert.deepEqual(getScreenShareProfile(profile, 'source', 'av1'), profile);
+    assert.ok(Object.isFrozen(profile));
+  }
+});
+
+test('encoder IPC accepts bounded explicit choices, never arbitrary encoder IDs or capture during a probe', () => {
+  const probe = { action: 'probe-encoding', probeId: instanceId, video, encodingMode: 'hardware', codec: 'auto' };
+  for (const encodingMode of ['hardware', 'software'])
+    for (const codec of ['auto', 'h264', 'av1'])
+      assert.equal(nativeScreenCommandSchema.safeParse({ ...probe, encodingMode, codec }).success, true);
+  for (const change of [{ encodingMode: 'browser' }, { codec: 'vp9' }, { encoder: 'custom-path' },
+    { desktopSourceId: 'window:123:0' }, { video: { ...video, width: 999999 } }, { probeId: 'anything' }])
+    assert.equal(nativeScreenCommandSchema.safeParse({ ...probe, ...change }).success, false);
+  const source = { action: 'source-add', callId: instanceId, shareId: 'screen', desktopSourceId: 'window:123:0',
+    video, audio: false, audioBitrateKbps: 128, encodingMode: 'software', codec: 'av1' };
+  assert.equal(nativeScreenCommandSchema.safeParse(source).success, true);
+  for (const preserveAspectRatio of [undefined, true, false]) {
+    const command = nativeScreenCommandSchema.parse({ ...source, preserveAspectRatio });
+    assert.equal(command.action, 'source-add');
+    if (command.action === 'source-add') assert.equal(command.preserveAspectRatio, preserveAspectRatio ?? true);
+  }
+  for (const preserveAspectRatio of [null, 0, 'false', {}])
+    assert.equal(nativeScreenCommandSchema.safeParse({ ...source, preserveAspectRatio }).success, false);
+  assert.equal(nativeScreenCommandSchema.safeParse({ ...source, encoder: 'obs_x264' }).success, false);
+  assert.equal(nativeScreenCommandSchema.safeParse({ action: 'cancel-encoding-probe', probeId: instanceId }).success, true);
+  for (const encodingMode of ['hardware', 'software'])
+    for (const codec of ['h264', 'av1']) {
+      assert.equal(nativeScreenCommandSchema.safeParse({ ...probe, encodingStrategy: 'manual', encodingMode, codec }).success, true);
+      assert.equal(nativeScreenCommandSchema.safeParse({ ...source, encodingStrategy: 'manual', encodingMode, codec }).success, true);
+    }
+  for (const command of [probe, source]) {
+    assert.equal(nativeScreenCommandSchema.safeParse({ ...command, encodingStrategy: 'manual', codec: 'auto' }).success, false);
+    assert.equal(nativeScreenCommandSchema.safeParse({ ...command, encodingStrategy: 'manual', codec: undefined }).success, false);
+    assert.equal(nativeScreenCommandSchema.safeParse({ ...command, encodingStrategy: 'manual', encodingMode: undefined }).success, false);
+    assert.equal(nativeScreenCommandSchema.safeParse({ ...command, encodingStrategy: 'invalid' }).success, false);
+  }
+});
+
+test('preview packet codec remains independent of geometry and missing codec retains legacy H264 metadata', () => {
+  const packet = { type: 'packet', sequence: 1, pipelineId: instanceId, video,
+    timestampUs: 1, keyframe: true, data: new Uint8Array([1]) };
+  assert.equal(nativeScreenPreviewPacketSchema.parse(packet).codec, undefined);
+  assert.equal(nativeScreenPreviewPacketSchema.parse({ ...packet, codec: 'av1' }).codec, 'av1');
+  assert.equal(nativeScreenPreviewPacketSchema.safeParse({ ...packet, codec: 'vp8' }).success, false);
 });
 
 test('native P2P validates both video-only and explicit A/V control, including UTF-8 limits', () => {

@@ -53,21 +53,55 @@ async function runQualitySettingsSmoke() {
     screenShareTelemetryPosition: settingsStore.screenShareTelemetryPosition,
     screenShareTelemetryMode: settingsStore.screenShareTelemetryMode,
     preferredVideoCodec: settingsStore.preferredVideoCodec,
+    preferredScreenCodec: settingsStore.preferredScreenCodec,
+    screenEncodingMode: settingsStore.screenEncodingMode,
+    screenEncodingStrategy: settingsStore.screenEncodingStrategy,
     screenSharePreviewPauseWhenUnfocused: settingsStore.screenSharePreviewPauseWhenUnfocused,
     screenShareReceiver: settingsStore.screenShareReceiver,
   };
   let modal;
+  check(settingsStore.screenEncodingMode === 'hardware', 'A fresh settings profile must default to Hardware encoding.');
+  check(settingsStore.screenEncodingStrategy === 'automatic', 'A fresh settings profile must default to Automatic selection.');
+  const encodingRequests = [];
+  let hardwareAvailable = true;
+  const encodingCommand = async command => {
+    if (command.action === 'cancel-encoding-probe') return { kind: 'ok' };
+    check(command.action === 'probe-encoding' && !('desktopSourceId' in command),
+      'Encoding controls may only request source-free capability discovery, never source preparation or capture.');
+    encodingRequests.push(command);
+    const automatic = command.encodingStrategy === 'automatic';
+    const mode = automatic ? hardwareAvailable ? 'hardware' : 'software' : command.encodingMode;
+    const codec = automatic ? mode === 'hardware' ? 'av1' : 'h264' : command.codec;
+    const unavailable = !automatic && mode === 'hardware' && !hardwareAvailable;
+    return { kind: 'encoding', availability: {
+      selection: unavailable ? null : { mode, codec, encoder: mode === 'hardware'
+        ? codec === 'av1' ? 'av1_texture_amf' : 'h264_texture_amf'
+        : codec === 'av1' ? 'monky_aom_av1' : 'obs_x264' },
+      hardware: { available: hardwareAvailable, reason: hardwareAvailable ? null : 'Fixture encoder unsupported for this profile.' },
+      fallback: automatic && mode === 'software',
+      ...(unavailable ? { reason: 'Fixture encoder unsupported for this profile.' } : {}),
+    } };
+  };
   const disposeTooltips = initTooltips();
   try {
     for (const [locale, platform] of [['pt-BR', 'win32'], ['en', 'win32'], ['pt-BR', 'darwin'], ['en', 'darwin']]) {
-      window.api = { ...originalApi, platform };
+      hardwareAvailable = true;
+      let completeInitialProbe;
+      const initialProbe = new Promise(resolve => { completeInitialProbe = resolve; });
+      window.api = { ...originalApi, platform, nativeScreenCommand: async command => {
+        if (command.action === 'probe-encoding') await initialProbe;
+        return encodingCommand(command);
+      } };
       language.setLanguage(locale);
       settingsStore.qualityPreset = 'CUSTOM';
       settingsStore.screenShareTelemetryEnabled = false;
       settingsStore.screenShareTelemetryPosition = 'top-right';
       settingsStore.screenShareTelemetryMode = 'simple';
       settingsStore.screenSharePreviewPauseWhenUnfocused = true;
-      settingsStore.preferredVideoCodec = 'auto';
+      settingsStore.preferredVideoCodec = 'vp9';
+      settingsStore.preferredScreenCodec = 'h264';
+      settingsStore.screenEncodingMode = 'hardware';
+      settingsStore.screenEncodingStrategy = 'automatic';
       settingsStore.screenShareReceiver = settingsStore.nativeScreenReceiverComingSoon ? 'chromium' : 'native';
       modal = new SettingsModal();
       for (const tab of Object.values(modal)) {
@@ -118,13 +152,99 @@ async function runQualitySettingsSmoke() {
       check(qualityTab.scrollWidth <= qualityTab.clientWidth + 1,
         'The localized menu label must remain fully available in the sidebar at small viewports.');
       const av1 = quality.querySelector('#select-video-codec option[value="av1"]');
-      check(av1.disabled && av1.textContent.includes(language.t('screenShare.comingSoon')),
-        'AV1 must remain disabled and localized as coming soon.');
-      check([...quality.querySelectorAll('#select-video-codec option')].map(option => option.value).join(',') === 'auto,h264,av1',
-        'Only Automatic, H.264 and the disabled AV1 entry belong in the screen codec chooser.');
-      for (const codec of ['auto', 'h264'])
+      check(!av1.disabled && av1.textContent === language.t('settings.codecAv1')
+        && !av1.textContent.includes(language.t('screenShare.comingSoon')),
+      'AV1 must be enabled and localized as an implemented screen codec.');
+      check([...quality.querySelectorAll('#select-video-codec option')].map(option => option.value).join(',') === 'h264,av1',
+        'Manual codec selection must offer exact H.264 and AV1 only.');
+      for (const codec of ['h264', 'av1'])
         check(!quality.querySelector(`#select-video-codec option[value="${codec}"]`).disabled,
-          'The libobs H.264 choices must remain enabled.');
+          'Both libobs modes must expose the implemented screen codec choices.');
+      const hardware = quality.querySelector('#screen-encoding-hardware');
+      const software = quality.querySelector('#screen-encoding-software');
+      const automatic = quality.querySelector('#screen-encoding-automatic');
+      const manual = quality.querySelector('#screen-encoding-manual');
+      const screenCodec = quality.querySelector('#select-video-codec');
+      const encodingStatus = quality.querySelector('#screen-encoding-status');
+      check(automatic.getAttribute('aria-pressed') === 'true' && manual.getAttribute('aria-pressed') === 'false'
+        && quality.querySelectorAll('[data-settings-section="screen-encoding"]').length === 1
+        && quality.querySelectorAll('#select-video-codec').length === 1
+        && screenCodec.closest('[data-settings-section="screen-encoding"]') === automatic.closest('[data-settings-section="screen-encoding"]'),
+      'Automatic/Manual, encoding and codec must be grouped exactly once.');
+      const helperStyle = getComputedStyle(quality.querySelector('#screen-receiver-apply'));
+      const standardHelperStyle = { fontSize: helperStyle.fontSize, color: helperStyle.color, marginTop: helperStyle.marginTop };
+      for (const selector of ['#screen-codec-description', '#screen-encoding-status', '#screen-encoding-apply']) {
+        const helper = quality.querySelector(selector);
+        const style = getComputedStyle(helper);
+        check(helper.classList.contains('audio-device-status')
+          && style.fontSize === helperStyle.fontSize && style.color === helperStyle.color
+          && style.marginTop === helperStyle.marginTop && style.overflowWrap === helperStyle.overflowWrap,
+        'Encoding status and help must use the same muted helper typography and spacing as receiver settings.');
+      }
+      check(hardware instanceof HTMLButtonElement && software instanceof HTMLButtonElement
+        && hardware.classList.contains('input-mode-card') && software.classList.contains('input-mode-card')
+        && hardware.getAttribute('aria-pressed') === 'false' && software.getAttribute('aria-pressed') === 'false',
+      'Automatic must not claim an encoding selection before discovery finishes.');
+      check(hardware.textContent.includes(language.t('settings.screenEncodingHardware'))
+        && hardware.textContent.includes(locale === 'pt-BR' ? 'Recomendado' : 'Recommended'),
+      'Hardware must visibly retain its localized recommended label.');
+      check(hardware.disabled && software.disabled && screenCodec.disabled && screenCodec.value === ''
+        && encodingStatus.getAttribute('aria-busy') === 'true' && !manual.disabled,
+        'Mode controls must expose source-free discovery loading rather than claim unverified availability.');
+      completeInitialProbe();
+      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/encoder discovery`);
+      check(hardware.disabled && software.disabled && screenCodec.disabled && screenCodec.value === 'av1'
+        && hardware.getAttribute('aria-pressed') === 'true' && settingsStore.preferredScreenCodec === 'h264',
+      'Automatic fields must be read-only and show resolved Hardware/AV1 without overwriting manual choices.');
+      check(encodingStatus.textContent === language.t('settings.screenEncodingReady', { codec: 'AV1' }),
+        'Available encoding must show the concise localized status.');
+      automatic.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      await settled(() => !hardware.disabled && !software.disabled && !screenCodec.disabled, `${locale}/manual selection`);
+      check(settingsStore.screenEncodingStrategy === 'manual' && screenCodec.value === 'h264',
+        'Manual restores the saved exact choices and unlocks the encoding and codec controls.');
+      hardwareAvailable = false;
+      screenCodec.value = 'av1';
+      screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
+      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/manual unavailable combination`);
+      check(hardware.disabled && hardware.getAttribute('aria-pressed') === 'true'
+        && software.getAttribute('aria-pressed') === 'false' && screenCodec.value === 'av1'
+        && settingsStore.screenEncodingMode === 'hardware' && settingsStore.screenEncodingStrategy === 'manual'
+        && encodingStatus.textContent.includes('Fixture encoder unsupported for this profile.'),
+      'An unavailable Manual Hardware/AV1 combination must stay exact and show its reason without Software substitution.');
+      hardwareAvailable = true;
+      screenCodec.value = 'h264';
+      screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
+      await settled(() => !hardware.disabled, `${locale}/manual supported combination`);
+      hardware.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      await settled(() => !software.disabled && software.getAttribute('aria-pressed') === 'true', `${locale}/software encoding`);
+      settingsStore.load(false);
+      check(settingsStore.screenEncodingMode === 'software' && settingsStore.screenEncodingStrategy === 'manual'
+        && hardware.getAttribute('aria-pressed') === 'false'
+        && JSON.parse(localStorage.getItem('monky_settings')).screenEncodingMode === 'software',
+      'Explicit Software selection must persist despite available hardware.');
+      hardwareAvailable = false;
+      screenCodec.value = 'av1';
+      screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
+      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/unsupported hardware`);
+      check(hardware.disabled && hardware.isConnected && getComputedStyle(hardware).display !== 'none'
+        && encodingStatus.textContent.includes('Fixture encoder unsupported for this profile.')
+        && software.getAttribute('aria-pressed') === 'true',
+      'Unavailable Hardware must remain visible with its reason while explicit Software stays selected.');
+      automatic.click();
+      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/automatic fallback`);
+      settingsStore.load(false);
+      check(settingsStore.screenEncodingStrategy === 'automatic' && settingsStore.screenEncodingMode === 'software'
+        && settingsStore.preferredScreenCodec === 'av1' && screenCodec.value === 'h264'
+        && hardware.disabled && software.disabled && screenCodec.disabled,
+      'Automatic fallback must show Software/H.264 without persisting its resolved choices or switching to Manual.');
+      manual.click();
+      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/manual restore`);
+      check(screenCodec.value === 'av1' && !screenCodec.disabled && software.getAttribute('aria-pressed') === 'true',
+        'Returning to Manual must restore the exact previous Software/AV1 choice.');
+      screenCodec.value = 'h264';
+      screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
+      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/manual H264`);
+      hardwareAvailable = true;
       check(quality.querySelectorAll('#checkbox-screen-telemetry').length === 1 &&
         !voice.querySelector('#checkbox-screen-telemetry, #select-screen-telemetry-position, #select-screen-telemetry-mode'),
       'Telemetry controls must exist once, only under Quality.');
@@ -256,20 +376,17 @@ async function runQualitySettingsSmoke() {
       });
       try {
         const codec = quality.querySelector('#select-video-codec'), previousCodec = settingsStore.preferredVideoCodec;
-        const previousSettings = localStorage.getItem('monky_settings');
-        const dismiss = async key => {
-          await settled(() => document.querySelector('.dialog-card'), `${locale}/native settings error`);
-          const dialog = document.querySelector('.dialog-card');
-          check(dialog.querySelector('.dialog-message').textContent === language.t(key), 'Native setting errors must use the selected language.');
-          dialog.querySelector('[data-action="confirm"]').click();
-          await settled(() => !document.querySelector('.dialog-card'), `${locale}/native error dismissal`);
-        };
+        const activeSource = videoService.getNativeScreenCapture(metadataOnly.id).source;
         codec.value = 'av1';
         codec.dispatchEvent(new Event('change', { bubbles: true }));
-        check(settingsStore.preferredVideoCodec === previousCodec && codec.value === previousCodec,
-          'An incompatible native codec change must restore the selection before persistence.');
-        check(localStorage.getItem('monky_settings') === previousSettings, 'Rejected native settings must not be saved.');
-        await dismiss('screenShare.codecsSoon');
+        await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/software AV1 preference`);
+        settingsStore.load(false);
+        check(settingsStore.preferredScreenCodec === 'av1' && codec.value === 'av1'
+          && settingsStore.preferredVideoCodec === previousCodec && settingsStore.screenEncodingMode === 'software',
+        'Software AV1 must persist independently of the existing camera codec preference.');
+        check(videoService.getNativeScreenCapture(metadataOnly.id).source === activeSource
+          && !document.querySelector('.dialog-card'),
+        'A supported next-share codec preference must not replace active source metadata or report coming soon.');
         const frameRate = quality.querySelector('#custom-screenFps');
         frameRate.value = '144';
         frameRate.dispatchEvent(new Event('change', { bubbles: true }));
@@ -334,6 +451,7 @@ async function runQualitySettingsSmoke() {
       check(!document.querySelector('.chat-copy-toast'), 'Closing quality settings must retire its toast and timer.');
       const storedAfterClose = localStorage.getItem('monky_settings');
       chromiumReceiver.click();
+      hardware.click();
       check(localStorage.getItem('monky_settings') === storedAfterClose,
         'Closing settings must remove detached receiver card listeners.');
       preview.checked = true;
@@ -349,6 +467,10 @@ async function runQualitySettingsSmoke() {
       'Reopening settings must restore the same telemetry choices in Quality.');
       check(reopened.querySelector('#checkbox-screen-preview-focus').checked === false,
         'Reopening settings must restore the preview focus preference.');
+      check(reopened.querySelector('#screen-encoding-software').getAttribute('aria-pressed') === 'true'
+        && reopened.querySelector('#screen-encoding-hardware').getAttribute('aria-pressed') === 'false'
+        && reopened.querySelector('#select-video-codec').value === 'av1',
+      'Reopening settings must retain explicit Software and AV1 rather than reselect recommended Hardware.');
       modal.close();
 
       const previousApi = window.api;
@@ -372,15 +494,23 @@ async function runQualitySettingsSmoke() {
         requiresSelectionProbe: true, captureKinds: ['window', 'monitor', 'game'] };
       window.api = {
         platform: 'win32',
-        nativeScreenCommand: async () => { nativeCommands++; throw new Error('Picker UI must not probe or capture native media.'); },
+        nativeScreenCommand: async command => {
+          if (command.action === 'probe-encoding' || command.action === 'cancel-encoding-probe') return encodingCommand(command);
+          nativeCommands++;
+          throw new Error('Picker UI must not prepare a source or capture native media.');
+        },
         prepareScreenShareWindow: async () => { nativeCommands++; throw new Error('Choosing a method must not prepare its window.'); },
         getDesktopSources: async () => { enumerations++; return enumerateSources(); },
         openExternal: async url => { sourceOpens.push(url); return { success: sourceOpenSuccess }; },
       };
       webRtcManager.getNativeScreenCapabilities = async () => capabilities;
       try {
+        const previousEncodingRequests = encodingRequests.length;
         await picker.open();
         const pickerRoot = document.querySelector('.screen-share-picker-card');
+        check(encodingRequests.length === previousEncodingRequests && nativeCommands === 0
+          && !pickerRoot.querySelector('[data-settings-section="screen-encoding"], #select-video-codec'),
+        'The picker does not duplicate encoding settings or probe encoders before source admission.');
         const info = pickerRoot.querySelector('#share-capture-info');
         const tabs = [...pickerRoot.querySelectorAll('[role="tab"]')];
         check(tabs.length === 2 && !pickerRoot.querySelector('#share-tab-game') && tabs.every(tab => !tab.disabled &&
@@ -389,7 +519,7 @@ async function runQualitySettingsSmoke() {
         'Explicit selection support must show two source types, never a duplicate Games list.');
         check(info.dataset.backend === 'probe-pending' && nativeCommands === 0 &&
           info.hidden && !info.textContent && getComputedStyle(info).display === 'none' && info.getBoundingClientRect().height === 0,
-        'Internal verification stays pending without probing, a provisional banner or an empty layout placeholder.');
+        'Source verification stays pending without capturing, a provisional banner or an empty layout placeholder.');
         check(pickerRoot.querySelector('#share-window-methods').hidden,
           'Window capture methods must wait for an explicitly selected window.');
         const refresh = pickerRoot.querySelector('#btn-refresh-sources');
@@ -399,16 +529,35 @@ async function runQualitySettingsSmoke() {
           refresh.getAttribute('aria-label') === language.t('screenShare.refreshSourcesLabel') &&
           refresh.textContent.includes(language.t('screenShare.refreshSources')),
         'Refresh must be an accessible native button with localized text and an explicit controlled panel.');
-        check(aspect instanceof HTMLInputElement && !aspect.checked && aspect.getAttribute('role') === 'switch' &&
+        check(aspect instanceof HTMLInputElement && aspect.checked && aspect.getAttribute('role') === 'switch' &&
           aspect.closest('.toggle-switch') && aspect.getAttribute('aria-labelledby') === 'share-aspect-label' &&
           aspect.getAttribute('aria-describedby') === 'share-aspect-description' &&
           pickerRoot.querySelector('#share-aspect-label').textContent === language.t('screenShare.preserveAspectRatio'),
-        'Each new picker starts with a localized, described aspect-ratio switch off, not a standalone checkbox.');
+        'Each new picker starts with a localized, described aspect-ratio switch on, not a standalone checkbox.');
+        const aspectLabel = pickerRoot.querySelector('#share-aspect-label');
+        const aspectHelp = pickerRoot.querySelector('#share-aspect-description');
+        const aspectSwitch = aspect.closest('.toggle-switch');
+        const audioSwitch = pickerRoot.querySelector('#chk-share-audio').closest('.toggle-switch');
+        const labelStyle = getComputedStyle(aspectLabel), helpStyle = getComputedStyle(aspectHelp);
+        const audioLabelStyle = getComputedStyle(pickerRoot.querySelector('#share-audio-text'));
+        check(labelStyle.fontSize === audioLabelStyle.fontSize && labelStyle.color === audioLabelStyle.color
+          && aspectSwitch.parentElement === aspectLabel.parentElement
+          && aspectSwitch.getBoundingClientRect().width === audioSwitch.getBoundingClientRect().width
+          && aspectSwitch.getBoundingClientRect().height === audioSwitch.getBoundingClientRect().height
+          && getComputedStyle(aspectSwitch.parentElement).gap === '12px',
+        'Aspect ratio must use the same compact label typography and standard switch as picker audio, beside its label.');
+        check(aspectHelp.classList.contains('audio-device-status')
+          && helpStyle.fontSize === standardHelperStyle.fontSize && helpStyle.color === standardHelperStyle.color
+          && helpStyle.marginTop === standardHelperStyle.marginTop
+          && aspectHelp.textContent === language.t('screenShare.preserveAspectRatioDescription')
+          && aspectHelp.scrollWidth <= aspectHelp.clientWidth + 1
+          && aspectHelp.parentElement.getBoundingClientRect().height <= 100,
+        'The complete ON/OFF explanation must use standard muted helper spacing and stay compact without horizontal overflow.');
         aspect.focus();
         check(document.activeElement === aspect && aspect.tabIndex === 0,
           'The aspect-ratio switch must be reachable by keyboard.');
         aspect.click();
-        check(aspect.checked, 'The existing switch component must toggle its native checked state.');
+        check(!aspect.checked, 'The existing switch component must allow explicit OFF.');
         const choose = () => pickerRoot.querySelector('.source-item')
           .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
         choose();
@@ -436,12 +585,13 @@ async function runQualitySettingsSmoke() {
           !button.title && button.getAttribute('aria-describedby') === `${button.id}-description`),
         'Supported method cards keep their accessible descriptions without provisional badges or tooltips.');
         const enumerationsBeforeMethod = enumerations;
+        const encodingRequestsBeforeMethod = encodingRequests.length;
         windowMethod.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
         check(gameMethod.getAttribute('aria-pressed') === 'true' && windowMethod.getAttribute('aria-pressed') === 'false' &&
           document.activeElement === gameMethod && picker.selectedSourceId === windowId &&
           [...pickerRoot.querySelectorAll('.source-item')].every((card, index) => card === windowCards[index]) &&
-          enumerations === enumerationsBeforeMethod && nativeCommands === 0,
-        'Keyboard method changes must keep the same opaque window and DOM list, without enumeration or native work.');
+          enumerations === enumerationsBeforeMethod && nativeCommands === 0 && encodingRequests.length === encodingRequestsBeforeMethod,
+        'Keyboard method changes must keep the same opaque window and DOM list without enumeration, repeated encoding probes or capture.');
         check(!pickerRoot.querySelector('#share-game-tip').hidden &&
           pickerRoot.querySelector('#share-game-tip').textContent.includes(language.t('screenShare.gameCompatibility')) &&
           pickerRoot.querySelector('#share-game-tip').textContent.includes(language.t('screenShare.gameWindowAlternative')),
@@ -574,7 +724,8 @@ async function runQualitySettingsSmoke() {
         'Returning to Normal must keep the chosen window and its app-audio preference.');
         gameMethod.click();
         const savedQuality = JSON.stringify({ preset: settingsStore.qualityPreset, profile: settingsStore.customProfile,
-          codec: settingsStore.preferredVideoCodec });
+          codec: settingsStore.preferredScreenCodec, encodingMode: settingsStore.screenEncodingMode,
+          cameraCodec: settingsStore.preferredVideoCodec });
         let resolveRefresh;
         const pendingRefresh = new Promise(resolve => { resolveRefresh = resolve; });
         enumerateSources = () => pendingRefresh;
@@ -599,17 +750,18 @@ async function runQualitySettingsSmoke() {
           picker.activeTab === 'window' && picker.selectedSourceId === windowId &&
           picker.windowCaptureMethod === 'game' && gameMethod.getAttribute('aria-pressed') === 'true' &&
           pickerRoot.querySelector(`[data-source-id="${windowId}"]`).getAttribute('aria-pressed') === 'true' &&
-          aspect.checked && !audio.checked && nativeCommands === 0,
+          !aspect.checked && !audio.checked && nativeCommands === 0,
         'Refresh must add newly opened windows while retaining the exact source, method, audio and aspect-ratio choice.');
         check(JSON.stringify({ preset: settingsStore.qualityPreset, profile: settingsStore.customProfile,
-          codec: settingsStore.preferredVideoCodec }) === savedQuality,
+          codec: settingsStore.preferredScreenCodec, encodingMode: settingsStore.screenEncodingMode,
+          cameraCodec: settingsStore.preferredVideoCodec }) === savedQuality,
         'Refreshing a source list must never change media quality or codec preferences.');
         enumerateSources = async () => { throw new Error('Expected software-only refresh failure'); };
         refresh.click();
         aspect.focus();
         await settled(() => !!pickerRoot.querySelector('#share-sources-panel [role="alert"]'), `${locale}/refresh error`);
         check(!refresh.disabled && pickerRoot.querySelector('#btn-share').disabled &&
-          picker.selectedSourceId === windowId && picker.windowCaptureMethod === 'game' && aspect.checked && !audio.checked,
+          picker.selectedSourceId === windowId && picker.windowCaptureMethod === 'game' && !aspect.checked && !audio.checked,
         'An enumeration error must be visible and retryable, never confirm an unverified stale list or discard pending choices.');
         check(document.activeElement === aspect,
           'Refresh completion must not steal focus after the user moves to another available control.');
@@ -617,7 +769,7 @@ async function runQualitySettingsSmoke() {
         pickerRoot.querySelector('[data-loading-retry]').click();
         await settled(() => !refresh.disabled, `${locale}/refresh retry`);
         check(picker.selectedSourceId === windowId && picker.windowCaptureMethod === 'game' &&
-          !pickerRoot.querySelector('#btn-share').disabled && aspect.checked && !audio.checked,
+          !pickerRoot.querySelector('#btn-share').disabled && !aspect.checked && !audio.checked,
         'Retry must recover the same valid selection without reopening the picker.');
         check(!pickerRoot.querySelector('input[type="radio"]') &&
           [...pickerRoot.querySelectorAll('input[type="checkbox"]')].every(input => input.closest('.toggle-switch')),
@@ -638,7 +790,7 @@ async function runQualitySettingsSmoke() {
           monitors.every(source => source.name === 'Generic PnP Monitor'),
         'Thumbnail accessibility uses the localized monitor label without modifying raw Main metadata or inventing previews.');
         check(audio.checked && pickerRoot.querySelector('#share-window-methods').hidden &&
-          pickerRoot.querySelector('#share-audio-text').textContent === language.t('screenShare.shareAudio') && aspect.checked,
+          pickerRoot.querySelector('#share-audio-text').textContent === language.t('screenShare.shareAudio') && !aspect.checked,
         'Screens keep their separate system-audio choice and do not display window capture methods.');
         choose();
         check(picker.selectedSourceId === monitors[0].id && monitorCards[0].getAttribute('aria-pressed') === 'true' && nativeCommands === 0,
@@ -713,7 +865,7 @@ async function runQualitySettingsSmoke() {
         refresh.click();
         await settled(() => !refresh.disabled, `${locale}/removed source`);
         check(picker.selectedSourceId === null && pickerRoot.querySelector('#share-window-methods').hidden &&
-          !pickerRoot.querySelector(`[data-source-id="${windowId}"]`) && confirmation.disabled && !audio.checked && aspect.checked,
+          !pickerRoot.querySelector(`[data-source-id="${windowId}"]`) && confirmation.disabled && !audio.checked && !aspect.checked,
         'Refreshing away a closed window must clear selection/method controls without changing its audio preference.');
         picker.close();
         await picker.open();
@@ -723,8 +875,8 @@ async function runQualitySettingsSmoke() {
         refresh.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         check(picker.windowCaptureMethod === 'window' && document.querySelector('#share-method-window').getAttribute('aria-pressed') === 'true',
           'Detached method-card listeners must not mutate the next picker opening.');
-        check(!document.querySelector('#chk-preserve-aspect-ratio').checked && enumerations === reopenedEnumerations,
-          'A new sharing picker resets aspect ratio and detached refresh handlers cannot enumerate or mutate it.');
+        check(document.querySelector('#chk-preserve-aspect-ratio').checked && enumerations === reopenedEnumerations,
+          'A new sharing picker resets aspect ratio to ON and detached refresh handlers cannot enumerate or mutate it.');
         check(nativeCommands === 0 && capabilities.capture === false && capabilities.backend === null,
           'The picker must never manufacture hardware qualification while browsing sources.');
       } finally {

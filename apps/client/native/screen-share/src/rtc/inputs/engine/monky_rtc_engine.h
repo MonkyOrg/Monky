@@ -179,6 +179,10 @@ MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_create_encoded(
     const MonkyEngineOptions* options, const MonkyEngineCallbacks* callbacks,
     MonkyRtcEngine** engine, MonkyEngineError* error) MONKY_ENGINE_NOEXCEPT;
 
+MONKY_ENGINE_API MonkyEngineStatus __cdecl monky_rtc_engine_create_encoded_av1(
+    const MonkyEngineOptions* options, const MonkyEngineCallbacks* callbacks,
+    MonkyRtcEngine** engine, MonkyEngineError* error) MONKY_ENGINE_NOEXCEPT;
+
 // IDs are caller-selected nonzero safe JS integers. Do not reuse a request ID
 // before its completion event has been consumed.
 // OK acknowledges admission only. operation events report actual completion.

@@ -4,7 +4,7 @@ import {
   createNativeScreenPresentation, registerNativeAudioPortReceiver, type NativeScreenPresentationController,
 } from '@monky/screen-share';
 import * as nativeAudioProtocol from '@monky/shared';
-import { SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
+import { SOUNDBOARD_FILES_IPC, EDITOR_COMMAND_IPC, DESKTOP_SOURCES_IPC, type EditorCommand, type IpcInvokeChannels } from '@monky/shared';
 import { APP_SHUTDOWN_EVENT, APP_SHUTDOWN_IPC, type AppShutdownRequest, NATIVE_SCREEN_EVENT, NATIVE_SCREEN_IPC, nativeScreenEventSchema } from '@monky/shared';
 import { AUDIO_PREVIEW_IPC, CRASH_RECOVERY_IPC, DEVELOPMENT_QA_IPC, LOCAL_EXECUTION_CHANGED, LOCAL_EXECUTION_IPC, LOCAL_EXECUTION_TASK_FAILED, SERVER_INVITE_AVAILABLE, SERVER_INVITE_IPC, SHORTCUT_IPC, SOUND_DOWNLOAD_IPC, SOUND_DOWNLOAD_PROGRESS, UPDATER_IPC } from '@monky/shared';
 import type {
@@ -18,6 +18,9 @@ import type {
   ClientLogConfig,
   ClientLogEntry,
   DesktopSource,
+  DesktopSourcesOptions,
+  DesktopSourcePreview,
+  DesktopSourcePreviewsRequest,
   DevelopmentQaConfig,
   DevelopmentQaReport,
   DiscoveredLanServer,
@@ -118,7 +121,8 @@ export interface ElectronApi {
   onHostServerStatusChanged: (
     callback: (status: { isRunning: boolean; port: number | null; serverId: string | null }) => void
   ) => () => void;
-  getDesktopSources: () => Promise<DesktopSource[]>;
+  getDesktopSources: (options?: DesktopSourcesOptions) => Promise<DesktopSource[]>;
+  getDesktopSourcePreviews: (request: DesktopSourcePreviewsRequest) => Promise<DesktopSourcePreview[]>;
   prepareScreenShareWindow: (sourceId: string) => Promise<boolean>;
   ensureScreenPermission: () => Promise<boolean>;
   selectImageDialog: () => Promise<ImageSelectionResult | null>;
@@ -342,7 +346,8 @@ const api: ElectronApi = {
     ipcRenderer.on('server-host:status-changed', listener);
     return () => ipcRenderer.removeListener('server-host:status-changed', listener);
   },
-  getDesktopSources: () => ipcRenderer.invoke('screen-share:get-sources'),
+  getDesktopSources: (options) => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.list, options),
+  getDesktopSourcePreviews: (request) => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.previews, request),
   prepareScreenShareWindow: (sourceId: string) => ipcRenderer.invoke('screen-share:prepare-window', sourceId),
   ensureScreenPermission: (): Promise<boolean> => ipcRenderer.invoke('screen-share:ensure-permission'),
   selectImageDialog: () => ipcRenderer.invoke('dialog:select-image'),

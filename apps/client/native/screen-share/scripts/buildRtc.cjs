@@ -95,7 +95,7 @@ function build(config) {
       use_siso: false, use_remoteexec: false, clang_use_chrome_plugins: false,
       rtc_include_tests: false, rtc_build_examples: false, rtc_build_tools: false,
       rtc_enable_protobuf: false, rtc_use_h264: false, rtc_use_h265: false,
-      enable_libaom: false, enable_rust: false, enable_rust_cxx: false, enable_chromium_prelude: false,
+      enable_libaom: true, enable_rust: false, enable_rust_cxx: false, enable_chromium_prelude: false,
       compute_build_timestamp: `${rootTarget}/pinned_timestamp.py`,
       cc_wrapper: `"${python}" -I -S -B "${wrapper}" "${vfsPath}" ${overlayHash} --`,
     };
@@ -116,7 +116,7 @@ function build(config) {
         description.cflags_cc.some(flag => flag.includes('libc++')),
       `Native DLL compiler/CRT configuration drift: ${target}`);
     }
-    execute(ninja, ['-C', output, `-j${config.jobs}`, 'monky_screen_rtc', 'monky_rtc_engine_contract_probe', 'monky_msvc_job'],
+    execute(ninja, ['-C', output, `-j${config.jobs}`, 'monky_screen_rtc', 'monky_av1', 'monky_rtc_engine_contract_probe', 'monky_msvc_job'],
       { cwd: sdk, env });
     const contracts = JSON.parse(execute(path.join(output, 'monky_rtc_engine_contract_probe.exe'), [], { env, capture: true }));
     assert.ok(contracts.checks > 85000 && contracts.devicesOpened === false, 'Native device-free contract checks did not complete.');
@@ -161,7 +161,7 @@ function build(config) {
 
     const bin = path.join(root, 'bin', 'win32-x64');
     fs.mkdirSync(bin, { recursive: true });
-    const binaries = [dll, addon].map(filename => {
+    const binaries = [dll, addon, path.join(output, 'monky_av1.dll')].map(filename => {
       const bytes = fs.readFileSync(filename);
       write(path.join(bin, path.basename(filename)), bytes);
       return { name: path.basename(filename), bytes: bytes.length, sha256: digest(bytes) };

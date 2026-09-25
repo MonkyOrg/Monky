@@ -7985,22 +7985,17 @@ button[data-loading="1"]::after {
   flex-shrink: 0;
 }
 
-.share-aspect-option {
+.share-aspect-option > div:first-child {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
-}
-
-.share-aspect-option > div {
   min-width: 0;
 }
 
-.share-aspect-option small {
-  display: block;
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.5;
+#share-aspect-label {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
 }
 
 .share-source-tabs .tab-button {
@@ -8254,6 +8249,15 @@ button[data-loading="1"]::after {
   object-fit: cover;
   border-radius: var(--radius-sm);
   background-color: #000000;
+}
+
+.source-preview {
+  min-height: 110px;
+}
+
+.source-thumbnail--loading {
+  display: block;
+  background-color: var(--bg-active);
 }
 
 /* Janelas minimizadas (ex.: um jogo em tela cheia que minimizou no alt-tab) nao

@@ -65,6 +65,7 @@ struct Model {
   unsigned loads = 0, resolves = 0, releases = 0, creates = 0, opens = 0, destroys = 0;
   unsigned deviceToken = 0;
   bool sessionLive = false;
+  bool av1 = false;
   std::vector<NV_ENC_CAPS> queriedCaps;
   std::function<void(NV_ENCODE_API_FUNCTION_LIST&)> changeFunctions;
 
@@ -78,7 +79,8 @@ void Session(void* session) {
 }
 
 void H264(GUID codec) {
-  Check(std::memcmp(&codec, &NV_ENC_CODEC_H264_GUID, sizeof(GUID)) == 0, "query selected a different codec GUID");
+  const auto expected = active->av1 ? NV_ENC_CODEC_AV1_GUID : NV_ENC_CODEC_H264_GUID;
+  Check(std::memcmp(&codec, &expected, sizeof(GUID)) == 0, "query selected a different codec GUID");
 }
 
 NVENCSTATUS NVENCAPI Open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS* parameters, void** session) {
@@ -188,16 +190,17 @@ BOOL WINAPI Release(HMODULE library) {
 
 void Run(const char* name, const std::function<void(Model&)>& configure = {},
          const std::vector<std::string>& failureParts = {},
-         const std::function<void(const Model&)>& verify = {}) {
+         const std::function<void(const Model&)>& verify = {}, bool unsupported = false) {
   scenario = name;
   Model model;
   if (configure) configure(model);
   active = &model;
   bool failed = false;
-  try { ProbeNvencDevice(model.Device(), model.video, {&Load, &Resolve, &Release}); }
+  try { ProbeNvencDevice(model.Device(), model.video, {&Load, &Resolve, &Release}, model.av1); }
   catch (const ContractError& error) {
     failed = true;
-    Check(error.code == "ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE", "driver failure changed error category");
+    Check(error.code == (unsupported ? "ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED" : "ERR_SCREEN_CAPTURE_NVENC_UNAVAILABLE"),
+          "driver failures and proven unsupported capabilities must retain distinct categories");
     const std::string message = error.what();
     maximumDiagnosticBytes = (std::max)(maximumDiagnosticBytes, message.size());
     Check(!message.empty() && message.size() <= 1024, "error exceeds the protocol diagnostic bound");
@@ -232,13 +235,23 @@ int main() {
     Run("4K120 Level6 device admission", [](Model& model) { model.video = {3840, 2160, 120, 80000}; });
     Run("4K120 refuses Level5.2-only hardware", [](Model& model) {
       model.video = {3840, 2160, 120, 80000}; model.caps[3].value = 52;
-    }, {"NV_ENC_CAPS_LEVEL_MAX", "value=52", "required=60"});
+    }, {"NV_ENC_CAPS_LEVEL_MAX", "value=52", "required=60"}, {}, true);
     Run("1080p120 retains Level5.1 hardware admission", [](Model& model) { model.caps[3].value = 51; });
     Run("missing H264 is not a failed cap call", [](Model& model) { model.codecs.values.pop_back(); },
         {"nvEncGetEncodeGUIDs", "H264=0", "status=0"}, [](const Model& model) {
       Check(model.profiles.countCalls == 0 && model.formats.countCalls == 0 && model.queriedCaps.empty(),
             "queries continued without a confirmed H264 GUID");
+    }, true);
+    Run("AV1 uses its own codec and profile GUIDs", [](Model& model) {
+      model.av1 = true; model.profiles.values = {NV_ENC_AV1_PROFILE_MAIN_GUID};
+    }, {}, [](const Model& model) {
+      Check(model.queriedCaps.size() == 3 &&
+          std::find(model.queriedCaps.begin(), model.queriedCaps.end(), NV_ENC_CAPS_LEVEL_MAX) == model.queriedCaps.end(),
+          "AV1 must not apply H264 level-idc queries");
     });
+    Run("missing AV1 is explicitly unsupported", [](Model& model) {
+      model.av1 = true; model.codecs.values = {NV_ENC_CODEC_H264_GUID};
+    }, {"AV1=0"}, {}, true);
     Run("maximum bounded enumeration", [](Model& model) {
       model.codecs.values.assign(64, GUID{}); model.codecs.values.back() = NV_ENC_CODEC_H264_GUID;
       model.profiles.values.assign(64, GUID{}); model.profiles.values.back() = NV_ENC_H264_PROFILE_MAIN_GUID;
@@ -285,11 +298,11 @@ int main() {
       }, {listName, "status=0", "capacity=", "returned="});
     }
     Run("unreturned GUID is not support", [](Model& model) { model.codecs.returned = 2; },
-        {"nvEncGetEncodeGUIDs", "returned=2", "H264=0"});
+        {"nvEncGetEncodeGUIDs", "returned=2", "H264=0"}, {}, true);
     Run("missing Main profile", [](Model& model) { model.profiles.values.pop_back(); },
-        {"nvEncGetEncodeProfileGUIDs", "Main=0"});
+        {"nvEncGetEncodeProfileGUIDs", "Main=0"}, {}, true);
     Run("missing NV12 input", [](Model& model) { model.formats.values.pop_back(); },
-        {"nvEncGetInputFormats", "NV12=0"});
+        {"nvEncGetInputFormats", "NV12=0"}, {}, true);
     for (unsigned index = 0; index < 4; ++index) {
       const auto name = index == 0 ? "NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE" :
           index == 1 ? "NV_ENC_CAPS_WIDTH_MAX" : index == 2 ? "NV_ENC_CAPS_HEIGHT_MAX" : "NV_ENC_CAPS_LEVEL_MAX";
@@ -302,12 +315,12 @@ int main() {
       Run("successful capability without output", [&](Model& model) { model.caps[index].writeValue = false; },
           {name, "status=0", "value=-1"});
       Run("unsupported required capability", [&](Model& model) { model.caps[index].value = 0; },
-          {name, "status=0", "value=0"});
+          {name, "status=0", "value=0"}, {}, true);
     }
     Run("insufficient maximum width", [](Model& model) { model.caps[1].value = 1280; },
-        {"NV_ENC_CAPS_WIDTH_MAX", "value=1280", "required=1920"});
+        {"NV_ENC_CAPS_WIDTH_MAX", "value=1280", "required=1920"}, {}, true);
     Run("insufficient maximum height", [](Model& model) { model.caps[2].value = 720; },
-        {"NV_ENC_CAPS_HEIGHT_MAX", "value=720", "required=1080"});
+        {"NV_ENC_CAPS_HEIGHT_MAX", "value=720", "required=1080"}, {}, true);
     Run("unknown driver status remains a numeric failure", [](Model& model) {
       model.caps[0].status = static_cast<NVENCSTATUS>(31);
     }, {"nvEncGetEncodeCaps", "status=31", "unknown NVENCSTATUS", "value=1"});
@@ -318,7 +331,7 @@ int main() {
     Run("unsupported SDK function list", [](Model& model) { model.createStatus = NV_ENC_ERR_INVALID_VERSION; },
         {"NvEncodeAPICreateInstance", "status=15", "NV_ENC_ERR_INVALID_VERSION", "api=12.2"});
     Run("driver session refusal", [](Model& model) { model.openStatus = NV_ENC_ERR_UNSUPPORTED_DEVICE; },
-        {"nvEncOpenEncodeSessionEx", "status=2", "NV_ENC_ERR_UNSUPPORTED_DEVICE"});
+        {"nvEncOpenEncodeSessionEx", "status=2", "NV_ENC_ERR_UNSUPPORTED_DEVICE"}, {}, true);
     Run("successful open without session", [](Model& model) { model.returnSession = false; },
         {"nvEncOpenEncodeSessionEx", "status=0", "session=0"});
     Run("failed open still owns returned session", [](Model& model) {
@@ -340,6 +353,14 @@ int main() {
           {name, "missing"}, [](const Model& model) { Check(model.opens == 0, "session opened with incomplete API"); });
     Run("destroy refusal cannot become success", [](Model& model) { model.destroyStatus = NV_ENC_ERR_GENERIC; },
         {"nvEncDestroyEncoder", "status=20", "retirement=unconfirmed"});
+    Run("unsupported AV1 with failed retirement is a driver error", [](Model& model) {
+      model.av1 = true; model.codecs.values = {NV_ENC_CODEC_H264_GUID};
+      model.destroyStatus = NV_ENC_ERR_GENERIC;
+    }, {"AV1=0", "nvEncDestroyEncoder", "retirement=unconfirmed"});
+    Run("unsupported AV1 with failed DLL release is a driver error", [](Model& model) {
+      model.av1 = true; model.codecs.values = {NV_ENC_CODEC_H264_GUID};
+      model.releaseSucceeds = false;
+    }, {"AV1=0", "FreeLibrary", "win32=6"});
     Run("primary failure retained when destroy fails", [](Model& model) {
       model.caps[1].status = NV_ENC_ERR_INVALID_PARAM; model.caps[1].value = -9;
       model.destroyStatus = NV_ENC_ERR_GENERIC;

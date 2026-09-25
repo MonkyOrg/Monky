@@ -9,6 +9,55 @@ import { SettingsStore } from '../src/renderer/stores/settingsStore';
 import { DEFAULT_CUSTOM_PROFILE } from '@monky/shared';
 import { customVideoFpsLimit, normalizeCustomQualityProfile } from '../src/renderer/utils/qualityProfileLimits';
 
+test('screen encoding defaults to Automatic independently of camera and persists exact Manual software', () => {
+  withSettingsStorage(storage => {
+    for (const preferredVideoCodec of ['av1', 'vp9', 'vp8', 'h264']) {
+      storage.setItem('monky_settings', JSON.stringify({ preferredVideoCodec }));
+      const store = new SettingsStore();
+      assert.equal(store.screenEncodingMode, 'hardware');
+      assert.equal(store.screenEncodingStrategy, 'automatic');
+      assert.equal(store.preferredScreenCodec, 'h264');
+      assert.equal(store.preferredVideoCodec, preferredVideoCodec);
+      store.screenEncodingMode = 'software';
+      store.screenEncodingStrategy = 'manual';
+      store.preferredScreenCodec = 'av1';
+      store.save();
+      const restored = new SettingsStore();
+      assert.equal(restored.screenEncodingMode, 'software');
+      assert.equal(restored.screenEncodingStrategy, 'manual');
+      assert.equal(restored.preferredScreenCodec, 'av1');
+      assert.equal(restored.preferredVideoCodec, preferredVideoCodec);
+    }
+    storage.setItem('monky_settings', JSON.stringify({ screenEncodingMode: 'chromium', preferredScreenCodec: 'vp9' }));
+    const invalid = new SettingsStore();
+    assert.equal(invalid.screenEncodingMode, 'hardware');
+    assert.equal(invalid.preferredScreenCodec, 'h264');
+    assert.equal(invalid.screenEncodingStrategy, 'automatic');
+  });
+});
+
+test('legacy explicit screen choices migrate to Manual, and Automatic preserves dormant manual preferences on reload', () => {
+  withSettingsStorage(storage => {
+    for (const [input, strategy, mode, codec] of [
+      [{}, 'automatic', 'hardware', 'h264'],
+      [{ preferredScreenCodec: 'auto' }, 'automatic', 'hardware', 'h264'],
+      [{ screenEncodingMode: 'software' }, 'manual', 'software', 'h264'],
+      [{ screenEncodingMode: 'software', preferredScreenCodec: 'auto' }, 'manual', 'software', 'h264'],
+      [{ preferredScreenCodec: 'av1' }, 'manual', 'hardware', 'av1'],
+      [{ preferredScreenCodec: 'h264' }, 'manual', 'hardware', 'h264'],
+      [{ screenEncodingStrategy: 'automatic', screenEncodingMode: 'software', preferredScreenCodec: 'av1' }, 'automatic', 'software', 'av1'],
+      [{ screenEncodingStrategy: 'invalid', screenEncodingMode: 'software' }, 'automatic', 'software', 'h264'],
+    ] as const) {
+      storage.setItem('monky_settings', JSON.stringify(input));
+      const store = new SettingsStore();
+      assert.equal(store.screenEncodingStrategy, strategy);
+      assert.equal(store.screenEncodingMode, mode);
+      assert.equal(store.preferredScreenCodec, codec);
+      store.save();
+      assert.equal(new SettingsStore().screenEncodingStrategy, strategy);
+    }
+  });
+});
 test('custom video ceilings apply to both camera and screen including 4K FPS combinations', () => {
   for (const [width, height, limit] of [[1920, 1080, 120], [2560, 1440, 120], [3440, 1440, 120],
     [3840, 2160, 60], [3840, 1080, 60], [1920, 2160, 60]]) {

@@ -20,7 +20,8 @@ import { resolveAudioOutput } from '../../utils/audioPreferences';
 import { customVideoFpsLimit } from '../../utils/qualityProfileLimits';
 import { BrowserScreenSubscription } from './BrowserScreenSubscription';
 import type { RemoteMediaRouter } from './RemoteMediaRouter';
-import type { PreferredVideoCodec } from './codecPreferences';
+import type { ScreenCodecPreference } from '@monky/shared';
+import { acceptScreenEncoding } from '../screenEncoding';
 
 export interface NativeScreenCallContext {
   readonly client: NetworkClient;
@@ -477,13 +478,16 @@ export class NativeScreenController {
       ready: call.api.nativeScreenCommand({
         action: 'source-add', callId: call.config.callId, shareId: input.shareId,
         desktopSourceId: input.desktopSourceId, video: input.video, audio: input.audio, audioBitrateKbps: input.audioBitrateKbps,
-        preserveAspectRatio: input.preserveAspectRatio ?? false,
+        preserveAspectRatio: input.preserveAspectRatio ?? true,
+        encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
+        encodingStrategy: settingsStore.screenEncodingStrategy,
         ...(input.replacesAudioShareId ? { replacesAudioShareId: input.replacesAudioShareId } : {}),
         ...(input.captureKind ? { captureKind: input.captureKind } : {}),
       }).then(result => {
         this.current(call);
         if (call.sources.get(input.shareId) !== entry || entry.removing) throw cancelled();
         if (result.kind !== 'source') throw new Error('Native source preparation returned no descriptor.');
+        acceptScreenEncoding(result.encoding);
         entry.descriptor = result.source;
         return result.source;
       }),
@@ -537,8 +541,10 @@ export class NativeScreenController {
             action: 'source-add', callId: call.config.callId, shareId,
             replacesSourceInstanceId: previous.descriptor.instanceId,
             desktopSourceId: capture.desktopSourceId, captureKind: capture.captureKind,
-            preserveAspectRatio: capture.preserveAspectRatio ?? false,
+            preserveAspectRatio: capture.preserveAspectRatio ?? true,
             video, audio: capture.source.audio, audioBitrateKbps,
+            encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
+            encodingStrategy: settingsStore.screenEncodingStrategy,
           });
           this.current(call);
           if (!isCurrentCapture() || previous.removing || call.sources.get(shareId) !== previous) {
@@ -546,6 +552,7 @@ export class NativeScreenController {
             return;
           }
           if (result.kind !== 'source') throw new Error('Native quality preparation returned no source descriptor.');
+          acceptScreenEncoding(result.encoding);
           transition.retired = true;
           await this.releaseLocalPreview(call, previous);
           this.current(call);
@@ -617,11 +624,11 @@ export class NativeScreenController {
     this.changed();
   }
 
-  public settingsIssue(profile: QualityProfile, codec: PreferredVideoCodec): 'profile' | 'codec' | null {
+  public settingsIssue(profile: QualityProfile, codec: ScreenCodecPreference): 'profile' | 'codec' | null {
     if (!videoService.getNativeScreenCaptures().length) return null;
     if (!nativeScreenProfile(profile) || !nativeScreenAudioBitrateSchema.safeParse(profile.audioBitrateKbps).success)
       return 'profile';
-    return codec === 'auto' || codec === 'h264' ? null : 'codec';
+    return codec === 'auto' || codec === 'h264' || codec === 'av1' ? null : 'codec';
   }
 
   public async sync(): Promise<void> {
@@ -876,7 +883,7 @@ export class NativeScreenController {
     if (remote?.browser) {
       const reports = await remote.browser.stats();
       return current() ? { backend: 'browser', source, target: remote.browser, reports,
-        profile: getScreenShareProfile(source.video, remote.quality) } : null;
+        profile: getScreenShareProfile(source.video, remote.quality, source.codec) } : null;
     }
     if (remote && !remote.requested) return { backend: 'native', source, viewers: null, endpoints: [] };
     const result = await call.api.nativeScreenCommand({

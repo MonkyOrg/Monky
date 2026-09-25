@@ -22,9 +22,10 @@ const options = {
 };
 
 function capability(encoder) {
-  return { encoderId: encoder, codec: 'h264', adapterIndex: 0, adapterLuid: '456',
-    vendorId: protocol.ENCODERS[encoder].vendorId, deviceId: 123,
-    probe: protocol.ENCODERS[encoder].probe, probeVerified: true, textureInput: true, dynamicBitrate: true };
+  const selected = protocol.ENCODERS[encoder];
+  return { encoderId: encoder, codec: selected.codec, adapterIndex: 0, adapterLuid: '456',
+    vendorId: selected.vendorId ?? 0x8086, deviceId: 123,
+    probe: selected.probe, probeVerified: true, textureInput: selected.mode === 'hardware', dynamicBitrate: true };
 }
 
 function message(encoder, type = 'prepared', initialized = true, selectedVideo = video) {
@@ -128,7 +129,7 @@ test('source-free probe proves encoder initialization and returns only after cle
       const result = await pending;
       assert.equal(f.closed, true);
       assert.deepEqual(result, {
-        ...capability(encoder), encoderInitialized: true, hardwareSessionConfirmed: false,
+        ...capability(encoder), mode: protocol.ENCODERS[encoder].mode, encoderInitialized: true, hardwareSessionConfirmed: false,
         hardwareQualified: false, sourceCaptured: false, captureKinds: ['window', 'monitor', 'game'],
         video: { ...video, scaleMode: scaleMode ?? 'stretch' },
       });
@@ -283,5 +284,19 @@ test('capture waits for the first encoded packet before requesting lazy NVENC pa
 test('AMF declares input primaries and verifies the exact fixed option without relaxing H264 colour admission', () => {
   const host = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'host.cpp'), 'utf8');
   assert.match(host, /const auto options = EncoderProfileOptions\(capability_\.encoder, arguments_\.video\);[\s\S]*obs_data_set_string\(encoderSettings_, "ffmpeg_opts", options\.c_str\(\)\)/u);
-  assert.match(host, /obs_data_get_string\(settings\.value, nvenc \? "opts" : "ffmpeg_opts"\), 64\) ==\s*EncoderProfileOptions\(capability_\.encoder, arguments_\.video\)/u);
+  assert.match(host, /obs_data_get_string\(settings\.value, nvenc \? "opts" : "ffmpeg_opts"\), 512\) ==\s*EncoderProfileOptions\(capability_\.encoder, arguments_\.video\)/u);
+});
+
+test('AMF cleanup failures override unsupported codes while retaining the primary diagnostic', () => {
+  const probe = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'amfProbe.h'), 'utf8');
+  const cleanup = probe.slice(probe.indexOf('const auto cleanupFailure'), probe.indexOf('bool retired = true'));
+  assert.match(cleanup, /ContractError\(errorCode, std::string\(error\.what\(\)\) \+ "; " \+ detail\)/u);
+  assert.doesNotMatch(cleanup, /ContractError\(error\.code/u);
+});
+
+test('software AV1 stops encoding after an update failure even when libobs ignores its return value', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'softwareAv1.cpp'), 'utf8');
+  assert.match(source, /\*received = false;\s*if \(encoder\.failed\) return false;/u);
+  assert.match(source, /if \(bitrate < 50 \|\| bitrate > 80000\) \{\s*encoder\.failed = true;/u);
+  assert.match(source, /if \(!bitrateAv1\([\s\S]*?encoder\.failed = true;[\s\S]*?return false;/u);
 });

@@ -175,7 +175,7 @@ function build(config) {
     for (const relative of ['bin\\64bit\\obs.dll', 'bin\\64bit\\libobs-d3d11.dll', 'bin\\64bit\\libobs-winrt.dll',
       'bin\\64bit\\obs-amf-test.exe', 'bin\\64bit\\obs-nvenc-test.exe',
       'bin\\64bit\\obs-qsv-test.exe',
-      'obs-plugins\\64bit\\obs-ffmpeg.dll', 'obs-plugins\\64bit\\obs-nvenc.dll',
+      'obs-plugins\\64bit\\obs-ffmpeg.dll', 'obs-plugins\\64bit\\obs-nvenc.dll', 'obs-plugins\\64bit\\obs-x264.dll',
       ...['32', '64'].flatMap(arch => ['graphics-hook' + arch + '.dll',
         'inject-helper' + arch + '.exe', 'get-graphics-offsets' + arch + '.exe']
         .map(name => path.win32.join('data', 'obs-plugins', 'win-capture', name)))]) {
@@ -184,7 +184,7 @@ function build(config) {
     inspect(module);
     for (const file of stockFiles) {
       if (file.path.startsWith('data\\libobs\\') ||
-        /^data\\obs-plugins\\(?:win-capture|obs-ffmpeg|obs-nvenc)\\locale\\en-US\.ini$/u.test(file.path) ||
+        /^data\\obs-plugins\\(?:win-capture|obs-ffmpeg|obs-nvenc|obs-x264)\\locale\\en-US\.ini$/u.test(file.path) ||
         /^data\\obs-plugins\\win-capture\\(?:compatibility|package)\.json$/u.test(file.path) ||
         file.path.startsWith('data\\obs-plugins\\win-capture\\schema\\')) select(file.path);
     }
@@ -192,6 +192,8 @@ function build(config) {
     assert.ok(runtime.every(file => !/Qt6|obs-vulkan|obs64\.exe/iu.test(file.path)),
       'GUI and global Vulkan installer files do not belong in the explicit capture runtime.');
     const modulePin = fingerprint(module);
+    const av1Path = path.join(root, 'bin', 'win32-x64', 'monky_av1.dll');
+    const av1Runtime = { path: 'monky_av1.dll', ...fingerprint(av1Path) };
     const captureDataDigest = createHash('sha256').update(runtime
       .filter(file => file.path.startsWith('data\\obs-plugins\\win-capture\\'))
       .map(file => `${file.path}\0${file.bytes}\0${file.sha256}`).sort().join('\n')).digest('hex');
@@ -200,17 +202,23 @@ function build(config) {
       'struct RuntimePin { const wchar_t* relative; std::uint64_t bytes; const char* sha256; };\n' +
       `inline constexpr char kCaptureDataDigest[] = "${captureDataDigest}";\n` +
       `inline constexpr RuntimePin kCaptureModule{L"obs-plugins\\\\64bit\\\\win-capture.dll", ${modulePin.bytes}ULL, "${modulePin.sha256}"};\n` +
+      `inline constexpr RuntimePin kAv1Runtime{L"monky_av1.dll", ${av1Runtime.bytes}ULL, "${av1Runtime.sha256}"};\n` +
       'inline constexpr RuntimePin kRuntimeFiles[] = {\n' +
       runtime.map(file => `  {L${JSON.stringify(file.path)}, ${file.bytes}ULL, "${file.sha256}"},`).join('\n') + '\n};\n}\n');
     const executable = path.join(buildDirectory, 'monky-screen-capture.exe');
     const tests = path.join(buildDirectory, 'capture-contract-test.exe');
     const nvencTests = path.join(buildDirectory, 'nvenc-probe-contract-test.exe');
+    const softwareObject = path.join(buildDirectory, 'software-av1.obj');
+    compile('software-av1', ['/nologo', '/c', '/std:c++20', '/EHsc', '/MD', '/W4', '/WX', '/O2', '/utf-8', '/Brepro',
+      `/I${quote(generated)}`, `/I${quote(path.join(vendor, 'libobs'))}`,
+      quote(path.join(source, 'softwareAv1.cpp')), `/Fo${quote(softwareObject)}`]);
     for (const [name, input, output] of [['host', 'host.cpp', executable], ['contracts', 'contractTest.cpp', tests],
       ['nvenc-probe-contracts', 'nvencProbeTest.cpp', nvencTests]]) {
       compile(name, ['/nologo', '/std:c++20', '/EHsc', '/MD', '/W4', '/WX', '/O2', '/utf-8', '/Brepro',
         `/I${quote(generated)}`, `/I${quote(path.join(dependencies, 'include'))}`,
         quote(path.join(source, input)), `/Fo${quote(path.join(buildDirectory, `${name}.obj`))}`,
-        `/Fe${quote(output)}`, '/link', '/INCREMENTAL:NO', 'bcrypt.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib', 'ole32.lib']);
+        `/Fe${quote(output)}`, ...(name === 'host' ? [quote(softwareObject)] : []),
+        '/link', '/INCREMENTAL:NO', 'bcrypt.lib', 'd3d11.lib', 'dxgi.lib', 'user32.lib', 'ole32.lib']);
     }
     inspect(executable);
     const contracts = JSON.parse(execute(tests, [], { env, capture: true }));
@@ -266,7 +274,7 @@ function build(config) {
       }
     }
     const report = {
-      schemaVersion: 4, obsVersion: inputs.version, obsRevision: inputs.revision, runtime,
+      schemaVersion: 5, obsVersion: inputs.version, obsRevision: inputs.revision, runtime, av1Runtime,
       sourceFiles,
       sourceBindingRecipe: fingerprint(path.join(__dirname, 'captureSourceBindings.cjs')),
       crt: { version: crt.version, files: redistributables },
@@ -274,7 +282,8 @@ function build(config) {
       module: { path: 'obs-plugins\\64bit\\win-capture.dll', ...modulePin },
       source: fingerprint(path.join(source, 'wgc-plugin-main.c')), systemDependencies: [...systemDependencies].sort(),
       contracts, commands, configuration: {
-        captureKinds: ['window', 'monitor', 'game'], encoders: ['h264_texture_amf', 'obs_nvenc_h264_tex'],
+        captureKinds: ['window', 'monitor', 'game'],
+        encoders: ['h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264', 'av1_texture_amf', 'obs_nvenc_av1_tex', 'monky_aom_av1'],
         encoderProbe: 'source-free-hardware-initialization',
         gameCaptureStartup: 'explicit-game-target-only', compatibilityUpdater: false,
         globalVulkanHook: false, hardwareQualified: false, scaleModes: ['stretch', 'fit'],

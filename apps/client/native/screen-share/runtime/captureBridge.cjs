@@ -105,7 +105,8 @@ class CaptureBridge extends ObsHostBridge {
   receiveLive(message) {
     if (message.type === 'packet') {
       assert.ok(this.liveHello, 'Live AU preceded host identity.');
-      const result = this.onPacket(message.frame);
+      const result = this.onPacket(this.prepared?.configuration?.codec === 'av1'
+        ? { ...message.frame, codec: 'av1' } : message.frame);
       assert.ok(result === undefined || result === false, 'Live AU admission must be synchronous, without a JS frame queue.');
       return result;
     }
@@ -173,7 +174,9 @@ class CaptureBridge extends ObsHostBridge {
   getCapabilities() {
     if (!this.prepared?.capability) return null;
     return Object.freeze({ ...this.prepared.capability,
-      hardwareSessionConfirmed: this.events.ready === 1, hardwareQualified: false });
+      mode: protocol.ENCODERS[this.prepared.capability.encoderId].mode,
+      hardwareSessionConfirmed: protocol.ENCODERS[this.prepared.capability.encoderId].mode === 'hardware' &&
+        this.events.ready === 1, hardwareQualified: false });
   }
 
   resumePackets() {
@@ -288,7 +291,8 @@ async function probeCaptureCapabilities(options, signal, dependencies = {}) {
   if (failure) throw failure;
   assert.equal(prepared?.encoderInitialized, true);
   return Object.freeze({
-    ...prepared.capability, encoderInitialized: true, hardwareSessionConfirmed: false,
+    ...prepared.capability, mode: protocol.ENCODERS[prepared.capability.encoderId].mode,
+    encoderInitialized: true, hardwareSessionConfirmed: false,
     hardwareQualified: false, sourceCaptured: false,
     captureKinds: Object.freeze([...prepared.captureKinds]), video,
   });

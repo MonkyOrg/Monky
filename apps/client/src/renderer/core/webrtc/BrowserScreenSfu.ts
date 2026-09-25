@@ -5,6 +5,7 @@ import {
   type NativeScreenVideoProfile, type SfuConsumedPayload, type SfuProducerClosedPayload,
   type SfuProducersListPayload, type SfuRouterRtpCapabilitiesPayload, type SfuWebRtcTransportCreatedPayload,
 } from '@monky/shared';
+import { BrowserScreenCodecError, supportsBrowserAv1Level } from './browserScreenCodecs';
 
 export type BrowserScreenRpc = <T>(method: NativeScreenRpcMethod, payload: Record<string, unknown>) => Promise<T>;
 type RouterResponse = Omit<SfuRouterRtpCapabilitiesPayload, 'rtpCapabilities'> & { rtpCapabilities: SfuTypes.RtpCapabilities };
@@ -147,10 +148,20 @@ export class BrowserScreenSfu {
     const producer = entry.value;
     const selected = () => !this.stopping && this.producers.get(producer.producerId) === entry;
     const capabilities = structuredClone(this.device.rtpCapabilities);
+    const selectedMime = `video/${this.options.source.codec ?? 'h264'}`;
+    const selectedCodecs = capabilities.codecs?.filter(codec => codec.mimeType.toLowerCase() === selectedMime
+      && (selectedMime !== 'video/av1' || supportsBrowserAv1Level(this.options.profile, codec.parameters ?? {})));
+    if (selectedMime === 'video/av1' && !selectedCodecs?.length)
+      throw new BrowserScreenCodecError('The SFU AV1 receive level is insufficient for the selected screen profile.');
+    const selectedPayloads = new Set(selectedCodecs?.map(codec => codec.preferredPayloadType));
+    capabilities.codecs = capabilities.codecs?.filter(codec => !codec.mimeType.toLowerCase().startsWith('video/')
+      || selectedCodecs?.includes(codec)
+      || (codec.mimeType.toLowerCase() === 'video/rtx' && typeof codec.parameters?.apt === 'number'
+        && selectedPayloads.has(codec.parameters.apt)));
     const receiveLevel = getScreenH264ProfileLevelId(this.options.profile).slice(2);
     for (const codec of capabilities.codecs ?? []) {
       const profile = codec.parameters?.['profile-level-id'];
-      if (codec.mimeType.toLowerCase() === 'video/h264' && typeof profile === 'string'
+      if (selectedMime === 'video/h264' && codec.mimeType.toLowerCase() === 'video/h264' && typeof profile === 'string'
         && /^4d[0-9a-f]{4}$/i.test(profile)
         && Number.parseInt(profile.slice(4), 16) < Number.parseInt(receiveLevel.slice(2), 16))
         codec.parameters = { ...codec.parameters, 'max-recv-level': receiveLevel };
@@ -179,6 +190,14 @@ export class BrowserScreenSfu {
       || metadata.appData.nativeScreen.sourceInstanceId !== producer.appData.nativeScreen.sourceInstanceId
       || screenShareProfileKey(metadata.appData.nativeScreen.video) !== screenShareProfileKey(producer.appData.nativeScreen.video))
       throw new Error('The screen consumer changed its publisher, source or rendition.');
+    if (consumed.kind === 'video' && (!consumed.rtpParameters.codecs?.some(codec =>
+      codec.mimeType.toLowerCase() === selectedMime) || consumed.rtpParameters.codecs.some(codec =>
+      codec.mimeType.toLowerCase() !== selectedMime && codec.mimeType.toLowerCase() !== 'video/rtx')))
+      throw new Error('The screen consumer codec differs from its advertised source.');
+    if (consumed.kind === 'video' && selectedMime === 'video/av1'
+      && consumed.rtpParameters.codecs.some(codec => codec.mimeType.toLowerCase() === selectedMime
+        && !supportsBrowserAv1Level(this.options.profile, codec.parameters ?? {})))
+      throw new BrowserScreenCodecError('The SFU AV1 consumer level is insufficient for the selected screen profile.');
     const consumer = await transport.consume({
       id: consumed.id, producerId: consumed.producerId, kind: consumed.kind,
       rtpParameters: consumed.rtpParameters, appData: metadata.appData,

@@ -193,6 +193,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
     '../../stores/settingsStore': { settingsStore: {
       getScreenAudioVolume: () => volume, screenSharePreviewPauseWhenUnfocused: true,
       getScreenShareReceiver: () => receiver,
+      screenEncodingStrategy: 'automatic', screenEncodingMode: 'hardware', preferredScreenCodec: 'h264',
     } },
     '../../stores/voiceStore': { voiceStore: {
       getScreenWatchers: () => watching ? [['publisher', [remote.shareId]]] : [],
@@ -202,6 +203,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
     '../../utils/audioPreferences': { resolveAudioOutput: () => 'default' },
     '../../utils/qualityProfileLimits': qualityLimits,
     '../../i18n': { t: key => key },
+    '../screenEncoding': { acceptScreenEncoding() {} },
   };
   const exports = {};
   load(exports, name => {
@@ -227,6 +229,7 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
     assert.equal(appBus.listenerCount('settings.updated'), 0);
   });
   return { controller, local, captures, captureStreams, sources, commands, events, errors, replies, requests, watches, elements, stopped, retired, Stream, browsers,
+    settings: dependencies['../../stores/settingsStore'].settingsStore,
     receiver: value => { receiver = value; },
     registerCapture: (stream, capture) => { captures.set(stream.id, capture); captureStreams.set(stream.id, stream); },
     mainListeners, networkListeners, context, get remote() { return remote; }, nativeScreenProfile: exports.nativeScreenProfile,
@@ -375,9 +378,9 @@ for (const scenario of [
     const command = f.commands.find(command => command.action === 'source-add');
     assert.equal(command.captureKind, scenario.kind);
     assert.equal(command.desktopSourceId, id);
-    assert.equal(command.preserveAspectRatio, false, 'Legacy callers explicitly retain stretch');
+    assert.equal(command.preserveAspectRatio, true, 'Omitted per-share choices default to fit');
     assert.equal(f.captures.get(stream.id).desktopSourceId, id);
-    assert.equal(f.captures.get(stream.id).preserveAspectRatio, false);
+    assert.equal(f.captures.get(stream.id).preserveAspectRatio, true);
     assert.deepEqual(f.errors, []);
   });
 }
@@ -424,6 +427,35 @@ test('independent aspect-ratio choices survive quality replacement and reconnect
     assert.equal(Object.hasOwn(f.captures.get(shareId).source, 'preserveAspectRatio'), false);
   }
 });
+
+test('omitted aspect-ratio choice remains fit through source admission, quality replacement and reconnect', async t => {
+  const f = fixture(t);
+  await f.local(input);
+  await f.controller.applyQuality(profile());
+  await f.controller.close();
+  await f.controller.sync();
+  const additions = f.commands.filter(command => command.action === 'source-add');
+  assert.equal(additions.length, 3);
+  assert.ok(additions.every(command => command.preserveAspectRatio === true));
+});
+
+for (const strategy of ['automatic', 'manual']) {
+  test(`${strategy} encoding strategy and dormant/exact choices reach Main on start, profile change and reconnect`, async t => {
+    const f = fixture(t);
+    Object.assign(f.settings, { screenEncodingStrategy: strategy, screenEncodingMode: 'software', preferredScreenCodec: 'av1' });
+    await f.local();
+    await f.controller.applyQuality(profile());
+    await f.controller.close();
+    await f.controller.sync();
+    const additions = f.commands.filter(command => command.action === 'source-add');
+    assert.equal(additions.length, 3);
+    for (const command of additions) {
+      assert.equal(command.encodingStrategy, strategy);
+      assert.equal(command.encodingMode, 'software');
+      assert.equal(command.codec, 'av1');
+    }
+  });
+}
 
 for (const failure of [null, 'admission', 'retirement', 'cancelled']) {
   test(`source-start audio handoff gates preview on exact old retirement (${failure ?? 'success'})`, async t => {
@@ -740,7 +772,7 @@ test('active native settings reject incompatible codecs and profiles before chan
   const source = await f.local();
   const before = f.commands.length;
   assert.equal(f.controller.settingsIssue(profile(), 'vp9'), 'codec');
-  assert.equal(f.controller.settingsIssue(profile(), 'av1'), 'codec');
+  assert.equal(f.controller.settingsIssue(profile(), 'av1'), null);
   assert.equal(f.controller.settingsIssue(profile(), 'vp8'), 'codec');
   assert.equal(f.controller.settingsIssue(profile(), 'auto'), null);
   assert.equal(f.controller.settingsIssue(profile(), 'h264'), null);

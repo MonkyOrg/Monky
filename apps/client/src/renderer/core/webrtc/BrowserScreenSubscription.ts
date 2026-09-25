@@ -5,7 +5,7 @@ import {
 } from '@monky/shared';
 import { BrowserScreenP2p } from './BrowserScreenP2p';
 import { BrowserScreenSfu, type BrowserScreenRpc } from './BrowserScreenSfu';
-import { supportsBrowserScreenCodec } from './browserScreenCodecs';
+import { BrowserScreenCodecError, supportsBrowserScreenCodec } from './browserScreenCodecs';
 
 export interface BrowserScreenSubscriptionOptions {
   call: NativeScreenCall;
@@ -52,7 +52,7 @@ export class BrowserScreenSubscription {
 
   private fail(error: unknown): void {
     if (this.stopping) return;
-    this.options.onUnavailable('connection-failed');
+    this.options.onUnavailable(error instanceof BrowserScreenCodecError ? 'unsupported' : 'connection-failed');
     this.options.onError(error);
   }
 
@@ -66,12 +66,14 @@ export class BrowserScreenSubscription {
       let supported: boolean;
       try {
         supported = await Promise.race([
-          supportsBrowserScreenCodec(getScreenShareProfile(this.options.source.video, this.options.quality)), cancelled,
+          supportsBrowserScreenCodec(getScreenShareProfile(this.options.source.video, this.options.quality, this.options.source.codec),
+            this.options.source.codec ?? 'h264'), cancelled,
         ]);
       } finally { this.cancelDiscovery = null; }
       if (!supported) {
         this.options.onUnavailable('unsupported');
-        throw new Error('This browser cannot decode the requested screen rendition in H.264 Main at its required level.');
+        throw new Error(`This browser cannot decode the requested ${this.options.source.codec === 'av1' ? 'AV1'
+          : 'H.264 Main at its required level'} screen rendition. Select H.264 or another supported screen profile on the publisher; no server transcoding is available.`);
       }
       if (this.stopping) throw new DOMException('Screen Watch was retired during codec discovery.', 'AbortError');
       this.started = true;
@@ -109,7 +111,7 @@ export class BrowserScreenSubscription {
       this.generation = signal.generation;
       if (call.mode === 'p2p') {
         this.p2p = new BrowserScreenP2p({
-          call, publisherSessionId, source, profile: getScreenShareProfile(source.video, this.options.quality),
+          call, publisherSessionId, source, profile: getScreenShareProfile(source.video, this.options.quality, source.codec),
           subscriptionId: this.subscriptionId,
           generation: signal.generation, muted: this.muted,
           send: control => this.options.send(this.envelope({ action: 'control', control })),
@@ -117,7 +119,7 @@ export class BrowserScreenSubscription {
         });
       } else {
         this.sfu = new BrowserScreenSfu({
-          call, publisherSessionId, source, profile: getScreenShareProfile(source.video, this.options.quality),
+          call, publisherSessionId, source, profile: getScreenShareProfile(source.video, this.options.quality, source.codec),
           muted: this.muted, rpc: this.options.rpc, onTrack: this.options.onTrack, onError: error => this.fail(error),
         });
         const sfu = this.sfu;
@@ -151,7 +153,7 @@ export class BrowserScreenSubscription {
     if (this.stopping || this.options.call.mode !== 'sfu') return Promise.resolve();
     if (this.sfu) return this.sfu.addProducer(producer);
     const { source, publisherSessionId, quality } = this.options;
-    const profile = getScreenShareProfile(source.video, quality);
+    const profile = getScreenShareProfile(source.video, quality, source.codec);
     if (producer.producerSessionId !== publisherSessionId || producer.appData.shareId !== source.shareId
       || producer.appData.nativeScreen.sourceInstanceId !== source.instanceId
       || screenShareProfileKey(producer.appData.nativeScreen.video) !== screenShareProfileKey(profile)) return Promise.resolve();

@@ -156,13 +156,13 @@ if (!process.versions.electron) {
     timeout = setTimeout(() => { console.error('Screen codec smoke timed out'); void finish(1); }, 120000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__screen_codec__`);
     const result = await window.webContents.executeJavaScript(
-      `(${runScreenCodecSmoke.toString()})(${JSON.stringify(MessageType)}, ${process.argv.includes('--admission-only')}, ${process.argv.includes('--codecs-only')}, ${process.argv.includes('--h264-profiles-only')})`, true);
+      `(${runScreenCodecSmoke.toString()})(${JSON.stringify(MessageType)}, ${process.argv.includes('--admission-only')}, ${process.argv.includes('--codecs-only')}, ${process.argv.includes('--h264-profiles-only')}, ${process.argv.includes('--picker-only')})`, true);
     console.log(`Screen codecs: ${result.checks} checks passed; actual output: ${result.outputs.join(', ')}`);
     await finish(0);
   }).catch(async error => { console.error(error); await finish(1); });
 }
 
-async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profilesOnly) {
+async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profilesOnly, pickerOnly) {
   const [{ WebRtcManager }, { SfuClientEngine }, { NetworkClient }, codecs, { settingsStore: settings },
     { voiceStore: voice }, { videoService }, { appEvents }, { VideoDiagnosticsSampler }] = await Promise.all([
     import('/core/WebRtcManager.ts'), import('/core/webrtc/SfuClientEngine.ts'), import('/core/NetworkClient.ts'),
@@ -408,6 +408,10 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     onHealthChanged() {}, onRoster() {}, onConsumerTrack() {}, onConsumerClosed() {}, onConnectionFailed() {}, onConnected() {},
   });
   try {
+    if (pickerOnly) {
+      await testScreenSharePickerLifecycle();
+      return { checks, outputs };
+    }
     if (admissionOnly) {
       await testRejoinAdmission();
       await testForegroundAdmission();
@@ -937,6 +941,10 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     const originalDisplay = navigator.mediaDevices.getDisplayMedia;
     const originalNativeStart = globalRtc.startNativeScreenShare;
     const originalCodec = settings.preferredVideoCodec;
+    const originalScreenCodec = settings.preferredScreenCodec;
+    const originalEncodingMode = settings.screenEncodingMode;
+    const originalEncodingStrategy = settings.screenEncodingStrategy;
+    const originalApi = window.api;
     const originalVideoPreset = videoService.currentPreset;
     const captureWith = handler => {
       navigator.mediaDevices.getUserMedia = handler;
@@ -948,12 +956,15 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     let selection = 0;
     let browserAcquisitions = 0;
     const nativeSelections = [];
-    const mount = () => {
+    const encodingProbes = [];
+    const mount = async (preserveAspectRatio = true) => {
       picker.close();
       const modal = document.createElement('div');
       modal.innerHTML = '<button id="btn-share">Share</button><button id="btn-share-add">Add</button>'
         + '<button id="btn-cancel">Cancel</button><button id="modal-close">Close</button>'
-        + '<input type="hidden" id="chk-share-audio"><p id="share-capture-info"></p>';
+        + '<input type="hidden" id="chk-share-audio"><p id="share-capture-info"></p>'
+        + `<label class="toggle-switch"><input type="checkbox" id="chk-preserve-aspect-ratio" ${preserveAspectRatio ? 'checked' : ''}>`
+        + '<span class="toggle-slider"></span></label>';
       document.body.appendChild(modal);
       picker.modalEl = modal;
       picker.activeTab = 'screen';
@@ -973,17 +984,27 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
     voice.addScreenShare(old.stream.id);
     client.send = (type, payload) => { if (type === MessageType.VOICE_STATE_UPDATE) states.push(payload); };
     settings.preferredVideoCodec = 'h264';
+    settings.preferredScreenCodec = 'h264';
+    settings.screenEncodingMode = 'hardware';
+    settings.screenEncodingStrategy = 'manual';
+    window.api = { ...originalApi, platform: 'win32', nativeScreenCommand: async command => {
+      encodingProbes.push(command);
+      throw new Error('The picker must leave encoder verification to native source admission');
+    } };
     videoService.setQualityPreset('NORMAL');
     captureWith(async () => { browserAcquisitions++; throw new Error('The picker must not fall back to Chromium capture.'); });
-    globalRtc.startNativeScreenShare = async (desktopSourceId, audio, thumbnail, isWanted, captureKind) => {
-      nativeSelections.push({ desktopSourceId, isWanted, captureKind });
+    globalRtc.startNativeScreenShare = async (desktopSourceId, audio, thumbnail, isWanted, captureKind, preserveAspectRatio) => {
+      nativeSelections.push({ desktopSourceId, isWanted, captureKind, preserveAspectRatio });
       check(captureKind === 'monitor' && desktopSourceId === picker.selectedSourceId,
         'The picker forwards exactly the selected native source and method');
+      check(typeof preserveAspectRatio === 'boolean'
+        && preserveAspectRatio === picker.modalEl.querySelector('#chk-preserve-aspect-ratio').checked,
+      'The picker forwards both default fit and explicit stretch without treating OFF as missing');
       const stream = await acquireNative();
       // Deliberately return even an obsolete descriptor to exercise the
       // picker's cleanup independently of the native controller's own guard.
       videoService.registerNativeScreenShare(stream, {
-        desktopSourceId, captureKind, thumbnail, audioBitrateKbps: 128,
+        desktopSourceId, captureKind, preserveAspectRatio, thumbnail, audioBitrateKbps: 128,
         source: { shareId: stream.id, instanceId: crypto.randomUUID(), audio,
           video: { width: 1280, height: 720, fps: 30, maxBitrateKbps: 6000 } },
       });
@@ -995,18 +1016,18 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
         acquisitions++;
         throw new DOMException('Picker cancelled', 'AbortError');
       };
-      mount();
+      await mount(false);
       await picker.startSharing('replace');
       check(acquisitions === 1 && old.stream.getVideoTracks()[0].readyState === 'live'
         && voice.screenShareIds.includes(old.stream.id) && states.length === 0 && browserAcquisitions === 0,
       'Cancelling acquisition preserves the existing share and never requests fallback capture');
 
       acquireNative = () => new Promise(resolve => { pendingCaptures.push(resolve); });
-      mount();
+      await mount();
       const abandoned = picker.startSharing('replace');
       await until(() => pendingCaptures.length === 1, 'Old picker waits for acquisition');
       picker.close();
-      const currentModal = mount();
+      const currentModal = await mount();
       const current = picker.startSharing('add');
       await until(() => pendingCaptures.length === 2, 'A new picker may start after cancelling the old one');
       const late = new MediaStream();
@@ -1027,7 +1048,7 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
       const replacement = new MediaStream();
       acquireNative = async () => replacement;
       states.length = 0;
-      mount();
+      await mount();
       await picker.startSharing('replace');
       check(old.stream.getVideoTracks()[0].readyState === 'ended' && !videoService.getScreenStream(added.id)
         && !videoService.getNativeScreenCapture(added.id) && videoService.getScreenStream(replacement.id) === replacement
@@ -1038,6 +1059,13 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
         && states[0].screenShareIds[0] === replacement.id && states[0].nativeScreenShares[0].shareId === replacement.id,
       'Replacement publishes one final screen state instead of an intermediate sharing=false');
       check(browserAcquisitions === 0, 'Native picker scenarios never request the disabled Chromium path');
+      check(encodingProbes.length === 0 && settings.preferredScreenCodec === 'h264'
+        && settings.screenEncodingMode === 'hardware' && settings.screenEncodingStrategy === 'manual',
+      'The picker leaves saved encoding preferences unchanged and verification to native source admission');
+      check(nativeSelections[0].preserveAspectRatio === false
+        && nativeSelections.slice(1).every(selection => selection.preserveAspectRatio === true)
+        && videoService.getNativeScreenCapture(replacement.id)?.preserveAspectRatio === true,
+      'A new picker restores fit after a previous explicit OFF and persists that share choice in its capture metadata');
 
       acquisitions = 0;
       captureWith(async () => {
@@ -1054,6 +1082,10 @@ async function runScreenCodecSmoke(MessageType, admissionOnly, codecsOnly, profi
       navigator.mediaDevices.getDisplayMedia = originalDisplay;
       globalRtc.startNativeScreenShare = originalNativeStart;
       settings.preferredVideoCodec = originalCodec;
+      settings.preferredScreenCodec = originalScreenCodec;
+      settings.screenEncodingMode = originalEncodingMode;
+      settings.screenEncodingStrategy = originalEncodingStrategy;
+      window.api = originalApi;
       videoService.setQualityPreset(originalVideoPreset);
       client.send = originalSend;
       videoService.stopScreenShare();

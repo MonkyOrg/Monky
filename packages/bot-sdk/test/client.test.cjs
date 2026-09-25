@@ -1355,8 +1355,8 @@ test('new SDK reconnects using the known legacy bot contract without an update w
   bot.command({ name: 'ping', description: 'Ping', handler() {} });
   bot.connect();
   await server.next(MessageType.COMMAND_REGISTER);
-  assert.deepEqual(offered.map(offer => offer.protocolVersion), [27, 24]);
-  assert.equal(PROTOCOL_VERSION, 27);
+  assert.deepEqual(offered.map(offer => offer.protocolVersion), [28, 24]);
+  assert.equal(PROTOCOL_VERSION, 28);
   assert.equal(offered[0].protocolOffer.minimumVersion, 24);
   assert.equal(offered[0].publicKey, offered[1].publicKey);
   assert.equal(offered[0].botToken, offered[1].botToken);
@@ -2034,7 +2034,7 @@ test('settings validate defaults, register cloned declarations and hydrate immut
   const declaration = settingsDefinition();
   const expected = structuredClone(declaration);
   const snapshot = serverSettings();
-  assert.equal(PROTOCOL_VERSION, 27);
+  assert.equal(PROTOCOL_VERSION, 28);
   assert.deepEqual(resolveBotSettingsValues(declaration.server, {}), { success: true, values: snapshot.values });
   assert.equal(bot.settings(declaration), bot);
   const invalid = settingsDefinition();
