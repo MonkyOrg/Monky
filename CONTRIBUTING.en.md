@@ -290,6 +290,10 @@ out the SemVer on its own:
 | any type with `!` (`feat!:`, `fix!:`, …), `major:`, or `BREAKING CHANGE:` in the body | **major** — `X.0.0` |
 | anything else (`fix:`, `docs:`, `chore:`, `refactor:`…) | **patch** — `1.0.X` |
 
+With a scope, prefer the conventional form `feat(chat)!:`. Version calculation
+also accepts the marker before the scope (`feat!(chat):`) in existing messages,
+including squash entries, so neither a breaking change nor its `BREAKING CHANGE` footer is lost.
+
 Note that **patch is the default**: every merge into `main` publishes some
 version, even if it is a documentation commit.
 

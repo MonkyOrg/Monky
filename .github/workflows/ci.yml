@@ -103,6 +103,7 @@ jobs:
         run: npm run build --workspace=packages/shared
       - name: Test bot contracts and SDK
         run: |
+          node scripts/test-versioning.js
           node scripts/test-changelog.js
           node --test scripts/test-light-contracts.js scripts/test-light-build.js scripts/test-native-ci.js
           npm run test --workspace=packages/shared
