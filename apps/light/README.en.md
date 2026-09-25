@@ -130,6 +130,10 @@ npm run test:light:scripts
 CI prepares native runs on Windows, Intel macOS, and Apple Silicon macOS.
 Tool versions come from `buildTools` in `dependencies.json`; the cache contains
 downloaded archives, which remain subject to hash validation.
+The pinned `FieldTrials` source also uses this cache: transport failures receive
+up to three attempts, and only content with the expected SHA-256 is accepted.
+Script tests exercise CMake's actual downloader against a local server,
+including HTTP failures, corrupt cache entries and rejection of mismatched content.
 
 ## Identity and profile isolation
 

@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { dispatchKey } = require('./fixtures/nativeKeyboard.cjs');
 
 const clientRoot = path.resolve(__dirname, '..');
 const output = path.join(clientRoot, 'dist-test');
@@ -106,15 +107,7 @@ async function runNativeSmoke(window) {
     checks++;
   };
   const key = async (key, code, virtualKey, text, modifiers = 0) => {
-    // CDP bypasses Cocoa's native editing-command resolver.
-    const commands = process.platform === 'darwin' && modifiers === 4 && code === 'KeyZ' ? ['undo'] : [];
-    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
-      type: 'keyDown', key, code, modifiers, commands, windowsVirtualKeyCode: virtualKey, nativeVirtualKeyCode: virtualKey,
-      ...(text ? { text, unmodifiedText: text } : {}),
-    });
-    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
-      type: 'keyUp', key, code, modifiers, windowsVirtualKeyCode: virtualKey, nativeVirtualKeyCode: virtualKey,
-    });
+    await dispatchKey(window, key, code, virtualKey, modifiers, text);
   };
   const enter = (shift = false) => key('Enter', 'Enter', 13, '\r', shift ? 8 : 0);
   const escape = () => key('Escape', 'Escape', 27);
@@ -512,12 +505,7 @@ async function runLiveMarkdownSmoke(window) {
     return rows.length ? rows.at(-1)-rows[0]+1 : 0;
   };
   const key = async (key, code, keyCode, modifiers = 0) => {
-    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
-      type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, modifiers,
-    });
-    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
-      type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, modifiers,
-    });
+    await dispatchKey(window, key, code, keyCode, modifiers);
     await fixture('settle()');
   };
   const insert = async text => {
@@ -906,6 +894,12 @@ async function runLiveMarkdownSmoke(window) {
       'The framed code remains directly editable through native typing');
     await key('z', 'KeyZ', 90, process.platform === 'darwin' ? 4 : 2);
     check((await fixture('state()')).value === codeMessage, 'Undo inside a code block restores its exact original source');
+    await key(process.platform === 'darwin' ? 'Z' : 'y', process.platform === 'darwin' ? 'KeyZ' : 'KeyY',
+      process.platform === 'darwin' ? 90 : 89, process.platform === 'darwin' ? 12 : 2);
+    check((await fixture('state()')).value.includes('const answer = 42; // edited'),
+      'Native Redo restores the code edit on both Cocoa and Windows textareas');
+    await key('z', 'KeyZ', 90, process.platform === 'darwin' ? 4 : 2);
+    check((await fixture('state()')).value === codeMessage, 'Undo after Redo still preserves the exact surrounding Markdown');
     await insert(' // edited');
     await evaluate(`(() => { const input=document.getElementById('chat-message-input');
       const from=input.value.indexOf('const answer'); input.setSelectionRange(from,from+'const answer = 42;'.length); })()`);
@@ -989,8 +983,7 @@ async function runEditorContextSmoke(window, locale) {
     await settle();
   };
   const key = async (key, code, keyCode, modifiers = 0) => {
-    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, modifiers });
-    await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, modifiers });
+    await dispatchKey(window, key, code, keyCode, modifiers);
     await settle();
   };
   const item = index => `.floating-context-menu button:nth-child(${index})`;

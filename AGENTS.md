@@ -90,6 +90,16 @@ npm run start --workspace=apps/client -- --user-data-dir="C:\Projetos\Monky-qa\p
 
 ---
 
+## ✅ Validação local obrigatória antes de abrir PR
+
+- **Nunca abra um PR sem executar antes as validações locais correspondentes ao CI.** Leia `.github/workflows/ci.yml`, os scripts chamados pelos jobs e os testes dos arquivos alterados; não use o CI como primeira rodada de testes.
+- Rode o build e as suítes afetadas sobre a revisão que será enviada. Mudanças em contratos compartilhados, protocolo ou compatibilidade exigem conferir **shared, servidor, cliente e SDK**, inclusive testes com versões fixadas, negociação e fallback. Para alterações de interface, rode também os testes DOM e de teclado/pointer relevantes; somente type-check ou inspeção visual não substituem esses testes.
+- **Falha local bloqueia a abertura do PR.** Corrija a causa, acrescente a regressão aplicável e repita os testes antes de publicar. A mesma regra vale para enviar correções a um PR já aberto.
+- Verifique diferenças de Windows/macOS e caminhos de falha, como downloads interrompidos, quando a alteração os afetar. Registre no PR os comandos executados e os cenários que dependem de outro sistema operacional; testes locais reduzem falhas evitáveis, mas não garantem disponibilidade de serviços externos nem substituem o CI multiplataforma.
+- Preserve a máquina do desenvolvedor: use perfis e servidores descartáveis. Variantes reservadas a runners descartáveis, como testes do clipboard real, continuam exclusivas do CI; nunca altere `GITHUB_ACTIONS` para contornar essa proteção.
+
+---
+
 ## 🚢 Publicação de Releases: Somente por Merge de PR
 
 - **NUNCA publique releases a partir de branches de trabalho ou de integração.** Aprovar um teste local ou pedir uma release não autoriza publicar diretamente da branch.

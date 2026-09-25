@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { dispatchKey } = require('./fixtures/nativeKeyboard.cjs');
 
 const clientRoot = path.resolve(__dirname, '..');
 const output = path.join(clientRoot, 'dist-test');
@@ -115,21 +116,6 @@ if (!process.versions.electron) {
       : `Message clipboard DOM smoke: ${checks} checks passed (native keys/pointer, real Markdown and MIME blobs; system clipboard untouched)`);
     await finish(0);
   }).catch(async error => { console.error(error); await finish(1); });
-}
-
-async function dispatchKey(window, key, code, virtualKey, modifiers = 0, text) {
-  // CDP bypasses Cocoa's key-binding resolver; native editing needs its command.
-  const editingCommand = code === 'KeyZ' ? (modifiers === 12 ? 'redo' : 'undo')
-    : code === 'KeyV' ? 'paste' : code === 'KeyC' && !(modifiers & 8) ? 'copy' : null;
-  const commands = process.platform === 'darwin' && [4, 12].includes(modifiers) && editingCommand
-    ? [editingCommand] : [];
-  await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
-    type: text ? 'keyDown' : 'rawKeyDown', key, code, modifiers, windowsVirtualKeyCode: virtualKey, commands,
-    ...(text ? { text, unmodifiedText: text } : {}),
-  });
-  await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
-    type: 'keyUp', key, code, modifiers, windowsVirtualKeyCode: virtualKey,
-  });
 }
 
 async function dispatchClick(window, point, clickCount = 1) {
