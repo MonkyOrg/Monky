@@ -34,14 +34,28 @@ if (!process.versions.electron) {
   let window;
   let timeout;
   let imageServer;
+  let finishing = false;
   const finish = async code => {
+    if (finishing) return;
+    finishing = true;
     clearTimeout(timeout);
+    let phase = 'destroying the browser';
+    const teardownTimeout = setTimeout(() => {
+      console.error(`Message clipboard teardown timed out while ${phase}`);
+      app.exit(1);
+    }, 10_000);
     if (window && !window.isDestroyed()) {
       if (window.webContents.debugger.isAttached()) window.webContents.debugger.detach();
       window.destroy();
     }
+    phase = 'closing Vite';
     if (vite) await vite.close();
-    if (imageServer?.listening) await new Promise(resolve => imageServer.close(resolve));
+    phase = 'closing image fixtures';
+    if (imageServer?.listening) await new Promise((resolve, reject) => {
+      imageServer.close(error => error ? reject(error) : resolve());
+      imageServer.closeAllConnections();
+    });
+    clearTimeout(teardownTimeout);
     app.exit(code);
   };
   app.whenReady().then(async () => {
@@ -75,7 +89,7 @@ if (!process.versions.electron) {
       configFile: path.join(clientRoot, 'vite.config.ts'),
       cacheDir: path.join(process.env.MONKY_CLIPBOARD_PROFILE, 'vite-cache'),
       logLevel: 'error',
-      server: { host: '127.0.0.1', port: 0, strictPort: true, open: false },
+      server: { host: '127.0.0.1', port: 0, strictPort: true, open: false, hmr: false, watch: null },
       plugins: [{
         name: 'message-clipboard-fixture',
         configureServer(server) {
@@ -111,6 +125,15 @@ if (!process.versions.electron) {
     await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
     window.webContents.focus();
     const checks = systemClipboard ? await runSystemClipboardSmoke(window) : await runSmoke(window);
+    // Chromium may leave speculative or aborted image requests connected at teardown.
+    const pendingImage = require('node:net').createConnection({ host: '127.0.0.1', port: imageAddress.port });
+    await new Promise((resolve, reject) => {
+      pendingImage.once('error', reject);
+      pendingImage.once('connect', () => {
+        pendingImage.write('GET /authored.png HTTP/1.1\r\n');
+        resolve();
+      });
+    });
     console.log(systemClipboard
       ? `Message system clipboard smoke: ${checks} checks passed (native copy/paste into an independent rich editor and textarea)`
       : `Message clipboard DOM smoke: ${checks} checks passed (native keys/pointer, real Markdown and MIME blobs; system clipboard untouched)`);
