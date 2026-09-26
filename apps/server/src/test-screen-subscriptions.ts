@@ -578,6 +578,46 @@ async function privateScreenFixture() {
   return { ...f, source, revoked, recv, otherRecv, version: (value: number | null) => { version = value; } };
 }
 
+test('legacy screen audio metadata uses its own stream ID but requires an advertised legacy share', async () => {
+  const f = await signalingFixture();
+  const [viewer, , publisher] = f.clients;
+  const metadata = {
+    fromSessionId: 'publisher', targetSessionId: 'viewer-a', signalType: 'screen-audio-meta',
+    streamId: 'separate-audio-stream', subscriptionId: 'publisher-epoch',
+  };
+  f.server['handleRtcSignal'](publisher, metadata);
+  assert.deepEqual(f.sent.at(-1), {
+    socket: viewer.ws, type: MessageType.RTC_SIGNAL, requestId: undefined, payload: metadata,
+  });
+  f.service.updateVoiceState('publisher', { screenShareIds: [] });
+  f.server['handleRtcSignal'](publisher, metadata);
+  assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+  assert.equal(f.sent.at(-1)?.socket, publisher.ws);
+  f.manager.close();
+});
+
+test('private sources cannot announce shared legacy audio, even to authorized viewers or beside a public share', async () => {
+  const f = await privateScreenFixture();
+  const [viewer, outsider, publisher] = f.clients;
+  for (const target of [viewer, outsider]) {
+    for (const streamId of ['one', 'separate-audio-stream']) {
+      f.server['handleRtcSignal'](publisher, {
+        fromSessionId: 'publisher', targetSessionId: target.sessionId, signalType: 'screen-audio-meta',
+        streamId, subscriptionId: 'publisher-epoch',
+      });
+      assert.equal(f.sent.at(-1)?.type, MessageType.SERVER_ERROR);
+      assert.equal(f.sent.at(-1)?.socket, publisher.ws);
+    }
+    f.server['handleRtcSignal'](publisher, {
+      fromSessionId: 'publisher', targetSessionId: target.sessionId, signalType: 'screen-video-meta',
+      streamId: 'two', subscriptionId: 'publisher-epoch',
+    });
+    assert.equal(f.sent.at(-1)?.type, MessageType.RTC_SIGNAL, 'public legacy video remains visible');
+    assert.equal(f.sent.at(-1)?.socket, target.ws);
+  }
+  f.manager.close();
+});
+
 test('private SFU projection hides producers and close events; guessed native/legacy video and audio are denied', async () => {
   const f = await privateScreenFixture();
   const [viewer, outsider] = f.clients;

@@ -115,6 +115,11 @@ async function run() {
       [MessageType.VOICE_USER_JOINED]);
     if (mode === 'p2p') {
       const streamId = await evaluate('peerFixture.screenStreamId');
+      const videoId = await evaluate('peerFixture.videoStreamId');
+      assert.notEqual(streamId, videoId, 'Screen audio and video must use distinct stream identities');
+      await browser.peer.request(MessageType.VOICE_STATE_UPDATE, {
+        screenShareIds: [videoId], isScreenSharing: true, isSharingScreenAudio: true,
+      }, [MessageType.VOICE_STATE_CHANGED]);
       sendSignal({ signalType: 'screen-audio-meta', streamId });
     }
     await evaluate('peerFixture.start()');
@@ -250,6 +255,7 @@ async function setupBrowserPeer(config) {
   globalThis.peerFixture = {
     microphoneGain: microphone.gain,
     screenStreamId: screen.destination.stream.id,
+    videoStreamId: video.id,
     complete({ id, result, error }) {
       const request = pending.get(id);
       if (!request) throw new Error('Unexpected fixture RPC completion');

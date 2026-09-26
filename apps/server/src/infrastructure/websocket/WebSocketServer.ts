@@ -3347,9 +3347,16 @@ export class WebSocketServer {
       const publisherId = payload.signalType === 'screen-watch' ? payload.targetSessionId : session.sessionId;
       const viewerId = payload.signalType === 'screen-watch' ? session.sessionId : payload.targetSessionId;
       const publisher = this.signalingService.getVoiceState(publisherId);
+      // Legacy audio has its own MediaStream ID, separate from the advertised video shares.
+      const canRoute = payload.signalType === 'screen-audio-meta'
+        ? !publisher?.nativeScreenShares?.some(source => source.audience)
+          && !!publisher?.screenShareIds?.some(shareId =>
+            !publisher.nativeScreenShares?.some(source => source.shareId === shareId)
+            && this.signalingService.canWatchScreen(publisherId, viewerId, shareId))
+        : this.signalingService.canWatchScreen(publisherId, viewerId, payload.streamId);
       // Native sources use isolated, authorized subscriptions, never the legacy call peer.
       if (!payload.streamId || publisher?.nativeScreenShares?.some(source => source.shareId === payload.streamId)
-        || !this.signalingService.canWatchScreen(publisherId, viewerId, payload.streamId)) {
+        || !canRoute) {
         this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'Transmissão não está disponível.', requestId);
         return;
       }
