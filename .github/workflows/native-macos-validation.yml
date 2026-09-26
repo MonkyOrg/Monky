@@ -39,3 +39,5 @@ jobs:
         run: |
           node --test apps/client/native/screen-share/test/macScreenProvider.test.cjs
           node apps/client/native/screen-share/test/macNativeHostSmoke.cjs
+      - name: Exercise actual VideoToolbox H264 encoding and callback retirement
+        run: apps/client/native/screen-share/bin/darwin-${{ matrix.arch }}/monky-screen-mac --encoder-smoke

@@ -17,8 +17,10 @@ function build({ arch = process.arch } = {}) {
     execute('xcrun', ['--sdk', 'macosx', 'clang++', '-std=c++20', '-fobjc-arc', '-fblocks', '-O2',
       '-Wall', '-Wextra', '-Werror', '-mmacosx-version-min=14.0',
       '-arch', arch === 'x64' ? 'x86_64' : 'arm64', '-isysroot', sdk,
-      path.join(source, 'host.mm'), '-framework', 'Foundation', '-framework', 'AppKit',
-      '-framework', 'ScreenCaptureKit', '-framework', 'CoreGraphics', '-o', executable]);
+      path.join(source, 'host.mm'), path.join(source, 'videoEncoder.mm'),
+      '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'ScreenCaptureKit',
+      '-framework', 'CoreGraphics', '-framework', 'VideoToolbox', '-framework', 'CoreMedia',
+      '-framework', 'CoreVideo', '-o', executable]);
     const tests = arch === process.arch
       ? JSON.parse(execute(executable, ['--self-test'], { capture: true })) : null;
     if (tests) assert.equal(tests.deviceFree, true);

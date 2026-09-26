@@ -23,6 +23,7 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+#include "videoEncoder.h"
 
 namespace {
 constexpr size_t kMaximumCommand = 65536;
@@ -289,6 +290,17 @@ void Command(NSData* bytes) {
 int main(int argc, const char* argv[]) {
   @autoreleasepool {
     if (@available(macOS 14.0, *)) {
+      if (argc == 2 && std::string_view(argv[1]) == "--encoder-smoke") {
+        try {
+          NSArray* results = @[monky::screen::mac::VideoEncoderSmoke(false),
+            monky::screen::mac::VideoEncoderSmoke(true)];
+          NSData* json = [NSJSONSerialization dataWithJSONObject:results options:0 error:nil];
+          Require(json != nil);
+          WriteBytes(static_cast<const uint8_t*>(json.bytes), json.length);
+          std::puts("");
+          return 0;
+        } catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
+      }
       if (argc == 2 && std::string_view(argv[1]) == "--self-test") {
         Require(ProcessStart(getpid()).length > 0);
         std::puts("{\"deviceFree\":true,\"checks\":1}");
