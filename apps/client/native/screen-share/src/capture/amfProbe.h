@@ -9,6 +9,16 @@
 
 namespace monky::screen_capture {
 
+inline void ValidateAmfComponentResult(AMF_RESULT result, bool av1, const std::string& evidence) {
+  if (result == AMF_OK) return;
+  const bool unsupported = result == AMF_NOT_SUPPORTED || result == AMF_NOT_FOUND ||
+      result == AMF_CODEC_NOT_SUPPORTED;
+  throw ContractError(unsupported ? "ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED" : "ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE",
+      evidence + (av1 ? "; CreateComponent(AV1)" : "; CreateComponent(H264)") +
+      " status=" + std::to_string(result) +
+      (unsupported ? "; selected codec is not supported by this GPU" : ""));
+}
+
 inline std::string ProbeAmfDevice(ID3D11Device* device, const VideoConfiguration& video, bool av1 = false) {
   constexpr auto errorCode = "ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE";
   Require(device != nullptr, "Invalid AMF probe device", errorCode);
@@ -41,9 +51,7 @@ inline std::string ProbeAmfDevice(ID3D11Device* device, const VideoConfiguration
     Require(context != nullptr, "AMF returned no context", errorCode);
     check(context->InitDX11(device, amf::AMF_DX11_1), "InitDX11(selected OBS device)");
     const auto created = factory->CreateComponent(context, av1 ? AMFVideoEncoder_AV1 : AMFVideoEncoderVCE_AVC, &encoder);
-    if (created == AMF_NOT_SUPPORTED || created == AMF_NOT_FOUND)
-      throw ContractError("ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED", evidence + "; selected codec is not supported by this GPU");
-    check(created, av1 ? "CreateComponent(AV1)" : "CreateComponent(H264)");
+    ValidateAmfComponentResult(created, av1, evidence);
     Require(encoder != nullptr, "AMF returned no selected codec component", errorCode);
     check(encoder->SetProperty(av1 ? AMF_VIDEO_ENCODER_AV1_FRAMESIZE : AMF_VIDEO_ENCODER_FRAMESIZE,
         AMFConstructSize(video.width, video.height)), "SetProperty(FrameSize)");

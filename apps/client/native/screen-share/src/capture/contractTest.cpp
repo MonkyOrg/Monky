@@ -1,6 +1,7 @@
 #include <Windows.h>
 #include "liveNative.h"
 #include "platformContract.h"
+#include "amfProbe.h"
 #include <iostream>
 
 using namespace monky::screen_capture;
@@ -380,6 +381,25 @@ int main(int argc, char** argv) {
     check(RequiredCaptureH264Level({3840, 2160, 60, 80000}) == 52);
     check(RequiredCaptureH264Level({3840, 2160, 120, 80000}) == 60);
     ValidateAmfLevelCapability(52, {3840, 2160, 60, 80000});
+    for (const bool av1 : {false, true}) {
+      for (int value = AMF_OK; value <= AMF_VULKAN_FAILED + 1; ++value) {
+        const auto status = static_cast<AMF_RESULT>(value);
+        const bool unsupported = status == AMF_NOT_SUPPORTED || status == AMF_NOT_FOUND ||
+            status == AMF_CODEC_NOT_SUPPORTED;
+        try {
+          ValidateAmfComponentResult(status, av1, "AMF modeled source-free probe");
+          check(status == AMF_OK);
+        } catch (const ContractError& error) {
+          check(status != AMF_OK);
+          check(error.code == (unsupported ? "ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED" :
+              "ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE"));
+          const std::string diagnostic = error.what();
+          check(diagnostic.find(av1 ? "CreateComponent(AV1)" : "CreateComponent(H264)") != std::string::npos);
+          check(diagnostic.find("status=" + std::to_string(value)) != std::string::npos);
+          check(diagnostic.find("AMF modeled source-free probe") != std::string::npos);
+        }
+      }
+    }
     ValidateAmfLevelCapability(60, {3840, 2160, 120, 80000});
     ValidateAmfLevelCapability(51, {1920, 1080, 120, 80000});
     ValidateAmfLevelCapability(52, {1920, 1080, 240, 80000});

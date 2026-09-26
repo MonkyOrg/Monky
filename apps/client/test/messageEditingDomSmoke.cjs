@@ -1583,13 +1583,16 @@ async function installFixture() {
           overlay.applyHoverState();
           return [...root.querySelectorAll('.overlay-resize-hint.near-pointer')].map(hint => hint.dataset.direction).join(',');
         };
-        for (const [direction, x, y, rotation] of [
-          ['nw', 1, 1, 180], ['ne', bounds.width - 1, 1, 270],
-          ['sw', 1, bounds.height - 1, 90], ['se', bounds.width - 1, bounds.height - 1, 0],
+        for (const [direction, x, y] of [
+          ['nw', 1, 1], ['ne', bounds.width - 1, 1],
+          ['sw', 1, bounds.height - 1], ['se', bounds.width - 1, bounds.height - 1],
         ]) {
           check(showHint(x, y) === direction, `Only the ${direction} corner lights up near that corner`);
           const hint = root.querySelector(`[data-direction="${direction}"]`);
-          check(hint.querySelector('path').getAttribute('transform') === `rotate(${rotation} 8 8)`, `${direction} grip points toward its own corner`);
+          const matrix = hint.querySelector('path').getCTM();
+          check(Math.abs(Math.abs(matrix.b) - Math.abs(matrix.a)) < 0.001
+            && (matrix.a * matrix.b > 0) === (direction === 'ne' || direction === 'sw'),
+          `${direction} double arrow follows its native resize diagonal`);
           check(getComputedStyle(hint).pointerEvents === 'none', 'Resize indicators never intercept native window resizing');
         }
         check(showHint(bounds.width * 0.35, bounds.height - 40) === 's', 'Bottom-center hint appears while approaching its central region');

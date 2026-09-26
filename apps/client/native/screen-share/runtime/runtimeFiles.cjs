@@ -79,12 +79,23 @@ function loadRuntime(directory = path.resolve(__dirname, '..', 'bin', 'win32-x64
   const rtcBuild = JSON.parse(fs.readFileSync(path.join(directory, 'rtc-build.json'), 'utf8'));
   assert.equal(rtcBuild.schemaVersion, 1);
   assert.equal(rtcBuild.webrtcRevision, '36ea4535a500ac137dbf1f577ce40dc1aaa774ef');
-  assert.ok(Array.isArray(rtcBuild.binaries) && rtcBuild.binaries.length === 3);
-  for (const name of ['monky_screen_rtc.dll', 'monky_screen_rtc.node', 'monky_av1.dll']) {
+  assert.ok(Array.isArray(rtcBuild.binaries) && rtcBuild.binaries.length === 4);
+  for (const name of ['monky_screen_rtc.dll', 'monky_screen_rtc.node', 'monky_av1.dll', 'monky_native_handles.node']) {
     const file = rtcBuild.binaries.find(binary => binary.name === name);
     assert.ok(file); verifiedFile(directory, { ...file, path: name });
   }
-  return Object.freeze({ ...capture, rtc: encoded.load(path.join(directory, 'monky_screen_rtc.node')) });
+  return Object.freeze({ ...capture, rtc: encoded.load(path.join(directory, 'monky_screen_rtc.node'), {
+    capabilities: rtcBuild.capabilities, handlesFile: path.join(directory, 'monky_native_handles.node'),
+  }) });
 }
 
-module.exports = { loadRuntime, loadCaptureRuntime, verifiedFile };
+function loadThumbnailRuntime(directory = path.resolve(__dirname, '..', 'bin', 'win32-x64')) {
+  assert.equal(process.platform, 'win32');
+  assert.equal(process.arch, 'x64');
+  const build = JSON.parse(fs.readFileSync(path.join(directory, 'thumbnail-build.json'), 'utf8'));
+  assert.equal(build.schemaVersion, 1);
+  assert.equal(build.host.path, 'monky-screen-thumbnail.exe');
+  return Object.freeze({ kind: 'verified-native-thumbnail-host', executable: verifiedFile(directory, build.host) });
+}
+
+module.exports = { loadRuntime, loadCaptureRuntime, loadThumbnailRuntime, verifiedFile };

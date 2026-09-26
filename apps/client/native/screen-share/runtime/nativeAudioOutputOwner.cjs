@@ -241,15 +241,16 @@ class NativeAudioOutputOwner {
       try {
         // Reserve before direct native admission: it can synchronously publish PCM.
         const result = this.#engine.grantAudioCredits(payload);
-        this.#requireDirect(result, record, 'grantCredits');
-        if (result !== undefined) throw new Error('Native audio credit admission must return void.');
+        return this.#receiveNative(result, record, 'grantCredits', receipt => {
+          if (receipt !== undefined) throw new Error('Native audio credit admission must return void.');
+          this.#assertLive(record);
+          this.#counts.acceptedGrants++;
+          return true;
+        });
       } catch (error) {
         record.grantAdmissionUncertain = true;
         throw error;
       }
-      this.#assertLive(record);
-      this.#counts.acceptedGrants++;
-      return true;
     } catch (error) { this.#fail(record, error, 'grantCredits'); throw error; }
   }
 
@@ -263,23 +264,24 @@ class NativeAudioOutputOwner {
       record.lastProbeId = payload.probeId;
       record.probes.set(payload.probeId, null);
       const result = this.#engine.audioClockProbe(payload);
-      this.#requireDirect(result, record, 'probe');
-      const observation = fields(result, ['epoch', 'probeId', 'rtcBeforeUs', 'rtcAfterUs'], 'Invalid native clock observation.');
-      if (observation.epoch !== record.epoch || observation.probeId !== payload.probeId
-        || !nonnegative(observation.rtcBeforeUs) || !nonnegative(observation.rtcAfterUs)
-        || observation.rtcAfterUs < observation.rtcBeforeUs
-        || observation.rtcAfterUs - observation.rtcBeforeUs > 20000) throw new Error('Uncorrelated native audio clock observation.');
-      this.#assertLive(record);
-      // OutputClock::Probe has just expired these observations using this same native bracket.
-      for (const [id, rtcAfterUs] of record.probes) {
-        if (nonnegative(rtcAfterUs) && observation.rtcBeforeUs - rtcAfterUs > 200000) {
-          record.probes.delete(id);
-          this.#counts.expiredProbes++;
+      return this.#receiveNative(result, record, 'probe', receipt => {
+        const observation = fields(receipt, ['epoch', 'probeId', 'rtcBeforeUs', 'rtcAfterUs'], 'Invalid native clock observation.');
+        if (observation.epoch !== record.epoch || observation.probeId !== payload.probeId
+          || !nonnegative(observation.rtcBeforeUs) || !nonnegative(observation.rtcAfterUs)
+          || observation.rtcAfterUs < observation.rtcBeforeUs
+          || observation.rtcAfterUs - observation.rtcBeforeUs > 20000) throw new Error('Uncorrelated native audio clock observation.');
+        this.#assertLive(record);
+        // OutputClock::Probe expires observations using this same native bracket.
+        for (const [id, rtcAfterUs] of record.probes) {
+          if (nonnegative(rtcAfterUs) && observation.rtcBeforeUs - rtcAfterUs > 200000) {
+            record.probes.delete(id);
+            this.#counts.expiredProbes++;
+          }
         }
-      }
-      record.probes.set(payload.probeId, observation.rtcAfterUs);
-      this.#counts.probes++;
-      return result;
+        record.probes.set(payload.probeId, observation.rtcAfterUs);
+        this.#counts.probes++;
+        return receipt;
+      });
     } catch (error) { this.#fail(record, error, 'probe'); throw error; }
   }
 
@@ -294,18 +296,19 @@ class NativeAudioOutputOwner {
       record.probes.delete(payload.probeId);
       record.calibrationId = null;
       const result = this.#engine.calibrateAudioClock(payload);
-      this.#requireDirect(result, record, 'calibrate');
-      const calibration = fields(result, ['epoch', 'calibrationId', 'offsetUs', 'uncertaintyUs'], 'Invalid native clock calibration.');
-      if (calibration.epoch !== record.epoch || !positive(calibration.calibrationId)
-        || calibration.calibrationId <= record.lastCalibrationId
-        || !Number.isFinite(calibration.offsetUs) || Math.abs(calibration.offsetUs) > Number.MAX_SAFE_INTEGER
-        || !Number.isFinite(calibration.uncertaintyUs) || calibration.uncertaintyUs < 0 || calibration.uncertaintyUs > 20000) {
-        throw new Error('Uncorrelated or invalid native audio clock calibration.');
-      }
-      this.#assertLive(record);
-      record.calibrationId = record.lastCalibrationId = calibration.calibrationId;
-      this.#counts.calibrations++;
-      return result;
+      return this.#receiveNative(result, record, 'calibrate', receipt => {
+        const calibration = fields(receipt, ['epoch', 'calibrationId', 'offsetUs', 'uncertaintyUs'], 'Invalid native clock calibration.');
+        if (calibration.epoch !== record.epoch || !positive(calibration.calibrationId)
+          || calibration.calibrationId <= record.lastCalibrationId
+          || !Number.isFinite(calibration.offsetUs) || Math.abs(calibration.offsetUs) > Number.MAX_SAFE_INTEGER
+          || !Number.isFinite(calibration.uncertaintyUs) || calibration.uncertaintyUs < 0 || calibration.uncertaintyUs > 20000) {
+          throw new Error('Uncorrelated or invalid native audio clock calibration.');
+        }
+        this.#assertLive(record);
+        record.calibrationId = record.lastCalibrationId = calibration.calibrationId;
+        this.#counts.calibrations++;
+        return receipt;
+      });
     } catch (error) {
       if (!this.#rejectClockObservation(record, error, 'calibrate')) this.#fail(record, error, 'calibrate');
       throw error;
@@ -335,12 +338,13 @@ class NativeAudioOutputOwner {
       if (payload.available) record.lastClockEpoch = payload.clockEpoch;
       nativeFeedback = { ...payload };
       const result = this.#engine.setAudioOutputFeedback(payload);
-      this.#requireDirect(result, record, 'feedback');
-      if (result !== undefined) throw new Error('Native audio feedback admission must return void.');
-      this.#assertLive(record);
-      record.lastFeedback = { ...payload };
-      this.#counts[payload.available ? 'availableFeedback' : 'unavailableFeedback']++;
-      return true;
+      return this.#receiveNative(result, record, 'feedback', receipt => {
+        if (receipt !== undefined) throw new Error('Native audio feedback admission must return void.');
+        this.#assertLive(record);
+        record.lastFeedback = { ...payload };
+        this.#counts[payload.available ? 'availableFeedback' : 'unavailableFeedback']++;
+        return true;
+      }, nativeFeedback);
     } catch (error) {
       if (nativeFeedback) record.rejectedFeedback = nativeFeedback;
       if (nativeFeedback && this.#rejectClockObservation(record, error, 'feedback')) return false;
@@ -534,6 +538,26 @@ class NativeAudioOutputOwner {
     if (!thenable(result)) return;
     void Promise.resolve(result).then(undefined, error => this.#fail(record, error, phase));
     throw new Error('Native audio metadata methods must be synchronous, not synthetic asynchronous acknowledgements.');
+  }
+
+  #receiveNative(result, record, phase, accept, feedback = null) {
+    if (this.#engine.asynchronousNative !== true) {
+      this.#requireDirect(result, record, phase);
+      return accept(result);
+    }
+    if (!thenable(result)) throw new Error('The isolated native operation requires its real child acknowledgement.');
+    return Promise.resolve(result).then(accept).catch(error => {
+      if (this.#isCancellation(record, error)) {
+        if (phase === 'grantCredits' || phase === 'feedback') return false;
+        throw error;
+      }
+      if (phase === 'grantCredits') record.grantAdmissionUncertain = true;
+      if (feedback) record.rejectedFeedback = feedback;
+      if (['calibrate', 'feedback'].includes(phase) && this.#rejectClockObservation(record, error, phase)) {
+        if (phase === 'feedback') return false;
+      } else this.#fail(record, error, phase);
+      throw error;
+    });
   }
 
   #markStopping(record, reason) {

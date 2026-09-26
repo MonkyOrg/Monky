@@ -11,8 +11,9 @@ async function runScreenAudienceSmoke() {
   const deny = async () => { mediaRequests++; throw new Error('Audience UI must never request media.'); };
   media.getUserMedia = deny;
   media.getDisplayMedia = deny;
-  const [{ ScreenSharePickerModal }, { webRtcManager }, language] = await Promise.all([
-    import('/views/ScreenSharePickerModal.ts'), import('/core/WebRtcManager.ts'), import('/i18n/index.ts'),
+  const [{ ScreenSharePickerModal }, { OverlayConfigModal }, { webRtcManager }, language] = await Promise.all([
+    import('/views/ScreenSharePickerModal.ts'), import('/views/OverlayConfigModal.ts'),
+    import('/core/WebRtcManager.ts'), import('/i18n/index.ts'),
   ]);
   const originalApi = window.api, originalCapabilities = webRtcManager.getNativeScreenCapabilities;
   const originalLanguage = language.getLanguage();
@@ -26,7 +27,7 @@ async function runScreenAudienceSmoke() {
     getDesktopSources: async () => [{ id: 'window:1', type: 'window', name: 'Owned fixture', thumbnailDataUrl: '', appIconDataUrl: null }],
     getDesktopSourcePreviews: async () => [],
   };
-  let picker, preview = '', previewScroll = 0;
+  let picker, overlay, preview = '', previewScroll = 0;
   try {
     for (const locale of ['pt-BR', 'en']) {
       document.body.replaceChildren();
@@ -46,6 +47,24 @@ async function runScreenAudienceSmoke() {
         },
       };
       const privacy = document.querySelector('#chk-private-share');
+      await settle();
+      const aspect = document.querySelector('#chk-preserve-aspect-ratio');
+      const labels = ['share-aspect-label', 'share-private-label'].map(id => document.getElementById(id));
+      const audioStyle = getComputedStyle(document.querySelector('#share-audio-text'));
+      for (const label of labels) {
+        const style = getComputedStyle(label);
+        check(['fontSize', 'fontWeight', 'fontFamily', 'color'].every(key => style[key] === audioStyle[key]),
+          `${locale}: both picker option labels must match the standard audio label typography.`);
+      }
+      const switches = [aspect, privacy].map(input => input.closest('.toggle-switch').getBoundingClientRect());
+      check(Math.abs(switches[0].right - switches[1].right) < 1,
+        'Picker option switches must share a right-aligned column.');
+      check(switches.every(rect => rect.width === 36 && rect.height === 20), 'Switches keep their standard size.');
+      labels[0].click();
+      check(!aspect.checked, 'Clicking the aspect label changes the associated switch exactly once.');
+      labels[0].click();
+      check(aspect.checked, 'The aspect label also restores ON.');
+      if (locale === 'pt-BR') window.modalOptionPickerPreview = document.body.innerHTML;
       privacy.checked = true;
       privacy.dispatchEvent(new Event('change', { bubbles: true }));
       const trigger = document.querySelector('#share-audience-toggle');
@@ -106,10 +125,66 @@ async function runScreenAudienceSmoke() {
       previewScroll = card.scrollTop;
       picker.close();
       check(!document.querySelector('#share-audience-popup'), 'Closing modal retires the dropdown.');
+
+      overlay = new OverlayConfigModal();
+      overlay.open();
+      await settle();
+      const overlayAspect = document.querySelector('#overlay-aspect-ratio');
+      const row = overlayAspect.closest('.overlay-aspect-option');
+      const reference = document.querySelector('#overlay-hide-self-cb').closest('.toggle-switch').parentElement;
+      check(!!row, 'Overlay aspect ratio must use an option row, not unstyled body text.');
+      const rowStyle = getComputedStyle(row), referenceStyle = getComputedStyle(reference);
+      check(['display', 'alignItems', 'justifyContent', 'gap', 'padding', 'backgroundColor', 'border', 'borderRadius']
+        .every(key => rowStyle[key] === referenceStyle[key]), 'Aspect ratio uses the same card treatment as other overlay toggles.');
+      for (const id of ['overlay-hide-stage-cb', 'overlay-hide-inactive-cb']) {
+        const input = document.getElementById(id);
+        const option = input.closest('.overlay-visibility-option');
+        const style = getComputedStyle(option);
+        check(['display', 'alignItems', 'justifyContent', 'gap', 'padding', 'backgroundColor', 'border', 'borderRadius']
+          .every(key => style[key] === referenceStyle[key]), `${id}: new options retain the standard card treatment.`);
+        const label = document.getElementById(input.getAttribute('aria-labelledby'));
+        const hint = document.getElementById(input.getAttribute('aria-describedby'));
+        check(label?.htmlFor === id && hint?.textContent && getComputedStyle(label).fontSize === '12px'
+          && getComputedStyle(hint).fontSize === '11px', `${id}: accessible labels use standard typography.`);
+        const checked = input.checked;
+        label.click();
+        check(input.checked !== checked, `${id}: label activates its switch exactly once.`);
+        label.click();
+      }
+      const title = document.getElementById(overlayAspect.getAttribute('aria-labelledby'));
+      const description = document.getElementById(overlayAspect.getAttribute('aria-describedby'));
+      const referenceText = reference.firstElementChild.lastElementChild;
+      for (const [actual, expected] of [[title, referenceText.children[0]], [description, referenceText.children[1]]]) {
+        const actualStyle = getComputedStyle(actual), expectedStyle = getComputedStyle(expected);
+        check(['fontSize', 'fontWeight', 'fontFamily', 'color'].every(key => actualStyle[key] === expectedStyle[key]),
+          'Overlay title and helper text match the existing compact typography.');
+      }
+      check(title.textContent === language.t('overlay.preserveAspectRatio')
+        && description.textContent === language.t('overlay.preserveAspectRatioDesc'),
+      'Overlay aspect title and description retain their translations and accessible relationships.');
+      check(row.scrollWidth <= row.clientWidth && description.scrollWidth <= description.clientWidth,
+        'Overlay aspect controls fit without horizontal overflow.');
+      const toggle = overlayAspect.closest('.toggle-switch');
+      const referenceToggle = reference.querySelector('.toggle-switch');
+      check(Math.abs(toggle.getBoundingClientRect().right - referenceToggle.getBoundingClientRect().right) < 1
+        && toggle.getBoundingClientRect().width === 36, 'Overlay switches stay aligned and do not shrink.');
+      overlayAspect.scrollIntoView({ block: 'nearest' });
+      overlayAspect.focus();
+      check(document.activeElement === overlayAspect && overlayAspect.tabIndex === 0
+        && overlayAspect.getAttribute('role') === 'switch', 'Overlay aspect ratio remains keyboard focusable as a switch.');
+      const initial = overlayAspect.checked;
+      title.click();
+      check(overlayAspect.checked === !initial && overlay.currentPreserveAspectRatio === !initial,
+        'Clicking the overlay title toggles once and updates its existing configuration state.');
+      title.click();
+      check(overlay.currentPreserveAspectRatio === initial, 'A second click restores the previous overlay choice.');
+      if (locale === 'pt-BR') window.modalOptionOverlayPreview = document.body.innerHTML;
+      overlay.close();
     }
     check(mediaRequests === 0, 'No camera, desktop pixels, or native capture requested.');
   } finally {
     picker?.close();
+    overlay?.close();
     window.api = originalApi;
     webRtcManager.getNativeScreenCapabilities = originalCapabilities;
     Object.assign(media, originalMedia);

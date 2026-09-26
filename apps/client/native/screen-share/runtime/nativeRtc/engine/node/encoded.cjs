@@ -14,18 +14,20 @@ function validateCapabilities(value) {
   return value;
 }
 
-function load(filename) {
+function load(filename, { capabilities, handlesFile } = {}) {
   assert.equal(process.platform, 'win32');
   assert.equal(process.arch, 'x64');
   assert.ok(typeof filename === 'string' && path.isAbsolute(filename) && path.extname(filename) === '.node');
-  const addon = require(filename);
-  assert.equal(typeof addon.capabilities, 'function');
-  assert.equal(typeof addon.createEngine, 'function');
+  validateCapabilities(capabilities);
+  assert.ok(typeof handlesFile === 'string' && path.isAbsolute(handlesFile));
+  const { ProcessEngine } = require('./process.cjs');
+  const declared = structuredClone(capabilities);
   return Object.freeze({
-    capabilities: () => validateCapabilities(addon.capabilities()),
+    // Build-verified compiled support, not a device probe. Each child validates
+    // the actual DLL against this declaration before engine.ready can resolve.
+    capabilities: () => structuredClone(declared),
     createEngine(options, onEvent) {
-      validateCapabilities(addon.capabilities());
-      return addon.createEngine(options, onEvent);
+      return new ProcessEngine({ filename, capabilities: declared, handlesFile, options, onEvent });
     },
   });
 }

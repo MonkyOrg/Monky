@@ -68,6 +68,15 @@ const nvencCapabilities = [
   'NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE', 'NV_ENC_CAPS_WIDTH_MAX', 'NV_ENC_CAPS_HEIGHT_MAX',
 ] as const;
 function nativeErrorDiagnostics(error: Error): NativeErrorDiagnostic[] {
+  if (record(error) && error.code === 'ERR_RTC_HOST_EXIT' && error.hostExited === true) {
+    const exitCode = typeof error.exitCode === 'number' && Number.isInteger(error.exitCode)
+      && error.exitCode >= -2147483648 && error.exitCode <= 4294967295 ? error.exitCode : null;
+    const signal = typeof error.signal === 'string'
+      && ['SIGABRT', 'SIGSEGV', 'SIGTERM', 'SIGKILL', 'SIGBUS', 'SIGILL', 'SIGFPE'].includes(error.signal)
+      ? error.signal : null;
+    return [{ kind: 'rtc-host-exit', hostExited: true, exitCode,
+      exitCodeHex: exitCode === null ? null : `0x${(exitCode >>> 0).toString(16).padStart(8, '0')}`, signal }];
+  }
   const message = error.message.slice(0, 8192);
   const amf = /^AMF H264 requires level_idc=(\d{2}) for (\d{1,4})x(\d{1,4})@(\d{1,3}); selected adapter\/runtime reports MaxLevel=(\d{2})(?=$|[.;\s])/.exec(message);
   if (amf) {
@@ -522,6 +531,7 @@ class NativeScreenSharingService {
         await mkdir(root, { recursive: true });
         await mkdir(directory);
         let retirementConfirmed = true;
+        let capability: NativeScreenCaptureCapability | undefined;
         try {
           const proof = await probeCaptureCapabilities({
             host: runtime.host, runtime: runtime.obs, runId, runDirectory: directory, encoder: selection.encoder,
@@ -531,6 +541,7 @@ class NativeScreenSharingService {
             || proof.codec !== selection.codec || proof.mode !== selection.mode || proof.hardwareQualified
             || proof.hardwareSessionConfirmed)
             throw new Error('Encoder discovery returned a different or unverified encoder.');
+          capability = proof;
         } catch (error) {
           // An aggregate from the native probe means retirement could not be proved.
           retirementConfirmed = !(error instanceof AggregateError);
@@ -551,7 +562,18 @@ class NativeScreenSharingService {
           }
         }
         abort.throwIfAborted();
-      }, inspectHardware);
+        if (capability) this.log('encoder-candidate-ready', {
+          encoder: selection.encoder, codec: selection.codec, encodingMode: selection.mode,
+          video: diagnosticProfile(profile), adapterIndex: capability.adapterIndex,
+          vendorId: capability.vendorId, deviceId: capability.deviceId,
+          encoderInitialized: true, retirementConfirmed: true, sourceCaptured: false,
+        });
+      }, inspectHardware, (selection, error) => {
+        this.logFailure('encoder-candidate', error, undefined, {
+          encoder: selection.encoder, codec: selection.codec, encodingMode: selection.mode,
+          retirementConfirmed: true, continuingHardwareDiscovery: true,
+        });
+      });
     });
     this.encodingQueue = work.catch(() => {});
     this.encodingJobs.add(work);
@@ -636,9 +658,7 @@ class NativeScreenSharingService {
       try { await this.closeCall(call); }
       catch (error) {
         if (this.calls.has(call.config.callId)) throw error;
-        console.warn('[NativeScreen] Media retired with cleanup errors:', error);
-        this.logFailure('remote-retirement', error, undefined, this.context(call));
-        return { kind: 'retired-with-errors', remoteAcknowledged: !call.remoteUnavailable, error: errorDetails(error).message };
+        return this.retiredWithErrors(call, error);
       }
       return { kind: 'ok' };
     }
@@ -650,7 +670,11 @@ class NativeScreenSharingService {
       case 'source-add':
         return this.addSource(call, command);
       case 'source-remove':
-        await this.removeSource(call, command.shareId);
+        try { await this.removeSource(call, command.shareId); }
+        catch (error) {
+          if (call.sources.has(command.shareId) || call.sourceSelections.has(command.shareId)) throw error;
+          return this.retiredWithErrors(call, error, command.shareId);
+        }
         break;
       case 'preview-preferences':
         call.pausePreviewWhenUnfocused = command.pauseWhenUnfocused;
@@ -717,7 +741,13 @@ class NativeScreenSharingService {
         const subscriptionKey = key(command.publisherSessionId, command.shareId);
         if (call.watchVersions.get(subscriptionKey)?.presentationId === command.presentationId) call.watchVersions.delete(subscriptionKey);
         const entry = call.subscriptions.get(subscriptionKey);
-        if (entry?.subscription.presentationId === command.presentationId) await this.closeSubscription(call, entry);
+        if (entry?.subscription.presentationId === command.presentationId) {
+          try { await this.closeSubscription(call, entry); }
+          catch (error) {
+            if (!entry.subscription.snapshot().closed || call.subscriptions.get(subscriptionKey) === entry) throw error;
+            return this.retiredWithErrors(call, error, command.shareId);
+          }
+        }
         break;
       }
       case 'signal':
@@ -1101,7 +1131,14 @@ class NativeScreenSharingService {
           quality: options.quality, video: diagnosticProfile(getScreenShareProfile(source.video, options.quality, source.codec)) };
         this.log('pipeline-create', diagnostic);
         const observe = this.endpointObserver(call, source.shareId, options.pipelineId, 'receive', options.quality);
-        return new NativeScreenEndpoint({
+        const healthRecorded = new Set<'diagnostic' | 'terminal'>();
+        const recordHealth = (trigger: 'diagnostic' | 'terminal'): void => {
+          if (healthRecorded.has(trigger)) return;
+          healthRecorded.add(trigger);
+          try { this.log('receive-health', { ...diagnostic, trigger, observations: endpoint.failureDiagnostics() }, 'WARN'); }
+          catch (error) { this.logFailure('receive-health-read', error, undefined, diagnostic); }
+        };
+        const endpoint = new NativeScreenEndpoint({
           ...options, runtime: this.nativeRuntime(), textures: sharedTexture, role: 'receive', ...call.config,
           source: { ...options.source, codec: source.codec ?? 'h264' },
           onState: state => { observe(state); options.onState(state); },
@@ -1109,11 +1146,14 @@ class NativeScreenSharingService {
           destination: { frame: call.frame, presentationId: options.presentationId },
           ...(source.audio ? { audio: this.audioOptions(call, intent.audio) } : {}),
           rpc: (type, payload) => this.rpc(call, type, payload),
+          onError: error => { recordHealth('terminal'); options.onError(error); },
           onDiagnostic: error => {
+            recordHealth('diagnostic');
             console.warn('[NativeScreen] Receive diagnostic:', error);
             this.logFailure('receive-diagnostic', error, undefined, diagnostic);
           },
         });
+        return endpoint;
       },
     });
     const entry = { source, publisherSessionId: command.publisherSessionId, subscription };
@@ -1192,6 +1232,12 @@ class NativeScreenSharingService {
       }
     }
     await receiving;
+  }
+
+  private retiredWithErrors(call: CallRecord, error: unknown, shareId?: string): NativeScreenCommandResult {
+    console.warn('[NativeScreen] Media retired with cleanup errors:', error);
+    this.logFailure('remote-retirement', error, undefined, this.context(call, shareId));
+    return { kind: 'retired-with-errors', remoteAcknowledged: !call.remoteUnavailable, error: errorDetails(error).message };
   }
 
   private closeCall(call: CallRecord): Promise<void> {
@@ -1289,11 +1335,11 @@ class NativeScreenSharingService {
     const work = Promise.allSettled([this.retireEncodingProbes(), ...calls.map(async call => {
       try { await this.closeCall(call); }
       catch (error) {
-        // Match leave-local: remote loss is observable, but only the original
-        // owners' local retirement proofs can release the call slot.
-        if (!call.remoteUnavailable || this.calls.has(call.config.callId)) throw error;
+        // A historical cleanup error is not retained ownership. Only the
+        // original owners' retirement proofs can release the call slot.
+        if (this.calls.has(call.config.callId)) throw error;
         this.logFailure('shutdown-remote-retirement', error, undefined, this.context(call));
-        this.log('shutdown-locally-retired', { ...this.context(call), remoteAcknowledged: false }, 'WARN');
+        this.log('shutdown-locally-retired', { ...this.context(call), remoteAcknowledged: !call.remoteUnavailable }, 'WARN');
       }
     })]).then(results => {
       const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);

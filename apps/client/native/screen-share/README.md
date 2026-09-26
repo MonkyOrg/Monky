@@ -42,6 +42,93 @@ Automático não promete transcodificação por espectador. O cabeçalho do keyf
 real é a fonte de verdade, pois o extradata AMF anterior ao primeiro frame pode
 estar desatualizado.
 
+## Isolamento do RTC nativo
+
+### Estado do desenvolvimento macOS
+
+`src/mac/host.mm` e `runtime/mac` implementam um provedor separado de fontes
+ScreenCaptureKit e imagens PNG do SCScreenshotManager para macOS 14+ (Intel e
+Apple Silicon). Esse provedor **ainda não está habilitado no aplicativo**.
+Seu protocolo declara explicitamente `capture: false`, `encoder: null`,
+`transport: false` e `receive: false`: listar fontes e gerar miniaturas não
+significa transmitir ou receber vídeo.
+
+O código experimental também inclui captura contínua com SCStream e
+codificação/decodificação H.264 com VideoToolbox.
+Esses componentes não habilitam o backend no aplicativo: a integração completa
+de RTC, áudio, apresentação e distribuição permanece adiada para desenvolvimento
+e testes no próprio Mac. Esta entrega preserva o comportamento atual do macOS.
+
+Para compilar e verificar o processo nativo em um Mac:
+
+```sh
+node apps/client/native/screen-share/scripts/buildMac.cjs
+node --test apps/client/native/screen-share/test/macScreenProvider.test.cjs
+node apps/client/native/screen-share/test/macNativeHostSmoke.cjs
+```
+
+O smoke verifica handshake, capacidades e encerramento real sem capturar fontes
+pessoais nem solicitar permissão de gravação. Ele **não valida captura visual,
+VideoToolbox, RTC, áudio ou apresentação IOSurface**. Essas integrações, a
+assinatura/empacotamento e os testes de mídia em hardware macOS ainda são
+necessários antes de habilitar o compartilhamento nativo nessa plataforma.
+
+### Backend Windows
+
+Cada endpoint de publicação/recepção possui um **processo de mídia próprio**
+(`utilityProcess`, serviço **Monky native screen RTC**). Somente esse filho
+carrega `monky_screen_rtc.node` e o WebRTC/decoder nativo. Abort, access violation
+ou timeout encerram apenas o filho possuído, rejeitam suas operações pendentes
+e reportam `ERR_RTC_HOST_EXIT` à fonte/assinatura. Assistir/compartilhar novamente
+cria outro processo; não muda o codec nem usa Chromium como fallback.
+Os testes Node usam `child_process.fork`; o backend continua Windows x64.
+
+Após a confirmação de saída do host, o diagnóstico persistente conserva seu
+código de saída numérico e hexadecimal e sinais conhecidos do sistema, sem
+copiar mensagens, caminhos ou campos arbitrários. Contenção de uma falha
+induzida não identifica, por si só, a causa de um crash ocorrido em outra GPU.
+
+O Main carrega somente `monky_native_handles.node`, um módulo pequeno de
+`OpenProcess`/`DuplicateHandle`/`CloseHandle`, sem RTC, codec, COM ou D3D.
+Cada textura é duplicada para um **HANDLE NT pertencente ao Main** antes da
+importação; um número de handle do filho não é reutilizado no Main.
+O duplicado permanece possuído até `allReferencesReleased` do Chromium
+(ou prova de que nunca foi importado). A morte do filho comprova encerramento
+do processo, **não conclusão de fence/GPU**: não libera referências externas,
+não remove guards por timeout e não reaproveita o endpoint antigo.
+Um host JS ainda responsivo não mascara um worker nativo preso: operações
+de decoder observadas em andamento por oito segundos, no relógio diagnóstico
+nativo existente, também encerram somente esse filho, preservando os duplicados.
+O snapshot nativo distingue chamadas MFT de entrada/saída, cópia/fence de GPU
+e devolução de `IMFSample` por enums e contadores limitados, sem conteúdo de mídia.
+Esses escopos permanecem legíveis enquanto a chamada está bloqueada; o mutex
+de diagnóstico não cobre chamadas externas nem altera sua ordem ou seus fences.
+O pump devolve os `IMFSample` originais somente após os fences de cópia e antes
+de outra operação MFT de processamento/encerramento. Leituras pendentes cedem ao evento de fence,
+inclusive durante abort/shutdown: a capacidade privada de apresentação não é
+uma garantia sobre o pool interno do decoder. `sampleRetirementDeferrals` conta
+essas esperas, sem impor FPS, sleeps ou um novo limite arbitrário de superfícies.
+O envio de tela usa AUs comprimidos, não empréstimos de textura. Para o
+`submitFrame` NV12 legado, morte do filho sem recibo do reader/fence **não**
+autoriza reutilizar a textura do produtor: a API retém esse guard e rejeita
+o comprovante de fechamento, em vez de inventar aposentadoria de GPU.
+
+IPC tem limites de quantidade/bytes e confirmações correlacionadas. A entrada
+de vídeo aguarda o ACK real da cópia nativa mantendo um único AU na pipe
+limitada de captura; não inventa `copied:true`. PCM conserva seus créditos,
+identidade e recibo de processamento separados da cópia serializada.
+Probes/calibração executam no filho usando o relógio RTC original; timestamps
+QPC/renderer e limites de incerteza permanecem inalterados. Capabilities
+síncronas descrevem o build verificado, conferido novamente no filho antes
+de `ready`; snapshots síncronos são cache, diagnósticos solicitam observação nova.
+
+`nativeRtcProcess.test.cjs` verifica abort real, timeout, rejeição de operações,
+créditos e recuperação. `nativeCaptureSmoke.cjs --rtc-fault=receive` (ou
+`publish`, com `--quality`) encerra o host durante apresentação real, verifica
+o Main e a retirada de leases, depois abre novos endpoints no mesmo aplicativo.
+`nativeAvSmoke.cjs --rtc-fault` acrescenta PCM/Opus real, retirada do áudio
+e novo Assistir após a falha, em P2P ou SFU.
+
 ## Fontes e verificação de disponibilidade
 
 O seletor tem duas abas: **Telas** e **Janelas**. Após selecionar uma janela,
@@ -60,7 +147,35 @@ uma lista desatualizada.
 | Monitor (`monitor`) | `monitor_capture`, WGC | Interface do dispositivo, nome GDI e limites físicos do monitor | Sistema, excluindo o Monky |
 | Captura de Jogo (`game`) | `game_capture`, explicitamente para a janela escolhida | A mesma identidade HWND/PID/criação, não apenas título ou executável | Aplicativo/processo selecionado |
 
-Os monitores vêm da enumeração nativa, não de um ordinal de tela do Electron.
+No Windows, tanto monitores quanto janelas vêm exclusivamente da enumeração
+Win32, sem `desktopCapturer` ou associação por ordinal/DPI do Electron. A lista
+inicial não captura pixels. Uma falha de enumeração é um erro de carregamento,
+não uma resposta de sucesso com a aba vazia.
+
+As miniaturas usam `monky-screen-thumbnail.exe`, um processo WGC independente
+por imagem, sem encoder, libobs ou hook de jogo. O alvo original é verificado
+antes e depois da captura. O resultado é um PNG em memória, limitado a 1 MiB,
+publicado após a limpeza nativa e aceito pelo Main somente após a saída normal
+do filho. Uma saída forçada descarta a imagem; não é prova de um fence.
+Há no máximo quatro processos ativos e 32 pedidos ativos/na fila. O helper tem
+limite de vida de 4,5 segundos; o Main também limita a espera e aguarda a saída
+antes de reutilizar a vaga. Nenhum handle de GPU é exportado pelo helper.
+
+Antes de iniciar uma prévia, o helper confere o suporte à API sem borda,
+solicita `GraphicsCaptureAccessKind.Borderless` e exige autorização do Windows.
+Só então define `IsBorderRequired(false)` e inicia a sessão. Definir a propriedade
+sem autorização não basta: o Windows pode ignorá-la. Sem suporte ou autorização,
+a prévia fica indisponível, mas a fonte permanece selecionável; não há tentativa
+com borda nem mudança nas configurações de privacidade do sistema. Bordas
+solicitadas por outros aplicativos não são alteradas.
+
+O seletor pede lotes de quatro fontes por tipo, atualiza as imagens gradualmente
+e mantém a lista selecionável. Atualizar, fechar ou iniciar o compartilhamento
+cancela as miniaturas; o fechamento do aplicativo aguarda os filhos originais.
+Fontes minimizadas/protegidas ou imagens indisponíveis conservam sua opção sem
+uma imagem substituta. Erros ficam registrados, e o cache continua limitado a
+dez segundos, 256 entradas e 8 MiB. Ícones vêm da API de arquivos do sistema.
+
 Desconectar o monitor ou alterar sua identidade, posição ou resolução encerra
 a fonte e exige nova seleção explícita; não se troca para a tela principal.
 Minimizar ou ocultar uma janela/jogo é tratado como pausa, não como perda da
@@ -93,6 +208,19 @@ A disponibilidade distingue arquivos, encoder e fonte:
    `hardwareSessionConfirmed` só então pode ser verdadeiro, em modo Hardware.
    `hardwareQualified` permanece falso: uma sessão não qualifica todos os usos.
 
+Na criação do componente AMF, `AMF_CODEC_NOT_SUPPORTED`, `AMF_NOT_SUPPORTED`
+e `AMF_NOT_FOUND` comprovam indisponibilidade do codec. `AMF_FAIL` (status 1)
+continua sendo falha de inicialização, não prova de codec ausente. A ausência
+de AV1 por hardware não implica ausência de H.264, nem justifica crash;
+Software muda o encoder, mas a captura libobs e a apresentação nativa ainda
+dependem de APIs gráficas.
+No Automático, uma falha de inicialização de um candidato, com encerramento
+independentemente comprovado, é registrada e permite verificar os demais
+candidatos Hardware. Só um probe bem-sucedido autoriza usá-los. Se nenhum
+funcionar e houver falha de inicialização não esclarecida, ela é preservada:
+não autoriza fallback para Software. Cancelamento, timeout e encerramento
+não comprovado continuam interrompendo a sequência imediatamente.
+
 SPS/PPS são exigidos e validados no primeiro pacote, antes de enviar qualquer
 vídeo, não na inicialização: o plugin NVENC do OBS só disponibiliza esses
 cabeçalhos ao produzir o primeiro pacote. O fluxo começa com um IDR, e cada
@@ -107,6 +235,13 @@ A trilha da prévia nativa pertence ao preload, não ao `VideoService`: encerrar
 essa trilha antes do decoder fecha o writer enquanto ainda há frames chegando.
 O proprietário bloqueia novos frames, encerra o decoder e drena o writer antes
 de parar a trilha; timeout mantém os recursos retidos para nova tentativa.
+
+Parar uma fonte ou recepção pode retornar `retired-with-errors` quando os
+proprietários originais comprovam o encerramento, mas reportam um erro de limpeza.
+O renderer registra o aviso e libera somente o estado daquela instância, permitindo
+compartilhar ou assistir novamente na mesma chamada. O fechamento do app também
+prossegue após essa comprovação; um erro histórico não equivale a um recurso retido.
+Sem comprovação, a operação continua falhando e preserva os proprietários para retry.
 
 Uma amostragem QPC/RTC que excede 2 ms descarta o quadro e invalida seus
 dependentes, solicitando um IDR real pela recuperação existente (limite de
@@ -529,12 +664,41 @@ bit a bit idênticos entre versões distintas do toolchain.
 
 ## Validação
 
+Na primeira advertência e na primeira falha terminal de cada pipeline, `receive-health`
+registra uma projeção limitada do snapshot de controle: filas, recursos
+retidos e operações do decoder em andamento. Isso permite atualizar a observação
+se uma advertência antiga anteceder um travamento posterior. São no máximo
+duas observações por pipeline, quatro decoders e 61 registros por observação.
+As quatro chamadas nativas selecionadas por decoder priorizam operações
+em andamento sobre chamadas concluídas recentes e indicam truncamento.
+São observações em cache,
+com seus timestamps, não uma consulta síncrona ao worker de mídia nem
+prova de que ele está progredindo. Não são registrados SDP, credenciais,
+nomes de fontes ou mensagens nativas arbitrárias. Falha de leitura aparece
+separadamente e não substitui o erro original nem altera a limpeza.
+Falhas de parada da captura também preservam a causa original junto da
+ausência de comprovação de encerramento; a fonte não é considerada fechada
+sem essa comprovação.
+
 `npm run test:native-screen --workspace=@monky/client` cobre os contratos e
 lifecycle sem exigir captura de hardware. O build C++ também executa contratos
 sem abrir dispositivos. `test\nativeCaptureSmoke.cjs`, neste módulo, e
 `apps\client\test\nativeScreenAppSmoke.cjs` exercitam mídia real em janelas
 sintéticas próprias; exigem o hardware qualificado e um diretório novo de
 artefatos via `--artifacts=<caminho_absoluto>`.
+
+No Windows, defina `$env:MONKY_TEST_DISPLAY='2'` na mesma chamada que inicia
+os ensaios de captura, A/V ou aplicação para escolher `\\.\DISPLAY2`
+(não o índice da lista do Electron). As janelas recebem coordenadas antes
+da criação, começam ocultas e só aparecem após validar o posicionamento.
+Monitor ausente ou janela maior que sua área útil interrompem o ensaio;
+não há retorno à tela principal nem redução silenciosa da fonte.
+Para manter essa preferência também quando o launcher omitir a variável,
+use `{"display":2}` em `.native-screen\test-display.json` na raiz do repositório.
+Esse arquivo é local e ignorado pelo Git; a variável de ambiente tem precedência.
+O destino precisa ser não primário e estar à esquerda da tela principal.
+Sem essa configuração opcional, outros ambientes mantêm o posicionamento
+padrão anterior. Um destino configurado inválido nunca usa esse caminho padrão.
 
 `nativeCaptureSmoke.cjs` aceita `--encoder=h264_texture_amf`,
 `obs_nvenc_h264_tex`, `obs_x264`, `av1_texture_amf`, `obs_nvenc_av1_tex`

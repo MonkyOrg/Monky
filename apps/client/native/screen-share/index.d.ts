@@ -23,6 +23,19 @@ export type LegacyNativeWindowCaptureTarget = { kind?: never; hwnd: number; expe
 export function validateCaptureTarget<T extends NativeScreenCaptureTarget | LegacyNativeWindowCaptureTarget>(target: T): T;
 export function validateCaptureTarget(target: unknown): NativeScreenCaptureTarget | LegacyNativeWindowCaptureTarget;
 
+export interface NativeThumbnailHost {
+  readonly kind: 'verified-native-thumbnail-host';
+  readonly executable: string;
+}
+export function loadThumbnailRuntime(directory?: string): NativeThumbnailHost;
+export class NativeThumbnailCapturer {
+  constructor(host: NativeThumbnailHost);
+  capture(target: NativeScreenCaptureTarget, options?: {
+    signal?: AbortSignal; width?: number; height?: number;
+  }): Promise<Buffer>;
+  close(): Promise<void>;
+}
+
 export interface NativeScreenCaptureCapability {
   readonly encoderId: Exclude<NativeScreenCaptureEncoder, 'auto'>;
   readonly codec: 'h264' | 'av1';
@@ -222,6 +235,7 @@ export class NativeScreenEndpoint {
   removeRemoteProducer(producerId: string): Promise<void>;
   stats(): Promise<NativeScreenEndpointSnapshot & { capture: unknown; rtc: unknown }>;
   diagnostics(): Promise<NativeScreenEndpointDiagnostics>;
+  failureDiagnostics(): ReadonlyArray<Record<string, string | number | boolean | null>>;
   snapshot(): NativeScreenEndpointSnapshot;
   close(): Promise<NativeScreenEndpointSnapshot>;
 }

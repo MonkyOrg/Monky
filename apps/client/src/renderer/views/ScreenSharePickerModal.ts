@@ -573,37 +573,39 @@ export class ScreenSharePickerModal {
     await Promise.all(SOURCE_TABS.map(async ({ id: type }) => {
       const pending = sources.filter(source => source.type === type && source.thumbnailState !== undefined
         && (source.thumbnailState === 'pending' || (type === 'window' && !source.appIconDataUrl)));
-      if (!pending.length) return;
-      try {
-        const previews = await Promise.all(Array.from({ length: Math.ceil(pending.length / 256) }, (_, index) =>
-          window.api.getDesktopSourcePreviews({ type, sourceIds: pending.slice(index * 256, (index + 1) * 256).map(source => source.id) })));
+      for (let offset = 0; offset < pending.length; offset += 4) {
         if (!isCurrent()) return;
-        const byId = new Map(previews.flat().map(preview => [preview.id, preview]));
-        for (const source of pending) {
-          const preview = byId.get(source.id);
-          source.appIconDataUrl = preview?.appIconDataUrl ?? source.appIconDataUrl;
-          if (source.thumbnailState !== 'unavailable') {
-            source.thumbnailDataUrl = preview?.thumbnailDataUrl ?? source.thumbnailDataUrl;
-            source.thumbnailState = source.thumbnailDataUrl ? 'ready' : 'unavailable';
+        const batch = pending.slice(offset, offset + 4);
+        try {
+          const previews = await window.api.getDesktopSourcePreviews({ type, sourceIds: batch.map(source => source.id) });
+          if (!isCurrent()) return;
+          const byId = new Map(previews.map(preview => [preview.id, preview]));
+          for (const source of batch) {
+            const preview = byId.get(source.id);
+            source.appIconDataUrl = preview?.appIconDataUrl ?? source.appIconDataUrl;
+            if (source.thumbnailState !== 'unavailable') {
+              source.thumbnailDataUrl = preview?.thumbnailDataUrl ?? source.thumbnailDataUrl;
+              source.thumbnailState = source.thumbnailDataUrl ? 'ready' : 'unavailable';
+            }
           }
+        } catch (error) {
+          if (!isCurrent()) return;
+          console.error('[ScreenShare] Could not load source previews', error);
+          for (const source of batch) source.thumbnailState = 'unavailable';
+          const note = modal.querySelector<HTMLElement>('#share-preview-error');
+          if (note) { note.textContent = t('screenShare.previewsFailed'); note.hidden = false; }
         }
-      } catch (error) {
         if (!isCurrent()) return;
-        console.error('[ScreenShare] Could not load source previews', error);
-        for (const source of pending) source.thumbnailState = 'unavailable';
-        const note = modal.querySelector<HTMLElement>('#share-preview-error');
-        if (note) { note.textContent = t('screenShare.previewsFailed'); note.hidden = false; }
+        const updated = new Map(batch.map(source => [source.id, source]));
+        modal.querySelectorAll<HTMLElement>('.source-item').forEach(item => {
+          const source = updated.get(item.dataset.sourceId ?? '');
+          if (!source) return;
+          const preview = item.querySelector<HTMLElement>('.source-preview');
+          if (preview) preview.innerHTML = this.renderSourcePreview(source);
+          const icon = item.querySelector<HTMLElement>('.source-icon');
+          if (icon) icon.innerHTML = this.renderSourceIcon(source);
+        });
       }
-      if (!isCurrent()) return;
-      const updated = new Map(pending.map(source => [source.id, source]));
-      modal.querySelectorAll<HTMLElement>('.source-item').forEach(item => {
-        const source = updated.get(item.dataset.sourceId ?? '');
-        if (!source) return;
-        const preview = item.querySelector<HTMLElement>('.source-preview');
-        if (preview) preview.innerHTML = this.renderSourcePreview(source);
-        const icon = item.querySelector<HTMLElement>('.source-icon');
-        if (icon) icon.innerHTML = this.renderSourceIcon(source);
-      });
     }));
   }
 
@@ -913,6 +915,8 @@ export class ScreenSharePickerModal {
         if (!proceed) return;
       }
       assertCurrent();
+      await window.api.cancelDesktopSourcePreviews?.();
+      assertCurrent();
       const native = this.usesNativeCapture(sourceId, shareAudio, captureKind, mode);
       if (!native) throw new Error(this.captureUnavailableMessage(shareAudio, captureKind, mode));
       // Prepare the selection before retiring existing shares. Audible
@@ -1002,6 +1006,7 @@ export class ScreenSharePickerModal {
         if (btnCancel) btnCancel.disabled = false;
         if (btnClose) btnClose.disabled = false;
         this.updateCaptureInfo();
+        void this.loadSourcePreviews(modal, this.sourceRequest);
       }
     }
   }
@@ -1029,6 +1034,8 @@ export class ScreenSharePickerModal {
     // actually open, otherwise the close() call at the start of open() would
     // instantly clear the button loading before the picker even appears.
     if (wasOpen) {
+      void window.api.cancelDesktopSourcePreviews?.()
+        .catch(error => console.error('[ScreenShare] Could not cancel source previews', error));
       appEvents.emit('modal.screenshare_picker_closed');
     }
   }

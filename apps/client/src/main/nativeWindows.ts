@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import type { DesktopCapturerSource, Display, Rectangle } from 'electron';
 import type { NativeMonitorInfo, NativeWindowInfo, NativeWindowState } from '@monky/screen-audio';
 import { validateCaptureTarget, type NativeScreenCaptureTarget } from '@monky/screen-share';
 import type { DesktopSource, NativeScreenCaptureKind } from '@monky/shared';
@@ -20,6 +19,7 @@ type Inspection = {
   windowState(hwnd: number): NativeWindowState | null;
   monitors(): NativeMonitorInfo[];
   monitorState(deviceId: string): NativeMonitorInfo | null;
+  isWindowExcluded?(hwnd: number): boolean;
 };
 type MonitorTarget = Extract<NativeScreenCaptureTarget, { kind: 'monitor' }>;
 type WindowTarget = Extract<NativeScreenCaptureTarget, { hwnd: number }>;
@@ -40,26 +40,12 @@ function monitorIdentity(target: MonitorTarget): string {
 
 export function nativeMonitorDesktopSources(
   monitors: readonly { id: string; monitor: NativeMonitorInfo }[],
-  previews: readonly Pick<DesktopCapturerSource, 'id' | 'display_id' | 'thumbnail'>[],
-  displays: readonly Pick<Display, 'id' | 'bounds'>[],
-  toDipRect: (bounds: Rectangle) => Rectangle,
-  warn: (message: string) => void,
-  thumbnails = true,
 ): DesktopSource[] {
   return [...monitors].sort((a, b) => a.monitor.deviceName.localeCompare(b.monitor.deviceName, 'en', { numeric: true }))
-    .map(({ id, monitor }, index) => {
-      const bounds = toDipRect({ ...monitor.bounds });
-      const matches = displays.filter(display => display.bounds.x === bounds.x && display.bounds.y === bounds.y
-        && display.bounds.width === bounds.width && display.bounds.height === bounds.height);
-      const images = matches.length === 1
-        ? previews.filter(source => source.id.startsWith('screen:') && source.display_id === String(matches[0].id))
-        : [];
-      let thumbnailDataUrl = '';
-      if (thumbnails && images.length === 1 && !images[0].thumbnail.isEmpty()) thumbnailDataUrl = images[0].thumbnail.toDataURL();
-      else if (thumbnails) warn(`Native monitor preview unavailable for ${monitor.deviceName}: `
-        + `${matches.length} matching displays, ${images.length} matching images; an unambiguous, nonempty thumbnail is required.`);
-      return { id, name: monitor.name, displayNumber: index + 1, type: 'screen', thumbnailDataUrl, appIconDataUrl: null };
-    });
+    .map(({ id, monitor }, index) => ({
+      id, name: monitor.name, displayNumber: index + 1, type: 'screen',
+      thumbnailDataUrl: '', appIconDataUrl: null, thumbnailState: 'pending',
+    }));
 }
 
 export class NativeDesktopSources {
@@ -72,6 +58,7 @@ export class NativeDesktopSources {
     // Refreshing another picker must not revoke a still-owned hidden/minimized
     // selection needed for source restoration.
     const selected = new Map([...this.windows].filter(([, target]) => {
+      if (this.inspect.isWindowExcluded?.(target.hwnd)) return false;
       const state = this.inspect.windowState(target.hwnd);
       return state?.isTopLevel && state.processId === target.expectedProcessId
         && state.processCreationTime100ns === target.expectedProcessCreationTime100ns;
@@ -79,6 +66,7 @@ export class NativeDesktopSources {
     const handles = new Set<number>();
     const result: { id: string; window: NativeWindowInfo }[] = [];
     for (const window of this.inspect.windows()) {
+      if (this.inspect.isWindowExcluded?.(window.hwnd)) continue;
       if (isGhostWindow(window) || (!window.isVisible && !window.isIconic) || !window.processCreationTime100ns) continue;
       if (handles.has(window.hwnd)) throw new Error('Native window identity is ambiguous.');
       handles.add(window.hwnd);
@@ -129,7 +117,7 @@ export class NativeDesktopSources {
     }
     const selected = this.windows.get(sourceId);
     const state = selected ? this.inspect.windowState(selected.hwnd) : null;
-    if (!selected || !state?.isTopLevel || state.processId !== selected.expectedProcessId
+    if (!selected || this.inspect.isWindowExcluded?.(selected.hwnd) || !state?.isTopLevel || state.processId !== selected.expectedProcessId
       || state.processCreationTime100ns !== selected.expectedProcessCreationTime100ns)
       throw new Error('The selected screen-sharing window is unavailable or was replaced.');
     const target: WindowTarget = { ...selected, kind };

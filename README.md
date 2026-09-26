@@ -132,14 +132,41 @@ Os campos de codificação e codec ficam somente leitura e mostram o resultado
 real da verificação. O fallback é informado, mas não altera o modo Automático nem
 as escolhas manuais salvas; uma nova abertura volta a verificar o hardware.
 **Manual** permite escolher exatamente Hardware/Software e H.264/AV1, sem opção
-de codec Automático e sem substituir uma combinação indisponível. Hardware
-incompatível permanece visível e desabilitado com o motivo. Preferências explícitas
+de codec Automático. As combinações são verificadas antes de salvar ou reaplicar
+a transmissão; uma escolha indisponível ou cuja verificação falhe não substitui
+as preferências salvas. Codecs incompatíveis ficam desabilitados, inclusive no
+menu por teclado, com explicação localizada. Software + AV1 continua disponível
+quando sua própria verificação passa. Os cards indicam o codec disponível para
+cada modo, permitindo escolher uma alternativa sem substituir escolhas silenciosamente.
+Se apenas o FPS for incompatível, valores menores são testados em ordem decrescente
+(por exemplo, H.264 4K120 → 90 → 60); só o FPS confirmado é aplicado, mantendo
+codec, modo, resolução e bitrate. Falhas de driver não provocam esse ajuste e
+permitem tentar a verificação novamente. Preferências explícitas
 anteriores de Software ou codec são migradas para Manual. As escolhas de tela
 continuam independentes da câmera. Erros reais de driver/runtime são exibidos,
 sem troca silenciosa de modo.
 
 A disponibilidade é verificada para o codec e a qualidade escolhidos sem capturar
 uma fonte; a confirmação então verifica a fonte exata selecionada.
+
+Nos smokes de configurações (`settingsNavigationSmoke.cjs`) e mídia
+(`nativeScreenAppSmoke.cjs`), `$env:MONKY_TEST_DISPLAY='2'` posiciona somente as
+janelas pertencentes ao teste no dispositivo Windows `DISPLAY2`, inclusive fontes
+sintéticas e receptores reabertos. A opção falha explicitamente se o monitor não
+existir, registra PID/título/coordenadas e nunca reduz as dimensões solicitadas
+para caber na tela. Não altera a instalação, janelas do usuário ou a configuração
+dos monitores; sem essa variável, o posicionamento existente é mantido.
+O dispositivo deve ser não primário e estar à esquerda do principal. O helper
+único `apps\client\test\fixtures\testDisplay.cjs` registra e passa os limites
+verificados ao construtor antes de qualquer exibição, usando `showInactive`
+quando pode preservar o foco atual.
+`node apps\client\test\settingsNavigationSmoke.cjs --verify-display-placement`
+verifica os limites iniciais de janelas ocultas 480p/720p, inclusive reabertura e
+importação pelo Main, sem exibir janelas, focar, capturar mídia ou iniciar o Vite.
+Toda a janela deve caber na área útil do monitor, considerando o DPI real. Se não
+couber (por exemplo, uma fonte 4K em uma tela 2560×1440), o teste falha sem reduzir
+a qualidade nem avançar sobre outro monitor.
+
 O seletor de compartilhamento usa as preferências salvas, sem repetir os controles
 de modo, codificação e codec; uma falha na verificação impede o início e informa o motivo.
 Não há troca de modo durante a transmissão, captura alternativa pelo Chromium ou

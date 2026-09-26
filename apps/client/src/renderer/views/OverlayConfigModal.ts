@@ -1,4 +1,4 @@
-import { OverlayConfig, OverlayLayout, OverlayMode, OverlayPosition, OVERLAY_DEFAULT_WIDTH, OVERLAY_DEFAULT_HEIGHT } from '@monky/shared';
+import { OverlayConfig, OverlayLayout, OverlayMode, OverlayPosition, isOverlayCardSizeCustom } from '@monky/shared';
 import { settingsStore } from '../stores/settingsStore';
 import { overlayBridgeService } from '../core/OverlayBridgeService';
 import { appEvents } from '../core/EventBus';
@@ -9,11 +9,14 @@ export class OverlayConfigModal {
   private currentMode: OverlayMode = 'cameras-only';
   private currentLayout: OverlayLayout = 'grid';
   private currentPosition: OverlayPosition = 'bottom-right';
+  private positionChanged = false;
   private currentCardOpacity: number = 85;
   private currentFocusActiveSpeaker: boolean = false;
   private currentAutoOpenOnLeaveStage: boolean = false;
   private currentMinimalistMode: boolean = false;
   private currentHideSelf: boolean = false;
+  private currentHideStagePreviews = false;
+  private currentHideInactiveParticipants = false;
   private currentPreserveAspectRatio = true;
   private overlaySettingsUnbind: (() => void) | null = null;
 
@@ -23,21 +26,18 @@ export class OverlayConfigModal {
     const config = settingsStore.getOverlayConfig();
     this.currentMode = config.mode;
     this.currentLayout = config.layout;
-    this.currentPosition = config.position === 'custom' ? 'bottom-right' : config.position;
+    this.currentPosition = config.position;
+    this.positionChanged = false;
     this.currentCardOpacity = Math.round(config.cardOpacity * 100);
     this.currentFocusActiveSpeaker = config.focusActiveSpeaker;
     this.currentAutoOpenOnLeaveStage = !!config.autoOpenOnLeaveStage;
     this.currentMinimalistMode = !!config.minimalistMode;
     this.currentHideSelf = !!config.hideSelf;
+    this.currentHideStagePreviews = !!config.hideStagePreviews;
+    this.currentHideInactiveParticipants = !!config.hideInactiveParticipants;
     this.currentPreserveAspectRatio = config.preserveAspectRatio !== false;
 
-    // The overlay only stores custom bounds once the user moves or resizes it.
-    // The "reset size" control is pointless at the default size, so it only
-    // shows after the size itself was changed (#543).
-    const bounds = config.bounds;
-    const overlaySizeChanged =
-      !!bounds &&
-      (bounds.width !== OVERLAY_DEFAULT_WIDTH || bounds.height !== OVERLAY_DEFAULT_HEIGHT);
+    const overlaySizeChanged = isOverlayCardSizeCustom(config);
 
     this.modalEl = document.createElement('div');
     this.modalEl.className = 'modal-backdrop';
@@ -93,17 +93,21 @@ export class OverlayConfigModal {
             </div>
           </div>
 
-          <!-- 2. Switch Ocultar-me -->
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-            <div>
-              <div>${t('overlay.preserveAspectRatio')}</div>
-              <small>${t('overlay.preserveAspectRatioDesc')}</small>
+          <div class="overlay-aspect-option" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 10px 14px;">
+            <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+              <span class="material-symbols-outlined md-18" style="color: var(--text-secondary);" aria-hidden="true">aspect_ratio</span>
+              <div style="min-width: 0;">
+                <label id="overlay-aspect-label" for="overlay-aspect-ratio" style="display: block; font-size: 12px; font-weight: 600; color: var(--text-primary); cursor: pointer;">${t('overlay.preserveAspectRatio')}</label>
+                <div id="overlay-aspect-description" style="font-size: 11px; color: var(--text-muted);">${t('overlay.preserveAspectRatioDesc')}</div>
+              </div>
             </div>
-            <label class="toggle-switch" aria-label="${t('overlay.preserveAspectRatio')}">
-              <input type="checkbox" id="overlay-aspect-ratio" ${this.currentPreserveAspectRatio ? 'checked' : ''} />
+            <label class="toggle-switch">
+              <input type="checkbox" role="switch" id="overlay-aspect-ratio" aria-labelledby="overlay-aspect-label"
+                aria-describedby="overlay-aspect-description" ${this.currentPreserveAspectRatio ? 'checked' : ''} />
               <span class="toggle-slider"></span>
             </label>
           </div>
+          <!-- 2. Switch Ocultar-me -->
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 10px 14px;">
             <div style="display: flex; align-items: center; gap: 8px;">
               <span class="material-symbols-outlined md-18" style="color: var(--text-secondary);">visibility_off</span>
@@ -114,6 +118,35 @@ export class OverlayConfigModal {
             </div>
             <label class="toggle-switch" aria-label="${t('overlay.hideSelfTitle')}">
               <input type="checkbox" id="overlay-hide-self-cb" ${this.currentHideSelf ? 'checked' : ''} />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+
+          <div class="overlay-visibility-option">
+            <div class="overlay-visibility-description">
+              <span class="material-symbols-outlined md-18" aria-hidden="true">picture_in_picture</span>
+              <div>
+                <label id="overlay-hide-stage-label" for="overlay-hide-stage-cb">${t('overlay.hideStagePreviewsTitle')}</label>
+                <div id="overlay-hide-stage-description">${t('overlay.hideStagePreviewsDesc')}</div>
+              </div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" role="switch" id="overlay-hide-stage-cb" aria-labelledby="overlay-hide-stage-label"
+                aria-describedby="overlay-hide-stage-description" ${this.currentHideStagePreviews ? 'checked' : ''} />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="overlay-visibility-option">
+            <div class="overlay-visibility-description">
+              <span class="material-symbols-outlined md-18" aria-hidden="true">videocam_off</span>
+              <div>
+                <label id="overlay-hide-inactive-label" for="overlay-hide-inactive-cb">${t('overlay.hideInactiveParticipantsTitle')}</label>
+                <div id="overlay-hide-inactive-description">${t('overlay.hideInactiveParticipantsDesc')}</div>
+              </div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" role="switch" id="overlay-hide-inactive-cb" aria-labelledby="overlay-hide-inactive-label"
+                aria-describedby="overlay-hide-inactive-description" ${this.currentHideInactiveParticipants ? 'checked' : ''} />
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -231,18 +264,26 @@ export class OverlayConfigModal {
     // Resizing the overlay window while this modal is open must reveal (or hide)
     // the "reset size" control right away — before this it only re-evaluated when
     // the modal was closed and reopened (#543).
-    this.overlaySettingsUnbind = appEvents.on('overlay_settings.updated', () => {
+    const unbindSettings = appEvents.on('overlay_settings.updated', () => {
       this.refreshResetSizeButton();
+      if (!this.positionChanged) {
+        this.currentPosition = settingsStore.getOverlayConfig().position;
+        this.modalEl?.querySelectorAll<HTMLElement>('.overlay-pos-btn').forEach(btn => {
+          btn.classList.toggle('selected', btn.dataset.pos === this.currentPosition);
+        });
+      }
     });
+    const unbindState = appEvents.on('overlay.state_changed', () => this.refreshFooter());
+    this.overlaySettingsUnbind = () => {
+      unbindSettings();
+      unbindState();
+    };
   }
 
   private refreshResetSizeButton(): void {
     const btn = this.modalEl?.querySelector('#btn-overlay-reset-size') as HTMLElement | null;
     if (!btn) return;
-    const bounds = settingsStore.getOverlayConfig().bounds;
-    const overlaySizeChanged =
-      !!bounds &&
-      (bounds.width !== OVERLAY_DEFAULT_WIDTH || bounds.height !== OVERLAY_DEFAULT_HEIGHT);
+    const overlaySizeChanged = isOverlayCardSizeCustom(settingsStore.getOverlayConfig());
     btn.style.display = overlaySizeChanged ? 'inline-flex' : 'none';
   }
 
@@ -261,21 +302,12 @@ export class OverlayConfigModal {
             <span class="material-symbols-outlined md-16">close</span>
             <span>${t('overlay.stopOverlayBtn')}</span>
           </button>
-        ` : `
-          <button type="button" id="btn-overlay-modal-cancel" class="btn btn-secondary" style="padding: 0 16px; height: 38px; flex-shrink: 0; white-space: nowrap;">
-            ${t('common.cancel')}
-          </button>
-        `}
+        ` : ''}
       </div>
       <div style="display: flex; align-items: center; gap: 8px;">
-        ${isActive ? `
-          <button type="button" id="btn-overlay-modal-cancel" class="btn btn-secondary" style="padding: 0 16px; height: 38px; flex-shrink: 0; white-space: nowrap;">
-            ${t('common.cancel')}
-          </button>
-        ` : ''}
         <button type="button" id="btn-overlay-modal-apply" class="btn btn-primary" style="display: inline-flex; align-items: center; gap: 6px; padding: 0 20px; height: 38px; font-weight: 600; flex-shrink: 0; white-space: nowrap;">
-          <span class="material-symbols-outlined md-16">${isActive ? 'sync' : 'rocket_launch'}</span>
-          <span>${isActive ? t('overlay.applyChangesBtn') : t('overlay.startOverlayBtn')}</span>
+          <span class="material-symbols-outlined md-16">${isActive ? 'check' : 'rocket_launch'}</span>
+          <span>${isActive ? t('common.done') : t('overlay.startOverlayBtn')}</span>
         </button>
       </div>
     `;
@@ -372,6 +404,16 @@ export class OverlayConfigModal {
       this.currentHideSelf = chkHideSelf.checked;
       this.syncLiveIfActive();
     });
+    const hideStage = this.modalEl.querySelector<HTMLInputElement>('#overlay-hide-stage-cb');
+    hideStage?.addEventListener('change', () => {
+      this.currentHideStagePreviews = hideStage.checked;
+      this.syncLiveIfActive();
+    });
+    const hideInactive = this.modalEl.querySelector<HTMLInputElement>('#overlay-hide-inactive-cb');
+    hideInactive?.addEventListener('change', () => {
+      this.currentHideInactiveParticipants = hideInactive.checked;
+      this.syncLiveIfActive();
+    });
 
     // Seleção de layout
     const layoutCards = this.modalEl.querySelectorAll('.overlay-option-card[data-layout]');
@@ -391,6 +433,7 @@ export class OverlayConfigModal {
         posButtons.forEach((b) => b.classList.remove('selected'));
         btn.classList.add('selected');
         this.currentPosition = btn.getAttribute('data-pos') as OverlayPosition;
+        this.positionChanged = true;
         this.syncLiveIfActive();
       });
     });
@@ -401,9 +444,6 @@ export class OverlayConfigModal {
       if (window.api?.resetOverlayBounds) {
         window.api.resetOverlayBounds().catch(() => {});
       }
-      settingsStore.setOverlayConfig({ bounds: undefined });
-      // Back at the default size, so the control has nothing left to reset (#543).
-      (btnResetSize as HTMLElement).style.display = 'none';
       this.syncLiveIfActive();
     });
 
@@ -420,10 +460,6 @@ export class OverlayConfigModal {
   private attachFooterEvents(): void {
     if (!this.modalEl) return;
 
-    this.modalEl.querySelectorAll('#btn-overlay-modal-cancel').forEach((btn) => {
-      btn.addEventListener('click', () => this.close());
-    });
-
     // Botão Parar Sobreposição (desarma o modo automático e fecha a janela)
     const btnCloseWindow = this.modalEl.querySelector('#btn-overlay-modal-close-window');
     btnCloseWindow?.addEventListener('click', async () => {
@@ -431,16 +467,11 @@ export class OverlayConfigModal {
       this.close();
     });
 
-    // Botão Ativar / Aplicar
+    // Botão Ativar / Pronto
     const btnApply = this.modalEl.querySelector('#btn-overlay-modal-apply');
     btnApply?.addEventListener('click', async () => {
-      const armedButHidden = this.isOverlayActive() && !overlayBridgeService.getIsOpen();
-      this.saveCurrentConfig();
-      if (armedButHidden) {
-        // Only armed: the window belongs to the automation, and forcing it open
-        // over the stage would just make it close again on the next check.
-        this.syncLive();
-      } else {
+      if (!this.isOverlayActive()) {
+        this.saveCurrentConfig();
         await overlayBridgeService.open(settingsStore.getOverlayConfig());
       }
       this.close();
@@ -451,24 +482,29 @@ export class OverlayConfigModal {
     if (this.isOverlayActive()) this.syncLive();
   }
 
-  private saveCurrentConfig(): void {
-    settingsStore.setOverlayConfig({
+  private saveCurrentConfig(): Partial<OverlayConfig> {
+    const config: Partial<OverlayConfig> = {
       mode: this.currentMode,
       layout: this.currentLayout,
-      position: this.currentPosition,
+      ...(this.positionChanged ? { position: this.currentPosition } : {}),
       cardOpacity: this.currentCardOpacity / 100,
       focusActiveSpeaker: this.currentFocusActiveSpeaker,
       autoOpenOnLeaveStage: this.currentAutoOpenOnLeaveStage,
       minimalistMode: this.currentMinimalistMode,
       hideSelf: this.currentHideSelf,
+      hideStagePreviews: this.currentHideStagePreviews,
+      hideInactiveParticipants: this.currentHideInactiveParticipants,
       preserveAspectRatio: this.currentPreserveAspectRatio,
-    });
+    };
+    settingsStore.setOverlayConfig(config);
+    this.positionChanged = false;
+    return config;
   }
 
   private syncLive(): void {
-    this.saveCurrentConfig();
+    const config = this.saveCurrentConfig();
     if (window.api?.setOverlayConfig) {
-      window.api.setOverlayConfig(settingsStore.getOverlayConfig()).catch(() => {});
+      window.api.setOverlayConfig(config).catch(() => {});
     }
     overlayBridgeService.syncState();
   }

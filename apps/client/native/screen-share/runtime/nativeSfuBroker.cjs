@@ -276,8 +276,8 @@ function encoding(value, kind = 'video') {
  *   Source cascades await intent application for earlier correlated producer
  *   request IDs only, never a later queued setter or an operation's cleanup.
  * - handleNativeEvent(event) must run directly, outside command/control queues.
- *   engine.respond is synchronous void admission. Thenables/non-void returns
- *   are rejected and their rejections observed, never promoted into an ACK.
+ *   Direct engine.respond is synchronous void admission. The process adapter
+ *   instead awaits its correlated child admission; arbitrary thenables reject.
  *   The original native request Promise still proves operation completion.
  * - stopWatching(publisherSessionId, shareId, watchVersion) retires only that
  *   generation. Invalidate the controller's Watch/presentation route first.
@@ -1297,7 +1297,7 @@ class NativeSfuBroker {
           const data = await this.runCallback(token);
           this.assertCallback(token);
           responseAttempted = true;
-          requireValue(this.respond(callbackId, { ok: true, data }), 'RESPOND', 'Native SFU did not accept its signaling response.');
+          requireValue(await this.respond(callbackId, { ok: true, data }), 'RESPOND', 'Native SFU did not accept its signaling response.');
           token.acknowledged = true;
           if (token.initialGate) token.record.initialPauseAcknowledged = true;
           return true;
@@ -1333,6 +1333,15 @@ class NativeSfuBroker {
     if (this.engineRetired) return false;
     try {
       const result = this.engine.respond(callbackId, response);
+      if (this.engine.asynchronousNative === true && typeof result?.then === 'function') {
+        return result.then(value => {
+          requireValue(value === undefined, 'RESPOND', 'The native host did not acknowledge void response admission.');
+          return true;
+        }).catch(() => {
+          this.report(failure('RESPOND', 'Native host response admission failed; no retirement is inferred.'));
+          return false;
+        });
+      }
       if (result === undefined) return true;
       this.report(failure('RESPOND', 'Native SFU respond must synchronously return void; its reply was not acknowledged.'));
       void Promise.resolve(result).catch(() => {

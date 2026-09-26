@@ -123,6 +123,7 @@ export interface ElectronApi {
   ) => () => void;
   getDesktopSources: (options?: DesktopSourcesOptions) => Promise<DesktopSource[]>;
   getDesktopSourcePreviews: (request: DesktopSourcePreviewsRequest) => Promise<DesktopSourcePreview[]>;
+  cancelDesktopSourcePreviews: () => Promise<void>;
   prepareScreenShareWindow: (sourceId: string) => Promise<boolean>;
   ensureScreenPermission: () => Promise<boolean>;
   selectImageDialog: () => Promise<ImageSelectionResult | null>;
@@ -220,6 +221,7 @@ export interface ElectronApi {
   setOverlayConfig: (config: Partial<OverlayConfig>) => Promise<void>;
   saveOverlayBounds: (bounds: OverlayBounds) => Promise<void>;
   resetOverlayBounds: () => Promise<void>;
+  layoutOverlayCards: (layout: IpcInvokeChannels['overlay:layout-cards']['args'][0]) => Promise<OverlayBounds>;
   sendOverlaySignal: (payload: OverlaySignalPayload) => Promise<void>;
   sendOverlaySyncState: (state: OverlaySyncState) => Promise<void>;
   onOverlayStateChanged: (cb: (isOpen: boolean) => void) => () => void;
@@ -228,6 +230,7 @@ export interface ElectronApi {
   onOverlaySyncStateReceived: (cb: (state: OverlaySyncState) => void) => () => void;
   onOverlayCloseRequested: (cb: () => void) => () => void;
   onOverlayHoverChanged: (cb: (hovered: boolean, point?: { x: number; y: number }) => void) => () => void;
+  onOverlayResizeStateChanged: (cb: (resizing: boolean) => void) => () => void;
 
   // Client Logging (#444)
   writeClientLog: (entry: ClientLogEntry) => Promise<void>;
@@ -348,6 +351,7 @@ const api: ElectronApi = {
   },
   getDesktopSources: (options) => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.list, options),
   getDesktopSourcePreviews: (request) => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.previews, request),
+  cancelDesktopSourcePreviews: () => ipcRenderer.invoke(DESKTOP_SOURCES_IPC.cancelPreviews),
   prepareScreenShareWindow: (sourceId: string) => ipcRenderer.invoke('screen-share:prepare-window', sourceId),
   ensureScreenPermission: (): Promise<boolean> => ipcRenderer.invoke('screen-share:ensure-permission'),
   selectImageDialog: () => ipcRenderer.invoke('dialog:select-image'),
@@ -533,6 +537,7 @@ const api: ElectronApi = {
   setOverlayConfig: (config) => ipcRenderer.invoke('overlay:set-config', config),
   saveOverlayBounds: (bounds) => ipcRenderer.invoke('overlay:save-bounds', bounds),
   resetOverlayBounds: () => ipcRenderer.invoke('overlay:reset-bounds'),
+  layoutOverlayCards: (layout) => ipcRenderer.invoke('overlay:layout-cards', layout),
   sendOverlaySignal: (payload) => ipcRenderer.invoke('overlay:send-signal', payload),
   sendOverlaySyncState: (state) => ipcRenderer.invoke('overlay:send-sync-state', state),
   onOverlayStateChanged: (cb) => {
@@ -576,6 +581,11 @@ const api: ElectronApi = {
     return () => {
       ipcRenderer.removeListener('overlay:hover-changed', listener);
     };
+  },
+  onOverlayResizeStateChanged: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, resizing: boolean) => cb(resizing);
+    ipcRenderer.on('overlay:resize-state-changed', listener);
+    return () => ipcRenderer.removeListener('overlay:resize-state-changed', listener);
   },
 
   // Client Logging (#444)

@@ -2,6 +2,11 @@
   "abiVersion": 2,
   "contractRevision": 8,
   "stage": "native-screen-runtime",
+  "processAdapter": {
+    "host": "One owned Electron utilityProcess per engine, Node fork outside Electron; RTC addon never loaded in Main. Same native ABI, codecs, routing and clock domains.",
+    "submitEncodedFrame": "Promise of the actual child native-copy receipt; admission is not processing retirement. LiveSenderFlow retains one original AU in the bounded capture pipe until acknowledgement, then consumes that exact receipt without resubmission.",
+    "faults": "ERR_RTC_HOST_EXIT rejects pending work after owned OS process exit. Native byte ownership can then retire; external Chromium texture references remain owned until their independent retirement proof."
+  },
   "commands": {
     "source.createEncodedVideo": "target=0; {width:even[2,3840],height:even[2,2160],fps:integer[1,120],syncGroup,enabled?:false} -> {sourceId}; requires engine videoInput:'encoded-h264'. Each independently encoded rendition owns its engine and external video source. RTC cannot rescale or increase the source framerate; no GPU/raw input import or transmitter codec instantiation.",
     "peer.configureBitrate": "target=peerId; {startBitrateBps,maxBitrateBps},150000<=start<=max<=80000000. Public PeerConnection.SetBitrate only once before publication; no forced minimum or periodic estimator resets. Returns configured values plus minimumBitrateForced:false and bandwidthMeasured:false. This is a startup estimate, not proof of available bandwidth; congestion control remains responsible for later allocation.",

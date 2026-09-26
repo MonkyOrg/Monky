@@ -5,6 +5,8 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <type_traits>
+#include <utility>
 
 namespace monky::screen_video {
 
@@ -21,6 +23,29 @@ struct DecoderConfig {
   std::uint32_t maxInFlight = 8, maxPendingPackets = 32;
   std::string profileLevelId;
 };
+
+enum class DecoderNativeOperation : std::uint8_t {
+  ProcessInput, ProcessOutput, OutputCopy, DeviceCheck, TextureCreate, CopySubmit,
+  FenceSignal, ContextFlush, FencePoll, FenceArm, SampleReturn,
+  EndStreaming, TransformShutdown, PlatformShutdown, Count
+};
+
+using DecoderNativeCallObserver =
+    std::function<void(DecoderNativeOperation, const std::function<void()>&)>;
+
+template <typename Function>
+std::invoke_result_t<Function> ObserveDecoderNativeCall(
+    const DecoderNativeCallObserver& observer, DecoderNativeOperation operation,
+    Function&& function) {
+  if (!observer) return std::forward<Function>(function)();
+  if constexpr (std::is_void_v<std::invoke_result_t<Function>>) {
+    observer(operation, std::forward<Function>(function));
+  } else {
+    std::optional<std::invoke_result_t<Function>> result;
+    observer(operation, [&] { result.emplace(std::forward<Function>(function)()); });
+    return std::move(result).value();
+  }
+}
 
 struct VideoFrameRect {
   std::uint32_t x = 0, y = 0, width = 0, height = 0;
@@ -64,7 +89,14 @@ struct DecoderSchedulingStats {
   std::uint64_t outputCapacityChecks = 0, outputCapacityDeferrals = 0;
   std::uint64_t processInputOtherHresults = 0, processOutputOtherHresults = 0;
   std::uint64_t pumpBudgetYields = 0;
+  std::uint64_t sampleRetirementDeferrals = 0;
 };
+
+template <typename Retire, typename Pending>
+bool DecoderSamplesReadyForTransform(Retire&& retire, Pending&& pending) {
+  std::forward<Retire>(retire)();
+  return std::forward<Pending>(pending)() == 0;
+}
 
 // One scalar stamp per existing queued AU; retries keep that AU and its first
 // attempt. These steady-clock intervals never replace its original media PTS.
@@ -117,7 +149,8 @@ class MfH264Decoder {
   using AcceptedSink = std::function<void(std::uint64_t)>;
   using RetainedFrames = std::function<std::size_t()>;
   MfH264Decoder(const DecoderConfig& config, FrameSink frames,
-                 AcceptedSink accepted, RetainedFrames retained);
+                 AcceptedSink accepted, RetainedFrames retained,
+                 DecoderNativeCallObserver observer = {});
   ~MfH264Decoder();
   MfH264Decoder(const MfH264Decoder&) = delete;
   MfH264Decoder& operator=(const MfH264Decoder&) = delete;

@@ -21,6 +21,7 @@ Napi::Value platform_list_monitors(const Napi::CallbackInfo& info);
 Napi::Value platform_get_monitor_state(const Napi::CallbackInfo& info);
 bool platform_restore_window(int64_t hwnd);
 Napi::Value GetKeyboardLayoutSnapshot(const Napi::CallbackInfo& info);
+Napi::Value SetWindowResizeAspect(const Napi::CallbackInfo& info);
 #elif defined(__MACOS__)
 bool platform_is_supported();
 bool platform_start(uint32_t targetPid, uint32_t loopbackMode, int64_t includeWindowId,
@@ -211,6 +212,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("listMonitors", Napi::Function::New(env, platform_list_monitors));
   exports.Set("getMonitorState", Napi::Function::New(env, platform_get_monitor_state));
   exports.Set("getKeyboardLayout", Napi::Function::New(env, GetKeyboardLayoutSnapshot));
+  exports.Set("setWindowResizeAspect", Napi::Function::New(env, SetWindowResizeAspect));
   exports.Set("createPacketCapture", Napi::Function::New(env, screen_audio::CreatePacketCapture));
 #endif
   return exports;

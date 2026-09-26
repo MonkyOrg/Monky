@@ -280,7 +280,8 @@ class NativePcmCaptureBridge {
       this.rejectInput(record, error);
       return;
     } finally {
-      // Audio extension1 copies PCM synchronously. Retain processing identity, not a JS-memory loan.
+      // Direct N-API copies synchronously; the process adapter first serializes
+      // its bounded IPC copy. Either way this caller no longer lends JS memory.
       record.packet = null;
     }
     void completed.then(result => {

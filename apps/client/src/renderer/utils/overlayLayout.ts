@@ -1,12 +1,12 @@
 export const OVERLAY_RESIZE_HINTS = [
-  { direction: 'nw', x: 0, y: 0, rotation: 180 },
+  { direction: 'nw', x: 0, y: 0, rotation: 135 },
   { direction: 'n', x: 0.5, y: 0, rotation: 0 },
-  { direction: 'ne', x: 1, y: 0, rotation: 270 },
+  { direction: 'ne', x: 1, y: 0, rotation: 45 },
   { direction: 'w', x: 0, y: 0.5, rotation: 90 },
   { direction: 'e', x: 1, y: 0.5, rotation: 90 },
-  { direction: 'sw', x: 0, y: 1, rotation: 90 },
+  { direction: 'sw', x: 0, y: 1, rotation: 45 },
   { direction: 's', x: 0.5, y: 1, rotation: 0 },
-  { direction: 'se', x: 1, y: 1, rotation: 0 },
+  { direction: 'se', x: 1, y: 1, rotation: 135 },
 ] as const;
 
 export function overlayResizeHint(width: number, height: number, pointer: { x: number; y: number }) {
@@ -22,16 +22,18 @@ export function overlayResizeHint(width: number, height: number, pointer: { x: n
   )?.direction;
 }
 
-export function fitOverlayCards(width: number, height: number, count: number, layout: string) {
-  let best = { columns: 1, width: 0, height: 0 };
-  if (width <= 0 || height <= 0 || count < 1) return best;
-  for (let columns = 1; columns <= count; columns++) {
-    if (layout === 'vertical' && columns !== 1) continue;
-    if (layout === 'horizontal' && columns !== count) continue;
-    const rows = Math.ceil(count / columns);
-    const cardWidth = Math.max(0, Math.min((width - (columns - 1) * 6) / columns,
-      (height - (rows - 1) * 6) / rows * 16 / 9));
-    if (cardWidth > best.width) best = { columns, width: cardWidth, height: cardWidth * 9 / 16 };
-  }
-  return best;
+export function fitOverlayCards(width: number, height: number, count: number, layout: string, preserveAspectRatio = true, aspectRatio = 16 / 9) {
+  if (width <= 0 || height <= 0 || count < 1) return { columns: 1, width: 0, height: 0 };
+  const { columns, rows } = arrangeOverlayCards({ width: 0, height: 0 }, count, layout);
+  const cellWidth = Math.max(0, (width - (columns - 1) * 6) / columns);
+  const cellHeight = Math.max(0, (height - (rows - 1) * 6) / rows);
+  const cardWidth = preserveAspectRatio ? Math.min(cellWidth, cellHeight * aspectRatio) : cellWidth;
+  return { columns, width: cardWidth, height: preserveAspectRatio ? cardWidth / aspectRatio : cellHeight };
+}
+
+export function arrangeOverlayCards(size: { width: number; height: number }, count: number, layout: string) {
+  const columns = layout === 'vertical' ? 1 : layout === 'horizontal' ? Math.max(1, count) : Math.max(1, Math.ceil(Math.sqrt(count)));
+  const rows = Math.ceil(count / columns);
+  return { columns, rows, width: columns * size.width + (columns - 1) * 6,
+    height: rows * size.height + Math.max(0, rows - 1) * 6 };
 }

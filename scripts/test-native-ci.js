@@ -228,6 +228,7 @@ test('the extracted DOM lane preserves every existing test command and its order
     'node apps/client/test/settingsNavigationSmoke.cjs --quality-settings',
     'node apps/client/test/settingsNavigationSmoke.cjs --screen-stage',
     'node apps/client/test/settingsNavigationSmoke.cjs --screen-audience',
+    'node apps/client/test/settingsNavigationSmoke.cjs --overlay-window',
     'npm run test:settings:ui --workspace=apps/client',
     'npm run test:camera --workspace=apps/client',
     'node apps/client/test/footerControlsSmoke.cjs',

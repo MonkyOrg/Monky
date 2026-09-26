@@ -1,12 +1,14 @@
 export const PROTOCOL_VERSION = 29;
 
 /**
- * Default size of the floating overlay window (#169). Shared so the renderer can
- * tell whether the user resized it away from the default — the "reset size"
- * control is only worth showing once the size actually changed (#543).
+ * Initial shell size; populated overlays size themselves from readable cards,
+ * rather than dividing this rectangle among an arbitrary participant count.
  */
-export const OVERLAY_DEFAULT_WIDTH = 340;
-export const OVERLAY_DEFAULT_HEIGHT = 240;
+export const OVERLAY_DEFAULT_WIDTH = 514;
+export const OVERLAY_DEFAULT_HEIGHT = 334;
+export const OVERLAY_DEFAULT_CARD_WIDTH = 240;
+export const OVERLAY_DEFAULT_CARD_HEIGHT = 135;
+export const OVERLAY_MINIMALIST_CARD_HEIGHT = 36;
 
 export const LIMITS = {
   MESSAGE_DELETE_UNDO_SECONDS: 60,

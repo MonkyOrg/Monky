@@ -1,10 +1,22 @@
-import type { NativeScreenVideoProfile, ScreenEncodingAvailability } from '@monky/shared';
+import type {
+  NativeScreenVideoProfile, ScreenEncodingAvailability, ScreenEncodingStrategy, ScreenEncodingMode, ScreenCodec,
+} from '@monky/shared';
 import { settingsStore } from '../stores/settingsStore';
 import { t } from '../i18n';
 import { showInfoToast } from '../views/CopyToast';
 
+export interface ScreenEncodingPreferences {
+  readonly encodingStrategy: ScreenEncodingStrategy;
+  readonly encodingMode: ScreenEncodingMode;
+  readonly codec: ScreenCodec;
+}
+
 export async function probeScreenEncoding(
   video: NativeScreenVideoProfile, signal: AbortSignal,
+  preferences: ScreenEncodingPreferences = {
+    encodingStrategy: settingsStore.screenEncodingStrategy,
+    encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
+  },
 ): Promise<ScreenEncodingAvailability> {
   signal.throwIfAborted();
   if (typeof window.api?.nativeScreenCommand !== 'function') throw new Error(t('screenShare.nativeUnavailable'));
@@ -18,8 +30,7 @@ export async function probeScreenEncoding(
   try {
     const result = await window.api.nativeScreenCommand({
       action: 'probe-encoding', probeId, video,
-      encodingMode: settingsStore.screenEncodingMode, codec: settingsStore.preferredScreenCodec,
-      encodingStrategy: settingsStore.screenEncodingStrategy,
+      ...preferences,
     });
     signal.throwIfAborted();
     if (result.kind !== 'encoding') throw new Error('Invalid screen encoder discovery response.');

@@ -1,0 +1,43 @@
+name: Native macOS source validation
+
+on:
+  push:
+    paths:
+      - '.github/workflows/native-macos-validation.yml'
+      - 'apps/client/native/screen-share/src/mac/**'
+      - 'apps/client/native/screen-share/runtime/mac/**'
+      - 'apps/client/native/screen-share/runtime/nativePreviewImage.cjs'
+      - 'apps/client/native/screen-share/scripts/buildMac.cjs'
+      - 'apps/client/native/screen-share/test/mac*.cjs'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  sources:
+    name: ScreenCaptureKit sources (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: ${{ matrix.arch }}
+      - name: Build ScreenCaptureKit source host
+        run: node apps/client/native/screen-share/scripts/buildMac.cjs --arch=${{ matrix.arch }}
+      - name: Verify bounded native source transport and cleanup
+        run: |
+          node --test apps/client/native/screen-share/test/macScreenProvider.test.cjs apps/client/native/screen-share/test/macVideoCapture.test.cjs
+          node apps/client/native/screen-share/test/macNativeHostSmoke.cjs
+      - name: Exercise actual VideoToolbox H264 encoding and callback retirement
+        run: apps/client/native/screen-share/bin/darwin-${{ matrix.arch }}/monky-screen-mac --encoder-smoke

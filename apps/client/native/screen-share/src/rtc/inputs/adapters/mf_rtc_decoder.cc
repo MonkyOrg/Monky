@@ -519,7 +519,7 @@ class DecoderWorker final : public Worker {
               return OnFrame(std::move(frame));
             },
             [this](std::uint64_t request) { OnAccepted(request); },
-            [this] { return retained(); });
+            [this] { return retained(); }, ObserveNativeDecoderCalls(diagnostics_));
       });
       ++core_generation_;
       core_start_loss_epoch_ = input.metadata.loss_epoch;

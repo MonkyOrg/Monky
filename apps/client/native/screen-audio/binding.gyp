@@ -33,6 +33,7 @@
               "src/win/wasapi_format.cpp",
               "src/win/packet_capture.cpp",
               "src/win/window_enum.cpp",
+              "src/win/window_resize.cpp",
               "src/win/keyboard_layout.cpp"
             ],
             "defines!": ["_HAS_EXCEPTIONS=0"],
@@ -43,6 +44,7 @@
               "-lAvrt",
               "-lKsuser",
               "-lUser32",
+              "-lComctl32",
               "-lDwmapi"
             ],
             "msvs_settings": {

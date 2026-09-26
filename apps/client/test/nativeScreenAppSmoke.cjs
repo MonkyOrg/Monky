@@ -172,9 +172,10 @@ async function startSyntheticSource(label) {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   let sourceFile = path.join(clientRoot, 'native', 'screen-share', 'test', 'nativeAvSource.cjs');
-  if (fourK) {
-    const wrapper = path.join(artifacts, `${label}-4k.cjs`);
-    await fs.writeFile(wrapper, `(${fourKSourceFixture.toString()})(${JSON.stringify({ sourceFile, ownerPid: process.pid })});\n`,
+  if (fourK || process.env.MONKY_TEST_DISPLAY !== undefined) {
+    const wrapper = path.join(artifacts, `${label}-${fourK ? '4k' : 'display'}.cjs`);
+    await fs.writeFile(wrapper, `(${sourceFixture.toString()})(${JSON.stringify({ sourceFile, ownerPid: process.pid,
+      fourK, displayHelper: path.join(__dirname, 'fixtures', 'testDisplay.cjs') })});\n`,
       { flag: 'wx' });
     sourceFile = wrapper;
   }
@@ -201,10 +202,13 @@ async function startSyntheticSource(label) {
   return owner;
 }
 
-function fourKSourceFixture({ sourceFile, ownerPid }) {
+function sourceFixture({ sourceFile, ownerPid, fourK, displayHelper }) {
   const assert = require('node:assert/strict');
-  const { app, BrowserWindow } = require('electron');
+  const { app, BrowserWindow, screen } = require('electron');
   assert.equal(process.ppid, ownerPid);
+  let placement;
+  try { placement = require(displayHelper).installTestDisplay({ app, screen, BrowserWindow }); }
+  catch (error) { console.error('[TestDisplay] Source launch rejected:', error); app.exit(1); return; }
   const send = process.send.bind(process);
   process.send = (message, ...args) => {
     if (message.type !== 'ready') return send(message, ...args);
@@ -212,15 +216,20 @@ function fourKSourceFixture({ sourceFile, ownerPid }) {
       const windows = BrowserWindow.getAllWindows();
       assert.equal(windows.length, 1);
       const window = windows[0];
-      window.setMaximumSize(4096, 2304);
-      window.setContentSize(3840, 2160);
-      const canvas = await window.webContents.executeJavaScript(`(() => {
+      let canvas;
+      if (fourK) {
+        placement?.windowOptions({ width: 3840, height: 2160 });
+        window.setMaximumSize(4096, 2304);
+        window.setContentSize(3840, 2160);
+        canvas = await window.webContents.executeJavaScript(`(() => {
         const canvas = document.getElementById('source');
         canvas.width = 3840; canvas.height = 2160;
         canvas.getContext('2d').setTransform(3840 / 800, 0, 0, 2160 / 600, 0, 0);
         return { width: canvas.width, height: canvas.height, innerWidth, innerHeight, devicePixelRatio };
-      })()`);
-      send({ ...message, canvas, contentSize: window.getContentSize(), bounds: window.getBounds() }, ...args);
+        })()`);
+      }
+      send({ ...message, ...(fourK ? { canvas } : {}), contentSize: window.getContentSize(), bounds: window.getBounds(),
+        testDisplay: placement?.snapshot() ?? null }, ...args);
     })().catch(error => { console.error(error); app.exit(1); });
     return true;
   };
@@ -269,12 +278,16 @@ function mainFixture({ clientRoot, origin, ownerPid, clockFeedbackStall, fourK, 
   const assert = require('node:assert/strict');
   const fs = require('node:fs');
   const path = require('node:path');
-  const { app, BrowserWindow, dialog } = require('electron');
+  const { app, BrowserWindow, dialog, screen } = require('electron');
   assert.equal(process.ppid, ownerPid);
   assert.equal(process.connected, true);
   const envelope = JSON.parse(fs.readFileSync(process.env.MONKY_QA_CONFIG, 'utf8'));
   assert.equal(envelope.ownerPid, ownerPid);
   assert.equal(envelope.config.scenario, 'home');
+  let placement;
+  try { placement = require(path.join(clientRoot, 'test', 'fixtures', 'testDisplay.cjs')).installTestDisplay({ app, screen, BrowserWindow }); }
+  catch (error) { console.error('[TestDisplay] Participant launch rejected:', error); app.exit(1); return; }
+  placement?.interceptElectronImports();
   const metadata = require(path.join(clientRoot, 'package.json'));
   // The real Main still owns profile, launcher-envelope and renderer-frame validation.
   app.setAppPath(clientRoot);
@@ -465,6 +478,7 @@ function mainFixture({ clientRoot, origin, ownerPid, clockFeedbackStall, fourK, 
       process.send({ type: 'qa-response', id: input.id, value: {
         mainFocused: window.isFocused(), anyFocused: (!!focused && !focused.isDestroyed()) || focusedWindowIds.length > 0,
         mainWindowId: window.id, focusedWindowId: focused?.id ?? null, focusedWindowIds,
+        testDisplay: placement?.snapshot() ?? null,
       } });
     } catch (error) {
       process.send({ type: 'qa-response', id: input.id, error: error.stack ?? String(error) });
@@ -1653,6 +1667,7 @@ async function run() {
   source = primarySource.child;
   const sourceReady = primarySource.ready;
   report.sourcePid = source.pid;
+  report.sourceTestDisplay = sourceReady.testDisplay ?? null;
   const secondarySource = sourceReplacement ? await startSyntheticSource('replacement-source') : null;
   if (secondarySource) {
     assert.notEqual(secondarySource.child.pid, source.pid);
@@ -1725,7 +1740,8 @@ async function run() {
       `--remote-debugging-port=${debugPort}`, '--remote-debugging-address=127.0.0.1', '--allow-loopback-in-peer-connection',
       ...receiveLogArgs, ...overlayArgs], {
       cwd: clientRoot, runId, label: `Native Monky ${label}`, timeoutMs: 60000,
-      env: isolatedEnvironment(profile, { MONKY_QA_CONFIG: configFile, VITE_DEV_SERVER_URL: origin }),
+      env: isolatedEnvironment(profile, { MONKY_QA_CONFIG: configFile, VITE_DEV_SERVER_URL: origin,
+        ...(process.env.MONKY_TEST_DISPLAY !== undefined ? { MONKY_TEST_DISPLAY: process.env.MONKY_TEST_DISPLAY } : {}) }),
       onFailure: error => {
         const expected = expectedWindowClosures.get(label);
         if (expected) expected.push(error);
@@ -1775,6 +1791,8 @@ async function run() {
       audioEnabled, preserveAspectRatio, gameFallback, sourceQualityChanges, fourK, fourK60, fullHd60, screenCodec,
     })})`);
     report[`${label}Setup`] = owned.identity;
+    report[`${label}TestDisplay`] = process.env.MONKY_TEST_DISPLAY !== undefined
+      ? (await child.call('qa-focus-state')).testDisplay : null;
     if (report.protocolContracts.minimumClient !== undefined) {
       assert.equal(owned.identity.protocol?.version, report.protocolContracts.version);
       assert.equal(owned.identity.protocol?.minimumVersion, report.protocolContracts.minimumClient);

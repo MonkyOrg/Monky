@@ -144,7 +144,11 @@ export class SettingsStore {
   public overlayAutoOpenOnLeaveStage: boolean = false;
   public overlayMinimalistMode: boolean = false;
   public overlayHideSelf: boolean = false;
+  public overlayHideStagePreviews = false;
+  public overlayHideInactiveParticipants = false;
   public overlayPreserveAspectRatio: boolean = true;
+  public overlayCardSize: OverlayConfig['cardSize'] | null = null;
+  public overlayMinimalistCardSize: OverlayConfig['minimalistCardSize'] | null = null;
   public overlaySavedBounds: OverlayBounds | null = null;
 
   constructor() {
@@ -162,6 +166,8 @@ export class SettingsStore {
     this.botUserPreferences = {};
     this.botLocalePreferences = {};
     this.autoEntryServerKeys = [];
+    this.overlayHideStagePreviews = false;
+    this.overlayHideInactiveParticipants = false;
     if (typeof localStorage === 'undefined') return;
     try {
       const raw = localStorage.getItem('monky_settings');
@@ -334,7 +340,17 @@ export class SettingsStore {
         if (typeof this.overlayHideSelf !== 'boolean') {
           this.overlayHideSelf = false;
         }
+        if (typeof this.overlayHideStagePreviews !== 'boolean') this.overlayHideStagePreviews = false;
+        if (typeof this.overlayHideInactiveParticipants !== 'boolean') this.overlayHideInactiveParticipants = false;
         if (typeof this.overlayPreserveAspectRatio !== 'boolean') this.overlayPreserveAspectRatio = true;
+        for (const key of ['overlayCardSize', 'overlayMinimalistCardSize'] as const) {
+          const size = this[key];
+          if (size != null && (Array.isArray(size) || ![size.width, size.height]
+            .every(value => Number.isFinite(value) && value >= 1 && value <= 16384))) {
+            console.warn('[Settings] Ignoring invalid overlay card dimensions:', key);
+            this[key] = null;
+          }
+        }
         if (
           this.overlaySavedBounds &&
           (typeof this.overlaySavedBounds.width !== 'number' || typeof this.overlaySavedBounds.height !== 'number')
@@ -365,7 +381,11 @@ export class SettingsStore {
       autoOpenOnLeaveStage: this.overlayAutoOpenOnLeaveStage,
       minimalistMode: this.overlayMinimalistMode,
       hideSelf: this.overlayHideSelf,
+      hideStagePreviews: this.overlayHideStagePreviews,
+      hideInactiveParticipants: this.overlayHideInactiveParticipants,
       preserveAspectRatio: this.overlayPreserveAspectRatio,
+      cardSize: this.overlayCardSize ?? undefined,
+      minimalistCardSize: this.overlayMinimalistCardSize ?? undefined,
       bounds: this.overlaySavedBounds || undefined,
     };
   }
@@ -427,9 +447,13 @@ export class SettingsStore {
     if (typeof config.hideSelf === 'boolean') {
       this.overlayHideSelf = config.hideSelf;
     }
+    if (typeof config.hideStagePreviews === 'boolean') this.overlayHideStagePreviews = config.hideStagePreviews;
+    if (typeof config.hideInactiveParticipants === 'boolean') this.overlayHideInactiveParticipants = config.hideInactiveParticipants;
     if (typeof config.preserveAspectRatio === 'boolean') {
       this.overlayPreserveAspectRatio = config.preserveAspectRatio;
     }
+    if ('cardSize' in config) this.overlayCardSize = config.cardSize ? { ...config.cardSize } : null;
+    if ('minimalistCardSize' in config) this.overlayMinimalistCardSize = config.minimalistCardSize ? { ...config.minimalistCardSize } : null;
     // Presence of the key (not truthiness) is what matters: resetting the size
     // sends `{ bounds: undefined }` on purpose, and that has to actually clear
     // the saved bounds so the "reset size" control knows it is back to default
@@ -695,7 +719,11 @@ export class SettingsStore {
         overlayAutoOpenOnLeaveStage: this.overlayAutoOpenOnLeaveStage,
         overlayMinimalistMode: this.overlayMinimalistMode,
         overlayHideSelf: this.overlayHideSelf,
+        overlayHideStagePreviews: this.overlayHideStagePreviews,
+        overlayHideInactiveParticipants: this.overlayHideInactiveParticipants,
         overlayPreserveAspectRatio: this.overlayPreserveAspectRatio,
+        overlayCardSize: this.overlayCardSize,
+        overlayMinimalistCardSize: this.overlayMinimalistCardSize,
         overlaySavedBounds: this.overlaySavedBounds,
       }));
       appEvents.emit('settings.updated');

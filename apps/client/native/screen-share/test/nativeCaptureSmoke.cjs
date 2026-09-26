@@ -18,7 +18,13 @@ if (!process.versions.electron) {
   child.once('exit', code => { clearTimeout(timeout); process.exitCode = code ?? 1; });
   return;
 }
-const { app, BrowserWindow, sharedTexture, MessageChannelMain } = require('electron');
+const { app, BrowserWindow, screen, sharedTexture, MessageChannelMain } = require('electron');
+let placement;
+try {
+  placement = require('../../../test/fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
+}
+catch (error) { console.error('[TestDisplay] Capture launch rejected:', error); app.exit(1); return; }
+const createWindow = options => placement ? placement.createWindow(options) : new BrowserWindow(options);
 const { getScreenShareProfile } = require('@monky/shared');
 const moduleDirectory = process.argv.find(value => value.startsWith('--module='))?.slice('--module='.length)
   ?? path.resolve(__dirname, '..');
@@ -47,6 +53,9 @@ assert.ok(['auto', 'obs_x264', 'monky_aom_av1', 'av1_texture_amf', 'obs_nvenc_av
 assert.ok(selectedQuality === undefined || ['source', '1080p60', '720p60', '480p30'].includes(selectedQuality));
 const codec = ['monky_aom_av1', 'av1_texture_amf', 'obs_nvenc_av1_tex'].includes(encoder) ? 'av1' : 'h264';
 const previewOnly = process.argv.includes('--preview-only');
+const rtcFault = process.argv.find(value => value.startsWith('--rtc-fault='))?.slice('--rtc-fault='.length);
+assert.ok(rtcFault === undefined || ['publish', 'receive'].includes(rtcFault));
+assert.ok(!rtcFault || (selectedQuality && !previewOnly && !auditFfmpeg));
 assert.ok(['p2p', 'sfu'].includes(mode));
 assert.ok(directory && path.isAbsolute(directory), 'An explicit isolated smoke-artifact directory is required.');
 assert.equal(fs.existsSync(directory), false, 'Never reuse a smoke profile or capture owner.');
@@ -191,7 +200,7 @@ async function runDemandControllers(runtime) {
     },
   });
   const start = async (id, quality) => {
-    const window = new BrowserWindow({ width: 640, height: 400, show: false,
+    const window = createWindow({ width: 640, height: 400, show: false,
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false,
         preload: path.join(__dirname, 'nativeCaptureSmoke.preload.cjs') } });
     extraWindows.add(window); windows.set(id, window);
@@ -279,7 +288,7 @@ async function runDemandControllers(runtime) {
   }
 }
 
-async function runProfile(runtime, quality, sourceLoss = false) {
+async function runProfile(runtime, quality, sourceLoss = false, fault = null) {
   const runId = randomUUID();
   const source = { shareId: 'own-source', instanceId: runId, audio: false,
     codec,
@@ -295,6 +304,10 @@ async function runProfile(runtime, quality, sourceLoss = false) {
   report.profiles.push(result);
   const phase = name => { result.phase = name; progress(); console.log(`Capture smoke ${video.width}x${video.height}@${video.fps}: ${name}`); };
   const mediaError = error => {
+    if (result.expectingRtcFault) {
+      (result.expectedRtcErrors ??= []).push({ code: error.code, message: error.message });
+      return;
+    }
     if (!result.expectingSourceLoss) { fail(error); return; }
     (result.expectedSourceErrors ??= []).push({ code: error.code, message: error.message });
   };
@@ -392,6 +405,27 @@ async function runProfile(runtime, quality, sourceLoss = false) {
     }
     result.activeRtp = { sender: await videoRtp(sender, 'outbound-rtp'), receiver: await videoRtp(receiver, 'inbound-rtp') };
     assert.ok(result.activeRtp.sender.bytes > 0 && result.activeRtp.receiver.bytes > 0);
+    if (fault) {
+      phase('terminating-owned-rtc-host');
+      await waitFor(() => receiver.presentation.leases.size > 0, 'No real Chromium texture lease was available for the fault test.');
+      const endpoint = fault === 'receive' ? receiver : sender;
+      assert.notEqual(endpoint.engine.child.pid, process.pid);
+      assert.equal(Object.keys(require.cache).some(filename => filename.endsWith('monky_screen_rtc.node')), false);
+      result.expectingRtcFault = true;
+      result.fault = { role: fault, pid: endpoint.engine.child.pid,
+        externalTexturesAtExit: receiver.presentation.leases.size };
+      const nativeId = mode === 'p2p' ? endpoint.peerId : fault === 'publish'
+        ? endpoint.publication.producerId : [...endpoint.broker.activeConsumers.values()][0].nativeId;
+      const pending = endpoint.commands.request(mode === 'p2p' ? 'peer.getStats' : 'sfu.getStats', nativeId, {});
+      const settled = pending.then(() => 'completed-before-exit', error => error.code);
+      endpoint.engine.child.kill();
+      await endpoint.engine.exitState.promise;
+      result.fault.pendingOutcome = await settled;
+      assert.equal(await playbackWindow.webContents.executeJavaScript('6 * 7'), 42);
+      assert.equal(sourceWindow.isDestroyed(), false);
+      result.fault.mainSurvived = true;
+      return;
+    }
     phase('stopping-watch');
     await receiver.stopWatching();
     if (sfu) {
@@ -418,6 +452,8 @@ async function runProfile(runtime, quality, sourceLoss = false) {
     }
   } catch (error) {
     result.error = error.stack ?? String(error);
+    result.mainResponsiveAfterError = await within(playbackWindow.webContents.executeJavaScript('6 * 7'),
+      2000, 'The owned renderer did not answer after a media failure.').then(value => value === 42, () => false);
     result.sender = sender.engine.snapshot(); result.receiver = receiver.engine.snapshot();
     result.flow = sender.flow?.snapshot();
     if (sfu) {
@@ -435,15 +471,29 @@ async function runProfile(runtime, quality, sourceLoss = false) {
     const expected = error => error === sender.host?.nativeError
       || (error instanceof AggregateError && error.errors.length > 0 && error.errors.every(expected));
     const rejected = outcomes.filter(value => value.status === 'rejected').map(value => value.reason);
-    const errors = rejected.filter(error => !result.expectingSourceLoss || !expected(error));
+    const errors = rejected.filter(error => !result.expectingRtcFault && (!result.expectingSourceLoss || !expected(error)));
     if (result.expectingSourceLoss)
       assert.ok(result.expectedSourceErrors?.some(error => error.code === 'ERR_SCREEN_CAPTURE_SOURCE_LOST'),
         'The original native source failure was not reported.');
     result.retirement = sender.snapshot();
+    result.receiverRetirement = receiver.snapshot();
+    result.rtcRetirement = { sender: sender.engine.snapshot().process, receiver: receiver.engine.snapshot().process };
+    result.localRetirementProven = sender.snapshot().nativeClosed && receiver.snapshot().nativeClosed;
     result.nativeClosed = errors.length === 0 && sender.snapshot().nativeClosed && receiver.snapshot().nativeClosed;
     result.cleanupErrors = errors.map(error => error.stack ?? String(error)); progress();
     assert.equal(sender.snapshot().closed, true);
     assert.equal(receiver.snapshot().closed, true);
+    if (result.expectingRtcFault) {
+      assert.ok(result.expectedRtcErrors.some(error => error.code === 'ERR_RTC_HOST_EXIT'));
+      for (const endpoint of [sender, receiver]) {
+        assert.equal(endpoint.engine.pending.size, 0);
+        assert.equal(endpoint.engine.leases.size, 0);
+        assert.equal(endpoint.engine.hostExited, true);
+      }
+      assert.equal(sender.flow.inFlight.size, 0);
+      result.fault.ownedMediaRetired = true;
+      progress();
+    }
     if (sender.runDirectory) assert.equal(fs.existsSync(sender.runDirectory), false, 'An owned capture directory survived complete retirement.');
     if (sfu) {
       try { sfu.assertRetired(); result.serverResourcesRetired = true; }
@@ -491,9 +541,9 @@ async function runProfile(runtime, quality, sourceLoss = false) {
 app.whenReady().then(async () => {
   try {
     const runtime = loadRuntime();
-    sourceWindow = new BrowserWindow({ width: 800, height: 600, useContentSize: true, frame: false, show: false,
+    sourceWindow = createWindow({ width: 800, height: 600, useContentSize: true, frame: false, show: false,
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false } });
-    playbackWindow = new BrowserWindow({ width: 640, height: 400, show: false,
+    playbackWindow = createWindow({ width: 640, height: 400, show: false,
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false,
         preload: path.join(__dirname, 'nativeCaptureSmoke.preload.cjs') } });
     for (const window of [sourceWindow, playbackWindow]) {
@@ -508,8 +558,9 @@ app.whenReady().then(async () => {
     if (previewOnly) await runPreview(runtime);
     else {
       if (!selectedQuality) await runDemandControllers(runtime);
+      if (rtcFault) await runProfile(runtime, selectedQuality, false, rtcFault);
       for (const quality of selectedQuality ? [selectedQuality] : ['source', '1080p60', '720p60', '480p30'])
-        await runProfile(runtime, quality, quality === '480p30');
+        await runProfile(runtime, quality, quality === '480p30' && !rtcFault);
     }
   } catch (error) {
     report.errors.push(error.stack ?? String(error)); console.error(error); process.exitCode = 1;

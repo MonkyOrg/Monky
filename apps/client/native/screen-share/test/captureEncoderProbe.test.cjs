@@ -307,6 +307,16 @@ test('AMF cleanup failures override unsupported codes while retaining the primar
   assert.doesNotMatch(cleanup, /ContractError\(error\.code/u);
 });
 
+test('AMF codec absence classification is restricted to component discovery, never initialization or teardown', () => {
+  const probe = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'amfProbe.h'), 'utf8');
+  const nativeProbe = probe.slice(probe.indexOf('inline std::string ProbeAmfDevice'));
+  assert.match(nativeProbe, /const auto created = factory->CreateComponent[\s\S]*?ValidateAmfComponentResult\(created, av1, evidence\);/u);
+  assert.equal(nativeProbe.match(/ValidateAmfComponentResult\(/gu)?.length, 1);
+  assert.match(nativeProbe, /check\(context->InitDX11\(device, amf::AMF_DX11_1\), "InitDX11\(selected OBS device\)"\)/u);
+  assert.match(nativeProbe, /check\(encoder->GetCaps\(&caps\), "GetCaps"\)/u);
+  assert.match(nativeProbe, /if \(failure\) std::rethrow_exception\(failure\)/u);
+});
+
 test('software AV1 stops encoding after an update failure even when libobs ignores its return value', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'capture', 'softwareAv1.cpp'), 'utf8');
   assert.match(source, /\*received = false;\s*if \(encoder\.failed\) return false;/u);

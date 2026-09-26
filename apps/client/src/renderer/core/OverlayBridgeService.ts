@@ -401,28 +401,6 @@ export class OverlayBridgeService {
       ? participants.filter((p) => sidOf(p) !== currentSessionId)
       : participants;
 
-    // Detectar orador ativo
-    let currentSpeakerSessionId: string | null = null;
-    for (const p of visibleParticipants) {
-      const isSpeaking = isParticipantSpeaking(p, callStore);
-      if (isSpeaking) {
-        currentSpeakerSessionId = sidOf(p);
-        this.lastActiveSpeakerSessionId = currentSpeakerSessionId;
-        break;
-      }
-    }
-
-    if (!currentSpeakerSessionId && this.lastActiveSpeakerSessionId) {
-      const exists = visibleParticipants.some((p) => sidOf(p) === this.lastActiveSpeakerSessionId);
-      if (exists) {
-        currentSpeakerSessionId = this.lastActiveSpeakerSessionId;
-      }
-    }
-
-    if (!currentSpeakerSessionId && visibleParticipants.length > 0) {
-      currentSpeakerSessionId = sidOf(visibleParticipants[0]);
-    }
-
     let nextSlotIndex = 0;
 
     const participantStates: OverlayParticipantState[] = visibleParticipants.map((p) => {
@@ -506,7 +484,14 @@ export class OverlayBridgeService {
         screenSlotIndexes,
         screenCaptureModes,
       };
-    });
+    }).filter(p => !config.hideInactiveParticipants || p.isCameraOn
+      || (config.mode === 'cameras-and-screens' && p.screenShareIds.length > 0));
+
+    const speaking = participantStates.find(p => p.isSpeaking);
+    if (speaking) this.lastActiveSpeakerSessionId = speaking.sessionId;
+    const currentSpeakerSessionId = speaking?.sessionId
+      ?? participantStates.find(p => p.sessionId === this.lastActiveSpeakerSessionId)?.sessionId
+      ?? participantStates[0]?.sessionId ?? null;
 
     // Limpa slots não utilizados trocando de volta para a dummyTrack
     if (this.isWebRtcReady) {

@@ -2,11 +2,13 @@ import type {
   OverlayConfig,
   OverlayParticipantState,
   OverlaySyncState,
+  OverlayCardSize,
 } from '@monky/shared';
 import { escapeHtml } from '../utils/html';
 import { t } from '../i18n';
 import { renderAudioMuteIndicators } from './AudioStateIcon';
-import { fitOverlayCards, OVERLAY_RESIZE_HINTS, overlayResizeHint } from '../utils/overlayLayout';
+import { arrangeOverlayCards, fitOverlayCards, OVERLAY_RESIZE_HINTS, overlayResizeHint } from '../utils/overlayLayout';
+import { getOverlayCardSize, overlayCardAspect } from '@monky/shared';
 
 type OverlayTile = {
   p: OverlayParticipantState;
@@ -27,8 +29,11 @@ export class OverlayStageView {
   private unbindListeners: Array<() => void> = [];
   private leavingTimers = new Map<string, number>();
   private isHovered = false;
+  private isResizing = false;
   private pointer: { x: number; y: number } | undefined;
   private layoutObserver: ResizeObserver | null = null;
+  private cardSize: OverlayCardSize | null = null;
+  private layoutRequestKey = '';
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -44,10 +49,24 @@ export class OverlayStageView {
       this.applyHoverState();
     });
     this.layoutObserver.observe(this.container);
+    if (window.api?.onOverlayResizeStateChanged) {
+      this.unbindListeners.push(window.api.onOverlayResizeStateChanged(resizing => {
+        this.isResizing = resizing;
+        if (!resizing) {
+          this.cardSize = null;
+          this.layoutRequestKey = '';
+        }
+        this.applyCardLayout(!resizing);
+        this.applyHoverState();
+      }));
+    }
 
     if (window.api?.onOverlaySyncStateReceived) {
       this.unbindListeners.push(
         window.api.onOverlaySyncStateReceived((state) => {
+          if (!this.currentState || !!state.config.minimalistMode !== !!this.currentState.config.minimalistMode) {
+            this.acceptCardConfig(state.config);
+          }
           this.currentState = state;
           this.render();
         })
@@ -57,6 +76,7 @@ export class OverlayStageView {
     if (window.api?.onOverlayConfigUpdated) {
       this.unbindListeners.push(
         window.api.onOverlayConfigUpdated((config) => {
+          this.acceptCardConfig(config);
           if (this.currentState) {
             this.currentState.config = config;
             this.render();
@@ -235,6 +255,7 @@ export class OverlayStageView {
   }
 
   private renderEmptyState(isAlone: boolean = false): void {
+    this.layoutRequestKey = '';
     this.container.innerHTML = `
       <div class="overlay-stage-root">
         <div class="overlay-stage-topbar">
@@ -250,7 +271,8 @@ export class OverlayStageView {
         </div>
         <div class="overlay-empty-state">
           <span class="material-symbols-outlined md-20" style="color: var(--text-muted); opacity: 0.6;">group</span>
-          <span>${isAlone ? t('overlay.aloneInChannel') : t('overlay.waitingChannel')}</span>
+          <span>${this.currentState?.config.hideInactiveParticipants
+            ? t('overlay.noActiveVideo') : isAlone ? t('overlay.aloneInChannel') : t('overlay.waitingChannel')}</span>
         </div>
         ${this.renderResizeHint()}
       </div>
@@ -513,7 +535,10 @@ export class OverlayStageView {
 
   private applyHoverState(): void {
     const root = this.container.querySelector('.overlay-stage-root');
-    if (root) root.classList.toggle('is-hovered', this.isHovered);
+    if (root) {
+      root.classList.toggle('is-hovered', this.isHovered || this.isResizing);
+      root.classList.toggle('is-resizing', this.isResizing);
+    }
     const bounds = root?.getBoundingClientRect();
     const direction = this.isHovered && this.pointer && bounds
       ? overlayResizeHint(bounds.width, bounds.height, { x: this.pointer.x - bounds.left, y: this.pointer.y - bounds.top })
@@ -523,38 +548,80 @@ export class OverlayStageView {
     }
   }
 
-  private applyCardLayout(): void {
+  private acceptCardConfig(config: OverlayConfig): void {
+    if (this.isResizing) return;
+    const nextSize = getOverlayCardSize(config);
+    if (nextSize.width !== this.cardSize?.width || nextSize.height !== this.cardSize?.height
+      || config.minimalistMode !== this.currentState?.config.minimalistMode) {
+      this.cardSize = nextSize;
+      this.layoutRequestKey = '';
+    }
+  }
+
+  private applyCardLayout(refit = false): void {
     const cards = this.container.querySelector<HTMLElement>('.overlay-cards-container');
     if (!cards) return;
     const config = this.currentState?.config;
-    const preserve = config?.preserveAspectRatio !== false && !config?.minimalistMode;
+    if (!config) return;
+    const preserve = config.preserveAspectRatio !== false;
+    const aspect = overlayCardAspect(config.minimalistMode);
     cards.classList.toggle('preserve-aspect', preserve);
-    if (!preserve) {
-      cards.style.removeProperty('grid-template-columns');
-      cards.style.removeProperty('grid-auto-rows');
-      cards.style.removeProperty('--overlay-card-width');
-      cards.style.removeProperty('--overlay-card-height');
-      return;
+    cards.classList.add('fixed-card-size');
+    const count = cards.querySelectorAll('.overlay-card:not(.leaving), .overlay-mini-item').length;
+    if (!count) return;
+    if (this.isResizing || refit) {
+      const fitted = fitOverlayCards(cards.clientWidth, cards.clientHeight, count, config.layout, preserve, aspect);
+      if (fitted.width < 1 || fitted.height < 1) return;
+      this.cardSize = { width: fitted.width, height: fitted.height };
     }
-    const count = cards.querySelectorAll('.overlay-card:not(.leaving)').length;
-    const fitted = fitOverlayCards(cards.clientWidth, cards.clientHeight, count, config?.layout ?? 'grid');
-    cards.style.gridTemplateColumns = `repeat(${fitted.columns}, ${fitted.width}px)`;
-    cards.style.gridAutoRows = `${fitted.height}px`;
-    cards.style.setProperty('--overlay-card-width', `${fitted.width}px`);
-    cards.style.setProperty('--overlay-card-height', `${fitted.height}px`);
+    if (!this.cardSize) this.cardSize = getOverlayCardSize(config);
+    const layout = arrangeOverlayCards(this.cardSize, count, config.layout);
+    cards.classList.toggle('scrollable', layout.width > cards.clientWidth + 1 || layout.height > cards.clientHeight + 1);
+    cards.style.gridTemplateColumns = `repeat(${layout.columns}, ${this.cardSize.width}px)`;
+    cards.style.gridAutoRows = `${this.cardSize.height}px`;
+    cards.style.setProperty('--overlay-card-width', `${this.cardSize.width}px`);
+    cards.style.setProperty('--overlay-card-height', `${this.cardSize.height}px`);
+    if (this.isResizing) return;
+    const root = this.container.querySelector<HTMLElement>('.overlay-stage-root');
+    if (!root || !window.api?.layoutOverlayCards) return;
+    const rootStyle = getComputedStyle(root);
+    const paddingX = parseFloat(rootStyle.paddingLeft) + parseFloat(rootStyle.paddingRight);
+    const paddingY = parseFloat(rootStyle.paddingTop) + parseFloat(rootStyle.paddingBottom);
+    const topbar = root.querySelector<HTMLElement>('.overlay-stage-topbar');
+    const barHeight = topbar ? topbar.getBoundingClientRect().height + parseFloat(getComputedStyle(topbar).marginBottom) : 0;
+    const key = `${!!config.minimalistMode}:${preserve}:${this.cardSize.width}:${this.cardSize.height}:${layout.columns}:${layout.rows}`;
+    if (key === this.layoutRequestKey) return;
+    this.layoutRequestKey = key;
+    void window.api.layoutOverlayCards({
+      cardSize: { ...this.cardSize },
+      minimalistMode: !!config.minimalistMode,
+      preserveAspectRatio: preserve,
+      width: Math.ceil(layout.width + paddingX),
+      height: Math.ceil(layout.height + paddingY + barHeight),
+      resizeAspect: {
+        ratio: layout.columns * aspect / layout.rows,
+        extraSize: {
+          width: Math.round(paddingX + (layout.columns - 1) * 6),
+          height: Math.round(paddingY + barHeight + (layout.rows - 1) * 6),
+        },
+      },
+    }).catch((error: unknown) => {
+      console.error('[OverlayStage] Could not preserve overlay card dimensions:', error);
+    });
   }
 
   /** Visual hints only: the native window border still handles resizing. */
   private renderResizeHint(): string {
-    return OVERLAY_RESIZE_HINTS.map(({ direction, x, y, rotation }) => `
-      <div class="overlay-resize-hint" data-direction="${direction}" style="left:calc(${x * 100}% - ${x * 18}px);top:calc(${y * 100}% - ${y * 18}px)" aria-hidden="true">
+    return OVERLAY_RESIZE_HINTS.map(({ direction, x, y, rotation }) => {
+      // The diagonal of the rounded frame is 2px inward from its square corner.
+      const inset = x !== 0.5 && y !== 0.5 ? 2 : 0;
+      return `
+      <div class="overlay-resize-hint" data-direction="${direction}" style="left:calc(${x * 100}% - ${x * (16 + inset * 2)}px + ${inset}px);top:calc(${y * 100}% - ${y * (16 + inset * 2)}px + ${inset}px)" aria-hidden="true">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path transform="rotate(${rotation} 8 8)" d="${x === 0.5 || y === 0.5
-            ? 'M8 2V14 M5 5L8 2L11 5 M5 11L8 14L11 11'
-            : 'M15 6L6 15 M15 10L10 15 M15 14L14 15'}" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+          <path transform="rotate(${rotation} 8 8)" d="M8 2V14 M5 5L8 2L11 5 M5 11L8 14L11 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
       </div>
-    `).join('');
+    `; }).join('');
   }
 
   private attachControls(): void {

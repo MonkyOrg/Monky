@@ -18,7 +18,8 @@ inline Json DecoderSchedulingSnapshot(const screen_video::DecoderSchedulingStats
           {"outputCapacityDeferrals", value.outputCapacityDeferrals},
           {"processInputOtherHresults", value.processInputOtherHresults},
           {"processOutputOtherHresults", value.processOutputOtherHresults},
-          {"pumpBudgetYields", value.pumpBudgetYields}};
+          {"pumpBudgetYields", value.pumpBudgetYields},
+          {"sampleRetirementDeferrals", value.sampleRetirementDeferrals}};
 }
 
 template <typename Outcome, typename Name>

@@ -2,6 +2,14 @@
   "abiVersion": 2,
   "contractRevision": 8,
   "audioExtensionVersion": 1,
+  "processAdapter": {
+    "entry": "encoded.cjs creates an owned process; host.cjs alone loads the RTC addon. Direct node signatures below describe the child N-API layer.",
+    "asynchronous": "request/respond, media submission, audio metadata and frame release await correlated child results. cancel is bounded dispatch; the original request remains the completion proof. Audio probes use the existing native RTC clock, with no timestamp substitution.",
+    "bounds": "128 outstanding calls, 32MiB serialized pending data, 16 encoded admission requests, 8 PCM processing requests; production capture additionally retains only one AU awaiting admission. At most 128 unacknowledged native events/8MiB. Budget exhaustion rejects, never creates an unbounded queue.",
+    "textures": "Kernel-only helper pins the actual process object and duplicates its NT HANDLE into the importer. Main owns each duplicate until Chromium retirement or unused proof. Original native GPU retirement is awaited while alive; on actual host death OS disposal is distinguished from GPU fence completion. Legacy input GPU texture loans remain guarded after host death without a reader/fence receipt; full-close proof then rejects. Production screen publication uses compressed bytes, not these input GPU loans.",
+    "snapshot": "snapshot() returns a copied cached observation with explicit process metadata; refreshSnapshot() awaits a real child observation. close() proves OS exit and all Main texture duplicates retired, not merely a native close response.",
+    "capabilities": "Synchronous compiled capabilities come from the hash-verified build manifest. The child validates its actual DLL against that complete declaration before ready resolves; neither is a hardware probe."
+  },
   "requiredCompiledCapabilities": {
     "inputLeaseCorrelation": true,
     "pairedCaptureClock": true,

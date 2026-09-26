@@ -335,8 +335,10 @@ test('preparation preserves the selected installation and SDK through bootstrap,
     './notices.cjs': { generateNotices() { calls.push({ name: 'notices' }); } },
     './buildRtc.cjs': { build: config => calls.push({ name: 'rtc', config }) },
     './buildCapture.cjs': { build: config => calls.push({ name: 'capture', config }) },
+    './buildThumbnails.cjs': { options: () => ({}), build: config => calls.push({ name: 'thumbnails', config }) },
     [path.join(packageRoot, 'index.cjs')]: { loadRuntime: () =>
-      ({ obs: { version: '32.1.1' }, rtc: { capabilities: () => ({ contractRevision: 'fixture' }) } }) },
+      ({ obs: { version: '32.1.1' }, rtc: { capabilities: () => ({ contractRevision: 'fixture' }) } }),
+      loadThumbnailRuntime: () => ({}) },
   });
   await module.prepare({ python: f.python, jobs: 2, vswhere: f.vswhere });
   assert.equal(writes.length, 1);
@@ -345,7 +347,7 @@ test('preparation preserves the selected installation and SDK through bootstrap,
   assert.ok(bootstrap.args.includes(`--sdk-root=${f.sdk}`));
   assert.ok(bootstrap.args.includes(`--vswhere=${f.vswhere}`));
   for (const call of calls.filter(value => value.exe)) assert.equal(call.opts.env, env);
-  for (const name of ['rtc', 'capture']) {
+  for (const name of ['rtc', 'capture', 'thumbnails']) {
     const config = calls.find(call => call.name === name).config;
     assert.equal(config.vsInstall, f.vs); assert.equal(config.sdkRoot, f.sdk); assert.equal(config.vswhere, f.vswhere);
     assert.equal(config.python, path.join(f.root, '.native-screen', 'python', 'Scripts', 'python.exe'));

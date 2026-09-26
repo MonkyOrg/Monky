@@ -1,3 +1,4 @@
+require('./mainStdio.test.cjs');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');

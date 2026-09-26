@@ -14,6 +14,7 @@ export type MainLanguage = 'pt-BR' | 'en';
 const CATALOGS = {
   'pt-BR': {
     'screenShare.ownWindowAudioUnavailable': 'A janela do Monky só pode ser compartilhada sem áudio, para evitar eco da chamada.',
+    'screenShare.overlayWindowUnavailable': 'A janela de sobreposição não pode ser compartilhada. Selecione outra janela.',
     'crash.title': 'Ops! O Monky encontrou uma falha',
     'crash.description': 'A interface parou de funcionar. Você pode nos ajudar a entender o que aconteceu ou reabrir o aplicativo quando quiser.',
     'crash.privacy': 'Nada é reportado automaticamente. “Reportar bug” copia o diagnóstico abaixo e abre o formulário habitual no GitHub. Cole em “Contexto adicional” e revise antes de publicar.',
@@ -182,6 +183,7 @@ const CATALOGS = {
   },
   en: {
     'screenShare.ownWindowAudioUnavailable': 'Monky windows can only be shared without audio to prevent call feedback.',
+    'screenShare.overlayWindowUnavailable': 'The overlay window cannot be shared. Select another window.',
     'crash.title': 'Oops! Monky ran into a problem',
     'crash.description': 'The interface stopped working. You can help us understand what happened, or reopen the app whenever you are ready.',
     'crash.privacy': 'Nothing is reported automatically. “Report a bug” copies the diagnostic below and opens the usual GitHub form. Paste into “Contexto adicional” (additional context) and review before publishing.',

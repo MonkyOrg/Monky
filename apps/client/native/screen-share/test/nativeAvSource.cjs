@@ -2,7 +2,13 @@
 
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, screen } = require('electron');
+let placement;
+try {
+  placement = require('../../../test/fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
+}
+catch (error) { console.error('[TestDisplay] Source launch rejected:', error); app.exit(1); return; }
+const createWindow = options => placement ? placement.createWindow(options) : new BrowserWindow(options);
 
 const profile = process.argv.find(value => value.startsWith('--profile='))?.slice('--profile='.length);
 assert.ok(profile && path.isAbsolute(profile) && typeof process.send === 'function');
@@ -16,7 +22,7 @@ app.on('window-all-closed', () => {});
 process.on('disconnect', () => app.exit(0));
 
 app.whenReady().then(async () => {
-  window = new BrowserWindow({ width: 800, height: 600, useContentSize: true, frame: false,
+  window = createWindow({ width: 800, height: 600, useContentSize: true, frame: false,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   await window.loadFile(path.join(__dirname, 'nativeCaptureSmoke.html'), { hash: 'source' });
@@ -73,7 +79,7 @@ process.on('message', message => {
       assert.deepEqual(window.getContentSize(), [message.width, message.height]);
     } else if (message.command === 'duplicate-title') {
       assert.ok(!duplicate || duplicate.isDestroyed());
-      duplicate = new BrowserWindow({ show: false, title: window.getTitle(),
+      duplicate = createWindow({ show: false, title: window.getTitle(),
         webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
       assert.equal(duplicate.getTitle(), window.getTitle());
       assert.notEqual(duplicate.getNativeWindowHandle().readBigUInt64LE(), window.getNativeWindowHandle().readBigUInt64LE());

@@ -130,13 +130,38 @@ Hardware + AV1, Hardware + H.264, then Software + H.264. Read-only encoding and
 codec fields show the verified result. Fallback is reported without changing
 Automatic mode or saved manual choices; reopening checks hardware again.
 **Manual** selects exactly Hardware/Software and H.264/AV1, with no Automatic
-codec option and no substitution for an unavailable combination. Unsupported
-hardware remains visibly disabled with its reason. Earlier explicit Software or
+codec option. Combinations are checked before saving or reapplying a stream;
+an unsupported choice or failed check does not replace saved preferences.
+Unsupported codecs are disabled, including keyboard menu navigation, with a
+localized explanation. Software + AV1 remains available when its own check succeeds.
+Mode cards identify their available codec so alternatives stay reachable without
+silently substituting selections. If only FPS is incompatible, lower rates are
+tested in descending order (for example, H.264 4K120 → 90 → 60); only the confirmed
+FPS is applied, preserving codec, mode, resolution and bitrate. Driver failures
+never trigger this adjustment and remain retryable. Earlier explicit Software or
 codec preferences migrate to Manual. Screen choices remain independent of the
 camera. Real driver/runtime errors are reported rather than silently changing modes.
 
 Encoder availability is checked for the selected codec and quality without
 capturing a source; confirmation then probes the exact selected source.
+
+For settings (`settingsNavigationSmoke.cjs`) and media (`nativeScreenAppSmoke.cjs`)
+smokes, `$env:MONKY_TEST_DISPLAY='2'` places only test-owned windows on Windows
+device `DISPLAY2`, including synthetic sources and reopened receivers. The option
+fails explicitly if that monitor is absent, logs PID/title/coordinates, and never
+shrinks the requested dimensions to fit. It does not affect the installation,
+user windows or OS display configuration; unset, existing placement is unchanged.
+The device must be non-primary and left of the primary display. The single helper
+`apps\client\test\fixtures\testDisplay.cjs` logs and passes verified bounds to the
+constructor before showing anything, using `showInactive` where current focus
+can be preserved.
+`node apps\client\test\settingsNavigationSmoke.cjs --verify-display-placement`
+checks initial native bounds for hidden 480p/720p windows, including reopening and
+Main-style imports, without showing windows, focusing, capturing media or starting Vite.
+The whole window must fit within the monitor's work area at its actual DPI. An
+oversized request (such as a 4K source on a 2560×1440 display) fails without reducing
+quality or spilling onto another monitor.
+
 The screen-share picker uses saved preferences without repeating mode, encoding
 and codec controls; a failed verification blocks startup and reports the reason.
 There is no mid-stream mode switch, Chromium capture fallback or GPU-brand

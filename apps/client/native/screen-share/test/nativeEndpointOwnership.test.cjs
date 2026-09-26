@@ -10,6 +10,7 @@ const os = require('node:os');
 const { CaptureBridge } = require('../runtime/captureBridge.cjs');
 const { NativeScreenEndpoint, assertNativeScreenEndpointLocallyClosed } = require('../runtime/nativeEndpoint.cjs');
 const { NativeRtcCommands } = require('../runtime/nativeRtcCommands.cjs');
+const { decoderFailureObservations } = require('../runtime/nativeVideoDiagnostics.cjs');
 
 function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = false,
   target = { hwnd: 12345, expectedProcessId: 56789 }, captureEncoder = 'auto', captureModule, preserveAspectRatio,
@@ -130,6 +131,97 @@ test('a genuine admitted failure during SFU drain remains visible instead of bec
   assert.deepEqual(f.errors, [failure]);
   assert.equal(f.endpoint.snapshot().errors[0].code, failure.code);
   assert.doesNotThrow(() => assertNativeScreenEndpointLocallyClosed(f.endpoint));
+});
+
+test('missing capture retirement preserves the original stop failure and permits a proven retry', async () => {
+  const f = fixture({ role: 'publish' });
+  await f.endpoint.ready;
+  const failure = Object.assign(new Error('Modeled capture pipe did not reach EOF'),
+    { code: 'ERR_SCREEN_CAPTURE_PIPE' });
+  let retired = false;
+  f.endpoint.host = {
+    stop: async () => { if (!retired) throw failure; },
+    snapshot: () => ({ nativeClosed: retired }),
+  };
+  f.finish({ closed: true });
+  await assert.rejects(f.endpoint.close(), error => {
+    assert.ok(error instanceof AggregateError);
+    assert.ok(error.errors.includes(failure), 'The stop cause must not be replaced by a proof assertion.');
+    assert.ok(error.errors.some(value => value.code === 'ERR_SCREEN_CAPTURE_RETIREMENT'));
+    return true;
+  });
+  assert.equal(f.endpoint.nativeClosed, false);
+  assert.throws(() => assertNativeScreenEndpointLocallyClosed(f.endpoint));
+  retired = true;
+  await f.endpoint.close();
+  assert.doesNotThrow(() => assertNativeScreenEndpointLocallyClosed(f.endpoint));
+});
+
+test('failure diagnostics use cached counters without issuing RTC work or exposing native payloads', async () => {
+  const f = fixture();
+  await f.endpoint.ready;
+  const snapshot = {
+    state: 'ready', pendingOperations: 0, activeReceiverRoutes: 1, decodedFrames: 0,
+    failure: { message: 'PRIVATE_FAILURE' }, sfu: { sdp: 'PRIVATE_SDP' },
+    mf: { decoders: [{
+      sessionId: 1,
+      worker: { status: 0, observedAtRtcUs: 120, pendingFrames: 16, recoveryRequested: true,
+        retainedLeases: 0, credential: 'PRIVATE_WORKER' },
+      core: { submitted: 0, adapter: { vendorId: 4098, deviceId: 123, description: 'PRIVATE_ADAPTER' } },
+      diagnostics: { operations: {
+        'core-create': { calls: 1, inProgress: 1, returned: 0, lastStartSteadyUs: 100,
+          message: 'PRIVATE_OPERATION' },
+        PRIVATE_OPERATION: { calls: 9 },
+      } },
+    }] },
+  };
+  f.engine.snapshot = () => snapshot;
+  const rows = f.endpoint.failureDiagnostics();
+  assert.equal(rows[0].snapshotScope, 'cached-control-observation');
+  assert.equal(rows[0].decodedFrames, 0);
+  assert.equal(rows[1].pendingFrames, 16);
+  assert.equal(rows[1].recoveryRequested, true);
+  assert.equal(rows[2].vendorId, 4098);
+  assert.equal(rows[3].operation, 'core-create');
+  assert.equal(rows[3].inProgress, 1);
+  assert.equal(rows[3].lastCompletionSteadyUs, null);
+  assert.deepEqual(f.requests, []);
+  assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_/);
+  snapshot.state = 'PRIVATE_STATE';
+  snapshot.mf.decoders[0].worker.status = 'PRIVATE_STATUS';
+  snapshot.mf.decoders = Array(64).fill(snapshot.mf.decoders[0]);
+  const bounded = decoderFailureObservations(snapshot);
+  assert.equal(bounded[0].state, null);
+  assert.equal(bounded[0].decoderCount, 64);
+  assert.equal(bounded[0].truncated, true);
+  assert.equal(bounded.filter(row => row.kind === 'decoder-worker').length, 4);
+  assert.equal(bounded[1].status, null);
+  assert.doesNotMatch(JSON.stringify(bounded), /PRIVATE_/);
+  f.finish({ closed: true });
+  await f.endpoint.close();
+});
+
+test('cached failure logs retain the blocked native operation before recent calls with a bounded allowlist', () => {
+  const nativeNames = ['mft-process-input', 'mft-process-output', 'gpu-output-copy', 'gpu-device-check',
+    'gpu-texture-create', 'gpu-copy-submit', 'gpu-fence-signal', 'gpu-context-flush',
+    'gpu-fence-poll', 'gpu-fence-arm', 'mf-sample-return', 'mft-end-streaming',
+    'mft-shutdown', 'mf-platform-shutdown'];
+  const names = ['core-create', 'core-enqueue', 'core-pump', 'core-flush', 'core-stop', 'core-abort',
+    'core-stats-copy', 'cache-publish', 'callback', ...nativeNames];
+  const operations = Object.fromEntries(names.map((name, index) => [name, {
+    calls: 1, inProgress: 0, returned: 1, lastStartSteadyUs: 100 + index, message: 'PRIVATE_DETAIL',
+  }]));
+  Object.assign(operations['mft-process-output'], { inProgress: 1, returned: 0, lastStartSteadyUs: 1 });
+  operations.PRIVATE_OPERATION = { calls: 999, inProgress: 1 };
+  const decoder = { sessionId: 1, core: { pendingGpuCopies: 6 }, diagnostics: { operations, observedAtSteadyUs: 1000 } };
+  const rows = decoderFailureObservations({ state: 'ready', mf: { decoders: Array(64).fill(decoder) } });
+  assert.equal(rows.length, 61);
+  assert.equal(rows.filter(row => row.operation === 'mft-process-output' && row.inProgress === 1).length, 4);
+  assert.equal(rows.filter(row => nativeNames.includes(row.operation)).length, 16);
+  assert.ok(rows.filter(row => row.kind === 'decoder-core').every(row =>
+    row.nativeOperationCount === 14 && row.nativeOperationsTruncated && row.pendingGpuCopies === 6
+    && row.nativeObservedAtSteadyUs === 1000));
+  assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_/);
 });
 
 const captureFailure = (code = 'ERR_SCREEN_CAPTURE_GAME_UNAVAILABLE') => Object.assign(new Error(code), { code });

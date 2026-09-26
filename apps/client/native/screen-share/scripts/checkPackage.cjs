@@ -12,11 +12,15 @@ function verifySourceInputs() {
   const bin = path.join(root, 'bin', 'win32-x64');
   const rtc = JSON.parse(fs.readFileSync(path.join(bin, 'rtc-build.json'), 'utf8'));
   const capture = JSON.parse(fs.readFileSync(path.join(bin, 'capture-build.json'), 'utf8'));
+  const thumbnails = JSON.parse(fs.readFileSync(path.join(bin, 'thumbnail-build.json'), 'utf8'));
   assert.equal(capture.schemaVersion, 5, 'Rebuild capture for hardware/software H264 and AV1.');
   verify(path.join(root, 'scripts', 'captureSourceBindings.cjs'), capture.sourceBindingRecipe);
+  assert.equal(thumbnails.schemaVersion, 1);
+  verify(path.join(root, 'scripts', 'buildThumbnails.cjs'), thumbnails.sourceRecipe);
   for (const [directory, records] of [
     [path.join(root, 'src', 'rtc'), rtc.sourceFiles],
     [path.join(root, 'src', 'capture'), capture.sourceFiles],
+    [path.join(root, 'src', 'thumbnail'), thumbnails.sourceFiles],
   ]) {
     assert.ok(Array.isArray(records) && records.length > 0, 'Rebuild native screen sharing before packaging.');
     assert.deepEqual(records.map(file => file.path).sort(), regularFiles(directory),
@@ -83,6 +87,7 @@ async function afterPack(context) {
       `Packaged native runtime differs from the verified source: ${relative}`);
   verifyLegalFiles(directory);
   require(path.join(directory, 'index.cjs')).loadRuntime();
+  require(path.join(directory, 'index.cjs')).loadThumbnailRuntime();
   console.log('Packaged native screen runtime, app-local CRT, source fingerprints and third-party notices verified.');
 }
 
