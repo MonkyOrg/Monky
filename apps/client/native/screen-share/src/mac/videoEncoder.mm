@@ -1,4 +1,6 @@
 #include "videoEncoder.h"
+#include "videoDecoder.h"
+#include "../rtc/inputs/native_core/h264_bitstream.h"
 #import <VideoToolbox/VideoToolbox.h>
 #include <algorithm>
 #include <atomic>
@@ -14,8 +16,11 @@ namespace monky::screen::mac {
 namespace {
 constexpr size_t kMaximumPacket = 4 * 1024 * 1024;
 struct EncoderError : std::runtime_error {
+  std::string code;
   OSStatus status;
-  EncoderError(const char* operation, OSStatus value) : std::runtime_error(operation), status(value) {}
+  EncoderError(const char* operation, OSStatus value)
+      : std::runtime_error(std::string(operation) + " nativeStatus=" + std::to_string(value)),
+        code(operation), status(value) {}
 };
 void Check(OSStatus status, const char* operation) {
   if (status != noErr) throw EncoderError(operation, status);
@@ -98,6 +103,8 @@ struct VideoEncoder::State {
   uintptr_t next_frame = 0;
   std::atomic<size_t> active_callbacks{0};
   std::atomic<bool> failed{false};
+  std::mutex output_mutex;
+  std::unique_ptr<screen_video::H264Bitstream> bitstream;
   bool hardware = false, keyframe = true, closed = false;
   int64_t last_timestamp = -1;
 
@@ -126,8 +133,16 @@ struct VideoEncoder::State {
       }
       Check(status, "ERR_MAC_VIDEO_ENCODE");
       Require(!(flags & kVTEncodeInfo_FrameDropped), "ERR_MAC_VIDEO_FRAME_DROPPED");
-      if (!self.failed.load()) self.output(Packet(sample, duration));
-    } catch (const EncoderError& error) { self.Report(error.what(), error.status); }
+      if (!self.failed.load()) {
+        auto frame = Packet(sample, duration);
+        std::lock_guard lock(self.output_mutex);
+        const auto unit = self.bitstream->Convert(frame.bytes);
+        Require(unit.hasPicture && unit.keyFrame == frame.keyframe &&
+            self.bitstream->Verified() && screen_video::IsBt709LimitedCompatible(self.bitstream->Sps()),
+            "ERR_MAC_VIDEO_BITSTREAM");
+        self.output(std::move(frame));
+      }
+    } catch (const EncoderError& error) { self.Report(error.code.c_str(), error.status); }
     catch (...) { self.Report("ERR_MAC_VIDEO_CALLBACK", 0); }
     { std::lock_guard lock(self.pending_mutex); self.pending.erase(id); }
     --self.active_callbacks;
@@ -143,6 +158,10 @@ VideoEncoder::VideoEncoder(EncoderOptions options, Output output, Failure failur
       options.bitrate_kbps >= 50 && options.bitrate_kbps <= 80000 &&
       options.bitrate_kbps % 50 == 0 && output && failure, "ERR_MAC_VIDEO_OPTIONS");
   self.options = options;
+  const auto level = screen_video::RequiredH264Level(options.width, options.height, options.fps,
+      options.bitrate_kbps * 1000);
+  self.bitstream = std::make_unique<screen_video::H264Bitstream>(options.width, options.height, level,
+      screen_video::H264Profile::Main, screen_video::H264LevelPolicy::Exact);
   self.output = std::move(output);
   self.failure = std::move(failure);
   NSDictionary* specification = options.hardware
@@ -161,7 +180,9 @@ VideoEncoder::VideoEncoder(EncoderOptions options, Output output, Failure failur
         "ERR_MAC_VIDEO_SESSION");
     self.Property(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     self.Property(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
-    self.Property(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Main_AutoLevel);
+    NSString* profile = [NSString stringWithFormat:@"H264_Main_%u_%u",
+      static_cast<unsigned>(level / 10), static_cast<unsigned>(level % 10)];
+    self.Property(kVTCompressionPropertyKey_ProfileLevel, (__bridge CFStringRef)profile);
     self.Property(kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
     self.Property(kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2);
     self.Property(kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
@@ -169,13 +190,19 @@ VideoEncoder::VideoEncoder(EncoderOptions options, Output output, Failure failur
     self.Integer(kVTCompressionPropertyKey_MaxKeyFrameInterval, options.fps);
     self.Integer(kVTCompressionPropertyKey_AverageBitRate, options.bitrate_kbps * 1000);
     Check(VTCompressionSessionPrepareToEncodeFrames(self.session), "ERR_MAC_VIDEO_PREPARE");
-    CFTypeRef using_hardware = nullptr;
-    Check(VTSessionCopyProperty(self.session, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
-        kCFAllocatorDefault, &using_hardware), "ERR_MAC_VIDEO_HARDWARE_PROBE");
-    const bool known = using_hardware && CFGetTypeID(using_hardware) == CFBooleanGetTypeID();
-    self.hardware = known && CFBooleanGetValue(static_cast<CFBooleanRef>(using_hardware));
-    if (using_hardware) CFRelease(using_hardware);
-    Require(known && self.hardware == options.hardware, "ERR_MAC_VIDEO_MODE_CHANGED");
+    if (options.hardware) {
+      CFTypeRef using_hardware = nullptr;
+      Check(VTSessionCopyProperty(self.session, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+          kCFAllocatorDefault, &using_hardware), "ERR_MAC_VIDEO_HARDWARE_PROBE");
+      const bool known = using_hardware && CFGetTypeID(using_hardware) == CFBooleanGetTypeID();
+      self.hardware = known && CFBooleanGetValue(static_cast<CFBooleanRef>(using_hardware));
+      if (using_hardware) CFRelease(using_hardware);
+      Require(known && self.hardware, "ERR_MAC_VIDEO_MODE_CHANGED");
+    } else {
+      // Apple's software encoder need not implement the hardware-selection
+      // property. EnableHardware=false forbids that execution path outright.
+      self.hardware = false;
+    }
   } catch (...) {
     if (self.session) { VTCompressionSessionInvalidate(self.session); CFRelease(self.session); self.session = nullptr; }
     throw;
@@ -288,8 +315,12 @@ NSDictionary* VideoEncoderSmoke(bool hardware) {
         "ERR_MAC_VIDEO_TEST_TIMESTAMPS");
     bytes += frames[index].bytes.size();
   }
-  return @{@"hardwareRequested": @(hardware), @"hardwareObserved": @(encoder->Hardware()),
+  const auto decoded = VideoDecoderSmoke(frames);
+  return @{@"hardwareRequested": @(hardware),
+    @"hardwareObserved": hardware ? @(encoder->Hardware()) : [NSNull null],
+    @"softwareEnforced": @(!hardware),
     @"available": @YES, @"actualEncodedFrames": @(frames.size()), @"actualEncodedBytes": @(bytes),
+    @"actualDecodedFrames": @(decoded), @"decodedPixelsVerified": @YES,
     @"nativeCallbacksRetired": @YES, @"captureValidated": @NO, @"realtimeThroughputValidated": @NO,
     @"nativeStatus": @(failure_status)};
 }

@@ -17,7 +17,8 @@ function build({ arch = process.arch } = {}) {
     execute('xcrun', ['--sdk', 'macosx', 'clang++', '-std=c++20', '-fobjc-arc', '-fblocks', '-O2',
       '-Wall', '-Wextra', '-Werror', '-mmacosx-version-min=14.0',
       '-arch', arch === 'x64' ? 'x86_64' : 'arm64', '-isysroot', sdk,
-      path.join(source, 'host.mm'), path.join(source, 'videoEncoder.mm'),
+      path.join(source, 'host.mm'), path.join(source, 'videoEncoder.mm'), path.join(source, 'videoDecoder.mm'),
+      path.join(root, 'src', 'rtc', 'inputs', 'native_core', 'h264_bitstream.cc'),
       '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'ScreenCaptureKit',
       '-framework', 'CoreGraphics', '-framework', 'VideoToolbox', '-framework', 'CoreMedia',
       '-framework', 'CoreVideo', '-o', executable]);
@@ -32,6 +33,10 @@ function build({ arch = process.arch } = {}) {
       executable: { name: 'monky-screen-mac', ...fingerprint(executable) },
       sourceFiles: regularFiles(source).map(name => ({ path: name, ...fingerprint(path.join(source, name)) })),
       sourceRecipe: fingerprint(__filename), tests,
+      sharedSourceFiles: ['h264_bitstream.h', 'h264_bitstream.cc'].map(name => ({
+        path: path.join('src', 'rtc', 'inputs', 'native_core', name),
+        ...fingerprint(path.join(root, 'src', 'rtc', 'inputs', 'native_core', name)),
+      })),
     };
     write(path.join(output, 'mac-capture-build.json'), JSON.stringify(manifest, null, 2) + '\n');
     console.log(JSON.stringify(manifest));
