@@ -38,8 +38,9 @@ for (const language of ['en', 'pt-BR']) {
     };
     f.mountQuality();
     await flush();
-    assert.deepEqual(probes.map(input => input.video.fps), [120, 90, 60]);
-    for (const input of probes) {
+    const selectedProbes = probes.filter(input => input.codec === 'h264' && input.encodingMode === 'hardware');
+    assert.deepEqual(selectedProbes.map(input => input.video.fps), [120, 90, 60]);
+    for (const input of selectedProbes) {
       assert.equal(input.codec, 'h264');
       assert.equal(input.encodingMode, 'hardware');
       assert.equal(input.encodingStrategy, 'manual');
@@ -60,9 +61,10 @@ for (const language of ['en', 'pt-BR']) {
     assert.doesNotMatch(toast, /RAW_DRIVER/);
     assert.equal(control(f, 'screen-encoding-status').getAttribute('aria-busy'), 'false');
     assert.equal(f.traces.filter(trace => trace[0] === 'preset').length, 1);
+    const count = probes.length;
     f.settingsStore.save();
     await flush();
-    assert.equal(probes.length, 3, 'No redundant probe after the confirmed settings commit.');
+    assert.equal(probes.length, count, 'No redundant probe after the confirmed settings commit or alternative discovery.');
   });
 }
 
@@ -73,7 +75,7 @@ test('supported AV1 4K120 is not lowered and codec edits start the same verified
   f.settingsStore.preferredScreenCodec = 'av1';
   const probes = [];
   f.controls.encoding = async input => {
-    probes.push([input.codec, input.video.fps]);
+    probes.push([input.encodingMode, input.codec, input.video.fps]);
     return input.codec === 'av1' || input.video.fps <= 60 ? supported(input) : unsupported();
   };
   f.mountQuality();
@@ -81,10 +83,12 @@ test('supported AV1 4K120 is not lowered and codec edits start the same verified
   assert.equal(f.settingsStore.customProfile.screenFps, 120);
   assert.equal(f.saves, 0);
   assert.equal(f.document.querySelector('.chat-copy-toast'), null);
+  probes.length = 0;
   control(f, 'select-video-codec').value = 'h264';
   change(control(f, 'select-video-codec'));
   await flush();
-  assert.deepEqual(probes, [['av1', 120], ['h264', 120], ['h264', 90], ['h264', 60]]);
+  assert.deepEqual(probes.filter(([mode, codec]) => mode === 'hardware' && codec === 'h264')
+    .map(([, , fps]) => fps), [120, 90, 60]);
   assert.equal(f.settingsStore.customProfile.screenFps, 60);
 });
 
@@ -198,7 +202,7 @@ for (const failure of ['initial-exception', 'candidate-exception', 'initial-erro
     configure(f);
     const probes = [];
     f.controls.encoding = async input => {
-      probes.push(input.video.fps);
+      if (input.codec === 'h264' && input.encodingMode === 'hardware') probes.push(input.video.fps);
       if (input.video.fps === 120 && failure.startsWith('candidate')) return unsupported();
       if (failure.endsWith('exception')) throw new Error('RAW_DRIVER_CRASH');
       return { ...unsupported(), hardware: { available: false, reason: 'RAW_DRIVER_CRASH', error: true } };
@@ -219,7 +223,10 @@ test('no supported lower profile leaves preferences unchanged with localized una
   t.after(() => f.close());
   configure(f);
   const original = copy(f.settingsStore.customProfile), probes = [];
-  f.controls.encoding = async input => { probes.push(input.video.fps); return unsupported(); };
+  f.controls.encoding = async input => {
+    if (input.codec === 'h264' && input.encodingMode === 'hardware') probes.push(input.video.fps);
+    return unsupported();
+  };
   f.mountQuality();
   for (let turn = 0; turn < 5; turn++) await flush();
   assert.deepEqual(probes, [120, 90, 60, 48, 30, 24, 20, 15, 10, 5]);
@@ -419,7 +426,11 @@ test('unsupported bitrate is never invented or lowered: exhaust probes then rest
   change(control(f, 'custom-screenBitrate'));
   for (let turn = 0; turn < 5; turn++) await flush();
   assert.ok(probes.length > 1);
-  assert.ok(probes.every(input => input.video.maxBitrateKbps === 80000));
+  const requestedProbes = probes.filter(input => input.video.maxBitrateKbps === 80000);
+  assert.deepEqual(requestedProbes.map(input => input.video.fps), [60, 48, 30, 24, 20, 15, 10, 5]);
+  assert.ok(probes.filter(input => input.video.maxBitrateKbps !== 80000)
+    .every(input => input.video.maxBitrateKbps === previous.screenBitrateKbps),
+  'After rejecting the request, alternative checks must use the restored profile, never a guessed bitrate.');
   assert.deepEqual(copy(f.settingsStore.customProfile), previous);
   assert.equal(control(f, 'custom-screenBitrate').value, String(previous.screenBitrateKbps));
   assert.equal(f.saves, 0);
@@ -442,6 +453,7 @@ test('camera/audio numeric clamps retain existing limits and reuse only the iden
   f.mountQuality();
   await flush();
   const before = copy(f.settingsStore.customProfile);
+  const initialProbes = probes;
   for (const [id, value, key, expected] of [
     ['custom-cameraFps', '500', 'cameraFps', 120],
     ['custom-cameraWidth', '10000', 'cameraWidth', 3840],
@@ -456,7 +468,7 @@ test('camera/audio numeric clamps retain existing limits and reuse only the iden
   assert.equal(f.settingsStore.customProfile.cameraFps, 60, 'The existing camera 4K60 cap remains unchanged.');
   assert.equal(f.settingsStore.customProfile.screenFps, before.screenFps);
   assert.equal(f.settingsStore.customProfile.screenBitrateKbps, before.screenBitrateKbps);
-  assert.equal(probes, 1, 'Camera/audio changes do not probe or capture the webcam.');
+  assert.equal(probes, initialProbes, 'Camera/audio changes do not repeat screen discovery or capture the webcam.');
 });
 
 test('newer custom quality edits cancel the old candidate and closing keeps unverified values out of storage', async t => {
@@ -556,3 +568,296 @@ test('explicit verified Software remains usable when optional hardware inspectio
   assert.ok(f.warnings.length);
   assert.doesNotMatch(f.document.body.textContent, /RAW_DRIVER/);
 });
+
+test('source-free probes accept an immutable explicit preference snapshot without mutating the store', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  const { probeScreenEncoding } = f.load('core/screenEncoding');
+  const gate = deferred(), probes = [];
+  f.controls.encoding = input => { probes.push(copy(input)); return gate.promise; };
+  const preferences = Object.freeze({ encodingStrategy: 'manual', encodingMode: 'software', codec: 'av1' });
+  const video = Object.freeze({ width: 1920, height: 1080, fps: 60, maxBitrateKbps: 8000 });
+  const result = probeScreenEncoding(video, new AbortController().signal, preferences);
+  assert.equal(f.settingsStore.screenEncodingStrategy, 'automatic');
+  assert.equal(f.settingsStore.screenEncodingMode, 'hardware');
+  assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
+  f.settingsStore.preferredScreenCodec = 'av1';
+  gate.resolve(supported(preferences));
+  assert.equal((await result).selection.mode, 'software');
+  assert.equal(probes.length, 1);
+  assert.equal(probes[0].action, 'probe-encoding');
+  assert.deepEqual(probes[0].video, video);
+  for (const [key, value] of Object.entries(preferences)) assert.equal(probes[0][key], value);
+  assert.ok(!('desktopSourceId' in probes[0]), 'Discovery must never prepare a desktop source.');
+  assert.equal(f.saves, 0);
+});
+
+for (const language of ['pt-BR', 'en']) {
+  test(`prechecked Hardware AV1 is disabled while verified Software AV1 and Hardware H264 stay reachable (${language})`, async t => {
+    const f = fixture(language);
+    t.after(() => f.close());
+    configure(f);
+    const probes = [];
+    f.controls.encoding = async input => {
+      probes.push(copy(input));
+      return input.encodingMode === 'hardware' && input.codec === 'av1' ? unsupported() : supported(input);
+    };
+    f.mountQuality();
+    await flush();
+    const codec = control(f, 'select-video-codec');
+    assert.equal(codec.querySelector('[value="av1"]').disabled, true);
+    assert.equal(codec.querySelector('[value="h264"]').disabled, false);
+    assert.equal(control(f, 'screen-encoding-hardware').disabled, false);
+    assert.match(control(f, 'screen-encoding-choices').textContent, /AV1/);
+    assert.doesNotMatch(control(f, 'screen-encoding-choices').textContent, /RAW_DRIVER/);
+    assert.equal(f.saves, 0, 'Advisory checks must not change preferences or quality.');
+    assert.equal(f.traces.filter(trace => trace[0] === 'preset').length, 0);
+    const count = probes.length;
+    codec.value = 'av1';
+    change(codec);
+    await flush();
+    assert.equal(codec.value, 'h264', 'A synthetic change cannot bypass a disabled option.');
+    assert.equal(probes.length, count);
+    assert.equal(f.saves, 0);
+    control(f, 'screen-encoding-software').click();
+    await flush();
+    assert.equal(codec.querySelector('[value="av1"]').disabled, false, 'Software AV1 has its own successful proof.');
+    codec.value = 'av1';
+    change(codec);
+    assert.equal(f.settingsStore.preferredScreenCodec, 'h264', 'The latest proof is still pending.');
+    await flush();
+    assert.equal(f.settingsStore.screenEncodingMode, 'software');
+    assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
+    assert.match(control(f, 'screen-encoding-hardware-choice').textContent, /H264.*120/);
+    assert.equal(f.saves, 2);
+    control(f, 'screen-encoding-hardware').click();
+    assert.equal(f.settingsStore.screenEncodingMode, 'software');
+    await flush();
+    assert.equal(f.settingsStore.screenEncodingMode, 'hardware');
+    assert.equal(f.settingsStore.preferredScreenCodec, 'h264',
+      'The Hardware card explicitly advertised its verified H264 combination before activation.');
+    assert.equal(f.settingsStore.customProfile.screenFps, 120);
+  });
+}
+
+for (const failure of ['unsupported', 'exception', 'error-result']) {
+  test(`fresh Manual verification ${failure} rolls back a previously advertised codec without applying or saving`, async t => {
+    const f = fixture();
+    t.after(() => f.close());
+    configure(f);
+    f.mountQuality();
+    await flush();
+    const original = copy(f.settingsStore.customProfile), probes = [], gate = deferred();
+    f.controls.encoding = async input => {
+      probes.push(copy(input));
+      await gate.promise;
+      if (failure === 'exception') throw new Error('RAW_DRIVER_RETIREMENT_FAILURE');
+      return failure === 'unsupported' ? unsupported()
+        : { ...unsupported(), hardware: { available: false, reason: 'RAW_DRIVER_RUNTIME_FAILURE', error: true } };
+    };
+    f.traces.length = 0;
+    const codec = control(f, 'select-video-codec');
+    codec.value = 'av1';
+    change(codec);
+    await flush();
+    assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
+    assert.equal(f.saves, 0);
+    assert.equal(f.traces.filter(trace => trace[0] === 'preset').length, 0);
+    gate.resolve();
+    await flush();
+    assert.equal(codec.value, 'h264');
+    assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
+    assert.deepEqual(copy(f.settingsStore.customProfile), original);
+    assert.equal(f.saves, 0);
+    assert.equal(f.traces.filter(trace => ['assert-settings', 'preset'].includes(trace[0])).length, 0);
+    assert.equal(codec.querySelector('[value="av1"]').disabled, failure === 'unsupported');
+    assert.deepEqual(probes.map(input => input.video.fps),
+      failure === 'unsupported' ? [120, 90, 60, 48, 30, 24, 20, 15, 10, 5] : [120],
+      'Only proven unsupported results can initiate FPS adjustment, never driver/retirement failures.');
+    assert.doesNotMatch(f.document.body.textContent, /RAW_DRIVER/);
+    assert.ok(f.warnings.length);
+    if (failure !== 'unsupported') {
+      assert.match(control(f, 'screen-encoding-choices').textContent, /AV1/);
+      f.controls.encoding = async input => supported(input);
+      codec.value = 'av1';
+      change(codec);
+      await flush();
+      assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
+      assert.equal(f.settingsStore.customProfile.screenFps, 120);
+      assert.equal(f.saves, 1, 'A transient failure remains retryable, not permanently unsupported.');
+    }
+  });
+}
+
+for (const failure of ['unsupported', 'exception']) {
+  test(`entering Manual with ${failure} saved preferences exposes alternatives but does not save the invalid draft`, async t => {
+    const f = fixture();
+    t.after(() => f.close());
+    configure(f);
+    f.settingsStore.screenEncodingStrategy = 'automatic';
+    f.controls.encoding = async input => {
+      if (input.encodingStrategy === 'automatic') return supported({ encodingMode: 'hardware', codec: 'av1' });
+      if (input.encodingMode === 'hardware' && input.codec === 'h264') {
+        if (failure === 'exception') throw new Error('RAW_DRIVER_INIT_FAILURE');
+        return unsupported();
+      }
+      return supported(input);
+    };
+    f.mountQuality();
+    await flush();
+    control(f, 'screen-encoding-manual').click();
+    await flush();
+    assert.equal(f.settingsStore.screenEncodingStrategy, 'automatic');
+    assert.equal(f.saves, 0);
+    const codec = control(f, 'select-video-codec');
+    assert.equal(codec.disabled, false, 'A failed draft must not trap the user in the same invalid saved combination.');
+    assert.equal(codec.querySelector('[value="av1"]').disabled, false);
+    codec.value = 'av1';
+    change(codec);
+    await flush();
+    assert.equal(f.settingsStore.screenEncodingStrategy, 'manual');
+    assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
+    assert.equal(f.settingsStore.screenEncodingMode, 'hardware');
+    assert.equal(f.saves, 1);
+  });
+}
+
+test('unrelated settings.updated while Manual verification is pending preserves the draft and commits it once', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  configure(f);
+  f.mountQuality();
+  await flush();
+  const gate = deferred();
+  f.controls.encoding = () => gate.promise;
+  control(f, 'select-video-codec').value = 'av1';
+  change(control(f, 'select-video-codec'));
+  f.settingsStore.screenShareTelemetryEnabled = true;
+  f.load('core/EventBus').appEvents.emit('settings.updated');
+  assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
+  assert.equal(f.saves, 0);
+  gate.resolve(supported({ encodingMode: 'hardware', codec: 'av1' }));
+  await flush();
+  assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
+  assert.equal(f.settingsStore.screenShareTelemetryEnabled, true);
+  assert.equal(f.saves, 1);
+  assert.equal(f.traces.filter(trace => trace[0] === 'preset').length, 1);
+});
+
+test('an errored codec stays retryable without trapping the user away from a separately verified other-mode codec', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  configure(f);
+  f.settingsStore.screenEncodingMode = 'software';
+  f.settingsStore.preferredScreenCodec = 'av1';
+  f.controls.encoding = async input => {
+    if (input.encodingMode === 'software' && input.codec === 'h264') return unsupported();
+    if (input.encodingMode === 'hardware' && input.codec === 'av1') throw new Error('RAW_DRIVER_FAILURE');
+    return supported(input);
+  };
+  f.mountQuality();
+  await flush();
+  assert.equal(control(f, 'select-video-codec').querySelector('[value="h264"]').disabled, true);
+  assert.match(control(f, 'screen-encoding-hardware-choice').textContent, /H264/);
+  control(f, 'screen-encoding-hardware').click();
+  await flush();
+  assert.equal(f.settingsStore.screenEncodingMode, 'hardware');
+  assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
+  const av1 = control(f, 'select-video-codec').querySelector('[value="av1"]');
+  assert.equal(av1.disabled, false, 'An inspection error must not be reclassified as unsupported.');
+  assert.match(av1.textContent, new RegExp(f.i18n.t('settings.screenEncodingRetry')));
+  assert.equal(f.saves, 1);
+});
+
+test('external preferences matching a pending draft trigger a fresh check rather than strand the controls', async t => {
+  const f = fixture();
+  t.after(() => f.close());
+  configure(f);
+  f.mountQuality();
+  await flush();
+  const old = deferred();
+  let checks = 0;
+  f.controls.encoding = async input => ++checks === 1 ? old.promise : supported(input);
+  control(f, 'select-video-codec').value = 'av1';
+  change(control(f, 'select-video-codec'));
+  f.settingsStore.preferredScreenCodec = 'av1';
+  f.load('core/EventBus').appEvents.emit('settings.updated');
+  await flush();
+  assert.equal(checks, 2);
+  assert.equal(control(f, 'screen-encoding-status').getAttribute('aria-busy'), 'false');
+  assert.equal(control(f, 'select-video-codec').value, 'av1');
+  assert.equal(f.traces.filter(trace => trace[0] === 'preset').length, 1);
+  old.reject(new Error('RAW_DRIVER_STALE_FAILURE'));
+  await flush();
+  assert.equal(control(f, 'screen-encoding-status').textContent, f.i18n.t('settings.screenEncodingReady', { codec: 'AV1' }));
+  assert.equal(f.saves, 0, 'The external owner saved preferences; discovery must not save them again.');
+});
+
+for (const invalidate of ['new-codec', 'profile', 'external-mode', 'cleanup', 'detach']) {
+  test(`late alternative capability cannot disable current controls after ${invalidate}`, async t => {
+    const f = fixture();
+    t.after(() => f.close());
+    configure(f);
+    const gate = deferred();
+    let waiting = true;
+    f.controls.encoding = async input => input.codec === 'av1' && input.encodingMode === 'hardware' && waiting
+      ? gate.promise : supported(input);
+    const root = f.mountQuality();
+    await flush();
+    assert.equal(control(f, 'screen-encoding-choices').getAttribute('aria-busy'), 'true');
+    waiting = false;
+    if (invalidate === 'new-codec') {
+      control(f, 'select-video-codec').value = 'av1';
+      change(control(f, 'select-video-codec'));
+    }
+    if (invalidate === 'profile') {
+      control(f, 'custom-screenBitrate').value = '8000';
+      change(control(f, 'custom-screenBitrate'));
+    }
+    if (invalidate === 'external-mode') {
+      f.settingsStore.screenEncodingMode = 'software';
+      f.load('core/EventBus').appEvents.emit('settings.updated');
+    }
+    if (invalidate === 'cleanup') f.quality.cleanup();
+    if (invalidate === 'detach') root.remove();
+    await flush();
+    const saved = f.saves, applied = f.traces.filter(trace => trace[0] === 'preset').length;
+    gate.resolve(unsupported());
+    await flush();
+    assert.equal(f.saves, saved);
+    assert.equal(f.traces.filter(trace => trace[0] === 'preset').length, applied);
+    assert.equal(root.querySelector('#select-video-codec [value="av1"]').disabled, false);
+    assert.doesNotMatch(root.textContent, /RAW_DRIVER/);
+    if (invalidate !== 'detach') assert.ok(f.traces.some(trace => trace[0] === 'cancel-encoding'));
+  });
+}
+
+for (const stage of ['preflight', 'apply']) {
+  test(`Manual codec change with live ${stage} failure restores preferences and permits a later verified apply`, async t => {
+    const f = fixture();
+    t.after(() => f.close());
+    configure(f);
+    f.mountQuality();
+    await flush();
+    const manager = f.load('core/WebRtcManager').webRtcManager, apply = manager.setQualityPreset;
+    if (stage === 'preflight') f.controls.settingsError = new Error('RAW_DRIVER_LIVE_FAILURE');
+    else manager.setQualityPreset = () => { throw new Error('RAW_DRIVER_LIVE_FAILURE'); };
+    const codec = control(f, 'select-video-codec');
+    codec.value = 'av1';
+    change(codec);
+    await flush();
+    assert.equal(f.settingsStore.preferredScreenCodec, 'h264');
+    assert.equal(codec.value, 'h264');
+    assert.equal(f.saves, 0);
+    assert.equal(f.traces.filter(trace => trace[0] === 'preset').length, 0);
+    f.controls.settingsError = null;
+    manager.setQualityPreset = apply;
+    codec.value = 'av1';
+    change(codec);
+    await flush();
+    assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
+    assert.equal(f.saves, 1);
+    assert.equal(f.traces.filter(trace => trace[0] === 'preset').length, 1,
+      'The appliedEncoding guard must not mistake the failed transaction for a live applied selection.');
+  });
+}

@@ -25,11 +25,11 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
 
   const [{ VoiceStageView }, { voiceStore: voice }, { settingsStore: settings }, { serverStore: server },
     { participantManager: participants }, { appEvents }, { videoService }, { webRtcManager: rtc },
-    { sessionManager }, language, { showInfoToast }] = await Promise.all([
+    { sessionManager }, language, { showInfoToast }, { overlayBridgeService }] = await Promise.all([
     import('/views/VoiceStageView.ts'), import('/stores/voiceStore.ts'), import('/stores/settingsStore.ts'),
     import('/stores/serverStore.ts'), import('/core/ParticipantManager.ts'), import('/core/EventBus.ts'),
     import('/core/VideoService.ts'), import('/core/WebRtcManager.ts'), import('/core/SessionManager.ts'),
-    import('/i18n/index.ts'), import('/views/CopyToast.ts'),
+    import('/i18n/index.ts'), import('/views/CopyToast.ts'), import('/core/OverlayBridgeService.ts'),
   ]);
   const originalLanguage = language.getLanguage();
   const session = sessionManager.create('screen-stage-ui.test', 7890, 'UI fixture');
@@ -68,6 +68,10 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
   });
   replace(settings, 'screenShareTelemetryEnabled', false);
   replace(settings, 'screenShareTelemetryPosition', 'top-left');
+  replace(settings, 'overlayHideStagePreviews', false);
+  replace(settings, 'overlayAutoOpenOnLeaveStage', true);
+  let overlayOpen = false;
+  replace(overlayBridgeService, 'getIsOpen', () => overlayOpen);
   let stage;
   let fullscreen = null;
   let exitGate = null;
@@ -200,6 +204,27 @@ async function runScreenStageSmoke(fallbackHandlerSource) {
       checkBadgeLayout();
       const focusedCard = card(local.sessionId, first.id);
       const focusedVideo = video(local.sessionId, first.id);
+      const mountedVideos = [...root.querySelectorAll('video')].map(element => ({ element, stream: element.srcObject }));
+      const previews = root.querySelector('#stage-participants-area');
+      const previewNotice = root.querySelector('#stage-overlay-preview-notice');
+      for (const [option, open] of [[false, false], [false, true], [true, false], [true, true], [false, true], [true, true], [true, false]]) {
+        settings.overlayHideStagePreviews = option;
+        overlayOpen = open;
+        appEvents.emit('overlay_settings.updated');
+        appEvents.emit('overlay.state_changed', open);
+        const hidden = option && open;
+        check((getComputedStyle(focusedVideo).visibility === 'hidden') === hidden && previews.inert === hidden,
+          'Stage previews hide only for an actual open overlay, not an armed automatic overlay.');
+        check(previewNotice.hidden !== hidden && previewNotice.textContent === language.t('overlay.stagePreviewsHidden'),
+          'The hidden-preview explanation follows the selected language and visibility.');
+        check(mountedVideos.every(({ element, stream }) => element.isConnected && element.srcObject === stream),
+          'Toggling stage visibility never tears down or rebinds video streams.');
+        check(getComputedStyle(root.querySelector('#stage-btn-mic')).visibility === 'visible'
+          && !root.querySelector('.stage-call-controls').closest('[inert]'),
+          'Call controls remain visible and interactive.');
+      }
+      settings.overlayHideStagePreviews = false;
+      appEvents.emit('overlay_settings.updated');
       const bounds = focusedCard.getBoundingClientRect();
       const scroll = (target, deltaY, ctrlKey = false) => {
         const event = new WheelEvent('wheel', { deltaY, ctrlKey, bubbles: true, cancelable: true,

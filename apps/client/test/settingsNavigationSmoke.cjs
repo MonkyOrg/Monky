@@ -7,7 +7,9 @@ const releaseNotesOnly = process.argv.includes('--release-notes');
 const qualitySettingsOnly = process.argv.includes('--quality-settings');
 const screenStageOnly = process.argv.includes('--screen-stage');
 const screenAudienceOnly = process.argv.includes('--screen-audience');
-if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly, screenAudienceOnly].filter(Boolean).length > 1)
+const overlayWindowOnly = process.argv.includes('--overlay-window');
+const displayPlacementOnly = process.argv.includes('--verify-display-placement');
+if ([releaseNotesOnly, qualitySettingsOnly, screenStageOnly, screenAudienceOnly, overlayWindowOnly, displayPlacementOnly].filter(Boolean).length > 1)
   throw new Error('Choose one targeted UI smoke.');
 
 if (!process.versions.electron) {
@@ -20,9 +22,9 @@ if (!process.versions.electron) {
   child.once('error', error => { console.error(error); cleanup(); process.exitCode = 1; });
   child.once('exit', code => { cleanup(); process.exitCode = code ?? 1; });
 } else {
-  const { app, BrowserWindow } = require('electron');
+  const { app, BrowserWindow, screen } = require('electron');
   app.setPath('userData', process.env.MONKY_SETTINGS_NAV_PROFILE);
-  if (qualitySettingsOnly || screenStageOnly || screenAudienceOnly) app.disableHardwareAcceleration();
+  if (qualitySettingsOnly || screenStageOnly || screenAudienceOnly || overlayWindowOnly || displayPlacementOnly) app.disableHardwareAcceleration();
   // Hosted Windows sessions can disable Chromium's scroll animator independently of matchMedia.
   app.commandLine.appendSwitch('enable-smooth-scrolling');
   app.on('window-all-closed', () => {});
@@ -36,6 +38,13 @@ if (!process.versions.electron) {
     app.exit(code);
   };
   app.whenReady().then(async () => {
+    if (displayPlacementOnly) {
+      timeout = setTimeout(() => { console.error('Hidden display verification timed out'); void finish(1); }, 20000);
+      verifyHiddenDisplayPlacement({ app, BrowserWindow, screen });
+      await finish(0);
+      return;
+    }
+    const placement = require('./fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
     const { createServer } = await import('vite');
     vite = await createServer({
       configFile: path.join(clientRoot, 'vite.config.ts'), logLevel: 'error',
@@ -60,27 +69,91 @@ if (!process.versions.electron) {
     });
     const address = httpServer.address();
     if (!address || typeof address === 'string') throw new Error('Missing Vite listener');
-    window = new BrowserWindow({
-      show: false, width: 1100, height: 850, useContentSize: true,
+    const options = {
+      title: 'Monky settings UI smoke', show: false, width: 1100, height: 850, useContentSize: true,
       webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, offscreen: true },
-    });
+    };
+    window = placement ? placement.createWindow(options) : new BrowserWindow(options);
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     timeout = setTimeout(() => { console.error('Settings navigation smoke timed out'); void finish(1); }, 90_000);
     await window.loadURL(`http://127.0.0.1:${address.port}/__settings_navigation__`);
-    if (!qualitySettingsOnly && !screenStageOnly && !screenAudienceOnly) {
+    if (!qualitySettingsOnly && !screenStageOnly && !screenAudienceOnly && !overlayWindowOnly) {
       window.focus();
       window.webContents.focus();
     }
     const evaluate = code => window.webContents.executeJavaScript(code, true);
+    if (overlayWindowOnly) {
+      const { runOverlayWindowSmoke, runOverlayConfigPositionSmoke } = require('./overlayWindowSmoke.cjs');
+      const { runOverlayParticipantSmoke } = require('./overlayParticipantSmoke.cjs');
+      let checks = 0;
+      for (const [width, height] of [[600, 400], [340, 240]]) {
+        window.setContentSize(width, height);
+        checks += await evaluate(`(${runOverlayWindowSmoke.toString()})()`);
+        checks += await evaluate(`(${runOverlayConfigPositionSmoke.toString()})()`);
+        checks += await evaluate(`(${runOverlayParticipantSmoke.toString()})()`);
+        for (const state of ['Idle', 'Hover']) {
+          await evaluate(`(async () => {
+            document.body.classList.add('overlay-window-mode');
+            document.body.innerHTML = '<div id="app">' + window.overlayWindow${state}Preview + '</div>';
+            await new Promise(requestAnimationFrame);
+            await new Promise(requestAnimationFrame);
+          })()`);
+          fs.writeFileSync(path.join(clientRoot, 'dist-test', `overlay-window-${state.toLowerCase()}-${width}.png`),
+            (await window.webContents.capturePage()).toPNG());
+        }
+      }
+      console.log(`Overlay window: ${checks} checks passed, frame/resize/drag/controls, no media capture`);
+      await finish(0);
+      return;
+    }
     if (screenAudienceOnly) {
       const { runScreenAudienceSmoke } = require('./screenAudienceSmoke.cjs');
+      // Give the hidden fixture DOM focus without focusing a desktop window.
+      window.webContents.debugger.attach('1.3');
+      await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
       let checks = 0;
       for (const [width, height] of [[1100, 850], [640, 440]]) {
         window.setContentSize(width, height);
         checks += await evaluate(`(${runScreenAudienceSmoke.toString()})()`);
         fs.writeFileSync(path.join(clientRoot, 'dist-test', `screen-audience-${width}.png`),
           (await window.webContents.capturePage()).toPNG());
+        for (const [name, preview] of [['picker', 'modalOptionPickerPreview'], ['overlay', 'modalOptionOverlayPreview']]) {
+          await evaluate(`(async () => {
+            document.body.innerHTML = window.${preview};
+            await document.fonts.ready;
+            await new Promise(requestAnimationFrame);
+            await new Promise(requestAnimationFrame);
+          })()`);
+          fs.writeFileSync(path.join(clientRoot, 'dist-test', `modal-options-${name}-${width}.png`),
+            (await window.webContents.capturePage()).toPNG());
+          window.webContents.focus();
+          for (const id of name === 'picker' ? ['chk-preserve-aspect-ratio', 'chk-private-share']
+            : ['overlay-aspect-ratio', 'overlay-hide-stage-cb', 'overlay-hide-inactive-cb']) {
+            const checked = await evaluate(`(() => {
+              const input = document.getElementById(${JSON.stringify(id)});
+              input.scrollIntoView({ block: 'nearest' });
+              input.focus();
+              return input.checked;
+            })()`);
+            window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+            window.webContents.sendInputEvent({ type: 'char', keyCode: ' ' });
+            window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+            const state = await evaluate(`(async () => {
+              await new Promise(requestAnimationFrame);
+              await new Promise(requestAnimationFrame);
+              const input = document.getElementById(${JSON.stringify(id)});
+              const result = { active: document.activeElement === input, checked: input.checked,
+                documentFocused: document.hasFocus(), outline: getComputedStyle(input.nextElementSibling).outlineStyle };
+              input.checked = ${checked};
+              return result;
+            })()`);
+            if (!state.active || state.checked === checked || state.outline !== 'solid')
+              throw new Error(`${id}: native Space must toggle once with visible focus: ${JSON.stringify(state)}`);
+            checks++;
+          }
+        }
       }
+      window.webContents.debugger.detach();
       console.log(`Screen audience: ${checks} checks passed, 500 members/20 roles, software rendering only, no capture`);
       await finish(0);
       return;
@@ -183,6 +256,72 @@ if (!process.versions.electron) {
     console.log('Code modal: native two-axis resize, viewport bounds and submission passed');
     await finish(0);
   }).catch(async error => { console.error(error); await finish(1); });
+}
+
+function verifyHiddenDisplayPlacement({ app, BrowserWindow, screen }) {
+  const assert = require('node:assert/strict');
+  const displayHelper = require('./fixtures/testDisplay.cjs');
+  assert.equal(process.env.MONKY_TEST_DISPLAY ?? displayHelper.localDisplayPreference(), '2',
+    'Hidden verification requires display 2 in the environment or local test-display.json.');
+  const owned = new Set(), records = [];
+  let proof, placement;
+  const initial = (_event, window) => {
+    owned.add(window);
+    records.push({ pid: process.pid, windowId: window.id, title: window.getTitle(), bounds: window.getBounds(),
+      visible: window.isVisible(), focused: window.isFocused(), beforeConstruction: proof });
+  };
+  const guardedConstructor = new Proxy(BrowserWindow, {
+    construct(target, [options]) {
+      assert.equal(options.show, false, 'The real native constructor must never receive a visible-window request.');
+      assert.equal(options.center, false);
+      assert.equal(proof?.phase, 'before-construction');
+      assert.deepEqual({ x: options.x, y: options.y, width: options.width, height: options.height }, proof.bounds);
+      return Reflect.construct(target, [options], target);
+    },
+  });
+  // Observe the native constructor's bounds before the helper's event guards can move anything.
+  app.prependListener('browser-window-created', initial);
+  try {
+    placement = displayHelper.installTestDisplay({ app, screen, BrowserWindow: guardedConstructor }, {
+      log: line => {
+        console.log(line);
+        const record = JSON.parse(line.slice('[TestDisplay] '.length));
+        if (record.phase === 'before-construction') proof = record;
+      },
+    });
+    const verify = window => {
+      const record = records.find(item => item.windowId === window.id);
+      assert.ok(record);
+      assert.equal(record.beforeConstruction.deviceName, '\\\\.\\DISPLAY2');
+      assert.deepEqual(record.bounds, record.beforeConstruction.bounds,
+        'Initial native bounds must be correct before browser-window-created repositioning.');
+      assert.equal(record.visible, false);
+      assert.equal(record.focused, false);
+      assert.equal(window.isVisible(), false);
+      assert.equal(window.isFocused(), false);
+      assert.deepEqual(window.getContentSize(), [record.bounds.width, record.bounds.height]);
+      console.log(`[TestDisplayInitialBounds] ${JSON.stringify(record)}`);
+    };
+    const options = { show: false, frame: false, useContentSize: true,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } };
+    const source = placement.createWindow({ ...options, title: 'Monky hidden 480p source placement', width: 640, height: 480 });
+    verify(source);
+    placement.interceptElectronImports();
+    const { BrowserWindow: ImportedWindow } = require('electron');
+    const receiver = new ImportedWindow({ ...options, title: 'Monky hidden 720p receiver placement', width: 1280, height: 720 });
+    verify(receiver);
+    source.destroy();
+    const reopened = new ImportedWindow({ ...options, title: 'Monky hidden 480p reopened placement', width: 640, height: 480 });
+    verify(reopened);
+    const count = records.length;
+    assert.throws(() => new ImportedWindow({ ...options, width: 3840, height: 2160 }), /does not fit/);
+    assert.equal(records.length, count, 'An oversized request must fail before native construction.');
+    console.log(`Hidden display verification: ${records.length} native constructors verified before show; no visible windows, focus, media or Vite.`);
+  } finally {
+    placement?.dispose();
+    app.removeListener('browser-window-created', initial);
+    for (const window of owned) if (!window.isDestroyed()) window.destroy();
+  }
 }
 
 async function runVersionCopyKeyboardSmoke(window) {

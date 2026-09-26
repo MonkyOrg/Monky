@@ -25,6 +25,8 @@
 #include <vector>
 #include "videoEncoder.h"
 #include "videoCaptureHost.h"
+#include "videoDecoder.h"
+#include "ownedWindow.h"
 
 namespace {
 constexpr size_t kMaximumCommand = 65536;
@@ -374,6 +376,7 @@ void Command(NSData* bytes) {
     Output(@{@"type": @"result", @"id": @(request), @"value": @{
       @"platform": @"darwin", @"minimumMacOS": @"14.0", @"enumeration": @"ScreenCaptureKit",
       @"thumbnails": @"SCScreenshotManager", @"capture": @NO, @"encoder": [NSNull null],
+      @"screenRecordingPermission": @(CGPreflightScreenCaptureAccess()),
       @"transport": @NO, @"receive": @NO, @"audio": @NO}});
     return;
   }
@@ -403,6 +406,49 @@ void Command(NSData* bytes) {
 int main(int argc, const char* argv[]) {
   @autoreleasepool {
     if (@available(macOS 14.0, *)) {
+      if (argc == 2 && std::string_view(argv[1]) == "--owned-window") {
+        return monky::screen::mac::RunOwnedWindow([](uint32_t window) {
+          NSDictionary* value = @{@"windowId": @(window), @"processId": @(getpid()),
+            @"processStartTimeUs": ProcessStart(getpid())};
+          NSData* json = [NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
+          Require(json != nil);
+          WriteBytes(static_cast<const uint8_t*>(json.bytes), json.length);
+          std::puts(""); std::fflush(stdout);
+        });
+      }
+      if (argc == 2 && std::string_view(argv[1]) == "--decode-owned-window") {
+        try {
+          std::vector<uint8_t> input;
+          uint8_t buffer[65536];
+          for (;;) {
+            const auto count = read(STDIN_FILENO, buffer, sizeof(buffer));
+            if (count < 0 && errno == EINTR) continue;
+            if (!count) break;
+            Require(count > 0 && input.size() + static_cast<size_t>(count) <= 20 * 1024 * 1024);
+            input.insert(input.end(), buffer, buffer + count);
+          }
+          NSArray* values = [NSJSONSerialization JSONObjectWithData:
+            [NSData dataWithBytes:input.data() length:input.size()] options:0 error:nil];
+          Require([values isKindOfClass:NSArray.class] && values.count == 3);
+          std::vector<monky::screen::mac::EncodedFrame> frames;
+          for (NSDictionary* value in values) {
+            Exact(value, @[@"timestampUs", @"durationUs", @"keyframe", @"data"]);
+            NSData* bytes = [[NSData alloc] initWithBase64EncodedString:Text(value[@"data"], 6 * 1024 * 1024) options:0];
+            Require(bytes.length > 0 && bytes.length <= 4 * 1024 * 1024);
+            monky::screen::mac::EncodedFrame frame;
+            frame.timestamp_us = Number(value[@"timestampUs"], 0, 9007199254740991LL);
+            frame.duration_us = Number(value[@"durationUs"], 1, 1000000);
+            Require(CFGetTypeID((__bridge CFTypeRef)value[@"keyframe"]) == CFBooleanGetTypeID());
+            frame.keyframe = [value[@"keyframe"] boolValue];
+            const auto* begin = static_cast<const uint8_t*>(bytes.bytes);
+            frame.bytes.assign(begin, begin + bytes.length);
+            frames.push_back(std::move(frame));
+          }
+          Require(monky::screen::mac::VideoDecoderSmoke(frames, true) == 3);
+          std::puts("{\"decodedOwnedFrames\":3,\"pixelsVerified\":true,\"nativeCallbacksRetired\":true}");
+          return 0;
+        } catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
+      }
       if (argc == 2 && std::string_view(argv[1]) == "--encoder-smoke") {
         try {
           NSArray* results = @[monky::screen::mac::VideoEncoderSmoke(false),

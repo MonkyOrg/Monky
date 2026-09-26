@@ -2,8 +2,12 @@
 
 #include "mf_rtc_internal.h"
 
+#include <mferror.h>
+
+#include <future>
 #include <numeric>
 #include <string_view>
+#include <thread>
 
 namespace monky::native_rtc::mf {
 namespace decoder_diagnostic_checks_detail {
@@ -33,6 +37,54 @@ inline void Reach(detail::DecoderInputDiagnosticTicket& input, DecoderInputStage
   if (stage >= DecoderInputStage::ProcessInputAccepted) input.ProcessInputAccepted();
   if (stage >= DecoderInputStage::OutputMatched) input.OutputMatched(detail::DecoderDiagnosticClock::now());
 }
+
+class LimitedDecoderSurfacePool {
+ public:
+  explicit LimitedDecoderSurfacePool(std::size_t count) : capacity_(count) {
+    for (std::size_t i = 1; i <= count; ++i) samples_.push_back(i);
+  }
+  bool TransformCall() {
+    std::unique_lock lock(mutex_);
+    ++calls_;
+    changed_.notify_all();
+    changed_.wait(lock, [&] { return cancelled_ || samples_.size() < capacity_; });
+    return !cancelled_;
+  }
+  void RetireCopies() {
+    std::lock_guard lock(mutex_);
+    while (!samples_.empty() && samples_.front() <= completed_) {
+      samples_.pop_front();
+      ++returned_;
+    }
+    changed_.notify_all();
+  }
+  void CompleteFence(std::uint64_t completed) {
+    std::lock_guard lock(mutex_);
+    completed_ = completed;
+    changed_.notify_all();
+  }
+  bool WaitForCall() {
+    std::unique_lock lock(mutex_);
+    return changed_.wait_for(lock, std::chrono::seconds(2), [&] { return calls_ != 0; });
+  }
+  void CancelFixtureWait() {
+    std::lock_guard lock(mutex_);
+    cancelled_ = true;
+    changed_.notify_all();
+  }
+  std::size_t Pending() const { std::lock_guard lock(mutex_); return samples_.size(); }
+  std::size_t Returned() const { std::lock_guard lock(mutex_); return returned_; }
+  std::size_t Calls() const { std::lock_guard lock(mutex_); return calls_; }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable changed_;
+  std::deque<std::uint64_t> samples_;
+  const std::size_t capacity_;
+  std::uint64_t completed_ = 0;
+  std::size_t calls_ = 0, returned_ = 0;
+  bool cancelled_ = false;
+};
 
 }  // namespace decoder_diagnostic_checks_detail
 
@@ -125,6 +177,57 @@ void RunDecoderDiagnosticChecks(Check&& check) {
           measured.in_progress == 0 && measured.last_completion_steady_us &&
           measured.duration.count == initial.duration.count + 3,
           "Core/callback operations changed invocation count or treated refusal/throw as processed media");
+  }
+
+  {
+    using Native = screen_video::DecoderNativeOperation;
+    auto isolated = std::make_shared<DecoderDiagnosticLedger>();
+    const auto observer = ObserveNativeDecoderCalls(isolated);
+    for (std::size_t i = 0; i < static_cast<std::size_t>(Native::Count); ++i) {
+      const auto native = static_cast<Native>(i);
+      const auto operation = static_cast<std::size_t>(NativeDecoderOperation(native));
+      unsigned calls = 0;
+      const auto result = screen_video::ObserveDecoderNativeCall(observer, native, [&] {
+        ++calls;
+        check(isolated->Snapshot().operations[operation].in_progress == 1,
+              "Native MFT/GPU call was not observable before its actual invocation");
+        return E_FAIL;
+      });
+      check(result == E_FAIL && calls == 1 && isolated->Snapshot().operations[operation].returned == 1,
+            "Native call diagnostics replaced a failed HRESULT or repeated the foreign call");
+      try {
+        screen_video::ObserveDecoderNativeCall(observer, native, [] {
+          throw std::runtime_error("native-call-error");
+        });
+      } catch (const std::runtime_error& error) {
+        check(std::string_view(error.what()) == "native-call-error", "Native-call exception was replaced");
+      }
+      check(isolated->Snapshot().operations[operation].exceptions == 1 &&
+            Conserved(isolated->Snapshot()), "Native-call exceptions invented a successful operation");
+    }
+    std::promise<void> entered, release;
+    auto entering = entered.get_future(), releasing = release.get_future();
+    HRESULT result = S_OK;
+    std::jthread worker([&] {
+      isolated->Measure(DecoderOperation::CorePump, [&] {
+        result = screen_video::ObserveDecoderNativeCall(observer, Native::ProcessOutput, [&] {
+          entered.set_value();
+          releasing.wait();
+          return MF_E_TRANSFORM_NEED_MORE_INPUT;
+        });
+      });
+    });
+    const bool started = entering.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    auto snapshot = std::async(std::launch::async, [&] { return isolated->Snapshot(); });
+    const bool responsive = snapshot.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    release.set_value();
+    worker.join();
+    const auto observed = snapshot.get();
+    check(started && responsive && result == MF_E_TRANSFORM_NEED_MORE_INPUT &&
+          observed.operations[static_cast<std::size_t>(DecoderOperation::CorePump)].in_progress == 1 &&
+          observed.operations[static_cast<std::size_t>(DecoderOperation::MftProcessOutput)].in_progress == 1 &&
+          observed.operations[static_cast<std::size_t>(DecoderOperation::GpuFencePoll)].in_progress == 0,
+          "A blocked native call held the diagnostic mutex or concealed its exact nested operation");
   }
 
   for (std::size_t stage_index = 0; stage_index < static_cast<std::size_t>(DecoderInputStage::Count); ++stage_index) {
@@ -227,6 +330,67 @@ void RunDecoderDiagnosticChecks(Check&& check) {
 
 template <typename Check>
 void RunDecoderSchedulingChecks(Check&& check) {
+  {
+    decoder_diagnostic_checks_detail::LimitedDecoderSurfacePool pool(6);
+    auto worker = std::async(std::launch::async, [&] {
+      pool.RetireCopies();
+      const bool returned = pool.TransformCall();
+      pool.RetireCopies();
+      return returned;
+    });
+    const bool entered = pool.WaitForCall();
+    pool.CompleteFence(6);
+    const bool blocked = worker.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout;
+    const auto retained = pool.Pending(), returned = pool.Returned();
+    // Only the fixture wait is cancelled; the worker then retires samples using
+    // the already-completed fence. Real MFT calls have no such escape hatch.
+    pool.CancelFixtureWait();
+    const bool succeeded = worker.get();
+    check(entered && blocked && retained == 6 && returned == 0 && !succeeded,
+          "Legacy pre-loop-only retirement did not expose the limited-surface wait cycle");
+    check(pool.Pending() == 0 && pool.Returned() == 6,
+          "The blocked-call fixture abandoned ownership or retired before actual fence completion");
+  }
+  for (const auto operation : {"ProcessInput", "ProcessOutput", "END_OF_STREAM",
+                                "DRAIN", "FLUSH", "Shutdown", "Abort"}) {
+    for (const std::size_t count : {1u, 2u, 6u, 8u}) {
+      decoder_diagnostic_checks_detail::LimitedDecoderSurfacePool pool(count);
+      std::vector<std::string_view> order;
+      const auto attempt = [&] {
+        if (!screen_video::DecoderSamplesReadyForTransform(
+              [&] { order.push_back("retire"); pool.RetireCopies(); },
+              [&] { return pool.Pending(); })) return false;
+        order.push_back(operation);
+        return pool.TransformCall();
+      };
+      check(!attempt() && pool.Calls() == 0 && pool.Returned() == 0 &&
+            pool.Pending() == count && order == std::vector<std::string_view>{"retire"},
+            "A transform/control call began before its retained samples had a completion fence");
+      pool.CompleteFence(count - 1);
+      check(!attempt() && pool.Calls() == 0 && pool.Pending() == 1 &&
+            pool.Returned() == count - 1,
+            "Partial GPU completion was guessed to be sufficient decoder-pool capacity");
+      pool.CompleteFence(count);
+      check(attempt() && pool.Calls() == 1 && pool.Pending() == 0 &&
+            pool.Returned() == count && order.back() == operation &&
+            order[order.size() - 2] == "retire",
+            "A completed fence did not resume the original operation after real sample return");
+      check(attempt() && pool.Calls() == 2 && pool.Returned() == count,
+            "The retirement gate fabricated another sample return or capped normal transform calls");
+    }
+  }
+  {
+    unsigned calls = 0;
+    bool failed = false;
+    try {
+      if (screen_video::DecoderSamplesReadyForTransform(
+            [] { throw std::runtime_error("retirement-unproven"); },
+            [] { return std::size_t{0}; })) ++calls;
+    } catch (const std::runtime_error& error) {
+      failed = std::string_view(error.what()) == "retirement-unproven";
+    }
+    check(failed && calls == 0, "A retirement failure became transform admission or successful shutdown");
+  }
   using Clock = screen_video::EncoderTimingAggregate::Clock;
   const auto begin = Clock::time_point{};
   screen_video::DecoderSchedulingStats stats;

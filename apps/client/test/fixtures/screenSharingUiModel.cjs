@@ -50,7 +50,7 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
-const flush = async () => { for (let turn = 0; turn < 30; turn++) await Promise.resolve(); };
+const flush = async () => { for (let turn = 0; turn < 200; turn++) await Promise.resolve(); };
 
 class ModelElement {
   constructor(document, tag = 'div') {
@@ -367,6 +367,7 @@ function fixture(language = 'en') {
     },
     getDesktopSources: options => { enumerations++; return controls.sources(options); },
     getDesktopSourcePreviews: request => controls.previews ? controls.previews(request) : Promise.resolve([]),
+    cancelDesktopSourcePreviews: async () => { traces.push(['cancel-previews']); },
     prepareScreenShareWindow: async id => { traces.push(['prepare-window', id]); return false; },
     openExternal: url => { traces.push(['open-external', url]); return controls.openExternal(url); },
   };

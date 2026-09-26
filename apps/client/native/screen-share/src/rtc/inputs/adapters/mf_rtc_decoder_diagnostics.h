@@ -65,11 +65,18 @@ inline const char* DecoderOutputOutcomeName(DecoderOutputOutcome value) noexcept
 
 enum class DecoderOperation : std::uint8_t {
   CoreCreate, CoreEnqueue, CorePump, CoreFlush, CoreStop, CoreAbort,
-  CoreStatsCopy, CachePublish, Callback, Count
+  CoreStatsCopy, CachePublish, Callback,
+  MftProcessInput, MftProcessOutput, GpuOutputCopy, GpuDeviceCheck, GpuTextureCreate,
+  GpuCopySubmit, GpuFenceSignal, GpuContextFlush, GpuFencePoll, GpuFenceArm,
+  MfSampleReturn, MftEndStreaming, MftShutdown, MfPlatformShutdown, Count
 };
 inline const char* DecoderOperationName(DecoderOperation value) noexcept {
   constexpr std::array names{"core-create", "core-enqueue", "core-pump", "core-flush",
-      "core-stop", "core-abort", "core-stats-copy", "cache-publish", "callback"};
+      "core-stop", "core-abort", "core-stats-copy", "cache-publish", "callback",
+      "mft-process-input", "mft-process-output", "gpu-output-copy", "gpu-device-check",
+      "gpu-texture-create", "gpu-copy-submit", "gpu-fence-signal", "gpu-context-flush",
+      "gpu-fence-poll", "gpu-fence-arm", "mf-sample-return", "mft-end-streaming",
+      "mft-shutdown", "mf-platform-shutdown"};
   static_assert(names.size() == static_cast<std::size_t>(DecoderOperation::Count));
   const auto index = static_cast<std::size_t>(value);
   return index < names.size() ? names[index] : "unknown";
@@ -203,6 +210,29 @@ class DecoderDiagnosticLedger {
   mutable std::mutex mutex_;
   DecoderDiagnosticSnapshot snapshot_;
 };
+
+inline DecoderOperation NativeDecoderOperation(screen_video::DecoderNativeOperation operation) {
+  constexpr std::array mapping{
+      DecoderOperation::MftProcessInput, DecoderOperation::MftProcessOutput,
+      DecoderOperation::GpuOutputCopy, DecoderOperation::GpuDeviceCheck,
+      DecoderOperation::GpuTextureCreate, DecoderOperation::GpuCopySubmit,
+      DecoderOperation::GpuFenceSignal, DecoderOperation::GpuContextFlush,
+      DecoderOperation::GpuFencePoll, DecoderOperation::GpuFenceArm,
+      DecoderOperation::MfSampleReturn, DecoderOperation::MftEndStreaming,
+      DecoderOperation::MftShutdown, DecoderOperation::MfPlatformShutdown};
+  static_assert(mapping.size() == static_cast<std::size_t>(screen_video::DecoderNativeOperation::Count));
+  const auto index = static_cast<std::size_t>(operation);
+  if (index >= mapping.size()) throw std::invalid_argument("Unknown decoder native-call operation");
+  return mapping[index];
+}
+
+inline screen_video::DecoderNativeCallObserver ObserveNativeDecoderCalls(
+    std::shared_ptr<DecoderDiagnosticLedger> ledger) {
+  return [ledger = std::move(ledger)](screen_video::DecoderNativeOperation operation,
+                                    const std::function<void()>& call) {
+    ledger->Measure(NativeDecoderOperation(operation), call);
+  };
+}
 
 template <typename Outcome>
 class DecoderCallDiagnostic {

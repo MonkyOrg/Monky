@@ -10,9 +10,11 @@ const directory = process.argv.find(value => value.startsWith('--artifacts='))?.
 const mode = process.argv.find(value => value.startsWith('--mode='))?.slice('--mode='.length) ?? 'p2p';
 const soakMs = Number(process.argv.find(value => value.startsWith('--soak-ms='))?.slice('--soak-ms='.length) ?? 0);
 const simulateDisconnect = process.argv.includes('--disconnect');
+const simulateRtcFault = process.argv.includes('--rtc-fault');
 assert.ok(directory && path.isAbsolute(directory) && ['p2p', 'sfu'].includes(mode));
 assert.ok(Number.isSafeInteger(soakMs) && soakMs >= 0 && soakMs <= 90000);
 assert.ok(!simulateDisconnect || mode === 'sfu');
+assert.ok(!simulateRtcFault || !simulateDisconnect);
 
 if (!process.versions.electron) {
   const { spawn } = require('node:child_process');
@@ -60,7 +62,12 @@ if (!process.versions.electron) {
   return;
 }
 
-const { app, BrowserWindow, sharedTexture, MessageChannelMain } = require('electron');
+const { app, BrowserWindow, screen, sharedTexture, MessageChannelMain } = require('electron');
+let placement;
+try {
+  placement = require('../../../test/fixtures/testDisplay.cjs').installTestDisplay({ app, screen, BrowserWindow });
+}
+catch (error) { console.error('[TestDisplay] A/V launch rejected:', error); app.exit(1); return; }
 const { loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription, NativePcmCaptureHub } = require('../index.cjs');
 const captureModule = require('@monky/screen-audio');
 const { createSfuFixture } = require('./sfuFixture.cjs');
@@ -85,6 +92,10 @@ const expectedSourceLoss = error => error.code === 'ERR_SCREEN_CAPTURE_SOURCE_LO
   || (error instanceof AggregateError && error.errors.length > 0 && error.errors.every(expectedSourceLoss));
 const fatal = error => { errors.push(error); console.error(error); };
 const failure = error => {
+  if (report.expectingRtcFault) {
+    (report.expectedRtcErrors ??= []).push({ code: error.code ?? null, message: error.message });
+    return;
+  }
   if (report.simulatedDisconnect) {
     (report.remoteCleanupErrors ??= []).push(error.stack ?? String(error));
     return;
@@ -138,9 +149,10 @@ function audioOptions(window, publish = false) {
   };
 }
 async function createWindow(id) {
-  const window = new BrowserWindow({ width: 640, height: 400, show: false,
+  const options = { width: 640, height: 400, show: false,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false,
-      preload: path.join(__dirname, 'nativeCaptureSmoke.preload.cjs') } });
+      preload: path.join(__dirname, 'nativeCaptureSmoke.preload.cjs') } };
+  const window = placement ? placement.createWindow(options) : new BrowserWindow(options);
   windows.set(id, window);
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('render-process-gone', (_event, details) => failure(new Error(`Owned A/V Renderer exited: ${details.reason}`)));
@@ -315,6 +327,8 @@ async function run() {
   const muted = await signalWindow('viewer-a');
   assert.equal(muted.nonzeroFrames, 0, 'Muted screen audio still entered the native output.');
   const other = await signalWindow('viewer-b', 300);
+  report.audioControls = { normal, half, muted, other };
+  fs.writeFileSync(path.join(directory, 'progress.json'), JSON.stringify(report, null, 2) + '\n');
   assert.ok(other.nonzeroFrames > 4800, 'Muting one viewer also muted another.');
   await endpoint.setAudioPreferences({ muted: false, volume: 1 });
   await delay(500);
@@ -339,6 +353,35 @@ async function run() {
   assert.equal(hub.getStats().captureStarts, 2);
   await waitFor(() => receivers.get('viewer-d').audioOutput.owner.getStats().pcmSignal?.nonzeroFrames > 4800,
     'A fresh Watch failed to resume the actual captured audio.');
+  let finalViewer = 'viewer-d';
+  if (simulateRtcFault) {
+    phase('terminating-live-av-receiver');
+    const endpoint = receivers.get(finalViewer), pid = endpoint.engine.child.pid;
+    assert.notEqual(pid, process.pid);
+    assert.ok(endpoint.audioOutput.owner.getStats().pcmSignal.nonzeroFrames > 4800);
+    report.expectingRtcFault = true;
+    endpoint.engine.child.kill();
+    await endpoint.engine.exitState.promise;
+    assert.equal(await windows.get(finalViewer).webContents.executeJavaScript('6 * 7'), 42);
+    await waitFor(() => subscriptions.get(finalViewer).closed && publisher.snapshot().pipelines.length === 0,
+      'The failed media child did not retire its subscription and final PCM demand.', 30000);
+    await hub.waitUntilIdle();
+    assertNativeScreenEndpointLocallyClosed(endpoint);
+    assert.equal(endpoint.engine.pending.size, 0);
+    assert.equal(endpoint.engine.leases.size, 0);
+    assert.equal(endpoint.audioOutput.owner.getStats().stopped, true);
+    assert.equal(senders.at(-1).pcm.getStats().outstanding, 0);
+    assert.ok(report.expectedRtcErrors.some(error => error.code === 'ERR_RTC_HOST_EXIT'));
+    report.rtcFault = { pid, mainSurvived: true, texturesRetired: true, pcmRetired: true };
+    report.expectingRtcFault = false;
+    phase('recovering-after-av-fault');
+    finalViewer = 'viewer-e';
+    await start(finalViewer, '480p30');
+    assert.notEqual(receivers.get(finalViewer).engine.child.pid, pid);
+    await waitFor(() => receivers.get(finalViewer).audioOutput.owner.getStats().pcmSignal?.nonzeroFrames > 4800,
+      'A replacement media child did not resume actual captured PCM.');
+    report.rtcFault.recovered = true;
+  }
   if (simulateDisconnect) {
     phase('disconnecting-signaling');
     report.simulatedDisconnect = true;
@@ -348,7 +391,7 @@ async function run() {
   phase('source-loss');
   expectingSourceLoss = true;
   await sourceCommand('close-source');
-  await waitFor(() => subscriptions.get('viewer-d').closed && publisher.snapshot().pipelines.length === 0,
+  await waitFor(() => subscriptions.get(finalViewer).closed && publisher.snapshot().pipelines.length === 0,
     'Source loss did not retire its active A/V subscription.');
   report.sourceLoss = senders.at(-1).snapshot();
   assert.ok(report.sourceLoss.errors.some(error => error.code === 'ERR_SCREEN_CAPTURE_SOURCE_LOST'));

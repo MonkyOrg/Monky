@@ -372,6 +372,7 @@ export class VoiceStageView {
 
         <!-- Live Broadcast Top Banner Container -->
         <div id="stage-broadcast-banner-wrapper" style="display: none;"></div>
+        <div id="stage-overlay-preview-notice" role="status" hidden>${t('overlay.stagePreviewsHidden')}</div>
 
         <!-- Participants Container (Grid or Focused) -->
         <div id="stage-content-area">
@@ -425,6 +426,14 @@ export class VoiceStageView {
   }
 
   public updateControlsUI(): void {
+    const previewsHidden = settingsStore.overlayHideStagePreviews && overlayBridgeService.getIsOpen();
+    const previews = this.container.querySelector<HTMLElement>('#stage-participants-area');
+    if (previews) {
+      previews.classList.toggle('overlay-previews-hidden', previewsHidden);
+      previews.inert = previewsHidden;
+    }
+    const previewNotice = this.container.querySelector<HTMLElement>('#stage-overlay-preview-notice');
+    if (previewNotice) previewNotice.hidden = !previewsHidden;
     const moderation = getVoiceControlModeration();
     const btnMic = document.getElementById('stage-btn-mic');
     if (btnMic) {
@@ -2064,6 +2073,7 @@ export class VoiceStageView {
     const u5 = appEvents.on('modal.screenshare_picker_opened', clearScreenLoading);
     const u6 = appEvents.on('modal.screenshare_picker_closed', clearScreenLoading);
     const u7 = appEvents.on('settings.updated', () => {
+      this.updateControlsUI();
       this.applyTelemetryOverlayState();
       this.syncTelemetryMonitor();
     });

@@ -23,7 +23,7 @@ const { createNativeAudioOutput } = require('./nativeAudioOutput.cjs');
 const { NativeAudioReceiveAdapter } = require('./nativeAudioReceiveAdapter.cjs');
 const { assertNativeAudioOutputStopped } = require('./nativeAudioOutputOwner.cjs');
 const { within } = require('./nativeDeadline.cjs');
-const { rtpReports, decoderObservations } = require('./nativeVideoDiagnostics.cjs');
+const { rtpReports, decoderObservations, decoderFailureObservations } = require('./nativeVideoDiagnostics.cjs');
 
 const cancelled = () => new DOMException('The native screen endpoint was retired.', 'AbortError');
 const endpointOwners = new WeakMap();
@@ -220,7 +220,7 @@ class NativeScreenEndpoint {
       this.sourceId = created.sourceId;
       this.flow = new LiveSenderFlow({
         engine: this.engine, sourceId: this.sourceId, initialBitrateKbps: Math.min(5000, maxBitrateKbps),
-        onError: error => this.report(error),
+        onError: error => this.report(error), onWritable: () => this.host?.resumePackets(),
       });
       this.abort.signal.throwIfAborted();
       this.sourceDescription = {
@@ -567,7 +567,12 @@ class NativeScreenEndpoint {
 
   async stats() {
     const capture = this.host?.ready && !this.host.stopping ? await this.host.getStats() : null;
-    return { ...this.snapshot(), capture, rtc: this.engine.snapshot() };
+    const rtc = this.engine.refreshSnapshot ? await this.engine.refreshSnapshot() : this.engine.snapshot();
+    return { ...this.snapshot(), capture, rtc };
+  }
+
+  failureDiagnostics() {
+    return decoderFailureObservations(this.engine.snapshot());
   }
 
   diagnostics() {
@@ -594,8 +599,9 @@ class NativeScreenEndpoint {
     const results = await Promise.allSettled(requests);
     this.abort.signal.throwIfAborted();
     if (this.stopRequested || this.closing) throw cancelled();
-    const snapshot = this.role === 'receive' ? this.engine.snapshot() : null;
-    if (snapshot?.state === 'closing' || snapshot?.state === 'closed') throw cancelled();
+    const snapshot = this.role === 'receive'
+      ? this.engine.refreshSnapshot ? await this.engine.refreshSnapshot() : this.engine.snapshot() : null;
+    if (snapshot?.state === 'closing' || snapshot?.state === 'closed' || snapshot?.process?.exited) throw cancelled();
     for (const result of results) {
       try {
         if (result.status === 'rejected') throw result.reason;
@@ -685,6 +691,7 @@ class NativeScreenEndpoint {
     if (audioClosed) void audioClosed.catch(() => {});
     await within(closing, 15000, 'Native screen engine retirement timed out.');
     assertNativeRtcEngineClosed(this.commands, this.engine);
+    this.flow?.finishAfterEngineClose(this.commands);
     let transportRetired = !this.transport, operationsRetired = false;
     if (this.transport) await collect(this.transport.finishAfterEngineClose(closing).then(() => { transportRetired = true; }));
     await collect(this.pcm?.finishAfterEngineClose(closing));
@@ -694,7 +701,11 @@ class NativeScreenEndpoint {
       'Native screen operations retained ownership after engine closure.').then(() => { operationsRetired = true; }));
     if (this.host) {
       await collect(this.stopCaptureHost(this.host));
-      assert.equal(this.host.snapshot().nativeClosed, true, 'The native capture host did not prove retirement.');
+      if (this.host.snapshot().nativeClosed !== true) {
+        errors.push(Object.assign(new Error('The native capture host did not prove retirement.'),
+          { code: 'ERR_SCREEN_CAPTURE_RETIREMENT' }));
+        throw new AggregateError([...new Set(errors)], 'The native capture host did not prove retirement.');
+      }
     }
     assert.equal(this.flow?.inFlight.size ?? 0, 0, 'Encoded native copies survived engine closure.');
     if (this.presentation) assert.equal(this.presentation.getStats().outstandingLeases, 0);

@@ -48,7 +48,7 @@ const profile = (width = 1280, height = 720, fps = 60) => ({
 });
 const cancelled = () => new DOMException('Modeled operation was cancelled.', 'AbortError');
 
-function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false, capabilities = {
+function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false, commandResult = () => undefined, capabilities = {
   capture: true, captureAudio: true, receive: true, backend: 'libobs-amf', reason: null,
 } } = {}) {
   const appBus = new EventEmitter();
@@ -93,6 +93,8 @@ function fixture(t, { iceServers = [], receiver = 'native', allowBrowser = false
           for (const id of map.keys()) if (id.startsWith(`${command.callId}\0`)) map.delete(id);
       }
       await commandHook(command);
+      const overridden = commandResult(command);
+      if (overridden !== undefined) return overridden;
       switch (command.action) {
         case 'capabilities': return { kind: 'capabilities', capabilities };
         case 'join': calls.add(command.callId); return { kind: 'ok' };
@@ -749,6 +751,45 @@ test('Stop during a profile replacement prevents a queued sync from resurrecting
   gate.resolve(); await Promise.all([changing, syncing, stopping]);
   assert.equal(f.commands.filter(command => command.action === 'source-add').length, 2);
   assert.equal(f.sources.size, 0);
+});
+
+test('proven source retirement with warnings releases renderer state and permits sharing again without a restart', async t => {
+  const f = fixture(t, { commandResult: command => command.action === 'source-remove'
+    ? { kind: 'retired-with-errors', remoteAcknowledged: true, error: 'Native owner retired with a stop warning' } : undefined });
+  const source = await f.local();
+  await f.controller.attachLocalPreview(source.shareId);
+  assert.equal(f.elements.size, 1);
+  await f.controller.removeSource(source.shareId);
+  assert.equal(f.elements.size, 0);
+  assert.equal(f.sources.size, 0);
+  assert.ok(f.errors.some(row => row[1] === 'Native media retired with cleanup errors'));
+  const replacement = await f.local();
+  assert.notEqual(replacement.instanceId, source.instanceId);
+  await f.controller.attachLocalPreview(replacement.shareId);
+  f.emit({ type: 'state', publisherSessionId: 'self', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, state: 'closed' });
+  await tick();
+  assert.equal(f.elements.size, 1, 'Late old-source closure must not remove the replacement preview.');
+  await f.controller.removeSource(replacement.shareId);
+  assert.equal(f.elements.size, 0);
+  await f.controller.close();
+});
+
+test('a proved Watch stop with warnings permits a fresh presentation in the same renderer call', async t => {
+  const f = fixture(t, { commandResult: command => command.action === 'stop'
+    ? { kind: 'retired-with-errors', remoteAcknowledged: true, error: 'Receiver retired with a stop warning' } : undefined });
+  f.watching(true); await f.controller.sync();
+  const previous = f.commands.findLast(command => command.action === 'watch');
+  f.watching(false); await f.controller.sync();
+  assert.equal(f.elements.size, 0);
+  assert.equal(f.watches.size, 0);
+  f.watching(true); await f.controller.sync();
+  const replacement = f.commands.findLast(command => command.action === 'watch');
+  assert.equal(replacement.callId, previous.callId);
+  assert.notEqual(replacement.presentationId, previous.presentationId);
+  assert.equal(f.controller.getWatchState('publisher', f.remote.shareId).state, 'playing');
+  assert.equal(f.watches.size, 1);
+  await f.controller.close();
 });
 
 test('failed source removal retains its original cleanup obligation until the Main acknowledges retry', async t => {

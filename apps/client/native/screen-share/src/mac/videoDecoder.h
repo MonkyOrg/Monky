@@ -17,5 +17,5 @@ class VideoDecoder {
   struct State;
   std::unique_ptr<State> state_;
 };
-size_t VideoDecoderSmoke(const std::vector<EncodedFrame>& frames);
+size_t VideoDecoderSmoke(const std::vector<EncodedFrame>& frames, bool owned_window = false);
 }

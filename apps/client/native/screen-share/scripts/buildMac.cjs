@@ -20,6 +20,7 @@ function build({ arch = process.arch } = {}) {
       path.join(source, 'host.mm'), path.join(source, 'videoEncoder.mm'), path.join(source, 'videoDecoder.mm'),
       path.join(source, 'videoCapture.mm'),
       path.join(source, 'videoCaptureHost.mm'),
+      path.join(source, 'ownedWindow.mm'),
       path.join(root, 'src', 'rtc', 'inputs', 'native_core', 'h264_bitstream.cc'),
       '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'ScreenCaptureKit',
       '-framework', 'CoreGraphics', '-framework', 'VideoToolbox', '-framework', 'CoreMedia',

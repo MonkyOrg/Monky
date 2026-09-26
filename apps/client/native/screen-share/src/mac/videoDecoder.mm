@@ -171,7 +171,7 @@ void VideoDecoder::Close() {
   Check(drain, "ERR_MAC_DECODE_DRAIN");
   Check(wait, "ERR_MAC_DECODE_WAIT");
 }
-size_t VideoDecoderSmoke(const std::vector<EncodedFrame>& frames) {
+size_t VideoDecoderSmoke(const std::vector<EncodedFrame>& frames, bool owned_window) {
   std::mutex mutex;
   std::vector<int64_t> decoded;
   std::string failure;
@@ -183,10 +183,12 @@ size_t VideoDecoderSmoke(const std::vector<EncodedFrame>& frames) {
       const auto stride = CVPixelBufferGetBytesPerRowOfPlane(image, plane);
       const auto height = CVPixelBufferGetHeightOfPlane(image, plane);
       const auto width = CVPixelBufferGetWidthOfPlane(image, plane);
-      const int expected = plane == 0 ? 80 : 128;
+      if (owned_window && plane != 0) continue;
       for (const size_t row : {height / 4, height / 2, height * 3 / 4})
-        for (const size_t column : {width / 4, width / 2, width * 3 / 4})
+        for (const size_t column : {width / 4, width * 3 / 4}) {
+          const int expected = owned_window ? (column < width / 2 ? 63 : 32) : (plane == 0 ? 80 : 128);
           valid &= std::abs(int(data[row * stride + column]) - expected) <= 12;
+        }
     }
     Check(CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly), "ERR_MAC_DECODE_TEST_UNLOCK");
     Require(valid, "ERR_MAC_DECODE_TEST_PIXELS");

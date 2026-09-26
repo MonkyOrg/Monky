@@ -99,6 +99,7 @@ export type DesktopSourcePreview = Pick<DesktopSource, 'id' | 'thumbnailDataUrl'
 export const DESKTOP_SOURCES_IPC = {
   list: 'screen-share:get-sources',
   previews: 'screen-share:get-previews',
+  cancelPreviews: 'screen-share:cancel-previews',
 } as const satisfies Record<string, keyof IpcInvokeChannels>;
 
 export interface ImageSelectionResult {
@@ -497,6 +498,23 @@ export type OverlayMode = 'cameras-only' | 'cameras-and-screens';
 export type OverlayLayout = 'grid' | 'vertical' | 'horizontal';
 export type OverlayPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'custom';
 
+export interface OverlayCardSize {
+  width: number;
+  height: number;
+}
+
+export interface OverlayCardLayout {
+  cardSize: OverlayCardSize;
+  minimalistMode?: boolean;
+  preserveAspectRatio?: boolean;
+  width: number;
+  height: number;
+  resizeAspect?: {
+    ratio: number;
+    extraSize: OverlayCardSize;
+  };
+}
+
 export interface OverlayConfig {
   mode: OverlayMode;
   layout: OverlayLayout;
@@ -506,7 +524,11 @@ export interface OverlayConfig {
   autoOpenOnLeaveStage?: boolean;
   minimalistMode?: boolean;
   hideSelf?: boolean;
+  hideStagePreviews?: boolean;
+  hideInactiveParticipants?: boolean;
   preserveAspectRatio?: boolean;
+  cardSize?: OverlayCardSize;
+  minimalistCardSize?: OverlayCardSize;
   bounds?: OverlayBounds;
 }
 
@@ -731,6 +753,7 @@ export interface IpcInvokeChannels {
   'overlay:set-config': { args: [config: Partial<OverlayConfig>]; returnType: void };
   'overlay:save-bounds': { args: [bounds: OverlayBounds]; returnType: void };
   'overlay:reset-bounds': { args: []; returnType: void };
+  'overlay:layout-cards': { args: [layout: OverlayCardLayout]; returnType: OverlayBounds };
   'overlay:send-signal': { args: [payload: OverlaySignalPayload]; returnType: void };
   'overlay:send-sync-state': { args: [state: OverlaySyncState]; returnType: void };
 
@@ -776,6 +799,7 @@ export interface IpcInvokeChannels {
   'screen-share:ensure-permission': { args: []; returnType: boolean };
   'screen-share:get-sources': { args: [options?: DesktopSourcesOptions]; returnType: DesktopSource[] };
   'screen-share:get-previews': { args: [request: DesktopSourcePreviewsRequest]; returnType: DesktopSourcePreview[] };
+  'screen-share:cancel-previews': { args: []; returnType: void };
   'screen-share:prepare-window': { args: [string]; returnType: boolean };
 
   // Diálogos Nativos
@@ -901,6 +925,7 @@ export interface IpcEvents {
   'overlay:state-changed': [isOpen: boolean];
   'overlay:config-updated': [config: OverlayConfig];
   'overlay:hover-changed': [hovered: boolean, point?: { x: number; y: number }];
+  'overlay:resize-state-changed': [resizing: boolean];
   'overlay:signal-received': [signal: string];
   'overlay:sync-state-received': [state: OverlaySyncState];
   'overlay:close-requested': [];

@@ -116,6 +116,56 @@ function fixture(hooks = {}, timeoutMs = 150) {
   };
 }
 
+test('isolated native audio waits for correlated credits and preserves real clock replies across IPC', async () => {
+  const admission = deferred();
+  const f = fixture({ grant: () => admission.promise });
+  f.engine.asynchronousNative = true;
+  for (const name of ['audioClockProbe', 'calibrateAudioClock', 'setAudioOutputFeedback']) {
+    const direct = f.engine[name];
+    f.engine[name] = (...args) => Promise.resolve().then(() => direct(...args));
+  }
+  await f.owner.start('owned-output');
+  const granting = f.owner.grantCredits({ epoch: 1, grantSequence: 1, frames: 480 });
+  assert.equal(f.owner.getStats().acceptedGrants, 0);
+  admission.resolve();
+  assert.equal(await granting, true);
+  const observed = await f.owner.probe({ epoch: 1, probeId: 1 });
+  assert.deepEqual(observed, { epoch: 1, probeId: 1, rtcBeforeUs: 2000000, rtcAfterUs: 2000100 });
+  const calibrated = await f.owner.calibrate({
+    epoch: 1, probeId: 1, rendererBeforeUs: 1999000, rendererAfterUs: 1999200,
+  });
+  assert.equal(calibrated.calibrationId, 1);
+  assert.equal(await f.owner.feedback({ epoch: 1, available: false }), true);
+  await f.owner.stop();
+  assert.deepEqual(f.errors, []);
+});
+
+test('isolated credit rejection never becomes admission or native output retirement', async () => {
+  const admission = deferred();
+  const f = fixture({ grant: () => admission.promise });
+  f.engine.asynchronousNative = true;
+  await f.owner.start('owned-output');
+  const granting = f.owner.grantCredits({ epoch: 1, grantSequence: 1, frames: 480 });
+  const rejected = assert.rejects(granting, /host exited/u);
+  admission.reject(new Error('host exited'));
+  await rejected;
+  assert.equal(f.owner.getStats().acceptedGrants, 0);
+  await f.owner.finishAfterEngineClose(f.commands.closeEngine());
+  assert.equal(f.owner.getStats().stopped, true);
+});
+
+test('a real IPC credit acknowledgement arriving after stop cannot revive or fail the retired output', async () => {
+  const admission = deferred(), f = fixture({ grant: () => admission.promise });
+  f.engine.asynchronousNative = true;
+  await f.owner.start('owned-output');
+  const granting = f.owner.grantCredits({ epoch: 1, grantSequence: 1, frames: 480 });
+  await f.owner.stop();
+  admission.resolve();
+  assert.equal(await granting, false);
+  assert.equal(f.owner.getStats().stopped, true);
+  assert.deepEqual(f.errors, []);
+});
+
 test('constructor and import are inert; one real same-engine owner persists across all restarts', async () => {
   const f = fixture();
   assert.deepEqual(f.calls, []);

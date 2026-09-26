@@ -5,6 +5,8 @@ const { test } = require('node:test');
 const { fixture, deferred, flush, MONITOR_SOURCE_ID } = require('./fixtures/screenSharingUiModel.cjs');
 require('./privateScreenSharingUi.test.cjs');
 require('./screenEncodingAdjustment.test.cjs');
+require('./testDisplay.test.cjs');
+require('./overlayPosition.test.cjs');
 
 const key = (element, value, modifiers = {}) => {
   const event = new Event('keydown', { bubbles: true, cancelable: true });
@@ -30,6 +32,35 @@ const chooseWindowMethod = (f, method, sourceId = 'window:101:0') => {
   assert.equal(f.picker.windowCaptureMethod, method);
   return card;
 };
+
+test('native thumbnails load progressively in bounded batches and closing cancels remaining acquisition', async t => {
+  const f = fixture('en');
+  t.after(() => f.close());
+  const pending = [], requests = [];
+  const sources = Array.from({ length: 12 }, (_, i) => ({
+    ...f.sources[1], id: `window:${101 + i}:0`, name: `Owned window ${i}`, thumbnailState: 'pending',
+  }));
+  f.controls.sources = async () => sources;
+  f.controls.previews = request => {
+    requests.push(request);
+    const gate = deferred(); pending.push(gate);
+    return gate.promise;
+  };
+  await f.picker.open();
+  control(f, 'share-tab-window').click();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].sourceIds.length, 4);
+  pending[0].resolve(requests[0].sourceIds.map(id => ({ id, thumbnailDataUrl: 'owned-image', appIconDataUrl: null })));
+  await flush();
+  assert.equal(requests.length, 2);
+  assert.equal(f.document.querySelectorAll('img.source-thumbnail').length, 4);
+  assert.equal(f.document.querySelectorAll('.source-thumbnail--loading').length, 8);
+  f.picker.close();
+  assert.equal(f.traces.filter(row => row[0] === 'cancel-previews').length, 1);
+  pending[1].resolve([]);
+  await flush();
+  assert.equal(requests.length, 2, 'Closed pickers must not request another batch.');
+});
 
 for (const language of ['pt-BR', 'en']) {
   test(`minimized sources gain icons without presenting a cached image as a current preview (${language})`, async t => {
@@ -1430,6 +1461,7 @@ for (const saved of ['vp8', 'vp9', 'av1']) {
     f.settingsStore.screenEncodingStrategy = 'manual';
     const root = f.mountQuality();
     const codec = root.querySelector('#select-video-codec');
+    await flush();
     assert.equal(f.settingsStore.preferredVideoCodec, saved);
     assert.equal(f.saves, 0);
     assert.equal(codec.value, 'h264');
@@ -1437,8 +1469,10 @@ for (const saved of ['vp8', 'vp9', 'av1']) {
     assert.equal(codec.querySelector('option[value="vp9"]'), null);
     codec.value = 'av1';
     change(codec);
+    assert.equal(f.saves, 0, 'An unverified selection must not be saved.');
+    await flush();
     assert.equal(f.settingsStore.preferredVideoCodec, saved);
-    assert.equal(f.saves, 1);
+      assert.equal(f.saves, 1);
     assert.equal(codec.value, 'av1');
     assert.equal(f.settingsStore.preferredScreenCodec, 'av1');
     codec.value = 'auto';
@@ -1466,7 +1500,7 @@ test('a late codec error cannot open a dialog after quality settings cleanup', a
   const codec = control(f, 'select-video-codec');
   codec.value = 'av1';
   change(codec);
-  assert.equal(f.saves, 1);
+  assert.equal(f.saves, 0, 'Closing an unverified edit must not save it.');
   f.quality.cleanup();
   gate.reject(new Error('Obsolete codec operation'));
   await flush();
@@ -1820,24 +1854,24 @@ test('encoder discovery follows screen codec and profile changes but ignores unr
   assert.equal(probes.length, 1);
   control(f, 'screen-encoding-manual').click();
   await flush();
-  assert.equal(probes.length, 2);
+  assert.equal(probes.length, 5, 'Manual prechecks each exact mode/codec without saving alternatives.');
   const codec = root.querySelector('#select-video-codec');
   codec.value = 'av1';
   change(codec);
   await flush();
-  assert.equal(probes.length, 3);
-  assert.equal(probes[2].codec, 'av1');
+  assert.equal(probes.length, 6);
+  assert.equal(probes[5].codec, 'av1');
   const preset = root.querySelector('#select-preset');
   preset.value = 'HIGH';
   change(preset);
   await flush();
-  assert.equal(probes.length, 4);
-  assert.notDeepEqual(probes[3].video, probes[2].video);
+  assert.equal(probes.length, 10);
+  assert.notDeepEqual(probes[6].video, probes[5].video);
   f.quality.cleanup();
   f.settingsStore.preferredScreenCodec = 'h264';
   f.settingsStore.save();
   await flush();
-  assert.equal(probes.length, 4, 'The settings subscription is removed with its view.');
+  assert.equal(probes.length, 10, 'The settings subscription is removed with its view.');
 });
 
 for (const codec of ['h264', 'av1']) {
@@ -1860,7 +1894,7 @@ for (const codec of ['h264', 'av1']) {
   });
 }
 
-test('Manual unsupported combination stays selected and unavailable; Automatic rediscovery is not pinned to old Software', async t => {
+test('An old unsupported Manual combination is disabled without saving it again; Automatic rediscovers hardware', async t => {
   const f = fixture();
   t.after(() => f.close());
   f.settingsStore.screenEncodingStrategy = 'manual';
@@ -1870,8 +1904,9 @@ test('Manual unsupported combination stays selected and unavailable; Automatic r
   f.mountQuality();
   await flush();
   assert.equal(control(f, 'screen-encoding-hardware').getAttribute('aria-pressed'), 'true');
-  assert.equal(control(f, 'screen-encoding-hardware').disabled, false, 'Manual choices can request a verified lower-FPS profile.');
-  assert.equal(control(f, 'select-video-codec').value, 'av1');
+  assert.equal(control(f, 'screen-encoding-hardware').disabled, true, 'All tested frame rates were unsupported.');
+  assert.equal(control(f, 'select-video-codec').value, '');
+  assert.equal(control(f, 'select-video-codec').querySelector('option[value="av1"]').disabled, true);
   assert.doesNotMatch(control(f, 'screen-encoding-status').textContent, /Manual AV1 unsupported/);
   assert.equal(f.saves, 0);
   f.controls.encoding = async () => ({ selection: { mode: 'software', codec: 'h264', encoder: 'obs_x264' },
@@ -1898,7 +1933,7 @@ test('changing Automatic/Manual cancels stale discovery and late results never o
   f.controls.encoding = input => input.encodingStrategy === 'automatic' ? automatic.promise : manual.promise;
   f.mountQuality();
   assert.equal(key(control(f, 'screen-encoding-automatic'), 'ArrowRight').defaultPrevented, true);
-  assert.equal(f.settingsStore.screenEncodingStrategy, 'manual');
+  assert.equal(f.settingsStore.screenEncodingStrategy, 'automatic', 'The draft Manual choice is not saved until verified.');
   assert.ok(f.traces.some(trace => trace[0] === 'cancel-encoding'));
   manual.resolve({ selection: { mode: 'hardware', codec: 'h264', encoder: 'h264_texture_amf' },
     hardware: { available: true, reason: null }, fallback: false });

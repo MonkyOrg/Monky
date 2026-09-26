@@ -1,3 +1,4 @@
+import { setMainStdioLogger } from './mainStdio';
 import { app, BrowserWindow, dialog, ipcMain, IpcMainEvent, Menu, screen, session, shell } from 'electron';
 import path from 'path';
 import { setupIpcHandlers } from './ipcHandlers';
@@ -370,6 +371,7 @@ function createWindow(deferShow = false): void {
   let minimizeToTray = !developmentQa;
 
   clientLogger = new ClientLogger();
+  setMainStdioLogger(clientLogger);
   clientLogger.write({
     timestamp: new Date().toISOString(),
     level: 'INFO',

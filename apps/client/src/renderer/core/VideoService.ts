@@ -470,6 +470,7 @@ export class VideoService {
           clientLog.warn('SCREEN_SHARE', 'Failed to restore window before capture', {
             error: e instanceof Error ? e.message : String(e),
           });
+          throw e;
         }
       }
       assertCurrent();

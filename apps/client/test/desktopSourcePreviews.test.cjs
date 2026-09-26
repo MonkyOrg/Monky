@@ -123,3 +123,40 @@ test('timeout does not launch overlapping replacement captures for an unfinished
   job.resolve([a]);
   assert.equal((await retry)[0].id, a.id);
 });
+
+test('native batches request only missing identities and serialize additional requests behind their original owner', async () => {
+  const gate = deferred(), a = source(), b = source('window:2:identity'), calls = [];
+  const previews = new DesktopSourcePreviews(async (type, ids, signal) => {
+    calls.push({ type, ids, signal });
+    if (ids.includes(a.id)) { await gate.promise; return [a]; }
+    return [b];
+  });
+  const first = previews.get(request(a.id)), second = previews.get(request(b.id));
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].ids, [a.id]);
+  gate.resolve();
+  assert.equal((await first)[0].id, a.id);
+  assert.equal((await second)[0].id, b.id);
+  assert.deepEqual(calls[1].ids, [b.id]);
+});
+
+test('closing or refreshing cancels native work but awaits its real completion before admitting a replacement', async () => {
+  const gate = deferred(), a = source(), calls = [];
+  const previews = new DesktopSourcePreviews(async (_type, _ids, signal) => {
+    calls.push(signal);
+    if (calls.length === 1) await gate.promise;
+    return [a];
+  });
+  const first = previews.get(request(a.id));
+  let cancelled = false;
+  const cancelling = previews.cancel().then(() => { cancelled = true; });
+  const replacement = previews.get(request(a.id));
+  assert.equal(calls[0].aborted, true);
+  await Promise.resolve();
+  assert.equal(cancelled, false);
+  assert.equal(calls.length, 1);
+  gate.resolve(); await first; await cancelling; await replacement;
+  assert.equal(calls.length, 2);
+  await previews.dispose();
+  await assert.rejects(previews.get(request(a.id)), { name: 'AbortError' });
+});

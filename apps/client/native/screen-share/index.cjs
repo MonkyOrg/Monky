@@ -1,6 +1,7 @@
 'use strict';
 
-const { loadRuntime, loadCaptureRuntime } = require('./runtime/runtimeFiles.cjs');
+const { loadRuntime, loadCaptureRuntime, loadThumbnailRuntime } = require('./runtime/runtimeFiles.cjs');
+const { NativeThumbnailCapturer } = require('./runtime/nativeThumbnail.cjs');
 const { NativeScreenEndpoint } = require('./runtime/nativeEndpoint.cjs');
 const { NativeScreenPublisher } = require('./runtime/nativeScreenPublisher.cjs');
 const { NativeScreenSubscription } = require('./runtime/nativeScreenSubscription.cjs');
@@ -15,4 +16,5 @@ module.exports = {
   loadRuntime, NativeScreenEndpoint, NativeScreenPublisher, NativeScreenSubscription,
   createNativeScreenPresentation, NativePcmCaptureHub, registerNativeAudioPortReceiver, NativeScreenPreviewBridge,
   CaptureBridge, validateCaptureTarget, loadCaptureRuntime, probeCaptureCapabilities,
+  loadThumbnailRuntime, NativeThumbnailCapturer,
 };

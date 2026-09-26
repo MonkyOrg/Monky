@@ -82,7 +82,14 @@ function getKeyboardLayout(previousId = '', characters = '') {
   return binding.getKeyboardLayout(previousId, characters);
 }
 
+function setWindowResizeAspect(handle, ratio, extraWidth, extraHeight) {
+  if (!binding || typeof binding.setWindowResizeAspect !== 'function')
+    throw new Error('Native window resize constraints are unavailable. Rebuild the native audio module.');
+  binding.setWindowResizeAspect(handle, ratio, extraWidth, extraHeight);
+}
+
 module.exports = {
   isSupported, isPacketCaptureSupported, start, stop, getLastError, getStatus, createPacketCapture,
   listWindowOwners, listWindows, restoreWindow, getWindowState, getKeyboardLayout, listMonitors, getMonitorState,
+  setWindowResizeAspect,
 };

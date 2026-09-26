@@ -24,6 +24,8 @@
     "test:bot-marketplace": "node --test test/botMarketplaceReinstallSmoke.cjs",
     "test:recovery": "tsc -p tsconfig.test.json && node --test dist-test/test/networkClient.test.js dist-test/test/voiceConnection.test.js dist-test/test/voiceModeReconnect.test.js test/navigationFavoritesSmoke.cjs test/crashRecovery.test.cjs && node test/voiceRecoverySmoke.cjs && node test/crashRecoverySmoke.cjs",
     "test:crashes": "node --test test/crashRecovery.test.cjs && node test/crashRecoverySmoke.cjs",
+    "test:stdio": "tsc -p tsconfig.electron.json && node --test test/mainStdio.test.cjs && node test/mainStdioSmoke.cjs",
+    "test:overlay": "tsc -p tsconfig.electron.json && node --test test/overlayPosition.test.cjs && node test/settingsNavigationSmoke.cjs --overlay-window && node test/overlayNativeResizeSmoke.cjs",
     "test:loading": "node --test test/loadingSkeletonSmoke.cjs",
     "test:invites": "tsc -p tsconfig.test.json && node --test dist-test/test/serverInvites.test.js test/navigationFavoritesSmoke.cjs test/serverInviteWebsiteSmoke.cjs",
     "test:bots": "tsc -p tsconfig.test.json && node --test dist-test/test/botInteractions.test.js dist-test/test/botScreens.test.js dist-test/test/commandUi.test.js dist-test/test/commandAutocomplete.test.js dist-test/test/soundDownloads.test.js dist-test/test/soundDownloadConfirmation.test.js dist-test/test/localPermissions.test.js dist-test/test/localExecutionService.test.js dist-test/test/localTools.test.js dist-test/test/localExecutionRenderer.test.js dist-test/test/localExecutionTasks.test.js dist-test/test/localAudioSender.test.js dist-test/test/worker.test.js dist-test/test/workerClient.test.js dist-test/test/workerProtocol.test.js test/localExecutionIpc.test.cjs test/localToolsTab.test.cjs",

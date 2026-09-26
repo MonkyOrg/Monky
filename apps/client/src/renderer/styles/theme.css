@@ -7962,6 +7962,8 @@ button[data-loading="1"]::after {
 }
 
 .screen-share-picker-card .toggle-switch input:focus-visible + .toggle-slider,
+.overlay-aspect-option .toggle-switch input:focus-visible + .toggle-slider,
+.overlay-visibility-option .toggle-switch input:focus-visible + .toggle-slider,
 #checkbox-screen-preview-focus:focus-visible + .toggle-slider {
   outline: 2px solid var(--accent-primary);
   outline-offset: 3px;
@@ -7988,6 +7990,7 @@ button[data-loading="1"]::after {
 .share-aspect-option > div:first-child {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
   min-width: 0;
 }
@@ -8109,7 +8112,8 @@ button[data-loading="1"]::after {
   outline-offset: -2px;
 }
 
-#share-aspect-label {
+#share-aspect-label,
+#share-private-label {
   color: var(--text-secondary);
   font-size: 0.85rem;
   cursor: pointer;
@@ -9906,16 +9910,71 @@ body.overlay-window-mode #app {
   overflow: hidden;
 }
 
+.overlay-visibility-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+.overlay-visibility-description {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-secondary);
+}
+.overlay-visibility-description label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.overlay-visibility-description label + div {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+#stage-participants-area.overlay-previews-hidden,
+#stage-participants-area.overlay-previews-hidden * {
+  visibility: hidden !important;
+}
+#stage-overlay-preview-notice {
+  padding: 12px 16px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
 .overlay-stage-root {
   width: 100vw;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 6px;
+  padding: 14px;
   box-sizing: border-box;
   background: transparent !important;
   position: relative;
   overflow: hidden;
+}
+
+.overlay-stage-root::after {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--text-muted);
+  border-radius: 6px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.overlay-stage-root.is-hovered::after {
+  opacity: 1;
 }
 
 .overlay-stage-topbar {
@@ -9923,11 +9982,10 @@ body.overlay-window-mode #app {
   align-items: center;
   justify-content: space-between;
   height: 24px;
+  flex-shrink: 0;
   padding: 0 6px;
-  /* A janela é transparente e o mouse atravessa o que é 100% transparente, então
-     a barra mantém um fundo quase imperceptível para continuar recebendo o
-     :hover; quem some de fato é o conteúdo dela (#169). */
-  background: rgba(14, 17, 23, 0.02);
+  /* Keep the entire drag affordance discoverable, without a separate title chip. */
+  background: rgba(14, 17, 23, 0.35);
   border-radius: 6px;
   margin-bottom: 6px;
   transition: background 0.2s ease, backdrop-filter 0.2s ease;
@@ -9935,30 +9993,22 @@ body.overlay-window-mode #app {
 }
 
 .overlay-stage-topbar > * {
-  opacity: 0;
+  opacity: 0.5;
   transition: opacity 0.2s ease;
 }
 
-/* The bar itself is a drag region, and drag regions swallow :hover, so relying
-   on hover alone left nothing to aim at when the pointer was right over the bar
-   — the user ended up "clicking on nothing". The grip now rests as a faint,
-   always-present chip so it is discoverable, and the whole bar lights up
-   whenever the pointer is over the overlay: `.is-hovered` is driven from the
-   main process (cursor tracking) precisely because the drag region blocks CSS
-   :hover over the bar (#543). */
-.overlay-stage-topbar > .overlay-drag-handle {
-  opacity: 0.5;
-}
-
-.overlay-stage-root:hover .overlay-stage-topbar,
 .overlay-stage-root.is-hovered .overlay-stage-topbar {
   background: rgba(14, 17, 23, 0.75);
   backdrop-filter: blur(8px);
 }
 
-.overlay-stage-root:hover .overlay-stage-topbar > *,
 .overlay-stage-root.is-hovered .overlay-stage-topbar > * {
   opacity: 1;
+}
+
+.overlay-stage-root.is-resizing .overlay-stage-topbar,
+.overlay-stage-root.is-resizing .overlay-stage-topbar > * {
+  transition: none;
 }
 
 .overlay-drag-handle {
@@ -9968,8 +10018,12 @@ body.overlay-window-mode #app {
   user-select: none;
   padding: 2px 8px;
   border-radius: 6px;
-  background: rgba(14, 17, 23, 0.55);
-  backdrop-filter: blur(4px);
+  min-width: 0;
+}
+.overlay-channel-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .overlay-topbar-actions {
@@ -10007,14 +10061,15 @@ body.overlay-window-mode #app {
 /* Do not intercept the native frameless window's resize border. */
 .overlay-resize-hint {
   position: absolute;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: rgba(255, 255, 255, 0.9);
   opacity: 0;
   pointer-events: none;
+  z-index: 2;
   transition: opacity 0.2s ease;
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.9));
 }
@@ -10030,6 +10085,9 @@ body.overlay-window-mode #app {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  padding: 12px;
+  text-align: center;
+  line-height: 1.5;
   color: var(--text-muted);
   font-size: 12px;
   background: rgba(14, 17, 23, 0.6);
@@ -10047,22 +10105,33 @@ body.overlay-window-mode #app {
 }
 
 .overlay-empty-state { -webkit-app-region: drag; }
-body.overlay-window-mode .overlay-cards-container.preserve-aspect {
+body.overlay-window-mode .overlay-cards-container.fixed-card-size {
   display: grid;
-  align-content: center;
-  justify-content: center;
+  align-content: safe center;
+  justify-content: safe center;
+  overflow: auto;
 }
-body.overlay-window-mode .overlay-cards-container.preserve-aspect .overlay-card {
+body.overlay-window-mode .overlay-stage-root.is-resizing .overlay-cards-container.fixed-card-size {
+  overflow: hidden;
+}
+body.overlay-window-mode .overlay-cards-container.fixed-card-size.scrollable {
+  -webkit-app-region: no-drag;
+}
+body.overlay-window-mode .overlay-cards-container.fixed-card-size.scrollable .overlay-card {
+  -webkit-app-region: drag;
+}
+body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card,
+body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-mini-item {
   min-width: 0;
   min-height: 0;
   width: 100%;
   height: 100%;
 }
-body.overlay-window-mode .overlay-cards-container.preserve-aspect .overlay-video-wrapper {
+body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-video-wrapper {
   min-height: 0;
   height: 0;
 }
-body.overlay-window-mode .overlay-cards-container.preserve-aspect .overlay-card.leaving {
+body.overlay-window-mode .overlay-cards-container.fixed-card-size .overlay-card.leaving {
   width: var(--overlay-card-width);
   height: var(--overlay-card-height);
   margin: auto;
@@ -10316,11 +10385,7 @@ body.overlay-window-mode .overlay-cards-container.preserve-aspect .overlay-card.
 }
 
 .overlay-cards-container.layout-minimalist {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 4px 6px 6px;
-  overflow-y: auto;
+  gap: 6px;
 }
 
 .overlay-mini-item {
@@ -10332,7 +10397,8 @@ body.overlay-window-mode .overlay-cards-container.preserve-aspect .overlay-card.
   backdrop-filter: blur(8px);
   border: 1px solid transparent;
   border-radius: 6px;
-  transition: all 0.15s ease;
+  overflow: hidden;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
 
 .overlay-mini-item.speaking {

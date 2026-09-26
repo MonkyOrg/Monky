@@ -166,6 +166,11 @@ export class NativeScreenController {
     clientLog.error('SCREEN_SHARE', 'Native screen operation failed', { error: messageOf(error) });
   }
 
+  private warnRetirement(result: Extract<NativeScreenCommandResult, { kind: 'retired-with-errors' }>): void {
+    clientLog.warn('SCREEN_SHARE', 'Native media retired with cleanup errors',
+      { error: result.error, remoteAcknowledged: result.remoteAcknowledged });
+  }
+
   private async ok(call: Call, command: NativeScreenCommand): Promise<void> {
     this.current(call);
     const work = call.api.nativeScreenCommand(command);
@@ -173,6 +178,10 @@ export class NativeScreenController {
     let result: NativeScreenCommandResult;
     try { result = await work; }
     finally { call.controls.delete(work); }
+    if (result.kind === 'retired-with-errors' && (command.action === 'source-remove' || command.action === 'stop')) {
+      this.warnRetirement(result);
+      return;
+    }
     if (result.kind !== 'ok') throw new Error(`Unexpected native screen response to ${command.action}.`);
   }
 
@@ -986,8 +995,7 @@ export class NativeScreenController {
         }
       } else result = await call.api.nativeScreenCommand({ action: 'leave-local', callId: call.config.callId });
       if (result.kind === 'retired-with-errors')
-        clientLog.warn('SCREEN_SHARE', 'Native media retired with cleanup errors',
-          { error: result.error, remoteAcknowledged: result.remoteAcknowledged });
+        this.warnRetirement(result);
       else if (result.kind !== 'ok') throw new Error('Native call retirement returned an invalid acknowledgement.');
       await Promise.allSettled([call.ready, ...call.watchTasks.values(), ...call.sourceTasks.values(),
         ...[...call.sources.values()].map(source => source.ready)]);

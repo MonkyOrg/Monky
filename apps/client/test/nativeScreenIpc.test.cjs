@@ -140,6 +140,50 @@ test('driver, runtime, timeout, cancellation and retirement failures never silen
   }
 });
 
+test('Automatic can verify H264 hardware after a retired AV1 initialization failure without selecting software', async () => {
+  const compiled = ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf', 'obs_nvenc_h264_tex', 'obs_x264'];
+  const failure = Object.assign(new Error('AMF AV1 source-free probe; CreateComponent(AV1) status=1'),
+    { code: 'ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE' });
+  const tried = [], diagnostics = [];
+  const result = await policy.exports.selectScreenEncoding('automatic', 'hardware', 'auto', compiled,
+    async selection => {
+      tried.push(selection.encoder);
+      if (selection.encoder === 'av1_texture_amf') throw failure;
+      if (selection.encoder === 'obs_nvenc_av1_tex')
+        throw Object.assign(new Error('Unsupported selected adapter'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+      assert.equal(selection.encoder, 'h264_texture_amf');
+    }, true, (selection, error) => diagnostics.push({ selection, error }));
+  assert.deepEqual(tried, ['av1_texture_amf', 'obs_nvenc_av1_tex', 'h264_texture_amf']);
+  assert.equal(result.selection.encoder, 'h264_texture_amf');
+  assert.equal(result.selection.mode, 'hardware');
+  assert.equal(result.fallback, false);
+  assert.deepEqual(result.hardware, { available: true, reason: null });
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].error, failure);
+});
+
+test('unresolved hardware initialization errors forbid automatic Software and uncertain retirement stops all probing', async () => {
+  const failure = Object.assign(new Error('AMF component initialization failed'),
+    { code: 'ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE' });
+  const compiled = ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'];
+  const tried = [], diagnostics = [];
+  await assert.rejects(policy.exports.selectScreenEncoding('automatic', 'hardware', 'auto', compiled,
+    async selection => {
+      tried.push(selection.encoder);
+      if (selection.encoder === 'av1_texture_amf') throw failure;
+      throw Object.assign(new Error('Unsupported profile'), { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
+    }, true, (_selection, error) => diagnostics.push(error)), error => error === failure);
+  assert.deepEqual(tried, ['av1_texture_amf', 'h264_texture_amf']);
+  assert.deepEqual(diagnostics, [failure]);
+  const pending = Object.assign(new AggregateError([failure, new Error('Retirement pending')]),
+    { code: failure.code });
+  const blocked = [];
+  await assert.rejects(policy.exports.selectScreenEncoding('automatic', 'hardware', 'auto', compiled,
+    async selection => { blocked.push(selection.encoder); throw pending; }, true,
+    () => assert.fail('An unretired probe cannot be treated as a candidate failure')), error => error === pending);
+  assert.deepEqual(blocked, ['av1_texture_amf']);
+});
+
 test('explicit software is usable despite a visibly reported hardware driver error', async () => {
   const result = await policy.exports.selectScreenEncoding('manual', 'software', 'h264', ['obs_nvenc_h264_tex', 'obs_x264'],
     async selection => { if (selection.mode === 'hardware') throw new Error('Driver initialization failed'); });
@@ -261,6 +305,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
         profile: shared.getScreenShareProfile(this.options.source.video, this.options.quality, this.options.source.codec),
         readErrors: 0, rtp: [], decoders: [] };
     }
+    failureDiagnostics() { return [{ kind: 'engine', state: 'ready', decodedFrames: 0 }]; }
     async close() {
       if (this.closed) return;
       this.closed = true;
@@ -295,6 +340,7 @@ function fixture(t, { gpu, directory, role = 'publisher', platform = 'win32',
         else if (options.encoder !== encoder) throw Object.assign(new Error('Encoder is unsupported by this adapter.'),
           { code: 'ERR_SCREEN_CAPTURE_ENCODER_UNSUPPORTED' });
         return { encoderId: options.encoder, codec: encoderCodec(options.encoder), mode: encoderMode(options.encoder),
+          adapterIndex: 0, vendorId: options.encoder.startsWith('obs_nvenc_') ? 0x10de : 0x1002, deviceId: 1,
           encoderInitialized: true, sourceCaptured: false, hardwareQualified: false, hardwareSessionConfirmed: false };
       },
       loadRuntime: () => ({ capture: { captureKinds: ['window', 'monitor', 'game'],
@@ -653,6 +699,85 @@ test('receiver lifecycle records watch, playing and unwatch once without logging
   assert.ok(f.logs.some(entry => entry.message === 'Native screen unwatch-requested'));
   assert.ok(f.logs.some(entry => entry.message === 'Native screen subscription-retirement-result' && entry.data.closed));
   assert.doesNotMatch(JSON.stringify(f.logs), /secret-|private-peer|sdp|credential/);
+});
+
+test('first receiver failure persists cached health once without stopping recovery or masking its cause', async t => {
+  for (const failedRead of [false, true]) {
+    const f = fixture(t, { role: 'viewer' });
+    await f.join(); await f.participants();
+    await f.watch();
+    await f.accepted(f.sent.find(event => event.type === 'signal' && event.signal.action === 'watch').signal);
+    const endpoint = f.endpoints[0];
+    let reads = 0;
+    endpoint.failureDiagnostics = () => {
+      reads++;
+      if (failedRead) throw new Error('secret-native-read-failure');
+      return [{ kind: 'decoder-operation', operation: 'core-create', inProgress: 1 }];
+    };
+    for (let index = 0; index < 100; index++)
+      endpoint.options.onDiagnostic(Object.assign(new Error('secret-native-backpressure'),
+        { code: 'ERR_RTC_DECODER_BACKPRESSURE' }));
+    assert.equal(reads, 1);
+    assert.equal(endpoint.closed, false);
+    assert.equal(f.logs.filter(entry => entry.message === 'Native screen receive-health').length, failedRead ? 0 : 1);
+    assert.equal(f.logs.filter(entry => entry.message === 'Native screen receive-health-read failed').length, failedRead ? 1 : 0);
+    assert.ok(f.logs.some(entry => entry.message === 'Native screen receive-diagnostic failed'
+      && entry.data.nativeCodes.includes('ERR_RTC_DECODER_BACKPRESSURE')));
+    assert.doesNotMatch(JSON.stringify(f.logs), /secret-/);
+    await f.command({ action: 'leave' });
+  }
+});
+
+test('a later terminal receiver failure gets a fresh cached observation after an earlier diagnostic', async t => {
+  const f = fixture(t, { role: 'viewer' });
+  await f.join(); await f.participants();
+  await f.watch();
+  await f.accepted(f.sent.find(event => event.type === 'signal' && event.signal.action === 'watch').signal);
+  const endpoint = f.endpoints[0];
+  let reads = 0;
+  endpoint.failureDiagnostics = () => [{ kind: 'decoder-operation', operation: 'mft-process-output', calls: ++reads }];
+  const warning = Object.assign(new Error('Temporary backpressure'), { code: 'ERR_RTC_DECODER_BACKPRESSURE' });
+  for (let index = 0; index < 100; index++) endpoint.options.onDiagnostic(warning);
+  const terminal = Object.assign(new Error('The native process exited'), { code: 'ERR_RTC_HOST_EXIT', hostExited: true });
+  endpoint.options.onError(terminal);
+  endpoint.options.onError(terminal);
+  assert.equal(reads, 2);
+  const health = f.logs.filter(entry => entry.message === 'Native screen receive-health');
+  assert.deepEqual(health.map(entry => entry.data.trigger), ['diagnostic', 'terminal']);
+  assert.equal(health[1].data.observations[0].calls, 2);
+  await f.command({ action: 'leave' });
+});
+
+test('RTC host exits retain bounded OS status without exporting native messages or arbitrary fields', async t => {
+  const f = fixture(t, { role: 'viewer' });
+  await f.join(); await f.participants();
+  await f.watch();
+  await f.accepted(f.sent.find(event => event.type === 'signal' && event.signal.action === 'watch').signal);
+  const endpoint = f.endpoints[0];
+  for (const [exitCode, signal, expectedCode, expectedSignal] of [
+    [3221225477, null, 3221225477, null],
+    [-1073741819, null, -1073741819, null],
+    [null, 'SIGSEGV', null, 'SIGSEGV'],
+    [4294967296, 'secret-signal', null, null],
+    ['secret-exit-code', 'secret-signal', null, null],
+  ]) {
+    endpoint.options.onDiagnostic(Object.assign(new Error('secret-native-fault-message'), {
+      code: 'ERR_RTC_HOST_EXIT', hostExited: true, exitCode, signal, sourceTitle: 'secret-title',
+      path: 'secret-path', detail: 'secret-driver-detail',
+    }));
+    const entry = f.logs.findLast(value => value.message === 'Native screen receive-diagnostic failed');
+    assert.deepEqual(entry.data.nativeDiagnostics, [{
+      kind: 'rtc-host-exit', hostExited: true, exitCode: expectedCode,
+      exitCodeHex: expectedCode === null ? null : '0xc0000005', signal: expectedSignal,
+    }]);
+  }
+  endpoint.options.onDiagnostic(Object.assign(new Error('secret-not-yet-exited'), {
+    code: 'ERR_RTC_HOST_EXIT', hostExited: false, exitCode: 3221225477,
+  }));
+  assert.equal(f.logs.findLast(value => value.message === 'Native screen receive-diagnostic failed')
+    .data.nativeDiagnostics, undefined);
+  assert.doesNotMatch(JSON.stringify(f.logs), /secret-/);
+  await f.command({ action: 'leave' });
 });
 
 test('asynchronous capture and preview failures persist bounded diagnostics without changing source ownership', async t => {
@@ -1407,6 +1532,65 @@ test('same-call game/window to monitor swaps retire PCM, reset selectors and rej
     .map(entry => entry.data.call)).size, 1, 'All swaps remain in the original native call');
 });
 
+test('source Stop acknowledges proven retirement despite a cleanup error and permits reuse in the same call', async t => {
+  const f = fixture(t);
+  await f.join();
+  const { source } = await f.addSource('retired-source', { audio: false });
+  await f.command({ action: 'preview-start', shareId: source.shareId,
+    sourceInstanceId: source.instanceId, presentationId: randomUUID() });
+  const endpoint = f.endpoints[0], close = endpoint.close.bind(endpoint);
+  endpoint.close = async () => {
+    await close();
+    throw new Error('Original stop failed after the media owner actually retired');
+  };
+  const result = await f.command({ action: 'source-remove', shareId: source.shareId });
+  assert.equal(result.kind, 'retired-with-errors');
+  assert.match(result.error, /Original stop failed/);
+  assert.equal(endpoint.closed, true);
+  assert.equal((await f.command({ action: 'stats' })).publishers.length, 0);
+  const replacement = (await f.addSource(source.shareId, { audio: false })).source;
+  assert.notEqual(replacement.instanceId, source.instanceId);
+  await f.command({ action: 'source-remove', shareId: replacement.shareId });
+  await f.service.prepareShutdown();
+});
+
+test('Watch Stop acknowledges a closed receiver with cleanup errors without poisoning the next Watch', async t => {
+  const f = fixture(t, { role: 'viewer' });
+  await f.join(); await f.participants();
+  const old = await f.watch();
+  await f.accepted(f.sent.findLast(event => event.type === 'signal' && event.signal.action === 'watch').signal);
+  const endpoint = f.endpoints[0], close = endpoint.close.bind(endpoint);
+  endpoint.close = async () => {
+    await close();
+    throw new Error('Receiver reported failure after actual closure');
+  };
+  const result = await f.command({ action: 'stop', publisherSessionId: 'publisher',
+    shareId: f.source.shareId, presentationId: old.presentationId });
+  assert.equal(result.kind, 'retired-with-errors');
+  assert.equal(endpoint.closed, true);
+  const replacement = await f.watch();
+  assert.notEqual(replacement.presentationId, old.presentationId);
+  await f.accepted(f.sent.findLast(event => event.type === 'signal' && event.signal.action === 'watch').signal);
+  assert.equal(f.endpoints.length, 2);
+  assert.equal(f.endpoints[1].closed, false);
+  await f.command({ action: 'leave' });
+});
+
+test('application shutdown finishes after all original owners retire even if a native close reported an error', async t => {
+  const f = fixture(t, { role: 'viewer' });
+  await f.join(); await f.participants(); await f.watch();
+  await f.accepted(f.sent.findLast(event => event.type === 'signal' && event.signal.action === 'watch').signal);
+  const endpoint = f.endpoints[0], close = endpoint.close.bind(endpoint);
+  endpoint.close = async () => {
+    await close();
+    throw new Error('Native close failed after proven local retirement');
+  };
+  await f.service.prepareShutdown();
+  assert.equal(endpoint.closed, true);
+  assert.equal((await f.command({ action: 'leave' })).kind, 'ok');
+  assert.ok(f.logs.some(entry => entry.message === 'Native screen shutdown-locally-retired'));
+});
+
 test('shutdown preparation keeps the real Main RPC bridge live until native retirement, then accepts only retired-call goodbye', async t => {
   const f = fixture(t, { role: 'viewer' });
   f.config.mode = 'sfu';
@@ -1966,6 +2150,36 @@ for (const [mode, encoder] of [['hardware', 'av1_texture_amf'], ['software', 'mo
     assert.equal(f.removedDirectories.length, f.encodingProbes.length);
   });
 }
+
+test('Main persists the retired AV1 failure while independently proving H264 hardware for discovery and sharing', async t => {
+  const failure = Object.assign(new Error('AMF AV1 source-free probe; CreateComponent(AV1) status=1'),
+    { code: 'ERR_SCREEN_CAPTURE_AMF_UNAVAILABLE' });
+  const f = fixture(t, {
+    compiledEncoders: ['av1_texture_amf', 'h264_texture_amf', 'obs_x264'],
+    encodingProbe: options => { if (options.encoder === 'av1_texture_amf') throw failure; },
+  });
+  const discovery = await f.invoke({ action: 'probe-encoding', probeId: randomUUID(),
+    video, encodingStrategy: 'automatic', encodingMode: 'hardware', codec: 'auto' });
+  assert.equal(discovery.availability.selection.encoder, 'h264_texture_amf');
+  assert.equal(discovery.availability.fallback, false);
+  assert.equal(f.probes.length, 0);
+  const diagnostic = f.logs.find(entry => entry.message === 'Native screen encoder-candidate failed');
+  assert.ok(diagnostic.data.nativeCodes.includes(failure.code));
+  assert.equal(diagnostic.data.retirementConfirmed, true);
+  assert.equal(diagnostic.data.continuingHardwareDiscovery, true);
+  const ready = f.logs.find(entry => entry.message === 'Native screen encoder-candidate-ready');
+  assert.equal(ready.data.encoder, 'h264_texture_amf');
+  assert.equal(ready.data.adapterIndex, 0);
+  assert.equal(ready.data.vendorId, 0x1002);
+  assert.equal(ready.data.sourceCaptured, false);
+  assert.equal(ready.data.retirementConfirmed, true);
+  await f.join();
+  const added = await f.addSource();
+  assert.equal(added.source.codec, 'h264');
+  assert.equal(added.encoding.selection.mode, 'hardware');
+  assert.equal(f.probes[0].options.encoder, 'h264_texture_amf');
+  assert.equal(f.encodingProbes.some(probe => probe.encoder === 'obs_x264'), false);
+});
 
 test('Main Automatic source admission ignores dormant manual preferences and independently rediscovers hardware', async t => {
   const f = fixture(t, { encoder: 'av1_texture_amf', compiledEncoders: ['av1_texture_amf', 'obs_x264'] });

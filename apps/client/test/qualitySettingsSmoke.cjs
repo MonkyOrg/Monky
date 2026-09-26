@@ -39,10 +39,10 @@ async function runQualitySettingsSmoke() {
   media.getUserMedia = denyMedia;
   media.getDisplayMedia = denyMedia;
   const [{ SettingsModal }, { settingsStore }, { appEvents }, { initTooltips }, language, { videoService },
-    { webRtcManager }, { ScreenSharePickerModal }] = await Promise.all([
+    { webRtcManager }, { ScreenSharePickerModal }, { SelectEnhancer }] = await Promise.all([
     import('/views/SettingsModal.ts'), import('/stores/settingsStore.ts'), import('/core/EventBus.ts'),
     import('/core/TooltipService.ts'), import('/i18n/index.ts'), import('/core/VideoService.ts'),
-    import('/core/WebRtcManager.ts'), import('/views/ScreenSharePickerModal.ts'),
+    import('/core/WebRtcManager.ts'), import('/views/ScreenSharePickerModal.ts'), import('/core/SelectEnhancer.ts'),
   ]);
   const originalLanguage = language.getLanguage();
   const originalApi = window.api;
@@ -86,6 +86,8 @@ async function runQualitySettingsSmoke() {
     } };
   };
   const disposeTooltips = initTooltips();
+  const selects = new SelectEnhancer();
+  selects.init();
   try {
     for (const [locale, platform] of [['pt-BR', 'win32'], ['en', 'win32'], ['pt-BR', 'darwin'], ['en', 'darwin']]) {
       hardwareAvailable = true;
@@ -176,7 +178,7 @@ async function runQualitySettingsSmoke() {
       'Automatic/Manual, encoding and codec must be grouped exactly once.');
       const helperStyle = getComputedStyle(quality.querySelector('#screen-receiver-apply'));
       const standardHelperStyle = { fontSize: helperStyle.fontSize, color: helperStyle.color, marginTop: helperStyle.marginTop };
-      for (const selector of ['#screen-codec-description', '#screen-encoding-status', '#screen-encoding-apply']) {
+      for (const selector of ['#screen-codec-description', '#screen-encoding-status', '#screen-encoding-choices', '#screen-encoding-apply']) {
         const helper = quality.querySelector(selector);
         const style = getComputedStyle(helper);
         check(helper.classList.contains('audio-device-status')
@@ -202,31 +204,60 @@ async function runQualitySettingsSmoke() {
       check(encodingStatus.textContent === language.t('settings.screenEncodingReady', { codec: 'AV1' }),
         'Available encoding must show the concise localized status.');
       automatic.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
-      await settled(() => !hardware.disabled && !software.disabled && !screenCodec.disabled, `${locale}/manual selection`);
+      const choicesStatus = quality.querySelector('#screen-encoding-choices');
+      const encodingSettled = () => encodingStatus.getAttribute('aria-busy') === 'false'
+        && choicesStatus.getAttribute('aria-busy') === 'false';
+      await settled(() => settingsStore.screenEncodingStrategy === 'manual' && encodingSettled(), `${locale}/manual selection`);
       check(settingsStore.screenEncodingStrategy === 'manual' && screenCodec.value === 'h264',
         'Manual restores the saved exact choices and unlocks the encoding and codec controls.');
       hardwareAvailable = false;
       screenCodec.value = 'av1';
       screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
-      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/manual unavailable combination`);
+      await settled(encodingSettled, `${locale}/manual unavailable combination`);
       check(!hardware.disabled && hardware.getAttribute('aria-pressed') === 'true'
-        && software.getAttribute('aria-pressed') === 'false' && screenCodec.value === 'av1'
+        && software.getAttribute('aria-pressed') === 'false' && screenCodec.value === 'h264'
+        && settingsStore.preferredScreenCodec === 'h264' && screenCodec.querySelector('[value="av1"]').disabled
         && settingsStore.screenEncodingMode === 'hardware' && settingsStore.screenEncodingStrategy === 'manual'
         && encodingStatus.textContent === language.t('settings.screenEncodingProfileUnavailable', {
           codec: 'AV1', mode: language.t('settings.screenEncodingHardwareShort'),
         }),
-      `An unavailable Manual combination must retain explicit choices and show a friendly localized explanation, not backend details: ${JSON.stringify({
+      `An unavailable Manual change must roll back, disable the rejected codec and show a friendly localized explanation: ${JSON.stringify({
         disabled: hardware.disabled, hardware: hardware.getAttribute('aria-pressed'),
         software: software.getAttribute('aria-pressed'), codec: screenCodec.value,
         savedCodec: settingsStore.preferredScreenCodec, mode: settingsStore.screenEncodingMode,
         strategy: settingsStore.screenEncodingStrategy, status: encodingStatus.textContent,
       })}`);
+      const savedEncoding = localStorage.getItem('monky_settings');
+      const rejectedProbeCount = encodingRequests.length;
+      screenCodec.scrollIntoView({ block: 'center' });
+      screenCodec.focus();
+      screenCodec.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      await settled(() => !!document.querySelector('.monky-select-popup'), `${locale}/codec dropdown`);
+      const disabledAv1 = [...document.querySelectorAll('.monky-select-popup [role="option"]')]
+        .find(row => row.textContent.startsWith(language.t('settings.codecAv1')));
+      check(disabledAv1?.getAttribute('aria-disabled') === 'true'
+        && disabledAv1.textContent.includes(language.t('screenShare.unavailable'))
+        && choicesStatus.textContent.includes(language.t('settings.screenEncodingProfileUnavailable', {
+          codec: 'AV1', mode: language.t('settings.screenEncodingHardwareShort'),
+        })),
+      'The custom dropdown must retain unavailable AV1 with disabled semantics and a visible localized Hardware reason.');
+      disabledAv1.click();
+      check(screenCodec.value === 'h264' && localStorage.getItem('monky_settings') === savedEncoding
+        && encodingRequests.length === rejectedProbeCount, 'Pointer activation cannot save or probe a disabled codec.');
+      screenCodec.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+      const activeCodec = document.getElementById(screenCodec.getAttribute('aria-activedescendant'));
+      check(activeCodec?.textContent.startsWith(language.t('settings.codecH264')),
+        'Keyboard navigation must skip unavailable AV1 rather than focus a forbidden Manual choice.');
+      screenCodec.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      await settled(encodingSettled, `${locale}/codec keyboard confirmation`);
+      check(screenCodec.value === 'h264' && localStorage.getItem('monky_settings') === savedEncoding,
+        'Keyboard confirmation must preserve the verified codec without saving a rejected draft.');
       hardwareAvailable = true;
       screenCodec.value = 'h264';
       screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
-      await settled(() => !hardware.disabled, `${locale}/manual supported combination`);
+      await settled(encodingSettled, `${locale}/manual supported combination`);
       hardware.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
-      await settled(() => !software.disabled && software.getAttribute('aria-pressed') === 'true', `${locale}/software encoding`);
+      await settled(() => settingsStore.screenEncodingMode === 'software' && encodingSettled(), `${locale}/software encoding`);
       settingsStore.load(false);
       check(settingsStore.screenEncodingMode === 'software' && settingsStore.screenEncodingStrategy === 'manual'
         && hardware.getAttribute('aria-pressed') === 'false'
@@ -235,11 +266,13 @@ async function runQualitySettingsSmoke() {
       hardwareAvailable = false;
       screenCodec.value = 'av1';
       screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
-      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/unsupported hardware`);
+      await settled(encodingSettled, `${locale}/unsupported hardware`);
       check(!hardware.disabled && hardware.isConnected && getComputedStyle(hardware).display !== 'none'
         && encodingStatus.textContent === language.t('settings.screenEncodingHardwareUnavailable')
-        && software.getAttribute('aria-pressed') === 'true',
-      'Unavailable Hardware must remain selectable for another profile while explicit Software stays selected with a friendly explanation.');
+        && software.getAttribute('aria-pressed') === 'true' && !av1.disabled
+        && settingsStore.preferredScreenCodec === 'av1'
+        && JSON.parse(localStorage.getItem('monky_settings')).preferredScreenCodec === 'av1',
+      'A verified Hardware H264 alternative remains available while Software AV1 stays selected with a friendly explanation.');
       automatic.click();
       await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/automatic fallback`);
       settingsStore.load(false);
@@ -248,19 +281,19 @@ async function runQualitySettingsSmoke() {
         && hardware.disabled && software.disabled && screenCodec.disabled,
       'Automatic fallback must show Software/H.264 without persisting its resolved choices or switching to Manual.');
       manual.click();
-      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/manual restore`);
+      await settled(encodingSettled, `${locale}/manual restore`);
       check(screenCodec.value === 'av1' && !screenCodec.disabled && software.getAttribute('aria-pressed') === 'true',
         'Returning to Manual must restore the exact previous Software/AV1 choice.');
       screenCodec.value = 'h264';
       screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
-      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/manual H264`);
+      await settled(encodingSettled, `${locale}/manual H264`);
       hardwareAvailable = true;
       const changeQuality = async (id, value) => {
         const field = quality.querySelector(`#${id}`);
         field.value = value;
         field.dispatchEvent(new Event('change', { bubbles: true }));
         await wait();
-        await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/${id} compatibility`);
+        await settled(encodingSettled, `${locale}/${id} compatibility`);
       };
       const nonScreenQuality = () => Object.fromEntries(Object.entries(settingsStore.customProfile)
         .filter(([key]) => !key.startsWith('screen')));
@@ -269,7 +302,7 @@ async function runQualitySettingsSmoke() {
       await changeQuality('q-res-screen', '3840x2160');
       await changeQuality('q-select-screenFps', '120');
       hardware.click();
-      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/hardware AV1 4K120`);
+      await settled(encodingSettled, `${locale}/hardware AV1 4K120`);
       check(settingsStore.customProfile.screenFps === 120 && screenCodec.value === 'av1'
         && hardware.getAttribute('aria-pressed') === 'true',
       'A supported Hardware AV1 4K120 profile must retain its requested FPS.');
@@ -954,6 +987,7 @@ async function runQualitySettingsSmoke() {
     check(mediaRequests === 0, 'This smoke must never request microphone, camera or display capture.');
   } finally {
     modal?.close();
+    selects.dispose();
     disposeTooltips();
     window.api = originalApi;
     Object.assign(settingsStore, original);

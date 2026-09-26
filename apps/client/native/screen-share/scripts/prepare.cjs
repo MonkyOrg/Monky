@@ -55,8 +55,11 @@ async function prepare(config) {
   });
   require('./buildCapture.cjs').build({ stock: capture.stock, dependencies: capture.dependencies,
     python: interpreter, ...selected });
+  const thumbnails = require('./buildThumbnails.cjs');
+  thumbnails.build({ ...thumbnails.options([]), python: interpreter, ...selected });
   generateNotices();
   const runtime = require(path.join(root, 'index.cjs')).loadRuntime();
+  require(path.join(root, 'index.cjs')).loadThumbnailRuntime();
   console.log(JSON.stringify({
     nativeScreenReady: true, obsVersion: runtime.obs.version,
     contractRevision: runtime.rtc.capabilities().contractRevision,

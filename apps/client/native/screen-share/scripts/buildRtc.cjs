@@ -143,6 +143,13 @@ function build(config) {
         },
         VCLinkerTool: { AdditionalOptions: ['/guard:cf'], GenerateDebugInformation: 'false' },
       },
+    }, {
+      target_name: 'monky_native_handles', sources: [path.join(engineDirectory, 'node', 'napi_handles.cc')],
+      defines: ['NAPI_VERSION=8', 'NOMINMAX', 'WIN32_LEAN_AND_MEAN'],
+      msvs_settings: {
+        VCCLCompilerTool: { AdditionalOptions: ['/std:c++20', '/permissive-'], RuntimeLibrary: 2 },
+        VCLinkerTool: { AdditionalOptions: ['/guard:cf'], GenerateDebugInformation: 'false' },
+      },
     }] }, null, 2) + '\n');
     execute(process.execPath, [require.resolve('node-gyp/bin/node-gyp.js'), 'configure', '--release',
       '--jobs=1', `--msvs_version=${toolchain.visualStudio.path}`, `--directory=${addonBuild}`], { env });
@@ -161,7 +168,8 @@ function build(config) {
 
     const bin = path.join(root, 'bin', 'win32-x64');
     fs.mkdirSync(bin, { recursive: true });
-    const binaries = [dll, addon, path.join(output, 'monky_av1.dll')].map(filename => {
+    const binaries = [dll, addon, path.join(output, 'monky_av1.dll'),
+      path.join(addonBuild, 'build', 'Release', 'monky_native_handles.node')].map(filename => {
       const bytes = fs.readFileSync(filename);
       write(path.join(bin, path.basename(filename)), bytes);
       return { name: path.basename(filename), bytes: bytes.length, sha256: digest(bytes) };

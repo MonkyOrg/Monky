@@ -10,6 +10,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  mac-native-sources:
+    uses: ./.github/workflows/native-macos-validation.yml
+
   light-native:
     name: Light native (${{ matrix.target }})
     strategy:

@@ -1,17 +1,18 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { assertNativeRtcEngineClosed } = require('./nativeRtcCommands.cjs');
 const STARTUP_BITRATE_KBPS = 150;
 const RECOVERY_REASONS = new Set(['rtc-unconsumed', 'input-expired', 'publication-expired', 'codec-expired', 'clock-sample-uncertain']);
 
 class LiveSenderFlow {
-  constructor({ engine, sourceId, onError, initialBitrateKbps, now = () => performance.now() }) {
+  constructor({ engine, sourceId, onError, initialBitrateKbps, now = () => performance.now(), onWritable = () => {} }) {
     assert.equal(typeof engine?.submitEncodedFrame, 'function');
     assert.ok(Number.isSafeInteger(sourceId) && sourceId > 0);
     assert.equal(typeof onError, 'function');
     assert.ok(Number.isInteger(initialBitrateKbps) && initialBitrateKbps >= 50 &&
       initialBitrateKbps <= 80000 && initialBitrateKbps % 50 === 0);
-    Object.assign(this, { engine, sourceId, onError, now });
+    Object.assign(this, { engine, sourceId, onError, now, onWritable });
     this.demand = false; this.connected = false; this.needsIdr = true; this.paused = false;
     this.capturePaused = false;
     this.currentKbps = initialBitrateKbps; this.desiredKbps = initialBitrateKbps; this.lastUpdateAt = -Infinity;
@@ -141,6 +142,16 @@ class LiveSenderFlow {
     return work;
   }
   packet(frame) {
+    // The capture pipe retains this one AU until the child acknowledges its
+    // native copy. A replay consumes the receipt, never submits a second copy.
+    if (this.admission) {
+      assert.equal(this.admission.frameId, frame.frameId);
+      if (!this.admission.settled) return false;
+      const { error } = this.admission;
+      this.admission = null;
+      if (error) return this.rejectFrame(frame, error);
+      return;
+    }
     if (this.closing || !this.connected || !this.demand) {
       this.counts.observed++; this.counts.notWatched++; this.needsIdr = true; this.waitingSince = null; return;
     }
@@ -166,19 +177,39 @@ class LiveSenderFlow {
         timebaseNumerator: frame.timebaseNumerator, timebaseDenominator: frame.timebaseDenominator,
       });
     } catch (error) {
-      if (error.code === 'ERR_RTC_ENCODED_RECOVERY' && error.status === 8) {
-        this.counts.observed++; this.counts.nativeRecoveryRejections++;
-        this.needsIdr = true; this.waitingSince ??= this.now();
-        assert.ok(this.now() - this.waitingSince <= 1500, 'Native input did not recover through a fresh IDR within1500ms.');
-        this.requestIdr();
-        return;
-      }
-      // QUEUE_FULL means no copy was admitted. Keep that AU in the bounded
-      // pipe framer until an actual native retirement returns its credit.
-      if (error.code !== 'ERR_RTC_ENCODED_INPUT' || error.status !== 3 || !this.inFlight.size) throw error;
-      this.counts.inputBackpressure++;
+      return this.rejectFrame(frame, error);
+    }
+    if (this.engine.asynchronousNative === true) {
+      assert.equal(typeof result?.then, 'function');
+      const admission = { frameId: frame.frameId, settled: false, error: null };
+      this.admission = admission;
+      // Retain metadata only; serialized IPC and the bounded capture pipe own
+      // their separate byte copies. No timestamp or copy receipt is invented.
+      const identity = { frameId: frame.frameId, keyframe: frame.keyframe };
+      admission.work = result.then(receipt => this.admitFrame(identity, receipt)).catch(error => {
+        admission.error = error;
+      }).then(() => {
+        admission.settled = true;
+        this.onWritable();
+      });
+      void admission.work.catch(error => this.fail(error));
       return false;
     }
+    this.admitFrame(frame, result);
+  }
+  rejectFrame(frame, error) {
+    if (error.code === 'ERR_RTC_ENCODED_RECOVERY' && error.status === 8) {
+      this.counts.observed++; this.counts.nativeRecoveryRejections++;
+      this.needsIdr = true; this.waitingSince ??= this.now();
+      assert.ok(this.now() - this.waitingSince <= 1500, 'Native input did not recover through a fresh IDR within1500ms.');
+      this.requestIdr();
+      return;
+    }
+    if (error.code !== 'ERR_RTC_ENCODED_INPUT' || error.status !== 3 || !this.inFlight.size) throw error;
+    this.counts.inputBackpressure++;
+    return false;
+  }
+  admitFrame(frame, result) {
     assert.equal(result.copied, true); assert.equal(result.frameId, frame.frameId);
     assert.equal(result.sourceId, this.sourceId); assert.equal(result.networkDeliveryConfirmed, false);
     this.inFlight.add(frame.frameId);
@@ -193,11 +224,19 @@ class LiveSenderFlow {
   }
   async close() {
     this.closing = true; clearTimeout(this.rateTimer); this.rateTimer = null;
-    const outcomes = await Promise.allSettled([this.rateWork, this.idrWork].filter(Boolean));
+    const outcomes = await Promise.allSettled([this.rateWork, this.idrWork, this.admission?.work].filter(Boolean));
     const rejected = outcomes.filter(result => result.status === 'rejected').map(result => result.reason);
     this.counts.cancelledFeedbackRequests = rejected.filter(error => error.name === 'AbortError').length;
     const failures = rejected.filter(error => error.name !== 'AbortError');
     if (failures.length) throw new AggregateError(failures, 'Live feedback did not retire cleanly.');
+  }
+  finishAfterEngineClose(commands) {
+    assertNativeRtcEngineClosed(commands, this.engine);
+    if (this.engine.asynchronousNative !== true) return;
+    assert.equal(this.engine.snapshot().process.exited, true);
+    this.counts.copiesDisposedWithHost = this.inFlight.size;
+    this.inFlight.clear();
+    this.admission = null;
   }
   snapshot() {
     return { ...this.counts, demand: this.demand, connected: this.connected, paused: this.paused, capturePaused: this.capturePaused,

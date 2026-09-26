@@ -104,6 +104,7 @@ struct MfH264Decoder::Impl {
   };
 
   DecoderConfig config;
+  DecoderNativeCallObserver observer;
   DecoderStats stats;
   FrameSink sink;
   AcceptedSink accepted;
@@ -138,9 +139,16 @@ struct MfH264Decoder::Impl {
   winrt::com_ptr<ID3D11RenderTargetView> inspectRtv;
   winrt::com_ptr<ID3D11Buffer> inspectConstants;
 
-  Impl(const DecoderConfig& config, FrameSink output, AcceptedSink input, RetainedFrames holders)
-      : config(config), sink(std::move(output)), accepted(std::move(input)), retained(std::move(holders)),
+  Impl(const DecoderConfig& config, FrameSink output, AcceptedSink input, RetainedFrames holders,
+       DecoderNativeCallObserver observer)
+      : config(config), observer(std::move(observer)), sink(std::move(output)),
+        accepted(std::move(input)), retained(std::move(holders)),
         bitstream(config.width, config.height, ConfigLevel(config), H264Profile::AnySupported) {}
+
+  template <typename Function>
+  std::invoke_result_t<Function> Native(DecoderNativeOperation operation, Function&& function) {
+    return ObserveDecoderNativeCall(observer, operation, std::forward<Function>(function));
+  }
 
   ~Impl() {
     if (activation) activation->ShutdownObject();
@@ -162,7 +170,7 @@ struct MfH264Decoder::Impl {
 
   void CheckDevice() {
     if (!device) return;
-    const auto hr = device->GetDeviceRemovedReason();
+    const auto hr = Native(DecoderNativeOperation::DeviceCheck, [&] { return device->GetDeviceRemovedReason(); });
     if (FAILED(hr)) { deviceLost = true; Fail("ERR_DECODER_DEVICE_LOST", "Decoder D3D11 device was lost", hr); }
   }
 
@@ -521,14 +529,20 @@ struct MfH264Decoder::Impl {
     desc.ArraySize = 1;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
     desc.MiscFlags = 0;
-    Require(device->CreateTexture2D(&desc, nullptr, frame->texture.put()),
+    Require(Native(DecoderNativeOperation::TextureCreate, [&] {
+      return device->CreateTexture2D(&desc, nullptr, frame->texture.put());
+    }),
             "ERR_DECODER_PRIVATE_TEXTURE", "Cannot allocate bounded immutable private NV12 output");
     // The original IMFSample, not merely its texture, prevents allocator slice reuse.
     copies.push_back({std::move(sample), frame, Clock::now(), input->second.submittedAt});
     submitted.erase(input);
-    context->CopySubresourceRegion(frame->texture.get(), 0, 0, 0, 0, source.get(), subresource, nullptr);
-    const auto signal = context->Signal(fence.get(), frame->readyValue);
-    context->Flush();
+    Native(DecoderNativeOperation::CopySubmit, [&] {
+      context->CopySubresourceRegion(frame->texture.get(), 0, 0, 0, 0, source.get(), subresource, nullptr);
+    });
+    const auto signal = Native(DecoderNativeOperation::FenceSignal, [&] {
+      return context->Signal(fence.get(), frame->readyValue);
+    });
+    Native(DecoderNativeOperation::ContextFlush, [&] { context->Flush(); });
     ++stats.outputSamples;
     ++stats.gpuCopies;
     stats.pendingGpuCopies = copies.size();
@@ -553,13 +567,16 @@ struct MfH264Decoder::Impl {
       output.dwStreamID = outputId;
       DWORD status = 0;
       const auto hr = MeasureEncoderCall(stats.scheduling.processOutput, [&] {
-        return transform->ProcessOutput(0, 1, &output, &status);
+        return Native(DecoderNativeOperation::ProcessOutput, [&] {
+          return transform->ProcessOutput(0, 1, &output, &status);
+        });
       });
       const auto outputAt = Clock::now();
       winrt::com_ptr<IMFSample> sample;
       sample.attach(output.pSample);
       if (output.pEvents) output.pEvents->Release();
       if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+        sample = nullptr;
         ConfigureOutput(false);
         ++stats.streamChanges;
         continue;
@@ -576,7 +593,7 @@ struct MfH264Decoder::Impl {
         Fail("ERR_DECODER_EMPTY_OUTPUT", "Decoder returned success without a real output sample");
       }
       MeasureEncoderCall(stats.scheduling.copyOutput, [&] {
-        CopyOutput(std::move(sample), outputAt);
+        Native(DecoderNativeOperation::OutputCopy, [&] { CopyOutput(std::move(sample), outputAt); });
       });
       lastProgress = Clock::now();
       return true;
@@ -587,7 +604,7 @@ struct MfH264Decoder::Impl {
   void RetireCopies() {
     if (copies.empty()) return;
     if (!deviceLost) {
-      const auto completed = fence->GetCompletedValue();
+      const auto completed = Native(DecoderNativeOperation::FencePoll, [&] { return fence->GetCompletedValue(); });
       if (completed == UINT64_MAX) {
         deviceLost = true;
         Fail("ERR_DECODER_DEVICE_LOST", "Decoder copy fence reported device loss");
@@ -596,7 +613,7 @@ struct MfH264Decoder::Impl {
       while (!copies.empty() && copies.front().frame->readyValue <= completed) {
         auto copy = std::move(copies.front());
         copies.pop_front();
-        copy.originalSample = nullptr;
+        Native(DecoderNativeOperation::SampleReturn, [&] { copy.originalSample = nullptr; });
         ++stats.sampleReturns;
         ++stats.gpuCopiesCompleted;
         const auto now = Clock::now();
@@ -620,7 +637,9 @@ struct MfH264Decoder::Impl {
       }
       if (!copies.empty() && armedFence != copies.front().frame->readyValue) {
         armedFence = copies.front().frame->readyValue;
-        Require(fence->SetEventOnCompletion(armedFence, wake.Get()), "ERR_DECODER_FENCE_EVENT", "Cannot await decoded copy completion");
+        Require(Native(DecoderNativeOperation::FenceArm, [&] {
+          return fence->SetEventOnCompletion(armedFence, wake.Get());
+        }), "ERR_DECODER_FENCE_EVENT", "Cannot await decoded copy completion");
       }
     } else {
       stats.sampleReturns += copies.size();
@@ -631,21 +650,30 @@ struct MfH264Decoder::Impl {
     stats.pendingGpuCopies = copies.size();
   }
 
+  bool SamplesReadyForTransform() {
+    const bool ready = DecoderSamplesReadyForTransform(
+        [&] { RetireCopies(); }, [&] { return copies.size(); });
+    if (!ready) ++stats.scheduling.sampleRetirementDeferrals;
+    return ready;
+  }
+
   void EndPlatform() {
+    if (!SamplesReadyForTransform()) return;
     if (activation) {
       auto owner = std::move(activation);
-      const auto end = transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
-      const auto close = owner->ShutdownObject();
+      const auto end = Native(DecoderNativeOperation::EndStreaming, [&] {
+        return transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+      });
+      const auto close = Native(DecoderNativeOperation::TransformShutdown, [&] { return owner->ShutdownObject(); });
       transform = nullptr;
       streaming = false;
       shutdown = true;
       Require(end, "ERR_DECODER_END_STREAMING", "Decoder end-streaming failed");
       Require(close, "ERR_DECODER_SHUTDOWN", "Decoder activation shutdown failed");
     }
-    if (!copies.empty()) return;
     manager = nullptr;
     if (mfStarted) {
-      const auto hr = MFShutdown();
+      const auto hr = Native(DecoderNativeOperation::PlatformShutdown, [&] { return MFShutdown(); });
       mfStarted = false;
       Require(hr, "ERR_DECODER_MF_SHUTDOWN", "Decoder MF shutdown failed");
     }
@@ -667,6 +695,9 @@ struct MfH264Decoder::Impl {
     }
     unsigned operations = 0;
     while (++operations <= 64) {
+      // An MFT may wait for its output allocator. This worker must first return
+      // original samples whose GPU reads completed, or yield to the fence event.
+      if (!SamplesReadyForTransform()) break;
       if (outputAvailable) {
         if (!CanOutput()) break;
         if (Output()) continue;
@@ -676,7 +707,9 @@ struct MfH264Decoder::Impl {
         PrepareInput(input);
         input.timing.BeforeProcessInput(stats.scheduling, Clock::now());
         const auto hr = MeasureEncoderCall(stats.scheduling.processInput, [&] {
-          return transform->ProcessInput(inputId, input.sample.get(), 0);
+          return Native(DecoderNativeOperation::ProcessInput, [&] {
+            return transform->ProcessInput(inputId, input.sample.get(), 0);
+          });
         });
         if (hr == MF_E_NOTACCEPTING) {
           ++stats.notAccepting;
@@ -754,8 +787,10 @@ struct MfH264Decoder::Impl {
     // Retain all original output samples until our submitted reads complete.
     // Re-signal once so a failure after CopySubresourceRegion cannot lose its retirement fence.
     if (!copies.empty() && !deviceLost) {
-      const auto hr = context->Signal(fence.get(), copies.back().frame->readyValue);
-      context->Flush();
+      const auto hr = Native(DecoderNativeOperation::FenceSignal, [&] {
+        return context->Signal(fence.get(), copies.back().frame->readyValue);
+      });
+      Native(DecoderNativeOperation::ContextFlush, [&] { context->Flush(); });
       Require(hr, "ERR_DECODER_ABORT_FENCE", "Cannot fence decoder reads while aborting");
     }
     EndPlatform();
@@ -928,8 +963,10 @@ float PS(Vertex input) : SV_Target {
 };
 
 MfH264Decoder::MfH264Decoder(const DecoderConfig& config, FrameSink frames,
-                             AcceptedSink accepted, RetainedFrames retained)
-    : impl_(std::make_unique<Impl>(config, std::move(frames), std::move(accepted), std::move(retained))) {
+                             AcceptedSink accepted, RetainedFrames retained,
+                             DecoderNativeCallObserver observer)
+    : impl_(std::make_unique<Impl>(config, std::move(frames), std::move(accepted),
+                                   std::move(retained), std::move(observer))) {
   impl_->Initialize();
 }
 MfH264Decoder::~MfH264Decoder() = default;

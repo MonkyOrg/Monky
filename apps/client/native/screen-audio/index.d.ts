@@ -34,6 +34,9 @@ export function getLastError(): string;
 /** Returns the capture status: 0=idle, 1=starting, 2=capturing, 3=error */
 export function getStatus(): number;
 
+/** Windows UI-thread only. A zero ratio removes the constraint; destruction also removes it. Dimensions are DIPs. */
+export function setWindowResizeAspect(handle: Buffer, ratio: number, extraWidth: number, extraHeight: number): void;
+
 export interface PacketCaptureOptions {
   /** Defaults to the host PID. Packet mode rejects another PID to prevent feedback. */
   excludePid?: number;
