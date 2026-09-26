@@ -933,6 +933,17 @@ export class SfuManager {
     return !!record && !record.consumer.closed && record.sessionId === sessionId && record.channelId === channelId;
   }
 
+  public getConsumerProducerId(sessionId: string, channelId: string, consumerId: string): string | undefined {
+    const record = this.consumers.get(consumerId);
+    return record?.sessionId === sessionId && record.channelId === channelId ? record.producerId : undefined;
+  }
+
+  public revokeConsumers(canReceive: (sessionId: string, channelId: string, producerId: string) => boolean): void {
+    for (const [id, record] of this.consumers) {
+      if (!canReceive(record.sessionId, record.channelId, record.producerId)) this.discardPendingConsumer(id);
+    }
+  }
+
   public async setMicrophonesMuted(sessionId: string, muted: boolean): Promise<void> {
     await Promise.all([...this.producers.values()].filter((record) =>
       record.sessionId === sessionId && record.kind === 'audio' && record.appData.mediaType === 'mic'

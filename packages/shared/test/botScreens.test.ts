@@ -12,8 +12,8 @@ import {
 
 test('authentication shape allows negotiation while the compatibility floor rejects obsolete peers', () => {
   const input = { nickname: 'Member', publicKey: 'ab'.repeat(32), protocolVersion: PROTOCOL_VERSION };
-  assert.equal(PROTOCOL_VERSION, 28);
-  assert.equal(MIN_CLIENT_PROTOCOL, 28);
+  assert.equal(PROTOCOL_VERSION, 29);
+  assert.equal(MIN_CLIENT_PROTOCOL, 29);
   assert.equal(MIN_BOT_PROTOCOL, 24);
   assert.equal(authConnectSchema.safeParse(input).success, true);
   for (const version of [16, 17, 18, 19, 21, 22, 23]) {
@@ -21,12 +21,12 @@ test('authentication shape allows negotiation while the compatibility floor reje
     assert.equal(negotiateProtocol(version, undefined, 'client'), null);
     assert.equal(negotiateProtocol(version, undefined, 'bot'), null);
   }
-  for (const version of [24, 25, 26, 27]) {
+  for (const version of [24, 25, 26, 27, 28]) {
     for (const protocolOffer of [undefined, { minimumVersion: 24, features: ['chat-blocks', 'message-length-setting', 'chat-delivery'] }]) {
       assert.equal(authConnectSchema.safeParse({ ...input, protocolVersion: version, protocolOffer }).success, true);
       assert.equal(negotiateProtocol(version, protocolOffer, 'client'), null);
       assert.deepEqual(negotiateProtocol(version, protocolOffer, 'bot'), {
-        version: 28, minimumVersion: 24, features: protocolOffer ? ['message-length-setting'] : [],
+        version: 29, minimumVersion: 24, features: protocolOffer ? ['message-length-setting'] : [],
       });
     }
     assert.equal(legacyProtocolFallback(version, 'client'), null);
@@ -34,20 +34,20 @@ test('authentication shape allows negotiation while the compatibility floor reje
   }
 });
 
-test('protocol 28 rejects old screen descriptors while retaining negotiated chat features', () => {
+test('protocol 29 rejects old screen privacy descriptors while retaining negotiated chat features', () => {
   assert.deepEqual(createProtocolOffer('client'), {
-    minimumVersion: 28, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo'],
+    minimumVersion: 29, features: ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo'],
   });
   assert.deepEqual(createProtocolOffer('bot'), { minimumVersion: 24, features: ['message-length-setting'] });
-  assert.deepEqual(negotiateProtocol(28, undefined, 'client'), { version: 28, ...createProtocolOffer('client') });
-  assert.deepEqual(negotiateProtocol(28, { minimumVersion: 28, features: [] }, 'client')?.features, []);
-  assert.deepEqual(negotiateProtocol(29, { minimumVersion: 28, features: ['chat-blocks', 'message-delete-undo', 'unknown'] }, 'client'), {
-    version: 28, minimumVersion: 28, features: ['chat-blocks', 'message-delete-undo'],
+  assert.deepEqual(negotiateProtocol(29, undefined, 'client'), { version: 29, ...createProtocolOffer('client') });
+  assert.deepEqual(negotiateProtocol(29, { minimumVersion: 29, features: [] }, 'client')?.features, []);
+  assert.deepEqual(negotiateProtocol(30, { minimumVersion: 29, features: ['chat-blocks', 'message-delete-undo', 'unknown'] }, 'client'), {
+    version: 29, minimumVersion: 29, features: ['chat-blocks', 'message-delete-undo'],
   });
-  assert.equal(negotiateProtocol(29, undefined, 'client'), null);
-  assert.equal(negotiateProtocol(29, { minimumVersion: 29, features: [] }, 'client'), null);
-  for (const offer of [null, { minimumVersion: 28, features: 'chat-blocks' }, { minimumVersion: 29, features: [] }]) {
-    assert.equal(negotiateProtocol(28, offer, 'client'), null);
+  assert.equal(negotiateProtocol(30, undefined, 'client'), null);
+  assert.equal(negotiateProtocol(30, { minimumVersion: 30, features: [] }, 'client'), null);
+  for (const offer of [null, { minimumVersion: 29, features: 'chat-blocks' }, { minimumVersion: 30, features: [] }]) {
+    assert.equal(negotiateProtocol(29, offer, 'client'), null);
   }
 });
 

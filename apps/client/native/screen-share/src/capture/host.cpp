@@ -904,7 +904,10 @@ class Host {
           const bool validated = host.libraries_.validateAv1 &&
               host.libraries_.validateAv1(parameterSets.data(), parameterSets.size(),
                   host.arguments_.video.width, host.arguments_.video.height, error, sizeof(error));
-          Require(validated, error[0] ? error : "AV1 sequence validation is unavailable", "ERR_SCREEN_CAPTURE_AV1");
+          Require(validated, (std::string(error[0] ? error : "AV1 sequence validation is unavailable") +
+              "; encoder=" + EncoderId(host.capability_.encoder) +
+              " bitrateKbps=" + std::to_string(host.live_->Bitrate()) +
+              " ceilingKbps=" + std::to_string(host.arguments_.bitrateCeilingKbps)).c_str(), "ERR_SCREEN_CAPTURE_AV1");
           const auto header = monky::screen_video::InspectAv1(parameterSets);
           Require(header.sequence && !header.picture && picture.picture && picture.keyframe,
                   "AV1 keyframe requires a valid sequence header", "ERR_SCREEN_CAPTURE_AV1");
@@ -1304,6 +1307,8 @@ class Host {
         continue;
       }
       PropertiesRef properties(api(), api().obs_get_encoder_properties(SelectedEncoder()));
+      Require(feedback.bitrateKbps <= arguments_.bitrateCeilingKbps,
+              "Live bitrate exceeds the configured capture ceiling", "ERR_SCREEN_CAPTURE_BITRATE");
       SetInteger(properties.value, encoderSettings_, "bitrate", feedback.bitrateKbps);
       if (encoder_) {
         api().obs_encoder_update(encoder_, encoderSettings_);
@@ -1368,7 +1373,8 @@ class Host {
       else Require(api().obs_data_get_int(encoderSettings_, "device") == -1,
                    "NVENC did not select the current texture device", "ERR_SCREEN_CAPTURE_SETTINGS");
       Property(properties.value, "opts", abi::PropertyType::Text);
-      api().obs_data_set_string(encoderSettings_, "opts", "");
+      const auto options = EncoderProfileOptions(capability_.encoder, arguments_.video, arguments_.bitrateCeilingKbps);
+      api().obs_data_set_string(encoderSettings_, "opts", options.c_str());
     } else {
       SetBoolean(properties.value, encoderSettings_, "pre_analysis", false);
       Property(properties.value, "ffmpeg_opts", abi::PropertyType::Text);
@@ -1397,7 +1403,7 @@ class Host {
         BoundedString(api().obs_data_get_string(settings.value, "profile"), 32) == "main" &&
         BoundedString(api().obs_data_get_string(settings.value, "preset"), 32) == (nvenc ? "p4" : "balanced") &&
         BoundedString(api().obs_data_get_string(settings.value, nvenc ? "opts" : "ffmpeg_opts"), 512) ==
-            EncoderProfileOptions(capability_.encoder, arguments_.video) &&
+            EncoderProfileOptions(capability_.encoder, arguments_.video, arguments_.bitrateCeilingKbps) &&
         api().obs_data_get_int(settings.value, "bitrate") == (live_ ? live_->Bitrate() : arguments_.video.bitrateKbps) &&
         api().obs_data_get_int(settings.value, "bf") == 0 &&
         api().obs_data_get_int(settings.value, "keyint_sec") == 1,

@@ -64,6 +64,7 @@ async function runQualitySettingsSmoke() {
   check(settingsStore.screenEncodingStrategy === 'automatic', 'A fresh settings profile must default to Automatic selection.');
   const encodingRequests = [];
   let hardwareAvailable = true;
+  let limitFourKH264 = false;
   const encodingCommand = async command => {
     if (command.action === 'cancel-encoding-probe') return { kind: 'ok' };
     check(command.action === 'probe-encoding' && !('desktopSourceId' in command),
@@ -72,12 +73,14 @@ async function runQualitySettingsSmoke() {
     const automatic = command.encodingStrategy === 'automatic';
     const mode = automatic ? hardwareAvailable ? 'hardware' : 'software' : command.encodingMode;
     const codec = automatic ? mode === 'hardware' ? 'av1' : 'h264' : command.codec;
-    const unavailable = !automatic && mode === 'hardware' && !hardwareAvailable;
+    const hardwareSupported = hardwareAvailable && !(limitFourKH264 && codec === 'h264'
+      && (command.video.width >= 3840 || command.video.height >= 2160) && command.video.fps > 60);
+    const unavailable = !automatic && mode === 'hardware' && !hardwareSupported;
     return { kind: 'encoding', availability: {
       selection: unavailable ? null : { mode, codec, encoder: mode === 'hardware'
         ? codec === 'av1' ? 'av1_texture_amf' : 'h264_texture_amf'
         : codec === 'av1' ? 'monky_aom_av1' : 'obs_x264' },
-      hardware: { available: hardwareAvailable, reason: hardwareAvailable ? null : 'Fixture encoder unsupported for this profile.' },
+      hardware: { available: hardwareSupported, reason: hardwareSupported ? null : 'Fixture encoder unsupported for this profile.' },
       fallback: automatic && mode === 'software',
       ...(unavailable ? { reason: 'Fixture encoder unsupported for this profile.' } : {}),
     } };
@@ -206,11 +209,18 @@ async function runQualitySettingsSmoke() {
       screenCodec.value = 'av1';
       screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
       await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/manual unavailable combination`);
-      check(hardware.disabled && hardware.getAttribute('aria-pressed') === 'true'
+      check(!hardware.disabled && hardware.getAttribute('aria-pressed') === 'true'
         && software.getAttribute('aria-pressed') === 'false' && screenCodec.value === 'av1'
         && settingsStore.screenEncodingMode === 'hardware' && settingsStore.screenEncodingStrategy === 'manual'
-        && encodingStatus.textContent.includes('Fixture encoder unsupported for this profile.'),
-      'An unavailable Manual Hardware/AV1 combination must stay exact and show its reason without Software substitution.');
+        && encodingStatus.textContent === language.t('settings.screenEncodingProfileUnavailable', {
+          codec: 'AV1', mode: language.t('settings.screenEncodingHardwareShort'),
+        }),
+      `An unavailable Manual combination must retain explicit choices and show a friendly localized explanation, not backend details: ${JSON.stringify({
+        disabled: hardware.disabled, hardware: hardware.getAttribute('aria-pressed'),
+        software: software.getAttribute('aria-pressed'), codec: screenCodec.value,
+        savedCodec: settingsStore.preferredScreenCodec, mode: settingsStore.screenEncodingMode,
+        strategy: settingsStore.screenEncodingStrategy, status: encodingStatus.textContent,
+      })}`);
       hardwareAvailable = true;
       screenCodec.value = 'h264';
       screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
@@ -226,10 +236,10 @@ async function runQualitySettingsSmoke() {
       screenCodec.value = 'av1';
       screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
       await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/unsupported hardware`);
-      check(hardware.disabled && hardware.isConnected && getComputedStyle(hardware).display !== 'none'
-        && encodingStatus.textContent.includes('Fixture encoder unsupported for this profile.')
+      check(!hardware.disabled && hardware.isConnected && getComputedStyle(hardware).display !== 'none'
+        && encodingStatus.textContent === language.t('settings.screenEncodingHardwareUnavailable')
         && software.getAttribute('aria-pressed') === 'true',
-      'Unavailable Hardware must remain visible with its reason while explicit Software stays selected.');
+      'Unavailable Hardware must remain selectable for another profile while explicit Software stays selected with a friendly explanation.');
       automatic.click();
       await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/automatic fallback`);
       settingsStore.load(false);
@@ -245,6 +255,57 @@ async function runQualitySettingsSmoke() {
       screenCodec.dispatchEvent(new Event('change', { bubbles: true }));
       await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/manual H264`);
       hardwareAvailable = true;
+      const changeQuality = async (id, value) => {
+        const field = quality.querySelector(`#${id}`);
+        field.value = value;
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+        await wait();
+        await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/${id} compatibility`);
+      };
+      const nonScreenQuality = () => Object.fromEntries(Object.entries(settingsStore.customProfile)
+        .filter(([key]) => !key.startsWith('screen')));
+      const unchangedQuality = JSON.stringify(nonScreenQuality());
+      await changeQuality('select-video-codec', 'av1');
+      await changeQuality('q-res-screen', '3840x2160');
+      await changeQuality('q-select-screenFps', '120');
+      hardware.click();
+      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/hardware AV1 4K120`);
+      check(settingsStore.customProfile.screenFps === 120 && screenCodec.value === 'av1'
+        && hardware.getAttribute('aria-pressed') === 'true',
+      'A supported Hardware AV1 4K120 profile must retain its requested FPS.');
+      limitFourKH264 = true;
+      const previousBitrate = settingsStore.customProfile.screenBitrateKbps;
+      const checkAdjustedProfile = description => {
+        check(settingsStore.customProfile.screenWidth === 3840 && settingsStore.customProfile.screenHeight === 2160
+          && settingsStore.customProfile.screenFps === 60 && settingsStore.customProfile.screenBitrateKbps === previousBitrate
+          && quality.querySelector('#q-select-screenFps').value === '60'
+          && settingsStore.preferredScreenCodec === 'h264' && settingsStore.screenEncodingMode === 'hardware'
+          && settingsStore.screenEncodingStrategy === 'manual',
+        `${description} must show the confirmed 60 FPS without changing the selected codec, mode, resolution or bitrate.`);
+        check(document.querySelector('.chat-copy-toast-label')?.textContent === language.t('settings.screenEncodingFpsAdjusted', {
+          codec: 'H264', mode: language.t('settings.screenEncodingHardwareShort'), previous: 120, fps: 60,
+        }), `${description} must explain the automatic change using the selected language: ${document.querySelector('.chat-copy-toast-label')?.textContent}`);
+        check(JSON.stringify(nonScreenQuality()) === unchangedQuality,
+          `${description} must preserve camera and audio settings.`);
+      };
+      const firstAdjustmentProbe = encodingRequests.length;
+      await changeQuality('select-video-codec', 'h264');
+      checkAdjustedProfile('Changing the codec at 4K120');
+      const probedFrameRates = encodingRequests.slice(firstAdjustmentProbe)
+        .filter(command => command.codec === 'h264').map(command => command.video.fps);
+      check([120, 90, 60].every(fps => probedFrameRates.includes(fps)),
+        'A lower FPS must be confirmed through real capability requests, not guessed from codec or GPU labels.');
+      await changeQuality('q-select-screenFps', '120');
+      checkAdjustedProfile('Changing FPS back to an unsupported 120');
+      await changeQuality('q-res-screen', '1920x1080');
+      await changeQuality('q-select-screenFps', '120');
+      check(settingsStore.customProfile.screenFps === 120,
+        'Supported 1080p120 must not be reduced by the 4K-only fixture restriction.');
+      await changeQuality('q-res-screen', '3840x2160');
+      checkAdjustedProfile('Changing resolution from 1080p120 to 4K');
+      limitFourKH264 = false;
+      software.click();
+      await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/restore Software preference`);
       check(quality.querySelectorAll('#checkbox-screen-telemetry').length === 1 &&
         !voice.querySelector('#checkbox-screen-telemetry, #select-screen-telemetry-position, #select-screen-telemetry-mode'),
       'Telemetry controls must exist once, only under Quality.');
@@ -388,8 +449,9 @@ async function runQualitySettingsSmoke() {
           && !document.querySelector('.dialog-card'),
         'A supported next-share codec preference must not replace active source metadata or report coming soon.');
         const frameRate = quality.querySelector('#custom-screenFps');
-        frameRate.value = '144';
+        frameRate.value = '241';
         frameRate.dispatchEvent(new Event('change', { bubbles: true }));
+        await settled(() => settingsStore.customProfile.screenFps === Number(frameRate.max), `${locale}/normalized FPS commit`);
         check(settingsStore.customProfile.screenFps === Number(frameRate.max) && Number(frameRate.value) === Number(frameRate.max),
           'Typed FPS above the ceiling must clamp both the saved profile and visible value.');
         check(!quality.querySelector('#quality-custom-status')
@@ -398,54 +460,58 @@ async function runQualitySettingsSmoke() {
         const helpStyle = getComputedStyle(quality.querySelector('.quality-custom-help'));
         check(helpStyle.fontSize === '11px' && helpStyle.fontWeight === '400',
           'Permanent limit guidance must remain small and regular-weight rather than dominate the form.');
-        const change = (id, value) => {
+        const change = async (id, value) => {
           const field = quality.querySelector(`#${id}`);
           field.value = value;
           field.dispatchEvent(new Event('change', { bubbles: true }));
-          return field;
+          await wait();
+          await settled(() => encodingStatus.getAttribute('aria-busy') === 'false', `${locale}/${id} commit`);
+          return quality.querySelector(`#${id}`);
         };
         for (const kind of ['camera', 'screen']) {
+          const fourKLimit = kind === 'camera' ? 60 : 120;
+          const fullHdLimit = kind === 'camera' ? 120 : 240;
           for (const aspect of ['16:9', '16:10', '4:3', '21:9']) {
-            change(`q-aspect-${kind}`, aspect);
+            await change(`q-aspect-${kind}`, aspect);
             for (const option of quality.querySelector(`#q-res-${kind}`).options) {
               if (option.value === '__custom__') continue;
               const [width, height] = option.value.split('x').map(Number);
               check(width <= 3840 && height <= 2160, 'Resolution dropdowns must obey the same custom ceilings.');
             }
           }
-          change(`q-aspect-${kind}`, '16:9');
-          change(`q-res-${kind}`, '1920x1080');
-          change(`q-select-${kind}Fps`, '120');
-          change(`q-res-${kind}`, '3840x2160');
-          check(settingsStore.customProfile[`${kind}Fps`] === 60 &&
-            quality.querySelector(`#q-select-${kind}Fps`).value === '60', 'Selecting 4K must immediately reduce 120 FPS to 60.');
+          await change(`q-aspect-${kind}`, '16:9');
+          await change(`q-res-${kind}`, '1920x1080');
+          await change(`q-select-${kind}Fps`, String(fullHdLimit));
+          await change(`q-res-${kind}`, '3840x2160');
+          check(settingsStore.customProfile[`${kind}Fps`] === fourKLimit &&
+            quality.querySelector(`#q-select-${kind}Fps`).value === String(fourKLimit), 'Selecting 4K must apply its media-specific FPS ceiling.');
           check([...quality.querySelector(`#q-select-${kind}Fps`).options]
-            .every(option => option.value === '__custom__' || Number(option.value) <= 60), '4K dropdown cannot offer more than 60 FPS.');
-          change(`q-res-${kind}`, '__custom__');
-          const width = change(`custom-${kind}Width`, '9999');
-          const height = change(`custom-${kind}Height`, '9999');
-          change(`q-select-${kind}Fps`, '__custom__');
-          const fps = change(`custom-${kind}Fps`, '9999');
-          change(`q-select-${kind}Bitrate`, '__custom__');
-          const bitrate = change(`custom-${kind}Bitrate`, '1e6');
-          check(width.value === '3840' && height.value === '2160' && fps.value === '60' && bitrate.value === '80000',
+            .every(option => option.value === '__custom__' || Number(option.value) <= fourKLimit), '4K dropdown cannot exceed its FPS ceiling.');
+          await change(`q-res-${kind}`, '__custom__');
+          const width = await change(`custom-${kind}Width`, '9999');
+          const height = await change(`custom-${kind}Height`, '9999');
+          await change(`q-select-${kind}Fps`, '__custom__');
+          const fps = await change(`custom-${kind}Fps`, '9999');
+          await change(`q-select-${kind}Bitrate`, '__custom__');
+          const bitrate = await change(`custom-${kind}Bitrate`, '1e6');
+          check(width.value === '3840' && height.value === '2160' && fps.value === String(fourKLimit) && bitrate.value === '80000',
             'Typing or pasting custom/exponential values cannot bypass resolution, FPS or bitrate limits.');
           for (const input of [width, height, fps, bitrate]) {
             check(input.validity.valid && getComputedStyle(input).appearance === 'textfield',
               'Custom fields keep native numeric validity and keyboard access without visible number spinners.');
           }
-          change(`custom-${kind}Fps`, '');
-          check(fps.value === '60' && document.querySelector('.chat-copy-toast-label')?.textContent === language.t('settings.qualityValueInvalid')
+          await change(`custom-${kind}Fps`, '');
+          check(fps.value === String(fourKLimit) && document.querySelector('.chat-copy-toast-label')?.textContent === language.t('settings.qualityValueInvalid')
             && document.querySelectorAll('.chat-copy-toast').length === 1,
             'An empty custom value must restore the previous value and replace, not stack, feedback toasts.');
-          change(`custom-${kind}Width`, '1920');
-          change(`custom-${kind}Height`, '1080');
-          change(`custom-${kind}Fps`, '121');
-          check(fps.max === '120' && fps.value === '120', 'Leaving 4K must restore the 120 FPS ceiling without exceeding it.');
+          await change(`custom-${kind}Width`, '1920');
+          await change(`custom-${kind}Height`, '1080');
+          await change(`custom-${kind}Fps`, String(fullHdLimit + 1));
+          check(fps.max === String(fullHdLimit) && fps.value === String(fullHdLimit), 'Leaving 4K must restore the media-specific FPS ceiling without exceeding it.');
         }
         settingsStore.load(false);
         check(settingsStore.customProfile.screenBitrateKbps === 80000 && settingsStore.customProfile.cameraBitrateKbps === 80000
-          && settingsStore.customProfile.screenFps === 120, 'Normalized custom values must persist across reloads.');
+          && settingsStore.customProfile.screenFps === 240, 'Normalized custom values must persist across reloads.');
       } finally { videoService.stopScreenShare(metadataOnly.id); }
       modal.close();
       check(!document.querySelector('.chat-copy-toast'), 'Closing quality settings must retire its toast and timer.');

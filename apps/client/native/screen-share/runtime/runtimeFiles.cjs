@@ -61,6 +61,7 @@ function loadCaptureRuntime(directory = path.resolve(__dirname, '..', 'bin', 'wi
     gameCaptureStartup: 'explicit-game-target-only', compatibilityUpdater: false,
     globalVulkanHook: false, hardwareQualified: false, scaleModes: ['stretch', 'fit'],
     captureDataStorage: 'pinned-profile-cache',
+    wgcCadence: 'requested-half-frame-interval-when-supported',
   });
   return Object.freeze({
     host: Object.freeze({ kind: 'verified-native-screen-capture-host', executable, sha256: capture.host.sha256 }),

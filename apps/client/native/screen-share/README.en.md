@@ -140,17 +140,22 @@ SFU/PCM transactions before invalidating their callbacks; timeouts retain
 ownership for retry. Diagnostic queries during retirement return unavailability,
 not fabricated zero FPS.
 
-The configurable ceiling is 3840x2160/120 FPS/80 Mbps, without changing existing
-presets, with **a maximum of 60 FPS at 3840 px wide or 2160 px high**.
+The configurable screen ceiling is 3840x2160/80 Mbps, without changing existing
+presets: **up to 240 FPS below 4K and 120 FPS at 3840 px wide or 2160 px high**.
 The client applies the same limit to dropdowns, typed values and saved
-preferences. The receiving contract and runtime remain compatible with profiles
-from older clients; the selection policy does not change the protocol.
+preferences. Camera keeps its existing 120 FPS limit, or 60 FPS at 4K.
+The shared contract, capture host, timebase and RTC accept the new profiles;
+client and server must use compatible versions of that contract.
 Each profile negotiates its required H.264 level: at least 5.1 for
-1080p120, 5.2 for 4K60 and 6 for 4K120. The versioned WebRTC overlay and
+1080p120, 5.2 for 1080p240/4K60 and 6 for 4K120. The versioned WebRTC overlay and
 `h264-profile-level-id` patch add actual Level 6 support; their patches and
-licenses accompany corresponding sources. Client and server require protocol
-26. The bitrate ceiling is not a floor: congestion control stays active and
+licenses accompany corresponding sources. The bitrate ceiling is not a floor: congestion control stays active and
 different profiles may consume additional upload bandwidth.
+
+For SFU, both H.264 and AV1 SDP retain the initial estimate of up to 5 Mbps and
+the profile ceiling. The adapter includes AV1 when serializing those options,
+avoiding an unintended 300 kbps start and accumulated packets in the pacer.
+No bitrate minimum is imposed; congestion control can still lower the estimate.
 
 This does not make every encoder 4K120-capable. The AMF installed on the tested
 RX 9070 XT reports `MaxLevel=52` and rejects `ProfileLevel=60`; 4K60/80 Mbps
@@ -159,6 +164,14 @@ adapter without capturing pixels and rejects an incompatible profile before
 retiring the old source. It neither silently changes to 60 FPS nor falsifies the
 level. NVENC must also admit the requested level. Initialization is not proof of
 physical frame cadence.
+
+For NVENC AV1, the host pins `tier=0` and the Main Tier level that accommodates
+the resolution, FPS and **entire bitrate ceiling**, not just the initial 5 Mbps.
+The level remains unchanged during congestion adjustments; 4K/80 Mbps requires
+index 17 (6.1). Feedback exceeding the ceiling is rejected. Bitstream validation
+still rejects High Tier, and diagnostics include the encoder, requested bitrate
+and ceiling. This avoids relying on the driver's automatic level choice as
+bitrate increases.
 
 The separate `probeCaptureCapabilities()` export initializes the encoder on
 the GPU without capturing a source, but **is not Main's global discovery
@@ -178,9 +191,9 @@ can prevent preparation or capture.
 ## Video, audio and preview demand
 
 Video uses NV12, H.264 Main profile, zero B-frames and a one-second GOP, with
-limits of 3840x2160, 120 FPS (60 FPS at 4K) and 80000 kbps, subject to encoder support. The **Keep aspect ratio** switch
-in the picker applies only to the share being created. Off (default), it
-stretches the image to the requested resolution. On, it centers the entire
+limits of 3840x2160, 240 FPS (120 FPS at 4K) and 80000 kbps, subject to encoder support. The **Keep aspect ratio** switch
+in the picker applies only to the share being created. Off, it
+stretches the image to the requested resolution. On (default), it centers the entire
 image and adds black bars when aspect ratios differ, without cropping or
 distorting the source. The choice applies to preview and every viewer profile,
 including after a quality change; it does not change the configured resolution
@@ -238,7 +251,7 @@ overlapping clock remains an explicit error.
 
 ## OBS dependencies and Game Capture
 
-`scripts\buildCapture.cjs` generates **schema 4**
+`scripts\buildCapture.cjs` generates **schema 5**
 `bin\win32-x64\capture-build.json`. It keeps OBS **32.1.1**, revision
 `7272af1375b38bc3cf4e0f98a5d999e8b76e9309`, with SHA-256-verified files.
 Alongside libobs/D3D11/WinRT, `obs-ffmpeg` and the specialized `win-capture`
@@ -247,6 +260,16 @@ module, the package includes `obs-nvenc.dll`, locale data,
 The probes are also placed beside `monky-screen-capture.exe`.
 The dependency package's NVENC header `include\ffnvcodec\nvEncodeAPI.h` is
 verified through `src\capture\runtime-additions.json`.
+
+The build also recompiles `libobs-winrt.dll` from the same OBS revision.
+The specialization in `src\capture\wgcCadence.h` configures WGC cadence on
+session creation and device recovery, only when Windows exposes
+`GraphicsCaptureSession.MinUpdateInterval`. Otherwise Windows retains control
+over frame delivery and the limitation is logged. Vendored sources remain
+unaltered and hash-verified; `scripts\captureSourceBindings.cjs`, the
+specialization and OBS sources are included in the release's corresponding
+source. The manifest and host verify the rebuilt DLL's hash, not the original
+OBS package DLL's hash.
 
 OBS helpers `graphics-hook32.dll`/`graphics-hook64.dll`,
 `inject-helper32.exe`/`inject-helper64.exe` and
@@ -514,6 +537,22 @@ Use `--quality=480p30`, `720p60` or `1080p60` for a single profile,
 to validate capture and WebCodecs preview without network admission.
 Software still uses libobs/D3D11 capture but does not require a GPU encoder.
 Scenarios verify pixels, cadence and resource retirement.
+
+`--quality=source --profile=1080p240` and
+`--quality=source --profile=4k120` exercise the new profiles without reducing
+receiver quality. `--cadence-ffmpeg=<absolute_executable_path>` adds an
+independent audit of the synthetic window's visual counter: it decodes a
+bounded in-memory sample and requires distinct frames at no less than 85%
+of the requested FPS, alongside native presentation checks. Packet counts,
+encoded frames or repeated presentations alone do not prove actual capture
+cadence. The audit does not record video.
+
+For 240 FPS qualification, also use `--disable-frame-rate-limit
+--disable-gpu-vsync` **only in the test process**: the synthetic window's
+compositor can limit new frames even when JavaScript paints faster.
+The fixture produces bounded-work updates independently of RAF.
+These flags are not applied to the distributed application. Actual delivery
+still depends on the source cadence and system load.
 
 `test\nativeWindowIdentitySmoke.cjs --artifacts=<absolute_path>` uses the
 build-generated `capture-contract-test.exe` to create owned

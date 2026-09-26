@@ -4,6 +4,8 @@ import { probeScreenEncoding } from '../core/screenEncoding';
 import { t } from '../i18n';
 import { escapeHtml } from '../utils/html';
 import { appEvents } from '../core/EventBus';
+import { FPS_OPTIONS } from './settings/qualityOptions';
+import { showInfoToast } from './CopyToast';
 
 export class ScreenEncodingControls {
   private events: AbortController | null = null;
@@ -14,9 +16,12 @@ export class ScreenEncodingControls {
   private error = '';
   private selectionKey: string | null = null;
   private unbindSettings: (() => void) | null = null;
+  private clearToast: (() => void) | null = null;
 
   constructor(private readonly profile: () => NativeScreenVideoProfile | null,
-    private readonly changed: () => void = () => {}) {}
+    private readonly changed: () => void = () => {},
+    private readonly applyCompatibleProfile?: (profile: NativeScreenVideoProfile) => void,
+    private readonly rejected?: () => void) {}
 
   static html(): string {
     return `<div class="form-group" data-settings-section="screen-encoding"
@@ -114,14 +119,60 @@ export class ScreenEncodingControls {
     }, { signal: this.events?.signal });
   }
 
-  async refresh(): Promise<void> {
+  private key(profile = this.profile()): string {
+    const automatic = settingsStore.screenEncodingStrategy === 'automatic';
+    return JSON.stringify([profile, settingsStore.screenEncodingStrategy,
+      ...(automatic ? [] : [settingsStore.screenEncodingMode, settingsStore.preferredScreenCodec])]);
+  }
+
+  private accept(profile: NativeScreenVideoProfile, requested: NativeScreenVideoProfile,
+    availability: ScreenEncodingAvailability): void {
+    const probe = this.probe, container = this.container;
+    const current = () => this.probe === probe && !probe?.signal.aborted
+      && this.container === container && !!container?.isConnected;
+    // Saving emits settings.updated synchronously; retain the confirmed probe.
+    this.selectionKey = this.key(profile);
+    try { this.applyCompatibleProfile?.(profile); }
+    catch (error) {
+      console.warn('[ScreenEncoding] Compatible profile could not be applied:', error);
+      if (!current()) return;
+      this.availability = null;
+      this.error = t('settings.screenEncodingAdjustmentBlocked');
+      this.rejected?.();
+      this.selectionKey = this.key();
+      this.clearToast = showInfoToast(this.error);
+      return;
+    }
+    if (!current()) return;
+    this.availability = availability;
+    if (profile.fps !== requested.fps && availability.selection) {
+      this.clearToast = showInfoToast(t('settings.screenEncodingFpsAdjusted', {
+        codec: availability.selection.codec.toUpperCase(), mode: t(availability.selection.mode === 'hardware'
+          ? 'settings.screenEncodingHardwareShort' : 'settings.screenEncodingSoftware'),
+        previous: requested.fps, fps: profile.fps,
+      }), 6000);
+    }
+  }
+
+  async refresh(applyRequested = false): Promise<void> {
     const profile = this.profile();
     const automatic = settingsStore.screenEncodingStrategy === 'automatic';
-    const key = JSON.stringify([profile, settingsStore.screenEncodingStrategy,
-      ...(automatic ? [] : [settingsStore.screenEncodingMode, settingsStore.preferredScreenCodec])]);
-    if (!this.container || key === this.selectionKey) return;
+    const mode = settingsStore.screenEncodingMode, codec = settingsStore.preferredScreenCodec;
+    const key = this.key(profile);
+    if (!this.container?.isConnected) return;
+    if (key === this.selectionKey) {
+      if (!applyRequested || this.pending) return;
+      if (profile && this.availability?.selection && !this.error) {
+        this.accept(profile, profile, this.availability);
+        this.render();
+        this.changed();
+        return;
+      }
+    }
     this.selectionKey = key;
     this.probe?.abort();
+    this.clearToast?.();
+    this.clearToast = null;
     const probe = new AbortController();
     this.probe = probe;
     this.pending = true;
@@ -129,14 +180,61 @@ export class ScreenEncodingControls {
     this.availability = null;
     this.render();
     this.changed();
+    const current = () => !probe.signal.aborted && this.probe === probe
+      && !!this.container?.isConnected && this.key() === key;
+    const verified = (availability: ScreenEncodingAvailability) => {
+      if (availability.hardware.error) {
+        if (automatic || mode !== 'software' || availability.selection?.mode !== 'software')
+          throw new Error(availability.hardware.reason ?? 'Encoder verification failed.');
+        console.warn('[ScreenEncoding] Optional hardware inspection failed; explicit software was verified:',
+          availability.hardware.reason);
+      }
+      if (availability.selection && !automatic && (availability.selection.mode !== mode
+        || availability.selection.codec !== codec || availability.fallback
+        || (mode === 'hardware' && !availability.hardware.available)))
+        throw new Error('Encoder verification changed the explicitly selected codec or encoding mode.');
+      if (availability.selection && !availability.hardware.available && !availability.hardware.error)
+        console.warn('[ScreenEncoding] Hardware unavailable; software was verified:', availability.hardware.reason);
+      return availability;
+    };
     try {
       if (!profile) throw new Error(t('screenShare.nativeProfileChangeBlocked'));
       const availability = await probeScreenEncoding(profile, probe.signal);
-      if (probe.signal.aborted || this.probe !== probe) return;
-      this.availability = availability;
+      if (!current()) return;
+      this.availability = verified(availability);
+      if (availability.selection) {
+        this.accept(profile, profile, availability);
+        return;
+      }
+      if (this.applyCompatibleProfile) {
+        for (const fps of FPS_OPTIONS.filter(value => value < profile.fps).reverse()) {
+          const candidate = { ...profile, fps };
+          const result = await probeScreenEncoding(candidate, probe.signal);
+          if (!current()) return;
+          verified(result);
+          if (!result.selection) continue;
+          this.accept(candidate, profile, result);
+          return;
+        }
+      }
+      console.warn('[ScreenEncoding] No compatible frame rate for the requested profile:', {
+        profile, mode, codec, reason: availability.reason ?? availability.hardware.reason,
+      });
+      this.error = t('settings.screenEncodingProfileUnavailable', {
+        codec: codec.toUpperCase(), mode: t(mode === 'hardware'
+          ? 'settings.screenEncodingHardwareShort' : 'settings.screenEncodingSoftware'),
+      });
+      this.rejected?.();
+      this.selectionKey = this.key();
+      this.clearToast = showInfoToast(this.error);
     } catch (error) {
-      if (probe.signal.aborted || this.probe !== probe) return;
-      this.error = error instanceof Error ? error.message : t('screenShare.nativeUnavailable');
+      if (!current()) return;
+      console.warn('[ScreenEncoding] Encoder verification failed:', error);
+      this.availability = null;
+      this.error = t('settings.screenEncodingProbeFailed');
+      this.rejected?.();
+      this.selectionKey = this.key();
+      this.clearToast = showInfoToast(this.error);
     } finally {
       if (!probe.signal.aborted && this.probe === probe) {
         this.pending = false;
@@ -158,7 +256,7 @@ export class ScreenEncodingControls {
     const hardware = this.container?.querySelector<HTMLButtonElement>('#screen-encoding-hardware');
     const software = this.container?.querySelector<HTMLButtonElement>('#screen-encoding-software');
     if (hardware) {
-      hardware.disabled = automatic || this.pending || !this.availability?.hardware.available;
+      hardware.disabled = automatic || this.pending;
       hardware.setAttribute('aria-pressed', String(selectedMode === 'hardware'));
       hardware.setAttribute('aria-describedby', 'screen-encoding-status');
     }
@@ -176,18 +274,21 @@ export class ScreenEncodingControls {
     if (status) {
       status.setAttribute('aria-busy', String(this.pending));
       status.textContent = this.pending ? t('common.loading') : this.error
-        ? t('settings.screenEncodingError', { reason: this.error })
-        : !selection ? t('settings.screenEncodingSelectionUnavailable', { reason: this.availability?.reason
-          ?? this.availability?.hardware.reason ?? t('screenShare.nativeEncoderUnavailable') })
-        : this.availability?.hardware.error
-          ? t('settings.screenEncodingError', { reason: this.availability.hardware.reason ?? '' })
+        ? this.error
+        : !selection ? t('settings.screenEncodingProfileUnavailable', {
+          codec: settingsStore.preferredScreenCodec.toUpperCase(),
+          mode: t(settingsStore.screenEncodingMode === 'hardware'
+            ? 'settings.screenEncodingHardwareShort' : 'settings.screenEncodingSoftware'),
+        })
         : !this.availability?.hardware.available
-          ? t('settings.screenEncodingUnavailable', { reason: this.availability?.hardware.reason ?? '' })
+          ? t('settings.screenEncodingHardwareUnavailable')
           : t('settings.screenEncodingReady', { codec: selection.codec.toUpperCase() });
     }
   }
 
   cleanup(): void {
+    this.clearToast?.();
+    this.clearToast = null;
     this.unbindSettings?.();
     this.unbindSettings = null;
     this.selectionKey = null;

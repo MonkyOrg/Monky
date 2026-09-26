@@ -14,6 +14,8 @@ const profiles = [
   { width: 1920, height: 1080, fps: 60, bitrateKbps: 4000 },
   { width: 1280, height: 720, fps: 60, bitrateKbps: 2500 },
   { width: 852, height: 480, fps: 30, bitrateKbps: 1000 },
+  { width: 1920, height: 1080, fps: 240, bitrateKbps: 20000 },
+  { width: 3840, height: 2160, fps: 120, bitrateKbps: 80000 },
 ];
 const runId = 'a'.repeat(32);
 const source = { hwnd: 19, expectedProcessId: 10 };

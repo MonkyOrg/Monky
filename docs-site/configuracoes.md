@@ -88,25 +88,39 @@ Sinalização, controle da conexão, voz e câmera podem continuar usando a rede
 
 ### Compartilhamento nativo e qualidade do espectador
 
-O seletor mostra os métodos e o codificador H.264 disponíveis no backend
-nativo deste dispositivo. Opções indisponíveis ficam desabilitadas com o
-motivo; a marca da GPU não garante suporte. Não há troca automática para
+O seletor mostra os métodos de captura disponíveis. O encoder e o codec são
+escolhidos em **Qualidade e compartilhamento**. A disponibilidade é confirmada
+para a combinação de codec, resolução, FPS e bitrate; a marca da GPU não garante suporte. Não há troca automática para
 Chromium ou para outra fonte. A tentativa automática de **Captura de jogo**
 para **Normal**, quando necessária, usa somente a mesma janela e gera um aviso.
 
-Para até **3840×2160**, **120 FPS** e **80000 kbps**, use **Personalizado** em
-**Qualidade e compartilhamento**; os presets existentes não mudam. **Em 4K,
-o máximo é 60 FPS**: atingir 3840 px de largura ou 2160 px de altura limita
+Para até **3840×2160**, **240 FPS** e **80000 kbps**, use **Personalizado** em
+**Qualidade e compartilhamento**; os presets existentes não mudam. **Na tela em 4K,
+o máximo é 120 FPS**: atingir 3840 px de largura ou 2160 px de altura limita
 automaticamente o campo e a lista de FPS. Os valores digitados também respeitam
 esses tetos; valores acima deles são ajustados com um aviso visível.
-Os limites ainda dependem do encoder: **4K/60** exige H.264 nível 5.2.
-Se o dispositivo não admitir o perfil, ele será recusado, sem
-reduzir FPS silenciosamente; em uma troca de qualidade, o preflight mantém a
-fonte anterior enquanto verifica a nova configuração. Reserve banda para o
+Esses perfis estão disponíveis para H.264 e AV1, sujeitos ao encoder e ao receptor.
+**1080p/240 e 4K/60** exigem H.264 nível 5.2; **4K/120** exige nível 6.0.
+A câmera mantém o teto de 120 FPS, ou 60 FPS em 4K.
+Ela usa a captura do Chromium e os modos oferecidos pela webcam, um caminho
+diferente da captura nativa de tela.
+
+Qualquer alteração de qualidade — preset, resolução, FPS, bitrate, codec ou
+Hardware/Software — valida a combinação antes de aplicá-la. Se necessário, o
+app busca um FPS menor confirmado pelo codificador, preservando a resolução,
+o bitrate e as escolhas explícitas de codec e modo em **Manual**, e mostra um
+toast com o que mudou e por quê.
+Por exemplo, H.264 por hardware em 4K120 pode ser ajustado para 4K60 quando
+esse for o perfil compatível da GPU. Em Manual, não troca para Software ou outro
+codec silenciosamente. Em **Automático**, mantém a negociação de codec e modo.
+Não inventa limites de bitrate do driver. Sem uma combinação confirmada,
+não altera o perfil de qualidade nem a transmissão e mostra um aviso amigável.
+Em uma transmissão, o preflight mantém a fonte anterior enquanto verifica a
+nova configuração. Reserve banda para o
 jogo e para cada perfil transmitido. No seletor, **Manter proporção** encaixa a imagem no tamanho
 escolhido, adicionando bordas quando necessário, sem distorcer. Desligado,
 mantém o comportamento atual de esticar para preencher. O switch começa
-desligado em cada novo compartilhamento e não é uma preferência global.
+ligado em cada novo compartilhamento e não é uma preferência global.
 
 A prévia de um novo compartilhamento entra em foco assim que seu tile fica
 disponível. Você pode desfocá-la: mudanças de qualidade, reconexões e tentativas
@@ -524,7 +538,8 @@ O perfil **Personalizado** abre listas com os valores mais usados — proporçã
 (16:9, 16:10, 4:3 e 21:9), resolução (da mais baixa até 4K), FPS e bitrate. Cada
 lista tem a opção **Personalizado...**, que libera um campo numérico para
 valores fora da lista, dentro dos mesmos limites: 3840×2160, 80000 kbps de vídeo
-e 120 FPS (60 FPS ao atingir 3840 px de largura ou 2160 px de altura).
+e 240 FPS para tela (120 FPS ao atingir 3840 px de largura ou 2160 px de altura).
+Para câmera, os tetos continuam em 120 FPS e 60 FPS em 4K.
 O áudio mantém seu limite próprio de 510 kbps. Trocar a proporção mantém a resolução mais
 próxima da que você já usava.
 

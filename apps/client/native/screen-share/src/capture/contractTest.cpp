@@ -302,7 +302,9 @@ int main(int argc, char** argv) {
     check(ScaleTime(-1, 1, 60) == -16666);
     rejects([&] { ScaleTime(1, 0, 120); });
     rejects([&] { ScaleTime(1, 1, 0); });
-    rejects([&] { ScaleTime(1, 1, 121); });
+    check(ScaleTime(240 * 60 * 60 * 8, 1, 240) == 28800000000LL);
+    check(ScaleTime(1, 1, 240) == 4166);
+    rejects([&] { ScaleTime(1, 1, 241); });
     check(ParseFeedback("100000 bitrate 5000").sequence == 100000);
     check(ParseCommand("100000 stats").sequence == 100000);
     check(ExpiredDeadline(Phase::Running, 28800000, 0, 100, 0) == Deadline::None);
@@ -354,15 +356,34 @@ int main(int argc, char** argv) {
     check(EncoderProfileOptions(EncoderKind::Amf, {1920, 1080, 120, 5000}) == "InColorPrimaries=1 ProfileLevel=51");
     check(EncoderProfileOptions(EncoderKind::Amf, {852, 480, 30, 1500}) == "InColorPrimaries=1 ProfileLevel=31");
     check(EncoderProfileOptions(EncoderKind::Nvenc, {3840, 2160, 120, 20000}).empty());
+    check(RequiredCaptureAv1Level({3840, 2160, 60, 5000}, 40000) == 13);
+    check(RequiredCaptureAv1Level({3840, 2160, 60, 5000}, 40050) == 14);
+    check(RequiredCaptureAv1Level({3840, 2160, 60, 5000}, 60000) == 14);
+    check(RequiredCaptureAv1Level({3840, 2160, 60, 5000}, 60050) == 17);
+    check(RequiredCaptureAv1Level({1280, 720, 60, 5000}, 6000) == 8);
+    check(RequiredCaptureAv1Level({1920, 1080, 120, 5000}, 20000) == 12);
+    check(RequiredCaptureAv1Level({848, 480, 30, 1500}, 1500) == 4);
+    for (unsigned bitrate = 50; bitrate <= 80000; bitrate += 50) {
+      check(EncoderProfileOptions(EncoderKind::NvencAv1, {3840, 2160, 60, bitrate}, 80000) == "level=17 tier=0");
+      if (bitrate <= 12000)
+        check(EncoderProfileOptions(EncoderKind::NvencAv1, {1920, 1080, 60, bitrate}, 12000) == "level=9 tier=0");
+    }
+    rejects([&] { RequiredCaptureAv1Level({3840, 2160, 60, 5000}, 4950); });
+    rejects([&] { RequiredCaptureAv1Level({3840, 2160, 60, 5000}, 80050); });
     check(RequiredCaptureH264Level({3840, 2160, 120, 20000}) == 60);
     check(RequiredCaptureH264Level({3840, 2160, 60, 20000}) == 52);
     check(RequiredCaptureH264Level({1920, 1080, 120, 20000}) == 51);
+    check(RequiredCaptureH264Level({1920, 1080, 240, 20000}) == 52);
+    check(RequiredCaptureAv1Level({1920, 1080, 240, 5000}, 20000) == 13);
+    check(RequiredCaptureAv1Level({3840, 2160, 120, 5000}, 80000) == 17);
     check(RequiredCaptureH264Level({1920, 1080, 120, 80000}) == 51);
     check(RequiredCaptureH264Level({3840, 2160, 60, 80000}) == 52);
     check(RequiredCaptureH264Level({3840, 2160, 120, 80000}) == 60);
     ValidateAmfLevelCapability(52, {3840, 2160, 60, 80000});
     ValidateAmfLevelCapability(60, {3840, 2160, 120, 80000});
     ValidateAmfLevelCapability(51, {1920, 1080, 120, 80000});
+    ValidateAmfLevelCapability(52, {1920, 1080, 240, 80000});
+    rejects([&] { ValidateAmfLevelCapability(51, {1920, 1080, 240, 80000}); });
     for (const auto invalidMaximum : {-1, 0, 9, 63})
       rejects([&] { ValidateAmfLevelCapability(invalidMaximum, {3840, 2160, 60, 80000}); });
     try {
@@ -374,7 +395,7 @@ int main(int argc, char** argv) {
           std::string(error.what()).find("MaxLevel=52") != std::string::npos);
     }
     for (const auto video : {VideoConfiguration{3840, 2160, 120, 80000}, {3840, 2160, 60, 80000},
-                            {1920, 1080, 120, 5000}, {1920, 1080, 60, 5000},
+                            {1920, 1080, 240, 5000}, {1920, 1080, 120, 5000}, {1920, 1080, 60, 5000},
                             {1280, 720, 60, 3000}, {852, 480, 30, 1500}}) {
       ValidateVideoConfiguration(video);
       const auto prefix = ParameterSets(video);
@@ -578,7 +599,7 @@ int main(int argc, char** argv) {
                                    {3840, 2160, 121, 20000}, {3840, 2160, 120, 80050},
                                    {1919, 1080, 120, 5000}, {1920, 1081, 120, 5000},
                                    {854, 480, 30, 1000}, {2, 2, 1, 50},
-                                   {1920, 1080, 121, 5000}, {1920, 1080, 0, 5000}, {1920, 1080, 120, 5010}})
+                                   {1920, 1080, 241, 5000}, {1920, 1080, 0, 5000}, {1920, 1080, 120, 5010}})
       rejects([&] { ValidateVideoConfiguration(invalidVideo); });
     check(RetirementJson({true, true, false, true, false}).find("\"sourceReleased\":false") != std::string::npos);
     OutputBudget budget;
@@ -590,6 +611,18 @@ int main(int argc, char** argv) {
       L"--run-id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", L"--hwnd=19", L"--pid=10",
       L"--width=1920", L"--height=1080", L"--fps=60", L"--bitrate=5000"};
     check(ParseArguments(windowArguments).encoder == EncoderKind::Auto);
+    for (const auto ceiling : {L"--bitrate-ceiling=5000", L"--bitrate-ceiling=80000"}) {
+      auto selected = windowArguments; selected.push_back(ceiling);
+      check(ParseArguments(selected).bitrateCeilingKbps ==
+          (std::wstring_view(ceiling).ends_with(L"=5000") ? 5000u : 80000u));
+      selected.push_back(ceiling);
+      rejects([&] { ParseArguments(selected); });
+    }
+    for (const auto ceiling : {L"--bitrate-ceiling=0", L"--bitrate-ceiling=4950", L"--bitrate-ceiling=5010",
+                              L"--bitrate-ceiling=80050"}) {
+      auto selected = windowArguments; selected.push_back(ceiling);
+      rejects([&] { ParseArguments(selected); });
+    }
     const auto checkScaleArguments = [&](const std::vector<std::wstring_view>& options) {
       check(ParseArguments(options).video.scaleMode == ScaleMode::Stretch);
       for (const auto mode : {L"--scale-mode=stretch", L"--scale-mode=fit"}) {

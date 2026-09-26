@@ -63,14 +63,14 @@ export class RoleService {
     const defaultRoles = await this.roleRepo.getDefaultRoles();
     for (const role of defaultRoles) {
       if ((role.permissions & Permission.ADMINISTRATOR) !== 0 || await this.isBuiltInAdminRole(role.id)) continue;
-      await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, role.id));
+      await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, role.id), false);
     }
   }
 
   public async assignAdminRole(userId: string): Promise<void> {
     const adminRole = await this.roleRepo.findByName('Admin');
     if (adminRole) {
-      await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, adminRole.id));
+      await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(userId, adminRole.id), false);
     }
   }
 
@@ -111,7 +111,7 @@ export class RoleService {
       isDefault: parsed.data.isDefault ?? false,
       createdAt: Date.now(),
     };
-    await this.permissionService.withRoleMutation(() => this.roleRepo.create(roleRecord));
+    await this.permissionService.withRoleMutation(() => this.roleRepo.create(roleRecord), false);
     return { success: true, role: this.toRole(roleRecord) };
   }
 
@@ -155,7 +155,7 @@ export class RoleService {
     }
     if (parsed.data.position !== undefined) updates.position = parsed.data.position;
     if (parsed.data.isDefault !== undefined) updates.isDefault = parsed.data.isDefault;
-    await this.permissionService.withRoleMutation(() => this.roleRepo.update(existing.id, updates));
+    await this.permissionService.withRoleMutation(() => this.roleRepo.update(existing.id, updates), false);
     const updated = await this.roleRepo.findById(existing.id);
     return { success: true, role: this.toRole(updated ?? { ...existing, ...updates }) };
   }
@@ -175,7 +175,7 @@ export class RoleService {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode excluir este cargo.' };
     }
 
-    await this.permissionService.withRoleMutation(() => this.roleRepo.delete(roleId));
+    await this.permissionService.withRoleMutation(() => this.roleRepo.delete(roleId), { roleId });
     return { success: true };
   }
 
@@ -202,7 +202,7 @@ export class RoleService {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode promover alguém a administrador.' };
     }
 
-    await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(parsed.data.userId, parsed.data.roleId));
+    await this.permissionService.withRoleMutation(() => this.roleRepo.assignRole(parsed.data.userId, parsed.data.roleId), false);
     return { success: true };
   }
 
@@ -229,7 +229,9 @@ export class RoleService {
       return { success: false, errorCode: ProtocolErrorCode.PERMISSION_DENIED, errorMessage: 'Apenas o dono do servidor pode remover um administrador.' };
     }
 
-    await this.permissionService.withRoleMutation(() => this.roleRepo.unassignRole(parsed.data.userId, parsed.data.roleId));
+    await this.permissionService.withRoleMutation(() => this.roleRepo.unassignRole(parsed.data.userId, parsed.data.roleId), {
+      userId: parsed.data.userId, roleId: parsed.data.roleId,
+    });
     return { success: true };
   }
 }

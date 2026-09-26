@@ -72,6 +72,7 @@ export function probeCaptureCapabilities(
 
 export class CaptureBridge {
   constructor(options: NativeScreenCaptureProbeOptions & {
+    bitrateCeilingKbps?: number;
     isSourcePaused?: () => boolean;
     onError: (error: Error) => void;
     onPacket: (frame: NativeScreenPreviewFrame) => undefined | false;

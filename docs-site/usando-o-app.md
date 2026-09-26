@@ -30,7 +30,49 @@ aberto e mostra o aviso no próprio painel. A prévia fica desligada e seu switc
 bloqueado até você escolher uma imagem. Isso também vale para chroma key com
 substituição por imagem; nenhum vídeo sem o efeito é publicado como alternativa.
 
-Quem transmite aparece com selo **LIVE**. Clique no card para destacar ou use tela cheia.
+Quem pode assistir vê o selo **LIVE**. Clique no card para destacar ou use tela cheia.
+
+### Ajuste de FPS para o codificador
+
+Na seção **Qualidade** das configurações, toda mudança de resolução, FPS,
+bitrate, preset, codec ou método de codificação passa pela verificação da
+combinação antes de reaplicar uma transmissão. O modo **Manual** mantém o codec e
+o método escolhidos. Se o perfil não for suportado, o app testa
+taxas de quadros menores e só ajusta os FPS após confirmar uma combinação
+compatível neste computador — por exemplo, de 4K120 para 4K60. Um aviso explica
+o ajuste; resolução, bitrate, câmera e áudio permanecem iguais.
+
+Os limites numéricos de câmera e áudio continuam valendo; verificar a tela
+não exige iniciar a webcam. O app não inventa limites de bitrate do codificador.
+Falhas temporárias na verificação não reduzem os FPS. Se nenhuma opção for
+compatível, a mudança de perfil não é aplicada: ajuste a qualidade ou escolha
+outro codificador. Durante uma transmissão,
+o ajuste passa pela mesma validação das mudanças manuais de qualidade;
+se ela impedir a alteração, o perfil anterior é mantido.
+
+### Compartilhamento privado
+
+No seletor de tela ou janela, ative **Compartilhamento privado** e abra
+**Quem pode assistir**. O dropdown permite buscar e selecionar vários
+**Usuários** ou **Cargos**, com fotos dos usuários, cores dos cargos e uma lista
+com rolagem. Os selecionados aparecem resumidos no campo; reabra a lista para
+desmarcar alguém. Selecionar um usuário **ou**
+um cargo que ele possui libera o acesso; não é necessário atender aos dois.
+Selecione pelo menos um: uma seleção vazia bloqueia o início, nunca torna a
+transmissão pública. Novas transmissões são públicas por padrão.
+
+Para as outras pessoas, não aparece transmissão, selo LIVE nem áudio de tela.
+Isso também vale para administradores: não há acesso automático. O servidor
+verifica o público antes de permitir vídeo ou áudio; conhecer um identificador
+de transmissão não permite assistir. As permissões do canal e a participação
+na mesma chamada continuam necessárias.
+
+A seleção acompanha a transmissão ao trocar a fonte, reconectar ou mudar a
+qualidade, e identifica a pessoa, não apenas um dispositivo. Remover ou excluir
+um cargo revoga imediatamente as assinaturas que dependem dele, sem encerrar
+o microfone ou outras transmissões permitidas. Adicionar um cargo dá
+visibilidade à transmissão. O público é escolhido antes de iniciar; para
+definir outro, encerre a transmissão e inicie novamente.
 
 ## Chat
 

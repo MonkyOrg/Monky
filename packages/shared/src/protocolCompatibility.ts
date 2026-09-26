@@ -6,7 +6,8 @@ import { PROTOCOL_VERSION } from './constants.js';
 // Protocol 26 introduced the native 4K/80 Mbps bounds and H.264 negotiation.
 // Protocol 28 adds screen codec metadata to strict source/signaling schemas.
 // Older clients cannot safely decode AV1 or accept those descriptors.
-export const MIN_CLIENT_PROTOCOL = 28;
+// Protocol 29 adds private screen audiences and 1080p240/4K120 profile bounds.
+export const MIN_CLIENT_PROTOCOL = 29;
 export const MIN_BOT_PROTOCOL = 24;
 export const PROTOCOL_FEATURES = ['chat-blocks', 'message-length-setting', 'chat-delivery', 'message-delete-undo'] as const;
 export type ProtocolFeature = typeof PROTOCOL_FEATURES[number];

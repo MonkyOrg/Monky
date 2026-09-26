@@ -7992,6 +7992,123 @@ button[data-loading="1"]::after {
   min-width: 0;
 }
 
+.share-audience-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.share-audience-picker { position: relative; }
+
+.share-audience-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+#share-audience-summary, .share-audience-identity, .share-audience-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+#share-audience-summary { flex: 1; overflow: hidden; }
+.share-audience-identity { flex: 1; }
+.share-audience-chip { padding: 2px 6px; border-radius: 5px; background: var(--bg-tertiary); }
+.share-audience-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-audience-placeholder { color: var(--text-muted); font-size: 0.85rem; }
+.share-audience-more { flex-shrink: 0; color: var(--text-secondary); font-size: 0.8rem; }
+.share-audience-chevron { flex-shrink: 0; color: var(--text-secondary); }
+.share-audience-trigger[aria-expanded="true"] { border-color: var(--accent-primary); }
+.share-audience-trigger[aria-expanded="true"] .share-audience-chevron { transform: rotate(180deg); }
+
+.share-audience-popup {
+  position: absolute;
+  z-index: 5;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: min(360px, 48vh);
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.35);
+}
+
+.share-audience-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 6px 8px 10px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.share-audience-search input {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.85rem;
+  outline: none;
+}
+
+.share-audience-search:focus-within { border-bottom-color: var(--accent-primary); }
+.share-audience-search input::placeholder { color: var(--text-muted); }
+.share-audience-options { max-height: min(280px, 35vh); overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+.share-audience-options h4 { margin: 0; padding: 10px 8px 5px; font-size: 0.75rem; font-weight: 600; color: var(--text-muted); }
+
+.share-audience-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.share-audience-option:hover, .share-audience-option:focus-visible { background: var(--bg-tertiary); }
+.share-audience-option[aria-selected="true"] { background: color-mix(in srgb, var(--accent-primary) 14%, transparent); }
+.share-audience-check { flex-shrink: 0; color: var(--accent-primary); visibility: hidden; }
+.share-audience-option[aria-selected="true"] .share-audience-check { visibility: visible; }
+.share-audience-avatar { width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; object-fit: cover; }
+.share-audience-role { width: 12px; height: 12px; margin: 6px; flex-shrink: 0; border-radius: 50%; background: var(--role-color); }
+.share-audience-chip .share-audience-avatar { width: 20px; height: 20px; }
+.share-audience-chip .share-audience-role { margin: 4px; }
+#share-audience-no-results { padding: 12px 8px; margin: 0; font-size: 0.85rem; color: var(--text-muted); }
+.share-audience-popup[hidden], .share-audience-option[hidden], .share-audience-group[hidden] { display: none; }
+.share-audience-trigger:disabled, .share-audience-option:disabled { opacity: 0.5; cursor: not-allowed; }
+.share-audience-trigger:focus-visible, .share-audience-option:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -2px;
+}
+
 #share-aspect-label {
   color: var(--text-secondary);
   font-size: 0.85rem;

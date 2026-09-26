@@ -779,6 +779,21 @@
       "sha256": "838c3d35190b895ab3a7e6bab7e006f050e5ee6056f4698bd40af09e5c3fb407"
     },
     {
+      "path": "libobs-winrt\\winrt-capture.cpp",
+      "bytes": 20376,
+      "sha256": "bc5eff3f156f8177d7001f4a1e549aaa44338c644c02a3de893ed3520f150527"
+    },
+    {
+      "path": "libobs-winrt\\winrt-dispatch.cpp",
+      "bytes": 1890,
+      "sha256": "46c57111638f02abf209c97ba346dfc3ebd73792188a93649519fa2393d81631"
+    },
+    {
+      "path": "libobs\\util\\windows\\ComPtr.hpp",
+      "bytes": 3321,
+      "sha256": "1049996d3dd2bfed5513e6a3f19a23727dde182607998652f18fcc5361cb6320"
+    },
+    {
       "path": "libobs-winrt\\winrt-capture.h",
       "bytes": 1082,
       "sha256": "c0f6aecb6d715279abf4c10c12af1723a54cd8e88c8e03dc76ea556a4858fae4"

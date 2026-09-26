@@ -1,9 +1,17 @@
 import { ADMIN_PERMISSIONS, DEFAULT_PERMISSIONS, Permission, hasPermission } from '@monky/shared';
 import { IRoleRepository, IServerRepository } from '../../domain/repositories';
 
+interface ScreenRoleRevocation { roleId?: string; userId?: string }
+
 export class PermissionService {
   private roleAccessVersion = 0;
   private pendingRoleMutations = 0;
+  private screenRoleVersion = 0;
+  private roleMutationListener?: (revocation: ScreenRoleRevocation | null) => void;
+
+  public setRoleMutationListener(listener: ((revocation: ScreenRoleRevocation | null) => void) | undefined): void {
+    this.roleMutationListener = listener;
+  }
 
   constructor(
     private serverRepo: IServerRepository,
@@ -14,19 +22,31 @@ export class PermissionService {
     return this.pendingRoleMutations === 0 ? this.roleAccessVersion : null;
   }
 
+  public getScreenRoleAccessVersion(): number {
+    return this.screenRoleVersion;
+  }
+
   /**
    * A role write can commit before its WebSocket broadcast resumes. Sensitive
    * readers must invalidate stale authorization at that write boundary, not
    * only after the asynchronously published role list changes.
    */
-  public async withRoleMutation<T>(mutation: () => Promise<T>): Promise<T> {
+  public async withRoleMutation<T>(mutation: () => Promise<T>, revocation: ScreenRoleRevocation | false = {}): Promise<T> {
     this.roleAccessVersion++;
     this.pendingRoleMutations++;
+    if (revocation !== false) {
+      this.screenRoleVersion++;
+    }
     try {
+      this.roleMutationListener?.(revocation === false ? null : revocation);
       return await mutation();
     } finally {
       this.pendingRoleMutations--;
       this.roleAccessVersion++;
+      if (revocation !== false) {
+        this.screenRoleVersion++;
+      }
+      this.roleMutationListener?.(revocation === false ? null : revocation);
     }
   }
 

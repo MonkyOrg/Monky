@@ -32,6 +32,16 @@ const directory = process.argv.find(value => value.startsWith('--artifacts='))?.
 const mode = process.argv.find(value => value.startsWith('--mode='))?.slice('--mode='.length) ?? 'p2p';
 const encoder = process.argv.find(value => value.startsWith('--encoder='))?.slice('--encoder='.length) ?? 'auto';
 const selectedQuality = process.argv.find(value => value.startsWith('--quality='))?.slice('--quality='.length);
+const selectedProfile = process.argv.find(value => value.startsWith('--profile='))?.slice('--profile='.length) ?? '1080p120';
+const auditFfmpeg = process.argv.find(value => value.startsWith('--cadence-ffmpeg='))?.slice('--cadence-ffmpeg='.length);
+assert.ok(!auditFfmpeg || (path.isAbsolute(auditFfmpeg) && fs.existsSync(auditFfmpeg) && selectedQuality === 'source'),
+  'Unique-frame qualification requires an existing absolute FFmpeg executable and source quality.');
+assert.ok(['1080p120', '1080p240', '4k120'].includes(selectedProfile));
+assert.ok(selectedProfile === '1080p120' || selectedQuality === 'source',
+  'High-FPS qualification requires the explicit source quality.');
+const sourceVideo = selectedProfile === '4k120'
+  ? { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 }
+  : { width: 1920, height: 1080, fps: selectedProfile === '1080p240' ? 240 : 120, maxBitrateKbps: 20000 };
 assert.ok(['auto', 'obs_x264', 'monky_aom_av1', 'av1_texture_amf', 'obs_nvenc_av1_tex',
   'h264_texture_amf', 'obs_nvenc_h264_tex'].includes(encoder));
 assert.ok(selectedQuality === undefined || ['source', '1080p60', '720p60', '480p30'].includes(selectedQuality));
@@ -47,7 +57,7 @@ app.setPath('userData', profile); app.setPath('sessionData', profile);
 app.setName('MonkyNativeCaptureSmoke');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 const failures = [];
-const report = { mode, encoder, codec, moduleDirectory, profiles: [], errors: [], personalWindowsCaptured: false, videoRecorded: false };
+const report = { mode, encoder, codec, selectedProfile, moduleDirectory, profiles: [], errors: [], personalWindowsCaptured: false, videoRecorded: false };
 const progress = () => fs.writeFileSync(path.join(directory, 'progress.json'), JSON.stringify(report, null, 2) + '\n');
 const fail = value => {
   const error = value instanceof Error ? value : new Error(String(value));
@@ -273,13 +283,14 @@ async function runProfile(runtime, quality, sourceLoss = false) {
   const runId = randomUUID();
   const source = { shareId: 'own-source', instanceId: runId, audio: false,
     codec,
-    video: { width: 1920, height: 1080, fps: 120, maxBitrateKbps: 20000 } };
+    video: sourceVideo };
   const video = getScreenShareProfile(source.video, quality, codec);
   const sfu = mode === 'sfu' ? await createSfuFixture(runId) : null;
   activeSfu = sfu;
   const destination = { frame: playbackWindow.webContents.mainFrame, presentationId: `screen-${runId}` };
   await playbackWindow.webContents.executeJavaScript(`nativeCaptureSmoke.start(${JSON.stringify(destination.presentationId)})`);
   let sender, receiver;
+  const audit = { active: false, frames: [], bytes: 0, firstTimestamp: null, lastTimestamp: null };
   const result = { video, nativeClosed: false };
   report.profiles.push(result);
   const phase = name => { result.phase = name; progress(); console.log(`Capture smoke ${video.width}x${video.height}@${video.fps}: ${name}`); };
@@ -342,18 +353,43 @@ async function runProfile(runtime, quality, sourceLoss = false) {
     assertPixels(first.pixels, video);
     result.pixels = first.pixels;
     phase('measuring-presentation');
+    if (auditFfmpeg) {
+      const deliverPacket = sender.host.onPacket;
+      audit.active = true;
+      sender.host.onPacket = frame => {
+        const accepted = deliverPacket(frame);
+        if (accepted === false || !audit.active || (!audit.frames.length && !frame.keyframe)) return accepted;
+        assert.ok(audit.frames.length < 1536 && audit.bytes + frame.data.length <= 32 * 1024 * 1024,
+          'Owned-source cadence audit exceeded its fixed memory budget.');
+        audit.frames.push(Buffer.from(frame.data));
+        audit.bytes += frame.data.length;
+        audit.firstTimestamp ??= frame.timestampUs;
+        audit.lastTimestamp = frame.timestampUs;
+        return accepted;
+      };
+    }
     await delay(1000);
+    const captureBefore = await sender.host.getStats();
+    const sourceBefore = await sourceWindow.webContents.executeJavaScript('nativeCaptureSourceSample()');
     const before = await sample(); await delay(3000); const after = await sample();
+    audit.active = false;
+    const sourceAfter = await sourceWindow.webContents.executeJavaScript('nativeCaptureSourceSample()');
     result.pixels = first.pixels;
     result.presentedFps = (after.playback.counters.presentedFrames - before.playback.counters.presentedFrames)
       * 1000 / (after.sampledAtMs - before.sampledAtMs);
     result.playback = after.playback;
     result.capture = await sender.host.getStats();
+    result.sourcePaintFps = (sourceAfter.frames - sourceBefore.frames) * 1000 / (sourceAfter.at - sourceBefore.at);
+    result.encodedFps = (result.capture.native.observation.outputPackets - captureBefore.native.observation.outputPackets)
+      * Number(result.capture.native.qpcFrequency) / Number(BigInt(result.capture.native.qpc) - BigInt(captureBefore.native.qpc));
     result.sender = sender.engine.snapshot(); result.receiver = receiver.engine.snapshot();
     result.flow = sender.flow.snapshot();
     assert.deepEqual(after.errors, []);
     assert.ok(result.presentedFps >= video.fps * .85,
       `Native presentation ${result.presentedFps.toFixed(2)} FPS did not sustain the ${video.fps} FPS profile.`);
+    if (selectedProfile !== '1080p120') {
+      assert.ok(result.encodedFps >= video.fps * .85, `Encoder only sustained ${result.encodedFps.toFixed(2)} FPS.`);
+    }
     result.activeRtp = { sender: await videoRtp(sender, 'outbound-rtp'), receiver: await videoRtp(receiver, 'inbound-rtp') };
     assert.ok(result.activeRtp.sender.bytes > 0 && result.activeRtp.receiver.bytes > 0);
     phase('stopping-watch');
@@ -416,6 +452,39 @@ async function runProfile(runtime, quality, sourceLoss = false) {
     if (errors.length) throw new AggregateError(errors, 'Native smoke retirement failed.');
   }
   if (failures.length) throw new AggregateError(failures, 'Native smoke reported runtime failures.');
+  if (auditFfmpeg) {
+    assert.ok(audit.frames.length > 0 && audit.lastTimestamp > audit.firstTimestamp);
+    const decoded = require('node:child_process').spawnSync(auditFfmpeg, [
+      '-hide_banner', '-loglevel', 'error', '-nostdin', '-f', codec === 'av1' ? 'obu' : 'h264', '-i', 'pipe:0',
+      '-an', '-vf', 'crop=iw*0.48:ih*0.04:iw*0.25:ih*190/600,scale=16:1:flags=neighbor,format=gray',
+      '-fps_mode', 'passthrough', '-f', 'rawvideo', 'pipe:1',
+    ], { input: Buffer.concat(audit.frames), timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
+    assert.equal(decoded.status, 0, decoded.error?.message ?? decoded.stderr.toString());
+    assert.equal(decoded.stdout.length, audit.frames.length * 16, 'Every captured access unit must decode to exactly one audit frame.');
+    let previous = null, unique = 0, reorderedFrames = 0;
+    const counterSteps = {}, counterSamples = [];
+    for (let at = 0; at < decoded.stdout.length; at += 16) {
+      let value = 0;
+      for (let bit = 0; bit < 16; bit++) if (decoded.stdout[at + bit] > 127) value |= 1 << bit;
+      if (counterSamples.length < 64) counterSamples.push(value);
+      if (previous === null) unique++;
+      else {
+        const step = (value - previous + 65536) % 65536;
+        counterSteps[step] = (counterSteps[step] ?? 0) + 1;
+        if (step >= 32768) reorderedFrames++;
+        else if (step > 0) unique++;
+      }
+      previous = value;
+    }
+    const durationSeconds = (audit.lastTimestamp - audit.firstTimestamp + 1000000 / video.fps) / 1000000;
+    result.cadenceAudit = { decodedFrames: audit.frames.length, uniqueFrames: unique, durationSeconds,
+      uniqueCapturedFps: unique / durationSeconds, reorderedFrames, counterSteps, counterSamples,
+      retainedBytes: audit.bytes, writtenToDisk: false };
+    progress();
+    assert.equal(reorderedFrames, 0, 'The decoded visual source counter moved backwards.');
+    assert.ok(result.cadenceAudit.uniqueCapturedFps >= video.fps * .85,
+      `Only ${result.cadenceAudit.uniqueCapturedFps.toFixed(2)} unique source frames/s survived capture and encoding.`);
+  }
   console.log(JSON.stringify({ profile: video, pixels: result.pixels, presentedFps: result.presentedFps, nativeClosed: result.nativeClosed }));
 }
 

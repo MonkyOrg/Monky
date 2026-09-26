@@ -146,6 +146,15 @@ test('Windows DOM runs independently of native compilation while the existing re
   assert.equal(check.run, 'test "$PACKAGE_RESULT" = success && test "$DOM_RESULT" = success');
 });
 
+test('CI exercises screen privacy alongside voice lifecycle tests', () => {
+  const server = step(ci.jobs['bot-tests'], 'Test server, client state and real bot conversations');
+  const command = server.run.split('\n').find(line => line.startsWith('node --test '));
+  assert.ok(command);
+  assert.ok(command.split(' ').includes('apps/server/dist/test-screen-subscriptions.js'));
+  assert.ok(command.split(' ').includes('apps/server/dist/test-voice.js'));
+  assert.equal(server['continue-on-error'], undefined);
+});
+
 test('both build lanes and release retain the qualified Windows toolchain and no validation bypass', () => {
   for (const job of [ci.jobs['client-dom'], ci.jobs.package, release.jobs.build]) {
     assert.deepEqual(step(job, 'Setup MSVC (Windows)').with, {
@@ -218,6 +227,7 @@ test('the extracted DOM lane preserves every existing test command and its order
     'node apps/client/test/settingsNavigationSmoke.cjs --release-notes',
     'node apps/client/test/settingsNavigationSmoke.cjs --quality-settings',
     'node apps/client/test/settingsNavigationSmoke.cjs --screen-stage',
+    'node apps/client/test/settingsNavigationSmoke.cjs --screen-audience',
     'npm run test:settings:ui --workspace=apps/client',
     'npm run test:camera --workspace=apps/client',
     'node apps/client/test/footerControlsSmoke.cjs',

@@ -1,4 +1,4 @@
-import { QUALITY_PRESETS, QualityPresetType, QualityProfile, NATIVE_SCREEN_VIDEO_LIMITS } from '@monky/shared';
+import { QUALITY_PRESETS, QualityPresetType, QualityProfile, NATIVE_SCREEN_VIDEO_LIMITS, type NativeScreenVideoProfile } from '@monky/shared';
 import { settingsStore } from '../../../stores/settingsStore';
 import { webRtcManager } from '../../../core/WebRtcManager';
 import { t } from '../../../i18n';
@@ -27,12 +27,92 @@ export class QualityTab {
   private eventController: AbortController | null = null;
   private customProfileController: AbortController | null = null;
   private clearQualityToast: (() => void) | null = null;
-  private readonly encoding = new ScreenEncodingControls(() => nativeScreenProfile(
-    settingsStore.qualityPreset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[settingsStore.qualityPreset]));
+  private container: HTMLElement | null = null;
+  private requestedQuality: { preset: QualityPresetType; profile: QualityProfile } | null = null;
+  private appliedEncoding = '';
+  private readonly encoding = new ScreenEncodingControls(() => nativeScreenProfile(this.qualityProfile()),
+    undefined, profile => this.applyCompatibleProfile(profile), () => this.rejectQualityRequest());
+
+  private qualityProfile(): QualityProfile {
+    return this.requestedQuality?.profile ?? (settingsStore.qualityPreset === 'CUSTOM'
+      ? settingsStore.customProfile : QUALITY_PRESETS[settingsStore.qualityPreset]);
+  }
+
+  private encodingKey(): string {
+    return JSON.stringify([settingsStore.screenEncodingStrategy,
+      settingsStore.screenEncodingMode, settingsStore.preferredScreenCodec]);
+  }
+
+  private requestQualityChanges(preset: QualityPresetType, profile: QualityProfile): void {
+    this.requestedQuality = { preset, profile };
+    void this.encoding.refresh(true);
+  }
+
+  private renderQualityDetails(): void {
+    const container = this.container;
+    if (!container) return;
+    const preset = this.requestedQuality?.preset ?? settingsStore.qualityPreset;
+    const select = container.querySelector<HTMLSelectElement>('#select-preset');
+    if (select) select.value = preset;
+    const details = container.querySelector<HTMLElement>('#preset-details');
+    this.customProfileController?.abort();
+    this.customProfileController = null;
+    if (details) {
+      const focused = document.activeElement;
+      const focusId = focused instanceof HTMLElement && details.contains(focused) ? focused.id : '';
+      details.innerHTML = this.getPresetDetailsHtml(preset);
+      if (preset === 'CUSTOM') this.attachCustomProfileListeners(container);
+      if (focusId) details.querySelector<HTMLElement>(`#${CSS.escape(focusId)}`)?.focus();
+    }
+  }
+
+  private rejectQualityRequest(): void {
+    if (!this.requestedQuality) return;
+    this.requestedQuality = null;
+    this.renderQualityDetails();
+  }
+
+  private commitQualityChanges(preset: QualityPresetType, customProfile?: QualityProfile, persist = true): void {
+    const previousPreset = settingsStore.qualityPreset, previousCustom = settingsStore.customProfile;
+    const profile = preset === 'CUSTOM' ? customProfile ?? previousCustom : QUALITY_PRESETS[preset];
+    webRtcManager.assertScreenSharingSettings(profile);
+    settingsStore.qualityPreset = preset;
+    if (customProfile) settingsStore.customProfile = customProfile;
+    try { webRtcManager.setQualityPreset(preset); }
+    catch (error) {
+      settingsStore.qualityPreset = previousPreset;
+      settingsStore.customProfile = previousCustom;
+      throw error;
+    }
+    if (persist) settingsStore.save();
+    void this.encoding.refresh();
+  }
+
+  private applyCompatibleProfile(profile: NativeScreenVideoProfile): void {
+    if (!this.container || this.eventController?.signal.aborted) throw new Error('Quality settings were closed.');
+    const previous = this.qualityProfile();
+    const adjusted = previous.screenFps !== profile.fps;
+    if (!this.requestedQuality && !adjusted && this.appliedEncoding === this.encodingKey()) return;
+    const preset = adjusted ? 'CUSTOM' : this.requestedQuality?.preset ?? settingsStore.qualityPreset;
+    const persist = !!this.requestedQuality || adjusted;
+    const encoding = this.encodingKey();
+    this.requestedQuality = null;
+    try {
+      this.commitQualityChanges(preset, preset === 'CUSTOM' ? { ...previous, screenFps: profile.fps } : undefined, persist);
+      this.appliedEncoding = encoding;
+    } catch (error) {
+      this.renderQualityDetails();
+      throw error;
+    }
+    if (adjusted) this.renderQualityDetails();
+  }
 
   private settingsError(error: unknown): void {
     console.warn('[QualityTab] Could not apply screen sharing settings:', error);
-    void showAlert({ variant: 'danger', message: error instanceof Error ? error.message : t('screenShare.nativeProfileChangeBlocked') });
+    const safeMessages = [t('screenShare.nativeProfileChangeBlocked'), t('screenShare.nativeCodecChangeBlocked')];
+    const message = error instanceof Error && safeMessages.includes(error.message)
+      ? error.message : t('settings.screenEncodingAdjustmentBlocked');
+    void showAlert({ variant: 'danger', message });
   }
 
   public renderHtml(): string {
@@ -135,7 +215,8 @@ export class QualityTab {
   }
 
   public getPresetDetailsHtml(preset: QualityPresetType): string {
-    const p: QualityProfile = preset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[preset];
+    const p: QualityProfile = this.requestedQuality?.preset === preset ? this.requestedQuality.profile
+      : preset === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[preset];
     const totalMbps = Math.round((p.audioBitrateKbps + p.cameraBitrateKbps + p.screenBitrateKbps) / 100) / 10;
 
     if (preset === 'CUSTOM') {
@@ -206,7 +287,7 @@ export class QualityTab {
     bitrateHelp?: 'audio' | 'camera' | 'screen',
   ): string {
     const id = key.replace('Kbps', '');
-    const { min, max, step } = customQualityBounds(key, settingsStore.customProfile);
+    const { min, max, step } = customQualityBounds(key, this.qualityProfile());
     options = options.filter(option => option >= min && option <= max);
     const isKnown = options.includes(value);
     const mediaLabel = bitrateHelp === 'audio' ? t('settings.audio')
@@ -291,6 +372,8 @@ export class QualityTab {
   public attachEvents(container: HTMLElement): void {
     this.cleanup();
     this.eventController = new AbortController();
+    this.container = container;
+    this.appliedEncoding = this.encodingKey();
     this.encoding.attach(container);
     const options = { signal: this.eventController.signal };
     const nativeReceiver = container.querySelector<HTMLButtonElement>('#screen-receiver-native');
@@ -307,7 +390,6 @@ export class QualityTab {
       }, options);
     }
     const selectPreset = container.querySelector<HTMLSelectElement>('#select-preset');
-    const presetDetails = container.querySelector<HTMLElement>('#preset-details');
     const checkboxPreviewFocus = container.querySelector<HTMLInputElement>('#checkbox-screen-preview-focus');
     const checkboxScreenTelemetry = container.querySelector<HTMLInputElement>('#checkbox-screen-telemetry');
     const selectScreenTelemetryPos = container.querySelector<HTMLSelectElement>('#select-screen-telemetry-position');
@@ -348,22 +430,10 @@ export class QualityTab {
         selectPreset.value = settingsStore.qualityPreset;
         return;
       }
-      try { webRtcManager.assertScreenSharingSettings(val === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[val]); }
-      catch (error) { selectPreset.value = settingsStore.qualityPreset; this.settingsError(error); return; }
-      settingsStore.qualityPreset = val;
-      settingsStore.save();
-      webRtcManager.setQualityPreset(val);
-      void this.encoding.refresh();
-      this.customProfileController?.abort();
-      this.customProfileController = null;
+      this.requestQualityChanges(val, val === 'CUSTOM' ? settingsStore.customProfile : QUALITY_PRESETS[val]);
       this.clearQualityToast?.();
       this.clearQualityToast = null;
-      if (presetDetails) {
-        presetDetails.innerHTML = this.getPresetDetailsHtml(val);
-        if (val === 'CUSTOM') {
-          this.attachCustomProfileListeners(container);
-        }
-      }
+      this.renderQualityDetails();
     }, options);
 
     if (settingsStore.qualityPreset === 'CUSTOM') {
@@ -375,27 +445,28 @@ export class QualityTab {
     this.customProfileController?.abort();
     this.customProfileController = new AbortController();
     const options = { signal: this.customProfileController.signal };
-    let previousProfile = { ...settingsStore.customProfile };
+    let editedProfile = { ...this.qualityProfile() };
     const notify = (key: 'settings.qualityValueAdjusted' | 'settings.qualityValueInvalid' | null) => {
       this.clearQualityToast?.();
       this.clearQualityToast = key ? showInfoToast(t(key)) : null;
     };
     const syncInputs = () => {
+      const profile = this.qualityProfile();
       for (const key of CUSTOM_QUALITY_FIELDS) {
         const id = key.replace('Kbps', '');
         const input = container.querySelector<HTMLInputElement>(`#custom-${id}`);
-        const { min, max, step } = customQualityBounds(key, settingsStore.customProfile);
+        const { min, max, step } = customQualityBounds(key, profile);
         if (input) {
           input.min = String(min);
           input.max = String(max);
           input.step = String(step);
-          input.value = String(settingsStore.customProfile[key]);
+          input.value = String(profile[key]);
         }
         if (key === 'cameraFps' || key === 'screenFps') {
           const select = container.querySelector<HTMLSelectElement>(`#q-select-${id}`);
           if (!select) continue;
           const custom = select.value === CUSTOM_OPTION;
-          const value = settingsStore.customProfile[key];
+          const value = profile[key];
           select.innerHTML = FPS_OPTIONS.filter(fps => fps <= max).map(fps =>
             `<option value="${fps}">${fps} fps</option>`).join('')
             + `<option value="${CUSTOM_OPTION}">${escapeHtml(t('settings.optionCustom'))}</option>`;
@@ -406,30 +477,17 @@ export class QualityTab {
       }
     };
     const apply = () => {
-      const requested = settingsStore.customProfile;
-      settingsStore.customProfile = normalizeCustomQualityProfile(requested);
-      const adjusted = CUSTOM_QUALITY_FIELDS.some(key => settingsStore.customProfile[key] !== requested[key]);
-      try { webRtcManager.assertScreenSharingSettings(settingsStore.customProfile); }
-      catch (error) {
-        settingsStore.customProfile = { ...previousProfile };
-        const details = container.querySelector<HTMLElement>('#preset-details');
-        if (details) {
-          details.innerHTML = this.getPresetDetailsHtml('CUSTOM');
-          this.attachCustomProfileListeners(container);
-        }
-        this.settingsError(error);
-        return;
-      }
-      settingsStore.save();
-      webRtcManager.setQualityPreset('CUSTOM');
-      void this.encoding.refresh();
-      previousProfile = { ...settingsStore.customProfile };
-      syncInputs();
+      const requested = editedProfile;
+      const normalized = normalizeCustomQualityProfile(requested);
+      const adjusted = CUSTOM_QUALITY_FIELDS.some(key => normalized[key] !== requested[key]);
+      editedProfile = normalized;
       notify(adjusted ? 'settings.qualityValueAdjusted' : null);
+      this.requestQualityChanges('CUSTOM', normalized);
+      syncInputs();
     };
 
     const setValue = (key: QualityNumberKey, value: number) => {
-      settingsStore.customProfile = { ...settingsStore.customProfile, [key]: value };
+      editedProfile = { ...editedProfile, [key]: value };
     };
 
     // The free-form number box behind each "custom" entry.
@@ -499,7 +557,7 @@ export class QualityTab {
         // Switching the aspect ratio snaps to the entry closest in height, so
         // the user keeps roughly the same quality instead of being thrown to
         // the top of the new list.
-        const currentHeight = settingsStore.customProfile[heightKey];
+        const currentHeight = this.qualityProfile()[heightKey];
         const target = closestResolution(group, currentHeight);
         if (resSelect) {
           resSelect.innerHTML = this.renderResolutionOptions(group, target.width, target.height);
@@ -530,6 +588,8 @@ export class QualityTab {
   }
 
   public cleanup(): void {
+    this.requestedQuality = null;
+    this.container = null;
     this.encoding.cleanup();
     this.clearQualityToast?.();
     this.clearQualityToast = null;

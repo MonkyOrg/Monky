@@ -23,13 +23,16 @@ const publication = {
   metadataVersion: 1, trackId: 'track', mid: null, streamIds: ['screen-one'],
 };
 
-test('4K120 and 80 Mbps are explicit ceilings with honest per-rendition H264 levels', () => {
+test('1080p240, 4K120 and 80 Mbps have explicit ceilings and honest per-rendition H264 levels', () => {
   const maximum = { width: 3840, height: 2160, fps: 120, maxBitrateKbps: 80000 };
   assert.deepEqual(nativeScreenVideoProfileSchema.parse(maximum), maximum);
   assert.equal(getScreenH264ProfileLevelId(video), '4d0033');
   assert.equal(getScreenH264ProfileLevelId({ ...maximum, fps: 30 }), '4d0033');
   assert.equal(getScreenH264ProfileLevelId({ ...maximum, fps: 60 }), '4d0034');
   assert.equal(getScreenH264ProfileLevelId(maximum), '4d003c');
+  assert.equal(getScreenH264ProfileLevelId({ ...video, fps: 240 }), '4d0034');
+  assert.equal(nativeScreenVideoProfileSchema.safeParse({ ...video, fps: 240 }).success, true);
+  assert.equal(nativeScreenVideoProfileSchema.safeParse({ ...video, fps: 241 }).success, false);
   assert.equal(getScreenH264ProfileLevelId(getScreenShareProfile(maximum, '1080p60')), '4d0033');
   assert.deepEqual(getScreenShareProfile(maximum, 'source'), maximum);
   for (const invalid of [{ width: 3844 }, { height: 2162 }, { fps: 121 }, { maxBitrateKbps: 80050 }])
@@ -44,6 +47,7 @@ test('AV1 Main-tier level bounds account for dimensions, display rate and bitrat
     [1920, 1080, 30, 12000, 8],
     [1920, 1080, 60, 20000, 9],
     [1920, 1080, 120, 20000, 12],
+    [1920, 1080, 240, 20000, 13],
     [3840, 2160, 30, 30000, 12],
     [3840, 2160, 60, 40000, 13],
     [3840, 2160, 120, 60000, 14],
@@ -66,7 +70,7 @@ test('quality changes actual encoder dimensions, cadence and bitrate, never upsc
   assert.deepEqual(getScreenShareQualities(small), [{ quality: 'source', profile: small }]);
   assert.ok(Object.isFrozen(getScreenShareProfile(video, '720p60')));
   assert.throws(() => getScreenShareProfile({ ...video, width: 854 }, 'source'));
-  assert.equal(nativeScreenVideoProfileSchema.safeParse({ ...video, fps: 121 }).success, false);
+  assert.equal(nativeScreenVideoProfileSchema.safeParse({ ...video, fps: 241 }).success, false);
   assert.equal(nativeScreenVideoProfileSchema.safeParse({ ...video, maxBitrateKbps: 149 }).success, false);
 });
 

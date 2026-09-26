@@ -25,6 +25,7 @@ void RunH264LevelChecks(Check check) {
       "4K120 requires Level6 even at the unchanged20Mbps ceiling");
   check(screen_video::RequiredH264Level(3840, 2160, 60, 20000000) == 52, "4K60 requires Level5.2");
   check(screen_video::RequiredH264Level(1920, 1080, 120, 20000000) == 51, "1080p120 remains Level5.1");
+  check(screen_video::RequiredH264Level(1920, 1080, 240, 20000000) == 52, "1080p240 requires Level5.2");
   check(screen_video::H264LevelMaxBitrate(60) == 240000000, "H264 standard limit must not redefine Monky's20Mbps cap");
 }
 

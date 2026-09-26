@@ -408,6 +408,7 @@ class NativeScreenEndpoint {
     this.host = new CaptureBridge({
       host: this.runtime.host, runtime: this.runtime.obs, runId, runDirectory: this.runDirectory,
       encoder: this.captureEncoder,
+      bitrateCeilingKbps: maxBitrateKbps,
       video: { width, height, fps, bitrateKbps: Math.min(5000, maxBitrateKbps),
         scaleMode: this.preserveAspectRatio ? 'fit' : 'stretch' },
       isSourcePaused: this.isSourcePaused,

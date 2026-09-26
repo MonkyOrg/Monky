@@ -151,8 +151,18 @@ async function runDropdownSmoke() {
   const originals = {
     save: settings.save, preset: settings.qualityPreset, codec: settings.preferredVideoCodec,
     profile: { ...settings.customProfile }, microphone: settings.selectedMicrophoneId,
-    setPreset: rtc.setQualityPreset, reapply: rtc.reapplyCodecPreferences,
+    setPreset: rtc.setQualityPreset, reapply: rtc.reapplyCodecPreferences, api: window.api,
   };
+  window.api = { ...originals.api, nativeScreenCommand: async command => {
+    if (command.action === 'cancel-encoding-probe') return { kind: 'ok' };
+    check(command.action === 'probe-encoding' && !('desktopSourceId' in command),
+      'Quality dropdown validation may only probe encoders without capturing a source');
+    return { kind: 'encoding', availability: {
+      selection: { mode: command.encodingStrategy === 'automatic' ? 'hardware' : command.encodingMode,
+        codec: command.encodingStrategy === 'automatic' ? 'av1' : command.codec, encoder: 'fixture' },
+      hardware: { available: true, reason: null }, fallback: false,
+    } };
+  } };
   let saves = 0;
   let applies = 0;
   settings.save = () => { saves++; };
@@ -183,6 +193,7 @@ async function runDropdownSmoke() {
     key(preset, 'End');
     check(preset.value === 'NORMAL', 'Navigation previews without changing native value');
     key(preset, 'Enter');
+    for (let attempt = 0; attempt < 100 && settings.qualityPreset !== 'CUSTOM'; attempt++) await wait();
     check(preset.value === 'CUSTOM' && settings.qualityPreset === 'CUSTOM', 'Existing quality handler updates native value and settings');
     check(inputs === 1 && changes === 1 && saves === 1 && applies === 1, 'Input/change and application handler fire exactly once after duplicate init');
     check(fixture.querySelector('#q-select-audioBitrate'), 'Existing CUSTOM handler renders dependent controls');
@@ -380,6 +391,7 @@ async function runDropdownSmoke() {
     settings.selectedMicrophoneId = originals.microphone;
     rtc.setQualityPreset = originals.setPreset;
     rtc.reapplyCodecPreferences = originals.reapply;
+    window.api = originals.api;
   }
   // Keep a real settings fixture for trusted-input checks and the screenshot.
   const strategy = settings.screenEncodingStrategy;

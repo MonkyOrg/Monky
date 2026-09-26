@@ -68,6 +68,7 @@ interface Presentation {
 type SourceInput = Omit<NativeScreenCapture, 'source'> & {
   shareId: string; video: NativeScreenVideoProfile; audio: boolean;
   replacesAudioShareId?: string;
+  audience?: NativeScreenSource['audience'];
 };
 interface Source {
   readonly ready: Promise<NativeScreenSource>;
@@ -258,7 +259,7 @@ export class NativeScreenController {
     this.current(call);
     const participants = call.context.participants.getInVoiceChannel(call.config.channelId).map(participant => ({
       sessionId: participant.user.sessionId || participant.user.id,
-      nativeScreenShares: participant.voiceState?.nativeScreenShares ?? [],
+      nativeScreenShares: (participant.voiceState?.nativeScreenShares ?? []).map(({ audience: _audience, ...source }) => source),
     }));
     const roster = JSON.stringify(participants);
     if (roster !== call.roster) {
@@ -383,8 +384,9 @@ export class NativeScreenController {
       if (!entry || entry.stopping || entry.presentationId !== event.presentationId
         || entry.source.instanceId !== event.sourceInstanceId) return;
       if (event.type === 'capture-mode') entry.captureMode = event.mode;
-      else entry.state = event.type === 'state' && (event.state === 'playing' || event.state === 'connecting')
-        ? { state: event.state } : { state: 'unavailable', reason: event.reason ?? 'connection-failed' };
+      else if (!(event.type === 'state' && event.state === 'closed' && entry.state.state === 'unavailable'))
+        entry.state = event.type === 'state' && (event.state === 'playing' || event.state === 'connecting')
+          ? { state: event.state } : { state: 'unavailable', reason: event.reason ?? 'connection-failed' };
       this.changed();
     }
   }
@@ -488,8 +490,8 @@ export class NativeScreenController {
         if (call.sources.get(input.shareId) !== entry || entry.removing) throw cancelled();
         if (result.kind !== 'source') throw new Error('Native source preparation returned no descriptor.');
         acceptScreenEncoding(result.encoding);
-        entry.descriptor = result.source;
-        return result.source;
+        entry.descriptor = { ...result.source, ...(input.audience ? { audience: input.audience } : {}) };
+        return entry.descriptor;
       }),
     };
     call.sources.set(input.shareId, entry);
@@ -560,8 +562,9 @@ export class NativeScreenController {
             await this.removeCallSource(call, shareId);
             return;
           }
-          call.sources.set(shareId, { descriptor: result.source, ready: Promise.resolve(result.source), removing: false });
-          videoService.updateNativeScreenCapture({ ...capture, source: result.source, audioBitrateKbps });
+          const source = { ...result.source, ...(capture.source.audience ? { audience: capture.source.audience } : {}) };
+          call.sources.set(shareId, { descriptor: source, ready: Promise.resolve(source), removing: false });
+          videoService.updateNativeScreenCapture({ ...capture, source, audioBitrateKbps });
           try { await this.attachLocalPreview(shareId); }
           catch (error) { this.report(error); }
           call.context.announceSources();
@@ -577,6 +580,7 @@ export class NativeScreenController {
       const replace = async (nextVideo: NativeScreenVideoProfile, nextAudioBitrate: number): Promise<void> => {
         const source = await this.addCallSource(call, {
           ...capture, shareId, video: nextVideo, audioBitrateKbps: nextAudioBitrate, audio: capture.source.audio,
+          audience: capture.source.audience,
         });
         this.current(call);
         if (videoService.getNativeScreenCapture(shareId) !== capture) { await this.removeCallSource(call, shareId); return; }

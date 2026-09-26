@@ -57,7 +57,7 @@ function fixture({ incomplete = false, role = 'receive', mode = 'p2p', audio = f
 
 test('publisher fixes its H264 ceiling before engine startup and source creation, receiver keeps Main6', async () => {
   for (const mode of ['p2p', 'sfu']) {
-    for (const [width, height, fps, level] of [[1920, 1080, 120, 51], [3840, 2160, 60, 52], [3840, 2160, 120, 60]]) {
+    for (const [width, height, fps, level] of [[1920, 1080, 120, 51], [1920, 1080, 240, 52], [3840, 2160, 60, 52], [3840, 2160, 120, 60]]) {
       for (const role of ['publish', 'receive']) {
         const f = fixture({ mode, role, video: { width, height, fps, maxBitrateKbps: 80000 } });
         try {

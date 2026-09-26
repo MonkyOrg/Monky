@@ -144,17 +144,22 @@ mas drena transações SFU/PCM já admitidas antes de invalidar seus callbacks;
 timeout retém o proprietário para retry. Consultas de diagnóstico durante essa
 retirada retornam indisponibilidade, sem inventar FPS zero.
 
-O teto configurável é 3840x2160/120 FPS/80 Mbps, sem mudar os presets existentes,
-com **máximo de 60 FPS ao atingir 3840 px de largura ou 2160 px de altura**.
+O teto configurável da tela é 3840x2160/80 Mbps, sem mudar os presets existentes:
+**até 240 FPS abaixo de 4K e 120 FPS ao atingir 3840 px de largura ou 2160 px de altura**.
 O cliente aplica o mesmo limite nas listas, valores digitados e preferências
-salvas. O contrato de recepção e o runtime mantêm compatibilidade com perfis de
-clientes anteriores; a política de seleção não altera o protocolo.
+salvas. Câmera mantém seus limites anteriores de 120 FPS, ou 60 FPS em 4K.
+O contrato compartilhado, o host de captura, a base de tempo e o RTC aceitam os
+novos perfis; cliente e servidor precisam usar versões compatíveis desse contrato.
 Cada perfil negocia o nível H.264 necessário: pelo menos 5.1 para 1080p120,
-5.2 para 4K60 e 6 para 4K120. O overlay versionado do WebRTC e o patch de
+5.2 para 1080p240/4K60 e 6 para 4K120. O overlay versionado do WebRTC e o patch de
 `h264-profile-level-id` acrescentam suporte real ao nível 6; os patches e
-licenças acompanham as fontes correspondentes. Cliente e servidor exigem
-protocolo 26. O teto de bitrate não é um piso: o controle de congestionamento
+licenças acompanham as fontes correspondentes. O teto de bitrate não é um piso: o controle de congestionamento
 continua ativo e diferentes perfis podem consumir upload adicional.
+
+No SFU, o SDP de H.264 e AV1 preserva a estimativa inicial de até 5 Mbps e o
+teto do perfil. O adaptador inclui AV1 ao serializar essas opções, evitando o
+início involuntário em 300 kbps e o acúmulo de pacotes no pacer. Nenhum bitrate
+mínimo é imposto; a estimativa continua podendo cair com congestionamento.
 
 Isso não torna todo encoder compatível com 4K120. No AMF instalado na RX 9070 XT
 do ensaio, `MaxLevel=52` e `ProfileLevel=60` é rejeitado; 4K60/80 Mbps inicializa
@@ -162,6 +167,14 @@ em nível 5.2. O preflight consulta essa capacidade no adaptador selecionado,
 sem capturar pixels, e recusa o perfil incompatível antes de retirar a fonte
 antiga. Não muda para 60 FPS nem falsifica o nível silenciosamente. NVENC também
 precisa admitir o nível solicitado. Inicialização não comprova cadência física.
+
+No NVENC AV1, o host fixa `tier=0` e o nível Main Tier que comporta a resolução,
+o FPS e o **teto completo de bitrate**, não somente os 5 Mbps iniciais.
+O nível permanece igual durante os ajustes de congestionamento; 4K/80 Mbps
+requer índice 17 (6.1). Feedback acima do teto é rejeitado. A validação do
+bitstream continua rejeitando High Tier, e o diagnóstico inclui encoder,
+bitrate solicitado e teto. Isso evita depender da escolha automática de nível
+do driver quando o bitrate sobe.
 
 O export separado `probeCaptureCapabilities()` inicializa o encoder na GPU
 sem capturar uma fonte, mas **não é o fluxo de descoberta global do Main**.
@@ -181,9 +194,9 @@ e limite de sessões do encoder podem impedir o preparo ou a captura.
 ## Vídeo, áudio e demanda de prévia
 
 O vídeo usa NV12, perfil H.264 Main, zero B-frames e GOP de um segundo, com
-limites de 3840x2160, 120 FPS (60 FPS em 4K) e 80000 kbps, sujeitos ao encoder. O switch **Preservar proporção** no
-seletor vale somente para o compartilhamento que está sendo criado. Desligado
-(padrão), estica a imagem para a resolução solicitada. Ligado, mantém a imagem
+limites de 3840x2160, 240 FPS (120 FPS em 4K) e 80000 kbps, sujeitos ao encoder. O switch **Preservar proporção** no
+seletor vale somente para o compartilhamento que está sendo criado. Desligado,
+estica a imagem para a resolução solicitada. Ligado (padrão), mantém a imagem
 inteira centralizada e acrescenta barras pretas quando as proporções diferem,
 sem cortar ou deformar a fonte. A escolha vale para a prévia e todos os perfis
 de espectadores, inclusive depois de trocar a qualidade; não altera a resolução
@@ -242,7 +255,7 @@ Retrocesso real ou sobreposição parcial continua sendo erro explícito.
 
 ## Dependências OBS e Captura de Jogo
 
-`scripts\buildCapture.cjs` gera `bin\win32-x64\capture-build.json` no **schema 4**.
+`scripts\buildCapture.cjs` gera `bin\win32-x64\capture-build.json` no **schema 5**.
 Ele mantém OBS **32.1.1**, revisão
 `7272af1375b38bc3cf4e0f98a5d999e8b76e9309`, com arquivos verificados por SHA-256.
 Além de libobs/D3D11/WinRT, `obs-ffmpeg` e do módulo `win-capture` especializado,
@@ -251,6 +264,16 @@ o pacote inclui `obs-nvenc.dll`, dados de locale, probes
 Os probes também ficam ao lado de `monky-screen-capture.exe`.
 O header NVENC `include\ffnvcodec\nvEncodeAPI.h` do pacote de dependências é
 verificado por `src\capture\runtime-additions.json`.
+
+O build também recompila `libobs-winrt.dll` a partir da mesma revisão OBS.
+A especialização em `src\capture\wgcCadence.h` configura a cadência WGC na
+criação da sessão e na recuperação do dispositivo, somente quando o Windows
+expõe `GraphicsCaptureSession.MinUpdateInterval`. Sem essa propriedade, o
+Windows continua controlando a entrega de frames e essa limitação é registrada.
+As fontes vendorizadas permanecem intactas e verificadas por hash; a receita
+`scripts\captureSourceBindings.cjs`, a especialização e as fontes OBS integram
+as fontes correspondentes da release. O manifesto e o host verificam o hash
+da DLL recompilada, não o da DLL original do pacote OBS.
 
 Os helpers OBS `graphics-hook32.dll`/`graphics-hook64.dll`,
 `inject-helper32.exe`/`inject-helper64.exe` e
@@ -521,6 +544,22 @@ Use `--quality=480p30`, `720p60` ou `1080p60` para um único perfil,
 para validar captura e prévia WebCodecs sem admissão de rede.
 Software também usa captura libobs/D3D11; não exige um encoder na GPU.
 Os ensaios verificam pixels, cadência e encerramento dos recursos.
+
+`--quality=source --profile=1080p240` e
+`--quality=source --profile=4k120` exercitam os novos perfis sem reduzir a
+qualidade no receptor. `--cadence-ffmpeg=<executável_absoluto>` acrescenta
+uma auditoria independente do contador visual da janela sintética: decodifica
+uma amostra limitada em memória e exige pelo menos 85% do FPS solicitado
+em frames distintos, além das verificações de apresentação nativa. Contar
+apenas pacotes, frames codificados ou apresentações repetidas não comprova
+a cadência real da captura. Essa auditoria não grava vídeo.
+
+Para qualificar 240 FPS, use também `--disable-frame-rate-limit
+--disable-gpu-vsync` **somente no processo do ensaio**: o compositor da janela
+sintética pode limitar os quadros novos mesmo quando o JavaScript pinta mais
+rápido. A fonte do ensaio produz atualizações com trabalho limitado e relógio
+independente de RAF. Essas flags não são aplicadas ao aplicativo distribuído.
+A entrega real continua dependendo da cadência da fonte e da carga do sistema.
 
 `test\nativeWindowIdentitySmoke.cjs --artifacts=<caminho_absoluto>` usa o
 `capture-contract-test.exe` gerado pelo build para criar janelas próprias

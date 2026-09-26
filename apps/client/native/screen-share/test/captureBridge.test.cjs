@@ -9,7 +9,7 @@ const { CaptureBridge } = require('../runtime/captureBridge.cjs');
 const artifactDirectory = path.join(__dirname, 'capture-runtime-fixture');
 const manifest = { directory: 'obs' };
 
-function fixture(onPacket = () => {}) {
+function fixture(onPacket = () => {}, options = {}) {
   const runId = '1'.repeat(32), errors = [], notices = [], commands = [];
   const runtime = { kind: 'verified-stock-obs-runtime', version: '32.1.1', artifactDirectory,
     stockDirectory: path.join(artifactDirectory, manifest.directory, 'stock'),
@@ -18,6 +18,7 @@ function fixture(onPacket = () => {}) {
     host: { kind: 'verified-native-screen-capture-host', executable: path.join(artifactDirectory, 'model-live-host.exe'), sha256: 'a'.repeat(64) },
     runtime, runId, runDirectory: path.join(artifactDirectory, `monky-screen-capture-${runId}`), video: { width: 1920, height: 1080, fps: 120, bitrateKbps: 5000 },
     onError: error => errors.push(error), onNotice: value => { notices.push(value); }, onPacket,
+    ...options,
   });
   const child = new EventEmitter();
   child.pid = 42;
@@ -47,6 +48,24 @@ test('live feedback crosses a writable stream with matched bounded acknowledgeme
   assert.equal((await idr).keyframeConfirmed, false);
   assert.equal(f.bridge.liveRequests.size, 0);
   await f.close(); assert.deepEqual(f.errors, []);
+});
+
+test('NVENC AV1 carries its full adaptive ceiling independently of the startup bitrate', async () => {
+  for (const ceiling of [5000, 12000, 40000, 80000]) {
+    const f = fixture(undefined, { encoder: 'obs_nvenc_av1_tex', bitrateCeilingKbps: ceiling });
+    try {
+      const args = f.bridge.argumentsForSource({ hwnd: 19, expectedProcessId: 10 }, f.bridge.runId);
+      assert.ok(args.includes('--bitrate=5000'));
+      assert.ok(args.includes(`--bitrate-ceiling=${ceiling}`));
+      const rate = f.bridge.setBitrate(ceiling);
+      f.acknowledge(1, 'bitrate', ceiling);
+      await rate;
+      assert.throws(() => f.bridge.setBitrate(ceiling + 50), /ceiling/);
+      assert.deepEqual(f.commands, [`1 bitrate ${ceiling}\n`]);
+    } finally { await f.close(); }
+  }
+  for (const ceiling of [0, 4950, 5010, 80050, NaN])
+    assert.throws(() => fixture(undefined, { bitrateCeilingKbps: ceiling }), /ceiling/);
 });
 
 test('first-frame readiness excludes minimized time but still times out an available source', async () => {

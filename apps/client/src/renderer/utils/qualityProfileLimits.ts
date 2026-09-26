@@ -7,15 +7,15 @@ export const CUSTOM_QUALITY_FIELDS: readonly QualityNumberKey[] = [
   'cameraBitrateKbps', 'screenBitrateKbps', 'cameraFps', 'screenFps',
 ];
 
-export function customVideoFpsLimit(width: number, height: number): number {
+export function customVideoFpsLimit(width: number, height: number, screen = true): number {
   return width >= NATIVE_SCREEN_VIDEO_LIMITS.width || height >= NATIVE_SCREEN_VIDEO_LIMITS.height
-    ? 60 : NATIVE_SCREEN_VIDEO_LIMITS.fps;
+    ? (screen ? 120 : 60) : (screen ? NATIVE_SCREEN_VIDEO_LIMITS.fps : 120);
 }
 
 export function customQualityBounds(key: QualityNumberKey, profile: QualityProfile): { min: number; max: number; step: number } {
   if (key.endsWith('Width')) return { min: key === 'screenWidth' ? 4 : 1, max: NATIVE_SCREEN_VIDEO_LIMITS.width, step: 1 };
   if (key.endsWith('Height')) return { min: key === 'screenHeight' ? 2 : 1, max: NATIVE_SCREEN_VIDEO_LIMITS.height, step: 1 };
-  if (key === 'cameraFps') return { min: 1, max: customVideoFpsLimit(profile.cameraWidth, profile.cameraHeight), step: 1 };
+  if (key === 'cameraFps') return { min: 1, max: customVideoFpsLimit(profile.cameraWidth, profile.cameraHeight, false), step: 1 };
   if (key === 'screenFps') return { min: 1, max: customVideoFpsLimit(profile.screenWidth, profile.screenHeight), step: 1 };
   if (key === 'audioBitrateKbps') return { min: 6, max: 510, step: 1 };
   return { min: key === 'screenBitrateKbps' ? 150 : 1, max: NATIVE_SCREEN_VIDEO_LIMITS.maxBitrateKbps,

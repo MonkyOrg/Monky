@@ -22,7 +22,7 @@ static_assert(offsetof(Header, timestampUs) == 48 && offsetof(Header, timebaseNu
 static_assert(std::endian::native == std::endian::little);
 
 inline std::int64_t ScaleTime(std::int64_t ticks, std::uint32_t num, std::uint32_t den) {
-  Require(num == 1 && den > 0 && den <= 120,
+  Require(num == 1 && den > 0 && den <= 240,
       "Capture requires the original configured video timebase", "ERR_SCREEN_CAPTURE_CLOCK");
   const auto whole = ticks / den, remainder = ticks % den;
   const auto secondsLimit = static_cast<std::int64_t>(kMaxSafeInteger / 1000000);

@@ -108,7 +108,15 @@ class ModelElement {
   }
   set value(value) { this.currentValue = String(value); }
   get valueAsNumber() { return this.value === '' ? NaN : Number(this.value); }
-  get innerHTML() { return this.markup ?? ''; }
+  get innerHTML() {
+    const escape = value => String(value).replace(/[&<>"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[char]);
+    return this.markup ?? this.children.map(child => {
+      if (typeof child === 'string') return escape(child);
+      const tag = child.tagName.toLowerCase();
+      const attributes = [...child.attributes].map(([name, value]) => ` ${name}="${escape(value)}"`).join('');
+      return `<${tag}${attributes}>` + (['input', 'img', 'br', 'hr', 'meta', 'link'].includes(tag) ? '' : `${child.innerHTML}</${tag}>`);
+    }).join('');
+  }
   set innerHTML(value) {
     this.markup = value;
     this.replaceChildren();
@@ -229,6 +237,7 @@ class ModelElement {
   checkVisibility() { return !this.hidden && this.style.display !== 'none' && (!this.parentElement || this.parentElement.checkVisibility()); }
   getBoundingClientRect() { return { top: this.top, left: 0, width: 600, height: 50, right: 600, bottom: this.top + 50 }; }
   scrollTo({ top }) { this.scrollTop = top; }
+  scrollIntoView(options) { this.lastScrollIntoView = options; }
 }
 
 function fixture(language = 'en') {
@@ -298,6 +307,7 @@ function fixture(language = 'en') {
     getProfile: () => settingsStore.qualityPreset === 'CUSTOM' ? settingsStore.customProfile : shared.QUALITY_PRESETS[settingsStore.qualityPreset],
     getScreenStream: id => streams.get(id),
     getNativeScreenCapture: id => captures.get(id),
+    getNativeScreenCaptures: () => [...captures.values()],
     cancelPendingScreenShare: () => { cancelled++; },
     stopScreenShare: id => { traces.push(['video-stop', id]); streams.delete(id); captures.delete(id); },
     startScreenShare: async () => { throw new Error('Chromium capture fallback must not run'); },
@@ -305,20 +315,22 @@ function fixture(language = 'en') {
   const createStream = (desktopSourceId = 'window:101:0') => {
     const stream = { id: `stream-${++sequence}`, getVideoTracks: () => [] };
     streams.set(stream.id, stream);
-    captures.set(stream.id, { desktopSourceId });
+    captures.set(stream.id, { desktopSourceId, source: { shareId: stream.id } });
     return stream;
   };
   const webRtcManager = {
     getNativeScreenCapabilities: () => controls.capabilities(),
-    async startNativeScreenShare(id, audio, thumbnail, isWanted, kind, preserveAspectRatio, audioReplacement) {
-      traces.push(['native-start', id, audio, thumbnail, kind, preserveAspectRatio]);
+    async startNativeScreenShare(id, audio, thumbnail, isWanted, kind, preserveAspectRatio, audioReplacement, audience) {
+      traces.push(['native-start', id, audio, thumbnail, kind, preserveAspectRatio, ...(audience ? [audience] : [])]);
       if (controls.start) return controls.start({ id, audio, thumbnail, isWanted, kind, preserveAspectRatio, audioReplacement });
       if (audioReplacement) {
         traces.push(['audio-replacement', audioReplacement.shareId]);
         await audioReplacement.retirePrevious();
         if (!isWanted()) throw new DOMException('Cancelled selection', 'AbortError');
       }
-      return createStream(id);
+      const stream = createStream(id);
+      if (audience) captures.get(stream.id).source.audience = audience;
+      return stream;
     },
     assertScreenSharingSettings(profile, codec) {
       traces.push(['assert-settings', profile, codec]);
@@ -358,7 +370,12 @@ function fixture(language = 'en') {
     prepareScreenShareWindow: async id => { traces.push(['prepare-window', id]); return false; },
     openExternal: url => { traces.push(['open-external', url]); return controls.openExternal(url); },
   };
+  const serverStore = {
+    currentUser: { id: 'self' }, roles: [{ id: 'friends', name: 'Friends' }, { id: 'admin', name: 'Admin' }],
+    knownMembers: new Map([['allowed', { id: 'allowed', nickname: 'Alice' }], ['outsider', { id: 'outsider', nickname: 'Bob' }]]),
+  };
   const stubs = {
+    'core/NetworkClient': { networkClient: { getHttpBaseUrl: () => 'http://127.0.0.1:9999' } },
     'core/EventBus': { appEvents },
     'core/ScreenAudioService': { screenAudioService },
     'core/VideoService': { videoService },
@@ -366,7 +383,7 @@ function fixture(language = 'en') {
     'stores/settingsStore': { settingsStore },
     'stores/voiceStore': { voiceStore, VoiceStore: { MAX_SCREEN_SHARES: 3 } },
     'core/screenShareControls': {
-      captureScreenShareCall: () => ({ isCurrent: () => controls.current }),
+      captureScreenShareCall: () => ({ isCurrent: () => controls.current, serverStore }),
       notifyScreenShareState: () => traces.push(['notify', [...voiceStore.screenShareIds]]),
       stopLocalScreenShares,
     },
@@ -385,7 +402,7 @@ function fixture(language = 'en') {
     'views/ScreenSharePickerModal', 'views/GameCaptureGuideModal', 'views/CopyToast', 'views/settings/tabs/QualityTab', 'views/settings/qualityOptions',
     'views/ScreenEncodingControls', 'core/screenEncoding',
     'views/settings/SettingsSectionNavigation', 'i18n/index', 'i18n/locales/en', 'i18n/locales/pt-BR',
-    'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits',
+    'utils/html', 'utils/buttonLoading', 'utils/loadingSkeleton', 'utils/qualityProfileLimits', 'utils/avatar', 'utils/colors',
   ]);
   function load(name) {
     if (Object.hasOwn(stubs, name)) return stubs[name];
@@ -402,7 +419,7 @@ function fixture(language = 'en') {
       localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
       navigator: { language, languages: [language] },
       Element: ModelElement, HTMLElement: ModelElement, HTMLButtonElement: ModelElement, HTMLInputElement: ModelElement,
-      Event, DOMException, Error, crypto, AbortController: Controller, MutationObserver: Observer, ResizeObserver: Observer,
+      Event, DOMException, Error, crypto, btoa, AbortController: Controller, MutationObserver: Observer, ResizeObserver: Observer,
       CSS: { escape: value => value }, getComputedStyle: () => ({ rowGap: '8', opacity: '1', marginTop: '0', marginBottom: '0' }),
       requestAnimationFrame: callback => setImmediate(callback), cancelAnimationFrame: clearImmediate,
       setTimeout, clearTimeout, console: { warn: (...value) => warnings.push(value), error: (...value) => warnings.push(value) },
@@ -439,7 +456,7 @@ function fixture(language = 'en') {
       t: i18n.t, showInfoToast: (message, durationMs) => traces.push(['info-toast', message, durationMs]),
       showAlert: stubs['views/Dialog'].showAlert,
     }),
-    settingsStore, voiceStore, streams, captures, capabilities, createStream, traces, alerts, warnings, events, observers, mediaQuery,
+    settingsStore, serverStore, voiceStore, streams, captures, capabilities, createStream, traces, alerts, warnings, events, observers, mediaQuery,
     get saves() { return saves; }, get enumerations() { return enumerations; }, get cancelled() { return cancelled; },
     close() { picker.close(); quality.cleanup(); document.body.replaceChildren(); },
   };
