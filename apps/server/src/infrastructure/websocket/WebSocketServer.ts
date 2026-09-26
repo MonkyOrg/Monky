@@ -36,6 +36,8 @@ import {
   ChatUploadTokenPayload,
   LIMITS,
   MessageType,
+  screenViewersRequestSchema,
+  type ScreenViewersResult,
   PROTOCOL_VERSION,
   negotiateProtocol,
   type ProtocolAgreement,
@@ -873,6 +875,9 @@ export class WebSocketServer {
 
       case MessageType.NATIVE_SCREEN_SIGNAL:
         this.handleNativeScreenSignal(session, payload, requestId);
+        break;
+      case MessageType.SCREEN_VIEWERS_GET:
+        this.handleScreenViewers(session, payload, requestId);
         break;
 
       case MessageType.RTC_DIAGNOSTICS_REPORT:
@@ -3269,6 +3274,40 @@ export class WebSocketServer {
     }
   }
 
+  private handleScreenViewers(session: ClientSession, value: unknown, requestId?: string): void {
+    if (!session.user || !session.sessionId || session.isBot) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'A consulta de espectadores exige uma sessão de participante.', requestId);
+      return;
+    }
+    const parsed = screenViewersRequestSchema.safeParse(value);
+    if (!parsed.success) {
+      this.sendError(session.ws, ProtocolErrorCode.BAD_REQUEST, 'Consulta de espectadores inválida.', requestId);
+      return;
+    }
+    const query = parsed.data;
+    const publisher = this.signalingService.getVoiceState(query.publisherSessionId);
+    const source = publisher?.nativeScreenShares?.find(entry => entry.shareId === query.shareId);
+    if (!publisher || publisher.channelId !== query.channelId || !publisher.screenShareIds?.includes(query.shareId)
+      || (source?.instanceId ?? null) !== query.sourceInstanceId
+      || !this.signalingService.canWatchScreen(query.publisherSessionId, session.sessionId, query.shareId, source?.instanceId)) {
+      this.sendError(session.ws, ProtocolErrorCode.PERMISSION_DENIED, 'A transmissão não está disponível para esta sessão.', requestId);
+      return;
+    }
+    const viewers = source
+      ? this.signalingService.getNativeScreenViewers(query.publisherSessionId, query.shareId, source.instanceId)
+      : [...this.sfuManager.getScreenViewers(query.publisherSessionId, query.channelId, query.shareId),
+        ...this.signalingService.getLegacyScreenViewers(query.publisherSessionId, query.shareId)];
+    const viewerSessionIds = [...new Set(viewers)].filter(id => {
+      const viewer = this.findSessionById(id);
+      return id !== query.publisherSessionId && viewer?.ws.readyState === WebSocket.OPEN
+        && this.signalingService.canWatchScreen(query.publisherSessionId, id, query.shareId, source?.instanceId);
+    });
+    this.send(session.ws, {
+      type: MessageType.SCREEN_VIEWERS_RESULT, requestId,
+      payload: { ...query, viewerSessionIds } satisfies ScreenViewersResult,
+    });
+  }
+
   private handleNativeScreenSignal(session: ClientSession, value: unknown, requestId?: string): void {
     if (!session.user || !session.sessionId) return;
     const parsed = nativeScreenSignalSchema.safeParse(
@@ -3364,6 +3403,7 @@ export class WebSocketServer {
 
     const targetSocket = this.sessionSockets.get(payload.targetSessionId);
     if (targetSocket && targetSocket.readyState === WebSocket.OPEN) {
+      this.signalingService.trackScreenSignal(payload);
       this.send(targetSocket, {
         type: MessageType.RTC_SIGNAL,
         requestId,

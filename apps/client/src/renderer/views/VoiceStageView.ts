@@ -35,6 +35,7 @@ import { isCameraOperationCancelled } from '../utils/cameraEffects';
 import { getBotVoiceContext, type BotVoiceContext } from '../utils/botVoice';
 import { replaceAroundLiveChild } from '../utils/preserveLiveChild';
 import { BotScreenView } from './BotScreenView';
+import { ScreenViewersView } from './ScreenViewersView';
 import type { VoiceBotScreensUpdated } from '../stores/botScreenStore';
 import { showInfoToast } from './CopyToast';
 
@@ -119,6 +120,7 @@ export class VoiceStageView {
   private cameraToggleEpoch = 0;
   private cameraTogglePending = false;
   private botScreens = new Map<string, BotScreenView>();
+  private screenViewers: ScreenViewersView[] = [];
   private botVoiceContext: BotVoiceContext | null = null;
   private botScreenLayoutObserver: ResizeObserver | null = null;
   private clearMiniappToast: (() => void) | null = null;
@@ -861,7 +863,7 @@ export class VoiceStageView {
         // overlay (volume/fullscreen), nor right after a slider drag whose
         // pointer-up may land outside the controls (#75).
         if (Date.now() < this.suppressCardClickUntil) return;
-        if ((e.target as HTMLElement).closest('.stage-card-controls')) return;
+        if ((e.target as HTMLElement).closest('.stage-card-controls, .stage-viewers')) return;
         // While zoomed in, a click pans instead of dropping out of focus (#271).
         if (this.focusZoom.scale > 1 && card.classList.contains('stage-focused-main')) return;
         const tileKey = card.getAttribute('data-tile-key');
@@ -904,6 +906,7 @@ export class VoiceStageView {
     });
 
     this.setupFocusedScreenZoom(area);
+    this.screenViewers = [...area.querySelectorAll<HTMLElement>('.stage-viewers')].map(root => new ScreenViewersView(root));
 
     // #150: "Assistir transmissão" — opt into a gated remote screen share.
     // Starts video + audio and auto-focuses the broadcaster.
@@ -1447,6 +1450,9 @@ export class VoiceStageView {
         </div>
       `}
 
+      ${isScreenTile && isViewingCallServer() && this.currentChannelId === voiceStore.currentVoiceChannelId
+        && serverStore.serverDetails?.protocol?.features.includes('screen-viewers') ? `
+        <div class="stage-viewers" data-publisher="${escapeHtml(sidOf(p))}" data-share="${escapeHtml(tile.shareId!)}"></div>` : ''}
       <div class="stage-badges-overlay">
         <span>${label}</span>
         ${isPeerFailed ? `<span class="material-symbols-outlined md-14 stage-peer-failed-icon" title="${isSfu ? t('main.sfuConnectionFailed') : peerFailureTooltip('stage.peerConnectionFailed')}">link_off</span>` : ''}
@@ -2150,6 +2156,8 @@ export class VoiceStageView {
   }
 
   private unbindTelemetryControls(): void {
+    this.screenViewers.forEach(view => view.destroy());
+    this.screenViewers = [];
     this.unbindTelemetryButtons.forEach(unbind => unbind());
     this.unbindTelemetryButtons = [];
   }

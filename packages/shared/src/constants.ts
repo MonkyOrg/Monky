@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 29;
+export const PROTOCOL_VERSION = 30;
 
 /**
  * Initial shell size; populated overlays size themselves from readable cards,

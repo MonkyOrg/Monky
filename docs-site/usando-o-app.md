@@ -74,6 +74,23 @@ o microfone ou outras transmissões permitidas. Adicionar um cargo dá
 visibilidade à transmissão. O público é escolhido antes de iniciar; para
 definir outro, encerre a transmissão e inicie novamente.
 
+### Quem está assistindo
+
+Em cliente e servidor com suporte à lista de espectadores (protocolo 30), cada
+card de transmissão mostra até dois avatares e **+N assistindo** para os demais,
+sem repetir a contagem total. Passe o
+mouse, clique ou use o teclado para abrir a lista completa; **Escape** fecha.
+Todos na chamada que podem ver a transmissão podem consultar a lista, mesmo
+sem assistir. Nas transmissões privadas, o público autorizado continua sendo
+respeitado.
+
+Na lista aberta, se você estiver assistindo, o resumo mostra **Você e mais X pessoas estão
+assistindo**. A lista conta conexões com assinatura aceita, não apenas pessoas
+autorizadas, e não comprova atenção à tela. Duas conexões da mesma pessoa
+aparecem separadamente. A atualização ocorre aproximadamente a cada dois
+segundos; se a consulta falhar, o card informa a indisponibilidade em vez de
+mostrar uma contagem desatualizada. A prévia local não conta como espectador.
+
 ## Chat
 
 Cada canal de texto tem histórico salvo no servidor, avatares, horários, formatação básica e limite anti-flood de 10 mensagens a cada 5 segundos.
