@@ -526,7 +526,8 @@ build do `gclient`. Checkouts modificados ou incompletos interrompem a
 preparação; não são resetados ou substituídos silenciosamente.
 
 Downloads de arquivos compactados têm até três tentativas para falhas
-transitórias de rede/servidor, com espera e descarte do arquivo parcial.
+transitórias de rede/servidor, incluindo conexões abortadas no Windows
+(`ECONNABORTED`), com espera e descarte do arquivo parcial.
 Cada tentativa concluída precisa validar o SHA-256 e o tamanho, quando fixado.
 Falhas de integridade, certificado, redirecionamento inseguro ou HTTP
 permanente interrompem o preparo sem repetir nem substituir o cache.

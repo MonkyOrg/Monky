@@ -92,6 +92,11 @@ function downloadFixture(t) {
 test('archive downloads retry only transient failures from a new file before verifying every byte', async t => {
   for (const [name, fail] of [
     ['connection reset', () => ({ error: Object.assign(new Error('reset'), { code: 'ECONNRESET' }) })],
+    ['Windows connection aborted', () => ({ error: Object.assign(new Error('write ECONNABORTED'), { code: 'ECONNABORTED' }) })],
+    ['Windows body aborted', () => ({ status: 200, response: new Readable({ read() {
+      this.push(Buffer.from('incomplete data'));
+      this.destroy(Object.assign(new Error('read ECONNABORTED'), { code: 'ECONNABORTED' }));
+    } }) })],
     ['truncated body', () => ({ status: 200, response: new Readable({ read() {
       this.push(Buffer.from('incomplete data'));
       this.destroy(Object.assign(new Error('truncated'), { code: 'ERR_STREAM_PREMATURE_CLOSE' }));
@@ -114,9 +119,9 @@ test('archive downloads retry only transient failures from a new file before ver
   });
 });
 
-test('archive retries stop at three attempts and leave neither a cache hit nor partial files', async t => {
+for (const code of ['EAI_AGAIN', 'ECONNABORTED']) test(`archive retries stop at three ${code} attempts and leave no cached or partial files`, async t => {
   const f = downloadFixture(t);
-  const failure = Object.assign(new Error('temporary DNS failure'), { code: 'EAI_AGAIN' });
+  const failure = Object.assign(new Error(`temporary transport failure: ${code}`), { code });
   const requests = archiveRequests(t, () => ({ error: failure }));
   await assert.rejects(download(f.record, f.directory), error => error === failure);
   assert.equal(requests.length, 3);

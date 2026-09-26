@@ -140,7 +140,7 @@ async function archiveResponse(url, signal, redirects = 0) {
 function retryableDownloadFailure(error) {
   if (error?.code === 'ERR_NATIVE_ARCHIVE_HTTP')
     return [408, 429, 500, 502, 503, 504].includes(error.statusCode);
-  return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH',
+  return ['ECONNRESET', 'ECONNABORTED', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH',
     'EHOSTUNREACH', 'ERR_STREAM_PREMATURE_CLOSE'].includes(error?.code)
     || error?.code === 'ABORT_ERR' && error.cause?.name === 'TimeoutError';
 }
