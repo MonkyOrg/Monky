@@ -181,6 +181,41 @@ async function p2pFixture(t: TestContext, options: { manager?: WebRtcManager; sc
   return { manager, client, participants, peers, screens, microphone, camera, audio, sent, watch };
 }
 
+test('viewer queries are source-bound and reject stale call/source responses', async t => {
+  const f = await p2pFixture(t);
+  const user = { id: 'publisher', sessionId: 'publisher', clientId: 'publisher',
+    nickname: 'Publisher', status: 'ONLINE' as const, joinedAt: 1 };
+  f.participants.addUser(user);
+  const state = { sessionId: 'publisher', userId: 'publisher', channelId: 'room', isMuted: false,
+    isDeafened: false, isSpeaking: false, isCameraOn: false, isScreenSharing: true, screenShareIds: ['screen-one'],
+    isSharingScreenAudio: false, serverMuted: false, serverDeafened: false };
+  f.participants.updateVoiceState(state);
+  let current = true;
+  f.manager['nativeScreenContext'] = () => ({
+    client: f.client, participants: f.participants, sessionId: 'viewer-one', channelId: 'room', mode: 'p2p',
+    isCurrent: () => current, announceSources() {},
+  });
+  let beforeReply = () => {};
+  let publisherSessionId = 'publisher';
+  t.mock.method(f.client, 'sendRequest', async (type: MessageType, query: { publisherSessionId: string; channelId: string;
+    shareId: string; sourceInstanceId: string | null }) => {
+    assert.equal(type, MessageType.SCREEN_VIEWERS_GET);
+    assert.deepEqual(query, { publisherSessionId: 'publisher', channelId: 'room', shareId: 'screen-one', sourceInstanceId: null });
+    beforeReply();
+    return { ...query, publisherSessionId, viewerSessionIds: ['viewer-one', 'viewer-two'] };
+  });
+  assert.deepEqual(await f.manager.getScreenViewers('publisher', 'screen-one'), ['viewer-one', 'viewer-two']);
+  publisherSessionId = 'someone-else';
+  await assert.rejects(f.manager.getScreenViewers('publisher', 'screen-one'), /another source/);
+  publisherSessionId = 'publisher';
+  beforeReply = () => { current = false; };
+  await assert.rejects(f.manager.getScreenViewers('publisher', 'screen-one'), { name: 'AbortError' });
+  current = true;
+  beforeReply = () => f.participants.updateVoiceState({ ...state, screenShareIds: [] });
+  await assert.rejects(f.manager.getScreenViewers('publisher', 'screen-one'), { name: 'AbortError' });
+  await assert.rejects(f.manager.getScreenViewers('publisher', 'missing'), { name: 'AbortError' });
+});
+
 test('a bot authorized to receive microphones is never offered camera or screen media', async t => {
   const f = await p2pFixture(t);
   const sessionId = 'bot:listener';

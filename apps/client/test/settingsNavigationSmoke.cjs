@@ -160,12 +160,39 @@ if (!process.versions.electron) {
     }
     if (screenStageOnly) {
       const { runScreenStageSmoke } = require('./screenStageSmoke.cjs');
+      const { runScreenViewersSmoke } = require('./screenViewersSmoke.cjs');
       const { appEventHandlerSource } = require('./fixtures/screenSharingUiModel.cjs');
       const fallbackHandler = appEventHandlerSource('native_screen.capture_fallback');
+      window.webContents.debugger.attach('1.3');
+      await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
       let checks = 0;
       for (const [width, height] of [[1100, 850], [640, 440]]) {
         window.setContentSize(width, height);
         checks += await evaluate(`(${runScreenStageSmoke.toString()})(${JSON.stringify(fallbackHandler)})`);
+        checks += await evaluate(`(${runScreenViewersSmoke.toString()})()`);
+        await evaluate(`(async () => {
+          const { ScreenViewersView } = await import('/views/ScreenViewersView.ts');
+          document.body.innerHTML = '<div class="stage-viewers" data-publisher="retired-fixture" data-share="fixture"></div>';
+          window.keyboardViewers = new ScreenViewersView(document.querySelector('.stage-viewers'));
+        })()`);
+        for (const keyCode of ['Return', 'Space']) {
+          await evaluate(`document.querySelector('.stage-viewers-button').focus()`);
+          window.webContents.focus();
+          window.webContents.sendInputEvent({ type: 'keyDown', keyCode });
+          window.webContents.sendInputEvent({ type: 'char', keyCode: keyCode === 'Return' ? '\r' : ' ' });
+          window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
+          if (!await evaluate(`new Promise(resolve => requestAnimationFrame(() =>
+            resolve(document.querySelector('.stage-viewers-popup').matches(':popover-open'))))`))
+            throw new Error(`${keyCode} must open the viewer list`);
+          window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+          window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+          if (!await evaluate(`new Promise(resolve => requestAnimationFrame(() =>
+            resolve(!document.querySelector('.stage-viewers-popup').matches(':popover-open')
+              && document.activeElement.matches('.stage-viewers-button'))))`))
+            throw new Error('Escape must close the viewer list and restore trigger focus');
+          checks += 2;
+        }
+        await evaluate(`window.keyboardViewers.destroy(); delete window.keyboardViewers; document.body.innerHTML = ''`);
       }
       console.log(`Screen stage: ${checks} checks passed, software rendering only, no media capture`);
       await finish(0);

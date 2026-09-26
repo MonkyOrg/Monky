@@ -74,6 +74,22 @@ it, without stopping microphones or other authorized streams. Granting a role
 makes the stream visible. Choose the audience before starting; to define a
 different one, stop the stream and start again.
 
+### Who is watching
+
+On clients and servers supporting viewer lists (protocol 30), each screen-share
+card shows up to two avatars and **+N watching** for the rest, without repeating
+the total count. Hover, click, or use the
+keyboard to open the complete list; **Escape** closes it. Everyone in the call
+who can see the stream can inspect its viewers, even without watching.
+Private streams remain restricted to their authorized audience.
+
+When you are watching, the expanded list says **You and X other people are watching**.
+The list counts connections with accepted subscriptions, not merely people
+allowed to watch, and does not prove attention to the screen. Two connections
+from the same person appear separately. It refreshes approximately every two
+seconds; failed requests show an unavailable state rather than a stale count.
+The local preview is not counted as a viewer.
+
 ## Chat
 
 Each text channel has history saved on the server, avatars, timestamps, basic formatting and an anti-flood limit of 10 messages every 5 seconds.

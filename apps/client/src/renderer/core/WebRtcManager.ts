@@ -5,7 +5,7 @@ import {
   QualityPresetType,
   QualityProfile,
   ScreenWatchSignalPayload,
-  screenWatchSignalSchema,
+  screenWatchSignalSchema, screenViewersResultSchema,
   WebRtcSignalPayload,
   type NativeScreenCapabilities,
   type NativeScreenSource,
@@ -381,6 +381,27 @@ export class WebRtcManager {
 
   public getNativeScreenCapabilities(): Promise<NativeScreenCapabilities> {
     return this.nativeScreens.capabilities();
+  }
+
+  public async getScreenViewers(publisherSessionId: string, shareId: string): Promise<string[]> {
+    const context = this.nativeScreenContext();
+    const getSource = () => this.voiceParticipants.get(publisherSessionId)?.voiceState;
+    const state = getSource();
+    const sourceInstanceId = state?.nativeScreenShares?.find(source => source.shareId === shareId)?.instanceId ?? null;
+    if (!context || state?.channelId !== context.channelId || !state.screenShareIds?.includes(shareId))
+      throw new DOMException('The screen share was retired.', 'AbortError');
+    const result = screenViewersResultSchema.parse(await context.client.sendRequest<unknown>(
+      MessageType.SCREEN_VIEWERS_GET,
+      { channelId: context.channelId, publisherSessionId, shareId, sourceInstanceId },
+    ));
+    const current = getSource();
+    if (!context.isCurrent() || current?.channelId !== context.channelId || !current.screenShareIds?.includes(shareId)
+      || (current.nativeScreenShares?.find(source => source.shareId === shareId)?.instanceId ?? null) !== sourceInstanceId)
+      throw new DOMException('The screen share was replaced.', 'AbortError');
+    if (result.publisherSessionId !== publisherSessionId || result.channelId !== context.channelId
+      || result.shareId !== shareId || result.sourceInstanceId !== sourceInstanceId)
+      throw new Error('Screen viewers response belongs to another source.');
+    return result.viewerSessionIds;
   }
 
   public getNativeScreenSource(sessionId: string, shareId: string): NativeScreenSource | null {

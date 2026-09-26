@@ -5,6 +5,8 @@ import {
   type NativeScreenSignalPayload,
   type NativeScreenSource,
   type UserRoleSummary,
+  screenWatchSignalSchema,
+  type ScreenWatchSignalPayload,
 } from '@monky/shared';
 import { IChannelRepository, IVoiceRestrictionRepository } from '../../domain/repositories';
 import type { VoiceRestrictions } from '../../domain/entities';
@@ -18,6 +20,8 @@ export class SignalingService {
   // person, so the same user can be in voice from two devices at once (#309).
   private voiceStates: Map<string, VoiceParticipantState> = new Map();
   private voiceMembershipListener?: () => void;
+  private screenPeerEpochs = new Map<string, Map<string, string>>();
+  private legacyScreenViewers = new Map<string, ScreenWatchSignalPayload>();
   private screenRoleIds = new Map<string, Set<string>>();
   private screenRoleVersion: number | null = null;
   private currentRoleVersion: () => number | null = () => null;
@@ -87,6 +91,11 @@ export class SignalingService {
   }
 
   public reconcileScreenSubscriptions(): void {
+    for (const [key, watch] of this.legacyScreenViewers) {
+      if (!this.canWatchScreen(watch.targetSessionId, watch.fromSessionId, watch.streamId)
+        || this.voiceStates.get(watch.targetSessionId)?.nativeScreenShares?.some(source => source.shareId === watch.streamId))
+        this.legacyScreenViewers.delete(key);
+    }
     for (const [key, { request }] of this.nativeScreenSubscriptions) {
       if (this.canWatchScreen(request.publisherSessionId, request.fromSessionId, request.shareId, request.sourceInstanceId)) continue;
       this.nativeScreenSubscriptions.delete(key);
@@ -317,6 +326,8 @@ export class SignalingService {
     const list = Array.from(this.voiceStates.values());
     this.voiceStates.clear();
     this.nativeScreenSubscriptions.clear();
+    this.screenPeerEpochs.clear();
+    this.legacyScreenViewers.clear();
     if (list.length) this.voiceMembershipListener?.();
     return list;
   }
@@ -334,12 +345,63 @@ export class SignalingService {
   }
 
   private dropNativeScreenSubscriptionsFor(sessionId: string): void {
+    this.screenPeerEpochs.delete(sessionId);
+    for (const peers of this.screenPeerEpochs.values()) peers.delete(sessionId);
+    for (const [key, watch] of this.legacyScreenViewers) {
+      if (watch.fromSessionId === sessionId || watch.targetSessionId === sessionId) this.legacyScreenViewers.delete(key);
+    }
     for (const [key, subscription] of this.nativeScreenSubscriptions) {
       if (subscription.request.fromSessionId === sessionId || subscription.request.publisherSessionId === sessionId) {
         this.nativeScreenSubscriptions.delete(key);
         this.screenSubscriptionRevoked?.(subscription.request);
       }
     }
+  }
+
+  public getNativeScreenViewers(publisherSessionId: string, shareId: string, sourceInstanceId: string): string[] {
+    return [...this.nativeScreenSubscriptions.values()].flatMap(({ request, generation }) =>
+      generation !== null && request.publisherSessionId === publisherSessionId && request.shareId === shareId
+        && request.sourceInstanceId === sourceInstanceId
+        && this.canWatchScreen(publisherSessionId, request.fromSessionId, shareId, sourceInstanceId)
+        ? [request.fromSessionId] : []);
+  }
+
+  /** Called only after authenticated signaling has been authorized and forwarded. */
+  public trackScreenSignal(signal: WebRtcSignalPayload): void {
+    const { fromSessionId: from, targetSessionId: target } = signal;
+    if (signal.signalType === 'offer' || signal.signalType === 'answer') {
+      if (!signal.subscriptionId) return;
+      let peers = this.screenPeerEpochs.get(from);
+      if (!peers) this.screenPeerEpochs.set(from, peers = new Map());
+      if (peers.get(target) === signal.subscriptionId) return;
+      peers.set(target, signal.subscriptionId);
+      for (const [key, watch] of this.legacyScreenViewers) {
+        if ((watch.fromSessionId === from && watch.targetSessionId === target)
+          || (watch.fromSessionId === target && watch.targetSessionId === from)) this.legacyScreenViewers.delete(key);
+      }
+    } else if (signal.signalType === 'screen-watch') {
+      const parsed = screenWatchSignalSchema.safeParse(signal);
+      if (!parsed.success) return;
+      const watch = parsed.data;
+      if (this.screenPeerEpochs.get(target)?.get(from) !== watch.subscriptionId
+        || this.screenPeerEpochs.get(from)?.get(target) !== watch.watcherSubscriptionId) return;
+      const key = JSON.stringify([target, from, watch.streamId]);
+      if ((this.legacyScreenViewers.get(key)?.subscriptionRevision ?? 0) >= watch.subscriptionRevision) return;
+      this.legacyScreenViewers.set(key, watch);
+    } else if (signal.signalType === 'user-left') {
+      this.screenPeerEpochs.get(from)?.delete(target);
+      this.screenPeerEpochs.get(target)?.delete(from);
+      for (const [key, watch] of this.legacyScreenViewers) {
+        if ((watch.fromSessionId === from && watch.targetSessionId === target)
+          || (watch.fromSessionId === target && watch.targetSessionId === from)) this.legacyScreenViewers.delete(key);
+      }
+    }
+  }
+
+  public getLegacyScreenViewers(publisherSessionId: string, shareId: string): string[] {
+    return [...this.legacyScreenViewers.values()].filter(watch => watch.watching
+      && watch.targetSessionId === publisherSessionId && watch.streamId === shareId
+      && this.canWatchScreen(publisherSessionId, watch.fromSessionId, shareId)).map(watch => watch.fromSessionId);
   }
 
   public authorizeNativeScreenSignal(signal: NativeScreenSignalPayload):

@@ -4,6 +4,7 @@ import './test-screen-privacy';
 import WebSocket from 'ws';
 import type { types as SfuTypes } from 'mediasoup';
 import { MessageType, ProtocolErrorCode, nativeScreenSignalSchema,
+  screenViewersRequestSchema, screenViewersResultSchema,
   type RtcTransportPurpose, type ScreenWatchSignalPayload } from '@monky/shared';
 import { SignalingService } from './application/services/SignalingService';
 import type { ChannelRecord } from './domain/entities';
@@ -573,11 +574,119 @@ async function privateScreenFixture() {
       nativeScreen: { sourceInstanceId: source.instanceId, pipelineId: crypto.randomUUID(), video: source.video },
     };
   }
+
   const recv = f.addReceiver('viewer-a', 'screen');
   const otherRecv = f.addReceiver('viewer-b', 'screen');
   return { ...f, source, revoked, recv, otherRecv, version: (value: number | null) => { version = value; } };
 }
 
+test('viewer list contracts reject spoofed requester identity, unsafe references and malformed replies',() => {
+  const query={ channelId: 'room',publisherSessionId: 'publisher',shareId: 'one',sourceInstanceId: null };
+  assert.equal(screenViewersRequestSchema.safeParse(query).success,true);
+  for(const invalid of [{ ...query,requesterSessionId: 'publisher' },{ ...query,shareId: '<script>' },
+  { ...query,sourceInstanceId: 'old' },{ ...query,channelId: '' }])
+    assert.equal(screenViewersRequestSchema.safeParse(invalid).success,false);
+  assert.equal(screenViewersResultSchema.safeParse({ ...query,viewerSessionIds: ['viewer-a'] }).success,true);
+  assert.equal(screenViewersResultSchema.safeParse({ ...query,viewerSessionIds: [null] }).success,false);
+});
+
+for(const backend of ['native','browser'] as const) test(`native ${backend} viewers are authorized per source and visible to every allowed participant`,async () => {
+  const f=await privateScreenFixture();
+  const [viewer,outsider,publisher]=f.clients;
+  const query={ channelId: 'room',publisherSessionId: 'publisher',shareId: 'one',sourceInstanceId: f.source.instanceId };
+  const read=(client=publisher) => {
+    f.server['handleScreenViewers'](client,query,'query');
+    assert.equal(f.sent.at(-1)?.socket,client.ws);
+    assert.equal(f.sent.at(-1)?.requestId,'query');
+    return screenViewersResultSchema.parse(f.sent.at(-1)?.payload).viewerSessionIds;
+  };
+  assert.deepEqual(read(),[],'allowed audience is not the list of viewers');
+  assert.deepEqual(read(viewer),[],'an authorized non-watcher can inspect the list');
+  const watch=nativeScreenSignalSchema.parse({
+    ...query,fromSessionId: 'viewer-a',targetSessionId: 'publisher',
+    action: 'watch',subscriptionId: crypto.randomUUID(),quality: 'source',backend,
+  });
+  assert.equal(f.service.authorizeNativeScreenSignal(watch).success,true);
+  assert.deepEqual(read(),[],'unaccepted requests are not counted');
+  const accepted=nativeScreenSignalSchema.parse({
+    ...watch,fromSessionId: 'publisher',targetSessionId: 'viewer-a',action: 'accepted',generation: 1,
+  });
+  assert.equal(f.service.authorizeNativeScreenSignal(accepted).success,true);
+  assert.deepEqual(read(),['viewer-a']);
+  assert.deepEqual(read(viewer),['viewer-a'],'the viewer sees their own session exactly once');
+  f.server['handleScreenViewers'](outsider,query);
+  assert.equal(f.sent.at(-1)?.type,MessageType.SERVER_ERROR,'private audience is never disclosed');
+  for(const invalid of [{ ...query,sourceInstanceId: crypto.randomUUID() },{ ...query,publisherSessionId: 'viewer-a' },
+  { ...query,channelId: 'other-room' }]) {
+    f.server['handleScreenViewers'](publisher,invalid);
+    assert.equal(f.sent.at(-1)?.type,MessageType.SERVER_ERROR);
+  }
+  assert.equal(f.service.authorizeNativeScreenSignal(nativeScreenSignalSchema.parse({
+    ...query,fromSessionId: 'viewer-a',targetSessionId: 'publisher',subscriptionId: watch.subscriptionId,action: 'stop',
+  })).success,true);
+  assert.deepEqual(read(),[]);
+  assert.equal(f.service.authorizeNativeScreenSignal(watch).success,true);
+  assert.equal(f.service.authorizeNativeScreenSignal(accepted).success,true);
+  f.service.setScreenRoles([],[],2);
+  f.version(2);
+  assert.deepEqual(read(),[],'role revocation removes viewers before the next roster refresh');
+  f.manager.close();
+});
+
+test('legacy P2P viewers follow authenticated peer epochs, revisions, source retirement and departure',async () => {
+  const f=await signalingFixture();
+  const [viewer,,publisher]=f.clients;
+  const route=(client: typeof viewer,payload: object) => f.server['handleRtcSignal'](client,payload);
+  route(publisher,{ fromSessionId: 'spoofed',targetSessionId: 'viewer-a',signalType: 'offer',subscriptionId: 'pub',sdp: { type: 'offer' } });
+  route(viewer,{ fromSessionId: 'viewer-a',targetSessionId: 'publisher',signalType: 'answer',subscriptionId: 'view',sdp: { type: 'answer' } });
+  const watch={
+    fromSessionId: 'spoofed',targetSessionId: 'publisher',signalType: 'screen-watch',streamId: 'one',
+    subscriptionId: 'pub',watcherSubscriptionId: 'view',subscriptionRevision: 1,watching: true
+  };
+  const read=() => {
+    f.server['handleScreenViewers'](viewer,{
+      channelId: 'room',publisherSessionId: 'publisher',shareId: 'one',sourceInstanceId: null,
+    });
+    return screenViewersResultSchema.parse(f.sent.at(-1)?.payload).viewerSessionIds;
+  };
+  route(viewer,watch);
+  assert.deepEqual(read(),['viewer-a']);
+  assert.deepEqual(f.service.getLegacyScreenViewers('publisher','two'),[]);
+  route(viewer,{ ...watch,subscriptionRevision: 2,watching: false });
+  route(viewer,watch);
+  assert.deepEqual(read(),[],'late watch cannot undo a newer stop');
+  route(viewer,{ ...watch,subscriptionRevision: 3 });
+  route(publisher,{ targetSessionId: 'viewer-a',signalType: 'offer',subscriptionId: 'pub-new',sdp: { type: 'offer' } });
+  assert.deepEqual(read(),[]);
+  route(viewer,{ ...watch,subscriptionRevision: 4 });
+  assert.deepEqual(read(),[],'old publisher epoch is not authoritative');
+  route(viewer,{ ...watch,subscriptionId: 'pub-new' });
+  assert.deepEqual(read(),['viewer-a']);
+  await f.service.joinVoiceChannel('viewer-a','viewer-a','other-room');
+  assert.deepEqual(f.service.getLegacyScreenViewers('publisher','one'),[]);
+  f.manager.close();
+});
+
+test('SFU viewer lists count active video consumers, deduplicate renditions, and retire on pause/close',async () => {
+  const f=await signalingFixture();
+  const one=await f.consume('video-one');
+  await f.consume('system-audio');
+  await f.consume('camera');
+  assert.deepEqual(f.manager.getScreenViewers('publisher','room','one'),[]);
+  await f.manager.setConsumerPaused('viewer-a','room',one.id,false);
+  assert.deepEqual(f.manager.getScreenViewers('publisher','room','one'),['viewer-a']);
+  assert.deepEqual(f.manager.getScreenViewers('publisher','room','two'),[]);
+  f.server['handleScreenViewers'](f.clients[1],{
+    channelId: 'room',publisherSessionId: 'publisher',shareId: 'one',sourceInstanceId: null,
+  });
+  assert.deepEqual(screenViewersResultSchema.parse(f.sent.at(-1)?.payload).viewerSessionIds,['viewer-a']);
+  await f.manager.setConsumerPaused('viewer-a','room',one.id,true);
+  assert.deepEqual(f.manager.getScreenViewers('publisher','room','one'),[]);
+  await f.manager.setConsumerPaused('viewer-a','room',one.id,false);
+  f.manager.closeConsumer('viewer-a','room',one.id);
+  assert.deepEqual(f.manager.getScreenViewers('publisher','room','one'),[]);
+  f.manager.close();
+});
 test('legacy screen audio metadata uses its own stream ID but requires an advertised legacy share', async () => {
   const f = await signalingFixture();
   const [viewer, , publisher] = f.clients;
